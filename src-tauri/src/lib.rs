@@ -1,0 +1,83 @@
+mod backend;
+
+use backend::commands;
+use tauri::Manager as _;
+
+#[cfg_attr(mobile, tauri::mobile_entry_point)]
+pub fn run() {
+    tauri::Builder::default()
+        .plugin(tauri_plugin_websocket::init())
+        .plugin(tauri_plugin_upload::init())
+        .plugin(tauri_plugin_store::Builder::new().build())
+        .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_process::init())
+        .plugin(tauri_plugin_os::init())
+        .plugin(tauri_plugin_notification::init())
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(tauri_plugin_log::log::LevelFilter::Info)
+                .build(),
+        )
+        .plugin(tauri_plugin_http::init())
+        .plugin(tauri_plugin_global_shortcut::Builder::new().build())
+        .plugin(tauri_plugin_fs::init())
+        .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_opener::init())
+        .setup(|app| {
+            let state = backend::BackendState::initialize(app.handle())?;
+            if let Err(error) = state.tasks.recover() {
+                tauri_plugin_log::log::error!("backend recovery failed: {error}");
+            }
+            app.manage(state);
+            Ok(())
+        })
+        .invoke_handler(tauri::generate_handler![
+            commands::upsert_provider_connection,
+            commands::list_provider_connections,
+            commands::set_credential,
+            commands::delete_credential,
+            commands::get_credential_status,
+            commands::get_credential,
+            commands::list_model_definitions,
+            commands::list_provider_model_bindings,
+            commands::fetch_provider_models,
+            commands::test_provider_connection,
+            commands::replace_provider_model_bindings,
+            commands::save_canvas_document,
+            commands::get_canvas_document,
+            commands::list_canvas_documents,
+            commands::start_generation,
+            commands::optimize_video_prompt,
+            commands::run_prompt_node,
+            commands::list_generation_tasks,
+            commands::get_generation_task,
+            commands::recover_generation_tasks,
+            commands::query_video_task_now,
+            commands::list_remote_video_tasks,
+            commands::list_assets,
+            commands::configure_tos_staging,
+            commands::get_tos_staging_config,
+            commands::test_tos_connectivity,
+            commands::start_staging_upload,
+            commands::get_staging_job,
+            commands::list_local_assets,
+            commands::verify_local_result,
+            commands::get_video_downloader_engine,
+            commands::install_video_downloader_engine,
+            commands::update_video_downloader_engine,
+            commands::import_downloader_cookies,
+            commands::clear_downloader_cookies,
+            commands::start_video_download,
+            commands::get_video_download_job,
+            commands::cancel_video_download,
+            commands::get_video_composer_engine,
+            commands::install_video_composer_engine,
+            commands::start_video_composition,
+            commands::get_video_composition_job,
+            commands::cancel_video_composition,
+            commands::backend_health,
+        ])
+        .run(tauri::generate_context!())
+        .expect("error while running tauri application");
+}

@@ -1,0 +1,107 @@
+pub mod asset_library;
+pub mod commands;
+pub mod composer;
+pub mod credentials;
+pub mod downloader;
+pub mod error;
+pub mod local_results;
+pub mod media;
+pub mod model_schema;
+pub mod prompt_optimize;
+pub mod provider;
+pub mod staging;
+pub mod storage;
+pub mod tasks;
+pub mod tos_sign;
+pub mod types;
+
+use std::sync::Arc;
+
+use asset_library::AssetLibrary;
+use composer::VideoCompositionService;
+use credentials::CredentialStore;
+use downloader::VideoDownloadService;
+use error::BackendResult;
+use local_results::LocalResultService;
+use media::MediaResolver;
+use provider::ProviderRuntime;
+use staging::StagingService;
+use storage::{GenerationTaskLifecycle, Storage};
+use tasks::GenerationTaskService;
+use tauri::{AppHandle, Manager as _};
+
+pub struct BackendState {
+    pub storage: Arc<Storage>,
+    pub lifecycle: GenerationTaskLifecycle,
+    pub credentials: CredentialStore,
+    pub providers: ProviderRuntime,
+    pub assets: AssetLibrary,
+    pub local_results: LocalResultService,
+    pub staging: StagingService,
+    pub tasks: GenerationTaskService,
+    pub downloader: VideoDownloadService,
+    pub composer: VideoCompositionService,
+}
+
+impl BackendState {
+    pub fn initialize(app: &AppHandle) -> BackendResult<Self> {
+        let database_path = app
+            .path()
+            .app_local_data_dir()?
+            .join("infinite-canvas.sqlite3");
+        let downloads_directory = app.path().download_dir()?;
+        let storage = Arc::new(Storage::open(&database_path)?);
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        let credentials = CredentialStore;
+        let providers =
+            ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials.clone())?;
+        let assets = AssetLibrary::new(providers.clone());
+        let local_results = LocalResultService::new(
+            Arc::clone(&storage),
+            lifecycle.clone(),
+            providers.client().clone(),
+            downloads_directory.clone(),
+        );
+        let staging =
+            StagingService::new(Arc::clone(&storage), credentials.clone(), assets.clone())?;
+        let media = MediaResolver::new(
+            providers.clone(),
+            assets.clone(),
+            local_results.clone(),
+            staging.clone(),
+        );
+        let tasks = GenerationTaskService::new(
+            app.clone(),
+            Arc::clone(&storage),
+            lifecycle.clone(),
+            providers.clone(),
+            media,
+            local_results.clone(),
+            staging.clone(),
+        );
+        // yt-dlp 引擎与浏览器 Cookies 存放在应用数据目录；下载产物与生成结果
+        // 一致落在系统下载目录的「无限画布」子目录。
+        let downloader = VideoDownloadService::new(
+            downloads_directory.clone(),
+            app.path().app_local_data_dir()?.join("yt-dlp-engine"),
+        )?;
+        // FFmpeg 合成引擎同样放在应用数据目录；合成产物与下载产物同目录。
+        let composer = VideoCompositionService::new(
+            downloads_directory,
+            app.path().app_local_data_dir()?.join("ffmpeg-engine"),
+        )?;
+
+        Ok(Self {
+            storage,
+            lifecycle,
+            credentials,
+            providers,
+            assets,
+            local_results,
+            staging,
+            tasks,
+            downloader,
+            composer,
+        })
+    }
+}

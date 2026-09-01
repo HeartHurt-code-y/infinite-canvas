@@ -1,0 +1,125 @@
+// @vitest-environment node
+
+import { readFileSync } from "node:fs";
+import { describe, expect, it } from "vitest";
+
+const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+
+function cssRule(selector: string): string {
+  const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const match = appCss.match(new RegExp(`${escapedSelector}\\s*\\{([^}]+)\\}`));
+  expect(match, `Missing CSS rule for ${selector}`).not.toBeNull();
+  return match?.[1] ?? "";
+}
+
+describe("画布素材节点尺寸", () => {
+  it("为拖入的素材保留大尺寸媒体预览区", () => {
+    expect(cssRule(".canvas-asset-node")).toMatch(/width:\s*500px/);
+    expect(cssRule(".canvas-asset-node")).toMatch(/height:\s*437\.5px/);
+    expect(
+      cssRule(".canvas-asset-node:not(.canvas-asset-node--media) .canvas-asset-node__visual"),
+    ).toMatch(/min-height:\s*362\.5px/);
+  });
+
+  it("任务启动后自动生成的产物卡片与普通素材节点同为正常尺寸", () => {
+    expect(cssRule(".canvas-asset-node--output")).toMatch(/width:\s*500px/);
+    expect(cssRule(".canvas-asset-node--output")).toMatch(/height:\s*437\.5px/);
+  });
+
+  it("让图片和视频完整全出血展示且不裁切", () => {
+    expect(cssRule(".canvas-asset-node--media")).toMatch(/padding:\s*0/);
+    expect(cssRule(".canvas-asset-node--media")).toMatch(/overflow:\s*visible/);
+    expect(cssRule(".canvas-asset-node--media > .canvas-asset-node__visual")).toMatch(
+      /position:\s*absolute/,
+    );
+    expect(cssRule(".canvas-asset-node--media > .canvas-asset-node__visual")).toMatch(/inset:\s*0/);
+    expect(cssRule(".canvas-asset-node--media > .canvas-asset-node__visual")).toMatch(
+      /min-height:\s*0/,
+    );
+    expect(cssRule(".canvas-asset-node--media > .canvas-asset-node__visual")).toMatch(
+      /overflow:\s*hidden/,
+    );
+    expect(cssRule(".canvas-asset-node__visual img:not(.contact-sheet-crop)")).toMatch(
+      /object-fit:\s*contain/,
+    );
+    expect(cssRule(".canvas-asset-node__visual video")).toMatch(/object-fit:\s*contain/);
+    expect(appCss).not.toMatch(
+      /\.canvas-asset-node__visual\s+\.contact-sheet-crop\s*\{[^}]*width:\s*100%/,
+    );
+  });
+
+  it("只裁切媒体圆角，不裁掉伸出卡片的连接端口", () => {
+    expect(cssRule(".canvas-asset-node--media")).toMatch(/overflow:\s*visible/);
+    expect(cssRule(".canvas-asset-node__port")).toMatch(/right:\s*-12px/);
+    expect(cssRule(".canvas-asset-node__port")).toMatch(/width:\s*24px/);
+    expect(cssRule(".canvas-asset-node__port")).toMatch(/height:\s*24px/);
+    expect(cssRule(".canvas-asset-node__port::after")).toMatch(/width:\s*var\(--space-md\)/);
+  });
+});
+
+describe("画布生成节点尺寸", () => {
+  it("保留基础尺寸并允许图片与视频生成节点随连接素材数量向下延展", () => {
+    expect(cssRule(".canvas-gen-node--image")).toMatch(/width:\s*580px/);
+    expect(cssRule(".canvas-gen-node--image")).toMatch(/height:\s*auto/);
+    expect(cssRule(".canvas-gen-node--image")).toMatch(/min-height:\s*480px/);
+    expect(cssRule(".canvas-gen-node--video")).toMatch(/width:\s*580px/);
+    expect(cssRule(".canvas-gen-node--video")).toMatch(/height:\s*auto/);
+    expect(cssRule(".canvas-gen-node--video")).toMatch(/min-height:\s*900px/);
+    expect(cssRule(".canvas-gen-node .node-media-inputs")).toMatch(/max-height:\s*none/);
+    expect(cssRule(".canvas-gen-node .node-media-inputs")).toMatch(/overflow:\s*visible/);
+    expect(cssRule(".canvas-gen-node--video .canvas-gen-node__settings")).toMatch(
+      /max-height:\s*none/,
+    );
+    expect(cssRule(".canvas-gen-node--video .canvas-gen-node__settings")).toMatch(
+      /overflow-y:\s*visible/,
+    );
+  });
+});
+
+describe("视频拼接与合成节点", () => {
+  it("提供固定工具节点尺寸和可触达的顺序按钮", () => {
+    expect(cssRule(".canvas-video-composer")).toMatch(/width:\s*580px/);
+    expect(cssRule(".canvas-video-composer")).toMatch(/height:\s*500px/);
+    expect(cssRule(".canvas-video-composer__input-actions button")).toMatch(/min-width:\s*44px/);
+    expect(cssRule(".canvas-video-composer__input-actions button")).toMatch(/height:\s*44px/);
+  });
+});
+
+describe("提示词审计按钮状态", () => {
+  it("禁用态保持清晰且只有真正审计时才显示进度光标", () => {
+    expect(appCss).toMatch(
+      /\.canvas-prompt-node__audit-button:not\(:disabled\):hover,[\s\S]*\.canvas-prompt-node__audit-button:not\(:disabled\):focus-visible\s*\{/,
+    );
+    expect(cssRule(".canvas-prompt-node__audit-button:disabled")).toMatch(/cursor:\s*not-allowed/);
+    expect(cssRule(".canvas-prompt-node__audit-button:disabled")).toMatch(/opacity:\s*1/);
+    expect(cssRule('.canvas-prompt-node__audit-button[data-state="loading"]:disabled')).toMatch(
+      /cursor:\s*progress/,
+    );
+  });
+});
+
+describe("画布连线交互", () => {
+  it("把用户看见的节点端口本身作为 React Flow 的可拖拽热区", () => {
+    const handleRule = cssRule(".canvas-flow-handle");
+    expect(handleRule).toMatch(/width:\s*24px/);
+    expect(handleRule).toMatch(/height:\s*24px/);
+    expect(handleRule).toMatch(/background:\s*var\(--color-paper\)/);
+    expect(handleRule).toMatch(/border:\s*var\(--rule-active\)\s+solid\s+var\(--color-accent\)/);
+    expect(handleRule).toMatch(/border-radius:\s*var\(--radius-round\)/);
+    expect(handleRule).toMatch(/cursor:\s*crosshair/);
+    expect(handleRule).not.toMatch(/opacity:\s*0/);
+    expect(appCss).toMatch(
+      /\.canvas-react-flow \.canvas-flow-node \.node-port,[\s\S]*?\.canvas-video-downloader__output-port\s*\{[^}]*display:\s*none/,
+    );
+  });
+
+  it("提供宽命中区、顺序标记与可见删除控件", () => {
+    expect(cssRule(".edge-hit-target")).toMatch(/stroke-width:\s*18/);
+    expect(cssRule(".edge-hit-target")).toMatch(/pointer-events:\s*stroke/);
+    expect(cssRule(".edge-order-marker text")).toMatch(/text-anchor:\s*middle/);
+    expect(cssRule(".edge-delete-control")).toMatch(/opacity:\s*0/);
+    expect(appCss).toMatch(
+      /\.edge-group--removable\.is-selected\s+\.edge-delete-control[^{]*\{[^}]*opacity:\s*1/,
+    );
+  });
+});

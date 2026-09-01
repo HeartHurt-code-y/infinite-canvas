@@ -1,0 +1,260 @@
+import { fireEvent, render, screen, within } from "@testing-library/react";
+import { describe, expect, it, vi } from "vitest";
+import type {
+  GenerationTaskClient,
+  GenerationTaskDetail,
+  GenerationTaskSummary,
+} from "../../lib/backend";
+import { HistoryDialog } from "./HistoryDialog";
+
+const SUMMARY: GenerationTaskSummary = {
+  id: "task-failed-1",
+  canvasId: "canvas-1",
+  sourceNodeId: "node-1",
+  operation: "text_to_image",
+  status: "failed",
+  queryHealth: "healthy",
+  providerConnectionId: "provider-1",
+  providerDisplayNameSnapshot: "测试供应商",
+  modelDefinitionId: "remote::provider-1::image-model",
+  remoteModelIdSnapshot: "image-model",
+  remoteTaskId: null,
+  progress: null,
+  tokens: null,
+  createdAt: 1_777_000_000_000,
+  updatedAt: 1_777_000_002_000,
+  completedAt: 1_777_000_002_000,
+};
+
+const DETAIL: GenerationTaskDetail = {
+  summary: SUMMARY,
+  logicalRequest: { prompt: [{ kind: "text", text: "测试提示词" }] },
+  resolvedRequest: {},
+  attempts: [
+    {
+      id: "attempt-1",
+      attemptNumber: 1,
+      phase: "submit",
+      startedAt: 1_777_000_000_000,
+      finishedAt: 1_777_000_002_000,
+      backoffMs: 2_000,
+      outcome: "failed",
+      error: {
+        kind: "protocol",
+        message: "protocol error: provider refused request",
+        details: {
+          rawResponse: '{"code":"UPSTREAM_FAILED","message":"图像尺寸无效"}',
+        },
+        backtrace: "stack line 1\nstack line 2",
+      },
+    },
+  ],
+  calls: [
+    {
+      id: "call-failed",
+      taskId: SUMMARY.id,
+      attemptId: "attempt-1",
+      phase: "submit",
+      request: { model: "image-model", size: "invalid" },
+      sentAt: 1_777_000_000_000,
+      responseReceivedAt: 1_777_000_002_000,
+      durationMs: 2_000,
+      httpStatus: 422,
+      responseHeaders: {},
+      rawResponse: '{"code":"UPSTREAM_FAILED","message":"图像尺寸无效"}',
+      runtimeError: null,
+    },
+    {
+      id: "call-succeeded",
+      taskId: SUMMARY.id,
+      attemptId: "attempt-1",
+      phase: "observe",
+      request: { taskId: "remote-1" },
+      sentAt: 1_777_000_003_000,
+      responseReceivedAt: 1_777_000_003_100,
+      durationMs: 100,
+      httpStatus: 200,
+      responseHeaders: {},
+      rawResponse: '{"status":"done"}',
+      runtimeError: null,
+    },
+  ],
+  events: [],
+  results: [],
+  textOutput: null,
+  finalError: null,
+};
+
+function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClient {
+  return {
+    start: vi.fn(() => Promise.resolve(detail.summary.id)),
+    list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursorCreatedBefore: null })),
+    get: vi.fn(() => Promise.resolve(detail)),
+    queryVideoTaskNow: vi.fn(() => Promise.resolve()),
+  };
+}
+
+describe("HistoryDialog diagnostics", () => {
+  it("shows the complete text-model product and archived provider payloads", async () => {
+    const textSummary: GenerationTaskSummary = {
+      ...SUMMARY,
+      id: "task-text-1",
+      operation: "text_generation",
+      status: "succeeded",
+      remoteModelIdSnapshot: "claude-sonnet",
+    };
+    const textDetail: GenerationTaskDetail = {
+      ...DETAIL,
+      summary: textSummary,
+      logicalRequest: { userPrompt: "把雨夜站台扩写为电影镜头" },
+      calls: [
+        {
+          ...DETAIL.calls[0]!,
+          id: "call-text-1",
+          taskId: textSummary.id,
+          phase: "text_generation",
+          httpStatus: 200,
+          runtimeError: null,
+          request: {
+            body: { model: "claude-sonnet", messages: [{ role: "user", content: "完整输入" }] },
+          },
+          rawResponse: '{"content":[{"type":"text","text":"完整原始输出"}]}',
+        },
+      ],
+      attempts: [],
+      textOutput: {
+        optimizedPrompt: "雨夜站台，电影级侧逆光。",
+        rawModelOutput: "分析内容\n\n雨夜站台，电影级侧逆光。",
+      },
+      finalError: null,
+    };
+
+    render(<HistoryDialog open onClose={vi.fn()} client={createClient(textDetail)} />);
+
+    expect(await screen.findByText("文本生成 · claude-sonnet")).toBeInTheDocument();
+    expect(await screen.findByText("把雨夜站台扩写为电影镜头")).toBeInTheDocument();
+    expect(screen.getByText("节点采用的提示词")).toBeInTheDocument();
+    expect(screen.getByText("雨夜站台，电影级侧逆光。")).toBeInTheDocument();
+    expect(screen.getByText("模型原始文本")).toBeInTheDocument();
+    expect(screen.getByText(/分析内容/)).toBeInTheDocument();
+    expect(screen.getByText("文本生成", { selector: ".history-call__phase" })).toBeInTheDocument();
+    expect(screen.getByText("供应商响应")).toBeInTheDocument();
+  });
+
+  it("surfaces readable error summaries and expands failed provider calls", async () => {
+    render(<HistoryDialog open onClose={vi.fn()} client={createClient()} />);
+
+    const attemptError = await screen.findByRole("group", { name: "第 1 次尝试失败" });
+    expect(attemptError).toHaveTextContent("第 1 次尝试失败 · 供应商协议");
+    expect(attemptError).toHaveTextContent("protocol error: provider refused request");
+    expect(within(attemptError).getByText("完整技术详情")).toBeInTheDocument();
+
+    const failedCallLabel = screen.getByText("调用 1");
+    const failedCallDetails = failedCallLabel.closest("details");
+    expect(failedCallDetails).not.toBeNull();
+    expect(failedCallDetails).toHaveProperty("open", true);
+
+    const providerError = screen.getByRole("group", { name: "供应商调用失败" });
+    expect(providerError).toHaveTextContent("供应商调用失败 · UPSTREAM_FAILED");
+    expect(providerError).toHaveTextContent("图像尺寸无效");
+
+    const openResponse = document.querySelector(".history-payload[open] .history-raw");
+    expect(openResponse).toHaveTextContent('"message": "图像尺寸无效"');
+    expect(openResponse).not.toHaveTextContent('\\"message\\"');
+
+    const succeededCallDetails = screen.getByText("调用 2").closest("details");
+    expect(succeededCallDetails).not.toBeNull();
+    expect(succeededCallDetails).toHaveProperty("open", false);
+  });
+
+  it("provides an explicit close control and still closes when the image is clicked", async () => {
+    const detailWithResult: GenerationTaskDetail = {
+      ...DETAIL,
+      results: [
+        {
+          taskId: SUMMARY.id,
+          resultIndex: 0,
+          mediaType: "image",
+          remoteTaskId: "remote-1",
+          source: null,
+          saveStatus: "succeeded",
+          finalPath: "C:\\results\\image.png",
+          relativePath: "image.png",
+          byteSize: 2_097_152,
+          mimeType: "image/png",
+          sha256: null,
+          savedAt: 1_777_000_003_000,
+          error: null,
+        },
+      ],
+    };
+
+    render(<HistoryDialog open onClose={vi.fn()} client={createClient(detailWithResult)} />);
+
+    const resultLabel = await screen.findByText(/\u7ed3\u679c 1 · \u56fe\u7247/);
+    const resultButton = resultLabel.closest("button");
+    const resultCard = resultLabel.closest(".history-result");
+    expect(resultButton).not.toBeNull();
+    expect(resultCard).not.toBeNull();
+    expect(resultButton).not.toContainElement(
+      within(resultCard as HTMLElement).getByRole("button", {
+        name: "在文件夹中显示该结果",
+      }),
+    );
+    fireEvent.click(resultButton!);
+
+    const preview = screen.getByRole("dialog", { name: "媒体预览" });
+    expect(preview.querySelector(".history-lightbox__bar")).not.toBeInTheDocument();
+    expect(within(preview).getByRole("button", { name: "关闭媒体预览" })).toBeInTheDocument();
+
+    fireEvent.click(within(preview).getByRole("button", { name: "任务结果 1，关闭媒体预览" }));
+    expect(screen.queryByRole("dialog", { name: "媒体预览" })).not.toBeInTheDocument();
+  });
+
+  it("keeps a video preview dismissible with Escape and a backdrop click", async () => {
+    const detailWithVideo: GenerationTaskDetail = {
+      ...DETAIL,
+      results: [
+        {
+          taskId: SUMMARY.id,
+          resultIndex: 0,
+          mediaType: "video",
+          remoteTaskId: "remote-1",
+          source: null,
+          saveStatus: "succeeded",
+          finalPath: "C:\\results\\portrait-video.mp4",
+          relativePath: "portrait-video.mp4",
+          byteSize: 4_194_304,
+          mimeType: "video/mp4",
+          sha256: null,
+          savedAt: 1_777_000_003_000,
+          error: null,
+        },
+      ],
+    };
+    const onClose = vi.fn();
+
+    render(<HistoryDialog open onClose={onClose} client={createClient(detailWithVideo)} />);
+
+    const resultLabel = await screen.findByText(/结果 1 · 视频/);
+    const resultButton = resultLabel.closest("button");
+    expect(resultButton).not.toBeNull();
+
+    fireEvent.click(resultButton!);
+    fireEvent.keyDown(window, { key: "Escape" });
+    expect(screen.queryByRole("dialog", { name: "媒体预览" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+
+    fireEvent.click(resultButton!);
+    const preview = screen.getByRole("dialog", { name: "媒体预览" });
+    const stage = preview.querySelector(".history-lightbox__stage");
+    const video = preview.querySelector("video");
+    expect(stage).not.toBeNull();
+    expect(video).not.toBeNull();
+    fireEvent.click(video!);
+    expect(screen.getByRole("dialog", { name: "媒体预览" })).toBeInTheDocument();
+    fireEvent.click(stage!);
+    expect(screen.queryByRole("dialog", { name: "媒体预览" })).not.toBeInTheDocument();
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});

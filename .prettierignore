@@ -1,0 +1,12 @@
+coverage/
+dist/
+node_modules/
+src-tauri/gen/
+src-tauri/target/
+src-tauri/skills/screenplay/
+package-lock.json
+pnpm-lock.yaml
+.firecrawl/
+.playwright-mcp/
+.workbuddy/
+src-tauri/skills/storyboard/

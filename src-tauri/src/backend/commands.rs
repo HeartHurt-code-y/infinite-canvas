@@ -1,0 +1,783 @@
+use reqwest::Method;
+use serde_json::{Value, json};
+use std::path::Path;
+use tauri::{AppHandle, Emitter as _, State};
+use tauri_plugin_log::log::{debug, error, info};
+
+use super::{
+    BackendState,
+    composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
+    downloader::{VideoDownloadJobRecord, VideoDownloaderEngineStatus},
+    error::{BackendError, CommandResult, IntoCommandResult as _},
+    model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
+    prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
+    provider::MOYU_ADAPTER_ID,
+    storage::now_ms,
+    types::{
+        AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
+        ConnectivityTestResult, CredentialStatus, GenerationOperation, GenerationResultRecord,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
+        ModelDefinition, ProviderConnection, ProviderModelBinding, RawProviderResponse,
+        RecoveryReport, RemoteModelOption, ReplaceProviderModelBindingsCommand,
+        SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
+        StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
+        TosStagingConfig, UpsertProviderConnectionCommand, VideoTaskListCommand,
+    },
+};
+
+#[tauri::command]
+pub fn upsert_provider_connection(
+    state: State<'_, BackendState>,
+    command: UpsertProviderConnectionCommand,
+) -> CommandResult<ProviderConnection> {
+    validate_provider_command(&command).command()?;
+    state.storage.upsert_provider_connection(&command).command()
+}
+
+#[tauri::command]
+pub fn list_provider_connections(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<ProviderConnection>> {
+    state.storage.list_provider_connections().command()
+}
+
+#[tauri::command]
+pub fn set_credential(
+    state: State<'_, BackendState>,
+    command: SetCredentialCommand,
+) -> CommandResult<CredentialStatus> {
+    state
+        .credentials
+        .set(&command.credential_ref, &command.secret)
+        .command()?;
+    state.credentials.status(&command.credential_ref).command()
+}
+
+#[tauri::command]
+pub fn delete_credential(
+    state: State<'_, BackendState>,
+    credential_ref: String,
+) -> CommandResult<()> {
+    state.credentials.delete(&credential_ref).command()
+}
+
+#[tauri::command]
+pub fn get_credential_status(
+    state: State<'_, BackendState>,
+    credential_ref: String,
+) -> CommandResult<CredentialStatus> {
+    state.credentials.status(&credential_ref).command()
+}
+
+/// 按引用名回读已保存的凭据明文。用于设置界面在重新打开时把已保存的密钥
+/// 以明文回填到输入框（用户明确要求凭据「持久化一直显露」）。
+///
+/// 仅在本机凭据库内读取；这不是任何对外网络请求，读取失败（如不存在）由调用方
+/// 降级为「留空沿用」语义。
+#[tauri::command]
+pub fn get_credential(
+    state: State<'_, BackendState>,
+    credential_ref: String,
+) -> CommandResult<String> {
+    state.credentials.get(&credential_ref).command()
+}
+
+#[tauri::command]
+pub fn list_model_definitions(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<ModelDefinition>> {
+    state.storage.list_model_definitions().command()
+}
+
+#[tauri::command]
+pub fn list_provider_model_bindings(
+    state: State<'_, BackendState>,
+    provider_connection_id: Option<String>,
+) -> CommandResult<Vec<ProviderModelBinding>> {
+    state
+        .storage
+        .list_bindings(provider_connection_id.as_deref())
+        .command()
+}
+
+#[tauri::command]
+pub async fn fetch_provider_models(
+    state: State<'_, BackendState>,
+    provider_connection_id: String,
+) -> CommandResult<Vec<RemoteModelOption>> {
+    state
+        .providers
+        .list_models(&provider_connection_id)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn test_provider_connection(
+    state: State<'_, BackendState>,
+    provider_connection_id: String,
+) -> CommandResult<ConnectivityTestResult> {
+    state
+        .providers
+        .test_connection(&provider_connection_id)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub fn replace_provider_model_bindings(
+    state: State<'_, BackendState>,
+    command: ReplaceProviderModelBindingsCommand,
+) -> CommandResult<Vec<ProviderModelBinding>> {
+    validate_model_selections(&command).command()?;
+    state
+        .storage
+        .replace_provider_model_bindings(&command)
+        .command()
+}
+
+#[tauri::command]
+pub fn save_canvas_document(
+    state: State<'_, BackendState>,
+    command: SaveCanvasDocumentCommand,
+) -> CommandResult<CanvasDocumentRecord> {
+    if command.id.trim().is_empty() || !command.document.is_object() {
+        return Err(BackendError::validation(
+            "canvas document requires an id and a JSON object",
+            json!({ "canvasId": command.id, "documentType": command.document }),
+        )
+        .payload());
+    }
+    state.storage.save_canvas_document(&command).command()
+}
+
+#[tauri::command]
+pub fn get_canvas_document(
+    state: State<'_, BackendState>,
+    canvas_id: String,
+) -> CommandResult<CanvasDocumentRecord> {
+    state.storage.get_canvas_document(&canvas_id).command()
+}
+
+#[tauri::command]
+pub fn list_canvas_documents(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<CanvasDocumentSummary>> {
+    state.storage.list_canvas_documents().command()
+}
+
+#[tauri::command]
+pub fn start_generation(
+    state: State<'_, BackendState>,
+    command: StartGenerationCommand,
+) -> CommandResult<String> {
+    state.tasks.start(command).command()
+}
+
+/// 视频节点提示词优化：把 Seedance 技能整体注入为系统提示词，
+/// 调用所选文本大模型完成优化 / 细节审查，只返回提取后的提示词正文。
+#[tauri::command]
+pub async fn optimize_video_prompt(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: OptimizeVideoPromptCommand,
+) -> CommandResult<OptimizedPromptResult> {
+    let deps = super::prompt_optimize::PromptVisionDeps {
+        app: &app,
+        storage: &state.storage,
+        lifecycle: &state.lifecycle,
+        providers: &state.providers,
+        assets: &state.assets,
+        staging: &state.staging,
+        local_results: &state.local_results,
+    };
+    super::prompt_optimize::optimize_video_prompt(&deps, command)
+        .await
+        .command()
+}
+
+/// 独立提示词节点：调用已配置的文本模型生成或优化提示词；
+/// 连入的图片素材会先解析为视觉理解内容块再随请求发送。
+#[tauri::command]
+pub async fn run_prompt_node(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: OptimizeVideoPromptCommand,
+) -> CommandResult<OptimizedPromptResult> {
+    let deps = super::prompt_optimize::PromptVisionDeps {
+        app: &app,
+        storage: &state.storage,
+        lifecycle: &state.lifecycle,
+        providers: &state.providers,
+        assets: &state.assets,
+        staging: &state.staging,
+        local_results: &state.local_results,
+    };
+    super::prompt_optimize::optimize_video_prompt(&deps, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub fn list_generation_tasks(
+    state: State<'_, BackendState>,
+    query: GenerationTaskListQuery,
+) -> CommandResult<GenerationTaskPage> {
+    state.tasks.list(query).command()
+}
+
+#[tauri::command]
+pub fn get_generation_task(
+    state: State<'_, BackendState>,
+    task_id: String,
+) -> CommandResult<GenerationTaskDetail> {
+    state.tasks.get(&task_id).command()
+}
+
+#[tauri::command]
+pub fn recover_generation_tasks(state: State<'_, BackendState>) -> CommandResult<RecoveryReport> {
+    state.tasks.recover().command()
+}
+
+#[tauri::command]
+pub fn query_video_task_now(state: State<'_, BackendState>, task_id: String) -> CommandResult<()> {
+    state.tasks.query_remote_now(&task_id).command()
+}
+
+#[tauri::command]
+pub async fn list_remote_video_tasks(
+    state: State<'_, BackendState>,
+    command: VideoTaskListCommand,
+) -> CommandResult<RawProviderResponse> {
+    if command.start_timestamp < 0
+        || command.end_timestamp < command.start_timestamp
+        || command.page == 0
+        || command.page_size == 0
+    {
+        return Err(BackendError::validation(
+            "remote video task list requires an explicit valid time range and positive pagination",
+            json!({ "command": command }),
+        )
+        .payload());
+    }
+    let mut query = vec![
+        ("start_timestamp", command.start_timestamp.to_string()),
+        ("end_timestamp", command.end_timestamp.to_string()),
+        ("p", command.page.to_string()),
+        ("page_size", command.page_size.to_string()),
+    ];
+    if let Some(status) = command.status.filter(|value| !value.trim().is_empty()) {
+        query.push(("status", status));
+    }
+    let providers = state.providers.clone();
+    providers
+        .raw_json_request(
+            &command.provider_connection_id,
+            Method::GET,
+            "/v1/video/tasks",
+            &query,
+            None,
+        )
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn list_assets(
+    state: State<'_, BackendState>,
+    command: AssetListCommand,
+) -> CommandResult<Vec<CloudAssetRecord>> {
+    state.assets.browse(command).await.command()
+}
+
+#[tauri::command]
+pub fn configure_tos_staging(
+    state: State<'_, BackendState>,
+    config: TosStagingConfig,
+) -> CommandResult<()> {
+    state.staging.configure(&config).command()
+}
+
+#[tauri::command]
+pub fn get_tos_staging_config(
+    state: State<'_, BackendState>,
+) -> CommandResult<Option<TosStagingConfig>> {
+    state.storage.get_tos_config().command()
+}
+
+#[tauri::command]
+pub async fn test_tos_connectivity(
+    state: State<'_, BackendState>,
+) -> CommandResult<ConnectivityTestResult> {
+    state.staging.test_connectivity().await.command()
+}
+
+#[tauri::command]
+pub fn start_staging_upload(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: StartStagingCommand,
+) -> CommandResult<String> {
+    let started_at = std::time::Instant::now();
+    info!(
+        "[staging] start_staging_upload 命令开始: localPath={}, purpose={}, mediaType={}, import={}",
+        command.local_path,
+        command.purpose,
+        command.media_type.as_str(),
+        match &command.import {
+            Some(target) => format!(
+                "导入素材库（providerConnectionId={}, name={:?}）",
+                target.provider_connection_id, target.name
+            ),
+            None => "无（仅生成输入中转）".to_string(),
+        }
+    );
+
+    let job = match state.staging.create_job(command) {
+        Ok(job) => {
+            info!(
+                "[staging] 暂存任务记录创建成功: jobId={}, 耗时 {}ms",
+                job.id,
+                started_at.elapsed().as_millis()
+            );
+            job
+        }
+        Err(bad_request) => {
+            let record = bad_request.runtime_record();
+            error!(
+                "[staging] 暂存任务记录创建失败: 耗时 {}ms, 错误: {record}",
+                started_at.elapsed().as_millis()
+            );
+            return Err(bad_request.payload());
+        }
+    };
+
+    let staging = state.staging.clone();
+    let job_id = job.id.clone();
+    let spawned_job_id = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let run_started_at = std::time::Instant::now();
+        info!("[staging] 后台暂存执行开始: jobId={spawned_job_id}");
+        let event = match staging.run_job(&spawned_job_id).await {
+            Ok(job) => {
+                info!(
+                    "[staging] 后台暂存执行成功: jobId={}, 最终状态={}, assetId={:?}, 已上传 {}/{} 字节, 总耗时 {}ms",
+                    spawned_job_id,
+                    job.status.as_str(),
+                    job.asset_id,
+                    job.bytes_uploaded,
+                    job.bytes_total
+                        .map(|total| total.to_string())
+                        .unwrap_or_else(|| "未知".to_string()),
+                    run_started_at.elapsed().as_millis()
+                );
+                json!({ "jobId": spawned_job_id, "job": job })
+            }
+            Err(runtime_error) => {
+                let record = runtime_error.runtime_record();
+                error!(
+                    "[staging] 后台暂存执行失败: jobId={}, 总耗时 {}ms, 错误: {record}",
+                    spawned_job_id,
+                    run_started_at.elapsed().as_millis()
+                );
+                json!({ "jobId": spawned_job_id, "error": record })
+            }
+        };
+        if let Err(emit_error) = app.emit("staging:state-changed", event) {
+            error!(
+                "[staging] staging:state-changed 事件发射失败: jobId={spawned_job_id}, 错误: {emit_error}"
+            );
+        }
+    });
+    info!(
+        "[staging] start_staging_upload 命令完成（后台任务已启动）: jobId={}, 命令总耗时 {}ms",
+        job_id,
+        started_at.elapsed().as_millis()
+    );
+    Ok(job_id)
+}
+
+#[tauri::command]
+pub fn list_local_assets(state: State<'_, BackendState>) -> CommandResult<Vec<LocalAssetRecord>> {
+    state.staging.list_local_assets().command()
+}
+
+#[tauri::command]
+pub fn get_staging_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<StagingJobRecord> {
+    let started_at = std::time::Instant::now();
+    // 前端进度轮询会每秒调用本命令，常规路径降级为 debug 避免刷屏；失败仍以 error 记录。
+    debug!("[staging] get_staging_job 命令开始: jobId={job_id}");
+    match state.storage.get_staging_job(&job_id) {
+        Ok(job) => {
+            debug!(
+                "[staging] get_staging_job 命令成功: jobId={}, 状态={}, 已上传 {}/{} 字节, purpose={}, 耗时 {}ms",
+                job_id,
+                job.status.as_str(),
+                job.bytes_uploaded,
+                job.bytes_total
+                    .map(|total| total.to_string())
+                    .unwrap_or_else(|| "未知".to_string()),
+                job.purpose,
+                started_at.elapsed().as_millis()
+            );
+            Ok(job)
+        }
+        Err(not_found) => {
+            let record = not_found.runtime_record();
+            error!(
+                "[staging] get_staging_job 命令失败: jobId={}, 耗时 {}ms, 错误: {record}",
+                job_id,
+                started_at.elapsed().as_millis()
+            );
+            Err(not_found.payload())
+        }
+    }
+}
+
+#[tauri::command]
+pub async fn verify_local_result(
+    state: State<'_, BackendState>,
+    task_id: String,
+    result_index: u32,
+) -> CommandResult<GenerationResultRecord> {
+    let local_results = state.local_results.clone();
+    local_results
+        .verify_local_result(&task_id, result_index)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub fn backend_health(state: State<'_, BackendState>) -> CommandResult<Value> {
+    let providers = state.storage.list_provider_connections().command()?;
+    let models = state.storage.list_model_definitions().command()?;
+    Ok(json!({
+        "database": "ready",
+        "providerConnectionCount": providers.len(),
+        "modelDefinitionCount": models.len(),
+        "timestamp": now_ms()
+    }))
+}
+
+fn validate_provider_command(
+    command: &UpsertProviderConnectionCommand,
+) -> Result<(), BackendError> {
+    if command.id.trim().is_empty()
+        || command.display_name.trim().is_empty()
+        || command.adapter_id.trim().is_empty()
+        || command.base_url.trim().is_empty()
+    {
+        return Err(BackendError::validation(
+            "provider connection requires id, display name, adapter id, and base URL",
+            json!({ "command": command }),
+        ));
+    }
+    if command.adapter_id != MOYU_ADAPTER_ID {
+        return Err(BackendError::validation(
+            "provider adapter is not supported",
+            json!({ "adapterId": command.adapter_id, "supported": [MOYU_ADAPTER_ID] }),
+        ));
+    }
+    let url = url::Url::parse(&command.base_url)?;
+    if !matches!(url.scheme(), "http" | "https") || url.host_str().is_none() {
+        return Err(BackendError::validation(
+            "provider base URL must be an absolute HTTP or HTTPS URL",
+            json!({ "baseUrl": command.base_url }),
+        ));
+    }
+    if !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(BackendError::validation(
+            "provider base URL must not contain credentials, query parameters, or a fragment",
+            json!({ "baseUrl": command.base_url }),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_model_selections(
+    command: &ReplaceProviderModelBindingsCommand,
+) -> Result<(), BackendError> {
+    if command.provider_connection_id.trim().is_empty() {
+        return Err(BackendError::validation(
+            "provider connection id must not be empty",
+            json!({ "command": command }),
+        ));
+    }
+
+    let mut model_ids = std::collections::HashSet::new();
+    for selection in &command.selections {
+        if selection.model_definition_id.trim().is_empty()
+            || selection.display_name.trim().is_empty()
+            || selection.remote_model_id.trim().is_empty()
+        {
+            return Err(BackendError::validation(
+                "selected model requires ids and a display name",
+                json!({ "selection": selection }),
+            ));
+        }
+        if selection.enabled != !selection.enabled_operations.is_empty() {
+            return Err(BackendError::validation(
+                "enabled models require operations and disabled models must not expose operations",
+                json!({ "selection": selection }),
+            ));
+        }
+        if !model_ids.insert(selection.model_definition_id.as_str()) {
+            return Err(BackendError::validation(
+                "selected model definition ids must be unique",
+                json!({ "modelDefinitionId": selection.model_definition_id }),
+            ));
+        }
+        let expected_model_definition_id = provider_scoped_model_definition_id(
+            &command.provider_connection_id,
+            &selection.remote_model_id,
+        );
+        if selection.model_definition_id != expected_model_definition_id {
+            return Err(BackendError::validation(
+                "selected model definition must be scoped to its provider connection",
+                json!({
+                    "providerConnectionId": command.provider_connection_id,
+                    "remoteModelId": selection.remote_model_id,
+                    "modelDefinitionId": selection.model_definition_id,
+                    "expectedModelDefinitionId": expected_model_definition_id
+                }),
+            ));
+        }
+        let has_image_operation = selection.enabled_operations.iter().any(|operation| {
+            matches!(
+                operation,
+                GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+            )
+        });
+        let has_video_operation = selection
+            .enabled_operations
+            .contains(&GenerationOperation::VideoGeneration);
+        if has_image_operation && has_video_operation {
+            return Err(BackendError::validation(
+                "a saved model must be classified as either an image model or a video model",
+                json!({
+                    "modelDefinitionId": selection.model_definition_id,
+                    "enabledOperations": selection.enabled_operations
+                }),
+            ));
+        }
+        if !selection.operation_schema.is_null() && !selection.operation_schema.is_object() {
+            return Err(BackendError::validation(
+                "selected model operation schema must be a JSON object",
+                json!({
+                    "modelDefinitionId": selection.model_definition_id,
+                    "operationSchema": selection.operation_schema
+                }),
+            ));
+        }
+        if selection.enabled {
+            validate_schema_for_operations(
+                &selection.operation_schema,
+                &selection.remote_model_id,
+                &selection.enabled_operations,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+// ---------- 网络爆款视频下载（内置 yt-dlp 引擎） ----------
+
+#[tauri::command]
+pub fn get_video_downloader_engine(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    Ok(state.downloader.engine_status())
+}
+
+#[tauri::command]
+pub async fn install_video_downloader_engine(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    Ok(state.downloader.install_engine().await)
+}
+
+#[tauri::command]
+pub async fn update_video_downloader_engine(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    Ok(state.downloader.update_engine().await)
+}
+
+#[tauri::command]
+pub fn import_downloader_cookies(
+    state: State<'_, BackendState>,
+    source_path: String,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    state
+        .downloader
+        .import_cookies(Path::new(&source_path))
+        .command()
+}
+
+#[tauri::command]
+pub fn clear_downloader_cookies(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    state.downloader.clear_cookies().command()
+}
+
+#[tauri::command]
+pub fn start_video_download(
+    state: State<'_, BackendState>,
+    command: StartVideoDownloadCommand,
+) -> CommandResult<VideoDownloadJobRecord> {
+    state.downloader.start_download(&command.url).command()
+}
+
+#[tauri::command]
+pub fn get_video_download_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoDownloadJobRecord> {
+    state.downloader.get_job(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_video_download(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoDownloadJobRecord> {
+    state.downloader.cancel_job(&job_id).command()
+}
+
+// ---------- 画布视频合成（内置 FFmpeg 引擎） ----------
+
+#[tauri::command]
+pub fn get_video_composer_engine(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoComposerEngineStatus> {
+    Ok(state.composer.engine_status())
+}
+
+#[tauri::command]
+pub async fn install_video_composer_engine(
+    state: State<'_, BackendState>,
+) -> CommandResult<VideoComposerEngineStatus> {
+    Ok(state.composer.install_engine().await)
+}
+
+#[tauri::command]
+pub fn start_video_composition(
+    state: State<'_, BackendState>,
+    command: StartVideoCompositionCommand,
+) -> CommandResult<VideoCompositionJobRecord> {
+    state.composer.start_composition(command).command()
+}
+
+#[tauri::command]
+pub fn get_video_composition_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoCompositionJobRecord> {
+    state.composer.get_job(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_video_composition(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoCompositionJobRecord> {
+    state.composer.cancel_job(&job_id).command()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn provider(base_url: &str) -> UpsertProviderConnectionCommand {
+        UpsertProviderConnectionCommand {
+            id: "company".into(),
+            display_name: "Company".into(),
+            adapter_id: MOYU_ADAPTER_ID.into(),
+            base_url: base_url.into(),
+            enabled: true,
+        }
+    }
+
+    #[test]
+    fn provider_validation_accepts_custom_paths_but_rejects_embedded_secrets() {
+        assert!(validate_provider_command(&provider("https://api.example.com/openai/v1")).is_ok());
+        assert!(
+            validate_provider_command(&provider("https://user:pass@api.example.com/v1")).is_err()
+        );
+        assert!(
+            validate_provider_command(&provider("https://api.example.com/v1?token=secret"))
+                .is_err()
+        );
+        assert!(validate_provider_command(&provider("https://api.example.com/v1#models")).is_err());
+    }
+
+    #[test]
+    fn provider_validation_rejects_unknown_adapters_when_saving() {
+        let mut command = provider("https://api.example.com/v1");
+        command.adapter_id = "unknown".into();
+        assert!(validate_provider_command(&command).is_err());
+    }
+
+    fn model_selection(
+        provider_connection_id: &str,
+        remote_model_id: &str,
+        enabled_operations: Vec<GenerationOperation>,
+    ) -> ReplaceProviderModelBindingsCommand {
+        ReplaceProviderModelBindingsCommand {
+            provider_connection_id: provider_connection_id.into(),
+            selections: vec![super::super::types::ProviderModelSelection {
+                model_definition_id: provider_scoped_model_definition_id(
+                    provider_connection_id,
+                    remote_model_id,
+                ),
+                display_name: "Company model".into(),
+                remote_model_id: remote_model_id.into(),
+                enabled: !enabled_operations.is_empty(),
+                enabled_operations,
+                operation_schema: json!({}),
+            }],
+        }
+    }
+
+    #[test]
+    fn model_selection_requires_provider_scoping_and_one_generation_category() {
+        let valid_image = model_selection(
+            "company",
+            "image-v1",
+            vec![
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ],
+        );
+        assert!(validate_model_selections(&valid_image).is_ok());
+
+        let disabled = model_selection("company", "declined-v1", Vec::new());
+        assert!(validate_model_selections(&disabled).is_ok());
+
+        let mixed = model_selection(
+            "company",
+            "mixed-v1",
+            vec![
+                GenerationOperation::TextToImage,
+                GenerationOperation::VideoGeneration,
+            ],
+        );
+        assert!(validate_model_selections(&mixed).is_err());
+
+        let mut wrong_scope = model_selection(
+            "company",
+            "video-v1",
+            vec![GenerationOperation::VideoGeneration],
+        );
+        wrong_scope.selections[0].model_definition_id = "remote::other::video-v1".into();
+        assert!(validate_model_selections(&wrong_scope).is_err());
+    }
+}

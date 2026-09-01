@@ -1,0 +1,65 @@
+{
+  "_template_description": "screenplay-master SKILL 人设卡模板 - 用于AI agent创建角色时标准化填充",
+  "_usage_note": "创建新角色时：1）复制此模板；2）按_schema定义填充新角色数据；3）删除所有_description字段",
+
+  "_schema": {
+    "name": { "type": "string", "required": true, "description": "角色姓名（全名，可含字/号/英文名，命名应暗示性格或命运走向）" },
+    "gender": { "type": "string", "enum": ["男", "女", "其他"], "required": true },
+    "age": { "type": "string", "required": true, "description": "年龄（数字+单位，决定社会经验、体力上限、认知模式）" },
+    "identity": { "type": "string", "required": true, "description": "表面身份（对外展示的社会角色/职业/地位）" },
+    "hidden_identity": { "type": "string", "required": false, "description": "隐藏身份（真实背景/秘密身份，适时揭露制造反转；无则留空）" },
+    "tag": { "type": "string", "required": true, "description": "3秒标签（一句话让人3秒记住，'形容词+名词'或'身份+特征'）" },
+    "desire_surface": { "type": "string", "required": true, "description": "表层欲望（公开追求的目标，推动日常情节）" },
+    "desire_deep": { "type": "string", "required": true, "description": "深层欲望（内心真正渴望，揭露时为最高潮时刻）" },
+    "trigger_point": { "type": "string", "required": true, "description": "雷点/禁忌（触碰即情绪爆发的敏感点，多与创伤或核心价值观相关）" },
+    "facade": { "type": "string", "required": true, "description": "A面形象（对外人格面具，与B面落差制造戏剧张力）" },
+    "true_self": { "type": "string", "required": true, "description": "B面形象（真实自我，只在独处或极度信任时显露）" },
+    "speech_pattern": { "type": "string", "required": true, "description": "语言标识（口头禅/语速/用词习惯/句式/方言，不看名字也能认出）" },
+    "arc_start": { "type": "string", "required": true, "description": "弧光起点（开始时的状态，必含明显缺陷或局限）" },
+    "arc_mid": { "type": "string", "required": true, "description": "弧光转折（导致转变的关键事件：打击/背叛/失去/觉醒）" },
+    "arc_end": { "type": "string", "required": true, "description": "弧光终点（结尾最终状态：成长/堕落/完成使命）" },
+    "relationships": {
+      "type": "array",
+      "items": {
+        "relation": { "type": "string", "description": "关系类型，如夫妻/父子/仇敌/师徒/主仆" },
+        "target": { "type": "string", "description": "关系对象姓名或身份" },
+        "dynamic": { "type": "string", "description": "互动模式：互动方式/情感张力/权力关系" }
+      },
+      "required": true
+    },
+    "appearance": { "type": "string", "required": true, "description": "外貌特征（身高/体型/五官/气质/独特标志，要有画面感）" },
+    "clothing_style": { "type": "string", "required": true, "description": "着装风格（反映经济水平/审美/生活态度，变化暗示心态转变）" },
+    "signature_move": { "type": "string", "required": true, "description": "标志性动作（专属习惯性动作，增强辨识度）" },
+    "signature_line": { "type": "string", "required": true, "description": "标志性台词（概括人生态度或核心矛盾，适合宣传语/高潮台词）" },
+    "weakness": { "type": "string", "required": true, "description": "弱点/软肋（致命缺陷或情感软肋，用于制造危机和高潮）" },
+    "strength": { "type": "string", "required": true, "description": "核心优势（最突出的能力/品质，逆风翻盘的依仗）" }
+  },
+
+  "_example": {
+    "name": "萧沉舟",
+    "gender": "男",
+    "age": "28岁",
+    "identity": "苏家上门女婿，无业，在家洗衣做饭",
+    "hidden_identity": "龙王殿之主，地下世界统治者'龙王'，资产万亿",
+    "tag": "废物赘婿",
+    "desire_surface": "被妻子苏婉清认可和尊重，不再被丈母娘辱骂",
+    "desire_deep": "找到一个可以卸下伪装、做回普通人的归宿",
+    "trigger_point": "被人喊'废物'，尤其是妻子失望的眼神",
+    "facade": "懦弱无能、逆来顺受、对丈母娘的刁难唯唯诺诺",
+    "true_self": "杀伐决断、城府极深、武力值天花板",
+    "speech_pattern": "平时语速慢、声音低、常带'嗯''好的''对不起'等卑微用词；气场全开时语调冰冷简短",
+    "arc_start": "三年赘婿生涯磨平棱角，在苏家当牛做马",
+    "arc_mid": "丈母娘逼苏婉清离婚改嫁豪门，对方在订婚宴上羞辱苏婉清，萧沉舟第一次动用龙王殿力量",
+    "arc_end": "完成从'萧家弃子'到'龙王'的身份认同，不再逃避自己的命运",
+    "relationships": [
+      { "relation": "夫妻", "target": "苏婉清", "dynamic": "表面是她嫌弃他、他讨好她；实际上他暗中为她挡下所有明枪暗箭" },
+      { "relation": "丈母娘", "target": "王美兰", "dynamic": "王美兰视他为吸血虫，日日刁难辱骂；他表面忍气吞声" }
+    ],
+    "appearance": "身高一米八五，肩宽腿长。五官深邃，常年低垂的眼帘遮住锐利眼神",
+    "clothing_style": "平时穿几十块的旧T恤和洗白的牛仔裤；龙王形态下一身剪裁利落的黑色西装",
+    "signature_move": "紧张或压抑时会用右手拇指摩挲左手虎口的旧疤痕",
+    "signature_line": "我这条命是她捡回来的，谁敢动她，我让谁九族陪葬。",
+    "weakness": "苏婉清是他的唯一软肋。任何以苏婉清为要挟的局他都不得不跳",
+    "strength": "武力值天花板、龙王殿万亿资产和遍布全球的情报网络、顶级的谋略和隐忍能力"
+  }
+}
