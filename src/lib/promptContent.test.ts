@@ -357,4 +357,77 @@ describe("prompt content interface", () => {
       { kind: "text", text: " 看向镜头" },
     ]);
   });
+
+  it("recognizes a typed 参考图N reference alias as a mention chip", () => {
+    // 用户手写「参考图1」参考语义别名时，应同「图片1」一样自动识别为媒体引用。
+    const first = assetCandidate("asset-node-1", "角色.png", "asset-1");
+    const second = assetCandidate("asset-node-2", "背景.png", "asset-2");
+    const session = createPromptContentEditorSession([first, second]);
+    const element = document.createElement("div");
+    session.attach(element);
+    session.restore({
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "让 参考图1 跟随 参考图2 移动" }],
+    });
+
+    expect(session.autoResolve({ fresh: true })).toMatchObject({
+      converted: 2,
+      ambiguous: 0,
+      pending: 0,
+    });
+    const references = session
+      .snapshot()
+      .items.filter((item) => item.kind === "media_reference");
+    expect(references).toHaveLength(2);
+    expect(references[0]).toMatchObject({
+      kind: "media_reference",
+      canvasNodeKey: "asset-node-1",
+      target: { assetId: "asset-1" },
+    });
+    expect(references[1]).toMatchObject({
+      kind: "media_reference",
+      canvasNodeKey: "asset-node-2",
+      target: { assetId: "asset-2" },
+    });
+  });
+
+  it("converts a typed @别名 split across text items into one mention chip", () => {
+    // 回归：手打 @ 后 IME 输入中文时，@ 与别名可能落在不同的文本项/文本节点里，
+    // auto-resolve 仍应把「@图片1」整体转成单个引用 chip，且不残留多余的 @。
+    const candidate = assetCandidate("asset-node-1");
+    const session = createPromptContentEditorSession([candidate]);
+    const element = document.createElement("div");
+    session.attach(element);
+    session.restore({
+      schema: "prompt-content",
+      version: 1,
+      items: [
+        { kind: "text", text: "开场 " },
+        { kind: "text", text: "@" },
+        { kind: "text", text: "图片1" },
+      ],
+    });
+
+    expect(session.autoResolve({ fresh: true })).toMatchObject({
+      converted: 1,
+      ambiguous: 0,
+      pending: 0,
+    });
+    const items = session.snapshot().items;
+    expect(items).toMatchObject([
+      { kind: "text", text: "开场 " },
+      {
+        kind: "media_reference",
+        canvasNodeKey: "asset-node-1",
+        displayNameSnapshot: "角色.png",
+      },
+    ]);
+    const plainText = items
+      .filter((item) => item.kind === "text")
+      .map((item) => (item as { text: string }).text)
+      .join("");
+    expect(plainText).not.toContain("@@");
+    expect(plainText).not.toContain("@");
+  });
 });

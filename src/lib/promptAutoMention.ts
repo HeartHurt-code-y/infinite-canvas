@@ -21,6 +21,8 @@ export interface PromptAutoMentionCandidate {
   readonly resultIndex?: number;
   readonly kind: "image" | "video" | "audio";
   readonly name: string;
+  /** @ 下拉候选缩略图源（可选，UI 用于候选与同名选择器预览）。 */
+  readonly previewUrl?: string | null;
 }
 
 /** 一条可自动匹配的模式文本（已归一化）及其归属候选下标。 */
@@ -95,20 +97,27 @@ const AUTO_ALIAS_KIND_LABEL: Readonly<Record<string, string>> = {
   audio: "音频",
 };
 
-/**
- * 为候选生成「图片1 / 视频2」形式的确定性别名。
- * 编号只取决于当前生成节点同类连线顺序，和候选实例 key 一一对应。
- */
-export function buildAutoMentionAliases(
+/** 参考语义别名：与主别名（图片1…）并列的「参考图N」等写法，同样可直接绑定素材。 */
+const AUTO_ALIAS_REFERENCE_KIND_LABEL: Readonly<Record<string, string>> = {
+  image: "参考图",
+  video: "参考视频",
+  audio: "参考音频",
+};
+
+/** 单个候选构建出的全部别名：主别名（图片1…）+ 参考变体（参考图1…）。 */
+interface AutoMentionAliasRecord {
+  readonly candidateIndex: number;
+  readonly label: string;
+  readonly referenceLabel: string;
+}
+
+function buildAutoMentionAliasRecords(
   candidates: readonly PromptAutoMentionCandidate[],
-): AutoMentionAlias[] {
+): AutoMentionAliasRecord[] {
   const counts = new Map<string, number>();
   const naturalOwners = naturalOwnersByText(candidates);
   const usedAliases = new Set<string>();
-  return candidates.map((candidate, candidateIndex) => {
-    const ordinal = (counts.get(candidate.kind) ?? 0) + 1;
-    counts.set(candidate.kind, ordinal);
-    const base = `${AUTO_ALIAS_KIND_LABEL[candidate.kind] ?? "素材"}${ordinal}`;
+  const uniqueLabel = (base: string, candidateIndex: number): string => {
     let label = base;
     let suffix = 1;
     // 别名是用户可以手写的语法，不能与另一素材的真实名称或其他别名冲突。
@@ -123,11 +132,34 @@ export function buildAutoMentionAliases(
       label = `${base}·实例${suffix}`;
     }
     usedAliases.add(normalizeAutoMentionText(label));
-    return {
+    return label;
+  };
+  return candidates.map((candidate, candidateIndex) => {
+    const ordinal = (counts.get(candidate.kind) ?? 0) + 1;
+    counts.set(candidate.kind, ordinal);
+    const label = uniqueLabel(
+      `${AUTO_ALIAS_KIND_LABEL[candidate.kind] ?? "素材"}${ordinal}`,
       candidateIndex,
-      label,
-    };
+    );
+    const referenceLabel = uniqueLabel(
+      `${AUTO_ALIAS_REFERENCE_KIND_LABEL[candidate.kind] ?? "参考素材"}${ordinal}`,
+      candidateIndex,
+    );
+    return { candidateIndex, label, referenceLabel };
   });
+}
+
+/**
+ * 为候选生成「图片1 / 视频2」形式的确定性别名。
+ * 编号只取决于当前生成节点同类连线顺序，和候选实例 key 一一对应。
+ */
+export function buildAutoMentionAliases(
+  candidates: readonly PromptAutoMentionCandidate[],
+): AutoMentionAlias[] {
+  return buildAutoMentionAliasRecords(candidates).map(({ candidateIndex, label }) => ({
+    candidateIndex,
+    label,
+  }));
 }
 
 /** 返回候选在当前连线集合里的稳定别名。 */
@@ -139,8 +171,28 @@ export function autoMentionAliasForCandidate(
 }
 
 /**
+ * 把稳定别名（图片1 / 视频2…）与参考变体（参考图1…）注册进模式集合。
+ * 别名对所有候选都生效，与 UI「可识别名称」提示保持一致：
+ * 输入别名即可直接绑定素材，而不只是同名冲突时的消歧工具。
+ * buildAutoMentionAliasRecords 已保证别名不与真实名称或其他别名冲突。
+ */
+function registerAutoMentionAliases(
+  ownersByText: Map<string, Set<number>>,
+  candidates: readonly PromptAutoMentionCandidate[],
+): void {
+  for (const record of buildAutoMentionAliasRecords(candidates)) {
+    for (const label of [record.label, record.referenceLabel]) {
+      const normalized = normalizeAutoMentionText(label);
+      const owners = ownersByText.get(normalized) ?? new Set<number>();
+      owners.add(record.candidateIndex);
+      ownersByText.set(normalized, owners);
+    }
+  }
+}
+
+/**
  * 由候选素材构建自动匹配模式库：
- * - 每个候选产出「完整名 + 词干」两条模式；
+ * - 每个候选产出「完整名 + 词干」两条模式，另加稳定别名（图片1…）；
  * - 归一化后重复出现的模式视为歧义（同素材重名/词干与他素材同名），剔除，
  *   避免自动引用插错对象（手动 @ 下拉仍可用）；
  * - 返回按长度降序排列的模式列表，供最长优先扫描。
@@ -149,6 +201,7 @@ export function buildAutoMentionPatterns(
   candidates: readonly PromptAutoMentionCandidate[],
 ): AutoMentionPattern[] {
   const ownersByText = naturalOwnersByText(candidates);
+  registerAutoMentionAliases(ownersByText, candidates);
   const patterns: AutoMentionPattern[] = [];
   for (const [text, owners] of ownersByText) {
     if (owners.size !== 1) continue;
@@ -171,7 +224,7 @@ export function countAmbiguousAutoMentionPatterns(
 /**
  * 构建完整自动解析模式：
  * - 自然名称/词干保留全部 owner，同名时进入待确认态；
- * - 仅对涉及自然名称歧义的候选注册「图片1」等唯一别名；
+ * - 所有候选都注册「图片1」等唯一别名，输入别名可直接绑定对应实例；
  * - 已确认映射优先把歧义自然名称收敛到一个仍在线的实例。
  */
 export function buildAutoMentionResolutionPatterns(
@@ -179,18 +232,7 @@ export function buildAutoMentionResolutionPatterns(
   learnedMappings: ReadonlyMap<string, string> = new Map(),
 ): AutoMentionResolutionPattern[] {
   const ownersByText = naturalOwnersByText(candidates);
-  const ambiguousCandidateIndexes = new Set<number>();
-  ownersByText.forEach((owners) => {
-    if (owners.size > 1) owners.forEach((index) => ambiguousCandidateIndexes.add(index));
-  });
-
-  for (const alias of buildAutoMentionAliases(candidates)) {
-    if (!ambiguousCandidateIndexes.has(alias.candidateIndex)) continue;
-    const normalized = normalizeAutoMentionText(alias.label);
-    const owners = ownersByText.get(normalized) ?? new Set<number>();
-    owners.add(alias.candidateIndex);
-    ownersByText.set(normalized, owners);
-  }
+  registerAutoMentionAliases(ownersByText, candidates);
 
   const candidateIndexByKey = new Map(
     candidates.map((candidate, index) => [candidate.canvasNodeKey, index] as const),
@@ -436,10 +478,26 @@ function replacePlainTextMatches(
       const match = matches[index]!;
       const pattern = patterns[matches[index]!.patternIndex]!;
       const matchedText = node.data.slice(match.start, match.end);
-      const replacementStart =
-        match.start > 0 && node.data[match.start - 1] === "@" ? match.start - 1 : match.start;
+      let rangeStartNode: Text = node;
+      let rangeStartOffset = match.start;
+      if (match.start > 0 && node.data[match.start - 1] === "@") {
+        rangeStartOffset = match.start - 1;
+      } else if (match.start === 0) {
+        // 命中在独立文本节点开头时，@ 可能落在前一个兄弟文本节点里
+        // （手打 @ 后 IME 输入中文、Tiptap 将两者拆成相邻文本节点的结构）。
+        const previous = node.previousSibling;
+        if (
+          previous instanceof Text &&
+          previous.data.length > 0 &&
+          previous.data.endsWith("@") &&
+          previous.parentElement?.closest("[data-mention-id], [data-ambiguous-pattern]") == null
+        ) {
+          rangeStartNode = previous;
+          rangeStartOffset = previous.data.length - 1;
+        }
+      }
       const range = doc.createRange();
-      range.setStart(node, replacementStart);
+      range.setStart(rangeStartNode, rangeStartOffset);
       range.setEnd(node, match.end);
 
       let replacement: HTMLSpanElement | null = null;
