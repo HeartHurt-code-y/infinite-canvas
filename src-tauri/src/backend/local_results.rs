@@ -106,6 +106,28 @@ impl LocalResultService {
         }
     }
 
+    pub fn pending_video_content_result(
+        &self,
+        task_id: &str,
+        remote_task_id: &str,
+    ) -> GenerationResultRecord {
+        GenerationResultRecord {
+            task_id: task_id.to_string(),
+            result_index: 1,
+            media_type: MediaType::Video,
+            remote_task_id: Some(remote_task_id.to_string()),
+            source: json!({ "kind": "content", "remoteTaskId": remote_task_id }),
+            save_status: SaveStatus::Pending,
+            final_path: None,
+            relative_path: None,
+            byte_size: None,
+            mime_type: None,
+            sha256: None,
+            saved_at: None,
+            error: None,
+        }
+    }
+
     pub async fn save_images<F>(
         &self,
         task_id: &str,
@@ -286,6 +308,89 @@ impl LocalResultService {
                 record.error = Some(error.runtime_record());
                 error!(
                     "[save] 视频结果下载或校验失败: taskId={}, remoteTaskId={}, 保存状态=failed, 错误: {}",
+                    task_id,
+                    remote_task_id,
+                    record
+                        .error
+                        .as_ref()
+                        .map(|error| error.to_string())
+                        .unwrap_or_default()
+                );
+                self.persist_result(&record)?;
+                Ok(record)
+            }
+        }
+    }
+
+    /// 直接落盘视频字节（海外平台 content 接口 fallback 场景：视频成功但观察
+    /// 响应缺失 `result_url`/`video_url` 时，已由 provider 通过
+    /// `GET /v1/videos/{task_id}/content` 下载到原始字节）。
+    pub async fn save_video_bytes(
+        &self,
+        task_id: &str,
+        remote_task_id: &str,
+        bytes: Vec<u8>,
+        mut on_ready: impl FnMut(&GenerationResultRecord, Option<String>) + Send,
+    ) -> BackendResult<GenerationResultRecord> {
+        info!(
+            "[save] 开始保存视频结果（content 字节直存）: taskId={}, remoteTaskId={}, 字节 {}",
+            task_id,
+            remote_task_id,
+            bytes.len()
+        );
+        let mut record = GenerationResultRecord {
+            task_id: task_id.to_string(),
+            result_index: 1,
+            media_type: MediaType::Video,
+            remote_task_id: Some(remote_task_id.to_string()),
+            source: json!({ "kind": "content", "remoteTaskId": remote_task_id }),
+            save_status: SaveStatus::Pending,
+            final_path: None,
+            relative_path: None,
+            byte_size: None,
+            mime_type: None,
+            sha256: None,
+            saved_at: None,
+            error: None,
+        };
+        self.persist_result(&record)?;
+        record.save_status = SaveStatus::Writing;
+        self.persist_result(&record)?;
+        on_ready(&record, None);
+
+        let result = self.prepare_bytes(bytes, MediaType::Video);
+        match result {
+            Ok(prepared) => match self
+                .commit_prepared(task_id, 1, Some(remote_task_id), prepared)
+                .await
+            {
+                Ok(saved) => Ok(saved),
+                Err(error) => {
+                    record.save_status = match error {
+                        BackendError::Conflict(_) => SaveStatus::Conflict,
+                        _ => SaveStatus::Failed,
+                    };
+                    record.error = Some(error.runtime_record());
+                    error!(
+                        "[save] 视频字节提交写入失败: taskId={}, remoteTaskId={}, 保存状态={}, 错误: {}",
+                        task_id,
+                        remote_task_id,
+                        record.save_status.as_str(),
+                        record
+                            .error
+                            .as_ref()
+                            .map(|error| error.to_string())
+                            .unwrap_or_default()
+                    );
+                    self.persist_result(&record)?;
+                    Ok(record)
+                }
+            },
+            Err(error) => {
+                record.save_status = SaveStatus::Failed;
+                record.error = Some(error.runtime_record());
+                error!(
+                    "[save] 视频字节校验失败: taskId={}, remoteTaskId={}, 保存状态=failed, 错误: {}",
                     task_id,
                     remote_task_id,
                     record

@@ -403,6 +403,113 @@ impl ProviderRuntime {
         Ok((observation, response))
     }
 
+    /// 通过 `GET {base_url}/v1/videos/{remote_task_id}/content` 获取海外平台视频
+    /// 生成成功产物的原始字节流（`video/mp4`）。
+    ///
+    /// 文档契约：当成功观察响应中顶层 `data.result_url` 为空（旧任务）时，
+    /// 应回退到本接口获取视频内容，这是最可靠的获取方式。
+    pub async fn fetch_video_content(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+    ) -> BackendResult<Vec<u8>> {
+        let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
+            BackendError::validation(
+                "video task has no remote task id",
+                json!({ "taskId": task.id }),
+            )
+        })?;
+        let context = self.resolve_frozen(task)?;
+        let path = format!("/v1/videos/{remote_task_id}/content");
+        let url = endpoint(&context.base_url, &path)?;
+        let call_id = Uuid::new_v4().to_string();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallPrepared {
+                call_id: call_id.clone(),
+                attempt_id: attempt_id.to_string(),
+                phase: "video-content".to_string(),
+                request: json!({
+                    "providerConnectionId": context.provider_connection_id,
+                    "adapterId": context.adapter_id,
+                    "credentialReference": context.api_key_ref,
+                    "method": "GET",
+                    "url": sanitize_url(&url),
+                    "headers": { "authorization": "已排除敏感凭据" },
+                    "bodyType": "none",
+                    "body": Value::Null,
+                }),
+            },
+        )?;
+        let sent_at = now_ms();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallSent {
+                call_id: call_id.clone(),
+                sent_at,
+            },
+        )?;
+        let response = match self
+            .client
+            .get(url)
+            .bearer_auth(&context.api_key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                let backend_error = BackendError::Transport(error);
+                self.lifecycle.commit(
+                    &task.id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.clone(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                    },
+                )?;
+                return Err(backend_error);
+            }
+        };
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        if !(200..300).contains(&status) {
+            let raw_response =
+                String::from_utf8_lossy(&response.bytes().await?).into_owned();
+            self.lifecycle.commit(
+                &task.id,
+                GenerationLifecycleFact::ProviderCallResponded {
+                    call_id: call_id.clone(),
+                    sent_at,
+                    status,
+                    headers: headers.clone(),
+                    raw_response: raw_response.clone(),
+                },
+            )?;
+            return Err(BackendError::protocol(
+                format!("video content download returned HTTP {status}"),
+                json!({ "httpStatus": status, "headers": headers, "rawResponse": raw_response }),
+            ));
+        }
+        let bytes = response.bytes().await?.to_vec();
+        info!(
+            "[provider] 收到视频 content 直连响应: taskId={}, callId={}, HTTP {status}, 字节 {}",
+            task.id,
+            call_id,
+            bytes.len()
+        );
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallResponded {
+                call_id: call_id.clone(),
+                sent_at,
+                status,
+                headers,
+                raw_response: format!("<binary video content: {} bytes>", bytes.len()),
+            },
+        )?;
+        Ok(bytes)
+    }
+
     async fn captured_json(
         &self,
         task: &TaskExecutionRecord,
@@ -2658,6 +2765,31 @@ mod tests {
             Some("https://cdn.example.com/video.mp4")
         );
         assert_eq!(observation.failure, None);
+    }
+
+    #[test]
+    fn successful_video_observation_without_result_url_yields_no_video_url() {
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "code": "success",
+                "data": {
+                    "status": "SUCCESS",
+                    "progress": "100%",
+                    "result_url": "",
+                    "data": {
+                        "content": { "video_url": "" }
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let observation = parse_video_observation(&response).expect("video observation");
+        assert_eq!(observation.remote_status, "SUCCESS");
+        assert_eq!(observation.video_url, None);
     }
 
     #[test]

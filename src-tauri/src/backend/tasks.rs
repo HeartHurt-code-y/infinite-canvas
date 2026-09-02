@@ -779,45 +779,83 @@ impl GenerationTaskService {
                             json!({ "taskId": task_id }),
                         )
                     })?;
-                    let video_url = observation.video_url.as_deref().ok_or_else(|| {
-                        BackendError::protocol(
-                            "successful video task has no video_url",
-                            json!({ "taskId": task_id, "remoteTaskId": remote_task_id }),
-                        )
-                    })?;
-                    info!(
-                        "[generation] 视频生成成功，开始保存结果: taskId={}, remoteTaskId={}, videoUrl={}",
-                        task_id,
-                        remote_task_id,
-                        super::provider::redact_url_string(video_url)
-                    );
-                    self.commit_fact(
-                        task_id,
-                        GenerationLifecycleFact::ObservationApplied {
-                            attempt_id,
-                            call_id,
-                            tokens,
-                            observation: GenerationRemoteObservation::Succeeded {
-                                result: self.local_results.pending_video_result(
+                    let event_service = self.clone();
+                    let result = match observation.video_url.as_deref() {
+                        Some(video_url) => {
+                            info!(
+                                "[generation] 视频生成成功，开始保存结果: taskId={}, remoteTaskId={}, videoUrl={}",
+                                task_id,
+                                remote_task_id,
+                                super::provider::redact_url_string(video_url)
+                            );
+                            self.commit_fact(
+                                task_id,
+                                GenerationLifecycleFact::ObservationApplied {
+                                    attempt_id,
+                                    call_id,
+                                    tokens,
+                                    observation: GenerationRemoteObservation::Succeeded {
+                                        result: self.local_results.pending_video_result(
+                                            task_id,
+                                            remote_task_id,
+                                            video_url,
+                                        ),
+                                    },
+                                },
+                            )?;
+                            self.local_results
+                                .save_video(
                                     task_id,
                                     remote_task_id,
                                     video_url,
-                                ),
-                            },
-                        },
-                    )?;
-                    let event_service = self.clone();
-                    let result = self
-                        .local_results
-                        .save_video(
-                            task_id,
-                            remote_task_id,
-                            video_url,
-                            move |record, preview_src| {
-                                event_service.emit_result_ready(record, preview_src);
-                            },
-                        )
-                        .await?;
+                                    move |record, preview_src| {
+                                        event_service.emit_result_ready(record, preview_src);
+                                    },
+                                )
+                                .await?
+                        }
+                        None => {
+                            info!(
+                                "[generation] 视频生成成功但观察响应缺失 result_url，尝试通过 content 接口获取视频字节: taskId={}, remoteTaskId={}",
+                                task_id,
+                                remote_task_id
+                            );
+                            let bytes = self
+                                .providers
+                                .fetch_video_content(&task, &attempt_id)
+                                .await?;
+                            info!(
+                                "[generation] content 接口下载完成: taskId={}, remoteTaskId={}, 字节 {}",
+                                task_id,
+                                remote_task_id,
+                                bytes.len()
+                            );
+                            self.commit_fact(
+                                task_id,
+                                GenerationLifecycleFact::ObservationApplied {
+                                    attempt_id,
+                                    call_id,
+                                    tokens,
+                                    observation: GenerationRemoteObservation::Succeeded {
+                                        result: self.local_results.pending_video_content_result(
+                                            task_id,
+                                            remote_task_id,
+                                        ),
+                                    },
+                                },
+                            )?;
+                            self.local_results
+                                .save_video_bytes(
+                                    task_id,
+                                    remote_task_id,
+                                    bytes,
+                                    move |record, preview_src| {
+                                        event_service.emit_result_ready(record, preview_src);
+                                    },
+                                )
+                                .await?
+                        }
+                    };
                     let error_suffix = result
                         .error
                         .as_ref()
