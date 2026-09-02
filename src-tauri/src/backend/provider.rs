@@ -1403,10 +1403,8 @@ fn build_video_body(
 
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
-    let prompt = video_prompt(resolved);
-    if !prompt.trim().is_empty() {
-        body.insert(prompt_field, Value::String(prompt));
-    }
+    // prompt 字段仅保留简短占位符，真正生效的提示词文本由 `content` 中的 text 项承载。
+    body.insert(prompt_field, Value::String(VIDEO_PROMPT_PLACEHOLDER.to_string()));
     match content_container.as_str() {
         "root" => {
             body.insert(content_field, Value::Array(content));
@@ -1431,29 +1429,9 @@ fn build_video_body(
     Ok(Value::Object(body))
 }
 
-/// 通用视频 body 的 prompt 渲染：由结构化 `content` 重建，媒体引用渲染为
-/// `图片N` / `视频N` / `音频N` 简洁标签，而不是 `[图片N：文件名]` 占位形式。
-/// 真正生效的提示词文本由 `content` 中的 text 项承载。
-fn video_prompt(resolved: &ResolvedGeneration) -> String {
-    let mut prompt = String::new();
-    for item in &resolved.content {
-        match item {
-            CompiledContentItem::Text(text) => prompt.push_str(text),
-            CompiledContentItem::Media {
-                media_type,
-                type_position,
-            } => {
-                let label = match media_type {
-                    MediaType::Image => "图片",
-                    MediaType::Video => "视频",
-                    MediaType::Audio => "音频",
-                };
-                prompt.push_str(&format!("{label}{type_position}"));
-            }
-        }
-    }
-    prompt
-}
+/// 通用视频 body 的 prompt 占位符：prompt 字段仅保留简短占位，真正生效的
+/// 提示词文本由 `metadata.content` 中的 text 项承载，媒体引用由 image_url 等项承载。
+const VIDEO_PROMPT_PLACEHOLDER: &str = "...";
 
 fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
     validate_wan_media(resolved)?;
@@ -2277,8 +2255,10 @@ mod tests {
 
         let body = build_video_body(&video_task, &generation).expect("Dreamina video body");
         assert_eq!(body["model"], "dreamina-seedance-2.5");
-        assert_eq!(body["prompt"], "A train arrives");
+        // prompt 字段仅保留简短占位符，生效文本在 metadata.content 的 text 项中。
+        assert_eq!(body["prompt"], "...");
         assert_eq!(body["metadata"]["content"][0]["type"], "text");
+        assert_eq!(body["metadata"]["content"][0]["text"], "A train arrives");
         assert_eq!(body["metadata"]["ratio"], "9:16");
         assert_eq!(body["metadata"]["resolution"], "720p");
         assert_eq!(body["metadata"]["duration"], 12);
@@ -2340,9 +2320,8 @@ mod tests {
 
         let body = build_video_body(&video_task, &generation).expect("Dreamina media body");
 
-        // prompt 字段应为简洁标签，而不是 [图片N：文件名] 占位形式。
-        assert_eq!(body["prompt"], "图片1和图片2疯狂做爱");
-        // 真正生效的提示词按顺序落在 metadata.content 的 text 项中。
+        // prompt 字段仅保留简短占位符，真正生效的提示词按顺序落在 metadata.content 的 text 项中。
+        assert_eq!(body["prompt"], "...");
         assert_eq!(body["metadata"]["content"][0]["type"], "image_url");
         assert_eq!(body["metadata"]["content"][1]["type"], "text");
         assert_eq!(body["metadata"]["content"][1]["text"], "和");
