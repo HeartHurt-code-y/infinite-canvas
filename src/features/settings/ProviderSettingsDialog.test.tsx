@@ -4,6 +4,7 @@ import { assetLibraryClient } from "../../lib/backend";
 import type {
   ProviderConnection,
   ProviderSettingsClient,
+  ProviderTokenGroup,
   RemoteModelOption,
   TosStagingClient,
 } from "../../lib/backend";
@@ -72,6 +73,7 @@ const REMOTE_MODELS: RemoteModelOption[] = [
     configuredOperations: [],
     suggestedOperations: ["text_to_image"],
     operationSchema: IMAGE_OPERATION_SCHEMA,
+    tokenGroup: null,
   },
   {
     id: "company-video-1",
@@ -82,8 +84,19 @@ const REMOTE_MODELS: RemoteModelOption[] = [
     configuredOperations: ["video_generation"],
     suggestedOperations: ["text_to_image", "image_to_image"],
     operationSchema: VIDEO_OPERATION_SCHEMA,
+    tokenGroup: null,
   },
 ];
+
+const AS_GROUP: ProviderTokenGroup = {
+  id: "token-group-1",
+  providerConnectionId: SAVED_PROVIDER.id,
+  groupName: "as分组",
+  credentialRef: "provider:provider-company:token:token-group-1",
+  enabled: true,
+  createdAt: 1,
+  updatedAt: 1,
+};
 
 function createClient(overrides: Partial<ProviderSettingsClient> = {}): ProviderSettingsClient {
   return {
@@ -95,6 +108,19 @@ function createClient(overrides: Partial<ProviderSettingsClient> = {}): Provider
     testConnection: vi.fn(() => Promise.resolve(CONNECTIVITY_OK)),
     replaceProviderModelBindings: vi.fn(() => Promise.resolve([])),
     getCredential: vi.fn(() => Promise.resolve("")),
+    listProviderTokenGroups: vi.fn(() => Promise.resolve([])),
+    upsertProviderTokenGroup: vi.fn(() =>
+      Promise.resolve({
+        id: "token-group-1",
+        providerConnectionId: SAVED_PROVIDER.id,
+        groupName: "as分组",
+        credentialRef: "provider:provider-company:token:token-group-1",
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1,
+      }),
+    ),
+    deleteProviderTokenGroup: vi.fn(() => Promise.resolve()),
     ...overrides,
   };
 }
@@ -110,6 +136,7 @@ const SAVED_IMAGE_MODEL: RemoteModelOption[] = [
     configuredOperations: ["text_to_image"],
     suggestedOperations: [],
     operationSchema: IMAGE_OPERATION_SCHEMA,
+    tokenGroup: null,
   },
 ];
 
@@ -243,6 +270,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: ["text_to_image", "image_to_image"],
         suggestedOperations: [],
         operationSchema: IMAGE_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
       {
         id: "company-disabled-1",
@@ -253,6 +281,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: [],
         suggestedOperations: [],
         operationSchema: IMAGE_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
       {
         id: "company-video-1",
@@ -263,6 +292,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: ["video_generation"],
         suggestedOperations: [],
         operationSchema: VIDEO_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
     ];
     const client = createClient({
@@ -342,6 +372,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: [],
         suggestedOperations: ["text_generation"],
         operationSchema: TEXT_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
     ];
     const client = createClient({
@@ -389,6 +420,7 @@ describe("ProviderSettingsDialog", () => {
       configuredOperations: [],
       suggestedOperations: ["text_generation"],
       operationSchema: TEXT_OPERATION_SCHEMA,
+      tokenGroup: null,
     };
     const client = createClient({
       listProviderConnections: vi.fn(() => Promise.resolve([SAVED_PROVIDER])),
@@ -514,6 +546,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: ["video_generation"],
         suggestedOperations: [],
         operationSchema: VIDEO_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
     ];
     const client = createClient({
@@ -582,7 +615,7 @@ describe("ProviderSettingsDialog", () => {
 
     const imageModelName = await screen.findByText("公司图片模型");
     expect(callOrder).toEqual(["save-connection", "save-key", "fetch-models"]);
-    expect(client.fetchProviderModels).toHaveBeenCalledWith(SAVED_PROVIDER.id);
+    expect(client.fetchProviderModels).toHaveBeenCalledWith(SAVED_PROVIDER.id, null);
 
     const imageModel = imageModelName.closest("article");
     expect(imageModel).not.toBeNull();
@@ -625,6 +658,70 @@ describe("ProviderSettingsDialog", () => {
     );
     expect(onCatalogChanged).toHaveBeenCalledOnce();
     expect(screen.getByText(/1 个图片模型、1 个视频模型/)).toBeInTheDocument();
+  });
+
+  it("按令牌分组拉取模型、为模型指定调用令牌，并在保存时携带 tokenGroup", async () => {
+    const client = createClient({
+      listProviderConnections: vi.fn(() => Promise.resolve([SAVED_PROVIDER])),
+      listProviderTokenGroups: vi.fn(() => Promise.resolve([AS_GROUP])),
+      fetchProviderModels: vi.fn(() => Promise.resolve(REMOTE_MODELS)),
+    });
+    const onCatalogChanged = vi.fn(() => Promise.resolve());
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={onCatalogChanged}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    // 已保存的供应商加载后，「拉取令牌」下拉应列出令牌分组。
+    await waitFor(() => expect(screen.getByLabelText("供应商连接")).toHaveValue(SAVED_PROVIDER.id));
+    const pullTokenSelect = screen.getByLabelText(/拉取令牌/);
+    await waitFor(() =>
+      expect(within(pullTokenSelect).getByRole("option", { name: "as分组" })).toBeInTheDocument(),
+    );
+    fireEvent.change(pullTokenSelect, { target: { value: "as分组" } });
+
+    const fetchButton = screen.getByRole("button", { name: "拉取模型" });
+    await waitFor(() => expect(fetchButton).toBeEnabled());
+    fireEvent.click(fetchButton);
+
+    // 拉取请求应携带所选令牌分组。
+    await waitFor(() =>
+      expect(client.fetchProviderModels).toHaveBeenCalledWith(SAVED_PROVIDER.id, "as分组"),
+    );
+
+    // 模型卡片上的「调用令牌」下拉列出全部分组，可为该模型指定 as 分组。
+    const imageModelName = await screen.findByText("公司图片模型");
+    const imageModel = imageModelName.closest("article");
+    expect(imageModel).not.toBeNull();
+    const tokenSelect = within(imageModel as HTMLElement).getByLabelText(/调用令牌/);
+    expect(within(tokenSelect).getByRole("option", { name: "as分组" })).toBeInTheDocument();
+    fireEvent.change(tokenSelect, { target: { value: "as分组" } });
+
+    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+
+    // 保存时该模型的绑定应携带 tokenGroup: "as分组"。
+    await waitFor(() =>
+      expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(
+        SAVED_PROVIDER.id,
+        expect.arrayContaining([
+          expect.objectContaining({
+            remoteModelId: "company-image-1",
+            enabled: true,
+            tokenGroup: "as分组",
+          }),
+          expect.objectContaining({
+            remoteModelId: "company-video-1",
+            enabled: true,
+            tokenGroup: null,
+          }),
+        ]),
+      ),
+    );
   });
 
   it("keeps an explicitly disabled model unselected after pulling again", async () => {
@@ -756,6 +853,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: ["text_to_image"],
         suggestedOperations: [],
         operationSchema: IMAGE_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
       {
         id: "company-video-1",
@@ -766,6 +864,7 @@ describe("ProviderSettingsDialog", () => {
         configuredOperations: ["video_generation"],
         suggestedOperations: [],
         operationSchema: VIDEO_OPERATION_SCHEMA,
+        tokenGroup: null,
       },
     ];
     const client = createClient({

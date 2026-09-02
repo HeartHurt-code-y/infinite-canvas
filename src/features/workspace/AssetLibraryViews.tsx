@@ -19,7 +19,7 @@ import {
   type RealPersonGroup,
 } from "../../lib/backend";
 
-import { AssetKindIcon, ContactSheetCrop, NodeTypeIcon } from "./PromptNodeViews";
+import { AssetKindIcon, NodeTypeIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard, openExternalUrl } from "./desktopActions";
 import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
 import {
@@ -575,9 +575,6 @@ function AssetCardVideoVisual({
           }}
         />
       ) : null}
-      {!isRealAsset && effectiveCoverUrl == null && !videoCoverReady ? (
-        <ContactSheetCrop visual={asset.visual as Exclude<AssetItem["visual"], "ambience">} />
-      ) : null}
     </span>
   );
 }
@@ -684,7 +681,7 @@ export function AssetSourceDialog({
             </div>
           ) : (
             <div className="asset-source-dialog__fallback" role="img" aria-label={asset.name}>
-              <ContactSheetCrop visual={asset.visual as Exclude<AssetItem["visual"], "ambience">} />
+              <AssetMediaState kind={asset.kind} state="unavailable" />
             </div>
           )}
         </section>
@@ -874,10 +871,6 @@ function AssetCard({
                     setLoadedImagePreviewUrl(null);
                     setFailedImagePreviewUrl(asset.previewUrl ?? null);
                   }}
-                />
-              ) : !isRealAsset ? (
-                <ContactSheetCrop
-                  visual={asset.visual as Exclude<AssetItem["visual"], "ambience">}
                 />
               ) : null}
             </>

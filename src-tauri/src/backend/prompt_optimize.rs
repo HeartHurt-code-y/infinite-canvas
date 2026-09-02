@@ -1740,12 +1740,21 @@ pub async fn optimize_video_prompt(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .unwrap_or("legacy-prompt-optimizer");
+    // 文本模型同样按绑定上的令牌分组解析密钥，与媒体生成任务保持一致；
+    // 冻结到任务快照后，captured_text_json 通过 resolve_frozen 直接使用对应密钥。
+    let task_api_key_ref = deps.storage.resolve_binding_credential_ref(
+        &command.provider_connection_id,
+        binding.token_group.as_deref(),
+    )?;
+    deps.providers
+        .resolve_token_group(&provider.id, binding.token_group.as_deref())?;
     deps.lifecycle.create(NewTask {
         id: &task_id,
         canvas_id,
         source_node_id,
         operation: GenerationOperation::TextGeneration,
         provider: &provider,
+        api_key_ref: &task_api_key_ref,
         model_definition_id: &command.model_definition_id,
         remote_model_id: Some(&remote_model_id),
         logical_request: &logical_request,

@@ -157,7 +157,14 @@ impl GenerationTaskService {
         };
         command.parameters = normalize_parameters(operation_schema, &supplied_parameters)?;
         command.model_operation_schema_snapshot = Some(operation_schema.clone());
-        self.providers.resolve_current(&provider.id)?;
+        // 模型绑定指定了令牌分组时，用该分组的密钥；否则用供应商主 API Key。
+        // 先解析出密钥引用并校验其可用（resolve 会读取凭据），再冻结进任务快照。
+        let task_api_key_ref = self.storage.resolve_binding_credential_ref(
+            &command.provider_connection_id,
+            binding.token_group.as_deref(),
+        )?;
+        self.providers
+            .resolve_token_group(&provider.id, binding.token_group.as_deref())?;
 
         let remote_model_id = binding
             .remote_model_id
@@ -180,6 +187,7 @@ impl GenerationTaskService {
             source_node_id: &command.source_node_id,
             operation: command.operation,
             provider: &provider,
+            api_key_ref: &task_api_key_ref,
             model_definition_id: &command.model_definition_id,
             remote_model_id: Some(remote_model_id),
             logical_request: &logical_request,

@@ -16,14 +16,16 @@ use super::{
     types::{
         AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
         ConnectivityTestResult, CreateRealPersonAuthLinkCommand, CredentialStatus,
-        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, GenerationOperation,
-        GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
-        LocalAssetRecord, ModelDefinition, ProviderConnection, ProviderModelBinding,
+        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
+        ModelDefinition, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
         RawProviderResponse, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
         RecoveryReport, RemoteModelOption, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
         StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
-        TosStagingConfig, UpsertProviderConnectionCommand, VideoTaskListCommand,
+        TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
+        VideoTaskListCommand,
     },
 };
 
@@ -106,10 +108,11 @@ pub fn list_provider_model_bindings(
 pub async fn fetch_provider_models(
     state: State<'_, BackendState>,
     provider_connection_id: String,
+    token_group: Option<String>,
 ) -> CommandResult<Vec<RemoteModelOption>> {
     state
         .providers
-        .list_models(&provider_connection_id)
+        .list_models(&provider_connection_id, token_group.as_deref())
         .await
         .command()
 }
@@ -118,12 +121,59 @@ pub async fn fetch_provider_models(
 pub async fn test_provider_connection(
     state: State<'_, BackendState>,
     provider_connection_id: String,
+    token_group: Option<String>,
 ) -> CommandResult<ConnectivityTestResult> {
     state
         .providers
-        .test_connection(&provider_connection_id)
+        .test_connection(&provider_connection_id, token_group.as_deref())
         .await
         .command()
+}
+
+#[tauri::command]
+pub fn list_provider_token_groups(
+    state: State<'_, BackendState>,
+    provider_connection_id: String,
+) -> CommandResult<Vec<ProviderTokenGroup>> {
+    state
+        .storage
+        .list_provider_token_groups(&provider_connection_id)
+        .command()
+}
+
+#[tauri::command]
+pub fn upsert_provider_token_group(
+    state: State<'_, BackendState>,
+    command: UpsertProviderTokenGroupCommand,
+) -> CommandResult<ProviderTokenGroup> {
+    let group = state
+        .storage
+        .upsert_provider_token_group(&command)
+        .command()?;
+    // 分组密钥只写入 Windows 凭据管理器，不落库；为空表示沿用已保存密钥。
+    if let Some(secret) = command.secret.filter(|value| !value.trim().is_empty()) {
+        state
+            .credentials
+            .set(&group.credential_ref, &secret)
+            .command()?;
+    }
+    Ok(group)
+}
+
+#[tauri::command]
+pub fn delete_provider_token_group(
+    state: State<'_, BackendState>,
+    command: DeleteProviderTokenGroupCommand,
+) -> CommandResult<()> {
+    let credential_ref = state
+        .storage
+        .delete_provider_token_group(&command.provider_connection_id, &command.group_name)
+        .command()?;
+    if let Some(credential_ref) = credential_ref {
+        // best-effort 清理已保存的分组密钥；凭据本身不存在不算错误。
+        let _ = state.credentials.delete(&credential_ref);
+    }
+    Ok(())
 }
 
 #[tauri::command]
@@ -792,6 +842,7 @@ mod tests {
                 remote_model_id: remote_model_id.into(),
                 enabled: !enabled_operations.is_empty(),
                 enabled_operations,
+                token_group: None,
                 operation_schema: json!({}),
             }],
         }

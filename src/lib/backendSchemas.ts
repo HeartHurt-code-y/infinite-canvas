@@ -16,6 +16,7 @@ import type {
   OptimizedPromptResult,
   ProviderConnection,
   ProviderModelBinding,
+  ProviderTokenGroup,
   RealPersonAuthLink,
   RealPersonGroup,
   RemoteModelOption,
@@ -69,11 +70,24 @@ export const providerModelBindingSchema = v.looseObject({
   enabledOperations: v.array(generationOperationSchema),
   remoteModelId: nullableStringSchema,
   enabled: v.boolean(),
+  tokenGroup: nullableStringSchema,
   createdAt: v.number(),
   updatedAt: v.number(),
 }) satisfies v.GenericSchema<ProviderModelBinding>;
 
 export const providerModelBindingsSchema = v.array(providerModelBindingSchema);
+
+export const providerTokenGroupSchema = v.looseObject({
+  id: v.string(),
+  providerConnectionId: v.string(),
+  groupName: v.string(),
+  credentialRef: v.string(),
+  enabled: v.boolean(),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+}) satisfies v.GenericSchema<ProviderTokenGroup>;
+
+export const providerTokenGroupsSchema = v.array(providerTokenGroupSchema);
 
 export const remoteModelOptionSchema = v.looseObject({
   id: v.string(),
@@ -84,6 +98,7 @@ export const remoteModelOptionSchema = v.looseObject({
   configuredOperations: v.array(generationOperationSchema),
   suggestedOperations: v.array(generationOperationSchema),
   operationSchema: jsonObjectSchema,
+  tokenGroup: nullableStringSchema,
 }) satisfies v.GenericSchema<RemoteModelOption>;
 
 export const remoteModelOptionsSchema = v.array(remoteModelOptionSchema);

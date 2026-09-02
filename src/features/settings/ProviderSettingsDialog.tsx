@@ -30,10 +30,12 @@ import {
   type GenerationOperation,
   type ProviderConnection,
   type ProviderSettingsClient,
+  type ProviderTokenGroup,
   type RemoteModelOption,
   type TosStagingClient,
 } from "../../lib/backend";
 import { AssetLibraryTokenSettings } from "./AssetLibraryTokenSettings";
+import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
 import { TosStagingSettings } from "./TosStagingSettings";
 
 interface ProviderDraft {
@@ -178,6 +180,11 @@ export function ProviderSettingsDialog({
   const [modelUsage, setModelUsage] = useState<Record<string, ModelUsage>>({});
   const [modelSearch, setModelSearch] = useState("");
   const [modelTypeFilter, setModelTypeFilter] = useState<ModelTypeFilter>("all");
+  const [tokenGroups, setTokenGroups] = useState<ProviderTokenGroup[]>([]);
+  /** 每个模型使用的令牌分组（null = 供应商默认令牌），供保存绑定与回显。 */
+  const [modelTokenGroups, setModelTokenGroups] = useState<Record<string, string | null>>({});
+  /** 拉取模型时使用的令牌分组（null = 供应商默认令牌）。 */
+  const [pullTokenGroup, setPullTokenGroup] = useState<string | null>(null);
   const [busyAction, setBusyAction] = useState<BusyAction>("loading-connections");
   const [rawError, setRawError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -199,6 +206,10 @@ export function ProviderSettingsDialog({
         setModelUsage(
           Object.fromEntries(models.map((model) => [model.id, initialModelUsage(model)])),
         );
+        setModelTokenGroups(
+          Object.fromEntries(models.map((model) => [model.id, model.tokenGroup ?? null])),
+        );
+        setPullTokenGroup(null);
         setModelSearch("");
         setModelTypeFilter("all");
       } catch (error: unknown) {
@@ -294,6 +305,8 @@ export function ProviderSettingsDialog({
     setModelUsage({});
     setModelSearch("");
     setModelTypeFilter("all");
+    setModelTokenGroups({});
+    setPullTokenGroup(null);
     setRawError(null);
     setSuccessMessage(null);
     setTestNotice(null);
@@ -379,14 +392,21 @@ export function ProviderSettingsDialog({
     setBusyAction("fetching-models");
     try {
       const provider = await persistConnection(connectionInput.apiKey);
-      const models = await client.fetchProviderModels(provider.id);
+      const models = await client.fetchProviderModels(provider.id, pullTokenGroup);
       setRemoteModels(models);
       setModelUsage(
         Object.fromEntries(models.map((model) => [model.id, initialModelUsage(model)])),
       );
+      setModelTokenGroups(
+        Object.fromEntries(models.map((model) => [model.id, model.tokenGroup ?? null])),
+      );
       setModelSearch("");
       setModelTypeFilter("all");
-      setSuccessMessage(`已保存连接，并从 ${provider.displayName} 拉取 ${models.length} 个模型。`);
+      setSuccessMessage(
+        `已保存连接，并从 ${provider.displayName}${
+          pullTokenGroup ? `（${pullTokenGroup} 令牌）` : ""
+        } 拉取 ${models.length} 个模型。`,
+      );
       window.requestAnimationFrame(() => modelSearchRef.current?.focus());
     } catch (error) {
       setRawError(formatRawBackendError(error));
@@ -421,6 +441,7 @@ export function ProviderSettingsDialog({
           enabled: enabledOperations.length > 0,
           enabledOperations,
           operationSchema: model.operationSchema ?? {},
+          tokenGroup: modelTokenGroups[model.id] ?? null,
         };
       });
       await client.replaceProviderModelBindings(draft.id, selections);
@@ -612,6 +633,27 @@ export function ProviderSettingsDialog({
                 )}
                 {busyAction === "saving-connection" ? "正在保存…" : "保存连接"}
               </button>
+              <label className="provider-pull-token">
+                <span>拉取令牌</span>
+                <select
+                  value={pullTokenGroup ?? ""}
+                  disabled={busyAction !== null}
+                  onChange={(event) =>
+                    setPullTokenGroup(event.target.value ? event.target.value : null)
+                  }
+                  aria-describedby="provider-pull-token-hint"
+                >
+                  <option value="">默认令牌</option>
+                  {tokenGroups.map((group) => (
+                    <option key={group.id} value={group.groupName}>
+                      {group.groupName}
+                    </option>
+                  ))}
+                </select>
+                <small id="provider-pull-token-hint">
+                  不同分组的令牌能拉到的模型目录可能不同；用对应分组拉取即可看到该分组可用的模型。
+                </small>
+              </label>
               <button
                 type="button"
                 className="provider-fetch-action"
@@ -653,6 +695,15 @@ export function ProviderSettingsDialog({
             onAssetsLoaded={onAssetLibraryLoaded}
             onPullStarted={onAssetLibraryLoading}
             onPullFailed={onAssetLibraryLoadFailed}
+          />
+
+          <ProviderTokenGroupSettings
+            provider={providers.find((provider) => provider.id === assetTokenProviderId) ?? null}
+            providers={providers}
+            onProviderChanged={(providerId) => setAssetTokenProviderId(providerId)}
+            client={client}
+            credentialClient={client}
+            onTokenGroupsChanged={(groups) => setTokenGroups(Array.from(groups))}
           />
 
           {remoteModels.length > 0 ? (
@@ -818,6 +869,30 @@ export function ProviderSettingsDialog({
                             </span>
                           ) : null}
                         </div>
+                        <label className="model-option__token">
+                          <span>调用令牌</span>
+                          <select
+                            value={modelTokenGroups[model.id] ?? ""}
+                            onChange={(event) =>
+                              setModelTokenGroups((current) => ({
+                                ...current,
+                                [model.id]: event.target.value ? event.target.value : null,
+                              }))
+                            }
+                            aria-describedby={`${model.id}-token-hint`}
+                          >
+                            <option value="">默认令牌</option>
+                            {tokenGroups.map((group) => (
+                              <option key={group.id} value={group.groupName}>
+                                {group.groupName}
+                              </option>
+                            ))}
+                          </select>
+                          <small id={`${model.id}-token-hint`}>
+                            {modelTokenGroups[model.id] ?? "默认令牌"}{" "}
+                            调用该模型；不同分组令牌可访问不同模型。
+                          </small>
+                        </label>
                       </article>
                     );
                   })

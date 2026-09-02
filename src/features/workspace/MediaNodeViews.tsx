@@ -31,7 +31,6 @@ import { AssetMediaState } from "./AssetLibraryViews";
 import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
 import {
   AssetKindIcon,
-  ContactSheetCrop,
   ImageNodeSettings,
   NodeTypeIcon,
   PromptMentionInput,
@@ -1025,8 +1024,6 @@ function CanvasAssetNodeVideoVisual({
     <>
       {!coverReady && isRealAsset ? (
         <AssetMediaState kind="video" state={videoFailed ? "unavailable" : "loading"} />
-      ) : !coverReady ? (
-        <ContactSheetCrop visual="portrait" />
       ) : null}
       {!videoFailed ? (
         <video
@@ -1144,8 +1141,6 @@ export function CanvasAssetNode({
                   setFailedImageUrl(node.previewUrl);
                 }}
               />
-            ) : !isRealAsset ? (
-              <ContactSheetCrop visual="station" />
             ) : null}
           </>
         ) : node.kind === "audio" ? (
@@ -1674,9 +1669,7 @@ export function CanvasResultNode({
               decoding="async"
             />
           )
-        ) : (
-          <ContactSheetCrop visual="portrait" />
-        )}
+        ) : null}
       </span>
       <span className="result-facts">
         <span>

@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import {
   assetLibraryClient,
   BackendContractError,
+  providerSettingsClient,
   tosStagingClient,
   type CloudAsset,
 } from "./backend";
@@ -233,5 +234,125 @@ describe("tosStagingClient.listLocalAssets", () => {
       },
     });
     await expect(request).rejects.not.toThrow(/must-not-leak/);
+  });
+});
+
+describe("providerSettingsClient token groups", () => {
+  it("lists token groups for a provider connection", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    const groups = [
+      {
+        id: "token-group-1",
+        providerConnectionId: "provider-1",
+        groupName: "as分组",
+        credentialRef: "provider:provider-1:token:token-group-1",
+        enabled: true,
+        createdAt: 1,
+        updatedAt: 1,
+      },
+    ];
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve(groups);
+    });
+
+    await expect(providerSettingsClient.listProviderTokenGroups("provider-1")).resolves.toEqual(
+      groups,
+    );
+    expect(capturedCommand).toBe("list_provider_token_groups");
+    expect(capturedArgs).toEqual({ providerConnectionId: "provider-1" });
+  });
+
+  it("upserts a token group and forwards its secret to the command", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    const group = {
+      id: "token-group-2",
+      providerConnectionId: "provider-1",
+      groupName: "as分组",
+      credentialRef: "provider:provider-1:token:token-group-2",
+      enabled: true,
+      createdAt: 1,
+      updatedAt: 1,
+    };
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve(group);
+    });
+
+    await expect(
+      providerSettingsClient.upsertProviderTokenGroup({
+        providerConnectionId: "provider-1",
+        groupName: "as分组",
+        enabled: true,
+        secret: "as-token-secret",
+      }),
+    ).resolves.toEqual(group);
+    expect(capturedCommand).toBe("upsert_provider_token_group");
+    expect(capturedArgs).toEqual({
+      command: {
+        providerConnectionId: "provider-1",
+        groupName: "as分组",
+        enabled: true,
+        secret: "as-token-secret",
+      },
+    });
+  });
+
+  it("deletes a token group by name", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve(null);
+    });
+
+    await expect(
+      providerSettingsClient.deleteProviderTokenGroup("provider-1", "as分组"),
+    ).resolves.toBeUndefined();
+    expect(capturedCommand).toBe("delete_provider_token_group");
+    expect(capturedArgs).toEqual({
+      command: { providerConnectionId: "provider-1", groupName: "as分组" },
+    });
+  });
+
+  it("forwards the pull token group when fetching provider models", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      expect(command).toBe("fetch_provider_models");
+      capturedArgs = args;
+      return Promise.resolve([
+        {
+          id: "company-sd",
+          modelDefinitionId: "remote::provider-1::company-sd",
+          displayName: "SD",
+          ownedBy: null,
+          hasConfiguredBinding: false,
+          configuredOperations: [],
+          suggestedOperations: ["text_to_image"],
+          operationSchema: {},
+          tokenGroup: "as分组",
+        },
+      ]);
+    });
+
+    await providerSettingsClient.fetchProviderModels("provider-1", "as分组");
+    expect(capturedArgs).toEqual({ providerConnectionId: "provider-1", tokenGroup: "as分组" });
+  });
+
+  it("defaults the pull token group to null", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      expect(command).toBe("fetch_provider_models");
+      capturedArgs = args;
+      return Promise.resolve([]);
+    });
+
+    await providerSettingsClient.fetchProviderModels("provider-1");
+    expect(capturedArgs).toEqual({ providerConnectionId: "provider-1", tokenGroup: null });
   });
 });

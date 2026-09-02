@@ -1201,8 +1201,6 @@ export function getNodeDescriptor(
   };
 }
 
-export const CONTACT_SHEET_SRC = "/media/night-train-contact-sheet.png";
-
 export const CANVAS_ID = "canvas-scene-03";
 
 /** 画布文档标题（仅用于 canvas_documents 表展示）。 */

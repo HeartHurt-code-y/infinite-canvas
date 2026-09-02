@@ -36,7 +36,6 @@ import {
 import { diffPromptRuns } from "../../lib/promptDiff";
 
 import type {
-  AssetItem,
   AssetKind,
   ImageNodeConfig,
   MentionCandidate,
@@ -46,7 +45,6 @@ import type {
   VideoNodeConfig,
 } from "./workspaceModel";
 import {
-  CONTACT_SHEET_SRC,
   IMAGE_PROMPT_OPTIMIZATION_DEFAULT_MODE,
   IMAGE_PROMPT_OPTIMIZATION_MODES,
   MAX_GENERATION_COUNT,
@@ -92,27 +90,6 @@ export function NodeTypeIcon({
   if (kind === "video_composer") return <FilmStrip {...iconProps} />;
   if (kind === "video_downloader") return <DownloadSimple {...iconProps} />;
   return <FolderOpen {...iconProps} />;
-}
-
-export function ContactSheetCrop({
-  visual,
-  className = "",
-}: {
-  readonly visual: Exclude<AssetItem["visual"], "ambience">;
-  readonly className?: string;
-}) {
-  return (
-    <img
-      src={CONTACT_SHEET_SRC}
-      alt=""
-      width={1254}
-      height={1254}
-      draggable={false}
-      decoding="async"
-      fetchPriority="high"
-      className={`contact-sheet-crop contact-sheet-crop--${visual}${className ? ` ${className}` : ""}`}
-    />
-  );
 }
 
 type AutoMentionFeedbackKind =

@@ -39,13 +39,8 @@ describe("画布素材节点尺寸", () => {
     expect(cssRule(".canvas-asset-node--media > .canvas-asset-node__visual")).toMatch(
       /overflow:\s*hidden/,
     );
-    expect(cssRule(".canvas-asset-node__visual img:not(.contact-sheet-crop)")).toMatch(
-      /object-fit:\s*contain/,
-    );
+    expect(cssRule(".canvas-asset-node__visual img")).toMatch(/object-fit:\s*contain/);
     expect(cssRule(".canvas-asset-node__visual video")).toMatch(/object-fit:\s*contain/);
-    expect(appCss).not.toMatch(
-      /\.canvas-asset-node__visual\s+\.contact-sheet-crop\s*\{[^}]*width:\s*100%/,
-    );
   });
 
   it("只裁切媒体圆角，不裁掉伸出卡片的连接端口", () => {

@@ -175,6 +175,7 @@ const SECOND_VIDEO_MODEL = {
 const IMAGE_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "gpt-image-2",
+  tokenGroup: null,
   enabledOperations: ["text_to_image", "image_to_image"],
   remoteModelId: null,
   enabled: true,
@@ -185,6 +186,7 @@ const IMAGE_BINDING = {
 const ALT_IMAGE_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "gpt-image-2-fast",
+  tokenGroup: null,
   enabledOperations: ["text_to_image", "image_to_image"],
   remoteModelId: null,
   enabled: true,
@@ -195,6 +197,7 @@ const ALT_IMAGE_BINDING = {
 const TEXT_ONLY_IMAGE_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "gpt-image-text-only",
+  tokenGroup: null,
   enabledOperations: ["text_to_image"],
   remoteModelId: null,
   enabled: true,
@@ -205,6 +208,7 @@ const TEXT_ONLY_IMAGE_BINDING = {
 const SECOND_PROVIDER_IMAGE_BINDING = {
   providerConnectionId: "luma-production",
   modelDefinitionId: "gpt-image-2",
+  tokenGroup: null,
   enabledOperations: ["text_to_image", "image_to_image"],
   remoteModelId: null,
   enabled: true,
@@ -215,6 +219,7 @@ const SECOND_PROVIDER_IMAGE_BINDING = {
 const SECOND_PROVIDER_ALT_IMAGE_BINDING = {
   providerConnectionId: "luma-production",
   modelDefinitionId: "photon-1",
+  tokenGroup: null,
   enabledOperations: ["text_to_image", "image_to_image"],
   remoteModelId: null,
   enabled: true,
@@ -225,6 +230,7 @@ const SECOND_PROVIDER_ALT_IMAGE_BINDING = {
 const VIDEO_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "doubao-seedance-2-5-260628",
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: null,
   enabled: true,
@@ -235,6 +241,7 @@ const VIDEO_BINDING = {
 const ALT_VIDEO_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "doubao-seedance-2-5-lite",
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: null,
   enabled: true,
@@ -245,6 +252,7 @@ const ALT_VIDEO_BINDING = {
 const FAST_VIDEO_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: "doubao-seedance-2-0-fast-260128",
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: null,
   enabled: true,
@@ -255,6 +263,7 @@ const FAST_VIDEO_BINDING = {
 const STALE_WAN_VIDEO_BINDING = {
   providerConnectionId: "moyu-production",
   modelDefinitionId: STALE_WAN_VIDEO_MODEL.id,
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: "wan3.0-video",
   enabled: true,
@@ -265,6 +274,7 @@ const STALE_WAN_VIDEO_BINDING = {
 const SECOND_PROVIDER_VIDEO_BINDING = {
   providerConnectionId: "luma-production",
   modelDefinitionId: "doubao-seedance-2-5-260628",
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: null,
   enabled: true,
@@ -275,6 +285,7 @@ const SECOND_PROVIDER_VIDEO_BINDING = {
 const SECOND_PROVIDER_ALT_VIDEO_BINDING = {
   providerConnectionId: "luma-production",
   modelDefinitionId: "ray-2",
+  tokenGroup: null,
   enabledOperations: ["video_generation"],
   remoteModelId: null,
   enabled: true,
@@ -730,6 +741,7 @@ function baseInvokeImplementation(command: string): Promise<unknown> {
         {
           providerConnectionId: "moyu-production",
           modelDefinitionId: TEXT_MODEL.id,
+          tokenGroup: null,
           enabledOperations: ["text_generation"],
           remoteModelId: null,
           enabled: true,
@@ -2393,7 +2405,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   it("图片素材节点按原图比例自适应卡片尺寸，完整展示且不裁切", async () => {
     render(<App />);
     const node = await addAssetNode("图片", "站台参考图", 148, 148);
-    const image = node.querySelector<HTMLImageElement>("img:not(.contact-sheet-crop)");
+    const image = node.querySelector<HTMLImageElement>("img");
     expect(image).not.toBeNull();
 
     Object.defineProperties(image!, {
@@ -2516,11 +2528,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     const video = card.querySelector<HTMLVideoElement>("video");
 
-    // 封面就绪前只显示中性加载状态，不用演示联系表冒充真实视频。
+    // 封面就绪前只显示中性加载状态。
     expect(video).toHaveAttribute("src", "https://cdn.example.com/hem.mp4");
     expect(video).not.toHaveAttribute("poster");
     expect(within(card).getByText("正在加载预览")).toBeInTheDocument();
-    expect(card.querySelector(".contact-sheet-crop")).toBeNull();
 
     // 元数据就绪后 seek 到中点，中间帧替换占位图。
     Object.defineProperty(video!, "duration", { value: 10, configurable: true });
@@ -2529,7 +2540,6 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.loadedData(video!);
     expect(video).toHaveClass("is-cover");
     expect(within(card).queryByText("正在加载预览")).not.toBeInTheDocument();
-    expect(card.querySelector(".contact-sheet-crop")).toBeNull();
 
     // 悬浮自动播放，移开暂停并回到中间帧。
     fireEvent.mouseEnter(card);
@@ -2549,7 +2559,6 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(video).toHaveAttribute("src", "https://cdn.example.com/train.mp4");
     expect(video).toHaveAttribute("preload", "metadata");
     expect(within(node).getByText("正在加载预览")).toBeInTheDocument();
-    expect(node.querySelector(".contact-sheet-crop")).toBeNull();
 
     // 元数据就绪后 seek 到中点，中间帧作为静止封面。
     Object.defineProperties(video!, {
@@ -2578,18 +2587,16 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   it("画布中的云端图片和视频加载失败时显示真实错误状态而不是演示图", async () => {
     render(<App />);
     const imageNode = await addAssetNode("图片", "站台参考图", 148, 148);
-    const image = imageNode.querySelector<HTMLImageElement>("img:not(.contact-sheet-crop)");
+    const image = imageNode.querySelector<HTMLImageElement>("img");
     expect(image).not.toBeNull();
     fireEvent.error(image!);
     expect(within(imageNode).getByText("预览不可用")).toBeInTheDocument();
-    expect(imageNode.querySelector(".contact-sheet-crop")).toBeNull();
 
     const videoNode = await addAssetNode("视频", "列车进站参考", 700, 148);
     const video = videoNode.querySelector<HTMLVideoElement>("video");
     expect(video).not.toBeNull();
     fireEvent.error(video!);
     expect(within(videoNode).getByText("预览不可用")).toBeInTheDocument();
-    expect(videoNode.querySelector(".contact-sheet-crop")).toBeNull();
   });
 
   it("从素材节点连到拖入的图片生成节点时携带 explicitMedia 并切换图生图", async () => {

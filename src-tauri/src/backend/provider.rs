@@ -241,6 +241,33 @@ impl ProviderRuntime {
         )
     }
 
+    /// 按模型的令牌分组解析凭据上下文：`token_group = None` 使用供应商主 API Key
+    /// （等价 `resolve_current`），`Some(name)` 使用该分组自己的密钥。
+    pub fn resolve_token_group(
+        &self,
+        provider_connection_id: &str,
+        token_group: Option<&str>,
+    ) -> BackendResult<ResolvedProviderContext> {
+        let provider = self
+            .storage
+            .get_provider_connection(provider_connection_id)?;
+        if !provider.enabled {
+            return Err(BackendError::validation(
+                "provider connection is disabled",
+                json!({ "providerConnectionId": provider_connection_id }),
+            ));
+        }
+        let api_key_ref = self
+            .storage
+            .resolve_binding_credential_ref(provider_connection_id, token_group)?;
+        self.resolve(
+            provider.id,
+            provider.adapter_id,
+            provider.base_url,
+            api_key_ref,
+        )
+    }
+
     fn resolve(
         &self,
         provider_connection_id: String,
@@ -748,6 +775,23 @@ impl ProviderRuntime {
             .await
     }
 
+    /// 与 `raw_json_request` 相同，但可指定模型令牌分组：
+    /// `token_group = Some(name)` 时使用该分组的密钥发起请求（不同分组能访问的
+    /// 模型目录不同，拉取模型与连通性测试需要按分组令牌进行）。
+    pub async fn raw_json_request_with_token_group(
+        &self,
+        provider_connection_id: &str,
+        token_group: Option<&str>,
+        method: Method,
+        path: &str,
+        query: &[(&str, String)],
+        body: Option<&Value>,
+    ) -> BackendResult<RawProviderResponse> {
+        let context = self.resolve_token_group(provider_connection_id, token_group)?;
+        self.send_raw_json_request(&context, method, path, query, body, &[])
+            .await
+    }
+
     /// 素材库专用直连请求。基础地址取自当前素材库供应商连接，Bearer 凭据
     /// 优先使用该连接专用的素材库令牌，再兼容旧版全局令牌。
     pub(super) async fn raw_asset_json_request(
@@ -833,14 +877,25 @@ impl ProviderRuntime {
     ///
     /// 失败（网络不可达、凭据错误、非 2xx）转换为 `ok=false` 的结果而不是错误，
     /// 保存动作本身已经成功，前端需要把两种结果分开提示。
+    ///
+    /// `token_group` 非空时用该分组的令牌测试（客户曾反馈 as 分组令牌拉取失败，
+    /// 单独测试分组连通性可直接定位密钥/权限问题）。
     pub async fn test_connection(
         &self,
         provider_connection_id: &str,
+        token_group: Option<&str>,
     ) -> BackendResult<ConnectivityTestResult> {
         let started_at = std::time::Instant::now();
         let elapsed_ms = || started_at.elapsed().as_millis() as u64;
         match self
-            .raw_json_request(provider_connection_id, Method::GET, "/v1/models", &[], None)
+            .raw_json_request_with_token_group(
+                provider_connection_id,
+                token_group,
+                Method::GET,
+                "/v1/models",
+                &[],
+                None,
+            )
             .await
         {
             Ok(response) => {
@@ -866,9 +921,17 @@ impl ProviderRuntime {
     pub async fn list_models(
         &self,
         provider_connection_id: &str,
+        token_group: Option<&str>,
     ) -> BackendResult<Vec<RemoteModelOption>> {
         let response = self
-            .raw_json_request(provider_connection_id, Method::GET, "/v1/models", &[], None)
+            .raw_json_request_with_token_group(
+                provider_connection_id,
+                token_group,
+                Method::GET,
+                "/v1/models",
+                &[],
+                None,
+            )
             .await?;
         let mut models = parse_model_catalog(&response)?;
         let definitions = self.storage.list_model_definitions()?;
@@ -914,6 +977,11 @@ impl ProviderRuntime {
                 .filter(|binding| binding.enabled)
                 .map(|binding| binding.enabled_operations.clone())
                 .unwrap_or_default();
+            // 令牌分组：优先取已保存绑定上的分组（回显用户配置），
+            // 否则标记本次拉取所用的分组，方便前端预选同一个分组令牌。
+            model.token_group = binding
+                .and_then(|binding| binding.token_group.clone())
+                .or_else(|| token_group.map(ToOwned::to_owned));
         }
 
         Ok(models)
@@ -1753,6 +1821,7 @@ fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<Remo
                 configured_operations: Vec::new(),
                 suggested_operations,
                 operation_schema,
+                token_group: None,
             })
         })
         .collect();

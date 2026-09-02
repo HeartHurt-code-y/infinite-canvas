@@ -7,6 +7,7 @@ use std::{
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
+use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
@@ -18,10 +19,11 @@ use super::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
         GenerationResultRecord, GenerationTaskDetail, GenerationTaskEvent, GenerationTaskListQuery,
         GenerationTaskPage, GenerationTaskStatus, GenerationTaskSummary, MediaType,
-        ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding, QueryHealth,
-        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
-        StagingAssetImportTarget, StagingJobRecord, StagingStatus, TextGenerationOutputRecord,
-        TokenUsage, TosStagingConfig, UpsertProviderConnectionCommand,
+        ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
+        ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
+        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingJobRecord,
+        StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
     },
 };
 
@@ -68,9 +70,21 @@ CREATE TABLE IF NOT EXISTS provider_model_bindings (
   enabled_operations_json TEXT NOT NULL,
   remote_model_id TEXT,
   enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  token_group TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (provider_connection_id, model_definition_id)
+);
+
+CREATE TABLE IF NOT EXISTS provider_token_groups (
+  id TEXT PRIMARY KEY,
+  provider_connection_id TEXT NOT NULL REFERENCES provider_connections(id),
+  group_name TEXT NOT NULL,
+  credential_ref TEXT NOT NULL,
+  enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  UNIQUE(provider_connection_id, group_name)
 );
 
 CREATE TABLE IF NOT EXISTS generation_tasks (
@@ -247,6 +261,9 @@ pub struct NewTask<'a> {
     pub source_node_id: &'a str,
     pub operation: GenerationOperation,
     pub provider: &'a ProviderConnection,
+    /// 任务实际使用的密钥引用：模型绑定了令牌分组时是该分组的凭据，
+    /// 否则为供应商主 API Key（即 provider.api_key_ref）。
+    pub api_key_ref: &'a str,
     pub model_definition_id: &'a str,
     pub remote_model_id: Option<&'a str>,
     pub logical_request: &'a Value,
@@ -281,6 +298,7 @@ impl Storage {
             params![now_ms()],
         )?;
         migrate_generation_tasks_tokens(&connection)?;
+        migrate_provider_token_groups(&connection)?;
 
         let storage = Self {
             connection: Mutex::new(connection),
@@ -597,7 +615,7 @@ impl Storage {
         self.lock()?
             .query_row(
                 "SELECT provider_connection_id, model_definition_id, enabled_operations_json,
-                        remote_model_id, enabled, created_at, updated_at
+                        remote_model_id, enabled, token_group, created_at, updated_at
                  FROM provider_model_bindings
                  WHERE provider_connection_id = ?1 AND model_definition_id = ?2",
                 params![provider_connection_id, model_definition_id],
@@ -618,12 +636,12 @@ impl Storage {
         let connection = self.lock()?;
         let sql = if provider_connection_id.is_some() {
             "SELECT provider_connection_id, model_definition_id, enabled_operations_json,
-                    remote_model_id, enabled, created_at, updated_at
+                    remote_model_id, enabled, token_group, created_at, updated_at
              FROM provider_model_bindings WHERE provider_connection_id = ?1
              ORDER BY model_definition_id"
         } else {
             "SELECT provider_connection_id, model_definition_id, enabled_operations_json,
-                    remote_model_id, enabled, created_at, updated_at
+                    remote_model_id, enabled, token_group, created_at, updated_at
              FROM provider_model_bindings ORDER BY provider_connection_id, model_definition_id"
         };
         let mut statement = connection.prepare(sql)?;
@@ -689,12 +707,13 @@ impl Storage {
             transaction.execute(
                 "INSERT INTO provider_model_bindings
                  (provider_connection_id, model_definition_id, enabled_operations_json,
-                  remote_model_id, enabled, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)
+                  remote_model_id, enabled, token_group, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?7)
                  ON CONFLICT(provider_connection_id, model_definition_id) DO UPDATE SET
                    enabled_operations_json = excluded.enabled_operations_json,
                    remote_model_id = excluded.remote_model_id,
                    enabled = excluded.enabled,
+                   token_group = excluded.token_group,
                    updated_at = excluded.updated_at",
                 params![
                     command.provider_connection_id,
@@ -702,6 +721,7 @@ impl Storage {
                     serde_json::to_string(&operations)?,
                     selection.remote_model_id,
                     selection.enabled,
+                    selection.token_group,
                     timestamp,
                 ],
             )?;
@@ -710,6 +730,179 @@ impl Storage {
         drop(connection);
 
         self.list_bindings(Some(&command.provider_connection_id))
+    }
+
+    /// 供应商连接下的令牌分组（同一供应商内按令牌区分模型的凭据作用域）。
+    pub fn list_provider_token_groups(
+        &self,
+        provider_connection_id: &str,
+    ) -> BackendResult<Vec<ProviderTokenGroup>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, provider_connection_id, group_name, credential_ref, enabled,
+                    created_at, updated_at
+             FROM provider_token_groups WHERE provider_connection_id = ?1
+             ORDER BY group_name COLLATE NOCASE",
+        )?;
+        let rows = statement.query_map(
+            params![provider_connection_id],
+            provider_token_group_from_row,
+        )?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn get_provider_token_group(
+        &self,
+        provider_connection_id: &str,
+        group_name: &str,
+    ) -> BackendResult<Option<ProviderTokenGroup>> {
+        self.lock()?
+            .query_row(
+                "SELECT id, provider_connection_id, group_name, credential_ref, enabled,
+                        created_at, updated_at
+                 FROM provider_token_groups
+                 WHERE provider_connection_id = ?1 AND group_name = ?2",
+                params![provider_connection_id, group_name],
+                provider_token_group_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
+    /// 新增或更新令牌分组。以 `(provider_connection_id, group_name)` 为键：
+    /// 已存在则更新 enabled 并保留原凭据引用；不存在则生成稳定 id 与凭据引用。
+    /// 分组密钥本身不落库，由命令层在返回后用 `set_credential` 写入凭据管理器。
+    pub fn upsert_provider_token_group(
+        &self,
+        command: &UpsertProviderTokenGroupCommand,
+    ) -> BackendResult<ProviderTokenGroup> {
+        let group_name = command.group_name.trim();
+        if group_name.is_empty() {
+            return Err(BackendError::Validation {
+                message: "token group name cannot be empty".into(),
+                details: json!({ "field": "group_name" }),
+            });
+        }
+        if group_name.len() > 64 {
+            return Err(BackendError::Validation {
+                message: "token group name must be at most 64 characters".into(),
+                details: json!({ "field": "group_name" }),
+            });
+        }
+        self.get_provider_connection(&command.provider_connection_id)?;
+
+        let timestamp = now_ms();
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let existing: Option<ProviderTokenGroup> = transaction
+            .query_row(
+                "SELECT id, provider_connection_id, group_name, credential_ref, enabled,
+                        created_at, updated_at
+                 FROM provider_token_groups
+                 WHERE provider_connection_id = ?1 AND group_name = ?2",
+                params![command.provider_connection_id, group_name],
+                provider_token_group_from_row,
+            )
+            .optional()?;
+        let group = if let Some(existing) = existing {
+            transaction.execute(
+                "UPDATE provider_token_groups
+                 SET enabled = ?1, updated_at = ?2
+                 WHERE id = ?3",
+                params![command.enabled, timestamp, existing.id],
+            )?;
+            ProviderTokenGroup {
+                id: existing.id,
+                provider_connection_id: existing.provider_connection_id,
+                group_name: existing.group_name,
+                credential_ref: existing.credential_ref,
+                enabled: command.enabled,
+                created_at: existing.created_at,
+                updated_at: timestamp,
+            }
+        } else {
+            let id = format!("token-group-{}", Uuid::new_v4());
+            let credential_ref =
+                format!("provider:{}:token:{}", command.provider_connection_id, id);
+            transaction.execute(
+                "INSERT INTO provider_token_groups
+                 (id, provider_connection_id, group_name, credential_ref, enabled, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?6)",
+                params![
+                    id,
+                    command.provider_connection_id,
+                    group_name,
+                    credential_ref,
+                    command.enabled,
+                    timestamp,
+                ],
+            )?;
+            ProviderTokenGroup {
+                id,
+                provider_connection_id: command.provider_connection_id.clone(),
+                group_name: group_name.to_string(),
+                credential_ref,
+                enabled: command.enabled,
+                created_at: timestamp,
+                updated_at: timestamp,
+            }
+        };
+        transaction.commit()?;
+        Ok(group)
+    }
+
+    /// 删除令牌分组，返回被删行的凭据引用（供命令层 best-effort 清理密钥）。
+    pub fn delete_provider_token_group(
+        &self,
+        provider_connection_id: &str,
+        group_name: &str,
+    ) -> BackendResult<Option<String>> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let credential_ref: Option<String> = transaction
+            .query_row(
+                "SELECT credential_ref FROM provider_token_groups
+                 WHERE provider_connection_id = ?1 AND group_name = ?2",
+                params![provider_connection_id, group_name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if credential_ref.is_some() {
+            transaction.execute(
+                "DELETE FROM provider_token_groups
+                 WHERE provider_connection_id = ?1 AND group_name = ?2",
+                params![provider_connection_id, group_name],
+            )?;
+            // 被删除分组的模型绑定回到供应商默认令牌（主 API Key）。
+            transaction.execute(
+                "UPDATE provider_model_bindings
+                 SET token_group = NULL, updated_at = ?1
+                 WHERE provider_connection_id = ?2 AND token_group = ?3",
+                params![now_ms(), provider_connection_id, group_name],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(credential_ref)
+    }
+
+    /// 解析模型调用应使用的密钥引用：
+    /// `token_group = None` 返回供应商主 API Key；`Some(name)` 返回对应分组凭据引用。
+    /// 分组不存在时报错，避免任务静默退回主密钥造成与用户配置不符的调用。
+    pub fn resolve_binding_credential_ref(
+        &self,
+        provider_connection_id: &str,
+        token_group: Option<&str>,
+    ) -> BackendResult<String> {
+        let Some(token_group) = token_group else {
+            let provider = self.get_provider_connection(provider_connection_id)?;
+            return Ok(provider.api_key_ref);
+        };
+        let group = self.get_provider_token_group(provider_connection_id, token_group)?;
+        group.map(|group| group.credential_ref).ok_or_else(|| {
+            BackendError::Conflict(format!(
+                "token group {token_group:?} is not configured for provider {provider_connection_id}"
+            ))
+        })
     }
 
     fn insert_task(&self, task: NewTask<'_>) -> BackendResult<()> {
@@ -733,7 +926,7 @@ impl Storage {
                 task.provider.display_name,
                 task.provider.adapter_id,
                 task.provider.base_url,
-                task.provider.api_key_ref,
+                task.api_key_ref,
                 task.model_definition_id,
                 task.remote_model_id,
                 serde_json::to_string(task.logical_request)?,
@@ -1267,6 +1460,24 @@ fn migrate_generation_tasks_tokens(connection: &Connection) -> BackendResult<()>
     Ok(())
 }
 
+/// 为旧数据库补齐令牌分组支持：
+/// 1. `provider_model_bindings` 缺 `token_group` 列时 ALTER 补齐（NULL = 供应商默认令牌）；
+/// 2. `provider_token_groups` 表由 SCHEMA 的 CREATE TABLE IF NOT EXISTS 保证存在，无需额外处理。
+fn migrate_provider_token_groups(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(provider_model_bindings)")?;
+    let has_token_group_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| result.map(|name| name == "token_group").unwrap_or(false));
+    drop(statement);
+    if !has_token_group_column {
+        connection.execute(
+            "ALTER TABLE provider_model_bindings ADD COLUMN token_group TEXT",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
 fn provider_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderConnection> {
     Ok(ProviderConnection {
         id: row.get(0)?,
@@ -1277,6 +1488,18 @@ fn provider_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderConnection> {
         enabled: row.get(5)?,
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
+    })
+}
+
+fn provider_token_group_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderTokenGroup> {
+    Ok(ProviderTokenGroup {
+        id: row.get(0)?,
+        provider_connection_id: row.get(1)?,
+        group_name: row.get(2)?,
+        credential_ref: row.get(3)?,
+        enabled: row.get(4)?,
+        created_at: row.get(5)?,
+        updated_at: row.get(6)?,
     })
 }
 
@@ -1293,8 +1516,9 @@ fn binding_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderModelBinding> {
         enabled_operations: operations,
         remote_model_id: row.get(3)?,
         enabled: row.get(4)?,
-        created_at: row.get(5)?,
-        updated_at: row.get(6)?,
+        token_group: row.get(5)?,
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
     })
 }
 
@@ -1675,6 +1899,7 @@ mod tests {
                 source_node_id: "prompt-1",
                 operation: GenerationOperation::TextGeneration,
                 provider: &provider,
+                api_key_ref: &provider.api_key_ref,
                 model_definition_id: &model.id,
                 remote_model_id: model.remote_model_id.as_deref(),
                 logical_request: &json!({ "userPrompt": "原始创意" }),
@@ -1786,6 +2011,7 @@ mod tests {
                     remote_model_id: "company-video-1".into(),
                     enabled: true,
                     enabled_operations: vec![GenerationOperation::VideoGeneration],
+                    token_group: None,
                     operation_schema: json!({
                         "video_generation": {
                             "parameters": {
@@ -1835,6 +2061,7 @@ mod tests {
                     remote_model_id: "declined-image".into(),
                     enabled: false,
                     enabled_operations: Vec::new(),
+                    token_group: None,
                     operation_schema: default_model_schema(
                         "declined-image",
                         &[GenerationOperation::TextToImage],
@@ -1888,6 +2115,7 @@ mod tests {
                         remote_model_id: "shared-model".into(),
                         enabled: true,
                         enabled_operations: vec![operation],
+                        token_group: None,
                         operation_schema: default_model_schema("shared-model", &[operation]),
                     }],
                 })
@@ -2184,5 +2412,243 @@ mod tests {
             expected_revision: Some(1),
         });
         assert!(matches!(stale, Err(BackendError::Conflict(_))));
+    }
+
+    #[test]
+    fn provider_token_groups_crud_and_credential_ref_resolution() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "company-prod".into(),
+                display_name: "公司生产环境".into(),
+                adapter_id: "moyu_v1".into(),
+                base_url: "https://example.com/v1".into(),
+                enabled: true,
+            })
+            .expect("insert provider");
+
+        // 默认令牌 = 供应商主 API Key，无论是否配置分组都返回主引用。
+        let provider = storage
+            .get_provider_connection("company-prod")
+            .expect("provider");
+        assert_eq!(
+            storage
+                .resolve_binding_credential_ref("company-prod", None)
+                .expect("default token"),
+            provider.api_key_ref
+        );
+        // 分组不存在时报错，而不是静默回退主令牌。
+        assert!(matches!(
+            storage.resolve_binding_credential_ref("company-prod", Some("as分组")),
+            Err(BackendError::Conflict(_))
+        ));
+
+        let group = storage
+            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
+                provider_connection_id: "company-prod".into(),
+                group_name: "as分组".into(),
+                enabled: true,
+                secret: None,
+            })
+            .expect("insert token group");
+        assert_eq!(group.group_name, "as分组");
+        assert!(
+            group
+                .credential_ref
+                .starts_with("provider:company-prod:token:")
+        );
+
+        // 同组再次 upsert 保留原凭据引用（幂等）。
+        let again = storage
+            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
+                provider_connection_id: "company-prod".into(),
+                group_name: "as分组".into(),
+                enabled: false,
+                secret: None,
+            })
+            .expect("upsert same group");
+        assert_eq!(again.credential_ref, group.credential_ref);
+        assert!(!again.enabled);
+
+        let groups = storage
+            .list_provider_token_groups("company-prod")
+            .expect("list groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(
+            storage
+                .get_provider_token_group("company-prod", "as分组")
+                .expect("get group")
+                .expect("group exists")
+                .id,
+            group.id
+        );
+
+        // 解析绑定凭据引用：Some 分组名命中该分组的 credential_ref。
+        assert_eq!(
+            storage
+                .resolve_binding_credential_ref("company-prod", Some("as分组"))
+                .expect("resolve as group"),
+            group.credential_ref
+        );
+
+        // 空名 / 超长名被校验拒绝。
+        assert!(matches!(
+            storage.upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
+                provider_connection_id: "company-prod".into(),
+                group_name: "  ".into(),
+                enabled: true,
+                secret: None,
+            }),
+            Err(BackendError::Validation { .. })
+        ));
+
+        // 删除分组返回其凭据引用，之后解析报错。
+        assert_eq!(
+            storage
+                .delete_provider_token_group("company-prod", "as分组")
+                .expect("delete group")
+                .expect("had credential ref"),
+            group.credential_ref
+        );
+        assert!(
+            storage
+                .list_provider_token_groups("company-prod")
+                .expect("list after delete")
+                .is_empty()
+        );
+        assert!(matches!(
+            storage.resolve_binding_credential_ref("company-prod", Some("as分组")),
+            Err(BackendError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn model_binding_persists_token_group_and_delete_resets_it_to_default() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "company-prod".into(),
+                display_name: "公司生产环境".into(),
+                adapter_id: "moyu_v1".into(),
+                base_url: "https://example.com/v1".into(),
+                enabled: true,
+            })
+            .expect("insert provider");
+        storage
+            .upsert_provider_token_group(&UpsertProviderTokenGroupCommand {
+                provider_connection_id: "company-prod".into(),
+                group_name: "as分组".into(),
+                enabled: true,
+                secret: None,
+            })
+            .expect("insert token group");
+
+        storage
+            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
+                provider_connection_id: "company-prod".into(),
+                selections: vec![
+                    ProviderModelSelection {
+                        model_definition_id: "remote::company-prod::company-sd".into(),
+                        display_name: "公司 SD".into(),
+                        remote_model_id: "company-sd".into(),
+                        enabled: true,
+                        enabled_operations: vec![GenerationOperation::TextToImage],
+                        token_group: Some("as分组".into()),
+                        operation_schema: default_model_schema(
+                            "company-sd",
+                            &[GenerationOperation::TextToImage],
+                        ),
+                    },
+                    ProviderModelSelection {
+                        model_definition_id: "remote::company-prod::company-image".into(),
+                        display_name: "公司图片".into(),
+                        remote_model_id: "company-image".into(),
+                        enabled: true,
+                        enabled_operations: vec![GenerationOperation::TextToImage],
+                        token_group: None,
+                        operation_schema: default_model_schema(
+                            "company-image",
+                            &[GenerationOperation::TextToImage],
+                        ),
+                    },
+                ],
+            })
+            .expect("save selections with token groups");
+
+        let sd = storage
+            .get_binding("company-prod", "remote::company-prod::company-sd")
+            .expect("sd binding");
+        assert_eq!(sd.token_group.as_deref(), Some("as分组"));
+        let image = storage
+            .get_binding("company-prod", "remote::company-prod::company-image")
+            .expect("image binding");
+        assert_eq!(image.token_group, None);
+
+        // 删除分组后，引用该分组的绑定回退到默认令牌。
+        storage
+            .delete_provider_token_group("company-prod", "as分组")
+            .expect("delete group");
+        let sd = storage
+            .get_binding("company-prod", "remote::company-prod::company-sd")
+            .expect("sd binding after delete");
+        assert_eq!(sd.token_group, None);
+    }
+
+    #[test]
+    fn migration_adds_token_group_column_to_existing_databases() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        // 模拟历史版本：provider_model_bindings 已有除 token_group 外的全部列。
+        let connection = rusqlite::Connection::open(&path).expect("open raw db");
+        connection
+            .execute(
+                "CREATE TABLE provider_model_bindings (
+                   provider_connection_id TEXT NOT NULL,
+                   model_definition_id TEXT NOT NULL,
+                   enabled_operations_json TEXT NOT NULL,
+                   remote_model_id TEXT,
+                   enabled INTEGER NOT NULL,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL,
+                   PRIMARY KEY (provider_connection_id, model_definition_id)
+                 )",
+                [],
+            )
+            .expect("create legacy table");
+        connection
+            .execute(
+                "INSERT INTO provider_model_bindings
+                 (provider_connection_id, model_definition_id, enabled_operations_json,
+                  remote_model_id, enabled, created_at, updated_at)
+                 VALUES ('company-prod', 'remote::company-prod::company-sd',
+                         '[\"text_to_image\"]', 'company-sd', 1, 1, 1)",
+                [],
+            )
+            .expect("insert legacy row");
+
+        let columns = |connection: &rusqlite::Connection| {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(provider_model_bindings)")
+                .expect("pragma");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect columns")
+        };
+        assert!(
+            !columns(&connection).contains(&"token_group".to_string()),
+            "legacy table must not have token_group yet"
+        );
+
+        migrate_provider_token_groups(&connection).expect("migration adds token_group");
+        assert!(
+            columns(&connection).contains(&"token_group".to_string()),
+            "token_group column must be added by migration"
+        );
+        // 幂等：再次执行不报错。
+        migrate_provider_token_groups(&connection).expect("migration is idempotent");
     }
 }

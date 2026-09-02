@@ -271,6 +271,39 @@ pub struct UpsertProviderConnectionCommand {
     pub enabled: bool,
 }
 
+/// 供应商连接下的令牌分组：同一供应商接口可能签发多组分组令牌，
+/// 不同分组能拉取/调用的模型不同（如 as 分组可调 sd、默认分组可调 image）。
+/// 每个模型绑定记录使用哪个分组令牌；分组密钥保存在 Windows 凭据管理器。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProviderTokenGroup {
+    pub id: String,
+    pub provider_connection_id: String,
+    pub group_name: String,
+    pub credential_ref: String,
+    pub enabled: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpsertProviderTokenGroupCommand {
+    pub provider_connection_id: String,
+    pub group_name: String,
+    pub enabled: bool,
+    /// 非空时由命令层写入该分组的密钥（Windows 凭据管理器）。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteProviderTokenGroupCommand {
+    pub provider_connection_id: String,
+    pub group_name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SetCredentialCommand {
@@ -304,6 +337,9 @@ pub struct ProviderModelBinding {
     pub enabled_operations: Vec<GenerationOperation>,
     pub remote_model_id: Option<String>,
     pub enabled: bool,
+    /// 调用该模型使用的令牌分组；None = 使用供应商主 API Key（默认令牌）。
+    #[serde(default)]
+    pub token_group: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -319,6 +355,9 @@ pub struct RemoteModelOption {
     pub configured_operations: Vec<GenerationOperation>,
     pub suggested_operations: Vec<GenerationOperation>,
     pub operation_schema: Value,
+    /// 该模型应使用的令牌分组；None = 供应商默认令牌。
+    #[serde(default)]
+    pub token_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -331,6 +370,9 @@ pub struct ProviderModelSelection {
     pub enabled_operations: Vec<GenerationOperation>,
     #[serde(default)]
     pub operation_schema: Value,
+    /// 调用该模型使用的令牌分组；None = 供应商默认令牌。
+    #[serde(default)]
+    pub token_group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

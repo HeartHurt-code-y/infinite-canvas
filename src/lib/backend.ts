@@ -21,6 +21,8 @@ import {
   providerConnectionSchema,
   providerConnectionsSchema,
   providerModelBindingsSchema,
+  providerTokenGroupSchema,
+  providerTokenGroupsSchema,
   remoteModelOptionsSchema,
   realPersonAuthLinkSchema,
   realPersonGroupsSchema,
@@ -70,6 +72,19 @@ export interface ProviderModelBinding {
   readonly enabledOperations: readonly GenerationOperation[];
   readonly remoteModelId: string | null;
   readonly enabled: boolean;
+  /** 调用该模型使用的令牌分组；null = 供应商默认令牌（主 API Key）。 */
+  readonly tokenGroup: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** 供应商连接下的令牌分组：同一供应商内按令牌区分模型，各组持独立密钥。 */
+export interface ProviderTokenGroup {
+  readonly id: string;
+  readonly providerConnectionId: string;
+  readonly groupName: string;
+  readonly credentialRef: string;
+  readonly enabled: boolean;
   readonly createdAt: number;
   readonly updatedAt: number;
 }
@@ -84,6 +99,8 @@ export interface RemoteModelOption {
   readonly configuredOperations: readonly GenerationOperation[];
   readonly suggestedOperations: readonly GenerationOperation[];
   readonly operationSchema: ModelOperationSchema;
+  /** 该模型应使用的令牌分组；null = 供应商默认令牌。 */
+  readonly tokenGroup: string | null;
 }
 
 export interface ProviderModelSelection {
@@ -93,6 +110,8 @@ export interface ProviderModelSelection {
   readonly enabled: boolean;
   readonly enabledOperations: readonly GenerationOperation[];
   readonly operationSchema: ModelOperationSchema;
+  /** 调用该模型使用的令牌分组；null = 供应商默认令牌。 */
+  readonly tokenGroup: string | null;
 }
 
 /**
@@ -188,14 +207,37 @@ export interface ProviderSettingsClient {
   ): Promise<void>;
   /** 按引用名回读已保存的凭据明文，供设置界面重新打开时明文回填（用户要求持久化可见）。 */
   getCredential(this: void, credentialRef: string): Promise<string>;
-  fetchProviderModels(this: void, providerConnectionId: string): Promise<RemoteModelOption[]>;
+  fetchProviderModels(
+    this: void,
+    providerConnectionId: string,
+    tokenGroup?: string | null,
+  ): Promise<RemoteModelOption[]>;
   listSavedProviderModels(this: void, providerConnectionId: string): Promise<RemoteModelOption[]>;
-  testConnection(this: void, providerConnectionId: string): Promise<ConnectivityTestResult>;
+  testConnection(
+    this: void,
+    providerConnectionId: string,
+    tokenGroup?: string | null,
+  ): Promise<ConnectivityTestResult>;
   replaceProviderModelBindings(
     this: void,
     providerConnectionId: string,
     selections: readonly ProviderModelSelection[],
   ): Promise<ProviderModelBinding[]>;
+  listProviderTokenGroups(this: void, providerConnectionId: string): Promise<ProviderTokenGroup[]>;
+  upsertProviderTokenGroup(
+    this: void,
+    command: {
+      readonly providerConnectionId: string;
+      readonly groupName: string;
+      readonly enabled: boolean;
+      readonly secret?: string | null;
+    },
+  ): Promise<ProviderTokenGroup>;
+  deleteProviderTokenGroup(
+    this: void,
+    providerConnectionId: string,
+    groupName: string,
+  ): Promise<void>;
 }
 
 export function isDesktopRuntime(): boolean {
@@ -281,16 +323,30 @@ export const providerSettingsClient: ProviderSettingsClient = {
   setCredential: (command) => invokeDesktopVoid("set_credential", { command }),
   getCredential: (credentialRef) =>
     invokeDesktop("get_credential", stringSchema, { credentialRef }),
-  fetchProviderModels: (providerConnectionId) =>
-    invokeDesktop("fetch_provider_models", remoteModelOptionsSchema, { providerConnectionId }),
+  fetchProviderModels: (providerConnectionId, tokenGroup = null) =>
+    invokeDesktop("fetch_provider_models", remoteModelOptionsSchema, {
+      providerConnectionId,
+      tokenGroup,
+    }),
   listSavedProviderModels: (providerConnectionId) => loadSavedProviderModels(providerConnectionId),
-  testConnection: (providerConnectionId) =>
+  testConnection: (providerConnectionId, tokenGroup = null) =>
     invokeDesktop("test_provider_connection", connectivityTestResultSchema, {
       providerConnectionId,
+      tokenGroup,
     }),
   replaceProviderModelBindings: (providerConnectionId, selections) =>
     invokeDesktop("replace_provider_model_bindings", providerModelBindingsSchema, {
       command: { providerConnectionId, selections },
+    }),
+  listProviderTokenGroups: (providerConnectionId) =>
+    invokeDesktop("list_provider_token_groups", providerTokenGroupsSchema, {
+      providerConnectionId,
+    }),
+  upsertProviderTokenGroup: (command) =>
+    invokeDesktop("upsert_provider_token_group", providerTokenGroupSchema, { command }),
+  deleteProviderTokenGroup: (providerConnectionId, groupName) =>
+    invokeDesktopVoid("delete_provider_token_group", {
+      command: { providerConnectionId, groupName },
     }),
 };
 
@@ -327,6 +383,7 @@ async function loadSavedProviderModels(providerConnectionId: string): Promise<Re
         configuredOperations: binding.enabled ? binding.enabledOperations : [],
         suggestedOperations: [],
         operationSchema: definition.operations,
+        tokenGroup: binding.tokenGroup ?? null,
       },
     ];
   });

@@ -1622,6 +1622,7 @@ mod tests {
                 source_node_id: "node-1",
                 operation,
                 provider: &provider,
+                api_key_ref: &provider.api_key_ref,
                 model_definition_id: "model-1",
                 remote_model_id: Some("remote-model-1"),
                 logical_request: &json!({ "prompt": "frozen" }),

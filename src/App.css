@@ -838,37 +838,6 @@ h3 {
   opacity: 0.82;
 }
 
-.contact-sheet-crop {
-  position: absolute;
-  width: 200%;
-  max-width: none;
-  height: 200%;
-  object-fit: cover;
-  pointer-events: none;
-  user-select: none;
-}
-
-.contact-sheet-crop--portrait {
-  top: 0;
-  left: 0;
-}
-
-.contact-sheet-crop--station,
-.contact-sheet-crop--train {
-  top: 0;
-  left: -100%;
-}
-
-.contact-sheet-crop--rain {
-  top: -100%;
-  left: 0;
-}
-
-.contact-sheet-crop--sketch {
-  top: -100%;
-  left: -100%;
-}
-
 .asset-empty {
   display: grid;
   justify-items: start;
@@ -1871,7 +1840,7 @@ svg[data-spin="true"] {
   min-height: 362.5px;
 }
 
-.canvas-asset-node__visual img:not(.contact-sheet-crop) {
+.canvas-asset-node__visual img {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -6813,11 +6782,6 @@ svg[data-spin="true"] {
   opacity: 1;
 }
 
-.asset-card__visual--video .contact-sheet-crop {
-  width: 100%;
-  height: 100%;
-}
-
 .model-option__uses {
   flex-wrap: wrap;
   gap: var(--space-xs);
@@ -9509,4 +9473,192 @@ details[open] > summary .history-disclosure__caret {
   .history-lightbox {
     --history-lightbox-gutter: var(--space-sm);
   }
+}
+
+/* ============ 供应商令牌分组（同一供应商内按令牌区分模型） ============ */
+.token-group-settings {
+  display: grid;
+  gap: var(--space-md);
+  margin-block-start: var(--space-xl);
+  padding-block-start: var(--space-lg);
+  border-top: var(--rule-thin) solid var(--color-rule);
+}
+
+.token-group-settings .provider-form__heading {
+  align-items: flex-start;
+  min-width: 0;
+}
+
+.token-group-settings .settings-step {
+  color: var(--color-accent);
+}
+
+.token-group-settings__row {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.7fr) minmax(16rem, 1.3fr) auto;
+  gap: var(--space-sm);
+  align-items: end;
+  padding: var(--space-sm);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.token-group-settings__row--new {
+  border-style: dashed;
+  border-color: var(--color-rule-2);
+}
+
+.token-group-settings__name,
+.token-group-settings__secret {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+
+.token-group-settings__name label,
+.token-group-settings__secret label {
+  color: var(--color-neutral);
+  font-size: var(--text-2xs);
+}
+
+.token-group-settings__name input,
+.token-group-settings__secret input {
+  width: 100%;
+  min-width: 0;
+  height: var(--size-control);
+  padding-inline: var(--space-xs);
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+}
+
+.token-group-settings__secret small {
+  min-inline-size: 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.token-group-settings__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  white-space: nowrap;
+}
+
+.token-group-settings__actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: var(--size-control);
+  padding-inline: var(--space-sm);
+  color: var(--color-ink-2);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.token-group-settings__actions button[data-state="loading"] svg {
+  animation: task-status-spin var(--dur-progress) linear infinite;
+}
+
+.token-group-settings__actions .token-group-settings__delete {
+  color: var(--color-error);
+}
+
+.token-group-settings__actions .token-group-settings__add {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .token-group-settings__actions button:hover:not(:disabled) {
+    background: var(--color-paper-2);
+    border-color: var(--color-rule-3);
+  }
+
+  .token-group-settings__actions .token-group-settings__add:hover:not(:disabled) {
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+  }
+}
+
+.token-group-settings__notice {
+  margin-block-start: 0;
+}
+
+/* 拉取模型时选择令牌分组 */
+.provider-pull-token {
+  display: grid;
+  gap: var(--space-2xs);
+}
+
+.provider-pull-token > span {
+  color: var(--color-neutral);
+  font-size: var(--text-2xs);
+}
+
+.provider-pull-token select {
+  height: var(--size-control);
+  min-width: 9rem;
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.provider-pull-token small {
+  min-inline-size: 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+/* 模型卡片内的「调用令牌」选择 */
+.model-option__token {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: auto minmax(8rem, 14rem) 1fr;
+  gap: var(--space-xs);
+  align-items: center;
+  min-width: 0;
+  padding-block-start: var(--space-xs);
+  border-top: var(--rule-thin) dashed var(--color-rule);
+}
+
+.model-option__token > span {
+  color: var(--color-neutral);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.model-option__token select {
+  height: var(--size-control);
+  min-width: 0;
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.model-option__token small {
+  min-inline-size: 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.45;
+  overflow-wrap: anywhere;
 }

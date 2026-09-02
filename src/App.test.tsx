@@ -579,10 +579,9 @@ describe("App workspace", () => {
     expect(screen.queryByRole("button", { name: /预览图片素材详情/ })).not.toBeInTheDocument();
 
     // 国际版的过期签名 URL 会让 video 触发 error。真实云端条目不能继续
-    // 显示内置联系表冒充视频内容，必须明确提示预览不可用。
+    // 显示内置占位内容冒充视频，必须明确提示预览不可用。
     fireEvent.error(brokenVideoCard.querySelector("video")!);
     expect(within(brokenVideoCard).getByText("预览不可用")).toBeInTheDocument();
-    expect(brokenVideoCard.querySelector(".contact-sheet-crop")).toBeNull();
 
     // 切回图片 tab，断言 3 张图、且不含 video 卡片。
     fireEvent.click(screen.getByRole("tab", { name: /图片\s*3/ }));
@@ -594,7 +593,6 @@ describe("App workspace", () => {
     });
     const brokenImage = brokenImageCard.querySelector(".asset-card__preview");
     expect(brokenImage).toHaveAttribute("src", "https://cdn.example.com/a.png");
-    expect(document.querySelectorAll(".asset-card .contact-sheet-crop")).toHaveLength(0);
 
     // 图片签名 URL 过期时不能只把 img 隐藏并留下无说明的空卡片。
     fireEvent.error(brokenImage!);
@@ -604,7 +602,6 @@ describe("App workspace", () => {
     const dialog = screen.getByRole("dialog", { name: "img-alpha" });
     fireEvent.error(within(dialog).getByRole("img", { name: "img-alpha" }));
     expect(within(dialog).getByText("预览不可用")).toBeInTheDocument();
-    expect(dialog.querySelector(".contact-sheet-crop")).toBeNull();
     expect(within(dialog).queryByText(fullAssetReference)).not.toBeInTheDocument();
     expect(within(dialog).getByText("Moyu 生产")).toBeInTheDocument();
     expect(within(dialog).queryByText("moyu-prod")).not.toBeInTheDocument();
