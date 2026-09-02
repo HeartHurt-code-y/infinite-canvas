@@ -157,6 +157,37 @@ describe("prompt content interface", () => {
     expect(restored.snapshot()).toEqual(snapshot);
   });
 
+  it("mounts a V1 snapshot as Tiptap content with an atomic media reference", () => {
+    const candidate = assetCandidate("asset-node-1");
+    const persisted: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [
+        { kind: "text", text: "参考 " },
+        {
+          kind: "media_reference",
+          mentionId: "mention-persisted",
+          canvasNodeKey: candidate.canvasNodeKey,
+          target: targetFor(candidate),
+          displayNameSnapshot: candidate.name,
+        },
+        { kind: "text", text: "\n继续运镜" },
+      ],
+    };
+    const session = createPromptContentEditorSession([candidate]);
+    session.restore(persisted);
+    const host = document.createElement("div");
+    session.attach(host);
+
+    const editor = host.querySelector<HTMLElement>(".ProseMirror[contenteditable='true']");
+    const reference = host.querySelector<HTMLElement>("[data-mention-id='mention-persisted']");
+    expect(editor).not.toBeNull();
+    expect(reference).toHaveAttribute("contenteditable", "false");
+    expect(reference).toHaveAttribute("data-canvas-node-key", "asset-node-1");
+    expect(reference).toHaveTextContent("@角色.png");
+    expect(session.snapshot()).toEqual(persisted);
+  });
+
   it("migrates legacy HTML through a whitelist instead of restoring arbitrary markup", () => {
     const session = createPromptContentEditorSession();
     const element = document.createElement("div");
@@ -272,5 +303,58 @@ describe("prompt content interface", () => {
 
     expect(result).toEqual({ ok: false, invalidNodeKeys: ["gen-1"] });
     expect(module.read("gen-1")?.plainText).toBe("原内容");
+  });
+
+  it("does not rebuild the editor DOM when auto-resolve changes nothing", () => {
+    // 回归：输入中文等与任何素材名都不匹配的文本时，自动识别不应触发 setContent
+    // 重建整个编辑器 DOM。重建会打断 IME 组合（拼音被打散成错乱字符）并重置光标。
+    const session = createPromptContentEditorSession();
+    const element = document.createElement("div");
+    session.attach(element);
+    session.replaceText("普通中文内容，不匹配任何素材名");
+
+    const editor = element.querySelector<HTMLElement>(".ProseMirror");
+    expect(editor).not.toBeNull();
+    const paragraph = editor!.querySelector("p");
+    const textNodeBefore = paragraph?.firstChild;
+    const domBefore = editor!.innerHTML;
+
+    expect(session.autoResolve({ fresh: true })).toMatchObject({
+      converted: 0,
+      ambiguous: 0,
+      pending: 0,
+    });
+
+    // 内容没有变化，编辑器 DOM 不应被替换重建（text node 引用必须保持不变）。
+    expect(editor!.innerHTML).toBe(domBefore);
+    expect(editor!.querySelector("p")?.firstChild).toBe(textNodeBefore);
+  });
+
+  it("still converts a typed connected name into a mention chip via auto-resolve", () => {
+    // 功能不回归：手输匹配素材名时，auto-resolve 仍应把纯文本转成引用 chip。
+    const candidate = assetCandidate("asset-node-1");
+    const session = createPromptContentEditorSession([candidate]);
+    const element = document.createElement("div");
+    session.attach(element);
+    session.restore({
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "让 角色.png 看向镜头" }],
+    });
+
+    expect(session.autoResolve({ fresh: true })).toMatchObject({
+      converted: 1,
+      ambiguous: 0,
+      pending: 0,
+    });
+    expect(session.snapshot().items).toMatchObject([
+      { kind: "text", text: "让 " },
+      {
+        kind: "media_reference",
+        canvasNodeKey: "asset-node-1",
+        displayNameSnapshot: "角色.png",
+      },
+      { kind: "text", text: " 看向镜头" },
+    ]);
   });
 });

@@ -22,6 +22,8 @@ import {
   providerConnectionsSchema,
   providerModelBindingsSchema,
   remoteModelOptionsSchema,
+  realPersonAuthLinkSchema,
+  realPersonGroupsSchema,
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
@@ -386,6 +388,8 @@ export type StagingStatus =
 export interface StagingAssetImportTarget {
   readonly providerConnectionId: string;
   readonly name: string | null;
+  /** Positive platform group ID returned by listRealPersonGroups. Omit for ordinary assets. */
+  readonly groupId?: number | null | undefined;
 }
 
 export interface StartStagingCommand {
@@ -531,11 +535,56 @@ export interface AssetListQuery {
   readonly groupId?: number | null;
 }
 
+export interface RealPersonAuthLink {
+  readonly h5Url: string;
+  readonly tip: string | null;
+}
+
+export interface RealPersonGroup {
+  /** Positive platform group ID used as the upload `groupId`. */
+  readonly id: number;
+  /** Upstream `group-xxx` identifier; display-only. */
+  readonly remoteGroupId: string;
+  readonly artistName: string;
+  readonly artistDesc: string | null;
+  /** Display-only timestamp; may be null while the upstream record is still synchronizing. */
+  readonly authorizedAt: string | null;
+  readonly assetCount: number;
+}
+
+export interface CreateRealPersonAuthLinkCommand {
+  readonly providerConnectionId: string;
+  readonly artistName: string;
+  readonly artistDesc?: string | null;
+}
+
+export interface DeleteRealPersonAssetCommand {
+  readonly providerConnectionId: string;
+  /** Stable `asset-xxx` ID without the `asset://` prefix. */
+  readonly id: string;
+}
+
+export interface DeleteRealPersonGroupCommand {
+  readonly providerConnectionId: string;
+  /** Positive platform group ID, not `remoteGroupId`. */
+  readonly id: number;
+}
+
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
 }
 
-export const assetLibraryClient: AssetLibraryClient = {
+export interface RealPersonAssetLibraryClient {
+  createRealPersonAuthLink(
+    this: void,
+    command: CreateRealPersonAuthLinkCommand,
+  ): Promise<RealPersonAuthLink>;
+  listRealPersonGroups(this: void, providerConnectionId: string): Promise<RealPersonGroup[]>;
+  deleteRealPersonAsset(this: void, command: DeleteRealPersonAssetCommand): Promise<string>;
+  deleteRealPersonGroup(this: void, command: DeleteRealPersonGroupCommand): Promise<void>;
+}
+
+export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClient = {
   list: (query) =>
     invokeDesktop("list_assets", cloudAssetsSchema, {
       command: {
@@ -547,6 +596,21 @@ export const assetLibraryClient: AssetLibraryClient = {
         groupId: query.groupId ?? null,
       },
     }),
+  createRealPersonAuthLink: (command) =>
+    invokeDesktop("create_real_person_auth_link", realPersonAuthLinkSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        artistName: command.artistName,
+        artistDesc: command.artistDesc ?? null,
+      },
+    }),
+  listRealPersonGroups: (providerConnectionId) =>
+    invokeDesktop("list_real_person_groups", realPersonGroupsSchema, {
+      command: { providerConnectionId },
+    }),
+  deleteRealPersonAsset: (command) =>
+    invokeDesktop("delete_real_person_asset", stringSchema, { command }),
+  deleteRealPersonGroup: (command) => invokeDesktopVoid("delete_real_person_group", { command }),
 };
 
 const MEDIA_EXTENSION_KINDS: Record<string, MediaType> = {
@@ -593,6 +657,72 @@ export async function pickLocalMediaFiles(): Promise<readonly string[]> {
   });
   if (selection == null) return [];
   return Array.isArray(selection) ? selection : [selection];
+}
+
+const PROMPT_MATERIAL_BY_EXTENSION: Readonly<
+  Record<string, { readonly kind: PromptMaterialKind; readonly mimeType: string }>
+> = {
+  png: { kind: "image", mimeType: "image/png" },
+  jpg: { kind: "image", mimeType: "image/jpeg" },
+  jpeg: { kind: "image", mimeType: "image/jpeg" },
+  webp: { kind: "image", mimeType: "image/webp" },
+  gif: { kind: "image", mimeType: "image/gif" },
+  mp3: { kind: "audio", mimeType: "audio/mpeg" },
+  wav: { kind: "audio", mimeType: "audio/wav" },
+  m4a: { kind: "audio", mimeType: "audio/mp4" },
+  aac: { kind: "audio", mimeType: "audio/aac" },
+  ogg: { kind: "audio", mimeType: "audio/ogg" },
+  flac: { kind: "audio", mimeType: "audio/flac" },
+  mp4: { kind: "video", mimeType: "video/mp4" },
+  webm: { kind: "video", mimeType: "video/webm" },
+  mov: { kind: "video", mimeType: "video/quicktime" },
+  mkv: { kind: "video", mimeType: "video/x-matroska" },
+  pdf: { kind: "document", mimeType: "application/pdf" },
+  txt: { kind: "document", mimeType: "text/plain" },
+  md: { kind: "document", mimeType: "text/markdown" },
+  markdown: { kind: "document", mimeType: "text/markdown" },
+  json: { kind: "document", mimeType: "application/json" },
+};
+
+/**
+ * 为剧本节点选择本地参考素材。只保存路径与轻量元数据，避免把大体积 Base64
+ * 写进画布存档；文件字节会在用户真正发送/审计时由 Rust 后端读取。
+ */
+export async function pickPromptMultimodalFiles(): Promise<readonly PickedPromptMaterial[]> {
+  if (!isDesktopRuntime()) return [];
+  const [{ open }, { stat }] = await Promise.all([
+    import("@tauri-apps/plugin-dialog"),
+    import("@tauri-apps/plugin-fs"),
+  ]);
+  const selection = await open({
+    multiple: true,
+    title: "为剧本添加参考素材",
+    filters: [
+      {
+        name: "图片 / 音频 / 视频 / PDF / 文本",
+        extensions: Object.keys(PROMPT_MATERIAL_BY_EXTENSION),
+      },
+    ],
+  });
+  if (selection == null) return [];
+  const paths = Array.isArray(selection) ? selection : [selection];
+  const materials = await Promise.all(
+    paths.map(async (localPath): Promise<PickedPromptMaterial | null> => {
+      const extension = localPath.split(".").pop()?.toLowerCase() ?? "";
+      const definition = PROMPT_MATERIAL_BY_EXTENSION[extension];
+      if (!definition) return null;
+      const info = await stat(localPath);
+      if (!info.isFile) return null;
+      return {
+        localPath,
+        displayName: localPath.split(/[\\/]/).pop() ?? localPath,
+        kind: definition.kind,
+        mimeType: definition.mimeType,
+        byteSize: info.size,
+      };
+    }),
+  );
+  return materials.filter((material): material is PickedPromptMaterial => material != null);
 }
 
 export type FrontendLogLevel = "info" | "warn" | "error";
@@ -863,6 +993,21 @@ export interface PromptVisionImageInput {
   readonly displayName: string;
 }
 
+/** 剧本节点直接选择的本地多模态素材；后端在发送时读取并校验文件签名。 */
+export type PromptMaterialKind = "image" | "audio" | "video" | "document";
+
+export interface PromptMultimodalInput {
+  readonly localPath: string;
+  readonly displayName: string;
+  readonly kind: PromptMaterialKind;
+  readonly mimeType: string;
+}
+
+/** 文件选择器返回的持久化元数据；正文仍留在本地文件中，不写入画布 JSON。 */
+export interface PickedPromptMaterial extends PromptMultimodalInput {
+  readonly byteSize: number;
+}
+
 export interface OptimizeVideoPromptCommand {
   /** 用于把文本模型调用归档到当前画布与来源节点；旧调用方可省略。 */
   readonly canvasId?: string;
@@ -878,6 +1023,8 @@ export interface OptimizeVideoPromptCommand {
   readonly detailReview?: boolean;
   /** 连入提示词节点的图片素材（按连线顺序）；省略时按纯文本调用。 */
   readonly visionImages?: readonly PromptVisionImageInput[];
+  /** 剧本节点直接选择的图片、音频、视频或文档素材。 */
+  readonly multimodalInputs?: readonly PromptMultimodalInput[];
 }
 
 export interface OptimizedPromptResult {

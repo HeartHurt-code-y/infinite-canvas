@@ -17,7 +17,7 @@ MVP 应先采用以下保守实现：
 - 公司接口补充契约已确认：图片、视频和音频分别按各自的传入顺序区分位置，三个序列都从 `1` 开始，不存在跨类型共享的全局素材序号。提示内容依次出现图片 A、视频 A、图片 B、音频 A 时，位置分别是 `图片 1、视频 1、图片 2、音频 1`。
 - 新接口应实现为独立的“图片编辑（图生图）节点”，而不是文生图节点里的模式。它具有必填、可重复且有顺序的图片文件数组端口、不同的 multipart 传输、必填模型和 Base64-only 输出；独立节点能让连线契约保持稳定，也避免切换模式后静默丢失图片输入。产品已决定 MVP 开放多图且采用前端轻校验，实际最大数量交给后端或供应商判断，不能从当前文档推断。[图片编辑文档](https://doc.moyu.info/497391425e0.md)
 - “生成数量”保留在文生图、图片编辑和视频生成节点内部，但三类请求都没有数量参数。两类图片响应虽然是 `data[]`，文档没有说明如何请求条数；视频响应只展示一个 `content.video_url`。因此 MVP 的生成数量必须固定为只读值 `1`，同时图片解析器仍应容纳服务端意外返回的多项结果。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md) [Seedance 视频生成文档](https://doc.moyu.info/9280779m0.md)
-- 新素材优先走 `POST /v1/assets/async`，取得真实素材 ID 后轮询 `POST /v1/assets/get`；素材进入 `Active` 后才允许连接到生成节点。[素材库文档](https://doc.moyu.info/9280781m0.md)
+- 新素材走 `POST /v1/assets` 的默认同步模式，传单个公网 `url` 和必填 `group_id`；取得真实素材 ID 后轮询 `POST /v1/assets/get`，素材进入 `Active` 后才允许连接到生成节点。[素材库文档](https://doc.moyu.info/9280781m0.md)
 - 图片和视频生成成功后都不调用素材接口。图片 URL 或 Base64 结果保存为 `<Downloads>/无限画布/<safe(localGenerationTaskId)>-<resultIndex>.<实际扩展名>`；视频从 `content.video_url` 下载为 `<Downloads>/无限画布/<safe(task_id)>.<实际扩展名>`，不创建供应商子目录。历史预览只读取本地文件；TOS 只在本地结果以后作为必须使用公网 URL 的远程输入时按需中转。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md) [视频生成文档](https://doc.moyu.info/9280779m0.md)
 
 ## 五份文档的职责
@@ -77,18 +77,17 @@ Content-Type: application/json
 
 ### 素材与分组
 
-| 方法   | 路径                         | 职责                                                                      | 来源                                             |
-| ------ | ---------------------------- | ------------------------------------------------------------------------- | ------------------------------------------------ |
-| `POST` | `/v1/assets`                 | 单条同步 URL 导入、旧式单条异步 URL 导入，或最多 50 条的批量异步 URL 导入 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/async`           | 新式单条异步 URL 导入，立即返回真实 `asset-...` ID                        | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/list`            | 分页查询当前令牌可见素材，可按名称和分组过滤                              | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/get`             | 通过素材 ID、旧异步任务 ID 或新异步真实 ID 查询单个素材                   | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/batch/get`       | 按 `batch_id` 查询批量导入的逐条状态                                      | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/update`          | 更新素材名称                                                              | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/delete`          | 删除素材                                                                  | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `GET`  | `/v1/assets/groups`          | 获取当前令牌可见分组；可能含合成历史分组 `id=-2`                          | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/groups`          | 创建当前令牌的自定义分组                                                  | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `POST` | `/v1/assets/groups/transfer` | 把自建分组或全部历史分组转移到用户拥有的另一令牌                          | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| 方法   | 路径                         | 职责                                                    | 来源                                             |
+| ------ | ---------------------------- | ------------------------------------------------------- | ------------------------------------------------ |
+| `POST` | `/v1/assets`                 | 单条 URL 导入；`upload_mode` 可为默认 `sync` 或 `async` | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/list`            | 分页查询当前令牌可见素材，可按名称和分组过滤            | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/get`             | 通过真实素材 ID 查询单个素材                            | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/update`          | 更新素材名称                                            | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/delete`          | 删除素材                                                | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `GET`  | `/v1/assets/groups`          | 获取当前令牌可见分组；可能含合成历史分组 `id=-2`        | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/groups`          | 创建当前令牌的自定义分组                                | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/groups/delete`   | 删除自建分组或全部历史分组及其中素材                    | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `POST` | `/v1/assets/groups/transfer` | 把自建分组或全部历史分组转移到用户拥有的另一令牌        | [素材库文档](https://doc.moyu.info/9280781m0.md) |
 
 任务列表成功项的 `fail_reason` 会保存形如 `/v1/videos/{task_id}/content` 的视频代理 URL，但五份文档没有把该路径定义为独立接口，也没有说明它是否需要鉴权、是否支持下载、Range 请求或有效期。MVP 不能把它当作正式下载契约。[任务列表文档](https://doc.moyu.info/9280780m0.md)
 
@@ -357,30 +356,35 @@ Moyu 的五份文档没有定义统一的 `@mention`、素材别名或“提示�
 
 ### “上传”实际上是 URL 导入
 
-所有已描述的**创建素材**方式都接收公网可访问的 `url` 或 `urls`，没有 multipart、文件字节、Base64、预签名上传或本地路径参数。因此用户主动导入素材库的本地文件必须先经过外部暂存。产品已决定使用火山引擎 TOS 作为这一中转层，具体安全架构见 [TOS 暂存上传设计](./tos-staging-design.md)；这不会改变 Moyu 素材接口本身仍只接受 URL 的事实。图片和视频生成结果不进入素材库，所以它们的本地保存不受这项限制。[素材库文档](https://doc.moyu.info/9280781m0.md)
+创建素材只接收单个公网可访问的 `url`，没有 multipart、文件字节、Base64、预签名上传或本地路径参数。因此用户主动导入素材库的本地文件必须先经过外部暂存。产品已决定使用火山引擎 TOS 作为这一中转层，具体安全架构见 [TOS 暂存上传设计](./tos-staging-design.md)；这不会改变 Moyu 素材接口本身仍只接受 URL 的事实。图片和视频生成结果不进入素材库，所以它们的本地保存不受这项限制。[素材库文档](https://doc.moyu.info/9280781m0.md)
 
 `/v1/images/edits` 虽然接收 multipart 图片文件，但它是生成/编辑端点，不会创建素材记录，也不返回 `asset://`。它不能替代素材上传；素材节点作为编辑输入时需要先下载为字节，本地图片结果则可以直接读取文件字节。编辑输出的 Base64 直接保存成本地结果，不经 TOS 或素材库。[图片编辑文档](https://doc.moyu.info/497391425e0.md)
 
-| 方式          | 请求                                       | 初始返回                       | 轮询/回调                                        | 建议用途                         | 来源                                             |
-| ------------- | ------------------------------------------ | ------------------------------ | ------------------------------------------------ | -------------------------------- | ------------------------------------------------ |
-| 同步 URL 导入 | `POST /v1/assets`，默认 `upload_mode=sync` | `id`、`asset_url`              | 文档仍要求等到 `Active`                          | 仅用于简单联调；长连接可达数十秒 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| 旧式单条异步  | `POST /v1/assets`，`upload_mode=async`     | `task-...`、`Processing`       | 每约 3 秒查询 `/get`；可选 Webhook；5 分钟超时   | 需要 Webhook 时                  | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| 批量异步      | `POST /v1/assets`，传最多 50 个 `urls`     | `batch_id` 与逐项 `Processing` | `/batch/get` 每 5–10 秒；可选整批 Webhook        | 同类型批量素材                   | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| 新式单条异步  | `POST /v1/assets/async`                    | 真实 `asset-...` ID、`Pending` | `/get`，建议间隔至少 500 ms；无 Webhook 参数说明 | **桌面 MVP 默认**                | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| 方式          | 请求                                       | 初始返回                | 后续查询                                      | 建议用途                                 | 来源                                             |
+| ------------- | ------------------------------------------ | ----------------------- | --------------------------------------------- | ---------------------------------------- | ------------------------------------------------ |
+| 同步 URL 导入 | `POST /v1/assets`，默认 `upload_mode=sync` | 真实 `id`、`asset_url`  | 以真实 ID 调用 `/v1/assets/get` 等待 `Active` | **桌面 MVP 默认**，可建立稳定素材身份    | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| 异步 URL 导入 | `POST /v1/assets`，`upload_mode=async`     | 占位 `id`、`Processing` | 轮询 `/v1/assets/list` 取得真实素材记录       | 不希望长连接且能处理名称匹配歧义的调用方 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
 
-旧式异步 Webhook 可选 `callback_secret`，平台用原始请求体做 HMAC-SHA256，并通过 `X-Webhook-Signature` 发送十六进制签名；接收方应以 `task_id` / `X-Track-Id` 幂等处理并尽快返回 2xx。桌面应用本身通常没有公网回调地址，因此 MVP 仍应以轮询为主。[素材库文档](https://doc.moyu.info/9280781m0.md)
+异步返回的占位 `id` 不能直接拼成 `asset://`，文档要求待列表出现 `Active` 记录后再读取真实 `asset_url`。由于文档没有提供占位 ID 与最终素材 ID 的稳定查询映射，桌面 MVP 使用同步模式。[素材库文档](https://doc.moyu.info/9280781m0.md)
+
+### 真人（明星）素材 H5 授权
+
+真人素材在普通 URL 导入前增加一次令牌隔离的人脸授权流程：[真人素材 H5 文档](https://kxzlbkdpvn.apifox.cn/9353151m0.md)
+
+1. `POST /v1/assets/real-person/auth/link` 传 `artist_name`（最多 32 字符）和可选 `artist_desc`（最多 300 字符），取得仅 120 秒有效且只能使用一次的 `h5_url`。
+2. 真人本人在手机 H5 页面完成刷脸后，客户端调用 `GET /v1/assets/real-person/groups` 查询已授权组。
+3. 上传时必须把列表项的整数平台 `id` 作为 `POST /v1/assets` 的 `group_id`；不能误传展示用的上游 `group_id`（`group-xxx` 字符串）。该上传会触发同人脸校验，失败可能返回 `FaceMismatch`。
+4. 单素材与整组永久删除分别使用 `POST /v1/assets/real-person/assets/delete` 和 `POST /v1/assets/real-person/groups/delete`。整组删除会同时删除组内全部素材。
+
+实现中，普通素材继续自动解析“无限画布上传”分组；仅在暂存导入目标显式携带正整数 `groupId` 时跳过普通分组发现并进入真人素材组。所有 H5、查询、上传和删除操作均使用同一个 `providerConnectionId`，从而保持 API Key/Token 作用域一致。
 
 ### 素材状态归一化
 
-| API 状态            | 内部状态                  | 说明                                                       | 来源                                             |
-| ------------------- | ------------------------- | ---------------------------------------------------------- | ------------------------------------------------ |
-| `Pending`           | `processing`              | 新式异步处理中                                             | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `Processing`        | `processing`              | 旧式或批量异步处理中                                       | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `Active`            | `ready`                   | 已审核并可用于视频生成                                     | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `Failed`            | `failed`                  | 审核、下载、参数或超时失败                                 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| `Deleted`           | `deleted`                 | 已删除；只在新式异步状态说明中出现                         | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| Webhook `completed` | `completed`（导入任务层） | 任务已完成，仍需逐项检查 `submit_review_status` / 素材状态 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
-| Webhook `failed`    | `failed`（导入任务层）    | 整个导入任务失败                                           | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| API 状态     | 内部状态     | 说明                       | 来源                                             |
+| ------------ | ------------ | -------------------------- | ------------------------------------------------ |
+| `Processing` | `processing` | 素材处理中                 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `Active`     | `ready`      | 已审核并可用于视频生成     | [素材库文档](https://doc.moyu.info/9280781m0.md) |
+| `Failed`     | `failed`     | 审核、下载、参数或超时失败 | [素材库文档](https://doc.moyu.info/9280781m0.md) |
 
 `asset_url`（`asset://...`）应作为生成引用保存；`url` 是预览/下载地址。文档的列表和单素材响应把 `url` 描述为约 12 小时有效的签名 URL，过期后可重新查询刷新。[素材库文档](https://doc.moyu.info/9280781m0.md)
 
@@ -396,7 +400,7 @@ Moyu 的五份文档没有定义统一的 `@mention`、素材别名或“提示�
 2. 文生图只有 `b64_json` 时，或处理任何图片编辑结果时，在 Tauri 后端把 Base64 解码到 `.part` 文件；这一过程不经过 TOS。
 3. 通过文件魔数和可用 MIME 识别真实格式，校验非空内容并计算哈希；响应 `output_format` 只作候选扩展名。
 4. 验证通过后原子改名为 `<Downloads>/无限画布/<safe(localGenerationTaskId)>-<resultIndex>.<实际扩展名>`；结果索引从 `1` 开始，单结果也使用 `-1`。
-5. 创建本地图片结果记录和画布节点，不调用 `/v1/assets/async` 或其他素材接口。
+5. 创建本地图片结果记录和画布节点，不调用 `POST /v1/assets` 或其他素材接口。
 
 只有文生图响应可能同时包含 `url` 和 `b64_json`；此时优先下载 URL，并保留完整原始响应用于诊断和必要的本地保存恢复。任何大段 Base64 都不得写入长期画布 JSON，但必须按任务原始返回保存策略完整留在任务调用记录中。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md)
 
@@ -464,8 +468,7 @@ Moyu 的五份文档没有定义统一的 `@mention`、素材别名或“提示�
 - 任务列表默认使用“服务器本地时区当天”，但文档没有说明服务器时区；客户端必须传明确 Unix 秒范围。[任务列表文档](https://doc.moyu.info/9280780m0.md)
 - 五类响应封装不一致：文生图返回 `created/data/usage`，图片编辑返回更多必填输出元数据，视频提交返回 `task_id`，单视频任务和素材常用 `code: "success"`，任务列表使用 `success: true`。适配器不能依赖单一响应外壳。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md) [视频生成文档](https://doc.moyu.info/9280779m0.md) [任务列表文档](https://doc.moyu.info/9280780m0.md) [素材库文档](https://doc.moyu.info/9280781m0.md)
 - 文生图结果 URL 完全没有 TTL 说明；图片编辑不返回 URL；视频结果 URL 的有效期只在素材库完整流程示例中标注约 24 小时，视频生成主文档也没有正式的刷新或重新签名协议。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md) [素材库文档](https://doc.moyu.info/9280781m0.md)
-- 新式 `/v1/assets/async` 没有 Webhook 参数；若未来需要无轮询导入，只能使用旧式 `POST /v1/assets` + `upload_mode=async`，或由服务端补充同等回调能力。[素材库文档](https://doc.moyu.info/9280781m0.md)
-- 批量导入按同一 `asset_type` 串行审核，实测说明约 26–27 秒/条；MVP 素材库应展示逐项状态，不能把批次提交成功当成素材可用。[素材库文档](https://doc.moyu.info/9280781m0.md)
+- `upload_mode=async` 只返回上游占位 ID，而文档要求通过素材列表寻找最终记录，没有定义占位 ID 到真实素材 ID 的稳定映射；同名并发上传存在关联歧义，因此桌面 MVP 使用同步模式。[素材库文档](https://doc.moyu.info/9280781m0.md)
 
 ## 建议的 MVP 适配器边界
 
@@ -522,7 +525,7 @@ ProviderConnectionRegistry(baseUrl, apiKeyRef, adapterId)
 以下测试只验证文档声明的能力；其中涉及真实请求的部分需要公司提供测试 `BASE_URL` 和专用令牌。
 
 1. 用令牌 A 创建分组、读取分组 ID，并确认令牌 B 无法读取该分组与素材。[素材库文档](https://doc.moyu.info/9280781m0.md)
-2. 分别以 `Image`、`Video`、`Audio` 通过公网 URL 调用 `/v1/assets/async`，验证 `Pending -> Active/Failed`，并验证 `asset://` 可被同令牌生成任务引用。[素材库文档](https://doc.moyu.info/9280781m0.md)
+2. 分别以 `Image`、`Video`、`Audio` 和单个公网 `url` 调用 `POST /v1/assets`，验证创建响应包含真实 `id/asset_url`、`/v1/assets/get` 最终进入 `Active/Failed`，并验证 `asset://` 可被同令牌生成任务引用。[素材库文档](https://doc.moyu.info/9280781m0.md)
 3. 用公司确认的每个文生图模型显式提交 `model`、非空 `prompt`、默认与支持的 `size` / `quality`，验证未支持组合的真实错误行为。[文生图文档](https://doc.moyu.info/495380766e0.md)
 4. 对文生图响应分别验证“仅 URL”“仅 Base64”“二者都有”“空 `data`”“结果项二者都无”；只把有效结果标为成功。[文生图文档](https://doc.moyu.info/495380766e0.md)
 5. 用 `gpt-image-2`、一个 PNG 文件和非空提示词构造真实 multipart 请求，确认 Header、`image[]` part 名、文件名、MIME 和响应结构。[图片编辑文档](https://doc.moyu.info/497391425e0.md)
@@ -533,7 +536,7 @@ ProviderConnectionRegistry(baseUrl, apiKeyRef, adapterId)
 10. 验证首帧、首尾帧、参考图片、参考视频、参考音频各端口映射，并验证首尾帧与参考图片互斥。[视频生成文档](https://doc.moyu.info/9280779m0.md)
 11. 验证 2.0 音频不能单独运行，2.5 可纯音频运行；验证各模型素材数量上限。[视频生成文档](https://doc.moyu.info/9280779m0.md)
 12. 验证视频任务状态并集和 `progress`；模拟重启后用显式时间范围分页恢复任务，按 `SUCCESS` / `FAILURE` 拆分 `fail_reason` 双重语义。[任务列表文档](https://doc.moyu.info/9280780m0.md)
-13. 验证视频成功后不调用 `/v1/assets/async`，而是把单任务响应的 `video_url` 下载为 `<Downloads>/无限画布/<safe(task_id)>.<实际扩展名>`；不创建供应商子目录，原始 URL 过期后历史仍使用本地文件播放。[视频生成文档](https://doc.moyu.info/9280779m0.md)
+13. 验证视频成功后不调用 `POST /v1/assets`，而是把单任务响应的 `video_url` 下载为 `<Downloads>/无限画布/<safe(task_id)>.<实际扩展名>`；不创建供应商子目录，原始 URL 过期后历史仍使用本地文件播放。[视频生成文档](https://doc.moyu.info/9280779m0.md)
 14. 验证文生图、图片编辑、视频任务和素材的不同成功外壳及所有非 2xx 都能被正确识别；失败时必须保存并展示收到的完整原始响应，不得生成替代错误信息。[文生图文档](https://doc.moyu.info/495380766e0.md) [图片编辑文档](https://doc.moyu.info/497391425e0.md) [视频生成文档](https://doc.moyu.info/9280779m0.md) [任务列表文档](https://doc.moyu.info/9280780m0.md) [素材库文档](https://doc.moyu.info/9280781m0.md)
 15. 建立两个使用同一 Adapter、不同 `BASE_URL` 和专用令牌的供应商连接，共同绑定同一个模型；验证节点切换连接后只改变请求源地址和鉴权，模型、参数、请求体、图片顺序、视频顺序、音频顺序和原始错误展示保持一致。
 16. 把令牌 A 的素材连接到令牌 B 的生成节点，验证应用不直接转发 A 的 `asset://`：图生图使用 A 下载的有序文件字节，视频生成使用 A 刷新的短期可读 URL，失败时保留连线并展示完整原始错误。
@@ -574,6 +577,6 @@ ProviderConnectionRegistry(baseUrl, apiKeyRef, adapterId)
 13. 是否计划提供视频 Webhook、幂等键、限流和费用查询？
 14. `/v1/videos/{task_id}/content` 的鉴权、有效期、Range/CORS 和服务端抓取规则是什么？
 15. `POST /v1/assets/groups` 能否直接返回数值 `id`，避免创建后按名称反查？
-16. `/v1/assets/async` 的 `url` 到底是永久直链还是可刷新的 12 小时签名 URL？
+16. 素材列表和单素材查询返回的 `url` 是否始终为约 12 小时签名 URL？
 
 在上述问题中，图片模型注册表、图片编辑文件限制和环境地址决定 MVP 能否稳定完成文生图、图片编辑与本地结果保存；TOS 预签名基础设施决定“从本地上传素材”和“本地结果作为远程 URL 输入”能否完成。其余问题可以先按本文保守规则实现，再通过契约测试逐项放开。

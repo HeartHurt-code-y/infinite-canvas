@@ -3,17 +3,30 @@ import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
 import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
 import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
+import { FileText } from "@phosphor-icons/react/FileText";
+import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
 import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
+import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
+import { Paperclip } from "@phosphor-icons/react/Paperclip";
 import { PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
+import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { X } from "@phosphor-icons/react/X";
 import { useEffect, useRef, useState } from "react";
-import { type PromptOptimizationMode, type ProviderCatalogEntry } from "../../lib/backend";
+import {
+  formatBytes,
+  type PromptMaterialKind,
+  type PromptOptimizationMode,
+  type ProviderCatalogEntry,
+} from "../../lib/backend";
+
+import { MarkdownView } from "../../components/MarkdownView";
 
 import { NodeTypeIcon, PromptAuditPanel } from "./PromptNodeViews";
 import type {
   AssetKind,
   CanvasNodeDimensions,
+  ConnectedScreenplayInput,
   DocumentSkillNodeData,
   GenNodeData,
   PromptNodeConfig,
@@ -31,6 +44,31 @@ import {
   isTextGenerationModel,
 } from "./workspaceModel";
 
+function ScreenplayMaterialIcon({ kind }: { readonly kind: PromptMaterialKind }) {
+  const props = { size: 15, weight: "bold" as const, "aria-hidden": true as const };
+  if (kind === "image") return <ImageSquare {...props} />;
+  if (kind === "audio") return <MusicNotes {...props} />;
+  if (kind === "video") return <VideoCamera {...props} />;
+  return <FileText {...props} />;
+}
+
+function screenplayMaterialKindLabel(kind: PromptMaterialKind): string {
+  if (kind === "image") return "图片";
+  if (kind === "audio") return "音频";
+  if (kind === "video") return "视频";
+  return "文档";
+}
+
+function screenplayMaterialCompatibilityHint(remoteModelId: string | undefined): string {
+  const identity = remoteModelId?.toLowerCase() ?? "";
+  if (identity.startsWith("gemini")) return "当前 Gemini 接口可读取全部受支持格式。";
+  if (identity.startsWith("claude")) return "当前 Claude 接口可读取图片、PDF 与文本。";
+  if (identity.includes("audio")) {
+    return "当前接口可读取图片、MP3 / WAV 与文本；视频或 PDF 请切换 Gemini。";
+  }
+  return "当前接口可读取图片与文本；音视频或 PDF 建议切换 Gemini。";
+}
+
 /** 内置技能文档节点：完整多轮对话、可编辑稿件、审计确认和 Markdown 导出。 */
 export function CanvasDocumentSkillNode({
   node,
@@ -40,11 +78,15 @@ export function CanvasDocumentSkillNode({
   error,
   providerCatalog,
   audit,
+  sourceInput,
   onSelect,
   onNodeDragStart,
   onRemove,
+  onUnlink,
   onSizeChange,
   onChange,
+  onPickMaterials,
+  onRemoveMaterial,
   onSend,
   onAudit,
   onApplyAudit,
@@ -58,6 +100,7 @@ export function CanvasDocumentSkillNode({
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly audit: PromptOptimizationPanelState | undefined;
+  readonly sourceInput: ConnectedScreenplayInput | null;
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
     key: string,
@@ -67,8 +110,11 @@ export function CanvasDocumentSkillNode({
     clientY: number,
   ) => void;
   readonly onRemove: (key: string) => void;
+  readonly onUnlink: (edgeId: string) => void;
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onChange: (config: ScreenplayNodeConfig) => void;
+  readonly onPickMaterials?: (key: string) => Promise<void>;
+  readonly onRemoveMaterial?: (key: string, materialId: string) => void;
   readonly onSend: (key: string) => void;
   readonly onAudit: (key: string) => void;
   readonly onApplyAudit: (key: string) => void;
@@ -77,7 +123,12 @@ export function CanvasDocumentSkillNode({
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const conversationRef = useRef<HTMLDivElement>(null);
+  const composerRef = useRef<HTMLTextAreaElement>(null);
+  const composerComposingRef = useRef(false);
+  const publishedComposerRef = useRef(node.config.composer);
   const [exporting, setExporting] = useState(false);
+  const [pickingMaterials, setPickingMaterials] = useState(false);
+  const [composerInitialValue] = useState(node.config.composer);
   const copy = DOCUMENT_SKILL_NODE_COPY[node.kind];
   const textModelProviders = providerCatalog
     .map((entry) => ({
@@ -93,6 +144,9 @@ export function CanvasDocumentSkillNode({
     (model) => model.definitionId === node.config.modelSelection.modelDefinitionId,
   );
   const selectionReady = Boolean(selectedProvider && selectedModel);
+  const materials = node.config.materials ?? [];
+  const screenplayHasMaterials = node.kind === "screenplay" && materials.length > 0;
+  const sourceDocumentReady = node.kind === "storyboard" && Boolean(sourceInput?.document.trim());
   const auditBusy = audit?.status === "running";
   const auditUnavailableReason = auditBusy
     ? `正在审计当前${copy.documentName}`
@@ -123,6 +177,38 @@ export function CanvasDocumentSkillNode({
     const conversation = conversationRef.current;
     if (conversation) conversation.scrollTop = conversation.scrollHeight;
   }, [node.config.conversation]);
+
+  useEffect(() => {
+    publishedComposerRef.current = node.config.composer;
+    const composer = composerRef.current;
+    if (
+      composer == null ||
+      composerComposingRef.current ||
+      composer.value === node.config.composer
+    ) {
+      return;
+    }
+
+    const focused = document.activeElement === composer;
+    const selectionStart = composer.selectionStart;
+    const selectionEnd = composer.selectionEnd;
+    const selectionDirection = composer.selectionDirection;
+    composer.value = node.config.composer;
+    if (focused) {
+      const valueLength = composer.value.length;
+      composer.setSelectionRange(
+        Math.min(selectionStart, valueLength),
+        Math.min(selectionEnd, valueLength),
+        selectionDirection,
+      );
+    }
+  }, [node.config.composer]);
+
+  const publishComposer = (value: string) => {
+    if (value === publishedComposerRef.current) return;
+    publishedComposerRef.current = value;
+    onChange({ ...node.config, composer: value });
+  };
 
   return (
     <div
@@ -185,6 +271,33 @@ export function CanvasDocumentSkillNode({
       </div>
 
       <div className="canvas-screenplay-node__body">
+        {node.kind === "storyboard" ? (
+          <div className={`canvas-screenplay-node__source${sourceInput ? " is-connected" : ""}`}>
+            <span className="canvas-screenplay-node__source-copy">
+              <BookOpenText size={16} weight="bold" aria-hidden="true" />
+              <span>
+                <small>输入剧本</small>
+                <strong>{sourceInput?.name ?? "尚未连接剧本节点"}</strong>
+              </span>
+            </span>
+            {sourceInput ? (
+              <button
+                type="button"
+                aria-label={`解除剧本连线：${sourceInput.name}`}
+                title="解除剧本连线"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onUnlink(sourceInput.edgeId);
+                }}
+              >
+                <X size={14} weight="bold" aria-hidden="true" />
+              </button>
+            ) : (
+              <span className="canvas-screenplay-node__source-hint">从剧本节点右侧端口连入</span>
+            )}
+          </div>
+        ) : null}
         <div className="canvas-screenplay-node__skill-badge">
           {node.kind === "storyboard" ? (
             <FilmSlate size={16} weight="bold" aria-hidden="true" />
@@ -279,7 +392,7 @@ export function CanvasDocumentSkillNode({
                 className={`canvas-screenplay-node__message is-${entry.role}`}
               >
                 <span>{documentSkillRoleLabel(entry.role, node.kind)}</span>
-                <p>{entry.content}</p>
+                <MarkdownView content={entry.content} />
               </article>
             ))
           )}
@@ -294,13 +407,31 @@ export function CanvasDocumentSkillNode({
         <label className="canvas-prompt-node__field">
           <span>本轮消息</span>
           <textarea
+            ref={composerRef}
             className="canvas-screenplay-node__composer"
             aria-label={copy.composerAriaLabel}
-            placeholder={copy.composerPlaceholder}
-            value={node.config.composer}
+            placeholder={
+              sourceDocumentReady
+                ? "可留空直接生成，或输入画幅、时长、平台等拆镜要求"
+                : copy.composerPlaceholder
+            }
+            defaultValue={composerInitialValue}
             disabled={running || auditBusy}
-            onChange={(event) => onChange({ ...node.config, composer: event.target.value })}
+            onCompositionStart={() => {
+              composerComposingRef.current = true;
+            }}
+            onCompositionEnd={(event) => {
+              composerComposingRef.current = false;
+              publishComposer(event.currentTarget.value);
+            }}
+            onChange={(event) => {
+              if (composerComposingRef.current || (event.nativeEvent as InputEvent).isComposing) {
+                return;
+              }
+              publishComposer(event.currentTarget.value);
+            }}
             onKeyDown={(event) => {
+              if (composerComposingRef.current || event.nativeEvent.isComposing) return;
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
                 event.preventDefault();
                 onSend(node.key);
@@ -308,11 +439,85 @@ export function CanvasDocumentSkillNode({
             }}
           />
         </label>
+        {node.kind === "screenplay" ? (
+          <div className="canvas-screenplay-node__materials" aria-label="剧本参考素材">
+            <div className="canvas-screenplay-node__materials-heading">
+              <span>
+                <strong>参考素材</strong>
+                <small>{materials.length ? `已添加 ${materials.length} 项` : "可选"}</small>
+              </span>
+              <button
+                type="button"
+                className="canvas-screenplay-node__materials-add"
+                aria-label="添加多模态参考素材"
+                disabled={running || auditBusy || pickingMaterials || materials.length >= 8}
+                title={materials.length >= 8 ? "每个剧本节点最多添加 8 项素材" : undefined}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  if (!onPickMaterials) return;
+                  setPickingMaterials(true);
+                  void onPickMaterials(node.key).finally(() => setPickingMaterials(false));
+                }}
+              >
+                {pickingMaterials ? (
+                  <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
+                ) : (
+                  <Paperclip size={15} weight="bold" aria-hidden="true" />
+                )}
+                {pickingMaterials ? "读取中" : "添加素材"}
+              </button>
+            </div>
+            {materials.length ? (
+              <ul className="canvas-screenplay-node__material-list">
+                {materials.map((material) => (
+                  <li key={material.id}>
+                    <span className="canvas-screenplay-node__material-icon" aria-hidden="true">
+                      <ScreenplayMaterialIcon kind={material.kind} />
+                    </span>
+                    <span className="canvas-screenplay-node__material-copy">
+                      <strong title={material.displayName}>{material.displayName}</strong>
+                      <small>
+                        {screenplayMaterialKindLabel(material.kind)}
+                        {formatBytes(material.byteSize)
+                          ? ` · ${formatBytes(material.byteSize)}`
+                          : ""}
+                      </small>
+                    </span>
+                    <button
+                      type="button"
+                      aria-label={`移除参考素材：${material.displayName}`}
+                      title="移除素材"
+                      disabled={running || auditBusy}
+                      onMouseDown={(event) => event.stopPropagation()}
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        onRemoveMaterial?.(node.key, material.id);
+                      }}
+                    >
+                      <X size={13} weight="bold" aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            ) : (
+              <p>图片、音频、视频、PDF、TXT / Markdown；发送和审计时会一并读取。</p>
+            )}
+            <p className="canvas-screenplay-node__materials-hint">
+              {screenplayMaterialCompatibilityHint(selectedModel?.remoteModelId)}
+            </p>
+          </div>
+        ) : null}
         <div className="canvas-screenplay-node__composer-actions">
           <span>Ctrl / ⌘ + Enter 发送</span>
           <button
             type="button"
-            disabled={running || auditBusy || !selectionReady || !node.config.composer.trim()}
+            disabled={
+              running ||
+              auditBusy ||
+              !selectionReady ||
+              (!node.config.composer.trim() && !sourceDocumentReady && !screenplayHasMaterials)
+            }
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();

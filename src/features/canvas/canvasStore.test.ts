@@ -3,6 +3,8 @@ import type {
   AssetNodeData,
   GenNodeData,
   OutputNodeData,
+  ScreenplayNodeData,
+  StoryboardNodeData,
   VideoComposerNodeData,
   ViralRemixNodeData,
 } from "../../App";
@@ -78,6 +80,25 @@ const viralRemixNode: ViralRemixNodeData = {
     currentDocument: "",
     catalogResolved: true,
   },
+};
+
+const screenplayNode = (key: string): ScreenplayNodeData => ({
+  key,
+  kind: "screenplay",
+  x: 80,
+  y: 80,
+  config: {
+    modelSelection: { providerId: "provider-1", modelDefinitionId: "model-1" },
+    composer: "",
+    conversation: [],
+    currentDocument: "# 测试剧本",
+    catalogResolved: true,
+  },
+});
+
+const storyboardNode: StoryboardNodeData = {
+  ...screenplayNode("storyboard-1"),
+  kind: "storyboard",
 };
 
 const outputNode: OutputNodeData = {
@@ -156,6 +177,9 @@ describe("canvas state interface", () => {
     canvas.commands.addNode("asset", videoAssetNode);
     canvas.commands.addNode("viralRemix", viralRemixNode);
     canvas.commands.addNode("videoComposer", composerNode);
+    canvas.commands.addNode("screenplay", screenplayNode("screenplay-1"));
+    canvas.commands.addNode("screenplay", screenplayNode("screenplay-2"));
+    canvas.commands.addNode("storyboard", storyboardNode);
 
     expect(canvas.commands.connect("prompt-1", "gen-1").status).toBe("connected");
     const promptReplacement = canvas.commands.connect("prompt-2", "gen-1");
@@ -165,6 +189,15 @@ describe("canvas state interface", () => {
     });
     expect(canvas.commands.connect("asset-video", "viral-1").status).toBe("connected");
     expect(canvas.commands.connect("asset-video", "composer-1").status).toBe("connected");
+    expect(canvas.commands.connect("screenplay-1", "storyboard-1").status).toBe("connected");
+    expect(canvas.commands.connect("screenplay-2", "storyboard-1")).toMatchObject({
+      status: "connected",
+      replacedEdgeIds: ["screenplay-1->storyboard-1"],
+    });
+    expect(canvas.commands.connect("storyboard-1", "screenplay-1")).toMatchObject({
+      status: "rejected",
+      reason: "unsupported-connection",
+    });
     expect(canvas.commands.connect("gen-1", "viral-1")).toMatchObject({
       status: "rejected",
       reason: "unsupported-connection",
@@ -203,6 +236,21 @@ describe("canvas state interface", () => {
       y: 90,
       measured: { width: 320, height: 180 },
     });
+  });
+
+  it("refreshes the screenplay connection projection when its live document changes", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("screenplay", screenplayNode("screenplay-live"));
+    const before = canvas.getSnapshot().nodeByKey.screenplay;
+
+    canvas.commands.patchNode("screenplay", "screenplay-live", (node) => ({
+      ...node,
+      config: { ...node.config, currentDocument: "# 最新剧本" },
+    }));
+
+    const after = canvas.getSnapshot().nodeByKey.screenplay;
+    expect(after).not.toBe(before);
+    expect(after.get("screenplay-live")?.config.currentDocument).toBe("# 最新剧本");
   });
 });
 

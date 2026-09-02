@@ -157,6 +157,26 @@ pub struct PromptVisionImage {
     pub display_name: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PromptMultimodalKind {
+    Image,
+    Audio,
+    Video,
+    Document,
+}
+
+/// 剧本节点直接选择的本地参考素材。路径只在桌面端后端读取；每次请求都会重新
+/// 校验扩展名、声明 MIME、文件签名与体积，避免把大文件编码进画布存档。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptMultimodalInput {
+    pub local_path: String,
+    pub display_name: String,
+    pub kind: PromptMultimodalKind,
+    pub mime_type: String,
+}
+
 /// 解析视觉素材所需的后端服务（与生成任务共享同一套素材读取链路）。
 pub struct PromptVisionDeps<'a> {
     pub app: &'a AppHandle,
@@ -193,6 +213,9 @@ pub struct OptimizeVideoPromptCommand {
     /// 连入提示词节点的图片素材（按连线顺序）；省略时按纯文本调用，兼容旧调用方。
     #[serde(default)]
     pub vision_images: Vec<PromptVisionImage>,
+    /// 剧本节点直接选择的本地图片、音频、视频或文档素材。
+    #[serde(default)]
+    pub multimodal_inputs: Vec<PromptMultimodalInput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -748,6 +771,32 @@ impl VisionImagePayload {
     }
 }
 
+#[derive(Debug, Clone)]
+struct MultimodalPayload {
+    display_name: String,
+    kind: PromptMultimodalKind,
+    mime_type: String,
+    base64: Option<String>,
+    text: Option<String>,
+}
+
+impl MultimodalPayload {
+    fn data_url(&self) -> Option<String> {
+        self.base64
+            .as_ref()
+            .map(|base64| format!("data:{};base64,{base64}", self.mime_type))
+    }
+
+    fn labeled_text(&self) -> Option<String> {
+        self.text
+            .as_ref()
+            .map(|text| format!("# 参考文档：{}\n\n{text}", self.display_name))
+    }
+}
+
+type StaticRequestHeader = (&'static str, &'static str);
+type TextModelRequest = (String, Vec<StaticRequestHeader>, Value);
+
 /// 按模型推断的请求档案构造对应的 HTTP 请求（路径、请求头、请求体）。
 /// 三种档案对应 moyu 聚合平台代理的三类文本接口：
 /// - openai_chat_v1（OpenAI / 豆包 / DeepSeek / Qwen 等）：/v1/chat/completions
@@ -755,18 +804,21 @@ impl VisionImagePayload {
 /// - gemini_generate_content_v1：/v1beta/models/{model}:generateContent
 ///   （系统提示词走 systemInstruction，流式由 URL 决定而非 body 字段，这里无需流式）。
 ///
-/// 携带视觉素材时，图片内容块排在用户文本之前（先看图、再读需求）；
-/// 无视觉素材时保持原有纯文本请求体形状。
+/// 携带素材时，素材内容块排在用户文本之前（先读取素材、再执行需求）；
+/// 无素材时保持原有纯文本请求体形状。各档案只构造其公开支持的内容块，不能
+/// 原生读取的组合会在本地返回明确错误，而不是静默丢弃素材。
 fn build_text_model_request(
     profile: &str,
     remote_model_id: &str,
     system_prompt: &str,
     user_prompt: &str,
     vision_images: &[VisionImagePayload],
-) -> (String, Vec<(&'static str, &'static str)>, Value) {
+    multimodal_inputs: &[MultimodalPayload],
+) -> BackendResult<TextModelRequest> {
+    let has_materials = !vision_images.is_empty() || !multimodal_inputs.is_empty();
     match profile {
         "anthropic_messages_v1" => {
-            let user_content = if vision_images.is_empty() {
+            let user_content = if !has_materials {
                 Value::String(user_prompt.to_string())
             } else {
                 let mut content: Vec<Value> = vision_images
@@ -782,10 +834,55 @@ fn build_text_model_request(
                         })
                     })
                     .collect();
+                for material in multimodal_inputs {
+                    if let Some(text) = material.labeled_text() {
+                        content.push(json!({ "type": "text", "text": text }));
+                        continue;
+                    }
+                    let data = material.base64.as_ref().ok_or_else(|| {
+                        BackendError::validation(
+                            "multimodal material is missing binary data",
+                            json!({ "displayName": material.display_name }),
+                        )
+                    })?;
+                    match material.kind {
+                        PromptMultimodalKind::Image => content.push(json!({
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": material.mime_type,
+                                "data": data,
+                            },
+                        })),
+                        PromptMultimodalKind::Document
+                            if material.mime_type == "application/pdf" =>
+                        {
+                            content.push(json!({
+                                "type": "document",
+                                "source": {
+                                    "type": "base64",
+                                    "media_type": material.mime_type,
+                                    "data": data,
+                                },
+                            }));
+                        }
+                        _ => {
+                            return Err(BackendError::validation(
+                                "the selected Claude interface only accepts images, PDF and text materials",
+                                json!({
+                                    "displayName": material.display_name,
+                                    "kind": material.kind,
+                                    "mimeType": material.mime_type,
+                                    "suggestion": "Switch to a Gemini model for audio or video materials."
+                                }),
+                            ));
+                        }
+                    }
+                }
                 content.push(json!({ "type": "text", "text": user_prompt }));
                 Value::Array(content)
             };
-            (
+            Ok((
                 "/v1/messages".to_string(),
                 vec![("anthropic-version", "2023-06-01")],
                 json!({
@@ -795,10 +892,10 @@ fn build_text_model_request(
                     "max_tokens": 8192,
                     "stream": false,
                 }),
-            )
+            ))
         }
         "gemini_generate_content_v1" => {
-            let parts = if vision_images.is_empty() {
+            let parts = if !has_materials {
                 vec![json!({ "text": user_prompt })]
             } else {
                 let mut parts: Vec<Value> = vision_images
@@ -809,20 +906,38 @@ fn build_text_model_request(
                         })
                     })
                     .collect();
+                for material in multimodal_inputs {
+                    if let Some(text) = material.labeled_text() {
+                        parts.push(json!({ "text": text }));
+                    } else {
+                        let data = material.base64.as_ref().ok_or_else(|| {
+                            BackendError::validation(
+                                "multimodal material is missing binary data",
+                                json!({ "displayName": material.display_name }),
+                            )
+                        })?;
+                        parts.push(json!({
+                            "inline_data": {
+                                "mime_type": material.mime_type,
+                                "data": data,
+                            },
+                        }));
+                    }
+                }
                 parts.push(json!({ "text": user_prompt }));
                 parts
             };
-            (
+            Ok((
                 format!("/v1beta/models/{remote_model_id}:generateContent"),
                 Vec::new(),
                 json!({
                     "systemInstruction": { "parts": [{ "text": system_prompt }] },
                     "contents": [{ "role": "user", "parts": parts }],
                 }),
-            )
+            ))
         }
         _ => {
-            let user_content = if vision_images.is_empty() {
+            let user_content = if !has_materials {
                 Value::String(user_prompt.to_string())
             } else {
                 let mut content: Vec<Value> = vision_images
@@ -834,10 +949,64 @@ fn build_text_model_request(
                         })
                     })
                     .collect();
+                for material in multimodal_inputs {
+                    if let Some(text) = material.labeled_text() {
+                        content.push(json!({ "type": "text", "text": text }));
+                        continue;
+                    }
+                    match material.kind {
+                        PromptMultimodalKind::Image => {
+                            let data_url = material.data_url().ok_or_else(|| {
+                                BackendError::validation(
+                                    "multimodal image is missing binary data",
+                                    json!({ "displayName": material.display_name }),
+                                )
+                            })?;
+                            content.push(json!({
+                                "type": "image_url",
+                                "image_url": { "url": data_url },
+                            }));
+                        }
+                        PromptMultimodalKind::Audio
+                            if remote_model_id.to_ascii_lowercase().contains("audio")
+                                && matches!(
+                                    material.mime_type.as_str(),
+                                    "audio/mpeg" | "audio/wav"
+                                ) =>
+                        {
+                            let data = material.base64.as_ref().ok_or_else(|| {
+                                BackendError::validation(
+                                    "multimodal audio is missing binary data",
+                                    json!({ "displayName": material.display_name }),
+                                )
+                            })?;
+                            let format = if material.mime_type == "audio/mpeg" {
+                                "mp3"
+                            } else {
+                                "wav"
+                            };
+                            content.push(json!({
+                                "type": "input_audio",
+                                "input_audio": { "data": data, "format": format },
+                            }));
+                        }
+                        _ => {
+                            return Err(BackendError::validation(
+                                "the selected OpenAI-compatible interface only accepts images, MP3/WAV and text materials",
+                                json!({
+                                    "displayName": material.display_name,
+                                    "kind": material.kind,
+                                    "mimeType": material.mime_type,
+                                    "suggestion": "Switch to a Gemini model for video, PDF or other audio formats."
+                                }),
+                            ));
+                        }
+                    }
+                }
                 content.push(json!({ "type": "text", "text": user_prompt }));
                 Value::Array(content)
             };
-            (
+            Ok((
                 "/v1/chat/completions".to_string(),
                 Vec::new(),
                 json!({
@@ -848,8 +1017,39 @@ fn build_text_model_request(
                     ],
                     "stream": false,
                 }),
-            )
+            ))
         }
+    }
+}
+
+/// 任务时间线保留请求结构与短文本，但不把大体积 Base64 / 整份本地文档重复写入
+/// SQLite。实际 HTTP 请求仍使用未修改的 `body`。
+fn redacted_request_value(value: &Value) -> Value {
+    match value {
+        Value::Array(values) => Value::Array(values.iter().map(redacted_request_value).collect()),
+        Value::Object(values) => Value::Object(
+            values
+                .iter()
+                .map(|(key, value)| {
+                    let redacted = match (key.as_str(), value) {
+                        ("data", Value::String(data)) if data.len() > 512 => {
+                            Value::String(format!("<base64 omitted: {} characters>", data.len()))
+                        }
+                        ("url", Value::String(url)) if url.starts_with("data:") => {
+                            Value::String(format!("<data URL omitted: {} characters>", url.len()))
+                        }
+                        (_, Value::String(text)) if text.len() > 20_000 => Value::String(format!(
+                            "{}\n<content omitted: {} characters>",
+                            text.chars().take(2_000).collect::<String>(),
+                            text.len()
+                        )),
+                        _ => redacted_request_value(value),
+                    };
+                    (key.clone(), redacted)
+                })
+                .collect(),
+        ),
+        _ => value.clone(),
     }
 }
 
@@ -1150,6 +1350,165 @@ async fn resolve_vision_images(
     Ok(payloads)
 }
 
+const MAX_MULTIMODAL_INPUTS: usize = 8;
+const MAX_MULTIMODAL_FILE_BYTES: u64 = 20 * 1024 * 1024;
+const MAX_MULTIMODAL_TOTAL_BYTES: u64 = 40 * 1024 * 1024;
+
+fn expected_multimodal_mime(kind: PromptMultimodalKind, extension: &str) -> Option<&'static str> {
+    match (kind, extension) {
+        (PromptMultimodalKind::Image, "png") => Some("image/png"),
+        (PromptMultimodalKind::Image, "jpg" | "jpeg") => Some("image/jpeg"),
+        (PromptMultimodalKind::Image, "webp") => Some("image/webp"),
+        (PromptMultimodalKind::Image, "gif") => Some("image/gif"),
+        (PromptMultimodalKind::Audio, "mp3") => Some("audio/mpeg"),
+        (PromptMultimodalKind::Audio, "wav") => Some("audio/wav"),
+        (PromptMultimodalKind::Audio, "m4a") => Some("audio/mp4"),
+        (PromptMultimodalKind::Audio, "aac") => Some("audio/aac"),
+        (PromptMultimodalKind::Audio, "ogg") => Some("audio/ogg"),
+        (PromptMultimodalKind::Audio, "flac") => Some("audio/flac"),
+        (PromptMultimodalKind::Video, "mp4") => Some("video/mp4"),
+        (PromptMultimodalKind::Video, "webm") => Some("video/webm"),
+        (PromptMultimodalKind::Video, "mov") => Some("video/quicktime"),
+        (PromptMultimodalKind::Video, "mkv") => Some("video/x-matroska"),
+        (PromptMultimodalKind::Document, "pdf") => Some("application/pdf"),
+        (PromptMultimodalKind::Document, "txt") => Some("text/plain"),
+        (PromptMultimodalKind::Document, "md" | "markdown") => Some("text/markdown"),
+        (PromptMultimodalKind::Document, "json") => Some("application/json"),
+        _ => None,
+    }
+}
+
+fn binary_signature_matches(expected: &str, detected: &str) -> bool {
+    expected == detected
+        || matches!(
+            (expected, detected),
+            ("audio/wav", "audio/x-wav")
+                | ("audio/mp4", "video/mp4")
+                | ("audio/mp4", "audio/m4a")
+                | ("audio/mp4", "application/mp4")
+                | ("audio/ogg", "application/ogg")
+                | ("audio/flac", "audio/x-flac")
+        )
+}
+
+async fn resolve_multimodal_inputs(
+    inputs: &[PromptMultimodalInput],
+) -> BackendResult<Vec<MultimodalPayload>> {
+    if inputs.len() > MAX_MULTIMODAL_INPUTS {
+        return Err(BackendError::validation(
+            "a screenplay request accepts at most 8 multimodal materials",
+            json!({ "materialCount": inputs.len(), "maximum": MAX_MULTIMODAL_INPUTS }),
+        ));
+    }
+    let mut total_bytes = 0u64;
+    let mut payloads = Vec::with_capacity(inputs.len());
+    for input in inputs {
+        let display_name = input.display_name.trim();
+        let path = Path::new(input.local_path.trim());
+        if display_name.is_empty() || !path.is_absolute() {
+            return Err(BackendError::validation(
+                "multimodal material requires a display name and absolute local path",
+                json!({ "displayName": display_name, "localPath": input.local_path }),
+            ));
+        }
+        let extension = path
+            .extension()
+            .and_then(|value| value.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let expected_mime = expected_multimodal_mime(input.kind, &extension).ok_or_else(|| {
+            BackendError::validation(
+                "multimodal material extension does not match its declared kind",
+                json!({
+                    "displayName": display_name,
+                    "kind": input.kind,
+                    "extension": extension,
+                }),
+            )
+        })?;
+        if input.mime_type != expected_mime {
+            return Err(BackendError::validation(
+                "multimodal material MIME type does not match its extension",
+                json!({
+                    "displayName": display_name,
+                    "declaredMimeType": input.mime_type,
+                    "expectedMimeType": expected_mime,
+                }),
+            ));
+        }
+        let metadata = tokio::fs::metadata(path).await.map_err(|error| {
+            BackendError::validation(
+                "multimodal material is no longer available at its saved path",
+                json!({
+                    "displayName": display_name,
+                    "localPath": path.display().to_string(),
+                    "error": error.to_string(),
+                }),
+            )
+        })?;
+        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MULTIMODAL_FILE_BYTES
+        {
+            return Err(BackendError::validation(
+                "multimodal material must be a non-empty file no larger than 20 MiB",
+                json!({ "displayName": display_name, "byteSize": metadata.len() }),
+            ));
+        }
+        total_bytes += metadata.len();
+        if total_bytes > MAX_MULTIMODAL_TOTAL_BYTES {
+            return Err(BackendError::validation(
+                "multimodal materials exceed the 40 MiB total limit",
+                json!({ "displayName": display_name, "totalBytes": total_bytes }),
+            ));
+        }
+        let bytes = tokio::fs::read(path).await?;
+        if matches!(
+            expected_mime,
+            "text/plain" | "text/markdown" | "application/json"
+        ) {
+            let text = String::from_utf8(bytes).map_err(|error| {
+                BackendError::validation(
+                    "text material must use UTF-8 encoding",
+                    json!({ "displayName": display_name, "error": error.to_string() }),
+                )
+            })?;
+            payloads.push(MultimodalPayload {
+                display_name: display_name.to_string(),
+                kind: input.kind,
+                mime_type: expected_mime.to_string(),
+                base64: None,
+                text: Some(text),
+            });
+            continue;
+        }
+        let detected_mime = infer::get(&bytes)
+            .map(|kind| kind.mime_type())
+            .ok_or_else(|| {
+                BackendError::validation(
+                    "multimodal material type could not be identified from its file signature",
+                    json!({ "displayName": display_name, "byteSize": bytes.len() }),
+                )
+            })?;
+        if !binary_signature_matches(expected_mime, detected_mime) {
+            return Err(BackendError::validation(
+                "multimodal material MIME type does not match its file signature",
+                json!({
+                    "displayName": display_name,
+                    "expectedMimeType": expected_mime,
+                    "detectedMimeType": detected_mime,
+                }),
+            ));
+        }
+        payloads.push(MultimodalPayload {
+            display_name: display_name.to_string(),
+            kind: input.kind,
+            mime_type: expected_mime.to_string(),
+            base64: Some(BASE64_STANDARD.encode(bytes)),
+            text: None,
+        });
+    }
+    Ok(payloads)
+}
+
 async fn execute_recorded_text_call(
     deps: &PromptVisionDeps<'_>,
     task_id: &str,
@@ -1160,7 +1519,28 @@ async fn execute_recorded_text_call(
     let skill_system_prompt = load_skill_system_prompt(command.mode)?;
     let vision_images =
         resolve_vision_images(deps, task_id, attempt_id, &command.vision_images).await?;
+    let multimodal_inputs = resolve_multimodal_inputs(&command.multimodal_inputs).await?;
     let (system_prompt, user_prompt) = build_system_and_user_prompts(command, &skill_system_prompt);
+    let user_prompt = if multimodal_inputs.is_empty() {
+        user_prompt
+    } else {
+        let inventory = multimodal_inputs
+            .iter()
+            .enumerate()
+            .map(|(index, material)| {
+                format!(
+                    "{}. {}（{}）",
+                    index + 1,
+                    material.display_name,
+                    material.mime_type
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!(
+            "以下本地参考素材已随请求附带，请逐项读取并用于本轮任务：\n{inventory}\n\n{user_prompt}"
+        )
+    };
     let profile = text_request_profile(remote_model_id);
     let (path, headers, body) = build_text_model_request(
         profile,
@@ -1168,7 +1548,8 @@ async fn execute_recorded_text_call(
         &system_prompt,
         &user_prompt,
         &vision_images,
-    );
+        &multimodal_inputs,
+    )?;
     commit_generation_transition(
         deps,
         task_id,
@@ -1177,12 +1558,12 @@ async fn execute_recorded_text_call(
                 "profile": profile,
                 "path": path,
                 "headers": headers.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
-                "body": body,
+                "body": redacted_request_value(&body),
             }),
         },
     )?;
     info!(
-        "[generation] 提示词模型请求开始: taskId={}, task={:?}, mode={}, detailReview={}, profile={}, providerConnectionId={}, model={}, 系统提示词 {} 字符, 视觉素材 {} 张",
+        "[generation] 提示词模型请求开始: taskId={}, task={:?}, mode={}, detailReview={}, profile={}, providerConnectionId={}, model={}, 系统提示词 {} 字符, 视觉素材 {} 张, 多模态素材 {} 项",
         task_id,
         command.task,
         command.mode.as_str(),
@@ -1192,6 +1573,7 @@ async fn execute_recorded_text_call(
         remote_model_id,
         system_prompt.len(),
         vision_images.len(),
+        multimodal_inputs.len(),
     );
     let response = deps
         .providers
@@ -1482,7 +1864,9 @@ mod tests {
             "SYS",
             "USER",
             &[],
-        );
+            &[],
+        )
+        .unwrap();
         assert_eq!(path, "/v1/chat/completions");
         assert!(headers.is_empty());
         assert_eq!(body["messages"][0]["role"], "system");
@@ -1495,7 +1879,9 @@ mod tests {
             "SYS",
             "USER",
             &[],
-        );
+            &[],
+        )
+        .unwrap();
         assert_eq!(path, "/v1/messages");
         assert!(headers.contains(&("anthropic-version", "2023-06-01")));
         // Anthropic：system 独立字段 + 必填 max_tokens
@@ -1509,7 +1895,9 @@ mod tests {
             "SYS",
             "USER",
             &[],
-        );
+            &[],
+        )
+        .unwrap();
         assert_eq!(path, "/v1beta/models/gemini-2.5-flash:generateContent");
         assert!(headers.is_empty());
         // Gemini：systemInstruction + contents/parts，且不允许 stream 字段
@@ -1531,8 +1919,15 @@ mod tests {
             },
         ];
         // OpenAI 兼容：image_url 内容块携带 Data URL，文本块排在图片之后。
-        let (_, _, body) =
-            build_text_model_request("openai_chat_v1", "glm-5.3-flash", "SYS", "USER", &images);
+        let (_, _, body) = build_text_model_request(
+            "openai_chat_v1",
+            "glm-5.3-flash",
+            "SYS",
+            "USER",
+            &images,
+            &[],
+        )
+        .unwrap();
         let content = body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         assert_eq!(content[0]["type"], "image_url");
@@ -1552,7 +1947,9 @@ mod tests {
             "SYS",
             "USER",
             &images,
-        );
+            &[],
+        )
+        .unwrap();
         let content = body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["media_type"], "image/png");
@@ -1566,11 +1963,81 @@ mod tests {
             "SYS",
             "USER",
             &images,
-        );
+            &[],
+        )
+        .unwrap();
         let parts = body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["inline_data"]["mime_type"], "image/png");
         assert_eq!(parts[1]["inline_data"]["data"], "BBBB");
         assert_eq!(parts[2]["text"], "USER");
+    }
+
+    #[test]
+    fn multimodal_materials_are_adapted_per_text_api_profile() {
+        let video = MultimodalPayload {
+            display_name: "走位参考.mp4".to_string(),
+            kind: PromptMultimodalKind::Video,
+            mime_type: "video/mp4".to_string(),
+            base64: Some("VIDEO".to_string()),
+            text: None,
+        };
+        let text_document = MultimodalPayload {
+            display_name: "人物小传.md".to_string(),
+            kind: PromptMultimodalKind::Document,
+            mime_type: "text/markdown".to_string(),
+            base64: None,
+            text: Some("主角害怕失去控制。".to_string()),
+        };
+        let (_, _, body) = build_text_model_request(
+            "gemini_generate_content_v1",
+            "gemini-2.5-flash",
+            "SYS",
+            "USER",
+            &[],
+            &[video.clone(), text_document.clone()],
+        )
+        .unwrap();
+        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        assert_eq!(parts[0]["inline_data"]["mime_type"], "video/mp4");
+        assert!(parts[1]["text"].as_str().unwrap().contains("人物小传.md"));
+        assert_eq!(parts[2]["text"], "USER");
+
+        let claude_error = build_text_model_request(
+            "anthropic_messages_v1",
+            "claude-sonnet-4-5",
+            "SYS",
+            "USER",
+            &[],
+            &[video],
+        )
+        .unwrap_err();
+        assert!(
+            claude_error
+                .to_string()
+                .contains("only accepts images, PDF and text")
+        );
+
+        let audio = MultimodalPayload {
+            display_name: "访谈.mp3".to_string(),
+            kind: PromptMultimodalKind::Audio,
+            mime_type: "audio/mpeg".to_string(),
+            base64: Some("AUDIO".to_string()),
+            text: None,
+        };
+        let (_, _, body) = build_text_model_request(
+            "openai_chat_v1",
+            "gpt-4o-audio-preview",
+            "SYS",
+            "USER",
+            &[],
+            &[audio, text_document],
+        )
+        .unwrap();
+        let content = body["messages"][1]["content"].as_array().unwrap();
+        assert_eq!(content[0]["type"], "input_audio");
+        assert_eq!(content[0]["input_audio"]["format"], "mp3");
+        assert!(content[1]["text"].as_str().unwrap().contains("人物小传.md"));
+        assert_eq!(content[2]["text"], "USER");
     }
 
     #[test]
@@ -1594,6 +2061,7 @@ mod tests {
         }))
         .unwrap();
         assert!(command.vision_images.is_empty());
+        assert!(command.multimodal_inputs.is_empty());
         assert!(command.canvas_id.is_none());
         assert!(command.source_node_id.is_none());
         assert_eq!(command.task, PromptTask::Optimize);
@@ -1616,6 +2084,26 @@ mod tests {
         .unwrap();
         assert_eq!(command.vision_images.len(), 1);
         assert_eq!(command.vision_images[0].display_name, "参考图");
+
+        let command: OptimizeVideoPromptCommand = serde_json::from_value(json!({
+            "providerConnectionId": "provider",
+            "modelDefinitionId": "model",
+            "mode": "screenplay",
+            "task": "generate",
+            "userPrompt": "根据素材创作",
+            "multimodalInputs": [{
+                "localPath": "C:\\\\project\\\\reference.mp4",
+                "displayName": "reference.mp4",
+                "kind": "video",
+                "mimeType": "video/mp4"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(command.multimodal_inputs.len(), 1);
+        assert_eq!(
+            command.multimodal_inputs[0].kind,
+            PromptMultimodalKind::Video
+        );
     }
 
     #[test]
@@ -1634,6 +2122,7 @@ mod tests {
             }],
             detail_review: true,
             vision_images: Vec::new(),
+            multimodal_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "完整技能上下文");
         assert_eq!(user, "严格审查这个Phase 是否已经是最优版本");
@@ -1839,6 +2328,7 @@ mod tests {
             }],
             detail_review: false,
             vision_images: Vec::new(),
+            multimodal_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "双技能全文");
         assert!(system.contains("双技能全文"));
@@ -1884,6 +2374,7 @@ mod tests {
             }],
             detail_review: false,
             vision_images: Vec::new(),
+            multimodal_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "V4.6 完整技能");
         assert!(system.contains("V4.6 完整技能"));
@@ -1941,6 +2432,7 @@ mod tests {
             }],
             detail_review: false,
             vision_images: Vec::new(),
+            multimodal_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "纯复刻技能全文");
         assert!(system.contains("# 初稿"));

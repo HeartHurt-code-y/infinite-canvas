@@ -16,8 +16,10 @@ use super::{
     provider::ProviderRuntime,
     storage::TaskExecutionRecord,
     types::{
-        AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus, MediaType,
-        RawProviderResponse,
+        AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
+        CreateRealPersonAuthLinkCommand, DeleteRealPersonAssetCommand,
+        DeleteRealPersonGroupCommand, MediaType, RawProviderResponse, RealPersonAuthLink,
+        RealPersonGroup, RealPersonProviderCommand,
     },
 };
 
@@ -47,8 +49,6 @@ trait AssetPort: Send + Sync {
     ) -> PortFuture<RawProviderResponse>;
 
     fn download(&self, url: String) -> PortFuture<Vec<u8>>;
-
-    fn credential_ref(&self, provider_connection_id: String) -> BackendResult<String>;
 }
 
 #[derive(Clone)]
@@ -114,11 +114,6 @@ impl AssetPort for ProviderAssetAdapter {
             Ok(response.bytes().await?.to_vec())
         })
     }
-
-    fn credential_ref(&self, provider_connection_id: String) -> BackendResult<String> {
-        self.providers
-            .resolved_asset_library_credential_ref(&provider_connection_id)
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -127,6 +122,7 @@ pub struct ImportStagedAsset {
     pub public_url: String,
     pub media_type: MediaType,
     pub display_name: Option<String>,
+    pub group_id: Option<i64>,
 }
 
 pub struct AssetReadTrace<'a> {
@@ -137,7 +133,9 @@ pub struct AssetReadTrace<'a> {
 #[derive(Debug, Clone)]
 pub enum AssetDelivery {
     Bytes,
-    RemoteReadable { destination_credential_ref: String },
+    RemoteReadable {
+        destination_provider_connection_id: String,
+    },
 }
 
 pub struct ResolveAsset<'a> {
@@ -182,7 +180,6 @@ impl Default for PollPolicy {
 #[derive(Clone)]
 pub struct AssetLibrary {
     port: Arc<dyn AssetPort>,
-    upload_groups: Arc<Mutex<HashMap<String, i64>>>,
     upload_group_gates: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
     poll_policy: PollPolicy,
 }
@@ -198,7 +195,6 @@ impl AssetLibrary {
     fn with_port(port: Arc<dyn AssetPort>, poll_policy: PollPolicy) -> Self {
         Self {
             port,
-            upload_groups: Arc::new(Mutex::new(HashMap::new())),
             upload_group_gates: Arc::new(Mutex::new(HashMap::new())),
             poll_policy,
         }
@@ -237,8 +233,171 @@ impl AssetLibrary {
         Ok(parse_asset_page(&provider_connection_id, &payload))
     }
 
+    /// Create a single-use H5 face-authorization link for a real-person asset group.
+    pub async fn create_real_person_auth_link(
+        &self,
+        command: CreateRealPersonAuthLinkCommand,
+    ) -> BackendResult<RealPersonAuthLink> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        let artist_name = command.artist_name.trim();
+        if artist_name.is_empty() {
+            return Err(BackendError::validation(
+                "artist_name must not be empty",
+                json!({ "field": "artistName" }),
+            ));
+        }
+        if artist_name.chars().count() > 32 {
+            return Err(BackendError::validation(
+                "artist_name must not exceed 32 characters",
+                json!({ "field": "artistName", "maxLength": 32 }),
+            ));
+        }
+        let artist_desc = command
+            .artist_desc
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if artist_desc.is_some_and(|value| value.chars().count() > 300) {
+            return Err(BackendError::validation(
+                "artist_desc must not exceed 300 characters",
+                json!({ "field": "artistDesc", "maxLength": 300 }),
+            ));
+        }
+        let mut body = json!({ "artist_name": artist_name });
+        if let Some(value) = artist_desc {
+            body["artist_desc"] = value.into();
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/real-person/auth/link",
+                body: Some(body),
+            })
+            .await?;
+        require_success("create real-person auth link", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let data = payload.get("data").unwrap_or(&payload);
+        let h5_url = data
+            .get("h5_url")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| value.starts_with("https://") || value.starts_with("http://"))
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "real-person auth response did not return an H5 URL",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        Ok(RealPersonAuthLink {
+            h5_url: h5_url.to_string(),
+            tip: data
+                .get("tip")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned),
+        })
+    }
+
+    /// List face-authorized real-person groups scoped to the selected provider token.
+    pub async fn list_real_person_groups(
+        &self,
+        command: RealPersonProviderCommand,
+    ) -> BackendResult<Vec<RealPersonGroup>> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::GET,
+                path: "/v1/assets/real-person/groups",
+                body: None,
+            })
+            .await?;
+        require_success("list real-person groups", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let groups = payload
+            .get("data")
+            .map(asset_array)
+            .filter(|groups| !groups.is_empty())
+            .unwrap_or_else(|| asset_array(&payload));
+        groups
+            .into_iter()
+            .map(parse_real_person_group)
+            .collect::<BackendResult<Vec<_>>>()
+    }
+
+    /// Permanently remove one real-person asset from both the platform and upstream service.
+    pub async fn delete_real_person_asset(
+        &self,
+        command: DeleteRealPersonAssetCommand,
+    ) -> BackendResult<String> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        let id = command.id.trim();
+        if id.is_empty() || id.starts_with("asset://") {
+            return Err(BackendError::validation(
+                "real-person asset deletion requires an asset id without the asset:// prefix",
+                json!({ "id": command.id }),
+            ));
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/real-person/assets/delete",
+                body: Some(json!({ "id": id })),
+            })
+            .await?;
+        require_success("delete real-person asset", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let returned_id = payload
+            .pointer("/data/id")
+            .or_else(|| payload.get("id"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "real-person asset deletion did not return an asset id",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        Ok(returned_id.to_string())
+    }
+
+    /// Permanently remove a real-person group and every asset contained in it.
+    pub async fn delete_real_person_group(
+        &self,
+        command: DeleteRealPersonGroupCommand,
+    ) -> BackendResult<()> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        if command.id <= 0 {
+            return Err(BackendError::validation(
+                "real-person group deletion requires a positive platform group id",
+                json!({ "id": command.id }),
+            ));
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/real-person/groups/delete",
+                body: Some(json!({ "id": command.id })),
+            })
+            .await?;
+        require_success("delete real-person group", &response)
+    }
+
     /// Import an already staged public object and wait until the remote 素材 becomes readable.
-    /// Group discovery, single-flight creation, batch polling and terminal-state mapping stay local.
+    /// Group discovery, single-flight creation, single-asset polling and terminal-state mapping stay local.
     pub async fn import_staged(
         &self,
         request: ImportStagedAsset,
@@ -255,15 +414,25 @@ impl AssetLibrary {
                 }),
             ));
         }
-        let group_id = self
-            .resolve_upload_group(&request.provider_connection_id)
-            .await?;
+        let group_id = match request.group_id {
+            Some(group_id) if group_id > 0 => group_id,
+            Some(group_id) => {
+                return Err(BackendError::validation(
+                    "real-person asset import requires a positive platform group id",
+                    json!({ "groupId": group_id }),
+                ));
+            }
+            None => {
+                self.resolve_upload_group(&request.provider_connection_id)
+                    .await?
+            }
+        };
         let display_name = request
             .display_name
             .as_deref()
             .map(|value| value.chars().take(64).collect::<String>());
         let mut body = json!({
-            "urls": [request.public_url],
+            "url": request.public_url,
             "asset_type": media_type_name(request.media_type),
             "group_id": group_id,
         });
@@ -281,25 +450,21 @@ impl AssetLibrary {
             .await?;
         require_success("submit asset import", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
-        let batch_id = payload
-            .pointer("/data/batch_id")
-            .or_else(|| payload.get("batch_id"))
+        let asset_id = payload
+            .pointer("/data/id")
+            .or_else(|| payload.get("id"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 BackendError::protocol(
-                    "asset import did not return a batch id",
+                    "asset import did not return an asset id",
                     json!({ "rawResponse": response.body }),
                 )
             })?
             .to_string();
-        self.wait_for_import(
-            &request.provider_connection_id,
-            &request.public_url,
-            &batch_id,
-        )
-        .await
+        self.wait_for_import(&request.provider_connection_id, &asset_id)
+            .await
     }
 
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
@@ -386,13 +551,11 @@ impl AssetLibrary {
                 })
             }
             AssetDelivery::RemoteReadable {
-                destination_credential_ref,
+                destination_provider_connection_id,
             } => {
-                let source_credential_ref = self
-                    .port
-                    .credential_ref(identity.provider_connection_id.clone())?;
-                let same_credential_scope = source_credential_ref == destination_credential_ref;
-                let reference = if same_credential_scope {
+                let same_provider_scope =
+                    identity.provider_connection_id == destination_provider_connection_id;
+                let reference = if same_provider_scope {
                     asset.asset_url.clone().or(asset.preview_url.clone())
                 } else {
                     asset.preview_url.clone()
@@ -415,15 +578,6 @@ impl AssetLibrary {
     }
 
     async fn resolve_upload_group(&self, provider_connection_id: &str) -> BackendResult<i64> {
-        if let Some(group_id) = self
-            .upload_groups
-            .lock()
-            .await
-            .get(provider_connection_id)
-            .copied()
-        {
-            return Ok(group_id);
-        }
         let gate = {
             let mut gates = self.upload_group_gates.lock().await;
             Arc::clone(
@@ -433,15 +587,6 @@ impl AssetLibrary {
             )
         };
         let _guard = gate.lock().await;
-        if let Some(group_id) = self
-            .upload_groups
-            .lock()
-            .await
-            .get(provider_connection_id)
-            .copied()
-        {
-            return Ok(group_id);
-        }
         let mut group_id = self.find_upload_group(provider_connection_id).await?;
         if group_id.is_none() {
             let response = self
@@ -465,10 +610,6 @@ impl AssetLibrary {
                 }),
             )
         })?;
-        self.upload_groups
-            .lock()
-            .await
-            .insert(provider_connection_id.to_string(), group_id);
         Ok(group_id)
     }
 
@@ -499,8 +640,7 @@ impl AssetLibrary {
     async fn wait_for_import(
         &self,
         provider_connection_id: &str,
-        public_url: &str,
-        batch_id: &str,
+        asset_id: &str,
     ) -> BackendResult<CloudAssetIdentity> {
         let started = tokio::time::Instant::now();
         let mut consecutive_failures = 0;
@@ -508,19 +648,16 @@ impl AssetLibrary {
             if started.elapsed() >= self.poll_policy.timeout {
                 return Err(BackendError::protocol(
                     "asset import did not become ready before the local wait deadline",
-                    json!({ "batchId": batch_id, "waitedMs": started.elapsed().as_millis() }),
+                    json!({ "assetId": asset_id, "waitedMs": started.elapsed().as_millis() }),
                 ));
-            }
-            if !self.poll_policy.interval.is_zero() {
-                tokio::time::sleep(self.poll_policy.interval).await;
             }
             let response = match self
                 .port
                 .send(RemoteAssetRequest {
                     provider_connection_id: provider_connection_id.to_string(),
                     method: Method::POST,
-                    path: "/v1/assets/batch/get",
-                    body: Some(json!({ "batch_id": batch_id })),
+                    path: "/v1/assets/get",
+                    body: Some(json!({ "id": asset_id })),
                 })
                 .await
             {
@@ -530,6 +667,7 @@ impl AssetLibrary {
                     if consecutive_failures >= self.poll_policy.failure_limit {
                         return Err(error);
                     }
+                    self.wait_before_next_import_poll().await;
                     continue;
                 }
             };
@@ -538,47 +676,46 @@ impl AssetLibrary {
                 if consecutive_failures >= self.poll_policy.failure_limit {
                     return Err(error);
                 }
+                self.wait_before_next_import_poll().await;
                 continue;
             }
             let payload: Value = serde_json::from_str(&response.body)?;
-            let items = payload
-                .get("data")
-                .map(asset_array)
-                .filter(|items| !items.is_empty())
-                .unwrap_or_else(|| asset_array(&payload));
-            let item = items
-                .iter()
-                .copied()
-                .find(|item| {
-                    item.as_object()
-                        .and_then(|record| string_field(record, &["source_url", "sourceUrl"]))
-                        == Some(public_url)
-                })
-                .or_else(|| items.first().copied())
+            let item = payload.get("data").unwrap_or(&payload);
+            let returned_asset_id = item
+                .get("id")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
                 .ok_or_else(|| {
                     BackendError::protocol(
-                        "asset batch lookup did not include the imported item",
-                        json!({ "batchId": batch_id, "rawResponse": response.body }),
+                        "asset lookup did not return an asset id",
+                        json!({ "assetId": asset_id, "rawResponse": response.body }),
                     )
                 })?;
+            if returned_asset_id != asset_id {
+                return Err(BackendError::protocol(
+                    "asset lookup returned a different asset id",
+                    json!({
+                        "assetId": asset_id,
+                        "returnedAssetId": returned_asset_id,
+                        "rawResponse": response.body
+                    }),
+                ));
+            }
             consecutive_failures = 0;
             let status = item
                 .get("status")
                 .and_then(Value::as_str)
-                .unwrap_or("UNKNOWN");
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    BackendError::protocol(
+                        "asset lookup did not return a status",
+                        json!({ "assetId": asset_id, "rawResponse": response.body }),
+                    )
+                })?;
             match status.trim().to_ascii_lowercase().as_str() {
                 "active" | "ready" => {
-                    let asset_id = item
-                        .as_object()
-                        .and_then(|record| string_field(record, &["id", "asset_id", "assetId"]))
-                        .map(str::trim)
-                        .filter(|value| !value.is_empty() && *value != batch_id)
-                        .ok_or_else(|| {
-                            BackendError::protocol(
-                                "ready asset import did not return a stable asset id",
-                                json!({ "batchId": batch_id, "rawResponse": response.body }),
-                            )
-                        })?;
                     return Ok(CloudAssetIdentity {
                         provider_connection_id: provider_connection_id.to_string(),
                         asset_id: asset_id.to_string(),
@@ -588,14 +725,20 @@ impl AssetLibrary {
                     return Err(BackendError::protocol(
                         format!("asset import reached terminal status {status}"),
                         json!({
-                            "batchId": batch_id,
+                            "assetId": asset_id,
                             "itemError": item.get("error"),
                             "rawResponse": response.body
                         }),
                     ));
                 }
-                _ => {}
+                _ => self.wait_before_next_import_poll().await,
             }
+        }
+    }
+
+    async fn wait_before_next_import_poll(&self) {
+        if !self.poll_policy.interval.is_zero() {
+            tokio::time::sleep(self.poll_policy.interval).await;
         }
     }
 }
@@ -604,14 +747,104 @@ fn require_success(operation: &str, response: &RawProviderResponse) -> BackendRe
     if (200..300).contains(&response.status) {
         return Ok(());
     }
+    let upstream_message = serde_json::from_str::<Value>(&response.body)
+        .ok()
+        .and_then(|payload| {
+            payload
+                .pointer("/error/message")
+                .or_else(|| payload.get("message"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.chars().take(1000).collect::<String>())
+        });
+    let message = match upstream_message {
+        Some(message) => format!("{operation} returned HTTP {}: {message}", response.status),
+        None => format!("{operation} returned HTTP {}", response.status),
+    };
     Err(BackendError::protocol(
-        format!("{operation} returned HTTP {}", response.status),
+        message,
         json!({
             "httpStatus": response.status,
             "headers": response.headers,
             "rawResponse": response.body
         }),
     ))
+}
+
+fn require_provider_connection_id(value: &str) -> BackendResult<&str> {
+    let value = value.trim();
+    if value.is_empty() {
+        return Err(BackendError::validation(
+            "real-person asset operation requires a provider connection",
+            json!({ "field": "providerConnectionId" }),
+        ));
+    }
+    Ok(value)
+}
+
+fn parse_real_person_group(raw: &Value) -> BackendResult<RealPersonGroup> {
+    let record = raw.as_object().ok_or_else(|| {
+        BackendError::protocol(
+            "real-person group entry must be an object",
+            json!({ "entry": raw }),
+        )
+    })?;
+    let required_string = |field: &str| {
+        record
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned)
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    format!("real-person group did not return {field}"),
+                    json!({ "entry": raw }),
+                )
+            })
+    };
+    let optional_string = |fields: &[&str]| {
+        fields.iter().find_map(|field| {
+            record
+                .get(*field)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+        })
+    };
+    let id = record
+        .get("id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)
+        .ok_or_else(|| {
+            BackendError::protocol(
+                "real-person group did not return a positive platform id",
+                json!({ "entry": raw }),
+            )
+        })?;
+    Ok(RealPersonGroup {
+        id,
+        remote_group_id: required_string("group_id")?,
+        artist_name: required_string("artist_name")?,
+        artist_desc: record
+            .get("artist_desc")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToOwned::to_owned),
+        authorized_at: optional_string(&[
+            "authorized_at",
+            "authorizedAt",
+            "created_at",
+            "createdAt",
+        ]),
+        asset_count: record
+            .get("asset_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    })
 }
 
 fn parse_asset_page(provider_connection_id: &str, payload: &Value) -> Vec<CloudAssetRecord> {
@@ -816,7 +1049,6 @@ mod tests {
         responses: StdMutex<VecDeque<RawProviderResponse>>,
         requests: StdMutex<Vec<RemoteAssetRequest>>,
         downloads: StdMutex<StdHashMap<String, Vec<u8>>>,
-        credential_refs: StdMutex<StdHashMap<String, String>>,
     }
 
     impl InMemoryAssetAdapter {
@@ -880,16 +1112,6 @@ mod tests {
                 .cloned()
                 .ok_or_else(|| BackendError::NotFound(format!("missing download: {url}")));
             Box::pin(async move { result })
-        }
-
-        fn credential_ref(&self, provider_connection_id: String) -> BackendResult<String> {
-            Ok(self
-                .credential_refs
-                .lock()
-                .expect("credential lock")
-                .get(&provider_connection_id)
-                .cloned()
-                .unwrap_or_else(|| format!("provider:{provider_connection_id}:api-key")))
         }
     }
 
@@ -984,22 +1206,207 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_staged_owns_group_creation_submission_and_polling() {
+    async fn real_person_operations_follow_the_documented_h5_contract() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": {
+                        "h5_url": "https://h5.example.com/auth?ticket=once",
+                        "tip": "请在 120 秒内完成认证"
+                    }
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": { "items": [{
+                        "id": 128,
+                        "group_id": "group-remote-1",
+                        "artist_name": "张三",
+                        "artist_desc": "品牌代言人真人素材组",
+                        "authorized_at": "2026-04-27T12:00:29+08:00",
+                        "asset_count": 3
+                    }] }
+                }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-1" } }),
+            ),
+            response(200, json!({ "code": "success" })),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let link = library
+            .create_real_person_auth_link(CreateRealPersonAuthLinkCommand {
+                provider_connection_id: "provider-1".into(),
+                artist_name: " 张三 ".into(),
+                artist_desc: Some(" 品牌代言人真人素材组 ".into()),
+            })
+            .await
+            .expect("create auth link");
+        assert_eq!(link.h5_url, "https://h5.example.com/auth?ticket=once");
+
+        let groups = library
+            .list_real_person_groups(RealPersonProviderCommand {
+                provider_connection_id: "provider-1".into(),
+            })
+            .await
+            .expect("list groups");
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, 128);
+        assert_eq!(groups[0].remote_group_id, "group-remote-1");
+        assert_eq!(groups[0].artist_name, "张三");
+        assert_eq!(groups[0].asset_count, 3);
+
+        let deleted_id = library
+            .delete_real_person_asset(DeleteRealPersonAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-1".into(),
+            })
+            .await
+            .expect("delete asset");
+        assert_eq!(deleted_id, "asset-1");
+
+        library
+            .delete_real_person_group(DeleteRealPersonGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                id: 128,
+            })
+            .await
+            .expect("delete group");
+
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 4);
+        assert_eq!(requests[0].path, "/v1/assets/real-person/auth/link");
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(
+            requests[0].body,
+            Some(json!({
+                "artist_name": "张三",
+                "artist_desc": "品牌代言人真人素材组"
+            }))
+        );
+        assert_eq!(requests[1].path, "/v1/assets/real-person/groups");
+        assert_eq!(requests[1].method, Method::GET);
+        assert_eq!(requests[1].body, None);
+        assert_eq!(requests[2].body, Some(json!({ "id": "asset-1" })));
+        assert_eq!(requests[3].body, Some(json!({ "id": 128 })));
+    }
+
+    #[tokio::test]
+    async fn real_person_group_without_authorized_at_remains_visible() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "code": "success",
+                "data": { "items": [{
+                    "id": 129,
+                    "group_id": "group-remote-without-authorized-at",
+                    "artist_name": "李四",
+                    "artist_desc": "认证成功的真人素材组",
+                    "asset_count": 0
+                }] }
+            }),
+        )]));
+        let library = test_library(adapter, immediate_poll());
+
+        let groups = library
+            .list_real_person_groups(RealPersonProviderCommand {
+                provider_connection_id: "provider-1".into(),
+            })
+            .await
+            .expect("a valid authorized group must not be discarded when its timestamp is absent");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, 129);
+        assert_eq!(groups[0].artist_name, "李四");
+        assert_eq!(groups[0].authorized_at, None);
+    }
+
+    #[tokio::test]
+    async fn real_person_import_uses_the_explicit_platform_group_without_group_discovery() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-real-1", "asset_url": "asset://asset-real-1" } }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-real-1", "asset_type": "Image", "status": "Active" } }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/face.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("张三-正脸".into()),
+                group_id: Some(128),
+            })
+            .await
+            .expect("import real-person asset");
+
+        assert_eq!(identity.asset_id, "asset-real-1");
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets", "/v1/assets/get"]
+        );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[0].body.as_ref().unwrap()["group_id"], 128);
+    }
+
+    #[tokio::test]
+    async fn real_person_import_surfaces_face_mismatch_from_the_upstream_error_envelope() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            500,
+            json!({ "error": { "message": "FaceMismatch: 上传素材与授权认证人脸不一致" } }),
+        )]));
+        let library = test_library(adapter, immediate_poll());
+
+        let error = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/not-the-artist.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("错误人脸".into()),
+                group_id: Some(128),
+            })
+            .await
+            .expect_err("face mismatch must fail");
+
+        assert!(error.to_string().contains("FaceMismatch"));
+        assert!(error.to_string().contains("上传素材与授权认证人脸不一致"));
+    }
+
+    #[tokio::test]
+    async fn import_staged_follows_documented_single_asset_contract() {
         let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
             response(200, json!({ "data": [] })),
-            response(200, json!({ "success": true })),
+            response(
+                200,
+                json!({ "code": "success", "data": { "group_name": "user-1-token-1-infinite-canvas" } }),
+            ),
             response(
                 200,
                 json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
             ),
-            response(200, json!({ "data": { "batch_id": "batch-1" } })),
             response(
                 200,
-                json!({ "data": { "items": [{ "source_url": "https://tos.example.com/a.png", "status": "Processing" }] } }),
+                json!({ "code": "success", "data": { "id": "asset-1", "asset_url": "asset://asset-1" } }),
             ),
             response(
                 200,
-                json!({ "data": { "items": [{ "id": "asset-1", "source_url": "https://tos.example.com/a.png", "status": "Active" }] } }),
+                json!({ "code": "success", "data": { "id": "asset-1", "asset_type": "Image", "status": "Processing" } }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-1", "asset_type": "Image", "status": "Active" } }),
             ),
         ]));
         let library = test_library(Arc::clone(&adapter), immediate_poll());
@@ -1010,6 +1417,7 @@ mod tests {
                 public_url: "https://tos.example.com/a.png".into(),
                 media_type: MediaType::Image,
                 display_name: Some("参考图".into()),
+                group_id: None,
             })
             .await
             .expect("import");
@@ -1022,10 +1430,89 @@ mod tests {
                 "/v1/assets/groups",
                 "/v1/assets/groups",
                 "/v1/assets",
-                "/v1/assets/batch/get",
-                "/v1/assets/batch/get",
+                "/v1/assets/get",
+                "/v1/assets/get",
             ]
         );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[0].method, Method::GET);
+        assert_eq!(requests[1].method, Method::POST);
+        assert_eq!(requests[2].method, Method::GET);
+        assert_eq!(requests[3].method, Method::POST);
+        assert_eq!(requests[4].method, Method::POST);
+        assert_eq!(requests[5].method, Method::POST);
+        assert_eq!(
+            requests[3].body,
+            Some(json!({
+                "url": "https://tos.example.com/a.png",
+                "asset_type": "Image",
+                "name": "参考图",
+                "group_id": 12,
+            }))
+        );
+        assert_eq!(requests[4].body, Some(json!({ "id": "asset-1" })));
+    }
+
+    #[tokio::test]
+    async fn import_staged_resolves_the_group_inside_each_current_token_scope() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-1", "asset_url": "asset://asset-1" } }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-1", "asset_type": "Image", "status": "Active" } }),
+            ),
+            response(
+                200,
+                json!({ "data": [{ "id": 24, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-2", "asset_url": "asset://asset-2" } }),
+            ),
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-2", "asset_type": "Image", "status": "Active" } }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        for (url, name) in [
+            ("https://tos.example.com/a.png", "素材 A"),
+            ("https://tos.example.com/b.png", "素材 B"),
+        ] {
+            library
+                .import_staged(ImportStagedAsset {
+                    provider_connection_id: "provider-1".into(),
+                    public_url: url.into(),
+                    media_type: MediaType::Image,
+                    display_name: Some(name.into()),
+                    group_id: None,
+                })
+                .await
+                .expect("import in current token scope");
+        }
+
+        assert_eq!(
+            adapter.request_paths(),
+            vec![
+                "/v1/assets/groups",
+                "/v1/assets",
+                "/v1/assets/get",
+                "/v1/assets/groups",
+                "/v1/assets",
+                "/v1/assets/get",
+            ]
+        );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[1].body.as_ref().unwrap()["group_id"], 12);
+        assert_eq!(requests[4].body.as_ref().unwrap()["group_id"], 24);
     }
 
     #[tokio::test]
@@ -1095,21 +1582,16 @@ mod tests {
             asset_response(),
             asset_response(),
         ]));
-        adapter
-            .credential_refs
-            .lock()
-            .expect("credential lock")
-            .insert("provider-1".into(), "asset-library-token:provider-1".into());
         let library = test_library(Arc::clone(&adapter), immediate_poll());
         let task = task();
-        let request = |destination_credential_ref: &str| ResolveAsset {
+        let request = |destination_provider_connection_id: &str| ResolveAsset {
             identity: CloudAssetIdentity {
                 provider_connection_id: "provider-1".into(),
                 asset_id: "asset-1".into(),
             },
             expected_media_type: MediaType::Video,
             delivery: AssetDelivery::RemoteReadable {
-                destination_credential_ref: destination_credential_ref.into(),
+                destination_provider_connection_id: destination_provider_connection_id.into(),
             },
             trace: AssetReadTrace {
                 task: &task,
@@ -1118,11 +1600,11 @@ mod tests {
         };
 
         let cross_scope = library
-            .resolve(request("provider:provider-1:api-key"))
+            .resolve(request("provider-2"))
             .await
             .expect("cross-scope resolve");
         let same_scope = library
-            .resolve(request("asset-library-token:provider-1"))
+            .resolve(request("provider-1"))
             .await
             .expect("same-scope resolve");
 

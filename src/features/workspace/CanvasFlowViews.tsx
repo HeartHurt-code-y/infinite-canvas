@@ -108,6 +108,7 @@ export function CanvasFlowEdgeView({
           aria-label={`选择连线：${data.label}；按 Delete 删除`}
           onClick={(event) => {
             event.stopPropagation();
+            event.currentTarget.focus();
             data.onSelect();
           }}
           onKeyDown={(event) => {

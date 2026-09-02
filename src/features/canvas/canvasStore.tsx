@@ -358,6 +358,11 @@ function sameConnectionData(
     const second = next as GenNodeData;
     return first.kind === second.kind && first.config === second.config;
   }
+  if (type === "screenplay") {
+    const first = previous as ScreenplayNodeData;
+    const second = next as ScreenplayNodeData;
+    return first.config.currentDocument === second.config.currentDocument;
+  }
   if (type === "videoComposer") {
     const first = previous as VideoComposerNodeData;
     const second = next as VideoComposerNodeData;
@@ -832,6 +837,9 @@ function isOutputGenerationReference(node: OutputNodeData): boolean {
 }
 
 function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
+  if (source.type === "screenplay") {
+    return target.type === "storyboard";
+  }
   if (source.type === "gen" && source.data.kind === "prompt") {
     return target.type === "gen" && target.data.kind !== "prompt";
   }
@@ -1026,6 +1034,14 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
                     edge.toKey === toKey &&
                     edgeSource?.type === "gen" &&
                     edgeSource.data.kind === "prompt";
+                  if (replaced) replacedEdgeIds.push(edge.id);
+                  return !replaced;
+                });
+              }
+              if (source.type === "screenplay" && target.type === "storyboard") {
+                edges = edges.filter((edge) => {
+                  const edgeSource = state.nodesById[edge.fromKey];
+                  const replaced = edge.toKey === toKey && edgeSource?.type === "screenplay";
                   if (replaced) replacedEdgeIds.push(edge.id);
                   return !replaced;
                 });

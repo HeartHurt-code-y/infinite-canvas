@@ -16,6 +16,8 @@ import type {
   OptimizedPromptResult,
   ProviderConnection,
   ProviderModelBinding,
+  RealPersonAuthLink,
+  RealPersonGroup,
   RemoteModelOption,
   StagingJobRecord,
   StagingStateChangedEvent,
@@ -124,6 +126,7 @@ const stagingStatusSchema = v.picklist([
 const stagingAssetImportTargetSchema = v.looseObject({
   providerConnectionId: v.string(),
   name: nullableStringSchema,
+  groupId: v.optional(nullableNumberSchema),
 });
 
 export const stagingJobRecordSchema = v.looseObject({
@@ -176,6 +179,22 @@ export const cloudAssetSchema = v.looseObject({
 }) satisfies v.GenericSchema<CloudAsset>;
 
 export const cloudAssetsSchema = v.array(cloudAssetSchema);
+
+export const realPersonAuthLinkSchema = v.looseObject({
+  h5Url: v.string(),
+  tip: nullableStringSchema,
+}) satisfies v.GenericSchema<RealPersonAuthLink>;
+
+export const realPersonGroupSchema = v.looseObject({
+  id: v.number(),
+  remoteGroupId: v.string(),
+  artistName: v.string(),
+  artistDesc: nullableStringSchema,
+  authorizedAt: nullableStringSchema,
+  assetCount: v.number(),
+}) satisfies v.GenericSchema<RealPersonGroup>;
+
+export const realPersonGroupsSchema = v.array(realPersonGroupSchema);
 
 const generationTaskStatusSchema = v.picklist([
   "created",

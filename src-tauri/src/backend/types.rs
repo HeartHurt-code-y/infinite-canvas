@@ -629,6 +629,55 @@ pub struct AssetListCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct CreateRealPersonAuthLinkCommand {
+    pub provider_connection_id: String,
+    pub artist_name: String,
+    pub artist_desc: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealPersonAuthLink {
+    pub h5_url: String,
+    pub tip: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealPersonGroup {
+    /// Platform group ID. This integer, rather than `remote_group_id`, is used for uploads.
+    pub id: i64,
+    /// Upstream `group-xxx` identifier, retained only for display and diagnostics.
+    pub remote_group_id: String,
+    pub artist_name: String,
+    pub artist_desc: Option<String>,
+    /// Display-only authorization timestamp. Some upstream responses omit it briefly after auth.
+    pub authorized_at: Option<String>,
+    pub asset_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RealPersonProviderCommand {
+    pub provider_connection_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRealPersonAssetCommand {
+    pub provider_connection_id: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteRealPersonGroupCommand {
+    pub provider_connection_id: String,
+    pub id: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {
     /// TOS 地域，例如 `cn-beijing`。
     pub region: String,
@@ -656,6 +705,9 @@ pub struct StartStagingCommand {
 pub struct StagingAssetImportTarget {
     pub provider_connection_id: String,
     pub name: Option<String>,
+    /// A positive real-person platform group ID. `None` keeps the ordinary asset flow.
+    #[serde(default)]
+    pub group_id: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]

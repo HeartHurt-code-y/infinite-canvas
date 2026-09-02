@@ -27,8 +27,8 @@ Tauri Rust 暂存模块
     │ 2. 通过预签名 PUT URL 上传对象（15 分钟有效期）
     │ 3. 生成预签名 GET / DELETE URL（1 小时有效期）
     ▼
-公司素材接口 /v1/assets/async
-    │ 4. Pending → Active
+公司素材接口 /v1/assets
+    │ 4. Processing → Active
     ▼
 asset://... 业务素材
     │
@@ -144,7 +144,7 @@ TOS 暂存流程成功创建后，只能自然进入 `active`、`failed`、`inte
 
 - PUT URL 过期但对象尚未上传完成：申请新的 PUT URL并重新上传。
 - 对象已上传但 GET URL 过期：只刷新 GET URL，不重复上传。
-- 素材导入失败且 TOS 对象仍存在：刷新 GET URL并重试 `/v1/assets/async`。
+- 素材导入失败且 TOS 对象仍存在：刷新 GET URL并重试 `POST /v1/assets`。
 - 素材已经 `Active` 但主动清理失败：不影响业务素材成功状态，记录待清理并依赖生命周期兜底。
 - 应用重启：从本地暂存记录恢复 `staged`、`importing` 和 `cleaning` 状态。
 - 应用退出中断尚未完成的简单 PUT：标记 `interrupted`；不自动声称已取消，也不把未确认完整的对象当作 `staged`。

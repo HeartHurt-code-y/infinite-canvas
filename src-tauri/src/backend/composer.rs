@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use serde::Serialize;
+use serde_json::json;
 use tokio::io::AsyncBufReadExt as _;
 use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
@@ -189,7 +190,15 @@ impl VideoCompositionService {
         {
             let mut runtime = self.inner.engine.lock().expect("engine runtime poisoned");
             if runtime.installing {
-                return self.engine_status();
+                // 已有其他调用方正在安装：直接基于当前持有的锁构造状态返回，
+                // 禁止调用 engine_status()——它会再次 lock 同一把 std Mutex，
+                // 而 std Mutex 不可重入，重入会导致死锁（并发首次安装时必现）。
+                return VideoComposerEngineStatus {
+                    state: VideoComposerEngineState::Installing,
+                    version: None,
+                    binary_path: None,
+                    last_error: runtime.last_error.clone(),
+                };
             }
             runtime.installing = true;
             runtime.last_error = None;
@@ -217,6 +226,35 @@ impl VideoCompositionService {
             tauri_plugin_log::log::error!("[composer] FFmpeg 引擎安装失败: {error}");
         }
         self.engine_status()
+    }
+
+    /// 获取已就绪的 ffmpeg 可执行文件路径；引擎未安装时自动安装。
+    ///
+    /// 素材导入等需要本地转码的模块复用同一套 FFmpeg 引擎，
+    /// 避免为单个功能重复下载独立二进制。
+    ///
+    /// 并发安全：多个任务首次同时触发安装时，本方法会等待正在进行的安装
+    /// 完成后返回就绪路径，而不是对“正在安装”的状态直接报错。
+    pub async fn ensure_ffmpeg(&self) -> BackendResult<PathBuf> {
+        let deadline = std::time::Instant::now() + Duration::from_secs(600);
+        loop {
+            let status = self.install_engine().await;
+            match status.state {
+                VideoComposerEngineState::Ready => return Ok(self.ffmpeg_binary()),
+                VideoComposerEngineState::Installing if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(Duration::from_millis(500)).await;
+                }
+                _ => {
+                    return Err(BackendError::protocol(
+                        "ffmpeg engine is not ready",
+                        json!({
+                            "state": format!("{:?}", status.state),
+                            "lastError": status.last_error,
+                        }),
+                    ));
+                }
+            }
+        }
     }
 
     /// 用 ffmpeg-sidecar 的平台感知下载逻辑把官方构建拉到自建引擎目录。

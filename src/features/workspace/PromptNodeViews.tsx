@@ -145,9 +145,9 @@ function readyAutoMentionFeedback(candidates: readonly MentionCandidate[]): Auto
 }
 
 /**
- * 生成节点内的提示词输入框：contentEditable 非受控实现。
+ * 生成节点内的提示词输入框：Tiptap 管理编辑态，V1 canonical document 管理持久化。
  * - 输入 "@" 或点击 "@" 按钮弹出候选下拉（连线的素材优先）；
- * - 选中后由提示内容 DOM adapter 插入原子引用；
+ * - 选中后由提示内容 adapter 插入 Tiptap 原子引用节点；
  * - canonical document、结构化持久化与冻结提交均由提示内容 module 负责。
  */
 export function PromptMentionInput({
@@ -191,12 +191,23 @@ export function PromptMentionInput({
   const editorDescriptionId = `${editorId}-description`;
   const autoMentionStatusId = `${editorId}-auto-status`;
   const attachInput = useCallback(
-    (element: HTMLDivElement | null) => {
-      inputRef.current = element;
-      sessionRef.current?.attach(element);
-      registerInput(nodeKey, element == null ? null : sessionRef.current);
+    (host: HTMLDivElement | null) => {
+      const ariaLabel = expanded
+        ? "放大的提示词输入框，输入 @ 引用素材"
+        : labelledBy
+          ? null
+          : "提示词输入框，输入 @ 引用素材";
+      const ariaLabelledBy = expanded ? null : (labelledBy ?? null);
+      const ariaDescribedBy = expanded ? editorDescriptionId : (describedBy ?? null);
+      sessionRef.current?.attach(host, {
+        ...(ariaLabel ? { "aria-label": ariaLabel } : {}),
+        ...(ariaLabelledBy ? { "aria-labelledby": ariaLabelledBy } : {}),
+        ...(ariaDescribedBy ? { "aria-describedby": ariaDescribedBy } : {}),
+      });
+      inputRef.current = host?.querySelector<HTMLDivElement>("[contenteditable='true']") ?? null;
+      registerInput(nodeKey, host == null ? null : sessionRef.current);
     },
-    [nodeKey, registerInput],
+    [describedBy, editorDescriptionId, expanded, labelledBy, nodeKey, registerInput],
   );
 
   const filtered = useMemo(() => {
@@ -655,23 +666,12 @@ export function PromptMentionInput({
         <div className="prompt-mention__field">
           <div
             ref={attachInput}
-            className="prompt-mention__input"
-            contentEditable
-            suppressContentEditableWarning
-            role="textbox"
-            aria-multiline="true"
-            aria-label={
-              expanded
-                ? "放大的提示词输入框，输入 @ 引用素材"
-                : labelledBy
-                  ? undefined
-                  : "提示词输入框，输入 @ 引用素材"
-            }
-            aria-labelledby={expanded ? undefined : labelledBy}
-            aria-describedby={expanded ? editorDescriptionId : describedBy}
-            data-placeholder="描述画面…输入 @ 或直接写素材名，自动引用素材"
-            onInput={(event) => {
-              updatePromptSnapshot(event.currentTarget);
+            className="prompt-mention__editor"
+            onInput={() => {
+              const input = inputRef.current;
+              // IME 组合期间不强制读取/同步编辑器 DOM：此时输入法仍持有未提交的
+              // 候选拼音，提前 flush 会把组合文本错误提交成错乱字符。
+              if (input != null && !composingRef.current) updatePromptSnapshot(input);
               syncQueryFromCaret();
               scheduleAutoDetect();
             }}

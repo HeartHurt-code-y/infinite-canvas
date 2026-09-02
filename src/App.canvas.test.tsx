@@ -5,6 +5,23 @@ import type { CloudAsset, GenerationTaskDetail, GenerationTaskSummary } from "./
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
+const { dialogOpenMock, dialogSaveMock, fileStatMock, writeTextFileMock } = vi.hoisted(() => ({
+  dialogOpenMock: vi.fn(),
+  dialogSaveMock: vi.fn(),
+  fileStatMock: vi.fn(),
+  writeTextFileMock: vi.fn(),
+}));
+
+vi.mock("@tauri-apps/plugin-dialog", () => ({
+  open: dialogOpenMock,
+  save: dialogSaveMock,
+}));
+
+vi.mock("@tauri-apps/plugin-fs", () => ({
+  stat: fileStatMock,
+  writeTextFile: writeTextFileMock,
+}));
+
 // 桌面运行时 mock：@tauri-apps/api 的 invoke / listen 都会走到这里。
 const invokeMock = vi.fn<(command: string, args?: Record<string, unknown>) => Promise<unknown>>();
 const mediaPlayMock = vi.fn<() => Promise<void>>();
@@ -456,7 +473,11 @@ function dragNodeViaHandle(
 }
 
 /** 通过 RF 连线把手连接两个节点（mousedown 源 handle → window mousemove → mouseup 目标位置）。 */
-function connectViaHandles(sourceNode: HTMLElement, targetNode: HTMLElement): void {
+function connectViaHandles(
+  sourceNode: HTMLElement,
+  targetNode: HTMLElement,
+  targetOffset: { readonly x: number; readonly y: number } = { x: 0, y: 0 },
+): void {
   const sourceHandle = rfWrapperOf(sourceNode).querySelector<HTMLElement>(
     ".react-flow__handle.source",
   );
@@ -467,8 +488,9 @@ function connectViaHandles(sourceNode: HTMLElement, targetNode: HTMLElement): vo
   // 连线阈值逻辑会在首段 move 上只记录状态，需末段 move 才能完成命中。
   fireCanvasMouse(sourceHandle!, "mousedown", clientFromFlow(from.x, from.y));
   fireCanvasMouse(document, "mousemove", clientFromFlow(from.x + 2, from.y + 2));
-  fireCanvasMouse(document, "mousemove", clientFromFlow(to.x, to.y));
-  fireCanvasMouse(document, "mouseup", clientFromFlow(to.x, to.y));
+  const dropPoint = clientFromFlow(to.x + targetOffset.x, to.y + targetOffset.y);
+  fireCanvasMouse(document, "mousemove", dropPoint);
+  fireCanvasMouse(document, "mouseup", dropPoint);
 }
 
 async function addGenerationNode(
@@ -637,14 +659,19 @@ function placeCaretAtEnd(element: HTMLElement): void {
 }
 
 function setPromptText(input: HTMLElement, text: string): void {
-  input.replaceChildren(document.createTextNode(text));
-  placeCaretAtEnd(input);
+  const paragraph = input.querySelector<HTMLElement>(":scope > p");
+  const target = paragraph ?? input;
+  target.replaceChildren(document.createTextNode(text));
+  placeCaretAtEnd(target);
   fireEvent.input(input);
 }
 
 function appendPromptText(input: HTMLElement, text: string): void {
-  input.appendChild(document.createTextNode(text));
-  placeCaretAtEnd(input);
+  const paragraph = input.querySelector<HTMLElement>(":scope > p:last-child");
+  const target = paragraph ?? input;
+  const trailingBreak = target.querySelector<HTMLElement>(":scope > br.ProseMirror-trailingBreak");
+  target.insertBefore(document.createTextNode(text), trailingBreak);
+  placeCaretAtEnd(target);
   fireEvent.input(input);
 }
 
@@ -733,6 +760,10 @@ beforeEach(() => {
   vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => mediaPlayMock());
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => mediaPauseMock());
   invokeMock.mockImplementation((command) => baseInvokeImplementation(command));
+  dialogOpenMock.mockResolvedValue(null);
+  dialogSaveMock.mockResolvedValue(null);
+  fileStatMock.mockResolvedValue({ isFile: true, size: 1024 });
+  writeTextFileMock.mockResolvedValue(undefined);
   setupDesktopRuntime();
 });
 
@@ -757,6 +788,19 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(screen.getByRole("button", { name: "拖拽创建图片生成节点" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "拖拽创建视频生成节点" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "拖拽创建视频拼接与合成节点" })).toBeInTheDocument();
+  });
+
+  it("拖线落点偏离目标端口时仍会自动吸附并完成连接", async () => {
+    render(<App />);
+    const asset = await addAssetNode("图片", "站台参考图", 220, 180);
+    const generation = await addGenerationNode("图片", 920, 180);
+
+    // 默认 20px 半径无法覆盖这个落点；画布扩大后的命中半径应允许自然的手部误差。
+    connectViaHandles(asset, generation, { x: 36, y: 0 });
+
+    await waitFor(() =>
+      expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
+    );
   });
 
   it("视频拼接与合成节点接收多段素材，并可用按钮调整合成顺序", async () => {
@@ -3145,7 +3189,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const prompt = within(imageGeneration).getByRole("textbox", {
       name: "提示词输入框，输入 @ 引用素材",
     });
-    const actions = prompt.parentElement?.querySelector<HTMLElement>(".prompt-mention__actions");
+    const actions = prompt
+      .closest<HTMLElement>(".prompt-mention__field")
+      ?.querySelector<HTMLElement>(".prompt-mention__actions");
     expect(actions).not.toBeNull();
     expect(actions?.querySelector("button.prompt-mention__expand")).toBeInTheDocument();
     expect(actions?.querySelector("button.prompt-mention__trigger--detect")).toBeInTheDocument();
@@ -3420,9 +3466,109 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       within(imageGeneration).queryByRole("button", { name: "解除连线：站台参考图" }),
     ).not.toBeInTheDocument();
   });
+
+  it("从提示词输入框切到连线后可直接按 Delete 删除", async () => {
+    render(<App />);
+    const imageGeneration = await addGenerationNode("图片", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, imageGeneration);
+
+    const promptInput = within(imageGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    promptInput.focus();
+    expect(promptInput).toHaveFocus();
+
+    const edgeHitTarget = await screen.findByRole("button", {
+      name: "选择连线：站台参考图 → 图片生成节点；按 Delete 删除",
+    });
+    fireEvent.click(edgeHitTarget);
+    expect(edgeHitTarget).toHaveFocus();
+
+    fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+
+    expect(document.querySelector(".edge--asset-generation")).toBeNull();
+    expect(document.body).toContainElement(assetNode);
+    expect(document.body).toContainElement(imageGeneration);
+  });
 });
 
 describe("剧本创作与优化节点（桌面运行时）", () => {
+  it("可添加、移除多模态素材，并在无额外文字时随创作请求发送", async () => {
+    dialogOpenMock.mockResolvedValue(["C:\\project\\reference.png", "C:\\project\\interview.md"]);
+    fileStatMock.mockImplementation((path: string) =>
+      Promise.resolve({ isFile: true, size: path.endsWith(".png") ? 2048 : 4096 }),
+    );
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        return Promise.resolve({
+          optimizedPrompt: "# 素材改编稿\n\n第一场",
+          rawModelOutput: "ok",
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    await screen.findByText("画布为空");
+    const node = await addScreenplayNode(640, 400);
+
+    expect(within(node).getByLabelText("剧本参考素材")).toBeInTheDocument();
+    fireEvent.click(within(node).getByRole("button", { name: "添加多模态参考素材" }));
+    await waitFor(() => expect(within(node).getByText("reference.png")).toBeInTheDocument());
+    expect(within(node).getByText("interview.md")).toBeInTheDocument();
+    expect(within(node).getByText("已添加 2 项")).toBeInTheDocument();
+
+    const sendButton = within(node).getByRole("button", { name: "发送" });
+    expect(sendButton).toBeEnabled();
+    fireEvent.click(sendButton);
+
+    await waitFor(() =>
+      expect(within(node).getByRole("textbox", { name: "当前 Markdown 剧本" })).toHaveValue(
+        "# 素材改编稿\n\n第一场",
+      ),
+    );
+    const call = invokeMock.mock.calls
+      .filter(([command]) => command === "run_prompt_node")
+      .at(-1)?.[1] as {
+      command: {
+        userPrompt: string;
+        multimodalInputs: Array<Record<string, unknown>>;
+      };
+    };
+    expect(call.command.userPrompt).toBe("请分析附带的参考素材，并据此创作或优化剧本。");
+    expect(call.command.multimodalInputs).toEqual([
+      expect.objectContaining({
+        localPath: "C:\\project\\reference.png",
+        displayName: "reference.png",
+        kind: "image",
+        mimeType: "image/png",
+      }),
+      expect.objectContaining({
+        localPath: "C:\\project\\interview.md",
+        displayName: "interview.md",
+        kind: "document",
+        mimeType: "text/markdown",
+      }),
+    ]);
+    expect(within(node).getByText(/参考素材：reference\.png、interview\.md/)).toBeInTheDocument();
+
+    const removeButton = await waitFor(() => {
+      const button = within(node).getByRole("button", {
+        name: "移除参考素材：reference.png",
+      });
+      expect(button).toBeEnabled();
+      return button;
+    });
+    fireEvent.click(removeButton);
+    await waitFor(() =>
+      expect(
+        within(node).queryByRole("button", { name: "移除参考素材：reference.png" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(within(node).getByText("已添加 1 项")).toBeInTheDocument();
+  });
+
   it("完整注入多轮历史，支持审计并应用修订稿", async () => {
     let screenplayCall = 0;
     invokeMock.mockImplementation((command) => {
@@ -3506,8 +3652,66 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
 });
 
 describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
+  it("可连接剧本节点，并把上游最新剧本文档作为分镜上下文", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        return Promise.resolve({
+          optimizedPrompt: "# 雨夜归人 · 工业级分镜\n\n## SD01\n\n0-5s：24mm 建场镜头",
+          rawModelOutput: "ok",
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    await screen.findByText("画布为空");
+    const screenplay = await addScreenplayNode(360, 360);
+    fireEvent.change(within(screenplay).getByRole("textbox", { name: "当前 Markdown 剧本" }), {
+      target: { value: "# 雨夜归人\n\n林舟在暴雨中的站台等到了故人。" },
+    });
+    const storyboard = await addStoryboardNode(980, 360);
+
+    connectViaHandles(screenplay, storyboard);
+
+    await waitFor(() =>
+      expect(document.querySelectorAll(".edge--screenplay-storyboard")).toHaveLength(1),
+    );
+    expect(within(storyboard).getByText("雨夜归人")).toBeInTheDocument();
+    const sendButton = within(storyboard).getByRole("button", { name: "发送" });
+    expect(sendButton).toBeEnabled();
+    fireEvent.click(sendButton);
+
+    const documentEditor = within(storyboard).getByRole("textbox", {
+      name: "当前 Markdown 工业级分镜脚本",
+    });
+    await waitFor(() => expect((documentEditor as HTMLTextAreaElement).value).toContain("## SD01"));
+    const command = invokeMock.mock.calls
+      .filter(([name]) => name === "run_prompt_node")
+      .at(-1)?.[1] as {
+      command: {
+        userPrompt: string;
+        contextHistory: Array<{ role: string; content: string }>;
+      };
+    };
+    expect(command.command.userPrompt).toBe("请将已连接的剧本转换为工业级分镜脚本。");
+    expect(command.command.contextHistory).toEqual(
+      expect.arrayContaining([
+        {
+          role: "已连接的上游 Markdown 剧本 · 雨夜归人",
+          content: "# 雨夜归人\n\n林舟在暴雨中的站台等到了故人。",
+        },
+      ]),
+    );
+
+    fireEvent.click(within(storyboard).getByRole("button", { name: "解除剧本连线：雨夜归人" }));
+    await waitFor(() =>
+      expect(document.querySelector(".edge--screenplay-storyboard")).not.toBeInTheDocument(),
+    );
+  });
+
   it("每轮注入完整上下文，支持分镜审计、应用修订稿与 Markdown 导出", async () => {
     let storyboardCall = 0;
+    dialogSaveMock.mockResolvedValue("C:\\Exports\\工业级分镜脚本.md");
     invokeMock.mockImplementation((command) => {
       if (command === "run_prompt_node") {
         storyboardCall += 1;
@@ -3521,10 +3725,6 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
           rawModelOutput: "ok",
         });
       }
-      if (command === "plugin:dialog|save") {
-        return Promise.resolve("C:\\Exports\\工业级分镜脚本.md");
-      }
-      if (command === "plugin:fs|write_text_file") return Promise.resolve(null);
       return baseInvokeImplementation(command);
     });
 
@@ -3602,24 +3802,18 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     expect(exportButton).toBeEnabled();
     fireEvent.click(exportButton);
     await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith(
-        "plugin:dialog|save",
+      expect(dialogSaveMock).toHaveBeenCalledWith(
         expect.objectContaining({
-          options: expect.objectContaining({
-            filters: [{ name: "Markdown 分镜脚本文档", extensions: ["md", "markdown"] }],
-          }) as unknown as Record<string, unknown>,
+          filters: [{ name: "Markdown 分镜脚本文档", extensions: ["md", "markdown"] }],
         }),
       ),
     );
     await waitFor(() =>
-      expect(
-        invokeMock.mock.calls.some(([command]) => command === "plugin:fs|write_text_file"),
-      ).toBe(true),
+      expect(writeTextFileMock).toHaveBeenCalledWith(
+        "C:\\Exports\\工业级分镜脚本.md",
+        expect.stringContaining("## 审计记录"),
+      ),
     );
-    const writePayload = invokeMock.mock.calls.find(
-      ([command]) => command === "plugin:fs|write_text_file",
-    )?.[1] as unknown as Uint8Array;
-    expect(new TextDecoder().decode(writePayload)).toContain("## 审计记录");
   });
 });
 

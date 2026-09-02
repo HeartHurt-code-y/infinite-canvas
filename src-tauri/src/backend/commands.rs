@@ -15,9 +15,11 @@ use super::{
     storage::now_ms,
     types::{
         AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
-        ConnectivityTestResult, CredentialStatus, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
-        ModelDefinition, ProviderConnection, ProviderModelBinding, RawProviderResponse,
+        ConnectivityTestResult, CreateRealPersonAuthLinkCommand, CredentialStatus,
+        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, GenerationOperation,
+        GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
+        LocalAssetRecord, ModelDefinition, ProviderConnection, ProviderModelBinding,
+        RawProviderResponse, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
         RecoveryReport, RemoteModelOption, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
         StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
@@ -288,6 +290,54 @@ pub async fn list_assets(
     command: AssetListCommand,
 ) -> CommandResult<Vec<CloudAssetRecord>> {
     state.assets.browse(command).await.command()
+}
+
+#[tauri::command]
+pub async fn create_real_person_auth_link(
+    state: State<'_, BackendState>,
+    command: CreateRealPersonAuthLinkCommand,
+) -> CommandResult<RealPersonAuthLink> {
+    state
+        .assets
+        .create_real_person_auth_link(command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn list_real_person_groups(
+    state: State<'_, BackendState>,
+    command: RealPersonProviderCommand,
+) -> CommandResult<Vec<RealPersonGroup>> {
+    state
+        .assets
+        .list_real_person_groups(command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn delete_real_person_asset(
+    state: State<'_, BackendState>,
+    command: DeleteRealPersonAssetCommand,
+) -> CommandResult<String> {
+    state
+        .assets
+        .delete_real_person_asset(command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn delete_real_person_group(
+    state: State<'_, BackendState>,
+    command: DeleteRealPersonGroupCommand,
+) -> CommandResult<()> {
+    state
+        .assets
+        .delete_real_person_group(command)
+        .await
+        .command()
 }
 
 #[tauri::command]

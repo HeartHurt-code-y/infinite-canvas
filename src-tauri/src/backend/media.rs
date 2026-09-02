@@ -286,7 +286,9 @@ impl MediaResolver {
                             AssetDelivery::Bytes
                         } else {
                             AssetDelivery::RemoteReadable {
-                                destination_credential_ref: task.api_key_ref_snapshot.clone(),
+                                destination_provider_connection_id: task
+                                    .provider_connection_id
+                                    .clone(),
                             }
                         },
                         trace: AssetReadTrace { task, attempt_id },

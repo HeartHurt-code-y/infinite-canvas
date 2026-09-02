@@ -66,7 +66,124 @@ describe("assetLibraryClient.list", () => {
   });
 });
 
+describe("assetLibraryClient real-person H5 operations", () => {
+  it("creates an H5 authorization link with the provider-scoped artist payload", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve({
+        h5Url: "https://h5.example.com/auth?ticket=once",
+        tip: "请在 120 秒内完成认证",
+      });
+    });
+
+    await expect(
+      assetLibraryClient.createRealPersonAuthLink({
+        providerConnectionId: "provider-1",
+        artistName: "张三",
+        artistDesc: "品牌代言人真人素材组",
+      }),
+    ).resolves.toEqual({
+      h5Url: "https://h5.example.com/auth?ticket=once",
+      tip: "请在 120 秒内完成认证",
+    });
+    expect(capturedCommand).toBe("create_real_person_auth_link");
+    expect(capturedArgs).toEqual({
+      command: {
+        providerConnectionId: "provider-1",
+        artistName: "张三",
+        artistDesc: "品牌代言人真人素材组",
+      },
+    });
+  });
+
+  it("lists groups and preserves the platform ID separately from the upstream group ID", async () => {
+    const groups = [
+      {
+        id: 128,
+        remoteGroupId: "group-remote-1",
+        artistName: "张三",
+        artistDesc: null,
+        authorizedAt: "2026-04-27T12:00:29+08:00",
+        assetCount: 3,
+      },
+    ];
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      expect(command).toBe("list_real_person_groups");
+      capturedArgs = args;
+      return Promise.resolve(groups);
+    });
+
+    await expect(assetLibraryClient.listRealPersonGroups("provider-1")).resolves.toEqual(groups);
+    expect(capturedArgs).toEqual({ command: { providerConnectionId: "provider-1" } });
+  });
+
+  it("forwards permanent asset and group deletion to their dedicated commands", async () => {
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    mockDesktopInvoke((command, args) => {
+      calls.push([command, args]);
+      return Promise.resolve(command === "delete_real_person_asset" ? "asset-1" : null);
+    });
+
+    await expect(
+      assetLibraryClient.deleteRealPersonAsset({
+        providerConnectionId: "provider-1",
+        id: "asset-1",
+      }),
+    ).resolves.toBe("asset-1");
+    await expect(
+      assetLibraryClient.deleteRealPersonGroup({ providerConnectionId: "provider-1", id: 128 }),
+    ).resolves.toBeUndefined();
+    expect(calls).toEqual([
+      [
+        "delete_real_person_asset",
+        { command: { providerConnectionId: "provider-1", id: "asset-1" } },
+      ],
+      ["delete_real_person_group", { command: { providerConnectionId: "provider-1", id: 128 } }],
+    ]);
+  });
+});
+
 describe("tosStagingClient.listLocalAssets", () => {
+  it("forwards a real-person platform group ID through the existing staging upload", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve("job-real-1");
+    });
+
+    await expect(
+      tosStagingClient.startUpload({
+        localPath: "C:\\素材\\张三.png",
+        purpose: "asset_import",
+        mediaType: "image",
+        import: {
+          providerConnectionId: "provider-1",
+          name: "张三-正脸",
+          groupId: 128,
+        },
+      }),
+    ).resolves.toBe("job-real-1");
+    expect(capturedCommand).toBe("start_staging_upload");
+    expect(capturedArgs).toEqual({
+      command: {
+        localPath: "C:\\素材\\张三.png",
+        purpose: "asset_import",
+        mediaType: "image",
+        import: {
+          providerConnectionId: "provider-1",
+          name: "张三-正脸",
+          groupId: 128,
+        },
+      },
+    });
+  });
+
   it("reads the independent local index without a remote provider query", async () => {
     let capturedCommand = "";
     let capturedArgs: Record<string, unknown> | undefined;

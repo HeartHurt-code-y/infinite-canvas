@@ -62,8 +62,19 @@ impl BackendState {
             providers.client().clone(),
             downloads_directory.clone(),
         );
-        let staging =
-            StagingService::new(Arc::clone(&storage), credentials.clone(), assets.clone())?;
+        // FFmpeg 合成引擎同样放在应用数据目录；合成产物与下载产物同目录。
+        // 需在 StagingService 之前创建：素材导入遇到不支持格式（如 avif）时
+        // 复用同一套 FFmpeg 引擎做本地转码。
+        let composer = VideoCompositionService::new(
+            downloads_directory.clone(),
+            app.path().app_local_data_dir()?.join("ffmpeg-engine"),
+        )?;
+        let staging = StagingService::new(
+            Arc::clone(&storage),
+            credentials.clone(),
+            assets.clone(),
+            composer.clone(),
+        )?;
         let media = MediaResolver::new(
             providers.clone(),
             assets.clone(),
@@ -84,11 +95,6 @@ impl BackendState {
         let downloader = VideoDownloadService::new(
             downloads_directory.clone(),
             app.path().app_local_data_dir()?.join("yt-dlp-engine"),
-        )?;
-        // FFmpeg 合成引擎同样放在应用数据目录；合成产物与下载产物同目录。
-        let composer = VideoCompositionService::new(
-            downloads_directory,
-            app.path().app_local_data_dir()?.join("ffmpeg-engine"),
         )?;
 
         Ok(Self {

@@ -8,6 +8,11 @@ export async function revealDesktopItem(path: string): Promise<void> {
   await revealItemInDir(path);
 }
 
+export async function openExternalUrl(url: string): Promise<void> {
+  const { openUrl } = await import("@tauri-apps/plugin-opener");
+  await openUrl(url);
+}
+
 export async function saveMarkdownDocumentToDesktop(
   content: string,
   defaultPath: string,

@@ -13,6 +13,7 @@ import {
   type MediaReferenceTarget,
   type PromptOptimizationContextEntry,
   type PromptOptimizationMode,
+  type PromptMaterialKind,
   type ProviderCallRecord,
   type ProviderCatalogEntry,
   type StagingStatus,
@@ -44,6 +45,8 @@ export const COARSE_POINTER_MIN_ZOOM = 74;
 // 浮点精度出现抖动，栅格图也会放大到失去意义，保留硬顶更稳妥。
 export const MAX_ZOOM = 1000;
 export const ZOOM_STEP = 8;
+/** 连线拖拽时端口周围的屏幕像素吸附半径；端口视觉尺寸仍保持 24px。 */
+export const CANVAS_CONNECTION_RADIUS = 48;
 
 export interface AssetItem {
   readonly id: string;
@@ -99,8 +102,8 @@ export interface AssetNodeData {
 }
 
 /**
- * 素材连线：素材节点 → 生成节点（image/video，作为生成输入）
- * 或素材节点 → 素材节点（表达参考关系）。toKey 用同一命名空间区分目标。
+ * 画布连线：既承载媒体/生成节点关系，也承载剧本 → 分镜的文档输入关系。
+ * fromKey/toKey 共用画布节点 key 命名空间，具体语义由两端节点类型决定。
  */
 export interface AssetEdgeData {
   readonly id: string;
@@ -140,6 +143,14 @@ export interface ConnectedAssetInput {
   readonly kind: AssetKind;
   readonly edgeId: string;
   readonly sourceLabel: "素材" | "产物";
+}
+
+/** 分镜节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
+export interface ConnectedScreenplayInput {
+  readonly key: string;
+  readonly name: string;
+  readonly document: string;
+  readonly edgeId: string;
 }
 
 export interface InheritedAssetInput {
@@ -361,6 +372,16 @@ export interface ScreenplayConversationEntry {
   readonly content: string;
 }
 
+/** 剧本节点引用的本地素材元数据；大文件正文不进入画布存档。 */
+export interface ScreenplayMaterialInput {
+  readonly id: string;
+  readonly localPath: string;
+  readonly displayName: string;
+  readonly kind: PromptMaterialKind;
+  readonly mimeType: string;
+  readonly byteSize: number;
+}
+
 export interface ScreenplayNodeConfig {
   readonly modelSelection: NodeModelSelection;
   /** 尚未发送的本轮输入，随画布保存。 */
@@ -369,6 +390,8 @@ export interface ScreenplayNodeConfig {
   readonly conversation: readonly ScreenplayConversationEntry[];
   /** 当前可编辑、可导出的 Markdown 剧本文档。 */
   readonly currentDocument: string;
+  /** 每轮创作与审计都会重新发送的本地多模态参考素材。 */
+  readonly materials?: readonly ScreenplayMaterialInput[];
   readonly catalogResolved: boolean;
 }
 
@@ -595,6 +618,10 @@ export function viralRemixNodeKey(): string {
 
 export function screenplayMessageId(): string {
   return `turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+export function screenplayMaterialId(): string {
+  return `material-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 export function markdownDocumentExportName(
@@ -1284,6 +1311,7 @@ export function createScreenplayNodeConfig(
     composer: "",
     conversation: [],
     currentDocument: "",
+    materials: [],
     catalogResolved,
   };
 }

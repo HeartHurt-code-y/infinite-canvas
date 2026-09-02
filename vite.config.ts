@@ -18,6 +18,10 @@ const vendorGroups = [
     test: /[\\/]node_modules[\\/](@xyflow[\\/]|d3-|delaunator[\\/]|internmap[\\/]|robust-predicates[\\/])/,
   },
   {
+    name: "tiptap-vendor",
+    test: /[\\/]node_modules[\\/](@tiptap[\\/]|prosemirror-)/,
+  },
+  {
     name: "react-vendor",
     test: /[\\/]node_modules[\\/](react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/](?:query-core|react-query)[\\/]|use-sync-external-store[\\/]|zustand[\\/])/,
   },

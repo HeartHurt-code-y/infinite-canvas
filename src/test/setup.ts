@@ -124,6 +124,39 @@ if (typeof document !== "undefined" && typeof document.elementFromPoint !== "fun
   });
 }
 
+// ProseMirror 会在选区更新时读取 Range 几何；jsdom 没有这两个布局 API。
+// 返回零尺寸矩形即可覆盖编辑命令测试，真实布局由 WebView 提供。
+const EMPTY_CLIENT_RECT: DOMRect = {
+  x: 0,
+  y: 0,
+  width: 0,
+  height: 0,
+  top: 0,
+  right: 0,
+  bottom: 0,
+  left: 0,
+  toJSON: () => ({}),
+};
+if (typeof Range !== "undefined" && typeof Range.prototype.getBoundingClientRect !== "function") {
+  Object.defineProperty(Range.prototype, "getBoundingClientRect", {
+    configurable: true,
+    value: () => EMPTY_CLIENT_RECT,
+  });
+}
+if (typeof Range !== "undefined" && typeof Range.prototype.getClientRects !== "function") {
+  Object.defineProperty(Range.prototype, "getClientRects", {
+    configurable: true,
+    value: () => ({
+      0: EMPTY_CLIENT_RECT,
+      length: 1,
+      item: (index: number) => (index === 0 ? EMPTY_CLIENT_RECT : null),
+      [Symbol.iterator]: function* () {
+        yield EMPTY_CLIENT_RECT;
+      },
+    }),
+  });
+}
+
 // d3-zoom/xyflow 用 DOMMatrixReadOnly 解析视口 transform（jsdom 未实现）。
 // 这里解析 matrix(a,b,c,d,e,f) 字符串，m22 即缩放系数。
 class DOMMatrixReadOnlyStub {

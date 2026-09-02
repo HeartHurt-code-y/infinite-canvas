@@ -281,15 +281,6 @@ impl ProviderRuntime {
         Ok(context)
     }
 
-    pub(super) fn resolved_asset_library_credential_ref(
-        &self,
-        provider_connection_id: &str,
-    ) -> BackendResult<String> {
-        Ok(self
-            .resolve_asset_library(provider_connection_id)?
-            .api_key_ref)
-    }
-
     pub async fn submit(
         &self,
         task: &TaskExecutionRecord,

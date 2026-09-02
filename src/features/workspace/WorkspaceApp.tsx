@@ -1,5 +1,6 @@
 import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
+import { CaretRight } from "@phosphor-icons/react/CaretRight";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { Clock } from "@phosphor-icons/react/Clock";
@@ -12,6 +13,7 @@ import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { StackSimple } from "@phosphor-icons/react/StackSimple";
 import { TrashSimple } from "@phosphor-icons/react/TrashSimple";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
+import { UserFocus } from "@phosphor-icons/react/UserFocus";
 import { Warning } from "@phosphor-icons/react/Warning";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
@@ -51,6 +53,7 @@ import {
   isDesktopRuntime,
   loadProviderCatalog,
   pickLocalMediaFiles,
+  pickPromptMultimodalFiles,
   promptNodeClient,
   promptOptimizeClient,
   subscribeGenerationEvents,
@@ -65,9 +68,11 @@ import {
   type GenerationTaskSummary,
   type LocalAssetRecord,
   type PromptOptimizationContextEntry,
+  type PromptMultimodalInput,
   type PromptVisionImageInput,
   type ProviderCatalogEntry,
   type ProviderConnection,
+  type RealPersonGroup,
   type StagingJobRecord,
   type VideoDownloadJobRecord,
   type VideoDownloaderEngineStatus,
@@ -99,6 +104,7 @@ import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import {
   AssetFlow,
   AssetPanelError,
+  RealPersonAssetDialog,
   AssetSourceDialog,
   AssetUploadRow,
   RepositoryCard,
@@ -134,6 +140,7 @@ import type {
   CanvasNodeDimensions,
   CanvasNodeRect,
   ConnectedAssetInput,
+  ConnectedScreenplayInput,
   GenNodeData,
   GenerationMediaInput,
   ImageNodeConfig,
@@ -166,6 +173,7 @@ import {
   ASSET_NODE_HEIGHT,
   ASSET_NODE_WIDTH,
   ASSET_RENDER_BATCH_SIZE,
+  CANVAS_CONNECTION_RADIUS,
   CANVAS_DOCUMENT_TITLE,
   CANVAS_ID,
   CANVAS_SAVE_DEBOUNCE_MS,
@@ -240,6 +248,7 @@ import {
   resolvePendingGenerationNodeConfig,
   saveComposedVideoBlob,
   screenplayMessageId,
+  screenplayMaterialId,
   screenplayNodeKey,
   storyboardNodeKey,
   usesCoarsePointer,
@@ -308,6 +317,41 @@ function promptContentIssueMessage(issue: PromptContentIssue): string {
   return "提示词不能为空。请在该节点的提示词输入框中输入内容或 @ 引用素材。";
 }
 
+function connectedScreenplayName(node: ScreenplayNodeData): string {
+  const firstContentLine = node.config.currentDocument
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .find(Boolean);
+  const documentTitle = firstContentLine
+    ?.replace(/^#{1,6}\s+/u, "")
+    .replace(/\s+#+$/u, "")
+    .trim();
+  return documentTitle?.length ? documentTitle : `剧本节点 · ${node.key.slice(-6)}`;
+}
+
+const MAX_SCREENPLAY_MATERIALS = 8;
+const MAX_SCREENPLAY_MATERIAL_BYTES = 20 * 1024 * 1024;
+const MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES = 40 * 1024 * 1024;
+
+function screenplayMultimodalInputs(
+  config: ScreenplayNodeConfig,
+): readonly PromptMultimodalInput[] {
+  return (config.materials ?? []).map((material) => ({
+    localPath: material.localPath,
+    displayName: material.displayName,
+    kind: material.kind,
+    mimeType: material.mimeType,
+  }));
+}
+
+function screenplayConversationUserMessage(
+  userPrompt: string,
+  materials: ScreenplayNodeConfig["materials"],
+): string {
+  if (!materials?.length) return userPrompt;
+  return `${userPrompt}\n\n> 参考素材：${materials.map((material) => material.displayName).join("、")}`;
+}
+
 export function WorkspaceApp() {
   const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>("cloud");
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
@@ -319,6 +363,7 @@ export function WorkspaceApp() {
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [realPersonDialogOpen, setRealPersonDialogOpen] = useState(false);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -336,6 +381,8 @@ export function WorkspaceApp() {
     assetNodeByKey,
     outputNodeByKey,
     genNodeByKey,
+    screenplayNodeByKey,
+    storyboardNodeByKey,
     videoComposerNodeByKey,
     videoDownloaderNodeByKey,
     viralRemixNodeByKey,
@@ -360,6 +407,8 @@ export function WorkspaceApp() {
       assetNodeByKey: state.nodeByKey.asset,
       outputNodeByKey: state.nodeByKey.output,
       genNodeByKey: state.nodeByKey.gen,
+      screenplayNodeByKey: state.nodeByKey.screenplay,
+      storyboardNodeByKey: state.nodeByKey.storyboard,
       videoComposerNodeByKey: state.nodeByKey.videoComposer,
       videoDownloaderNodeByKey: state.nodeByKey.videoDownloader,
       viralRemixNodeByKey: state.nodeByKey.viralRemix,
@@ -389,6 +438,20 @@ export function WorkspaceApp() {
   // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
   const { pastCount, futureCount } = useCanvasHistoryCounts();
   const genTopologyByKey = genNodeByKey;
+  const screenplayInputByStoryboard = useMemo(() => {
+    const inputs = new Map<string, ConnectedScreenplayInput>();
+    for (const edge of assetEdges) {
+      const source = screenplayNodeByKey.get(edge.fromKey);
+      if (source == null || !storyboardNodeByKey.has(edge.toKey)) continue;
+      inputs.set(edge.toKey, {
+        key: source.key,
+        name: connectedScreenplayName(source),
+        document: source.config.currentDocument,
+        edgeId: edge.id,
+      });
+    }
+    return inputs;
+  }, [assetEdges, screenplayNodeByKey, storyboardNodeByKey]);
   // 空白处左键拖拽 / 任意位置中键拖拽平移画布时的指针状态。
   const [isPanning, setIsPanning] = useState(false);
   // 原生滚轮监听与缩放控制读取最新视图状态，避免监听器随状态变化反复重挂。
@@ -712,7 +775,7 @@ export function WorkspaceApp() {
   }, [promptContents, restoreDocument]);
 
   // 画布结构/视图变化 → 防抖保存（仅桌面端；浏览器预览模式无本地 SQLite）。
-  // 提示词纯 DOM 编辑不触发 React 状态，由下方画布容器上的 input 事件监听兜底触发。
+  // 提示词由 Tiptap 在 React 状态外管理，由下方画布容器上的 input 事件监听兜底触发。
   useEffect(() => {
     if (!canvasHydrated || !isDesktopRuntime()) return;
     if (suppressNextCanvasSaveRef.current) {
@@ -736,7 +799,7 @@ export function WorkspaceApp() {
     zoom,
   ]);
 
-  // 提示词输入（contentEditable）不进 React 状态，监听画布容器 input 事件触发防抖保存。
+  // Tiptap 提示词输入不进 React 状态，监听画布容器 input 事件触发防抖保存。
   useEffect(() => {
     if (!canvasHydrated || !isDesktopRuntime()) return;
     const viewport = canvasViewportRef.current;
@@ -1093,54 +1156,68 @@ export function WorkspaceApp() {
     wasOfflineRef.current = isOffline;
   }, [isOffline, assetLibrarySource, assetProvider, refreshCloudAssets]);
 
-  const handleImportLocalAssets = useCallback(async () => {
-    const destination = assetLibrarySource;
-    if (destination === "cloud" && !assetProvider) {
-      setAssetsError("请先在全局设置中配置并启用供应商连接，再上传本地素材。");
-      return;
-    }
-    if (destination === "cloud") setAssetsError(null);
-    else setLocalAssetsError(null);
-    const files = await pickLocalMediaFiles();
-    if (files.length === 0) return;
-    for (const filePath of files) {
-      const kind = inferMediaKindFromName(filePath);
-      if (!kind) continue;
-      const name = filePath.split(/[\\/]/).pop() ?? filePath;
-      try {
-        const jobId = await tosStagingClient.startUpload({
-          localPath: filePath,
-          purpose: destination === "local" ? "local_asset" : "asset_import",
-          mediaType: kind,
-          import:
-            destination === "cloud" && assetProvider
-              ? {
-                  providerConnectionId: assetProvider.id,
-                  name,
-                }
-              : null,
-        });
-        setAssetUploads((current) => [
-          ...current,
-          {
-            jobId,
-            name,
-            kind,
-            status: "validating",
-            bytesUploaded: 0,
-            bytesTotal: null,
-            error: null,
-            lastAdvancedAt: Date.now(),
-            stalled: false,
-            destination,
-          },
-        ]);
-      } catch (error) {
-        if (destination === "cloud") setAssetsError(formatRawBackendError(error));
-        else setLocalAssetsError(formatRawBackendError(error));
+  const handleImportLocalAssets = useCallback(
+    async (realPersonGroup?: RealPersonGroup): Promise<number> => {
+      const destination = realPersonGroup ? "cloud" : assetLibrarySource;
+      if (destination === "cloud" && !assetProvider) {
+        setAssetsError("请先在全局设置中配置并启用供应商连接，再上传本地素材。");
+        return 0;
       }
-    }
-  }, [assetLibrarySource, assetProvider]);
+      if (destination === "cloud") setAssetsError(null);
+      else setLocalAssetsError(null);
+      const files = await pickLocalMediaFiles();
+      if (files.length === 0) return 0;
+      let startedCount = 0;
+      let firstError: unknown = null;
+      for (const filePath of files) {
+        const kind = inferMediaKindFromName(filePath);
+        if (!kind) continue;
+        const name = filePath.split(/[\\/]/).pop() ?? filePath;
+        try {
+          const jobId = await tosStagingClient.startUpload({
+            localPath: filePath,
+            purpose: destination === "local" ? "local_asset" : "asset_import",
+            mediaType: kind,
+            import:
+              destination === "cloud" && assetProvider
+                ? {
+                    providerConnectionId: assetProvider.id,
+                    name,
+                    groupId: realPersonGroup?.id ?? null,
+                  }
+                : null,
+          });
+          startedCount += 1;
+          setAssetUploads((current) => [
+            ...current,
+            {
+              jobId,
+              name,
+              kind,
+              status: "validating",
+              bytesUploaded: 0,
+              bytesTotal: null,
+              error: null,
+              lastAdvancedAt: Date.now(),
+              stalled: false,
+              destination,
+            },
+          ]);
+        } catch (error) {
+          firstError ??= error;
+          if (destination === "cloud") setAssetsError(formatRawBackendError(error));
+          else setLocalAssetsError(formatRawBackendError(error));
+        }
+      }
+      if (startedCount === 0 && firstError != null && realPersonGroup) {
+        throw firstError instanceof Error
+          ? firstError
+          : new Error(formatRawBackendError(firstError));
+      }
+      return startedCount;
+    },
+    [assetLibrarySource, assetProvider],
+  );
 
   useEffect(() => {
     return subscribeStagingEvents((payload) => {
@@ -1444,6 +1521,78 @@ export function WorkspaceApp() {
         delete next[key];
         return next;
       });
+    },
+    [patchNode],
+  );
+
+  const handlePickScreenplayMaterials = useCallback(
+    async (nodeKey: string) => {
+      try {
+        const picked = await pickPromptMultimodalFiles();
+        if (!picked.length) return;
+        let addedCount = 0;
+        let rejectedCount = 0;
+        patchNode("screenplay", nodeKey, (node) => {
+          const existing = node.config.materials ?? [];
+          const existingPaths = new Set(
+            existing.map((material) => material.localPath.toLocaleLowerCase()),
+          );
+          let totalBytes = existing.reduce((total, material) => total + material.byteSize, 0);
+          const additions = [] as NonNullable<ScreenplayNodeConfig["materials"]>[number][];
+          for (const material of picked) {
+            const normalizedPath = material.localPath.toLocaleLowerCase();
+            const exceedsCount = existing.length + additions.length >= MAX_SCREENPLAY_MATERIALS;
+            const exceedsFileLimit =
+              material.byteSize <= 0 || material.byteSize > MAX_SCREENPLAY_MATERIAL_BYTES;
+            const exceedsTotalLimit =
+              totalBytes + material.byteSize > MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES;
+            if (
+              existingPaths.has(normalizedPath) ||
+              exceedsCount ||
+              exceedsFileLimit ||
+              exceedsTotalLimit
+            ) {
+              rejectedCount += 1;
+              continue;
+            }
+            existingPaths.add(normalizedPath);
+            totalBytes += material.byteSize;
+            additions.push({ ...material, id: screenplayMaterialId() });
+          }
+          addedCount = additions.length;
+          if (!additions.length) return node;
+          return {
+            ...node,
+            config: { ...node.config, materials: [...existing, ...additions] },
+          };
+        });
+        if (addedCount) {
+          setNodeStartError(nodeKey, null);
+          toast.success(`已添加 ${addedCount} 项参考素材`);
+        }
+        if (rejectedCount) {
+          toast.info(`${rejectedCount} 项素材未添加`, {
+            description: "已存在、超过 8 项，或超出单项 20 MB / 合计 40 MB 限制。",
+          });
+        }
+      } catch (error) {
+        const message = formatRawBackendError(error);
+        setNodeStartError(nodeKey, message);
+        toast.error("读取参考素材失败", { description: message });
+      }
+    },
+    [patchNode, setNodeStartError],
+  );
+
+  const handleRemoveScreenplayMaterial = useCallback(
+    (nodeKey: string, materialId: string) => {
+      patchNode("screenplay", nodeKey, (node) => ({
+        ...node,
+        config: {
+          ...node.config,
+          materials: (node.config.materials ?? []).filter((material) => material.id !== materialId),
+        },
+      }));
     },
     [patchNode],
   );
@@ -1798,8 +1947,10 @@ export function WorkspaceApp() {
         failWith("剧本模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
         return;
       }
-      const userPrompt = node.config.composer.trim();
-      if (!userPrompt) {
+      const materials = node.config.materials ?? [];
+      const userPrompt =
+        node.config.composer.trim() || "请分析附带的参考素材，并据此创作或优化剧本。";
+      if (!node.config.composer.trim() && !materials.length) {
         failWith("请输入本轮剧本创作或修改要求。");
         return;
       }
@@ -1828,6 +1979,7 @@ export function WorkspaceApp() {
           content: node.config.currentDocument,
         });
       }
+      const multimodalInputs = screenplayMultimodalInputs(node.config);
       setNodeStartError(nodeKey, null);
       setScreenplayAudits((current) => {
         if (!(nodeKey in current)) return current;
@@ -1838,7 +1990,7 @@ export function WorkspaceApp() {
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
-        `[generation] 发起剧本多轮对话: node=${nodeKey}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${userPrompt.length} 字符`,
+        `[generation] 发起剧本多轮对话: node=${nodeKey}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${userPrompt.length} 字符, 多模态素材 ${multimodalInputs.length} 项`,
       );
       void promptNodeClient
         .run({
@@ -1851,6 +2003,7 @@ export function WorkspaceApp() {
           userPrompt,
           contextHistory,
           detailReview: false,
+          multimodalInputs,
         })
         .then((result) => {
           patchNode("screenplay", nodeKey, (item) => ({
@@ -1861,7 +2014,11 @@ export function WorkspaceApp() {
               currentDocument: result.optimizedPrompt,
               conversation: [
                 ...item.config.conversation,
-                { id: screenplayMessageId(), role: "user", content: userPrompt },
+                {
+                  id: screenplayMessageId(),
+                  role: "user",
+                  content: screenplayConversationUserMessage(userPrompt, materials),
+                },
                 {
                   id: screenplayMessageId(),
                   role: "assistant",
@@ -1945,6 +2102,7 @@ export function WorkspaceApp() {
         }),
       );
       contextHistory.push({ role: `第 ${round} 轮审计输入 · 当前剧本`, content: currentDocument });
+      const multimodalInputs = screenplayMultimodalInputs(node.config);
       setNodeStartError(nodeKey, null);
       setScreenplayAudits((current) => ({
         ...current,
@@ -1960,7 +2118,7 @@ export function WorkspaceApp() {
       }));
       frontendLog(
         "info",
-        `[generation] 发起剧本审计: node=${nodeKey}, round=${round}, 剧本 ${currentDocument.length} 字符, 注入 ${contextHistory.length} 条历史`,
+        `[generation] 发起剧本审计: node=${nodeKey}, round=${round}, 剧本 ${currentDocument.length} 字符, 注入 ${contextHistory.length} 条历史, 多模态素材 ${multimodalInputs.length} 项`,
       );
       void promptNodeClient
         .run({
@@ -1973,6 +2131,7 @@ export function WorkspaceApp() {
           userPrompt: currentDocument,
           contextHistory,
           detailReview: true,
+          multimodalInputs,
         })
         .then((result) => {
           const completedContext = [
@@ -2128,9 +2287,13 @@ export function WorkspaceApp() {
         failWith("工业级分镜模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
         return;
       }
-      const userPrompt = node.config.composer.trim();
+      const sourceInput = screenplayInputByStoryboard.get(nodeKey);
+      const sourceDocument = sourceInput?.document.trim() ?? "";
+      const userPrompt =
+        node.config.composer.trim() ||
+        (sourceDocument ? "请将已连接的剧本转换为工业级分镜脚本。" : "");
       if (!userPrompt) {
-        failWith("请粘贴剧本，或输入本轮分镜生成、补充或修改要求。");
+        failWith("请连接含有正文的剧本节点、粘贴剧本，或输入本轮分镜要求。");
         return;
       }
       const provider = providerCatalog.find(
@@ -2146,11 +2309,18 @@ export function WorkspaceApp() {
         failWith("请先在当前分镜节点中选择可用的文本模型。");
         return;
       }
-      const contextHistory: PromptOptimizationContextEntry[] = node.config.conversation.map(
-        (entry, index) => ({
+      const contextHistory: PromptOptimizationContextEntry[] = [];
+      if (sourceInput && sourceDocument) {
+        contextHistory.push({
+          role: `已连接的上游 Markdown 剧本 · ${sourceInput.name}`,
+          content: sourceDocument,
+        });
+      }
+      contextHistory.push(
+        ...node.config.conversation.map((entry, index) => ({
           role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "storyboard")}`,
           content: entry.content,
-        }),
+        })),
       );
       if (node.config.currentDocument.trim()) {
         contextHistory.push({
@@ -2218,7 +2388,14 @@ export function WorkspaceApp() {
           });
         });
     },
-    [patchNode, providerCatalog, setNodeStartError, startingNodeKeys, storyboardNodes],
+    [
+      patchNode,
+      providerCatalog,
+      screenplayInputByStoryboard,
+      setNodeStartError,
+      startingNodeKeys,
+      storyboardNodes,
+    ],
   );
 
   const handleStoryboardAudit = useCallback(
@@ -2268,11 +2445,19 @@ export function WorkspaceApp() {
         failWith("请先在当前分镜节点中选择可用的文本模型。");
         return;
       }
-      const contextHistory: PromptOptimizationContextEntry[] = node.config.conversation.map(
-        (entry, index) => ({
+      const sourceInput = screenplayInputByStoryboard.get(nodeKey);
+      const contextHistory: PromptOptimizationContextEntry[] = [];
+      if (sourceInput?.document.trim()) {
+        contextHistory.push({
+          role: `已连接的上游 Markdown 剧本 · ${sourceInput.name}`,
+          content: sourceInput.document.trim(),
+        });
+      }
+      contextHistory.push(
+        ...node.config.conversation.map((entry, index) => ({
           role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "storyboard")}`,
           content: entry.content,
-        }),
+        })),
       );
       contextHistory.push({
         role: `第 ${round} 轮审计输入 · 当前工业级分镜脚本`,
@@ -2354,7 +2539,14 @@ export function WorkspaceApp() {
           frontendLog("error", `[generation] 工业级分镜审计失败: node=${nodeKey}, ${message}`);
         });
     },
-    [patchNode, providerCatalog, setNodeStartError, storyboardAudits, storyboardNodes],
+    [
+      patchNode,
+      providerCatalog,
+      screenplayInputByStoryboard,
+      setNodeStartError,
+      storyboardAudits,
+      storyboardNodes,
+    ],
   );
 
   const handleApplyStoryboardAudit = useCallback(
@@ -2869,16 +3061,19 @@ export function WorkspaceApp() {
 
   /**
    * 连线拖拽结束：素材与已保存产物可连入图片/视频生成节点作为参考媒体；
-   * 图片素材还可连入提示词节点做视觉理解，提示词只可连入图片/视频节点。
+   * 图片素材还可连入提示词节点做视觉理解，提示词只可连入图片/视频节点；
+   * 剧本节点可作为工业级分镜节点的实时文档输入。
    */
   const connectCanvasNodes = useCallback(
     (fromKey: string, toKey: string) => {
       const promptSource = genNodes.find((node) => node.key === fromKey && node.kind === "prompt");
+      const screenplaySource = screenplayNodes.find((node) => node.key === fromKey);
       const outputSource = outputNodes.find((node) => node.key === fromKey);
       const downloaderSource = videoDownloaderNodes.find((node) => node.key === fromKey);
       const generationTarget = genNodes.find((node) => node.key === toKey);
       const composerTarget = videoComposerNodes.find((node) => node.key === toKey);
       const viralRemixTarget = viralRemixNodes.find((node) => node.key === toKey);
+      const storyboardTarget = storyboardNodes.find((node) => node.key === toKey);
       const result = connectCanvasStateNodes(fromKey, toKey);
       if (result.status !== "connected") return;
       const targetLabel = generationTarget
@@ -2887,16 +3082,20 @@ export function WorkspaceApp() {
           ? "视频拼接与合成节点"
           : viralRemixTarget
             ? "爆款视频复刻节点"
-            : `素材节点 ${toKey}`;
+            : storyboardTarget
+              ? "剧本转工业级分镜脚本节点"
+              : `素材节点 ${toKey}`;
       frontendLog(
         "info",
-        `[canvas] ${promptSource ? "提示词" : downloaderSource ? "网络爆款视频下载" : outputSource ? `${outputSource.mediaType === "image" ? "图片" : "视频"}产物` : "素材"}连线建立: ${fromKey} → ${targetLabel}`,
+        `[canvas] ${promptSource ? "提示词" : screenplaySource ? "剧本" : downloaderSource ? "网络爆款视频下载" : outputSource ? `${outputSource.mediaType === "image" ? "图片" : "视频"}产物` : "素材"}连线建立: ${fromKey} → ${targetLabel}`,
       );
     },
     [
       connectCanvasStateNodes,
       genNodes,
       outputNodes,
+      screenplayNodes,
+      storyboardNodes,
       videoComposerNodes,
       videoDownloaderNodes,
       viralRemixNodes,
@@ -4785,7 +4984,7 @@ export function WorkspaceApp() {
         ...measuredFor(node),
         selected: selectedNodeKey === node.key,
         data: {
-          hasSourceHandle: false,
+          hasSourceHandle: true,
           hasTargetHandle: false,
           content: (
             <CanvasDocumentSkillNode
@@ -4797,11 +4996,15 @@ export function WorkspaceApp() {
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
               audit={screenplayAudits[node.key]}
+              sourceInput={null}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
               onRemove={removeScreenplayNode}
+              onUnlink={removeAssetEdge}
               onSizeChange={handleGenNodeSizeChange}
               onChange={(config) => updateScreenplayNodeConfig(node.key, config)}
+              onPickMaterials={handlePickScreenplayMaterials}
+              onRemoveMaterial={handleRemoveScreenplayMaterial}
               onSend={handleRunScreenplayNode}
               onAudit={handleScreenplayAudit}
               onApplyAudit={handleApplyScreenplayAudit}
@@ -4821,8 +5024,11 @@ export function WorkspaceApp() {
       selectNode,
       ignoreLegacyNodeDrag,
       removeScreenplayNode,
+      removeAssetEdge,
       handleGenNodeSizeChange,
       updateScreenplayNodeConfig,
+      handlePickScreenplayMaterials,
+      handleRemoveScreenplayMaterial,
       handleRunScreenplayNode,
       handleScreenplayAudit,
       handleApplyScreenplayAudit,
@@ -4841,7 +5047,7 @@ export function WorkspaceApp() {
         selected: selectedNodeKey === node.key,
         data: {
           hasSourceHandle: false,
-          hasTargetHandle: false,
+          hasTargetHandle: true,
           content: (
             <CanvasDocumentSkillNode
               key={node.key}
@@ -4852,9 +5058,11 @@ export function WorkspaceApp() {
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
               audit={storyboardAudits[node.key]}
+              sourceInput={screenplayInputByStoryboard.get(node.key) ?? null}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
               onRemove={removeStoryboardNode}
+              onUnlink={removeAssetEdge}
               onSizeChange={handleGenNodeSizeChange}
               onChange={(config) => updateStoryboardNodeConfig(node.key, config)}
               onSend={handleRunStoryboardNode}
@@ -4873,9 +5081,11 @@ export function WorkspaceApp() {
       startErrorsByNode,
       providerCatalog,
       storyboardAudits,
+      screenplayInputByStoryboard,
       selectNode,
       ignoreLegacyNodeDrag,
       removeStoryboardNode,
+      removeAssetEdge,
       handleGenNodeSizeChange,
       updateStoryboardNodeConfig,
       handleRunStoryboardNode,
@@ -5235,27 +5445,34 @@ export function WorkspaceApp() {
         const genSource = genTopologyByKey.get(edge.fromKey);
         const composerSource = videoComposerNodeByKey.get(edge.fromKey);
         const downloaderSource = videoDownloaderNodeByKey.get(edge.fromKey);
+        const screenplaySource = screenplayNodeByKey.get(edge.fromKey);
         const source = assetNodeByKey.get(edge.fromKey);
         const outputSource = outputNodeByKey.get(edge.fromKey);
         const generationTarget = genTopologyByKey.get(edge.toKey);
         const composerTarget = videoComposerNodeByKey.get(edge.toKey);
         const viralRemixTarget = viralRemixNodeByKey.get(edge.toKey);
+        const storyboardTarget = storyboardNodeByKey.get(edge.toKey);
         const assetTarget = assetNodeByKey.get(edge.toKey);
         const isGenOutput =
           (genSource != null || composerSource != null) && outputNodeByKey.has(edge.toKey);
         const promptSource = genSource?.kind === "prompt" ? genSource : null;
+        const isScreenplayToStoryboard = screenplaySource != null && storyboardTarget != null;
         const sourceName = promptSource
           ? "提示词节点"
-          : downloaderSource
-            ? "网络爆款视频下载节点"
-            : (source?.name ?? outputSource?.name ?? "视频产物");
+          : screenplaySource
+            ? connectedScreenplayName(screenplaySource)
+            : downloaderSource
+              ? "网络爆款视频下载节点"
+              : (source?.name ?? outputSource?.name ?? "视频产物");
         const targetName = generationTarget
           ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}生成节点`
           : composerTarget
             ? "视频拼接与合成节点"
             : viralRemixTarget
               ? "爆款视频复刻节点"
-              : (assetTarget?.name ?? "目标节点");
+              : storyboardTarget
+                ? "剧本转工业级分镜脚本节点"
+                : (assetTarget?.name ?? "目标节点");
         const connectionOrder =
           composerTarget != null || (generationTarget && !promptSource)
             ? (inputOrderByEdge.get(edge.id) ?? 0)
@@ -5278,7 +5495,9 @@ export function WorkspaceApp() {
               ? `edge edge--gen-output edge--gen-output--${genSource?.kind ?? "video"}`
               : promptSource
                 ? "edge edge--prompt-generation"
-                : `edge edge--asset${generationTarget || composerTarget || viralRemixTarget ? " edge--asset-generation" : ""}`,
+                : isScreenplayToStoryboard
+                  ? "edge edge--screenplay-storyboard"
+                  : `edge edge--asset${generationTarget || composerTarget || viralRemixTarget ? " edge--asset-generation" : ""}`,
             order: connectionOrder,
             removable: !isGenOutput,
             onSelect: () => {
@@ -5294,6 +5513,8 @@ export function WorkspaceApp() {
       genTopologyByKey,
       videoComposerNodeByKey,
       videoDownloaderNodeByKey,
+      screenplayNodeByKey,
+      storyboardNodeByKey,
       assetNodeByKey,
       outputNodeByKey,
       viralRemixNodeByKey,
@@ -5675,31 +5896,55 @@ export function WorkspaceApp() {
             )}
           </div>
           {assetLibrarySource === "cloud" ? (
-            <div className="asset-provider-switcher">
-              <label htmlFor="asset-library-provider">供应商</label>
-              <select
-                id="asset-library-provider"
-                aria-label="素材库供应商"
-                value={assetProvider?.id ?? ""}
-                disabled={availableAssetProviders.length === 0}
-                onChange={(event) => {
-                  const nextProvider = availableAssetProviders.find(
-                    (provider) => provider.id === event.target.value,
-                  );
-                  if (nextProvider) handleAssetProviderChanged(nextProvider.id);
-                }}
+            <>
+              <div className="asset-provider-switcher">
+                <label htmlFor="asset-library-provider">供应商</label>
+                <select
+                  id="asset-library-provider"
+                  aria-label="素材库供应商"
+                  value={assetProvider?.id ?? ""}
+                  disabled={availableAssetProviders.length === 0}
+                  onChange={(event) => {
+                    const nextProvider = availableAssetProviders.find(
+                      (provider) => provider.id === event.target.value,
+                    );
+                    if (nextProvider) handleAssetProviderChanged(nextProvider.id);
+                  }}
+                >
+                  {availableAssetProviders.length > 0 ? (
+                    availableAssetProviders.map((provider) => (
+                      <option key={provider.id} value={provider.id}>
+                        {provider.displayName}
+                      </option>
+                    ))
+                  ) : (
+                    <option value="">未配置启用的供应商</option>
+                  )}
+                </select>
+              </div>
+              <button
+                type="button"
+                className="real-person-entry"
+                disabled={!isDesktopRuntime() || !assetProvider || isOffline}
+                aria-label="打开明星真人素材 H5 认证与上传"
+                onClick={() => setRealPersonDialogOpen(true)}
               >
-                {availableAssetProviders.length > 0 ? (
-                  availableAssetProviders.map((provider) => (
-                    <option key={provider.id} value={provider.id}>
-                      {provider.displayName}
-                    </option>
-                  ))
-                ) : (
-                  <option value="">未配置启用的供应商</option>
-                )}
-              </select>
-            </div>
+                <span className="real-person-entry__icon" aria-hidden="true">
+                  <UserFocus size={20} weight="duotone" />
+                </span>
+                <span className="real-person-entry__copy">
+                  <strong>明星真人素材</strong>
+                  <small>
+                    {!assetProvider
+                      ? "先配置供应商与素材库令牌"
+                      : isOffline
+                        ? "网络恢复后可进行 H5 认证"
+                        : "H5 人脸认证 · 同人素材上传"}
+                  </small>
+                </span>
+                <CaretRight size={16} weight="bold" aria-hidden="true" />
+              </button>
+            </>
           ) : null}
           {isDesktopRuntime() && selectedAssetsError ? (
             <AssetPanelError
@@ -5906,6 +6151,7 @@ export function WorkspaceApp() {
               zoomOnPinch
               zoomOnDoubleClick={false}
               preventScrolling
+              connectionRadius={CANVAS_CONNECTION_RADIUS}
               deleteKeyCode={null}
               onInit={handleFlowInit}
               onNodesChange={handleFlowNodesChange}
@@ -6059,6 +6305,14 @@ export function WorkspaceApp() {
       ) : null}
       {previewAsset ? (
         <AssetSourceDialog asset={previewAsset} onClose={() => setPreviewAsset(null)} />
+      ) : null}
+      {realPersonDialogOpen && assetProvider ? (
+        <RealPersonAssetDialog
+          providerConnectionId={assetProvider.id}
+          providerDisplayName={assetProvider.displayName}
+          onClose={() => setRealPersonDialogOpen(false)}
+          onUploadToGroup={handleImportLocalAssets}
+        />
       ) : null}
       {previewOutputNode ? (
         <CanvasOutputLightbox

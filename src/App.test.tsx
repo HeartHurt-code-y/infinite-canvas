@@ -526,6 +526,8 @@ describe("App workspace", () => {
           ];
           return Promise.resolve(items);
         }
+        case "list_real_person_groups":
+          return Promise.resolve([]);
         case "plugin:event|listen":
           return Promise.resolve(1);
         case "plugin:event|unlisten":
@@ -546,6 +548,15 @@ describe("App workspace", () => {
     vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
 
     render(<App />);
+
+    const realPersonEntry = await screen.findByRole("button", {
+      name: "打开明星真人素材 H5 认证与上传",
+    });
+    expect(realPersonEntry).toBeEnabled();
+    fireEvent.click(realPersonEntry);
+    const realPersonDialog = await screen.findByRole("dialog", { name: "明星真人素材" });
+    expect(within(realPersonDialog).getByText("创建 H5 认证链接")).toBeInTheDocument();
+    fireEvent.click(within(realPersonDialog).getByRole("button", { name: "关闭明星素材" }));
 
     // 等真实云端素材加载完成。Tab 计数会变为「图片 3 / 视频 2 / 音频 0」。
     const videoTab = await screen.findByRole("tab", { name: /视频\s*2/ });

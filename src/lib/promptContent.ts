@@ -1,19 +1,27 @@
+import { Editor } from "@tiptap/core";
 import type { ExplicitMediaInput, MediaReferenceTarget, MediaType, PromptSegment } from "./backend";
 import {
   AUTO_DETECT_DEBOUNCE_MS,
+  AUTO_MENTION_FRESH_MS,
   ambiguousCandidatesForPattern,
   autoMentionAliasForCandidate,
   buildAutoMentionAliases,
   confirmAmbiguousMentionChips,
   countAmbiguousAutoMentionPatterns,
   createMentionChipElement,
-  insertPlainTextAtSelection,
   markStaleMentionChips,
   normalizeAutoMentionText,
   resolvePromptAutoMentions,
   type AutoMentionResolutionResult,
   type PromptAutoMentionCandidate,
 } from "./promptAutoMention";
+import {
+  createPromptTiptapExtensions,
+  plainTextToTiptapContent,
+  promptDocumentFromTiptapJson,
+  promptDocumentToTiptapJson,
+  promptReferenceToTiptapNode,
+} from "./promptTiptap";
 
 export const PROMPT_AUTO_DETECT_DEBOUNCE_MS = AUTO_DETECT_DEBOUNCE_MS;
 
@@ -123,7 +131,7 @@ export type PromptPlainTextPreparation =
   | { readonly ok: false; readonly issues: readonly PromptContentIssue[] };
 
 export interface PromptContentEditorSession {
-  attach(element: HTMLDivElement | null): void;
+  attach(element: HTMLDivElement | null, attributes?: Readonly<Record<string, string>>): void;
   updateConnections(candidates: readonly PromptAutoMentionCandidate[]): void;
   acceptNativeInput(): PromptContentView;
   insertReference(candidate: PromptAutoMentionCandidate): PromptContentView;
@@ -559,6 +567,39 @@ function sameTarget(first: MediaReferenceTarget, second: MediaReferenceTarget): 
   return false;
 }
 
+function promptContentItemEqual(first: PromptContentItem, second: PromptContentItem): boolean {
+  if (first.kind !== second.kind) return false;
+  if (first.kind === "text") {
+    return second.kind === "text" && first.text === second.text;
+  }
+  if (first.kind === "pending_reference") {
+    return (
+      second.kind === "pending_reference" &&
+      first.normalizedPattern === second.normalizedPattern &&
+      first.displayText === second.displayText &&
+      first.candidateCount === second.candidateCount
+    );
+  }
+  if (second.kind !== "media_reference") return false;
+  return (
+    first.mentionId === second.mentionId &&
+    first.canvasNodeKey === second.canvasNodeKey &&
+    first.displayNameSnapshot === second.displayNameSnapshot &&
+    (first.learnedPattern ?? "") === (second.learnedPattern ?? "") &&
+    (first.aliasSnapshot ?? "") === (second.aliasSnapshot ?? "") &&
+    sameTarget(first.target, second.target)
+  );
+}
+
+/** 结构化比较两份 canonical document 是否等价，用于判断自动识别是否真正改动了内容。 */
+function promptDocumentsEqual(
+  first: PromptContentDocumentV1,
+  second: PromptContentDocumentV1,
+): boolean {
+  if (first.items.length !== second.items.length) return false;
+  return first.items.every((item, index) => promptContentItemEqual(item, second.items[index]!));
+}
+
 function viewFromDocument(
   document: PromptContentDocumentV1,
   connections: readonly PromptContentConnection[] = [],
@@ -652,19 +693,45 @@ function candidateTarget(candidate: PromptAutoMentionCandidate): MediaReferenceT
 }
 
 class PromptContentEditorSessionImplementation implements PromptContentEditorSession {
-  private element: HTMLDivElement | null = null;
+  private host: HTMLDivElement | null = null;
+  private editor: Editor | null = null;
   private candidates: readonly PromptAutoMentionCandidate[] = [];
   private document: PromptContentDocumentV1 = EMPTY_DOCUMENT;
+  private readonly freshMentionIds = new Set<string>();
+  private readonly freshTimers = new Map<string, number>();
+  private readonly handlePaste = () => true;
 
-  attach(element: HTMLDivElement | null): void {
-    if (element == null) {
-      if (this.element != null) this.document = documentFromDom(this.element);
-      this.element = null;
+  attach(element: HTMLDivElement | null, attributes: Readonly<Record<string, string>> = {}): void {
+    if (this.host === element && this.editor != null) {
+      this.editor.setOptions({
+        editorProps: {
+          attributes: this.editorAttributes(attributes),
+          handlePaste: this.handlePaste,
+        },
+      });
       return;
     }
-    this.element = element;
-    renderDocument(element, this.document);
-    this.markStale();
+    if (this.editor != null) {
+      this.syncFromEditor();
+      this.editor.destroy();
+      this.editor = null;
+    }
+    this.host = element;
+    if (element == null) return;
+    this.editor = new Editor({
+      element,
+      extensions: createPromptTiptapExtensions("描述画面…输入 @ 或直接写素材名，自动引用素材"),
+      content: promptDocumentToTiptapJson(this.document, this.presentation()),
+      injectCSS: false,
+      editorProps: {
+        attributes: this.editorAttributes(attributes),
+        // 富文本粘贴由 React 外层统一转成 text/plain，再走素材自动识别。
+        handlePaste: this.handlePaste,
+      },
+      onUpdate: ({ editor }) => {
+        this.document = promptDocumentFromTiptapJson(editor.getJSON());
+      },
+    });
   }
 
   updateConnections(candidates: readonly PromptAutoMentionCandidate[]): void {
@@ -673,74 +740,158 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   acceptNativeInput(): PromptContentView {
-    if (this.element != null) this.document = documentFromDom(this.element);
+    this.syncFromEditor();
     return this.read();
   }
 
-  private withDom<T>(change: (element: HTMLDivElement) => T): T {
-    const element = this.element ?? document.createElement("div");
-    if (this.element == null) renderDocument(element, this.document);
-    const result = change(element);
-    this.document = documentFromDom(element);
-    return result;
+  private editorAttributes(attributes: Readonly<Record<string, string>>): Record<string, string> {
+    return {
+      class: "prompt-mention__input nodrag nowheel",
+      role: "textbox",
+      "aria-multiline": "true",
+      spellcheck: "true",
+      ...attributes,
+    };
+  }
+
+  private presentation() {
+    return {
+      connectedCanvasNodeKeys: new Set(this.candidates.map((candidate) => candidate.canvasNodeKey)),
+      freshMentionIds: this.freshMentionIds,
+    };
+  }
+
+  /**
+   * ProseMirror 的 DOMObserver 在真实输入中会先于外层 React onInput 完成；测试里的
+   * 直接 DOM 写入没有 beforeinput，因此在读取前显式 flush，确保兼容既有测试工具。
+   */
+  private flushDomObserver(): void {
+    const view = this.editor?.view as
+      (Editor["view"] & { domObserver?: { flush(): void } }) | undefined;
+    view?.domObserver?.flush();
+  }
+
+  private syncFromEditor(): void {
+    if (this.editor == null) return;
+    // IME 组合期间不读取/不强制同步 DOM：候选拼音尚未提交，提前 flush 会被
+    // ProseMirror 当作已完成文本提交，破坏输入法组合状态。组合结束后的 input
+    // 事件会再次触发同步。
+    if (this.editor.view.composing) return;
+    this.flushDomObserver();
+    this.document = promptDocumentFromTiptapJson(this.editor.getJSON());
+  }
+
+  private applyDocument(preserveSelection = true): void {
+    if (this.editor == null) return;
+    const selection = this.editor.state.selection;
+    this.editor.commands.setContent(
+      promptDocumentToTiptapJson(this.document, this.presentation()),
+      { emitUpdate: false, errorOnInvalidContent: true },
+    );
+    this.document = promptDocumentFromTiptapJson(this.editor.getJSON());
+    if (!preserveSelection) return;
+    const max = Math.max(1, this.editor.state.doc.content.size - 1);
+    const from = Math.min(selection.from, max);
+    const to = Math.min(Math.max(selection.to, from), max);
+    this.editor.commands.setTextSelection({ from, to });
   }
 
   private notify(): void {
-    this.element?.dispatchEvent(new Event("input", { bubbles: true }));
+    this.editor?.view.dom.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  private markStale(): void {
-    if (this.element == null) return;
-    markStaleMentionChips(
-      this.element,
-      new Set(this.candidates.map((candidate) => candidate.canvasNodeKey)),
-    );
+  private rememberFreshMentions(element: HTMLElement): void {
+    const ids = Array.from(
+      element.querySelectorAll<HTMLElement>("[data-mention-id][data-auto='true']"),
+    )
+      .map((chip) => chip.dataset["mentionId"] ?? "")
+      .filter(Boolean);
+    for (const id of ids) {
+      this.freshMentionIds.add(id);
+      const previous = this.freshTimers.get(id);
+      if (previous != null) window.clearTimeout(previous);
+      const timer = window.setTimeout(() => {
+        this.freshTimers.delete(id);
+        this.freshMentionIds.delete(id);
+        const selector = `[data-mention-id="${CSS.escape(id)}"]`;
+        const chip = this.editor?.view.dom.querySelector<HTMLElement>(selector);
+        chip?.classList.remove("is-fresh");
+        if (chip) delete chip.dataset["auto"];
+      }, AUTO_MENTION_FRESH_MS);
+      this.freshTimers.set(id, timer);
+    }
+  }
+
+  private transformDocumentWithDom<T>(
+    change: (element: HTMLDivElement) => T,
+    syncFromEditor = true,
+    options?: { readonly forceApply?: boolean },
+  ): T {
+    if (syncFromEditor) this.syncFromEditor();
+    const element = document.createElement("div");
+    renderDocument(element, this.document);
+    const result = change(element);
+    this.rememberFreshMentions(element);
+    const next = documentFromDom(element);
+    // 没有实际内容变化时不要重建编辑器 DOM：重建（setContent）会打断 IME 组合，
+    // 把未完成的拼音候选提前提交成错乱字符，并重置光标位置导致删除方向错乱。
+    const changed = !promptDocumentsEqual(next, this.document);
+    if (changed || options?.forceApply) {
+      this.document = next;
+      this.applyDocument();
+    }
+    return result;
   }
 
   insertReference(candidate: PromptAutoMentionCandidate): PromptContentView {
-    this.withDom((element) => {
-      const candidateIndex = this.candidates.findIndex(
-        (entry) => entry.canvasNodeKey === candidate.canvasNodeKey,
-      );
-      const hasSameName =
-        ambiguousCandidatesForPattern(this.candidates, normalizeAutoMentionText(candidate.name))
-          .length > 1;
-      const chip = createMentionChipElement(candidate, {
-        ...(hasSameName && candidateIndex >= 0
-          ? { alias: autoMentionAliasForCandidate(this.candidates, candidateIndex) }
-          : {}),
-      });
-      const anchor = element.ownerDocument.createTextNode("\u200b");
-      const selection = element.ownerDocument.defaultView?.getSelection() ?? null;
-      const range = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
-      if (range != null && element.contains(range.startContainer)) {
-        range.deleteContents();
-        range.insertNode(chip);
-        chip.after(anchor);
-        range.setStartAfter(anchor);
-        range.collapse(true);
-        selection?.removeAllRanges();
-        selection?.addRange(range);
-      } else {
-        element.append(chip, anchor);
-      }
-    });
+    const candidateIndex = this.candidates.findIndex(
+      (entry) => entry.canvasNodeKey === candidate.canvasNodeKey,
+    );
+    const hasSameName =
+      ambiguousCandidatesForPattern(this.candidates, normalizeAutoMentionText(candidate.name))
+        .length > 1;
+    const reference: PromptContentMediaReferenceItem = {
+      kind: "media_reference",
+      mentionId: `mention-${globalThis.crypto.randomUUID()}`,
+      canvasNodeKey: candidate.canvasNodeKey,
+      target: candidateTarget(candidate),
+      displayNameSnapshot: candidate.name,
+      ...(hasSameName && candidateIndex >= 0
+        ? { aliasSnapshot: autoMentionAliasForCandidate(this.candidates, candidateIndex) }
+        : {}),
+    };
+    if (this.editor != null) {
+      this.editor.chain().focus().insertContent(promptReferenceToTiptapNode(reference)).run();
+      this.syncFromEditor();
+    } else {
+      this.document = {
+        schema: "prompt-content",
+        version: 1,
+        items: [...this.document.items, reference],
+      };
+    }
     this.notify();
-    this.element?.focus();
+    this.editor?.commands.focus();
     return this.read();
   }
 
   pastePlainText(text: string): AutoMentionResolutionResult {
-    const pending = this.withDom((element) => {
-      insertPlainTextAtSelection(element, text);
-      return element.querySelectorAll("[data-ambiguous-pattern]").length;
-    });
+    if (this.editor != null) {
+      const content = plainTextToTiptapContent(text);
+      if (content.length > 0) this.editor.commands.insertContent(content);
+      this.syncFromEditor();
+    } else {
+      const items = [...this.document.items];
+      appendText(items, text);
+      this.document = { schema: "prompt-content", version: 1, items };
+    }
+    const pending = this.document.items.filter((item) => item.kind === "pending_reference").length;
     this.notify();
     return { converted: 0, ambiguous: 0, pending };
   }
 
   autoResolve(options?: { readonly fresh?: boolean }): AutoMentionResolutionResult {
-    const result = this.withDom((element) =>
+    const result = this.transformDocumentWithDom((element) =>
       resolvePromptAutoMentions(element, this.candidates, {
         fresh: options?.fresh ?? true,
       }),
@@ -750,7 +901,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   confirmPending(pattern: string, candidate: PromptAutoMentionCandidate, alias: string): number {
-    const confirmed = this.withDom((element) =>
+    const confirmed = this.transformDocumentWithDom((element) =>
       confirmAmbiguousMentionChips(element, pattern, candidate, alias),
     );
     if (confirmed > 0) this.notify();
@@ -758,29 +909,43 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   reconcileConnections(): number {
+    this.syncFromEditor();
+    const element = document.createElement("div");
+    renderDocument(element, this.document);
     let reconciled = 0;
-    this.withDom((element) => {
+    for (const pending of element.querySelectorAll<HTMLElement>("[data-ambiguous-pattern]")) {
+      const pattern = pending.dataset["ambiguousPattern"] ?? "";
+      const options = ambiguousCandidatesForPattern(this.candidates, pattern);
+      if (options.length !== 1) continue;
+      const only = options[0]!;
+      reconciled += confirmAmbiguousMentionChips(element, pattern, only.candidate, only.alias);
+    }
+    if (reconciled > 0) {
+      this.rememberFreshMentions(element);
+      this.document = documentFromDom(element);
+      this.applyDocument();
+    } else if (this.editor != null) {
+      // 只改变断线展示时直接更新 node DOM，避免替换 atom 节点和打断当前选区。
       markStaleMentionChips(
-        element,
+        this.editor.view.dom,
         new Set(this.candidates.map((candidate) => candidate.canvasNodeKey)),
       );
-      for (const pending of element.querySelectorAll<HTMLElement>("[data-ambiguous-pattern]")) {
-        const pattern = pending.dataset["ambiguousPattern"] ?? "";
-        const options = ambiguousCandidatesForPattern(this.candidates, pattern);
-        if (options.length !== 1) continue;
-        const only = options[0]!;
-        reconciled += confirmAmbiguousMentionChips(element, pattern, only.candidate, only.alias);
-      }
-    });
+    }
     if (reconciled > 0) this.notify();
     return reconciled;
   }
 
   replaceText(text: string): AutoMentionResolutionResult {
-    const result = this.withDom((element) => {
-      element.textContent = text;
-      return resolvePromptAutoMentions(element, this.candidates, { fresh: true });
-    });
+    this.document = {
+      schema: "prompt-content",
+      version: 1,
+      items: text ? [{ kind: "text", text }] : [],
+    };
+    const result = this.transformDocumentWithDom(
+      (element) => resolvePromptAutoMentions(element, this.candidates, { fresh: true }),
+      false,
+      { forceApply: true },
+    );
     this.notify();
     return result;
   }
@@ -798,26 +963,28 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   mentionQueryAtCaret(): string | null {
-    return this.element == null ? null : (domMentionQueryAtCaret(this.element)?.query ?? null);
+    if (this.editor == null) return null;
+    this.flushDomObserver();
+    return domMentionQueryAtCaret(this.editor.view.dom as HTMLDivElement)?.query ?? null;
   }
 
   removeMentionQueryAtCaret(): boolean {
-    if (this.element == null) return false;
-    const context = domMentionQueryAtCaret(this.element);
-    const selection = this.element.ownerDocument.defaultView?.getSelection() ?? null;
-    if (context == null || selection == null) return false;
-    context.range.deleteContents();
-    context.range.collapse(true);
-    selection.removeAllRanges();
-    selection.addRange(context.range);
-    this.document = documentFromDom(this.element);
+    if (this.editor == null) return false;
+    const context = domMentionQueryAtCaret(this.editor.view.dom as HTMLDivElement);
+    if (context == null) return false;
+    const view = this.editor.view;
+    const from = view.posAtDOM(context.range.startContainer, context.range.startOffset, -1);
+    const to = view.posAtDOM(context.range.endContainer, context.range.endOffset, 1);
+    if (from >= to) return false;
+    this.editor.chain().focus().deleteRange({ from, to }).run();
+    this.syncFromEditor();
     return true;
   }
 
   pendingAt(target: EventTarget | null) {
-    if (!(target instanceof HTMLElement) || this.element == null) return null;
+    if (!(target instanceof HTMLElement) || this.host == null) return null;
     const pending = target.closest<HTMLElement>("[data-ambiguous-pattern]");
-    if (pending == null || !this.element.contains(pending)) return null;
+    if (pending == null || !this.host.contains(pending)) return null;
     const normalizedPattern = pending.dataset["ambiguousPattern"];
     if (!normalizedPattern) return null;
     return {
@@ -827,17 +994,15 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   firstPending() {
-    const pending = this.element?.querySelector<HTMLElement>("[data-ambiguous-pattern]");
+    const pending = this.host?.querySelector<HTMLElement>("[data-ambiguous-pattern]");
     return pending == null ? null : this.pendingAt(pending);
   }
 
   freshResolvedNames(): readonly string[] {
-    if (this.element == null) return [];
+    if (this.host == null) return [];
     return Array.from(
       new Set(
-        Array.from(
-          this.element.querySelectorAll<HTMLElement>("[data-mention-id][data-auto='true']"),
-        )
+        Array.from(this.host.querySelectorAll<HTMLElement>("[data-mention-id][data-auto='true']"))
           .map((chip) => chip.dataset["displayName"] ?? "")
           .filter(Boolean),
       ),
@@ -863,9 +1028,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     const decoded = decodePersistedPromptContent(persisted);
     if (decoded == null) return this.read();
     this.document = decoded;
-    if (this.element != null) {
-      renderDocument(this.element, decoded);
-      this.markStale();
+    this.freshMentionIds.clear();
+    if (this.editor != null) {
+      this.applyDocument(false);
       this.notify();
     }
     return this.read();
@@ -916,7 +1081,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   focusIssue(issue: PromptContentIssue): boolean {
-    if (this.element == null) return false;
+    if (this.host == null) return false;
     const selector =
       issue.kind === "pending_reference"
         ? `[data-ambiguous-pattern="${CSS.escape(issue.normalizedPattern)}"]`
@@ -924,7 +1089,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
           ? `[data-mention-id="${CSS.escape(issue.mentionId)}"]`
           : null;
     if (selector == null) return false;
-    const target = this.element.querySelector<HTMLElement>(selector);
+    const target = this.host.querySelector<HTMLElement>(selector);
     if (target == null) return false;
     target.focus();
     target.click();

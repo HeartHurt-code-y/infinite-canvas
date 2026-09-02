@@ -1,5 +1,6 @@
 use std::{
-    path::Path,
+    path::{Path, PathBuf},
+    process::Stdio,
     sync::{
         Arc,
         atomic::{AtomicU64, Ordering},
@@ -17,6 +18,7 @@ use uuid::Uuid;
 
 use super::{
     asset_library::{AssetLibrary, ImportStagedAsset},
+    composer::VideoCompositionService,
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     local_results::{format_bytes_per_sec, safe_file_stem},
@@ -40,6 +42,16 @@ const LEASE_URL_EXPIRY_SECS: i64 = 3600;
 
 /// 连通性测试探针对象的预签名 URL 有效期：只需覆盖一次立即发出的请求。
 const PROBE_URL_EXPIRY_SECS: i64 = 60;
+
+/// 摸鱼素材服务（POST /v1/assets 上游）支持的图片扩展名白名单。
+/// avif 等不在列表内的格式必须先转码为 webp 再导入，否则上游会以
+/// `[InvalidParameter] unsupported asset URL format` 或 `DownloadFailed` 拒绝。
+const SUPPORTED_IMPORT_IMAGE_EXTENSIONS: &[&str] =
+    &["jpeg", "jpg", "png", "webp", "bmp", "tiff", "gif", "heic"];
+
+/// Windows 下隐藏 ffmpeg 子进程的控制台窗口，避免转码时弹出黑框。
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 专用于 TOS 预签名请求的 HTTP 客户端。
 ///
@@ -65,6 +77,8 @@ pub struct StagingService {
     storage: Arc<Storage>,
     credentials: CredentialStore,
     assets: AssetLibrary,
+    /// 共享 FFmpeg 引擎：素材导入遇到不支持格式（如 avif）时用于本地转码。
+    composer: VideoCompositionService,
     client: reqwest::Client,
 }
 
@@ -80,6 +94,7 @@ impl StagingService {
         storage: Arc<Storage>,
         credentials: CredentialStore,
         assets: AssetLibrary,
+        composer: VideoCompositionService,
     ) -> BackendResult<Self> {
         let client = build_presign_http_client().map_err(|error| {
             BackendError::validation(
@@ -91,6 +106,7 @@ impl StagingService {
             storage,
             credentials,
             assets,
+            composer,
             client,
         })
     }
@@ -360,6 +376,7 @@ impl StagingService {
                 public_url: lease.get_url.clone(),
                 media_type: job.media_type,
                 display_name: import_target.name.clone(),
+                group_id: import_target.group_id,
             })
             .await;
         let identity = match imported {
@@ -413,14 +430,30 @@ impl StagingService {
         let credentials = TosCredentials::parse(&self.credentials.get(credential_ref)?)?;
 
         let local_path = Path::new(&job.local_path);
-        let metadata = tokio::fs::metadata(local_path).await?;
-        if !metadata.is_file() {
+        let source_metadata = tokio::fs::metadata(local_path).await?;
+        if !source_metadata.is_file() {
             return Err(BackendError::validation(
                 "staging input must be a readable file",
                 json!({ "localPath": job.local_path }),
             ));
         }
-        let (mime_type, extension) = detect_local_media(local_path, job.media_type).await?;
+        let (mut mime_type, mut extension) = detect_local_media(local_path, job.media_type).await?;
+        // avif 等摸鱼素材库不支持的图片扩展名 → 先用共享 FFmpeg 引擎转码为 webp，
+        // 再对转码产物做预签名上传与素材导入；转码临时文件随本函数退出自动清理。
+        let mut upload_path = local_path.to_path_buf();
+        let _converted_guard = if job.media_type == MediaType::Image
+            && !SUPPORTED_IMPORT_IMAGE_EXTENSIONS.contains(&extension.as_str())
+        {
+            let (temp_path, transcode_ext, transcode_mime) =
+                transcode_local_media(&self.composer, &job.id, local_path, &extension).await?;
+            mime_type = transcode_mime;
+            extension = transcode_ext;
+            upload_path = temp_path;
+            Some(TempFileGuard(Some(upload_path.clone())))
+        } else {
+            None
+        };
+        let metadata = tokio::fs::metadata(&upload_path).await?;
         job.bytes_total = Some(metadata.len());
         job.status = StagingStatus::Authorizing;
         job.object_key = Some(build_object_key(&config, &extension));
@@ -487,7 +520,7 @@ impl StagingService {
             object_key,
             metadata.len()
         );
-        let file = tokio::fs::File::open(local_path).await?;
+        let file = tokio::fs::File::open(&upload_path).await?;
         let upload_started = std::time::Instant::now();
         let uploaded = Arc::new(AtomicU64::new(0));
         let last_logged_bytes = Arc::new(AtomicU64::new(0));
@@ -650,6 +683,122 @@ async fn detect_local_media(path: &Path, expected: MediaType) -> BackendResult<(
         ));
     }
     Ok((mime, detected.extension().to_ascii_lowercase()))
+}
+
+/// 转码临时文件的自动清理守卫：作用域结束时删除临时文件，成功与失败路径一致。
+struct TempFileGuard(Option<PathBuf>);
+
+impl Drop for TempFileGuard {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
+}
+
+/// 将摸鱼素材库不支持的图片格式（如 avif）转码为 webp。
+///
+/// 复用 `VideoCompositionService` 管理的 FFmpeg 引擎（首次使用自动下载官方独立构建），
+/// 避免为转码单独下载二进制。输出写入系统临时目录，由调用方负责清理。
+/// 返回 `(输出路径, 扩展名, MIME)`。
+async fn transcode_local_media(
+    composer: &VideoCompositionService,
+    job_id: &str,
+    source: &Path,
+    source_ext: &str,
+) -> BackendResult<(PathBuf, String, String)> {
+    let ffmpeg = composer.ensure_ffmpeg().await?;
+    let output = std::env::temp_dir().join(format!(
+        "infinite-canvas-staging-{}-{}.webp",
+        job_id,
+        Uuid::new_v4()
+    ));
+    info!(
+        "[staging] 导入素材转码: jobId={}, sourceExt={}, 目标格式=webp, 输出={}",
+        job_id,
+        source_ext,
+        output.display()
+    );
+    let started = std::time::Instant::now();
+    let mut command = tokio::process::Command::new(&ffmpeg);
+    command
+        .arg("-y")
+        .arg("-hide_banner")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-i")
+        .arg(source)
+        .arg("-c:v")
+        .arg("libwebp")
+        .arg("-quality")
+        .arg("90")
+        .arg(&output)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    // 转码加超时保护：ffmpeg 意外挂起（损坏文件、杀软占用等）时不能把导入
+    // 任务永久卡在「准备中」，到点后杀掉子进程并按失败处理。
+    const TRANSCODE_TIMEOUT_SECS: u64 = 120;
+    let mut child = command.spawn()?;
+    let mut stderr_reader = tokio::io::BufReader::new(child.stderr.take().ok_or_else(|| {
+        BackendError::protocol(
+            "ffmpeg media transcode failed",
+            json!({ "jobId": job_id, "reason": "stderr pipe unavailable" }),
+        )
+    })?);
+    let stderr_task = tauri::async_runtime::spawn(async move {
+        use tokio::io::AsyncReadExt as _;
+        let mut buf = String::new();
+        let _ = stderr_reader.read_to_string(&mut buf).await;
+        buf
+    });
+    let status = match tokio::time::timeout(
+        std::time::Duration::from_secs(TRANSCODE_TIMEOUT_SECS),
+        child.wait(),
+    )
+    .await
+    {
+        Ok(status) => status.inspect_err(|_error| {
+            let _ = std::fs::remove_file(&output);
+        })?,
+        Err(_elapsed) => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            let _ = std::fs::remove_file(&output);
+            let stderr = stderr_task.await.unwrap_or_default();
+            return Err(BackendError::protocol(
+                "ffmpeg media transcode timed out",
+                json!({
+                    "jobId": job_id,
+                    "sourceExt": source_ext,
+                    "timeoutSecs": TRANSCODE_TIMEOUT_SECS,
+                    "stderr": stderr.trim(),
+                }),
+            ));
+        }
+    };
+    let stderr = stderr_task.await.unwrap_or_default();
+    if !status.success() {
+        let _ = std::fs::remove_file(&output);
+        return Err(BackendError::protocol(
+            "ffmpeg media transcode failed",
+            json!({
+                "jobId": job_id,
+                "sourceExt": source_ext,
+                "exitCode": status.code(),
+                "stderr": stderr.trim(),
+            }),
+        ));
+    }
+    info!(
+        "[staging] 导入素材转码完成: jobId={}, 输出={}, 耗时 {}ms",
+        job_id,
+        output.display(),
+        started.elapsed().as_millis()
+    );
+    Ok((output, "webp".to_string(), "image/webp".to_string()))
 }
 
 fn build_object_key(config: &TosStagingConfig, extension: &str) -> String {

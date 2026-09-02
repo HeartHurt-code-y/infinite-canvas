@@ -1602,6 +1602,7 @@ mod tests {
                 Some(StagingAssetImportTarget {
                     provider_connection_id: "company".into(),
                     name: None,
+                    group_id: None,
                 }),
             ))
             .expect("insert cloud asset");
