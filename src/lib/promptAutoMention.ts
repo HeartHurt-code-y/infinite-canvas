@@ -104,11 +104,19 @@ const AUTO_ALIAS_REFERENCE_KIND_LABEL: Readonly<Record<string, string>> = {
   audio: "参考音频",
 };
 
-/** 单个候选构建出的全部别名：主别名（图片1…）+ 参考变体（参考图1…）。 */
+/** 短别名：图片1 → 图N 的更短写法，便于快速手写绑定素材。 */
+const AUTO_ALIAS_SHORT_KIND_LABEL: Readonly<Record<string, string>> = {
+  image: "图",
+  video: "视",
+  audio: "音",
+};
+
+/** 单个候选构建出的全部别名：主别名（图片1…）+ 参考变体（参考图1…）+ 短别名（图1…）。 */
 interface AutoMentionAliasRecord {
   readonly candidateIndex: number;
   readonly label: string;
   readonly referenceLabel: string;
+  readonly shortLabel: string;
 }
 
 function buildAutoMentionAliasRecords(
@@ -145,7 +153,11 @@ function buildAutoMentionAliasRecords(
       `${AUTO_ALIAS_REFERENCE_KIND_LABEL[candidate.kind] ?? "参考素材"}${ordinal}`,
       candidateIndex,
     );
-    return { candidateIndex, label, referenceLabel };
+    const shortLabel = uniqueLabel(
+      `${AUTO_ALIAS_SHORT_KIND_LABEL[candidate.kind] ?? "素"}${ordinal}`,
+      candidateIndex,
+    );
+    return { candidateIndex, label, referenceLabel, shortLabel };
   });
 }
 
@@ -181,7 +193,7 @@ function registerAutoMentionAliases(
   candidates: readonly PromptAutoMentionCandidate[],
 ): void {
   for (const record of buildAutoMentionAliasRecords(candidates)) {
-    for (const label of [record.label, record.referenceLabel]) {
+    for (const label of [record.label, record.referenceLabel, record.shortLabel]) {
       const normalized = normalizeAutoMentionText(label);
       const owners = ownersByText.get(normalized) ?? new Set<number>();
       owners.add(record.candidateIndex);

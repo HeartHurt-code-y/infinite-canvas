@@ -392,6 +392,40 @@ describe("prompt content interface", () => {
     });
   });
 
+  it("recognizes a typed 图N short alias as a mention chip", () => {
+    // 用户手写「图1」这类短别名时，也应自动识别为媒体引用。
+    const first = assetCandidate("asset-node-1", "角色.png", "asset-1");
+    const second = assetCandidate("asset-node-2", "背景.png", "asset-2");
+    const session = createPromptContentEditorSession([first, second]);
+    const element = document.createElement("div");
+    session.attach(element);
+    session.restore({
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "让 图1 跟随 图2 移动" }],
+    });
+
+    expect(session.autoResolve({ fresh: true })).toMatchObject({
+      converted: 2,
+      ambiguous: 0,
+      pending: 0,
+    });
+    const references = session
+      .snapshot()
+      .items.filter((item) => item.kind === "media_reference");
+    expect(references).toHaveLength(2);
+    expect(references[0]).toMatchObject({
+      kind: "media_reference",
+      canvasNodeKey: "asset-node-1",
+      target: { assetId: "asset-1" },
+    });
+    expect(references[1]).toMatchObject({
+      kind: "media_reference",
+      canvasNodeKey: "asset-node-2",
+      target: { assetId: "asset-2" },
+    });
+  });
+
   it("converts a typed @别名 split across text items into one mention chip", () => {
     // 回归：手打 @ 后 IME 输入中文时，@ 与别名可能落在不同的文本项/文本节点里，
     // auto-resolve 仍应把「@图片1」整体转成单个引用 chip，且不残留多余的 @。
