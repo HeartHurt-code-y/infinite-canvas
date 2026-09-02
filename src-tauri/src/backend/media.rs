@@ -40,6 +40,8 @@ struct ResolveTargetRequest<'a> {
     role: &'a str,
     display_name: &'a str,
     prompt_segment_index: Option<usize>,
+    /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
+    content_index: Option<u32>,
 }
 
 impl MediaResolver {
@@ -96,73 +98,132 @@ impl MediaResolver {
                     mention_id,
                     target,
                     display_name_snapshot,
+                    type_position: explicit_type_position,
+                    content_index: explicit_content_index,
                 } => {
                     let media_type = target.media_type();
-                    let type_position = match plan_target_resolution(
-                        &resolved_targets,
-                        target,
-                        &images,
-                        &videos,
-                        &audios,
-                    ) {
-                        TargetResolutionPlan::Reuse(type_position) => {
-                            info!(
-                                "[resolve] 复用已解析提示词媒体引用: taskId={}, 片段 #{}, {}{}, 名称={}",
-                                task.id,
-                                segment_index,
-                                media_type.position_label(),
-                                type_position,
-                                display_name_snapshot
-                            );
-                            type_position
-                        }
-                        TargetResolutionPlan::Resolve(type_position) => {
-                            let role = default_reference_role(media_type).to_string();
-                            let (resolved, lease) = self
-                                .resolve_target(
-                                    task,
-                                    attempt_id,
-                                    ResolveTargetRequest {
-                                        target,
-                                        type_position,
-                                        role: &role,
-                                        display_name: display_name_snapshot,
-                                        prompt_segment_index: Some(segment_index),
-                                    },
-                                )
-                                .await
-                                .map_err(|error| {
-                                    BackendError::protocol(
-                                        "media reference resolution failed",
-                                        json!({
-                                            "mentionId": mention_id,
-                                            "segmentIndex": segment_index,
-                                            "mediaType": media_type,
-                                            "typePosition": type_position,
-                                            "target": target,
-                                            "sourceError": error.runtime_record()
-                                        }),
-                                    )
-                                })?;
-                            if let Some(lease) = lease {
-                                staging_leases.push(lease);
+                    // 统一编号来源：优先采用前端按输入顺序显式分配的同类序号（图片N）。
+                    // 缺失时回退到按出现顺序分配（兼容旧请求 / 纯文本迁移）。
+                    let type_position = match explicit_type_position {
+                        Some(position) => match resolved_type_position(&resolved_targets, target) {
+                            Some(existing) => {
+                                info!(
+                                    "[resolve] 复用已解析提示词媒体引用: taskId={}, 片段 #{}, {}{}, 名称={}",
+                                    task.id,
+                                    segment_index,
+                                    media_type.position_label(),
+                                    existing,
+                                    display_name_snapshot
+                                );
+                                existing
                             }
-                            info!(
-                                "[resolve] 提示词引用解析成功: taskId={}, 片段 #{}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
-                                task.id,
-                                segment_index,
-                                media_type.position_label(),
-                                type_position,
-                                display_name_snapshot,
-                                role,
-                                resolved.byte_size,
-                                resolved.mime_type
-                            );
-                            resolved_targets.insert(target.clone(), type_position);
-                            push_media(resolved, &mut images, &mut videos, &mut audios);
-                            type_position
-                        }
+                            None => {
+                                info!(
+                                    "[resolve] 前端显式指定媒体序号: taskId={}, 片段 #{}, {}{}, 名称={}",
+                                    task.id,
+                                    segment_index,
+                                    media_type.position_label(),
+                                    position,
+                                    display_name_snapshot
+                                );
+                                *position
+                            }
+                        },
+                        None => match plan_target_resolution(
+                            &resolved_targets,
+                            target,
+                            &images,
+                            &videos,
+                            &audios,
+                        ) {
+                            TargetResolutionPlan::Reuse(type_position) => {
+                                info!(
+                                    "[resolve] 复用已解析提示词媒体引用: taskId={}, 片段 #{}, {}{}, 名称={}",
+                                    task.id,
+                                    segment_index,
+                                    media_type.position_label(),
+                                    type_position,
+                                    display_name_snapshot
+                                );
+                                type_position
+                            }
+                            TargetResolutionPlan::Resolve(type_position) => {
+                                info!(
+                                    "[resolve] 按出现顺序分配媒体序号: taskId={}, 片段 #{}, {}{}, 名称={}",
+                                    task.id,
+                                    segment_index,
+                                    media_type.position_label(),
+                                    type_position,
+                                    display_name_snapshot
+                                );
+                                type_position
+                            }
+                        },
                     };
+                    if !resolved_targets.contains_key(target) {
+                        // 防错：前端显式编号与已有目标撞号 → 报错而非静默错位。
+                        if position_claimed_by_other(
+                            &resolved_targets,
+                            media_type,
+                            type_position,
+                            target,
+                        ) {
+                            return Err(BackendError::validation(
+                                "media reference position conflict: frontend assigned 图片N that is already claimed by another target",
+                                json!({
+                                    "mentionId": mention_id,
+                                    "segmentIndex": segment_index,
+                                    "mediaType": media_type,
+                                    "typePosition": type_position,
+                                    "target": target,
+                                }),
+                            ));
+                        }
+                        let role = default_reference_role(media_type).to_string();
+                        let (resolved, lease) = self
+                            .resolve_target(
+                                task,
+                                attempt_id,
+                                ResolveTargetRequest {
+                                    target,
+                                    type_position,
+                                    role: &role,
+                                    display_name: display_name_snapshot,
+                                    prompt_segment_index: Some(segment_index),
+                                    content_index: *explicit_content_index,
+                                },
+                            )
+                            .await
+                            .map_err(|error| {
+                                BackendError::protocol(
+                                    "media reference resolution failed",
+                                    json!({
+                                        "mentionId": mention_id,
+                                        "segmentIndex": segment_index,
+                                        "mediaType": media_type,
+                                        "typePosition": type_position,
+                                        "target": target,
+                                        "sourceError": error.runtime_record()
+                                    }),
+                                )
+                            })?;
+                        if let Some(lease) = lease {
+                            staging_leases.push(lease);
+                        }
+                        info!(
+                            "[resolve] 提示词引用解析成功: taskId={}, 片段 #{}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
+                            task.id,
+                            segment_index,
+                            media_type.position_label(),
+                            type_position,
+                            display_name_snapshot,
+                            role,
+                            resolved.byte_size,
+                            resolved.mime_type
+                        );
+                        resolved_targets.insert(target.clone(), type_position);
+                        push_media(resolved, &mut images, &mut videos, &mut audios);
+                    }
                     let marker = format!(
                         "[{}{}：{}]",
                         media_type.position_label(),
@@ -190,7 +251,27 @@ impl MediaResolver {
                 );
                 continue;
             }
-            let type_position = next_position(media_type, &images, &videos, &audios);
+            // 统一编号来源：优先采用前端按输入顺序显式分配的同类序号（图片N），
+            // 缺失时回退到按连接顺序分配。
+            let type_position = input
+                .type_position
+                .unwrap_or_else(|| next_position(media_type, &images, &videos, &audios));
+            // 防错：前端显式编号与已有目标撞号 → 报错而非静默错位。
+            if position_claimed_by_other(
+                &resolved_targets,
+                media_type,
+                type_position,
+                &input.target,
+            ) {
+                return Err(BackendError::validation(
+                    "explicit media position conflict: frontend assigned 图片N that is already claimed by another target",
+                    json!({
+                        "mediaType": media_type,
+                        "typePosition": type_position,
+                        "target": input.target,
+                    }),
+                ));
+            }
             let role = if input.role.trim().is_empty() {
                 default_reference_role(media_type)
             } else {
@@ -206,6 +287,7 @@ impl MediaResolver {
                         role,
                         display_name: &input.display_name_snapshot,
                         prompt_segment_index: None,
+                        content_index: input.content_index,
                     },
                 )
                 .await?;
@@ -239,6 +321,13 @@ impl MediaResolver {
             &operation_schema,
         )?;
 
+        // 统一输出顺序：按前端输入（连线）顺序（content_index）排列各类媒体，
+        // 保证 wan 的 media 数组与「图N」标签、content 数组与「图片N」标签一一对应。
+        // content_index 缺失时保持在解析顺序中的相对位置（稳定排序）。
+        sort_media_by_content_index(&mut images);
+        sort_media_by_content_index(&mut videos);
+        sort_media_by_content_index(&mut audios);
+
         Ok(ResolvedBundle {
             generation: ResolvedGeneration {
                 rendered_prompt,
@@ -265,6 +354,7 @@ impl MediaResolver {
             role,
             display_name,
             prompt_segment_index,
+            content_index,
         } = request;
         match target {
             MediaReferenceTarget::Asset {
@@ -323,6 +413,7 @@ impl MediaResolver {
                         bytes,
                         remote_reference,
                         prompt_segment_index,
+                        content_index,
                     },
                     None,
                 ))
@@ -367,6 +458,7 @@ impl MediaResolver {
                         bytes: needs_bytes.then_some(bytes),
                         remote_reference: (!needs_bytes).then_some(lease.get_url),
                         prompt_segment_index,
+                        content_index,
                     },
                     None,
                 ))
@@ -436,6 +528,7 @@ impl MediaResolver {
                         bytes: needs_bytes.then_some(bytes),
                         remote_reference,
                         prompt_segment_index,
+                        content_index,
                     },
                     lease,
                 ))
@@ -505,6 +598,24 @@ fn resolved_type_position(
     resolved_targets.get(target).copied()
 }
 
+/// 防错：检查某个 (media_type, type_position) 是否已被「另一个」目标占用。
+/// 若前端显式分配的「图片N」与已有解析目标撞号，说明素材引用错位，
+/// 直接报错而不是静默覆盖，避免请求参数里两个素材共用同一编号。
+fn position_claimed_by_other(
+    resolved_targets: &HashMap<MediaReferenceTarget, u32>,
+    media_type: MediaType,
+    type_position: u32,
+    target: &MediaReferenceTarget,
+) -> bool {
+    resolved_targets
+        .iter()
+        .any(|(other, other_position)| {
+            other != target
+                && *other_position == type_position
+                && other.media_type() == media_type
+        })
+}
+
 fn next_position(
     media_type: MediaType,
     images: &[ResolvedMedia],
@@ -530,6 +641,11 @@ fn push_media(
         MediaType::Video => videos.push(media),
         MediaType::Audio => audios.push(media),
     }
+}
+
+/// 按前端输入顺序（content_index）稳定排序；content_index 为 None 的排在末尾并保持相对顺序。
+fn sort_media_by_content_index(media: &mut Vec<ResolvedMedia>) {
+    media.sort_by_key(|item| item.content_index.unwrap_or(u32::MAX));
 }
 
 fn default_reference_role(media_type: MediaType) -> &'static str {
@@ -656,6 +772,7 @@ mod tests {
             bytes: None,
             remote_reference: None,
             prompt_segment_index: Some(0),
+            content_index: Some(type_position),
         }
     }
 
@@ -681,6 +798,7 @@ mod tests {
             bytes: None,
             remote_reference: None,
             prompt_segment_index: Some(0),
+            content_index: Some(1),
         });
         assert_eq!(
             next_position(MediaType::Video, &images, &videos, &audios),

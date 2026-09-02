@@ -63,6 +63,8 @@ pub struct ResolvedMedia {
     pub bytes: Option<Vec<u8>>,
     pub remote_reference: Option<String>,
     pub prompt_segment_index: Option<usize>,
+    /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
+    pub content_index: Option<u32>,
 }
 
 impl ResolvedMedia {
@@ -78,6 +80,7 @@ impl ResolvedMedia {
             "sha256": self.sha256,
             "fileName": self.file_name,
             "promptSegmentIndex": self.prompt_segment_index,
+            "contentIndex": self.content_index,
             "remoteReference": self.remote_reference.as_ref().map(|value| redact_url_string(value)),
         })
     }
@@ -137,6 +140,15 @@ impl ResolvedGeneration {
 pub enum ImageSource {
     Url(String),
     Base64(String),
+}
+
+/// 媒体类型的稳定排序权重：image < video < audio，用于 content 数组稳定排序。
+fn media_kind_rank(media_type: MediaType) -> u8 {
+    match media_type {
+        MediaType::Image => 0,
+        MediaType::Video => 1,
+        MediaType::Audio => 2,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1466,6 +1478,12 @@ fn build_video_body(
         request_field(&resolved.operation_schema, "contentContainer", "metadata")?;
 
     let mut content = Vec::new();
+    // 收集所有进入 content 的媒体项（提示词引用 + 未提及的显式媒体），
+    // 并按前端传入的 content_index（输入/连线顺序）升序排列。
+    // 这样 content 数组顺序与提示词中的「图片N」标签严格一致：
+    // 前端 UI 显示的图片1/图片2 与请求体 content[0]/content[1] 一一对应，
+    // 不再受提示词书写顺序影响，避免「删除/重加素材导致引用错位」。
+    let mut content_media = Vec::new();
     for item in &resolved.content {
         match item {
             // Seedance 文档：metadata.content 中的 type:"text" 条目会被忽略，
@@ -1481,13 +1499,7 @@ fn build_video_body(
                         json!({ "mediaType": media_type, "typePosition": type_position }),
                     )
                 })?;
-                let reference = media.remote_reference.as_ref().ok_or_else(|| {
-                    BackendError::validation(
-                        "video media input has no remote-readable reference",
-                        media.archive(),
-                    )
-                })?;
-                content.push(video_media_content(media, reference));
+                content_media.push(media);
             }
         }
     }
@@ -1498,6 +1510,26 @@ fn build_video_body(
         .chain(&resolved.audios)
         .filter(|media| media.prompt_segment_index.is_none())
     {
+        content_media.push(media);
+    }
+    // 去重：同一 target（type_position）可能被多次引用，content 里只保留一次。
+    content_media.sort_by(|a, b| {
+        media_kind_rank(a.media_type)
+            .cmp(&media_kind_rank(b.media_type))
+            .then(a.type_position.cmp(&b.type_position))
+            .then(a.content_index.unwrap_or(u32::MAX).cmp(&b.content_index.unwrap_or(u32::MAX)))
+    });
+    content_media.dedup_by(|a, b| {
+        a.media_type == b.media_type && a.type_position == b.type_position
+    });
+    // 按前端输入顺序（content_index）排列；缺失时保持在已解析顺序中的相对位置。
+    content_media.sort_by(|a, b| match (a.content_index, b.content_index) {
+        (Some(ai), Some(bi)) => ai.cmp(&bi),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => std::cmp::Ordering::Equal,
+    });
+    for media in content_media {
         let reference = media.remote_reference.as_ref().ok_or_else(|| {
             BackendError::validation(
                 "video media input has no remote-readable reference",
@@ -2220,6 +2252,7 @@ mod tests {
             bytes: None,
             remote_reference: Some(url.into()),
             prompt_segment_index,
+            content_index: Some(type_position),
         }
     }
 

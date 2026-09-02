@@ -175,6 +175,13 @@ pub enum PromptSegment {
         mention_id: String,
         target: MediaReferenceTarget,
         display_name_snapshot: String,
+        /// 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。
+        /// 由前端显式携带，保证 UI 显示与请求体编号一致；缺失时回退到按出现顺序分配。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        type_position: Option<u32>,
+        /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content_index: Option<u32>,
     },
 }
 
@@ -223,6 +230,12 @@ pub struct ExplicitMediaInput {
     pub target: MediaReferenceTarget,
     pub role: String,
     pub display_name_snapshot: String,
+    /// 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub type_position: Option<u32>,
+    /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content_index: Option<u32>,
 }
 
 fn default_generation_count() -> u32 {
@@ -852,6 +865,8 @@ mod tests {
                 canvas_node_key: Some("asset-node-7".into()),
             },
             display_name_snapshot: "角色正面".into(),
+            type_position: None,
+            content_index: None,
         };
         assert_eq!(
             serde_json::to_value(segment).expect("serialize"),
@@ -911,7 +926,9 @@ mod tests {
                         "mediaType": "image",
                         "canvasNodeKey": "asset-node-7"
                     },
-                    "displayNameSnapshot": "角色正面"
+                    "displayNameSnapshot": "角色正面",
+                    "typePosition": 1,
+                    "contentIndex": 1
                 },
                 {
                     "kind": "media_reference",
@@ -934,7 +951,9 @@ mod tests {
                     "mediaType": "image"
                 },
                 "role": "reference_image",
-                "displayNameSnapshot": "旧版素材"
+                "displayNameSnapshot": "旧版素材",
+                "typePosition": 2,
+                "contentIndex": 3
             }],
             "parameters": { "duration": 5 },
             "generationCount": 1
@@ -953,10 +972,14 @@ mod tests {
                     media_type: MediaType::Image,
                     canvas_node_key: Some(canvas_node_key),
                 },
+                type_position: Some(type_position),
+                content_index: Some(content_index),
                 ..
             } if provider_connection_id == "company"
                 && asset_id == "asset-1"
                 && canvas_node_key == "asset-node-7"
+                && *type_position == 1
+                && *content_index == 1
         ));
         assert!(matches!(
             &command.prompt[2],
@@ -977,5 +1000,7 @@ mod tests {
                 ..
             }
         ));
+        assert_eq!(command.explicit_media[0].type_position, Some(2));
+        assert_eq!(command.explicit_media[0].content_index, Some(3));
     }
 }

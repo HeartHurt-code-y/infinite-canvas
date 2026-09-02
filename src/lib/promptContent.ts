@@ -1057,6 +1057,32 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       view.referenceCount > 0 ||
       (context.connections.length > 0 && context.allowMediaOnly);
     if (!hasContent) return { ok: false, issues: [{ kind: "empty_prompt" }] };
+
+    // 统一媒体编号来源：按输入（连线）顺序，为每个连接分配
+    //   typePosition = 同类序号（图片N 的 N，与 UI「图片1/图片2」提示完全一致）；
+    //   contentIndex = 全局序号（决定请求体 metadata.content 数组顺序）。
+    // 这样即使提示词书写顺序与连线顺序不同，UI 显示的编号与请求体中的
+    // 「图片N」标签、content 数组位置三者始终一一对应，杜绝引用错位。
+    const positionByKey = new Map<string, { typePosition: number; contentIndex: number }>();
+    const kindCounts = new Map<MediaType, number>();
+    context.connections.forEach((connection, index) => {
+      const typePosition = (kindCounts.get(connection.kind) ?? 0) + 1;
+      kindCounts.set(connection.kind, typePosition);
+      positionByKey.set(connection.key, { typePosition, contentIndex: index + 1 });
+    });
+
+    const segments = view.segments.map((segment) => {
+      if (segment.kind !== "media_reference") return segment;
+      const canvasNodeKey = segment.target.canvasNodeKey;
+      const position = canvasNodeKey != null ? positionByKey.get(canvasNodeKey) : undefined;
+      if (position == null) return segment;
+      return {
+        ...segment,
+        typePosition: position.typePosition,
+        contentIndex: position.contentIndex,
+      };
+    });
+
     const mentionedCanvasNodeKeys = new Set(
       this.document.items.flatMap((item) =>
         item.kind === "media_reference" ? [item.canvasNodeKey] : [],
@@ -1064,15 +1090,21 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     );
     const explicitMedia: ExplicitMediaInput[] = context.connections
       .filter((connection) => !mentionedCanvasNodeKeys.has(connection.key))
-      .map((connection) => ({
-        target: structuredClone(connection.target),
-        role: "",
-        displayNameSnapshot: connection.name,
-      }));
+      .map((connection) => {
+        const position = positionByKey.get(connection.key);
+        return {
+          target: structuredClone(connection.target),
+          role: "",
+          displayNameSnapshot: connection.name,
+          ...(position
+            ? { typePosition: position.typePosition, contentIndex: position.contentIndex }
+            : {}),
+        };
+      });
     return {
       ok: true,
       frozen: {
-        segments: structuredClone(view.segments),
+        segments,
         explicitMedia,
         mentionedCanvasNodeKeys,
         plainText: view.plainText,

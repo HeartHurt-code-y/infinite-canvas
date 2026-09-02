@@ -977,6 +977,10 @@ export interface MediaReferencePromptSegment {
   readonly mentionId: string;
   readonly target: MediaReferenceTarget;
   readonly displayNameSnapshot: string;
+  /** 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。 */
+  readonly typePosition?: number;
+  /** 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。 */
+  readonly contentIndex?: number;
 }
 
 export type PromptSegment = TextPromptSegment | MediaReferencePromptSegment;
@@ -985,6 +989,10 @@ export interface ExplicitMediaInput {
   readonly target: MediaReferencePromptSegment["target"];
   readonly role: string;
   readonly displayNameSnapshot: string;
+  /** 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。 */
+  readonly typePosition?: number;
+  /** 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。 */
+  readonly contentIndex?: number;
 }
 
 export interface StartGenerationCommand {
