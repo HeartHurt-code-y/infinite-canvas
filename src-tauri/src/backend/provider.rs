@@ -292,7 +292,7 @@ impl ProviderRuntime {
         })
     }
 
-    fn resolve_asset_library(
+    pub(super) fn resolve_asset_library(
         &self,
         provider_connection_id: &str,
     ) -> BackendResult<ResolvedProviderContext> {
@@ -805,6 +805,61 @@ impl ProviderRuntime {
         let context = self.resolve_asset_library(provider_connection_id)?;
         self.send_raw_json_request(&context, method, path, query, body, &[])
             .await
+    }
+
+    /// 素材库专用 multipart 直传请求（海外平台素材上传：`POST /v1/assets/upload`）。
+    ///
+    /// 海外平台（如 konjac.ai）的素材导入不使用 JSON `url` 方式（旧端点 `/v1/assets/async`
+    /// 返回 404 Invalid URL），而是直接 multipart 上传文件字节。本方法复用素材库直连
+    /// 通道（供应商连接 + Bearer 素材库令牌），构造 `file` 文件 part 与文本字段 part。
+    pub(super) async fn raw_asset_multipart_request(
+        &self,
+        provider_connection_id: &str,
+        path: &str,
+        fields: &[(String, String)],
+        file_field: &str,
+        file_name: &str,
+        mime_type: &str,
+        file_bytes: Vec<u8>,
+    ) -> BackendResult<RawProviderResponse> {
+        let context = self.resolve_asset_library(provider_connection_id)?;
+        let url = endpoint(&context.base_url, path)?;
+        let sanitized_url = sanitize_url(&url);
+        let mut form = multipart::Form::new();
+        for (name, value) in fields {
+            form = form.text(name.clone(), value.clone());
+        }
+        let part = multipart::Part::bytes(file_bytes)
+            .file_name(file_name.to_string())
+            .mime_str(mime_type)
+            .map_err(BackendError::Transport)?;
+        form = form.part(file_field.to_string(), part);
+        let request = self
+            .client
+            .post(url)
+            .bearer_auth(&context.api_key)
+            .multipart(form);
+        info!(
+            "[provider] 发起直连请求: providerConnectionId={}, credentialReference={}, POST {} (multipart)",
+            context.provider_connection_id, context.api_key_ref, sanitized_url
+        );
+        let started_at = std::time::Instant::now();
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
+        info!(
+            "[provider] 收到直连响应: providerConnectionId={}, credentialReference={}, POST {sanitized_url} (multipart), HTTP {status}, 耗时 {}ms, 响应体 {} 字符",
+            context.provider_connection_id,
+            context.api_key_ref,
+            started_at.elapsed().as_millis(),
+            body.len()
+        );
+        Ok(RawProviderResponse {
+            status,
+            headers,
+            body,
+        })
     }
 
     /// 与 `raw_json_request` 相同，但支持附加自定义请求头。

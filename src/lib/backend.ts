@@ -621,6 +621,12 @@ export interface DeleteRealPersonAssetCommand {
   readonly id: string;
 }
 
+export interface DeleteAssetCommand {
+  readonly providerConnectionId: string;
+  /** Cloud `asset-xxx` ID; an `asset://` prefix is accepted and stripped. */
+  readonly id: string;
+}
+
 export interface DeleteRealPersonGroupCommand {
   readonly providerConnectionId: string;
   /** Positive platform group ID, not `remoteGroupId`. */
@@ -629,6 +635,8 @@ export interface DeleteRealPersonGroupCommand {
 
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
+  /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
+  deleteAsset(this: void, command: DeleteAssetCommand): Promise<string>;
 }
 
 export interface RealPersonAssetLibraryClient {
@@ -651,6 +659,13 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
         pageSize: query.pageSize ?? 100,
         name: query.name ?? null,
         groupId: query.groupId ?? null,
+      },
+    }),
+  deleteAsset: (command) =>
+    invokeDesktop("delete_asset", stringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
       },
     }),
   createRealPersonAuthLink: (command) =>
@@ -1090,16 +1105,6 @@ export interface OptimizedPromptResult {
   readonly rawModelOutput: string;
 }
 
-export interface PromptOptimizeClient {
-  optimize(this: void, command: OptimizeVideoPromptCommand): Promise<OptimizedPromptResult>;
-}
-
-export const promptOptimizeClient: PromptOptimizeClient = {
-  optimize: (command) =>
-    invokeDesktop("optimize_video_prompt", optimizedPromptResultSchema, { command }),
-};
-
-/** 独立提示词节点的文本模型调用；与旧版视频节点优化接口共用请求与响应合同。 */
 export interface PromptNodeClient {
   run(this: void, command: OptimizeVideoPromptCommand): Promise<OptimizedPromptResult>;
 }

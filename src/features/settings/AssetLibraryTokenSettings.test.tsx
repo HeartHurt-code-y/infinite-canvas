@@ -54,6 +54,7 @@ describe("AssetLibraryTokenSettings", () => {
         }}
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
+          deleteAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -83,6 +84,7 @@ describe("AssetLibraryTokenSettings", () => {
     };
     const libraryClient: AssetLibraryClient = {
       list: vi.fn(() => Promise.resolve([])),
+      deleteAsset: vi.fn(() => Promise.resolve("")),
     };
 
     const view = render(
@@ -131,6 +133,7 @@ describe("AssetLibraryTokenSettings", () => {
     };
     const libraryClient: AssetLibraryClient = {
       list: vi.fn(() => Promise.resolve(ASSETS)),
+      deleteAsset: vi.fn(() => Promise.resolve("")),
     };
     const onAssetsLoaded = vi.fn();
     const onPullStarted = vi.fn();
@@ -182,6 +185,7 @@ describe("AssetLibraryTokenSettings", () => {
         credentialClient={credentialClient}
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
+          deleteAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -206,6 +210,7 @@ describe("AssetLibraryTokenSettings", () => {
         }}
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
+          deleteAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,

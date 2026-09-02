@@ -244,10 +244,13 @@ describe("App workspace", () => {
     expect(within(videoNode!).getByRole("checkbox", { name: "生成音频" })).toBeChecked();
     expect(within(videoNode!).getByLabelText("输出格式")).toHaveValue("mp4");
     expect(within(videoNode!).getByLabelText("任务类型")).toHaveValue("auto");
-    expect(within(videoNode!).getByRole("checkbox", { name: "提示词优化" })).not.toBeChecked();
-    expect(within(videoNode!).getByLabelText("优化模式")).toBeInTheDocument();
-    expect(within(videoNode!).getByLabelText("优化文本模型供应商")).toBeInTheDocument();
-    expect(within(videoNode!).getByLabelText("优化文本模型")).toBeInTheDocument();
+    // 视频生成节点已移除提示词优化功能（交由独立「提示词生成与优化」节点承担）。
+    expect(
+      within(videoNode!).queryByRole("checkbox", { name: "提示词优化" }),
+    ).not.toBeInTheDocument();
+    expect(within(videoNode!).queryByLabelText("优化模式")).not.toBeInTheDocument();
+    expect(within(videoNode!).queryByLabelText("优化文本模型供应商")).not.toBeInTheDocument();
+    expect(within(videoNode!).queryByLabelText("优化文本模型")).not.toBeInTheDocument();
     expect(quantity).toHaveValue(1);
     expect(quantity).toHaveAttribute("max", "4");
     expect(quantity).toBeEnabled();
@@ -275,6 +278,10 @@ describe("App workspace", () => {
     expect(within(imageNode!).getByLabelText("质量")).toBeInTheDocument();
     expect(within(imageNode!).getByText("文生图")).toBeInTheDocument();
     expect(within(imageNode!).getByText("连接参考图片或视频后自动切换")).toBeInTheDocument();
+    // 图片生成节点已移除提示词优化功能（交由独立「提示词生成与优化」节点承担）。
+    expect(
+      within(imageNode!).queryByRole("checkbox", { name: "提示词优化" }),
+    ).not.toBeInTheDocument();
     expect(within(imageNode!).getByRole("button", { name: "开始图片生成" })).toHaveTextContent(
       "生成",
     );
@@ -457,6 +464,94 @@ describe("App workspace", () => {
     expect(pause).toHaveBeenCalledTimes(2);
     expect(video).toHaveProperty("currentTime", 0);
     expect(visual).not.toHaveClass("is-playing");
+  });
+
+  it("从素材详情弹窗两段式删除云端素材：确认后才调用删除接口并关闭弹窗", async () => {
+    const deleteCalls: Array<Record<string, unknown>> = [];
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-prod",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://47.94.250.161",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([
+            cloudAsset("moyu-prod", {
+              id: "asset-to-delete",
+              kind: "image",
+              name: "待删除素材",
+              previewUrl: "https://cdn.example.com/d.png",
+              assetUrl: "Asset://asset-to-delete",
+            }),
+          ]);
+        case "delete_asset":
+          deleteCalls.push((args?.["command"] as Record<string, unknown>) ?? {});
+          return Promise.resolve("asset-to-delete");
+        case "list_real_person_groups":
+          return Promise.resolve([]);
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+
+    const card = await screen.findByRole("button", { name: "预览图片素材详情：待删除素材" });
+    fireEvent.click(card);
+
+    const dialog = screen.getByRole("dialog", { name: "待删除素材" });
+    // 第一次点击「删除素材」只进入确认态，不触发删除接口。
+    fireEvent.click(within(dialog).getByRole("button", { name: "删除素材：待删除素材" }));
+    expect(deleteCalls).toHaveLength(0);
+    expect(
+      within(dialog).getByRole("button", { name: "确认删除素材：待删除素材" }),
+    ).toBeInTheDocument();
+    expect(
+      within(dialog).getByText("素材将从云端素材库永久删除，此操作不可撤销。"),
+    ).toBeInTheDocument();
+
+    // 第二次点击才真正删除：调用 delete_asset 并关闭弹窗。
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除素材：待删除素材" }));
+    expect(deleteCalls).toHaveLength(1);
+    expect(deleteCalls[0]).toEqual({
+      providerConnectionId: "moyu-prod",
+      id: "asset-to-delete",
+    });
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "待删除素材" })).not.toBeInTheDocument();
+    });
+    // 删除成功后重新拉取云端列表。
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([cmd]) => cmd === "list_assets").length,
+      ).toBeGreaterThan(1);
+    });
   });
 
   it("按国际版 data.items/preview_url 渲染真实素材并按媒体类型筛选", async () => {

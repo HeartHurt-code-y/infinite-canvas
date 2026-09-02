@@ -16,7 +16,7 @@ use super::{
     types::{
         AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
         ConnectivityTestResult, CreateRealPersonAuthLinkCommand, CredentialStatus,
-        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        DeleteAssetCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
         ModelDefinition, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
@@ -226,28 +226,6 @@ pub fn start_generation(
     state.tasks.start(command).command()
 }
 
-/// 视频节点提示词优化：把 Seedance 技能整体注入为系统提示词，
-/// 调用所选文本大模型完成优化 / 细节审查，只返回提取后的提示词正文。
-#[tauri::command]
-pub async fn optimize_video_prompt(
-    app: AppHandle,
-    state: State<'_, BackendState>,
-    command: OptimizeVideoPromptCommand,
-) -> CommandResult<OptimizedPromptResult> {
-    let deps = super::prompt_optimize::PromptVisionDeps {
-        app: &app,
-        storage: &state.storage,
-        lifecycle: &state.lifecycle,
-        providers: &state.providers,
-        assets: &state.assets,
-        staging: &state.staging,
-        local_results: &state.local_results,
-    };
-    super::prompt_optimize::optimize_video_prompt(&deps, command)
-        .await
-        .command()
-}
-
 /// 独立提示词节点：调用已配置的文本模型生成或优化提示词；
 /// 连入的图片素材会先解析为视觉理解内容块再随请求发送。
 #[tauri::command]
@@ -388,6 +366,14 @@ pub async fn delete_real_person_group(
         .delete_real_person_group(command)
         .await
         .command()
+}
+
+#[tauri::command]
+pub async fn delete_asset(
+    state: State<'_, BackendState>,
+    command: DeleteAssetCommand,
+) -> CommandResult<String> {
+    state.assets.delete_asset(command).await.command()
 }
 
 #[tauri::command]

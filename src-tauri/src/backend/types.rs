@@ -713,6 +713,14 @@ pub struct DeleteRealPersonAssetCommand {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct DeleteAssetCommand {
+    pub provider_connection_id: String,
+    /// 云端素材 ID（`asset-…`，不带 `asset://` 前缀）。
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DeleteRealPersonGroupCommand {
     pub provider_connection_id: String,
     pub id: i64,

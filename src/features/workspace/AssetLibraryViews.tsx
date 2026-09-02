@@ -4,6 +4,7 @@ import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { Copy } from "@phosphor-icons/react/Copy";
 import { IdentificationBadge } from "@phosphor-icons/react/IdentificationBadge";
+import { Trash } from "@phosphor-icons/react/Trash";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { Waveform as WaveformIcon } from "@phosphor-icons/react/Waveform";
@@ -583,9 +584,12 @@ function AssetCardVideoVisual({
 export function AssetSourceDialog({
   asset,
   onClose,
+  onDelete,
 }: {
   readonly asset: AssetItem;
   readonly onClose: () => void;
+  /** 云端素材提供删除；本地素材传 null 不渲染删除操作。 */
+  readonly onDelete: (() => void) | null;
 }) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -593,6 +597,30 @@ export function AssetSourceDialog({
   const mediaSrc = asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
+  // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，
+  // 避免误触；弹窗关闭时取消计时，不会在下次打开时残留。
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const deleteArmTimerRef = useRef<number | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    };
+  }, []);
+
+  const armDelete = () => {
+    if (confirmingDelete) return;
+    setConfirmingDelete(true);
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    deleteArmTimerRef.current = window.setTimeout(() => setConfirmingDelete(false), 4_000);
+  };
+  const confirmDelete = () => {
+    if (!confirmingDelete || onDelete == null) return;
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    setConfirmingDelete(false);
+    onDelete();
+    onClose();
+  };
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -717,6 +745,35 @@ export function AssetSourceDialog({
               </div>
             ) : null}
           </dl>
+          {onDelete ? (
+            <div className="asset-source-dialog__delete">
+              <button
+                type="button"
+                className={`asset-source-dialog__delete-button${confirmingDelete ? " is-armed" : ""}`}
+                aria-label={
+                  confirmingDelete ? `确认删除素材：${asset.name}` : `删除素材：${asset.name}`
+                }
+                onClick={confirmingDelete ? confirmDelete : armDelete}
+              >
+                {confirmingDelete ? (
+                  <>
+                    <WarningCircle size={16} weight="bold" aria-hidden="true" />
+                    确认删除？
+                  </>
+                ) : (
+                  <>
+                    <Trash size={16} weight="regular" aria-hidden="true" />
+                    删除素材
+                  </>
+                )}
+              </button>
+              {confirmingDelete ? (
+                <p className="asset-source-dialog__delete-hint">
+                  素材将从云端素材库永久删除，此操作不可撤销。
+                </p>
+              ) : null}
+            </div>
+          ) : null}
         </aside>
       </div>
     </dialog>,

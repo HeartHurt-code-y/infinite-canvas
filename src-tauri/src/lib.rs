@@ -16,6 +16,8 @@ pub fn run() {
         .plugin(
             tauri_plugin_log::Builder::new()
                 .level(tauri_plugin_log::log::LevelFilter::Info)
+                // 使用本机时区而非 UTC：默认 UseUtc 会让日志时间比本机慢 8 小时。
+                .timezone_strategy(tauri_plugin_log::TimezoneStrategy::UseLocal)
                 .build(),
         )
         .plugin(tauri_plugin_http::init())
@@ -51,7 +53,6 @@ pub fn run() {
             commands::get_canvas_document,
             commands::list_canvas_documents,
             commands::start_generation,
-            commands::optimize_video_prompt,
             commands::run_prompt_node,
             commands::list_generation_tasks,
             commands::get_generation_task,
@@ -63,6 +64,7 @@ pub fn run() {
             commands::list_real_person_groups,
             commands::delete_real_person_asset,
             commands::delete_real_person_group,
+            commands::delete_asset,
             commands::configure_tos_staging,
             commands::get_tos_staging_config,
             commands::test_tos_connectivity,

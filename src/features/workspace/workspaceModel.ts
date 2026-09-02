@@ -17,6 +17,7 @@ import {
   type ProviderCallRecord,
   type ProviderCatalogEntry,
   type StagingStatus,
+  toMediaSrc,
 } from "../../lib/backend";
 import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib/modelCapabilities";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
@@ -166,6 +167,8 @@ export interface GenerationMediaInput {
   readonly name: string;
   readonly kind: AssetKind;
   readonly target: MediaReferenceTarget;
+  /** @ 下拉候选的缩略图源；素材节点直用预览图，产物节点经 finalPath/previewSrc 解析。 */
+  readonly previewUrl?: string | null;
 }
 
 /**
@@ -804,7 +807,7 @@ export const EMPTY_GENERATION_TASKS: readonly GenerationTaskSummary[] = [];
 export const UPLOAD_STALL_HINT_MS = 15_000;
 
 // 云端素材列表刷新的触发来源，写入 [assets] 日志便于区分刷新路径。
-export type AssetRefreshSource = "initial" | "manual" | "reconnect" | "upload-finished";
+export type AssetRefreshSource = "initial" | "manual" | "reconnect" | "upload-finished" | "delete";
 
 // 云端单页最多 100 条，本地索引没有上限；分批挂载媒体卡片，避免一次创建无界 DOM。
 export const ASSET_RENDER_BATCH_SIZE = 40;
@@ -1125,7 +1128,7 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     descriptor: SCREENPLAY_NODE_DESCRIPTOR,
     assistantRole: "编剧助手",
     documentName: "剧本",
-    currentDocumentLabel: "当前 Markdown 剧本",
+    currentDocumentLabel: "当前剧本",
     skillTitle: "双技能已内置",
     skillDetail: "screenplay-master + screenwriter-zh · 每轮完整注入",
     providerAriaLabel: "剧本文本模型供应商",
@@ -1139,14 +1142,14 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     loadingLabel: "正在载入双技能与全部对话…",
     removeAriaLabel: "移除剧本创作与优化节点",
     exportAriaLabel: "导出 Markdown 剧本文档",
-    exportReadyTitle: "导出当前 Markdown 剧本",
+    exportReadyTitle: "导出当前剧本",
     exportEmptyTitle: "暂无可导出的剧本",
   },
   storyboard: {
     descriptor: STORYBOARD_NODE_DESCRIPTOR,
     assistantRole: "分镜导演",
     documentName: "分镜脚本",
-    currentDocumentLabel: "当前 Markdown 工业级分镜脚本",
+    currentDocumentLabel: "当前工业级分镜脚本",
     skillTitle: "V4.6 分镜技能已内置",
     skillDetail: "SKILL.md + 16 references · 每轮完整注入",
     providerAriaLabel: "分镜文本模型供应商",
@@ -1162,7 +1165,7 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     loadingLabel: "正在载入 V4.6 技能与全部上下文…",
     removeAriaLabel: "移除剧本转工业级分镜脚本节点",
     exportAriaLabel: "导出 Markdown 分镜脚本文档",
-    exportReadyTitle: "导出当前 Markdown 工业级分镜脚本",
+    exportReadyTitle: "导出当前工业级分镜脚本",
     exportEmptyTitle: "暂无可导出的分镜脚本",
   },
 };
@@ -1219,22 +1222,12 @@ export function parseGenerationCountInput(raw: string): number {
   return Math.min(MAX_GENERATION_COUNT, Math.max(1, parsed));
 }
 
-/** 图片/视频生成节点的提示词优化配置：是否开启、优化模式与接入的文本大模型。 */
-export interface NodePromptOptimizationConfig {
-  readonly enabled: boolean;
-  readonly mode: PromptOptimizationMode;
-  /** 文本大模型所在的供应商连接。 */
-  readonly providerId: string;
-  /** 文本大模型定义 ID。 */
-  readonly modelDefinitionId: string;
-}
-
+/** 提示词优化功能已从图片/视频生成节点移除，交由独立「提示词生成与优化」节点承担。 */
 export interface ImageNodeConfig {
   readonly modelSelection: NodeModelSelection;
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly catalogResolved: boolean;
-  readonly promptOptimization?: NodePromptOptimizationConfig | null;
 }
 
 export interface VideoNodeConfig {
@@ -1242,21 +1235,64 @@ export interface VideoNodeConfig {
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly catalogResolved: boolean;
-  readonly promptOptimization?: NodePromptOptimizationConfig | null;
 }
 
 export type PromptNodeTask = "generate" | "optimize";
 
-/** 提示词节点的稳定配置：输入创意、文本模型、技能模式与最近一次输出均随画布保存。 */
+export type PromptConversationRole = "user" | "assistant" | "audit" | "decision";
+
+export interface PromptConversationEntry {
+  readonly id: string;
+  readonly role: PromptConversationRole;
+  readonly content: string;
+}
+
+/** 提示词节点的稳定配置：输入创意、文本模型、技能模式、多轮对话与最近一次输出均随画布保存。 */
 export interface PromptNodeConfig {
   readonly modelSelection: NodeModelSelection;
   readonly task: PromptNodeTask;
   readonly mode: PromptOptimizationMode;
+  /** 尚未发送的本轮输入草稿（随画布保存；多轮对话的输入框）。 */
   readonly sourcePrompt: string;
+  /** 全部已完成轮次（你 / 提示词助手 / 审计 / 决定）；每次请求都会完整注入上一轮上下文。 */
+  readonly conversation?: readonly PromptConversationEntry[];
+  /** 当前可编辑输出（下发给下游节点）；应用审计结果后更新。 */
   readonly generatedPrompt: string;
   readonly catalogResolved: boolean;
-  /** 已完成审计的完整上下文（技能由后端每轮作为系统提示词重新载入）。 */
+  /** 兼容旧文档：旧版审计上下文在恢复时迁移进 conversation，此后不再写入。 */
   readonly auditContextHistory?: readonly PromptOptimizationContextEntry[];
+}
+
+export function promptConversationRoleLabel(role: PromptConversationRole): string {
+  if (role === "user") return "你";
+  if (role === "audit") return "审计";
+  if (role === "decision") return "决定";
+  return "提示词助手";
+}
+
+export function promptMessageId(): string {
+  return `prompt-turn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/** 旧版审计上下文（角色为「第 N 轮审计输入/结果」「用户决定」）折叠为多轮对话条目。 */
+function legacyAuditContextToConversation(
+  history: readonly PromptOptimizationContextEntry[] | undefined,
+): readonly PromptConversationEntry[] {
+  if (!history?.length) return [];
+  return history.map((entry) => {
+    const role: PromptConversationRole = entry.role.includes("审计结果")
+      ? "audit"
+      : entry.role.includes("用户决定")
+        ? "decision"
+        : "user";
+    return { id: promptMessageId(), role, content: entry.content };
+  });
+}
+
+/** 补齐旧提示词节点配置缺失的多轮对话字段，并把旧版审计上下文迁移进 conversation。 */
+export function migratePromptNodeConfig(config: PromptNodeConfig): PromptNodeConfig {
+  if (config.conversation != null) return config;
+  return { ...config, conversation: legacyAuditContextToConversation(config.auditContextHistory) };
 }
 
 export function createImageNodeConfig(
@@ -1268,7 +1304,6 @@ export function createImageNodeConfig(
     generationCount: 1,
     parameterValues: {},
     catalogResolved,
-    promptOptimization: null,
   };
 }
 
@@ -1281,7 +1316,6 @@ export function createVideoNodeConfig(
     generationCount: 1,
     parameterValues: {},
     catalogResolved,
-    promptOptimization: null,
   };
 }
 
@@ -1294,9 +1328,9 @@ export function createPromptNodeConfig(
     task: "generate",
     mode: "seedance_2_5",
     sourcePrompt: "",
+    conversation: [],
     generatedPrompt: "",
     catalogResolved,
-    auditContextHistory: [],
   };
 }
 
@@ -1352,26 +1386,6 @@ export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, str
   minimax_h3: "MiniMax H3 专用",
   realistic_character: "人物真实感图片 专用",
 };
-
-/** 图片节点可选的提示词技能：覆盖图片提示词的技能（不含仅面向视频的万相 / MiniMax）。 */
-export const IMAGE_PROMPT_OPTIMIZATION_MODES: readonly PromptOptimizationMode[] = [
-  "seedance_2_0",
-  "seedance_2_5",
-  "realistic_character",
-];
-/** 图片节点的默认技能：人物真实感图片。 */
-export const IMAGE_PROMPT_OPTIMIZATION_DEFAULT_MODE: PromptOptimizationMode = "realistic_character";
-
-/** 视频节点可选的提示词技能：全部模式（人物真实感技能亦覆盖图生视频首帧场景）。 */
-export const VIDEO_PROMPT_OPTIMIZATION_MODES: readonly PromptOptimizationMode[] = [
-  "seedance_2_0",
-  "seedance_2_5",
-  "wan_3_0",
-  "minimax_h3",
-  "realistic_character",
-];
-/** 视频节点的默认技能：Seedance 2.5。 */
-export const VIDEO_PROMPT_OPTIMIZATION_DEFAULT_MODE: PromptOptimizationMode = "seedance_2_5";
 
 /** 把提示词段序列（文本 + @引用）压成纯文本：引用内联为「@显示名」。 */
 export const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set([
@@ -1555,6 +1569,7 @@ export function assetGenerationInput(node: AssetNodeData): GenerationMediaInput 
     name: node.name,
     kind: node.kind,
     target: assetNodeReferenceTarget(node),
+    previewUrl: node.previewUrl ?? null,
   };
 }
 
@@ -1566,6 +1581,7 @@ export function outputGenerationInput(node: OutputNodeData): GenerationMediaInpu
     name: node.name ?? `${node.mediaType === "image" ? "图片" : "视频"}产物`,
     kind: node.mediaType,
     target,
+    previewUrl: node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null),
   };
 }
 
@@ -1581,6 +1597,8 @@ export interface MentionCandidate {
   readonly resultIndex?: number;
   readonly kind: AssetKind;
   readonly name: string;
+  /** @ 下拉候选缩略图源（可能为 null，渲染端需兜底到类型图标）。 */
+  readonly previewUrl?: string | null;
 }
 
 export function generationInputMentionCandidate(input: GenerationMediaInput): MentionCandidate {
@@ -1595,6 +1613,7 @@ export function generationInputMentionCandidate(input: GenerationMediaInput): Me
       resultIndex: target.resultIndex,
       kind: input.kind,
       name: input.name,
+      previewUrl: input.previewUrl ?? null,
     };
   }
   if (target.kind === "local_asset") {
@@ -1606,6 +1625,7 @@ export function generationInputMentionCandidate(input: GenerationMediaInput): Me
       referenceKind: target.kind,
       kind: input.kind,
       name: input.name,
+      previewUrl: input.previewUrl ?? null,
     };
   }
   return {
@@ -1616,6 +1636,7 @@ export function generationInputMentionCandidate(input: GenerationMediaInput): Me
     referenceKind: target.kind,
     kind: input.kind,
     name: input.name,
+    previewUrl: input.previewUrl ?? null,
   };
 }
 
@@ -1734,11 +1755,13 @@ export function resolvePendingGenerationNodeConfig(
 ): GenNodeData {
   if (node.config.catalogResolved) return node;
   if (node.kind === "prompt") {
+    // 先补齐旧文档缺失的多轮对话字段（旧版审计上下文迁移进 conversation），再校准模型选择。
+    const migrated = migratePromptNodeConfig(node.config);
     return {
       ...node,
       config: {
-        ...node.config,
-        modelSelection: reconcileTextModelSelection(node.config.modelSelection, providerCatalog),
+        ...migrated,
+        modelSelection: reconcileTextModelSelection(migrated.modelSelection, providerCatalog),
         catalogResolved: true,
       },
     };

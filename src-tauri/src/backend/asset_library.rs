@@ -10,6 +10,7 @@ use reqwest::Method;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
 use tokio::sync::Mutex;
+use url::Url;
 
 use super::{
     error::{BackendError, BackendResult},
@@ -17,7 +18,7 @@ use super::{
     storage::TaskExecutionRecord,
     types::{
         AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
-        CreateRealPersonAuthLinkCommand, DeleteRealPersonAssetCommand,
+        CreateRealPersonAuthLinkCommand, DeleteAssetCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, MediaType, RawProviderResponse, RealPersonAuthLink,
         RealPersonGroup, RealPersonProviderCommand,
     },
@@ -38,8 +39,28 @@ struct RemoteAssetRequest {
     body: Option<Value>,
 }
 
+/// multipart 文件上传请求（海外平台素材上传 `POST /v1/assets/upload`）。
+#[derive(Debug, Clone)]
+struct MultipartAssetRequest {
+    provider_connection_id: String,
+    path: &'static str,
+    /// multipart 文本字段，例如 `kind=image`、`group_id=16`、`name=...`。
+    fields: Vec<(String, String)>,
+    /// 文件 part 字段名（`file`）。
+    file_field: String,
+    file_name: String,
+    mime_type: String,
+    file_bytes: Vec<u8>,
+}
+
 trait AssetPort: Send + Sync {
     fn send(&self, request: RemoteAssetRequest) -> PortFuture<RawProviderResponse>;
+
+    fn send_multipart(&self, request: MultipartAssetRequest) -> PortFuture<RawProviderResponse>;
+
+    /// 素材库网关判定：给定 provider_connection_id 对应的 base_url 是否为海外平台。
+    /// 海外平台（如 konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传。
+    fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool>;
 
     fn get_recorded(
         &self,
@@ -70,6 +91,28 @@ impl AssetPort for ProviderAssetAdapter {
                 )
                 .await
         })
+    }
+
+    fn send_multipart(&self, request: MultipartAssetRequest) -> PortFuture<RawProviderResponse> {
+        let providers = self.providers.clone();
+        Box::pin(async move {
+            providers
+                .raw_asset_multipart_request(
+                    &request.provider_connection_id,
+                    request.path,
+                    &request.fields,
+                    &request.file_field,
+                    &request.file_name,
+                    &request.mime_type,
+                    request.file_bytes,
+                )
+                .await
+        })
+    }
+
+    fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool> {
+        let context = self.providers.resolve_asset_library(provider_connection_id)?;
+        Ok(is_overseas_asset_base_url(&context.base_url))
     }
 
     fn get_recorded(
@@ -396,6 +439,52 @@ impl AssetLibrary {
         require_success("delete real-person group", &response)
     }
 
+    /// Permanently remove one ordinary cloud asset from both the platform and upstream service.
+    ///
+    /// 对应上游契约 `POST /v1/assets/delete`，body `{"id":"asset-…"}`，返回被删除的素材 ID。
+    /// 接受 `asset://` 前缀以便前端直接传引用；未知/无权访问的素材由上游以 4xx/5xx 报错透传。
+    pub async fn delete_asset(&self, command: DeleteAssetCommand) -> BackendResult<String> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        let id = command
+            .id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| command.id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset deletion requires an asset id without the asset:// prefix",
+                json!({ "id": command.id }),
+            ));
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/delete",
+                body: Some(json!({ "id": id })),
+            })
+            .await?;
+        // 删除是幂等操作：素材已被删除或本就不存在时，上游返回 HTTP 404
+        // 「素材不存在或已删除」，此时删除目标已达成，按成功处理。
+        if response.status == 404 {
+            return Ok(id.to_string());
+        }
+        require_success("delete asset", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        // 上游成功响应可能只回 `{"code":"success","success":true}` 而不回显被删素材 id，
+        // 此时以请求的 id 作为被删除素材 id 返回（删除即针对该 id）。
+        let returned_id = payload
+            .pointer("/data/id")
+            .or_else(|| payload.get("id"))
+            .and_then(asset_id_string)
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| id.to_string());
+        Ok(returned_id)
+    }
+
     /// Import an already staged public object and wait until the remote 素材 becomes readable.
     /// Group discovery, single-flight creation, single-asset polling and terminal-state mapping stay local.
     pub async fn import_staged(
@@ -413,6 +502,16 @@ impl AssetLibrary {
                     "publicUrl": request.public_url
                 }),
             ));
+        }
+        // 海外平台（konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传：
+        // 其网关未实现 JSON 方式（`/v1/assets/async` 返回 404 Invalid URL），且 `/v1/assets/upload`
+        // 需要文件字节而非远端 URL。此处从暂存 URL 下载字节后 multipart 直传，并按 `db_id`
+        // 轮询素材列表直到 Active 取回真实素材 ID。
+        if self
+            .port
+            .is_overseas_gateway(&request.provider_connection_id)?
+        {
+            return self.import_staged_overseas(request).await;
         }
         let group_id = match request.group_id {
             Some(group_id) if group_id > 0 => group_id,
@@ -436,35 +535,225 @@ impl AssetLibrary {
             "asset_type": media_type_name(request.media_type),
             "group_id": group_id,
         });
-        if let Some(name) = display_name {
+        if let Some(name) = display_name.as_deref() {
             body["name"] = name.into();
         }
+        // 使用素材服务异步导入专用端点 `/v1/assets/async`：提交后**立即返回真实素材 ID**
+        // （`asset-…`，初始状态 `Pending`），可直接作为 `/v1/assets/get` 的 `id` 轮询。
+        // 这规避了旧端点返回数值占位 ID（`db_id`/`id`）无法查询的问题，也无需再按名称
+        // 在素材列表里猜测真实素材（按名称匹配存在同名歧义，可能误认同名旧素材）。
         let response = self
             .port
             .send(RemoteAssetRequest {
                 provider_connection_id: request.provider_connection_id.clone(),
                 method: Method::POST,
-                path: "/v1/assets",
+                path: "/v1/assets/async",
                 body: Some(body),
             })
             .await?;
         require_success("submit asset import", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
-        let asset_id = payload
+        let raw_id = payload
             .pointer("/data/id")
             .or_else(|| payload.get("id"))
-            .and_then(Value::as_str)
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
             .ok_or_else(|| {
                 BackendError::protocol(
                     "asset import did not return an asset id",
                     json!({ "rawResponse": response.body }),
                 )
-            })?
-            .to_string();
-        self.wait_for_import(&request.provider_connection_id, &asset_id)
+            })?;
+        let asset_id = asset_id_string(raw_id).ok_or_else(|| {
+            BackendError::protocol(
+                "asset import did not return an asset id",
+                json!({ "rawResponse": response.body }),
+            )
+        })?;
+        // `/v1/assets/async` 契约要求返回可查询的真实字符串 ID。若网关仍返回数值占位 ID，
+        // 说明该网关未实现此端点，直接报错而非按名称匹配旧素材（避免误认 + 误删源对象）。
+        if raw_id.is_number() {
+            return Err(BackendError::protocol(
+                "asset async endpoint returned a numeric placeholder id; the gateway does not implement /v1/assets/async",
+                json!({ "rawResponse": response.body }),
+            ));
+        }
+        self.wait_for_import(&request.provider_connection_id, raw_id, &asset_id)
             .await
+    }
+
+    /// 海外平台素材导入：从暂存 URL 下载字节后 multipart 直传 `POST /v1/assets/upload`，
+    /// 再按 `db_id` 轮询 `/v1/assets/list` 直到 Active 取回真实素材 ID。
+    async fn import_staged_overseas(
+        &self,
+        request: ImportStagedAsset,
+    ) -> BackendResult<CloudAssetIdentity> {
+        let group_id = match request.group_id {
+            Some(group_id) if group_id > 0 => group_id,
+            Some(group_id) => {
+                return Err(BackendError::validation(
+                    "real-person asset import requires a positive platform group id",
+                    json!({ "groupId": group_id }),
+                ));
+            }
+            None => {
+                self.resolve_upload_group(&request.provider_connection_id)
+                    .await?
+            }
+        };
+        let display_name = request
+            .display_name
+            .as_deref()
+            .map(|value| value.chars().take(64).collect::<String>());
+        // 从暂存 URL 下载文件字节，供 multipart 直传。
+        let bytes = self.port.download(request.public_url.clone()).await?;
+        let mut fields = vec![
+            ("kind".to_string(), media_type_kind(request.media_type).to_string()),
+            ("group_id".to_string(), group_id.to_string()),
+        ];
+        if let Some(name) = display_name.as_deref() {
+            fields.push(("name".to_string(), name.to_string()));
+        }
+        let file_name = display_name.clone().unwrap_or_else(|| "upload".to_string());
+        let response = self
+            .port
+            .send_multipart(MultipartAssetRequest {
+                provider_connection_id: request.provider_connection_id.clone(),
+                path: "/v1/assets/upload",
+                fields,
+                file_field: "file".to_string(),
+                file_name,
+                mime_type: media_type_mime(request.media_type).to_string(),
+                file_bytes: bytes,
+            })
+            .await?;
+        require_success("submit asset upload", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        // `/v1/assets/upload` 返回数值占位 ID（`db_id`，如 975），用于后续按 db_id 精确匹配。
+        let placeholder_db_id = payload
+            .pointer("/data/db_id")
+            .or_else(|| payload.pointer("/data/id"))
+            .and_then(Value::as_u64)
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "asset upload did not return a placeholder db id",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        self.wait_for_overseas_import(
+            &request.provider_connection_id,
+            placeholder_db_id,
+            display_name.as_deref(),
+        )
+        .await
+    }
+
+    /// 海外平台素材导入轮询：`POST /v1/assets/list` 按 `db_id` 精确匹配，直到 Active 取回真实素材 ID。
+    async fn wait_for_overseas_import(
+        &self,
+        provider_connection_id: &str,
+        placeholder_db_id: u64,
+        display_name: Option<&str>,
+    ) -> BackendResult<CloudAssetIdentity> {
+        let started = tokio::time::Instant::now();
+        let mut consecutive_failures = 0;
+        loop {
+            if started.elapsed() >= self.poll_policy.timeout {
+                return Err(BackendError::protocol(
+                    "asset upload did not become ready before the local wait deadline",
+                    json!({ "dbId": placeholder_db_id, "waitedMs": started.elapsed().as_millis() }),
+                ));
+            }
+            let mut body = Map::new();
+            body.insert("page_number".to_string(), json!(1));
+            body.insert("page_size".to_string(), json!(100));
+            if let Some(name) = display_name {
+                body.insert("name".to_string(), json!(name));
+            }
+            let response = match self
+                .port
+                .send(RemoteAssetRequest {
+                    provider_connection_id: provider_connection_id.to_string(),
+                    method: Method::POST,
+                    path: "/v1/assets/list",
+                    body: Some(Value::Object(body)),
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= self.poll_policy.failure_limit {
+                        return Err(error);
+                    }
+                    self.wait_before_next_import_poll().await;
+                    continue;
+                }
+            };
+            if let Err(error) = require_success("observe asset upload", &response) {
+                consecutive_failures += 1;
+                if consecutive_failures >= self.poll_policy.failure_limit {
+                    return Err(error);
+                }
+                self.wait_before_next_import_poll().await;
+                continue;
+            }
+            let payload: Value = serde_json::from_str(&response.body)?;
+            let candidates = payload
+                .get("data")
+                .map(asset_array)
+                .filter(|items| !items.is_empty())
+                .unwrap_or_else(|| asset_array(&payload));
+            let matched = candidates.into_iter().find(|entry| {
+                entry
+                    .get("db_id")
+                    .or_else(|| entry.get("id"))
+                    .and_then(Value::as_u64)
+                    == Some(placeholder_db_id)
+            });
+            consecutive_failures = 0;
+            let Some(entry) = matched else {
+                self.wait_before_next_import_poll().await;
+                continue;
+            };
+            let status = entry
+                .get("status")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .ok_or_else(|| {
+                    BackendError::protocol(
+                        "asset upload lookup did not return a status",
+                        json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
+                    )
+                })?;
+            match status.trim().to_ascii_lowercase().as_str() {
+                "active" | "ready" => {
+                    let asset_id = entry
+                        .get("id")
+                        .and_then(asset_id_string)
+                        .ok_or_else(|| {
+                            BackendError::protocol(
+                                "asset upload became active but returned no asset id",
+                                json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
+                            )
+                        })?;
+                    return Ok(CloudAssetIdentity {
+                        provider_connection_id: provider_connection_id.to_string(),
+                        asset_id,
+                    });
+                }
+                "failed" | "deleted" => {
+                    return Err(BackendError::protocol(
+                        format!("asset upload reached terminal status {status}"),
+                        json!({
+                            "dbId": placeholder_db_id,
+                            "itemError": entry.get("error"),
+                            "rawResponse": response.body
+                        }),
+                    ));
+                }
+                _ => self.wait_before_next_import_poll().await,
+            }
+        }
     }
 
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
@@ -640,7 +929,8 @@ impl AssetLibrary {
     async fn wait_for_import(
         &self,
         provider_connection_id: &str,
-        asset_id: &str,
+        raw_id: &Value,
+        poll_id: &str,
     ) -> BackendResult<CloudAssetIdentity> {
         let started = tokio::time::Instant::now();
         let mut consecutive_failures = 0;
@@ -648,7 +938,7 @@ impl AssetLibrary {
             if started.elapsed() >= self.poll_policy.timeout {
                 return Err(BackendError::protocol(
                     "asset import did not become ready before the local wait deadline",
-                    json!({ "assetId": asset_id, "waitedMs": started.elapsed().as_millis() }),
+                    json!({ "assetId": poll_id, "waitedMs": started.elapsed().as_millis() }),
                 ));
             }
             let response = match self
@@ -657,7 +947,9 @@ impl AssetLibrary {
                     provider_connection_id: provider_connection_id.to_string(),
                     method: Method::POST,
                     path: "/v1/assets/get",
-                    body: Some(json!({ "id": asset_id })),
+                    // 沿用创建响应返回的原始 ID 类型：数值 ID 发数值，字符串 ID 发字符串，
+                    // 避免新网关对 `id` 字段做严格 JSON 类型匹配时查不到素材（HTTP 404）。
+                    body: Some(json!({ "id": raw_id })),
                 })
                 .await
             {
@@ -681,27 +973,9 @@ impl AssetLibrary {
             }
             let payload: Value = serde_json::from_str(&response.body)?;
             let item = payload.get("data").unwrap_or(&payload);
-            let returned_asset_id = item
-                .get("id")
-                .and_then(Value::as_str)
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .ok_or_else(|| {
-                    BackendError::protocol(
-                        "asset lookup did not return an asset id",
-                        json!({ "assetId": asset_id, "rawResponse": response.body }),
-                    )
-                })?;
-            if returned_asset_id != asset_id {
-                return Err(BackendError::protocol(
-                    "asset lookup returned a different asset id",
-                    json!({
-                        "assetId": asset_id,
-                        "returnedAssetId": returned_asset_id,
-                        "rawResponse": response.body
-                    }),
-                ));
-            }
+            // 异步契约下轮询用的可能是任务/占位 ID，素材完成时真实素材 ID 会写回 `id` 字段
+            // （可能与轮询 ID 不同），因此不要求二者相等；Active 时优先采用返回的真实 ID。
+            let returned_asset_id = item.get("id").and_then(asset_id_string);
             consecutive_failures = 0;
             let status = item
                 .get("status")
@@ -711,21 +985,21 @@ impl AssetLibrary {
                 .ok_or_else(|| {
                     BackendError::protocol(
                         "asset lookup did not return a status",
-                        json!({ "assetId": asset_id, "rawResponse": response.body }),
+                        json!({ "assetId": poll_id, "rawResponse": response.body }),
                     )
                 })?;
             match status.trim().to_ascii_lowercase().as_str() {
                 "active" | "ready" => {
                     return Ok(CloudAssetIdentity {
                         provider_connection_id: provider_connection_id.to_string(),
-                        asset_id: asset_id.to_string(),
+                        asset_id: returned_asset_id.unwrap_or_else(|| poll_id.to_string()),
                     });
                 }
                 "failed" | "deleted" => {
                     return Err(BackendError::protocol(
                         format!("asset import reached terminal status {status}"),
                         json!({
-                            "assetId": asset_id,
+                            "assetId": poll_id,
                             "itemError": item.get("error"),
                             "rawResponse": response.body
                         }),
@@ -741,6 +1015,22 @@ impl AssetLibrary {
             tokio::time::sleep(self.poll_policy.interval).await;
         }
     }
+}
+
+/// 兼容字符串与数值形态的素材 ID。
+///
+/// 摸鱼素材服务的真实上游在创建/查询素材时以**数值**返回素材 `id`
+/// （如 `{"code":"success","data":{"db_id":962,"id":962,"status":"Processing"}}`），
+/// 而既有测试与部分文档契约使用字符串 ID（如 `"asset-1"`）。若只按字符串解析，
+/// 数值 ID 会被误判为「没有返回素材 ID」并抛出协议错误
+/// `asset import did not return an asset id`，因此两种形态都必须接受。
+fn asset_id_string(value: &Value) -> Option<String> {
+    value
+        .as_str()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .or_else(|| value.as_u64().map(|id| id.to_string()))
 }
 
 fn require_success(operation: &str, response: &RawProviderResponse) -> BackendResult<()> {
@@ -990,6 +1280,33 @@ fn media_type_name(media_type: MediaType) -> &'static str {
     }
 }
 
+/// 海外平台素材上传的 `kind` 字段取值（小写，如 `image` / `video` / `audio`）。
+fn media_type_kind(media_type: MediaType) -> &'static str {
+    match media_type {
+        MediaType::Image => "image",
+        MediaType::Video => "video",
+        MediaType::Audio => "audio",
+    }
+}
+
+/// 海外平台 multipart 上传使用的 MIME 类型。
+fn media_type_mime(media_type: MediaType) -> &'static str {
+    match media_type {
+        MediaType::Image => "image/jpeg",
+        MediaType::Video => "video/mp4",
+        MediaType::Audio => "audio/mpeg",
+    }
+}
+
+/// 判定素材库网关是否为海外平台。海外平台（如 konjac.ai）素材上传必须走
+/// `POST /v1/assets/upload` multipart 直传，国内平台走 JSON `POST /v1/assets/async`。
+fn is_overseas_asset_base_url(base_url: &str) -> bool {
+    Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .is_some_and(|host| host == "konjac.ai" || host.ends_with(".konjac.ai"))
+}
+
 fn media_type_wildcard(media_type: MediaType) -> &'static str {
     match media_type {
         MediaType::Image => "image/*",
@@ -1048,7 +1365,10 @@ mod tests {
     struct InMemoryAssetAdapter {
         responses: StdMutex<VecDeque<RawProviderResponse>>,
         requests: StdMutex<Vec<RemoteAssetRequest>>,
+        multipart_requests: StdMutex<Vec<MultipartAssetRequest>>,
         downloads: StdMutex<StdHashMap<String, Vec<u8>>>,
+        /// 是否为海外平台网关（默认 false，即国内 JSON 契约）。
+        overseas: StdMutex<bool>,
     }
 
     impl InMemoryAssetAdapter {
@@ -1059,10 +1379,24 @@ mod tests {
             }
         }
 
+        fn with_overseas(mut self, overseas: bool) -> Self {
+            *self.overseas.lock().expect("overseas lock") = overseas;
+            self
+        }
+
         fn request_paths(&self) -> Vec<&'static str> {
             self.requests
                 .lock()
                 .expect("request lock")
+                .iter()
+                .map(|request| request.path)
+                .collect()
+        }
+
+        fn multipart_request_paths(&self) -> Vec<&'static str> {
+            self.multipart_requests
+                .lock()
+                .expect("multipart lock")
                 .iter()
                 .map(|request| request.path)
                 .collect()
@@ -1082,6 +1416,19 @@ mod tests {
             self.requests.lock().expect("request lock").push(request);
             let response = self.take_response();
             Box::pin(async move { response })
+        }
+
+        fn send_multipart(&self, request: MultipartAssetRequest) -> PortFuture<RawProviderResponse> {
+            self.multipart_requests
+                .lock()
+                .expect("multipart lock")
+                .push(request);
+            let response = self.take_response();
+            Box::pin(async move { response })
+        }
+
+        fn is_overseas_gateway(&self, _provider_connection_id: &str) -> BackendResult<bool> {
+            Ok(*self.overseas.lock().expect("overseas lock"))
         }
 
         fn get_recorded(
@@ -1298,6 +1645,114 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn delete_asset_follows_the_documented_delete_contract() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "code": "success", "data": { "id": "asset-1" } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset(DeleteAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-1".into(),
+            })
+            .await
+            .expect("delete asset");
+
+        assert_eq!(deleted_id, "asset-1");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/delete");
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].body, Some(json!({ "id": "asset-1" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_strips_the_asset_scheme_prefix_before_calling_upstream() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "code": "success", "data": { "id": "asset-2" } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset(DeleteAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset://asset-2".into(),
+            })
+            .await
+            .expect("delete asset with scheme prefix");
+
+        assert_eq!(deleted_id, "asset-2");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[0].path, "/v1/assets/delete");
+        assert_eq!(requests[0].body, Some(json!({ "id": "asset-2" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_treats_a_gone_asset_404_as_idempotent_success() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            404,
+            json!({ "error": { "message": "素材不存在或已删除" } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset(DeleteAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-ghost".into(),
+            })
+            .await
+            .expect("a 404 gone-asset delete should be idempotent success");
+
+        assert_eq!(deleted_id, "asset-ghost");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/delete");
+        assert_eq!(requests[0].body, Some(json!({ "id": "asset-ghost" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_accepts_a_success_response_without_an_echoed_asset_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "code": "success", "success": true }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset(DeleteAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-962".into(),
+            })
+            .await
+            .expect("delete asset without echoed id");
+
+        assert_eq!(deleted_id, "asset-962");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/delete");
+        assert_eq!(requests[0].body, Some(json!({ "id": "asset-962" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_rejects_an_empty_or_whitespace_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(adapter, immediate_poll());
+
+        let error = library
+            .delete_asset(DeleteAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "  ".into(),
+            })
+            .await
+            .expect_err("empty id must be rejected before any request");
+
+        assert!(error.to_string().contains("asset id"));
+    }
+
+    #[tokio::test]
     async fn real_person_group_without_authorized_at_remains_visible() {
         let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
             200,
@@ -1355,7 +1810,7 @@ mod tests {
         assert_eq!(identity.asset_id, "asset-real-1");
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets", "/v1/assets/get"]
+            vec!["/v1/assets/async", "/v1/assets/get"]
         );
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[0].body.as_ref().unwrap()["group_id"], 128);
@@ -1429,7 +1884,7 @@ mod tests {
                 "/v1/assets/groups",
                 "/v1/assets/groups",
                 "/v1/assets/groups",
-                "/v1/assets",
+                "/v1/assets/async",
                 "/v1/assets/get",
                 "/v1/assets/get",
             ]
@@ -1451,6 +1906,101 @@ mod tests {
             }))
         );
         assert_eq!(requests[4].body, Some(json!({ "id": "asset-1" })));
+    }
+
+    /// 回归测试：若网关未实现 `/v1/assets/async` 而仍返回数值占位 `id`
+    /// （`{"code":"success","data":{"db_id":962,"id":962,"status":"Processing"}}`），
+    /// 必须**直接报错**，不得退回按名称轮询 `/v1/assets/list` —— 名称匹配存在同名歧义，
+    /// 会误认同名旧素材、并在新素材就绪前删除其 TOS 源对象，导致新素材永久卡在 Processing。
+    #[tokio::test]
+    async fn import_staged_rejects_numeric_placeholder_ids_from_the_async_endpoint() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": { "db_id": 962, "id": 962, "status": "Processing" },
+                    "success": true
+                }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let error = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect_err("numeric placeholder id from the async endpoint must fail loudly");
+
+        assert!(error.to_string().contains("/v1/assets/async"));
+        // 不再发起任何 /v1/assets/list 匹配请求。
+        assert_eq!(adapter.request_paths(), vec!["/v1/assets/groups", "/v1/assets/async"]);
+    }
+
+    /// 回归测试：异步契约下，轮询用的可能是任务/占位 ID，素材完成时真实素材 ID 会写回
+    /// `id` 字段（与轮询 ID 不同）。此前 `wait_for_import` 要求「返回 ID == 轮询 ID」，
+    /// 会误报 `asset lookup returned a different asset id`；现在应接受返回的真实 ID
+    /// 作为最终素材身份，而不是报错。
+    #[tokio::test]
+    async fn import_staged_adopts_the_real_asset_id_returned_on_active() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": { "id": "task-20260902000000-abcde", "status": "Processing" },
+                    "success": true
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": { "id": "task-20260902000000-abcde", "status": "Processing" },
+                    "success": true
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": {
+                        "id": "asset-20260902000001-xyz",
+                        "asset_type": "Image",
+                        "status": "Active"
+                    },
+                    "success": true
+                }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect("import adopts the real asset id on active");
+
+        // 最终身份采用 Active 响应里返回的真实素材 ID，而不是轮询用的任务 ID。
+        assert_eq!(identity.asset_id, "asset-20260902000001-xyz");
     }
 
     #[tokio::test]
@@ -1503,10 +2053,10 @@ mod tests {
             adapter.request_paths(),
             vec![
                 "/v1/assets/groups",
-                "/v1/assets",
+                "/v1/assets/async",
                 "/v1/assets/get",
                 "/v1/assets/groups",
-                "/v1/assets",
+                "/v1/assets/async",
                 "/v1/assets/get",
             ]
         );
@@ -1639,5 +2189,130 @@ mod tests {
             .expect_err("HTTP 401 should fail");
 
         assert!(error.to_string().contains("HTTP 401"));
+    }
+
+    #[tokio::test]
+    async fn import_staged_overseas_uploads_via_multipart_and_polls_the_list_by_db_id() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([
+                // 1) find_upload_group: 列出分组
+                response(
+                    200,
+                    json!({ "data": [{ "id": 16, "name": UPLOAD_GROUP_NAME }] }),
+                ),
+                // 2) multipart 直传 /v1/assets/upload 返回数值占位 db_id
+                response(
+                    200,
+                    json!({ "code": "success", "data": { "db_id": 975, "id": 975, "status": "Processing" }, "success": true }),
+                ),
+                // 3) 第一次轮询 list：仍 Processing
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "task-975", "db_id": 975, "asset_type": "image", "status": "Processing" }
+                    ] } }),
+                ),
+                // 4) 第二次轮询 list：Active，取回真实 asset id
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "asset-20260902-7hbb2", "db_id": 975, "asset_type": "image", "status": "Active" }
+                    ] } }),
+                ),
+            ])
+            .with_overseas(true),
+        );
+        adapter
+            .downloads
+            .lock()
+            .expect("download lock")
+            .insert("https://tos.example.com/a.png".into(), vec![1, 2, 3, 4]);
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect("overseas import");
+
+        assert_eq!(identity.asset_id, "asset-20260902-7hbb2");
+        // JSON 通道：分组发现 + 轮询 /v1/assets/list（两次），不走 /v1/assets/async。
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/groups", "/v1/assets/list", "/v1/assets/list"]
+        );
+        // multipart 通道只走一次 /v1/assets/upload。
+        assert_eq!(
+            adapter.multipart_request_paths(),
+            vec!["/v1/assets/upload"]
+        );
+        let uploads = adapter.multipart_requests.lock().expect("multipart lock");
+        assert_eq!(uploads[0].path, "/v1/assets/upload");
+        assert_eq!(uploads[0].file_field, "file");
+        assert_eq!(uploads[0].file_name, "参考图");
+        assert_eq!(uploads[0].mime_type, "image/jpeg");
+        assert_eq!(uploads[0].file_bytes, vec![1, 2, 3, 4]);
+        assert!(uploads[0].fields.contains(&("kind".to_string(), "image".to_string())));
+        assert!(uploads[0].fields.contains(&("group_id".to_string(), "16".to_string())));
+        assert!(uploads[0].fields.contains(&("name".to_string(), "参考图".to_string())));
+    }
+
+    #[tokio::test]
+    async fn import_staged_overseas_matches_by_db_id_even_when_processing_has_no_real_id() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([
+                response(200, json!({ "data": [{ "id": 16, "name": UPLOAD_GROUP_NAME }] })),
+                response(
+                    200,
+                    json!({ "code": "success", "data": { "db_id": 976, "id": 976, "status": "Processing" }, "success": true }),
+                ),
+                // 第一条 db_id=975 是旧素材（同名歧义），必须按 db_id 精确匹配到 976。
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "asset-old-975", "db_id": 975, "asset_type": "image", "status": "Active" },
+                        { "id": "task-976", "db_id": 976, "asset_type": "image", "status": "Processing" }
+                    ] } }),
+                ),
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "asset-old-975", "db_id": 975, "asset_type": "image", "status": "Active" },
+                        { "id": "asset-976-new", "db_id": 976, "asset_type": "image", "status": "Active" }
+                    ] } }),
+                ),
+            ])
+            .with_overseas(true),
+        );
+        adapter
+            .downloads
+            .lock()
+            .expect("download lock")
+            .insert("https://tos.example.com/b.png".into(), vec![9, 9, 9]);
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/b.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("同名素材".into()),
+                group_id: None,
+            })
+            .await
+            .expect("overseas import picks the record with matching db_id");
+
+        assert_eq!(identity.asset_id, "asset-976-new");
+        // JSON 通道：分组发现 + 轮询 list（两次）；multipart 通道：仅一次 upload。
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/groups", "/v1/assets/list", "/v1/assets/list"]
+        );
+        assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
     }
 }

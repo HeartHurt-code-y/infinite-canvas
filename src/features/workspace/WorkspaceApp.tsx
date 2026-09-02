@@ -55,7 +55,6 @@ import {
   pickLocalMediaFiles,
   pickPromptMultimodalFiles,
   promptNodeClient,
-  promptOptimizeClient,
   subscribeGenerationEvents,
   subscribeStagingEvents,
   toMediaSrc,
@@ -214,7 +213,6 @@ import {
   createViralRemixNodeConfig,
   documentSkillRoleLabel,
   fileNameFromPath,
-  firstTextModelSelection,
   formatTaskRawResponse,
   genNodeDimensions,
   genNodeKey,
@@ -240,6 +238,8 @@ import {
   outputNodeKey,
   outputNodeReferenceTarget,
   persistActiveAssetProviderId,
+  promptConversationRoleLabel,
+  promptMessageId,
   readActiveAssetProviderId,
   reconcileNodeModelSelections,
   reconcileTextModelSelection,
@@ -520,10 +520,6 @@ export function WorkspaceApp() {
   const [downloaderEngineBusy, setDownloaderEngineBusy] = useState(false);
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
   const [genNodeSizes, setGenNodeSizes] = useState<Record<string, CanvasNodeDimensions>>({});
-  // 各视频节点的提示词优化面板状态（key = 生成节点 key，会话内有效）。
-  const [promptOptimizations, setPromptOptimizations] = useState<
-    Record<string, PromptOptimizationPanelState>
-  >({});
   const [promptAudits, setPromptAudits] = useState<Record<string, PromptOptimizationPanelState>>(
     {},
   );
@@ -648,7 +644,6 @@ export function WorkspaceApp() {
     setVideoDownloaderRuns({});
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
-    setPromptOptimizations({});
     setPromptAudits({});
     setScreenplayAudits({});
     setStoryboardAudits({});
@@ -659,7 +654,6 @@ export function WorkspaceApp() {
     setVideoDownloaderRuns,
     setGenNodeSizes,
     setPreviewOutputNodeKey,
-    setPromptOptimizations,
     setPromptAudits,
     setScreenplayAudits,
     setStoryboardAudits,
@@ -1471,15 +1465,6 @@ export function WorkspaceApp() {
   const updateImageNodeConfig = useCallback(
     (key: string, config: ImageNodeConfig) => {
       patchNode("gen", key, (node) => (node.kind === "image" ? { ...node, config } : node));
-      // 关闭优化开关时清掉该节点的优化面板状态（进行中的请求回来后会被 running 守卫拦下）。
-      if (!config.promptOptimization?.enabled) {
-        setPromptOptimizations((current) => {
-          if (!(key in current)) return current;
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
-      }
     },
     [patchNode],
   );
@@ -1620,15 +1605,6 @@ export function WorkspaceApp() {
   const updateVideoNodeConfig = useCallback(
     (key: string, config: VideoNodeConfig) => {
       patchNode("gen", key, (node) => (node.kind === "video" ? { ...node, config } : node));
-      // 关闭优化开关时清掉该节点的优化面板状态（进行中的请求回来后会被 running 守卫拦下）。
-      if (!config.promptOptimization?.enabled) {
-        setPromptOptimizations((current) => {
-          if (!(key in current)) return current;
-          const next = { ...current };
-          delete next[key];
-          return next;
-        });
-      }
     },
     [patchNode],
   );
@@ -1683,6 +1659,12 @@ export function WorkspaceApp() {
         return;
       }
       const visionImages = promptVisionImages(nodeKey);
+      // 多轮对话：把全部已完成轮次逐条注入系统上下文，本轮输入作为新的用户消息。
+      const conversation = node.config.conversation ?? [];
+      const contextHistory: PromptOptimizationContextEntry[] = conversation.map((entry, index) => ({
+        role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
+        content: entry.content,
+      }));
       setNodeStartError(nodeKey, null);
       setPromptAudits((current) => {
         if (!(nodeKey in current)) return current;
@@ -1693,7 +1675,7 @@ export function WorkspaceApp() {
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
-        `[generation] 发起提示词节点请求: node=${nodeKey}, task=${node.config.task}, mode=${node.config.mode}, model=${model.remoteModelId}, 视觉素材 ${visionImages.length} 张`,
+        `[generation] 发起提示词节点请求: node=${nodeKey}, task=${node.config.task}, mode=${node.config.mode}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${sourcePrompt.length} 字符, 视觉素材 ${visionImages.length} 张`,
       );
       void promptNodeClient
         .run({
@@ -1704,14 +1686,25 @@ export function WorkspaceApp() {
           mode: node.config.mode,
           task: node.config.task,
           userPrompt: sourcePrompt,
-          contextHistory: [],
+          contextHistory,
           detailReview: false,
           visionImages,
         })
         .then((result) => {
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
-              ? { ...item, config: { ...item.config, generatedPrompt: result.optimizedPrompt } }
+              ? {
+                  ...item,
+                  config: {
+                    ...item.config,
+                    generatedPrompt: result.optimizedPrompt,
+                    conversation: [
+                      ...(item.config.conversation ?? []),
+                      { id: promptMessageId(), role: "user", content: sourcePrompt },
+                      { id: promptMessageId(), role: "assistant", content: result.optimizedPrompt },
+                    ],
+                  },
+                }
               : item,
           );
           frontendLog(
@@ -1747,8 +1740,14 @@ export function WorkspaceApp() {
       if (!node) return;
       const previous = promptAudits[nodeKey];
       if (previous?.status === "running") return;
-      const savedHistory = node.config.auditContextHistory ?? [];
-      const previousHistory = previous?.contextHistory ?? savedHistory;
+      const conversation = node.config.conversation ?? [];
+      const conversationHistory: PromptOptimizationContextEntry[] = conversation.map(
+        (entry, index) => ({
+          role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
+          content: entry.content,
+        }),
+      );
+      const previousHistory = previous?.contextHistory ?? conversationHistory;
       // Diff 尚未确认应用时，“再次审计”也要沿用上一轮审计建议，
       // 这样每一轮审计都建立在最新审计版本上，而不是回到第一版输出。
       const currentPrompt = (
@@ -1756,7 +1755,7 @@ export function WorkspaceApp() {
           ? previous.optimizedPrompt
           : node.config.generatedPrompt
       ).trim();
-      const auditCount = previousHistory.filter((entry) => entry.role.includes("审计输入")).length;
+      const auditCount = conversation.filter((entry) => entry.role === "audit").length;
       const round = Math.max(previous?.round ?? 0, auditCount) + 1;
       const failWith = (message: string) => {
         setPromptAudits((current) => ({
@@ -1834,7 +1833,16 @@ export function WorkspaceApp() {
           ];
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
-              ? { ...item, config: { ...item.config, auditContextHistory: completedContext } }
+              ? {
+                  ...item,
+                  config: {
+                    ...item.config,
+                    conversation: [
+                      ...(item.config.conversation ?? []),
+                      { id: promptMessageId(), role: "audit", content: result.optimizedPrompt },
+                    ],
+                  },
+                }
               : item,
           );
           setPromptAudits((current) => {
@@ -1874,15 +1882,11 @@ export function WorkspaceApp() {
     [genNodes, patchNode, promptAudits, promptVisionImages, providerCatalog],
   );
 
-  /** 应用审计建议到输出框，并把用户决定写进下一轮审计上下文。 */
+  /** 应用审计建议到输出框，并把用户决定写进多轮对话（供后续轮次沿用）。 */
   const handleApplyPromptAudit = useCallback(
     (nodeKey: string) => {
       const state = promptAudits[nodeKey];
       if (state?.status !== "done" || !state.optimizedPrompt) return;
-      const contextHistory = [
-        ...state.contextHistory,
-        { role: "用户决定", content: `已应用第 ${state.round} 轮审计结果。` },
-      ];
       patchNode("gen", nodeKey, (item) =>
         item.kind === "prompt"
           ? {
@@ -1890,14 +1894,21 @@ export function WorkspaceApp() {
               config: {
                 ...item.config,
                 generatedPrompt: state.optimizedPrompt!,
-                auditContextHistory: contextHistory,
+                conversation: [
+                  ...(item.config.conversation ?? []),
+                  {
+                    id: promptMessageId(),
+                    role: "decision",
+                    content: `已应用第 ${state.round} 轮审计结果。`,
+                  },
+                ],
               },
             }
           : item,
       );
       setPromptAudits((current) => ({
         ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null, contextHistory },
+        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
       }));
       frontendLog("info", `[generation] 应用提示词审计结果: node=${nodeKey}, round=${state.round}`);
       toast.success("已应用提示词审计结果", {
@@ -1907,23 +1918,32 @@ export function WorkspaceApp() {
     [patchNode, promptAudits],
   );
 
-  /** 放弃审计建议但保留审计上下文，下一轮仍可基于完整历史继续审查。 */
+  /** 放弃审计建议但保留多轮对话，下一轮仍可基于完整历史继续审查。 */
   const handleDiscardPromptAudit = useCallback(
     (nodeKey: string) => {
       const state = promptAudits[nodeKey];
       if (state?.status !== "done") return;
-      const contextHistory = [
-        ...state.contextHistory,
-        { role: "用户决定", content: `已保留当前输出，未应用第 ${state.round} 轮审计结果。` },
-      ];
       patchNode("gen", nodeKey, (item) =>
         item.kind === "prompt"
-          ? { ...item, config: { ...item.config, auditContextHistory: contextHistory } }
+          ? {
+              ...item,
+              config: {
+                ...item.config,
+                conversation: [
+                  ...(item.config.conversation ?? []),
+                  {
+                    id: promptMessageId(),
+                    role: "decision",
+                    content: `已保留当前输出，未应用第 ${state.round} 轮审计结果。`,
+                  },
+                ],
+              },
+            }
           : item,
       );
       setPromptAudits((current) => ({
         ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null, contextHistory },
+        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
       }));
       frontendLog(
         "info",
@@ -1975,7 +1995,7 @@ export function WorkspaceApp() {
       );
       if (node.config.currentDocument.trim()) {
         contextHistory.push({
-          role: "当前 Markdown 剧本文档",
+          role: "当前剧本文档",
           content: node.config.currentDocument,
         });
       }
@@ -2837,189 +2857,6 @@ export function WorkspaceApp() {
     [setNodeStartError, viralRemixNodes],
   );
 
-  /** 写入某节点的优化面板状态（running 守卫：仅当仍是本轮发起的状态时才落地结果）。 */
-  const patchPromptOptimization = useCallback(
-    (
-      nodeKey: string,
-      patch: (state: PromptOptimizationPanelState) => PromptOptimizationPanelState,
-    ) => {
-      setPromptOptimizations((current) => {
-        const state = current[nodeKey];
-        if (state == null) return current;
-        return { ...current, [nodeKey]: patch(state) };
-      });
-    },
-    [],
-  );
-
-  /**
-   * 发起提示词优化：读取节点当前提示词 → 注入技能系统提示词调用文本大模型 →
-   * done 态展示 diff 对比。detailReview = true 时把历史上下文全部注入并严格审查。
-   */
-  const handlePromptOptimize = useCallback(
-    (nodeKey: string, detailReview: boolean) => {
-      const genNode = genNodes.find(
-        (node): node is Extract<GenNodeData, { kind: "image" | "video" }> =>
-          node.key === nodeKey && (node.kind === "video" || node.kind === "image"),
-      );
-      const optimization = genNode?.config.promptOptimization;
-      if (!genNode || !optimization?.enabled) return;
-      const failWith = (message: string) => {
-        setPromptOptimizations((current) => {
-          const previous = current[nodeKey];
-          return {
-            ...current,
-            [nodeKey]: {
-              status: "error",
-              detail: detailReview,
-              round: previous?.round ?? 0,
-              originalPrompt: previous?.originalPrompt ?? "",
-              optimizedPrompt: null,
-              error: message,
-              contextHistory: previous?.contextHistory ?? [],
-            },
-          };
-        });
-      };
-      if (!isDesktopRuntime()) {
-        failWith("提示词优化只能在桌面应用中使用。请通过 Tauri 桌面端运行。");
-        return;
-      }
-      // 自动应用已配置的文本模型：历史选择为空或已失效（被移除/改分类）时，
-      // 回退到全局设置里第一个可用的文本模型，而不是直接报错阻塞。
-      const resolveOptimizationTarget = (): {
-        providerId: string;
-        modelDefinitionId: string;
-      } | null => {
-        const provider = providerCatalog.find(
-          (entry) => entry.provider.enabled && entry.provider.id === optimization.providerId,
-        );
-        const model = provider?.models.find(
-          (item) =>
-            item.definitionId === optimization.modelDefinitionId && isTextGenerationModel(item),
-        );
-        if (provider && model) {
-          return { providerId: provider.provider.id, modelDefinitionId: model.definitionId };
-        }
-        const fallback = firstTextModelSelection(providerCatalog);
-        return fallback.modelDefinitionId ? fallback : null;
-      };
-      const target = resolveOptimizationTarget();
-      if (!target) {
-        failWith(
-          "尚未配置文本模型：请先在全局设置的「供应商连接与模型」中把至少一个模型分类为文本模型。",
-        );
-        return;
-      }
-      const preparedPrompt = promptContents.preparePlainText(nodeKey);
-      if (preparedPrompt == null || !preparedPrompt.ok) {
-        const issue = preparedPrompt?.issues[0];
-        failWith(
-          issue?.kind === "pending_reference"
-            ? `请先确认提示词中的同名引用 @${issue.displayText}，再进行提示词优化。`
-            : "提示词为空：请先在该节点的提示词输入框中输入内容再优化。",
-        );
-        if (issue) promptContents.focusIssue(nodeKey, issue);
-        return;
-      }
-      const userPrompt = preparedPrompt.text;
-      const previous = promptOptimizations[nodeKey];
-      const round = (previous?.round ?? 0) + 1;
-      const contextHistory = detailReview
-        ? (previous?.contextHistory ?? [])
-        : [{ role: "用户当前提示词", content: userPrompt }];
-      setPromptOptimizations((current) => ({
-        ...current,
-        [nodeKey]: {
-          status: "running",
-          detail: detailReview,
-          round,
-          originalPrompt: userPrompt,
-          optimizedPrompt: null,
-          error: null,
-          contextHistory,
-        },
-      }));
-      frontendLog(
-        "info",
-        `[generation] 发起提示词优化: node=${nodeKey}, mode=${optimization.mode}, detailReview=${detailReview}, round=${round}, 提示词 ${userPrompt.length} 字符, 注入上下文 ${contextHistory.length} 条`,
-      );
-      promptOptimizeClient
-        .optimize({
-          canvasId: CANVAS_ID,
-          sourceNodeId: nodeKey,
-          providerConnectionId: target.providerId,
-          modelDefinitionId: target.modelDefinitionId,
-          mode: optimization.mode,
-          userPrompt,
-          contextHistory: detailReview ? contextHistory : [],
-          detailReview,
-        })
-        .then((result) => {
-          toast.success(`第 ${round} 轮提示词优化已完成`);
-          patchPromptOptimization(nodeKey, (state) => {
-            if (state.status !== "running") return state;
-            frontendLog(
-              "info",
-              `[generation] 提示词优化完成: node=${nodeKey}, round=${round}, 返回 ${result.optimizedPrompt.length} 字符`,
-            );
-            return {
-              ...state,
-              status: "done",
-              optimizedPrompt: result.optimizedPrompt,
-              error: null,
-              contextHistory: [
-                ...state.contextHistory,
-                {
-                  role: detailReview ? `第 ${round} 轮细节审查结果` : `第 ${round} 轮优化结果`,
-                  content: result.optimizedPrompt,
-                },
-              ],
-            };
-          });
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          frontendLog(
-            "error",
-            `[generation] 提示词优化失败: node=${nodeKey}, round=${round}, ${message}`,
-          );
-          toast.error("提示词优化失败", { description: message });
-          patchPromptOptimization(nodeKey, (state) =>
-            state.status === "running" ? { ...state, status: "error", error: message } : state,
-          );
-        });
-    },
-    [genNodes, promptContents, promptOptimizations, providerCatalog, patchPromptOptimization],
-  );
-
-  /** 不采用优化结果：保留输入框原提示词，仅记录用户决定供后续细节审查注入。 */
-  const handleDiscardOptimizedPrompt = useCallback(
-    (nodeKey: string) => {
-      const state = promptOptimizations[nodeKey];
-      if (state?.status !== "done") return;
-      frontendLog("info", `[generation] 放弃优化提示词: node=${nodeKey}, round=${state.round}`);
-      toast.info("已保留原提示词", {
-        description: `未应用第 ${state.round} 轮优化结果。`,
-      });
-      patchPromptOptimization(nodeKey, (current) => ({
-        ...current,
-        status: "idle",
-        detail: false,
-        optimizedPrompt: null,
-        error: null,
-        contextHistory: [
-          ...current.contextHistory,
-          {
-            role: "用户决定",
-            content: `已放弃第 ${current.round} 轮${current.detail ? "细节审查" : "优化"}结果，保留原提示词。`,
-          },
-        ],
-      }));
-    },
-    [promptOptimizations, patchPromptOptimization],
-  );
-
   /** Add a new canvas projection for an asset; repeated additions always create a new instance. */
   const addAssetNode = useCallback(
     (
@@ -3144,12 +2981,6 @@ export function WorkspaceApp() {
         return next;
       });
       promptContents.remove(key);
-      setPromptOptimizations((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
       setPromptAudits((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
@@ -4722,47 +4553,6 @@ export function WorkspaceApp() {
     }
   }, [mentionCandidatesFor, promptContents, promptSourceByTarget]);
 
-  /** 采用优化结果：把优化后的提示词写回节点输入框，并记录用户决定供细节审查注入。 */
-  const handleAdoptOptimizedPrompt = useCallback(
-    (nodeKey: string) => {
-      const state = promptOptimizations[nodeKey];
-      if (state?.status !== "done" || !state.optimizedPrompt) return;
-      const restored = promptContents.replaceText(
-        nodeKey,
-        state.optimizedPrompt,
-        mentionCandidatesFor(nodeKey),
-      );
-      if (restored) {
-        // 优化结果是纯文本，按当前连线在同一提示内容 edit interface 内重建引用。
-        if (restored.converted > 0 || restored.ambiguous > 0) {
-          frontendLog(
-            "info",
-            `[generation] 优化结果重建素材引用: node=${nodeKey}, 精确恢复 ${restored.converted} 处, 待确认 ${restored.pending} 处`,
-          );
-        }
-      }
-      frontendLog("info", `[generation] 采用优化提示词: node=${nodeKey}, round=${state.round}`);
-      toast.success("已采用优化提示词", {
-        description: `第 ${state.round} 轮结果已写回生成节点。`,
-      });
-      patchPromptOptimization(nodeKey, (current) => ({
-        ...current,
-        status: "idle",
-        detail: false,
-        optimizedPrompt: null,
-        error: null,
-        contextHistory: [
-          ...current.contextHistory,
-          {
-            role: "用户决定",
-            content: `已采用第 ${current.round} 轮${current.detail ? "细节审查" : "优化"}结果，当前提示词已更新为该版本。`,
-          },
-        ],
-      }));
-    },
-    [promptOptimizations, patchPromptOptimization, mentionCandidatesFor, promptContents],
-  );
-
   const nodeDescriptorContext = useMemo(
     () => ({ providerCatalog, nodeModelSelections }),
     [providerCatalog, nodeModelSelections],
@@ -4805,6 +4595,38 @@ export function WorkspaceApp() {
       addAssetNode(asset, point.x, point.y);
     },
     [addAssetNode, dropClientPointToBoard],
+  );
+
+  // 云端素材删除：调用上游 `POST /v1/assets/delete`，成功后重新拉取云端列表。
+  // 本地素材不走此路径（没有云端 ID，删除按钮也不渲染）。
+  const handleDeleteAsset = useCallback(
+    (asset: AssetItem) => {
+      if (asset.source !== "cloud" || !asset.providerConnectionId) return;
+      setAssetsError(null);
+      void assetLibraryClient
+        .deleteAsset({
+          providerConnectionId: asset.providerConnectionId,
+          id: asset.id,
+        })
+        .then(
+          (deletedId) => {
+            frontendLog(
+              "info",
+              `[assets] 云端素材已删除: providerConnectionId=${asset.providerConnectionId}, assetId=${asset.id}, deletedId=${deletedId}`,
+            );
+            if (assetProvider) refreshCloudAssets(assetProvider.id, "delete");
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 云端素材删除失败: providerConnectionId=${asset.providerConnectionId}, assetId=${asset.id}, 错误: ${formatted}`,
+            );
+            setAssetsError(error instanceof Error ? error.message : formatted);
+          },
+        );
+    },
+    [assetProvider, refreshCloudAssets],
   );
 
   const previewOutputNode =
@@ -5210,10 +5032,6 @@ export function WorkspaceApp() {
               }
               registerPromptInput={registerPromptInput}
               providerCatalog={providerCatalog}
-              promptOptimization={promptOptimizations[node.key]}
-              onPromptOptimize={handlePromptOptimize}
-              onAdoptOptimizedPrompt={handleAdoptOptimizedPrompt}
-              onDiscardOptimizedPrompt={handleDiscardOptimizedPrompt}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
               onRemove={removeGenNode}
@@ -5263,10 +5081,6 @@ export function WorkspaceApp() {
       mentionCandidatesFor,
       promptSourceByTarget,
       registerPromptInput,
-      promptOptimizations,
-      handlePromptOptimize,
-      handleAdoptOptimizedPrompt,
-      handleDiscardOptimizedPrompt,
       updateImageNodeConfig,
       updateVideoNodeConfig,
       handleStartGeneration,
@@ -6304,7 +6118,15 @@ export function WorkspaceApp() {
         </Suspense>
       ) : null}
       {previewAsset ? (
-        <AssetSourceDialog asset={previewAsset} onClose={() => setPreviewAsset(null)} />
+        <AssetSourceDialog
+          asset={previewAsset}
+          onClose={() => setPreviewAsset(null)}
+          onDelete={
+            previewAsset.source === "cloud" && previewAsset.providerConnectionId
+              ? () => handleDeleteAsset(previewAsset)
+              : null
+          }
+        />
       ) : null}
       {realPersonDialogOpen && assetProvider ? (
         <RealPersonAssetDialog
