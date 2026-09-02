@@ -1403,10 +1403,10 @@ fn build_video_body(
 
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
-    body.insert(
-        prompt_field,
-        Value::String(resolved.rendered_prompt.clone()),
-    );
+    let prompt = video_prompt(resolved);
+    if !prompt.trim().is_empty() {
+        body.insert(prompt_field, Value::String(prompt));
+    }
     match content_container.as_str() {
         "root" => {
             body.insert(content_field, Value::Array(content));
@@ -1429,6 +1429,30 @@ fn build_video_body(
         mapped_parameters(resolved, "metadata")?,
     )?;
     Ok(Value::Object(body))
+}
+
+/// 通用视频 body 的 prompt 渲染：由结构化 `content` 重建，媒体引用渲染为
+/// `图片N` / `视频N` / `音频N` 简洁标签，而不是 `[图片N：文件名]` 占位形式。
+/// 真正生效的提示词文本由 `content` 中的 text 项承载。
+fn video_prompt(resolved: &ResolvedGeneration) -> String {
+    let mut prompt = String::new();
+    for item in &resolved.content {
+        match item {
+            CompiledContentItem::Text(text) => prompt.push_str(text),
+            CompiledContentItem::Media {
+                media_type,
+                type_position,
+            } => {
+                let label = match media_type {
+                    MediaType::Image => "图片",
+                    MediaType::Video => "视频",
+                    MediaType::Audio => "音频",
+                };
+                prompt.push_str(&format!("{label}{type_position}"));
+            }
+        }
+    }
+    prompt
 }
 
 fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
@@ -2263,6 +2287,76 @@ mod tests {
         assert_eq!(body["metadata"]["priority"], 7);
         assert_eq!(body["metadata"]["tools"], json!([{ "type": "web_search" }]));
         assert!(body.get("omni_reference_task_type").is_none());
+    }
+
+    #[test]
+    fn dreamina_seedance_builder_renders_reference_media_as_short_labels_in_prompt() {
+        let schema = super::super::model_schema::default_model_schema(
+            "dreamina-seedance-2.5",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "ratio": "adaptive",
+                "resolution": "720p",
+                "duration": 30,
+                "generate_audio": true,
+                "output_format": "mp4",
+                "priority": 0
+            }),
+        );
+        // 模拟画布拼接：两张参考图 + 文本「疯狂做爱」。
+        generation.rendered_prompt =
+            "[图片1：微信图片_xxx.jpg]和[图片2：微信图片_yyy.jpg]疯狂做爱".into();
+        generation.content = vec![
+            CompiledContentItem::Media {
+                media_type: MediaType::Image,
+                type_position: 1,
+            },
+            CompiledContentItem::Text("和".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Image,
+                type_position: 2,
+            },
+            CompiledContentItem::Text("疯狂做爱".into()),
+        ];
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "asset://asset-20260902214334-t5rnj",
+            Some(1),
+        ));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "reference_image",
+            "asset://asset-20260902214333-l5lpp",
+            Some(2),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("dreamina-seedance-2.5".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Dreamina media body");
+
+        // prompt 字段应为简洁标签，而不是 [图片N：文件名] 占位形式。
+        assert_eq!(body["prompt"], "图片1和图片2疯狂做爱");
+        // 真正生效的提示词按顺序落在 metadata.content 的 text 项中。
+        assert_eq!(body["metadata"]["content"][0]["type"], "image_url");
+        assert_eq!(body["metadata"]["content"][1]["type"], "text");
+        assert_eq!(body["metadata"]["content"][1]["text"], "和");
+        assert_eq!(body["metadata"]["content"][2]["type"], "image_url");
+        assert_eq!(body["metadata"]["content"][3]["type"], "text");
+        assert_eq!(body["metadata"]["content"][3]["text"], "疯狂做爱");
+        assert_eq!(
+            body["metadata"]["content"][0]["image_url"]["url"],
+            "asset://asset-20260902214334-t5rnj"
+        );
+        assert_eq!(
+            body["metadata"]["content"][2]["image_url"]["url"],
+            "asset://asset-20260902214333-l5lpp"
+        );
     }
 
     #[test]

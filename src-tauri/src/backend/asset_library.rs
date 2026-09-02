@@ -1379,7 +1379,7 @@ mod tests {
             }
         }
 
-        fn with_overseas(mut self, overseas: bool) -> Self {
+        fn with_overseas(self, overseas: bool) -> Self {
             *self.overseas.lock().expect("overseas lock") = overseas;
             self
         }
