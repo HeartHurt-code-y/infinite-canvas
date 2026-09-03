@@ -232,6 +232,7 @@ pub fn schema_for_enabled_operations(
     let mut schema = Value::Object(schema);
     refresh_wan_30_video_defaults(&mut schema, model_id);
     refresh_dreamina_seedance_video_defaults(&mut schema, model_id);
+    refresh_seedance_25_video_defaults(&mut schema, model_id);
     schema
 }
 
@@ -456,6 +457,7 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     let mut complete = Value::Object(complete);
     refresh_wan_30_video_defaults(&mut complete, model_id);
     refresh_dreamina_seedance_video_defaults(&mut complete, model_id);
+    refresh_seedance_25_video_defaults(&mut complete, model_id);
     complete
 }
 
@@ -615,8 +617,12 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             } else {
                 Value::Array(Vec::new())
             };
-            let resolutions = if dreamina || seedance_25 || fast_or_mini {
+            // 海外 Dreamina Seedance 仅开放 720p/480p；国内 Seedance 2.5 官方全平台
+            // 支持 1080p（文档曾前后矛盾，现已确认），2.5 的 fast/mini 变体保持 720p/480p。
+            let resolutions = if dreamina || (seedance_25 && fast_or_mini) {
                 json!(["720p", "480p"])
+            } else if seedance_25 {
+                json!(["720p", "480p", "1080p"])
             } else if seedance_20 {
                 json!(["720p", "480p", "1080p", "4k"])
             } else {
@@ -646,7 +652,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                     json!({ "type": "boolean", "label": "生成音频", "default": true }),
                 );
             }
-            if (seedance_20 && !identity.contains("mini")) || (dreamina && seedance_25) {
+            // 联网搜索：Seedance 2.0 标准版，以及全部 Seedance 2.5（国内与海外）均支持，
+            // 仅在无媒体输入的文生视频场景启用。
+            if (seedance_20 && !identity.contains("mini")) || seedance_25 {
                 parameters.insert(
                     "web_search".into(),
                     json!({
@@ -790,6 +798,78 @@ pub fn refresh_dreamina_seedance_video_defaults(schema: &mut Value, model_id: &s
         .is_none_or(Map::is_empty)
     {
         return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
+/// 把历史版本为国内 Seedance 2.5 模型保存的视频参数档案刷新到当前能力。
+///
+/// 早期版本因官方文档对 `1080p` 与联网搜索支持前后矛盾，把国内
+/// `doubao-seedance-2-5-...` 的分辨率限制为 `480p/720p` 且不提供
+/// `web_search`。用户确认该模型在所有官方平台均支持联网搜索与 1080p：
+/// - 空参数档案：整体替换为当前默认（与 Wan / Dreamina 的升级一致）；
+/// - 非空档案：原位补齐缺失的 `1080p` 分辨率与 `web_search` 定义，
+///   不覆盖服务商下发的自定义参数。
+pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_seedance_25_video_model(model_id) || is_dreamina_seedance_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if !operation
+        .get("parameters")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty)
+    {
+        let Some(parameters) = operation
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        let mut changed = false;
+        if let Some(resolution) = parameters
+            .get_mut("resolution")
+            .and_then(Value::as_object_mut)
+            && let Some(values) = resolution.get_mut("enum").and_then(Value::as_array_mut)
+            && !values.iter().any(|value| value == "1080p")
+        {
+            values.push(json!("1080p"));
+            changed = true;
+        }
+        if !parameters.contains_key("web_search") {
+            parameters.insert(
+                "web_search".into(),
+                json!({
+                    "type": "boolean",
+                    "label": "联网搜索",
+                    "default": false,
+                    "requiresNoMedia": true,
+                    "requestField": "tools",
+                    "transform": "web_search_tool"
+                }),
+            );
+            changed = true;
+        }
+        return changed;
     }
 
     let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
@@ -1026,6 +1106,82 @@ mod tests {
                 .is_some()
         );
         assert!(domestic_parameters.get("priority").is_none());
+    }
+
+    #[test]
+    fn domestic_seedance_25_models_support_1080p_and_web_search() {
+        let schema = default_model_schema(
+            "doubao-seedance-2-5-260628",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let parameters = &schema["video_generation"]["parameters"];
+        assert_eq!(
+            parameters["resolution"]["enum"],
+            json!(["720p", "480p", "1080p"])
+        );
+        assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
+        assert_eq!(parameters["web_search"]["requiresNoMedia"], true);
+        assert!(parameters.get("omni_reference_task_type").is_some());
+
+        // 旧档案：非空但缺 1080p 与 web_search，应原位补齐且不覆盖其他自定义字段。
+        let mut stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata"
+                },
+                "parameters": {
+                    "ratio": { "type": "string", "label": "画幅", "default": "adaptive", "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"] },
+                    "resolution": { "type": "string", "label": "分辨率", "default": "720p", "enum": ["720p", "480p"] },
+                    "duration": { "type": "integer", "label": "时长", "default": -1, "enum": [-1] },
+                    "generate_audio": { "type": "boolean", "label": "生成音频", "default": true },
+                    "output_format": { "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"] },
+                    "omni_reference_task_type": { "type": "string", "label": "任务类型", "default": "auto", "enum": ["auto", "reference", "edit", "extend"] }
+                }
+            }
+        });
+        assert!(refresh_seedance_25_video_defaults(
+            &mut stale,
+            "doubao-seedance-2-5-260628"
+        ));
+        let parameters = &stale["video_generation"]["parameters"];
+        assert_eq!(
+            parameters["resolution"]["enum"],
+            json!(["720p", "480p", "1080p"])
+        );
+        assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
+        assert_eq!(parameters["output_format"]["default"], "mp4");
+
+        // 空参数档案：整体替换为当前默认。
+        let mut empty = json!({
+            "video_generation": { "resultType": "video", "parameters": {} }
+        });
+        assert!(refresh_seedance_25_video_defaults(
+            &mut empty,
+            "doubao-seedance-2-5-260628"
+        ));
+        let parameters = &empty["video_generation"]["parameters"];
+        assert_eq!(
+            parameters["resolution"]["enum"],
+            json!(["720p", "480p", "1080p"])
+        );
+        assert!(parameters.get("web_search").is_some());
+
+        // 海外 Dreamina 2.5 不受该刷新影响。
+        let mut dreamina = json!({
+            "video_generation": {
+                "resultType": "video",
+                "parameters": { "resolution": { "type": "string", "enum": ["720p", "480p"] } }
+            }
+        });
+        assert!(!refresh_seedance_25_video_defaults(
+            &mut dreamina,
+            "dreamina-seedance-2.5"
+        ));
     }
 
     #[test]

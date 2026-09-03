@@ -108,6 +108,39 @@ describe("model capabilities", () => {
     expect(repaired.map((capability) => capability.key)).toContain("priority");
   });
 
+  it("supports domestic Seedance 2.5 with 1080p and web search", () => {
+    const seedance25 = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedance-2-5-260628", ["video_generation"]),
+      "video_generation",
+      "doubao-seedance-2-5-260628",
+    );
+    expect(seedance25.map((capability) => capability.key)).toEqual([
+      "ratio",
+      "resolution",
+      "duration",
+      "generate_audio",
+      "web_search",
+      "output_format",
+      "omni_reference_task_type",
+    ]);
+    expect(seedance25.find((capability) => capability.key === "resolution")?.options).toEqual([
+      { value: "720p", label: "720p" },
+      { value: "480p", label: "480p" },
+      { value: "1080p", label: "1080p" },
+    ]);
+    expect(seedance25.find((capability) => capability.key === "web_search")).toMatchObject({
+      defaultValue: false,
+      requiresNoMedia: true,
+    });
+    expect(seedance25.find((capability) => capability.key === "duration")?.options).toHaveLength(
+      28,
+    );
+    expect(seedance25.some((capability) => capability.key === "omni_reference_task_type")).toBe(
+      true,
+    );
+    expect(seedance25.some((capability) => capability.key === "priority")).toBe(false);
+  });
+
   it("treats an explicitly empty parameter schema as authoritative", () => {
     const capabilities = modelParameterCapabilities(
       { video_generation: { parameters: {} } },

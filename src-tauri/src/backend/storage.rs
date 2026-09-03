@@ -2370,6 +2370,64 @@ mod tests {
     }
 
     #[test]
+    fn stale_domestic_seedance_25_definition_is_migrated_on_open() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        let storage = Storage::open(&path).expect("open db");
+        let timestamp = now_ms();
+        {
+            let connection = storage.lock().expect("database lock");
+            connection
+                .execute(
+                    "INSERT INTO model_definitions
+                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
+                     VALUES ('remote::company-prod::doubao-seedance-2-5-260628', 'Seedance 2.5', 'doubao-seedance-2-5-260628',
+                             ?2, ?1, ?1)",
+                    params![
+                        timestamp,
+                        json!({
+                            "video_generation": {
+                                "resultType": "video",
+                                "requestProfileId": "moyu_video_metadata_v1",
+                                "profileVersion": 1,
+                                "request": {
+                                    "path": "/v1/video/generations",
+                                    "encoding": "json",
+                                    "parameterContainer": "metadata"
+                                },
+                                "parameters": {
+                                    "ratio": { "type": "string", "label": "画幅", "default": "adaptive", "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"] },
+                                    "resolution": { "type": "string", "label": "分辨率", "default": "720p", "enum": ["720p", "480p"] },
+                                    "duration": { "type": "integer", "label": "时长", "default": -1, "enum": [-1] },
+                                    "generate_audio": { "type": "boolean", "label": "生成音频", "default": true },
+                                    "output_format": { "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"] },
+                                    "omni_reference_task_type": { "type": "string", "label": "任务类型", "default": "auto", "enum": ["auto", "reference", "edit", "extend"] }
+                                }
+                            }
+                        })
+                        .to_string()
+                    ],
+                )
+                .expect("insert stale Seedance 2.5 definition");
+        }
+
+        drop(storage);
+        let storage = Storage::open(&path).expect("reopen db");
+        let definition = storage
+            .list_model_definitions()
+            .expect("list definitions")
+            .into_iter()
+            .find(|model| model.id == "remote::company-prod::doubao-seedance-2-5-260628")
+            .expect("migrated Seedance 2.5 definition");
+        let parameters = &definition.operations["video_generation"]["parameters"];
+        assert_eq!(
+            parameters["resolution"]["enum"],
+            json!(["720p", "480p", "1080p"])
+        );
+        assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
+    }
+
+    #[test]
     fn canvas_save_uses_optimistic_revisions() {
         let directory = TempDir::new().expect("temp dir");
         let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");

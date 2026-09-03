@@ -243,9 +243,14 @@ function videoParameters(modelId: string): Record<string, unknown> {
     : seedance20
       ? Array.from({ length: 12 }, (_, index) => index + 4)
       : [5, 8, 12];
-  const resolutions =
-    dreamina || seedance25 || fast || mini
-      ? ["720p", "480p"]
+  // 海外 Dreamina Seedance 仅开放 720p/480p；国内 Seedance 2.5 官方全平台
+  // 支持 1080p（文档曾前后矛盾，现已确认），2.5 的 fast/mini 变体保持 720p/480p。
+  const resolutions = dreamina
+    ? ["720p", "480p"]
+    : seedance25
+      ? fast || mini
+        ? ["720p", "480p"]
+        : ["720p", "480p", "1080p"]
       : seedance20
         ? ["720p", "480p", "1080p", "4k"]
         : ["720p", "480p", "1080p"];
@@ -274,7 +279,9 @@ function videoParameters(modelId: string): Record<string, unknown> {
       default: true,
     },
   };
-  if ((seedance20 && !mini) || (dreamina && seedance25)) {
+  // 联网搜索：Seedance 2.0 标准版，以及全部 Seedance 2.5（国内与海外）均支持，
+  // 仅在无媒体输入的文生视频场景启用。
+  if ((seedance20 && !mini) || seedance25) {
     parameters["web_search"] = {
       type: "boolean",
       label: "联网搜索",
