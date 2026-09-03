@@ -42,6 +42,7 @@ import {
   PROMPT_OPTIMIZATION_MODE_LABELS,
   documentSkillRoleLabel,
   isTextGenerationModel,
+  promptConversationRoleLabel,
 } from "./workspaceModel";
 
 function ScreenplayMaterialIcon({ kind }: { readonly kind: PromptMaterialKind }) {
@@ -129,6 +130,8 @@ export function CanvasDocumentSkillNode({
   const [exporting, setExporting] = useState(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
   const [composerInitialValue] = useState(node.config.composer);
+  /** 文档区视图：默认「预览」渲染 Markdown；无内容或用户主动编辑时切回「编辑」。 */
+  const [documentMode, setDocumentMode] = useState<"edit" | "preview">("preview");
   const copy = DOCUMENT_SKILL_NODE_COPY[node.kind];
   const textModelProviders = providerCatalog
     .map((entry) => ({
@@ -157,6 +160,9 @@ export function CanvasDocumentSkillNode({
         : !selectionReady
           ? "请先选择可用的文本模型"
           : null;
+  // 文档区视图：无稿件时始终落在「编辑」，方便粘贴；有稿件时按用户选择的 预览/编辑 展示。
+  const hasDocument = node.config.currentDocument.trim().length > 0;
+  const effectiveDocumentMode = hasDocument ? documentMode : "edit";
 
   useEffect(() => {
     const element = nodeElementRef.current;
@@ -375,7 +381,7 @@ export function CanvasDocumentSkillNode({
 
         <div
           ref={conversationRef}
-          className="canvas-screenplay-node__conversation"
+          className="canvas-screenplay-node__conversation nodrag"
           role="log"
           aria-label={copy.conversationAriaLabel}
           aria-live="polite"
@@ -538,33 +544,72 @@ export function CanvasDocumentSkillNode({
             <label htmlFor={`document-skill-document-${node.key}`}>
               {copy.currentDocumentLabel}
             </label>
-            <button
-              type="button"
-              className="canvas-prompt-node__audit-button"
-              disabled={auditUnavailableReason != null}
-              title={auditUnavailableReason ?? `用内置技能与全部历史审计当前${copy.documentName}`}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onAudit(node.key);
-              }}
-            >
-              {auditBusy ? (
-                <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
-              ) : (
-                <MagnifyingGlass size={13} weight="bold" aria-hidden="true" />
-              )}
-              {auditBusy ? "审计中" : "审计"}
-            </button>
+            <span className="canvas-screenplay-node__document-tools">
+              <span
+                className="canvas-screenplay-node__document-mode"
+                role="group"
+                aria-label={`${copy.currentDocumentLabel}视图`}
+              >
+                <button
+                  type="button"
+                  aria-pressed={effectiveDocumentMode === "edit"}
+                  title="切换到 Markdown 源码编辑"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => setDocumentMode("edit")}
+                >
+                  编辑
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={effectiveDocumentMode === "preview"}
+                  title="切换到 Markdown 渲染预览"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => setDocumentMode("preview")}
+                >
+                  预览
+                </button>
+              </span>
+              <button
+                type="button"
+                className="canvas-prompt-node__audit-button"
+                disabled={auditUnavailableReason != null}
+                title={auditUnavailableReason ?? `用内置技能与全部历史审计当前${copy.documentName}`}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onAudit(node.key);
+                }}
+              >
+                {auditBusy ? (
+                  <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
+                ) : (
+                  <MagnifyingGlass size={13} weight="bold" aria-hidden="true" />
+                )}
+                {auditBusy ? "审计中" : "审计"}
+              </button>
+            </span>
           </div>
-          <textarea
-            id={`document-skill-document-${node.key}`}
-            aria-label={copy.currentDocumentLabel}
-            placeholder={copy.documentPlaceholder}
-            value={node.config.currentDocument}
-            disabled={running || auditBusy}
-            onChange={(event) => onChange({ ...node.config, currentDocument: event.target.value })}
-          />
+          {effectiveDocumentMode === "preview" ? (
+            <div
+              className="canvas-screenplay-node__document-preview nodrag"
+              role="region"
+              aria-label={`${copy.currentDocumentLabel}预览`}
+            >
+              <MarkdownView content={node.config.currentDocument} />
+            </div>
+          ) : (
+            <textarea
+              id={`document-skill-document-${node.key}`}
+              aria-label={copy.currentDocumentLabel}
+              placeholder={copy.documentPlaceholder}
+              value={node.config.currentDocument}
+              disabled={running || auditBusy}
+              onChange={(event) => {
+                setDocumentMode("edit");
+                onChange({ ...node.config, currentDocument: event.target.value });
+              }}
+            />
+          )}
         </div>
 
         {audit && audit.status !== "idle" ? (
@@ -630,6 +675,8 @@ export function CanvasViralRemixNode({
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const [exporting, setExporting] = useState(false);
+  /** 文档区视图：默认「预览」渲染 Markdown；无内容或用户主动编辑时切回「编辑」。 */
+  const [documentMode, setDocumentMode] = useState<"edit" | "preview">("preview");
   const textModelProviders = providerCatalog
     .map((entry) => ({
       provider: entry.provider,
@@ -644,6 +691,9 @@ export function CanvasViralRemixNode({
     (model) => model.definitionId === node.config.modelSelection.modelDefinitionId,
   );
   const selectionReady = Boolean(selectedProvider && selectedModel);
+  // 文档区视图：无稿件时始终落在「编辑」，方便粘贴；有稿件时按用户选择的 预览/编辑 展示。
+  const hasDocument = node.config.currentDocument.trim().length > 0;
+  const effectiveDocumentMode = hasDocument ? documentMode : "edit";
 
   useEffect(() => {
     const element = nodeElementRef.current;
@@ -860,17 +910,56 @@ export function CanvasViralRemixNode({
 
         <div className="canvas-screenplay-node__document canvas-viral-remix-node__document">
           <div className="canvas-screenplay-node__document-heading">
-            <label htmlFor={`viral-remix-document-${node.key}`}>当前 Markdown 复刻方案</label>
-            <span>可编辑 · 可导出</span>
+            <label htmlFor={`viral-remix-document-${node.key}`}>当前复刻方案</label>
+            <span className="canvas-screenplay-node__document-tools">
+              <span
+                className="canvas-screenplay-node__document-mode"
+                role="group"
+                aria-label="当前复刻方案视图"
+              >
+                <button
+                  type="button"
+                  aria-pressed={effectiveDocumentMode === "edit"}
+                  title="切换到 Markdown 源码编辑"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => setDocumentMode("edit")}
+                >
+                  编辑
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={effectiveDocumentMode === "preview"}
+                  title="切换到 Markdown 渲染预览"
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={() => setDocumentMode("preview")}
+                >
+                  预览
+                </button>
+              </span>
+              <span className="canvas-screenplay-node__document-hint">可编辑 · 可导出</span>
+            </span>
           </div>
-          <textarea
-            id={`viral-remix-document-${node.key}`}
-            aria-label="当前 Markdown 爆款视频复刻方案"
-            placeholder="连接视频并运行后，将在这里生成逐秒复刻提示词、爆点诊断和三条二创路线。"
-            value={node.config.currentDocument}
-            disabled={running}
-            onChange={(event) => onChange({ ...node.config, currentDocument: event.target.value })}
-          />
+          {effectiveDocumentMode === "preview" ? (
+            <div
+              className="canvas-screenplay-node__document-preview nodrag"
+              role="region"
+              aria-label="当前复刻方案预览"
+            >
+              <MarkdownView content={node.config.currentDocument} />
+            </div>
+          ) : (
+            <textarea
+              id={`viral-remix-document-${node.key}`}
+              aria-label="当前爆款视频复刻方案"
+              placeholder="连接视频并运行后，将在这里生成逐秒复刻提示词、爆点诊断和三条二创路线。"
+              value={node.config.currentDocument}
+              disabled={running}
+              onChange={(event) => {
+                setDocumentMode("edit");
+                onChange({ ...node.config, currentDocument: event.target.value });
+              }}
+            />
+          )}
         </div>
 
         {error ? (
@@ -914,7 +1003,7 @@ export function CanvasPromptNode({
   readonly running: boolean;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  /** 连入本节点的图片素材（视觉理解参考图，按连线建立顺序）。 */
+  /** 连入本节点的图片素材与图片/视频产物（多模态理解参考，按连线建立顺序）。 */
   readonly sourceConnections: readonly {
     readonly key: string;
     readonly name: string;
@@ -962,6 +1051,8 @@ export function CanvasPromptNode({
   );
   const selectionReady = Boolean(selectedProvider && selectedModel);
   const taskLabel = node.config.task === "generate" ? "生成提示词" : "优化提示词";
+  const conversation = node.config.conversation ?? [];
+  const conversationRef = useRef<HTMLDivElement>(null);
   const auditBusy = audit?.status === "running";
   const auditStatusId = `prompt-audit-status-${node.key}`;
   const promptOutputId = `prompt-output-${node.key}`;
@@ -979,8 +1070,15 @@ export function CanvasPromptNode({
   const promptStatusText =
     auditUnavailableReason ??
     (node.config.generatedPrompt
-      ? `已生成 ${node.config.generatedPrompt.length} 字${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 张视觉参考图` : ""}`
+      ? `已生成 ${node.config.generatedPrompt.length} 字${conversation.length > 0 ? `，累计 ${conversation.length} 条对话` : ""}${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 个参考素材` : ""}`
       : "输出会作为下游节点的提示词请求参数");
+
+  // 新消息出现时把对话区滚动到底部。
+  useEffect(() => {
+    const element = conversationRef.current;
+    if (element == null) return;
+    element.scrollTop = element.scrollHeight;
+  }, [conversation.length, running]);
 
   useEffect(() => {
     const element = nodeElementRef.current;
@@ -1064,13 +1162,13 @@ export function CanvasPromptNode({
         <div className="canvas-prompt-node__intro">
           <strong>把创意变成可执行的提示词</strong>
           <span>
-            选择生成或优化；连入图片辅助视觉理解，连接视频节点后参考图会随提示词自动传递。
+            支持多轮对话：每次生成、优化或审计都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。
           </span>
         </div>
         {sourceConnections.length > 0 ? (
           <div className="canvas-prompt-node__connections">
-            <span>参考图片（视觉理解）</span>
-            <ul aria-label="已连入的参考图片素材">
+            <span>参考素材（多模态理解）</span>
+            <ul aria-label="已连入的参考素材">
               {sourceConnections.map((connection) => (
                 <li key={connection.edgeId}>
                   <span>{connection.name}</span>
@@ -1107,6 +1205,36 @@ export function CanvasPromptNode({
             优化
           </button>
         </div>
+        <div
+          ref={conversationRef}
+          className="canvas-screenplay-node__conversation canvas-prompt-node__conversation nodrag"
+          role="log"
+          aria-label="提示词多轮对话"
+          aria-live="polite"
+        >
+          {conversation.length === 0 ? (
+            <div className="canvas-screenplay-node__empty">
+              <strong>从一句创意或待优化提示词开始</strong>
+              <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
+            </div>
+          ) : (
+            conversation.map((entry) => (
+              <article
+                key={entry.id}
+                className={`canvas-screenplay-node__message is-${entry.role}`}
+              >
+                <span>{promptConversationRoleLabel(entry.role)}</span>
+                <MarkdownView content={entry.content} />
+              </article>
+            ))
+          )}
+          {running ? (
+            <div className="canvas-screenplay-node__thinking" role="status">
+              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              正在调用文本模型…
+            </div>
+          ) : null}
+        </div>
         <label className="canvas-prompt-node__field">
           <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
           <textarea
@@ -1117,9 +1245,19 @@ export function CanvasPromptNode({
                 : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
+            disabled={running || auditBusy}
             onChange={(event) => onChange({ ...node.config, sourcePrompt: event.target.value })}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                event.preventDefault();
+                onRun(node.key);
+              }
+            }}
           />
         </label>
+        <div className="canvas-screenplay-node__composer-actions canvas-prompt-node__composer-actions">
+          <span>Ctrl / ⌘ + Enter 发送 · 每轮自动携带全部对话上下文</span>
+        </div>
         <div className="canvas-prompt-node__fields">
           <label className="canvas-prompt-node__field">
             <span>文本模型供应商</span>

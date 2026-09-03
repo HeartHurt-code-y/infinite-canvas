@@ -102,6 +102,16 @@ function datasetForTarget(target: MediaReferenceTarget): Record<string, string> 
       "data-media-kind": target.mediaType,
     };
   }
+  if (target.kind === "local_file") {
+    return {
+      "data-asset-id": target.path,
+      "data-provider-id": "",
+      "data-asset-source": "local",
+      "data-reference-kind": "local_file",
+      "data-file-path": target.path,
+      "data-media-kind": target.mediaType,
+    };
+  }
   return {
     "data-asset-id": `${target.generationTaskId}#${target.resultIndex}`,
     "data-provider-id": "",
@@ -117,6 +127,10 @@ function targetFromElement(element: HTMLElement): MediaReferenceTarget | null {
   const canvasNodeKey = element.dataset["canvasNodeKey"] ?? "";
   const mediaType = element.dataset["mediaKind"];
   if (!canvasNodeKey || !isMediaType(mediaType)) return null;
+  if (element.dataset["referenceKind"] === "local_file") {
+    const path = element.dataset["filePath"] ?? element.dataset["assetId"] ?? "";
+    return path ? { kind: "local_file", path, canvasNodeKey, mediaType } : null;
+  }
   if (element.dataset["referenceKind"] === "local_result") {
     const generationTaskId = element.dataset["generationTaskId"] ?? "";
     const resultIndex = Number.parseInt(element.dataset["resultIndex"] ?? "", 10);
@@ -200,9 +214,11 @@ const MediaReference = Node.create({
           ? target.assetId
           : target?.kind === "local_asset"
             ? target.stagingJobId
-            : target
-              ? `${target.generationTaskId}#${target.resultIndex}`
-              : ""
+            : target?.kind === "local_file"
+              ? target.path
+              : target
+                ? `${target.generationTaskId}#${target.resultIndex}`
+                : ""
       } · ${String(node.attrs["canvasNodeKey"] ?? "")}`,
     };
     if (target) Object.assign(attrs, datasetForTarget(target));

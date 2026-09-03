@@ -4,7 +4,7 @@ import { Key } from "@phosphor-icons/react/Key";
 import { Plus } from "@phosphor-icons/react/Plus";
 import { Trash } from "@phosphor-icons/react/Trash";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { useCallback, useEffect, useId, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   formatRawBackendError,
   providerSettingsClient,
@@ -50,11 +50,19 @@ export function ProviderTokenGroupSettings({
   const [requestError, setRequestError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
 
+  // 父组件可能传入每次渲染都新建的内联回调（例如在回调里 setState 后父组件重新渲染）。
+  // 若把该回调直接放进 reload 的依赖，回调引用一变就会重跑 reload，导致「读取中/未配置」
+  // 徽标无限闪烁。这里用 latest-ref 保存最新回调，使 reload 身份不随父组件渲染而改变。
+  const onTokenGroupsChangedRef = useRef(onTokenGroupsChanged);
+  useEffect(() => {
+    onTokenGroupsChangedRef.current = onTokenGroupsChanged;
+  }, [onTokenGroupsChanged]);
+
   const reload = useCallback(async () => {
     if (!provider) {
       setGroups([]);
       setSecrets({});
-      onTokenGroupsChanged([]);
+      onTokenGroupsChangedRef.current([]);
       setLoading(false);
       return;
     }
@@ -62,7 +70,7 @@ export function ProviderTokenGroupSettings({
     try {
       const list = await client.listProviderTokenGroups(provider.id);
       setGroups(list);
-      onTokenGroupsChanged(list);
+      onTokenGroupsChangedRef.current(list);
       const next: Record<string, string> = {};
       await Promise.all(
         list.map(async (group) => {
@@ -78,11 +86,11 @@ export function ProviderTokenGroupSettings({
       const formatted = error instanceof Error ? error.message : formatRawBackendError(error);
       setRequestError(formatted);
       setGroups([]);
-      onTokenGroupsChanged([]);
+      onTokenGroupsChangedRef.current([]);
     } finally {
       setLoading(false);
     }
-  }, [client, credentialClient, onTokenGroupsChanged, provider]);
+  }, [client, credentialClient, provider]);
 
   useEffect(() => {
     let active = true;

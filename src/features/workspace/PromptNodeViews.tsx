@@ -18,7 +18,6 @@ import { createPortal } from "react-dom";
 import {
   frontendLog,
   type GenerationOperation,
-  type PromptOptimizationMode,
   type ProviderCatalogEntry,
 } from "../../lib/backend";
 import {
@@ -39,21 +38,13 @@ import type {
   AssetKind,
   ImageNodeConfig,
   MentionCandidate,
-  NodePromptOptimizationConfig,
   PromptOptimizationPanelState,
   RepositoryNodeKind,
   VideoNodeConfig,
 } from "./workspaceModel";
 import {
-  IMAGE_PROMPT_OPTIMIZATION_DEFAULT_MODE,
-  IMAGE_PROMPT_OPTIMIZATION_MODES,
   MAX_GENERATION_COUNT,
-  PROMPT_OPTIMIZATION_MODE_LABELS,
-  VIDEO_PROMPT_OPTIMIZATION_DEFAULT_MODE,
-  VIDEO_PROMPT_OPTIMIZATION_MODES,
-  firstTextModelSelection,
   isImageGenerationModel,
-  isTextGenerationModel,
   parseGenerationCountInput,
   supportsGenerationNode,
 } from "./workspaceModel";
@@ -70,6 +61,31 @@ export function AssetKindIcon({
   if (kind === "image") return <ImageSquare {...iconProps} />;
   if (kind === "video") return <VideoCamera {...iconProps} />;
   return <WaveformIcon {...iconProps} />;
+}
+
+/** @ 候选缩略图：优先展示素材预览图，无图或加载失败时回退到类型图标。 */
+function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidate }) {
+  const [failed, setFailed] = useState(false);
+  const preview = candidate.previewUrl;
+  const showImage = preview != null && !failed && candidate.kind !== "audio";
+  return (
+    <span
+      className={`prompt-mention__thumb${showImage ? "" : " prompt-mention__thumb--fallback"}`}
+      aria-hidden="true"
+    >
+      {showImage ? (
+        <img
+          src={preview}
+          alt=""
+          draggable={false}
+          decoding="async"
+          onError={() => setFailed(true)}
+        />
+      ) : (
+        <AssetKindIcon kind={candidate.kind} size={20} />
+      )}
+    </span>
+  );
 }
 
 export function NodeTypeIcon({
@@ -187,22 +203,26 @@ export function PromptMentionInput({
     [describedBy, editorDescriptionId, expanded, labelledBy, nodeKey, registerInput],
   );
 
+  const candidateAliases = useMemo(
+    () => describePromptContentCandidates(candidates).aliases,
+    [candidates],
+  );
   const filtered = useMemo(() => {
     const keyword = query.trim().toLowerCase();
     if (!keyword) return candidates;
     return candidates.filter(
-      (candidate) =>
+      (candidate, index) =>
         candidate.name.toLowerCase().includes(keyword) ||
         candidate.assetId.toLowerCase().includes(keyword) ||
-        candidate.canvasNodeKey.toLowerCase().includes(keyword),
+        candidate.canvasNodeKey.toLowerCase().includes(keyword) ||
+        (candidateAliases[index]?.label ?? "").toLowerCase().includes(keyword),
     );
-  }, [candidates, query]);
+  }, [candidateAliases, candidates, query]);
 
   const candidateDescription = useMemo(
     () => describePromptContentCandidates(candidates, activeAmbiguity?.pattern),
     [activeAmbiguity?.pattern, candidates],
   );
-  const candidateAliases = candidateDescription.aliases;
   const candidateConnectionSignature = JSON.stringify(
     candidates.map((candidate) => [
       candidate.canvasNodeKey,
@@ -487,6 +507,36 @@ export function PromptMentionInput({
       runAutoDetect(false);
     }, PROMPT_AUTO_DETECT_DEBOUNCE_MS);
   }, [menuOpen, runAutoDetect]);
+
+  /**
+   * 候选菜单关闭后补一次重扫。手打 @ 会打开菜单，期间自动识别被跳过
+   * （避免干扰菜单查询）；若用户未从菜单选择而是直接关掉菜单，输入框里
+   * 的 @别名 / @素材名 仍是纯文本，需要这次重扫把它转换成引用 chip。
+   * 仅在仍存在 chip 之外的纯文本时重扫，避免选中菜单后误报 no-match。
+   */
+  const hasUnboundPlainText = useCallback((input: HTMLElement): boolean => {
+    const doc = input.ownerDocument ?? document;
+    const walker = doc.createTreeWalker(input, NodeFilter.SHOW_TEXT);
+    while (walker.nextNode()) {
+      const node = walker.currentNode as Text;
+      if (!node.data) continue;
+      if (node.parentElement?.closest("[data-mention-id], [data-ambiguous-pattern]") != null)
+        continue;
+      return true;
+    }
+    return false;
+  }, []);
+
+  const previousMenuOpenRef = useRef(menuOpen);
+  useEffect(() => {
+    const wasOpen = previousMenuOpenRef.current;
+    previousMenuOpenRef.current = menuOpen;
+    if (!wasOpen || menuOpen) return;
+    const input = inputRef.current;
+    if (input == null) return;
+    if (!hasUnboundPlainText(input)) return;
+    scheduleAutoDetect();
+  }, [hasUnboundPlainText, menuOpen, scheduleAutoDetect]);
 
   /**
    * 手动重扫保留一个短暂但可感知的“扫描中”阶段；否则同步解析会让 React
@@ -829,7 +879,7 @@ export function PromptMentionInput({
                       scheduleAutoDetect();
                     }}
                   >
-                    <AssetKindIcon kind={candidate.kind} />
+                    <MentionOptionThumb candidate={candidate} />
                     <span className="prompt-mention__option-name">{candidate.name}</span>
                     <span className="prompt-mention__option-tag">
                       {candidateAliases[
@@ -883,9 +933,7 @@ export function PromptMentionInput({
                       aria-label={`选择 ${alias}：${candidate.name}，实例 ${candidate.canvasNodeKey.slice(-6)}`}
                       onClick={() => confirmActiveAmbiguity(candidate, alias)}
                     >
-                      <span className="prompt-ambiguity__kind" aria-hidden="true">
-                        <AssetKindIcon kind={candidate.kind} />
-                      </span>
+                      <MentionOptionThumb candidate={candidate} />
                       <span className="prompt-ambiguity__option-copy">
                         <strong>{candidate.name}</strong>
                         <small>实例 {candidate.canvasNodeKey.slice(-6)}</small>
@@ -1112,14 +1160,6 @@ export function ImageNodeSettings({
           }
         />
       ))}
-
-      <NodePromptOptimizationSettings
-        config={config}
-        providerCatalog={providerCatalog}
-        availableModes={IMAGE_PROMPT_OPTIMIZATION_MODES}
-        defaultMode={IMAGE_PROMPT_OPTIMIZATION_DEFAULT_MODE}
-        onChange={(optimization) => onChange({ ...config, promptOptimization: optimization })}
-      />
     </div>
   );
 }
@@ -1345,164 +1385,7 @@ export function VideoNodeSettings({
           }
         />
       ))}
-
-      <NodePromptOptimizationSettings
-        config={config}
-        providerCatalog={providerCatalog}
-        availableModes={VIDEO_PROMPT_OPTIMIZATION_MODES}
-        defaultMode={VIDEO_PROMPT_OPTIMIZATION_DEFAULT_MODE}
-        onChange={(optimization) => onChange({ ...config, promptOptimization: optimization })}
-      />
     </div>
-  );
-}
-
-/**
- * 图片/视频生成节点共用的提示词优化设置：开关、技能模式与所接入的文本大模型。
- * 只使用在全局设置里配置为「文本模型」的模型（text_generation），
- * 防止误选图片/视频模型导致请求格式不匹配。
- */
-function NodePromptOptimizationSettings({
-  config,
-  providerCatalog,
-  availableModes,
-  defaultMode,
-  onChange,
-}: {
-  readonly config: {
-    readonly promptOptimization?: NodePromptOptimizationConfig | null;
-  };
-  readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly availableModes: readonly PromptOptimizationMode[];
-  readonly defaultMode: PromptOptimizationMode;
-  readonly onChange: (optimization: NodePromptOptimizationConfig) => void;
-}) {
-  const optimization: NodePromptOptimizationConfig = config.promptOptimization ?? {
-    enabled: false,
-    mode: defaultMode,
-    providerId: "",
-    modelDefinitionId: "",
-  };
-  const textModelProviders = providerCatalog
-    .map((entry) => ({
-      provider: entry.provider,
-      models: entry.models.filter(isTextGenerationModel),
-    }))
-    .filter((entry) => entry.provider.enabled && entry.models.length > 0);
-  const selectedTextProvider = textModelProviders.find(
-    (entry) => entry.provider.id === optimization.providerId,
-  );
-  const selectedTextModel =
-    selectedTextProvider?.models.find(
-      (model) => model.definitionId === optimization.modelDefinitionId,
-    ) ?? null;
-  const updateOptimization = (patch: Partial<NodePromptOptimizationConfig>) => {
-    onChange({ ...optimization, ...patch });
-  };
-  const enableOptimization = (enabled: boolean) => {
-    // 开启时若尚未选择（或选择已失效），直接应用第一个可用的文本模型。
-    if (
-      enabled &&
-      (!optimization.providerId ||
-        !optimization.modelDefinitionId ||
-        !textModelProviders.some(
-          (entry) =>
-            entry.provider.id === optimization.providerId &&
-            entry.models.some((model) => model.definitionId === optimization.modelDefinitionId),
-        ))
-    ) {
-      const fallback = firstTextModelSelection(providerCatalog);
-      updateOptimization({ enabled, ...fallback });
-      return;
-    }
-    updateOptimization({ enabled });
-  };
-
-  return (
-    <>
-      <div className="canvas-gen-node__opt-toggle">
-        <label className="canvas-gen-node__opt-toggle-label">
-          <input
-            type="checkbox"
-            checked={optimization.enabled}
-            onChange={(event) => enableOptimization(event.target.checked)}
-          />
-          <span>提示词优化</span>
-        </label>
-        <span
-          className="canvas-gen-node__opt-toggle-hint"
-          title="开启后自动应用已配置的文本模型，按所选提示词技能规范优化提示词"
-        >
-          {optimization.enabled
-            ? `已开启 · ${PROMPT_OPTIMIZATION_MODE_LABELS[optimization.mode]}`
-            : "提示词技能加持"}
-        </span>
-      </div>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--model">
-        <span>优化模式</span>
-        <select
-          value={optimization.mode}
-          onChange={(event) =>
-            updateOptimization({
-              mode: event.target.value as PromptOptimizationMode,
-            })
-          }
-        >
-          {(Object.keys(PROMPT_OPTIMIZATION_MODE_LABELS) as PromptOptimizationMode[])
-            .filter((mode) => availableModes.includes(mode))
-            .map((mode) => (
-              <option key={mode} value={mode}>
-                {PROMPT_OPTIMIZATION_MODE_LABELS[mode]}
-              </option>
-            ))}
-        </select>
-      </label>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--provider">
-        <span>优化文本模型供应商</span>
-        <select
-          value={optimization.providerId}
-          onChange={(event) => {
-            const providerId = event.target.value;
-            const modelDefinitionId =
-              textModelProviders.find((entry) => entry.provider.id === providerId)?.models[0]
-                ?.definitionId ?? "";
-            updateOptimization({ providerId, modelDefinitionId });
-          }}
-        >
-          {!optimization.providerId ? <option value="">请选择供应商</option> : null}
-          {optimization.providerId && !selectedTextProvider ? (
-            <option value={optimization.providerId}>{optimization.providerId}（不可用）</option>
-          ) : null}
-          {textModelProviders.map((entry) => (
-            <option key={entry.provider.id} value={entry.provider.id}>
-              {entry.provider.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
-
-      <label className="canvas-gen-node__field canvas-gen-node__field--model">
-        <span>优化文本模型</span>
-        <select
-          value={optimization.modelDefinitionId}
-          onChange={(event) => updateOptimization({ modelDefinitionId: event.target.value })}
-        >
-          {!optimization.modelDefinitionId ? <option value="">请选择文本模型</option> : null}
-          {optimization.modelDefinitionId && !selectedTextModel ? (
-            <option value={optimization.modelDefinitionId}>
-              {optimization.modelDefinitionId}（不可用）
-            </option>
-          ) : null}
-          {selectedTextProvider?.models.map((model) => (
-            <option key={model.definitionId} value={model.definitionId}>
-              {model.displayName}
-            </option>
-          ))}
-        </select>
-      </label>
-    </>
   );
 }
 
@@ -1554,120 +1437,6 @@ function PromptDiffView({
           )}
         </div>
       </div>
-    </div>
-  );
-}
-
-/**
- * 视频节点的提示词优化面板：发起优化、展示进行中/错误状态、
- * 优化完成后对比差异并选择采用 / 不采用 / 继续细节优化。
- */
-export function PromptOptimizationPanel({
-  state,
-  onStart,
-  onAdopt,
-  onDiscard,
-}: {
-  readonly state: PromptOptimizationPanelState | undefined;
-  readonly onStart: (detailReview: boolean) => void;
-  readonly onAdopt: () => void;
-  readonly onDiscard: () => void;
-}) {
-  const busy = state?.status === "running";
-  return (
-    <div className="prompt-opt-panel" aria-label="提示词优化">
-      <div className="prompt-opt-panel__toolbar">
-        <button
-          type="button"
-          className="prompt-opt-panel__start"
-          disabled={busy}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onStart(false);
-          }}
-        >
-          {busy ? (
-            <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
-          ) : (
-            <Sparkle size={13} weight="fill" aria-hidden="true" />
-          )}
-          {busy ? "优化中…" : "优化提示词"}
-        </button>
-        {state && state.round > 0 ? (
-          <span className="prompt-opt-panel__round">
-            {state.detail ? `细节审查 · 第 ${state.round} 轮` : `已优化 ${state.round} 轮`}
-          </span>
-        ) : null}
-      </div>
-
-      {state?.status === "running" ? (
-        <p className="prompt-opt-panel__status">
-          <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
-          {state.detail
-            ? "正在严格审查提示词是否符合技能规范…"
-            : "正在按提示词技能优化提示词，完成前生成按钮暂不可用…"}
-        </p>
-      ) : null}
-
-      {state?.status === "error" ? (
-        <div className="prompt-opt-panel__error">
-          <p>{state.error ?? "提示词优化失败。"}</p>
-          <button
-            type="button"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onStart(state.detail);
-            }}
-          >
-            重试
-          </button>
-        </div>
-      ) : null}
-
-      {state?.status === "done" && state.optimizedPrompt ? (
-        <div className="prompt-opt-panel__result">
-          <PromptDiffView original={state.originalPrompt} optimized={state.optimizedPrompt} />
-          <div className="prompt-opt-panel__actions">
-            <button
-              type="button"
-              className="prompt-opt-panel__adopt"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onAdopt();
-              }}
-            >
-              采用
-            </button>
-            <button
-              type="button"
-              className="prompt-opt-panel__discard"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onDiscard();
-              }}
-            >
-              不采用
-            </button>
-            <button
-              type="button"
-              className="prompt-opt-panel__detail"
-              title="把之前所有上下文注入系统提示词，严格审查当前提示词是否符合技能规范的最优版本"
-              disabled={busy}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onStart(true);
-              }}
-            >
-              细节优化
-            </button>
-          </div>
-        </div>
-      ) : null}
     </div>
   );
 }

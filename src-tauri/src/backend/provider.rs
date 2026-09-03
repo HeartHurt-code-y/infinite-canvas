@@ -931,6 +931,7 @@ impl ProviderRuntime {
     /// 海外平台（如 konjac.ai）的素材导入不使用 JSON `url` 方式（旧端点 `/v1/assets/async`
     /// 返回 404 Invalid URL），而是直接 multipart 上传文件字节。本方法复用素材库直连
     /// 通道（供应商连接 + Bearer 素材库令牌），构造 `file` 文件 part 与文本字段 part。
+    #[allow(clippy::too_many_arguments)]
     pub(super) async fn raw_asset_multipart_request(
         &self,
         provider_connection_id: &str,

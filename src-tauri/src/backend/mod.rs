@@ -4,6 +4,7 @@ pub mod composer;
 pub mod credentials;
 pub mod downloader;
 pub mod error;
+pub mod frame_extractor;
 pub mod local_results;
 pub mod media;
 pub mod model_schema;
@@ -22,6 +23,7 @@ use composer::VideoCompositionService;
 use credentials::CredentialStore;
 use downloader::VideoDownloadService;
 use error::BackendResult;
+use frame_extractor::VideoFrameExtractionService;
 use local_results::LocalResultService;
 use media::MediaResolver;
 use provider::ProviderRuntime;
@@ -41,6 +43,7 @@ pub struct BackendState {
     pub tasks: GenerationTaskService,
     pub downloader: VideoDownloadService,
     pub composer: VideoCompositionService,
+    pub frame_extractor: VideoFrameExtractionService,
 }
 
 impl BackendState {
@@ -95,7 +98,11 @@ impl BackendState {
         let downloader = VideoDownloadService::new(
             downloads_directory.clone(),
             app.path().app_local_data_dir()?.join("yt-dlp-engine"),
+            composer.clone(),
         )?;
+        // 视频抽帧复用同一套 FFmpeg 引擎；产物落在下载目录「无限画布/抽帧」。
+        let frame_extractor =
+            VideoFrameExtractionService::new(downloads_directory.clone(), composer.clone());
 
         Ok(Self {
             storage,
@@ -108,6 +115,7 @@ impl BackendState {
             tasks,
             downloader,
             composer,
+            frame_extractor,
         })
     }
 }

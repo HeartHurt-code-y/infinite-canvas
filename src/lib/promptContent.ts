@@ -371,6 +371,17 @@ function candidateFromItem(item: PromptContentMediaReferenceItem): PromptAutoMen
       name: item.displayNameSnapshot,
     };
   }
+  if (item.target.kind === "local_file") {
+    return {
+      canvasNodeKey: item.target.canvasNodeKey ?? item.canvasNodeKey,
+      assetId: item.target.path,
+      providerConnectionId: "",
+      source: "local",
+      referenceKind: "local_file",
+      kind: item.target.mediaType,
+      name: item.displayNameSnapshot,
+    };
+  }
   return {
     canvasNodeKey: item.canvasNodeKey,
     assetId: item.target.assetId,

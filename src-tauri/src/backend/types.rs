@@ -212,6 +212,13 @@ pub enum MediaReferenceTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         canvas_node_key: Option<String>,
     },
+    /// 任意本地文件引用（如视频抽帧产物）：直接读取磁盘路径，不经对象存储。
+    LocalFile {
+        path: String,
+        media_type: MediaType,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canvas_node_key: Option<String>,
+    },
 }
 
 impl MediaReferenceTarget {
@@ -219,7 +226,8 @@ impl MediaReferenceTarget {
         match self {
             Self::Asset { media_type, .. }
             | Self::LocalAsset { media_type, .. }
-            | Self::LocalResult { media_type, .. } => *media_type,
+            | Self::LocalResult { media_type, .. }
+            | Self::LocalFile { media_type, .. } => *media_type,
         }
     }
 }
@@ -584,6 +592,14 @@ pub struct VideoCompositionInputParams {
 pub struct StartVideoCompositionCommand {
     pub inputs: Vec<VideoCompositionInputParams>,
     pub output_name: String,
+}
+
+/// 视频抽帧节点的启动命令：输入本地视频绝对路径 + 若干抽帧秒数。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartVideoFrameExtractionCommand {
+    pub video_path: String,
+    pub timestamps: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

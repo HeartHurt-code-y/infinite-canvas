@@ -1,6 +1,11 @@
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProviderConnection, ProviderSettingsClient } from "../../lib/backend";
+import type {
+  ProviderConnection,
+  ProviderSettingsClient,
+  ProviderTokenGroup,
+} from "../../lib/backend";
 import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
 
 const PROVIDER: ProviderConnection = {
@@ -65,6 +70,31 @@ afterEach(() => {
 });
 
 describe("ProviderTokenGroupSettings", () => {
+  it("does not re-trigger reload when the parent re-renders with a fresh callback", async () => {
+    // 回归测试：真实父组件会在 onTokenGroupsChanged 回调里 setState，导致父组件重渲染并
+    // 传入新的内联回调。若 reload 把该回调当作依赖，就会无限循环重跑，徽标「读取中/未配置」
+    // 不停闪烁。修复后 listProviderTokenGroups 只应在首次挂载时调用一次。
+    const client = createClient();
+    const TestHarness = () => {
+      const [, setGroups] = useState<ProviderTokenGroup[]>([]);
+      return (
+        <ProviderTokenGroupSettings
+          provider={PROVIDER}
+          client={client}
+          credentialClient={client}
+          onTokenGroupsChanged={(next) => setGroups(Array.from(next))}
+        />
+      );
+    };
+    render(<TestHarness />);
+
+    await screen.findByText("未配置");
+    const callsAfterFirstLoad = vi.mocked(client.listProviderTokenGroups).mock.calls.length;
+    expect(callsAfterFirstLoad).toBe(1);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(vi.mocked(client.listProviderTokenGroups).mock.calls.length).toBe(callsAfterFirstLoad);
+  });
+
   it("loads and renders token groups for the active provider", async () => {
     const client = createClient({
       listProviderTokenGroups: vi.fn(() => Promise.resolve([AS_GROUP])),

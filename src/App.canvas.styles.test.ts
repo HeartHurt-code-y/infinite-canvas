@@ -93,6 +93,17 @@ describe("提示词审计按钮状态", () => {
   });
 });
 
+describe("剧本节点文本选中复制", () => {
+  it("编剧助手对话区与剧本预览框允许选中文字，而不是继承节点卡片的禁止选中", () => {
+    expect(cssRule(".canvas-screenplay-node__conversation")).toMatch(
+      /-webkit-user-select:\s*text;\s*user-select:\s*text/,
+    );
+    expect(cssRule(".canvas-screenplay-node__document-preview")).toMatch(
+      /-webkit-user-select:\s*text;\s*user-select:\s*text/,
+    );
+  });
+});
+
 describe("画布连线交互", () => {
   it("把用户看见的节点端口本身作为 React Flow 的可拖拽热区", () => {
     const handleRule = cssRule(".canvas-flow-handle");

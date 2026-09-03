@@ -564,6 +564,18 @@ async function addStoryboardNode(clientX: number, clientY: number): Promise<HTML
   );
 }
 
+/**
+ * 取文档区 Markdown 编辑框：文档区默认是「预览」渲染，读取/编辑前先切到「编辑」视图，
+ * 再按 aria-label 定位 textarea。
+ */
+function getDocumentEditor(node: HTMLElement, name: string): HTMLTextAreaElement {
+  const editToggle = within(node).getByRole("button", { name: "编辑" });
+  if (editToggle.getAttribute("aria-pressed") !== "true") {
+    fireEvent.click(editToggle);
+  }
+  return within(node).getByRole("textbox", { name });
+}
+
 async function addViralRemixNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-screenplay-node--viral_remix";
   const countBefore = document.querySelectorAll(selector).length;
@@ -593,6 +605,20 @@ async function addVideoDownloaderNode(clientX: number, clientY: number): Promise
   const countBefore = document.querySelectorAll(selector).length;
   dragToCanvas(
     screen.getByRole("button", { name: "拖拽创建网络爆款视频下载节点" }),
+    clientX,
+    clientY,
+  );
+  await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
+  return waitForNodeAccessible(
+    Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
+  );
+}
+
+async function addFrameExtractorNode(clientX: number, clientY: number): Promise<HTMLElement> {
+  const selector = ".canvas-video-frame-extractor";
+  const countBefore = document.querySelectorAll(selector).length;
+  dragToCanvas(
+    screen.getByRole("button", { name: "拖拽创建视频抽帧节点" }),
     clientX,
     clientY,
   );
@@ -846,6 +872,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           progress: 12,
           finalPath: null,
           fileName: null,
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
           error: null,
           createdAt: 1,
           updatedAt: 1,
@@ -859,6 +888,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           progress: 100,
           finalPath: "C:\\下载\\无限画布\\搞笑名场面 [73659182].mp4",
           fileName: "搞笑名场面 [73659182].mp4",
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
           error: null,
           createdAt: 1,
           updatedAt: 2,
@@ -870,6 +902,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           version: "2026.08.19",
           binaryPath: "C:/engine/yt-dlp.exe",
           cookiesInstalled: false,
+          bilibiliLoggedIn: false,
           lastError: null,
         });
       }
@@ -910,6 +943,204 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(document.querySelectorAll(".edge--asset")).toHaveLength(1);
   });
 
+  it("视频抽帧节点连入视频素材后按秒数抽帧并逐帧落卡", async () => {
+    const startArgs: Array<Record<string, unknown> | undefined> = [];
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (command === "start_video_frame_extraction") {
+        startArgs.push(args);
+        return Promise.resolve({
+          jobId: "frame-extract-test-1",
+          videoPath: "https://example.com/列车进站参考.mp4",
+          status: "processing",
+          progress: 0,
+          frames: [],
+          error: null,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+      }
+      if (command === "get_video_frame_extraction_job") {
+        return Promise.resolve({
+          jobId: "frame-extract-test-1",
+          videoPath: "https://example.com/列车进站参考.mp4",
+          status: "completed",
+          progress: 100,
+          frames: [
+            {
+              path: "C:\\下载\\无限画布\\抽帧\\列车进站参考@3.jpg",
+              timestampSeconds: 3,
+              width: 1080,
+              height: 1920,
+            },
+            {
+              path: "C:\\下载\\无限画布\\抽帧\\列车进站参考@8.5.jpg",
+              timestampSeconds: 8.5,
+              width: 1080,
+              height: 1920,
+            },
+          ],
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const videoAsset = await addAssetNode("视频", "列车进站参考", 220, 240);
+    const extractor = await addFrameExtractorNode(980, 260);
+    connectAssetToGeneration(videoAsset, extractor);
+
+    fireEvent.change(within(extractor).getByLabelText("抽帧秒数，多个秒数用逗号分隔"), {
+      target: { value: "3, 8.5" },
+    });
+    await waitFor(() =>
+      expect(within(extractor).getByRole("button", { name: "开始视频抽帧" })).toBeEnabled(),
+    );
+    fireEvent.click(within(extractor).getByRole("button", { name: "开始视频抽帧" }));
+
+    await waitFor(() => {
+      const startCall = startArgs.at(-1);
+      expect(startCall).toBeDefined();
+      const command = startCall!["command"] as { videoPath: string; timestamps: number[] };
+      // 云端视频素材的 videoUrl（签名 URL）原样交给后端，后端先下载到本地再抽帧。
+      expect(command.videoPath).toBe("https://cdn.example.com/train.mp4");
+      expect(command.timestamps).toEqual([3, 8.5]);
+    });
+
+    // 轮询返回 completed 后，逐帧生成 origin=frame_extract 的图片产物卡片并展示在节点内。
+    await waitFor(
+      () => expect(document.querySelectorAll(".canvas-asset-node--output")).toHaveLength(2),
+      { timeout: 4000 },
+    );
+    await waitFor(() =>
+      expect(within(extractor).getByText("抽帧完成 · 2 张图片已落在右侧")).toBeInTheDocument(),
+    );
+    expect(within(extractor).getAllByText(/@\d+(\.\d+)?\.jpg/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("B 站链接展示画质路由提醒：未登录提示 480P，其他站点不提示", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_video_downloader_engine") {
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookiesInstalled: true,
+          bilibiliLoggedIn: false,
+          lastError: null,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    const input = within(node).getByRole("textbox", { name: "视频链接" });
+
+    // 抖音链接：不出现 B 站画质路由提醒。
+    fireEvent.change(input, { target: { value: "https://v.douyin.com/iAbCdEf/" } });
+    expect(within(node).queryByText(/未登录 B 站/)).not.toBeInTheDocument();
+
+    // B 站未登录：提示自动 480P。
+    fireEvent.change(input, {
+      target: { value: "https://www.bilibili.com/video/BV1YE6gBHEoN/" },
+    });
+    await waitFor(() =>
+      expect(within(node).getByText(/未登录 B 站.*480P/)).toBeInTheDocument(),
+    );
+    expect(
+      within(node).getByText(/未登录 B 站.*480P/).closest(".canvas-video-downloader__quality"),
+    ).not.toBeNull();
+  });
+
+  it("B 站已登录时画质路由提醒为最高画质", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_video_downloader_engine") {
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookiesInstalled: true,
+          bilibiliLoggedIn: true,
+          lastError: null,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    fireEvent.change(within(node).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: "https://b23.tv/AbCdEf" },
+    });
+    await waitFor(() =>
+      expect(within(node).getByText(/已登录 B 站.*最高画质/)).toBeInTheDocument(),
+    );
+    expect(within(node).queryByText(/未登录 B 站/)).not.toBeInTheDocument();
+  });
+
+  it("B 站下载完成后展示已自动去除水印提示", async () => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "start_video_download") {
+        return Promise.resolve({
+          jobId: "download-clean-1",
+          url: "https://www.bilibili.com/video/BV1a2tb6rEwx/",
+          status: "downloading",
+          progress: 10,
+          finalPath: null,
+          fileName: null,
+          qualityMode: "best",
+          qualityHint: "已登录 B 站：将下载当前账号可用的最高画质。",
+          watermarkRemoved: false,
+          error: null,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+      }
+      if (command === "get_video_download_job") {
+        return Promise.resolve({
+          jobId: "download-clean-1",
+          url: "https://www.bilibili.com/video/BV1a2tb6rEwx/",
+          status: "completed",
+          progress: 100,
+          finalPath: "C:\\下载\\无限画布\\标题 [BV1a2tb6rEwx]（去水印）.mp4",
+          fileName: "标题 [BV1a2tb6rEwx]（去水印）.mp4",
+          qualityMode: "best",
+          qualityHint: "已登录 B 站：将下载当前账号可用的最高画质。",
+          watermarkRemoved: true,
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      }
+      if (command === "get_video_downloader_engine") {
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookiesInstalled: true,
+          bilibiliLoggedIn: true,
+          lastError: null,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    fireEvent.change(within(node).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: "https://www.bilibili.com/video/BV1a2tb6rEwx/" },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "开始下载视频" }));
+
+    await waitFor(
+      () => expect(within(node).getByText(/已自动去除 B 站右上角水印/)).toBeInTheDocument(),
+      { timeout: 4000 },
+    );
+  });
+
   it("爆款视频复刻节点可直连下载节点，并在下载完成后自动就绪", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "start_video_download") {
@@ -920,6 +1151,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           progress: 20,
           finalPath: null,
           fileName: null,
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
           error: null,
           createdAt: 1,
           updatedAt: 1,
@@ -933,6 +1167,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           progress: 100,
           finalPath: "C:\\下载\\无限画布\\爆款样片.mp4",
           fileName: "爆款样片.mp4",
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
           error: null,
           createdAt: 1,
           updatedAt: 2,
@@ -944,6 +1181,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           version: "2026.08.19",
           binaryPath: "C:/engine/yt-dlp.exe",
           cookiesInstalled: false,
+          bilibiliLoggedIn: false,
           lastError: null,
         });
       }
@@ -1116,8 +1354,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       task: "audit",
       detailReview: true,
       userPrompt: generatedPrompt,
-      contextHistory: [{ role: "第 1 轮审计输入", content: generatedPrompt }],
     });
+    // 审计同样携带完整多轮对话：生成轮的用户消息与助手输出都进入审计上下文。
+    expect(auditCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        { role: "第 1 条 · 你", content: "雨夜站台，女孩撑伞等候列车" },
+        { role: "第 2 条 · 提示词助手", content: generatedPrompt },
+        { role: "第 1 轮审计输入", content: generatedPrompt },
+      ]),
+    );
     await waitFor(() => expect(within(promptNode).getByText("审计建议")).toBeInTheDocument());
     fireEvent.click(within(promptNode).getByRole("button", { name: "再次审计" }));
     await waitFor(() =>
@@ -1173,6 +1418,84 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(generationCommand["prompt"]).toEqual([{ kind: "text", text: customPrompt }]);
   });
 
+  it("多轮生成与优化会携带之前的完整对话上下文", async () => {
+    const firstPrompt = "电影感雨夜站台，女孩撑伞等候列车。";
+    const secondPrompt = `${firstPrompt} 加入车灯在水面的暖色反射。`;
+    const thirdPrompt = `${secondPrompt} 镜头缓慢推近。`;
+    const replies = [firstPrompt, secondPrompt, thirdPrompt];
+    let promptRunCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        const optimizedPrompt = replies[Math.min(promptRunCount, replies.length - 1)];
+        promptRunCount += 1;
+        return Promise.resolve({ optimizedPrompt, rawModelOutput: optimizedPrompt });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    const composer = within(promptNode).getByRole("textbox", { name: "创意或需求" });
+    const promptOutput = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
+
+    // 第 1 轮：生成。首轮无历史，contextHistory 为空数组。
+    fireEvent.change(composer, { target: { value: "雨夜站台，女孩撑伞等候列车" } });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() => expect(promptOutput).toHaveValue(firstPrompt));
+    const firstCommand = invokeMock.mock.calls.find(
+      ([command]) => command === "run_prompt_node",
+    )?.[1] as { command: Record<string, unknown> };
+    expect(firstCommand.command).toMatchObject({
+      task: "generate",
+      userPrompt: "雨夜站台，女孩撑伞等候列车",
+      contextHistory: [],
+    });
+
+    // 第 1 轮消息落入对话记录。
+    const conversationLog = within(promptNode).getByRole("log", { name: "提示词多轮对话" });
+    expect(within(conversationLog).getByText("雨夜站台，女孩撑伞等候列车")).toBeInTheDocument();
+    expect(within(conversationLog).getByText("提示词助手")).toBeInTheDocument();
+
+    // 第 2 轮：切换为优化，请求必须携带第 1 轮的用户消息与助手输出。
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
+    fireEvent.change(composer, { target: { value: "加入车灯在水面的暖色反射" } });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(promptOutput).toHaveValue(secondPrompt));
+    const secondCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[1]?.[1] as { command: Record<string, unknown> };
+    expect(secondCommand.command).toMatchObject({
+      task: "optimize",
+      userPrompt: "加入车灯在水面的暖色反射",
+    });
+    expect(secondCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        { role: "第 1 条 · 你", content: "雨夜站台，女孩撑伞等候列车" },
+        { role: "第 2 条 · 提示词助手", content: firstPrompt },
+      ]),
+    );
+
+    // 第 3 轮：再次优化，上下文继续累计为 4 条历史。
+    fireEvent.change(composer, { target: { value: "镜头缓慢推近" } });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(promptOutput).toHaveValue(thirdPrompt));
+    const thirdCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[2]?.[1] as { command: Record<string, unknown> };
+    expect(thirdCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        { role: "第 1 条 · 你", content: "雨夜站台，女孩撑伞等候列车" },
+        { role: "第 2 条 · 提示词助手", content: firstPrompt },
+        { role: "第 3 条 · 你", content: "加入车灯在水面的暖色反射" },
+        { role: "第 4 条 · 提示词助手", content: secondPrompt },
+      ]),
+    );
+    expect(thirdCommand.command["contextHistory"]).toHaveLength(4);
+  });
+
   it("图片素材可连入提示词节点并作为视觉理解输入传出", async () => {
     invokeMock.mockImplementation((command) => {
       if (command === "run_prompt_node") {
@@ -1201,9 +1524,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const imageAsset = await addAssetNode("图片", "站台参考图", 20, 700);
     connectAssetToGeneration(imageAsset, promptNode);
     await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
-    expect(
-      within(promptNode).getByRole("list", { name: "已连入的参考图片素材" }),
-    ).toHaveTextContent("站台参考图");
+    expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+      "站台参考图",
+    );
 
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
     await waitFor(() =>
@@ -1242,6 +1565,168 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       ([command]) => command === "run_prompt_node",
     )[1]?.[1] as { command: Record<string, unknown> };
     expect(secondCommand.command["visionImages"]).toEqual([]);
+  });
+
+  it("已保存的图片产物可连入提示词节点并作为视觉理解输入传出", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "get_canvas_document") {
+        return Promise.resolve({
+          id: "canvas-scene-output-prompt",
+          title: "未命名画布",
+          document: {
+            version: 1,
+            assetNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            outputNodes: [
+              {
+                key: "output-prompt-image",
+                resultKey: "output-prompt-task#4",
+                sourceNodeId: "output-prompt-node",
+                taskId: "output-prompt-task",
+                mediaType: "image",
+                finalPath: "C:\\generated\\prompt-ref.png",
+                name: "prompt-ref.png",
+                aspectRatio: 16 / 9,
+                x: 40,
+                y: 180,
+              },
+            ],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      if (command === "run_prompt_node") {
+        return Promise.resolve({
+          optimizedPrompt: "参考生成画面，重新编排镜头与光影的提示词。",
+          rawModelOutput: "参考生成画面，重新编排镜头与光影的提示词。",
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+
+    const output = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    connectAssetToGeneration(output, promptNode);
+    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
+    expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+      "prompt-ref.png",
+    );
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "参考这张已生成的图，继续创作" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
+    );
+    const promptCommand = invokeMock.mock.calls.find(
+      ([command]) => command === "run_prompt_node",
+    )?.[1] as { command: Record<string, unknown> };
+    const visionImages = promptCommand.command["visionImages"] as Array<Record<string, unknown>>;
+    expect(visionImages).toHaveLength(1);
+    expect(visionImages[0]!["target"]).toMatchObject({
+      kind: "local_result",
+      generationTaskId: "output-prompt-task",
+      resultIndex: 4,
+      canvasNodeKey: "output-prompt-image",
+      mediaType: "image",
+    });
+    expect(visionImages[0]!["displayName"]).toBe("prompt-ref.png");
+  });
+
+  it("已保存的视频产物可连入提示词节点并作为多模态视频素材传出", async () => {
+    invokeMock.mockImplementation((command) => {
+      if (command === "get_canvas_document") {
+        return Promise.resolve({
+          id: "canvas-scene-output-prompt-video",
+          title: "未命名画布",
+          document: {
+            version: 1,
+            assetNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            outputNodes: [
+              {
+                key: "output-prompt-video",
+                resultKey: "output-prompt-video-task#2",
+                sourceNodeId: "output-prompt-video-node",
+                taskId: "output-prompt-video-task",
+                mediaType: "video",
+                finalPath: "C:\\generated\\prompt-motion.mp4",
+                name: "prompt-motion.mp4",
+                aspectRatio: 16 / 9,
+                x: 40,
+                y: 180,
+              },
+            ],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      if (command === "run_prompt_node") {
+        return Promise.resolve({
+          optimizedPrompt: "参考该视频片段，延续运镜与节奏写提示词。",
+          rawModelOutput: "参考该视频片段，延续运镜与节奏写提示词。",
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+
+    const output = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--video");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    connectAssetToGeneration(output, promptNode);
+    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
+    expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+      "prompt-motion.mp4",
+    );
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "参考这段生成视频，补充镜头语言" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
+    );
+    const promptCommand = invokeMock.mock.calls.find(
+      ([command]) => command === "run_prompt_node",
+    )?.[1] as { command: Record<string, unknown> };
+    // 视频产物走多模态素材通道，不进入视觉理解图片列表。
+    expect(promptCommand.command["visionImages"]).toEqual([]);
+    expect(promptCommand.command["multimodalInputs"]).toEqual([
+      {
+        localPath: "C:\\generated\\prompt-motion.mp4",
+        displayName: "prompt-motion.mp4",
+        kind: "video",
+        mimeType: "video/mp4",
+      },
+    ]);
   });
 
   it("视频节点自动继承提示词节点的视觉参考图，无需重复连线即可生成", async () => {
@@ -1302,6 +1787,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
         role: "",
         displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+        contentIndex: 1,
       },
     ]);
   });
@@ -2636,6 +3123,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
         role: "",
         displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+        contentIndex: 1,
       },
     ]);
   });
@@ -2721,6 +3210,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
         role: "",
         displayNameSnapshot: "upstream-frame.png",
+        typePosition: 1,
+        contentIndex: 1,
       },
     ]);
   });
@@ -2803,6 +3294,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           mediaType: "video",
         },
         displayNameSnapshot: "upstream-motion.mp4",
+        typePosition: 1,
+        contentIndex: 1,
       },
       { kind: "text", text: " 的最后一个镜头继续向前运动" },
     ]);
@@ -3119,6 +3612,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           mediaType: "image",
         },
         displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+        contentIndex: 1,
       },
       { kind: "text", text: "，随后 " },
       {
@@ -3132,6 +3627,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           mediaType: "video",
         },
         displayNameSnapshot: "列车进站参考",
+        typePosition: 1,
+        contentIndex: 2,
       },
       { kind: "text", text: "，镜头向右推进" },
     ]);
@@ -3406,6 +3903,132 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).toBe(secondAsset.dataset["connectionTarget"]);
   });
 
+  it("单一素材输入稳定别名「图片1」也能被识别并绑定", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "让图片1缓慢推进");
+    await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1), {
+      timeout: 1_600,
+    });
+    expect(promptInput.querySelector("[data-ambiguous-pattern]")).toBeNull();
+    const chip = promptInput.querySelector<HTMLElement>("[data-mention-id]")!;
+    expect(chip.dataset["canvasNodeKey"]).toBe(assetNode.dataset["connectionTarget"]);
+    expect(chip).toHaveTextContent(/图片1/);
+    expect(within(videoGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveTextContent(
+      "已自动引用 1 处素材",
+    );
+  });
+
+  it("手打带 @ 前缀的别名也能被识别并绑定", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "@图片1");
+    await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1), {
+      timeout: 1_600,
+    });
+    expect(promptInput.querySelector("[data-ambiguous-pattern]")).toBeNull();
+    const chip = promptInput.querySelector<HTMLElement>("[data-mention-id]")!;
+    expect(chip.dataset["canvasNodeKey"]).toBe(assetNode.dataset["connectionTarget"]);
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("@站台参考图 · 图片1");
+    expect(within(videoGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveTextContent(
+      "已自动引用 1 处素材",
+    );
+  });
+
+  it("@ 候选菜单按别名「图片1」过滤并选中已连接素材", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "开场 ");
+    fireEvent.keyDown(promptInput, { key: "@" });
+    promptInput.appendChild(document.createTextNode("@"));
+    placeCaretAtEnd(promptInput);
+    fireEvent.input(promptInput);
+
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    promptInput.appendChild(document.createTextNode("图片1"));
+    placeCaretAtEnd(promptInput);
+    fireEvent.input(promptInput);
+    await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+    const option = within(menu).getByRole("option", { name: /站台参考图/ });
+    expect(option).toHaveTextContent("图片1");
+
+    fireEvent.click(option);
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图");
+    expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
+  });
+
+  it("手打 @ 别名后关闭候选菜单，自动识别补扫并绑定素材", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "开场 ");
+    fireEvent.keyDown(promptInput, { key: "@" });
+    appendPromptText(promptInput, "@");
+
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    appendPromptText(promptInput, "图片1");
+    await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+
+    // 不选择菜单，直接关闭（Escape）：关闭后补扫应把 @图片1 转成引用 chip。
+    fireEvent.keyDown(promptInput, { key: "Escape" });
+    await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1), {
+      timeout: 1_600,
+    });
+    const chip = promptInput.querySelector<HTMLElement>("[data-mention-id]")!;
+    expect(chip.dataset["canvasNodeKey"]).toBe(assetNode.dataset["connectionTarget"]);
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图 · 图片1");
+    expect(within(videoGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveTextContent(
+      "已自动引用 1 处素材",
+    );
+  });
+
+  it("@ 候选菜单展示已连线素材的缩略图", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "开场 ");
+    fireEvent.keyDown(promptInput, { key: "@" });
+    appendPromptText(promptInput, "@");
+
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    appendPromptText(promptInput, "图片1");
+    await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+
+    const option = within(menu).getByRole("option", { name: /站台参考图/ });
+    const thumbImage = option.querySelector<HTMLElement>(".prompt-mention__thumb img");
+    expect(thumbImage).not.toBeNull();
+    expect(thumbImage).toHaveAttribute("src", "https://cdn.example.com/station.jpg");
+    expect(option.querySelector(".prompt-mention__thumb--fallback")).toBeNull();
+  });
+
   it("未命中或未连接素材时也给出明确的自动解析状态", async () => {
     render(<App />);
     const imageGeneration = await addGenerationNode("图片", 518, 222);
@@ -3530,11 +4153,9 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     expect(sendButton).toBeEnabled();
     fireEvent.click(sendButton);
 
-    await waitFor(() =>
-      expect(within(node).getByRole("textbox", { name: "当前 Markdown 剧本" })).toHaveValue(
-        "# 素材改编稿\n\n第一场",
-      ),
-    );
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前剧本").value).toBe("# 素材改编稿\n\n第一场");
+    });
     const call = invokeMock.mock.calls
       .filter(([command]) => command === "run_prompt_node")
       .at(-1)?.[1] as {
@@ -3604,8 +4225,9 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     fireEvent.change(composer, { target: { value: "写一个雨夜重逢短剧" } });
     fireEvent.click(within(node).getByRole("button", { name: "发送" }));
 
-    const documentEditor = within(node).getByRole("textbox", { name: "当前 Markdown 剧本" });
-    await waitFor(() => expect(documentEditor).toHaveValue("# 雨夜归人\n\n第一稿"));
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前剧本").value).toBe("# 雨夜归人\n\n第一稿");
+    });
     const firstCommand = invokeMock.mock.calls
       .filter(([command]) => command === "run_prompt_node")
       .at(-1)?.[1] as { command: Record<string, unknown> };
@@ -3618,7 +4240,9 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
 
     fireEvent.change(composer, { target: { value: "把结尾改成克制的开放式结局" } });
     fireEvent.click(within(node).getByRole("button", { name: "发送" }));
-    await waitFor(() => expect(documentEditor).toHaveValue("# 雨夜归人\n\n第二稿"));
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前剧本").value).toBe("# 雨夜归人\n\n第二稿");
+    });
     const secondCommand = invokeMock.mock.calls
       .filter(([command]) => command === "run_prompt_node")
       .at(-1)?.[1] as { command: { contextHistory: Array<{ role: string; content: string }> } };
@@ -3626,7 +4250,7 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
       expect.arrayContaining([
         expect.objectContaining({ content: "写一个雨夜重逢短剧" }),
         expect.objectContaining({ content: "# 雨夜归人\n\n第一稿" }),
-        expect.objectContaining({ role: "当前 Markdown 剧本文档" }),
+        expect.objectContaining({ role: "当前剧本文档" }),
       ]),
     );
 
@@ -3653,8 +4277,28 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     });
 
     fireEvent.click(within(node).getByRole("button", { name: "应用审计结果" }));
-    expect(documentEditor).toHaveValue("# 雨夜归人\n\n审计修订稿");
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前剧本").value).toBe("# 雨夜归人\n\n审计修订稿");
+    });
     expect(within(node).getByRole("button", { name: "导出 Markdown 剧本文档" })).toBeEnabled();
+  });
+
+  it("编剧助手对话区与剧本预览框不参与节点拖拽，支持选中文字复制", async () => {
+    render(<App />);
+    await screen.findByText("画布为空");
+    const node = await addScreenplayNode(640, 400);
+
+    // 编剧助手多轮对话区：带 nodrag，避免拖拽把“选中文字”手势劫持为移动节点。
+    const conversation = within(node).getByRole("log", { name: "剧本多轮对话" });
+    expect(conversation).toHaveClass("nodrag");
+
+    // 写入稿件后切到「预览」，预览框同样带 nodrag。
+    fireEvent.change(getDocumentEditor(node, "当前剧本"), {
+      target: { value: "# 雨夜归人\n\n第一场" },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "预览" }));
+    const preview = within(node).getByRole("region", { name: "当前剧本预览" });
+    expect(preview).toHaveClass("nodrag");
   });
 });
 
@@ -3673,7 +4317,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     render(<App />);
     await screen.findByText("画布为空");
     const screenplay = await addScreenplayNode(360, 360);
-    fireEvent.change(within(screenplay).getByRole("textbox", { name: "当前 Markdown 剧本" }), {
+    fireEvent.change(getDocumentEditor(screenplay, "当前剧本"), {
       target: { value: "# 雨夜归人\n\n林舟在暴雨中的站台等到了故人。" },
     });
     const storyboard = await addStoryboardNode(980, 360);
@@ -3688,10 +4332,9 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     expect(sendButton).toBeEnabled();
     fireEvent.click(sendButton);
 
-    const documentEditor = within(storyboard).getByRole("textbox", {
-      name: "当前 Markdown 工业级分镜脚本",
+    await waitFor(() => {
+      expect(getDocumentEditor(storyboard, "当前工业级分镜脚本").value).toContain("## SD01");
     });
-    await waitFor(() => expect((documentEditor as HTMLTextAreaElement).value).toContain("## SD01"));
     const command = invokeMock.mock.calls
       .filter(([name]) => name === "run_prompt_node")
       .at(-1)?.[1] as {
@@ -3747,10 +4390,9 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     });
     fireEvent.click(within(node).getByRole("button", { name: "发送" }));
 
-    const documentEditor = within(node).getByRole("textbox", {
-      name: "当前 Markdown 工业级分镜脚本",
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前工业级分镜脚本").value).toContain("## SD01");
     });
-    await waitFor(() => expect((documentEditor as HTMLTextAreaElement).value).toContain("## SD01"));
     const firstCommand = invokeMock.mock.calls
       .filter(([command]) => command === "run_prompt_node")
       .at(-1)?.[1] as { command: Record<string, unknown> };
@@ -3763,9 +4405,9 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
 
     fireEvent.change(composer, { target: { value: "加强雨势并把 SD01 调整到 6 秒" } });
     fireEvent.click(within(node).getByRole("button", { name: "发送" }));
-    await waitFor(() =>
-      expect((documentEditor as HTMLTextAreaElement).value).toContain("雨势加强"),
-    );
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前工业级分镜脚本").value).toContain("雨势加强");
+    });
     const secondCommand = invokeMock.mock.calls
       .filter(([command]) => command === "run_prompt_node")
       .at(-1)?.[1] as { command: { contextHistory: Array<{ role: string; content: string }> } };
@@ -3777,7 +4419,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
         expect.objectContaining({
           content: expect.stringContaining("24mm 建场镜头") as unknown as string,
         }),
-        expect.objectContaining({ role: "当前 Markdown 工业级分镜脚本" }),
+        expect.objectContaining({ role: "当前工业级分镜脚本" }),
       ]),
     );
 
@@ -3802,7 +4444,9 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     });
 
     fireEvent.click(within(node).getByRole("button", { name: "应用审计结果" }));
-    expect((documentEditor as HTMLTextAreaElement).value).toContain("审计记录");
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前工业级分镜脚本").value).toContain("审计记录");
+    });
     const exportButton = within(node).getByRole("button", {
       name: "导出 Markdown 分镜脚本文档",
     });
@@ -3821,58 +4465,5 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
         expect.stringContaining("## 审计记录"),
       ),
     );
-  });
-});
-
-describe("图片生成节点提示词优化（桌面运行时）", () => {
-  it("开启优化并选择人物真实感图片模式后，按技能模式调用文本模型并可采用结果", async () => {
-    const optimizedPrompt =
-      "35岁的亚洲女性，额头毛孔细密，鼻翼毛孔略明显，眼下是细薄纹理，轻微肤色不匀，颧骨有局部破碎高光。";
-    invokeMock.mockImplementation((command) => {
-      if (command === "optimize_video_prompt") {
-        return Promise.resolve({ optimizedPrompt, rawModelOutput: optimizedPrompt });
-      }
-      return baseInvokeImplementation(command);
-    });
-
-    render(<App />);
-    const imageNode = await addGenerationNode("图片", 444, 148);
-    setPromptText(
-      within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
-      "一个真实感的女性人物面部特写",
-    );
-
-    // 开启提示词优化：未选择文本模型时自动应用第一个可用文本模型。
-    fireEvent.click(within(imageNode).getByRole("checkbox", { name: "提示词优化" }));
-    await waitFor(() =>
-      expect(within(imageNode).getByLabelText("优化文本模型")).toHaveValue(TEXT_MODEL.id),
-    );
-    fireEvent.change(within(imageNode).getByLabelText("优化模式"), {
-      target: { value: "realistic_character" },
-    });
-    expect(within(imageNode).getByText("已开启 · 人物真实感图片 专用")).toBeInTheDocument();
-
-    // 发起优化：调用后端文本模型通道并携带人物真实感模式。
-    fireEvent.click(await within(imageNode).findByRole("button", { name: "优化提示词" }));
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("optimize_video_prompt", expect.anything()),
-    );
-    const optimizeCall = invokeMock.mock.calls.find(
-      ([command]) => command === "optimize_video_prompt",
-    )?.[1] as { command: Record<string, unknown> };
-    expect(optimizeCall.command).toMatchObject({
-      providerConnectionId: "moyu-production",
-      modelDefinitionId: TEXT_MODEL.id,
-      mode: "realistic_character",
-      userPrompt: "一个真实感的女性人物面部特写",
-    });
-
-    // 采用优化结果：写回提示词输入框。
-    fireEvent.click(await within(imageNode).findByRole("button", { name: "采用" }));
-    await waitFor(() => {
-      expect(
-        within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
-      ).toHaveTextContent(optimizedPrompt);
-    });
   });
 });

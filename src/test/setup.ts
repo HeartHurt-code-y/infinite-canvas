@@ -86,7 +86,7 @@ if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined
     ["canvas-screenplay-node--viral_remix", { width: 620, height: 780 }],
     ["canvas-screenplay-node", { width: 620, height: 760 }],
     ["canvas-video-composer", { width: 580, height: 500 }],
-    ["canvas-video-downloader", { width: 580, height: 420 }],
+    ["canvas-video-downloader", { width: 580, height: 456 }],
     ["canvas-asset-node--output", { width: 320, height: 180 }],
     ["canvas-asset-node", { width: 500, height: 437.5 }],
     ["canvas-result-node", { width: 250, height: 300 }],

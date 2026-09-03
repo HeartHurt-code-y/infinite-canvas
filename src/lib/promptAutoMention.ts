@@ -16,7 +16,7 @@ export interface PromptAutoMentionCandidate {
    * 媒体引用的后端类型。旧候选未保存该字段时仍按 asset/local_asset 解释；
    * 生成产物使用 local_result，并额外携带任务与结果下标。
    */
-  readonly referenceKind?: "asset" | "local_asset" | "local_result";
+  readonly referenceKind?: "asset" | "local_asset" | "local_result" | "local_file";
   readonly generationTaskId?: string;
   readonly resultIndex?: number;
   readonly kind: "image" | "video" | "audio";

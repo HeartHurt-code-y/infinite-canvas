@@ -85,6 +85,9 @@ pub fn run() {
             commands::start_video_composition,
             commands::get_video_composition_job,
             commands::cancel_video_composition,
+            commands::start_video_frame_extraction,
+            commands::get_video_frame_extraction_job,
+            commands::cancel_video_frame_extraction,
             commands::backend_health,
         ])
         .run(tauri::generate_context!())

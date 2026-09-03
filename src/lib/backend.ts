@@ -34,6 +34,7 @@ import {
   videoCompositionJobRecordSchema,
   videoDownloaderEngineStatusSchema,
   videoDownloadJobRecordSchema,
+  videoFrameExtractionJobRecordSchema,
 } from "./backendSchemas";
 
 export type GenerationOperation =
@@ -797,6 +798,20 @@ export async function pickPromptMultimodalFiles(): Promise<readonly PickedPrompt
   return materials.filter((material): material is PickedPromptMaterial => material != null);
 }
 
+/**
+ * 按本地文件路径解析多模态素材的类型与 MIME（与后端 expected_multimodal_mime 一致）。
+ * 产物节点等已有本地文件的引用场景复用同一份映射，避免前端声明与后端校验漂移。
+ */
+export function promptMultimodalDefinitionForPath(
+  localPath: string,
+): { readonly kind: PromptMaterialKind; readonly mimeType: string } | null {
+  const normalized = localPath.replace(/[\\/]/g, "/");
+  const fileName = normalized.split("/").pop() ?? "";
+  const dotIndex = fileName.lastIndexOf(".");
+  const extension = dotIndex >= 0 ? fileName.slice(dotIndex + 1).toLowerCase() : "";
+  return PROMPT_MATERIAL_BY_EXTENSION[extension] ?? null;
+}
+
 export type FrontendLogLevel = "info" | "warn" | "error";
 
 /**
@@ -969,8 +984,21 @@ export interface LocalResultMediaReferenceTarget {
   readonly mediaType: MediaType;
 }
 
+/** 任意本地文件引用（如视频抽帧产物）：直接读取磁盘路径。 */
+export interface LocalFileMediaReferenceTarget {
+  readonly kind: "local_file";
+  /** 本地文件绝对路径。 */
+  readonly path: string;
+  /** Stable identity of the repeated canvas instance. */
+  readonly canvasNodeKey?: string;
+  readonly mediaType: MediaType;
+}
+
 export type MediaReferenceTarget =
-  AssetMediaReferenceTarget | LocalAssetMediaReferenceTarget | LocalResultMediaReferenceTarget;
+  | AssetMediaReferenceTarget
+  | LocalAssetMediaReferenceTarget
+  | LocalResultMediaReferenceTarget
+  | LocalFileMediaReferenceTarget;
 
 export interface MediaReferencePromptSegment {
   readonly kind: "media_reference";
@@ -1220,6 +1248,9 @@ export type VideoDownloadStatus =
 
 export type VideoDownloaderEngineState = "not_installed" | "installing" | "ready" | "failed";
 
+/** B 站画质路由：best=最高可用画质；sd480=未登录封顶 480P。 */
+export type VideoDownloadQualityMode = "best" | "sd480";
+
 export interface VideoDownloadJobRecord {
   readonly jobId: string;
   readonly url: string;
@@ -1228,6 +1259,12 @@ export interface VideoDownloadJobRecord {
   readonly progress: number | null;
   readonly finalPath: string | null;
   readonly fileName: string | null;
+  /** 本次任务实际采用的画质路由；非 B 站为 null。 */
+  readonly qualityMode: VideoDownloadQualityMode | null;
+  /** 面向用户的中文画质说明（B 站下载时给出）。 */
+  readonly qualityHint: string | null;
+  /** B 站成片下载后是否已自动去除右上角水印（非 B 站恒为 false）。 */
+  readonly watermarkRemoved: boolean;
   readonly error: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -1238,6 +1275,8 @@ export interface VideoDownloaderEngineStatus {
   readonly version: string | null;
   readonly binaryPath: string | null;
   readonly cookiesInstalled: boolean;
+  /** 已导入的 cookies.txt 是否含 B 站登录态（SESSDATA）。 */
+  readonly bilibiliLoggedIn: boolean;
   readonly lastError: string | null;
 }
 
@@ -1269,6 +1308,58 @@ export const videoDownloaderClient: VideoDownloaderClient = {
     invokeDesktop("get_video_download_job", videoDownloadJobRecordSchema, { jobId }),
   cancelJob: (jobId) =>
     invokeDesktop("cancel_video_download", videoDownloadJobRecordSchema, { jobId }),
+};
+
+// ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
+
+export type VideoFrameExtractionStatus =
+  "preparing_engine" | "processing" | "completed" | "failed" | "cancelled";
+
+/** 单张抽帧结果。 */
+export interface ExtractedFrame {
+  /** 图片文件绝对路径（桌面端经 convertFileSrc 展示）。 */
+  readonly path: string;
+  /** 抽取时刻（秒）。 */
+  readonly timestampSeconds: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface VideoFrameExtractionJobRecord {
+  readonly jobId: string;
+  /** 输入视频的绝对路径。 */
+  readonly videoPath: string;
+  readonly status: VideoFrameExtractionStatus;
+  /** 0-100；引擎准备阶段为 null。 */
+  readonly progress: number | null;
+  readonly frames: readonly ExtractedFrame[];
+  readonly error: string | null;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+export interface VideoFrameExtractionClient {
+  startExtraction: (
+    videoPath: string,
+    timestamps: readonly number[],
+  ) => Promise<VideoFrameExtractionJobRecord>;
+  getJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
+  cancelJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
+}
+
+export const videoFrameExtractionClient: VideoFrameExtractionClient = {
+  startExtraction: (videoPath, timestamps) =>
+    invokeDesktop("start_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
+      command: { videoPath, timestamps: [...timestamps] },
+    }),
+  getJob: (jobId) =>
+    invokeDesktop("get_video_frame_extraction_job", videoFrameExtractionJobRecordSchema, {
+      jobId,
+    }),
+  cancelJob: (jobId) =>
+    invokeDesktop("cancel_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
+      jobId,
+    }),
 };
 
 // ---------- 画布视频合成（内置 FFmpeg 引擎） ----------

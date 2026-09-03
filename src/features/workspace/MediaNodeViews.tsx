@@ -7,6 +7,7 @@ import { CopySimple } from "@phosphor-icons/react/CopySimple";
 import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
 import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
 import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { Images } from "@phosphor-icons/react/Images";
 import { Play } from "@phosphor-icons/react/Play";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
@@ -34,7 +35,6 @@ import {
   ImageNodeSettings,
   NodeTypeIcon,
   PromptMentionInput,
-  PromptOptimizationPanel,
   VideoNodeSettings,
 } from "./PromptNodeViews";
 import type {
@@ -46,7 +46,6 @@ import type {
   InheritedAssetInput,
   MentionCandidate,
   OutputNodeData,
-  PromptOptimizationPanelState,
   ResultNodeData,
   RetryInfo,
   StaticNodeDescriptor,
@@ -57,6 +56,10 @@ import type {
   VideoDownloaderNodeConfig,
   VideoDownloaderNodeData,
   VideoDownloaderRunState,
+  FrameExtractorVideoInput,
+  VideoFrameExtractorNodeConfig,
+  VideoFrameExtractorNodeData,
+  VideoFrameExtractorRunState,
   VideoNodeConfig,
 } from "./workspaceModel";
 import {
@@ -87,10 +90,6 @@ export function CanvasGenNode({
   promptSourceName,
   registerPromptInput,
   providerCatalog,
-  promptOptimization,
-  onPromptOptimize,
-  onAdoptOptimizedPrompt,
-  onDiscardOptimizedPrompt,
   onSelect,
   onNodeDragStart,
   onRemove,
@@ -117,10 +116,6 @@ export function CanvasGenNode({
     session: PromptContentEditorSession | null,
   ) => void;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly promptOptimization: PromptOptimizationPanelState | undefined;
-  readonly onPromptOptimize: (key: string, detailReview: boolean) => void;
-  readonly onAdoptOptimizedPrompt: (key: string) => void;
-  readonly onDiscardOptimizedPrompt: (key: string) => void;
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
     key: string,
@@ -138,8 +133,6 @@ export function CanvasGenNode({
 }) {
   const isVideo = node.kind === "video";
   const nodeElementRef = useRef<HTMLDivElement>(null);
-  const optimizationEnabled = node.config.promptOptimization?.enabled === true;
-  const optimizationRunning = optimizationEnabled && promptOptimization?.status === "running";
   const effectiveInputs = [...connectedInputs, ...inheritedInputs];
   const referenceInputCount = effectiveInputs.length;
   const promptLabelId = `${node.kind}-prompt-label-${node.key}`;
@@ -180,11 +173,9 @@ export function CanvasGenNode({
           onSelect(node.key);
           return;
         }
-        // 提示词输入框、优化面板、按钮内部按下不触发节点拖动。
+        // 提示词输入框、按钮内部按下不触发节点拖动。
         if (
-          target.closest(
-            ".prompt-mention, .prompt-opt-panel, .canvas-gen-node__actions, .node-media-chip__unlink",
-          )
+          target.closest(".prompt-mention, .canvas-gen-node__actions, .node-media-chip__unlink")
         ) {
           return;
         }
@@ -213,19 +204,17 @@ export function CanvasGenNode({
         <span className="canvas-gen-node__actions">
           <button
             type="button"
-            className={`canvas-gen-node__start canvas-gen-node__start--labeled${starting || optimizationRunning ? " is-busy" : ""}`}
+            className={`canvas-gen-node__start canvas-gen-node__start--labeled${starting ? " is-busy" : ""}`}
             aria-label={isVideo ? "开始视频生成" : "开始图片生成"}
-            data-state={starting || optimizationRunning ? "loading" : undefined}
+            data-state={starting ? "loading" : undefined}
             title={
               !selectionReady
                 ? `请先选择可用的供应商和${isVideo ? "视频" : "图片"}模型`
-                : optimizationRunning
-                  ? `提示词优化完成后再开始${isVideo ? "视频" : "图片"}生成`
-                  : isVideo
-                    ? "点击开始视频生成"
-                    : "点击开始图片生成"
+                : isVideo
+                  ? "点击开始视频生成"
+                  : "点击开始图片生成"
             }
-            disabled={starting || optimizationRunning || !selectionReady}
+            disabled={starting || !selectionReady}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
               event.stopPropagation();
@@ -233,14 +222,14 @@ export function CanvasGenNode({
               onStartGeneration(node.key);
             }}
           >
-            {starting || optimizationRunning ? (
+            {starting ? (
               <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
             ) : isVideo ? (
               <Play size={15} weight="fill" aria-hidden="true" />
             ) : (
               <Sparkle size={15} weight="fill" aria-hidden="true" />
             )}
-            <span>{starting ? "提交中" : optimizationRunning ? "优化中" : "生成"}</span>
+            <span>{starting ? "提交中" : "生成"}</span>
           </button>
           <button
             type="button"
@@ -301,14 +290,6 @@ export function CanvasGenNode({
           onChange={(config) => onImageConfigChange(node.key, config)}
         />
       )}
-      {optimizationEnabled ? (
-        <PromptOptimizationPanel
-          state={promptOptimization}
-          onStart={(detailReview) => onPromptOptimize(node.key, detailReview)}
-          onAdopt={() => onAdoptOptimizedPrompt(node.key)}
-          onDiscard={() => onDiscardOptimizedPrompt(node.key)}
-        />
-      ) : null}
 
       {startError ? (
         <div className="canvas-gen-node__error" role="alert">
@@ -660,6 +641,12 @@ export function CanvasVideoComposerNode({
   );
 }
 
+/** 是否为 B 站链接（含 b23.tv 短链），用于触发 B 站画质路由提醒。 */
+function isBilibiliLink(url: string): boolean {
+  const lower = url.toLowerCase();
+  return lower.includes("bilibili.com") || lower.includes("b23.tv");
+}
+
 /**
  * 画布网络爆款视频下载节点：内置 yt-dlp 引擎，粘贴抖音等站点链接下载为
  * 本地视频文件。不接收媒体连线；成功后右侧自动落一张可连入视频拼接与
@@ -737,6 +724,8 @@ export function CanvasVideoDownloaderNode({
           : url.trim().length > 0
             ? "粘贴链接后即可下载"
             : "粘贴抖音等站点的视频链接";
+  const isBilibiliUrl = isBilibiliLink(url);
+  const bilibiliLoggedIn = engineStatus?.bilibiliLoggedIn === true;
   return (
     <div
       className={`canvas-video-downloader${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
@@ -918,6 +907,24 @@ export function CanvasVideoDownloaderNode({
         ) : null}
       </div>
 
+      {isBilibiliUrl ? (
+        <div
+          className={`canvas-video-downloader__quality${bilibiliLoggedIn ? " is-logged-in" : " is-guest"}`}
+          role="status"
+        >
+          {bilibiliLoggedIn ? (
+            <CheckCircle size={13} weight="fill" aria-hidden="true" />
+          ) : (
+            <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          )}
+          <span>
+            {bilibiliLoggedIn
+              ? "已登录 B 站 · 将下载当前账号可用的最高画质"
+              : "未登录 B 站 · 将自动下载 480P 画质，导入登录态 Cookies 可下载最高画质"}
+          </span>
+        </div>
+      ) : null}
+
       <div
         className={`canvas-video-downloader__status${runState?.status ? ` is-${runState.status}` : ""}`}
         role="status"
@@ -933,6 +940,14 @@ export function CanvasVideoDownloaderNode({
           ) : null}
           <strong>{statusText}</strong>
         </span>
+        {runState?.qualityHint ? (
+          <span className="canvas-video-downloader__quality-hint">{runState.qualityHint}</span>
+        ) : null}
+        {runState?.watermarkRemoved ? (
+          <span className="canvas-video-downloader__watermark-hint">
+            已自动去除 B 站右上角水印
+          </span>
+        ) : null}
         {running && !runState?.preparingEngine ? (
           <span
             className="canvas-video-downloader__progress"
@@ -974,6 +989,291 @@ export function CanvasVideoDownloaderNode({
       />
     </div>
   );
+}
+
+/**
+ * 画布视频抽帧节点：
+ * - 输入视频（素材/视频产物/下载·合成节点连线，或手动填写本地路径）；
+ * - 填写一个或多个秒数（支持小数），点击「抽帧」后用内置 ffmpeg 逐秒抽取关键帧；
+ * - 完成后每帧落一张图片产物卡片（origin=frame_extract），可连入图片/视频生成节点作为参考图。
+ */
+export function CanvasVideoFrameExtractorNode({
+  node,
+  inputs,
+  selected,
+  dragging,
+  runState,
+  producedFrames,
+  onSelect,
+  onNodeDragStart,
+  onRemove,
+  onConfigChange,
+  onStartExtraction,
+  onCancelExtraction,
+}: {
+  readonly node: VideoFrameExtractorNodeData;
+  readonly inputs: readonly FrameExtractorVideoInput[];
+  readonly selected: boolean;
+  readonly dragging: boolean;
+  readonly runState: VideoFrameExtractorRunState | undefined;
+  readonly producedFrames: readonly OutputNodeData[];
+  readonly onSelect: (key: string) => void;
+  readonly onNodeDragStart: (
+    key: string,
+    x: number,
+    y: number,
+    clientX: number,
+    clientY: number,
+  ) => void;
+  readonly onRemove: (key: string) => void;
+  readonly onConfigChange: (key: string, config: VideoFrameExtractorNodeConfig) => void;
+  readonly onStartExtraction: (key: string) => void;
+  readonly onCancelExtraction: (key: string) => void;
+}) {
+  const running = runState?.status === "running";
+  const source = inputs[0] ?? null;
+  const manualPath = node.config.videoPath.trim();
+  const resolvedSource =
+    source ??
+    (manualPath.length > 0
+      ? {
+          key: "manual",
+          name: fileNameFromPath(manualPath),
+          src: manualPath,
+          sourceLabel: "本地文件" as const,
+          edgeId: "",
+          finalPath: manualPath,
+        }
+      : null);
+  // 秒数编辑：用单个文本框输入多个秒数（逗号/空格/顿号分隔），实时解析并写回配置。
+  const [timestampsText, setTimestampsText] = useState(() =>
+    node.config.timestamps.join(", "),
+  );
+  useEffect(() => {
+    const serialized = node.config.timestamps.join(", ");
+    if (serialized !== timestampsText) setTimestampsText(serialized);
+    // 仅在节点配置变化时同步外部值；用户输入中的中间态不打断。
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [node.config.timestamps]);
+  const handleTimestampsInput = (text: string) => {
+    setTimestampsText(text);
+    const timestamps = parseTimestampList(text);
+    onConfigChange(node.key, { ...node.config, timestamps });
+  };
+  const timestamps = parseTimestampList(timestampsText);
+  const canStart = resolvedSource != null && timestamps.length > 0 && !running;
+  const statusText = running
+    ? runState?.preparingEngine
+      ? "正在准备 ffmpeg 引擎…"
+      : `正在抽帧 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
+    : runState?.status === "done"
+      ? `抽帧完成 · ${producedFrames.length} 张图片已落在右侧`
+      : runState?.status === "cancelled"
+        ? "已取消"
+        : runState?.status === "error"
+          ? "抽帧失败 · 请查看错误"
+          : resolvedSource == null
+            ? "请连入视频或填写视频文件路径"
+            : timestamps.length === 0
+              ? "请填写至少一个抽帧秒数"
+              : "填好秒数后即可抽帧";
+  return (
+    <div
+      className={`canvas-video-frame-extractor${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
+      aria-busy={running || undefined}
+      onMouseDown={(event) => {
+        if ((event.target as HTMLElement).closest("button, input")) {
+          onSelect(node.key);
+          return;
+        }
+        onSelect(node.key);
+        onNodeDragStart(node.key, node.x, node.y, event.clientX, event.clientY);
+      }}
+    >
+      <div className="canvas-video-frame-extractor__header">
+        <span className="canvas-video-frame-extractor__type">
+          <span className="canvas-video-frame-extractor__type-icon" aria-hidden="true">
+            <Images size={16} weight="bold" />
+          </span>
+          <span>
+            <strong>视频抽帧</strong>
+            <small>{resolvedSource ? resolvedSource.name : "等待视频输入"}</small>
+          </span>
+        </span>
+        <span className="canvas-video-frame-extractor__actions">
+          {running ? (
+            <button
+              type="button"
+              className="canvas-video-frame-extractor__cancel"
+              aria-label="取消视频抽帧"
+              title="取消抽帧"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onCancelExtraction(node.key);
+              }}
+            >
+              <X size={15} weight="bold" aria-hidden="true" />
+              <span>取消</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="canvas-video-frame-extractor__start"
+              disabled={!canStart}
+              aria-label="开始视频抽帧"
+              title={
+                resolvedSource == null
+                  ? "请先连入视频或填写视频文件路径"
+                  : timestamps.length === 0
+                    ? "请填写至少一个抽帧秒数"
+                    : "按秒数逐帧抽取关键帧"
+              }
+              data-state={running ? "loading" : undefined}
+              onClick={(event) => {
+                event.stopPropagation();
+                onStartExtraction(node.key);
+              }}
+            >
+              {running ? (
+                <CircleNotch size={15} weight="bold" className="spin-icon" aria-hidden="true" />
+              ) : (
+                <Play size={15} weight="fill" aria-hidden="true" />
+              )}
+              <span>{running ? "抽帧中" : "开始抽帧"}</span>
+            </button>
+          )}
+          <button
+            type="button"
+            className="canvas-video-frame-extractor__remove"
+            disabled={running}
+            aria-label="移除视频抽帧节点"
+            onClick={(event) => {
+              event.stopPropagation();
+              onRemove(node.key);
+            }}
+          >
+            <X size={12} weight="bold" aria-hidden="true" />
+          </button>
+        </span>
+      </div>
+
+      <div className="canvas-video-frame-extractor__source">
+        <span className="canvas-video-frame-extractor__source-label">
+          {source
+            ? `视频输入 · ${source.name}`
+            : manualPath.length > 0
+              ? `本地文件 · ${fileNameFromPath(manualPath)}`
+              : "视频输入"}
+        </span>
+        <input
+          className="canvas-video-frame-extractor__path"
+          type="text"
+          value={manualPath}
+          placeholder="或直接填写本地视频文件路径（可选）"
+          aria-label="视频文件路径"
+          onMouseDown={(event) => event.stopPropagation()}
+          onChange={(event) => {
+            onConfigChange(node.key, { ...node.config, videoPath: event.target.value });
+          }}
+        />
+        <p className="canvas-video-frame-extractor__helper">
+          连入素材视频 / 视频产物 / 下载·合成节点时会自动使用其最新产物。
+        </p>
+      </div>
+
+      <div className="canvas-video-frame-extractor__field">
+        <label htmlFor={`frame-ts-${node.key}`} className="canvas-video-frame-extractor__field-label">
+          抽帧秒数
+        </label>
+        <input
+          id={`frame-ts-${node.key}`}
+          className="canvas-video-frame-extractor__timestamps"
+          type="text"
+          inputMode="decimal"
+          value={timestampsText}
+          placeholder="例如 3, 8.5, 12"
+          aria-label="抽帧秒数，多个秒数用逗号分隔"
+          aria-invalid={timestampsText.length > 0 && timestamps.length === 0 || undefined}
+          onMouseDown={(event) => event.stopPropagation()}
+          onChange={(event) => handleTimestampsInput(event.target.value)}
+        />
+        <p className="canvas-video-frame-extractor__helper">
+          {timestamps.length > 0
+            ? `将抽取第 ${timestamps.map((t) => formatTimestampSeconds(t)).join("、")} 秒，共 ${timestamps.length} 张。`
+            : "支持 0 与小数秒，多个秒数用逗号、空格或顿号分隔。"}
+        </p>
+      </div>
+
+      {runState?.status === "error" && runState.error ? (
+        <pre className="canvas-video-frame-extractor__error" role="alert" tabIndex={0}>
+          {runState.error}
+        </pre>
+      ) : null}
+
+      <div
+        className={`canvas-video-frame-extractor__status${runState?.status === "error" || runState?.status === "cancelled" ? " is-error" : ""}${runState?.status === "done" ? " is-done" : ""}`}
+      >
+        <span>
+          {runState?.status === "done" ? <CheckCircle size={14} weight="bold" aria-hidden="true" /> : null}
+          {runState?.status === "error" || runState?.status === "cancelled" ? (
+            <WarningCircle size={14} weight="bold" aria-hidden="true" />
+          ) : null}
+          {statusText}
+        </span>
+      </div>
+
+      {running ? (
+        <span
+          className="canvas-video-frame-extractor__progress"
+          role="progressbar"
+          aria-label="视频抽帧进度"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={runState?.progress != null ? Math.round(runState.progress) : undefined}
+        >
+          <i
+            style={{
+              width: `${runState?.progress != null ? Math.min(100, Math.max(0, Math.round(runState.progress))) : 0}%`,
+            }}
+          />
+        </span>
+      ) : null}
+
+      {producedFrames.length > 0 ? (
+        <div className="canvas-video-frame-extractor__frames" aria-label="抽帧结果预览">
+          {producedFrames.map((frame) => {
+            const src = frame.finalPath != null ? toMediaSrc(frame.finalPath) : null;
+            const label = frame.name ?? "抽帧图片";
+            return (
+              <figure key={frame.key} className="canvas-video-frame-extractor__frame">
+                {src != null ? <img src={src} alt={label} draggable={false} /> : null}
+                <figcaption>{frame.name != null ? fileNameFromPath(frame.name) : label}</figcaption>
+              </figure>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function parseTimestampList(text: string): number[] {
+  return Array.from(
+    new Set(
+      text
+        .split(/[,，、;\s]+/)
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0)
+        .map((part) => Number(part))
+        .filter((value) => Number.isFinite(value) && value >= 0),
+    ),
+  ).sort((a, b) => a - b);
+}
+
+function formatTimestampSeconds(value: number): string {
+  if (Number.isInteger(value)) return String(value);
+  return String(Number(value.toFixed(2)));
 }
 
 /**
@@ -1567,8 +1867,8 @@ export function CanvasOutputNode({
           title={
             canUseAsGenerationReference
               ? isVideo
-                ? "拖到图片/视频生成节点作为参考视频，或拖到视频拼接与合成、爆款视频复刻节点"
-                : "拖到图片/视频生成节点作为参考图片"
+                ? "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考视频、视频拼接与合成、爆款视频复刻节点"
+                : "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考图片"
               : "拖到视频拼接与合成或爆款视频复刻节点"
           }
           onMouseDown={(event) => {

@@ -9,6 +9,7 @@ use super::{
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
     downloader::{VideoDownloadJobRecord, VideoDownloaderEngineStatus},
     error::{BackendError, CommandResult, IntoCommandResult as _},
+    frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider::MOYU_ADAPTER_ID,
@@ -24,8 +25,8 @@ use super::{
         RecoveryReport, RemoteModelOption, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
         StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
-        TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
-        VideoTaskListCommand,
+        StartVideoFrameExtractionCommand, TosStagingConfig, UpsertProviderConnectionCommand,
+        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
 
@@ -776,6 +777,35 @@ pub fn cancel_video_composition(
     job_id: String,
 ) -> CommandResult<VideoCompositionJobRecord> {
     state.composer.cancel_job(&job_id).command()
+}
+
+// ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
+
+#[tauri::command]
+pub fn start_video_frame_extraction(
+    state: State<'_, BackendState>,
+    command: StartVideoFrameExtractionCommand,
+) -> CommandResult<VideoFrameExtractionJobRecord> {
+    state
+        .frame_extractor
+        .start_extraction(&command.video_path, command.timestamps)
+        .command()
+}
+
+#[tauri::command]
+pub fn get_video_frame_extraction_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoFrameExtractionJobRecord> {
+    state.frame_extractor.get_job(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_video_frame_extraction(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoFrameExtractionJobRecord> {
+    state.frame_extractor.cancel_job(&job_id).command()
 }
 
 #[cfg(test)]

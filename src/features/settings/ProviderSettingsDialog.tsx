@@ -244,6 +244,17 @@ export function ProviderSettingsDialog({
     [client],
   );
 
+  // 关键修复：子组件 ProviderTokenGroupSettings 的 reload 依赖 onTokenGroupsChanged 的引用身份。
+  // 如果这里传入内联箭头函数，每次渲染都会生成新引用 → reload 重建 → effect 重跑 → 徽标
+  // 「读取中/未配置」无限闪烁。用 useCallback 固定引用即可断开这个循环。
+  const handleTokenGroupsChanged = useCallback((groups: readonly ProviderTokenGroup[]) => {
+    setTokenGroups(Array.from(groups));
+  }, []);
+
+  const handleAssetProviderChanged = useCallback((providerConnectionId: string) => {
+    setAssetTokenProviderId(providerConnectionId);
+  }, []);
+
   useEffect(() => {
     if (!open) return;
     let active = true;
@@ -689,7 +700,7 @@ export function ProviderSettingsDialog({
           <AssetLibraryTokenSettings
             provider={providers.find((provider) => provider.id === assetTokenProviderId) ?? null}
             providers={providers}
-            onProviderChanged={(providerId) => setAssetTokenProviderId(providerId)}
+            onProviderChanged={handleAssetProviderChanged}
             credentialClient={client}
             libraryClient={assetClient}
             onAssetsLoaded={onAssetLibraryLoaded}
@@ -700,10 +711,10 @@ export function ProviderSettingsDialog({
           <ProviderTokenGroupSettings
             provider={providers.find((provider) => provider.id === assetTokenProviderId) ?? null}
             providers={providers}
-            onProviderChanged={(providerId) => setAssetTokenProviderId(providerId)}
+            onProviderChanged={handleAssetProviderChanged}
             client={client}
             credentialClient={client}
-            onTokenGroupsChanged={(groups) => setTokenGroups(Array.from(groups))}
+            onTokenGroupsChanged={handleTokenGroupsChanged}
           />
 
           {remoteModels.length > 0 ? (

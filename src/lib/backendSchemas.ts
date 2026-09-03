@@ -27,6 +27,7 @@ import type {
   VideoCompositionJobRecord,
   VideoDownloadJobRecord,
   VideoDownloaderEngineStatus,
+  VideoFrameExtractionJobRecord,
 } from "./backend";
 
 const nullableStringSchema = v.nullable(v.string());
@@ -379,6 +380,9 @@ export const videoDownloadJobRecordSchema = v.looseObject({
   progress: nullableNumberSchema,
   finalPath: nullableStringSchema,
   fileName: nullableStringSchema,
+  qualityMode: v.nullable(v.picklist(["best", "sd480"])),
+  qualityHint: nullableStringSchema,
+  watermarkRemoved: v.boolean(),
   error: nullableStringSchema,
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -389,6 +393,7 @@ export const videoDownloaderEngineStatusSchema = v.looseObject({
   version: nullableStringSchema,
   binaryPath: nullableStringSchema,
   cookiesInstalled: v.boolean(),
+  bilibiliLoggedIn: v.boolean(),
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoDownloaderEngineStatus>;
 
@@ -412,6 +417,24 @@ export const videoComposerEngineStatusSchema = v.looseObject({
   binaryPath: nullableStringSchema,
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoComposerEngineStatus>;
+
+export const videoFrameExtractionJobRecordSchema = v.looseObject({
+  jobId: v.string(),
+  videoPath: v.string(),
+  status: v.picklist(["preparing_engine", "processing", "completed", "failed", "cancelled"]),
+  progress: nullableNumberSchema,
+  frames: v.array(
+    v.looseObject({
+      path: v.string(),
+      timestampSeconds: v.number(),
+      width: v.number(),
+      height: v.number(),
+    }),
+  ),
+  error: nullableStringSchema,
+  createdAt: v.number(),
+  updatedAt: v.number(),
+}) satisfies v.GenericSchema<VideoFrameExtractionJobRecord>;
 
 export const stringSchema = v.string();
 export const unknownSchema = v.unknown();

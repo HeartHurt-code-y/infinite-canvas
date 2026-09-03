@@ -13,6 +13,7 @@ import type {
   StoryboardNodeData,
   VideoComposerNodeData,
   VideoDownloaderNodeData,
+  VideoFrameExtractorNodeData,
   ViralRemixNodeData,
 } from "../workspace/workspaceModel";
 
@@ -44,6 +45,7 @@ export type CanvasNodeType =
   | "viralRemix"
   | "videoComposer"
   | "videoDownloader"
+  | "frameExtractor"
   | "result"
   | "output";
 
@@ -56,6 +58,7 @@ export interface CanvasNodesByType {
   viralRemix: ViralRemixNodeData;
   videoComposer: VideoComposerNodeData;
   videoDownloader: VideoDownloaderNodeData;
+  frameExtractor: VideoFrameExtractorNodeData;
   result: ResultNodeData;
   output: OutputNodeData;
 }
@@ -84,6 +87,7 @@ export interface CanvasDocumentV1 {
   readonly viralRemixNodes?: readonly ViralRemixNodeData[];
   readonly videoComposerNodes?: readonly VideoComposerNodeData[];
   readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
+  readonly frameExtractorNodes?: readonly VideoFrameExtractorNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -104,6 +108,7 @@ export interface CanvasDocumentV2 {
   readonly viralRemixNodes?: readonly ViralRemixNodeData[];
   readonly videoComposerNodes?: readonly VideoComposerNodeData[];
   readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
+  readonly frameExtractorNodes?: readonly VideoFrameExtractorNodeData[];
   readonly resultNodes: readonly ResultNodeData[];
   readonly outputNodes?: readonly Omit<OutputNodeData, "previewSrc">[];
   readonly assetEdges: readonly AssetEdgeData[];
@@ -125,6 +130,7 @@ export interface CanvasNodeLists {
   readonly viralRemix: readonly ViralRemixNodeData[];
   readonly videoComposer: readonly VideoComposerNodeData[];
   readonly videoDownloader: readonly VideoDownloaderNodeData[];
+  readonly frameExtractor: readonly VideoFrameExtractorNodeData[];
   readonly result: readonly ResultNodeData[];
   readonly output: readonly OutputNodeData[];
 }
@@ -137,6 +143,7 @@ export interface CanvasNodesByKey {
   readonly viralRemix: ReadonlyMap<string, ViralRemixNodeData>;
   readonly videoComposer: ReadonlyMap<string, VideoComposerNodeData>;
   readonly videoDownloader: ReadonlyMap<string, VideoDownloaderNodeData>;
+  readonly frameExtractor: ReadonlyMap<string, VideoFrameExtractorNodeData>;
   readonly result: ReadonlyMap<string, ResultNodeData>;
   readonly output: ReadonlyMap<string, OutputNodeData>;
 }
@@ -309,6 +316,7 @@ const CANVAS_NODE_TYPES: readonly CanvasNodeType[] = [
   "viralRemix",
   "videoComposer",
   "videoDownloader",
+  "frameExtractor",
   "result",
   "output",
 ];
@@ -442,6 +450,7 @@ function canvasNodeLists(nodesById: CanvasNodesById): CanvasNodeLists {
     viralRemix: typeNodes(nodesById, "viralRemix"),
     videoComposer: typeNodes(nodesById, "videoComposer"),
     videoDownloader: typeNodes(nodesById, "videoDownloader"),
+    frameExtractor: typeNodes(nodesById, "frameExtractor"),
     result: typeNodes(nodesById, "result"),
     output: typeNodes(nodesById, "output"),
   };
@@ -462,6 +471,7 @@ function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
     viralRemix: connectionTypeNodesByKey(nodesById, "viralRemix"),
     videoComposer: connectionTypeNodesByKey(nodesById, "videoComposer"),
     videoDownloader: connectionTypeNodesByKey(nodesById, "videoDownloader"),
+    frameExtractor: connectionTypeNodesByKey(nodesById, "frameExtractor"),
     result: connectionTypeNodesByKey(nodesById, "result"),
     output: connectionTypeNodesByKey(nodesById, "output"),
   };
@@ -677,6 +687,7 @@ function snapshotCanvasV2(
     viralRemixNodes: nodes.viralRemix,
     videoComposerNodes: nodes.videoComposer,
     videoDownloaderNodes: nodes.videoDownloader,
+    frameExtractorNodes: nodes.frameExtractor,
     resultNodes: nodes.result,
     outputNodes: nodes.output.map(persistedOutputNode),
     assetEdges: state.assetEdges,
@@ -734,6 +745,10 @@ function normalizeCanvasDocument(
     [
       "videoDownloader",
       Array.isArray(value["videoDownloaderNodes"]) ? value["videoDownloaderNodes"] : [],
+    ],
+    [
+      "frameExtractor",
+      Array.isArray(value["frameExtractorNodes"]) ? value["frameExtractorNodes"] : [],
     ],
     ["result", value["resultNodes"] as readonly unknown[]],
     ["output", Array.isArray(value["outputNodes"]) ? value["outputNodes"] : []],
@@ -845,6 +860,7 @@ function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry)
   }
   if (source.type === "asset") {
     if (target.type === "videoComposer") return source.data.kind === "video";
+    if (target.type === "frameExtractor") return source.data.kind === "video";
     if (target.type === "viralRemix") {
       return source.data.kind === "video" && source.data.videoUrl != null;
     }
@@ -859,13 +875,23 @@ function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry)
     if (target.type === "videoComposer" || target.type === "viralRemix") {
       return source.data.mediaType === "video" && hasArtifact;
     }
-    return (
-      target.type === "gen" &&
-      target.data.kind !== "prompt" &&
-      isOutputGenerationReference(source.data)
-    );
+    if (target.type === "frameExtractor") {
+      return source.data.mediaType === "video" && hasArtifact;
+    }
+    // 抽帧产物（本地图片文件）：作为参考媒体连入生成节点 / 提示词理解。
+    if (source.data.origin === "frame_extract") {
+      return target.type === "gen" && source.data.mediaType === "image" && hasArtifact;
+    }
+    // 已保存的图片/视频生成产物：连入图片/视频生成节点作为参考媒体，
+    // 连入提示词生成与优化节点作为参考理解素材（多模态参考理解）。
+    return target.type === "gen" && isOutputGenerationReference(source.data);
   }
-  return source.type === "videoDownloader" && target.type === "viralRemix";
+  // 下载/合成节点完成产物自动跟随最新产物到抽帧节点。
+  if (source.type === "videoDownloader" || source.type === "videoComposer") {
+    if (target.type === "viralRemix") return source.type === "videoDownloader";
+    if (target.type === "frameExtractor") return true;
+  }
+  return false;
 }
 
 /** 历史栈上限：超出后丢弃最旧记录，防止长会话内存无界增长。 */

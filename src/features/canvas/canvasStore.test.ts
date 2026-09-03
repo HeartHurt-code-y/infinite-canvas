@@ -41,7 +41,6 @@ const genNode: GenNodeData = {
     generationCount: 1,
     parameterValues: {},
     catalogResolved: true,
-    promptOptimization: null,
   },
 };
 
@@ -55,8 +54,8 @@ const promptNode = (key: string): GenNodeData => ({
     mode: "realistic_character",
     task: "generate",
     sourcePrompt: "",
+    conversation: [],
     generatedPrompt: "",
-    auditContextHistory: [],
     catalogResolved: true,
   },
 });
@@ -202,6 +201,32 @@ describe("canvas state interface", () => {
       status: "rejected",
       reason: "unsupported-connection",
     });
+  });
+
+  it("accepts saved image/video artifacts as reference inputs to prompt nodes", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("gen", genNode);
+    canvas.commands.addNode("gen", promptNode("prompt-1"));
+    canvas.commands.addNode("gen", promptNode("prompt-2"));
+    canvas.commands.addOutput(outputNode);
+    canvas.commands.addOutput({ ...outputNode, key: "output-video", mediaType: "video" });
+    canvas.commands.addOutput({
+      ...outputNode,
+      key: "output-composition",
+      origin: "composition",
+    });
+
+    // 图片产物与视频产物均可连入提示词节点做多模态参考理解。
+    expect(canvas.commands.connect("output-1", "prompt-1").status).toBe("connected");
+    expect(canvas.commands.connect("output-video", "prompt-1").status).toBe("connected");
+    expect(canvas.commands.connect("output-1", "prompt-2").status).toBe("connected");
+    // 合成产物不是 generation task 结果，不能作为提示词节点的参考理解素材。
+    expect(canvas.commands.connect("output-composition", "prompt-1")).toMatchObject({
+      status: "rejected",
+      reason: "unsupported-connection",
+    });
+    // 产物连入图片/视频生成节点的既有能力保持可用。
+    expect(canvas.commands.connect("output-1", "gen-1").status).toBe("connected");
   });
 
   it("removes a node, incident edges, and invalid selections in one write", () => {

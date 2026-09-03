@@ -29,7 +29,12 @@ export type GenerationNodeId = "image" | "video";
 export type CanvasGenNodeKind = GenerationNodeId | "prompt";
 export type DocumentSkillNodeKind = "screenplay" | "storyboard";
 export type RepositoryNodeKind =
-  CanvasGenNodeKind | DocumentSkillNodeKind | "viral_remix" | "video_composer" | "video_downloader";
+  | CanvasGenNodeKind
+  | DocumentSkillNodeKind
+  | "viral_remix"
+  | "video_composer"
+  | "video_downloader"
+  | "frame_extractor";
 export type MobilePanel = "assets" | "nodes" | null;
 
 export interface NodeModelSelection {
@@ -268,7 +273,9 @@ export const SCREENPLAY_NODE_COARSE_HEIGHT = 900;
 export const VIDEO_COMPOSER_NODE_WIDTH = 580;
 export const VIDEO_COMPOSER_NODE_HEIGHT = 500;
 export const VIDEO_DOWNLOADER_NODE_WIDTH = 580;
-export const VIDEO_DOWNLOADER_NODE_HEIGHT = 420;
+export const VIDEO_DOWNLOADER_NODE_HEIGHT = 456;
+export const VIDEO_FRAME_EXTRACTOR_NODE_WIDTH = 580;
+export const VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT = 470;
 export const VIRAL_REMIX_NODE_WIDTH = 620;
 export const VIRAL_REMIX_NODE_HEIGHT = 780;
 export const VIRAL_REMIX_NODE_COARSE_HEIGHT = 920;
@@ -481,7 +488,56 @@ export interface VideoDownloaderRunState {
   readonly status: "running" | "done" | "error" | "cancelled";
   readonly preparingEngine: boolean;
   readonly progress: number | null;
+  /** B 站画质路由的中文说明（如「未登录 B 站：将自动下载 480P 画质…」）。 */
+  readonly qualityHint: string | null;
+  /** B 站成片下载后是否已自动去除右上角水印。 */
+  readonly watermarkRemoved: boolean;
   readonly error: string | null;
+}
+
+/** 本地工具节点：输入任意视频，按指定秒数抽取关键帧图片并落卡。 */
+export interface VideoFrameExtractorNodeData {
+  readonly key: string;
+  readonly kind: "frame_extractor";
+  readonly x: number;
+  readonly y: number;
+  /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
+  readonly measured?: { readonly width: number; readonly height: number };
+  readonly config: VideoFrameExtractorNodeConfig;
+}
+
+export interface VideoFrameExtractorNodeConfig {
+  /** 抽帧秒数（可多个）；空数组代表尚未配置。 */
+  readonly timestamps: readonly number[];
+  /**
+   * 手动指定的本地视频绝对路径；为空时优先使用连线来源
+   * （素材视频 / 视频产物 / 下载节点完成产物）。
+   */
+  readonly videoPath: string;
+}
+
+/**
+ * 抽帧任务的会话内运行状态。jobId 关联后端内存任务记录；
+ * 完成后每个抽帧秒数自动落一张 origin=frame_extract 的图片产物卡片。
+ */
+export interface VideoFrameExtractorRunState {
+  readonly jobId: string;
+  readonly status: "running" | "done" | "error" | "cancelled";
+  readonly preparingEngine: boolean;
+  readonly progress: number | null;
+  readonly error: string | null;
+}
+
+/** 抽帧节点的视频输入：素材视频或视频产物（含下载/合成完成产物）。 */
+export interface FrameExtractorVideoInput {
+  readonly key: string;
+  readonly name: string;
+  /** 前端展示/预览用 src。 */
+  readonly src: string | null;
+  /** 传给 Rust 抽帧的本地文件绝对路径。 */
+  readonly finalPath: string | null;
+  readonly sourceLabel: "素材" | "产物";
+  readonly edgeId: string;
 }
 
 export interface ViralRemixNodeConfig {
@@ -566,7 +622,7 @@ export interface OutputNodeData {
   readonly taskId: string;
   readonly mediaType: "image" | "video";
   /** 旧文档未保存时默认为 generation。 */
-  readonly origin?: "generation" | "composition" | "download";
+  readonly origin?: "generation" | "composition" | "download" | "frame_extract";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
   readonly finalPath: string | null;
   /** 供应商返回后、保存完成前的会话内预览地址；不写入画布文档。 */
@@ -605,6 +661,10 @@ export function videoComposerNodeKey(): string {
 
 export function videoDownloaderNodeKey(): string {
   return `downloader-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export function frameExtractorNodeKey(): string {
+  return `frame-extractor-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 export function screenplayNodeKey(): string {
@@ -680,6 +740,17 @@ export function nextVideoDownloaderOutputSlot(
   const stackIndex = current.filter((output) => output.sourceNodeId === node.key).length;
   return {
     x: node.x + VIDEO_DOWNLOADER_NODE_WIDTH + OUTPUT_NODE_GAP_X,
+    y: node.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
+  };
+}
+
+export function nextFrameExtractorOutputSlot(
+  node: VideoFrameExtractorNodeData,
+  current: readonly OutputNodeData[],
+): { x: number; y: number } {
+  const stackIndex = current.filter((output) => output.sourceNodeId === node.key).length;
+  return {
+    x: node.x + VIDEO_FRAME_EXTRACTOR_NODE_WIDTH + OUTPUT_NODE_GAP_X,
     y: node.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
   };
 }
@@ -1540,6 +1611,17 @@ export function assetNodeReferenceTarget(node: AssetNodeData): MediaReferenceTar
  * 合成节点产物不是 generation task 的结果，仍只用于视频拼接输入。
  */
 export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceTarget | null {
+  // 抽帧产物是带本地绝对路径的普通图片文件，直接作为 local_file 引用
+  // （生成节点 / 提示词理解都可直接读取磁盘）。
+  if (node.origin === "frame_extract") {
+    if (node.mediaType !== "image" || node.finalPath == null) return null;
+    return {
+      kind: "local_file",
+      path: node.finalPath,
+      canvasNodeKey: node.key,
+      mediaType: node.mediaType,
+    };
+  }
   // 合成与下载产物不是 generation task 的结果，无法通过 local_result 校验，
   // 只能作为视频拼接输入（下载产物同样是普通本地文件）。
   if (
@@ -1620,6 +1702,18 @@ export function generationInputMentionCandidate(input: GenerationMediaInput): Me
     return {
       canvasNodeKey: input.key,
       assetId: target.stagingJobId,
+      providerConnectionId: "",
+      source: "local",
+      referenceKind: target.kind,
+      kind: input.kind,
+      name: input.name,
+      previewUrl: input.previewUrl ?? null,
+    };
+  }
+  if (target.kind === "local_file") {
+    return {
+      canvasNodeKey: target.canvasNodeKey ?? input.key,
+      assetId: target.path,
       providerConnectionId: "",
       source: "local",
       referenceKind: target.kind,

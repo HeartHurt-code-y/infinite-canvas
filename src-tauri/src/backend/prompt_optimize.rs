@@ -15,17 +15,20 @@
 //! - 爆款视频复刻：注入 `douyin-reverse-prompt` V1.1 的纯复刻适配版；视频由前端
 //!   密集抽帧并合成带时间码联系表，后端只负责视觉分析，不包含任何下载能力。
 //!
-//! 细节优化（detail_review）：把之前所有上下文（原始提示词、每轮优化结果、采用决定）
-//! 追加到系统提示词，用户提示词固定为「严格审查当前提示词是否符合技能规范的最优版本」。
+//! 多轮上下文：只要本轮携带了历史上下文（提示词节点的多轮对话、历次结果、审计输入与
+//! 用户决定），就追加到系统提示词，使生成、优化与审计每一轮都沿用之前的完整对话。
+//! 细节优化（detail_review）：用户提示词固定为「严格审查当前提示词是否符合技能规范的最优版本」。
 //!
 //! 视觉理解：连入提示词节点的图片素材会先取回字节（云端素材经素材库接口、本地素材经
 //! 对象存储重签地址），再以 Base64 Data URL 图片内容块注入用户消息，供视觉模型看图
 //! 生成或优化提示词。
 
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tauri::{AppHandle, Emitter as _};
@@ -130,10 +133,6 @@ impl PromptOptimizationMode {
             // 复刻技能是从 douyin-reverse-prompt V1.1 裁剪出的纯视觉分析版本。
             Self::ViralRemix => "builtin://douyin-reverse-prompt-v1.1-remix-only",
         }
-    }
-
-    fn is_document_skill(self) -> bool {
-        matches!(self, Self::Screenplay | Self::Storyboard | Self::ViralRemix)
     }
 }
 
@@ -659,37 +658,66 @@ fn strip_realistic_character_explanation(content: &str) -> String {
     lines.join("\n").trim().to_string()
 }
 
+/// 移除模型输出中内嵌的思考 / 思维链内容，只保留正式输出文本。
+///
+/// 带思考的推理模型（如 DeepSeek 风格）或聚合网关常把思维链混进返回文本：
+/// - DeepSeek 风格的 `...` 与 `...` 独占整行分隔的思考块；
+/// - `[think] … [/think]` 标签包裹的思考块（大小写不敏感）。
+///
+/// 反复替换直到稳定；两套规则都要求思考块有明确的闭合标记（`...` 必须成对、
+/// `[/think]` 必须闭合），避免误伤剧本对白中的省略号或正文里的普通方括号文本。
+fn strip_thinking_blocks(text: &str) -> String {
+    static DOT_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?ms)^[ \t]*\.\.\.[ \t]*\r?\n.*?\r?\n[ \t]*\.\.\.[ \t]*(?:\r?\n|$)")
+            .expect("valid dot-delimited think block regex")
+    });
+    static TAG_BLOCK: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"(?is)\[think\].*?\[/think\]").expect("valid [think] tag regex")
+    });
+    let mut result = text.to_string();
+    loop {
+        let before = result.len();
+        result = DOT_BLOCK.replace_all(&result, "").into_owned();
+        result = TAG_BLOCK.replace_all(&result, "").into_owned();
+        if result.len() == before {
+            break;
+        }
+    }
+    result
+}
+
 /// 按模式从模型原始输出中提取纯提示词正文，丢弃问题分析、优化说明等无关部分。
 pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) -> String {
-    let content = raw_output.trim();
+    // 推理模型常在正文前内嵌思维链：先剥离 think/思考块，避免思考内容进入对话、稿件或下游提示词。
+    let content = strip_thinking_blocks(raw_output.trim());
     if content.is_empty() {
         return String::new();
     }
     match mode {
         PromptOptimizationMode::Seedance20 => {
-            if let Some(fenced) = extract_fenced_prompt_section(content) {
+            if let Some(fenced) = extract_fenced_prompt_section(&content) {
                 return fenced;
             }
             warn!("[generation] 提示词优化输出未找到「优化后的标准提示词」围栏，回退整体围栏剥离");
-            strip_outer_code_fence(content).to_string()
+            strip_outer_code_fence(&content).to_string()
         }
         PromptOptimizationMode::Seedance25 => {
-            strip_trailing_advice_lines(strip_outer_code_fence(content))
+            strip_trailing_advice_lines(strip_outer_code_fence(&content))
         }
-        PromptOptimizationMode::Wan30 => trim_wan30_preamble(strip_outer_code_fence(content))
+        PromptOptimizationMode::Wan30 => trim_wan30_preamble(strip_outer_code_fence(&content))
             .trim_end()
             .to_string(),
         PromptOptimizationMode::MiniMaxH3 => {
-            trim_minimax_h3_preamble(strip_outer_code_fence(content))
+            trim_minimax_h3_preamble(strip_outer_code_fence(&content))
                 .trim_end()
                 .to_string()
         }
         PromptOptimizationMode::RealisticCharacter => {
-            strip_realistic_character_explanation(strip_outer_code_fence(content))
+            strip_realistic_character_explanation(strip_outer_code_fence(&content))
         }
         PromptOptimizationMode::Screenplay
         | PromptOptimizationMode::Storyboard
-        | PromptOptimizationMode::ViralRemix => strip_outer_code_fence(content).to_string(),
+        | PromptOptimizationMode::ViralRemix => strip_outer_code_fence(&content).to_string(),
     }
 }
 
@@ -700,9 +728,9 @@ fn build_system_and_user_prompts(
     skill_system_prompt: &str,
 ) -> (String, String) {
     let mut system = skill_system_prompt.to_string();
-    if (command.detail_review || command.mode.is_document_skill())
-        && !command.context_history.is_empty()
-    {
+    // 只要本轮携带了历史上下文（多轮对话、历次结果、用户决定），就全部注入系统提示词；
+    // 不再限制在 detail_review / 文档技能模式，使提示词节点的生成与优化轮次同样能沿用前文。
+    if !command.context_history.is_empty() {
         let context = command
             .context_history
             .iter()
@@ -1323,6 +1351,17 @@ async fn resolve_vision_image(
                     json!({ "displayName": display_name }),
                 )
             })?;
+            tokio::fs::read(path).await?
+        }
+        MediaReferenceTarget::LocalFile {
+            path, media_type, ..
+        } => {
+            if *media_type != MediaType::Image {
+                return Err(BackendError::validation(
+                    "vision understanding only accepts image assets",
+                    json!({ "displayName": display_name, "mediaType": media_type }),
+                ));
+            }
             tokio::fs::read(path).await?
         }
     };
@@ -2145,6 +2184,58 @@ mod tests {
         let raw = "##### 问题分析\n原始提示词过于简略。\n\n---\n##### 优化后的标准提示词\n```\n一只橘猫在公园玩球。\n\n4K 高清，细节丰富。\n```\n\n---\n##### 优化说明\n- 补充了细节。\n\n**【依据参考文档】**\n- `references/prompt-guide.md`";
         let extracted = extract_optimized_prompt(PromptOptimizationMode::Seedance20, raw);
         assert_eq!(extracted, "一只橘猫在公园玩球。\n\n4K 高清，细节丰富。");
+    }
+
+    #[test]
+    fn strips_deepseek_style_dot_think_block() {
+        let raw = "好的，我来分析这个剧本需求。\n...\n先确定类型：女频复仇短剧，核心是反转与情感张力。\n...\n\n# 《雨夜归人》\n\n第 1 场 雨夜，废弃站台，外景";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(
+            stripped,
+            "好的，我来分析这个剧本需求。\n\n# 《雨夜归人》\n\n第 1 场 雨夜，废弃站台，外景"
+        );
+    }
+
+    #[test]
+    fn strips_multiple_dot_think_blocks() {
+        let raw = "...\n第一段思考。\n...\n\n正文。\n\n...\n第二段思考。\n...\n结尾。";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(stripped, "\n正文。\n\n结尾。");
+    }
+
+    #[test]
+    fn strips_think_tag_blocks_case_insensitively() {
+        let raw = "[THINK]这是内部推理。[/think]\n\n# 剧本正文";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(stripped, "\n\n# 剧本正文");
+    }
+
+    #[test]
+    fn keeps_ellipsis_inside_dialogue() {
+        let raw = "林岚：我…不知道该怎么办。\n\n（她沉默片刻，雨声渐大）";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(stripped, raw);
+    }
+
+    #[test]
+    fn keeps_unclosed_think_tag_intact() {
+        let raw = "说明：[think] 这只是一个普通引用文本";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(stripped, raw);
+    }
+
+    #[test]
+    fn unpaired_dot_delimiter_is_kept() {
+        let raw = "第一行。\n...\n正文没有闭合分隔行。";
+        let stripped = strip_thinking_blocks(raw);
+        assert_eq!(stripped, raw);
+    }
+
+    #[test]
+    fn screenplay_mode_strips_think_before_outer_fence() {
+        let raw = "...\n先构思大纲。\n...\n\n```markdown\n# 雨夜归人\n\n## 第一场\n```";
+        let extracted = extract_optimized_prompt(PromptOptimizationMode::Screenplay, raw);
+        assert_eq!(extracted, "# 雨夜归人\n\n## 第一场");
     }
 
     #[test]

@@ -533,6 +533,56 @@ impl MediaResolver {
                     lease,
                 ))
             }
+            MediaReferenceTarget::LocalFile {
+                path,
+                media_type,
+                canvas_node_key,
+            } => {
+                // 任意本地文件（如视频抽帧产物）：直接读取磁盘字节，不依赖对象存储。
+                let bytes = tokio::fs::read(path).await?;
+                let detected = infer::get(&bytes).ok_or_else(|| {
+                    BackendError::protocol(
+                        "local file media type could not be identified from file signature",
+                        json!({
+                            "path": path,
+                            "byteSize": bytes.len()
+                        }),
+                    )
+                })?;
+                validate_detected_type(*media_type, detected.mime_type())?;
+                let needs_bytes = task.operation == GenerationOperation::ImageToImage;
+                let (remote_reference, lease) = if needs_bytes {
+                    (None, None)
+                } else {
+                    let lease = self
+                        .staging
+                        .stage_for_remote_input(path.as_str(), *media_type)
+                        .await?;
+                    (Some(lease.get_url.clone()), Some(lease))
+                };
+                Ok((
+                    ResolvedMedia {
+                        media_type: *media_type,
+                        type_position,
+                        role: role.to_string(),
+                        display_name: display_name.to_string(),
+                        stable_identity: json!({
+                            "kind": "local_file",
+                            "path": path,
+                            "canvasNodeKey": canvas_node_key
+                        }),
+                        mime_type: detected.mime_type().to_string(),
+                        byte_size: bytes.len() as u64,
+                        sha256: sha256_bytes(&bytes),
+                        file_name: media_file_name(display_name, detected.extension()),
+                        bytes: needs_bytes.then_some(bytes),
+                        remote_reference,
+                        prompt_segment_index,
+                        content_index,
+                    },
+                    lease,
+                ))
+            }
         }
     }
 
@@ -644,7 +694,7 @@ fn push_media(
 }
 
 /// 按前端输入顺序（content_index）稳定排序；content_index 为 None 的排在末尾并保持相对顺序。
-fn sort_media_by_content_index(media: &mut Vec<ResolvedMedia>) {
+fn sort_media_by_content_index(media: &mut [ResolvedMedia]) {
     media.sort_by_key(|item| item.content_index.unwrap_or(u32::MAX));
 }
 
