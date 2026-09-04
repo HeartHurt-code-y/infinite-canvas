@@ -1487,8 +1487,8 @@ fn build_video_body(
     let mut content_media = Vec::new();
     for item in &resolved.content {
         match item {
-            // Seedance 文档：metadata.content 中的 type:"text" 条目会被忽略，
-            // 真正生效的提示词来自顶层 prompt 字段，因此不向 content 写入 text 条目。
+            // 文本片段统一并入下方渲染后的提示词；content 中不保留原始 text 条目，
+            // 而是在组装 body 时把渲染后的完整提示词作为首个 text 条目写回 content。
             CompiledContentItem::Text(_) => {}
             CompiledContentItem::Media {
                 media_type,
@@ -1542,11 +1542,19 @@ fn build_video_body(
 
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
-    // Seedance 文档：prompt 字段是实际发送给模型的提示词（必填非空）。
-    // 媒体引用渲染为「图片N / 视频N / 音频N」简洁标签，而不是 [图片N：文件名] 占位形式。
+    // Seedance 文档：顶层 prompt 仅要求非空（平台校验用），真正发送给上游模型的
+    // 提示词来自 metadata.content 中的 text 条目；只有未传 content 时才回退到顶层
+    // prompt。因此带媒体（参考图/视频/音频、编辑、延长等）的请求必须在 content
+    // 中显式携带文本，否则平台会以「prompt is required」拒绝任务创建。
+    // 这里把渲染后的提示词作为 content 首个 text 条目写入（媒体项随后），并保持
+    // 顶层 prompt 非空以满足平台校验；纯文生视频（无媒体）维持 content 为空，
+    // 由平台按既有行为回退到顶层 prompt。
     let prompt = video_prompt(resolved);
     if !prompt.trim().is_empty() {
-        body.insert(prompt_field, Value::String(prompt));
+        body.insert(prompt_field, Value::String(prompt.clone()));
+        if has_media {
+            content.insert(0, json!({ "type": "text", "text": prompt }));
+        }
     }
     match content_container.as_str() {
         "root" => {
@@ -1574,7 +1582,8 @@ fn build_video_body(
 
 /// 通用视频 body 的 prompt 渲染：由结构化 `content` 重建，媒体引用渲染为
 /// `图片N` / `视频N` / `音频N` 简洁标签，而不是 `[图片N：文件名]` 占位形式。
-/// 这是真正发送给模型的提示词（Seedance 文档：prompt 字段必填非空）。
+/// 结果既作为顶层 `prompt`（平台仅要求非空），也作为 `metadata.content` 的
+/// text 条目发送给模型（Seedance 文档：实际提示词来自 content 文本）。
 fn video_prompt(resolved: &ResolvedGeneration) -> String {
     let mut prompt = String::new();
     for item in &resolved.content {
@@ -1673,18 +1682,23 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
     let mut reference_images = 0_usize;
     let mut reference_videos = 0_usize;
     let mut reference_audios = 0_usize;
+    let mut document_files = 0_usize;
+    let mut document_links = 0_usize;
     for media in resolved
         .images
         .iter()
         .chain(&resolved.videos)
         .chain(&resolved.audios)
     {
-        match (media.role.as_str(), media.media_type) {
-            ("first_frame", MediaType::Image) => first_frames += 1,
-            ("last_frame", MediaType::Image) => last_frames += 1,
-            ("reference_image", MediaType::Image) => reference_images += 1,
-            ("reference_video", MediaType::Video) => reference_videos += 1,
-            ("reference_audio", MediaType::Audio) => reference_audios += 1,
+        match media.role.as_str() {
+            "first_frame" if media.media_type == MediaType::Image => first_frames += 1,
+            "last_frame" if media.media_type == MediaType::Image => last_frames += 1,
+            "reference_image" if media.media_type == MediaType::Image => reference_images += 1,
+            "reference_video" if media.media_type == MediaType::Video => reference_videos += 1,
+            "reference_audio" if media.media_type == MediaType::Audio => reference_audios += 1,
+            // 文档/网页生视频：`file`/`link` 素材本身就是公网 URL，不绑定图片/视频/音频类型。
+            "file" => document_files += 1,
+            "link" => document_links += 1,
             _ => {
                 return Err(BackendError::validation(
                     "Wan 3.0 media role is incompatible with the resolved media type",
@@ -1696,7 +1710,10 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
                 ));
             }
         }
-        if media.media_type == MediaType::Image {
+        // 图片格式与体积约束只适用于真正的图片素材；`file`/`link` 是公网文档/网页 URL。
+        if media.media_type == MediaType::Image
+            && !matches!(media.role.as_str(), "file" | "link")
+        {
             if !ALLOWED_IMAGE_MIME_TYPES.contains(&media.mime_type.as_str()) {
                 return Err(BackendError::validation(
                     "Wan 3.0 image input uses an unsupported format",
@@ -1714,6 +1731,20 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
                 ));
             }
         }
+        // 文档/网页仅支持无需登录的公开页面：请求层至少校验引用是公网 http(s) URL。
+        if matches!(media.role.as_str(), "file" | "link")
+            && !media.remote_reference.as_deref().is_some_and(|reference| {
+                reference.starts_with("http://") || reference.starts_with("https://")
+            })
+        {
+            return Err(BackendError::validation(
+                "Wan 3.0 document/link input must reference a public http(s) URL",
+                json!({
+                    "role": media.role,
+                    "displayName": media.display_name
+                }),
+            ));
+        }
     }
 
     if first_frames > 1
@@ -1721,6 +1752,8 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
         || reference_images > 10
         || reference_videos > 5
         || reference_audios > 5
+        || document_files > 1
+        || document_links > 1
     {
         return Err(BackendError::validation(
             "Wan 3.0 media input exceeds a documented count limit",
@@ -1729,7 +1762,9 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
                 "lastFrames": last_frames,
                 "referenceImages": reference_images,
                 "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios
+                "referenceAudios": reference_audios,
+                "documentFiles": document_files,
+                "documentLinks": document_links
             }),
         ));
     }
@@ -1744,6 +1779,30 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
                 "referenceImages": reference_images,
                 "referenceVideos": reference_videos,
                 "referenceAudios": reference_audios
+            }),
+        ));
+    }
+    let has_document_inputs = document_files > 0 || document_links > 0;
+    if has_document_inputs && (has_frame_inputs || has_reference_inputs) {
+        return Err(BackendError::validation(
+            "Wan 3.0 document/link inputs cannot be mixed with other media inputs",
+            json!({
+                "documentFiles": document_files,
+                "documentLinks": document_links,
+                "firstFrames": first_frames,
+                "lastFrames": last_frames,
+                "referenceImages": reference_images,
+                "referenceVideos": reference_videos,
+                "referenceAudios": reference_audios
+            }),
+        ));
+    }
+    if document_files > 0 && document_links > 0 {
+        return Err(BackendError::validation(
+            "Wan 3.0 file and link inputs are mutually exclusive",
+            json!({
+                "documentFiles": document_files,
+                "documentLinks": document_links
             }),
         ));
     }
@@ -1849,19 +1908,13 @@ fn parse_video_observation(
         .pointer("/data/progress")
         .or_else(|| value.get("progress"))
         .and_then(parse_progress);
-    let video_url = value
-        .pointer("/data/result_url")
-        .or_else(|| value.pointer("/data/data/data/content/video_url"))
-        .or_else(|| value.pointer("/data/data/content/video_url"))
-        .or_else(|| value.pointer("/data/content/video_url"))
-        .or_else(|| value.pointer("/content/video_url"))
-        .or_else(|| value.pointer("/data/metadata/url"))
-        .or_else(|| value.pointer("/metadata/url"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(ToOwned::to_owned);
+    let video_url = extract_video_url(&value);
     let fail_reason = value.pointer("/data/fail_reason").cloned();
-    let upstream_error = value.pointer("/data/data/error").cloned();
+    let upstream_error = value
+        .pointer("/data/data/data/data/error")
+        .or_else(|| value.pointer("/data/data/data/error"))
+        .or_else(|| value.pointer("/data/data/error"))
+        .cloned();
     let remote_failed = matches!(
         remote_status.to_ascii_uppercase().as_str(),
         "FAILURE" | "FAILED"
@@ -1887,6 +1940,70 @@ fn parse_video_observation(
     })
 }
 
+/// 从供应商视频观察响应中提取产物 URL。
+///
+/// 不同供应商/平台的嵌套层级差异很大，按序探测常见位置：
+/// - 海外平台：顶层 `data.result_url`
+/// - Seedance/MAGateway 轮询：`data.data.data.result_url`，或
+///   `data.data.data.data.content.video_url`（content 有时会被序列化为
+///   JSON 字符串，需二次解析）。
+/// - 其他历史结构：`data.data.result_url`、`data.data...content.video_url`、
+///   `metadata.url` 等。
+fn extract_video_url(value: &Value) -> Option<String> {
+    const PROBED_PATHS: &[&str] = &[
+        "/data/result_url",
+        "/data/data/result_url",
+        "/data/data/data/result_url",
+        "/data/data/data/data/content/video_url",
+        "/data/data/data/content/video_url",
+        "/data/data/content/video_url",
+        "/data/content/video_url",
+        "/content/video_url",
+        "/data/data/data/data/content/url",
+        "/data/metadata/url",
+        "/metadata/url",
+    ];
+    for path in PROBED_PATHS {
+        if let Some(url) = value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|url| !url.is_empty())
+        {
+            return Some(url.to_owned());
+        }
+    }
+    // content 可能以 JSON 字符串返回（内嵌 video_url / url），按同序深度的
+    // content 位置二次解析，避免因序列化方式不同而漏掉产物。
+    const CONTENT_PATHS: &[&str] = &[
+        "/data/data/data/data/content",
+        "/data/data/data/content",
+        "/data/data/content",
+        "/data/content",
+        "/content",
+    ];
+    for path in CONTENT_PATHS {
+        let Some(inner) = value
+            .pointer(path)
+            .and_then(Value::as_str)
+            .and_then(|raw| serde_json::from_str::<Value>(raw).ok())
+        else {
+            continue;
+        };
+        for key in ["video_url", "url"] {
+            if let Some(url) = inner
+                .pointer(&format!("/{key}"))
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|url| !url.is_empty())
+            {
+                return Some(url.to_owned());
+            }
+        }
+    }
+    None
+}
+
 fn parse_progress(value: &Value) -> Option<f64> {
     value.as_f64().or_else(|| {
         value
@@ -1896,8 +2013,15 @@ fn parse_progress(value: &Value) -> Option<f64> {
     })
 }
 
-/// 从供应商响应中提取 token 用量（usage 对象）。图片同步响应在顶层或
-/// `data.usage`，视频轮询响应在 `data.data.usage`；三种位置按序探测。
+/// 从供应商响应中提取 token 用量（usage 对象）。
+///
+/// 不同供应商/平台的嵌套层级差异很大：
+/// - OpenAI 兼容：顶层 `usage`
+/// - Gemini：`usageMetadata`
+/// - 图片同步响应：`data.usage`
+/// - Seedance/MAGateway 视频轮询：`data.data.data.data.usage`（其次
+///   `data.data.data.usage`、`data.data.usage`）。
+///
 /// usage 内至少要有一个已知的 token 字段才视为有效，避免把空对象当作用量。
 pub fn parse_token_usage(response: &CapturedHttpResponse) -> Option<TokenUsage> {
     if !response.is_success() {
@@ -1905,7 +2029,9 @@ pub fn parse_token_usage(response: &CapturedHttpResponse) -> Option<TokenUsage> 
     }
     let value: Value = serde_json::from_str(&response.body).ok()?;
     let usage = value
-        .pointer("/data/data/usage")
+        .pointer("/data/data/data/data/usage")
+        .or_else(|| value.pointer("/data/data/data/usage"))
+        .or_else(|| value.pointer("/data/data/usage"))
         .or_else(|| value.pointer("/data/usage"))
         .or_else(|| value.get("usage"))
         .or_else(|| value.get("usageMetadata"))?;
@@ -2489,22 +2615,87 @@ mod tests {
 
         let body = build_video_body(&video_task, &generation).expect("Dreamina media body");
 
-        // Seedance 文档：prompt 是实际发送给模型的提示词，媒体引用渲染为图片N简洁标签；
-        // metadata.content 仅保留媒体项，text 条目被忽略。
+        // Seedance 文档：顶层 prompt 仅要求非空，实际提示词来自 content 中的 text
+        // 条目；带媒体请求必须显式携带文本，因此 content 首项是渲染后的提示词，
+        // 随后才是媒体项（图片N 标签与媒体顺序一一对应）。
         assert_eq!(body["prompt"], "图片1和图片2疯狂做爱");
         assert_eq!(
             body["metadata"]["content"].as_array().map(Vec::len),
-            Some(2)
+            Some(3)
         );
-        assert_eq!(body["metadata"]["content"][0]["type"], "image_url");
-        assert_eq!(body["metadata"]["content"][1]["type"], "image_url");
+        assert_eq!(body["metadata"]["content"][0]["type"], "text");
         assert_eq!(
-            body["metadata"]["content"][0]["image_url"]["url"],
+            body["metadata"]["content"][0]["text"],
+            "图片1和图片2疯狂做爱"
+        );
+        assert_eq!(body["metadata"]["content"][1]["type"], "image_url");
+        assert_eq!(body["metadata"]["content"][2]["type"], "image_url");
+        assert_eq!(
+            body["metadata"]["content"][1]["image_url"]["url"],
             "asset://asset-20260902214334-t5rnj"
         );
         assert_eq!(
-            body["metadata"]["content"][1]["image_url"]["url"],
+            body["metadata"]["content"][2]["image_url"]["url"],
             "asset://asset-20260902214333-l5lpp"
+        );
+    }
+
+    #[test]
+    fn seedance_extend_with_reference_video_includes_text_item_in_content() {
+        // 回归：带媒体（参考视频延长）的 Seedance 请求必须把渲染提示词写入
+        // metadata.content 的首个 text 条目；缺失时平台以「prompt is required」
+        // 拒绝任务创建（真实的 HTTP 400 fail_to_fetch_task 场景）。
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedance-2-5-260628",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "ratio": "adaptive",
+                "resolution": "480p",
+                "duration": -1,
+                "generate_audio": true,
+                "output_format": "mp4",
+                "omni_reference_task_type": "extend"
+            }),
+        );
+        generation.rendered_prompt = "【生成目标】\n延长视频1，生成一段对峙戏".into();
+        generation.content = vec![
+            CompiledContentItem::Text("【生成目标】\n延长".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Video,
+                type_position: 1,
+            },
+            CompiledContentItem::Text("，生成一段对峙戏".into()),
+        ];
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/ref.mp4",
+            Some(1),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("doubao-seedance-2.5".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Seedance extend body");
+        assert_eq!(body["model"], "doubao-seedance-2.5");
+        assert_eq!(body["metadata"]["omni_reference_task_type"], "extend");
+        assert_eq!(
+            body["metadata"]["content"][0],
+            json!({ "type": "text", "text": "【生成目标】\n延长视频1，生成一段对峙戏" })
+        );
+        assert_eq!(body["metadata"]["content"][1]["type"], "video_url");
+        assert_eq!(body["metadata"]["content"][1]["role"], "reference_video");
+        assert_eq!(
+            body["metadata"]["content"][1]["video_url"]["url"],
+            "https://cdn.example.com/ref.mp4"
+        );
+        assert!(
+            body["prompt"]
+                .as_str()
+                .is_some_and(|prompt| !prompt.trim().is_empty())
         );
     }
 
@@ -2615,6 +2806,136 @@ mod tests {
     }
 
     #[test]
+    fn wan_video_builder_accepts_document_file_and_link_media() {
+        let schema = super::super::model_schema::default_model_schema(
+            "wan3.0-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+
+        // 文档文件（file）：解析公网文档内容生成视频。
+        let mut file_generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
+        );
+        file_generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "file",
+            "https://example.com/public-doc.pdf",
+            None,
+        ));
+        let mut file_task = task(GenerationOperation::VideoGeneration);
+        file_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let file_body = build_video_body(&file_task, &file_generation).expect("Wan file body");
+        assert_eq!(
+            file_body["media"],
+            json!([{ "type": "file", "url": "https://example.com/public-doc.pdf" }])
+        );
+
+        // 网页链接（link）：解析公网网页内容生成视频。
+        let mut link_generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720P", "ratio": "16:9", "duration": -1 }),
+        );
+        link_generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "link",
+            "https://example.com/public-article",
+            None,
+        ));
+        let mut link_task = task(GenerationOperation::VideoGeneration);
+        link_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let link_body = build_video_body(&link_task, &link_generation).expect("Wan link body");
+        assert_eq!(
+            link_body["media"],
+            json!([{ "type": "link", "url": "https://example.com/public-article" }])
+        );
+    }
+
+    #[test]
+    fn wan_video_builder_rejects_document_media_mixed_with_other_inputs() {
+        let schema = super::super::model_schema::default_model_schema(
+            "wan3.0-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+
+        // file 与 link 互斥。
+        let mut mixed_generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
+        );
+        mixed_generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "file",
+            "https://example.com/public-doc.pdf",
+            None,
+        ));
+        mixed_generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "link",
+            "https://example.com/public-article",
+            None,
+        ));
+        let mut mixed_task = task(GenerationOperation::VideoGeneration);
+        mixed_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let error = build_video_body(&mixed_task, &mixed_generation)
+            .expect_err("Wan file/link mixing must fail");
+        assert!(error.to_string().contains("mutually exclusive"));
+
+        // file/link 不与参考素材混用。
+        let mut reference_generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
+        );
+        reference_generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "link",
+            "https://example.com/public-article",
+            None,
+        ));
+        reference_generation.audios.push(resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_audio",
+            "https://cdn.example.com/music.mp3",
+            None,
+        ));
+        let mut reference_task = task(GenerationOperation::VideoGeneration);
+        reference_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let error = build_video_body(&reference_task, &reference_generation)
+            .expect_err("Wan document/link with references must fail");
+        assert!(error.to_string().contains("cannot be mixed"));
+    }
+
+    #[test]
+    fn wan_video_builder_rejects_non_public_document_references() {
+        let schema = super::super::model_schema::default_model_schema(
+            "wan3.0-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
+        );
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "link",
+            "asset://asset-20260902214334-t5rnj",
+            None,
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let error = build_video_body(&video_task, &generation)
+            .expect_err("Wan non-public document reference must fail");
+        assert!(error.to_string().contains("public http(s) URL"));
+    }
+
+    #[test]
     fn request_path_rejects_cross_origin_and_query_like_values() {
         assert!(
             request_path(
@@ -2683,6 +3004,47 @@ mod tests {
         assert_eq!(gemini.prompt_tokens, Some(17));
         assert_eq!(gemini.completion_tokens, Some(3));
         assert_eq!(gemini.total_tokens, Some(20));
+    }
+
+    #[test]
+    fn token_usage_extracts_from_deeply_nested_magateway_video_poll() {
+        // 回归：MAGateway/Seedance 视频轮询响应的 usage 位于
+        // `data.data.data.data.usage`，此前只探测更浅层级导致用量从未被记录。
+        let tokens = parse_token_usage(&CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "code": "success",
+                "data": {
+                    "task_id": "task_tdKuphY1aWjLG3jVtZMkCoNFLMfFL6xN",
+                    "status": "SUCCESS",
+                    "progress": "100%",
+                    "data": {
+                        "code": "success",
+                        "data": {
+                            "action": "generate",
+                            "data": {
+                                "content": { "video_url": "https://cdn.example.com/video.mp4" },
+                                "status": "succeeded",
+                                "usage": {
+                                    "completion_tokens": 87300,
+                                    "total_tokens": 87300
+                                }
+                            },
+                            "result_url": "https://cdn.example.com/video.mp4",
+                            "status": "SUCCESS"
+                        },
+                        "message": ""
+                    }
+                }
+            })
+            .to_string(),
+        })
+        .expect("token usage");
+
+        assert_eq!(tokens.completion_tokens, Some(87300));
+        assert_eq!(tokens.total_tokens, Some(87300));
     }
 
     #[test]
@@ -2824,6 +3186,114 @@ mod tests {
         let observation = parse_video_observation(&response).expect("video observation");
         assert_eq!(observation.remote_status, "SUCCESS");
         assert_eq!(observation.video_url, None);
+    }
+
+    #[test]
+    fn video_observation_extracts_url_from_deeply_nested_magateway_response() {
+        // 回归：MAGateway/Seedance 轮询成功响应将产物 URL 嵌套在
+        // `data.data.data.result_url` 与 `data.data.data.data.content.video_url`，
+        // 此前解析器只探测更浅的层级导致 video_url 丢失、视频无法落盘
+        // （交付包报「successful video task has no video_url」）。
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "code": "success",
+                "message": "",
+                "data": {
+                    "task_id": "task_tdKuphY1aWjLG3jVtZMkCoNFLMfFL6xN",
+                    "action": "generate",
+                    "status": "SUCCESS",
+                    "fail_reason": "https://cdn.example.com/red-herring.mp4",
+                    "submit_time": 1788489112,
+                    "start_time": 1788489118,
+                    "finish_time": 1788489292,
+                    "progress": "100%",
+                    "data": {
+                        "code": "success",
+                        "data": {
+                            "action": "generate",
+                            "data": {
+                                "cgtId": "cgt-20260904103155-x9bkq",
+                                "content": {
+                                    "video_url": "https://cdn.example.com/video.mp4"
+                                },
+                                "created_at": 1788489115,
+                                "draft": false,
+                                "duration": 4,
+                                "execution_expires_after": 172800,
+                                "framespersecond": 24,
+                                "generate_audio": true,
+                                "id": "task_tdKuphY1aWjLG3jVtZMkCoNFLMfFL6xN",
+                                "model": "Seedance2.0",
+                                "ratio": "16:9",
+                                "resolution": "720p",
+                                "seed": 19695,
+                                "service_tier": "default",
+                                "status": "succeeded",
+                                "updated_at": 1788489264,
+                                "usage": {
+                                    "completion_tokens": 87300,
+                                    "total_tokens": 87300
+                                }
+                            },
+                            "fail_reason": "",
+                            "finish_time": 1788489289,
+                            "progress": "100%",
+                            "result_url": "https://cdn.example.com/video.mp4",
+                            "start_time": 1788489116,
+                            "status": "SUCCESS",
+                            "submit_time": 1788489112,
+                            "task_id": "task_tdKuphY1aWjLG3jVtZMkCoNFLMfFL6xN"
+                        },
+                        "message": ""
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let observation = parse_video_observation(&response).expect("MAGateway observation");
+        assert_eq!(observation.remote_status, "SUCCESS");
+        assert_eq!(observation.progress, Some(100.0));
+        assert_eq!(
+            observation.video_url.as_deref(),
+            Some("https://cdn.example.com/video.mp4")
+        );
+        assert_eq!(observation.failure, None);
+    }
+
+    #[test]
+    fn video_observation_extracts_url_from_json_string_content() {
+        // 回归：content 以 JSON 字符串（而非对象）返回时也能提取 video_url。
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "code": "success",
+                "data": {
+                    "status": "SUCCESS",
+                    "progress": "100%",
+                    "data": {
+                        "data": {
+                            "data": {
+                                "content": "{\"video_url\":\"https://cdn.example.com/video.mp4\"}"
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        };
+
+        let observation = parse_video_observation(&response).expect("video observation");
+        assert_eq!(observation.remote_status, "SUCCESS");
+        assert_eq!(
+            observation.video_url.as_deref(),
+            Some("https://cdn.example.com/video.mp4")
+        );
     }
 
     #[test]
