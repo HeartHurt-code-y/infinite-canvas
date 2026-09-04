@@ -1810,6 +1810,40 @@ svg[data-spin="true"] {
   line-height: 1.5;
 }
 
+/* 智能扩写文本结果（Context-IR）：正文完整展示，卡片内滚动查看 */
+.canvas-output-node__text {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: var(--space-3xs);
+  overflow: auto;
+  color: var(--color-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-paper-2);
+  border: var(--rule-thin) solid var(--color-line);
+  border-radius: var(--radius-xs);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.6;
+}
+
+/* 结果展示节点里的文本产物缩略正文 */
+.canvas-result-node__text {
+  display: -webkit-box;
+  margin: 0;
+  padding: var(--space-3xs);
+  overflow: hidden;
+  color: var(--color-ink);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 6;
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .canvas-asset-node__visual {
   position: relative;
   display: block;
@@ -3703,8 +3737,8 @@ svg[data-spin="true"] {
 .canvas-video-downloader__quality.is-logged-in {
   color: var(--color-ok, var(--color-accent));
   background: color-mix(in oklch, var(--color-ok, var(--color-accent)) 12%, var(--color-paper));
-  border: var(--rule-thin)
-    solid color-mix(in oklch, var(--color-ok, var(--color-accent)) 45%, var(--color-rule));
+  border: var(--rule-thin) solid
+    color-mix(in oklch, var(--color-ok, var(--color-accent)) 45%, var(--color-rule));
 }
 
 .canvas-video-downloader__quality-hint {
@@ -4720,158 +4754,6 @@ svg[data-spin="true"] {
   min-width: 0;
 }
 
-.canvas-prompt-node__output-actions {
-  display: flex;
-  min-width: 0;
-  justify-content: flex-end;
-}
-
-.canvas-prompt-node__audit-button {
-  display: inline-flex;
-  min-width: 5rem;
-  min-height: 2.25rem;
-  align-items: center;
-  justify-content: center;
-  gap: var(--space-3xs);
-  padding-inline: var(--space-xs);
-  color: var(--color-accent-ink);
-  background: var(--color-accent);
-  border: var(--rule-thin) solid var(--color-accent);
-  border-radius: var(--radius-control);
-  box-shadow: var(--shadow-whisper);
-  cursor: pointer;
-  font-size: var(--text-2xs);
-  font-weight: 700;
-}
-
-.canvas-prompt-node__audit-button:not(:disabled):hover,
-.canvas-prompt-node__audit-button:not(:disabled):focus-visible {
-  color: var(--color-accent-ink);
-  background: var(--color-accent-hover);
-  border-color: var(--color-accent-hover);
-  outline: var(--rule-active) solid var(--color-focus);
-  outline-offset: var(--rule-thin);
-}
-
-.canvas-prompt-node__audit-button:disabled {
-  color: var(--color-ink-2);
-  background: var(--color-paper-3);
-  border-color: var(--color-rule-2);
-  box-shadow: none;
-  cursor: not-allowed;
-  opacity: 1;
-}
-
-.canvas-prompt-node__audit-button[data-state="loading"]:disabled {
-  color: var(--color-accent-ink);
-  background: var(--color-accent);
-  border-color: var(--color-accent);
-  cursor: progress;
-}
-
-.canvas-prompt-node__audit-panel {
-  display: grid;
-  gap: var(--space-2xs);
-  padding: var(--space-xs);
-  background: var(--color-paper-2);
-  border: var(--rule-thin) solid var(--color-accent);
-  border-radius: var(--radius-control);
-}
-
-.canvas-prompt-node__audit-heading {
-  display: flex;
-  min-width: 0;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: var(--space-xs);
-  color: var(--color-accent-ink);
-  font-size: var(--text-xs);
-  font-weight: 700;
-}
-
-.canvas-prompt-node__audit-heading small {
-  color: var(--color-muted);
-  font-size: var(--text-2xs);
-  font-weight: 500;
-}
-
-.canvas-prompt-node__audit-status {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2xs);
-  color: var(--color-accent-ink);
-  font-size: var(--text-2xs);
-  line-height: 1.45;
-}
-
-.canvas-prompt-node__audit-error {
-  display: grid;
-  gap: var(--space-2xs);
-  color: var(--color-error);
-  font-size: var(--text-2xs);
-  line-height: 1.45;
-}
-
-.canvas-prompt-node__audit-error span {
-  overflow-wrap: anywhere;
-  white-space: pre-wrap;
-}
-
-.canvas-prompt-node__audit-error button,
-.canvas-prompt-node__audit-actions button {
-  min-height: 2rem;
-  padding-inline: var(--space-xs);
-  border: var(--rule-thin) solid var(--color-rule-2);
-  border-radius: var(--radius-control);
-  font-size: var(--text-2xs);
-  font-weight: 700;
-}
-
-.canvas-prompt-node__audit-error button {
-  justify-self: start;
-  color: var(--color-error);
-  background: var(--color-error-soft);
-  border-color: var(--color-error);
-}
-
-.canvas-prompt-node__audit-error button:hover,
-.canvas-prompt-node__audit-error button:focus-visible,
-.canvas-prompt-node__audit-actions button:hover,
-.canvas-prompt-node__audit-actions button:focus-visible {
-  outline: var(--rule-active) solid var(--color-focus);
-  outline-offset: var(--rule-thin);
-}
-
-.canvas-prompt-node__audit-result {
-  display: grid;
-  gap: var(--space-2xs);
-}
-
-.canvas-prompt-node__audit-actions {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-3xs);
-}
-
-.canvas-prompt-node__audit-actions button {
-  color: var(--color-ink-2);
-  background: var(--color-paper);
-}
-
-.canvas-prompt-node__audit-actions .canvas-prompt-node__audit-apply {
-  color: var(--color-success);
-  border-color: var(--color-success);
-}
-
-.canvas-prompt-node__audit-actions .canvas-prompt-node__audit-discard {
-  color: var(--color-muted);
-}
-
-.canvas-prompt-node__audit-actions .canvas-prompt-node__audit-again {
-  color: var(--color-accent-ink);
-  border-color: var(--color-accent);
-}
-
 .canvas-prompt-node__status {
   display: flex;
   min-height: 2rem;
@@ -4990,10 +4872,6 @@ svg[data-spin="true"] {
   min-height: 6rem;
 }
 
-.canvas-prompt-node__conversation .canvas-screenplay-node__message.is-audit {
-  border-inline-start-color: var(--color-accent);
-}
-
 .canvas-prompt-node__composer-actions {
   justify-content: flex-end;
 }
@@ -5010,7 +4888,7 @@ svg[data-spin="true"] {
   stroke-dasharray: 10 5;
 }
 
-/* ============ 剧本创作与优化节点（内置双技能、多轮、审计、Markdown 导出） ============ */
+/* ============ 剧本创作与优化节点（内置双技能、多轮、Markdown 导出） ============ */
 
 .canvas-screenplay-node {
   position: relative;
@@ -5259,11 +5137,6 @@ svg[data-spin="true"] {
   border-color: color-mix(in oklch, var(--color-audio) 55%, var(--color-rule));
 }
 
-.canvas-screenplay-node__message.is-audit {
-  width: 100%;
-  border-inline-start: var(--rule-active) solid var(--color-success);
-}
-
 .canvas-screenplay-node__message.is-decision {
   width: auto;
   justify-self: center;
@@ -5277,10 +5150,6 @@ svg[data-spin="true"] {
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   font-weight: 700;
-}
-
-.canvas-screenplay-node__message.is-audit > span {
-  color: var(--color-success);
 }
 
 .canvas-screenplay-node__message .markdown-view {
@@ -5744,10 +5613,6 @@ svg[data-spin="true"] {
   border-color: color-mix(in oklch, var(--color-video) 55%, var(--color-rule));
 }
 
-.canvas-screenplay-node--storyboard .canvas-screenplay-node__message.is-audit > span {
-  color: var(--color-success);
-}
-
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__document > textarea {
   border-color: var(--color-video);
 }
@@ -6175,7 +6040,6 @@ svg[data-spin="true"] {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-
 
 .canvas-gen-node .prompt-mention__input {
   height: 58px;
@@ -7553,57 +7417,6 @@ svg[data-spin="true"] {
   gap: var(--space-xs);
 }
 
-.prompt-opt-diff {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: var(--space-2xs);
-}
-
-.prompt-opt-diff__pane {
-  display: grid;
-  align-content: start;
-  gap: var(--space-3xs);
-  min-width: 0;
-}
-
-.prompt-opt-diff__label {
-  color: var(--color-muted);
-  font-size: var(--text-2xs);
-}
-
-.prompt-opt-diff__text {
-  max-height: 10rem;
-  padding: var(--space-2xs);
-  overflow-y: auto;
-  color: var(--color-ink);
-  background: var(--color-paper);
-  border: var(--rule-thin) solid var(--color-rule);
-  border-radius: var(--radius-control);
-  font-size: var(--text-2xs);
-  line-height: 1.5;
-  white-space: pre-wrap;
-  word-break: break-word;
-  scrollbar-color: var(--color-rule-2) transparent;
-  scrollbar-width: thin;
-}
-
-.prompt-opt-diff__mark {
-  padding-block: 0;
-  border-radius: 2px;
-}
-
-.prompt-opt-diff__mark--removed {
-  background: var(--color-error-soft);
-  color: var(--color-error);
-  text-decoration: line-through;
-}
-
-.prompt-opt-diff__mark--added {
-  background: var(--color-success-soft);
-  color: var(--color-success);
-  font-weight: 600;
-}
-
 .model-picker__summary span {
   gap: var(--space-3xs);
   min-height: 1.75rem;
@@ -7930,10 +7743,7 @@ svg[data-spin="true"] {
 
   .canvas-prompt-node__task button,
   .canvas-prompt-node__connections button,
-  .canvas-prompt-node__port,
-  .canvas-prompt-node__audit-button,
-  .canvas-prompt-node__audit-error button,
-  .canvas-prompt-node__audit-actions button {
+  .canvas-prompt-node__port {
     min-width: var(--size-control-touch);
     min-height: var(--size-control-touch);
   }
@@ -9977,6 +9787,31 @@ details[open] > summary .history-disclosure__caret {
 }
 
 .history-lightbox__stage img:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+/* 历史预览灯箱里的文本结果（Context-IR 扩写正文） */
+.history-lightbox__text {
+  box-sizing: border-box;
+  width: min(860px, calc(100vw - (2 * var(--history-lightbox-gutter))));
+  max-height: calc(100vh - (2 * var(--history-lightbox-gutter)));
+  max-height: calc(100dvh - (2 * var(--history-lightbox-gutter)));
+  margin: 0;
+  padding: var(--space-md);
+  overflow: auto;
+  color: var(--color-ink);
+  white-space: pre-wrap;
+  word-break: break-word;
+  background: var(--color-paper-2);
+  border: var(--rule-thin) solid var(--color-line);
+  border-radius: var(--radius-sm);
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  line-height: 1.7;
+}
+
+.history-lightbox__stage .history-lightbox__text:focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--rule-active);
 }

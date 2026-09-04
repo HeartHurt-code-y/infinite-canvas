@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -43,6 +43,12 @@ const LEASE_URL_EXPIRY_SECS: i64 = 3600;
 /// 连通性测试探针对象的预签名 URL 有效期：只需覆盖一次立即发出的请求。
 const PROBE_URL_EXPIRY_SECS: i64 = 60;
 
+/// 连通性测试网络请求失败时的最大额外重试次数（指数退避）。
+const PROBE_MAX_RETRIES: u32 = 3;
+
+/// 连通性测试重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
+const PROBE_RETRY_BASE_DELAY_MS: u64 = 500;
+
 /// 摸鱼素材服务（POST /v1/assets 上游）支持的图片扩展名白名单。
 /// avif 等不在列表内的格式必须先转码为 webp 再导入，否则上游会以
 /// `[InvalidParameter] unsupported asset URL format` 或 `DownloadFailed` 拒绝。
@@ -70,6 +76,42 @@ fn build_presign_http_client() -> reqwest::Result<reqwest::Client> {
         .user_agent("InfiniteCanvas/0.1")
         .redirect(reqwest::redirect::Policy::none())
         .build()
+}
+
+/// 带指数退避重试的连通性探针 GET 请求。
+///
+/// `make_url` 每次（含重试）都会重新调用，调用方据此重新生成预签名 URL——探针 URL
+/// 有效期仅 `PROBE_URL_EXPIRY_SECS` 秒，而单次连接超时最长 30 秒，若固定 URL，
+/// 多次超时累计后探针 URL 会过期。
+///
+/// 仅对网络层失败（连接、超时等 `reqwest::Error`）重试，最多 `PROBE_MAX_RETRIES` 次，
+/// 每次重试前等待 `PROBE_RETRY_BASE_DELAY_MS * 2^(attempt)` 毫秒；presign 等生成 URL 的
+/// 错误直接传播（重试无意义），最后一次网络错误包装为 `BackendError::Transport`。
+async fn send_probe_with_retry<F>(
+    client: &reqwest::Client,
+    make_url: F,
+) -> BackendResult<reqwest::Response>
+where
+    F: Fn() -> BackendResult<String>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        let url = make_url()?;
+        match client.get(&url).send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt < PROBE_MAX_RETRIES => {
+                let delay_ms = PROBE_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                warn!(
+                    "[staging] 连通性测试网络请求失败，{delay_ms}ms 后重试 ({}/{})：{error}",
+                    attempt + 1,
+                    PROBE_MAX_RETRIES
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(BackendError::Transport(error)),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -150,54 +192,60 @@ impl StagingService {
             "{}/.connectivity-probe",
             config.object_prefix.trim_matches('/')
         );
-        let probe_url = presign_url(&PresignParams {
-            method: "GET",
-            host: &host,
-            object_key: &probe_key,
-            region: &config.region,
-            credentials: &credentials,
-            expires_secs: PROBE_URL_EXPIRY_SECS,
-            now: Utc::now(),
-        })?;
         info!(
             "[staging] 开始连通性测试: bucket={}, region={}, endpoint={}, objectKey={}",
             config.bucket, config.region, config.endpoint, probe_key
         );
         let started_at = std::time::Instant::now();
-        let response = self.client.get(&probe_url).send().await;
-        match response {
-            Ok(response) => {
-                let status = response.status().as_u16();
-                let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
-                let verdict = classify_probe_response(status, &body);
-                info!(
-                    "[staging] 连通性测试完成: HTTP {status}, verdict={}, 耗时 {}ms",
-                    verdict.reason_name().unwrap_or("ok"),
-                    started_at.elapsed().as_millis()
-                );
-                Ok(ConnectivityTestResult {
-                    ok: verdict.is_ok(),
-                    http_status: Some(status),
+        // 网络层失败按指数退避重试（最多 PROBE_MAX_RETRIES 次）；每次重试重新生成
+        // 预签名 URL，避免退避等待或单次连接超时（最长 30s）累计超过探针 URL 的 60s 有效期。
+        let response = match send_probe_with_retry(&self.client, || {
+            presign_url(&PresignParams {
+                method: "GET",
+                host: &host,
+                object_key: &probe_key,
+                region: &config.region,
+                credentials: &credentials,
+                expires_secs: PROBE_URL_EXPIRY_SECS,
+                now: Utc::now(),
+            })
+        })
+        .await
+        {
+            Ok(response) => response,
+            Err(BackendError::Transport(error)) => {
+                return Ok(ConnectivityTestResult {
+                    ok: false,
+                    http_status: None,
                     elapsed_ms: started_at.elapsed().as_millis() as u64,
-                    reason: verdict.reason_name().map(str::to_string),
-                    detail: (!verdict.is_ok()).then(|| {
-                        let code = extract_error_code(&body)
-                            .map(|code| format!("code={code}, "))
-                            .unwrap_or_default();
-                        truncate_connectivity_detail(&format!("{code}{}", body.trim()))
-                    }),
-                })
+                    reason: Some("network-error".to_string()),
+                    detail: Some(super::provider::truncate_connectivity_detail(
+                        &error.to_string(),
+                    )),
+                });
             }
-            Err(error) => Ok(ConnectivityTestResult {
-                ok: false,
-                http_status: None,
-                elapsed_ms: started_at.elapsed().as_millis() as u64,
-                reason: Some("network-error".to_string()),
-                detail: Some(super::provider::truncate_connectivity_detail(
-                    &error.to_string(),
-                )),
+            Err(error) => return Err(error),
+        };
+        let status = response.status().as_u16();
+        let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
+        let verdict = classify_probe_response(status, &body);
+        info!(
+            "[staging] 连通性测试完成: HTTP {status}, verdict={}, 耗时 {}ms",
+            verdict.reason_name().unwrap_or("ok"),
+            started_at.elapsed().as_millis()
+        );
+        Ok(ConnectivityTestResult {
+            ok: verdict.is_ok(),
+            http_status: Some(status),
+            elapsed_ms: started_at.elapsed().as_millis() as u64,
+            reason: verdict.reason_name().map(str::to_string),
+            detail: (!verdict.is_ok()).then(|| {
+                let code = extract_error_code(&body)
+                    .map(|code| format!("code={code}, "))
+                    .unwrap_or_default();
+                truncate_connectivity_detail(&format!("{code}{}", body.trim()))
             }),
-        }
+        })
     }
 
     pub fn create_job(&self, command: StartStagingCommand) -> BackendResult<StagingJobRecord> {
@@ -671,6 +719,7 @@ async fn detect_local_media(path: &Path, expected: MediaType) -> BackendResult<(
         MediaType::Image => mime.starts_with("image/"),
         MediaType::Video => mime.starts_with("video/"),
         MediaType::Audio => mime.starts_with("audio/"),
+        MediaType::Text => mime.starts_with("text/"),
     };
     if !valid {
         return Err(BackendError::validation(
@@ -1118,6 +1167,95 @@ mod tests {
         assert!(
             !captured.load(Ordering::SeqCst),
             "presign client must not follow the 307 to the capture server"
+        );
+    }
+
+    /// 回归测试：连通性探针网络请求失败时按指数退避重试，直到成功。
+    ///
+    /// 复现根因——此前 `test_connectivity` 对 `send().await` 只发一次请求，网络瞬断时
+    /// 直接返回 `network-error`。本测试用本地 TCP 服务模拟「前两次连接即读即断、第三次
+    /// 正常返回 200」，断言重试后探针成功且确实发生了重试（服务端共收到 3 次连接）。
+    #[tokio::test]
+    async fn probe_retry_recovers_after_transient_network_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // 本地服务：前两次连接「读取请求后立即关闭」（模拟网络瞬断），第三次正常返回 200。
+        let connections = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_connections = Arc::clone(&connections);
+        let server = std::thread::spawn(move || {
+            let fail_before_success: usize = 2;
+            for _ in 0..=fail_before_success {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                let _ = stream.read(&mut [0u8; 4096]);
+                if server_connections.fetch_add(1, Ordering::SeqCst) < fail_before_success {
+                    drop(stream); // 模拟网络瞬断：读到请求后立即关闭连接。
+                } else {
+                    let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+                    let _ = stream.flush();
+                }
+            }
+        });
+
+        let client = build_presign_http_client().unwrap();
+        // 本地回归测试用 http 直连，绕过 presign_url 固定生成的 https scheme。
+        let url = format!("http://{addr}/probe");
+        let response = send_probe_with_retry(&client, || Ok(url.clone()))
+            .await
+            .expect("probe should recover after transient failures");
+        assert_eq!(response.status().as_u16(), 200);
+
+        server.join().unwrap();
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            3,
+            "expected 3 connection attempts (1 initial + 2 retries)"
+        );
+    }
+
+    /// 回归测试：持续网络失败时，重试次数严格受 `PROBE_MAX_RETRIES` 限制并最终放弃。
+    ///
+    /// 本地 TCP 服务总是「读取请求后立即关闭连接」，断言请求恰好发出
+    /// `PROBE_MAX_RETRIES + 1` 次（1 次初始 + 3 次重试）后以传输错误结束。
+    #[tokio::test]
+    async fn probe_retry_gives_up_after_max_retries() {
+        use std::io::Read;
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_connections = Arc::clone(&connections);
+        let server = std::thread::spawn(move || {
+            for _ in 0..(PROBE_MAX_RETRIES + 1) {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    break;
+                };
+                server_connections.fetch_add(1, Ordering::SeqCst);
+                let _ = stream.read(&mut [0u8; 4096]);
+                drop(stream);
+            }
+        });
+
+        let client = build_presign_http_client().unwrap();
+        let url = format!("http://{addr}/probe");
+        let result = send_probe_with_retry(&client, || Ok(url.clone())).await;
+        assert!(
+            matches!(result, Err(BackendError::Transport(_))),
+            "probe must give up with a transport error after exhausting retries"
+        );
+
+        server.join().unwrap();
+        assert_eq!(
+            connections.load(Ordering::SeqCst),
+            (PROBE_MAX_RETRIES + 1) as usize,
+            "expected 1 initial attempt + PROBE_MAX_RETRIES retries"
         );
     }
 }

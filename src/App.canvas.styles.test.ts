@@ -80,19 +80,6 @@ describe("视频拼接与合成节点", () => {
   });
 });
 
-describe("提示词审计按钮状态", () => {
-  it("禁用态保持清晰且只有真正审计时才显示进度光标", () => {
-    expect(appCss).toMatch(
-      /\.canvas-prompt-node__audit-button:not\(:disabled\):hover,[\s\S]*\.canvas-prompt-node__audit-button:not\(:disabled\):focus-visible\s*\{/,
-    );
-    expect(cssRule(".canvas-prompt-node__audit-button:disabled")).toMatch(/cursor:\s*not-allowed/);
-    expect(cssRule(".canvas-prompt-node__audit-button:disabled")).toMatch(/opacity:\s*1/);
-    expect(cssRule('.canvas-prompt-node__audit-button[data-state="loading"]:disabled')).toMatch(
-      /cursor:\s*progress/,
-    );
-  });
-});
-
 describe("剧本节点文本选中复制", () => {
   it("编剧助手对话区与剧本预览框允许选中文字，而不是继承节点卡片的禁止选中", () => {
     expect(cssRule(".canvas-screenplay-node__conversation")).toMatch(

@@ -1,7 +1,8 @@
 use std::collections::HashMap;
 
+use rand::Rng as _;
 use serde_json::{Value, json};
-use tauri_plugin_log::log::{info, warn};
+use tauri_plugin_log::log::{error, info, warn};
 
 use super::{
     asset_library::{
@@ -20,6 +21,11 @@ use super::{
         StartGenerationCommand,
     },
 };
+
+/// 云端素材解析遇传输层故障（超时/连接失败等瞬时网络错误，例如请求素材库网关
+/// `/v1/assets/get` 失败）时的自动指数退避重试次数。`3` 表示除首次尝试外再自动
+/// 重试 3 次（共尝试 4 次），退避节奏为约 2s / 4s / 8s。
+const ASSET_RESOLVE_RETRIES: u32 = 3;
 
 #[derive(Clone)]
 pub struct MediaResolver {
@@ -364,26 +370,30 @@ impl MediaResolver {
                 canvas_node_key,
             } => {
                 let needs_bytes = task.operation == GenerationOperation::ImageToImage;
-                let resolved = self
-                    .assets
-                    .resolve(ResolveAsset {
-                        identity: super::types::CloudAssetIdentity {
-                            provider_connection_id: provider_connection_id.clone(),
-                            asset_id: asset_id.clone(),
-                        },
-                        expected_media_type: *media_type,
-                        delivery: if needs_bytes {
-                            AssetDelivery::Bytes
-                        } else {
-                            AssetDelivery::RemoteReadable {
-                                destination_provider_connection_id: task
-                                    .provider_connection_id
-                                    .clone(),
-                            }
-                        },
-                        trace: AssetReadTrace { task, attempt_id },
-                    })
-                    .await?;
+                let resolved = with_transport_retry(
+                    "云端素材解析",
+                    ASSET_RESOLVE_RETRIES,
+                    || {
+                        self.assets.resolve(ResolveAsset {
+                            identity: super::types::CloudAssetIdentity {
+                                provider_connection_id: provider_connection_id.clone(),
+                                asset_id: asset_id.clone(),
+                            },
+                            expected_media_type: *media_type,
+                            delivery: if needs_bytes {
+                                AssetDelivery::Bytes
+                            } else {
+                                AssetDelivery::RemoteReadable {
+                                    destination_provider_connection_id: task
+                                        .provider_connection_id
+                                        .clone(),
+                                }
+                            },
+                            trace: AssetReadTrace { task, attempt_id },
+                        })
+                    },
+                )
+                .await?;
                 let (bytes, remote_reference) = match resolved.access {
                     ResolvedAssetAccess::Bytes(bytes) => (Some(bytes), None),
                     ResolvedAssetAccess::RemoteReference(reference) => {
@@ -660,6 +670,80 @@ impl MediaResolver {
     }
 }
 
+/// 对可能因瞬时网络故障失败的解析操作执行指数退避自动重试。
+///
+/// 仅对传输层错误（`BackendError::Transport`，如向素材库网关请求 `/v1/assets/get`
+/// 时超时、连接失败等）重试；协议、校验等确定性错误直接返回，不做重试。
+/// `retries` 表示除首次尝试外的额外重试次数，退避节奏与生成任务自动重试一致：
+/// 第 1/2/3 次重试前约等待 2s / 4s / 8s（含 ±20% 抖动）。
+async fn with_transport_retry<T, F, Fut>(
+    label: &str,
+    retries: u32,
+    operation: F,
+) -> BackendResult<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = BackendResult<T>>,
+{
+    with_transport_retry_inner(label, retries, media_retry_delay_ms, operation).await
+}
+
+/// `with_transport_retry` 的实现体，退避延迟由 `delay_ms`（接收 1 起的重试序号）
+/// 注入，便于测试用 0 延迟验证控制流而无需真实等待。
+async fn with_transport_retry_inner<T, F, Fut, D>(
+    label: &str,
+    retries: u32,
+    delay_ms: D,
+    operation: F,
+) -> BackendResult<T>
+where
+    F: Fn() -> Fut,
+    Fut: std::future::Future<Output = BackendResult<T>>,
+    D: Fn(u32) -> u64,
+{
+    let mut last_error = None;
+    for attempt in 0..=retries {
+        if attempt > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms(attempt))).await;
+        }
+        match operation().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                let is_transport = matches!(&error, BackendError::Transport(_));
+                if !is_transport || attempt == retries {
+                    if is_transport {
+                        error!(
+                            "[resolve] {label} 传输层失败且自动重试已耗尽: 共尝试 {} 次, 错误: {}",
+                            retries + 1,
+                            error.payload().message
+                        );
+                    }
+                    return Err(error);
+                }
+                warn!(
+                    "[resolve] {label} 传输层失败，自动指数退避重试: 第 {} 次尝试失败, 下次退避约 {}ms, 错误: {}",
+                    attempt + 1,
+                    delay_ms(attempt + 1),
+                    error.payload().message
+                );
+                last_error = Some(error);
+            }
+        }
+    }
+    Err(last_error.unwrap_or_else(|| {
+        BackendError::protocol(
+            "retry loop exited without a result",
+            json!({ "operation": label }),
+        )
+    }))
+}
+
+/// 媒体解析自动重试的指数退避延迟：第 1/2/3 次重试前约 2s / 4s / 8s，含 ±20% 抖动。
+fn media_retry_delay_ms(retry_index: u32) -> u64 {
+    let nominal = 2_000_u64 * 2_u64.pow(retry_index.saturating_sub(1));
+    nominal + rand::rng().random_range(0..=(nominal / 5))
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum TargetResolutionPlan {
     Reuse(u32),
@@ -719,6 +803,7 @@ fn next_position(
         MediaType::Image => images.len(),
         MediaType::Video => videos.len(),
         MediaType::Audio => audios.len(),
+        MediaType::Text => 0,
     };
     length as u32 + 1
 }
@@ -733,6 +818,8 @@ fn push_media(
         MediaType::Image => images.push(media),
         MediaType::Video => videos.push(media),
         MediaType::Audio => audios.push(media),
+        // 文本产物不参与媒体输入解析，仅占位以保持穷尽性。
+        MediaType::Text => {}
     }
 }
 
@@ -746,6 +833,7 @@ fn default_reference_role(media_type: MediaType) -> &'static str {
         MediaType::Image => "reference_image",
         MediaType::Video => "reference_video",
         MediaType::Audio => "reference_audio",
+        MediaType::Text => "reference_video",
     }
 }
 
@@ -758,6 +846,7 @@ fn validate_detected_type(expected: MediaType, mime: &str) -> BackendResult<()> 
         MediaType::Image => mime.starts_with("image/"),
         MediaType::Video => mime.starts_with("video/"),
         MediaType::Audio => mime.starts_with("audio/"),
+        MediaType::Text => mime.starts_with("text/"),
     };
     if valid {
         Ok(())
@@ -857,6 +946,7 @@ mod tests {
                 MediaType::Image => "image/png",
                 MediaType::Video => "video/mp4",
                 MediaType::Audio => "audio/mpeg",
+                MediaType::Text => "text/plain",
             }
             .into(),
             byte_size: 1,
@@ -968,5 +1058,71 @@ mod tests {
             plan_target_resolution(&resolved_targets, &second_target, &[], &videos, &[]),
             TargetResolutionPlan::Resolve(2)
         );
+    }
+
+    /// 生成一个不依赖真实网络、确定性的传输层错误，用于验证重试控制流。
+    async fn transport_error() -> BackendError {
+        let client = reqwest::Client::new();
+        BackendError::Transport(client.get("not a url").send().await.unwrap_err())
+    }
+
+    #[tokio::test]
+    async fn transport_retry_recovers_after_transient_failures() {
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result = with_transport_retry_inner("test", 3, |_| 0, || {
+            let attempts = &attempts;
+            async move {
+                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                    Err(transport_error().await)
+                } else {
+                    Ok("ok")
+                }
+            }
+        })
+        .await;
+        assert_eq!(result.unwrap(), "ok");
+        // 首次失败 + 1 次重试后成功，第 3 次尝试命中成功分支。
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn transport_retry_exhausts_after_configured_retries() {
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result: BackendResult<i32> = with_transport_retry_inner("test", 3, |_| 0, || {
+            let attempts = &attempts;
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(transport_error().await)
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(BackendError::Transport(_))));
+        // 首次尝试 + 3 次自动重试 = 共 4 次尝试。
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 4);
+    }
+
+    #[tokio::test]
+    async fn transport_retry_does_not_retry_non_transport_errors() {
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result: BackendResult<i32> = with_transport_retry_inner("test", 3, |_| 0, || {
+            let attempts = &attempts;
+            async move {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Err(BackendError::protocol("deterministic", json!({})))
+            }
+        })
+        .await;
+        assert!(matches!(result, Err(BackendError::Protocol { .. })));
+        // 确定性错误不做重试，只尝试一次。
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn media_retry_delay_is_exponential_with_jitter() {
+        for (index, nominal) in [(1, 2_000), (2, 4_000), (3, 8_000)] {
+            let delay = media_retry_delay_ms(index);
+            assert!(delay >= nominal);
+            assert!(delay <= nominal + nominal / 5);
+        }
     }
 }

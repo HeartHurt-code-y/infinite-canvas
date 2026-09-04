@@ -84,7 +84,11 @@ import {
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
 } from "../../lib/modelCapabilities";
-import type { PromptContentConnection, PromptContentEditorSession, PromptContentIssue } from "../../lib/promptContent";
+import type {
+  PromptContentConnection,
+  PromptContentEditorSession,
+  PromptContentIssue,
+} from "../../lib/promptContent";
 import { createPromptContentModule } from "../../lib/promptContent";
 import {
   composeVideosInOrder,
@@ -153,7 +157,6 @@ import type {
   NodeModelSelections,
   OutputNodeData,
   PromptNodeConfig,
-  PromptOptimizationPanelState,
   RetryInfo,
   ScreenplayNodeConfig,
   ScreenplayNodeData,
@@ -193,6 +196,7 @@ import {
   EMPTY_GENERATION_TASKS,
   GENERATION_TASKS_POLL_INTERVAL_MS,
   GENERATION_TASKS_QUERY_KEY,
+  GPT_IMAGE_MAX_GENERATION_COUNT,
   MAX_GENERATION_COUNT,
   MAX_ZOOM,
   RESULT_NODE_HEIGHT,
@@ -231,6 +235,7 @@ import {
   getNodeDescriptor,
   inheritedVideoAssetInputs,
   isRunningTaskStatus,
+  textResultFromSource,
   isTerminalAssetUpload,
   isTerminalTaskStatus,
   isTextGenerationModel,
@@ -343,8 +348,10 @@ function connectedScreenplayName(node: ScreenplayNodeData): string {
 }
 
 const MAX_SCREENPLAY_MATERIALS = 8;
-const MAX_SCREENPLAY_MATERIAL_BYTES = 20 * 1024 * 1024;
-const MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES = 40 * 1024 * 1024;
+// Gemini 的内联媒体请求上限为 20 MB；Base64 约膨胀 1/3，因此原始文件合计
+// 控制在 14 MiB，给完整技能提示词与 JSON 包装预留空间。
+const MAX_SCREENPLAY_MATERIAL_BYTES = 14 * 1024 * 1024;
+const MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES = 14 * 1024 * 1024;
 
 function screenplayMultimodalInputs(
   config: ScreenplayNodeConfig,
@@ -542,15 +549,6 @@ export function WorkspaceApp() {
   const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
   const [genNodeSizes, setGenNodeSizes] = useState<Record<string, CanvasNodeDimensions>>({});
-  const [promptAudits, setPromptAudits] = useState<Record<string, PromptOptimizationPanelState>>(
-    {},
-  );
-  const [screenplayAudits, setScreenplayAudits] = useState<
-    Record<string, PromptOptimizationPanelState>
-  >({});
-  const [storyboardAudits, setStoryboardAudits] = useState<
-    Record<string, PromptOptimizationPanelState>
-  >({});
   const [previewOutputNodeKey, setPreviewOutputNodeKey] = useState<string | null>(null);
   const [previewAsset, setPreviewAsset] = useState<AssetItem | null>(null);
   const handleGenNodeSizeChange = useCallback((key: string, dimensions: CanvasNodeDimensions) => {
@@ -674,9 +672,6 @@ export function WorkspaceApp() {
     setFrameExtractorRuns({});
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
-    setPromptAudits({});
-    setScreenplayAudits({});
-    setStoryboardAudits({});
   }, [
     clearCanvasState,
     outputNodes,
@@ -685,9 +680,6 @@ export function WorkspaceApp() {
     setFrameExtractorRuns,
     setGenNodeSizes,
     setPreviewOutputNodeKey,
-    setPromptAudits,
-    setScreenplayAudits,
-    setStoryboardAudits,
   ]);
 
   useEffect(
@@ -1549,13 +1541,6 @@ export function WorkspaceApp() {
   const updatePromptNodeConfig = useCallback(
     (key: string, config: PromptNodeConfig) => {
       patchNode("gen", key, (node) => (node.kind === "prompt" ? { ...node, config } : node));
-      // 手动改动源输入、模型或输出后，旧 Diff 不再对应当前版本；历史上下文仍保留在节点配置中。
-      setPromptAudits((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
     },
     [patchNode],
   );
@@ -1563,12 +1548,6 @@ export function WorkspaceApp() {
   const updateScreenplayNodeConfig = useCallback(
     (key: string, config: ScreenplayNodeConfig) => {
       patchNode("screenplay", key, (node) => ({ ...node, config }));
-      setScreenplayAudits((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
     },
     [patchNode],
   );
@@ -1620,7 +1599,7 @@ export function WorkspaceApp() {
         }
         if (rejectedCount) {
           toast.info(`${rejectedCount} 项素材未添加`, {
-            description: "已存在、超过 8 项，或超出单项 20 MB / 合计 40 MB 限制。",
+            description: "已存在、超过 8 项，或超出单项 / 合计 14 MB 限制。",
           });
         }
       } catch (error) {
@@ -1648,12 +1627,6 @@ export function WorkspaceApp() {
   const updateStoryboardNodeConfig = useCallback(
     (key: string, config: ScreenplayNodeConfig) => {
       patchNode("storyboard", key, (node) => ({ ...node, config }));
-      setStoryboardAudits((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
     },
     [patchNode],
   );
@@ -1758,12 +1731,6 @@ export function WorkspaceApp() {
         content: entry.content,
       }));
       setNodeStartError(nodeKey, null);
-      setPromptAudits((current) => {
-        if (!(nodeKey in current)) return current;
-        const next = { ...current };
-        delete next[nodeKey];
-        return next;
-      });
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
@@ -1779,7 +1746,6 @@ export function WorkspaceApp() {
           task: node.config.task,
           userPrompt: sourcePrompt,
           contextHistory,
-          detailReview: false,
           visionImages,
           multimodalInputs: videoMaterials,
         })
@@ -1831,234 +1797,6 @@ export function WorkspaceApp() {
     ],
   );
 
-  /** 审计提示词节点的可编辑输出：技能全文与历史上下文进入系统提示词，用户提示词固定。 */
-  const handlePromptAudit = useCallback(
-    (nodeKey: string) => {
-      const node = genNodes.find(
-        (item): item is Extract<GenNodeData, { kind: "prompt" }> =>
-          item.key === nodeKey && item.kind === "prompt",
-      );
-      if (!node) return;
-      const previous = promptAudits[nodeKey];
-      if (previous?.status === "running") return;
-      const conversation = node.config.conversation ?? [];
-      const conversationHistory: PromptOptimizationContextEntry[] = conversation.map(
-        (entry, index) => ({
-          role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
-          content: entry.content,
-        }),
-      );
-      const previousHistory = previous?.contextHistory ?? conversationHistory;
-      // Diff 尚未确认应用时，“再次审计”也要沿用上一轮审计建议，
-      // 这样每一轮审计都建立在最新审计版本上，而不是回到第一版输出。
-      const currentPrompt = (
-        previous?.status === "done" && previous.optimizedPrompt
-          ? previous.optimizedPrompt
-          : node.config.generatedPrompt
-      ).trim();
-      const auditCount = conversation.filter((entry) => entry.role === "audit").length;
-      const round = Math.max(previous?.round ?? 0, auditCount) + 1;
-      const failWith = (message: string) => {
-        setPromptAudits((current) => ({
-          ...current,
-          [nodeKey]: {
-            status: "error",
-            detail: true,
-            round: Math.max(previous?.round ?? 0, auditCount),
-            originalPrompt: currentPrompt,
-            optimizedPrompt: null,
-            error: message,
-            contextHistory: previousHistory,
-          },
-        }));
-      };
-      if (!isDesktopRuntime()) {
-        failWith("提示词审计只能在桌面应用中使用。请通过 Tauri 桌面端运行。");
-        return;
-      }
-      if (!currentPrompt) {
-        failWith("输出提示词为空：请先生成提示词或直接编辑输出内容，再进行审计。");
-        return;
-      }
-      const provider = providerCatalog.find(
-        (entry) =>
-          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
-      );
-      const model = provider?.models.find(
-        (item) =>
-          item.definitionId === node.config.modelSelection.modelDefinitionId &&
-          isTextGenerationModel(item),
-      );
-      if (!provider || !model) {
-        failWith("请先在当前提示词节点中选择可用的文本模型。");
-        return;
-      }
-      const contextHistory = [
-        ...previousHistory,
-        { role: `第 ${round} 轮审计输入`, content: currentPrompt },
-      ];
-      const visionImages = promptVisionImages(nodeKey);
-      const videoMaterials = promptVideoMaterials(nodeKey);
-      setPromptAudits((current) => ({
-        ...current,
-        [nodeKey]: {
-          status: "running",
-          detail: true,
-          round,
-          originalPrompt: currentPrompt,
-          optimizedPrompt: null,
-          error: null,
-          contextHistory,
-        },
-      }));
-      frontendLog(
-        "info",
-        `[generation] 发起提示词审计: node=${nodeKey}, mode=${node.config.mode}, round=${round}, 提示词 ${currentPrompt.length} 字符, 视觉素材 ${visionImages.length} 张, 视频素材 ${videoMaterials.length} 个, 注入上下文 ${contextHistory.length} 条`,
-      );
-      void promptNodeClient
-        .run({
-          canvasId: CANVAS_ID,
-          sourceNodeId: nodeKey,
-          providerConnectionId: provider.provider.id,
-          modelDefinitionId: model.definitionId,
-          mode: node.config.mode,
-          task: "audit",
-          userPrompt: currentPrompt,
-          contextHistory,
-          detailReview: true,
-          visionImages,
-          multimodalInputs: videoMaterials,
-        })
-        .then((result) => {
-          const completedContext = [
-            ...contextHistory,
-            { role: `第 ${round} 轮审计结果`, content: result.optimizedPrompt },
-          ];
-          patchNode("gen", nodeKey, (item) =>
-            item.kind === "prompt"
-              ? {
-                  ...item,
-                  config: {
-                    ...item.config,
-                    conversation: [
-                      ...(item.config.conversation ?? []),
-                      { id: promptMessageId(), role: "audit", content: result.optimizedPrompt },
-                    ],
-                  },
-                }
-              : item,
-          );
-          setPromptAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                ...state,
-                status: "done",
-                optimizedPrompt: result.optimizedPrompt,
-                error: null,
-                contextHistory: completedContext,
-              },
-            };
-          });
-          frontendLog(
-            "info",
-            `[generation] 提示词审计完成: node=${nodeKey}, round=${round}, 返回 ${result.optimizedPrompt.length} 字符`,
-          );
-          toast.success(`第 ${round} 轮提示词审计已完成`);
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          setPromptAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return { ...current, [nodeKey]: { ...state, status: "error", error: message } };
-          });
-          frontendLog(
-            "error",
-            `[generation] 提示词审计失败: node=${nodeKey}, round=${round}, ${message}`,
-          );
-          toast.error("提示词审计失败", { description: message });
-        });
-    },
-    [genNodes, patchNode, promptAudits, promptVideoMaterials, promptVisionImages, providerCatalog],
-  );
-
-  /** 应用审计建议到输出框，并把用户决定写进多轮对话（供后续轮次沿用）。 */
-  const handleApplyPromptAudit = useCallback(
-    (nodeKey: string) => {
-      const state = promptAudits[nodeKey];
-      if (state?.status !== "done" || !state.optimizedPrompt) return;
-      patchNode("gen", nodeKey, (item) =>
-        item.kind === "prompt"
-          ? {
-              ...item,
-              config: {
-                ...item.config,
-                generatedPrompt: state.optimizedPrompt!,
-                conversation: [
-                  ...(item.config.conversation ?? []),
-                  {
-                    id: promptMessageId(),
-                    role: "decision",
-                    content: `已应用第 ${state.round} 轮审计结果。`,
-                  },
-                ],
-              },
-            }
-          : item,
-      );
-      setPromptAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      frontendLog("info", `[generation] 应用提示词审计结果: node=${nodeKey}, round=${state.round}`);
-      toast.success("已应用提示词审计结果", {
-        description: `第 ${state.round} 轮建议已写入当前输出。`,
-      });
-    },
-    [patchNode, promptAudits],
-  );
-
-  /** 放弃审计建议但保留多轮对话，下一轮仍可基于完整历史继续审查。 */
-  const handleDiscardPromptAudit = useCallback(
-    (nodeKey: string) => {
-      const state = promptAudits[nodeKey];
-      if (state?.status !== "done") return;
-      patchNode("gen", nodeKey, (item) =>
-        item.kind === "prompt"
-          ? {
-              ...item,
-              config: {
-                ...item.config,
-                conversation: [
-                  ...(item.config.conversation ?? []),
-                  {
-                    id: promptMessageId(),
-                    role: "decision",
-                    content: `已保留当前输出，未应用第 ${state.round} 轮审计结果。`,
-                  },
-                ],
-              },
-            }
-          : item,
-      );
-      setPromptAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      frontendLog(
-        "info",
-        `[generation] 保留提示词审计前输出: node=${nodeKey}, round=${state.round}`,
-      );
-      toast.info("已保留当前提示词", {
-        description: `未应用第 ${state.round} 轮审计建议。`,
-      });
-    },
-    [patchNode, promptAudits],
-  );
-
   /** 剧本对话：双技能全文由后端每轮重新载入，节点内全部历史逐条注入系统上下文。 */
   const handleRunScreenplayNode = useCallback(
     (nodeKey: string) => {
@@ -2104,12 +1842,6 @@ export function WorkspaceApp() {
       }
       const multimodalInputs = screenplayMultimodalInputs(node.config);
       setNodeStartError(nodeKey, null);
-      setScreenplayAudits((current) => {
-        if (!(nodeKey in current)) return current;
-        const next = { ...current };
-        delete next[nodeKey];
-        return next;
-      });
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
@@ -2125,7 +1857,6 @@ export function WorkspaceApp() {
           task: "generate",
           userPrompt,
           contextHistory,
-          detailReview: false,
           multimodalInputs,
         })
         .then((result) => {
@@ -2169,200 +1900,6 @@ export function WorkspaceApp() {
         });
     },
     [patchNode, providerCatalog, screenplayNodes, setNodeStartError, startingNodeKeys],
-  );
-
-  const handleScreenplayAudit = useCallback(
-    (nodeKey: string) => {
-      const node = screenplayNodes.find((item) => item.key === nodeKey);
-      if (!node) return;
-      const previous = screenplayAudits[nodeKey];
-      if (previous?.status === "running") return;
-      const currentDocument = (
-        previous?.status === "done" && previous.optimizedPrompt
-          ? previous.optimizedPrompt
-          : node.config.currentDocument
-      ).trim();
-      const round = node.config.conversation.filter((entry) => entry.role === "audit").length + 1;
-      const failWith = (message: string) => {
-        setScreenplayAudits((current) => ({
-          ...current,
-          [nodeKey]: {
-            status: "error",
-            detail: true,
-            round: round - 1,
-            originalPrompt: currentDocument,
-            optimizedPrompt: null,
-            error: message,
-            contextHistory: previous?.contextHistory ?? [],
-          },
-        }));
-      };
-      if (!isDesktopRuntime()) {
-        failWith("剧本审计只能在桌面应用中使用。请通过 Tauri 桌面端运行。");
-        return;
-      }
-      if (!currentDocument) {
-        failWith("当前剧本为空：请先完成一轮创作或粘贴 Markdown 剧本。");
-        return;
-      }
-      const provider = providerCatalog.find(
-        (entry) =>
-          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
-      );
-      const model = provider?.models.find(
-        (item) =>
-          item.definitionId === node.config.modelSelection.modelDefinitionId &&
-          isTextGenerationModel(item),
-      );
-      if (!provider || !model) {
-        failWith("请先在当前剧本节点中选择可用的文本模型。");
-        return;
-      }
-      const contextHistory: PromptOptimizationContextEntry[] = node.config.conversation.map(
-        (entry, index) => ({
-          role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "screenplay")}`,
-          content: entry.content,
-        }),
-      );
-      contextHistory.push({ role: `第 ${round} 轮审计输入 · 当前剧本`, content: currentDocument });
-      const multimodalInputs = screenplayMultimodalInputs(node.config);
-      setNodeStartError(nodeKey, null);
-      setScreenplayAudits((current) => ({
-        ...current,
-        [nodeKey]: {
-          status: "running",
-          detail: true,
-          round,
-          originalPrompt: currentDocument,
-          optimizedPrompt: null,
-          error: null,
-          contextHistory,
-        },
-      }));
-      frontendLog(
-        "info",
-        `[generation] 发起剧本审计: node=${nodeKey}, round=${round}, 剧本 ${currentDocument.length} 字符, 注入 ${contextHistory.length} 条历史, 多模态素材 ${multimodalInputs.length} 项`,
-      );
-      void promptNodeClient
-        .run({
-          canvasId: CANVAS_ID,
-          sourceNodeId: nodeKey,
-          providerConnectionId: provider.provider.id,
-          modelDefinitionId: model.definitionId,
-          mode: "screenplay",
-          task: "audit",
-          userPrompt: currentDocument,
-          contextHistory,
-          detailReview: true,
-          multimodalInputs,
-        })
-        .then((result) => {
-          const completedContext = [
-            ...contextHistory,
-            { role: `第 ${round} 轮审计结果`, content: result.optimizedPrompt },
-          ];
-          patchNode("screenplay", nodeKey, (item) => ({
-            ...item,
-            config: {
-              ...item.config,
-              conversation: [
-                ...item.config.conversation,
-                {
-                  id: screenplayMessageId(),
-                  role: "audit",
-                  content: result.optimizedPrompt,
-                },
-              ],
-            },
-          }));
-          setScreenplayAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                ...state,
-                status: "done",
-                optimizedPrompt: result.optimizedPrompt,
-                contextHistory: completedContext,
-              },
-            };
-          });
-          frontendLog(
-            "info",
-            `[generation] 剧本审计完成: node=${nodeKey}, round=${round}, 返回 ${result.optimizedPrompt.length} 字符`,
-          );
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          setScreenplayAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return { ...current, [nodeKey]: { ...state, status: "error", error: message } };
-          });
-          frontendLog("error", `[generation] 剧本审计失败: node=${nodeKey}, ${message}`);
-        });
-    },
-    [patchNode, providerCatalog, screenplayAudits, screenplayNodes, setNodeStartError],
-  );
-
-  const handleApplyScreenplayAudit = useCallback(
-    (nodeKey: string) => {
-      const state = screenplayAudits[nodeKey];
-      if (state?.status !== "done" || !state.optimizedPrompt) return;
-      patchNode("screenplay", nodeKey, (node) => ({
-        ...node,
-        config: {
-          ...node.config,
-          currentDocument: state.optimizedPrompt!,
-          conversation: [
-            ...node.config.conversation,
-            {
-              id: screenplayMessageId(),
-              role: "decision",
-              content: `已应用第 ${state.round} 轮审计修订稿。`,
-            },
-          ],
-        },
-      }));
-      setScreenplayAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      toast.success("已应用剧本审计修订稿", {
-        description: `第 ${state.round} 轮修订已写入当前剧本。`,
-      });
-    },
-    [patchNode, screenplayAudits],
-  );
-
-  const handleDiscardScreenplayAudit = useCallback(
-    (nodeKey: string) => {
-      const state = screenplayAudits[nodeKey];
-      if (state?.status !== "done") return;
-      patchNode("screenplay", nodeKey, (node) => ({
-        ...node,
-        config: {
-          ...node.config,
-          conversation: [
-            ...node.config.conversation,
-            {
-              id: screenplayMessageId(),
-              role: "decision",
-              content: `已保留当前剧本，未应用第 ${state.round} 轮审计修订稿。`,
-            },
-          ],
-        },
-      }));
-      setScreenplayAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      toast.info("已保留当前剧本", {
-        description: `未应用第 ${state.round} 轮审计修订。`,
-      });
-    },
-    [patchNode, screenplayAudits],
   );
 
   const handleExportScreenplay = useCallback(
@@ -2452,12 +1989,6 @@ export function WorkspaceApp() {
         });
       }
       setNodeStartError(nodeKey, null);
-      setStoryboardAudits((current) => {
-        if (!(nodeKey in current)) return current;
-        const next = { ...current };
-        delete next[nodeKey];
-        return next;
-      });
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
@@ -2473,7 +2004,6 @@ export function WorkspaceApp() {
           task: "generate",
           userPrompt,
           contextHistory,
-          detailReview: false,
         })
         .then((result) => {
           patchNode("storyboard", nodeKey, (item) => ({
@@ -2519,216 +2049,6 @@ export function WorkspaceApp() {
       startingNodeKeys,
       storyboardNodes,
     ],
-  );
-
-  const handleStoryboardAudit = useCallback(
-    (nodeKey: string) => {
-      const node = storyboardNodes.find((item) => item.key === nodeKey);
-      if (!node) return;
-      const previous = storyboardAudits[nodeKey];
-      if (previous?.status === "running") return;
-      const currentDocument = (
-        previous?.status === "done" && previous.optimizedPrompt
-          ? previous.optimizedPrompt
-          : node.config.currentDocument
-      ).trim();
-      const round = node.config.conversation.filter((entry) => entry.role === "audit").length + 1;
-      const failWith = (message: string) => {
-        setStoryboardAudits((current) => ({
-          ...current,
-          [nodeKey]: {
-            status: "error",
-            detail: true,
-            round: round - 1,
-            originalPrompt: currentDocument,
-            optimizedPrompt: null,
-            error: message,
-            contextHistory: previous?.contextHistory ?? [],
-          },
-        }));
-      };
-      if (!isDesktopRuntime()) {
-        failWith("分镜审计只能在桌面应用中使用。请通过 Tauri 桌面端运行。");
-        return;
-      }
-      if (!currentDocument) {
-        failWith("当前分镜脚本为空：请先完成一轮剧本转分镜或粘贴 Markdown 分镜稿。");
-        return;
-      }
-      const provider = providerCatalog.find(
-        (entry) =>
-          entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
-      );
-      const model = provider?.models.find(
-        (item) =>
-          item.definitionId === node.config.modelSelection.modelDefinitionId &&
-          isTextGenerationModel(item),
-      );
-      if (!provider || !model) {
-        failWith("请先在当前分镜节点中选择可用的文本模型。");
-        return;
-      }
-      const sourceInput = screenplayInputByStoryboard.get(nodeKey);
-      const contextHistory: PromptOptimizationContextEntry[] = [];
-      if (sourceInput?.document.trim()) {
-        contextHistory.push({
-          role: `已连接的上游 Markdown 剧本 · ${sourceInput.name}`,
-          content: sourceInput.document.trim(),
-        });
-      }
-      contextHistory.push(
-        ...node.config.conversation.map((entry, index) => ({
-          role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "storyboard")}`,
-          content: entry.content,
-        })),
-      );
-      contextHistory.push({
-        role: `第 ${round} 轮审计输入 · 当前工业级分镜脚本`,
-        content: currentDocument,
-      });
-      setNodeStartError(nodeKey, null);
-      setStoryboardAudits((current) => ({
-        ...current,
-        [nodeKey]: {
-          status: "running",
-          detail: true,
-          round,
-          originalPrompt: currentDocument,
-          optimizedPrompt: null,
-          error: null,
-          contextHistory,
-        },
-      }));
-      frontendLog(
-        "info",
-        `[generation] 发起工业级分镜审计: node=${nodeKey}, round=${round}, 分镜 ${currentDocument.length} 字符, 注入 ${contextHistory.length} 条历史`,
-      );
-      void promptNodeClient
-        .run({
-          canvasId: CANVAS_ID,
-          sourceNodeId: nodeKey,
-          providerConnectionId: provider.provider.id,
-          modelDefinitionId: model.definitionId,
-          mode: "storyboard",
-          task: "audit",
-          userPrompt: currentDocument,
-          contextHistory,
-          detailReview: true,
-        })
-        .then((result) => {
-          const completedContext = [
-            ...contextHistory,
-            { role: `第 ${round} 轮审计结果`, content: result.optimizedPrompt },
-          ];
-          patchNode("storyboard", nodeKey, (item) => ({
-            ...item,
-            config: {
-              ...item.config,
-              conversation: [
-                ...item.config.conversation,
-                {
-                  id: screenplayMessageId(),
-                  role: "audit",
-                  content: result.optimizedPrompt,
-                },
-              ],
-            },
-          }));
-          setStoryboardAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                ...state,
-                status: "done",
-                optimizedPrompt: result.optimizedPrompt,
-                contextHistory: completedContext,
-              },
-            };
-          });
-          frontendLog(
-            "info",
-            `[generation] 工业级分镜审计完成: node=${nodeKey}, round=${round}, 返回 ${result.optimizedPrompt.length} 字符`,
-          );
-        })
-        .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
-          setStoryboardAudits((current) => {
-            const state = current[nodeKey];
-            if (state?.status !== "running" || state.round !== round) return current;
-            return { ...current, [nodeKey]: { ...state, status: "error", error: message } };
-          });
-          frontendLog("error", `[generation] 工业级分镜审计失败: node=${nodeKey}, ${message}`);
-        });
-    },
-    [
-      patchNode,
-      providerCatalog,
-      screenplayInputByStoryboard,
-      setNodeStartError,
-      storyboardAudits,
-      storyboardNodes,
-    ],
-  );
-
-  const handleApplyStoryboardAudit = useCallback(
-    (nodeKey: string) => {
-      const state = storyboardAudits[nodeKey];
-      if (state?.status !== "done" || !state.optimizedPrompt) return;
-      patchNode("storyboard", nodeKey, (node) => ({
-        ...node,
-        config: {
-          ...node.config,
-          currentDocument: state.optimizedPrompt!,
-          conversation: [
-            ...node.config.conversation,
-            {
-              id: screenplayMessageId(),
-              role: "decision",
-              content: `已应用第 ${state.round} 轮分镜审计修订稿。`,
-            },
-          ],
-        },
-      }));
-      setStoryboardAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      toast.success("已应用分镜审计修订稿", {
-        description: `第 ${state.round} 轮修订已写入当前分镜。`,
-      });
-    },
-    [patchNode, storyboardAudits],
-  );
-
-  const handleDiscardStoryboardAudit = useCallback(
-    (nodeKey: string) => {
-      const state = storyboardAudits[nodeKey];
-      if (state?.status !== "done") return;
-      patchNode("storyboard", nodeKey, (node) => ({
-        ...node,
-        config: {
-          ...node.config,
-          conversation: [
-            ...node.config.conversation,
-            {
-              id: screenplayMessageId(),
-              role: "decision",
-              content: `已保留当前分镜脚本，未应用第 ${state.round} 轮审计修订稿。`,
-            },
-          ],
-        },
-      }));
-      setStoryboardAudits((current) => ({
-        ...current,
-        [nodeKey]: { ...state, status: "idle", optimizedPrompt: null, error: null },
-      }));
-      toast.info("已保留当前分镜", {
-        description: `未应用第 ${state.round} 轮审计修订。`,
-      });
-    },
-    [patchNode, storyboardAudits],
   );
 
   const handleExportStoryboard = useCallback(
@@ -2883,7 +2203,6 @@ export function WorkspaceApp() {
             mode: "viral_remix",
             task: "generate",
             userPrompt,
-            detailReview: false,
             visionImages: contactSheets.sheets.map((sheet) => ({
               dataUrl: sheet.dataUrl,
               displayName: sheet.displayName,
@@ -3088,12 +2407,6 @@ export function WorkspaceApp() {
         return next;
       });
       promptContents.remove(key);
-      setPromptAudits((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
       setStartErrorsByNode((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
@@ -3108,12 +2421,6 @@ export function WorkspaceApp() {
     (key: string) => {
       removeCanvasNode(key);
       setGenNodeSizes((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setScreenplayAudits((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
         delete next[key];
@@ -3139,12 +2446,6 @@ export function WorkspaceApp() {
     (key: string) => {
       removeCanvasNode(key);
       setGenNodeSizes((current) => {
-        if (!(key in current)) return current;
-        const next = { ...current };
-        delete next[key];
-        return next;
-      });
-      setStoryboardAudits((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
         delete next[key];
@@ -3507,13 +2808,16 @@ export function WorkspaceApp() {
     (record: GenerationResultRecord, previewSrc: string | null = null) => {
       if (!isDesktopRuntime()) return;
       const mediaType = record.mediaType;
-      if (mediaType !== "image" && mediaType !== "video") return;
+      if (mediaType !== "image" && mediaType !== "video" && mediaType !== "text") return;
       const resultKey = `${record.taskId}#${record.resultIndex}`;
       const saved = record.saveStatus === "succeeded" && record.finalPath != null;
-      if (!saved && previewSrc == null) return;
+      if (!saved && previewSrc == null && mediaType !== "text") return;
       if (saved && seenOutputResultKeysRef.current.has(resultKey)) return;
       const finalPath = saved ? record.finalPath : null;
       const name = finalPath ? fileNameFromPath(finalPath) : null;
+      // Context-IR 文本产物：扩写正文内联在 source.text，随事件写入卡片展示。
+      const textContent =
+        mediaType === "text" ? (textResultFromSource(record.source) ?? null) : null;
       let matched = false;
       patchNodes("output", (node) => {
         if (
@@ -3529,6 +2833,7 @@ export function WorkspaceApp() {
           resultKey,
           mediaType,
           ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
+          ...(textContent != null ? { textContent } : {}),
         };
       });
       if (saved) {
@@ -3700,10 +3005,7 @@ export function WorkspaceApp() {
       const connections: PromptContentConnection[] = [
         ...connectedAssets.map((input) => ({
           ...input,
-          role:
-            genNode.kind === "video"
-              ? (genNode.config.mediaRoles?.[input.key] ?? "")
-              : "",
+          role: genNode.kind === "video" ? (genNode.config.mediaRoles?.[input.key] ?? "") : "",
         })),
         ...urlConnections,
       ];
@@ -3760,18 +3062,29 @@ export function WorkspaceApp() {
         connections.length > 0,
       );
 
-      // 供应商 API 无数量参数：数量 > 1 时拆分为 N 个独立任务（每个任务数量 1），
+      // GPT-Image 契约的模型支持 `n` 参数：一次请求生成 n 张图片，不再拆分任务。
+      // 其余供应商 API 无数量参数：数量 > 1 时拆分为 N 个独立任务（每个任务数量 1），
       // 每个任务对应一张占位产物卡片，单独展示状态与执行细节。
+      const supportsBatchCount = parameterCapabilities.some(
+        (capability) => capability.key === "n" && capability.type === "integer",
+      );
+      const countMaximum = supportsBatchCount
+        ? GPT_IMAGE_MAX_GENERATION_COUNT
+        : MAX_GENERATION_COUNT;
       const generationCount = Math.min(
-        MAX_GENERATION_COUNT,
+        countMaximum,
         Math.max(1, Math.floor(genNode.config.generationCount) || 1),
       );
+      if (supportsBatchCount) {
+        parameters["n"] = generationCount;
+      }
+      const taskCount = supportsBatchCount ? 1 : generationCount;
       frontendLog(
         "info",
-        `[generation] 发起画布生成: node=${nodeKey}（${genNode.kind}）, operation=${operation}, 提示词片段 ${promptSegments.length} 个（含 ${promptSegments.filter((s) => s.kind === "media_reference").length} 个 @引用）, 显式媒体输入 ${explicitMedia.length} 个, 生成数量 ${generationCount}（拆分为 ${generationCount} 个任务）`,
+        `[generation] 发起画布生成: node=${nodeKey}（${genNode.kind}）, operation=${operation}, 提示词片段 ${promptSegments.length} 个（含 ${promptSegments.filter((s) => s.kind === "media_reference").length} 个 @引用）, 显式媒体输入 ${explicitMedia.length} 个, 生成数量 ${generationCount}${supportsBatchCount ? `（作为 n 参数一次请求提交）` : `（拆分为 ${taskCount} 个任务）`}`,
       );
       const startErrors: string[] = [];
-      let remaining = generationCount;
+      let remaining = taskCount;
       const settleOne = () => {
         remaining -= 1;
         if (remaining > 0) return;
@@ -3783,13 +3096,13 @@ export function WorkspaceApp() {
         if (startErrors.length > 0) {
           setNodeStartError(
             nodeKey,
-            startErrors.length === generationCount
-              ? `${generationCount} 个生成任务全部创建失败：${startErrors[0]}`
-              : `${startErrors.length}/${generationCount} 个生成任务创建失败：${startErrors[0]}`,
+            startErrors.length === taskCount
+              ? `${taskCount} 个生成任务全部创建失败：${startErrors[0]}`
+              : `${startErrors.length}/${taskCount} 个生成任务创建失败：${startErrors[0]}`,
           );
         }
       };
-      for (let index = 0; index < generationCount; index += 1) {
+      for (let index = 0; index < taskCount; index += 1) {
         void generationClient
           .start({
             canvasId: CANVAS_ID,
@@ -4066,7 +3379,10 @@ export function WorkspaceApp() {
           continue;
         }
         // 下载/合成节点直接连线：跟随该节点最近一次完成的视频产物。
-        if (videoDownloaderNodeByKey.has(edge.fromKey) || videoComposerNodeByKey.has(edge.fromKey)) {
+        if (
+          videoDownloaderNodeByKey.has(edge.fromKey) ||
+          videoComposerNodeByKey.has(edge.fromKey)
+        ) {
           const latestOutput =
             latestDownloadOutputBySource.get(edge.fromKey) ??
             latestCompositionOutputBySource.get(edge.fromKey);
@@ -4760,10 +4076,7 @@ export function WorkspaceApp() {
         | undefined;
       if (results == null) return;
       for (const { nodeKey, jobId, job, error } of results) {
-        if (
-          job != null &&
-          (job.status === "preparing_engine" || job.status === "processing")
-        ) {
+        if (job != null && (job.status === "preparing_engine" || job.status === "processing")) {
           const preparingEngine = job.status === "preparing_engine";
           setFrameExtractorRuns((current) => {
             const previous = current[nodeKey];
@@ -5360,7 +4673,6 @@ export function WorkspaceApp() {
               running={startingNodeKeys.has(node.key)}
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
-              audit={screenplayAudits[node.key]}
               sourceInput={null}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
@@ -5371,9 +4683,6 @@ export function WorkspaceApp() {
               onPickMaterials={handlePickScreenplayMaterials}
               onRemoveMaterial={handleRemoveScreenplayMaterial}
               onSend={handleRunScreenplayNode}
-              onAudit={handleScreenplayAudit}
-              onApplyAudit={handleApplyScreenplayAudit}
-              onDiscardAudit={handleDiscardScreenplayAudit}
               onExport={handleExportScreenplay}
             />
           ),
@@ -5385,7 +4694,6 @@ export function WorkspaceApp() {
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
-      screenplayAudits,
       selectNode,
       ignoreLegacyNodeDrag,
       removeScreenplayNode,
@@ -5395,9 +4703,6 @@ export function WorkspaceApp() {
       handlePickScreenplayMaterials,
       handleRemoveScreenplayMaterial,
       handleRunScreenplayNode,
-      handleScreenplayAudit,
-      handleApplyScreenplayAudit,
-      handleDiscardScreenplayAudit,
       handleExportScreenplay,
     ],
   );
@@ -5422,7 +4727,6 @@ export function WorkspaceApp() {
               running={startingNodeKeys.has(node.key)}
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
-              audit={storyboardAudits[node.key]}
               sourceInput={screenplayInputByStoryboard.get(node.key) ?? null}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
@@ -5431,9 +4735,6 @@ export function WorkspaceApp() {
               onSizeChange={handleGenNodeSizeChange}
               onChange={(config) => updateStoryboardNodeConfig(node.key, config)}
               onSend={handleRunStoryboardNode}
-              onAudit={handleStoryboardAudit}
-              onApplyAudit={handleApplyStoryboardAudit}
-              onDiscardAudit={handleDiscardStoryboardAudit}
               onExport={handleExportStoryboard}
             />
           ),
@@ -5445,7 +4746,6 @@ export function WorkspaceApp() {
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
-      storyboardAudits,
       screenplayInputByStoryboard,
       selectNode,
       ignoreLegacyNodeDrag,
@@ -5454,9 +4754,6 @@ export function WorkspaceApp() {
       handleGenNodeSizeChange,
       updateStoryboardNodeConfig,
       handleRunStoryboardNode,
-      handleStoryboardAudit,
-      handleApplyStoryboardAudit,
-      handleDiscardStoryboardAudit,
       handleExportStoryboard,
     ],
   );
@@ -5539,7 +4836,6 @@ export function WorkspaceApp() {
               dragging={false}
               running={startingNodeKeys.has(node.key)}
               error={startErrorsByNode[node.key] ?? null}
-              audit={promptAudits[node.key]}
               providerCatalog={providerCatalog}
               sourceConnections={connectedInputsByNode.get(node.key) ?? []}
               targetConnections={promptTargetsBySource.get(node.key) ?? []}
@@ -5551,9 +4847,6 @@ export function WorkspaceApp() {
               onSizeChange={handleGenNodeSizeChange}
               onChange={(config) => updatePromptNodeConfig(node.key, config)}
               onRun={handleRunPromptNode}
-              onAudit={handlePromptAudit}
-              onApplyAudit={handleApplyPromptAudit}
-              onDiscardAudit={handleDiscardPromptAudit}
             />
           ) : (
             <CanvasGenNode
@@ -5605,7 +4898,6 @@ export function WorkspaceApp() {
       selectedNodeKey,
       startingNodeKeys,
       startErrorsByNode,
-      promptAudits,
       providerCatalog,
       promptTargetsBySource,
       selectNode,
@@ -5616,9 +4908,6 @@ export function WorkspaceApp() {
       handleGenNodeSizeChange,
       updatePromptNodeConfig,
       handleRunPromptNode,
-      handlePromptAudit,
-      handleApplyPromptAudit,
-      handleDiscardPromptAudit,
       activeTaskByNode,
       inheritedInputsByNode,
       mentionCandidatesFor,

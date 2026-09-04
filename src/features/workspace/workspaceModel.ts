@@ -374,6 +374,7 @@ export type GenNodeData =
       readonly config: PromptNodeConfig;
     });
 
+/** `audit` / `decision` only preserve conversation entries from older canvas archives. */
 export type ScreenplayConversationRole = "user" | "assistant" | "audit" | "decision";
 
 export interface ScreenplayConversationEntry {
@@ -400,7 +401,7 @@ export interface ScreenplayNodeConfig {
   readonly conversation: readonly ScreenplayConversationEntry[];
   /** 当前可编辑、可导出的 Markdown 剧本文档。 */
   readonly currentDocument: string;
-  /** 每轮创作与审计都会重新发送的本地多模态参考素材。 */
+  /** 每轮创作都会重新发送的本地多模态参考素材。 */
   readonly materials?: readonly ScreenplayMaterialInput[];
   readonly catalogResolved: boolean;
 }
@@ -620,7 +621,8 @@ export interface OutputNodeData {
   /** 来源生成节点 key（定位与虚线连线用）。 */
   readonly sourceNodeId: string;
   readonly taskId: string;
-  readonly mediaType: "image" | "video";
+  /** 文本产物（Context-IR 等）为 "text"，无法作为媒体参考输入。 */
+  readonly mediaType: "image" | "video" | "text";
   /** 旧文档未保存时默认为 generation。 */
   readonly origin?: "generation" | "composition" | "download" | "frame_extract";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
@@ -629,6 +631,8 @@ export interface OutputNodeData {
   readonly previewSrc?: string | null;
   /** 展示名（产物文件名）；任务未完成时为 null。 */
   readonly name: string | null;
+  /** 文本产物（mediaType === "text"）的扩写正文；随结果事件内联，无需读取文件。 */
+  readonly textContent?: string | null;
   /** 生成结果原始宽高比；成功加载后写入并随画布持久化。 */
   readonly aspectRatio?: number;
   readonly x: number;
@@ -638,6 +642,9 @@ export interface OutputNodeData {
 }
 
 export function outputNodeDimensions(node: OutputNodeData): CanvasNodeDimensions {
+  if (node.mediaType === "text") {
+    return { width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT };
+  }
   return node.finalPath == null && node.previewSrc == null
     ? { width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT }
     : fitMediaNodeDimensions(node.aspectRatio);
@@ -759,6 +766,15 @@ export function nextFrameExtractorOutputSlot(
 export function fileNameFromPath(path: string): string {
   const segments = path.split(/[\\/]/).filter(Boolean);
   return segments[segments.length - 1] ?? path;
+}
+
+/** 从文本结果记录的 source（`{ kind: "text", text }`）提取扩写正文；非文本来源返回 null。 */
+export function textResultFromSource(source: unknown): string | null {
+  if (source == null || typeof source !== "object") return null;
+  const value = source as { readonly kind?: unknown; readonly text?: unknown };
+  if (value.kind !== "text" || typeof value.text !== "string") return null;
+  const text = value.text.trim();
+  return text.length > 0 ? text : null;
 }
 
 /** 桌面端通过原生 HTTP 拉取远程素材，转为同源 Blob，避免画布录制被 CORS 污染。 */
@@ -1164,12 +1180,12 @@ export const NODE_KIND_DESCRIPTORS: Record<CanvasGenNodeKind | "result", StaticN
 
 export const SCREENPLAY_NODE_DESCRIPTOR: StaticNodeDescriptor = {
   kindLabel: "剧本创作与优化",
-  description: "内置双技能 · 多轮创作、审计与 Markdown 导出",
+  description: "内置双技能 · 多轮创作与 Markdown 导出",
 };
 
 export const STORYBOARD_NODE_DESCRIPTOR: StaticNodeDescriptor = {
   kindLabel: "剧本转工业级分镜脚本",
-  description: "内置 V4.6 技能 · 多轮分镜、审计与 Markdown 导出",
+  description: "内置 V4.6 技能 · 多轮分镜与 Markdown 导出",
 };
 
 export interface DocumentSkillNodeCopy {
@@ -1209,7 +1225,7 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     emptyDescription: "助手会按项目类型逐步提问；后续每轮都会带上全部对话。",
     composerAriaLabel: "剧本对话消息",
     composerPlaceholder: "例如：写一部 80 集女频复仇短剧，先从项目参数开始",
-    documentPlaceholder: "对话产出的最新稿件会同步到这里，也可以粘贴或直接编辑后审计、导出。",
+    documentPlaceholder: "对话产出的最新稿件会同步到这里，也可以粘贴或直接编辑后导出。",
     loadingLabel: "正在载入双技能与全部对话…",
     removeAriaLabel: "移除剧本创作与优化节点",
     exportAriaLabel: "导出 Markdown 剧本文档",
@@ -1231,8 +1247,7 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     composerAriaLabel: "分镜对话消息",
     composerPlaceholder:
       "粘贴剧本，或输入：将上面的剧本转成 9:16、每段 15 秒的 Seedance 2.5 分镜脚本",
-    documentPlaceholder:
-      "最新工业级分镜稿会同步到这里；可直接编辑、继续对话、审计并导出 Markdown。",
+    documentPlaceholder: "最新工业级分镜稿会同步到这里；可直接编辑、继续对话并导出 Markdown。",
     loadingLabel: "正在载入 V4.6 技能与全部上下文…",
     removeAriaLabel: "移除剧本转工业级分镜脚本节点",
     exportAriaLabel: "导出 Markdown 分镜脚本文档",
@@ -1283,14 +1298,17 @@ export const CANVAS_DOCUMENT_TITLE = "未命名画布";
 /** 画布状态变更后的自动保存防抖间隔。 */
 export const CANVAS_SAVE_DEBOUNCE_MS = 1000;
 
-/** 生成数量上限：供应商 API 无数量参数，数量 > 1 时前端拆分为多个独立任务（每个任务数量 1）。 */
+/** 生成数量上限：供应商 API 无数量参数时，数量 > 1 拆分为多个独立任务（每个任务数量 1）。 */
 export const MAX_GENERATION_COUNT = 4;
 
-/** 解析生成数量输入：空值/非法值回落为 1，并钳制到 [1, MAX_GENERATION_COUNT]。 */
-export function parseGenerationCountInput(raw: string): number {
+/** GPT-Image 契约的生成数量上限（接口文档规定 n 的取值范围 1~10）。 */
+export const GPT_IMAGE_MAX_GENERATION_COUNT = 10;
+
+/** 解析生成数量输入：空值/非法值回落为 1，并钳制到 [1, max]。 */
+export function parseGenerationCountInput(raw: string, max: number = MAX_GENERATION_COUNT): number {
   const parsed = Number.parseInt(raw, 10);
   if (Number.isNaN(parsed)) return 1;
-  return Math.min(MAX_GENERATION_COUNT, Math.max(1, parsed));
+  return Math.min(max, Math.max(1, parsed));
 }
 
 /** 提示词优化功能已从图片/视频生成节点移除，交由独立「提示词生成与优化」节点承担。 */
@@ -1324,6 +1342,7 @@ export interface VideoUrlMediaInput {
 
 export type PromptNodeTask = "generate" | "optimize";
 
+/** `audit` / `decision` only preserve conversation entries from older canvas archives. */
 export type PromptConversationRole = "user" | "assistant" | "audit" | "decision";
 
 export interface PromptConversationEntry {
@@ -1339,9 +1358,9 @@ export interface PromptNodeConfig {
   readonly mode: PromptOptimizationMode;
   /** 尚未发送的本轮输入草稿（随画布保存；多轮对话的输入框）。 */
   readonly sourcePrompt: string;
-  /** 全部已完成轮次（你 / 提示词助手 / 审计 / 决定）；每次请求都会完整注入上一轮上下文。 */
+  /** 全部已完成轮次；每次请求都会完整注入上一轮上下文。 */
   readonly conversation?: readonly PromptConversationEntry[];
-  /** 当前可编辑输出（下发给下游节点）；应用审计结果后更新。 */
+  /** 当前可编辑输出（下发给下游节点）。 */
   readonly generatedPrompt: string;
   readonly catalogResolved: boolean;
   /** 兼容旧文档：旧版审计上下文在恢复时迁移进 conversation，此后不再写入。 */
@@ -1443,25 +1462,6 @@ export function createViralRemixNodeConfig(
     currentDocument: "",
     catalogResolved,
   };
-}
-
-/** 提示词优化/审计面板的运行时状态（会话内有效，完整审计上下文另存于提示词节点）。 */
-export interface PromptOptimizationPanelState {
-  /**
-   * running = 优化进行中（此时生成按钮被禁用）；done = 展示对比结果；
-   * error = 展示错误；idle = 已采用/放弃后的待命态（仅保留轮次与上下文）。
-   */
-  readonly status: "idle" | "running" | "done" | "error";
-  /** 最近一次执行是否为细节优化/审计。 */
-  readonly detail: boolean;
-  /** 已完成的优化轮次（含失败前的进行中轮次）。 */
-  readonly round: number;
-  /** 最近一轮请求前的原提示词（diff 对比基线）。 */
-  readonly originalPrompt: string;
-  readonly optimizedPrompt: string | null;
-  readonly error: string | null;
-  /** 细节优化/审计时注入系统提示词的全部历史上下文。 */
-  readonly contextHistory: readonly PromptOptimizationContextEntry[];
 }
 
 export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, string> = {
@@ -1625,6 +1625,8 @@ export function assetNodeReferenceTarget(node: AssetNodeData): MediaReferenceTar
  * 合成节点产物不是 generation task 的结果，仍只用于视频拼接输入。
  */
 export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceTarget | null {
+  // 文本产物（Context-IR 等）不是媒体，无法作为参考素材输入。
+  if (node.mediaType === "text") return null;
   // 抽帧产物是带本地绝对路径的普通图片文件，直接作为 local_file 引用
   // （生成节点 / 提示词理解都可直接读取磁盘）。
   if (node.origin === "frame_extract") {
@@ -1672,10 +1674,12 @@ export function assetGenerationInput(node: AssetNodeData): GenerationMediaInput 
 export function outputGenerationInput(node: OutputNodeData): GenerationMediaInput | null {
   const target = outputNodeReferenceTarget(node);
   if (target == null) return null;
+  // 文本产物无法作为媒体参考，target 非空即 image/video。
+  const kind = node.mediaType as AssetKind;
   return {
     key: node.key,
     name: node.name ?? `${node.mediaType === "image" ? "图片" : "视频"}产物`,
-    kind: node.mediaType,
+    kind,
     target,
     previewUrl: node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null),
   };

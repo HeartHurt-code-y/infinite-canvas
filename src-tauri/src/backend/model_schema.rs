@@ -89,14 +89,47 @@ fn is_dreamina_seedance_video_model(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("dreamina-seedance")
 }
 
+/// Veo 系列（Google Veo）：`veo-3`、`veo-3-fast`、`veo-3.1`、`veo-3.1-fast`。
+/// 按「非字母数字分隔的完整 ASCII 标记」匹配，避免把 `video` 等相近词误判。
+fn is_veo_video_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    contains_identity_token(&identity, "veo")
+}
+
+/// Vidu 系列（魔芋 AI 聚合平台）：`vidu2.0` / `viduq1` / `viduq3-pro` /
+/// `viduq3-turbo`。四个模型走同一套 Vidu 端点与请求契约，差异仅在分辨率白名单
+/// 与能力（`viduq3-pro` 不支持 ≥3 张参考图生视频）。
+/// 按「非字母数字分隔的完整 ASCII 标记」匹配，避免把 `video` 等相近词误判。
+fn is_vidu_video_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    contains_identity_token(&identity, "vidu")
+        || identity.contains("vidu2.0")
+        || identity.contains("viduq1")
+        || identity.contains("viduq3")
+}
+
+/// MiniMax-H3（魔芋平台新一代视频生成模型）：`MiniMax-H3`。
+/// 走独立的 MiniMax-H3 请求契约：`resolution` 取 `768P`/`2K`，媒体通过
+/// `metadata.first_frame_image` / `last_frame_image` / `reference_images` /
+/// `reference_videos` / `reference_audios` 传入，`metadata.task_type` 区分
+/// 文生/图生/参考生成（generation）与 768P→2K 再生成（regeneration）。
+fn is_minimax_h3_video_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    identity.contains("minimax-h3")
+        || identity.contains("minimax_h3")
+        || identity.contains("minimax h3")
+}
+
 /// 已知视频生成家族与常见生成方向缩写。这里不使用宽泛的厂商品牌名，避免把
 /// 同一厂商的文本模型误判为视频；供应商显式声明的 operations 永远拥有更高优先级。
 fn is_video_model_identity(identity: &str) -> bool {
-    const VIDEO_FRAGMENTS: [&str; 19] = [
+    const VIDEO_FRAGMENTS: [&str; 22] = [
         "seedance",
         "wan3.0-video",
         "wan3-0-video",
         "minimax-video",
+        "minimax-h3",
+        "minimax_h3",
         "hunyuan-video",
         "cogvideo",
         "ltx-video",
@@ -110,6 +143,7 @@ fn is_video_model_identity(identity: &str) -> bool {
         "luma-ray",
         "ray-2",
         "ray2",
+        "vidu",
         "视频生成",
         "视频模型",
     ];
@@ -155,6 +189,15 @@ fn is_image_model_identity(identity: &str) -> bool {
             .any(|token| contains_identity_token(identity, token))
         || ((identity.contains("gemini") || identity.contains("qwen"))
             && contains_identity_token(identity, "image"))
+}
+
+/// Gemini 图片生成模型（如 `gemini-2.5-flash-image`、`gemini-3-pro-image-preview`）。
+/// 走 OpenAI Images API（`POST /v1/images/generations`），但 `size` 使用画幅比例
+/// （`1:1`/`16:9`/…）而非像素尺寸，不声明 `quality`；上游忽略 `n`（一次只返回
+/// 一张，多张需业务侧并发调用）。
+fn is_gemini_image_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    identity.contains("gemini") && contains_identity_token(&identity, "image")
 }
 
 /// 按模型 ID / 显示名特征识别文本（对话）模型。
@@ -232,7 +275,11 @@ pub fn schema_for_enabled_operations(
     let mut schema = Value::Object(schema);
     refresh_wan_30_video_defaults(&mut schema, model_id);
     refresh_dreamina_seedance_video_defaults(&mut schema, model_id);
+    refresh_seedance_20_video_defaults(&mut schema, model_id);
     refresh_seedance_25_video_defaults(&mut schema, model_id);
+    refresh_veo_video_defaults(&mut schema, model_id);
+    refresh_vidu_video_defaults(&mut schema, model_id);
+    refresh_minimax_h3_video_defaults(&mut schema, model_id);
     schema
 }
 
@@ -457,8 +504,62 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     let mut complete = Value::Object(complete);
     refresh_wan_30_video_defaults(&mut complete, model_id);
     refresh_dreamina_seedance_video_defaults(&mut complete, model_id);
+    refresh_seedance_20_video_defaults(&mut complete, model_id);
     refresh_seedance_25_video_defaults(&mut complete, model_id);
+    refresh_veo_video_defaults(&mut complete, model_id);
+    refresh_vidu_video_defaults(&mut complete, model_id);
+    refresh_minimax_h3_video_defaults(&mut complete, model_id);
     complete
+}
+
+/// GPT-Image 契约的尺寸参数：接口文档规定只接受 `auto` 与三种标准尺寸。
+fn gpt_image_size_parameter() -> Value {
+    json!({
+        "type": "string",
+        "label": "尺寸",
+        "default": "auto",
+        "enum": ["auto", "1024x1024", "1536x1024", "1024x1536"]
+    })
+}
+
+/// GPT-Image 契约的质量参数：接口文档规定只接受 `auto/high/medium/low`。
+fn gpt_image_quality_parameter() -> Value {
+    json!({
+        "type": "string",
+        "label": "质量",
+        "default": "auto",
+        "enum": ["auto", "high", "medium", "low"]
+    })
+}
+
+/// GPT-Image 契约的生成数量参数：图片生成与图片编辑接口均声明 `n`，取值范围 1~10，默认 1。
+fn gpt_image_count_parameter() -> Value {
+    json!({
+        "type": "integer",
+        "label": "生成数量",
+        "default": 1,
+        "minimum": 1,
+        "maximum": 10
+    })
+}
+
+/// Gemini 图片生成契约的尺寸参数：接口只接受画幅比例（非像素尺寸），默认 `1:1`。
+fn gemini_image_size_parameter() -> Value {
+    json!({
+        "type": "string",
+        "label": "尺寸",
+        "default": "1:1",
+        "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"]
+    })
+}
+
+/// 尚未加入 `n` 参数的早期 GPT Image 文生图默认参数（加入 `n` 前的形状），
+/// 用于识别需要迁移到当前契约的已保存定义。
+fn gpt_image_text_to_image_parameters_before_n() -> Value {
+    json!({
+        "size": gpt_image_size_parameter(),
+        "quality": gpt_image_quality_parameter()
+    })
 }
 
 fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> Value {
@@ -483,6 +584,23 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
         GenerationOperation::TextToImage => {
+            // Gemini 图片生成契约：`size` 只接受画幅比例（1:1/16:9/…），不声明
+            // `quality`；上游忽略 `n`（一次只返回一张），因此不声明生成数量参数。
+            if is_gemini_image_model(model_id) {
+                let mut parameters = Map::new();
+                parameters.insert("size".into(), gemini_image_size_parameter());
+                return json!({
+                    "resultType": "image",
+                    "requestProfileId": "openai_images_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/images/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root"
+                    },
+                    "parameters": parameters
+                });
+            }
             // gpt-image 系列（gpt-image-1/1.5/2 …）遵循 GPT Image 契约：
             // quality 只接受 auto/high/medium/low，size 只接受 auto 与三种标准尺寸；
             // 其余模型沿用 dall-e 时代的通用契约（standard/hd）。
@@ -511,6 +629,29 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             } else {
                 ("standard", json!(["hd", "standard"]))
             };
+            let mut parameters = Map::new();
+            parameters.insert(
+                "size".into(),
+                json!({
+                    "type": "string",
+                    "label": "尺寸",
+                    "default": size_default,
+                    "enum": size_enum
+                }),
+            );
+            parameters.insert(
+                "quality".into(),
+                json!({
+                    "type": "string",
+                    "label": "质量",
+                    "default": quality_default,
+                    "enum": quality_enum
+                }),
+            );
+            // GPT Image 契约的图片生成接口还声明生成数量 `n`（1~10，默认 1）。
+            if gpt_image {
+                parameters.insert("n".into(), gpt_image_count_parameter());
+            }
             json!({
                 "resultType": "image",
                 "requestProfileId": "openai_images_v1",
@@ -520,35 +661,291 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                     "encoding": "json",
                     "parameterContainer": "root"
                 },
-                "parameters": {
-                    "size": {
-                        "type": "string",
-                        "label": "尺寸",
-                        "default": size_default,
-                        "enum": size_enum
-                    },
-                    "quality": {
-                        "type": "string",
-                        "label": "质量",
-                        "default": quality_default,
-                        "enum": quality_enum
-                    }
-                }
+                "parameters": parameters
             })
         }
-        GenerationOperation::ImageToImage => json!({
-            "resultType": "image",
-            "requestProfileId": "openai_image_edits_v1",
-            "profileVersion": 1,
-            "request": {
-                "path": "/v1/images/edits",
-                "encoding": "multipart",
-                "parameterContainer": "multipart"
-            },
-            "parameters": {}
-        }),
+        GenerationOperation::ImageToImage => {
+            // GPT-Image 契约的图片编辑接口（multipart）同样声明 `n`/`size`/`quality`；
+            // 其余模型沿用旧契约（只有 model/image[]/prompt）。
+            let gpt_image = model_id.to_ascii_lowercase().contains("gpt-image");
+            let mut parameters = Map::new();
+            if gpt_image {
+                parameters.insert("size".into(), gpt_image_size_parameter());
+                parameters.insert("quality".into(), gpt_image_quality_parameter());
+                parameters.insert("n".into(), gpt_image_count_parameter());
+            }
+            json!({
+                "resultType": "image",
+                "requestProfileId": "openai_image_edits_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/images/edits",
+                    "encoding": "multipart",
+                    "parameterContainer": "multipart"
+                },
+                "parameters": parameters
+            })
+        }
         GenerationOperation::VideoGeneration => {
             let identity = model_id.to_ascii_lowercase();
+            let vidu = is_vidu_video_model(&identity);
+            if vidu {
+                // Vidu 系列（魔芋AI 聚合平台）：请求体为顶层字段，`model`/`prompt`/
+                // `resolution`/`aspect_ratio`/`duration`/`seed`/`watermark` 均放顶层，
+                // `images` 为图生/首尾帧/参考图输入 URL/Base64 数组（1 张=图生、
+                // 2 张=首尾帧、≥3 张=参考图，数量自动判定生成模式），
+                // `movement_amplitude`/`style`/`audio`/`audio_type`/`off_peak`/`bgm`
+                // 等高级参数放入 `metadata` 对象透传。
+                // 分辨率受模型白名单前置校验：vidu2.0=360p/720p/1080p、
+                // viduq1=仅 1080p、viduq3-pro/viduq3-turbo=540p/720p/1080p。
+                // 轮询结果使用 `/v1/videos/{task_id}`（observePath）。
+                let default_resolution = if identity.contains("viduq1") {
+                    "1080p"
+                } else {
+                    "720p"
+                };
+                let resolutions = if identity.contains("vidu2.0") {
+                    json!(["360p", "720p", "1080p"])
+                } else if identity.contains("viduq1") {
+                    json!(["1080p"])
+                } else {
+                    // viduq3-pro / viduq3-turbo
+                    json!(["540p", "720p", "1080p"])
+                };
+                let durations = (1..=16).map(Value::from).collect::<Vec<_>>();
+                return json!({
+                    "resultType": "video",
+                    "requestProfileId": "moyu_vidu_video_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/video/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "mediaEncoding": "vidu_image_urls",
+                        "mediaField": "images",
+                        "metadataField": "metadata",
+                        "observePath": "/v1/videos/{task_id}"
+                    },
+                    "parameters": {
+                        "resolution": {
+                            "type": "string",
+                            "label": "分辨率",
+                            "default": default_resolution,
+                            "enum": resolutions,
+                            "order": 0
+                        },
+                        "aspect_ratio": {
+                            "type": "string",
+                            "label": "画幅",
+                            "default": "16:9",
+                            "enum": ["16:9", "9:16", "1:1", "3:4", "4:3"],
+                            "order": 1
+                        },
+                        "duration": {
+                            "type": "integer",
+                            "label": "时长",
+                            "default": 5,
+                            "enum": durations,
+                            "order": 2
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "label": "随机种子",
+                            "optional": true,
+                            "minimum": -1,
+                            "maximum": 4294967295i64,
+                            "order": 3
+                        },
+                        "watermark": {
+                            "type": "boolean",
+                            "label": "添加水印",
+                            "default": false,
+                            "order": 4
+                        },
+                        "movement_amplitude": {
+                            "type": "string",
+                            "label": "运动幅度",
+                            "default": "auto",
+                            "enum": ["auto", "small", "medium", "large"],
+                            "requestLocation": "metadata",
+                            "order": 5
+                        },
+                        "style": {
+                            "type": "string",
+                            "label": "风格",
+                            "default": "general",
+                            "enum": ["general", "anime"],
+                            "requestLocation": "metadata",
+                            "order": 6
+                        },
+                        "audio": {
+                            "type": "boolean",
+                            "label": "生成音频",
+                            "default": true,
+                            "requestLocation": "metadata",
+                            "order": 7
+                        },
+                        "audio_type": {
+                            "type": "string",
+                            "label": "音频类型",
+                            "optional": true,
+                            "requestLocation": "metadata",
+                            "order": 8
+                        },
+                        "off_peak": {
+                            "type": "boolean",
+                            "label": "闲时模式",
+                            "default": false,
+                            "requestLocation": "metadata",
+                            "order": 9
+                        },
+                        "bgm": {
+                            "type": "boolean",
+                            "label": "背景音乐",
+                            "default": false,
+                            "requestLocation": "metadata",
+                            "order": 10
+                        }
+                    }
+                });
+            }
+            if is_minimax_h3_video_model(&identity) {
+                // MiniMax-H3（魔芋平台新一代视频生成模型）：请求体为顶层字段，
+                // `model`/`prompt`/`duration`/`resolution`/`ratio`/`aigc_watermark`
+                // 均放顶层；媒体通过 `metadata` 传入：`first_frame_image`（首帧，
+                // ≤1）、`last_frame_image`（尾帧，≤1）、`reference_images`（参考图
+                // 数组，≤9）、`reference_videos`（参考视频数组，≤3）、
+                // `reference_audios`（参考音频数组，≤3）。
+                // `metadata.task_type` 区分任务类型：generation（文生/图生/参考
+                // 生成，默认）、regeneration（768P→2K 再生成，连接的源视频作为
+                // `base_video_url`，输出时长由源视频决定，不发送 duration）。
+                // 轮询使用默认 `GET /v1/video/generations/{task_id}`。
+                return json!({
+                    "resultType": "video",
+                    "requestProfileId": "moyu_minimax_h3_video_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/video/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "mediaEncoding": "minimax_h3_media",
+                        "metadataField": "metadata"
+                    },
+                    "parameters": {
+                        "task_type": {
+                            "type": "string",
+                            "label": "任务类型",
+                            "default": "generation",
+                            "enum": ["generation", "regeneration", "h3_context_ir"],
+                            "requestLocation": "metadata",
+                            "order": 0
+                        },
+                        "resolution": {
+                            "type": "string",
+                            "label": "分辨率",
+                            "default": "2K",
+                            "enum": ["768P", "2K"],
+                            "order": 1
+                        },
+                        "ratio": {
+                            "type": "string",
+                            "label": "画幅",
+                            "default": "adaptive",
+                            "enum": ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+                            "order": 2
+                        },
+                        "duration": {
+                            "type": "integer",
+                            "label": "时长",
+                            "default": 5,
+                            "enum": (4..=15).map(Value::from).collect::<Vec<_>>(),
+                            "order": 3
+                        },
+                        "aigc_watermark": {
+                            "type": "boolean",
+                            "label": "AIGC水印",
+                            "default": false,
+                            "order": 4
+                        }
+                    }
+                });
+            }
+            let veo = is_veo_video_model(&identity);
+            if veo {
+                // Veo（Google Veo，魔芋AI 代理）：请求体为顶层字段，`resolution`
+                // 必填（720p/1080p），1080p 要求 duration 必须为 8；`images` 为图生
+                // 视频参考图 URL 数组（只支持公网 http/https URL，不支持 base64）；
+                // 其余可选项（negativePrompt/sampleCount/enhancePrompt/seed）放入
+                // `metadata` 对象。
+                return json!({
+                    "resultType": "video",
+                    "requestProfileId": "moyu_veo_video_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/video/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "mediaEncoding": "veo_image_urls",
+                        "mediaField": "images",
+                        "metadataField": "metadata"
+                    },
+                    "parameters": {
+                        "resolution": {
+                            "type": "string",
+                            "label": "分辨率",
+                            "default": "720p",
+                            "enum": ["720p", "1080p"],
+                            "order": 0
+                        },
+                        "aspect_ratio": {
+                            "type": "string",
+                            "label": "画幅",
+                            "default": "16:9",
+                            "enum": ["16:9", "9:16"],
+                            "order": 1
+                        },
+                        "duration": {
+                            "type": "integer",
+                            "label": "时长",
+                            "default": 8,
+                            "enum": [4, 6, 8],
+                            "order": 2
+                        },
+                        "negativePrompt": {
+                            "type": "string",
+                            "label": "反向提示词",
+                            "optional": true,
+                            "requestLocation": "metadata",
+                            "order": 3
+                        },
+                        "sampleCount": {
+                            "type": "integer",
+                            "label": "单次生成数",
+                            "default": 1,
+                            "minimum": 1,
+                            "maximum": 4,
+                            "requestLocation": "metadata",
+                            "order": 4
+                        },
+                        "enhancePrompt": {
+                            "type": "boolean",
+                            "label": "提示词优化",
+                            "default": true,
+                            "requestLocation": "metadata",
+                            "order": 5
+                        },
+                        "seed": {
+                            "type": "integer",
+                            "label": "随机种子",
+                            "optional": true,
+                            "minimum": 0,
+                            "maximum": 4294967295i64,
+                            "requestLocation": "metadata",
+                            "order": 6
+                        }
+                    }
+                });
+            }
             let wan_30 = is_wan_30_video_model(&identity);
             if wan_30 {
                 let mut durations = vec![json!(-1)];
@@ -613,7 +1010,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                 values.extend((4..=30).map(Value::from));
                 Value::Array(values)
             } else if seedance_20 {
-                Value::Array((4..=15).map(Value::from).collect())
+                let mut values = vec![json!(-1)];
+                values.extend((4..=15).map(Value::from));
+                Value::Array(values)
             } else {
                 Value::Array(Vec::new())
             };
@@ -816,6 +1215,64 @@ pub fn refresh_dreamina_seedance_video_defaults(schema: &mut Value, model_id: &s
     true
 }
 
+/// 把历史版本为 Seedance 2.0 系列保存的视频参数档案补上 `duration=-1`（智能时长）。
+///
+/// Seedance 系列文档将 `duration=-1` 作为通用取值，由模型在有效范围内自主选择
+/// 时长；早期版本只对 2.5 暴露了该选项，2.0 已保存的档案需要原位补齐 `-1`，
+/// 避免覆盖服务商下发的非空自定义参数。
+pub fn refresh_seedance_20_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_seedance_20_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if !operation
+        .get("parameters")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty)
+    {
+        let Some(parameters) = operation
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        let Some(duration) = parameters
+            .get_mut("duration")
+            .and_then(Value::as_object_mut)
+        else {
+            return false;
+        };
+        let Some(values) = duration.get_mut("enum").and_then(Value::as_array_mut) else {
+            return false;
+        };
+        if !values.iter().any(|value| value.as_i64() == Some(-1)) {
+            values.insert(0, json!(-1));
+            return true;
+        }
+        return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
 /// 把历史版本为国内 Seedance 2.5 模型保存的视频参数档案刷新到当前能力。
 ///
 /// 早期版本因官方文档对 `1080p` 与联网搜索支持前后矛盾，把国内
@@ -888,6 +1345,146 @@ pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) ->
     true
 }
 
+/// 把旧版本为 Veo 模型保存的空视频参数档案刷新为当前协议。
+///
+/// Veo 是新增模型家族；若供应商下发或历史档案里出现空 `parameters: {}`，会覆盖
+/// 当前版本的顶层参数（resolution/aspect_ratio/duration）与 metadata 可选参数，
+/// 导致请求缺少必填的 `resolution` 而被平台拒绝。只修复明确的 Veo 模型与空参数，
+/// 避免覆盖供应商下发的非空自定义字段。
+pub fn refresh_veo_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_veo_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if !operation
+        .get("parameters")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty)
+    {
+        return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
+/// 把旧版本为 Vidu 模型保存的空视频参数档案刷新为当前协议。
+///
+/// Vidu 是新增模型家族；若供应商下发或历史档案里出现空 `parameters: {}`，会覆盖
+/// 当前版本的顶层参数（resolution/aspect_ratio/duration/seed/watermark）与
+/// metadata 高级参数，导致请求缺少模型能力白名单而可能被平台拒绝。只修复明确的
+/// Vidu 模型与空参数，避免覆盖供应商下发的非空自定义字段。
+pub fn refresh_vidu_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_vidu_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if !operation
+        .get("parameters")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty)
+    {
+        return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
+/// 把旧版本为 MiniMax-H3 保存的视频参数档案刷新为当前 MiniMax-H3 契约。
+///
+/// MiniMax-H3 是新增模型家族；若供应商下发或历史档案里出现空 `parameters: {}`
+/// （旧版本只按通用视频模型处理），会覆盖当前版本的分辨率/画幅/时长等顶层参数与
+/// `minimax_h3_media` 请求档案，导致请求缺少能力白名单而可能被平台拒绝。只修复
+/// 明确的 MiniMax-H3 模型与空参数，避免覆盖供应商下发的非空自定义字段。
+pub fn refresh_minimax_h3_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_minimax_h3_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let parameters_are_empty = operation
+        .get("parameters")
+        .and_then(Value::as_object)
+        .is_none_or(Map::is_empty);
+    let request = operation.get("request").and_then(Value::as_object);
+    let has_minimax_profile = operation.get("requestProfileId").and_then(Value::as_str)
+        == Some("moyu_minimax_h3_video_v1")
+        && request
+            .and_then(|request| request.get("mediaEncoding"))
+            .and_then(Value::as_str)
+            == Some("minimax_h3_media");
+    if !parameters_are_empty && has_minimax_profile {
+        return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    // 若供应商曾声明非空的扩展参数，保留它们；MiniMax-H3 的规范参数和请求协议
+    // 仍由当前版本档案提供。
+    if let Some(provided_parameters) = operation.get("parameters").and_then(Value::as_object)
+        && !provided_parameters.is_empty()
+        && let Some(target_parameters) = replacement
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+    {
+        for (key, value) in provided_parameters {
+            target_parameters
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
 /// 历史版本写入的文生图默认参数（dall-e 契约）。gpt-image 系列的供应商会以
 /// HTTP 400 拒绝其中的 `standard`/`hd` 质量与 dall-e 尺寸，需要迁移。
 fn legacy_text_to_image_parameters() -> Value {
@@ -910,18 +1507,72 @@ fn legacy_text_to_image_parameters() -> Value {
 /// 历史版本把 dall-e 契约当作所有文生图模型的默认参数持久化进了
 /// `model_definitions`。若 gpt-image 模型的参数仍是旧默认值（说明并非服务商
 /// 下发的自定义参数），则原位替换为当前默认值；其余情况一律不动。
+/// 也把 gpt-image 图生图的历史空参数（旧契约不支持 size/quality/n）刷新为当前契约。
 /// 返回是否发生了替换。
 pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
     if !model_id.to_ascii_lowercase().contains("gpt-image") {
         return false;
     }
+    let mut changed = false;
+    // 文生图：dall-e 旧契约，或尚未包含 n 的早期 GPT Image 契约 → 刷新为当前契约。
+    if let Some(definition) = schema
+        .get_mut("text_to_image")
+        .and_then(Value::as_object_mut)
+    {
+        let legacy = legacy_text_to_image_parameters();
+        let before_n = gpt_image_text_to_image_parameters_before_n();
+        if definition.get("parameters") == Some(&legacy)
+            || definition.get("parameters") == Some(&before_n)
+        {
+            if let Some(parameters) =
+                default_operation_schema(model_id, GenerationOperation::TextToImage)
+                    .get("parameters")
+                    .cloned()
+            {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    // 图生图：历史契约（旧接口不支持 size/quality/n）持久化为空参数 → 刷新为当前契约。
+    if let Some(definition) = schema
+        .get_mut("image_to_image")
+        .and_then(Value::as_object_mut)
+    {
+        let parameters_empty = definition
+            .get("parameters")
+            .and_then(Value::as_object)
+            .is_none_or(Map::is_empty);
+        if parameters_empty {
+            if let Some(parameters) =
+                default_operation_schema(model_id, GenerationOperation::ImageToImage)
+                    .get("parameters")
+                    .cloned()
+            {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// Gemini 图片模型的文生图契约变更：历史版本按 dall-e 通用契约把像素尺寸
+/// （`1024x1024` 等）与 `quality`（`standard`/`hd`）持久化进了 `model_definitions`，
+/// 而 Gemini 图片生成接口只接受画幅比例 `size`（`1:1`/`16:9`/…）且忽略 `n`。
+/// 若参数仍是旧默认形状（说明并非服务商下发的自定义参数），则原位替换为当前契约。
+/// 返回是否发生了替换。
+pub fn refresh_gemini_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_gemini_image_model(model_id) {
+        return false;
+    }
+    let legacy = legacy_text_to_image_parameters();
     let Some(definition) = schema
         .get_mut("text_to_image")
         .and_then(Value::as_object_mut)
     else {
         return false;
     };
-    let legacy = legacy_text_to_image_parameters();
     if definition.get("parameters") != Some(&legacy) {
         return false;
     }
@@ -1076,7 +1727,7 @@ mod tests {
                 json!(["720p", "480p"]),
                 "model {model_id}"
             );
-            assert_eq!(parameters["duration"]["enum"].as_array().unwrap().len(), 12);
+            assert_eq!(parameters["duration"]["enum"].as_array().unwrap().len(), 13);
             assert_eq!(parameters["generate_audio"]["default"], true);
             assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
         }
@@ -1211,6 +1862,63 @@ mod tests {
     }
 
     #[test]
+    fn seedance_20_video_schemas_gain_smart_duration() {
+        // 非空档案：原位把 `-1` 补到 duration 枚举首位。
+        let mut stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "parameters": {
+                    "duration": {
+                        "type": "integer",
+                        "label": "时长",
+                        "default": 5,
+                        "enum": [4, 5, 6]
+                    }
+                }
+            }
+        });
+        assert!(refresh_seedance_20_video_defaults(
+            &mut stale,
+            "doubao-seedance-2-0-260128"
+        ));
+        assert_eq!(
+            stale["video_generation"]["parameters"]["duration"]["enum"],
+            json!([-1, 4, 5, 6])
+        );
+
+        // 空参数档案：整体替换为当前默认，时长枚举同样包含 -1。
+        let mut empty = json!({
+            "video_generation": { "resultType": "video", "parameters": {} }
+        });
+        assert!(refresh_seedance_20_video_defaults(
+            &mut empty,
+            "doubao-seedance-2-0-fast-260128"
+        ));
+        let enum_values = empty["video_generation"]["parameters"]["duration"]["enum"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert_eq!(enum_values.len(), 13);
+        assert_eq!(enum_values[0], json!(-1));
+
+        // Seedance 2.5 不受该刷新影响。
+        let mut untouched = json!({
+            "video_generation": {
+                "resultType": "video",
+                "parameters": { "duration": { "type": "integer", "enum": [4, 5] } }
+            }
+        });
+        assert!(!refresh_seedance_20_video_defaults(
+            &mut untouched,
+            "doubao-seedance-2-5-260628"
+        ));
+        assert_eq!(
+            untouched["video_generation"]["parameters"]["duration"]["enum"],
+            json!([4, 5])
+        );
+    }
+
+    #[test]
     fn wan_30_models_use_the_root_media_request_contract() {
         for model_id in ["wan3.0-video", "wan3.0-video-prime"] {
             let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
@@ -1236,6 +1944,317 @@ mod tests {
             assert!(parameters["seed"].get("default").is_none());
             assert_eq!(parameters["watermark"]["default"], false);
         }
+    }
+
+    #[test]
+    fn veo_models_use_the_root_top_level_request_contract() {
+        for model_id in ["veo-3", "veo-3-fast", "veo-3.1", "veo-3.1-fast"] {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            let definition = &schema["video_generation"];
+            let parameters = &definition["parameters"];
+
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration]
+            );
+            assert_eq!(definition["requestProfileId"], "moyu_veo_video_v1");
+            assert_eq!(definition["request"]["parameterContainer"], "root");
+            assert_eq!(definition["request"]["mediaEncoding"], "veo_image_urls");
+            assert_eq!(definition["request"]["mediaField"], "images");
+            assert_eq!(parameters["resolution"]["default"], "720p");
+            assert_eq!(parameters["resolution"]["enum"], json!(["720p", "1080p"]));
+            assert_eq!(parameters["aspect_ratio"]["default"], "16:9");
+            assert_eq!(parameters["aspect_ratio"]["enum"], json!(["16:9", "9:16"]));
+            assert_eq!(parameters["duration"]["default"], 8);
+            assert_eq!(parameters["duration"]["enum"], json!([4, 6, 8]));
+            assert_eq!(parameters["negativePrompt"]["requestLocation"], "metadata");
+            assert_eq!(parameters["sampleCount"]["requestLocation"], "metadata");
+            assert_eq!(parameters["sampleCount"]["maximum"], 4);
+            assert_eq!(parameters["enhancePrompt"]["default"], true);
+            assert_eq!(parameters["enhancePrompt"]["requestLocation"], "metadata");
+            assert_eq!(parameters["seed"]["maximum"], 4_294_967_295_i64);
+            assert_eq!(parameters["seed"]["requestLocation"], "metadata");
+            assert!(parameters["seed"].get("default").is_none());
+        }
+    }
+
+    #[test]
+    fn stale_empty_veo_schema_is_upgraded_to_the_top_level_contract() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata"
+                },
+                "parameters": {}
+            }
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            "veo-3.1-fast",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(
+            repaired["video_generation"]["requestProfileId"],
+            "moyu_veo_video_v1"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["resolution"]["default"],
+            "720p"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["aspect_ratio"]["enum"],
+            json!(["16:9", "9:16"])
+        );
+
+        // 非 Veo 的通用视频模型空参数档案保持原样，不受 Veo 刷新影响。
+        let generic = schema_for_enabled_operations(
+            &stale,
+            "company-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(generic["video_generation"]["parameters"], json!({}));
+        assert_eq!(
+            generic["video_generation"]["requestProfileId"],
+            "moyu_video_metadata_v1"
+        );
+    }
+
+    #[test]
+    fn vidu_models_use_the_root_top_level_request_contract() {
+        for (model_id, expected_resolutions, expected_default_resolution) in [
+            ("vidu2.0", json!(["360p", "720p", "1080p"]), "720p"),
+            ("viduq1", json!(["1080p"]), "1080p"),
+            ("viduq3-pro", json!(["540p", "720p", "1080p"]), "720p"),
+            ("viduq3-turbo", json!(["540p", "720p", "1080p"]), "720p"),
+        ] {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            let definition = &schema["video_generation"];
+            let parameters = &definition["parameters"];
+
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration],
+                "model {model_id}"
+            );
+            assert_eq!(definition["requestProfileId"], "moyu_vidu_video_v1");
+            assert_eq!(definition["request"]["parameterContainer"], "root");
+            assert_eq!(definition["request"]["mediaEncoding"], "vidu_image_urls");
+            assert_eq!(definition["request"]["mediaField"], "images");
+            assert_eq!(definition["request"]["metadataField"], "metadata");
+            assert_eq!(definition["request"]["observePath"], "/v1/videos/{task_id}");
+            assert_eq!(
+                parameters["resolution"]["default"], expected_default_resolution,
+                "model {model_id}"
+            );
+            assert_eq!(
+                parameters["resolution"]["enum"], expected_resolutions,
+                "model {model_id}"
+            );
+            assert_eq!(parameters["aspect_ratio"]["default"], "16:9");
+            assert_eq!(
+                parameters["aspect_ratio"]["enum"],
+                json!(["16:9", "9:16", "1:1", "3:4", "4:3"])
+            );
+            assert_eq!(parameters["duration"]["default"], 5);
+            assert_eq!(parameters["duration"]["enum"].as_array().unwrap().len(), 16);
+            assert_eq!(parameters["seed"]["minimum"], -1);
+            assert_eq!(parameters["seed"]["maximum"], 4_294_967_295_i64);
+            assert!(parameters["seed"].get("default").is_none());
+            assert_eq!(parameters["watermark"]["default"], false);
+            assert_eq!(
+                parameters["movement_amplitude"]["requestLocation"],
+                "metadata"
+            );
+            assert_eq!(parameters["movement_amplitude"]["default"], "auto");
+            assert_eq!(
+                parameters["movement_amplitude"]["enum"],
+                json!(["auto", "small", "medium", "large"])
+            );
+            assert_eq!(parameters["style"]["requestLocation"], "metadata");
+            assert_eq!(parameters["style"]["enum"], json!(["general", "anime"]));
+            assert_eq!(parameters["audio"]["requestLocation"], "metadata");
+            assert_eq!(parameters["audio"]["default"], true);
+            assert_eq!(parameters["audio_type"]["requestLocation"], "metadata");
+            assert_eq!(parameters["off_peak"]["requestLocation"], "metadata");
+            assert_eq!(parameters["bgm"]["requestLocation"], "metadata");
+            assert_eq!(parameters["bgm"]["default"], false);
+        }
+    }
+
+    #[test]
+    fn stale_empty_vidu_schema_is_upgraded_to_the_top_level_contract() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata"
+                },
+                "parameters": {}
+            }
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            "viduq3-turbo",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(
+            repaired["video_generation"]["requestProfileId"],
+            "moyu_vidu_video_v1"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["observePath"],
+            "/v1/videos/{task_id}"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["resolution"]["default"],
+            "720p"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["aspect_ratio"]["enum"],
+            json!(["16:9", "9:16", "1:1", "3:4", "4:3"])
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["audio"]["default"],
+            true
+        );
+
+        // 非 Vidu 的通用视频模型空参数档案保持原样，不受 Vidu 刷新影响。
+        let generic = schema_for_enabled_operations(
+            &stale,
+            "company-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(generic["video_generation"]["parameters"], json!({}));
+        assert_eq!(
+            generic["video_generation"]["requestProfileId"],
+            "moyu_video_metadata_v1"
+        );
+    }
+
+    #[test]
+    fn minimax_h3_model_uses_the_root_top_level_request_contract() {
+        for model_id in ["MiniMax-H3", "minimax-h3", "minimax_h3_260901"] {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            let definition = &schema["video_generation"];
+            let parameters = &definition["parameters"];
+
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration],
+                "model {model_id}"
+            );
+            assert_eq!(
+                definition["requestProfileId"],
+                "moyu_minimax_h3_video_v1"
+            );
+            assert_eq!(definition["request"]["path"], "/v1/video/generations");
+            assert_eq!(definition["request"]["parameterContainer"], "root");
+            assert_eq!(
+                definition["request"]["mediaEncoding"],
+                "minimax_h3_media"
+            );
+            assert_eq!(definition["request"]["metadataField"], "metadata");
+            // 轮询沿用默认 `GET /v1/video/generations/{task_id}`，不声明 observePath。
+            assert!(definition["request"].get("observePath").is_none());
+
+            // metadata.task_type：generation（默认）/ regeneration / h3_context_ir。
+            assert_eq!(parameters["task_type"]["default"], "generation");
+            assert_eq!(
+                parameters["task_type"]["enum"],
+                json!(["generation", "regeneration", "h3_context_ir"])
+            );
+            assert_eq!(parameters["task_type"]["requestLocation"], "metadata");
+
+            // 顶层参数：resolution（768P/2K）、ratio、duration（4..=15）、aigc_watermark。
+            assert_eq!(parameters["resolution"]["default"], "2K");
+            assert_eq!(parameters["resolution"]["enum"], json!(["768P", "2K"]));
+            assert_eq!(parameters["ratio"]["default"], "adaptive");
+            assert_eq!(
+                parameters["ratio"]["enum"],
+                json!(["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"])
+            );
+            assert_eq!(parameters["duration"]["default"], 5);
+            assert_eq!(
+                parameters["duration"]["enum"].as_array().unwrap().as_slice(),
+                &(4..=15).map(Value::from).collect::<Vec<_>>()
+            );
+            assert_eq!(parameters["aigc_watermark"]["default"], false);
+            assert_eq!(parameters["aigc_watermark"]["type"], "boolean");
+            // 顶层参数不声明 requestLocation（默认落在参数容器 root）。
+            assert!(parameters["resolution"].get("requestLocation").is_none());
+            assert!(parameters["duration"].get("requestLocation").is_none());
+        }
+    }
+
+    #[test]
+    fn stale_empty_minimax_h3_schema_is_upgraded_to_the_h3_contract() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata"
+                },
+                "parameters": {}
+            }
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(
+            repaired["video_generation"]["requestProfileId"],
+            "moyu_minimax_h3_video_v1"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["mediaEncoding"],
+            "minimax_h3_media"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["resolution"]["default"],
+            "2K"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["task_type"]["default"],
+            "generation"
+        );
+
+        // 非 MiniMax-H3 的通用视频模型空参数档案保持原样，不受 H3 刷新影响。
+        let generic = schema_for_enabled_operations(
+            &stale,
+            "company-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(generic["video_generation"]["parameters"], json!({}));
+        assert_eq!(
+            generic["video_generation"]["requestProfileId"],
+            "moyu_video_metadata_v1"
+        );
     }
 
     #[test]
@@ -1417,6 +2436,17 @@ mod tests {
             parameters["size"]["enum"],
             json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
         );
+        // GPT Image 契约：图片生成声明生成数量 n（1~10，默认 1）。
+        assert_eq!(parameters["n"]["type"], "integer");
+        assert_eq!(parameters["n"]["default"], 1);
+        assert_eq!(parameters["n"]["minimum"], 1);
+        assert_eq!(parameters["n"]["maximum"], 10);
+
+        // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
+        let edit_parameters = &schema["image_to_image"]["parameters"];
+        assert_eq!(edit_parameters["n"]["default"], 1);
+        assert_eq!(edit_parameters["size"]["default"], "auto");
+        assert_eq!(edit_parameters["quality"]["default"], "auto");
 
         // 非 gpt-image 模型沿用通用文生图契约。
         let generic = default_model_schema("photon-1", &[GenerationOperation::TextToImage]);
@@ -1426,6 +2456,7 @@ mod tests {
             generic_parameters["quality"]["enum"],
             json!(["hd", "standard"])
         );
+        assert!(generic_parameters.get("n").is_none());
     }
 
     #[test]
@@ -1453,6 +2484,30 @@ mod tests {
             parameters["quality"]["enum"],
             json!(["auto", "high", "medium", "low"])
         );
+        assert_eq!(parameters["n"]["default"], 1);
+
+        // 尚未包含 n 的早期 GPT Image 契约也会被刷新（补上 n）。
+        let mut before_n = json!({
+            "text_to_image": { "parameters": gpt_image_text_to_image_parameters_before_n() }
+        });
+        assert!(refresh_legacy_image_parameter_defaults(
+            &mut before_n,
+            "gpt-image-2"
+        ));
+        assert_eq!(before_n["text_to_image"]["parameters"]["n"]["default"], 1);
+
+        // 图生图的历史空参数会被刷新为当前契约（含 n/size/quality）。
+        let mut edit = json!({
+            "image_to_image": { "resultType": "image", "parameters": {} }
+        });
+        assert!(refresh_legacy_image_parameter_defaults(
+            &mut edit,
+            "gpt-image-2"
+        ));
+        let edit_parameters = &edit["image_to_image"]["parameters"];
+        assert_eq!(edit_parameters["n"]["default"], 1);
+        assert_eq!(edit_parameters["size"]["default"], "auto");
+        assert_eq!(edit_parameters["quality"]["default"], "auto");
 
         // 与旧默认值不一致的自定义参数不被覆盖。
         let mut customized = json!({
@@ -1475,6 +2530,89 @@ mod tests {
         assert!(!refresh_legacy_image_parameter_defaults(
             &mut generic,
             "photon-1"
+        ));
+    }
+
+    #[test]
+    fn gemini_image_models_use_aspect_ratio_size_without_quality_or_count() {
+        for model_id in ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"] {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            assert_eq!(
+                operations_from_schema(&schema),
+                vec![GenerationOperation::TextToImage],
+                "model {model_id}"
+            );
+            let definition = &schema["text_to_image"];
+            assert_eq!(definition["requestProfileId"], "openai_images_v1");
+            assert_eq!(definition["request"]["path"], "/v1/images/generations");
+            let parameters = &definition["parameters"];
+            assert_eq!(parameters["size"]["default"], "1:1");
+            assert_eq!(
+                parameters["size"]["enum"],
+                json!(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"])
+            );
+            // 不声明质量参数，也不声明生成数量（上游忽略 n，一次只返回一张）。
+            assert!(
+                parameters.get("quality").is_none(),
+                "model {model_id} must not declare quality"
+            );
+            assert!(
+                parameters.get("n").is_none(),
+                "model {model_id} must not declare n"
+            );
+            // 仍被识别为图片模型，而非文本模型。
+            assert!(
+                schema.get("text_generation").is_none(),
+                "model {model_id} must not be classified as text"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_image_legacy_dall_e_parameters_are_refreshed() {
+        let mut schema = json!({
+            "text_to_image": {
+                "resultType": "image",
+                "requestProfileId": "openai_images_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/images/generations",
+                    "encoding": "json",
+                    "parameterContainer": "root"
+                },
+                "parameters": legacy_text_to_image_parameters()
+            }
+        });
+        assert!(refresh_gemini_image_parameter_defaults(
+            &mut schema,
+            "gemini-2.5-flash-image"
+        ));
+        let parameters = &schema["text_to_image"]["parameters"];
+        assert_eq!(parameters["size"]["default"], "1:1");
+        assert_eq!(
+            parameters["size"]["enum"],
+            json!(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"])
+        );
+        assert!(parameters.get("quality").is_none());
+        assert!(parameters.get("n").is_none());
+
+        // 与旧默认值不一致的自定义参数不被覆盖。
+        let mut customized = json!({
+            "text_to_image": { "parameters": legacy_text_to_image_parameters() }
+        });
+        customized["text_to_image"]["parameters"]["size"]["enum"] = json!(["1:1", "16:9"]);
+        assert!(!refresh_gemini_image_parameter_defaults(
+            &mut customized,
+            "gemini-2.5-flash-image"
+        ));
+
+        // 非 gemini 图片模型不动。
+        let mut generic = json!({
+            "text_to_image": { "parameters": legacy_text_to_image_parameters() }
+        });
+        assert!(!refresh_gemini_image_parameter_defaults(
+            &mut generic,
+            "gpt-image-2"
         ));
     }
 }

@@ -5,7 +5,6 @@ import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
 import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
 import { FileText } from "@phosphor-icons/react/FileText";
 import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
-import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
 import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
 import { Paperclip } from "@phosphor-icons/react/Paperclip";
 import { PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
@@ -22,7 +21,7 @@ import {
 
 import { MarkdownView } from "../../components/MarkdownView";
 
-import { NodeTypeIcon, PromptAuditPanel } from "./PromptNodeViews";
+import { NodeTypeIcon } from "./PromptNodeViews";
 import type {
   AssetKind,
   CanvasNodeDimensions,
@@ -30,7 +29,6 @@ import type {
   DocumentSkillNodeData,
   GenNodeData,
   PromptNodeConfig,
-  PromptOptimizationPanelState,
   ScreenplayNodeConfig,
   StaticNodeDescriptor,
   ViralRemixNodeConfig,
@@ -70,7 +68,7 @@ function screenplayMaterialCompatibilityHint(remoteModelId: string | undefined):
   return "当前接口可读取图片与文本；音视频或 PDF 建议切换 Gemini。";
 }
 
-/** 内置技能文档节点：完整多轮对话、可编辑稿件、审计确认和 Markdown 导出。 */
+/** 内置技能文档节点：完整多轮对话、可编辑稿件和 Markdown 导出。 */
 export function CanvasDocumentSkillNode({
   node,
   selected,
@@ -78,7 +76,6 @@ export function CanvasDocumentSkillNode({
   running,
   error,
   providerCatalog,
-  audit,
   sourceInput,
   onSelect,
   onNodeDragStart,
@@ -89,9 +86,6 @@ export function CanvasDocumentSkillNode({
   onPickMaterials,
   onRemoveMaterial,
   onSend,
-  onAudit,
-  onApplyAudit,
-  onDiscardAudit,
   onExport,
 }: {
   readonly node: DocumentSkillNodeData;
@@ -100,7 +94,6 @@ export function CanvasDocumentSkillNode({
   readonly running: boolean;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly audit: PromptOptimizationPanelState | undefined;
   readonly sourceInput: ConnectedScreenplayInput | null;
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
@@ -117,9 +110,6 @@ export function CanvasDocumentSkillNode({
   readonly onPickMaterials?: (key: string) => Promise<void>;
   readonly onRemoveMaterial?: (key: string, materialId: string) => void;
   readonly onSend: (key: string) => void;
-  readonly onAudit: (key: string) => void;
-  readonly onApplyAudit: (key: string) => void;
-  readonly onDiscardAudit: (key: string) => void;
   readonly onExport: (key: string) => Promise<void>;
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
@@ -150,16 +140,6 @@ export function CanvasDocumentSkillNode({
   const materials = node.config.materials ?? [];
   const screenplayHasMaterials = node.kind === "screenplay" && materials.length > 0;
   const sourceDocumentReady = node.kind === "storyboard" && Boolean(sourceInput?.document.trim());
-  const auditBusy = audit?.status === "running";
-  const auditUnavailableReason = auditBusy
-    ? `正在审计当前${copy.documentName}`
-    : running
-      ? "请等待本轮对话完成"
-      : !node.config.currentDocument.trim()
-        ? `生成或粘贴${copy.documentName}后才能审计`
-        : !selectionReady
-          ? "请先选择可用的文本模型"
-          : null;
   // 文档区视图：无稿件时始终落在「编辑」，方便粘贴；有稿件时按用户选择的 预览/编辑 展示。
   const hasDocument = node.config.currentDocument.trim().length > 0;
   const effectiveDocumentMode = hasDocument ? documentMode : "edit";
@@ -220,7 +200,7 @@ export function CanvasDocumentSkillNode({
     <div
       ref={nodeElementRef}
       className={`canvas-screenplay-node canvas-screenplay-node--${node.kind}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
-      aria-busy={running || auditBusy || exporting}
+      aria-busy={running || exporting}
       onMouseDown={(event) => {
         const target = event.target as HTMLElement;
         onSelect(node.key);
@@ -422,7 +402,7 @@ export function CanvasDocumentSkillNode({
                 : copy.composerPlaceholder
             }
             defaultValue={composerInitialValue}
-            disabled={running || auditBusy}
+            disabled={running}
             onCompositionStart={() => {
               composerComposingRef.current = true;
             }}
@@ -456,7 +436,7 @@ export function CanvasDocumentSkillNode({
                 type="button"
                 className="canvas-screenplay-node__materials-add"
                 aria-label="添加多模态参考素材"
-                disabled={running || auditBusy || pickingMaterials || materials.length >= 8}
+                disabled={running || pickingMaterials || materials.length >= 8}
                 title={materials.length >= 8 ? "每个剧本节点最多添加 8 项素材" : undefined}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
@@ -494,7 +474,7 @@ export function CanvasDocumentSkillNode({
                       type="button"
                       aria-label={`移除参考素材：${material.displayName}`}
                       title="移除素材"
-                      disabled={running || auditBusy}
+                      disabled={running}
                       onMouseDown={(event) => event.stopPropagation()}
                       onClick={(event) => {
                         event.stopPropagation();
@@ -507,7 +487,7 @@ export function CanvasDocumentSkillNode({
                 ))}
               </ul>
             ) : (
-              <p>图片、音频、视频、PDF、TXT / Markdown；发送和审计时会一并读取。</p>
+              <p>图片、音频、视频、PDF、TXT / Markdown；最多 8 项、合计 14 MB。</p>
             )}
             <p className="canvas-screenplay-node__materials-hint">
               {screenplayMaterialCompatibilityHint(selectedModel?.remoteModelId)}
@@ -520,7 +500,6 @@ export function CanvasDocumentSkillNode({
             type="button"
             disabled={
               running ||
-              auditBusy ||
               !selectionReady ||
               (!node.config.composer.trim() && !sourceDocumentReady && !screenplayHasMaterials)
             }
@@ -569,24 +548,6 @@ export function CanvasDocumentSkillNode({
                   预览
                 </button>
               </span>
-              <button
-                type="button"
-                className="canvas-prompt-node__audit-button"
-                disabled={auditUnavailableReason != null}
-                title={auditUnavailableReason ?? `用内置技能与全部历史审计当前${copy.documentName}`}
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onAudit(node.key);
-                }}
-              >
-                {auditBusy ? (
-                  <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
-                ) : (
-                  <MagnifyingGlass size={13} weight="bold" aria-hidden="true" />
-                )}
-                {auditBusy ? "审计中" : "审计"}
-              </button>
             </span>
           </div>
           {effectiveDocumentMode === "preview" ? (
@@ -603,7 +564,7 @@ export function CanvasDocumentSkillNode({
               aria-label={copy.currentDocumentLabel}
               placeholder={copy.documentPlaceholder}
               value={node.config.currentDocument}
-              disabled={running || auditBusy}
+              disabled={running}
               onChange={(event) => {
                 setDocumentMode("edit");
                 onChange({ ...node.config, currentDocument: event.target.value });
@@ -612,17 +573,6 @@ export function CanvasDocumentSkillNode({
           )}
         </div>
 
-        {audit && audit.status !== "idle" ? (
-          <PromptAuditPanel
-            state={audit}
-            subject={copy.documentName}
-            originalLabel={`当前${copy.documentName}`}
-            optimizedLabel="审计修订稿"
-            onAudit={() => onAudit(node.key)}
-            onApply={() => onApplyAudit(node.key)}
-            onDiscard={() => onDiscardAudit(node.key)}
-          />
-        ) : null}
         {error ? (
           <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
             {error}
@@ -983,7 +933,6 @@ export function CanvasPromptNode({
   providerCatalog,
   sourceConnections,
   targetConnections,
-  audit,
   onSelect,
   onNodeDragStart,
   onRemove,
@@ -992,9 +941,6 @@ export function CanvasPromptNode({
   onSizeChange,
   onChange,
   onRun,
-  onAudit,
-  onApplyAudit,
-  onDiscardAudit,
 }: {
   readonly node: Extract<GenNodeData, { kind: "prompt" }>;
   readonly descriptor: StaticNodeDescriptor;
@@ -1016,7 +962,6 @@ export function CanvasPromptNode({
     readonly kind: "image" | "video";
     readonly edgeId: string;
   }[];
-  readonly audit: PromptOptimizationPanelState | undefined;
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
     key: string,
@@ -1031,9 +976,6 @@ export function CanvasPromptNode({
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onChange: (config: PromptNodeConfig) => void;
   readonly onRun: (key: string) => void;
-  readonly onAudit: (key: string) => void;
-  readonly onApplyAudit: (key: string) => void;
-  readonly onDiscardAudit: (key: string) => void;
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const textModelProviders = providerCatalog
@@ -1053,25 +995,10 @@ export function CanvasPromptNode({
   const taskLabel = node.config.task === "generate" ? "生成提示词" : "优化提示词";
   const conversation = node.config.conversation ?? [];
   const conversationRef = useRef<HTMLDivElement>(null);
-  const auditBusy = audit?.status === "running";
-  const auditStatusId = `prompt-audit-status-${node.key}`;
   const promptOutputId = `prompt-output-${node.key}`;
-  const auditUnavailableReason = auditBusy
-    ? "正在审计当前输出"
-    : running
-      ? "请等待提示词生成完成后再进行审计"
-      : !node.config.generatedPrompt.trim()
-        ? "请先生成或输入输出提示词，再进行审计"
-        : !selectionReady
-          ? "请先选择可用的文本模型"
-          : null;
-  const auditHelpText =
-    auditUnavailableReason ?? "使用完整技能上下文审计当前输出，并生成 Diff 建议";
-  const promptStatusText =
-    auditUnavailableReason ??
-    (node.config.generatedPrompt
-      ? `已生成 ${node.config.generatedPrompt.length} 字${conversation.length > 0 ? `，累计 ${conversation.length} 条对话` : ""}${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 个参考素材` : ""}`
-      : "输出会作为下游节点的提示词请求参数");
+  const promptStatusText = node.config.generatedPrompt
+    ? `已生成 ${node.config.generatedPrompt.length} 字${conversation.length > 0 ? `，累计 ${conversation.length} 条对话` : ""}${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 个参考素材` : ""}`
+    : "输出会作为下游节点的提示词请求参数";
 
   // 新消息出现时把对话区滚动到底部。
   useEffect(() => {
@@ -1100,7 +1027,7 @@ export function CanvasPromptNode({
       ref={nodeElementRef}
       className={`canvas-gen-node canvas-gen-node--prompt${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
       data-connection-target={node.key}
-      aria-busy={running || auditBusy}
+      aria-busy={running}
       onMouseDown={(event) => {
         const target = event.target as HTMLElement;
         if (target.closest("textarea, select, button, .canvas-prompt-node__body")) {
@@ -1127,7 +1054,7 @@ export function CanvasPromptNode({
             className="canvas-gen-node__start canvas-gen-node__start--labeled canvas-prompt-node__run"
             aria-label={taskLabel}
             data-state={running ? "loading" : undefined}
-            disabled={running || auditBusy || !selectionReady}
+            disabled={running || !selectionReady}
             title={!selectionReady ? "请先选择可用的文本模型" : `调用文本模型${taskLabel}`}
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => {
@@ -1162,7 +1089,7 @@ export function CanvasPromptNode({
         <div className="canvas-prompt-node__intro">
           <strong>把创意变成可执行的提示词</strong>
           <span>
-            支持多轮对话：每次生成、优化或审计都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。
+            支持多轮对话：每次生成或优化都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。
           </span>
         </div>
         {sourceConnections.length > 0 ? (
@@ -1245,7 +1172,7 @@ export function CanvasPromptNode({
                 : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
-            disabled={running || auditBusy}
+            disabled={running}
             onChange={(event) => onChange({ ...node.config, sourcePrompt: event.target.value })}
             onKeyDown={(event) => {
               if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
@@ -1353,61 +1280,14 @@ export function CanvasPromptNode({
               className="canvas-prompt-node__output"
               placeholder="调用文本模型后，生成结果会出现在这里；也可以直接编辑"
               value={node.config.generatedPrompt}
-              disabled={auditBusy}
               onChange={(event) =>
                 onChange({ ...node.config, generatedPrompt: event.target.value })
               }
             />
           </div>
-          <div className="canvas-prompt-node__output-actions">
-            <button
-              type="button"
-              className="canvas-prompt-node__audit-button"
-              aria-label="审计当前输出提示词"
-              aria-describedby={auditStatusId}
-              data-visual="solid"
-              data-state={
-                auditBusy ? "loading" : auditUnavailableReason ? "unavailable" : undefined
-              }
-              disabled={auditUnavailableReason != null}
-              title={auditHelpText}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onSelect(node.key);
-                onAudit(node.key);
-              }}
-            >
-              {auditBusy ? (
-                <CircleNotch size={13} weight="bold" aria-hidden="true" className="spin-icon" />
-              ) : (
-                <MagnifyingGlass size={13} weight="bold" aria-hidden="true" />
-              )}
-              <span>{auditBusy ? "审计中" : "审计"}</span>
-            </button>
-          </div>
         </div>
-        {audit && audit.status !== "idle" ? (
-          <PromptAuditPanel
-            state={audit}
-            onAudit={() => onAudit(node.key)}
-            onApply={() => onApplyAudit(node.key)}
-            onDiscard={() => onDiscardAudit(node.key)}
-          />
-        ) : null}
-        <div
-          id={auditStatusId}
-          className="canvas-prompt-node__status"
-          role="status"
-          aria-live="polite"
-        >
-          <span
-            className={
-              auditUnavailableReason == null && node.config.generatedPrompt ? "is-ready" : ""
-            }
-          >
-            {promptStatusText}
-          </span>
+        <div className="canvas-prompt-node__status" role="status" aria-live="polite">
+          <span className={node.config.generatedPrompt ? "is-ready" : ""}>{promptStatusText}</span>
         </div>
         {error ? (
           <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>

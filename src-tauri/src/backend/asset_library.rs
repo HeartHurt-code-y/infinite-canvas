@@ -1,4 +1,4 @@
-use std::{
+﻿use std::{
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
@@ -1204,6 +1204,7 @@ fn parse_asset_entry(
         MediaType::Image => "图片素材",
         MediaType::Video => "视频素材",
         MediaType::Audio => "音频素材",
+        MediaType::Text => "文本素材",
     };
     Some(CloudAssetRecord {
         provider_connection_id: provider_connection_id.to_string(),
@@ -1277,6 +1278,7 @@ fn media_type_name(media_type: MediaType) -> &'static str {
         MediaType::Image => "Image",
         MediaType::Video => "Video",
         MediaType::Audio => "Audio",
+        MediaType::Text => "Text",
     }
 }
 
@@ -1286,6 +1288,7 @@ fn media_type_kind(media_type: MediaType) -> &'static str {
         MediaType::Image => "image",
         MediaType::Video => "video",
         MediaType::Audio => "audio",
+        MediaType::Text => "text",
     }
 }
 
@@ -1295,6 +1298,7 @@ fn media_type_mime(media_type: MediaType) -> &'static str {
         MediaType::Image => "image/jpeg",
         MediaType::Video => "video/mp4",
         MediaType::Audio => "audio/mpeg",
+        MediaType::Text => "text/plain",
     }
 }
 
@@ -1312,6 +1316,7 @@ fn media_type_wildcard(media_type: MediaType) -> &'static str {
         MediaType::Image => "image/*",
         MediaType::Video => "video/*",
         MediaType::Audio => "audio/*",
+        MediaType::Text => "text/*",
     }
 }
 
@@ -1324,6 +1329,7 @@ fn asset_file_extension(asset: &CloudAssetRecord) -> String {
             MediaType::Image => "jpg".to_string(),
             MediaType::Video => "mp4".to_string(),
             MediaType::Audio => "mp3".to_string(),
+            MediaType::Text => "txt".to_string(),
         })
 }
 
@@ -1339,6 +1345,7 @@ fn validate_detected_type(expected: MediaType, mime: &str) -> BackendResult<()> 
         MediaType::Image => mime.starts_with("image/"),
         MediaType::Video => mime.starts_with("video/"),
         MediaType::Audio => mime.starts_with("audio/"),
+        MediaType::Text => mime.starts_with("text/"),
     };
     if valid {
         Ok(())

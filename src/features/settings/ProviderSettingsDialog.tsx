@@ -298,15 +298,20 @@ export function ProviderSettingsDialog({
     });
   }, [modelSearch, modelTypeFilter, modelUsage, remoteModels]);
 
-  const selectedImageModelCount = Object.values(modelUsage).filter(
-    (usage) => usage.kind === "image",
-  ).length;
-  const selectedVideoModelCount = Object.values(modelUsage).filter(
-    (usage) => usage.kind === "video",
-  ).length;
-  const selectedTextModelCount = Object.values(modelUsage).filter(
-    (usage) => usage.kind === "text",
-  ).length;
+  // 所有分类计数统一从 remoteModels 列表 + modelUsage 推导，保证顶部标签与下方列表数量完全一致。
+  // 不再单独用 Object.values(modelUsage) 统计，避免出现孤立条目或与列表不同步的情况。
+  const modelTypeCounts = useMemo(() => {
+    let image = 0;
+    let video = 0;
+    let text = 0;
+    for (const model of remoteModels) {
+      const usage = modelUsage[model.id] ?? emptyModelUsage();
+      if (usage.kind === "image") image += 1;
+      else if (usage.kind === "video") video += 1;
+      else if (usage.kind === "text") text += 1;
+    }
+    return { all: remoteModels.length, image, video, text };
+  }, [remoteModels, modelUsage]);
 
   if (!open) return null;
 
@@ -458,7 +463,7 @@ export function ProviderSettingsDialog({
       await client.replaceProviderModelBindings(draft.id, selections);
       await onCatalogChanged();
       setSuccessMessage(
-        `已保存 ${selectedImageModelCount} 个图片模型、${selectedVideoModelCount} 个视频模型、${selectedTextModelCount} 个文本模型，对应生成节点与文本功能使用的模型列表已更新。`,
+        `已保存 ${modelTypeCounts.image} 个图片模型、${modelTypeCounts.video} 个视频模型、${modelTypeCounts.text} 个文本模型，对应生成节点与文本功能使用的模型列表已更新。`,
       );
       // 保存成功后自动做一次真实请求的连通性测试；无论结果如何都提示用户。
       // 测试失败不影响已保存的配置，因此失败只降级为提示而不是错误。
@@ -733,42 +738,42 @@ export function ProviderSettingsDialog({
                 <div className="model-type-filter" role="group" aria-label="按模型类型筛选">
                   <button
                     type="button"
-                    aria-label={`全部模型，${remoteModels.length} 个`}
+                    aria-label={`全部模型，${modelTypeCounts.all} 个`}
                     aria-pressed={modelTypeFilter === "all"}
                     onClick={() => setModelTypeFilter("all")}
                   >
                     全部
-                    <span aria-hidden="true">{remoteModels.length}</span>
+                    <span aria-hidden="true">{modelTypeCounts.all}</span>
                   </button>
                   <button
                     type="button"
-                    aria-label={`文本模型，${selectedTextModelCount} 个`}
+                    aria-label={`文本模型，${modelTypeCounts.text} 个`}
                     aria-pressed={modelTypeFilter === "text"}
                     onClick={() => setModelTypeFilter("text")}
                   >
                     <TextAa size={14} weight="bold" aria-hidden="true" />
                     文本
-                    <span aria-hidden="true">{selectedTextModelCount}</span>
+                    <span aria-hidden="true">{modelTypeCounts.text}</span>
                   </button>
                   <button
                     type="button"
-                    aria-label={`图片模型，${selectedImageModelCount} 个`}
+                    aria-label={`图片模型，${modelTypeCounts.image} 个`}
                     aria-pressed={modelTypeFilter === "image"}
                     onClick={() => setModelTypeFilter("image")}
                   >
                     <ImageSquare size={14} weight="bold" aria-hidden="true" />
                     图片
-                    <span aria-hidden="true">{selectedImageModelCount}</span>
+                    <span aria-hidden="true">{modelTypeCounts.image}</span>
                   </button>
                   <button
                     type="button"
-                    aria-label={`视频模型，${selectedVideoModelCount} 个`}
+                    aria-label={`视频模型，${modelTypeCounts.video} 个`}
                     aria-pressed={modelTypeFilter === "video"}
                     onClick={() => setModelTypeFilter("video")}
                   >
                     <VideoCamera size={14} weight="bold" aria-hidden="true" />
                     视频
-                    <span aria-hidden="true">{selectedVideoModelCount}</span>
+                    <span aria-hidden="true">{modelTypeCounts.video}</span>
                   </button>
                 </div>
                 <label className="model-search">
@@ -924,15 +929,15 @@ export function ProviderSettingsDialog({
                 <div className="model-picker__summary" aria-live="polite">
                   <span>
                     <ImageSquare size={14} weight="bold" aria-hidden="true" />
-                    图片模型 {selectedImageModelCount}
+                    图片模型 {modelTypeCounts.image}
                   </span>
                   <span>
                     <VideoCamera size={14} weight="bold" aria-hidden="true" />
-                    视频模型 {selectedVideoModelCount}
+                    视频模型 {modelTypeCounts.video}
                   </span>
                   <span>
                     <TextAa size={14} weight="bold" aria-hidden="true" />
-                    文本模型 {selectedTextModelCount}
+                    文本模型 {modelTypeCounts.text}
                   </span>
                 </div>
                 <button

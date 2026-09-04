@@ -274,7 +274,7 @@ describe("App workspace", () => {
     expect(within(imageNode!).getByLabelText("图片模型")).toBeInTheDocument();
     const quantity = within(imageNode!).getByRole("spinbutton", { name: "生成数量" });
     expect(quantity).toHaveValue(1);
-    expect(quantity).toHaveAttribute("max", "4");
+    expect(quantity).toHaveAttribute("max", "10");
     expect(within(imageNode!).getByLabelText("尺寸")).toBeInTheDocument();
     expect(within(imageNode!).getByLabelText("质量")).toBeInTheDocument();
     expect(within(imageNode!).getByText("文生图")).toBeInTheDocument();

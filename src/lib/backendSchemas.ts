@@ -125,6 +125,9 @@ export const nullableTosStagingConfigSchema = v.nullable(tosStagingConfigSchema)
 
 const mediaTypeSchema = v.picklist(["image", "video", "audio"]);
 
+/** 生成结果记录的类型：媒体产物之外，Context-IR 等任务产出文本（"text"）。 */
+const generationResultMediaTypeSchema = v.picklist(["image", "video", "audio", "text"]);
+
 const stagingStatusSchema = v.picklist([
   "validating",
   "authorizing",
@@ -259,7 +262,7 @@ export const generationTaskPageSchema = v.looseObject({
 export const generationResultRecordSchema = v.looseObject({
   taskId: v.string(),
   resultIndex: v.number(),
-  mediaType: mediaTypeSchema,
+  mediaType: generationResultMediaTypeSchema,
   remoteTaskId: nullableStringSchema,
   source: v.unknown(),
   saveStatus: v.picklist([

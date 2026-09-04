@@ -759,7 +759,7 @@ const PROMPT_MATERIAL_BY_EXTENSION: Readonly<
 
 /**
  * 为剧本节点选择本地参考素材。只保存路径与轻量元数据，避免把大体积 Base64
- * 写进画布存档；文件字节会在用户真正发送/审计时由 Rust 后端读取。
+ * 写进画布存档；文件字节会在用户真正发送时由 Rust 后端读取。
  */
 export async function pickPromptMultimodalFiles(): Promise<readonly PickedPromptMaterial[]> {
   if (!isDesktopRuntime()) return [];
@@ -898,13 +898,16 @@ export interface GenerationTaskPage {
 
 export type MediaType = "image" | "video" | "audio";
 
+/** 生成结果记录的类型：除媒体产物外，Context-IR 等任务产出纯文本（mediaType 为 "text"）。 */
+export type GenerationResultMediaType = MediaType | "text";
+
 export type SaveStatus =
   "pending" | "writing" | "succeeded" | "failed" | "interrupted" | "local_missing" | "conflict";
 
 export interface GenerationResultRecord {
   readonly taskId: string;
   readonly resultIndex: number;
-  readonly mediaType: MediaType;
+  readonly mediaType: GenerationResultMediaType;
   readonly remoteTaskId: string | null;
   readonly source: unknown;
   readonly saveStatus: SaveStatus;
@@ -1096,7 +1099,7 @@ export type PromptOptimizationMode =
 /** 文本技能模式；文档与视频复刻模式均使用随应用编译的完整技能上下文。 */
 export type TextSkillMode = PromptOptimizationMode | "screenplay" | "storyboard" | "viral_remix";
 
-/** 细节优化或审计时注入系统提示词的历史上下文条目（输入、结果、用户决定）。 */
+/** 文本模型请求注入系统提示词的历史上下文条目。 */
 export interface PromptOptimizationContextEntry {
   readonly role: string;
   readonly content: string;
@@ -1138,10 +1141,8 @@ export interface OptimizeVideoPromptCommand {
   readonly mode: TextSkillMode;
   readonly userPrompt: string;
   /** 提示词节点的执行意图；旧版视频节点省略时由后端按 optimize 处理。 */
-  readonly task?: "generate" | "optimize" | "audit";
+  readonly task?: "generate" | "optimize";
   readonly contextHistory?: readonly PromptOptimizationContextEntry[];
-  /** true = 细节优化/审计：上下文全部注入系统提示词。审计的用户提示词由后端固定。 */
-  readonly detailReview?: boolean;
   /** 连入提示词节点的图片素材（按连线顺序）；省略时按纯文本调用。 */
   readonly visionImages?: readonly PromptVisionImageInput[];
   /** 剧本节点直接选择的图片、音频、视频或文档素材。 */

@@ -10,6 +10,7 @@ import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
 import { Images } from "@phosphor-icons/react/Images";
 import { Play } from "@phosphor-icons/react/Play";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
+import { TextT } from "@phosphor-icons/react/TextT";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
@@ -75,6 +76,7 @@ import {
   outputNodeDimensions,
   outputNodeReferenceTarget,
   shortenTaskId,
+  textResultFromSource,
 } from "./workspaceModel";
 
 export function CanvasGenNode({
@@ -1612,19 +1614,22 @@ export function CanvasOutputNode({
   /** 模型展示名（进行中/失败态展示）。 */
   readonly modelLabel: string | null;
 }) {
+  const isTextResult = node.mediaType === "text";
   const isVideo = node.mediaType === "video";
   const [previewing, setPreviewing] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   const mediaSrc = node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null);
 
-  // 供应商结果已返回 → 立即展示媒体；本地 finalPath 到达后再切换为长期引用。
-  const hasArtifact = mediaSrc != null;
+  // 供应商结果已返回 → 立即展示媒体/文本；本地 finalPath 到达后再切换为长期引用。
+  // 文本产物（Context-IR）以内联正文为准，不依赖 finalPath。
+  const hasArtifact = isTextResult ? node.textContent != null : mediaSrc != null;
   const hasLocalArtifact = node.finalPath != null;
   const isPreviewOnly = !hasLocalArtifact && hasArtifact;
   const canUseAsGenerationReference = outputNodeReferenceTarget(node) != null;
   const canConnectToComposer = isVideo && hasArtifact;
   const dimensions = outputNodeDimensions(node);
+  const taskTypeLabel = isTextResult ? "智能扩写" : isVideo ? "视频生成" : "图片生成";
 
   // 未落卡时按任务状态派生展示阶段。
   const progress =
@@ -1693,6 +1698,27 @@ export function CanvasOutputNode({
     }
   }, [failedDetail]);
 
+  // 一键复制扩写正文（Context-IR 文本产物）。
+  const copyTextContent = useCallback(async () => {
+    if (node.textContent == null) return;
+    try {
+      if (isDesktopRuntime()) {
+        await copyTextToDesktopClipboard(node.textContent);
+      } else if (navigator.clipboard != null) {
+        await navigator.clipboard.writeText(node.textContent);
+      } else {
+        throw new Error("当前环境不支持剪贴板写入。");
+      }
+      setCopied(true);
+      window.clearTimeout(copyResetTimerRef.current);
+      copyResetTimerRef.current = window.setTimeout(() => setCopied(false), 2000);
+    } catch (error) {
+      const message = formatRawBackendError(error);
+      toast.error("复制失败", { description: message });
+      frontendLog("error", `[canvas] 复制扩写正文失败: ${message}`);
+    }
+  }, [node.textContent]);
+
   // 卸载时清理「已复制」回退计时器，避免对已卸载组件 setState。
   useEffect(() => {
     return () => window.clearTimeout(copyResetTimerRef.current);
@@ -1703,18 +1729,22 @@ export function CanvasOutputNode({
       : node.origin === "download"
         ? "网络爆款视频下载 · 本地结果"
         : task
-          ? `${isVideo ? "视频生成" : "图片生成"} · ${modelLabel ?? ""} · ${
+          ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
               isFailed
                 ? formatTaskClock(task.completedAt ?? task.updatedAt)
                 : formatTaskClock(task.createdAt)
             }`
-          : `${isVideo ? "视频生成" : "图片生成"} · ${shortenTaskId(node.taskId)}`;
+          : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   return (
     <div
       className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
-      aria-busy={isRunning || isSaving ? "true" : undefined}
+      aria-busy={
+        !(isTextResult && node.textContent != null) && (isRunning || isSaving)
+          ? "true"
+          : undefined
+      }
       onMouseDown={(event) => {
         // 整卡任意位置可自由拖动；按在媒体区域上且未发生位移的抬起视为点按，
         // React Flow 负责整卡拖动；媒体按钮自身的 click 负责打开全屏预览。
@@ -1731,7 +1761,46 @@ export function CanvasOutputNode({
         if (isVideo && hasArtifact) setPreviewing(false);
       }}
     >
-      {mediaSrc != null ? (
+      {isTextResult && node.textContent != null ? (
+        <>
+          <span className="canvas-output-node__state canvas-output-node__state--saved">
+            <TextT size={14} weight="fill" aria-hidden="true" />
+            <span className="canvas-output-node__status">
+              {isSaving ? "智能扩写完成 · 等待文本保存" : "智能扩写完成"}
+            </span>
+            <button
+              type="button"
+              className="canvas-output-node__copy"
+              aria-label="复制扩写正文"
+              title="复制扩写正文"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                void copyTextContent();
+              }}
+            >
+              {copied ? (
+                <Check size={13} weight="bold" aria-hidden="true" />
+              ) : (
+                <CopySimple size={13} weight="bold" aria-hidden="true" />
+              )}
+              {copied ? "已复制" : "复制"}
+            </button>
+          </span>
+          <pre className="canvas-output-node__text" aria-label="智能扩写正文" tabIndex={0}>
+            {node.textContent}
+          </pre>
+          <span className="canvas-asset-node__identity">
+            <TextT size={15} weight="bold" aria-hidden="true" />
+            <span className="canvas-asset-node__name" title={node.name ?? undefined}>
+              {node.name ?? "智能扩写结果"}
+            </span>
+          </span>
+          <span className="canvas-asset-node__meta">
+            智能扩写 · 文本产物 · {isPreviewOnly ? "正在保存本地副本" : "已保存到本机"}
+          </span>
+        </>
+      ) : mediaSrc != null ? (
         <>
           <button
             type="button"
@@ -1959,7 +2028,9 @@ export function CanvasResultNode({
         </span>
       </div>
       <span className="keyframe-preview keyframe-preview--large" aria-hidden="true">
-        {latestResult?.finalPath && isDesktopRuntime() ? (
+        {latestResult != null && latestResult.mediaType === "text" ? (
+          <pre className="canvas-result-node__text">{textResultFromSource(latestResult.source) ?? "（扩写文本未内联）"}</pre>
+        ) : latestResult?.finalPath && isDesktopRuntime() ? (
           latestResult.mediaType === "video" ? (
             <video src={toMediaSrc(latestResult.finalPath)} muted playsInline preload="metadata" />
           ) : (
@@ -1975,7 +2046,7 @@ export function CanvasResultNode({
       <span className="result-facts">
         <span>
           {latestResult
-            ? `${ASSET_KIND_LABELS[latestResult.mediaType]}结果 · ${fileBaseName(latestResult.finalPath) ?? "路径未记录"}${
+            ? `${latestResult.mediaType === "text" ? "文本" : ASSET_KIND_LABELS[latestResult.mediaType]}结果 · ${fileBaseName(latestResult.finalPath) ?? "路径未记录"}${
                 formatBytes(latestResult.byteSize) ? ` · ${formatBytes(latestResult.byteSize)}` : ""
               }`
             : "暂无结果 · 发起生成后显示"}

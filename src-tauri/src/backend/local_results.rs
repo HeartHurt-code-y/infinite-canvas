@@ -405,6 +405,152 @@ impl LocalResultService {
         }
     }
 
+    /// 登记 Context-IR 文本结果的待写记录（扩写文本内联在 `source.text` 中，
+    /// 前端无需读取文件即可展示）。
+    pub fn pending_text_result(
+        &self,
+        task_id: &str,
+        remote_task_id: &str,
+        text: &str,
+    ) -> GenerationResultRecord {
+        GenerationResultRecord {
+            task_id: task_id.to_string(),
+            result_index: 1,
+            media_type: MediaType::Text,
+            remote_task_id: Some(remote_task_id.to_string()),
+            source: json!({ "kind": "text", "text": text }),
+            save_status: SaveStatus::Pending,
+            final_path: None,
+            relative_path: None,
+            byte_size: None,
+            mime_type: Some("text/plain".into()),
+            sha256: Some(sha256_bytes(text.as_bytes())),
+            saved_at: None,
+            error: None,
+        }
+    }
+
+    /// 将 Context-IR 扩写文本保存为 `.txt` 文件并返回已落盘的记录。
+    pub async fn save_text(
+        &self,
+        task_id: &str,
+        remote_task_id: &str,
+        text: &str,
+        mut on_ready: impl FnMut(&GenerationResultRecord, Option<String>) + Send,
+    ) -> BackendResult<GenerationResultRecord> {
+        if text.trim().is_empty() {
+            return Err(BackendError::protocol(
+                "Context-IR text result is empty",
+                json!({ "taskId": task_id, "remoteTaskId": remote_task_id }),
+            ));
+        }
+        let mut record = self.pending_text_result(task_id, remote_task_id, text);
+        self.persist_result(&record)?;
+        record.save_status = SaveStatus::Writing;
+        self.persist_result(&record)?;
+        // 文本无需下载/校验，没有可即时预览的媒体地址，直接交回生命周期。
+        on_ready(&record, None);
+
+        let directory = self.downloads_directory.join("无限画布");
+        tokio::fs::create_dir_all(&directory).await?;
+        let stem = safe_file_stem(remote_task_id);
+        let file_name = format!("{stem}.txt");
+        let final_path = directory.join(&file_name);
+        let relative_path = Path::new("无限画布").join(&file_name);
+        let bytes = text.as_bytes();
+
+        // 与 save_video 保持一致：文件写入冲突/失败不向上抛错，落回记录状态，
+        // 由任务结果事件把 failed/conflict 状态带给前端。
+        let write_outcome = (async {
+            if tokio::fs::try_exists(&final_path).await? {
+                let existing = tokio::fs::read(&final_path).await?;
+                if existing != bytes {
+                    return Err(BackendError::Conflict(format!(
+                        "target text file already exists with different content: {}",
+                        final_path.display()
+                    )));
+                }
+                info!(
+                    "[save] 文本结果目标文件已存在且内容一致，直接复用: taskId={}, 路径={}",
+                    task_id,
+                    final_path.display()
+                );
+            } else {
+                let part_path = directory.join(format!(".{file_name}.{}.part", Uuid::new_v4()));
+                let mut file = tokio::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(&part_path)
+                    .await?;
+                file.write_all(bytes).await?;
+                file.sync_all().await?;
+                drop(file);
+                tokio::fs::rename(&part_path, &final_path).await?;
+                info!(
+                    "[save] 文本结果原子重命名完成: taskId={}, 临时文件={:?} -> 最终文件={}",
+                    task_id,
+                    part_path,
+                    final_path.display()
+                );
+            }
+            Ok(())
+        })
+        .await;
+
+        let saved = match write_outcome {
+            Ok(()) => GenerationResultRecord {
+                task_id: task_id.to_string(),
+                result_index: 1,
+                media_type: MediaType::Text,
+                remote_task_id: Some(remote_task_id.to_string()),
+                source: record.source.clone(),
+                save_status: SaveStatus::Succeeded,
+                final_path: Some(final_path.to_string_lossy().into_owned()),
+                relative_path: Some(relative_path.to_string_lossy().into_owned()),
+                byte_size: Some(bytes.len() as u64),
+                mime_type: Some("text/plain".into()),
+                sha256: Some(sha256_bytes(bytes)),
+                saved_at: Some(
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs() as i64)
+                        .unwrap_or_default(),
+                ),
+                error: None,
+            },
+            Err(error) => {
+                let status = match &error {
+                    BackendError::Conflict(_) => SaveStatus::Conflict,
+                    _ => SaveStatus::Failed,
+                };
+                error!(
+                    "[save] 文本结果写入失败: taskId={}, remoteTaskId={}, 保存状态={}, 错误: {}",
+                    task_id,
+                    remote_task_id,
+                    status.as_str(),
+                    error
+                );
+                GenerationResultRecord {
+                    task_id: task_id.to_string(),
+                    result_index: 1,
+                    media_type: MediaType::Text,
+                    remote_task_id: Some(remote_task_id.to_string()),
+                    source: record.source.clone(),
+                    save_status: status,
+                    final_path: None,
+                    relative_path: None,
+                    byte_size: None,
+                    mime_type: Some("text/plain".into()),
+                    sha256: Some(sha256_bytes(bytes)),
+                    saved_at: None,
+                    error: Some(error.runtime_record()),
+                }
+            }
+        };
+        self.persist_result(&saved)?;
+        Ok(saved)
+    }
+
     pub async fn resume_interrupted_result(
         &self,
         mut record: GenerationResultRecord,
@@ -423,6 +569,30 @@ impl LocalResultService {
         record.save_status = SaveStatus::Writing;
         record.error = None;
         self.persist_result(&record)?;
+
+        // Context-IR 文本结果：扩写文本内联在 source.text，无需下载，直接重新落盘。
+        if record.media_type == MediaType::Text {
+            let text = record
+                .source
+                .get("text")
+                .and_then(serde_json::Value::as_str)
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    BackendError::protocol(
+                        "interrupted text result has no inline text source",
+                        json!({ "result": record }),
+                    )
+                })?
+                .to_owned();
+            let remote_task_id = record.remote_task_id.clone().unwrap_or_default();
+            return self
+                .save_text(&record.task_id, &remote_task_id, &text, |_, _| {})
+                .await
+                .map(|mut saved| {
+                    saved.result_index = record.result_index;
+                    saved
+                });
+        }
 
         let source = match record.source.get("kind").and_then(|value| value.as_str()) {
             Some("url") => record
@@ -616,6 +786,7 @@ impl LocalResultService {
             MediaType::Image => mime_type.starts_with("image/"),
             MediaType::Video => mime_type.starts_with("video/"),
             MediaType::Audio => mime_type.starts_with("audio/"),
+            MediaType::Text => mime_type.starts_with("text/"),
         };
         if !valid {
             return Err(BackendError::protocol(
@@ -844,6 +1015,7 @@ pub fn preview_source(source: &ImageSource, expected: MediaType) -> Option<Strin
                 MediaType::Image => mime_type.starts_with("image/"),
                 MediaType::Video => mime_type.starts_with("video/"),
                 MediaType::Audio => mime_type.starts_with("audio/"),
+                MediaType::Text => mime_type.starts_with("text/"),
             };
             if !valid {
                 return None;
@@ -953,5 +1125,34 @@ mod tests {
         );
         let preview = preview_source(&source, MediaType::Image).expect("preview");
         assert!(preview.starts_with("data:image/png;base64,"));
+    }
+
+    #[test]
+    fn pending_text_result_carries_media_type_text_and_inline_prompt() {
+        // pending_text_result 是纯构造，不读写存储；用临时库实例化 Service。
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage = Arc::new(
+            crate::backend::storage::Storage::open(&directory.path().join("backend.sqlite"))
+                .expect("open db"),
+        );
+        let service = LocalResultService::new(
+            Arc::clone(&storage),
+            crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(&storage)),
+            reqwest::Client::new(),
+            directory.path().to_path_buf(),
+        );
+        let record = service.pending_text_result("task-1", "remote-1", "扩写后的完整提示词");
+        assert_eq!(record.media_type, MediaType::Text);
+        assert_eq!(record.media_type.as_str(), "text");
+        assert_eq!(record.remote_task_id.as_deref(), Some("remote-1"));
+        assert_eq!(record.source["kind"], "text");
+        assert_eq!(record.source["text"], "扩写后的完整提示词");
+        assert_eq!(record.save_status, SaveStatus::Pending);
+        assert_eq!(record.mime_type.as_deref(), Some("text/plain"));
+        // source 内联文本可被前端提取用于即时展示。
+        assert_eq!(
+            record.source.get("text").and_then(|value| value.as_str()),
+            Some("扩写后的完整提示词")
+        );
     }
 }

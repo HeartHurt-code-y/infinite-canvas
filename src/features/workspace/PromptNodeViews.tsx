@@ -24,7 +24,9 @@ import {
   type ProviderCatalogEntry,
 } from "../../lib/backend";
 import {
+  isMinimaxH3VideoModel,
   isWan30VideoModel,
+  modelGenerationCountMaximum,
   modelParameterCapabilities,
   resolvedParameterValue,
   wanMediaRolesForKind,
@@ -37,7 +39,6 @@ import {
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
   type PromptContentEditorSession,
 } from "../../lib/promptContent";
-import { diffPromptRuns } from "../../lib/promptDiff";
 
 import type {
   AssetKind,
@@ -45,7 +46,6 @@ import type {
   ImageNodeConfig,
   InheritedAssetInput,
   MentionCandidate,
-  PromptOptimizationPanelState,
   RepositoryNodeKind,
   VideoNodeConfig,
   VideoUrlMediaInput,
@@ -61,11 +61,12 @@ export function AssetKindIcon({
   kind,
   size = 15,
 }: {
-  readonly kind: AssetKind;
+  readonly kind: AssetKind | "text";
   readonly size?: number;
 }) {
   const iconProps = { size, weight: "bold" as const, "aria-hidden": true };
 
+  if (kind === "text") return <FileText {...iconProps} />;
   if (kind === "image") return <ImageSquare {...iconProps} />;
   if (kind === "video") return <VideoCamera {...iconProps} />;
   return <WaveformIcon {...iconProps} />;
@@ -1049,6 +1050,20 @@ export function ImageNodeSettings({
         selectedModel!.remoteModelId,
       )
     : [];
+  // 生成数量上限：支持 `n` 参数的模型（GPT-Image 契约）按其声明上限，
+  // 否则沿用任务拆分上限。
+  const countMaximum = selectedModelSupportsOperation
+    ? modelGenerationCountMaximum(
+        selectedModel!.operationSchema,
+        operation,
+        selectedModel!.remoteModelId,
+        MAX_GENERATION_COUNT,
+      )
+    : MAX_GENERATION_COUNT;
+  // `n` 由上方「生成数量」字段承载，避免与模型参数区重复渲染。
+  const modelParameterCapabilitiesWithoutCount = parameterCapabilities.filter(
+    (capability) => capability.key !== "n",
+  );
 
   return (
     <div className="canvas-gen-node__settings" aria-label="图片生成参数">
@@ -1103,12 +1118,12 @@ export function ImageNodeSettings({
           type="number"
           inputMode="numeric"
           min={1}
-          max={MAX_GENERATION_COUNT}
+          max={countMaximum}
           value={config.generationCount}
           onChange={(event) =>
             onChange({
               ...config,
-              generationCount: parseGenerationCountInput(event.target.value),
+              generationCount: parseGenerationCountInput(event.target.value, countMaximum),
             })
           }
         />
@@ -1154,7 +1169,7 @@ export function ImageNodeSettings({
         </select>
       </label>
 
-      {parameterCapabilities.map((capability) => (
+      {modelParameterCapabilitiesWithoutCount.map((capability) => (
         <GenerationParameterField
           key={capability.key}
           capability={capability}
@@ -1381,36 +1396,45 @@ export function VideoNodeSettings({
         </select>
       </label>
 
-      {parameterCapabilities.map((capability) => (
-        <GenerationParameterField
-          key={capability.key}
-          capability={capability}
-          value={resolvedParameterValue(capability, config.parameterValues)}
-          hasMediaInputs={hasMediaInputs}
-          onChange={(value) =>
-            onChange({
-              ...config,
-              parameterValues: { ...config.parameterValues, [capability.key]: value },
-            })
-          }
-        />
-      ))}
+      {parameterCapabilities.map((capability) => {
+        // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
+        const taskType = String(config.parameterValues["task_type"] ?? "generation");
+        if (capability.key === "resolution" && taskType === "h3_context_ir") return null;
+        return (
+          <GenerationParameterField
+            key={capability.key}
+            capability={capability}
+            value={resolvedParameterValue(capability, config.parameterValues)}
+            hasMediaInputs={hasMediaInputs}
+            onChange={(value) =>
+              onChange({
+                ...config,
+                parameterValues: { ...config.parameterValues, [capability.key]: value },
+              })
+            }
+          />
+        );
+      })}
 
       {isWan30VideoModel(
         selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "",
+      ) || isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "")
+        ? (
+            <VideoMediaRoleSection
+              inputs={mediaInputs ?? []}
+              roles={config.mediaRoles ?? {}}
+              onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
+            />
+          )
+        : null}
+      {isWan30VideoModel(
+        selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "",
       ) ? (
-        <>
-          <VideoMediaRoleSection
-            inputs={mediaInputs ?? []}
-            roles={config.mediaRoles ?? {}}
-            onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
-          />
-          <VideoUrlMediaSection
-            urlMedia={config.urlMedia ?? []}
-            hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
-            onChange={(urlMedia) => onChange({ ...config, urlMedia })}
-          />
-        </>
+        <VideoUrlMediaSection
+          urlMedia={config.urlMedia ?? []}
+          hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
+          onChange={(urlMedia) => onChange({ ...config, urlMedia })}
+        />
       ) : null}
     </div>
   );
@@ -1652,161 +1676,6 @@ function VideoUrlMediaSection({
               ? "文档（file）与网页（link）二选一，各限 1 个。"
               : "文档/网页生视频不与其它素材混用，请仅保留 URL 素材。"}
           </span>
-        </div>
-      ) : null}
-    </div>
-  );
-}
-
-/** 原提示词与优化后提示词的差异高亮对比：删除部分红色、新增部分绿色。 */
-function PromptDiffView({
-  original,
-  optimized,
-  originalLabel = "原提示词",
-  optimizedLabel = "优化后",
-  ariaLabel = "提示词优化对比",
-}: {
-  readonly original: string;
-  readonly optimized: string;
-  readonly originalLabel?: string;
-  readonly optimizedLabel?: string;
-  readonly ariaLabel?: string;
-}) {
-  const { originalRuns, optimizedRuns } = useMemo(
-    () => diffPromptRuns(original, optimized),
-    [original, optimized],
-  );
-  return (
-    <div className="prompt-opt-diff" aria-label={ariaLabel}>
-      <div className="prompt-opt-diff__pane">
-        <span className="prompt-opt-diff__label">{originalLabel}</span>
-        <div className="prompt-opt-diff__text">
-          {originalRuns.map((run, index) =>
-            run.type === "removed" ? (
-              <mark key={index} className="prompt-opt-diff__mark prompt-opt-diff__mark--removed">
-                {run.text}
-              </mark>
-            ) : (
-              <span key={index}>{run.text}</span>
-            ),
-          )}
-        </div>
-      </div>
-      <div className="prompt-opt-diff__pane">
-        <span className="prompt-opt-diff__label">{optimizedLabel}</span>
-        <div className="prompt-opt-diff__text">
-          {optimizedRuns.map((run, index) =>
-            run.type === "added" ? (
-              <mark key={index} className="prompt-opt-diff__mark prompt-opt-diff__mark--added">
-                {run.text}
-              </mark>
-            ) : (
-              <span key={index}>{run.text}</span>
-            ),
-          )}
-        </div>
-      </div>
-    </div>
-  );
-}
-
-/** 独立提示词节点的多轮审计面板：展示 Diff，并要求用户确认是否应用建议。 */
-export function PromptAuditPanel({
-  state,
-  onAudit,
-  onApply,
-  onDiscard,
-  subject = "提示词",
-  originalLabel = "当前输出",
-  optimizedLabel = "审计建议",
-}: {
-  readonly state: PromptOptimizationPanelState | undefined;
-  readonly onAudit: () => void;
-  readonly onApply: () => void;
-  readonly onDiscard: () => void;
-  readonly subject?: string;
-  readonly originalLabel?: string;
-  readonly optimizedLabel?: string;
-}) {
-  const busy = state?.status === "running";
-  return (
-    <div className="canvas-prompt-node__audit-panel" aria-label={`${subject}审计结果`}>
-      {state?.round ? (
-        <div className="canvas-prompt-node__audit-heading">
-          <span>第 {state.round} 轮审计</span>
-          {state.status === "done" ? <small>请确认是否应用审计建议</small> : null}
-        </div>
-      ) : null}
-
-      {state?.status === "running" ? (
-        <div className="canvas-prompt-node__audit-status" role="status" aria-live="polite">
-          <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
-          正在载入完整技能与全部对话上下文并审计当前{subject}…
-        </div>
-      ) : null}
-
-      {state?.status === "error" ? (
-        <div className="canvas-prompt-node__audit-error" role="alert">
-          <span>{state.error ?? `${subject}审计失败。`}</span>
-          <button
-            type="button"
-            disabled={busy}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onAudit();
-            }}
-          >
-            重试审计
-          </button>
-        </div>
-      ) : null}
-
-      {state?.status === "done" && state.optimizedPrompt ? (
-        <div className="canvas-prompt-node__audit-result">
-          <PromptDiffView
-            original={state.originalPrompt}
-            optimized={state.optimizedPrompt}
-            originalLabel={originalLabel}
-            optimizedLabel={optimizedLabel}
-            ariaLabel={`${subject}审计差异对比`}
-          />
-          <div className="canvas-prompt-node__audit-actions">
-            <button
-              type="button"
-              className="canvas-prompt-node__audit-apply"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onApply();
-              }}
-            >
-              应用审计结果
-            </button>
-            <button
-              type="button"
-              className="canvas-prompt-node__audit-discard"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onDiscard();
-              }}
-            >
-              保留当前输出
-            </button>
-            <button
-              type="button"
-              className="canvas-prompt-node__audit-again"
-              disabled={busy}
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onAudit();
-              }}
-            >
-              再次审计
-            </button>
-          </div>
         </div>
       ) : null}
     </div>

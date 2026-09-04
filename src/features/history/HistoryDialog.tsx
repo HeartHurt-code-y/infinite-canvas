@@ -28,6 +28,7 @@ import {
   type GenerationTaskSummary,
   type PromptSegment,
 } from "../../lib/backend";
+import { textResultFromSource } from "../workspace/workspaceModel";
 
 async function revealDesktopItem(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -411,7 +412,16 @@ function HistoryLightbox({
             <CaretLeft size={22} weight="bold" aria-hidden="true" />
           </button>
         ) : null}
-        {result.mediaType === "video" ? (
+        {result.mediaType === "text" ? (
+          <pre
+            key={result.finalPath ?? result.resultIndex}
+            className="history-lightbox__text"
+            tabIndex={0}
+            aria-label={`任务结果 ${index + 1} 的扩写文本`}
+          >
+            {textResultFromSource(result.source) ?? "（扩写文本未内联）"}
+          </pre>
+        ) : result.mediaType === "video" ? (
           <video
             key={result.finalPath ?? result.resultIndex}
             className="history-lightbox__media"
@@ -862,7 +872,11 @@ export function HistoryDialog({
                                 <span className="history-result__facts">
                                   <span>
                                     结果 {result.resultIndex + 1} ·{" "}
-                                    {result.mediaType === "video" ? "视频" : "图片"}
+                                    {result.mediaType === "text"
+                                      ? "文本"
+                                      : result.mediaType === "video"
+                                        ? "视频"
+                                        : "图片"}
                                     {formatBytes(result.byteSize)
                                       ? ` · ${formatBytes(result.byteSize)}`
                                       : ""}

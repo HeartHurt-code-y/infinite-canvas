@@ -13,7 +13,8 @@ use super::{
     error::{BackendError, BackendResult},
     model_schema::{
         default_model_schema, operations_from_schema, provider_scoped_model_definition_id,
-        refresh_legacy_image_parameter_defaults, schema_for_enabled_operations,
+        refresh_gemini_image_parameter_defaults, refresh_legacy_image_parameter_defaults,
+        schema_for_enabled_operations,
     },
     types::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
@@ -517,6 +518,7 @@ impl Storage {
             let mut repaired =
                 schema_for_enabled_operations(&definition.operations, &identity, &operations);
             refresh_legacy_image_parameter_defaults(&mut repaired, &identity);
+            refresh_gemini_image_parameter_defaults(&mut repaired, &identity);
             if repaired != definition.operations {
                 transaction.execute(
                     "UPDATE model_definitions SET operations_json = ?1, updated_at = ?2 WHERE id = ?3",

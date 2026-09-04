@@ -112,6 +112,7 @@ impl ResolvedGeneration {
             MediaType::Image => &self.images,
             MediaType::Video => &self.videos,
             MediaType::Audio => &self.audios,
+            MediaType::Text => &self.audios,
         };
         values.iter().find(|item| item.type_position == position)
     }
@@ -148,6 +149,7 @@ fn media_kind_rank(media_type: MediaType) -> u8 {
         MediaType::Image => 0,
         MediaType::Video => 1,
         MediaType::Audio => 2,
+        MediaType::Text => 3,
     }
 }
 
@@ -162,6 +164,9 @@ pub struct GenerationObservation {
     pub remote_status: String,
     pub progress: Option<f64>,
     pub video_url: Option<String>,
+    /// Context-IR（h3_context_ir）任务产出的是扩写文本，位于查询响应的
+    /// `data.data.task.content.prompt`；视频任务此字段为 None。
+    pub text_content: Option<String>,
     pub failure: Option<Value>,
 }
 
@@ -389,14 +394,14 @@ impl ProviderRuntime {
         task: &TaskExecutionRecord,
         attempt_id: &str,
     ) -> BackendResult<(GenerationObservation, CapturedHttpResponse)> {
-        let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
+        let _ = task.remote_task_id.as_deref().ok_or_else(|| {
             BackendError::validation(
                 "video task has no remote task id",
                 json!({ "taskId": task.id }),
             )
         })?;
         let context = self.resolve_frozen(task)?;
-        let path = format!("/v1/video/generations/{remote_task_id}");
+        let path = video_observe_path(&self.storage, task)?;
         let empty_body = Value::Null;
         let response = self
             .captured_json(
@@ -596,13 +601,16 @@ impl ProviderRuntime {
     }
 
     /// 文本模型专用的可追溯 JSON 调用。与媒体生成共用 provider_calls，
-    /// 因而会冻结实际 URL、协议头、完整请求体、完整原始响应和网络层错误。
+    /// 因而会冻结实际 URL、协议头、脱敏后的请求体、完整原始响应和网络层错误。
+    /// `body` 仅用于实际 HTTP 请求；`archive_body` 用于持久化，调用方可在其中
+    /// 移除大体积内联媒体或不应重复落盘的本地文档正文。
     pub async fn captured_text_json(
         &self,
         task: &TaskExecutionRecord,
         attempt_id: &str,
         path: &str,
         body: &Value,
+        archive_body: &Value,
         extra_headers: &[(&str, &str)],
     ) -> BackendResult<CapturedHttpResponse> {
         let context = self.resolve_frozen(task)?;
@@ -628,7 +636,7 @@ impl ProviderRuntime {
             "url": sanitize_url(&url),
             "headers": archived_headers,
             "bodyType": "json",
-            "body": redact_request_value(body),
+            "body": redact_request_value(archive_body),
         });
         let call_id = Uuid::new_v4().to_string();
         self.lifecycle.commit(
@@ -1428,6 +1436,49 @@ fn build_text_to_image_body(
     Ok(Value::Object(body))
 }
 
+/// 计算视频任务的状态轮询路径。
+///
+/// 默认使用 `GET /v1/video/generations/{task_id}`；模型定义可在操作 schema 的
+/// `request.observePath` 声明替代路径（支持 `{task_id}` 占位符），例如 Vidu 系列
+/// 使用 `GET /v1/videos/{task_id}`。路径会经过与提交路径相同的合法性校验。
+fn video_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
+    let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
+    let operation_schema = storage
+        .list_model_definitions()?
+        .into_iter()
+        .find(|definition| definition.id == task.model_definition_id)
+        .map(|definition| definition.operations);
+    video_observe_path_from_schema(operation_schema.as_ref(), remote_task_id)
+}
+
+/// 解析模型声明的视频轮询路径模板（默认 `/v1/video/generations/{task_id}`），
+/// 替换 `{task_id}` 占位符并做合法性校验。
+fn video_observe_path_from_schema(
+    operation_schema: Option<&Value>,
+    remote_task_id: &str,
+) -> BackendResult<String> {
+    let observe_path = operation_schema
+        .and_then(|schema| schema.pointer("/request/observePath"))
+        .and_then(Value::as_str)
+        .map(ToOwned::to_owned);
+    let path = match observe_path {
+        Some(template) => template.replace("{task_id}", remote_task_id),
+        None => format!("/v1/video/generations/{remote_task_id}"),
+    };
+    if !path.starts_with('/')
+        || path.starts_with("//")
+        || path.contains('?')
+        || path.contains('#')
+        || path.len() > 512
+    {
+        return Err(BackendError::validation(
+            "model observe path must be a relative absolute-path without query or fragment",
+            json!({ "path": path }),
+        ));
+    }
+    Ok(path)
+}
+
 fn build_video_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
@@ -1463,6 +1514,9 @@ fn build_video_body(
         .and_then(Value::as_str)
     {
         Some("wan_media_array") => return build_wan_video_body(model, resolved),
+        Some("veo_image_urls") => return build_veo_video_body(model, resolved),
+        Some("vidu_image_urls") => return build_vidu_video_body(model, resolved),
+        Some("minimax_h3_media") => return build_minimax_h3_video_body(model, resolved),
         Some(unsupported) => {
             return Err(BackendError::validation(
                 "video request uses an unsupported media encoding",
@@ -1597,6 +1651,7 @@ fn video_prompt(resolved: &ResolvedGeneration) -> String {
                     MediaType::Image => "图片",
                     MediaType::Video => "视频",
                     MediaType::Audio => "音频",
+                    MediaType::Text => "文本",
                 };
                 prompt.push_str(&format!("{label}{type_position}"));
             }
@@ -1646,6 +1701,408 @@ fn build_wan_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
     Ok(Value::Object(body))
 }
 
+/// Veo（Google Veo，魔芋AI 代理）视频请求体：`model`/`prompt`/`resolution`/
+/// `aspect_ratio`/`duration` 为顶层字段，`images` 为图生视频参考图 URL 数组
+/// （只支持公网 http/https URL，文档约定平台只取第一个），
+/// `negativePrompt`/`sampleCount`/`enhancePrompt`/`seed` 放入 `metadata` 对象。
+fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
+    validate_veo_media(resolved)?;
+    let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let media_field = request_field(&resolved.operation_schema, "mediaField", "images")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let mut body = Map::new();
+    body.insert(model_field, Value::String(model.to_string()));
+    let prompt = video_prompt(resolved);
+    if prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "Veo video prompt must not be empty",
+            resolved.archive(),
+        ));
+    }
+    body.insert(prompt_field, Value::String(prompt));
+
+    // 图生视频参考图：只支持公网 http(s) URL（暂存对象或远端素材的读取地址），
+    // 不支持 base64 / data URL 直传。
+    let images = resolved
+        .images
+        .iter()
+        .map(|item| {
+            let reference = item.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "Veo image input has no remote-readable reference",
+                    item.archive(),
+                )
+            })?;
+            if !(reference.starts_with("http://") || reference.starts_with("https://")) {
+                return Err(BackendError::validation(
+                    "Veo image input must reference a public http(s) URL",
+                    json!({
+                        "displayName": item.display_name,
+                        "remoteReference": redact_url_string(reference)
+                    }),
+                ));
+            }
+            Ok(Value::String(reference.clone()))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    if !images.is_empty() {
+        body.insert(media_field, Value::Array(images));
+    }
+
+    // resolution/aspect_ratio/duration 落在顶层；metadata 可选参数按
+    // requestLocation: "metadata" 归入 metadata 对象。
+    insert_mapped_parameters(
+        &mut body,
+        &metadata_field,
+        mapped_parameters(resolved, "root")?,
+    )?;
+
+    // 1080p 分辨率仅支持 8 秒时长（接口约束，提前给出可读错误）。
+    let resolution = body
+        .get("resolution")
+        .and_then(Value::as_str)
+        .unwrap_or("720p");
+    let duration = body.get("duration").and_then(Value::as_i64).unwrap_or(8);
+    if resolution == "1080p" && duration != 8 {
+        return Err(BackendError::validation(
+            "Veo 1080p resolution requires a duration of 8 seconds",
+            json!({ "resolution": resolution, "duration": duration }),
+        ));
+    }
+
+    Ok(Value::Object(body))
+}
+
+/// Veo 仅接受图片参考输入（顶层 `images` URL 数组）；视频/音频素材不支持。
+fn validate_veo_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "Veo video generation only accepts image reference inputs",
+            json!({
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// Vidu 系列（魔芋AI 聚合平台）视频请求体：`model`/`prompt`/`resolution`/
+/// `aspect_ratio`/`duration`/`seed`/`watermark` 为顶层字段，`images` 为图生/
+/// 首尾帧/参考图输入 URL 或 Base64 Data URI 数组（数量决定生成模式：
+/// 1 张=图生、2 张=首尾帧、≥3 张=参考图，保持输入顺序），
+/// `movement_amplitude`/`style`/`audio`/`audio_type`/`off_peak`/`bgm` 等高级参数
+/// 放入 `metadata` 对象透传。
+fn build_vidu_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
+    validate_vidu_media(resolved)?;
+    let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let media_field = request_field(&resolved.operation_schema, "mediaField", "images")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let mut body = Map::new();
+    body.insert(model_field, Value::String(model.to_string()));
+    let prompt = video_prompt(resolved);
+    if prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "Vidu video prompt must not be empty",
+            resolved.archive(),
+        ));
+    }
+    body.insert(prompt_field, Value::String(prompt));
+
+    // 图生/首尾帧/参考图输入：支持公网 http(s) URL 与带前缀的 Base64 Data URI。
+    // 数量决定生成模式（1 张=图生、2 张=首尾帧、≥3 张=参考图），保持输入顺序。
+    let images = resolved
+        .images
+        .iter()
+        .map(|item| {
+            let reference = item.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "Vidu image input has no remote-readable reference",
+                    item.archive(),
+                )
+            })?;
+            Ok(Value::String(reference.clone()))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    if !images.is_empty() {
+        body.insert(media_field, Value::Array(images));
+    }
+
+    // resolution/aspect_ratio/duration/seed/watermark 落在顶层；metadata 高级参数
+    // 按 requestLocation: "metadata" 归入 metadata 对象。
+    insert_mapped_parameters(
+        &mut body,
+        &metadata_field,
+        mapped_parameters(resolved, "root")?,
+    )?;
+
+    Ok(Value::Object(body))
+}
+
+/// Vidu 仅接受图片参考输入（顶层 `images` URL/Base64 数组）；视频/音频素材不支持。
+fn validate_vidu_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "Vidu video generation only accepts image reference inputs",
+            json!({
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    Ok(())
+}
+
+/// MiniMax-H3（魔芋平台新一代视频生成模型）视频请求体：
+/// - `model`/`prompt`/`duration`/`resolution`/`ratio`/`aigc_watermark` 为顶层字段；
+/// - 媒体通过 `metadata` 传入：`first_frame_image`（首帧）、`last_frame_image`（尾帧）、
+///   `reference_images`（参考图数组）、`reference_videos`（参考视频数组）、
+///   `reference_audios`（参考音频数组）；
+/// - `metadata.task_type` 区分任务类型：generation（文生/图生/参考生成，默认）与
+///   regeneration（768P→2K 再生成，连接的源视频作为 `base_video_url`，输出时长由
+///   源视频决定，不发送 `duration`）。
+fn build_minimax_h3_video_body(
+    model: &str,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    validate_minimax_h3_media(resolved)?;
+    let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let mut body = Map::new();
+    body.insert(model_field, Value::String(model.to_string()));
+    let prompt = video_prompt(resolved);
+    if prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "MiniMax-H3 video prompt must not be empty",
+            resolved.archive(),
+        ));
+    }
+    body.insert(prompt_field, Value::String(prompt));
+
+    // resolution/ratio/duration/aigc_watermark 落在顶层；task_type 声明了
+    // requestLocation: "metadata"，由 insert_mapped_parameters 归入 metadata 对象。
+    insert_mapped_parameters(
+        &mut body,
+        &metadata_field,
+        mapped_parameters(resolved, "root")?,
+    )?;
+
+    let task_type = body
+        .get(&metadata_field)
+        .and_then(|value| value.get("task_type"))
+        .and_then(Value::as_str)
+        .unwrap_or("generation")
+        .to_string();
+
+    if task_type == "regeneration" {
+        // regeneration：源视频作为 base_video_url（source_task_id 与 base_video_url
+        // 二选一，本地未提供任务 ID 输入，使用连接的源视频地址）；可额外携带
+        // 参考音频；输出时长由源视频决定，不发送 duration。
+        if resolved.videos.len() != 1 {
+            return Err(BackendError::validation(
+                "MiniMax-H3 regeneration requires exactly one source video input",
+                json!({ "videos": resolved.videos.len() }),
+            ));
+        }
+        if !resolved.images.is_empty() {
+            return Err(BackendError::validation(
+                "MiniMax-H3 regeneration does not accept image inputs",
+                json!({ "images": resolved.images.len() }),
+            ));
+        }
+        body.remove("duration");
+    } else if task_type == "h3_context_ir" {
+        // Context-IR（智能扩写）：产出文本而非视频，不接受 resolution（文档说明传了
+        // 也会被忽略）；输入仅限参考视频/音频（各 ≤3），不接受图片。
+        if !resolved.images.is_empty() {
+            return Err(BackendError::validation(
+                "MiniMax-H3 Context-IR does not accept image inputs",
+                json!({ "images": resolved.images.len() }),
+            ));
+        }
+        body.remove("resolution");
+    }
+
+    let metadata = body
+        .entry(metadata_field.clone())
+        .or_insert_with(|| Value::Object(Map::new()));
+    let metadata_object = metadata.as_object_mut().ok_or_else(|| {
+        BackendError::validation(
+            "MiniMax-H3 metadata field collides with a non-object value",
+            json!({ "metadataField": metadata_field }),
+        )
+    })?;
+    metadata_object.insert("task_type".into(), Value::String(task_type.clone()));
+
+    if task_type == "regeneration" {
+        let base = resolved.videos.first().expect("videos length checked");
+        let reference = base.remote_reference.as_ref().ok_or_else(|| {
+            BackendError::validation(
+                "MiniMax-H3 regeneration video has no remote-readable reference",
+                base.archive(),
+            )
+        })?;
+        metadata_object.insert("base_video_url".into(), Value::String(reference.clone()));
+        for media in &resolved.audios {
+            let reference = media.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "MiniMax-H3 regeneration audio has no remote-readable reference",
+                    media.archive(),
+                )
+            })?;
+            metadata_object
+                .entry("reference_audios")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("reference_audios array")
+                .push(Value::String(reference.clone()));
+        }
+    } else {
+        for media in &resolved.images {
+            let reference = media.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "MiniMax-H3 image input has no remote-readable reference",
+                    media.archive(),
+                )
+            })?;
+            match media.role.as_str() {
+                "first_frame" => {
+                    metadata_object
+                        .insert("first_frame_image".into(), Value::String(reference.clone()));
+                }
+                "last_frame" => {
+                    metadata_object
+                        .insert("last_frame_image".into(), Value::String(reference.clone()));
+                }
+                "reference_image" => {
+                    metadata_object
+                        .entry("reference_images")
+                        .or_insert_with(|| Value::Array(Vec::new()))
+                        .as_array_mut()
+                        .expect("reference_images array")
+                        .push(Value::String(reference.clone()));
+                }
+                _ => {
+                    return Err(BackendError::validation(
+                        "MiniMax-H3 image role is incompatible with the resolved media type",
+                        json!({
+                            "role": media.role,
+                            "mediaType": media.media_type,
+                            "displayName": media.display_name
+                        }),
+                    ));
+                }
+            }
+        }
+        for media in &resolved.videos {
+            let reference = media.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "MiniMax-H3 video input has no remote-readable reference",
+                    media.archive(),
+                )
+            })?;
+            metadata_object
+                .entry("reference_videos")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("reference_videos array")
+                .push(Value::String(reference.clone()));
+        }
+        for media in &resolved.audios {
+            let reference = media.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "MiniMax-H3 audio input has no remote-readable reference",
+                    media.archive(),
+                )
+            })?;
+            metadata_object
+                .entry("reference_audios")
+                .or_insert_with(|| Value::Array(Vec::new()))
+                .as_array_mut()
+                .expect("reference_audios array")
+                .push(Value::String(reference.clone()));
+        }
+    }
+
+    Ok(Value::Object(body))
+}
+
+/// MiniMax-H3 媒体前置校验：
+/// - 首帧/尾帧图片各最多 1 张，参考图最多 9 张，参考视频/音频各最多 3 段；
+/// - 首帧/尾帧模式与参考图/视频/音频模式不可混用（平台会以 build_request_failed 拒绝）；
+/// - 角色必须与素材类型匹配（role: first_frame/last_frame/reference_image → 图片，
+///   reference_video → 视频，reference_audio → 音频）。
+fn validate_minimax_h3_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
+    let mut first_frames = 0_usize;
+    let mut last_frames = 0_usize;
+    let mut reference_images = 0_usize;
+    let mut reference_videos = 0_usize;
+    let mut reference_audios = 0_usize;
+    for media in resolved
+        .images
+        .iter()
+        .chain(&resolved.videos)
+        .chain(&resolved.audios)
+    {
+        match media.role.as_str() {
+            "first_frame" if media.media_type == MediaType::Image => first_frames += 1,
+            "last_frame" if media.media_type == MediaType::Image => last_frames += 1,
+            "reference_image" if media.media_type == MediaType::Image => reference_images += 1,
+            "reference_video" if media.media_type == MediaType::Video => reference_videos += 1,
+            "reference_audio" if media.media_type == MediaType::Audio => reference_audios += 1,
+            _ => {
+                return Err(BackendError::validation(
+                    "MiniMax-H3 media role is incompatible with the resolved media type",
+                    json!({
+                        "role": media.role,
+                        "mediaType": media.media_type,
+                        "displayName": media.display_name
+                    }),
+                ));
+            }
+        }
+    }
+    if first_frames > 1
+        || last_frames > 1
+        || reference_images > 9
+        || reference_videos > 3
+        || reference_audios > 3
+    {
+        return Err(BackendError::validation(
+            "MiniMax-H3 media input exceeds a documented count limit",
+            json!({
+                "firstFrames": first_frames,
+                "lastFrames": last_frames,
+                "referenceImages": reference_images,
+                "referenceVideos": reference_videos,
+                "referenceAudios": reference_audios
+            }),
+        ));
+    }
+    let has_frame_inputs = first_frames > 0 || last_frames > 0;
+    let has_reference_inputs =
+        reference_images > 0 || reference_videos > 0 || reference_audios > 0;
+    if has_frame_inputs && has_reference_inputs {
+        return Err(BackendError::validation(
+            "MiniMax-H3 frame inputs and reference inputs cannot be mixed",
+            json!({
+                "firstFrames": first_frames,
+                "lastFrames": last_frames,
+                "referenceImages": reference_images,
+                "referenceVideos": reference_videos,
+                "referenceAudios": reference_audios
+            }),
+        ));
+    }
+    Ok(())
+}
+
 fn wan_prompt(resolved: &ResolvedGeneration) -> String {
     let mut prompt = String::new();
     for item in &resolved.content {
@@ -1659,6 +2116,7 @@ fn wan_prompt(resolved: &ResolvedGeneration) -> String {
                     MediaType::Image => "图",
                     MediaType::Video => "视频",
                     MediaType::Audio => "音频",
+                    MediaType::Text => "文本",
                 };
                 prompt.push_str(&format!("{label}{type_position}"));
             }
@@ -1826,6 +2284,11 @@ fn video_media_content(media: &ResolvedMedia, reference: &str) -> Value {
             "audio_url": { "url": reference },
             "role": media.role,
         }),
+        MediaType::Text => json!({
+            "type": "text",
+            "text": reference,
+            "role": media.role,
+        }),
     }
 }
 
@@ -1909,6 +2372,13 @@ fn parse_video_observation(
         .or_else(|| value.get("progress"))
         .and_then(parse_progress);
     let video_url = extract_video_url(&value);
+    // Context-IR（h3_context_ir）任务：扩写文本在透传层 `data.data.task.content.prompt`，
+    // 外层没有 result_url，`modality` 为 "text"。
+    let text_content = value
+        .pointer("/data/data/task/content/prompt")
+        .and_then(Value::as_str)
+        .filter(|content| !content.trim().is_empty())
+        .map(ToOwned::to_owned);
     let fail_reason = value.pointer("/data/fail_reason").cloned();
     let upstream_error = value
         .pointer("/data/data/data/data/error")
@@ -1936,6 +2406,7 @@ fn parse_video_observation(
         remote_status,
         progress,
         video_url,
+        text_content,
         failure,
     })
 }
@@ -2371,6 +2842,7 @@ mod tests {
                 MediaType::Image => "image/png",
                 MediaType::Video => "video/mp4",
                 MediaType::Audio => "audio/mpeg",
+                MediaType::Text => "text/plain",
             }
             .into(),
             byte_size: 1024,
@@ -2909,6 +3381,718 @@ mod tests {
         let error = build_video_body(&reference_task, &reference_generation)
             .expect_err("Wan document/link with references must fail");
         assert!(error.to_string().contains("cannot be mixed"));
+    }
+
+    #[test]
+    fn veo_video_builder_uses_top_level_parameters_and_metadata_fields() {
+        let schema = super::super::model_schema::default_model_schema(
+            "veo-3.1-fast",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "resolution": "1080p",
+                "aspect_ratio": "16:9",
+                "duration": 8,
+                "sampleCount": 2,
+                "enhancePrompt": true,
+                "negativePrompt": "blurry, low quality"
+            }),
+        );
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Veo video body");
+        assert_eq!(body["model"], "veo-3.1-fast");
+        assert_eq!(body["prompt"], "A train arrives");
+        assert_eq!(body["resolution"], "1080p");
+        assert_eq!(body["aspect_ratio"], "16:9");
+        assert_eq!(body["duration"], 8);
+        assert_eq!(body["metadata"]["negativePrompt"], "blurry, low quality");
+        assert_eq!(body["metadata"]["sampleCount"], 2);
+        assert_eq!(body["metadata"]["enhancePrompt"], true);
+        assert!(body.get("images").is_none());
+        // Veo 不携带 Seedance 的 metadata.content 协议。
+        assert!(body["metadata"].get("content").is_none());
+    }
+
+    #[test]
+    fn veo_video_builder_puts_reference_images_into_top_level_images_array() {
+        let schema = super::super::model_schema::default_model_schema(
+            "veo-3.1-fast",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "resolution": "720p",
+                "aspect_ratio": "9:16",
+                "duration": 4,
+                "sampleCount": 1,
+                "enhancePrompt": true
+            }),
+        );
+        generation.content = vec![
+            CompiledContentItem::Text("The cat ".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Image,
+                type_position: 1,
+            },
+            CompiledContentItem::Text(" slowly turns its head".into()),
+        ];
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/cat.jpg",
+            Some(1),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Veo image body");
+        assert_eq!(body["prompt"], "The cat 图片1 slowly turns its head");
+        assert_eq!(body["images"], json!(["https://cdn.example.com/cat.jpg"]));
+        assert_eq!(body["resolution"], "720p");
+        assert_eq!(body["aspect_ratio"], "9:16");
+        assert_eq!(body["duration"], 4);
+        assert!(body["metadata"].get("content").is_none());
+    }
+
+    #[test]
+    fn veo_video_builder_rejects_video_audio_and_non_public_image_references() {
+        let schema = super::super::model_schema::default_model_schema(
+            "veo-3.1-fast",
+            &[GenerationOperation::VideoGeneration],
+        );
+
+        // 视频/音频素材不支持。
+        let mut with_video = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720p", "aspect_ratio": "16:9", "duration": 8 }),
+        );
+        with_video.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/ref.mp4",
+            None,
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
+        let error = build_video_body(&video_task, &with_video).expect_err("Veo video must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("only accepts image reference inputs")
+        );
+
+        // 图片引用必须是公网 http(s) URL（不支持 asset:// 或 base64 直传）。
+        let mut with_asset = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720p", "aspect_ratio": "16:9", "duration": 8 }),
+        );
+        with_asset.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "asset://asset-20260902214334-t5rnj",
+            Some(1),
+        ));
+        let mut asset_task = task(GenerationOperation::VideoGeneration);
+        asset_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
+        let error =
+            build_video_body(&asset_task, &with_asset).expect_err("non-public image must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must reference a public http(s) URL")
+        );
+    }
+
+    #[test]
+    fn vidu_video_builder_uses_top_level_parameters_and_metadata_fields() {
+        let schema = super::super::model_schema::default_model_schema(
+            "viduq3-turbo",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "resolution": "1080p",
+                "aspect_ratio": "9:16",
+                "duration": 8,
+                "seed": 12345,
+                "watermark": false,
+                "movement_amplitude": "large",
+                "style": "anime",
+                "audio": false,
+                "off_peak": true,
+                "bgm": true
+            }),
+        );
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("viduq3-turbo".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Vidu video body");
+        assert_eq!(body["model"], "viduq3-turbo");
+        assert_eq!(body["prompt"], "A train arrives");
+        assert_eq!(body["resolution"], "1080p");
+        assert_eq!(body["aspect_ratio"], "9:16");
+        assert_eq!(body["duration"], 8);
+        assert_eq!(body["seed"], 12345);
+        assert_eq!(body["watermark"], false);
+        // metadata 高级参数按 requestLocation 归入 metadata 对象。
+        assert_eq!(body["metadata"]["movement_amplitude"], "large");
+        assert_eq!(body["metadata"]["style"], "anime");
+        assert_eq!(body["metadata"]["audio"], false);
+        assert_eq!(body["metadata"]["off_peak"], true);
+        assert_eq!(body["metadata"]["bgm"], true);
+        // Vidu 不携带 Seedance 的 metadata.content 协议。
+        assert!(body["metadata"].get("content").is_none());
+        assert!(body.get("images").is_none());
+    }
+
+    #[test]
+    fn vidu_video_builder_puts_reference_images_into_top_level_images_array() {
+        let schema = super::super::model_schema::default_model_schema(
+            "viduq3-turbo",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720p", "aspect_ratio": "16:9", "duration": 5 }),
+        );
+        generation.content = vec![
+            CompiledContentItem::Text("The cat ".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Image,
+                type_position: 1,
+            },
+            CompiledContentItem::Text(" slowly turns its head".into()),
+        ];
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/cat.jpg",
+            Some(1),
+        ));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "reference_image",
+            "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgA...",
+            None,
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("viduq3-turbo".into());
+
+        let body = build_video_body(&video_task, &generation).expect("Vidu image body");
+        assert_eq!(body["prompt"], "The cat 图片1 slowly turns its head");
+        assert_eq!(
+            body["images"],
+            json!([
+                "https://cdn.example.com/cat.jpg",
+                "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgA..."
+            ])
+        );
+        assert_eq!(body["resolution"], "720p");
+        assert_eq!(body["aspect_ratio"], "16:9");
+        assert_eq!(body["duration"], 5);
+        assert!(body["metadata"].get("content").is_none());
+    }
+
+    #[test]
+    fn vidu_video_builder_rejects_video_and_audio_inputs() {
+        let schema = super::super::model_schema::default_model_schema(
+            "viduq3-turbo",
+            &[GenerationOperation::VideoGeneration],
+        );
+
+        // 视频/音频素材不支持。
+        let mut with_video = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720p", "aspect_ratio": "16:9", "duration": 5 }),
+        );
+        with_video.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/ref.mp4",
+            None,
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("viduq3-turbo".into());
+        let error = build_video_body(&video_task, &with_video).expect_err("Vidu video must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("only accepts image reference inputs")
+        );
+
+        let mut with_audio = resolved(
+            schema["video_generation"].clone(),
+            json!({ "resolution": "720p", "aspect_ratio": "16:9", "duration": 5 }),
+        );
+        with_audio.audios.push(resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_audio",
+            "https://cdn.example.com/ref.mp3",
+            None,
+        ));
+        let mut audio_task = task(GenerationOperation::VideoGeneration);
+        audio_task.remote_model_id_snapshot = Some("viduq3-turbo".into());
+        let error = build_video_body(&audio_task, &with_audio).expect_err("Vidu audio must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("only accepts image reference inputs")
+        );
+    }
+
+    #[test]
+    fn minimax_h3_builder_uses_top_level_parameters_and_metadata_fields() {
+        let schema = super::super::model_schema::default_model_schema(
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "generation",
+                "resolution": "2K",
+                "ratio": "16:9",
+                "duration": 8,
+                "aigc_watermark": true
+            }),
+        );
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+
+        let body = build_video_body(&video_task, &generation).expect("MiniMax-H3 video body");
+        assert_eq!(body["model"], "MiniMax-H3");
+        assert_eq!(body["prompt"], "A train arrives");
+        // MiniMax-H3 文档：duration/resolution/ratio/aigc_watermark 均为顶层字段。
+        assert_eq!(body["resolution"], "2K");
+        assert_eq!(body["ratio"], "16:9");
+        assert_eq!(body["duration"], 8);
+        assert_eq!(body["aigc_watermark"], true);
+        // metadata 只包含任务类型（无媒体时不生成媒体字段）。
+        assert_eq!(body["metadata"]["task_type"], "generation");
+        assert!(body["metadata"].get("first_frame_image").is_none());
+        assert!(body["metadata"].get("reference_images").is_none());
+        // 顶层参数不得重复出现在 metadata。
+        assert!(body["metadata"].get("resolution").is_none());
+        assert!(body["metadata"].get("duration").is_none());
+        // task_type 只进 metadata，不留在顶层。
+        assert!(body.get("task_type").is_none());
+    }
+
+    #[test]
+    fn minimax_h3_builder_encodes_frame_and_reference_media() {
+        let schema = super::super::model_schema::default_model_schema(
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "generation",
+                "resolution": "2K",
+                "ratio": "adaptive",
+                "duration": 5,
+                "aigc_watermark": false
+            }),
+        );
+        // 首帧 + 尾帧 + 参考图 + 参考视频 + 参考音频（参考模式）。
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/ref1.png",
+            Some(1),
+        ));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "reference_image",
+            "https://cdn.example.com/ref2.png",
+            Some(2),
+        ));
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/ref.mp4",
+            Some(1),
+        ));
+        generation.audios.push(resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_audio",
+            "https://cdn.example.com/ref.mp3",
+            Some(1),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+
+        let body = build_video_body(&video_task, &generation).expect("MiniMax-H3 media body");
+        assert_eq!(body["metadata"]["task_type"], "generation");
+        assert_eq!(
+            body["metadata"]["reference_images"],
+            json!([
+                "https://cdn.example.com/ref1.png",
+                "https://cdn.example.com/ref2.png"
+            ])
+        );
+        assert_eq!(
+            body["metadata"]["reference_videos"],
+            json!(["https://cdn.example.com/ref.mp4"])
+        );
+        assert_eq!(
+            body["metadata"]["reference_audios"],
+            json!(["https://cdn.example.com/ref.mp3"])
+        );
+        assert!(body["metadata"].get("first_frame_image").is_none());
+        assert!(body["metadata"].get("last_frame_image").is_none());
+
+        // 首帧/尾帧模式（独立使用，互不依赖）。
+        let mut frame_generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "generation",
+                "resolution": "768P",
+                "ratio": "9:16",
+                "duration": 5,
+                "aigc_watermark": false
+            }),
+        );
+        frame_generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "first_frame",
+            "https://cdn.example.com/first.png",
+            Some(1),
+        ));
+        frame_generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "last_frame",
+            "https://cdn.example.com/last.png",
+            Some(2),
+        ));
+        let mut frame_task = task(GenerationOperation::VideoGeneration);
+        frame_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+
+        let frame_body =
+            build_video_body(&frame_task, &frame_generation).expect("MiniMax-H3 frame body");
+        assert_eq!(
+            frame_body["metadata"]["first_frame_image"],
+            "https://cdn.example.com/first.png"
+        );
+        assert_eq!(
+            frame_body["metadata"]["last_frame_image"],
+            "https://cdn.example.com/last.png"
+        );
+        assert!(frame_body["metadata"].get("reference_images").is_none());
+    }
+
+    #[test]
+    fn minimax_h3_builder_rejects_mixed_frame_and_reference_inputs() {
+        let schema = super::super::model_schema::default_model_schema(
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "generation",
+                "resolution": "2K",
+                "ratio": "adaptive",
+                "duration": 5,
+                "aigc_watermark": false
+            }),
+        );
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "first_frame",
+            "https://cdn.example.com/first.png",
+            Some(1),
+        ));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "reference_image",
+            "https://cdn.example.com/ref.png",
+            Some(2),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+        let error = build_video_body(&video_task, &generation)
+            .expect_err("Mixed frame and reference must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("frame inputs and reference inputs cannot be mixed")
+        );
+
+        // 角色与素材类型不匹配。
+        let mut wrong_role = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "generation",
+                "resolution": "2K",
+                "ratio": "adaptive",
+                "duration": 5,
+                "aigc_watermark": false
+            }),
+        );
+        wrong_role.audios.push(resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_image",
+            "https://cdn.example.com/ref.mp3",
+            None,
+        ));
+        let mut audio_task = task(GenerationOperation::VideoGeneration);
+        audio_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+        let error = build_video_body(&audio_task, &wrong_role)
+            .expect_err("Role/type mismatch must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("incompatible with the resolved media type")
+        );
+    }
+
+    #[test]
+    fn minimax_h3_builder_regeneration_uses_base_video_url_and_omits_duration() {
+        let schema = super::super::model_schema::default_model_schema(
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "regeneration",
+                "resolution": "2K",
+                "ratio": "adaptive",
+                "duration": 8,
+                "aigc_watermark": false
+            }),
+        );
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/source.mp4",
+            Some(1),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+
+        let body = build_video_body(&video_task, &generation).expect("MiniMax-H3 regen body");
+        assert_eq!(body["metadata"]["task_type"], "regeneration");
+        assert_eq!(
+            body["metadata"]["base_video_url"],
+            "https://cdn.example.com/source.mp4"
+        );
+        // regeneration 输出时长由源视频决定，不发送 duration。
+        assert!(body.get("duration").is_none());
+        assert!(body["metadata"].get("reference_videos").is_none());
+
+        // 缺少源视频时拒绝。
+        let empty = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "regeneration",
+                "resolution": "2K",
+                "ratio": "adaptive",
+                "duration": 8,
+                "aigc_watermark": false
+            }),
+        );
+        let mut empty_task = task(GenerationOperation::VideoGeneration);
+        empty_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+        let error = build_video_body(&empty_task, &empty).expect_err("Regeneration must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires exactly one source video input")
+        );
+    }
+
+    #[test]
+    fn minimax_h3_builder_context_ir_omits_resolution_and_maps_reference_media() {
+        let schema = super::super::model_schema::default_model_schema(
+            "MiniMax-H3",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "task_type": "h3_context_ir",
+                "resolution": "2K",
+                "ratio": "21:9",
+                "duration": 12,
+                "aigc_watermark": true
+            }),
+        );
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/clip.mp4",
+            Some(1),
+        ));
+        generation.audios.push(resolved_media(
+            MediaType::Audio,
+            1,
+            "reference_audio",
+            "https://cdn.example.com/music.mp3",
+            Some(2),
+        ));
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+
+        let body = build_video_body(&video_task, &generation).expect("MiniMax-H3 Context-IR body");
+        assert_eq!(body["metadata"]["task_type"], "h3_context_ir");
+        // Context-IR 不接受 resolution（文档说明传了也会被忽略），请求体不应携带。
+        assert!(body.get("resolution").is_none());
+        // 可传 duration/ratio 影响扩写。
+        assert_eq!(body["duration"], 12);
+        assert_eq!(body["ratio"], "21:9");
+        assert_eq!(body["aigc_watermark"], true);
+        assert_eq!(
+            body["metadata"]["reference_videos"],
+            json!(["https://cdn.example.com/clip.mp4"])
+        );
+        assert_eq!(
+            body["metadata"]["reference_audios"],
+            json!(["https://cdn.example.com/music.mp3"])
+        );
+
+        // Context-IR 不接受图片输入。
+        let mut with_image = resolved(
+            schema["video_generation"].clone(),
+            json!({ "task_type": "h3_context_ir" }),
+        );
+        with_image.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/shot.png",
+            Some(1),
+        ));
+        let mut image_task = task(GenerationOperation::VideoGeneration);
+        image_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
+        let error = build_video_body(&image_task, &with_image).expect_err("Context-IR must reject images");
+        assert!(
+            error.to_string().contains("does not accept image inputs"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn video_observation_extracts_context_ir_text_from_task_content_prompt() {
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "code": "success",
+                "message": "",
+                "data": {
+                    "task_id": "435194938720659",
+                    "action": "generate",
+                    "status": "SUCCESS",
+                    "fail_reason": "",
+                    "progress": "100%",
+                    "data": {
+                        "task": {
+                            "id": "435194938720659",
+                            "model": "MiniMax-H3",
+                            "status": "succeeded",
+                            "modality": "text",
+                            "task_type": "h3_context_ir",
+                            "content": {
+                                "prompt": "清晨的城市天际线，金色朝阳……（智能扩写后的完整提示词）"
+                            }
+                        }
+                    }
+                }
+            })
+            .to_string(),
+        };
+        let observation = parse_video_observation(&response).expect("Context-IR observation");
+        assert_eq!(observation.remote_status, "SUCCESS");
+        // Context-IR 无 result_url，扩写文本在透传层 content.prompt。
+        assert_eq!(observation.video_url, None);
+        assert_eq!(
+            observation.text_content.as_deref(),
+            Some("清晨的城市天际线，金色朝阳……（智能扩写后的完整提示词）")
+        );
+    }
+
+    #[test]
+    fn video_observe_path_supports_model_declared_paths() {
+        // 默认路径：/v1/video/generations/{task_id}。
+        assert_eq!(
+            video_observe_path_from_schema(None, "task_abc").expect("default path"),
+            "/v1/video/generations/task_abc"
+        );
+        // 模型声明 observePath（Vidu 系列）。
+        let schema = super::super::model_schema::default_model_schema(
+            "viduq3-pro",
+            &[GenerationOperation::VideoGeneration],
+        );
+        assert_eq!(
+            video_observe_path_from_schema(Some(&schema["video_generation"]), "task_vidu")
+                .expect("vidu path"),
+            "/v1/videos/task_vidu"
+        );
+        // 无该字段时回退默认路径。
+        let generic = json!({
+            "video_generation": {
+                "request": { "path": "/v1/video/generations" }
+            }
+        });
+        assert_eq!(
+            video_observe_path_from_schema(Some(&generic["video_generation"]), "task_gen")
+                .expect("generic path"),
+            "/v1/video/generations/task_gen"
+        );
+    }
+
+    #[test]
+    fn veo_video_builder_rejects_1080p_with_non_8_duration() {
+        let schema = super::super::model_schema::default_model_schema(
+            "veo-3.1-fast",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "resolution": "1080p",
+                "aspect_ratio": "16:9",
+                "duration": 4,
+                "sampleCount": 1,
+                "enhancePrompt": true
+            }),
+        );
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
+        let error = build_video_body(&video_task, &generation)
+            .expect_err("Veo 1080p with non-8 duration must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("requires a duration of 8 seconds")
+        );
     }
 
     #[test]

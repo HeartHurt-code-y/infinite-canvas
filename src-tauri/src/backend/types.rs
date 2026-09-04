@@ -141,6 +141,8 @@ pub enum MediaType {
     Image,
     Video,
     Audio,
+    /// Context-IR（MiniMax-H3 h3_context_ir）等文本产物：非媒体文件，保存为 .txt。
+    Text,
 }
 
 impl MediaType {
@@ -149,6 +151,7 @@ impl MediaType {
             Self::Image => "image",
             Self::Video => "video",
             Self::Audio => "audio",
+            Self::Text => "text",
         }
     }
 
@@ -157,6 +160,7 @@ impl MediaType {
             Self::Image => "图片",
             Self::Video => "视频",
             Self::Audio => "音频",
+            Self::Text => "文本",
         }
     }
 }

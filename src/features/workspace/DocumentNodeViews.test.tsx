@@ -33,7 +33,6 @@ describe("CanvasDocumentSkillNode composer", () => {
           running={false}
           error={null}
           providerCatalog={[]}
-          audit={undefined}
           sourceInput={null}
           onSelect={vi.fn()}
           onNodeDragStart={vi.fn()}
@@ -45,9 +44,6 @@ describe("CanvasDocumentSkillNode composer", () => {
             setConfig(nextConfig);
           }}
           onSend={vi.fn()}
-          onAudit={vi.fn()}
-          onApplyAudit={vi.fn()}
-          onDiscardAudit={vi.fn()}
           onExport={vi.fn().mockResolvedValue(undefined)}
         />
       );

@@ -24,6 +24,7 @@ export interface ModelParameterCapability {
 const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   size: "尺寸",
   quality: "质量",
+  n: "生成数量",
   ratio: "画幅",
   resolution: "分辨率",
   duration: "时长",
@@ -32,10 +33,19 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   output_format: "输出格式",
   priority: "执行优先级",
   omni_reference_task_type: "任务类型",
+  task_type: "任务类型",
+  aigc_watermark: "AIGC水印",
   seed: "随机种子",
   guidance_scale: "引导强度",
   negative_prompt: "反向提示词",
   watermark: "添加水印",
+  aspect_ratio: "画幅",
+  movement_amplitude: "运动幅度",
+  style: "风格",
+  audio: "生成音频",
+  audio_type: "音频类型",
+  off_peak: "闲时模式",
+  bgm: "背景音乐",
 };
 
 const OPTION_LABELS: Readonly<Record<string, string>> = {
@@ -46,9 +56,16 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   high: "高",
   medium: "中",
   low: "低",
+  small: "小",
+  large: "大",
+  general: "通用",
+  anime: "动漫",
   reference: "参考生成",
   edit: "编辑",
   extend: "延长",
+  generation: "生成",
+  regeneration: "再生成",
+  h3_context_ir: "智能扩写",
   "-1": "智能时长",
 };
 
@@ -136,8 +153,20 @@ function parameterCapability(
 }
 
 function textToImageParameters(modelId: string): Record<string, unknown> {
+  // Gemini 图片生成契约：size 只接受画幅比例（1:1/16:9/…），不声明 quality，
+  // 且接口忽略 n（多张走任务拆分）。
+  if (isGeminiImageModel(modelId)) {
+    return {
+      size: {
+        type: "string",
+        label: "尺寸",
+        default: "1:1",
+        enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+      },
+    };
+  }
   // gpt-image 系列（gpt-image-1/1.5/2 …）遵循 GPT Image 契约：
-  // 质量只接受 auto/high/medium/low，尺寸只接受 auto 与三种标准尺寸；
+  // 质量只接受 auto/high/medium/low，尺寸只接受 auto 与三种标准尺寸，并声明生成数量 n；
   // 其余模型沿用通用文生图契约（standard/hd）。
   if (modelId.toLocaleLowerCase().includes("gpt-image")) {
     return {
@@ -152,6 +181,13 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
         label: "质量",
         default: "auto",
         enum: ["auto", "high", "medium", "low"],
+      },
+      n: {
+        type: "integer",
+        label: "生成数量",
+        default: 1,
+        minimum: 1,
+        maximum: 10,
       },
     };
   }
@@ -171,6 +207,34 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   };
 }
 
+/** gpt-image 系列图片编辑（multipart）接口：与文生图一样声明 n/size/quality。 */
+function imageToImageParameters(modelId: string): Record<string, unknown> {
+  if (modelId.toLocaleLowerCase().includes("gpt-image")) {
+    return {
+      size: {
+        type: "string",
+        label: "尺寸",
+        default: "auto",
+        enum: ["auto", "1024x1024", "1536x1024", "1024x1536"],
+      },
+      quality: {
+        type: "string",
+        label: "质量",
+        default: "auto",
+        enum: ["auto", "high", "medium", "low"],
+      },
+      n: {
+        type: "integer",
+        label: "生成数量",
+        default: 1,
+        minimum: 1,
+        maximum: 10,
+      },
+    };
+  }
+  return {};
+}
+
 /** 是否万相 3.0 视频模型：支持首帧/首尾帧/参考图/参考视频/参考音频/文档(file)/网页(link) 素材角色。 */
 export function isWan30VideoModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
@@ -179,7 +243,8 @@ export function isWan30VideoModel(modelId: string): boolean {
 
 /** 万相 3.0 可分配给连接素材的媒体角色（文档 file / 网页 link 走 URL 输入，不在此列）。 */
 export interface WanVideoMediaRoleOption {
-  readonly value: "first_frame" | "last_frame" | "reference_image" | "reference_video" | "reference_audio";
+  readonly value:
+    "first_frame" | "last_frame" | "reference_image" | "reference_video" | "reference_audio";
   readonly label: string;
   readonly hint: string;
 }
@@ -193,7 +258,9 @@ export const WAN_VIDEO_MEDIA_ROLE_OPTIONS: readonly WanVideoMediaRoleOption[] = 
 ];
 
 /** 按素材类型给出可用的万相角色；文档/网页用 URL 输入表达，不占用连接素材角色。 */
-export function wanMediaRolesForKind(kind: "image" | "video" | "audio"): readonly WanVideoMediaRoleOption[] {
+export function wanMediaRolesForKind(
+  kind: "image" | "video" | "audio",
+): readonly WanVideoMediaRoleOption[] {
   if (kind === "video") {
     return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter((option) => option.value === "reference_video");
   }
@@ -201,8 +268,26 @@ export function wanMediaRolesForKind(kind: "image" | "video" | "audio"): readonl
     return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter((option) => option.value === "reference_audio");
   }
   return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter(
-    (option) => option.value === "reference_image" || option.value === "first_frame" || option.value === "last_frame",
+    (option) =>
+      option.value === "reference_image" ||
+      option.value === "first_frame" ||
+      option.value === "last_frame",
   );
+}
+
+/** gpt-image 系列遵循 GPT Image 契约（n/size/quality），与后端模型档案保持一致。 */
+export function isGptImageModel(modelId: string): boolean {
+  return modelId.toLocaleLowerCase().includes("gpt-image");
+}
+
+/**
+ * Gemini 图片生成模型（如 gemini-2.5-flash-image / gemini-3-pro-image-preview）：
+ * 走 OpenAI Images API，`size` 只接受画幅比例（1:1/16:9/…），不声明 quality，
+ * 且上游忽略 `n`（一次只返回一张，多张由业务侧并发拆分任务）。
+ */
+export function isGeminiImageModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return normalized.includes("gemini") && normalized.split(/[^a-z0-9]+/).includes("image");
 }
 
 function isSeedance20VideoModel(modelId: string): boolean {
@@ -219,8 +304,234 @@ function isDreaminaSeedanceVideoModel(modelId: string): boolean {
   return modelId.toLocaleLowerCase().includes("dreamina-seedance");
 }
 
+/** Veo 系列（Google Veo）：veo-3 / veo-3-fast / veo-3.1 / veo-3.1-fast。 */
+export function isVeoVideoModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return normalized.split(/[^a-z0-9]+/).includes("veo");
+}
+
+/**
+ * Vidu 系列（魔芋AI 聚合平台）：vidu2.0 / viduq1 / viduq3-pro / viduq3-turbo。
+ * 生成模式由图片数量自动判定（1 张=图生、2 张=首尾帧、≥3 张=参考图），
+ * 不支持参考视频/音频输入；分辨率受模型白名单前置校验。
+ */
+export function isViduVideoModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return (
+    normalized.split(/[^a-z0-9]+/).includes("vidu") ||
+    normalized.includes("vidu2.0") ||
+    normalized.includes("viduq1") ||
+    normalized.includes("viduq3")
+  );
+}
+
+/**
+ * MiniMax-H3（魔芋平台新一代视频生成模型）：`MiniMax-H3`。
+ * 分辨率取 `768P`/`2K`；画幅支持 adaptive/21:9/16:9/4:3/1:1/3:4/9:16；
+ * 时长 4-15 秒；`aigc_watermark` 控制 AIGC 水印；`metadata.task_type` 区分
+ * 文生/图生/参考生成（generation）与 768P→2K 再生成（regeneration）。
+ * 媒体角色与万相 3.0 相同（first_frame/last_frame/reference_image/
+ * reference_video/reference_audio），由后端请求体映射到 metadata。
+ */
+export function isMinimaxH3VideoModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return (
+    normalized.includes("minimax-h3") ||
+    normalized.includes("minimax_h3") ||
+    normalized.includes("minimax h3")
+  );
+}
+
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  const minimaxH3 = isMinimaxH3VideoModel(normalized);
+  if (minimaxH3) {
+    // MiniMax-H3（魔芋平台新一代视频生成模型）：duration/resolution/ratio/
+    // aigc_watermark 为顶层字段；task_type 归入 metadata。
+    // task_type=regeneration（再生成）时连接的源视频作为 base_video_url，
+    // 输出时长由源视频决定（后端忽略 duration）。
+    return {
+      task_type: {
+        type: "string",
+        label: "任务类型",
+        default: "generation",
+        enum: ["generation", "regeneration", "h3_context_ir"],
+        order: 0,
+      },
+      resolution: {
+        type: "string",
+        label: "分辨率",
+        default: "2K",
+        enum: ["768P", "2K"],
+        order: 1,
+      },
+      ratio: {
+        type: "string",
+        label: "画幅",
+        default: "adaptive",
+        enum: ["adaptive", "21:9", "16:9", "4:3", "1:1", "3:4", "9:16"],
+        order: 2,
+      },
+      duration: {
+        type: "integer",
+        label: "时长",
+        default: 5,
+        enum: Array.from({ length: 12 }, (_, index) => index + 4),
+        order: 3,
+      },
+      aigc_watermark: {
+        type: "boolean",
+        label: "AIGC水印",
+        default: false,
+        order: 4,
+      },
+    };
+  }
+  const vidu = isViduVideoModel(normalized);
+  if (vidu) {
+    // Vidu 系列：resolution 受模型白名单约束（vidu2.0=360p/720p/1080p、
+    // viduq1=仅 1080p、viduq3-pro/viduq3-turbo=540p/720p/1080p）；画幅支持
+    // 16:9/9:16/1:1/3:4/4:3；时长 1-16 秒；seed 传 -1/0 表示随机。
+    // movement_amplitude/style/audio/audio_type/off_peak/bgm 由后端归入 metadata。
+    const defaultResolution = normalized.includes("viduq1") ? "1080p" : "720p";
+    const resolutions = normalized.includes("vidu2.0")
+      ? ["360p", "720p", "1080p"]
+      : normalized.includes("viduq1")
+        ? ["1080p"]
+        : ["540p", "720p", "1080p"];
+    return {
+      resolution: {
+        type: "string",
+        label: "分辨率",
+        default: defaultResolution,
+        enum: resolutions,
+        order: 0,
+      },
+      aspect_ratio: {
+        type: "string",
+        label: "画幅",
+        default: "16:9",
+        enum: ["16:9", "9:16", "1:1", "3:4", "4:3"],
+        order: 1,
+      },
+      duration: {
+        type: "integer",
+        label: "时长",
+        default: 5,
+        enum: Array.from({ length: 16 }, (_, index) => index + 1),
+        order: 2,
+      },
+      seed: {
+        type: "integer",
+        label: "随机种子",
+        optional: true,
+        minimum: -1,
+        maximum: 4_294_967_295,
+        order: 3,
+      },
+      watermark: {
+        type: "boolean",
+        label: "添加水印",
+        default: false,
+        order: 4,
+      },
+      movement_amplitude: {
+        type: "string",
+        label: "运动幅度",
+        default: "auto",
+        enum: ["auto", "small", "medium", "large"],
+        order: 5,
+      },
+      style: {
+        type: "string",
+        label: "风格",
+        default: "general",
+        enum: ["general", "anime"],
+        order: 6,
+      },
+      audio: {
+        type: "boolean",
+        label: "生成音频",
+        default: true,
+        order: 7,
+      },
+      audio_type: {
+        type: "string",
+        label: "音频类型",
+        optional: true,
+        order: 8,
+      },
+      off_peak: {
+        type: "boolean",
+        label: "闲时模式",
+        default: false,
+        order: 9,
+      },
+      bgm: {
+        type: "boolean",
+        label: "背景音乐",
+        default: false,
+        order: 10,
+      },
+    };
+  }
+  const veo = isVeoVideoModel(normalized);
+  if (veo) {
+    // Veo（Google Veo）：resolution 必填；1080p 仅支持 8 秒时长；
+    // 画幅只支持 16:9 / 9:16；negativePrompt/sampleCount/enhancePrompt/seed
+    // 由后端归入 metadata。
+    return {
+      resolution: {
+        type: "string",
+        label: "分辨率",
+        default: "720p",
+        enum: ["720p", "1080p"],
+        order: 0,
+      },
+      aspect_ratio: {
+        type: "string",
+        label: "画幅",
+        default: "16:9",
+        enum: ["16:9", "9:16"],
+        order: 1,
+      },
+      duration: {
+        type: "integer",
+        label: "时长",
+        default: 8,
+        enum: [4, 6, 8],
+        order: 2,
+      },
+      negativePrompt: {
+        type: "string",
+        label: "反向提示词",
+        optional: true,
+        order: 3,
+      },
+      sampleCount: {
+        type: "integer",
+        label: "单次生成数",
+        default: 1,
+        minimum: 1,
+        maximum: 4,
+        order: 4,
+      },
+      enhancePrompt: {
+        type: "boolean",
+        label: "提示词优化",
+        default: true,
+        order: 5,
+      },
+      seed: {
+        type: "integer",
+        label: "随机种子",
+        optional: true,
+        minimum: 0,
+        maximum: 4_294_967_295,
+        order: 6,
+      },
+    };
+  }
   const wan30 = isWan30VideoModel(normalized);
   if (wan30) {
     return {
@@ -270,7 +581,7 @@ function videoParameters(modelId: string): Record<string, unknown> {
   const durations = seedance25
     ? [-1, ...Array.from({ length: 27 }, (_, index) => index + 4)]
     : seedance20
-      ? Array.from({ length: 12 }, (_, index) => index + 4)
+      ? [-1, ...Array.from({ length: 12 }, (_, index) => index + 4)]
       : [5, 8, 12];
   // 海外 Dreamina Seedance 仅开放 720p/480p；国内 Seedance 2.5 官方全平台
   // 支持 1080p（文档曾前后矛盾，现已确认），2.5 的 fast/mini 变体保持 720p/480p。
@@ -355,7 +666,7 @@ export function defaultModelOperationSchema(
         return [operation, { resultType: "image", parameters: textToImageParameters(modelId) }];
       }
       if (operation === "image_to_image") {
-        return [operation, { resultType: "image", parameters: {} }];
+        return [operation, { resultType: "image", parameters: imageToImageParameters(modelId) }];
       }
       if (operation === "text_generation") {
         return [operation, { resultType: "text", parameters: {} }];
@@ -388,6 +699,7 @@ function fallbackParameters(
   operation: GenerationOperation,
 ): Record<string, unknown> {
   if (operation === "text_to_image") return textToImageParameters(modelId);
+  if (operation === "image_to_image") return imageToImageParameters(modelId);
   if (operation === "video_generation") return videoParameters(modelId);
   return {};
 }
@@ -409,11 +721,16 @@ export function modelParameterCapabilities(
   }
 
   const fallback = fallbackParameters(modelId, operation);
-  // 升级前保存的 Wan / 海外 Dreamina Seedance 定义带有显式
-  // `parameters: {}`；通用模型仍把空对象视为权威声明，但这两个已知契约需要
-  // 立即回退到当前档案，避免节点参数区空白。
+  // 升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
+  // 定义带有显式 `parameters: {}`；通用模型仍把空对象视为权威声明，但这些已知契约
+  // 需要立即回退到当前档案，避免节点参数区空白。
   const effectiveParameters =
     (isWan30VideoModel(modelId) ||
+      isVeoVideoModel(modelId) ||
+      isViduVideoModel(modelId) ||
+      isMinimaxH3VideoModel(modelId) ||
+      isGptImageModel(modelId) ||
+      isGeminiImageModel(modelId) ||
       (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
     Object.keys(declaredParameters).length === 0
       ? fallback
@@ -476,4 +793,28 @@ export function generationParameters(
       return [[capability.key, resolvedParameterValue(capability, values)]];
     }),
   );
+}
+
+/** 模型是否支持批量数量参数 `n`：支持时一次请求生成多张，不再拆分多个独立任务。 */
+export function modelSupportsBatchCount(
+  operationSchema: ModelOperationSchema,
+  operation: GenerationOperation,
+  modelId: string,
+): boolean {
+  return modelParameterCapabilities(operationSchema, operation, modelId).some(
+    (capability) => capability.key === "n" && capability.type === "integer",
+  );
+}
+
+/** 模型声明的批量数量上限；模型不支持 `n` 时回退到 fallback（沿用任务拆分上限）。 */
+export function modelGenerationCountMaximum(
+  operationSchema: ModelOperationSchema,
+  operation: GenerationOperation,
+  modelId: string,
+  fallback: number,
+): number {
+  const capability = modelParameterCapabilities(operationSchema, operation, modelId).find(
+    (item) => item.key === "n" && item.type === "integer",
+  );
+  return capability?.maximum ?? fallback;
 }

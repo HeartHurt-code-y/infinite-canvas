@@ -617,11 +617,7 @@ async function addVideoDownloaderNode(clientX: number, clientY: number): Promise
 async function addFrameExtractorNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-video-frame-extractor";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建视频抽帧节点" }),
-    clientX,
-    clientY,
-  );
+  dragToCanvas(screen.getByRole("button", { name: "拖拽创建视频抽帧节点" }), clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -1047,11 +1043,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.change(input, {
       target: { value: "https://www.bilibili.com/video/BV1YE6gBHEoN/" },
     });
-    await waitFor(() =>
-      expect(within(node).getByText(/未登录 B 站.*480P/)).toBeInTheDocument(),
-    );
+    await waitFor(() => expect(within(node).getByText(/未登录 B 站.*480P/)).toBeInTheDocument());
     expect(
-      within(node).getByText(/未登录 B 站.*480P/).closest(".canvas-video-downloader__quality"),
+      within(node)
+        .getByText(/未登录 B 站.*480P/)
+        .closest(".canvas-video-downloader__quality"),
     ).not.toBeNull();
   });
 
@@ -1213,97 +1209,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(document.querySelectorAll(".edge--asset")).toHaveLength(2);
   });
 
-  it("明确区分审计不可用与审计进行中的状态", async () => {
-    render(<App />);
-    const promptNode = await addPromptNode(260, 180);
-    await waitFor(() =>
-      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
-    );
-
-    const auditButton = within(promptNode).getByRole("button", {
-      name: "审计当前输出提示词",
-    });
-    expect(auditButton).toBeDisabled();
-    expect(auditButton).toHaveAttribute("data-state", "unavailable");
-    expect(auditButton).toHaveAttribute("title", "请先生成或输入输出提示词，再进行审计");
-    expect(auditButton).toHaveAccessibleDescription("请先生成或输入输出提示词，再进行审计");
-
-    fireEvent.change(within(promptNode).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "电影感雨夜站台，女孩撑伞等候列车。" },
-    });
-
-    expect(auditButton).toBeEnabled();
-    expect(auditButton).not.toHaveAttribute("data-state");
-    expect(auditButton).toHaveAttribute(
-      "title",
-      "使用完整技能上下文审计当前输出，并生成 Diff 建议",
-    );
-
-    let finishAudit: ((value: { optimizedPrompt: string; rawModelOutput: string }) => void) | null =
-      null;
-    const pendingAudit = new Promise<{ optimizedPrompt: string; rawModelOutput: string }>(
-      (resolve) => {
-        finishAudit = resolve;
-      },
-    );
-    invokeMock.mockImplementation((command) =>
-      command === "run_prompt_node" ? pendingAudit : baseInvokeImplementation(command),
-    );
-
-    fireEvent.click(auditButton);
-    await waitFor(() => expect(auditButton).toHaveAttribute("data-state", "loading"));
-    expect(auditButton).toBeDisabled();
-    expect(auditButton).toHaveAttribute("title", "正在审计当前输出");
-    expect(auditButton).toHaveTextContent("审计中");
-    expect(auditButton).toHaveAccessibleDescription("正在审计当前输出");
-
-    act(() => {
-      finishAudit?.({
-        optimizedPrompt: "电影感雨夜站台，女孩撑伞等候列车，增加湿润反光。",
-        rawModelOutput: "电影感雨夜站台，女孩撑伞等候列车，增加湿润反光。",
-      });
-    });
-    await waitFor(() => expect(auditButton).toBeEnabled());
-  });
-
-  it("审计入口保持实色可见且不覆盖输出提示词的滚动区域", async () => {
-    render(<App />);
-    const promptNode = await addPromptNode(260, 180);
-    await waitFor(() =>
-      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
-    );
-
-    const output = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
-    fireEvent.change(output, {
-      target: { value: "电影感雨夜站台，女孩撑伞等候列车。" },
-    });
-
-    const auditButton = within(promptNode).getByRole("button", {
-      name: "审计当前输出提示词",
-    });
-    const outputEditor = output.closest(".canvas-prompt-node__output-editor");
-
-    expect(outputEditor).not.toContainElement(auditButton);
-    expect(auditButton).toHaveAttribute("data-visual", "solid");
-    expect(getComputedStyle(auditButton).position).not.toBe("absolute");
-  });
-
   it("提示词节点调用文本模型并把输出自动导入下游图片请求", async () => {
     const generatedPrompt = "电影感雨夜站台，女孩撑伞等候列车，镜头缓慢推进。";
-    const auditedPrompt = `${generatedPrompt} 4K 电影级光影，保持镜头节奏克制。`;
-    const secondAuditedPrompt = `${auditedPrompt} 加入列车灯光在水面上的反射。`;
-    let promptRunCount = 0;
     invokeMock.mockImplementation((command) => {
       if (command === "run_prompt_node") {
-        const optimizedPrompt =
-          promptRunCount++ === 0
-            ? generatedPrompt
-            : promptRunCount === 2
-              ? auditedPrompt
-              : secondAuditedPrompt;
         return Promise.resolve({
-          optimizedPrompt,
-          rawModelOutput: optimizedPrompt,
+          optimizedPrompt: generatedPrompt,
+          rawModelOutput: generatedPrompt,
         });
       }
       return baseInvokeImplementation(command);
@@ -1341,55 +1253,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
 
     const promptOutput = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
-    fireEvent.click(within(promptNode).getByRole("button", { name: "审计当前输出提示词" }));
-    await waitFor(() =>
-      expect(
-        invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node"),
-      ).toHaveLength(2),
-    );
-    const auditCommand = invokeMock.mock.calls.filter(
-      ([command]) => command === "run_prompt_node",
-    )[1]?.[1] as { command: Record<string, unknown> };
-    expect(auditCommand.command).toMatchObject({
-      task: "audit",
-      detailReview: true,
-      userPrompt: generatedPrompt,
-    });
-    // 审计同样携带完整多轮对话：生成轮的用户消息与助手输出都进入审计上下文。
-    expect(auditCommand.command["contextHistory"]).toEqual(
-      expect.arrayContaining([
-        { role: "第 1 条 · 你", content: "雨夜站台，女孩撑伞等候列车" },
-        { role: "第 2 条 · 提示词助手", content: generatedPrompt },
-        { role: "第 1 轮审计输入", content: generatedPrompt },
-      ]),
-    );
-    await waitFor(() => expect(within(promptNode).getByText("审计建议")).toBeInTheDocument());
-    fireEvent.click(within(promptNode).getByRole("button", { name: "再次审计" }));
-    await waitFor(() =>
-      expect(
-        invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node"),
-      ).toHaveLength(3),
-    );
-    const secondAuditCommand = invokeMock.mock.calls.filter(
-      ([command]) => command === "run_prompt_node",
-    )[2]?.[1] as { command: Record<string, unknown> };
-    expect(secondAuditCommand.command).toMatchObject({
-      task: "audit",
-      detailReview: true,
-      userPrompt: auditedPrompt,
-    });
-    expect(secondAuditCommand.command["contextHistory"]).toEqual(
-      expect.arrayContaining([
-        { role: "第 1 轮审计输入", content: generatedPrompt },
-        { role: "第 1 轮审计结果", content: auditedPrompt },
-        { role: "第 2 轮审计输入", content: auditedPrompt },
-      ]),
-    );
-    await waitFor(() => expect(within(promptNode).getByText("审计建议")).toBeInTheDocument());
-    fireEvent.click(within(promptNode).getByRole("button", { name: "应用审计结果" }));
-    await waitFor(() => expect(promptOutput).toHaveValue(secondAuditedPrompt));
-
-    const customPrompt = `${secondAuditedPrompt} 自定义镜头节奏。`;
+    expect(within(promptNode).queryByRole("button", { name: /审计/ })).not.toBeInTheDocument();
+    const customPrompt = `${generatedPrompt} 自定义镜头节奏。`;
     fireEvent.change(promptOutput, { target: { value: customPrompt } });
     expect(promptOutput).toHaveValue(customPrompt);
 
@@ -2052,7 +1917,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
   });
 
-  it("生成数量可修改并按数量拆分为多个独立任务提交", async () => {
+  it("生成数量可修改且 gpt-image 模型作为 n 参数一次请求提交", async () => {
     render(<App />);
 
     const imageNode = await addGenerationNode("图片", 370, 148);
@@ -2062,9 +1927,53 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     const quantity = within(imageNode).getByRole("spinbutton", { name: "生成数量" });
     expect(quantity).not.toHaveAttribute("readonly");
-    // 超出上限的输入被钳制到 4。
-    fireEvent.change(quantity, { target: { value: "9" } });
-    expect(quantity).toHaveValue(4);
+    // GPT Image 契约：n 的取值范围 1~10，超出上限的输入被钳制到 10。
+    fireEvent.change(quantity, { target: { value: "99" } });
+    expect(quantity).toHaveValue(10);
+    fireEvent.change(quantity, { target: { value: "3" } });
+    expect(quantity).toHaveValue(3);
+
+    setPromptText(
+      within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      "站台重逢",
+    );
+    fireEvent.click(within(imageNode).getByRole("button", { name: "开始图片生成" }));
+
+    // 数量 3 作为 n 参数在单个任务中一次请求提交（生成数量不再拆分任务）。
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    const command = submittedGenerationCommand();
+    expect(command).toMatchObject({
+      sourceNodeId: imageNode.dataset["connectionTarget"],
+      operation: "text_to_image",
+      providerConnectionId: PROVIDER.id,
+      modelDefinitionId: IMAGE_MODEL.id,
+      generationCount: 1,
+    });
+    expect(command["parameters"]).toMatchObject({ n: 3 });
+  });
+
+  it("不支持 n 参数的模型仍按数量拆分为多个独立任务提交", async () => {
+    render(<App />);
+
+    const imageNode = await addGenerationNode("图片", 370, 148);
+    await waitFor(() => {
+      expect(within(imageNode).getByLabelText("供应商")).toHaveValue(PROVIDER.id);
+    });
+
+    // 切到不支持 n 的通用契约模型（photon-1，位于 luma 供应商）。
+    fireEvent.change(within(imageNode).getByLabelText("供应商"), {
+      target: { value: SECOND_PROVIDER.id },
+    });
+    await waitFor(() => {
+      expect(within(imageNode).getByLabelText("供应商")).toHaveValue(SECOND_PROVIDER.id);
+    });
+    fireEvent.change(within(imageNode).getByLabelText("图片模型"), {
+      target: { value: SECOND_IMAGE_MODEL.id },
+    });
+    expect(within(imageNode).getByLabelText("图片模型")).toHaveValue(SECOND_IMAGE_MODEL.id);
+    const quantity = within(imageNode).getByRole("spinbutton", { name: "生成数量" });
+    // 无 n 参数时沿用任务拆分上限 4。
+    expect(quantity).toHaveAttribute("max", "4");
     fireEvent.change(quantity, { target: { value: "3" } });
     expect(quantity).toHaveValue(3);
 
@@ -2080,10 +1989,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(command).toMatchObject({
         sourceNodeId: imageNode.dataset["connectionTarget"],
         operation: "text_to_image",
-        providerConnectionId: PROVIDER.id,
-        modelDefinitionId: IMAGE_MODEL.id,
+        providerConnectionId: SECOND_PROVIDER.id,
+        modelDefinitionId: SECOND_IMAGE_MODEL.id,
         generationCount: 1,
       });
+      expect(command["parameters"]).not.toHaveProperty("n");
     }
   });
 
@@ -2297,6 +2207,20 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(generate);
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
     expect(submittedGenerationCommands()[1]!["parameters"]).not.toHaveProperty("web_search");
+  });
+
+  it("Seedance 2.0 视频节点也提供「智能时长」选项", async () => {
+    render(<App />);
+
+    const videoGeneration = await addGenerationNode("视频", 555, 222);
+    await waitFor(() => {
+      expect(within(videoGeneration).getByLabelText("供应商")).toHaveValue(PROVIDER.id);
+    });
+    fireEvent.change(within(videoGeneration).getByLabelText("视频模型"), {
+      target: { value: FAST_VIDEO_MODEL.id },
+    });
+
+    expect(within(videoGeneration).getByRole("option", { name: "智能时长" })).toBeInTheDocument();
   });
 
   it("任务启动即落占位产物卡片，进行中展示任务状态与进度", async () => {
@@ -3097,8 +3021,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).toBeInTheDocument();
     expect(document.querySelector(".edge--asset-generation")).not.toBeNull();
     expect(within(imageGeneration).getByText("图片参考生成")).toBeInTheDocument();
-    expect(within(imageGeneration).queryByLabelText("尺寸")).not.toBeInTheDocument();
-    expect(within(imageGeneration).queryByLabelText("质量")).not.toBeInTheDocument();
+    // GPT Image 契约：图生图（图片编辑）接口同样声明尺寸/质量参数。
+    expect(within(imageGeneration).getByLabelText("尺寸")).toBeInTheDocument();
+    expect(within(imageGeneration).getByLabelText("质量")).toBeInTheDocument();
 
     const promptInput = within(imageGeneration).getByRole("textbox", {
       name: "提示词输入框，输入 @ 引用素材",
@@ -3111,7 +3036,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     const command = submittedGenerationCommand();
     expect(command["operation"]).toBe("image_to_image");
-    expect(command["parameters"]).toEqual({});
+    expect(command["parameters"]).toEqual({ size: "auto", quality: "auto", n: 1 });
     expect(command["explicitMedia"]).toEqual([
       {
         target: {
@@ -3312,8 +3237,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 222);
     connectAssetToGeneration(assetNode, imageGeneration);
-    expect(within(imageGeneration).queryByLabelText("尺寸")).not.toBeInTheDocument();
-    expect(within(imageGeneration).queryByLabelText("质量")).not.toBeInTheDocument();
+    // GPT Image 契约：图生图（图片编辑）接口同样声明尺寸/质量参数，且沿用已选值。
+    expect(within(imageGeneration).getByLabelText("尺寸")).toHaveValue("1536x1024");
+    expect(within(imageGeneration).getByLabelText("质量")).toHaveValue("high");
 
     const unlink = await within(imageGeneration).findByRole("button", {
       name: "解除连线：站台参考图",
@@ -3338,7 +3264,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const command = submittedGenerationCommand();
     expect(command["operation"]).toBe("text_to_image");
     expect(command["explicitMedia"]).toEqual([]);
-    expect(command["parameters"]).toEqual({ size: "1536x1024", quality: "high" });
+    expect(command["parameters"]).toEqual({ size: "1536x1024", quality: "high", n: 1 });
   });
 
   it("断线后的 @ 实例不能继续提交", async () => {
@@ -4197,18 +4123,13 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     expect(within(node).getByText("已添加 1 项")).toBeInTheDocument();
   });
 
-  it("完整注入多轮历史，支持审计并应用修订稿", async () => {
+  it("完整注入多轮历史并支持 Markdown 导出", async () => {
     let screenplayCall = 0;
     invokeMock.mockImplementation((command) => {
       if (command === "run_prompt_node") {
         screenplayCall += 1;
         return Promise.resolve({
-          optimizedPrompt:
-            screenplayCall === 1
-              ? "# 雨夜归人\n\n第一稿"
-              : screenplayCall === 2
-                ? "# 雨夜归人\n\n第二稿"
-                : "# 雨夜归人\n\n审计修订稿",
+          optimizedPrompt: screenplayCall === 1 ? "# 雨夜归人\n\n第一稿" : "# 雨夜归人\n\n第二稿",
           rawModelOutput: "ok",
         });
       }
@@ -4254,32 +4175,7 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
       ]),
     );
 
-    // 等待“本轮对话完成”状态清除（running 标志与文档更新分两次渲染提交）。
-    fireEvent.click(
-      await waitFor(() => {
-        const auditButton = within(node).getByRole("button", { name: "审计" });
-        expect(auditButton).toBeEnabled();
-        return auditButton;
-      }),
-    );
-    await waitFor(() => expect(within(node).getByText("第 1 轮审计")).toBeInTheDocument());
-    await waitFor(() =>
-      expect(within(node).getByRole("button", { name: "应用审计结果" })).toBeEnabled(),
-    );
-    const auditCommand = invokeMock.mock.calls
-      .filter(([command]) => command === "run_prompt_node")
-      .at(-1)?.[1] as { command: Record<string, unknown> };
-    expect(auditCommand.command).toMatchObject({
-      mode: "screenplay",
-      task: "audit",
-      userPrompt: "# 雨夜归人\n\n第二稿",
-      detailReview: true,
-    });
-
-    fireEvent.click(within(node).getByRole("button", { name: "应用审计结果" }));
-    await waitFor(() => {
-      expect(getDocumentEditor(node, "当前剧本").value).toBe("# 雨夜归人\n\n审计修订稿");
-    });
+    expect(within(node).queryByRole("button", { name: /审计/ })).not.toBeInTheDocument();
     expect(within(node).getByRole("button", { name: "导出 Markdown 剧本文档" })).toBeEnabled();
   });
 
@@ -4359,7 +4255,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     );
   });
 
-  it("每轮注入完整上下文，支持分镜审计、应用修订稿与 Markdown 导出", async () => {
+  it("每轮注入完整上下文并支持 Markdown 导出", async () => {
     let storyboardCall = 0;
     dialogSaveMock.mockResolvedValue("C:\\Exports\\工业级分镜脚本.md");
     invokeMock.mockImplementation((command) => {
@@ -4369,9 +4265,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
           optimizedPrompt:
             storyboardCall === 1
               ? "# 雨夜归人 · 工业级分镜\n\n## SD01\n\n0-5s：24mm 建场镜头"
-              : storyboardCall === 2
-                ? "# 雨夜归人 · 工业级分镜\n\n## SD01\n\n0-6s：24mm 建场镜头，雨势加强"
-                : "# 雨夜归人 · 工业级分镜（审计修订）\n\n## SD01\n\n0-6s：24mm 建场镜头，雨势加强\n\n## 审计记录\n\n- 已修正时间码",
+              : "# 雨夜归人 · 工业级分镜\n\n## SD01\n\n0-6s：24mm 建场镜头，雨势加强",
           rawModelOutput: "ok",
         });
       }
@@ -4423,30 +4317,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
       ]),
     );
 
-    fireEvent.click(
-      await waitFor(() => {
-        const auditButton = within(node).getByRole("button", { name: "审计" });
-        expect(auditButton).toBeEnabled();
-        return auditButton;
-      }),
-    );
-    await waitFor(() => expect(within(node).getByText("第 1 轮审计")).toBeInTheDocument());
-    await waitFor(() =>
-      expect(within(node).getByRole("button", { name: "应用审计结果" })).toBeEnabled(),
-    );
-    const auditCommand = invokeMock.mock.calls
-      .filter(([command]) => command === "run_prompt_node")
-      .at(-1)?.[1] as { command: Record<string, unknown> };
-    expect(auditCommand.command).toMatchObject({
-      mode: "storyboard",
-      task: "audit",
-      detailReview: true,
-    });
-
-    fireEvent.click(within(node).getByRole("button", { name: "应用审计结果" }));
-    await waitFor(() => {
-      expect(getDocumentEditor(node, "当前工业级分镜脚本").value).toContain("审计记录");
-    });
+    expect(within(node).queryByRole("button", { name: /审计/ })).not.toBeInTheDocument();
     const exportButton = within(node).getByRole("button", {
       name: "导出 Markdown 分镜脚本文档",
     });
@@ -4462,7 +4333,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     await waitFor(() =>
       expect(writeTextFileMock).toHaveBeenCalledWith(
         "C:\\Exports\\工业级分镜脚本.md",
-        expect.stringContaining("## 审计记录"),
+        expect.stringContaining("雨势加强"),
       ),
     );
   });
