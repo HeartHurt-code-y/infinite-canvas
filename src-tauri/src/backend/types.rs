@@ -219,6 +219,14 @@ pub enum MediaReferenceTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         canvas_node_key: Option<String>,
     },
+    /// 公网 http(s) URL 引用（文档/网页生视频的 file/link 素材）：不经对象存储，
+    /// 直接把 URL 作为媒体引用传给供应商。仅支持无需登录的公开页面。
+    Url {
+        url: String,
+        media_type: MediaType,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canvas_node_key: Option<String>,
+    },
 }
 
 impl MediaReferenceTarget {
@@ -227,7 +235,8 @@ impl MediaReferenceTarget {
             Self::Asset { media_type, .. }
             | Self::LocalAsset { media_type, .. }
             | Self::LocalResult { media_type, .. }
-            | Self::LocalFile { media_type, .. } => *media_type,
+            | Self::LocalFile { media_type, .. }
+            | Self::Url { media_type, .. } => *media_type,
         }
     }
 }
@@ -917,6 +926,41 @@ mod tests {
                 "canvasNodeKey": "asset-node-local"
             })
         );
+    }
+
+    #[test]
+    fn url_references_serialize_as_public_http_media_and_expose_media_type() {
+        let target = MediaReferenceTarget::Url {
+            url: "https://example.com/public-article".into(),
+            media_type: MediaType::Image,
+            canvas_node_key: Some("video-node-1".into()),
+        };
+        assert_eq!(
+            serde_json::to_value(&target).expect("serialize"),
+            json!({
+                "kind": "url",
+                "url": "https://example.com/public-article",
+                "mediaType": "image",
+                "canvasNodeKey": "video-node-1"
+            })
+        );
+        assert_eq!(target.media_type(), MediaType::Image);
+        // 反序列化兼容前端 camelCase 字段。
+        let round_trip: MediaReferenceTarget = serde_json::from_value(json!({
+            "kind": "url",
+            "url": "https://example.com/public-doc.pdf",
+            "mediaType": "video",
+            "canvasNodeKey": "video-node-1"
+        }))
+        .expect("deserialize url target");
+        assert!(matches!(
+            round_trip,
+            MediaReferenceTarget::Url {
+                url,
+                media_type: MediaType::Video,
+                ..
+            } if url == "https://example.com/public-doc.pdf"
+        ));
     }
 
     #[test]

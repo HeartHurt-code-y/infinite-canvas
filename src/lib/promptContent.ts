@@ -1,5 +1,11 @@
 import { Editor } from "@tiptap/core";
-import type { ExplicitMediaInput, MediaReferenceTarget, MediaType, PromptSegment } from "./backend";
+import type {
+  ExplicitMediaInput,
+  ExplicitMediaTarget,
+  MediaReferenceTarget,
+  MediaType,
+  PromptSegment,
+} from "./backend";
 import {
   AUTO_DETECT_DEBOUNCE_MS,
   AUTO_MENTION_FRESH_MS,
@@ -80,7 +86,9 @@ export interface PromptContentConnection {
   readonly key: string;
   readonly name: string;
   readonly kind: MediaType;
-  readonly target: MediaReferenceTarget;
+  readonly target: ExplicitMediaTarget;
+  /** 显式媒体输入的角色（如首帧/参考图/文档/网页）；缺省时由后端按素材类型推导。 */
+  readonly role?: string;
 }
 
 export type PromptContentIssue =
@@ -554,7 +562,7 @@ export function isPromptContentDocument(value: unknown): value is PromptContentD
   return decodePromptContentDocument(value) != null;
 }
 
-function sameTarget(first: MediaReferenceTarget, second: MediaReferenceTarget): boolean {
+function sameTarget(first: MediaReferenceTarget, second: ExplicitMediaTarget): boolean {
   if (first.kind !== second.kind || first.mediaType !== second.mediaType) return false;
   if (first.kind === "asset" && second.kind === "asset") {
     return (
@@ -1105,7 +1113,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         const position = positionByKey.get(connection.key);
         return {
           target: structuredClone(connection.target),
-          role: "",
+          role: connection.role ?? "",
           displayNameSnapshot: connection.name,
           ...(position
             ? { typePosition: position.typePosition, contentIndex: position.contentIndex }

@@ -4,10 +4,13 @@ import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { CornersOut } from "@phosphor-icons/react/CornersOut";
 import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
+import { FileText } from "@phosphor-icons/react/FileText";
 import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
 import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
 import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
+import { Globe } from "@phosphor-icons/react/Globe";
 import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
+import { LinkSimple } from "@phosphor-icons/react/LinkSimple";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
@@ -21,8 +24,10 @@ import {
   type ProviderCatalogEntry,
 } from "../../lib/backend";
 import {
+  isWan30VideoModel,
   modelParameterCapabilities,
   resolvedParameterValue,
+  wanMediaRolesForKind,
   type ModelParameterCapability,
   type ModelParameterValue,
 } from "../../lib/modelCapabilities";
@@ -36,11 +41,14 @@ import { diffPromptRuns } from "../../lib/promptDiff";
 
 import type {
   AssetKind,
+  ConnectedAssetInput,
   ImageNodeConfig,
+  InheritedAssetInput,
   MentionCandidate,
   PromptOptimizationPanelState,
   RepositoryNodeKind,
   VideoNodeConfig,
+  VideoUrlMediaInput,
 } from "./workspaceModel";
 import {
   MAX_GENERATION_COUNT,
@@ -1251,11 +1259,13 @@ export function VideoNodeSettings({
   config,
   providerCatalog,
   hasMediaInputs,
+  mediaInputs,
   onChange,
 }: {
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
+  readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly onChange: (config: VideoNodeConfig) => void;
 }) {
   const availableProviders = providerCatalog.filter(
@@ -1385,6 +1395,265 @@ export function VideoNodeSettings({
           }
         />
       ))}
+
+      {isWan30VideoModel(
+        selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "",
+      ) ? (
+        <>
+          <VideoMediaRoleSection
+            inputs={mediaInputs ?? []}
+            roles={config.mediaRoles ?? {}}
+            onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
+          />
+          <VideoUrlMediaSection
+            urlMedia={config.urlMedia ?? []}
+            hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
+            onChange={(urlMedia) => onChange({ ...config, urlMedia })}
+          />
+        </>
+      ) : null}
+    </div>
+  );
+}
+
+/** 万相 3.0 连接素材角色的默认值（与后端 default_reference_role 对齐）。 */
+function defaultWanMediaRole(kind: AssetKind): string {
+  if (kind === "video") return "reference_video";
+  if (kind === "audio") return "reference_audio";
+  return "reference_image";
+}
+
+/** 万相 3.0 连接素材角色选择：为每路直连/继承素材分配首帧、首尾帧或参考角色。 */
+function VideoMediaRoleSection({
+  inputs,
+  roles,
+  onChange,
+}: {
+  readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
+  readonly roles: Readonly<Record<string, string>>;
+  readonly onChange: (roles: Readonly<Record<string, string>>) => void;
+}) {
+  if (inputs.length === 0) return null;
+  const effectiveRoles = inputs.map((input) => roles[input.key] ?? defaultWanMediaRole(input.kind));
+  const hasFrame = effectiveRoles.some(
+    (role) => role === "first_frame" || role === "last_frame",
+  );
+  const hasReference = effectiveRoles.some((role) => role.startsWith("reference_"));
+  const conflict = hasFrame && hasReference;
+  return (
+    <div className="canvas-gen-node__media-roles" aria-label="素材角色">
+      <div className="canvas-gen-node__section-title">
+        <span>素材角色</span>
+        <small>首帧/首尾帧与参考素材不可混用</small>
+      </div>
+      <ol className="canvas-gen-node__media-role-list">
+        {inputs.map((input, index) => {
+          const options = wanMediaRolesForKind(input.kind);
+          const current = roles[input.key] ?? defaultWanMediaRole(input.kind);
+          return (
+            <li key={`${input.key}:${index}`} className="canvas-gen-node__media-role">
+              <AssetKindIcon kind={input.kind} size={15} />
+              <span className="canvas-gen-node__media-role-name" title={input.name}>
+                {input.name}
+              </span>
+              <select
+                className="canvas-gen-node__media-role-select"
+                value={current}
+                aria-label={`${input.name} 的素材角色`}
+                onChange={(event) => {
+                  const next = { ...roles, [input.key]: event.target.value };
+                  onChange(next);
+                }}
+              >
+                {options.map((option) => (
+                  <option key={option.value} value={option.value}>
+                    {option.label}
+                  </option>
+                ))}
+              </select>
+            </li>
+          );
+        })}
+      </ol>
+      {conflict ? (
+        <div className="canvas-gen-node__media-role-warning" role="alert">
+          <WarningCircle size={14} weight="fill" aria-hidden="true" />
+          <span>首帧/首尾帧与参考素材（参考图/参考视频/参考音频）不可在同一请求混用，请二选一。</span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** 万相 3.0 URL 素材（文档 file / 网页 link）：解析公开文档或网页内容生成视频。 */
+function VideoUrlMediaSection({
+  urlMedia,
+  hasConnectedMedia,
+  onChange,
+}: {
+  readonly urlMedia: readonly VideoUrlMediaInput[];
+  readonly hasConnectedMedia: boolean;
+  readonly onChange: (urlMedia: readonly VideoUrlMediaInput[]) => void;
+}) {
+  const [draftRole, setDraftRole] = useState<"file" | "link" | null>(null);
+  const [draftUrl, setDraftUrl] = useState("");
+  const [draftError, setDraftError] = useState<string | null>(null);
+
+  const fileCount = urlMedia.filter((input) => input.role === "file").length;
+  const linkCount = urlMedia.filter((input) => input.role === "link").length;
+  const conflictCount = fileCount + linkCount > 1;
+  const mixedWithMedia = urlMedia.length > 0 && hasConnectedMedia;
+
+  const commitDraft = () => {
+    const trimmed = draftUrl.trim();
+    if (!trimmed) return;
+    if (!/^https?:\/\//i.test(trimmed)) {
+      setDraftError("仅支持公网 http(s) 链接");
+      return;
+    }
+    if (draftRole == null) return;
+    if (draftRole === "file" && fileCount >= 1) {
+      setDraftError("文档（file）每次请求限 1 个");
+      return;
+    }
+    if (draftRole === "link" && linkCount >= 1) {
+      setDraftError("网页（link）每次请求限 1 个");
+      return;
+    }
+    const next: VideoUrlMediaInput = {
+      id: `url-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      url: trimmed,
+      role: draftRole,
+      label: draftRole === "file" ? "文档素材" : "网页链接",
+    };
+    onChange([...urlMedia, next]);
+    setDraftUrl("");
+    setDraftError(null);
+    setDraftRole(null);
+  };
+
+  return (
+    <div className="canvas-gen-node__url-media" aria-label="URL 素材（文档/网页）">
+      <div className="canvas-gen-node__section-title">
+        <span>文档 / 网页生视频</span>
+        <small>解析公开文档或网页内容，file 与 link 各限 1 个</small>
+      </div>
+      {urlMedia.length > 0 ? (
+        <ol className="canvas-gen-node__url-list">
+          {urlMedia.map((input) => (
+            <li key={input.id} className="canvas-gen-node__url-item">
+              {input.role === "file" ? (
+                <FileText size={15} weight="bold" aria-hidden="true" />
+              ) : (
+                <Globe size={15} weight="bold" aria-hidden="true" />
+              )}
+              <span className="canvas-gen-node__url-copy">
+                <strong>
+                  {input.role === "file" ? "文档" : "网页"}
+                </strong>
+                <small title={input.url}>{input.url}</small>
+              </span>
+              <button
+                type="button"
+                className="canvas-gen-node__url-remove"
+                aria-label="移除 URL 素材"
+                onClick={() => onChange(urlMedia.filter((item) => item.id !== input.id))}
+              >
+                <X size={11} weight="bold" aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+
+      {draftRole != null ? (
+        <div className="canvas-gen-node__url-draft">
+          <span className="canvas-gen-node__url-draft-label">
+            {draftRole === "file" ? "文档 URL" : "网页链接"}
+          </span>
+          <input
+            type="text"
+            className="canvas-gen-node__url-draft-input"
+            placeholder={
+              draftRole === "file"
+                ? "https://…/public-doc.pdf"
+                : "https://…/public-article"
+            }
+            value={draftUrl}
+            onChange={(event) => {
+              setDraftUrl(event.target.value);
+              setDraftError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitDraft();
+              if (event.key === "Escape") {
+                setDraftRole(null);
+                setDraftUrl("");
+                setDraftError(null);
+              }
+            }}
+            autoFocus
+          />
+          <button type="button" className="canvas-gen-node__url-draft-add" onClick={commitDraft}>
+            添加
+          </button>
+          <button
+            type="button"
+            className="canvas-gen-node__url-draft-cancel"
+            aria-label="取消"
+            onClick={() => {
+              setDraftRole(null);
+              setDraftUrl("");
+              setDraftError(null);
+            }}
+          >
+            <X size={12} weight="bold" aria-hidden="true" />
+          </button>
+        </div>
+      ) : (
+        <div className="canvas-gen-node__url-actions">
+          <button
+            type="button"
+            className="canvas-gen-node__url-add"
+            onClick={() => {
+              setDraftRole("file");
+              setDraftUrl("");
+              setDraftError(null);
+            }}
+          >
+            <FileText size={13} weight="bold" aria-hidden="true" />
+            粘贴文档 URL
+          </button>
+          <button
+            type="button"
+            className="canvas-gen-node__url-add"
+            onClick={() => {
+              setDraftRole("link");
+              setDraftUrl("");
+              setDraftError(null);
+            }}
+          >
+            <LinkSimple size={13} weight="bold" aria-hidden="true" />
+            粘贴网页链接
+          </button>
+        </div>
+      )}
+      {draftError ? (
+        <div className="canvas-gen-node__url-error" role="alert">
+          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          {draftError}
+        </div>
+      ) : null}
+      {conflictCount || mixedWithMedia ? (
+        <div className="canvas-gen-node__url-warning" role="alert">
+          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          <span>
+            {conflictCount
+              ? "文档（file）与网页（link）二选一，各限 1 个。"
+              : "文档/网页生视频不与其它素材混用，请仅保留 URL 素材。"}
+          </span>
+        </div>
+      ) : null}
     </div>
   );
 }

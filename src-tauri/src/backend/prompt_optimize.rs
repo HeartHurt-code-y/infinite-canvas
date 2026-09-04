@@ -1364,6 +1364,17 @@ async fn resolve_vision_image(
             }
             tokio::fs::read(path).await?
         }
+        MediaReferenceTarget::Url {
+            url, media_type, ..
+        } => {
+            if *media_type != MediaType::Image {
+                return Err(BackendError::validation(
+                    "vision understanding only accepts image assets",
+                    json!({ "displayName": display_name, "mediaType": media_type }),
+                ));
+            }
+            download_vision_bytes(deps.providers, url, display_name).await?
+        }
     };
     vision_image_payload(display_name, bytes)
 }

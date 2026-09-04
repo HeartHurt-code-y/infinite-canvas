@@ -994,6 +994,19 @@ export interface LocalFileMediaReferenceTarget {
   readonly mediaType: MediaType;
 }
 
+/** 公网 http(s) URL 引用（文档/网页生视频的 file/link 素材）：直接把 URL 交给供应商抓取。
+ *  仅用于显式媒体输入，不参与提示词 @ 引用（mention）系统。 */
+export interface UrlMediaReferenceTarget {
+  readonly kind: "url";
+  /** 公网 http(s) URL，仅支持无需登录的公开页面。 */
+  readonly url: string;
+  /** Stable identity of the repeated canvas instance. */
+  readonly canvasNodeKey?: string;
+  readonly mediaType: MediaType;
+}
+
+export type ExplicitMediaTarget = MediaReferenceTarget | UrlMediaReferenceTarget;
+
 export type MediaReferenceTarget =
   | AssetMediaReferenceTarget
   | LocalAssetMediaReferenceTarget
@@ -1014,7 +1027,7 @@ export interface MediaReferencePromptSegment {
 export type PromptSegment = TextPromptSegment | MediaReferencePromptSegment;
 
 export interface ExplicitMediaInput {
-  readonly target: MediaReferencePromptSegment["target"];
+  readonly target: ExplicitMediaTarget;
   readonly role: string;
   readonly displayNameSnapshot: string;
   /** 前端按输入（连线）顺序分配的同类序号，即「图片N」中的 N。 */

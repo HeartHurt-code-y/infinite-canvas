@@ -171,9 +171,38 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   };
 }
 
-function isWan30VideoModel(modelId: string): boolean {
+/** 是否万相 3.0 视频模型：支持首帧/首尾帧/参考图/参考视频/参考音频/文档(file)/网页(link) 素材角色。 */
+export function isWan30VideoModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
   return normalized.includes("wan3.0-video") || normalized.includes("wan3-0-video");
+}
+
+/** 万相 3.0 可分配给连接素材的媒体角色（文档 file / 网页 link 走 URL 输入，不在此列）。 */
+export interface WanVideoMediaRoleOption {
+  readonly value: "first_frame" | "last_frame" | "reference_image" | "reference_video" | "reference_audio";
+  readonly label: string;
+  readonly hint: string;
+}
+
+export const WAN_VIDEO_MEDIA_ROLE_OPTIONS: readonly WanVideoMediaRoleOption[] = [
+  { value: "reference_image", label: "参考图", hint: "作为画面参考" },
+  { value: "first_frame", label: "首帧", hint: "严格作为视频第一帧" },
+  { value: "last_frame", label: "首尾帧", hint: "严格作为视频最后一帧" },
+  { value: "reference_video", label: "参考视频", hint: "作为运动/风格参考" },
+  { value: "reference_audio", label: "参考音频", hint: "作为配乐/音效参考" },
+];
+
+/** 按素材类型给出可用的万相角色；文档/网页用 URL 输入表达，不占用连接素材角色。 */
+export function wanMediaRolesForKind(kind: "image" | "video" | "audio"): readonly WanVideoMediaRoleOption[] {
+  if (kind === "video") {
+    return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter((option) => option.value === "reference_video");
+  }
+  if (kind === "audio") {
+    return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter((option) => option.value === "reference_audio");
+  }
+  return WAN_VIDEO_MEDIA_ROLE_OPTIONS.filter(
+    (option) => option.value === "reference_image" || option.value === "first_frame" || option.value === "last_frame",
+  );
 }
 
 function isSeedance20VideoModel(modelId: string): boolean {

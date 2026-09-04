@@ -1306,6 +1306,20 @@ export interface VideoNodeConfig {
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly catalogResolved: boolean;
+  /** 连接素材的显式角色：素材 key → 万相角色（first_frame/last_frame/reference_*）。 */
+  readonly mediaRoles?: Readonly<Record<string, string>>;
+  /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
+  readonly urlMedia?: readonly VideoUrlMediaInput[];
+}
+
+/** 视频节点的 URL 素材：公网 http(s) 文档或网页，角色为 file（文档）或 link（网页）。 */
+export interface VideoUrlMediaInput {
+  readonly id: string;
+  readonly url: string;
+  /** file = 文档 URL；link = 网页 URL。二选一、各限 1 个、不与其它素材混用。 */
+  readonly role: "file" | "link";
+  /** 展示用简短名称（如页面标题或域名）。 */
+  readonly label: string;
 }
 
 export type PromptNodeTask = "generate" | "optimize";

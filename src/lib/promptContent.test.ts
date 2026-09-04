@@ -115,6 +115,59 @@ describe("prompt content interface", () => {
     });
   });
 
+  it("passes an explicit role through to unmentioned explicit media", () => {
+    const candidate = assetCandidate("asset-node-9", "晨雾海岸.png", "asset-frame");
+    const session = createPromptContentEditorSession([candidate]);
+    session.attach(document.createElement("div"));
+
+    const prepared = session.prepareGeneration({
+      connections: [{ ...connectionFor(candidate), role: "first_frame" }],
+      allowMediaOnly: true,
+    });
+    expect(prepared.ok).toBe(true);
+    expect(prepared.ok && prepared.frozen.explicitMedia).toEqual([
+      {
+        target: {
+          kind: "asset",
+          providerConnectionId: "provider-1",
+          assetId: "asset-frame",
+          canvasNodeKey: "asset-node-9",
+          mediaType: "image",
+        },
+        role: "first_frame",
+        displayNameSnapshot: "晨雾海岸.png",
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ]);
+  });
+
+  it("carries url targets as explicit media with file/link role", () => {
+    const session = createPromptContentEditorSession([]);
+    session.attach(document.createElement("div"));
+
+    const prepared = session.prepareGeneration({
+      connections: [
+        {
+          key: "url:url-1",
+          name: "网页链接",
+          kind: "image",
+          target: { kind: "url", url: "https://example.com/public-article", mediaType: "image" },
+          role: "link",
+        },
+      ],
+      allowMediaOnly: true,
+    });
+    expect(prepared.ok).toBe(true);
+    expect(prepared.ok && prepared.frozen.explicitMedia).toMatchObject([
+      {
+        target: { kind: "url", url: "https://example.com/public-article", mediaType: "image" },
+        role: "link",
+        displayNameSnapshot: "网页链接",
+      },
+    ]);
+  });
+
   it("rejects disconnected and rebound references without changing their original identity", () => {
     const candidate = assetCandidate("asset-node-1");
     const session = createPromptContentEditorSession([candidate]);

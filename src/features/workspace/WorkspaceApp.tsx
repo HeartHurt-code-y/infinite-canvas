@@ -84,7 +84,7 @@ import {
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
 } from "../../lib/modelCapabilities";
-import type { PromptContentEditorSession, PromptContentIssue } from "../../lib/promptContent";
+import type { PromptContentConnection, PromptContentEditorSession, PromptContentIssue } from "../../lib/promptContent";
 import { createPromptContentModule } from "../../lib/promptContent";
 import {
   composeVideosInOrder,
@@ -170,6 +170,7 @@ import type {
   VideoFrameExtractorRunState,
   FrameExtractorVideoInput,
   VideoNodeConfig,
+  VideoUrlMediaInput,
   ViralRemixNodeConfig,
   ViralRemixNodeData,
   ViralRemixVideoInput,
@@ -3685,6 +3686,27 @@ export function WorkspaceApp() {
       }
 
       const connectedAssets = generationInputs(nodeKey);
+      // 万相 3.0 URL 素材（文档 file / 网页 link）：随节点配置保存，不在画布连线上。
+      const urlMedia: readonly VideoUrlMediaInput[] =
+        genNode.kind === "video" ? (genNode.config.urlMedia ?? []) : [];
+      const urlConnections: PromptContentConnection[] = urlMedia.map((input) => ({
+        key: `url:${input.id}`,
+        name: input.label,
+        // file/link 素材在请求体中只表达 type 与 url，类型仅占位，不参与图N引用编号。
+        kind: "image",
+        target: { kind: "url", url: input.url, mediaType: "image" },
+        role: input.role,
+      }));
+      const connections: PromptContentConnection[] = [
+        ...connectedAssets.map((input) => ({
+          ...input,
+          role:
+            genNode.kind === "video"
+              ? (genNode.config.mediaRoles?.[input.key] ?? "")
+              : "",
+        })),
+        ...urlConnections,
+      ];
       const hasMediaInput = connectedAssets.some(
         (input) => input.kind === "image" || input.kind === "video",
       );
@@ -3710,7 +3732,7 @@ export function WorkspaceApp() {
       }
 
       const preparedPrompt = promptContents.prepareGeneration(nodeKey, {
-        connections: connectedAssets,
+        connections,
         allowMediaOnly: modelAllowsMediaOnlyPrompt(
           resolvedSelection.model.operationSchema,
           operation,
@@ -3735,7 +3757,7 @@ export function WorkspaceApp() {
       const parameters: Record<string, unknown> = generationParameters(
         parameterCapabilities,
         genNode.config.parameterValues,
-        connectedAssets.length > 0,
+        connections.length > 0,
       );
 
       // 供应商 API 无数量参数：数量 > 1 时拆分为 N 个独立任务（每个任务数量 1），

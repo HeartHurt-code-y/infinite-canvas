@@ -278,6 +278,7 @@ export function CanvasGenNode({
           config={node.config}
           providerCatalog={providerCatalog}
           hasMediaInputs={effectiveInputs.length > 0}
+          mediaInputs={effectiveInputs}
           onChange={(config) => onVideoConfigChange(node.key, config)}
         />
       ) : (

@@ -583,6 +583,49 @@ impl MediaResolver {
                     lease,
                 ))
             }
+            MediaReferenceTarget::Url {
+                url,
+                media_type,
+                canvas_node_key,
+            } => {
+                // 文档/网页生视频（file/link）：素材本身是公网 http(s) URL，
+                // 不下载、不经对象存储，直接把 URL 作为远端可读引用交给供应商抓取。
+                if !(url.starts_with("http://") || url.starts_with("https://")) {
+                    return Err(BackendError::validation(
+                        "url media input must reference a public http(s) URL",
+                        json!({ "url": redact_url_string(url) }),
+                    ));
+                }
+                // 扩展名仅用于产物命名展示；URL 无扩展名时退化为占位后缀。
+                let url_extension = url
+                    .split('?')
+                    .next()
+                    .and_then(|path| path.rsplit('.').next())
+                    .filter(|segment| !segment.contains('/') && !segment.is_empty())
+                    .unwrap_or("url");
+                Ok((
+                    ResolvedMedia {
+                        media_type: *media_type,
+                        type_position,
+                        role: role.to_string(),
+                        display_name: display_name.to_string(),
+                        stable_identity: json!({
+                            "kind": "url",
+                            "url": redact_url_string(url),
+                            "canvasNodeKey": canvas_node_key
+                        }),
+                        mime_type: String::new(),
+                        byte_size: 0,
+                        sha256: String::new(),
+                        file_name: media_file_name(display_name, url_extension),
+                        bytes: None,
+                        remote_reference: Some(url.clone()),
+                        prompt_segment_index,
+                        content_index,
+                    },
+                    None,
+                ))
+            }
         }
     }
 
