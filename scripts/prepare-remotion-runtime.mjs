@@ -73,7 +73,7 @@ if (process.platform === "win32" && process.version !== `v${nodeVersion}`) {
 const destination = path.join(root, "src-tauri", "resources", "remotion-runtime");
 const fileNames = [
   "package.json",
-  "package-lock.json",
+  "pnpm-lock.yaml",
   "plan.mjs",
   "Composition.tsx",
   "index.tsx",
@@ -109,17 +109,17 @@ if (
   process.exit(0);
 }
 
-async function npmCi(directory, production = false) {
-  const args = ["ci", "--no-audit", "--no-fund", ...(production ? ["--omit=dev"] : [])];
+async function pnpmInstall(directory, production = false) {
+  const args = ["install", "--frozen-lockfile", "--no-fund", ...(production ? ["--prod"] : [])];
   await new Promise((resolve, reject) => {
     const child =
       process.platform === "win32"
-        ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `npm ${args.join(" ")}`], {
+        ? spawn(process.env.ComSpec ?? "cmd.exe", ["/d", "/s", "/c", `pnpm ${args.join(" ")}`], {
             cwd: directory,
             stdio: "inherit",
             windowsHide: true,
           })
-        : spawn("npm", args, { cwd: directory, stdio: "inherit" });
+        : spawn("pnpm", args, { cwd: directory, stdio: "inherit" });
     child.once("error", reject);
     child.once("exit", (code) =>
       code === 0 ? resolve() : reject(new Error(`动画依赖安装失败：${code}`)),
@@ -128,7 +128,7 @@ async function npmCi(directory, production = false) {
 }
 console.log("准备本地动画渲染运行时");
 const lockHash = createHash("sha256")
-  .update(await readFile(path.join(source, "package-lock.json")))
+  .update(await readFile(path.join(source, "pnpm-lock.yaml")))
   .digest("hex");
 let installedHash;
 try {
@@ -140,13 +140,13 @@ if (
   installedHash !== lockHash ||
   !existsSync(path.join(source, "node_modules", "@remotion", "bundler", "package.json"))
 ) {
-  await npmCi(source);
+  await pnpmInstall(source);
   await writeFile(path.join(source, "node_modules", ".canvas-lock"), lockHash);
 }
 await mkdir(destination, { recursive: true });
 for (const name of [
   "package.json",
-  "package-lock.json",
+  "pnpm-lock.yaml",
   "plan.mjs",
   "Composition.tsx",
   "render.mjs",
@@ -156,7 +156,7 @@ if (
   oldManifest?.lockHash !== lockHash ||
   !existsSync(path.join(destination, "node_modules", "@remotion", "renderer", "package.json"))
 )
-  await npmCi(destination, true);
+  await pnpmInstall(destination, true);
 await copyFile(process.execPath, path.join(destination, nodeName));
 if (!existsSync(path.join(destination, "NODE-LICENSE.txt"))) {
   const response = await fetch(

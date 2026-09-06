@@ -138,7 +138,7 @@ try {
   );
   await writeFile(
     path.join(project, "README.md"),
-    "# 可编辑动画工程\n\n修改 plan.json 中的标题、内容、颜色与排版数据，或编辑 Composition.tsx 调整动画。\n\n安装 Node.js 后在此目录运行 npm install，然后使用 npm run studio 预览，npm run mp4 或 npm run gif 导出。工程仅包含可信模板与本次数据，无供应商凭据。\n",
+    "# 可编辑动画工程\n\n修改 plan.json 中的标题、内容、颜色与排版数据，或编辑 Composition.tsx 调整动画。\n\n安装 Node.js 后在此目录运行 pnpm install，然后使用 pnpm run studio 预览，pnpm run mp4 或 pnpm run gif 导出。工程仅包含可信模板与本次数据，无供应商凭据。\n",
   );
   checkCancelled();
   progress(100, "动画与可编辑工程已完成");
