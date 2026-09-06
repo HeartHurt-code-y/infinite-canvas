@@ -66,6 +66,9 @@ export default defineConfig(() => ({
     minify: !process.env.TAURI_ENV_DEBUG,
     // Produce sourcemaps for debug builds only.
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
+    // 画布编辑器核心（WorkspaceApp + 节点视图 + store/backend client）启动必需，
+    // 主包 ~560 kB 是合理体积；第三方依赖已全部拆为独立 vendor chunk。
+    chunkSizeWarningLimit: 600,
     rolldownOptions: {
       output: {
         // Keep framework-heavy dependencies in dedicated vendor chunks.
