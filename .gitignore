@@ -18,7 +18,6 @@ coverage
 
 # Editor directories and files
 .vscode/*
-!.vscode/extensions.json
 .idea
 .DS_Store
 *.suo
@@ -27,12 +26,19 @@ coverage
 *.sln
 *.sw?
 
+# Local-only editor config (kept on this machine, not pushed to remote)
+.editorconfig
+
 # Agent / tool runtime state (logs, sessions, caches — not project source)
 .playwright-mcp/
 .hallmark/
 .zcode/
 .video_agent/
 .workbuddy/
+
+# Local-only project docs (kept on this machine, not pushed to remote)
+docs/
+CONTEXT.md
 
 # Generated, bundled local animation engine (rebuilt by remotion:prepare)
 src-tauri/resources/remotion-runtime/
