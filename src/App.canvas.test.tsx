@@ -5158,11 +5158,7 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
 
     // 素材详情弹窗按需懒加载（deferredDialogs），CI 首触发时加载可能超过
     // testing-library 默认 1s 轮询超时，这里显式放宽；按钮是弹窗的同步子节点。
-    const dialog = await screen.findByRole(
-      "dialog",
-      { name: "站台参考图" },
-      { timeout: 5_000 },
-    );
+    const dialog = await screen.findByRole("dialog", { name: "站台参考图" }, { timeout: 5_000 });
     fireEvent.click(
       within(dialog).getByRole("button", {
         name: /重命名素材：站台参考图$/,
