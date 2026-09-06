@@ -10,12 +10,17 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   build-macos:
     name: Build macOS Installer
     runs-on: macos-14
     timeout-minutes: 60
+    outputs:
+      artifact_url: ${{ steps.publish-artifact-links.outputs.artifact_url }}
+      artifact_name: ${{ steps.publish-artifact-links.outputs.artifact_name }}
+      run_url: ${{ steps.publish-artifact-links.outputs.run_url }}
 
     steps:
       - name: Checkout
@@ -59,35 +64,31 @@ jobs:
 
       - name: Publish artifact download links
         if: success()
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const owner = context.repo.owner;
-            const repo = context.repo.repo;
-            const runId = context.runId;
+        id: publish-artifact-links
+        env:
+          ARTIFACT_URL: ${{ steps.upload-artifacts.outputs.artifact-url }}
+          ARTIFACT_NAME: infinite-canvas-macos-${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          {
+            echo "run_url=${RUN_URL}"
+            if [ -n "${ARTIFACT_URL}" ]; then
+              echo "artifact_url=${ARTIFACT_URL}"
+              echo "artifact_name=${ARTIFACT_NAME}"
+            else
+              echo "artifact_url="
+              echo "artifact_name="
+            fi
+          } >> "$GITHUB_OUTPUT"
 
-            const listUrl = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${runId}`;
-            const response = await github.rest.actions.listWorkflowRunArtifacts({
-              owner,
-              repo,
-              run_id: runId,
-            });
-            const artifacts = response.data.artifacts.filter((artifact) =>
-              artifact.name.startsWith("infinite-canvas-macos-")
-            );
-            const lines = [
-              "## macOS 包已构建完成 ✅",
-              `- [本次运行页面](${listUrl})`,
-              "",
-              "### 可下载产物",
-            ];
-            if (artifacts.length === 0) {
-              lines.push("- 未检索到以 `infinite-canvas-macos-` 开头的产物，请检查构建日志。");
-            } else {
-              for (const artifact of artifacts) {
-                const artifactName = artifact.name || "unknown-artifact";
-                const downloadUrl = artifact.archive_download_url || listUrl;
-                lines.push(`- [${artifactName}](${downloadUrl})`);
-              }
-            }
-            await core.summary.addRaw(lines.join("\n")).write();
+          {
+            echo "## macOS 包已构建完成 ✅"
+            echo "- [本次运行页面](${RUN_URL})"
+            echo ""
+            echo "### 可下载产物"
+            if [ -n "${ARTIFACT_URL}" ]; then
+              echo "- [${ARTIFACT_NAME}](${ARTIFACT_URL})"
+            else
+              echo "- 未检索到上传产物链接，请检查上一步 Upload installer artifacts。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

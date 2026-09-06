@@ -6,8 +6,9 @@
 // 保证“内置优先、运行时下载回退”两条路径拿到的是同一类官方构建。
 //
 // 平台策略：Windows（x64/arm64）、macOS（x64/arm64）、Linux（x64/arm64）
-// 都在构建期预置内置引擎；失败会中断构建（与 remotion:prepare 一致），
-// 避免产出“宣称内置但实际缺失”的安装包。
+// 都在构建期预置 ffmpeg 引擎；失败会中断构建（与 remotion:prepare 一致），
+// 其中 macOS 仅要求 ffmpeg 存在；若 ffprobe 缺失则进入“内置降级态”，
+// 让运行时按需回退下载完整引擎。
 
 import {
   createHash,
@@ -68,6 +69,10 @@ function ffprobeName() {
   return process.platform === "win32" ? "ffprobe.exe" : "ffprobe";
 }
 
+function requireFFprobeBundle() {
+  return process.platform !== "darwin";
+}
+
 function probeVersion(binaryPath) {
   const result = spawnSync(binaryPath, ["-version"], {
     encoding: "utf8",
@@ -98,12 +103,13 @@ function zipEntryBinaries(extractDir) {
   const binDir = path.join(extractDir, inner.name, "bin");
   const ffmpeg = path.join(binDir, ffmpegName());
   const ffprobe = path.join(binDir, ffprobeName());
-  for (const file of [ffmpeg, ffprobe]) {
-    if (!existsSync(file)) {
-      throw new Error(`压缩包中缺少 ${path.basename(file)}`);
-    }
+  if (!existsSync(ffmpeg)) {
+    throw new Error(`压缩包中缺少 ${path.basename(ffmpeg)}`);
   }
-  return { ffmpeg, ffprobe };
+  if (!existsSync(ffprobe) && requireFFprobeBundle()) {
+    throw new Error(`压缩包中缺少 ${path.basename(ffprobe)}`);
+  }
+  return { ffmpeg, ffprobe: existsSync(ffprobe) ? ffprobe : null };
 }
 
 function linuxEntryBinaries(extractDir) {
@@ -114,23 +120,25 @@ function linuxEntryBinaries(extractDir) {
   }
   const ffmpeg = path.join(extractDir, inner.name, ffmpegName());
   const ffprobe = path.join(extractDir, inner.name, ffprobeName());
-  for (const file of [ffmpeg, ffprobe]) {
-    if (!existsSync(file)) {
-      throw new Error(`压缩包中缺少 ${path.basename(file)}`);
-    }
+  if (!existsSync(ffmpeg)) {
+    throw new Error(`压缩包中缺少 ${path.basename(ffmpeg)}`);
   }
-  return { ffmpeg, ffprobe };
+  if (!existsSync(ffprobe) && requireFFprobeBundle()) {
+    throw new Error(`压缩包中缺少 ${path.basename(ffprobe)}`);
+  }
+  return { ffmpeg, ffprobe: existsSync(ffprobe) ? ffprobe : null };
 }
 
 function macEntryBinaries(extractDir) {
   const ffmpeg = path.join(extractDir, ffmpegName());
   const ffprobe = path.join(extractDir, ffprobeName());
-  for (const file of [ffmpeg, ffprobe]) {
-    if (!existsSync(file)) {
-      throw new Error(`压缩包中缺少 ${path.basename(file)}`);
-    }
+  if (!existsSync(ffmpeg)) {
+    throw new Error(`压缩包中缺少 ${path.basename(ffmpeg)}`);
   }
-  return { ffmpeg, ffprobe };
+  return {
+    ffmpeg,
+    ffprobe: existsSync(ffprobe) ? ffprobe : null,
+  };
 }
 
 function entryBinaries(extractDir) {
@@ -196,12 +204,13 @@ async function prepare() {
   } catch {
     existing = null;
   }
+  const isDarwin = process.platform === "darwin";
   const ready =
     !force &&
     existing?.schemaVersion === 1 &&
     existing?.version &&
     existsSync(ffmpegPath) &&
-    existsSync(ffprobePath);
+    (isDarwin ? true : existsSync(ffprobePath));
   if (ready) {
     console.log(`[ffmpeg:prepare] 内置 FFmpeg 已就绪：v${existing.version}`);
     process.exit(0);
@@ -234,10 +243,16 @@ async function prepare() {
 
     mkdirSync(destination, { recursive: true });
     cpSync(ffmpeg, ffmpegPath);
-    cpSync(ffprobe, ffprobePath);
+    if (ffprobe) {
+      cpSync(ffprobe, ffprobePath);
+    } else if (existsSync(ffprobePath)) {
+      rmSync(ffprobePath, { force: true });
+    }
     if (process.platform !== "win32") {
       chmodSync(ffmpegPath, 0o755);
-      chmodSync(ffprobePath, 0o755);
+      if (existsSync(ffprobePath)) {
+        chmodSync(ffprobePath, 0o755);
+      }
     }
 
     const { version, firstLine } = probeVersion(ffmpegPath);
@@ -251,7 +266,7 @@ async function prepare() {
           version,
           source: ffmpegDownloadUrlValue,
           ffmpegSha256: sha256(ffmpegPath),
-          ffprobeSha256: sha256(ffprobePath),
+          ffprobeSha256: existsSync(ffprobePath) ? sha256(ffprobePath) : null,
           preparedAt: new Date().toISOString(),
         },
         null,
