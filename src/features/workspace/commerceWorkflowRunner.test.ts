@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   workflowReferenceFixtures,
   workflowReferenceInputs,
+  workflowConnectedReferenceFixtures,
 } from "../../test/workflowMaterialFixtures";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import type { OptimizeVideoPromptCommand, ProviderCatalogEntry } from "../../lib/backend";
@@ -124,12 +125,17 @@ describe("commerce composite workflow", () => {
       ...request,
       node: {
         ...request.node,
-        config: { ...request.node.config, materials: workflowReferenceFixtures },
+        config: {
+          ...request.node.config,
+          materials: workflowReferenceFixtures,
+          connectedMaterials: workflowConnectedReferenceFixtures,
+        },
       },
     };
     const checkpoint = await runner.run(withMaterials);
     expect(checkpoint.phase).toBe("done");
     for (const input of calls()) {
+      expect(input.referenceInputs).toEqual(workflowConnectedReferenceFixtures);
       if (input.mode === "ai_film_qc") {
         expect(input.multimodalInputs).toEqual(workflowReferenceInputs);
         expect(input.visionImages).toHaveLength(6);

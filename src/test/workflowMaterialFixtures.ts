@@ -1,4 +1,26 @@
-import type { PickedPromptMaterial } from "../lib/backend";
+import type { PickedPromptMaterial, PromptReferenceInput } from "../lib/backend";
+
+export const workflowConnectedReferenceFixtures: readonly PromptReferenceInput[] = [
+  {
+    displayName: "云端参考图",
+    target: {
+      kind: "asset",
+      providerConnectionId: "source-provider",
+      assetId: "cloud-image",
+      canvasNodeKey: "asset-instance-1",
+      mediaType: "image",
+    },
+  },
+  {
+    displayName: "本地素材库声音",
+    target: {
+      kind: "local_asset",
+      stagingJobId: "staged-audio",
+      canvasNodeKey: "asset-instance-2",
+      mediaType: "audio",
+    },
+  },
+];
 
 export const workflowReferenceFixtures: readonly PickedPromptMaterial[] = [
   {

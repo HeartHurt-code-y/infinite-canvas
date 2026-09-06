@@ -629,7 +629,7 @@ function connectPromptToGeneration(promptNode: HTMLElement, generationNode: HTML
 }
 
 async function addAssetNode(
-  kind: "图片" | "视频",
+  kind: "图片" | "视频" | "音频",
   name: string,
   clientX: number,
   clientY: number,
@@ -652,6 +652,20 @@ async function addAssetNode(
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
   );
+}
+
+async function addWorkflowNode(buttonName = "添加工作流节点"): Promise<HTMLElement> {
+  const repositoryToggle = screen.getByRole("button", { name: /工作流仓库/ });
+  if (repositoryToggle.getAttribute("aria-expanded") !== "true") {
+    fireEvent.click(repositoryToggle);
+  }
+  fireEvent.click(screen.getByRole("button", { name: buttonName }));
+  const workflow = await waitFor(() => {
+    const node = document.querySelector<HTMLElement>(".canvas-knowledge-workflow");
+    expect(node).not.toBeNull();
+    return node!;
+  });
+  return waitForNodeAccessible(workflow);
 }
 
 function expectNodesNotToOverlap(
@@ -837,6 +851,88 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() =>
       expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
     );
+  });
+
+  it.each([
+    ["知识教学视频", "添加工作流节点"],
+    ["AI影视", "添加AI影视工作流节点"],
+    ["漫剧自动", "添加漫剧自动工作流节点"],
+    ["剧情带货", "添加剧情带货工作流节点"],
+    ["动画逻辑图", "添加动画逻辑图工作流节点"],
+    ["小红书封面", "添加小红书封面工作流节点"],
+    ["短视频反推", "添加短视频反推工作流节点"],
+  ])("%s工作流节点可通过左侧端口接收素材连线", async (_title, buttonName) => {
+    render(<App />);
+    const asset = await addAssetNode("图片", "站台参考图", 220, 180);
+    const workflow = await addWorkflowNode(buttonName);
+
+    expect(rfWrapperOf(workflow).querySelector(".react-flow__handle.target")).not.toBeNull();
+    connectViaHandles(asset, workflow);
+
+    const references = within(workflow).getByRole("region", { name: "工作流参考素材" });
+    const connections = await within(references).findByRole("list", {
+      name: "工作流连线参考素材",
+    });
+    expect(within(connections).getAllByRole("listitem")).toHaveLength(1);
+    expect(connections).toHaveTextContent("站台参考图");
+    expect(connections).toHaveTextContent("已连接 · 图片");
+    expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1);
+  });
+
+  it("工作流同时接收图片视频音频连线，断开单条连线后保留其他参考与节点", async () => {
+    const audioAsset: CloudAsset = {
+      providerConnectionId: PROVIDER.id,
+      id: "asset-audio-1",
+      kind: "audio",
+      name: "旁白参考音频",
+      status: "ready",
+      rawStatus: "Active",
+      previewUrl: "https://cdn.example.com/narration.mp3",
+      assetUrl: "https://cdn.example.com/narration.mp3",
+      coverUrl: null,
+      groupId: null,
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, audioAsset])
+        : baseInvokeImplementation(command),
+    );
+    render(<App />);
+    const image = await addAssetNode("图片", "站台参考图", 220, 180);
+    const video = await addAssetNode("视频", "列车进站参考", 220, 640);
+    const audio = await addAssetNode("音频", "旁白参考音频", 720, 640);
+    const workflow = await addWorkflowNode();
+
+    for (const asset of [image, video, audio]) connectViaHandles(asset, workflow);
+    const references = within(workflow).getByRole("region", { name: "工作流参考素材" });
+    const connections = await within(references).findByRole("list", {
+      name: "工作流连线参考素材",
+    });
+    expect(within(connections).getAllByRole("listitem")).toHaveLength(3);
+    expect(connections).toHaveTextContent("站台参考图已连接 · 图片");
+    expect(connections).toHaveTextContent("列车进站参考已连接 · 视频");
+    expect(connections).toHaveTextContent("旁白参考音频已连接 · 音频");
+    expect(references).toHaveTextContent("全部参考资料 3 / 8 项");
+    expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(3);
+
+    connectViaHandles(image, workflow);
+    expect(within(connections).getAllByRole("listitem")).toHaveLength(3);
+    expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(3);
+
+    fireEvent.click(
+      within(connections).getByRole("button", { name: "断开工作流素材：列车进站参考" }),
+    );
+    expect(within(connections).getAllByRole("listitem")).toHaveLength(2);
+    expect(connections).not.toHaveTextContent("列车进站参考");
+    expect(connections).toHaveTextContent("站台参考图");
+    expect(connections).toHaveTextContent("旁白参考音频");
+    expect(references).toHaveTextContent("全部参考资料 2 / 8 项");
+    expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(2);
+    expect(
+      document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+    ).toHaveLength(3);
+    expect(workflow).toBeInTheDocument();
+    expect(video).toBeInTheDocument();
   });
 
   it("视频拼接与合成节点接收多段素材，并可用按钮调整合成顺序", async () => {

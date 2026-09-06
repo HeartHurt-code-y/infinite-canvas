@@ -1,4 +1,5 @@
 import type { WorkflowHistoryRecord } from "../../lib/workflowHistory";
+import { workflowMaterialsSignature } from "./workflowMaterials";
 import {
   createKnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowNodeData,
@@ -21,15 +22,21 @@ export function sameWorkflowHistoryInput(
   b: KnowledgeVideoWorkflowNodeData,
 ): boolean {
   const input = (node: KnowledgeVideoWorkflowNodeData) => {
-    return ordered(
-      Object.fromEntries(
+    return ordered({
+      ...Object.fromEntries(
         Object.entries(node.config).filter(
-          ([key, value]) =>
-            !["checkpoint", "historyRunId", "catalogResolved"].includes(key) &&
-            !(key === "materials" && Array.isArray(value) && value.length === 0),
+          ([key]) =>
+            ![
+              "checkpoint",
+              "historyRunId",
+              "catalogResolved",
+              "materials",
+              "connectedMaterials",
+            ].includes(key),
         ),
       ),
-    );
+      materialsSignature: workflowMaterialsSignature(node.config),
+    });
   };
   return JSON.stringify(input(a)) === JSON.stringify(input(b));
 }

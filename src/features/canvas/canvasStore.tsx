@@ -362,6 +362,7 @@ function sameConnectionData(
       first.source === second.source &&
       first.kind === second.kind &&
       first.name === second.name &&
+      first.previewUrl === second.previewUrl &&
       first.videoUrl === second.videoUrl
     );
   }
@@ -918,6 +919,7 @@ function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry)
     return target.type === "gen" && target.data.kind !== "prompt";
   }
   if (source.type === "asset") {
+    if (target.type === "knowledgeVideoWorkflow") return true;
     if (target.type === "videoComposer") return source.data.kind === "video";
     if (target.type === "frameExtractor") return source.data.kind === "video";
     if (target.type === "viralRemix") {
@@ -931,6 +933,13 @@ function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry)
   }
   if (source.type === "output") {
     const hasArtifact = source.data.finalPath != null || source.data.previewSrc != null;
+    if (target.type === "knowledgeVideoWorkflow") {
+      if (source.data.mediaType !== "image" && source.data.mediaType !== "video") return false;
+      if (source.data.origin === "frame_extract") {
+        return source.data.mediaType === "image" && source.data.finalPath != null;
+      }
+      return isOutputGenerationReference(source.data);
+    }
     if (target.type === "videoComposer" || target.type === "viralRemix") {
       return source.data.mediaType === "video" && hasArtifact;
     }

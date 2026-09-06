@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   workflowReferenceFixtures,
   workflowReferenceInputs,
+  workflowConnectedReferenceFixtures,
 } from "../../test/workflowMaterialFixtures";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import type {
@@ -133,12 +134,17 @@ describe("single-node portrait cover workflow", () => {
       ...request,
       node: {
         ...request.node,
-        config: { ...request.node.config, materials: workflowReferenceFixtures },
+        config: {
+          ...request.node.config,
+          materials: workflowReferenceFixtures,
+          connectedMaterials: workflowConnectedReferenceFixtures,
+        },
       },
     };
     const checkpoint = await runner.run(withMaterials);
     expect(checkpoint.phase).toBe("done");
     for (const input of calls()) {
+      expect(input.referenceInputs).toEqual(workflowConnectedReferenceFixtures);
       expect(input.multimodalInputs?.slice(0, 2).map((item) => item.localPath)).toEqual([
         portrait.localPath,
         material.localPath,

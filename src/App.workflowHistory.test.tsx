@@ -211,6 +211,195 @@ async function resumeFromHistory() {
 }
 
 describe("workflow history canvas integration", () => {
+  it("reuses a historical workflow with unchanged live edges without retaining detached copies", async () => {
+    const record = historyRecord();
+    const asset: CanvasDocumentV2["assetNodes"][number] = {
+      key: "live-image",
+      assetId: "asset-image",
+      providerConnectionId: "original-provider",
+      source: "cloud",
+      kind: "image",
+      name: "已连图片",
+      previewUrl: null,
+      videoUrl: null,
+      x: 0,
+      y: 0,
+    };
+    const reference = {
+      displayName: asset.name,
+      target: {
+        kind: "asset" as const,
+        assetId: asset.assetId,
+        providerConnectionId: asset.providerConnectionId,
+        mediaType: "image" as const,
+        canvasNodeKey: asset.key,
+      },
+    };
+    const savedRecord = {
+      ...record,
+      nodeSnapshot: {
+        ...record.nodeSnapshot,
+        config: { ...record.nodeSnapshot.config, connectedMaterials: [reference] },
+      },
+    };
+    const document = {
+      ...canvasDocument([record.nodeSnapshot]),
+      assetNodes: [asset],
+      assetEdges: [
+        {
+          id: `${asset.key}->${record.sourceNodeId}`,
+          fromKey: asset.key,
+          toKey: record.sourceNodeId,
+        },
+      ],
+    };
+    mocks.getCanvas.mockResolvedValue({
+      id: CANVAS_ID,
+      title: "已有连线",
+      document,
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    mocks.historyList.mockResolvedValue({ items: [savedRecord], nextCursor: null });
+    mocks.historyGet.mockResolvedValue({ record: savedRecord, events: [], tasks: [] });
+    render(<App />);
+    await screen.findByLabelText("知识视频制作要求");
+    await resumeFromHistory();
+    expect(screen.getAllByLabelText("知识视频制作要求")).toHaveLength(1);
+    expect(mocks.run.mock.calls[0]![0].node.config.connectedMaterials).toEqual([reference]);
+    expect(
+      screen.queryByRole("button", { name: "移除历史参考素材：已连图片" }),
+    ).not.toBeInTheDocument();
+    const unlink = screen.getByRole("button", { name: "断开工作流素材：已连图片" });
+    await waitFor(() => expect(unlink).toBeEnabled());
+    fireEvent.click(unlink);
+    fireEvent.click(screen.getByRole("button", { name: "继续制作" }));
+    await waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(2));
+    expect(mocks.run.mock.calls[1]![0].node.config.connectedMaterials ?? []).toEqual([]);
+  });
+
+  it("snapshots connected image, audio and video identities and drops disconnected inputs on the next run", async () => {
+    const workflow = node();
+    const assets: CanvasDocumentV2["assetNodes"] = ["image", "audio", "video"].map(
+      (kind, index) => ({
+        key: `reference-${kind}`,
+        assetId: `asset-${kind}`,
+        providerConnectionId: "original-asset-provider",
+        source: index === 1 ? "local" : "cloud",
+        kind: kind as "image" | "audio" | "video",
+        name: `参考${kind}`,
+        previewUrl: null,
+        videoUrl: null,
+        x: 0,
+        y: index * 250,
+      }),
+    );
+    const document = {
+      ...canvasDocument([workflow]),
+      assetNodes: assets,
+      assetEdges: assets.map((asset) => ({
+        id: `${asset.key}->${workflow.key}`,
+        fromKey: asset.key,
+        toKey: workflow.key,
+      })),
+    };
+    mocks.getCanvas.mockResolvedValue({
+      id: CANVAS_ID,
+      title: "素材连线",
+      document,
+      revision: 1,
+      createdAt: 1,
+      updatedAt: 1,
+    });
+    render(<App />);
+    const region = await screen.findByRole("region", { name: "工作流参考素材" });
+    expect(within(region).getByText(/全部参考资料 3 \/ 8 项/)).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
+    expect(mocks.run.mock.calls[0]![0].node.config.connectedMaterials).toEqual([
+      {
+        displayName: "参考image",
+        target: {
+          kind: "asset",
+          assetId: "asset-image",
+          providerConnectionId: "original-asset-provider",
+          mediaType: "image",
+          canvasNodeKey: "reference-image",
+        },
+      },
+      {
+        displayName: "参考audio",
+        target: {
+          kind: "local_asset",
+          stagingJobId: "asset-audio",
+          mediaType: "audio",
+          canvasNodeKey: "reference-audio",
+        },
+      },
+      {
+        displayName: "参考video",
+        target: {
+          kind: "asset",
+          assetId: "asset-video",
+          providerConnectionId: "original-asset-provider",
+          mediaType: "video",
+          canvasNodeKey: "reference-video",
+        },
+      },
+    ]);
+    const unlink = within(region).getByRole("button", { name: "断开工作流素材：参考audio" });
+    await waitFor(() => expect(unlink).toBeEnabled());
+    fireEvent.click(unlink);
+    expect(within(region).queryByText("参考audio")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    await waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(2));
+    expect(
+      mocks.run.mock.calls[1]![0].node.config.connectedMaterials?.map(
+        (item) => item.target.mediaType,
+      ),
+    ).toEqual(["image", "video"]);
+    await waitFor(
+      () => {
+        const saved = mocks.saveCanvas.mock.calls.at(-1)?.[0].document as
+          CanvasDocumentV2 | undefined;
+        expect(saved?.assetEdges).toHaveLength(2);
+        expect(saved?.knowledgeVideoWorkflowNodes?.[0]?.config.connectedMaterials ?? []).toEqual(
+          [],
+        );
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("restores historical media references without source nodes and lets the user remove them", async () => {
+    const record = historyRecord();
+    const reference = {
+      displayName: "历史旁白",
+      target: {
+        kind: "local_asset" as const,
+        stagingJobId: "saved-audio",
+        mediaType: "audio" as const,
+      },
+    };
+    const snapshot = {
+      ...record.nodeSnapshot,
+      config: { ...record.nodeSnapshot.config, connectedMaterials: [reference] },
+    };
+    const savedRecord = { ...record, nodeSnapshot: snapshot };
+    mocks.historyList.mockResolvedValue({ items: [savedRecord], nextCursor: null });
+    mocks.historyGet.mockResolvedValue({ record: savedRecord, events: [], tasks: [] });
+    render(<App />);
+    await resumeFromHistory();
+    expect(mocks.run.mock.calls[0]![0].node.config.connectedMaterials).toEqual([reference]);
+    const remove = await screen.findByRole("button", { name: "移除历史参考素材：历史旁白" });
+    await waitFor(() => expect(remove).toBeEnabled());
+    fireEvent.click(remove);
+    expect(
+      screen.queryByRole("button", { name: "移除历史参考素材：历史旁白" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("restores the reverse workflow as one node and preserves its completed download", async () => {
     const previous = historyRecord();
     const options = { ...createReverseVideoOptions(), sourceUrl: "https://v.douyin.com/example/" };

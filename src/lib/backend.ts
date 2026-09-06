@@ -1187,6 +1187,12 @@ export interface PickedPromptMaterial extends PromptMultimodalInput {
   readonly byteSize: number;
 }
 
+/** 连线素材保留来源身份，后端在每次请求时读取实际媒体正文。 */
+export interface PromptReferenceInput {
+  readonly target: MediaReferenceTarget;
+  readonly displayName: string;
+}
+
 export interface OptimizeVideoPromptCommand {
   readonly workflowRunId?: string;
   /** 用于把文本模型调用归档到当前画布与来源节点；旧调用方可省略。 */
@@ -1203,6 +1209,7 @@ export interface OptimizeVideoPromptCommand {
   readonly visionImages?: readonly PromptVisionImageInput[];
   /** 剧本节点直接选择的图片、音频、视频或文档素材。 */
   readonly multimodalInputs?: readonly PromptMultimodalInput[];
+  readonly referenceInputs?: readonly PromptReferenceInput[];
 }
 
 export interface OptimizedPromptResult {

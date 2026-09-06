@@ -135,6 +135,11 @@ import {
 } from "./MediaNodeViews";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import {
+  workflowCanvasInputs,
+  workflowCanvasInputsFromDocument,
+  withCanvasWorkflowMaterials,
+} from "./workflowCanvasInputs";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { WorkflowRepository } from "./WorkflowRepository";
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
@@ -143,8 +148,8 @@ import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
 import {
   MAX_WORKFLOW_MATERIALS,
   MAX_WORKFLOW_MATERIAL_BYTES,
-  workflowReferenceMaterials,
   workflowMaterialPathKey,
+  workflowMaterialQuota,
 } from "./workflowMaterials";
 import {
   createKnowledgeVideoDirectorWorkflow,
@@ -504,6 +509,24 @@ export function WorkspaceApp() {
   // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
   const { pastCount, futureCount } = useCanvasHistoryCounts();
   const genTopologyByKey = genNodeByKey;
+  const workflowInputsByNode = useMemo(
+    () =>
+      new Map(
+        knowledgeVideoWorkflowNodes.map((node) => [
+          node.key,
+          workflowCanvasInputs(
+            canvasEdgeIndex.byTarget.get(node.key) ?? [],
+            assetNodeByKey,
+            outputNodeByKey,
+          ),
+        ]),
+      ),
+    [knowledgeVideoWorkflowNodes, canvasEdgeIndex, assetNodeByKey, outputNodeByKey],
+  );
+  const workflowInputsRef = useRef(workflowInputsByNode);
+  useEffect(() => {
+    workflowInputsRef.current = workflowInputsByNode;
+  }, [workflowInputsByNode]);
   const screenplayInputByStoryboard = useMemo(() => {
     const inputs = new Map<string, ConnectedScreenplayInput>();
     for (const edge of assetEdges) {
@@ -1735,8 +1758,10 @@ export function WorkspaceApp() {
       restoredNode?: KnowledgeVideoWorkflowNodeData,
     ) => {
       if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      const document = snapshotV2({});
       const sourceNode =
-        restoredNode ?? knowledgeVideoWorkflowNodes.find((candidate) => candidate.key === key);
+        restoredNode ??
+        document.knowledgeVideoWorkflowNodes?.find((candidate) => candidate.key === key);
       if (!sourceNode) return;
       if (!isDesktopRuntime()) {
         setKnowledgeVideoWorkflowRuns((current) => ({
@@ -1755,8 +1780,12 @@ export function WorkspaceApp() {
           ? sourceNode.config.historyRunId
           : crypto.randomUUID();
       if (activeWorkflowHistoryIdsRef.current.has(historyRunId)) return;
-      const node = { ...sourceNode, config: { ...sourceNode.config, historyRunId } };
-      patchNode("knowledgeVideoWorkflow", key, () => node);
+      const savedNode = { ...sourceNode, config: { ...sourceNode.config, historyRunId } };
+      const node = withCanvasWorkflowMaterials(
+        savedNode,
+        workflowCanvasInputsFromDocument(document, key),
+      );
+      patchNode("knowledgeVideoWorkflow", key, () => savedNode);
       activeWorkflowHistoryIdsRef.current.add(historyRunId);
       setActiveWorkflowHistoryIds([...activeWorkflowHistoryIdsRef.current]);
       const controller = new AbortController();
@@ -1835,13 +1864,7 @@ export function WorkspaceApp() {
           }
         });
     },
-    [
-      knowledgeVideoWorkflowNodes,
-      recordedWorkflowRunner,
-      recoverWorkflowHistory,
-      patchNode,
-      providerCatalog,
-    ],
+    [recordedWorkflowRunner, snapshotV2, recoverWorkflowHistory, patchNode, providerCatalog],
   );
 
   const workflowHistoryActionsRef = useRef(new Set<string>());
@@ -1892,23 +1915,41 @@ export function WorkspaceApp() {
             ...nodes,
           ].map((item) => item.key),
         );
-        const restored = restoreWorkflowHistoryNode(latest, nodes, {
-          restart: action === "restart",
-          occupiedKeys,
-          newKey: `workflow-restored-${crypto.randomUUID()}`,
-          position: nearestAvailableNodePosition(
-            {
-              x: anchor.x - KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
-              y: anchor.y - 180,
-              width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
-              height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-            },
-            occupiedNodeRects,
+        let restored = restoreWorkflowHistoryNode(
+          latest,
+          nodes.map((node) =>
+            withCanvasWorkflowMaterials(node, workflowCanvasInputsFromDocument(document, node.key)),
           ),
-        });
-        if (restored.replace)
+          {
+            restart: action === "restart",
+            occupiedKeys,
+            newKey: `workflow-restored-${crypto.randomUUID()}`,
+            position: nearestAvailableNodePosition(
+              {
+                x: anchor.x - KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+                y: anchor.y - 180,
+                width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+                height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
+              },
+              occupiedNodeRects,
+            ),
+          },
+        );
+        if (restored.replace) {
+          // The history owns a full input snapshot; the live canvas continues to own its edges.
+          const original = nodes.find((node) => node.key === restored.node.key);
+          restored = {
+            ...restored,
+            node: {
+              ...restored.node,
+              config: {
+                ...restored.node.config,
+                connectedMaterials: original?.config.connectedMaterials ?? [],
+              },
+            },
+          };
           patchNode("knowledgeVideoWorkflow", restored.node.key, () => restored.node);
-        else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
+        } else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
         selectNode(restored.node.key);
         void flowInstanceRef.current?.setCenter(
           restored.node.x + KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
@@ -2046,27 +2087,28 @@ export function WorkspaceApp() {
         )
           return node;
         const materials = [...(node.config.materials ?? [])];
-        const existing = workflowReferenceMaterials(node.config);
-        const paths = new Set(existing.map(workflowMaterialPathKey));
+        const effectiveConfig = withCanvasWorkflowMaterials(
+          node,
+          workflowInputsRef.current.get(key) ?? [],
+        ).config;
         const generalPaths = new Set(materials.map(workflowMaterialPathKey));
-        let totalBytes = existing.reduce((sum, item) => sum + item.byteSize, 0);
         for (const item of picked) {
           const path = workflowMaterialPathKey(item);
-          const alreadyCounted = paths.has(path);
+          const nextQuota = workflowMaterialQuota({
+            ...effectiveConfig,
+            materials: [...materials, item],
+          });
           if (
             generalPaths.has(path) ||
             !Number.isFinite(item.byteSize) ||
             item.byteSize <= 0 ||
             item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
-            (!alreadyCounted &&
-              (paths.size >= MAX_WORKFLOW_MATERIALS ||
-                totalBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
+            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
           ) {
             rejected++;
             continue;
           }
-          if (!alreadyCounted) totalBytes += item.byteSize;
-          paths.add(path);
           generalPaths.add(path);
           materials.push(item);
         }
@@ -2121,11 +2163,15 @@ export function WorkspaceApp() {
         const existing = [...options.portraits, ...options.materials];
         const paths = new Set(existing.map(workflowMaterialPathKey));
         let totalBytes = existing.reduce((sum, item) => sum + item.byteSize, 0);
-        const references = workflowReferenceMaterials(node.config);
-        const referencePaths = new Set(references.map(workflowMaterialPathKey));
-        let referenceBytes = references.reduce((sum, item) => sum + item.byteSize, 0);
+        const effectiveConfig = withCanvasWorkflowMaterials(
+          node,
+          workflowInputsRef.current.get(key) ?? [],
+        ).config;
         for (const item of picked) {
-          const alreadyCounted = referencePaths.has(workflowMaterialPathKey(item));
+          const nextQuota = workflowMaterialQuota({
+            ...effectiveConfig,
+            xhsCover: { ...options, [field]: [...items, item] },
+          });
           if (
             item.kind !== "image" ||
             paths.has(workflowMaterialPathKey(item)) ||
@@ -2133,17 +2179,14 @@ export function WorkspaceApp() {
             !Number.isFinite(item.byteSize) ||
             item.byteSize <= 0 ||
             totalBytes + item.byteSize > XHS_COVER_MAX_REFERENCE_BYTES ||
-            (!alreadyCounted &&
-              (referencePaths.size >= MAX_WORKFLOW_MATERIALS ||
-                referenceBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
+            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
           ) {
             rejected++;
             continue;
           }
           paths.add(workflowMaterialPathKey(item));
           totalBytes += item.byteSize;
-          referencePaths.add(workflowMaterialPathKey(item));
-          if (!alreadyCounted) referenceBytes += item.byteSize;
           items.push(item);
         }
         return { ...node, config: { ...node.config, xhsCover: { ...options, [field]: items } } };
@@ -2201,27 +2244,28 @@ export function WorkspaceApp() {
           return node;
         const materials = [...options.materials];
         const paths = new Set(materials.map(workflowMaterialPathKey));
-        const references = workflowReferenceMaterials(node.config);
-        const referencePaths = new Set(references.map(workflowMaterialPathKey));
-        let totalBytes = references.reduce((total, item) => total + item.byteSize, 0);
+        const effectiveConfig = withCanvasWorkflowMaterials(
+          node,
+          workflowInputsRef.current.get(key) ?? [],
+        ).config;
         for (const item of picked) {
-          const alreadyCounted = referencePaths.has(workflowMaterialPathKey(item));
+          const nextQuota = workflowMaterialQuota({
+            ...effectiveConfig,
+            commerce: { ...options, materials: [...materials, item] },
+          });
           if (
             (item.kind !== "image" && item.kind !== "document") ||
             paths.has(workflowMaterialPathKey(item)) ||
             !Number.isFinite(item.byteSize) ||
             item.byteSize <= 0 ||
             item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
-            (!alreadyCounted &&
-              (referencePaths.size >= MAX_WORKFLOW_MATERIALS ||
-                totalBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
+            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
           ) {
             rejected++;
             continue;
           }
           paths.add(workflowMaterialPathKey(item));
-          referencePaths.add(workflowMaterialPathKey(item));
-          if (!alreadyCounted) totalBytes += item.byteSize;
           materials.push(item);
         }
         return { ...node, config: { ...node.config, commerce: { ...options, materials } } };
@@ -3259,6 +3303,7 @@ export function WorkspaceApp() {
       const composerTarget = videoComposerNodes.find((node) => node.key === toKey);
       const viralRemixTarget = viralRemixNodes.find((node) => node.key === toKey);
       const frameExtractorTarget = frameExtractorNodes.find((node) => node.key === toKey);
+      const workflowTarget = knowledgeVideoWorkflowNodes.some((node) => node.key === toKey);
       const storyboardTarget = storyboardNodes.find((node) => node.key === toKey);
       const result = connectCanvasStateNodes(fromKey, toKey);
       if (result.status !== "connected") return;
@@ -3272,7 +3317,9 @@ export function WorkspaceApp() {
               ? "视频抽帧节点"
               : storyboardTarget
                 ? "剧本转工业级分镜脚本节点"
-                : `素材节点 ${toKey}`;
+                : workflowTarget
+                  ? "工作流节点"
+                  : `素材节点 ${toKey}`;
       frontendLog(
         "info",
         `[canvas] ${promptSource ? "提示词" : screenplaySource ? "剧本" : downloaderSource ? "网络爆款视频下载" : outputSource ? `${outputSource.mediaType === "image" ? "图片" : "视频"}产物` : "素材"}连线建立: ${fromKey} → ${targetLabel}`,
@@ -3284,6 +3331,7 @@ export function WorkspaceApp() {
       outputNodes,
       screenplayNodes,
       storyboardNodes,
+      knowledgeVideoWorkflowNodes,
       videoComposerNodes,
       videoDownloaderNodes,
       frameExtractorNodes,
@@ -5774,11 +5822,24 @@ export function WorkspaceApp() {
         selected: selectedNodeKey === node.key,
         data: {
           hasSourceHandle: false,
-          hasTargetHandle: false,
+          hasTargetHandle: true,
           content: (
             <KnowledgeVideoWorkflowNode
               key={node.key}
               node={node}
+              connectedInputs={workflowInputsByNode.get(node.key) ?? []}
+              onUnlink={removeAssetEdge}
+              onRemoveHistoricalReference={(index) =>
+                patchNode("knowledgeVideoWorkflow", node.key, (current) => ({
+                  ...current,
+                  config: {
+                    ...current.config,
+                    connectedMaterials: (current.config.connectedMaterials ?? []).filter(
+                      (_, itemIndex) => itemIndex !== index,
+                    ),
+                  },
+                }))
+              }
               providerCatalog={providerCatalog}
               runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
               selected={selectedNodeKey === node.key}
@@ -5814,6 +5875,9 @@ export function WorkspaceApp() {
       })),
     [
       knowledgeVideoWorkflowNodes,
+      workflowInputsByNode,
+      removeAssetEdge,
+      patchNode,
       providerCatalog,
       knowledgeVideoWorkflowRuns,
       selectedNodeKey,
@@ -6232,6 +6296,7 @@ export function WorkspaceApp() {
         const viralRemixTarget = viralRemixNodeByKey.get(edge.toKey);
         const frameExtractorTarget = frameExtractorNodeByKey.get(edge.toKey);
         const storyboardTarget = storyboardNodeByKey.get(edge.toKey);
+        const workflowTarget = workflowInputsByNode.has(edge.toKey);
         const assetTarget = assetNodeByKey.get(edge.toKey);
         const isGenOutput =
           (genSource != null || composerSource != null) && outputNodeByKey.has(edge.toKey);
@@ -6258,9 +6323,11 @@ export function WorkspaceApp() {
                 ? "视频抽帧节点"
                 : storyboardTarget
                   ? "剧本转工业级分镜脚本节点"
-                  : (assetTarget?.name ?? "目标节点");
+                  : workflowTarget
+                    ? "工作流节点"
+                    : (assetTarget?.name ?? "目标节点");
         const connectionOrder =
-          composerTarget != null || (generationTarget && !promptSource)
+          workflowTarget || composerTarget != null || (generationTarget && !promptSource)
             ? (inputOrderByEdge.get(edge.id) ?? 0)
             : viralRemixTarget || frameExtractorTarget
               ? 1
@@ -6283,7 +6350,7 @@ export function WorkspaceApp() {
                 ? "edge edge--prompt-generation"
                 : isScreenplayToStoryboard
                   ? "edge edge--screenplay-storyboard"
-                  : `edge edge--asset${generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`,
+                  : `edge edge--asset${workflowTarget || generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`,
             order: connectionOrder,
             removable: !isGenOutput,
             onSelect: () => {
@@ -6296,6 +6363,7 @@ export function WorkspaceApp() {
       }),
     [
       assetEdges,
+      workflowInputsByNode,
       genTopologyByKey,
       videoComposerNodeByKey,
       videoDownloaderNodeByKey,

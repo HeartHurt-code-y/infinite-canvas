@@ -47,6 +47,43 @@ const templates: readonly [string, Partial<KnowledgeVideoWorkflowConfig>][] = [
 ];
 
 describe("workflow reference materials", () => {
+  it("counts connected sources toward capacity and permits reusing a connected local file", () => {
+    const materials = Array.from({ length: 7 }, (_, index) => ({
+      ...material,
+      localPath: `C:\\references\\${index}.png`,
+    }));
+    const props = nodeProps({ materials });
+    const input = {
+      edgeId: "frame->workflow",
+      displayName: "抽帧图片",
+      target: {
+        kind: "local_file" as const,
+        path: "C:\\frames\\one.png",
+        mediaType: "image" as const,
+      },
+    };
+    const { rerender } = render(
+      <KnowledgeVideoWorkflowNode {...props} connectedInputs={[input]} />,
+    );
+    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
+    expect(screen.getByText(/全部参考资料 8 \/ 8 项/)).toBeVisible();
+    rerender(
+      <KnowledgeVideoWorkflowNode
+        {...props}
+        connectedInputs={[
+          input,
+          {
+            ...input,
+            edgeId: "second->workflow",
+            target: { ...input.target, path: "C:\\frames\\two.png" },
+          },
+        ]}
+      />,
+    );
+    expect(screen.getByRole("alert")).toHaveTextContent("参考资料合计超过 8 项或 14 MB");
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+  });
+
   it.each(templates)("shows shared multimodal references in %s", (title, options) => {
     render(<KnowledgeVideoWorkflowNode {...nodeProps(options)} />);
     expect(screen.getByText(title)).toBeInTheDocument();

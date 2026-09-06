@@ -59,6 +59,8 @@ use super::{
     },
 };
 
+mod reference_inputs;
+
 /// Seedance 2.0 提示词优化技能目录（byted-ark-seedance-pe）。
 pub const SEEDANCE_20_SKILL_DIR: &str =
     r"C:\Users\bp180\Desktop\byted-ark-seedance-pe(4)\byted-ark-seedance-pe";
@@ -364,6 +366,14 @@ pub struct PromptMultimodalInput {
     pub mime_type: String,
 }
 
+/// 画布连入的媒体素材保留稳定身份；请求发送时再读取原始图片、音频或视频。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PromptReferenceInput {
+    pub target: MediaReferenceTarget,
+    pub display_name: String,
+}
+
 /// 解析视觉素材所需的后端服务（与生成任务共享同一套素材读取链路）。
 pub struct PromptVisionDeps<'a> {
     pub app: &'a AppHandle,
@@ -402,6 +412,9 @@ pub struct OptimizeVideoPromptCommand {
     /// 剧本节点直接选择的本地图片、音频、视频或文档素材。
     #[serde(default)]
     pub multimodal_inputs: Vec<PromptMultimodalInput>,
+    /// 连入工作流节点的图片、音频或视频，与本地参考素材共享数量和体积额度。
+    #[serde(default)]
+    pub reference_inputs: Vec<PromptReferenceInput>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1618,6 +1631,11 @@ fn build_system_and_user_prompts(
                 .multimodal_inputs
                 .iter()
                 .filter(|input| input.kind == PromptMultimodalKind::Image)
+                .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
                 .count();
         let evidence = if image_count == 0 {
             "本轮未附带图片：可按用户文字及历史中已确认的路径描述继续规划，明确写出依据和假设，不得声称已读取参考图或识别红线。多模态版标为待配参考图。".to_string()
@@ -1640,12 +1658,22 @@ fn build_system_and_user_prompts(
                 .multimodal_inputs
                 .iter()
                 .filter(|input| input.kind == PromptMultimodalKind::Image)
+                .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
                 .count();
         let video_count = command
             .multimodal_inputs
             .iter()
             .filter(|input| input.kind == PromptMultimodalKind::Video)
-            .count();
+            .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Video)
+                .count();
         let evidence = if image_count == 0 && video_count == 0 {
             "本轮未附带图片或视频视觉证据：依据用户文字与历史中已确认的设定编排，明确说明依据和假设，不得声称已看图或观看视频。".to_string()
         } else {
@@ -1667,12 +1695,22 @@ fn build_system_and_user_prompts(
                 .multimodal_inputs
                 .iter()
                 .filter(|input| input.kind == PromptMultimodalKind::Image)
+                .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
                 .count();
         let video_count = command
             .multimodal_inputs
             .iter()
             .filter(|input| input.kind == PromptMultimodalKind::Video)
-            .count();
+            .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Video)
+                .count();
         let evidence = if image_count == 0 && video_count == 0 {
             "本轮未附带图片或视频视觉证据：仅依据用户文字与历史中已确认的剧情和设定创作，不得声称已看图或观看视频。".to_string()
         } else {
@@ -1694,12 +1732,22 @@ fn build_system_and_user_prompts(
                 .multimodal_inputs
                 .iter()
                 .filter(|input| input.kind == PromptMultimodalKind::Image)
+                .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
                 .count();
         let video_count = command
             .multimodal_inputs
             .iter()
             .filter(|input| input.kind == PromptMultimodalKind::Video)
-            .count();
+            .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Video)
+                .count();
         let evidence = if image_count == 0 && video_count == 0 {
             "本轮未附带图片或视频视觉证据：仅依据用户文字及历史已确认的设定，不能声称已看过产品图、角色图或视频。".to_string()
         } else {
@@ -2211,12 +2259,13 @@ fn inline_vision_image_payload(
 }
 
 /// 下载视觉素材字节（素材库读取地址 / 对象存储重签地址均为直链）。
-async fn download_vision_bytes(
+async fn download_reference_bytes(
     providers: &ProviderRuntime,
     url: &str,
     display_name: &str,
+    byte_limit: Option<u64>,
 ) -> BackendResult<Vec<u8>> {
-    let response = providers.client().get(url).send().await?;
+    let mut response = providers.client().get(url).send().await?;
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let raw = String::from_utf8_lossy(&response.bytes().await?).into_owned();
@@ -2229,7 +2278,17 @@ async fn download_vision_bytes(
             }),
         ));
     }
-    Ok(response.bytes().await?.to_vec())
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await? {
+        if byte_limit.is_some_and(|limit| (bytes.len() + chunk.len()) as u64 > limit) {
+            return Err(BackendError::validation(
+                "reference material download exceeds the 14 MiB limit",
+                json!({ "displayName": display_name, "maximum": byte_limit }),
+            ));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    Ok(bytes)
 }
 
 /// 把一条连入提示词节点的图片素材解析为 Base64 视觉载荷。
@@ -2257,111 +2316,7 @@ async fn resolve_vision_image(
             json!({ "displayName": display_name }),
         )
     })?;
-    let bytes = match target {
-        MediaReferenceTarget::Asset {
-            provider_connection_id,
-            asset_id,
-            media_type,
-            ..
-        } => {
-            if *media_type != MediaType::Image {
-                return Err(BackendError::validation(
-                    "vision understanding only accepts image assets",
-                    json!({ "displayName": display_name, "mediaType": media_type }),
-                ));
-            }
-            let resolved = deps
-                .assets
-                .resolve(ResolveAsset {
-                    identity: CloudAssetIdentity {
-                        provider_connection_id: provider_connection_id.clone(),
-                        asset_id: asset_id.clone(),
-                    },
-                    expected_media_type: MediaType::Image,
-                    delivery: AssetDelivery::Bytes,
-                    trace: AssetReadTrace { task, attempt_id },
-                })
-                .await?;
-            match resolved.access {
-                ResolvedAssetAccess::Bytes(bytes) => bytes,
-                ResolvedAssetAccess::RemoteReference(_) => {
-                    return Err(BackendError::protocol(
-                        "vision asset resolution did not return bytes",
-                        json!({ "displayName": display_name, "assetId": asset_id }),
-                    ));
-                }
-            }
-        }
-        MediaReferenceTarget::LocalAsset {
-            staging_job_id,
-            media_type,
-            ..
-        } => {
-            if *media_type != MediaType::Image {
-                return Err(BackendError::validation(
-                    "vision understanding only accepts image assets",
-                    json!({ "displayName": display_name, "mediaType": media_type }),
-                ));
-            }
-            let lease = deps
-                .staging
-                .local_asset_lease(staging_job_id, MediaType::Image)?;
-            download_vision_bytes(deps.providers, &lease.get_url, display_name).await?
-        }
-        MediaReferenceTarget::LocalResult {
-            generation_task_id,
-            result_index,
-            media_type,
-            ..
-        } => {
-            if *media_type != MediaType::Image {
-                return Err(BackendError::validation(
-                    "vision understanding only accepts image assets",
-                    json!({ "displayName": display_name, "mediaType": media_type }),
-                ));
-            }
-            let record = deps
-                .local_results
-                .verify_local_result(generation_task_id, *result_index)
-                .await?;
-            if record.save_status != SaveStatus::Succeeded {
-                return Err(BackendError::validation(
-                    "vision reference local result is not available",
-                    json!({ "displayName": display_name, "saveStatus": record.save_status }),
-                ));
-            }
-            let path = record.final_path.as_deref().ok_or_else(|| {
-                BackendError::protocol(
-                    "saved vision reference local result has no path",
-                    json!({ "displayName": display_name }),
-                )
-            })?;
-            tokio::fs::read(path).await?
-        }
-        MediaReferenceTarget::LocalFile {
-            path, media_type, ..
-        } => {
-            if *media_type != MediaType::Image {
-                return Err(BackendError::validation(
-                    "vision understanding only accepts image assets",
-                    json!({ "displayName": display_name, "mediaType": media_type }),
-                ));
-            }
-            tokio::fs::read(path).await?
-        }
-        MediaReferenceTarget::Url {
-            url, media_type, ..
-        } => {
-            if *media_type != MediaType::Image {
-                return Err(BackendError::validation(
-                    "vision understanding only accepts image assets",
-                    json!({ "displayName": display_name, "mediaType": media_type }),
-                ));
-            }
-            download_vision_bytes(deps.providers, url, display_name).await?
-        }
-    };
-    vision_image_payload(display_name, bytes)
+    reference_inputs::resolve_vision_target(deps, task, attempt_id, target, display_name).await
 }
 
 /// 解析全部视觉素材；任一素材失败即整体失败，避免模型在缺图的情况下继续生成。
@@ -2554,9 +2509,20 @@ async fn execute_recorded_text_call(
     remote_model_id: &str,
 ) -> BackendResult<(OptimizedPromptResult, CapturedHttpResponse)> {
     let skill_system_prompt = load_skill_system_prompt(command.mode)?;
+    reference_inputs::validate_material_count(
+        command.multimodal_inputs.len() + command.reference_inputs.len(),
+    )?;
     let vision_images =
         resolve_vision_images(deps, task_id, attempt_id, &command.vision_images).await?;
-    let multimodal_inputs = resolve_multimodal_inputs(&command.multimodal_inputs).await?;
+    let mut multimodal_inputs = resolve_multimodal_inputs(&command.multimodal_inputs).await?;
+    reference_inputs::append_reference_inputs(
+        deps,
+        task_id,
+        attempt_id,
+        &command.reference_inputs,
+        &mut multimodal_inputs,
+    )
+    .await?;
     let (mut system_prompt, user_prompt) =
         build_system_and_user_prompts(command, &skill_system_prompt);
     if !multimodal_inputs.is_empty() {
@@ -2581,7 +2547,7 @@ async fn execute_recorded_text_call(
             .collect::<Vec<_>>()
             .join("\n");
         format!(
-            "以下本地参考素材已随请求附带，请逐项读取并用于本轮任务：\n{inventory}\n\n{user_prompt}"
+            "以下参考素材已随请求附带，请逐项读取并用于本轮任务：\n{inventory}\n\n{user_prompt}"
         )
     };
     let profile = text_request_profile(remote_model_id);
@@ -3202,6 +3168,7 @@ mod tests {
         .unwrap();
         assert!(command.vision_images.is_empty());
         assert!(command.multimodal_inputs.is_empty());
+        assert!(command.reference_inputs.is_empty());
         assert!(command.canvas_id.is_none());
         assert!(command.source_node_id.is_none());
         assert_eq!(command.task, PromptTask::Optimize);
@@ -3244,6 +3211,30 @@ mod tests {
             command.multimodal_inputs[0].kind,
             PromptMultimodalKind::Video
         );
+
+        let command: OptimizeVideoPromptCommand = serde_json::from_value(json!({
+            "providerConnectionId": "text-provider",
+            "modelDefinitionId": "model",
+            "mode": "ai_film_router",
+            "userPrompt": "根据连线素材规划",
+            "referenceInputs": [{
+                "target": {
+                    "kind": "asset",
+                    "providerConnectionId": "original-asset-provider",
+                    "assetId": "video-1",
+                    "mediaType": "video",
+                    "canvasNodeKey": "asset-node"
+                },
+                "displayName": "参考视频"
+            }]
+        }))
+        .unwrap();
+        assert_eq!(command.reference_inputs.len(), 1);
+        assert!(matches!(
+            &command.reference_inputs[0].target,
+            MediaReferenceTarget::Asset { provider_connection_id, media_type: MediaType::Video, .. }
+                if provider_connection_id == "original-asset-provider"
+        ));
 
         let removed_audit_task = serde_json::from_value::<OptimizeVideoPromptCommand>(json!({
             "providerConnectionId": "provider",
@@ -3492,6 +3483,7 @@ mod tests {
                 }],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let method = load_skill_system_prompt(command.mode).unwrap();
             let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -3583,6 +3575,7 @@ mod tests {
                 ],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let method = load_skill_system_prompt(command.mode).unwrap();
             let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -3871,6 +3864,7 @@ mod tests {
                 ],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let method = load_skill_system_prompt(command.mode).unwrap();
             let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -4053,6 +4047,7 @@ mod tests {
                 ],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let method = load_skill_system_prompt(command.mode).unwrap();
             let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -4301,6 +4296,7 @@ mod tests {
                 ],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let method = load_skill_system_prompt(command.mode).unwrap();
             let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -4492,6 +4488,7 @@ mod tests {
             }],
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "双技能全文");
         assert!(system.contains("双技能全文"));
@@ -4549,6 +4546,7 @@ mod tests {
             }],
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "V2.4 JSON 合同");
         assert!(system.contains("V2.4 JSON 合同"));
@@ -4591,6 +4589,7 @@ mod tests {
             context_history: Vec::new(),
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (_, user) = build_system_and_user_prompts(&command, &prompt);
         assert_eq!(
@@ -4784,6 +4783,7 @@ mod tests {
             context_history: Vec::new(),
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (_, router_user) = build_system_and_user_prompts(&command, "router");
         assert!(router_user.contains("ai-film-route.v1"));
@@ -4937,6 +4937,7 @@ mod tests {
                 context_history: vec![PromptOptimizationContextEntry { role: "user".to_string(), content: "已确认：保留原始标题。".to_string() }],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let (system, user) = build_system_and_user_prompts(&command, &method);
             assert!(system.contains("已确认：保留原始标题。"));
@@ -5036,6 +5037,7 @@ mod tests {
                 context_history: Vec::new(),
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let (system, user) = build_system_and_user_prompts(&command, &method);
             assert_eq!(system, method);
@@ -5114,6 +5116,7 @@ mod tests {
             context_history: Vec::new(),
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let method = load_skill_system_prompt(command.mode).unwrap();
         let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -5298,6 +5301,7 @@ mod tests {
             context_history: Vec::new(),
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let method = load_skill_system_prompt(command.mode).unwrap();
         let (system, user) = build_system_and_user_prompts(&command, &method);
@@ -5368,6 +5372,7 @@ mod tests {
             }],
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "V4.6 完整技能");
         assert!(system.contains("V4.6 完整技能"));
@@ -5422,6 +5427,7 @@ mod tests {
             }],
             vision_images: Vec::new(),
             multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
         };
         let (system, user) = build_system_and_user_prompts(&command, "纯复刻技能全文");
         assert!(system.contains("# 初稿"));
@@ -5507,6 +5513,7 @@ mod tests {
                 }],
                 vision_images: Vec::new(),
                 multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
             };
             let (system, user) = build_system_and_user_prompts(&command, &method);
             assert!(system.contains("声音保持待确认"));

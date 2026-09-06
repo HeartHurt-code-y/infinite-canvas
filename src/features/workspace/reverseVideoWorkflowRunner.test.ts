@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   workflowReferenceFixtures,
   workflowReferenceInputs,
+  workflowConnectedReferenceFixtures,
 } from "../../test/workflowMaterialFixtures";
 import type {
   OptimizeVideoPromptCommand,
@@ -280,14 +281,21 @@ describe("reverse video workflow", () => {
       ...request,
       node: {
         ...request.node,
-        config: { ...request.node.config, materials: workflowReferenceFixtures },
+        config: {
+          ...request.node.config,
+          materials: workflowReferenceFixtures,
+          connectedMaterials: workflowConnectedReferenceFixtures,
+        },
       },
     };
     const checkpoint = await runner.run(withMaterials);
     expect(checkpoint.phase).toBe("done");
     const calls = vi.mocked(promptClient.run).mock.calls.map(([input]) => input);
     expect(calls.length).toBeGreaterThanOrEqual(2);
-    for (const input of calls) expect(input.multimodalInputs).toEqual(workflowReferenceInputs);
+    for (const input of calls) {
+      expect(input.multimodalInputs).toEqual(workflowReferenceInputs);
+      expect(input.referenceInputs).toEqual(workflowConnectedReferenceFixtures);
+    }
     vi.mocked(promptClient.run).mockClear();
     const resumed = await runner.run({
       ...withMaterials,

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { PickedPromptMaterial } from "../../lib/backend";
 import type { WorkflowHistoryRecord } from "../../lib/workflowHistory";
+import { workflowConnectedReferenceFixtures } from "../../test/workflowMaterialFixtures";
 import { createKnowledgeVideoWorkflowConfig } from "./workspaceModel";
-import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
+import { restoreWorkflowHistoryNode, sameWorkflowHistoryInput } from "./workflowHistoryRestore";
 
 const config = createKnowledgeVideoWorkflowConfig(
   {
@@ -53,6 +54,7 @@ const record: WorkflowHistoryRecord = {
       historyRunId: "history-run",
       brief: "解释复利",
       materials,
+      connectedMaterials: workflowConnectedReferenceFixtures,
       checkpoint: {
         ...config.checkpoint,
         phase: "paused",
@@ -88,6 +90,7 @@ describe("restoring workflow history to the canvas", () => {
       config: {
         historyRunId: "history-run",
         materials,
+        connectedMaterials: workflowConnectedReferenceFixtures,
         checkpoint: { runId: "internal-run", shotRuns: { "shot-1": { videoTaskId: "paid-task" } } },
       },
     });
@@ -107,6 +110,9 @@ describe("restoring workflow history to the canvas", () => {
     { materials: [materials[1]!] },
     { materials: [...materials].reverse() },
     { materials: [{ ...materials[0]!, localPath: "C:\\references\\replacement.png" }] },
+    { connectedMaterials: [] },
+    { connectedMaterials: [...workflowConnectedReferenceFixtures].reverse() },
+    { connectedMaterials: [workflowConnectedReferenceFixtures[0]!] },
   ])(
     "preserves edited inputs and newer runs by creating a separate historical node: %j",
     (change) => {
@@ -122,6 +128,7 @@ describe("restoring workflow history to the canvas", () => {
       expect(restored.node.key).toBe("restored-copy");
       expect(restored.node.config.brief).toBe("解释复利");
       expect(restored.node.config.materials).toEqual(materials);
+      expect(restored.node.config.connectedMaterials).toEqual(workflowConnectedReferenceFixtures);
       expect(current.config).toMatchObject(change);
     },
   );
@@ -135,11 +142,34 @@ describe("restoring workflow history to the canvas", () => {
     expect(restored.node.config.historyRunId).toBeUndefined();
     expect(restored.node.config.brief).toBe("解释复利");
     expect(restored.node.config.materials).toEqual(materials);
+    expect(restored.node.config.connectedMaterials).toEqual(workflowConnectedReferenceFixtures);
     expect(restored.node.config.checkpoint).toMatchObject({
       phase: "idle",
       runId: null,
       shotRuns: {},
     });
     expect(record.nodeSnapshot.config.checkpoint.shotRuns["shot-1"]?.videoTaskId).toBe("paid-task");
+  });
+
+  it("treats empty legacy references as unchanged and ignores source instance renames", () => {
+    const source = { ...record.nodeSnapshot, config };
+    expect(
+      sameWorkflowHistoryInput(source, {
+        ...source,
+        config: { ...source.config, materials: [], connectedMaterials: [] },
+      }),
+    ).toBe(true);
+    const renamed = {
+      ...record.nodeSnapshot,
+      config: {
+        ...record.nodeSnapshot.config,
+        connectedMaterials: workflowConnectedReferenceFixtures.map((reference) => ({
+          ...reference,
+          displayName: "同一素材的新名称",
+          target: { ...reference.target, canvasNodeKey: "new-instance" },
+        })),
+      },
+    };
+    expect(sameWorkflowHistoryInput(record.nodeSnapshot, renamed)).toBe(true);
   });
 });

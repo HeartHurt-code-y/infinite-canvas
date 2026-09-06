@@ -12,9 +12,51 @@ import {
   fakeDependencies,
 } from "../../test/videoWorkflowFixtures";
 import { createAiFilmCheckpoint } from "./aiFilmWorkflowModel";
-import { workflowReferenceFixtures } from "../../test/workflowMaterialFixtures";
+import {
+  workflowReferenceFixtures,
+  workflowConnectedReferenceFixtures,
+} from "../../test/workflowMaterialFixtures";
 
 describe("knowledge video workflow runner", () => {
+  it("passes connected-only media to planning and visual checks and rejects a disconnected resume", async () => {
+    const fake = fakeDependencies(planJson());
+    const runner = createKnowledgeVideoWorkflowRunner({
+      promptClient: fake.promptClient,
+      generationClient: fake.generation,
+      frameClient: fake.frames,
+      composerClient: fake.composer,
+      sleep: () => Promise.resolve(),
+    });
+    const source = node();
+    const request = {
+      node: {
+        ...source,
+        config: { ...source.config, connectedMaterials: workflowConnectedReferenceFixtures },
+      },
+      providerCatalog: catalog,
+      signal: new AbortController().signal,
+      onCheckpoint: vi.fn(),
+      onProgress: vi.fn(),
+    };
+    const result = await runner.run(request);
+    expect(result.phase).toBe("done");
+    const calls = vi.mocked(fake.promptClient.run).mock.calls.map(([input]) => input);
+    expect(calls.some((input) => input.mode === "knowledge_video_director")).toBe(true);
+    expect(calls.some((input) => input.mode === "knowledge_video_qc")).toBe(true);
+    for (const input of calls)
+      expect(input.referenceInputs).toEqual(workflowConnectedReferenceFixtures);
+    vi.mocked(fake.promptClient.run).mockClear();
+    vi.mocked(fake.generation.start).mockClear();
+    const resumed = await runner.run({
+      ...request,
+      resume: true,
+      node: { ...source, config: { ...source.config, checkpoint: { ...result, phase: "paused" } } },
+    });
+    expect(resumed.error).toContain("参考素材已修改");
+    expect(fake.promptClient.run).not.toHaveBeenCalled();
+    expect(fake.generation.start).not.toHaveBeenCalled();
+  });
+
   it("reads multimodal references during planning and QC without consuming frame evidence slots", async () => {
     const fake = fakeDependencies(planJson());
     const runner = createKnowledgeVideoWorkflowRunner({

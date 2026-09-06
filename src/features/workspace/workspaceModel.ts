@@ -19,6 +19,7 @@ import {
   type PromptOptimizationContextEntry,
   type PromptOptimizationMode,
   type PromptMaterialKind,
+  type PromptReferenceInput,
   type ProviderCallRecord,
   type ProviderCatalogEntry,
   type StagingStatus,
@@ -705,6 +706,8 @@ export interface KnowledgeVideoWorkflowConfig {
   readonly brief: string;
   /** 所有工作流共用的本地参考素材，仅保存路径和元数据。 */
   readonly materials?: readonly PickedPromptMaterial[];
+  /** 连线在执行时解析，历史恢复只保存媒体身份，不保存临时读取地址。 */
+  readonly connectedMaterials?: readonly PromptReferenceInput[];
   readonly models: KnowledgeVideoWorkflowModelSelections;
   readonly imageParameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly videoParameterValues: Readonly<Record<string, ModelParameterValue>>;

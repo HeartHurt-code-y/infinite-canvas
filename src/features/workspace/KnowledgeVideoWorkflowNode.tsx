@@ -35,10 +35,12 @@ import {
 } from "./ReverseVideoWorkflowSections";
 import { reverseVideoInputReady } from "./reverseVideoWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
+import { withCanvasWorkflowMaterials, type WorkflowCanvasInput } from "./workflowCanvasInputs";
 import {
   MAX_WORKFLOW_MATERIAL_BYTES,
   MAX_WORKFLOW_MATERIALS,
   workflowReferenceMaterials,
+  workflowMaterialQuota,
 } from "./workflowMaterials";
 
 const REVERSE_VIDEO_WORKFLOW_STAGES = [
@@ -220,6 +222,9 @@ function stageIndexFor(phase: KnowledgeVideoWorkflowPhase): number {
 
 export interface KnowledgeVideoWorkflowNodeProps {
   readonly node: KnowledgeVideoWorkflowNodeData;
+  readonly connectedInputs?: readonly WorkflowCanvasInput[];
+  readonly onUnlink?: (edgeId: string) => void;
+  readonly onRemoveHistoricalReference?: (index: number) => void;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly runState?: KnowledgeVideoWorkflowRunState | null;
   readonly selected?: boolean;
@@ -259,6 +264,9 @@ export interface KnowledgeVideoWorkflowNodeProps {
 
 export function KnowledgeVideoWorkflowNode({
   node,
+  connectedInputs = [],
+  onUnlink,
+  onRemoveHistoricalReference,
   providerCatalog,
   runState,
   selected = false,
@@ -415,10 +423,12 @@ export function KnowledgeVideoWorkflowNode({
                 (episode) => episode.title.trim() && episode.script.trim(),
               )
             : Boolean(node.config.brief.trim());
-  const allMaterials = workflowReferenceMaterials(node.config);
-  const materialBytes = allMaterials.reduce((total, material) => total + material.byteSize, 0);
+  const effectiveConfig = withCanvasWorkflowMaterials(node, connectedInputs).config;
+  const allMaterials = workflowReferenceMaterials(effectiveConfig);
+  const materialQuota = workflowMaterialQuota(effectiveConfig);
   const materialsValid =
-    allMaterials.length <= MAX_WORKFLOW_MATERIALS && materialBytes <= MAX_WORKFLOW_MATERIAL_BYTES;
+    materialQuota.count <= MAX_WORKFLOW_MATERIALS &&
+    materialQuota.localBytes <= MAX_WORKFLOW_MATERIAL_BYTES;
   const readyToExecute = inputReady && modelsReady && materialsValid && !pickingMaterials;
 
   async function pickReferenceMaterials(pick: () => Promise<void> | void) {
@@ -565,6 +575,11 @@ export function KnowledgeVideoWorkflowNode({
         <WorkflowReferenceMaterials
           materials={node.config.materials ?? []}
           allMaterials={allMaterials}
+          totalCount={materialQuota.count}
+          connectedInputs={connectedInputs}
+          historicalReferences={node.config.connectedMaterials ?? []}
+          {...(onUnlink ? { onUnlink } : {})}
+          {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
           disabled={configurationLocked || phase === "awaiting_approval"}
           picking={pickingMaterials}
           {...(onPickMaterials

@@ -367,6 +367,113 @@ describe("canvas state interface", () => {
     expect(canvas.commands.connect("output-1", "gen-1").status).toBe("connected");
   });
 
+  it("keeps multiple workflow media inputs independent across reconnect, disconnect and removal", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    canvas.commands.addNode("asset", assetNode);
+    canvas.commands.addNode("asset", videoAssetNode);
+    canvas.commands.addNode("asset", { ...assetNode, key: "asset-audio", kind: "audio" });
+    canvas.commands.addOutput(outputNode);
+
+    const sourceKeys = ["asset-1", "asset-video", "asset-audio", "output-1"];
+    for (const sourceKey of sourceKeys) {
+      expect(canvas.commands.connect(sourceKey, "knowledge-video-1")).toMatchObject({
+        status: "connected",
+        replacedEdgeIds: [],
+      });
+    }
+    const connected = canvas.getSnapshot();
+    expect(connected.graph.byTarget.get("knowledge-video-1")).toHaveLength(4);
+    expect(canvas.commands.connect("asset-1", "knowledge-video-1")).toEqual({
+      status: "unchanged",
+      edgeId: "asset-1->knowledge-video-1",
+    });
+    expect(canvas.getSnapshot()).toBe(connected);
+
+    canvas.commands.selectEdge("asset-1->knowledge-video-1");
+    expect(canvas.commands.disconnect("asset-1->knowledge-video-1")).toBe("applied");
+    expect(canvas.getSnapshot().selection.edgeId).toBeNull();
+    expect(canvas.getSnapshot().nodes.asset).toHaveLength(3);
+    expect(canvas.getSnapshot().graph.byTarget.get("knowledge-video-1")).toHaveLength(3);
+
+    canvas.commands.removeNode("asset-video");
+    expect(
+      canvas
+        .getSnapshot()
+        .graph.byTarget.get("knowledge-video-1")
+        ?.map((edge) => edge.fromKey),
+    ).toEqual(["asset-audio", "output-1"]);
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow).toHaveLength(1);
+  });
+
+  it.each<{
+    name: string;
+    patch: Partial<OutputNodeData>;
+    accepted: boolean;
+  }>([
+    { name: "saved image", patch: {}, accepted: true },
+    { name: "saved video", patch: { mediaType: "video" }, accepted: true },
+    {
+      name: "saved extracted frame without generation identity",
+      patch: { origin: "frame_extract", resultKey: null },
+      accepted: true,
+    },
+    { name: "preview-only generation", patch: { finalPath: null }, accepted: false },
+    {
+      name: "preview-only extracted frame",
+      patch: { origin: "frame_extract", finalPath: null },
+      accepted: false,
+    },
+    {
+      name: "unfinished generation",
+      patch: { finalPath: null, previewSrc: null, resultKey: null },
+      accepted: false,
+    },
+    { name: "text output", patch: { mediaType: "text" }, accepted: false },
+    { name: "composition output", patch: { origin: "composition" }, accepted: false },
+    { name: "download output", patch: { origin: "download" }, accepted: false },
+    {
+      name: "mismatched generation identity",
+      patch: { resultKey: "other-task#0" },
+      accepted: false,
+    },
+  ])("validates $name as a workflow input", ({ patch, accepted }) => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    canvas.commands.addOutput({ ...outputNode, ...patch });
+
+    const connected = canvas.commands.connect("output-1", "knowledge-video-1");
+
+    expect(connected.status).toBe(accepted ? "connected" : "rejected");
+    expect(canvas.getSnapshot().graph.edges).toHaveLength(accepted ? 1 : 0);
+  });
+
+  it("rejects reverse workflow connections and non-media source nodes", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    canvas.commands.addNode("asset", assetNode);
+    canvas.commands.addNode("gen", genNode);
+    canvas.commands.addNode("gen", promptNode("prompt-1"));
+    canvas.commands.addNode("screenplay", screenplayNode("screenplay-1"));
+    canvas.commands.addNode("storyboard", storyboardNode);
+    canvas.commands.addNode("videoComposer", composerNode);
+    canvas.commands.addOutput(outputNode);
+
+    for (const sourceKey of ["gen-1", "prompt-1", "screenplay-1", "storyboard-1", "composer-1"]) {
+      expect(canvas.commands.connect(sourceKey, "knowledge-video-1")).toEqual({
+        status: "rejected",
+        reason: "unsupported-connection",
+      });
+    }
+    for (const targetKey of ["asset-1", "output-1", "gen-1"]) {
+      expect(canvas.commands.connect("knowledge-video-1", targetKey)).toEqual({
+        status: "rejected",
+        reason: "unsupported-connection",
+      });
+    }
+    expect(canvas.getSnapshot().graph.byTarget.get("knowledge-video-1")).toBeUndefined();
+  });
+
   it("removes a node, incident edges, and invalid selections in one write", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", assetNode);
@@ -415,9 +522,74 @@ describe("canvas state interface", () => {
     expect(after).not.toBe(before);
     expect(after.get("screenplay-live")?.config.currentDocument).toBe("# 最新剧本");
   });
+
+  it("refreshes connected workflow source media without replacing its edges", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    canvas.commands.addNode("asset", assetNode);
+    canvas.commands.addOutput(outputNode);
+    canvas.commands.connect("asset-1", "knowledge-video-1");
+    canvas.commands.connect("output-1", "knowledge-video-1");
+    const initial = canvas.getSnapshot();
+
+    canvas.commands.patchNode("asset", "asset-1", (node) => ({
+      ...node,
+      previewUrl: "https://example.com/current-preview.png",
+    }));
+    const withPreview = canvas.getSnapshot();
+    expect(withPreview.nodeByKey.asset).not.toBe(initial.nodeByKey.asset);
+    expect(withPreview.nodeByKey.asset.get("asset-1")?.previewUrl).toBe(
+      "https://example.com/current-preview.png",
+    );
+
+    canvas.commands.patchNode("asset", "asset-1", (node) => ({
+      ...node,
+      assetId: "local-upload-2",
+      source: "local",
+      name: "更新后的素材",
+    }));
+    canvas.commands.patchNode("output", "output-1", (node) => ({
+      ...node,
+      finalPath: "C:/results/new-output.png",
+    }));
+    const updated = canvas.getSnapshot();
+    expect(updated.nodeByKey.asset.get("asset-1")).toMatchObject({
+      assetId: "local-upload-2",
+      source: "local",
+      name: "更新后的素材",
+    });
+    expect(updated.nodeByKey.output).not.toBe(initial.nodeByKey.output);
+    expect(updated.nodeByKey.output.get("output-1")?.finalPath).toBe("C:/results/new-output.png");
+    expect(updated.graph.edges).toBe(initial.graph.edges);
+  });
 });
 
 describe("canvas document interface", () => {
+  it("restores workflow media connections by source identity after JSON serialization", () => {
+    const source = createCanvasState();
+    source.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    source.commands.addNode("asset", assetNode);
+    source.commands.addNode("asset", videoAssetNode);
+    source.commands.addNode("asset", { ...assetNode, key: "asset-audio", kind: "audio" });
+    source.commands.addOutput(outputNode);
+    for (const sourceKey of ["asset-1", "asset-video", "asset-audio", "output-1"]) {
+      source.commands.connect(sourceKey, "knowledge-video-1");
+    }
+
+    const serialized = JSON.stringify(source.commands.snapshotV2({}));
+    const target = createCanvasState();
+
+    expect(target.commands.restoreDocument(JSON.parse(serialized))).toMatchObject({ ok: true });
+    expect(target.getSnapshot().graph.edges).toEqual(source.getSnapshot().graph.edges);
+    expect(target.getSnapshot().graph.byTarget.get("knowledge-video-1")).toHaveLength(4);
+    expect(target.getSnapshot().nodeByKey.asset.get("asset-1")?.assetId).toBe("asset-source-1");
+    expect(target.getSnapshot().nodeByKey.output.get("output-1")?.finalPath).toBe(
+      "C:/results/output.png",
+    );
+    expect(target.commands.disconnect("asset-video->knowledge-video-1")).toBe("applied");
+    expect(target.getSnapshot().graph.byTarget.get("knowledge-video-1")).toHaveLength(3);
+  });
+
   it("restores legacy V1 prompt HTML atomically with a fresh history", async () => {
     const source = createCanvasState();
     source.commands.addNode("gen", genNode);
