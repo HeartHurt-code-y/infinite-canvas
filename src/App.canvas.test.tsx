@@ -5156,7 +5156,11 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
     render(<App />);
     fireEvent.click(await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" }));
 
-    fireEvent.click(screen.getByRole("button", { name: "重命名素材：站台参考图" }));
+    fireEvent.click(
+      await screen.findByRole("button", {
+        name: /重命名素材：站台参考图$/,
+      }),
+    );
     const input = screen.getByRole("textbox", { name: "站台参考图的新名称" });
     fireEvent.change(input, { target: { value: "站台新参考名" } });
     fireEvent.click(screen.getByRole("button", { name: "保存" }));
