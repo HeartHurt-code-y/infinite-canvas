@@ -1,0 +1,44 @@
+.canvas-workflow-references button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-xs);
+  flex-shrink: 0;
+  min-width: 28px;
+  min-height: 28px;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font: inherit;
+  cursor: pointer;
+}
+
+.canvas-workflow-references button:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+.canvas-workflow-references button:hover:not(:disabled) {
+  border-color: var(--color-accent);
+}
+
+.canvas-workflow-references button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.canvas-workflow-references .canvas-workflow-references__icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  height: 44px;
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+
+.canvas-workflow-references__quota {
+  font-variant-numeric: tabular-nums;
+}

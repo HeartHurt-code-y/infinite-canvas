@@ -1,0 +1,32 @@
+无图模式（已确认）：本条提示词没有任何参考图，全部 Subject 由文字描述定义。
+上线前须补参考图后重新生成：
+- <Subject 1> 林浩：需补正面清晰的人物主参考（锁面容、发型、服装）
+- <Subject 2> 场景：需补场景参考（锁空间、色彩、光线方向）
+
+subject_definitions:
+<Subject 1>：林浩，28 岁中国男性，黑色短发露出额头，深灰羊毛大衣，白色衬衫领口敞开。无参考图，由文字描述定义。
+<Subject 2>：雨夜的咖啡馆内景，木桌、暖光吊灯、窗外有雨痕。无参考图，由文字描述定义。
+
+summary:
+[reference generation] 8 秒一镜到底，场景是雨夜的咖啡馆。林浩坐在窗边，说完一句台词后转头看向窗外。
+
+retention_analysis:
+<Subject 1>：weak_reference 林浩外观（无参考图，外观以本次文字定义为唯一标准），动作：低头看杯 → 抬头看向镜头 → 说台词 → 转头看窗外收势。
+<Subject 2>：weak_reference 雨夜咖啡馆（无参考图，空间与光线以本次文字定义为唯一标准）。
+画面里只有林浩，绝对没有其它人。
+
+detailed_description:
+真人实拍，cinematic 风格，8K 超高清，画面中禁止出现字幕、水印和 logo。
+
+[一镜到底] 0–8s，场景是 Subject 2。林浩坐在画右靠窗的位置，占画面约 55%；镜头从 1.5 米处缓慢推近（push in with small amplitude at slow speed）。
+**0–1.2s：** 林浩低头看着面前的咖啡杯，右手拇指摩挲杯沿。
+**1.2–2s：** 他抬起头，视线正对镜头，喉结滚动一次。
+→林浩（S1）用低沉、平稳的男声说 <d>[中文] 这杯我请，你慢点喝。</d> 说完轻轻抿住嘴唇，唇线闭合。
+**5.4–8s：** 他收势：转头看向画左的窗外，目光落在雨痕上，肩膀落回椅背，画面在 8 秒定住。
+
+overall_soundscape:
+咖啡馆内的低语底噪贯穿全片，窗外雨声被玻璃压成低频闷响，瓷杯碰到木桌有一声轻响。
+
+non_diegetic_music: N/A
+
+Negative: no other people, no subtitles, no watermarks, no logos, no camera static,

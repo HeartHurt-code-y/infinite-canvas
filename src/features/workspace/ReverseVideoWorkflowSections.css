@@ -1,0 +1,95 @@
+.canvas-reverse-video-workflow .canvas-knowledge-workflow__model-grid {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.canvas-reverse-video__configuration,
+.canvas-reverse-video__deliverables {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 0;
+}
+
+.canvas-reverse-video__configuration legend {
+  padding: 0 0 10px;
+  font-weight: 700;
+}
+
+.canvas-reverse-video__configuration small {
+  color: var(--color-muted);
+  line-height: 1.5;
+}
+
+.canvas-reverse-video__actions,
+.canvas-reverse-video__local-input {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.canvas-reverse-video__local-input > span,
+.canvas-reverse-video__archive {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.canvas-reverse-video__local-input > span {
+  flex: 1;
+}
+
+.canvas-reverse-video-workflow .canvas-reverse-video__configuration button,
+.canvas-reverse-video-workflow .canvas-reverse-video__deliverables button {
+  padding: 8px 11px;
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: 7px;
+  background: var(--color-paper);
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  font-size: 12px;
+}
+
+.canvas-reverse-video-workflow button:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
+}
+
+.canvas-reverse-video-workflow :is(button, video):focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 3px;
+}
+
+.canvas-reverse-video__deliverables video,
+.canvas-reverse-video__sheets img {
+  display: block;
+  width: 100%;
+  max-height: 420px;
+  object-fit: contain;
+  border-radius: 7px;
+}
+
+.canvas-reverse-video__sheets {
+  display: grid;
+  gap: 12px;
+}
+
+.canvas-reverse-video__sheets figure {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.canvas-reverse-video__sheets figcaption {
+  font-size: 12px;
+}
+
+.canvas-reverse-video__archive {
+  border-top: var(--rule-thin) solid var(--color-rule);
+  padding-top: 12px;
+  font-size: 12px;
+}

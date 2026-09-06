@@ -46,6 +46,11 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   audio_type: "音频类型",
   off_peak: "闲时模式",
   bgm: "背景音乐",
+  sequential_image_generation: "组图模式",
+  max_images: "组图数量",
+  optimize_prompt_mode: "提示词优化",
+  background: "背景通道",
+  layer_decomposition: "图层拆分",
 };
 
 const OPTION_LABELS: Readonly<Record<string, string>> = {
@@ -67,6 +72,16 @@ const OPTION_LABELS: Readonly<Record<string, string>> = {
   regeneration: "再生成",
   h3_context_ir: "智能扩写",
   "-1": "智能时长",
+  disabled: "关闭",
+  fast: "快速",
+  jpeg: "JPEG",
+  jpg: "JPG",
+  png: "PNG",
+  webp: "WEBP",
+  url: "图片链接",
+  b64_json: "Base64 数据",
+  opaque: "实体背景",
+  transparent: "透明背景",
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -152,7 +167,159 @@ function parameterCapability(
   };
 }
 
+/**
+ * Doubao Seedream 图片生成模型（如 doubao-seedream-5-0-260128（moyu 文档推荐）/
+ * doubao-seedream-4-5-251128 / doubao-seedream-5-0-pro-260628）：走 moyu OpenAI
+ * Images API，但契约与 dall-e/gpt-image 不同——`size` 只接受 `2K` 及 ≥2K 的像素
+ * 尺寸，`quality` 仅 `standard`/`hd`，并支持 watermark、response_format
+ * （url/b64_json）、组图（sequential_image_generation）与输出格式
+ * （output_format：jpg/png/webp）等专属参数。
+ * 与视频模型 seedance 名称不同（seedream 不含 seedance），互不干扰。
+ */
+export function isSeedreamImageModel(modelId: string): boolean {
+  return modelId.toLocaleLowerCase().includes("seedream");
+}
+
+type SeedreamImageVersion =
+  | "5.0"
+  | "5.0-pro"
+  | "5.0-lite"
+  | "4.5"
+  | "4.0"
+  | "generic";
+
+/** Seedream 能力版本：5.0（文档推荐，组图/输出格式）、5.0 pro（图层拆分/
+ * 优化/输出格式/透明背景）、5.0 lite（组图/优化/联网搜索/输出格式）、
+ * 4.5/4.0（组图）、其他按通用处理。 */
+function seedreamImageVersion(modelId: string): SeedreamImageVersion | null {
+  const normalized = modelId.toLocaleLowerCase();
+  if (!normalized.includes("seedream")) return null;
+  if (normalized.includes("seedream-5-0-pro") || normalized.includes("seedream-5.0-pro")) {
+    return "5.0-pro";
+  }
+  if (normalized.includes("seedream-5-0-lite") || normalized.includes("seedream-5.0-lite")) {
+    return "5.0-lite";
+  }
+  if (normalized.includes("seedream-5-0") || normalized.includes("seedream-5.0")) {
+    return "5.0";
+  }
+  if (normalized.includes("seedream-4-5") || normalized.includes("seedream-4.5")) return "4.5";
+  if (normalized.includes("seedream-4-0") || normalized.includes("seedream-4.0")) return "4.0";
+  return "generic";
+}
+
+/** Seedream 基础参数：2K 契约尺寸、standard/hd 质量、水印开关（应用侧默认无水印，
+ * 与后端一致）、返回格式（url/b64_json）。 */
+function seedreamTextToImageBaseParameters(): Record<string, unknown> {
+  return {
+    size: {
+      type: "string",
+      label: "尺寸",
+      default: "2K",
+      enum: ["2K", "2048x2048", "2848x1600"],
+      order: 0,
+    },
+    quality: {
+      type: "string",
+      label: "质量",
+      default: "standard",
+      enum: ["standard", "hd"],
+      order: 1,
+    },
+    watermark: {
+      type: "boolean",
+      label: "添加水印",
+      default: false,
+      order: 2,
+    },
+    response_format: {
+      type: "string",
+      label: "返回格式",
+      default: "url",
+      enum: ["url", "b64_json"],
+      order: 9,
+    },
+  };
+}
+
+/** 按 Seedream 能力版本追加高级参数（与后端 model_schema 保持一致）。 */
+function seedreamVersionParameters(
+  version: SeedreamImageVersion,
+  imageToImage: boolean,
+): Record<string, unknown> {
+  const parameters: Record<string, unknown> = {};
+  if (version === "5.0" || version === "5.0-lite" || version === "4.5" || version === "4.0") {
+    parameters["sequential_image_generation"] = {
+      type: "string",
+      label: "组图模式",
+      default: "disabled",
+      enum: ["disabled", "auto"],
+      order: 3,
+    };
+    parameters["max_images"] = {
+      type: "integer",
+      label: "组图数量",
+      optional: true,
+      default: 4,
+      minimum: 1,
+      maximum: 15,
+      order: 4,
+    };
+  }
+  if (version === "5.0-pro" || version === "5.0-lite") {
+    parameters["optimize_prompt_mode"] = {
+      type: "string",
+      label: "提示词优化",
+      default: "fast",
+      enum: ["fast", "standard"],
+      order: 5,
+    };
+  }
+  if (version === "5.0" || version === "5.0-pro" || version === "5.0-lite") {
+    parameters["output_format"] = {
+      type: "string",
+      label: "输出格式",
+      default: "jpg",
+      enum: ["jpg", "png", "webp"],
+      order: 6,
+    };
+  }
+  if (version === "5.0-lite" && !imageToImage) {
+    parameters["web_search"] = {
+      type: "boolean",
+      label: "联网搜索",
+      default: false,
+      requiresNoMedia: true,
+      order: 7,
+    };
+  }
+  if (version === "5.0-pro" && imageToImage) {
+    parameters["background"] = {
+      type: "string",
+      label: "背景通道",
+      default: "opaque",
+      enum: ["opaque", "transparent"],
+      order: 7,
+    };
+    parameters["layer_decomposition"] = {
+      type: "boolean",
+      label: "图层拆分",
+      default: false,
+      order: 8,
+    };
+  }
+  return parameters;
+}
+
 function textToImageParameters(modelId: string): Record<string, unknown> {
+  // Doubao Seedream 契约：2K 尺寸 / standard-hd 质量 / 水印 + 版本高级参数。
+  if (isSeedreamImageModel(modelId)) {
+    const version = seedreamImageVersion(modelId) ?? "generic";
+    return {
+      ...seedreamTextToImageBaseParameters(),
+      ...seedreamVersionParameters(version, false),
+    };
+  }
   // Gemini 图片生成契约：size 只接受画幅比例（1:1/16:9/…），不声明 quality，
   // 且接口忽略 n（多张走任务拆分）。
   if (isGeminiImageModel(modelId)) {
@@ -207,8 +374,30 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   };
 }
 
-/** gpt-image 系列图片编辑（multipart）接口：与文生图一样声明 n/size/quality。 */
+/** gpt-image 系列图片编辑（multipart）接口：与文生图一样声明 n/size/quality。
+ *  Seedream 走 JSON 图生图（/v1/images/generations），声明 2K 契约参数，
+ *  5.0 pro 额外支持透明背景与图层拆分。
+ *  Gemini 走 JSON 图生图（/v1/images/generations），参考图以顶层 `image`
+ *  data URI 传入，声明画幅比例 `size`（与原生 imageConfig.aspectRatio 同义），
+ *  不声明 quality，且接口忽略 n（多张走任务拆分）。 */
 function imageToImageParameters(modelId: string): Record<string, unknown> {
+  if (isSeedreamImageModel(modelId)) {
+    const version = seedreamImageVersion(modelId) ?? "generic";
+    return {
+      ...seedreamTextToImageBaseParameters(),
+      ...seedreamVersionParameters(version, true),
+    };
+  }
+  if (isGeminiImageModel(modelId)) {
+    return {
+      size: {
+        type: "string",
+        label: "尺寸",
+        default: "1:1",
+        enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"],
+      },
+    };
+  }
   if (modelId.toLocaleLowerCase().includes("gpt-image")) {
     return {
       size: {
@@ -731,6 +920,7 @@ export function modelParameterCapabilities(
       isMinimaxH3VideoModel(modelId) ||
       isGptImageModel(modelId) ||
       isGeminiImageModel(modelId) ||
+      isSeedreamImageModel(modelId) ||
       (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
     Object.keys(declaredParameters).length === 0
       ? fallback

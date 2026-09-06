@@ -92,11 +92,13 @@ impl VideoFrameExtractionService {
         }
     }
 
-    /// 创建并启动一个抽帧任务。任务记录保存在内存中，前端轮询进度。
-    pub fn start_extraction(
+    /// 比例采样由后端在探测实际视频时长后换算，避免生成模型实际时长与计划值略有
+    /// 偏差时，99% 尾帧被误判为越界。
+    pub fn start_extraction_with_percentages(
         &self,
         video_path: &str,
         timestamps: Vec<f64>,
+        percentages: Vec<f64>,
     ) -> BackendResult<VideoFrameExtractionJobRecord> {
         let video_path = video_path.trim();
         if video_path.is_empty() {
@@ -121,15 +123,37 @@ impl VideoFrameExtractionService {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         timestamps.dedup_by(|first, second| (*first - *second).abs() < 0.01);
-        if timestamps.is_empty() {
+        let mut percentages: Vec<f64> = percentages
+            .into_iter()
+            .filter(|percentage| percentage.is_finite())
+            .collect();
+        percentages.sort_by(|first, second| {
+            first
+                .partial_cmp(second)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        percentages.dedup_by(|first, second| (*first - *second).abs() < 0.0001);
+        if timestamps.is_empty() && percentages.is_empty() {
             return Err(BackendError::validation(
-                "请至少填写一个抽帧秒数",
+                "请至少填写一个抽帧秒数或比例",
+                Value::Null,
+            ));
+        }
+        if !timestamps.is_empty() && !percentages.is_empty() {
+            return Err(BackendError::validation(
+                "抽帧秒数与比例不能同时填写",
                 Value::Null,
             ));
         }
         if timestamps.iter().any(|timestamp| *timestamp < 0.0) {
+            return Err(BackendError::validation("抽帧秒数不能为负数", Value::Null));
+        }
+        if percentages
+            .iter()
+            .any(|percentage| *percentage <= 0.0 || *percentage >= 1.0)
+        {
             return Err(BackendError::validation(
-                "抽帧秒数不能为负数",
+                "抽帧比例必须大于 0 且小于 1",
                 Value::Null,
             ));
         }
@@ -161,7 +185,7 @@ impl VideoFrameExtractionService {
         let owned_video_path = video_path.to_string();
         tauri::async_runtime::spawn(async move {
             service
-                .run_extraction(job_id, owned_video_path, timestamps)
+                .run_extraction(job_id, owned_video_path, timestamps, percentages)
                 .await;
         });
         Ok(record)
@@ -239,6 +263,7 @@ impl VideoFrameExtractionService {
         job_id: String,
         video_path: String,
         timestamps: Vec<f64>,
+        percentages: Vec<f64>,
     ) {
         // 1. 确保引擎就绪。
         let ffmpeg = match self.resolve_ffmpeg_binary().await {
@@ -280,10 +305,7 @@ impl VideoFrameExtractionService {
                     path
                 }
                 Err(error) => {
-                    self.fail_job(
-                        &job_id,
-                        format!("下载远程视频失败：{error}"),
-                    );
+                    self.fail_job(&job_id, format!("下载远程视频失败：{error}"));
                     return;
                 }
             }
@@ -295,9 +317,25 @@ impl VideoFrameExtractionService {
         let duration = match probe_video_duration(&ffmpeg, &local_source).await {
             Some(duration) => duration,
             None => {
-                self.fail_job(&job_id, "无法读取视频时长，请确认该文件是有效的视频".to_string());
+                self.fail_job(
+                    &job_id,
+                    "无法读取视频时长，请确认该文件是有效的视频".to_string(),
+                );
                 return;
             }
+        };
+        let timestamps = if percentages.is_empty() {
+            timestamps
+        } else {
+            percentages
+                .into_iter()
+                .map(|percentage| {
+                    // 留出一帧安全边界；极短视频仍至少从 0.01 秒取样。
+                    (duration * percentage)
+                        .min((duration - 0.01).max(0.01))
+                        .max(0.01)
+                })
+                .collect()
         };
         for timestamp in &timestamps {
             if *timestamp >= duration {
@@ -326,10 +364,7 @@ impl VideoFrameExtractionService {
             if self.is_cancelled(&job_id) {
                 return;
             }
-            let output = out_dir.join(format!(
-                "{stem}@{}.jpg",
-                format_seconds(*timestamp)
-            ));
+            let output = out_dir.join(format!("{stem}@{}.jpg", format_seconds(*timestamp)));
             match extract_frame(&ffmpeg, &source_text, *timestamp, &output).await {
                 Ok((width, height)) => {
                     frames.push(ExtractedFrame {
@@ -433,10 +468,7 @@ async fn extract_frame(
         ));
     }
     if !output.is_file() {
-        return Err(BackendError::protocol(
-            "抽帧未生成图片文件",
-            Value::Null,
-        ));
+        return Err(BackendError::protocol("抽帧未生成图片文件", Value::Null));
     }
     let dimensions = parse_video_dimensions(&String::from_utf8_lossy(&result.stderr));
     Ok(dimensions.unwrap_or((0, 0)))
@@ -523,10 +555,16 @@ async fn download_remote_video(url: &str, target: &Path) -> BackendResult<PathBu
         .user_agent("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36")
         .build()
         .map_err(|error| {
-            BackendError::protocol("初始化下载客户端失败", serde_json::json!({ "detail": error.to_string() }))
+            BackendError::protocol(
+                "初始化下载客户端失败",
+                serde_json::json!({ "detail": error.to_string() }),
+            )
         })?;
     let mut response = client.get(url).send().await.map_err(|error| {
-        BackendError::protocol("无法连接远程视频地址", serde_json::json!({ "detail": error.to_string() }))
+        BackendError::protocol(
+            "无法连接远程视频地址",
+            serde_json::json!({ "detail": error.to_string() }),
+        )
     })?;
     if !response.status().is_success() {
         return Err(BackendError::protocol(
@@ -535,15 +573,24 @@ async fn download_remote_video(url: &str, target: &Path) -> BackendResult<PathBu
         ));
     }
     let mut file = tokio::fs::File::create(target).await.map_err(|error| {
-        BackendError::protocol("创建远程视频临时文件失败", serde_json::json!({ "detail": error.to_string() }))
+        BackendError::protocol(
+            "创建远程视频临时文件失败",
+            serde_json::json!({ "detail": error.to_string() }),
+        )
     })?;
     while let Some(chunk) = response.chunk().await.map_err(|error| {
-        BackendError::protocol("下载远程视频中断", serde_json::json!({ "detail": error.to_string() }))
+        BackendError::protocol(
+            "下载远程视频中断",
+            serde_json::json!({ "detail": error.to_string() }),
+        )
     })? {
         tokio::io::AsyncWriteExt::write_all(&mut file, &chunk)
             .await
             .map_err(|error| {
-                BackendError::protocol("写入远程视频临时文件失败", serde_json::json!({ "detail": error.to_string() }))
+                BackendError::protocol(
+                    "写入远程视频临时文件失败",
+                    serde_json::json!({ "detail": error.to_string() }),
+                )
             })?;
     }
     tokio::io::AsyncWriteExt::flush(&mut file).await.ok();
@@ -637,7 +684,10 @@ mod tests {
     #[test]
     fn derives_stem_and_extension_from_remote_urls() {
         assert_eq!(remote_stem("https://cdn.example.com/train.mp4"), "train");
-        assert_eq!(remote_extension("https://cdn.example.com/train.mp4"), ".mp4");
+        assert_eq!(
+            remote_extension("https://cdn.example.com/train.mp4"),
+            ".mp4"
+        );
         assert_eq!(
             remote_stem("https://example.com/列车进站参考.mp4?token=abc"),
             "列车进站参考"
@@ -657,21 +707,27 @@ mod tests {
             )
             .expect("composer"),
         );
-        let empty = service.start_extraction("", vec![1.0]);
+        let empty = service.start_extraction_with_percentages("", vec![1.0], vec![]);
         assert!(matches!(empty, Err(BackendError::Validation { .. })));
-        let missing = service.start_extraction(
+        let missing = service.start_extraction_with_percentages(
             "C:\\definitely\\missing\\file.mp4",
             vec![1.0],
-        );
-        assert!(matches!(missing, Err(BackendError::Validation { .. })));
-        let no_timestamps = service.start_extraction(
-            "C:\\definitely\\missing\\file.mp4",
             vec![],
         );
-        assert!(matches!(no_timestamps, Err(BackendError::Validation { .. })));
-        let negative = service.start_extraction(
+        assert!(matches!(missing, Err(BackendError::Validation { .. })));
+        let no_timestamps = service.start_extraction_with_percentages(
+            "C:\\definitely\\missing\\file.mp4",
+            vec![],
+            vec![],
+        );
+        assert!(matches!(
+            no_timestamps,
+            Err(BackendError::Validation { .. })
+        ));
+        let negative = service.start_extraction_with_percentages(
             "C:\\definitely\\missing\\file.mp4",
             vec![-1.0],
+            vec![],
         );
         assert!(matches!(negative, Err(BackendError::Validation { .. })));
     }

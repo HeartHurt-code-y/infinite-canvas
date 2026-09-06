@@ -29,6 +29,8 @@ import {
   type PromptSegment,
 } from "../../lib/backend";
 import { textResultFromSource } from "../workspace/workspaceModel";
+import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
+import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
 
 async function revealDesktopItem(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -467,12 +469,34 @@ export function HistoryDialog({
   open,
   onClose,
   client = generationClient,
+  workflowClient,
+  canvasId,
+  initialTab = "generation",
+  initialWorkflowId,
+  onResumeWorkflow,
+  onRestartWorkflow,
+  onLocateWorkflow,
+  activeWorkflowIds,
 }: {
   readonly open: boolean;
   readonly onClose: () => void;
   readonly client?: GenerationTaskClient;
+  readonly workflowClient?: WorkflowHistoryClient;
+  readonly canvasId?: string;
+  readonly initialTab?: "generation" | "workflow";
+  readonly initialWorkflowId?: string | null;
+  readonly onResumeWorkflow?: (
+    record: WorkflowHistoryRecord,
+    decisionResolution?: string,
+  ) => Promise<void> | void;
+  readonly onRestartWorkflow?: (record: WorkflowHistoryRecord) => Promise<void> | void;
+  readonly onLocateWorkflow?: (record: WorkflowHistoryRecord) => void;
+  readonly activeWorkflowIds?: readonly string[];
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
+  const [activeTab, setActiveTab] = useState(initialTab);
+  const [workflowVisited, setWorkflowVisited] = useState(initialTab === "workflow");
+  const linkedTaskIdRef = useRef<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
   const [tasks, setTasks] = useState<readonly GenerationTaskSummary[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -489,29 +513,33 @@ export function HistoryDialog({
 
   // 打开对话框时加载第一页；筛选切换时重新加载（旧列表保留到新页返回，避免闪烁）。
   useEffect(() => {
-    if (!open) return;
+    if (!open || activeTab !== "generation") return;
     const requestId = ++listRequestRef.current;
+    let cancelled = false;
     void client
       .list({ statuses: statusFilterToStatuses(statusFilter), limit: HISTORY_PAGE_SIZE })
       .then((page) => {
-        if (requestId !== listRequestRef.current) return;
+        if (cancelled || requestId !== listRequestRef.current) return;
         setTasks(page.items);
         setCursor(page.nextCursorCreatedBefore);
         setListError(null);
         setListLoaded(true);
         // 默认选中第一项，打开即可看详情。
         const first = page.items[0];
-        setSelectedTaskId(first ? first.id : null);
+        setSelectedTaskId(linkedTaskIdRef.current ?? first?.id ?? null);
       })
       .catch((error: unknown) => {
-        if (requestId !== listRequestRef.current) return;
+        if (cancelled || requestId !== listRequestRef.current) return;
         setTasks([]);
         setCursor(null);
-        setSelectedTaskId(null);
+        if (!linkedTaskIdRef.current) setSelectedTaskId(null);
         setListError(formatRawBackendError(error));
         setListLoaded(true);
       });
-  }, [open, statusFilter, client]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, activeTab, statusFilter, client]);
 
   // 关闭时清空详情与浏览状态，避免下次打开闪现上一次的内容。
   // 清理放在关闭事件（而非 effect）中执行：setState 必须由事件驱动。
@@ -549,21 +577,39 @@ export function HistoryDialog({
   // 选中任务后加载完整详情（含尝试、供应商调用、结果与最终错误）。
   // 请求期间保留旧详情（标准主从布局），响应到达后整体替换。
   useEffect(() => {
-    if (selectedTaskId == null) return;
+    if (!open || activeTab !== "generation" || selectedTaskId == null) return;
     const requestId = ++detailRequestRef.current;
+    let cancelled = false;
     void client
       .get(selectedTaskId)
       .then((record) => {
-        if (requestId !== detailRequestRef.current) return;
+        if (cancelled || requestId !== detailRequestRef.current) return;
         setDetail(record);
         setDetailError(null);
       })
       .catch((error: unknown) => {
-        if (requestId !== detailRequestRef.current) return;
+        if (cancelled || requestId !== detailRequestRef.current) return;
         setDetail(null);
         setDetailError(formatRawBackendError(error));
       });
-  }, [client, selectedTaskId]);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, activeTab, client, selectedTaskId]);
+
+  const selectHistoryTab = (tab: "generation" | "workflow") => {
+    setActiveTab(tab);
+    setLightboxIndex(null);
+    if (tab === "workflow") setWorkflowVisited(true);
+  };
+
+  const selectLinkedGenerationTask = (taskId: string) => {
+    linkedTaskIdRef.current = taskId;
+    setDetail(null);
+    setDetailError(null);
+    setSelectedTaskId(taskId);
+    selectHistoryTab("generation");
+  };
 
   const handleKeyDown = (event: ReactKeyboardEvent<HTMLElement>) => {
     if (event.key !== "Escape") return;
@@ -616,8 +662,45 @@ export function HistoryDialog({
             <Clock size={14} weight="bold" aria-hidden="true" />
             历史记录
           </span>
-          <h2 id="generation-history-title">生成任务历史</h2>
-          <p>所有媒体与文本生成任务的调用、token 用量、完整产物与报错。</p>
+          <h2 id="generation-history-title">
+            {activeTab === "workflow" ? "工作流历史" : "生成任务历史"}
+          </h2>
+          <p>
+            {activeTab === "workflow"
+              ? "查看每次工作流的输入、执行过程、交付物，从保存的步骤重试或继续。"
+              : "所有媒体与文本生成任务的调用、token 用量、完整产物与报错。"}
+          </p>
+          <div className="workflow-history__tabs" role="tablist" aria-label="历史记录类型">
+            {(["generation", "workflow"] as const).map((tab) => (
+              <button
+                type="button"
+                role="tab"
+                key={tab}
+                id={`${tab}-history-tab`}
+                aria-controls={`${tab}-history-panel`}
+                aria-selected={activeTab === tab}
+                tabIndex={activeTab === tab ? 0 : -1}
+                className={`history-filter${activeTab === tab ? " is-active" : ""}`}
+                onClick={() => selectHistoryTab(tab)}
+                onKeyDown={(event) => {
+                  if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
+                  event.preventDefault();
+                  const next =
+                    event.key === "Home"
+                      ? "generation"
+                      : event.key === "End"
+                        ? "workflow"
+                        : tab === "generation"
+                          ? "workflow"
+                          : "generation";
+                  selectHistoryTab(next);
+                  document.getElementById(`${next}-history-tab`)?.focus();
+                }}
+              >
+                {tab === "generation" ? "生成任务" : "工作流"}
+              </button>
+            ))}
+          </div>
           <button
             type="button"
             className="history-dialog__close"
@@ -628,7 +711,27 @@ export function HistoryDialog({
           </button>
         </header>
 
-        <div className="history-dialog__body">
+        {workflowVisited && open ? (
+          <div className="workflow-history__container" hidden={activeTab !== "workflow"}>
+            <WorkflowHistoryPanel
+              client={workflowClient}
+              canvasId={canvasId}
+              initialWorkflowId={initialWorkflowId}
+              activeWorkflowIds={activeWorkflowIds}
+              {...(onResumeWorkflow ? { onResumeWorkflow } : {})}
+              {...(onRestartWorkflow ? { onRestartWorkflow } : {})}
+              {...(onLocateWorkflow ? { onLocateWorkflow } : {})}
+              onSelectGenerationTask={selectLinkedGenerationTask}
+            />
+          </div>
+        ) : null}
+        <div
+          className="history-dialog__body"
+          hidden={activeTab !== "generation"}
+          role="tabpanel"
+          id="generation-history-panel"
+          aria-labelledby="generation-history-tab"
+        >
           <aside className="history-list" aria-label="任务列表">
             <div className="history-filters" role="tablist" aria-label="状态筛选">
               {HISTORY_FILTERS.map((filter) => (
@@ -638,7 +741,10 @@ export function HistoryDialog({
                   role="tab"
                   aria-selected={statusFilter === filter.id}
                   className={`history-filter${statusFilter === filter.id ? " is-active" : ""}`}
-                  onClick={() => setStatusFilter(filter.id)}
+                  onClick={() => {
+                    linkedTaskIdRef.current = null;
+                    setStatusFilter(filter.id);
+                  }}
                 >
                   {filter.label}
                 </button>
@@ -658,7 +764,10 @@ export function HistoryDialog({
                     <button
                       type="button"
                       className={`history-item${selectedTaskId === task.id ? " is-selected" : ""}`}
-                      onClick={() => setSelectedTaskId(task.id)}
+                      onClick={() => {
+                        linkedTaskIdRef.current = null;
+                        setSelectedTaskId(task.id);
+                      }}
                       aria-current={selectedTaskId === task.id ? "true" : undefined}
                     >
                       <span className="history-item__top">

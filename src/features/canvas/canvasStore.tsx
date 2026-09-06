@@ -7,6 +7,7 @@ import type {
   AssetEdgeData,
   AssetNodeData,
   GenNodeData,
+  KnowledgeVideoWorkflowNodeData,
   OutputNodeData,
   ResultNodeData,
   ScreenplayNodeData,
@@ -42,6 +43,7 @@ export type CanvasNodeType =
   | "gen"
   | "screenplay"
   | "storyboard"
+  | "knowledgeVideoWorkflow"
   | "viralRemix"
   | "videoComposer"
   | "videoDownloader"
@@ -55,6 +57,7 @@ export interface CanvasNodesByType {
   gen: GenNodeData;
   screenplay: ScreenplayNodeData;
   storyboard: StoryboardNodeData;
+  knowledgeVideoWorkflow: KnowledgeVideoWorkflowNodeData;
   viralRemix: ViralRemixNodeData;
   videoComposer: VideoComposerNodeData;
   videoDownloader: VideoDownloaderNodeData;
@@ -84,6 +87,7 @@ export interface CanvasDocumentV1 {
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
   readonly storyboardNodes?: readonly StoryboardNodeData[];
+  readonly knowledgeVideoWorkflowNodes?: readonly KnowledgeVideoWorkflowNodeData[];
   readonly viralRemixNodes?: readonly ViralRemixNodeData[];
   readonly videoComposerNodes?: readonly VideoComposerNodeData[];
   readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
@@ -105,6 +109,7 @@ export interface CanvasDocumentV2 {
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];
   readonly storyboardNodes?: readonly StoryboardNodeData[];
+  readonly knowledgeVideoWorkflowNodes?: readonly KnowledgeVideoWorkflowNodeData[];
   readonly viralRemixNodes?: readonly ViralRemixNodeData[];
   readonly videoComposerNodes?: readonly VideoComposerNodeData[];
   readonly videoDownloaderNodes?: readonly VideoDownloaderNodeData[];
@@ -127,6 +132,7 @@ export interface CanvasNodeLists {
   readonly gen: readonly GenNodeData[];
   readonly screenplay: readonly ScreenplayNodeData[];
   readonly storyboard: readonly StoryboardNodeData[];
+  readonly knowledgeVideoWorkflow: readonly KnowledgeVideoWorkflowNodeData[];
   readonly viralRemix: readonly ViralRemixNodeData[];
   readonly videoComposer: readonly VideoComposerNodeData[];
   readonly videoDownloader: readonly VideoDownloaderNodeData[];
@@ -140,6 +146,7 @@ export interface CanvasNodesByKey {
   readonly gen: ReadonlyMap<string, GenNodeData>;
   readonly screenplay: ReadonlyMap<string, ScreenplayNodeData>;
   readonly storyboard: ReadonlyMap<string, StoryboardNodeData>;
+  readonly knowledgeVideoWorkflow: ReadonlyMap<string, KnowledgeVideoWorkflowNodeData>;
   readonly viralRemix: ReadonlyMap<string, ViralRemixNodeData>;
   readonly videoComposer: ReadonlyMap<string, VideoComposerNodeData>;
   readonly videoDownloader: ReadonlyMap<string, VideoDownloaderNodeData>;
@@ -199,6 +206,11 @@ export interface CanvasHistorySummary {
 }
 
 export interface CanvasCommands {
+  readonly insertSubgraph: (
+    nodes: readonly CanvasNodeEntry[],
+    edges: readonly AssetEdgeData[],
+    options?: { readonly selectNodeKey?: string | null },
+  ) => CanvasWriteResult;
   readonly addNode: <K extends CanvasNodeType>(
     type: K,
     node:
@@ -251,6 +263,11 @@ interface CanvasStoreState {
   readonly pan: CanvasPan;
   readonly selectedNodeKey: string | null;
   readonly selectedEdgeId: string | null;
+  readonly insertSubgraph: (
+    nodes: readonly CanvasNodeEntry[],
+    edges: readonly AssetEdgeData[],
+    options?: { readonly selectNodeKey?: string | null },
+  ) => CanvasWriteResult;
   readonly addNode: <K extends CanvasNodeType>(
     type: K,
     node:
@@ -313,6 +330,7 @@ const CANVAS_NODE_TYPES: readonly CanvasNodeType[] = [
   "gen",
   "screenplay",
   "storyboard",
+  "knowledgeVideoWorkflow",
   "viralRemix",
   "videoComposer",
   "videoDownloader",
@@ -447,6 +465,7 @@ function canvasNodeLists(nodesById: CanvasNodesById): CanvasNodeLists {
     gen: typeNodes(nodesById, "gen"),
     screenplay: typeNodes(nodesById, "screenplay"),
     storyboard: typeNodes(nodesById, "storyboard"),
+    knowledgeVideoWorkflow: typeNodes(nodesById, "knowledgeVideoWorkflow"),
     viralRemix: typeNodes(nodesById, "viralRemix"),
     videoComposer: typeNodes(nodesById, "videoComposer"),
     videoDownloader: typeNodes(nodesById, "videoDownloader"),
@@ -468,6 +487,7 @@ function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
     gen: connectionTypeNodesByKey(nodesById, "gen"),
     screenplay: connectionTypeNodesByKey(nodesById, "screenplay"),
     storyboard: connectionTypeNodesByKey(nodesById, "storyboard"),
+    knowledgeVideoWorkflow: connectionTypeNodesByKey(nodesById, "knowledgeVideoWorkflow"),
     viralRemix: connectionTypeNodesByKey(nodesById, "viralRemix"),
     videoComposer: connectionTypeNodesByKey(nodesById, "videoComposer"),
     videoDownloader: connectionTypeNodesByKey(nodesById, "videoDownloader"),
@@ -684,6 +704,7 @@ function snapshotCanvasV2(
     genNodes: nodes.gen,
     screenplayNodes: nodes.screenplay,
     storyboardNodes: nodes.storyboard,
+    knowledgeVideoWorkflowNodes: nodes.knowledgeVideoWorkflow,
     viralRemixNodes: nodes.viralRemix,
     videoComposerNodes: nodes.videoComposer,
     videoDownloaderNodes: nodes.videoDownloader,
@@ -698,6 +719,36 @@ function snapshotCanvasV2(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value != null && !Array.isArray(value);
+}
+
+const INTERRUPTED_KNOWLEDGE_VIDEO_PHASES = new Set(["planning", "generating", "qc", "composing"]);
+
+/**
+ * 运行控制器只存在于当前进程。文档恢复时，持久化为活动态的复合工作流实际已经
+ * 中断，因此转为可继续的 paused，同时完整保留检查点中的任务身份和阶段产物。
+ */
+function normalizeRestoredKnowledgeVideoWorkflowNode(
+  rawNode: Record<string, unknown>,
+): CanvasNodeData {
+  const config = rawNode["config"];
+  if (!isRecord(config)) return rawNode as unknown as CanvasNodeData;
+  const checkpoint = config["checkpoint"];
+  if (!isRecord(checkpoint)) return rawNode as unknown as CanvasNodeData;
+  const phase = checkpoint["phase"];
+  if (typeof phase !== "string" || !INTERRUPTED_KNOWLEDGE_VIDEO_PHASES.has(phase)) {
+    return rawNode as unknown as CanvasNodeData;
+  }
+  return {
+    ...rawNode,
+    config: {
+      ...config,
+      checkpoint: {
+        ...checkpoint,
+        phase: "paused",
+        lastActivePhase: phase,
+      },
+    },
+  } as unknown as CanvasNodeData;
 }
 
 interface NormalizedCanvasDocument {
@@ -737,6 +788,12 @@ function normalizeCanvasDocument(
     ["gen", value["genNodes"] as readonly unknown[]],
     ["screenplay", Array.isArray(value["screenplayNodes"]) ? value["screenplayNodes"] : []],
     ["storyboard", Array.isArray(value["storyboardNodes"]) ? value["storyboardNodes"] : []],
+    [
+      "knowledgeVideoWorkflow",
+      Array.isArray(value["knowledgeVideoWorkflowNodes"])
+        ? value["knowledgeVideoWorkflowNodes"]
+        : [],
+    ],
     ["viralRemix", Array.isArray(value["viralRemixNodes"]) ? value["viralRemixNodes"] : []],
     [
       "videoComposer",
@@ -769,7 +826,9 @@ function normalizeCanvasDocument(
       const data =
         type === "output"
           ? ({ ...rawNode, previewSrc: null } as unknown as CanvasNodeData)
-          : (rawNode as unknown as CanvasNodeData);
+          : type === "knowledgeVideoWorkflow"
+            ? normalizeRestoredKnowledgeVideoWorkflowNode(rawNode)
+            : (rawNode as unknown as CanvasNodeData);
       nodesById[key] = { type, data } as CanvasNodeEntry;
     }
   }
@@ -915,6 +974,69 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
           pan: { x: 0, y: 0 },
           selectedNodeKey: null,
           selectedEdgeId: null,
+          insertSubgraph: (nodes, edges, options) => {
+            let result: CanvasWriteResult = "unchanged";
+            set((state) => {
+              const batchNodeKeys = new Set<string>();
+              for (const entry of nodes) {
+                const key = entry.data.key;
+                if (batchNodeKeys.has(key)) {
+                  throw new Error("Canvas subgraph contains duplicate node key: " + key);
+                }
+                if (state.nodesById[key] != null) {
+                  throw new Error("Canvas node key already exists: " + key);
+                }
+                batchNodeKeys.add(key);
+              }
+
+              const nodesById: Record<string, CanvasNodeEntry> =
+                nodes.length === 0 ? state.nodesById : { ...state.nodesById };
+              for (const entry of nodes) nodesById[entry.data.key] = entry;
+
+              const existingEdgeIds = new Set(state.assetEdges.map((edge) => edge.id));
+              const batchEdgeIds = new Set<string>();
+              for (const edge of edges) {
+                if (batchEdgeIds.has(edge.id)) {
+                  throw new Error("Canvas subgraph contains duplicate edge id: " + edge.id);
+                }
+                if (existingEdgeIds.has(edge.id)) {
+                  throw new Error("Canvas edge id already exists: " + edge.id);
+                }
+                batchEdgeIds.add(edge.id);
+
+                const source = nodesById[edge.fromKey];
+                const target = nodesById[edge.toKey];
+                if (source == null || target == null) {
+                  throw new Error("Canvas subgraph edge endpoint is missing: " + edge.id);
+                }
+                if (!isSupportedConnection(source, target)) {
+                  throw new Error("Canvas subgraph connection is unsupported: " + edge.id);
+                }
+              }
+
+              const selectNodeKey = options?.selectNodeKey;
+              if (selectNodeKey != null && nodesById[selectNodeKey] == null) {
+                throw new Error("Canvas selected node key is missing: " + selectNodeKey);
+              }
+              const selectedNodeKey =
+                selectNodeKey === undefined ? state.selectedNodeKey : selectNodeKey;
+              if (
+                nodes.length === 0 &&
+                edges.length === 0 &&
+                selectedNodeKey === state.selectedNodeKey
+              ) {
+                return state;
+              }
+
+              result = "applied";
+              return {
+                nodesById,
+                assetEdges: edges.length === 0 ? state.assetEdges : [...state.assetEdges, ...edges],
+                selectedNodeKey,
+              };
+            });
+            return result;
+          },
           addNode: (type, nodeOrFactory, options) => {
             let added: CanvasNodeData | null = null;
             set((state) => {
@@ -1256,6 +1378,8 @@ function historySummary(store: CanvasStore): CanvasHistorySummary {
 function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplementation {
   const store = createCanvasStore(initialZoom);
   const commands: CanvasCommands = {
+    insertSubgraph: (nodes, edges, options) =>
+      store.getState().insertSubgraph(nodes, edges, options),
     addNode: (type, node, options) => store.getState().addNode(type, node, options),
     addOutput: (node) => store.getState().addOutput(node),
     patchNode: (type, key, update) => store.getState().patchNode(type, key, update),

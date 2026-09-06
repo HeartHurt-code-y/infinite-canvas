@@ -27,6 +27,8 @@
     "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:coverage",
     "check": "pnpm check:frontend && pnpm rust:fmt && pnpm rust:clippy",
     "tauri": "tauri",
+    "remotion:prepare": "node scripts/prepare-remotion-runtime.mjs",
+    "remotion:test": "node --test tools/remotion-runtime/plan.test.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },

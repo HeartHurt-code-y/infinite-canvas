@@ -1,5 +1,6 @@
 use std::{collections::HashSet, sync::Arc};
 
+use base64::Engine as _;
 use reqwest::{Method, multipart};
 use serde_json::{Map, Value, json};
 use tauri_plugin_log::log::{error, info};
@@ -137,10 +138,37 @@ impl ResolvedGeneration {
     }
 }
 
+/// 图片生成结果的图层元数据（Seedream 5.0 pro `layer_decomposition` 场景）。
+/// 开启图层拆分后，响应 `data` 数组中每个项代表一个图层（含底图），携带
+/// `z_index`（层级，0 为底图）、`name`（图层名）、`description`（图层描述）、
+/// `bounding_box`（图层在画布中的包围盒）。用于把每个图层单独落为可编辑对象。
+#[derive(Debug, Clone, Default)]
+pub struct ImageLayerMetadata {
+    pub z_index: u32,
+    pub name: Option<String>,
+    pub description: Option<String>,
+    pub bounding_box: Option<Value>,
+}
+
 #[derive(Debug, Clone)]
 pub enum ImageSource {
-    Url(String),
-    Base64(String),
+    Url {
+        url: String,
+        layer: Option<ImageLayerMetadata>,
+    },
+    Base64 {
+        data: String,
+        layer: Option<ImageLayerMetadata>,
+    },
+}
+
+impl ImageSource {
+    /// 图层元数据（仅 Seedream 图层拆分场景有值）。
+    pub fn layer(&self) -> Option<&ImageLayerMetadata> {
+        match self {
+            ImageSource::Url { layer, .. } | ImageSource::Base64 { layer, .. } => layer.as_ref(),
+        }
+    }
 }
 
 /// 媒体类型的稳定排序权重：image < video < audio，用于 content 数组稳定排序。
@@ -354,10 +382,48 @@ impl ProviderRuntime {
             }
             GenerationOperation::ImageToImage => {
                 let path = request_path(&resolved.operation_schema, "/v1/images/edits")?;
-                let response = self
-                    .captured_image_edit(task, attempt_id, &context, resolved, &path)
-                    .await?;
-                let submission = parse_image_submission(&response, true)?;
+                // Seedream 图生图走 JSON（`POST /v1/images/generations`，参考图以
+                // 顶层 `image` 字段传 URL）；Gemini 图生图同样走 JSON，但 `image`
+                // 传 data URI（`data:<mime>;base64,<DATA>`，见 https://doc.moyu.info/
+                // 9280683m0.md）；其余模型沿用 multipart edits 契约。
+                let encoding = resolved
+                    .operation_schema
+                    .pointer("/request/encoding")
+                    .and_then(Value::as_str)
+                    .unwrap_or("multipart");
+                let response = if encoding == "json" {
+                    let media_encoding = resolved
+                        .operation_schema
+                        .pointer("/request/mediaEncoding")
+                        .and_then(Value::as_str)
+                        .unwrap_or("seedream_image_urls");
+                    let body = match media_encoding {
+                        "gemini_image_data_uri" => {
+                            build_gemini_image_to_image_body(task, resolved)?
+                        }
+                        _ => build_seedream_image_to_image_body(task, resolved)?,
+                    };
+                    self.captured_json(
+                        task,
+                        attempt_id,
+                        &context,
+                        CapturedJsonRequest {
+                            phase: "submit",
+                            method: Method::POST,
+                            path: &path,
+                            body: &body,
+                        },
+                    )
+                    .await?
+                } else {
+                    self.captured_image_edit(task, attempt_id, &context, resolved, &path)
+                        .await?
+                };
+                let submission = if encoding == "json" {
+                    parse_image_submission(&response, false)?
+                } else {
+                    parse_image_submission(&response, true)?
+                };
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
@@ -490,8 +556,7 @@ impl ProviderRuntime {
         let status = response.status().as_u16();
         let headers = response_headers(response.headers());
         if !(200..300).contains(&status) {
-            let raw_response =
-                String::from_utf8_lossy(&response.bytes().await?).into_owned();
+            let raw_response = String::from_utf8_lossy(&response.bytes().await?).into_owned();
             self.lifecycle.commit(
                 &task.id,
                 GenerationLifecycleFact::ProviderCallResponded {
@@ -1335,6 +1400,20 @@ fn mapped_parameters(
                 json!([{ "type": "web_search" }])
             }
             Some("web_search_tool") => continue,
+            // Seedream 组图数量：仅在组图模式为 auto 时发送
+            // `sequential_image_generation_options: { "max_images": N }`。
+            Some("max_images_object") => {
+                if values
+                    .get("sequential_image_generation")
+                    .and_then(Value::as_str)
+                    != Some("auto")
+                {
+                    continue;
+                }
+                json!({ "max_images": value })
+            }
+            // Seedream 提示词优化：转换为 `optimize_prompt_options: { "mode": … }`。
+            Some("optimize_prompt_mode_object") => json!({ "mode": value }),
             Some(transform) => {
                 return Err(BackendError::validation(
                     "model parameter uses an unsupported request transform",
@@ -1428,6 +1507,172 @@ fn build_text_to_image_body(
         prompt_field,
         Value::String(resolved.rendered_prompt.clone()),
     );
+    insert_mapped_parameters(
+        &mut body,
+        &metadata_field,
+        mapped_parameters(resolved, "root")?,
+    )?;
+    Ok(Value::Object(body))
+}
+
+/// Seedream 图生图 JSON 请求体（moyu 聚合平台）：`POST /v1/images/generations`，
+/// `model`/`prompt` 与参数放顶层，参考图通过顶层 `image` 字段传 URL
+/// （文档示例 `"image":"https://…"`：单张为字符串，多张为保持输入顺序的 URL 数组），
+/// 不走 multipart edits 接口。
+fn build_seedream_image_to_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "seedream image-to-image requires at least one image reference",
+            json!({ "taskId": task.id }),
+        ));
+    }
+    // 文档规定 `image` 数组最多传入 6 张参考图（https://doc.moyu.info/9280685m0.md）。
+    if resolved.images.len() > 6 {
+        return Err(BackendError::validation(
+            "seedream image-to-image accepts at most 6 image references",
+            json!({ "images": resolved.images.len() }),
+        ));
+    }
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "seedream image-to-image only accepts image reference inputs",
+            json!({
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    if resolved.rendered_prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "image-to-image prompt must not be empty",
+            json!({ "taskId": task.id }),
+        ));
+    }
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "image")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let references = resolved
+        .images
+        .iter()
+        .map(|image| {
+            image.remote_reference.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "seedream image input has no remote-readable reference",
+                    image.archive(),
+                )
+            })
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    // 文档示例使用单字符串；多张参考图时保持输入顺序为 URL 数组。
+    let image_value = match references.as_slice() {
+        [single] => Value::String((*single).clone()),
+        _ => Value::Array(
+            references
+                .into_iter()
+                .map(|reference| Value::String(reference.clone()))
+                .collect(),
+        ),
+    };
+
+    let mut body = Map::new();
+    if let Some(model) = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+    {
+        body.insert(model_field, Value::String(model.to_string()));
+    }
+    body.insert(
+        prompt_field,
+        Value::String(resolved.rendered_prompt.clone()),
+    );
+    body.insert(image_field, image_value);
+    insert_mapped_parameters(
+        &mut body,
+        &metadata_field,
+        mapped_parameters(resolved, "root")?,
+    )?;
+    Ok(Value::Object(body))
+}
+
+/// Gemini 图生图 JSON 请求体（moyu 聚合平台，https://doc.moyu.info/9280683m0.md）：
+/// `POST /v1/images/generations`，`model`/`prompt`/`size` 放顶层，参考图通过顶层
+/// `image` 字段传 data URI（`data:<mime>;base64,<DATA>`，带前缀），不走 multipart
+/// edits 接口。文档示例单张为字符串；多张时保持输入顺序为数组。响应
+/// `data[].b64_json`（`url`/`revised_prompt` 未使用时会以空字符串返回，属正常）。
+fn build_gemini_image_to_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if resolved.images.is_empty() {
+        return Err(BackendError::validation(
+            "gemini image-to-image requires at least one image reference",
+            json!({ "taskId": task.id }),
+        ));
+    }
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "gemini image-to-image only accepts image reference inputs",
+            json!({
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    if resolved.rendered_prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "image-to-image prompt must not be empty",
+            json!({ "taskId": task.id }),
+        ));
+    }
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let image_field = request_field(&resolved.operation_schema, "mediaField", "image")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let data_uris = resolved
+        .images
+        .iter()
+        .map(|image| {
+            let bytes = image.bytes.clone().ok_or_else(|| {
+                BackendError::validation(
+                    "gemini image input has no bytes for base64 data uri encoding",
+                    image.archive(),
+                )
+            })?;
+            Ok(format!(
+                "data:{};base64,{}",
+                image.mime_type,
+                base64::engine::general_purpose::STANDARD.encode(bytes)
+            ))
+        })
+        .collect::<BackendResult<Vec<_>>>()?;
+    // 文档示例使用单字符串；多张参考图时保持输入顺序为数组。
+    let image_value = match data_uris.as_slice() {
+        [single] => Value::String(single.clone()),
+        _ => Value::Array(data_uris.into_iter().map(Value::String).collect::<Vec<_>>()),
+    };
+
+    let mut body = Map::new();
+    if let Some(model) = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+    {
+        body.insert(model_field, Value::String(model.to_string()));
+    }
+    body.insert(
+        prompt_field,
+        Value::String(resolved.rendered_prompt.clone()),
+    );
+    body.insert(image_field, image_value);
     insert_mapped_parameters(
         &mut body,
         &metadata_field,
@@ -1572,11 +1817,14 @@ fn build_video_body(
         media_kind_rank(a.media_type)
             .cmp(&media_kind_rank(b.media_type))
             .then(a.type_position.cmp(&b.type_position))
-            .then(a.content_index.unwrap_or(u32::MAX).cmp(&b.content_index.unwrap_or(u32::MAX)))
+            .then(
+                a.content_index
+                    .unwrap_or(u32::MAX)
+                    .cmp(&b.content_index.unwrap_or(u32::MAX)),
+            )
     });
-    content_media.dedup_by(|a, b| {
-        a.media_type == b.media_type && a.type_position == b.type_position
-    });
+    content_media
+        .dedup_by(|a, b| a.media_type == b.media_type && a.type_position == b.type_position);
     // 按前端输入顺序（content_index）排列；缺失时保持在已解析顺序中的相对位置。
     content_media.sort_by(|a, b| match (a.content_index, b.content_index) {
         (Some(ai), Some(bi)) => ai.cmp(&bi),
@@ -1865,10 +2113,7 @@ fn validate_vidu_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
 /// - `metadata.task_type` 区分任务类型：generation（文生/图生/参考生成，默认）与
 ///   regeneration（768P→2K 再生成，连接的源视频作为 `base_video_url`，输出时长由
 ///   源视频决定，不发送 `duration`）。
-fn build_minimax_h3_video_body(
-    model: &str,
-    resolved: &ResolvedGeneration,
-) -> BackendResult<Value> {
+fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendResult<Value> {
     validate_minimax_h3_media(resolved)?;
     let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
     let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
@@ -2086,8 +2331,7 @@ fn validate_minimax_h3_media(resolved: &ResolvedGeneration) -> BackendResult<()>
         ));
     }
     let has_frame_inputs = first_frames > 0 || last_frames > 0;
-    let has_reference_inputs =
-        reference_images > 0 || reference_videos > 0 || reference_audios > 0;
+    let has_reference_inputs = reference_images > 0 || reference_videos > 0 || reference_audios > 0;
     if has_frame_inputs && has_reference_inputs {
         return Err(BackendError::validation(
             "MiniMax-H3 frame inputs and reference inputs cannot be mixed",
@@ -2169,9 +2413,7 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
             }
         }
         // 图片格式与体积约束只适用于真正的图片素材；`file`/`link` 是公网文档/网页 URL。
-        if media.media_type == MediaType::Image
-            && !matches!(media.role.as_str(), "file" | "link")
-        {
+        if media.media_type == MediaType::Image && !matches!(media.role.as_str(), "file" | "link") {
             if !ALLOWED_IMAGE_MIME_TYPES.contains(&media.mime_type.as_str()) {
                 return Err(BackendError::validation(
                     "Wan 3.0 image input uses an unsupported format",
@@ -2303,14 +2545,43 @@ fn parse_image_submission(
         for item in items {
             let url = item.get("url").and_then(Value::as_str);
             let base64 = item.get("b64_json").and_then(Value::as_str);
+            // Seedream 5.0 pro 图层拆分：data 项携带 z_index/name/description/bounding_box，
+            // 用于把每个图层单独落为可编辑对象。
+            let layer = if item.get("z_index").is_some() {
+                Some(ImageLayerMetadata {
+                    z_index: item.get("z_index").and_then(Value::as_u64).unwrap_or(0) as u32,
+                    name: item
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned),
+                    description: item
+                        .get("description")
+                        .and_then(Value::as_str)
+                        .filter(|value| !value.is_empty())
+                        .map(ToOwned::to_owned),
+                    bounding_box: item.get("bounding_box").cloned(),
+                })
+            } else {
+                None
+            };
             if require_base64 {
                 if let Some(base64) = base64.filter(|value| !value.is_empty()) {
-                    sources.push(ImageSource::Base64(base64.to_string()));
+                    sources.push(ImageSource::Base64 {
+                        data: base64.to_string(),
+                        layer,
+                    });
                 }
             } else if let Some(url) = url.filter(|value| !value.is_empty()) {
-                sources.push(ImageSource::Url(url.to_string()));
+                sources.push(ImageSource::Url {
+                    url: url.to_string(),
+                    layer,
+                });
             } else if let Some(base64) = base64.filter(|value| !value.is_empty()) {
-                sources.push(ImageSource::Base64(base64.to_string()));
+                sources.push(ImageSource::Base64 {
+                    data: base64.to_string(),
+                    layer,
+                });
             }
         }
     }
@@ -2320,7 +2591,10 @@ fn parse_image_submission(
                 urls.iter()
                     .filter_map(Value::as_str)
                     .filter(|url| !url.is_empty())
-                    .map(|url| ImageSource::Url(url.to_string())),
+                    .map(|url| ImageSource::Url {
+                        url: url.to_string(),
+                        layer: None,
+                    }),
             );
         }
     }
@@ -2647,7 +2921,7 @@ fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<Remo
 
 pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     let mut url = Url::parse(base_url)?;
-    let base_segments = url
+    let mut base_segments = url
         .path()
         .split('/')
         .filter(|segment| !segment.is_empty())
@@ -2656,6 +2930,17 @@ pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
         .split('/')
         .filter(|segment| !segment.is_empty())
         .collect::<Vec<_>>();
+    // A provider connection can share OpenAI-compatible and Gemini endpoints.
+    // Their version roots are alternatives, while any gateway prefix stays intact.
+    if matches!(
+        (
+            base_segments.last().copied(),
+            requested_segments.first().copied()
+        ),
+        (Some("v1"), Some("v1beta")) | (Some("v1beta"), Some("v1"))
+    ) {
+        base_segments.pop();
+    }
     let overlap = (1..=base_segments.len().min(requested_segments.len()))
         .rev()
         .find(|count| base_segments[base_segments.len() - count..] == requested_segments[..*count])
@@ -2890,6 +3175,49 @@ mod tests {
     }
 
     #[test]
+    fn endpoint_switches_gemini_and_openai_versions_without_losing_gateway_prefixes() {
+        for (base, path, expected) in [
+            (
+                "https://example.com/v1/",
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                "https://example.com/v1beta/models/gemini-3.6-flash:generateContent",
+            ),
+            (
+                "https://example.com/gateway/v1",
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                "https://example.com/gateway/v1beta/models/gemini-3.6-flash:generateContent",
+            ),
+            (
+                "https://example.com/v1beta/",
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                "https://example.com/v1beta/models/gemini-3.6-flash:generateContent",
+            ),
+            (
+                "https://example.com/gateway/v1beta",
+                "/v1/images/generations",
+                "https://example.com/gateway/v1/images/generations",
+            ),
+            (
+                "https://example.com/v1",
+                "/v1/chat/completions",
+                "https://example.com/v1/chat/completions",
+            ),
+            (
+                "https://example.com/company",
+                "/v1beta/models/gemini-3.6-flash:generateContent",
+                "https://example.com/company/v1beta/models/gemini-3.6-flash:generateContent",
+            ),
+            (
+                "https://example.com/gateway/v1",
+                "/files",
+                "https://example.com/gateway/v1/files",
+            ),
+        ] {
+            assert_eq!(endpoint(base, path).unwrap().as_str(), expected);
+        }
+    }
+
+    #[test]
     fn model_parser_accepts_openai_and_company_shapes() {
         let openai = RawProviderResponse {
             status: 200,
@@ -2962,6 +3290,281 @@ mod tests {
         assert_eq!(body["input"], "A train arrives");
         assert_eq!(body["size"], "1024x1536");
         assert!(body.get("aspect").is_none());
+    }
+
+    #[test]
+    fn seedream_image_to_image_builder_uses_json_body_with_url_references() {
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-pro-260628",
+            &[
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ],
+        );
+        let mut generation = resolved(
+            schema["image_to_image"].clone(),
+            json!({
+                "size": "2048x2048",
+                "quality": "hd",
+                "watermark": true,
+                "response_format": "b64_json",
+                "background": "transparent",
+                "layer_decomposition": true
+            }),
+        );
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "image",
+            "https://cdn.example.com/a.png",
+            Some(0),
+        ));
+        let body = build_seedream_image_to_image_body(
+            &task(GenerationOperation::ImageToImage),
+            &generation,
+        )
+        .expect("seedream image-to-image body");
+        assert_eq!(body["model"], "company-model-v2");
+        assert_eq!(body["prompt"], "A train arrives");
+        // 单张参考图按文档示例以字符串发送。
+        assert_eq!(body["image"], "https://cdn.example.com/a.png");
+        assert_eq!(body["size"], "2048x2048");
+        assert_eq!(body["quality"], "hd");
+        assert_eq!(body["watermark"], true);
+        // 文档参数表：response_format 原样透传（b64_json 时响应走 Base64）。
+        assert_eq!(body["response_format"], "b64_json");
+        assert_eq!(body["background"], "transparent");
+        assert_eq!(body["layer_decomposition"], true);
+    }
+
+    #[test]
+    fn seedream_50_document_model_builds_json_body_with_documented_parameters() {
+        // moyu 文档推荐的 doubao-seedream-5-0-260128：组图模式 + 输出格式 +
+        // 返回格式 + 水印全部按文档参数表透传。
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-260128",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(
+            schema["image_to_image"].clone(),
+            json!({
+                "size": "2K",
+                "watermark": false,
+                "response_format": "b64_json",
+                "output_format": "webp",
+                "sequential_image_generation": "auto"
+            }),
+        );
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "image",
+            "https://cdn.example.com/a.png",
+            Some(0),
+        ));
+        let body = build_seedream_image_to_image_body(
+            &task(GenerationOperation::ImageToImage),
+            &generation,
+        )
+        .expect("seedream 5.0 image-to-image body");
+        assert_eq!(body["image"], "https://cdn.example.com/a.png");
+        assert_eq!(body["size"], "2K");
+        assert_eq!(body["watermark"], false);
+        assert_eq!(body["response_format"], "b64_json");
+        assert_eq!(body["output_format"], "webp");
+        assert_eq!(body["sequential_image_generation"], "auto");
+    }
+
+    #[test]
+    fn seedream_image_to_image_rejects_more_than_six_reference_images() {
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-260128",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({}));
+        for index in 1..=7 {
+            generation.images.push(resolved_media(
+                MediaType::Image,
+                index as u32,
+                "image",
+                &format!("https://cdn.example.com/{index}.png"),
+                Some((index - 1) as usize),
+            ));
+        }
+        let error = build_seedream_image_to_image_body(
+            &task(GenerationOperation::ImageToImage),
+            &generation,
+        )
+        .expect_err("seedream image-to-image must reject 7 reference images");
+        assert!(
+            error.to_string().contains("at most 6 image references"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn seedream_image_to_image_builder_uses_url_array_for_multiple_references() {
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-pro-260628",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({}));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "image",
+            "https://cdn.example.com/a.png",
+            Some(0),
+        ));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "image",
+            "https://cdn.example.com/b.png",
+            Some(1),
+        ));
+        let body = build_seedream_image_to_image_body(
+            &task(GenerationOperation::ImageToImage),
+            &generation,
+        )
+        .expect("seedream image-to-image body");
+        assert_eq!(
+            body["image"],
+            json!([
+                "https://cdn.example.com/a.png",
+                "https://cdn.example.com/b.png"
+            ])
+        );
+    }
+
+    #[test]
+    fn gemini_image_to_image_builder_uses_json_body_with_data_uri() {
+        // https://doc.moyu.info/9280683m0.md OpenAI 兼容格式：顶层 model/prompt/
+        // size + `image` data URI（带 `data:<mime>;base64,` 前缀），响应走 b64_json。
+        let schema = super::super::model_schema::default_model_schema(
+            "gemini-3-pro-image-preview",
+            &[GenerationOperation::ImageToImage],
+        );
+        assert_eq!(
+            schema["image_to_image"]["request"]["mediaEncoding"],
+            "gemini_image_data_uri"
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({ "size": "16:9" }));
+        let mut media = resolved_media(
+            MediaType::Image,
+            1,
+            "image",
+            "https://cdn.example.com/a.png",
+            Some(0),
+        );
+        media.bytes = Some(b"\x89PNG fake png bytes".to_vec());
+        generation.images.push(media);
+        let body =
+            build_gemini_image_to_image_body(&task(GenerationOperation::ImageToImage), &generation)
+                .expect("gemini image-to-image body");
+        assert_eq!(body["model"], "company-model-v2");
+        assert_eq!(body["prompt"], "A train arrives");
+        // 单张参考图按文档示例以 data URI 字符串发送。
+        let image = body["image"].as_str().expect("image must be a string");
+        assert_eq!(image, "data:image/png;base64,iVBORyBmYWtlIHBuZyBieXRlcw==");
+        assert_eq!(body["size"], "16:9");
+    }
+
+    #[test]
+    fn gemini_image_to_image_builder_uses_data_uri_array_for_multiple_references() {
+        let schema = super::super::model_schema::default_model_schema(
+            "gemini-3-pro-image-preview",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({}));
+        for (index, bytes) in [b"first-png-bytes".to_vec(), b"second-png-bytes".to_vec()]
+            .into_iter()
+            .enumerate()
+        {
+            let mut media = resolved_media(
+                MediaType::Image,
+                index as u32 + 1,
+                "image",
+                &format!("https://cdn.example.com/{}.png", index + 1),
+                Some(index),
+            );
+            media.bytes = Some(bytes);
+            generation.images.push(media);
+        }
+        let body =
+            build_gemini_image_to_image_body(&task(GenerationOperation::ImageToImage), &generation)
+                .expect("gemini image-to-image body");
+        // 多张参考图保持输入顺序为 data URI 数组。
+        let images = body["image"].as_array().expect("image must be an array");
+        assert_eq!(images.len(), 2);
+        assert_eq!(
+            images[0].as_str().unwrap(),
+            "data:image/png;base64,Zmlyc3QtcG5nLWJ5dGVz"
+        );
+        assert_eq!(
+            images[1].as_str().unwrap(),
+            "data:image/png;base64,c2Vjb25kLXBuZy1ieXRlcw=="
+        );
+    }
+
+    #[test]
+    fn gemini_image_to_image_rejects_media_without_bytes() {
+        let schema = super::super::model_schema::default_model_schema(
+            "gemini-3-pro-image-preview",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({}));
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "image",
+            "https://cdn.example.com/a.png",
+            Some(0),
+        ));
+        let error =
+            build_gemini_image_to_image_body(&task(GenerationOperation::ImageToImage), &generation)
+                .expect_err("gemini image-to-image must require base64-capable bytes");
+        assert!(
+            error.to_string().contains("no bytes for base64"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn seedream_group_optimize_and_web_search_parameters_transform_into_request_objects() {
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-lite",
+            &[GenerationOperation::TextToImage],
+        );
+        let generation = resolved(
+            schema["text_to_image"].clone(),
+            json!({
+                "sequential_image_generation": "auto",
+                "max_images": 8,
+                "optimize_prompt_mode": "fast",
+                "web_search": true
+            }),
+        );
+        let body = build_text_to_image_body(&task(GenerationOperation::TextToImage), &generation)
+            .expect("seedream text image body");
+        assert_eq!(body["sequential_image_generation"], "auto");
+        assert_eq!(
+            body["sequential_image_generation_options"],
+            json!({ "max_images": 8 })
+        );
+        assert_eq!(body["optimize_prompt_options"], json!({ "mode": "fast" }));
+        assert_eq!(body["tools"], json!([{ "type": "web_search" }]));
+
+        // 组图模式为 disabled 时不发送组图数量（max_images 被忽略）。
+        let generation = resolved(
+            schema["text_to_image"].clone(),
+            json!({ "sequential_image_generation": "disabled", "web_search": false }),
+        );
+        let body = build_text_to_image_body(&task(GenerationOperation::TextToImage), &generation)
+            .expect("seedream text image body");
+        assert_eq!(body["sequential_image_generation"], "disabled");
+        assert!(body.get("sequential_image_generation_options").is_none());
+        assert!(body.get("tools").is_none());
     }
 
     #[test]
@@ -3860,8 +4463,8 @@ mod tests {
         ));
         let mut audio_task = task(GenerationOperation::VideoGeneration);
         audio_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
-        let error = build_video_body(&audio_task, &wrong_role)
-            .expect_err("Role/type mismatch must fail");
+        let error =
+            build_video_body(&audio_task, &wrong_role).expect_err("Role/type mismatch must fail");
         assert!(
             error
                 .to_string()
@@ -3990,7 +4593,8 @@ mod tests {
         ));
         let mut image_task = task(GenerationOperation::VideoGeneration);
         image_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
-        let error = build_video_body(&image_task, &with_image).expect_err("Context-IR must reject images");
+        let error =
+            build_video_body(&image_task, &with_image).expect_err("Context-IR must reject images");
         assert!(
             error.to_string().contains("does not accept image inputs"),
             "unexpected error: {error}"
@@ -4250,8 +4854,75 @@ mod tests {
         else {
             panic!("expected images");
         };
-        assert!(matches!(images[0], ImageSource::Url(_)));
-        assert!(matches!(images[1], ImageSource::Base64(_)));
+        assert!(matches!(images[0], ImageSource::Url { .. }));
+        assert!(matches!(images[1], ImageSource::Base64 { .. }));
+    }
+
+    #[test]
+    fn image_parser_extracts_seedream_layer_metadata() {
+        // Seedream 5.0 pro 图层拆分：data 数组每项携带 z_index/name/description/bounding_box，
+        // 解析后应保留在 ImageSource.layer 中，供前端把每个图层单独落为可编辑对象。
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "data": [
+                    {
+                        "url": "https://example.com/base.png",
+                        "z_index": 0,
+                        "name": "底图",
+                        "description": "完整合成画面",
+                        "bounding_box": { "x": 0, "y": 0, "width": 2048, "height": 2048 }
+                    },
+                    {
+                        "url": "https://example.com/layer1.png",
+                        "z_index": 1,
+                        "name": "人物",
+                        "description": "前景人物主体"
+                    },
+                    {
+                        "url": "https://example.com/plain.png"
+                    }
+                ]
+            })
+            .to_string(),
+        };
+        let GenerationSubmission::Images(images) =
+            parse_image_submission(&response, false).expect("images")
+        else {
+            panic!("expected images");
+        };
+        assert_eq!(images.len(), 3);
+        // 底图：z_index=0，name/description/bounding_box 齐全。
+        match &images[0] {
+            ImageSource::Url { url, layer } => {
+                assert_eq!(url, "https://example.com/base.png");
+                let layer = layer.as_ref().expect("base layer metadata");
+                assert_eq!(layer.z_index, 0);
+                assert_eq!(layer.name.as_deref(), Some("底图"));
+                assert_eq!(layer.description.as_deref(), Some("完整合成画面"));
+                assert!(layer.bounding_box.is_some());
+            }
+            _ => panic!("expected url source"),
+        }
+        // 图层 1：z_index=1，无 bounding_box。
+        match &images[1] {
+            ImageSource::Url { layer, .. } => {
+                let layer = layer.as_ref().expect("layer 1 metadata");
+                assert_eq!(layer.z_index, 1);
+                assert_eq!(layer.name.as_deref(), Some("人物"));
+                assert!(layer.bounding_box.is_none());
+            }
+            _ => panic!("expected url source"),
+        }
+        // 普通结果：无 z_index，layer 为 None。
+        match &images[2] {
+            ImageSource::Url { layer, .. } => {
+                assert!(layer.is_none());
+            }
+            _ => panic!("expected url source"),
+        }
     }
 
     #[test]

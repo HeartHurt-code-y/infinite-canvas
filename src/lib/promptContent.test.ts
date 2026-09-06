@@ -7,13 +7,13 @@ import {
   type PromptContentConnection,
   type PromptContentDocumentV1,
 } from "./promptContent";
-import type { PromptAutoMentionCandidate } from "./promptAutoMention";
+import type { PromptReferenceCandidate } from "./promptReferences";
 
 function assetCandidate(
   canvasNodeKey: string,
   name = "角色.png",
   assetId = "asset-1",
-): PromptAutoMentionCandidate {
+): PromptReferenceCandidate {
   return {
     canvasNodeKey,
     assetId,
@@ -24,7 +24,7 @@ function assetCandidate(
   };
 }
 
-function targetFor(candidate: PromptAutoMentionCandidate): MediaReferenceTarget {
+function targetFor(candidate: PromptReferenceCandidate): MediaReferenceTarget {
   return {
     kind: "asset",
     providerConnectionId: candidate.providerConnectionId,
@@ -34,7 +34,7 @@ function targetFor(candidate: PromptAutoMentionCandidate): MediaReferenceTarget 
   };
 }
 
-function connectionFor(candidate: PromptAutoMentionCandidate): PromptContentConnection {
+function connectionFor(candidate: PromptReferenceCandidate): PromptContentConnection {
   return {
     key: candidate.canvasNodeKey,
     name: candidate.name,
@@ -44,13 +44,148 @@ function connectionFor(candidate: PromptAutoMentionCandidate): PromptContentConn
 }
 
 describe("prompt content interface", () => {
+  it("preserves ordinary names until the user explicitly requests name recognition", () => {
+    const candidate = assetCandidate("asset-node-1");
+    const session = createPromptContentEditorSession([candidate]);
+    session.replaceText("让 角色.png 看向镜头");
+    expect(session.autoResolve()).toMatchObject({ converted: 0 });
+    expect(session.read().plainText).toBe("让 角色.png 看向镜头");
+    expect(session.autoResolve({ mode: "names" })).toMatchObject({ converted: 1 });
+    expect(session.read().referenceCount).toBe(1);
+  });
+
+  it("resolves explicit references identically on paste, import, and immediate submission", () => {
+    const candidate = assetCandidate("asset-node-1");
+    for (const entry of ["paste", "replace", "submit"] as const) {
+      const session = createPromptContentEditorSession([candidate]);
+      if (entry === "paste") session.pastePlainText("看向 @图片1");
+      else if (entry === "replace") session.replaceText("看向 @图片1");
+      else
+        session.restore({
+          schema: "prompt-content",
+          version: 1,
+          items: [{ kind: "text", text: "看向 @图片1" }],
+        });
+      const prepared = session.prepareGeneration({
+        connections: [connectionFor(candidate)],
+        allowMediaOnly: false,
+      });
+      expect(prepared).toMatchObject({
+        ok: true,
+        frozen: {
+          segments: [
+            { kind: "text", text: "看向 " },
+            {
+              kind: "media_reference",
+              target: targetFor(candidate),
+              typePosition: 1,
+              contentIndex: 1,
+            },
+          ],
+        },
+      });
+    }
+  });
+
+  it("never learns a same-name choice or silently confirms after a disconnection", () => {
+    const first = assetCandidate("asset-node-1", "角色.png", "asset-1");
+    const second = assetCandidate("asset-node-2", "角色.png", "asset-2");
+    const session = createPromptContentEditorSession([first, second]);
+    session.replaceText("@角色.png");
+    expect(session.confirmPending("角色.png", first)).toBe(1);
+    session.pastePlainText(" 与 @角色.png");
+    expect(session.read().pendingCount).toBe(1);
+    session.updateConnections([first]);
+    expect(session.read().pendingCount).toBe(1);
+    expect(
+      session.prepareGeneration({ connections: [connectionFor(first)], allowMediaOnly: false }),
+    ).toMatchObject({ ok: false, issues: [{ kind: "pending_reference" }] });
+    expect(session.confirmPending("角色.png", second)).toBe(0);
+    expect(session.confirmPending("角色.png", first)).toBe(1);
+  });
+
+  it("keeps connection numbering and special roles when references appear in reverse order", () => {
+    const first = assetCandidate("asset-node-1", "开场.png", "asset-1");
+    const second = assetCandidate("asset-node-2", "结尾.png", "asset-2");
+    const session = createPromptContentEditorSession([first, second]);
+    session.replaceText("@图片2 @图片1 @图片2");
+    const prepared = session.prepareGeneration({
+      connections: [
+        { ...connectionFor(first), role: "first_frame" },
+        { ...connectionFor(second), role: "last_frame" },
+      ],
+      allowMediaOnly: false,
+    });
+    expect(prepared.ok).toBe(true);
+    if (!prepared.ok) return;
+    expect(
+      prepared.frozen.segments
+        .filter((segment) => segment.kind === "media_reference")
+        .map((segment) => segment.typePosition),
+    ).toEqual([2, 1, 2]);
+    expect(prepared.frozen.explicitMedia).toMatchObject([
+      { target: targetFor(first), role: "first_frame", typePosition: 1, contentIndex: 1 },
+      { target: targetFor(second), role: "last_frame", typePosition: 2, contentIndex: 2 },
+    ]);
+    session.replaceText("之后的提示词");
+    expect(
+      prepared.frozen.segments.filter((segment) => segment.kind === "media_reference"),
+    ).toHaveLength(3);
+  });
+
+  it("round-trips local-file references through editor, saved document, and submission", () => {
+    const candidate: PromptReferenceCandidate = {
+      ...assetCandidate("frame-1"),
+      referenceKind: "local_file",
+      source: "local",
+      providerConnectionId: "",
+      assetId: "C:\\frames\\frame.png",
+    };
+    const target: MediaReferenceTarget = {
+      kind: "local_file",
+      path: candidate.assetId,
+      mediaType: "image",
+      canvasNodeKey: candidate.canvasNodeKey,
+    };
+    const session = createPromptContentEditorSession([candidate]);
+    session.attach(document.createElement("div"));
+    session.insertReference(candidate);
+    const snapshot = session.snapshot();
+    expect(decodePromptContentDocument(snapshot)).toEqual(snapshot);
+    session.attach(null);
+    session.restore(snapshot);
+    session.attach(document.createElement("div"));
+    expect(
+      session.prepareGeneration({
+        connections: [
+          { key: candidate.canvasNodeKey, name: candidate.name, kind: candidate.kind, target },
+        ],
+        allowMediaOnly: false,
+      }),
+    ).toMatchObject({ ok: true, frozen: { segments: [{ kind: "media_reference", target }] } });
+    expect(
+      session.prepareGeneration({
+        connections: [
+          {
+            key: candidate.canvasNodeKey,
+            name: candidate.name,
+            kind: candidate.kind,
+            target: { ...target, path: "C:\\frames\\different.png" },
+          },
+        ],
+        allowMediaOnly: false,
+      }),
+    ).toMatchObject({ ok: false, issues: [{ kind: "reference_identity_changed" }] });
+    session.attach(null);
+  });
+
   it("turns a unique connected name into an ordered canonical media reference", () => {
     const candidate = assetCandidate("asset-node-1");
     const session = createPromptContentEditorSession([candidate]);
     const element = document.createElement("div");
     session.attach(element);
 
-    expect(session.replaceText("让 角色.png 看向镜头")).toMatchObject({
+    expect(session.replaceText("让 @角色.png 看向镜头")).toMatchObject({
       converted: 1,
       ambiguous: 0,
       pending: 0,
@@ -73,7 +208,7 @@ describe("prompt content interface", () => {
     const session = createPromptContentEditorSession([first, second]);
     session.attach(document.createElement("div"));
 
-    expect(session.replaceText("角色.png 与 角色.png")).toMatchObject({
+    expect(session.replaceText("@角色.png 与 @角色.png")).toMatchObject({
       converted: 0,
       ambiguous: 2,
       pending: 2,
@@ -89,13 +224,13 @@ describe("prompt content interface", () => {
     });
 
     const option = session.ambiguityOptions("角色.png")[1]!;
-    expect(session.confirmPending("角色.png", option.candidate, option.alias)).toBe(2);
+    expect(session.confirmPending("角色.png", option.candidate)).toBe(2);
     expect(session.snapshot().items.filter((item) => item.kind === "media_reference")).toHaveLength(
       2,
     );
   });
 
-  it("freezes prompt references and appends only unmentioned canvas instances", () => {
+  it("freezes every connected instance once and keeps prompt references separate", () => {
     const first = assetCandidate("asset-node-1", "角色.png", "shared-asset");
     const second = assetCandidate("asset-node-2", "角色副本.png", "shared-asset");
     const session = createPromptContentEditorSession([first, second]);
@@ -110,7 +245,10 @@ describe("prompt content interface", () => {
       ok: true,
       frozen: {
         segments: [{ kind: "media_reference", target: { canvasNodeKey: "asset-node-1" } }],
-        explicitMedia: [{ target: { canvasNodeKey: "asset-node-2" } }],
+        explicitMedia: [
+          { target: { canvasNodeKey: "asset-node-1" } },
+          { target: { canvasNodeKey: "asset-node-2" } },
+        ],
       },
     });
   });
@@ -280,7 +418,7 @@ describe("prompt content interface", () => {
   });
 
   it("preserves local-result canvas identity in the frozen target", () => {
-    const candidate: PromptAutoMentionCandidate = {
+    const candidate: PromptReferenceCandidate = {
       canvasNodeKey: "output-node-2",
       assetId: "task-1#0",
       providerConnectionId: "",
@@ -358,6 +496,28 @@ describe("prompt content interface", () => {
     expect(module.read("gen-1")?.plainText).toBe("原内容");
   });
 
+  it("applies an upstream change to a restored node before its editor first mounts", () => {
+    const candidate = assetCandidate("asset-node-1");
+    const module = createPromptContentModule();
+    module.restoreAll({
+      offscreen: {
+        schema: "prompt-content",
+        version: 1,
+        items: [{ kind: "text", text: "旧输出" }],
+      },
+    });
+    expect(module.replaceText("offscreen", "新输出 @图片1", [candidate])).toMatchObject({
+      converted: 1,
+    });
+    const editor = createPromptContentEditorSession([candidate]);
+    module.adoptEditor("offscreen", editor);
+    expect(editor.read().plainText).toBe("新输出 @角色.png");
+    expect(module.snapshotAll()["offscreen"]?.items).toMatchObject([
+      { kind: "text", text: "新输出 " },
+      { kind: "media_reference", canvasNodeKey: candidate.canvasNodeKey },
+    ]);
+  });
+
   it("does not rebuild the editor DOM when auto-resolve changes nothing", () => {
     // 回归：输入中文等与任何素材名都不匹配的文本时，自动识别不应触发 setContent
     // 重建整个编辑器 DOM。重建会打断 IME 组合（拼音被打散成错乱字符）并重置光标。
@@ -383,6 +543,52 @@ describe("prompt content interface", () => {
     expect(editor!.querySelector("p")?.firstChild).toBe(textNodeBefore);
   });
 
+  it("keeps multiple native paragraphs and the caret untouched when nothing matches", () => {
+    const session = createPromptContentEditorSession([assetCandidate("asset-node-1")]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    session.attach(host);
+    const input = host.querySelector<HTMLElement>(".ProseMirror")!;
+    input.innerHTML = "<p>第一段普通文字</p><p>第二段继续写作</p>";
+    session.acceptNativeInput();
+    const paragraphs = [...input.querySelectorAll("p")];
+    const text = paragraphs[1]!.firstChild!;
+    const selection = window.getSelection()!;
+    selection.setBaseAndExtent(text, 3, text, 3);
+    expect(session.autoResolve()).toMatchObject({ converted: 0, ambiguous: 0 });
+    session.updateConnections([]);
+    expect([...input.querySelectorAll("p")]).toEqual(paragraphs);
+    expect(selection.anchorNode).toBe(text);
+    expect(selection.anchorOffset).toBe(3);
+    session.attach(null);
+    host.remove();
+  });
+
+  it("does not put disconnected presentation updates in undo history", () => {
+    const candidate = assetCandidate("asset-node-1");
+    const session = createPromptContentEditorSession([candidate]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    session.attach(host);
+    session.insertReference(candidate);
+    session.pastePlainText("尾句");
+    session.updateConnections([]);
+    const input = host.querySelector<HTMLElement>(".ProseMirror")!;
+    expect(input.querySelector("[data-mention-id]")).toHaveClass("is-stale");
+    input.dispatchEvent(
+      new KeyboardEvent("keydown", {
+        key: "z",
+        code: "KeyZ",
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    );
+    expect(session.acceptNativeInput().plainText).not.toContain("尾句");
+    session.attach(null);
+    host.remove();
+  });
+
   it("still converts a typed connected name into a mention chip via auto-resolve", () => {
     // 功能不回归：手输匹配素材名时，auto-resolve 仍应把纯文本转成引用 chip。
     const candidate = assetCandidate("asset-node-1");
@@ -392,7 +598,7 @@ describe("prompt content interface", () => {
     session.restore({
       schema: "prompt-content",
       version: 1,
-      items: [{ kind: "text", text: "让 角色.png 看向镜头" }],
+      items: [{ kind: "text", text: "让 @角色.png 看向镜头" }],
     });
 
     expect(session.autoResolve({ fresh: true })).toMatchObject({
@@ -421,7 +627,7 @@ describe("prompt content interface", () => {
     session.restore({
       schema: "prompt-content",
       version: 1,
-      items: [{ kind: "text", text: "让 参考图1 跟随 参考图2 移动" }],
+      items: [{ kind: "text", text: "让 @参考图1 跟随 @参考图2 移动" }],
     });
 
     expect(session.autoResolve({ fresh: true })).toMatchObject({
@@ -429,9 +635,7 @@ describe("prompt content interface", () => {
       ambiguous: 0,
       pending: 0,
     });
-    const references = session
-      .snapshot()
-      .items.filter((item) => item.kind === "media_reference");
+    const references = session.snapshot().items.filter((item) => item.kind === "media_reference");
     expect(references).toHaveLength(2);
     expect(references[0]).toMatchObject({
       kind: "media_reference",
@@ -455,7 +659,7 @@ describe("prompt content interface", () => {
     session.restore({
       schema: "prompt-content",
       version: 1,
-      items: [{ kind: "text", text: "让 图1 跟随 图2 移动" }],
+      items: [{ kind: "text", text: "让 @图1 跟随 @图2 移动" }],
     });
 
     expect(session.autoResolve({ fresh: true })).toMatchObject({
@@ -463,9 +667,7 @@ describe("prompt content interface", () => {
       ambiguous: 0,
       pending: 0,
     });
-    const references = session
-      .snapshot()
-      .items.filter((item) => item.kind === "media_reference");
+    const references = session.snapshot().items.filter((item) => item.kind === "media_reference");
     expect(references).toHaveLength(2);
     expect(references[0]).toMatchObject({
       kind: "media_reference",

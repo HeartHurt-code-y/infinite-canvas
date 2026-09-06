@@ -200,6 +200,46 @@ fn is_gemini_image_model(model_id: &str) -> bool {
     identity.contains("gemini") && contains_identity_token(&identity, "image")
 }
 
+/// Doubao Seedream 图片生成模型（如 `doubao-seedream-5-0-260128`（moyu 文档
+/// 推荐）、`doubao-seedream-4-5-251128`、`doubao-seedream-5-0-pro-260628`）。
+/// moyu 聚合平台走 OpenAI Images API（`POST /v1/images/generations`），但契约与
+/// dall-e/gpt-image 不同：`size` 只接受 `2K` 及 ≥2K 的像素尺寸（`2048x2048`/
+/// `2848x1600`，低于 3686400 像素会被上游拒绝），`quality` 仅 `standard`/`hd`，
+/// 并支持 `watermark`、`response_format`（url/b64_json）、组图模式
+/// （`sequential_image_generation`）与输出格式（`output_format`：jpg/png/webp）
+/// 等 Seedream 专属参数。与视频模型 seedance 名称不同（`seedream` 不含
+/// `seedance` 子串），互不干扰。
+fn is_seedream_image_model(model_id: &str) -> bool {
+    model_id.to_ascii_lowercase().contains("seedream")
+}
+
+/// Seedream 图片模型的能力版本：按模型 ID 中的版本标记识别高级参数支持范围。
+/// - `5.0`：moyu 文档推荐的标准 Seedream 5.0（如 `doubao-seedream-5-0-260128`），
+///   支持组图、输出格式
+/// - `5.0-pro`：图层拆分、提示词优化、输出格式、透明背景（仅图生图）
+/// - `5.0-lite`：组图、提示词优化、联网搜索、输出格式
+/// - `4.5` / `4.0`：组图
+/// - `generic`：其他 Seedream 变体按 4.x 通用契约处理（只含基础参数）
+fn seedream_image_version(model_id: &str) -> Option<&'static str> {
+    let identity = model_id.to_ascii_lowercase();
+    if !identity.contains("seedream") {
+        return None;
+    }
+    if identity.contains("seedream-5-0-pro") || identity.contains("seedream-5.0-pro") {
+        Some("5.0-pro")
+    } else if identity.contains("seedream-5-0-lite") || identity.contains("seedream-5.0-lite") {
+        Some("5.0-lite")
+    } else if identity.contains("seedream-5-0") || identity.contains("seedream-5.0") {
+        Some("5.0")
+    } else if identity.contains("seedream-4-5") || identity.contains("seedream-4.5") {
+        Some("4.5")
+    } else if identity.contains("seedream-4-0") || identity.contains("seedream-4.0") {
+        Some("4.0")
+    } else {
+        Some("generic")
+    }
+}
+
 /// 按模型 ID / 显示名特征识别文本（对话）模型。
 /// 供应商（moyu 聚合平台）的 `/v1/models` 不返回模型能力分类，只能按命名约定推断；
 /// 视频模型（seedance）与图片模型（gpt-image / dall-e）已在调用方先行排除。
@@ -280,6 +320,7 @@ pub fn schema_for_enabled_operations(
     refresh_veo_video_defaults(&mut schema, model_id);
     refresh_vidu_video_defaults(&mut schema, model_id);
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
+    refresh_seedream_image_parameter_defaults(&mut schema, model_id);
     schema
 }
 
@@ -512,6 +553,146 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     complete
 }
 
+/// Seedream 文生图基础参数：`size` 走 2K 契约（`2K`/`2048x2048`/`2848x1600`，
+/// 低于 3686400 像素会被上游拒绝）、`quality` 仅 `standard`/`hd`、`watermark`
+/// 控制水印（应用侧默认无水印；文档 API 默认值为 true）、`response_format`
+/// 控制返回链接或 Base64。
+/// 版本附加参数由 `seedream_append_version_parameters` 按能力追加。
+fn seedream_text_to_image_parameters() -> Value {
+    json!({
+        "size": {
+            "type": "string",
+            "label": "尺寸",
+            "default": "2K",
+            "enum": ["2K", "2048x2048", "2848x1600"],
+            "order": 0
+        },
+        "quality": {
+            "type": "string",
+            "label": "质量",
+            "default": "standard",
+            "enum": ["standard", "hd"],
+            "order": 1
+        },
+        "watermark": {
+            "type": "boolean",
+            "label": "添加水印",
+            "default": false,
+            "order": 2
+        },
+        "response_format": {
+            "type": "string",
+            "label": "返回格式",
+            "default": "url",
+            "enum": ["url", "b64_json"],
+            "order": 9
+        }
+    })
+}
+
+/// 按 Seedream 能力版本向参数表追加高级参数（moyu 文档参数表）：
+/// - 组图模式 `sequential_image_generation`（auto/disabled）与组图数量
+///   `max_images`（1~15，仅 auto 时发送）：Seedream 5.0 / 5.0 lite / 4.5 / 4.0
+/// - 提示词优化 `optimize_prompt_mode`（fast/standard）：Seedream 5.0 pro / lite
+/// - 输出格式 `output_format`（jpg/png/webp，文档默认 jpg）：Seedream 5.0 /
+///   5.0 pro / 5.0 lite
+/// - 联网搜索 `web_search`（tools 转换，仅文生图、无媒体输入）：Seedream 5.0 lite
+/// - 背景通道 `background`（opaque/transparent）与图层拆分
+///   `layer_decomposition`（仅图生图）：Seedream 5.0 pro
+fn seedream_append_version_parameters(
+    parameters: &mut Map<String, Value>,
+    version: Option<&str>,
+    image_to_image: bool,
+) {
+    if matches!(version, Some("5.0" | "5.0-lite" | "4.5" | "4.0")) {
+        parameters.insert(
+            "sequential_image_generation".into(),
+            json!({
+                "type": "string",
+                "label": "组图模式",
+                "default": "disabled",
+                "enum": ["disabled", "auto"],
+                "order": 3
+            }),
+        );
+        parameters.insert(
+            "max_images".into(),
+            json!({
+                "type": "integer",
+                "label": "组图数量",
+                "optional": true,
+                "default": 4,
+                "minimum": 1,
+                "maximum": 15,
+                "requestField": "sequential_image_generation_options",
+                "transform": "max_images_object",
+                "order": 4
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-pro" | "5.0-lite")) {
+        parameters.insert(
+            "optimize_prompt_mode".into(),
+            json!({
+                "type": "string",
+                "label": "提示词优化",
+                "default": "fast",
+                "enum": ["fast", "standard"],
+                "requestField": "optimize_prompt_options",
+                "transform": "optimize_prompt_mode_object",
+                "order": 5
+            }),
+        );
+    }
+    if matches!(version, Some("5.0" | "5.0-pro" | "5.0-lite")) {
+        parameters.insert(
+            "output_format".into(),
+            json!({
+                "type": "string",
+                "label": "输出格式",
+                "default": "jpg",
+                "enum": ["jpg", "png", "webp"],
+                "order": 6
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-lite")) && !image_to_image {
+        parameters.insert(
+            "web_search".into(),
+            json!({
+                "type": "boolean",
+                "label": "联网搜索",
+                "default": false,
+                "requiresNoMedia": true,
+                "requestField": "tools",
+                "transform": "web_search_tool",
+                "order": 7
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-pro")) && image_to_image {
+        parameters.insert(
+            "background".into(),
+            json!({
+                "type": "string",
+                "label": "背景通道",
+                "default": "opaque",
+                "enum": ["opaque", "transparent"],
+                "order": 7
+            }),
+        );
+        parameters.insert(
+            "layer_decomposition".into(),
+            json!({
+                "type": "boolean",
+                "label": "图层拆分",
+                "default": false,
+                "order": 8
+            }),
+        );
+    }
+}
+
 /// GPT-Image 契约的尺寸参数：接口文档规定只接受 `auto` 与三种标准尺寸。
 fn gpt_image_size_parameter() -> Value {
     json!({
@@ -584,6 +765,27 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
         GenerationOperation::TextToImage => {
+            // Doubao Seedream 契约（moyu 聚合平台）：`size` 只接受 `2K` 及 ≥2K 的
+            // 像素尺寸（低于 3686400 像素会被上游拒绝），`quality` 仅 standard/hd，
+            // 并支持 watermark 与按版本区分的组图/提示词优化/联网搜索/输出格式参数。
+            if is_seedream_image_model(model_id) {
+                let version = seedream_image_version(model_id);
+                let mut parameters = seedream_text_to_image_parameters();
+                if let Some(parameters_object) = parameters.as_object_mut() {
+                    seedream_append_version_parameters(parameters_object, version, false);
+                }
+                return json!({
+                    "resultType": "image",
+                    "requestProfileId": "moyu_seedream_image_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/images/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root"
+                    },
+                    "parameters": parameters
+                });
+            }
             // Gemini 图片生成契约：`size` 只接受画幅比例（1:1/16:9/…），不声明
             // `quality`；上游忽略 `n`（一次只返回一张），因此不声明生成数量参数。
             if is_gemini_image_model(model_id) {
@@ -665,6 +867,54 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
         GenerationOperation::ImageToImage => {
+            // Seedream 图生图契约（moyu 聚合平台）：不走 multipart edits 接口，
+            // 而是 JSON `POST /v1/images/generations`，参考图通过顶层 `image`
+            // 字段传 URL（文档示例 `"image":"https://…"`）；参数容器为 root。
+            // 基础参数与文生图一致，5.0 pro 额外支持透明背景与图层拆分。
+            if is_seedream_image_model(model_id) {
+                let version = seedream_image_version(model_id);
+                let mut parameters = seedream_text_to_image_parameters();
+                if let Some(parameters_object) = parameters.as_object_mut() {
+                    seedream_append_version_parameters(parameters_object, version, true);
+                }
+                return json!({
+                    "resultType": "image",
+                    "requestProfileId": "moyu_seedream_image_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/images/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "mediaEncoding": "seedream_image_urls",
+                        "mediaField": "image"
+                    },
+                    "parameters": parameters
+                });
+            }
+            // Gemini 图生图契约（https://doc.moyu.info/9280683m0.md）：与文生图
+            // 一致走 OpenAI Images API JSON `POST /v1/images/generations`，参考图
+            // 通过顶层 `image` 字段传 data URI（`data:<mime>;base64,<DATA>`，带前缀；
+            // 文档示例单张为字符串，多张保持输入顺序为数组），不走 multipart edits
+            // 接口。参数容器为 root；`size` 使用画幅比例（与 Gemini 原生格式的
+            // `imageConfig.aspectRatio` 同义），不声明 `quality`，且接口忽略 `n`
+            // （一次只返回一张，多张由业务侧拆分任务）。
+            if is_gemini_image_model(model_id) {
+                let mut parameters = Map::new();
+                parameters.insert("size".into(), gemini_image_size_parameter());
+                return json!({
+                    "resultType": "image",
+                    "requestProfileId": "openai_images_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/images/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "mediaEncoding": "gemini_image_data_uri",
+                        "mediaField": "image"
+                    },
+                    "parameters": parameters
+                });
+            }
             // GPT-Image 契约的图片编辑接口（multipart）同样声明 `n`/`size`/`quality`；
             // 其余模型沿用旧契约（只有 model/image[]/prompt）。
             let gpt_image = model_id.to_ascii_lowercase().contains("gpt-image");
@@ -1561,29 +1811,245 @@ pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &st
 /// （`1024x1024` 等）与 `quality`（`standard`/`hd`）持久化进了 `model_definitions`，
 /// 而 Gemini 图片生成接口只接受画幅比例 `size`（`1:1`/`16:9`/…）且忽略 `n`。
 /// 若参数仍是旧默认形状（说明并非服务商下发的自定义参数），则原位替换为当前契约。
+///
+/// 图生图契约变更：历史版本按通用 multipart edits 契约（`POST /v1/images/edits`、
+/// `image[]` 文件 part、无参数）保存，而 Gemini 图生图走 JSON
+/// `POST /v1/images/generations`（顶层 `image` data URI + `size` 参数）。若参数
+/// 为空或请求编码仍是 multipart（说明并非服务商下发的自定义 JSON 契约），则把
+/// request 与 parameters 一并刷新为当前契约。
 /// 返回是否发生了替换。
 pub fn refresh_gemini_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
     if !is_gemini_image_model(model_id) {
         return false;
     }
+    let mut changed = false;
     let legacy = legacy_text_to_image_parameters();
-    let Some(definition) = schema
+    if let Some(definition) = schema
         .get_mut("text_to_image")
         .and_then(Value::as_object_mut)
-    else {
-        return false;
-    };
-    if definition.get("parameters") != Some(&legacy) {
+    {
+        if definition.get("parameters") == Some(&legacy) {
+            if let Some(parameters) =
+                default_operation_schema(model_id, GenerationOperation::TextToImage)
+                    .get("parameters")
+                    .cloned()
+            {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    // 图生图：历史 multipart edits 契约（空参数 / 非 JSON 编码）→ 刷新为 JSON 图生图契约。
+    if let Some(definition) = schema
+        .get_mut("image_to_image")
+        .and_then(Value::as_object_mut)
+    {
+        let parameters_empty = definition
+            .get("parameters")
+            .and_then(Value::as_object)
+            .is_none_or(Map::is_empty);
+        let encoding = definition
+            .get("request")
+            .and_then(Value::as_object)
+            .and_then(|request| request.get("encoding"))
+            .and_then(Value::as_str)
+            .unwrap_or("multipart");
+        if parameters_empty || encoding != "json" {
+            let current = default_operation_schema(model_id, GenerationOperation::ImageToImage);
+            if let Some(request) = current.get("request").cloned() {
+                definition.insert("request".into(), request);
+                changed = true;
+            }
+            if let Some(parameters) = current.get("parameters").cloned() {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    changed
+}
+
+/// 上一版 Seedream 默认参数形状（本次文档契约变更前的生成器输出：`watermark`
+/// 默认 `false`、无 `response_format`、`output_format` 为 `jpeg`/`png`）。用于把
+/// 历史保存的默认参数原位刷新为当前文档契约；服务商下发的自定义参数形状
+/// （含额外键或不同默认值）不会被匹配，避免覆盖第三方配置。
+fn previous_seedream_image_parameters(version: Option<&str>, image_to_image: bool) -> Value {
+    let mut parameters = Map::new();
+    parameters.insert(
+        "size".into(),
+        json!({
+            "type": "string",
+            "label": "尺寸",
+            "default": "2K",
+            "enum": ["2K", "2048x2048", "2848x1600"],
+            "order": 0
+        }),
+    );
+    parameters.insert(
+        "quality".into(),
+        json!({
+            "type": "string",
+            "label": "质量",
+            "default": "standard",
+            "enum": ["standard", "hd"],
+            "order": 1
+        }),
+    );
+    parameters.insert(
+        "watermark".into(),
+        json!({
+            "type": "boolean",
+            "label": "添加水印",
+            "default": false,
+            "order": 2
+        }),
+    );
+    if matches!(version, Some("5.0-lite" | "4.5" | "4.0")) {
+        parameters.insert(
+            "sequential_image_generation".into(),
+            json!({
+                "type": "string",
+                "label": "组图模式",
+                "default": "disabled",
+                "enum": ["disabled", "auto"],
+                "order": 3
+            }),
+        );
+        parameters.insert(
+            "max_images".into(),
+            json!({
+                "type": "integer",
+                "label": "组图数量",
+                "optional": true,
+                "default": 4,
+                "minimum": 1,
+                "maximum": 15,
+                "requestField": "sequential_image_generation_options",
+                "transform": "max_images_object",
+                "order": 4
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-pro" | "5.0-lite")) {
+        parameters.insert(
+            "optimize_prompt_mode".into(),
+            json!({
+                "type": "string",
+                "label": "提示词优化",
+                "default": "fast",
+                "enum": ["fast", "standard"],
+                "requestField": "optimize_prompt_options",
+                "transform": "optimize_prompt_mode_object",
+                "order": 5
+            }),
+        );
+        parameters.insert(
+            "output_format".into(),
+            json!({
+                "type": "string",
+                "label": "输出格式",
+                "default": "jpeg",
+                "enum": ["jpeg", "png"],
+                "order": 6
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-lite")) && !image_to_image {
+        parameters.insert(
+            "web_search".into(),
+            json!({
+                "type": "boolean",
+                "label": "联网搜索",
+                "default": false,
+                "requiresNoMedia": true,
+                "requestField": "tools",
+                "transform": "web_search_tool",
+                "order": 7
+            }),
+        );
+    }
+    if matches!(version, Some("5.0-pro")) && image_to_image {
+        parameters.insert(
+            "background".into(),
+            json!({
+                "type": "string",
+                "label": "背景通道",
+                "default": "opaque",
+                "enum": ["opaque", "transparent"],
+                "order": 7
+            }),
+        );
+        parameters.insert(
+            "layer_decomposition".into(),
+            json!({
+                "type": "boolean",
+                "label": "图层拆分",
+                "default": false,
+                "order": 8
+            }),
+        );
+    }
+    Value::Object(parameters)
+}
+
+/// Seedream 图片模型的契约变更：历史版本按 dall-e 通用契约把像素尺寸
+/// （`1024x1024` 等）与 `quality`（`standard`/`hd`）持久化进了 `model_definitions`，
+/// 而 moyu 的 Seedream 图片接口只接受 2K 及以上的尺寸（`2K`/`2048x2048`/
+/// `2848x1600`），并支持 watermark、返回格式与组图等专属参数。
+/// 若参数仍是旧默认形状（dall-e 旧契约、上一版 Seedream 默认形状，说明并非
+/// 服务商下发的自定义参数），则原位替换为当前契约；图生图的历史空参数
+/// （旧契约不支持 size/quality 等）同样刷新。
+/// 返回是否发生了替换。
+pub fn refresh_seedream_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_seedream_image_model(model_id) {
         return false;
     }
-    let Some(parameters) = default_operation_schema(model_id, GenerationOperation::TextToImage)
-        .get("parameters")
-        .cloned()
-    else {
-        return false;
+    let mut changed = false;
+    let version = seedream_image_version(model_id);
+    let current_parameters = |operation: GenerationOperation| -> Option<Value> {
+        default_operation_schema(model_id, operation)
+            .get("parameters")
+            .cloned()
     };
-    definition.insert("parameters".into(), parameters);
-    true
+    // 文生图：dall-e 旧契约 / 上一版 Seedream 默认 → 刷新为当前文档契约。
+    if let Some(definition) = schema
+        .get_mut("text_to_image")
+        .and_then(Value::as_object_mut)
+    {
+        let legacy = legacy_text_to_image_parameters();
+        let previous = previous_seedream_image_parameters(version, false);
+        let parameters_empty = definition
+            .get("parameters")
+            .and_then(Value::as_object)
+            .is_none_or(Map::is_empty);
+        if definition.get("parameters") == Some(&legacy)
+            || definition.get("parameters") == Some(&previous)
+            || parameters_empty
+        {
+            if let Some(parameters) = current_parameters(GenerationOperation::TextToImage) {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    // 图生图：历史契约（旧接口按 multipart 空参数保存）→ 刷新为 Seedream JSON 契约。
+    if let Some(definition) = schema
+        .get_mut("image_to_image")
+        .and_then(Value::as_object_mut)
+    {
+        let previous = previous_seedream_image_parameters(version, true);
+        let parameters_empty = definition
+            .get("parameters")
+            .and_then(Value::as_object)
+            .is_none_or(Map::is_empty);
+        if definition.get("parameters") == Some(&previous) || parameters_empty {
+            if let Some(parameters) = current_parameters(GenerationOperation::ImageToImage) {
+                definition.insert("parameters".into(), parameters);
+                changed = true;
+            }
+        }
+    }
+    changed
 }
 
 fn validate_parameter_value(
@@ -2160,16 +2626,10 @@ mod tests {
                 [GenerationOperation::VideoGeneration],
                 "model {model_id}"
             );
-            assert_eq!(
-                definition["requestProfileId"],
-                "moyu_minimax_h3_video_v1"
-            );
+            assert_eq!(definition["requestProfileId"], "moyu_minimax_h3_video_v1");
             assert_eq!(definition["request"]["path"], "/v1/video/generations");
             assert_eq!(definition["request"]["parameterContainer"], "root");
-            assert_eq!(
-                definition["request"]["mediaEncoding"],
-                "minimax_h3_media"
-            );
+            assert_eq!(definition["request"]["mediaEncoding"], "minimax_h3_media");
             assert_eq!(definition["request"]["metadataField"], "metadata");
             // 轮询沿用默认 `GET /v1/video/generations/{task_id}`，不声明 observePath。
             assert!(definition["request"].get("observePath").is_none());
@@ -2192,7 +2652,10 @@ mod tests {
             );
             assert_eq!(parameters["duration"]["default"], 5);
             assert_eq!(
-                parameters["duration"]["enum"].as_array().unwrap().as_slice(),
+                parameters["duration"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .as_slice(),
                 &(4..=15).map(Value::from).collect::<Vec<_>>()
             );
             assert_eq!(parameters["aigc_watermark"]["default"], false);
@@ -2460,6 +2923,262 @@ mod tests {
     }
 
     #[test]
+    fn seedream_image_models_use_the_moyu_2k_contract() {
+        // Seedream 4.5：2K 尺寸、standard/hd 质量、水印（默认开启）+ 组图模式。
+        let schema = infer_catalog_schema(
+            &json!({ "id": "doubao-seedream-4-5-251128" }),
+            "doubao-seedream-4-5-251128",
+            "Seedream 4.5",
+        );
+        assert_eq!(
+            operations_from_schema(&schema),
+            [GenerationOperation::TextToImage]
+        );
+        let parameters = &schema["text_to_image"]["parameters"];
+        assert_eq!(parameters["size"]["default"], "2K");
+        assert_eq!(
+            parameters["size"]["enum"],
+            json!(["2K", "2048x2048", "2848x1600"])
+        );
+        assert_eq!(parameters["quality"]["default"], "standard");
+        assert_eq!(parameters["quality"]["enum"], json!(["standard", "hd"]));
+        assert_eq!(parameters["watermark"]["type"], "boolean");
+        assert_eq!(parameters["watermark"]["default"], false);
+        // 返回格式：默认 url，可选 b64_json（文档参数表）。
+        assert_eq!(parameters["response_format"]["default"], "url");
+        assert_eq!(
+            parameters["response_format"]["enum"],
+            json!(["url", "b64_json"])
+        );
+        // 4.5 支持组图模式（auto/disabled）与组图数量（1~15）。
+        assert_eq!(
+            parameters["sequential_image_generation"]["enum"],
+            json!(["disabled", "auto"])
+        );
+        assert_eq!(parameters["max_images"]["default"], 4);
+        assert_eq!(parameters["max_images"]["minimum"], 1);
+        assert_eq!(parameters["max_images"]["maximum"], 15);
+        assert_eq!(
+            parameters["max_images"]["requestField"],
+            "sequential_image_generation_options"
+        );
+        assert_eq!(parameters["max_images"]["transform"], "max_images_object");
+        // 4.5 不支持提示词优化/联网搜索/输出格式。
+        assert!(parameters.get("optimize_prompt_mode").is_none());
+        assert!(parameters.get("web_search").is_none());
+        assert!(parameters.get("output_format").is_none());
+    }
+
+    #[test]
+    fn seedream_50_pro_adds_optimization_output_format_and_image_edit_only_parameters() {
+        let schema = default_model_schema(
+            "doubao-seedream-5-0-pro-260628",
+            &[
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ],
+        );
+        let text_parameters = &schema["text_to_image"]["parameters"];
+        assert_eq!(text_parameters["optimize_prompt_mode"]["default"], "fast");
+        assert_eq!(
+            text_parameters["optimize_prompt_mode"]["enum"],
+            json!(["fast", "standard"])
+        );
+        assert_eq!(
+            text_parameters["optimize_prompt_mode"]["requestField"],
+            "optimize_prompt_options"
+        );
+        assert_eq!(
+            text_parameters["optimize_prompt_mode"]["transform"],
+            "optimize_prompt_mode_object"
+        );
+        assert_eq!(text_parameters["output_format"]["default"], "jpg");
+        assert_eq!(
+            text_parameters["output_format"]["enum"],
+            json!(["jpg", "png", "webp"])
+        );
+        assert_eq!(text_parameters["watermark"]["default"], false);
+        assert_eq!(text_parameters["response_format"]["default"], "url");
+        // 5.0 pro 不支持组图模式与联网搜索。
+        assert!(text_parameters.get("sequential_image_generation").is_none());
+        assert!(text_parameters.get("web_search").is_none());
+
+        // 图生图走 JSON /v1/images/generations，声明透明背景与图层拆分。
+        let edit = &schema["image_to_image"];
+        assert_eq!(edit["request"]["path"], "/v1/images/generations");
+        assert_eq!(edit["request"]["encoding"], "json");
+        assert_eq!(edit["request"]["parameterContainer"], "root");
+        assert_eq!(edit["request"]["mediaEncoding"], "seedream_image_urls");
+        assert_eq!(edit["request"]["mediaField"], "image");
+        let edit_parameters = &edit["parameters"];
+        assert_eq!(edit_parameters["size"]["default"], "2K");
+        assert_eq!(edit_parameters["background"]["default"], "opaque");
+        assert_eq!(
+            edit_parameters["background"]["enum"],
+            json!(["opaque", "transparent"])
+        );
+        assert_eq!(edit_parameters["layer_decomposition"]["type"], "boolean");
+        assert_eq!(edit_parameters["layer_decomposition"]["default"], false);
+        assert_eq!(edit_parameters["response_format"]["default"], "url");
+    }
+
+    #[test]
+    fn seedream_50_lite_supports_sequential_optimization_web_search_and_output_format() {
+        let schema = default_model_schema(
+            "doubao-seedream-5-0-lite",
+            &[GenerationOperation::TextToImage],
+        );
+        let parameters = &schema["text_to_image"]["parameters"];
+        assert_eq!(
+            parameters["sequential_image_generation"]["enum"],
+            json!(["disabled", "auto"])
+        );
+        assert_eq!(parameters["optimize_prompt_mode"]["default"], "fast");
+        assert_eq!(parameters["output_format"]["default"], "jpg");
+        assert_eq!(
+            parameters["output_format"]["enum"],
+            json!(["jpg", "png", "webp"])
+        );
+        // 联网搜索仅文生图（requiresNoMedia），且只出现在 5.0 lite。
+        assert_eq!(parameters["web_search"]["requiresNoMedia"], true);
+        assert_eq!(parameters["web_search"]["requestField"], "tools");
+        assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
+    }
+
+    #[test]
+    fn seedream_50_document_model_matches_the_documented_5_0_contract() {
+        // moyu 文档（https://doc.moyu.info/9280685m0.md）推荐的 Seedream 5.0：
+        // 基础参数 + 组图模式 + 输出格式（jpg/png/webp）；不声明提示词优化/
+        // 联网搜索/背景通道/图层拆分。
+        for operation in [
+            GenerationOperation::TextToImage,
+            GenerationOperation::ImageToImage,
+        ] {
+            let schema = default_model_schema("doubao-seedream-5-0-260128", &[operation]);
+            let parameters = &schema[operation.as_str()]["parameters"];
+            assert_eq!(parameters["size"]["default"], "2K");
+            assert_eq!(parameters["watermark"]["default"], false);
+            assert_eq!(parameters["response_format"]["default"], "url");
+            assert_eq!(
+                parameters["sequential_image_generation"]["enum"],
+                json!(["disabled", "auto"])
+            );
+            assert_eq!(parameters["max_images"]["default"], 4);
+            assert_eq!(parameters["output_format"]["default"], "jpg");
+            assert_eq!(
+                parameters["output_format"]["enum"],
+                json!(["jpg", "png", "webp"])
+            );
+            assert!(parameters.get("optimize_prompt_mode").is_none());
+            assert!(parameters.get("web_search").is_none());
+            assert!(parameters.get("background").is_none());
+            assert!(parameters.get("layer_decomposition").is_none());
+        }
+    }
+
+    #[test]
+    fn seedream_legacy_dall_e_parameter_defaults_are_refreshed() {
+        // 历史版本按 dall-e 契约保存 → 刷新为 Seedream 2K 契约。
+        let mut schema = json!({
+            "text_to_image": {
+                "resultType": "image",
+                "requestProfileId": "openai_images_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/images/generations",
+                    "encoding": "json",
+                    "parameterContainer": "root"
+                },
+                "parameters": legacy_text_to_image_parameters()
+            }
+        });
+        assert!(refresh_seedream_image_parameter_defaults(
+            &mut schema,
+            "doubao-seedream-4-5-251128"
+        ));
+        let parameters = &schema["text_to_image"]["parameters"];
+        assert_eq!(parameters["size"]["default"], "2K");
+        assert_eq!(
+            parameters["size"]["enum"],
+            json!(["2K", "2048x2048", "2848x1600"])
+        );
+        assert!(parameters.get("sequential_image_generation").is_some());
+
+        // 图生图的历史空参数刷新为 Seedream JSON 契约（含 background 等）。
+        let mut edit = json!({
+            "image_to_image": { "resultType": "image", "parameters": {} }
+        });
+        assert!(refresh_seedream_image_parameter_defaults(
+            &mut edit,
+            "doubao-seedream-5-0-pro-260628"
+        ));
+        let edit_parameters = &edit["image_to_image"]["parameters"];
+        assert_eq!(edit_parameters["size"]["default"], "2K");
+        assert_eq!(edit_parameters["background"]["default"], "opaque");
+        assert_eq!(edit_parameters["layer_decomposition"]["default"], false);
+
+        // 上一版 Seedream 默认形状（watermark 默认 false、无 response_format、
+        // output_format 为 jpeg/png）→ 原位刷新为当前文档契约。
+        let mut stale = json!({
+            "text_to_image": {
+                "resultType": "image",
+                "parameters": previous_seedream_image_parameters(
+                    Some("4.5"),
+                    false
+                )
+            }
+        });
+        assert!(refresh_seedream_image_parameter_defaults(
+            &mut stale,
+            "doubao-seedream-4-5-251128"
+        ));
+        let refreshed = &stale["text_to_image"]["parameters"];
+        assert_eq!(refreshed["watermark"]["default"], false);
+        assert_eq!(refreshed["response_format"]["default"], "url");
+        assert_eq!(
+            refreshed["response_format"]["enum"],
+            json!(["url", "b64_json"])
+        );
+        assert!(refreshed.get("output_format").is_none());
+
+        // 5.0 模型上一版按 generic 保存（只有基础参数）→ 刷新为 5.0 文档契约。
+        let mut stale50 = json!({
+            "text_to_image": {
+                "resultType": "image",
+                "parameters": previous_seedream_image_parameters(
+                    Some("5.0"),
+                    false
+                )
+            }
+        });
+        assert!(refresh_seedream_image_parameter_defaults(
+            &mut stale50,
+            "doubao-seedream-5-0-260128"
+        ));
+        let refreshed50 = &stale50["text_to_image"]["parameters"];
+        assert_eq!(refreshed50["watermark"]["default"], false);
+        assert_eq!(refreshed50["response_format"]["default"], "url");
+        assert_eq!(
+            refreshed50["sequential_image_generation"]["default"],
+            "disabled"
+        );
+        assert_eq!(refreshed50["output_format"]["default"], "jpg");
+        assert_eq!(
+            refreshed50["output_format"]["enum"],
+            json!(["jpg", "png", "webp"])
+        );
+
+        // 非 Seedream 模型不受刷新影响。
+        let mut generic = json!({
+            "text_to_image": { "parameters": legacy_text_to_image_parameters() }
+        });
+        assert!(!refresh_seedream_image_parameter_defaults(
+            &mut generic,
+            "photon-1"
+        ));
+    }
+
+    #[test]
     fn legacy_dall_e_parameter_defaults_are_refreshed_for_gpt_image_models() {
         let mut schema = json!({
             "text_to_image": {
@@ -2612,6 +3331,102 @@ mod tests {
         });
         assert!(!refresh_gemini_image_parameter_defaults(
             &mut generic,
+            "gpt-image-2"
+        ));
+    }
+
+    #[test]
+    fn gemini_image_models_use_json_image_to_image_contract_with_data_uri_media() {
+        // https://doc.moyu.info/9280683m0.md：Gemini 图生图与文生图一致走
+        // OpenAI Images API JSON，参考图以顶层 `image` data URI 传入，参数为画幅比例。
+        for model_id in ["gemini-2.5-flash-image", "gemini-3-pro-image-preview"] {
+            let schema = default_model_schema(
+                model_id,
+                &[
+                    GenerationOperation::TextToImage,
+                    GenerationOperation::ImageToImage,
+                ],
+            );
+            let definition = &schema["image_to_image"];
+            assert_eq!(definition["resultType"], "image");
+            assert_eq!(definition["requestProfileId"], "openai_images_v1");
+            assert_eq!(definition["request"]["path"], "/v1/images/generations");
+            assert_eq!(definition["request"]["encoding"], "json");
+            assert_eq!(definition["request"]["parameterContainer"], "root");
+            assert_eq!(
+                definition["request"]["mediaEncoding"],
+                "gemini_image_data_uri"
+            );
+            assert_eq!(definition["request"]["mediaField"], "image");
+            let parameters = &definition["parameters"];
+            assert_eq!(parameters["size"]["default"], "1:1");
+            assert_eq!(
+                parameters["size"]["enum"],
+                json!(["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3"])
+            );
+            assert!(
+                parameters.get("quality").is_none(),
+                "model {model_id} must not declare quality"
+            );
+            assert!(
+                parameters.get("n").is_none(),
+                "model {model_id} must not declare n"
+            );
+        }
+    }
+
+    #[test]
+    fn gemini_image_legacy_multipart_image_to_image_contract_is_refreshed() {
+        // 历史保存的通用 multipart edits 契约（空参数、multipart 编码）→ 刷新为
+        // Gemini JSON 图生图契约（/v1/images/generations + data URI + size 参数）。
+        let mut schema = json!({
+            "image_to_image": {
+                "resultType": "image",
+                "requestProfileId": "openai_image_edits_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/images/edits",
+                    "encoding": "multipart",
+                    "parameterContainer": "multipart"
+                },
+                "parameters": {}
+            }
+        });
+        assert!(refresh_gemini_image_parameter_defaults(
+            &mut schema,
+            "gemini-3-pro-image-preview"
+        ));
+        let definition = &schema["image_to_image"];
+        assert_eq!(definition["request"]["path"], "/v1/images/generations");
+        assert_eq!(definition["request"]["encoding"], "json");
+        assert_eq!(
+            definition["request"]["mediaEncoding"],
+            "gemini_image_data_uri"
+        );
+        assert_eq!(definition["request"]["mediaField"], "image");
+        assert_eq!(definition["parameters"]["size"]["default"], "1:1");
+
+        // 已是 JSON 契约（当前形状）不被重复刷新。
+        let mut current = json!({
+            "image_to_image": default_operation_schema(
+                "gemini-3-pro-image-preview",
+                GenerationOperation::ImageToImage
+            )
+        });
+        assert!(!refresh_gemini_image_parameter_defaults(
+            &mut current,
+            "gemini-3-pro-image-preview"
+        ));
+
+        // 非 gemini 图片模型不动。
+        let mut other = json!({
+            "image_to_image": {
+                "request": { "path": "/v1/images/edits", "encoding": "multipart" },
+                "parameters": {}
+            }
+        });
+        assert!(!refresh_gemini_image_parameter_defaults(
+            &mut other,
             "gpt-image-2"
         ));
     }

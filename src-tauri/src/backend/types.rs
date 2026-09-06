@@ -266,6 +266,8 @@ fn default_generation_count() -> u32 {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartGenerationCommand {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workflow_run_id: Option<String>,
     pub canvas_id: String,
     pub source_node_id: String,
     pub operation: GenerationOperation,
@@ -612,7 +614,11 @@ pub struct StartVideoCompositionCommand {
 #[serde(rename_all = "camelCase")]
 pub struct StartVideoFrameExtractionCommand {
     pub video_path: String,
+    #[serde(default)]
     pub timestamps: Vec<f64>,
+    /// 0~1 的视频比例采样点。后端先探测实际时长再换算，和 timestamps 二选一。
+    #[serde(default)]
+    pub percentages: Vec<f64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

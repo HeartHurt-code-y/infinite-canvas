@@ -1,0 +1,64 @@
+Image upload order:
+@Image 1: Primary reference for <Subject 1>, locking face, hairstyle,
+  clothing, and body type. Ignore the watermark and UI text in the source image.
+@Audio 1: Voice-timbre reference for <Subject 1>.
+
+subject_definitions:
+
+- <Subject 1>: Tangtang, a Chinese woman in her mid-20s, brown
+  shoulder-length hair parted in the middle, silver anchor earrings,
+  a blue horizontal-striped short-sleeve T-shirt, and blue denim
+  overalls. Her appearance follows <Picture 1> exactly. <Picture 1>
+  must not show its grey studio background; the actual setting is
+  replaced by a night street.
+
+- <Subject 2>: The night street setting, with streetlamps, passing
+  traffic, shopfront lights, and the city skyline. No reference
+  image; defined by text only.
+
+- <Audio 1> is the voice-timbre reference for <Subject 1> (S1).
+
+summary:
+[reference generation + audio reference] An 8-second single
+continuous shot set on a night street. <Subject 1> walks along the
+street while the camera tracks backwards in front of her, holding a
+medium two-shot throughout. <Audio 1> provides the voice-timbre
+reference for <Subject 1>.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1]): fully_preserved - Tangtang's full
+outfit and identity. Action chain: walking -> turning to profile ->
+micro-expression shift.
+<Subject 2> (appears in [Shot 1]): fully_preserved - the night
+street setting.
+<Audio 1>: reference - its vocal timbre guides the dialogue delivery
+of <Subject 1> without copying the original signal.
+
+detailed_description:
+The target video uses a live-action cinematic night-street look
+with practical streetlight sources and a slightly cool colour cast.
+
+[Shot 1] 0-8s A medium two-shot frames <Subject 1> walking along
+the night street, the camera tracking backwards in front of her at a
+steady pace.
+
+**0-3s:** She walks forward with a slight sway, her eyes on the
+street ahead. The camera holds a constant distance of about two
+metres in front of her.
+
+**3-5s:** She turns her head toward the camera, her gaze lifting.
+
+**5-7s:** <Subject 1> (S1) says in the clear youthful voice referenced from
+<Audio 1>, <d>[Chinese] 今晚的月亮真圆。</d> The corners of her mouth
+lift into a small smile as she speaks, then her lips close gently
+as the line ends.
+
+**7-8s:** She looks away and keeps walking. The shot ends at 8
+seconds.
+
+overall_soundscape:
+Night-street ambience, distant traffic, wind moving along the street.
+
+non_diegetic_music: N/A
+
+Negative: no other people, no exaggerated expression, no text,

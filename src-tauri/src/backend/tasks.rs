@@ -796,9 +796,11 @@ impl GenerationTaskService {
                                 call_id,
                                 tokens,
                                 observation: GenerationRemoteObservation::Succeeded {
-                                    result: self
-                                        .local_results
-                                        .pending_text_result(task_id, remote_task_id, text),
+                                    result: self.local_results.pending_text_result(
+                                        task_id,
+                                        remote_task_id,
+                                        text,
+                                    ),
                                 },
                             },
                         )?;
@@ -845,8 +847,7 @@ impl GenerationTaskService {
                             None => {
                                 info!(
                                     "[generation] 视频生成成功但观察响应缺失 result_url，尝试通过 content 接口获取视频字节: taskId={}, remoteTaskId={}",
-                                    task_id,
-                                    remote_task_id
+                                    task_id, remote_task_id
                                 );
                                 let bytes = self
                                     .providers
@@ -865,10 +866,12 @@ impl GenerationTaskService {
                                         call_id,
                                         tokens,
                                         observation: GenerationRemoteObservation::Succeeded {
-                                            result: self.local_results.pending_video_content_result(
-                                                task_id,
-                                                remote_task_id,
-                                            ),
+                                            result: self
+                                                .local_results
+                                                .pending_video_content_result(
+                                                    task_id,
+                                                    remote_task_id,
+                                                ),
                                         },
                                     },
                                 )?;

@@ -1,0 +1,35 @@
+Image upload order:
+@Image 1: Primary reference for <Subject 2> (沈怀瑾), locking face,
+  hairstyle, and clothing.
+@Image 2: Primary reference for <Subject 1> (温念), locking face,
+  hairstyle, and clothing.
+@Image 3: Environment reference for <Subject 3> (sedan rear cabin),
+  locking space, colour, and light direction; the studio backdrop in
+  the source image is not carried over.
+
+subject_definitions:
+<Subject 2> is the man 沈怀瑾 shown in <Picture 1>, with short black hair, faint fresh small cuts on the bridge of his nose and cheekbone, and a dusty grey-brown work jacket with small tears over a white undershirt, matching worn trousers, and rugged hands.
+<Subject 1> is the young woman 温念 shown in <Picture 2>, with long loose dark hair, a worn dark navy-blue hooded sweatshirt with faded patches, blue jeans, and pale worn sneakers; she has a delicate oval face, slightly red-rimmed eyes, and natural realistic skin texture.
+<Subject 3> is the rear cabin of a luxury sedan shown in <Picture 3>, with black quilted-leather seats, an illuminated starlight headliner, a wood-and-chrome rear console, and a glowing city skyline visible through the windows at dusk.
+
+summary:
+[reference generation] The target video is a 15-second photorealistic live-action Chinese short-drama dialogue scene. <Subject 2> and <Subject 1> sit together in <Subject 3> at dusk: <Subject 2> turns to gaze at <Subject 1> and tells her she deserves it, <Subject 1> tears up with a happy smile and thanks him, then <Subject 2> faces the camera and asks viewers to leave warm blessings in the comments. The three reference pictures define the two characters and the car interior; they are generation guidance only, not frame anchors.
+
+retention_analysis:
+<Subject 1> (appears in [Shot 1], [Shot 2]): fully_preserved - her long dark hair, worn navy-blue hoodie, jeans, and delicate facial features are retained throughout.
+<Subject 2> (appears in [Shot 1], [Shot 3]): fully_preserved - his short black hair, faint facial cuts, dusty grey-brown work jacket, and white undershirt are retained throughout.
+<Subject 3> (appears in [Shot 1], [Shot 2], [Shot 3]): fully_preserved - the black quilted-leather seats, starlight headliner, wood-and-chrome console, and dusk city skyline are retained as the continuous environment.
+
+detailed_description:
+The target video is a photorealistic live-action Chinese short-drama scene in 8K ultra-high definition, with true-to-life skin pores and fabric weave, natural reflections and refractions in the car glass, a high-end film color grade, and no subtitles, watermarks, or logos anywhere in the frame.
+[Shot 1] The scene opens inside <Subject 3>, the luxury sedan rear cabin at dusk, with a soft golden-blue city glow through the windows. A two-person side-profile medium close-up shows <Subject 2>, the man in the dusty grey-brown work jacket with faint cuts on his nose bridge and cheekbone, seated on frame right, and <Subject 1>, the young woman in the worn navy-blue hoodie with long loose dark hair, seated on frame left. The camera pushes in with small amplitude at slow speed toward the midpoint between the two subjects. <Subject 2> turns his head toward <Subject 1> on frame left and holds a deep, tender gaze on her, his rugged hands resting calmly. He speaks in a firm yet doting, steady male voice (S1), <d>[Chinese] 你值得。</d> His eyes stay warm and certain as the camera keeps drifting closer.
+[Shot 2] At 00:02.500, the shot cuts to a side-profile close-up of <Subject 1>. She looks toward frame right where <Subject 2> sits just out of frame. Her red-rimmed eyes glisten, one tear slides slowly down her cheek, and a happy trembling smile spreads across her lips. A soft gentle crying sound accompanies her line. She answers in a grateful, choked-up female voice that wavers slightly between words (S2), <d>[Chinese] 谢谢你。</d> The camera holds nearly still with a barely perceptible drift as the tear reaches her jaw and her smile steadies.
+[Shot 3] At 00:06.500, the shot cuts back to a frontal medium close-up of <Subject 2>. He turns his head from <Subject 1>'s direction to look straight into the camera lens, his expression sincere. He then gives a slight respectful bow of his head and upper body toward the camera and straightens halfway. Speaking directly to the audience in the same firm, doting male voice (S1) at an earnest, slightly brisk pace, he says, <d>[Chinese] 如果家人们愿意成全我们，请在评论区留下一句暖心祝福，给念念撑撑腰。</d> He finishes with a small grateful nod as the video ends on his steady gaze.
+
+overall_soundscape:
+Quiet luxury-car cabin room tone continues throughout, with a faint muffled city traffic hum outside the windows, soft leather creaks as the characters move, and the soft gentle crying sound under <Subject 1>'s line in [Shot 2].
+
+non_diegetic_music:
+A piano-and-strings score at a slow tempo, restrained in dynamics, swells gently under [Shot 2], then settles into a sustained chord beneath [Shot 3] without any dramatic climax.
+
+Negative: no subtitles, no watermarks, no logos, no extra people, no exaggerated sobbing, no camera shake

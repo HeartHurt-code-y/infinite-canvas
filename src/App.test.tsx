@@ -126,6 +126,136 @@ describe("App workspace", () => {
     expect(templates[8]).toHaveAccessibleName("拖拽创建剧本转工业级分镜脚本节点");
     expect(within(repository).queryByRole("button", { name: /结果/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /取消/ })).not.toBeInTheDocument();
+
+    const workflowRepository = screen.getByRole("complementary", { name: "工作流仓库" });
+    const workflowToggle = within(workflowRepository).getByRole("button", {
+      name: /工作流仓库/,
+    });
+    expect(workflowToggle).toHaveAttribute("aria-expanded", "false");
+    expect(workflowRepository.querySelector(".workflow-repository__content")).toHaveAttribute(
+      "hidden",
+    );
+  });
+
+  it("expands the bottom workflow repository and inserts one automated workflow node", async () => {
+    render(<App />);
+
+    const workflowRepository = screen.getByRole("complementary", { name: "工作流仓库" });
+    fireEvent.click(within(workflowRepository).getByRole("button", { name: /工作流仓库/ }));
+
+    expect(workflowRepository).toHaveClass("workflow-repository--expanded");
+    expect(
+      within(workflowRepository).getByRole("heading", { name: "知识教学视频导演 V2.4" }),
+    ).toBeInTheDocument();
+    fireEvent.click(within(workflowRepository).getByRole("button", { name: "添加工作流节点" }));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-knowledge-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+
+    const workflowNode = document.querySelector<HTMLElement>(".canvas-knowledge-workflow");
+    expect(workflowNode).not.toBeNull();
+    fireEvent.click(within(workflowNode!).getByText("模型配置"));
+    expect(within(workflowNode!).getByLabelText("策划与审核供应商")).toHaveValue("moyu-production");
+    expect(within(workflowNode!).getByLabelText("图片生成供应商")).toHaveValue("moyu-production");
+    expect(within(workflowNode!).getByLabelText("视频生成供应商")).toHaveValue("moyu-production");
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(0);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+  });
+
+  it("adds a single film node from the bottom workflow repository", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "添加AI影视工作流节点" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-ai-film-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(screen.getByLabelText("影视制作要求")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("adds a single comic drama node and collapses the bottom repository", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "添加漫剧自动工作流节点" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-comic-drama-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(screen.getByLabelText("漫剧制作要求")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("adds one commerce workflow node with product settings and collapses the repository", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "添加剧情带货工作流节点" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-commerce-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(screen.getByLabelText("带货商品名称")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+  });
+
+  it("adds one animation workflow node with only a text model and collapses the repository", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "添加动画逻辑图工作流节点" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-remotion-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(screen.getByLabelText("动画制作要求")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    fireEvent.click(screen.getByText("模型配置"));
+    expect(screen.getByLabelText("策划与审核供应商")).toHaveValue("moyu-production");
+    expect(screen.queryByLabelText("图片生成供应商")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("视频生成供应商")).not.toBeInTheDocument();
+  });
+
+  it("adds one cover workflow with portrait inputs and only text and image models", async () => {
+    render(<App />);
+    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "添加小红书封面工作流节点" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-xhs-cover-workflow")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(screen.getByLabelText("封面内容")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+      "aria-expanded",
+      "false",
+    );
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    fireEvent.click(screen.getByText("模型配置"));
+    expect(screen.getByLabelText("策划与审核供应商")).toBeInTheDocument();
+    expect(screen.getByLabelText("图片生成供应商")).toBeInTheDocument();
+    expect(screen.queryByLabelText("视频生成供应商")).not.toBeInTheDocument();
   });
 
   it("switches the asset library by media type", () => {
@@ -549,9 +679,9 @@ describe("App workspace", () => {
     });
     // 删除成功后重新拉取云端列表。
     await waitFor(() => {
-      expect(
-        invokeMock.mock.calls.filter(([cmd]) => cmd === "list_assets").length,
-      ).toBeGreaterThan(1);
+      expect(invokeMock.mock.calls.filter(([cmd]) => cmd === "list_assets").length).toBeGreaterThan(
+        1,
+      );
     });
   });
 

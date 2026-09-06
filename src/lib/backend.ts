@@ -761,7 +761,10 @@ const PROMPT_MATERIAL_BY_EXTENSION: Readonly<
  * 为剧本节点选择本地参考素材。只保存路径与轻量元数据，避免把大体积 Base64
  * 写进画布存档；文件字节会在用户真正发送时由 Rust 后端读取。
  */
-export async function pickPromptMultimodalFiles(): Promise<readonly PickedPromptMaterial[]> {
+export async function pickPromptMultimodalFiles(options?: {
+  readonly title?: string;
+  readonly kinds?: readonly PromptMaterialKind[];
+}): Promise<readonly PickedPromptMaterial[]> {
   if (!isDesktopRuntime()) return [];
   const [{ open }, { stat }] = await Promise.all([
     import("@tauri-apps/plugin-dialog"),
@@ -769,11 +772,18 @@ export async function pickPromptMultimodalFiles(): Promise<readonly PickedPrompt
   ]);
   const selection = await open({
     multiple: true,
-    title: "为剧本添加参考素材",
+    title: options?.title ?? "为剧本添加参考素材",
     filters: [
       {
-        name: "图片 / 音频 / 视频 / PDF / 文本",
-        extensions: Object.keys(PROMPT_MATERIAL_BY_EXTENSION),
+        name:
+          options?.kinds?.length === 1 && options.kinds[0] === "image"
+            ? "图片"
+            : options?.kinds
+              ? "商品图片 / PDF / 文本"
+              : "图片 / 音频 / 视频 / PDF / 文本",
+        extensions: Object.entries(PROMPT_MATERIAL_BY_EXTENSION)
+          .filter(([, definition]) => !options?.kinds || options.kinds.includes(definition.kind))
+          .map(([extension]) => extension),
       },
     ],
   });
@@ -1040,6 +1050,7 @@ export interface ExplicitMediaInput {
 }
 
 export interface StartGenerationCommand {
+  readonly workflowRunId?: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
   readonly operation: GenerationOperation;
@@ -1092,12 +1103,56 @@ export const canvasDocumentClient: CanvasDocumentClient = {
   get: (canvasId) => invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
 };
 
-/** 提示词优化模式：决定注入哪份提示词技能（Seedance 2.0 / 2.5、万相 3.0、MiniMax H3 或人物真实感图片）作为文本模型的系统提示词。 */
+/** 提示词优化模式：决定注入哪份内置提示词方法作为文本模型的系统提示词。 */
 export type PromptOptimizationMode =
-  "seedance_2_0" | "seedance_2_5" | "wan_3_0" | "minimax_h3" | "realistic_character";
+  | "seedance_2_0"
+  | "seedance_2_5"
+  | "wan_3_0"
+  | "minimax_h3"
+  | "realistic_character"
+  | "fpv_path"
+  | "fight_prompt_master"
+  | "multi_grid_storyboard"
+  | "storyboard_prompt";
 
 /** 文本技能模式；文档与视频复刻模式均使用随应用编译的完整技能上下文。 */
-export type TextSkillMode = PromptOptimizationMode | "screenplay" | "storyboard" | "viral_remix";
+export type TextSkillMode =
+  | PromptOptimizationMode
+  | "screenplay"
+  | "storyboard"
+  | "knowledge_video_director"
+  | "knowledge_video_qc"
+  | "ai_film_router"
+  | "ai_film_synopsis"
+  | "ai_film_characters"
+  | "ai_film_worldbuilding"
+  | "ai_film_treatment"
+  | "ai_film_screenplay"
+  | "ai_film_assets"
+  | "ai_film_acting"
+  | "ai_film_prompts"
+  | "ai_film_qc"
+  | "comic_drama_director"
+  | "comic_drama_art"
+  | "comic_drama_storyboard"
+  | "comic_drama_director_review"
+  | "comic_drama_art_review"
+  | "comic_drama_storyboard_review"
+  | "comic_drama_content_review"
+  | "commerce_research"
+  | "commerce_creative"
+  | "commerce_script"
+  | "commerce_storyboard"
+  | "commerce_assets"
+  | "commerce_quick"
+  | "commerce_review"
+  | "remotion_planner"
+  | "remotion_review"
+  | "xhs_cover_plan"
+  | "xhs_cover_qc"
+  | "reverse_video_analysis"
+  | "reverse_video_review"
+  | "viral_remix";
 
 /** 文本模型请求注入系统提示词的历史上下文条目。 */
 export interface PromptOptimizationContextEntry {
@@ -1133,6 +1188,7 @@ export interface PickedPromptMaterial extends PromptMultimodalInput {
 }
 
 export interface OptimizeVideoPromptCommand {
+  readonly workflowRunId?: string;
   /** 用于把文本模型调用归档到当前画布与来源节点；旧调用方可省略。 */
   readonly canvasId?: string;
   readonly sourceNodeId?: string;
@@ -1356,15 +1412,17 @@ export interface VideoFrameExtractionClient {
   startExtraction: (
     videoPath: string,
     timestamps: readonly number[],
+    /** 可选的 0~1 比例采样点；由后端在探测实际视频时长后换算，避免计划时长漂移。 */
+    percentages?: readonly number[],
   ) => Promise<VideoFrameExtractionJobRecord>;
   getJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
   cancelJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
 }
 
 export const videoFrameExtractionClient: VideoFrameExtractionClient = {
-  startExtraction: (videoPath, timestamps) =>
+  startExtraction: (videoPath, timestamps, percentages) =>
     invokeDesktop("start_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
-      command: { videoPath, timestamps: [...timestamps] },
+      command: { videoPath, timestamps: [...timestamps], percentages: [...(percentages ?? [])] },
     }),
   getJob: (jobId) =>
     invokeDesktop("get_video_frame_extraction_job", videoFrameExtractionJobRecordSchema, {

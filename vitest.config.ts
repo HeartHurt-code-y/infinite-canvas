@@ -1,11 +1,12 @@
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vitest/config";
+import { configDefaults, defineConfig } from "vitest/config";
 
 export default defineConfig({
   plugins: [react()],
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
+    exclude: [...configDefaults.exclude, "tools/remotion-runtime/**", "src-tauri/resources/**"],
     // 画布集成用例会同时挂载大量媒体节点；并行全量运行时 5 秒默认值容易产生假超时。
     testTimeout: 10_000,
     // 隔离卫生兜底：现有用例已在 afterEach 手动 restore，这里保证未来新增用例

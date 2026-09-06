@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     collections::{HashMap, HashSet},
     future::Future,
     pin::Pin,
@@ -111,7 +111,9 @@ impl AssetPort for ProviderAssetAdapter {
     }
 
     fn is_overseas_gateway(&self, provider_connection_id: &str) -> BackendResult<bool> {
-        let context = self.providers.resolve_asset_library(provider_connection_id)?;
+        let context = self
+            .providers
+            .resolve_asset_library(provider_connection_id)?;
         Ok(is_overseas_asset_base_url(&context.base_url))
     }
 
@@ -606,7 +608,10 @@ impl AssetLibrary {
         // 从暂存 URL 下载文件字节，供 multipart 直传。
         let bytes = self.port.download(request.public_url.clone()).await?;
         let mut fields = vec![
-            ("kind".to_string(), media_type_kind(request.media_type).to_string()),
+            (
+                "kind".to_string(),
+                media_type_kind(request.media_type).to_string(),
+            ),
             ("group_id".to_string(), group_id.to_string()),
         ];
         if let Some(name) = display_name.as_deref() {
@@ -727,15 +732,12 @@ impl AssetLibrary {
                 })?;
             match status.trim().to_ascii_lowercase().as_str() {
                 "active" | "ready" => {
-                    let asset_id = entry
-                        .get("id")
-                        .and_then(asset_id_string)
-                        .ok_or_else(|| {
-                            BackendError::protocol(
-                                "asset upload became active but returned no asset id",
-                                json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
-                            )
-                        })?;
+                    let asset_id = entry.get("id").and_then(asset_id_string).ok_or_else(|| {
+                        BackendError::protocol(
+                            "asset upload became active but returned no asset id",
+                            json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
+                        )
+                    })?;
                     return Ok(CloudAssetIdentity {
                         provider_connection_id: provider_connection_id.to_string(),
                         asset_id,
@@ -1425,7 +1427,10 @@ mod tests {
             Box::pin(async move { response })
         }
 
-        fn send_multipart(&self, request: MultipartAssetRequest) -> PortFuture<RawProviderResponse> {
+        fn send_multipart(
+            &self,
+            request: MultipartAssetRequest,
+        ) -> PortFuture<RawProviderResponse> {
             self.multipart_requests
                 .lock()
                 .expect("multipart lock")
@@ -1950,7 +1955,10 @@ mod tests {
 
         assert!(error.to_string().contains("/v1/assets/async"));
         // 不再发起任何 /v1/assets/list 匹配请求。
-        assert_eq!(adapter.request_paths(), vec!["/v1/assets/groups", "/v1/assets/async"]);
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/groups", "/v1/assets/async"]
+        );
     }
 
     /// 回归测试：异步契约下，轮询用的可能是任务/占位 ID，素材完成时真实素材 ID 会写回
@@ -2254,19 +2262,28 @@ mod tests {
             vec!["/v1/assets/groups", "/v1/assets/list", "/v1/assets/list"]
         );
         // multipart 通道只走一次 /v1/assets/upload。
-        assert_eq!(
-            adapter.multipart_request_paths(),
-            vec!["/v1/assets/upload"]
-        );
+        assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
         let uploads = adapter.multipart_requests.lock().expect("multipart lock");
         assert_eq!(uploads[0].path, "/v1/assets/upload");
         assert_eq!(uploads[0].file_field, "file");
         assert_eq!(uploads[0].file_name, "参考图");
         assert_eq!(uploads[0].mime_type, "image/jpeg");
         assert_eq!(uploads[0].file_bytes, vec![1, 2, 3, 4]);
-        assert!(uploads[0].fields.contains(&("kind".to_string(), "image".to_string())));
-        assert!(uploads[0].fields.contains(&("group_id".to_string(), "16".to_string())));
-        assert!(uploads[0].fields.contains(&("name".to_string(), "参考图".to_string())));
+        assert!(
+            uploads[0]
+                .fields
+                .contains(&("kind".to_string(), "image".to_string()))
+        );
+        assert!(
+            uploads[0]
+                .fields
+                .contains(&("group_id".to_string(), "16".to_string()))
+        );
+        assert!(
+            uploads[0]
+                .fields
+                .contains(&("name".to_string(), "参考图".to_string()))
+        );
     }
 
     #[tokio::test]

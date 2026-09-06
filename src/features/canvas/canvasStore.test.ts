@@ -8,7 +8,16 @@ import type {
   VideoComposerNodeData,
   ViralRemixNodeData,
 } from "../../App";
-import { createCanvasState, type CanvasDocumentV1 } from "./canvasStore";
+import {
+  createKnowledgeVideoWorkflowConfig,
+  createPromptNodeConfig,
+  type KnowledgeVideoWorkflowNodeData,
+} from "../workspace/workspaceModel";
+import { createCanvasState, type CanvasDocumentV1, type CanvasNodeEntry } from "./canvasStore";
+import {
+  createXhsCoverCheckpoint,
+  createXhsCoverOptions,
+} from "../workspace/xhsCoverWorkflowModel";
 
 const assetNode: AssetNodeData = {
   key: "asset-1",
@@ -81,6 +90,21 @@ const viralRemixNode: ViralRemixNodeData = {
   },
 };
 
+const knowledgeVideoWorkflowNode: KnowledgeVideoWorkflowNodeData = {
+  key: "knowledge-video-1",
+  kind: "knowledge_video_workflow",
+  x: 160,
+  y: 140,
+  config: createKnowledgeVideoWorkflowConfig(
+    {
+      prompt: { providerId: "provider-1", modelDefinitionId: "text-model-1" },
+      image: { providerId: "provider-1", modelDefinitionId: "image-model-1" },
+      video: { providerId: "provider-1", modelDefinitionId: "video-model-1" },
+    },
+    true,
+  ),
+};
+
 const screenplayNode = (key: string): ScreenplayNodeData => ({
   key,
   kind: "screenplay",
@@ -145,12 +169,126 @@ describe("canvas state interface", () => {
     expect(canvas.getSnapshot().selection.nodeKey).toBe("asset-1");
   });
 
+  it("exposes and patches the composite knowledge-video workflow as one node", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode, {
+      select: true,
+    });
+
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow).toEqual([knowledgeVideoWorkflowNode]);
+    expect(canvas.getSnapshot().nodeByKey.knowledgeVideoWorkflow.get("knowledge-video-1")).toBe(
+      knowledgeVideoWorkflowNode,
+    );
+    expect(
+      canvas.commands.patchNode("knowledgeVideoWorkflow", "knowledge-video-1", (node) => ({
+        ...node,
+        config: { ...node.config, brief: "解释复利" },
+      })),
+    ).toBe("applied");
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config.brief).toBe("解释复利");
+  });
+
   it("rejects duplicate keys across node families", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", assetNode);
 
     expect(() => canvas.commands.addNode("gen", { ...genNode, key: assetNode.key })).toThrow(
       "Canvas node key already exists",
+    );
+  });
+
+  it("inserts a validated subgraph in one undoable write", async () => {
+    const canvas = createCanvasState();
+    const nodes = [
+      { type: "asset", data: assetNode },
+      { type: "gen", data: genNode },
+    ] as const satisfies readonly CanvasNodeEntry[];
+    const edges = [{ id: "workflow-edge", fromKey: "asset-1", toKey: "gen-1" }];
+
+    expect(canvas.commands.insertSubgraph(nodes, edges, { selectNodeKey: "gen-1" })).toBe(
+      "applied",
+    );
+    await flushHistoryBatch();
+
+    expect(canvas.getSnapshot().nodes.asset).toEqual([assetNode]);
+    expect(canvas.getSnapshot().nodes.gen).toEqual([genNode]);
+    expect(canvas.getSnapshot().graph.edges).toEqual(edges);
+    expect(canvas.getSnapshot().selection.nodeKey).toBe("gen-1");
+    expect(canvas.getHistory()).toMatchObject({ pastCount: 1, futureCount: 0 });
+
+    expect(canvas.commands.undo()).toBe("applied");
+    expect(canvas.getSnapshot().hasNodes).toBe(false);
+    expect(canvas.getSnapshot().graph.edges).toEqual([]);
+    expect(canvas.commands.redo()).toBe("applied");
+    expect(canvas.getSnapshot().nodes.asset).toEqual([assetNode]);
+    expect(canvas.getSnapshot().nodes.gen).toEqual([genNode]);
+    expect(canvas.getSnapshot().graph.edges).toEqual(edges);
+  });
+
+  it("rejects an invalid subgraph atomically before mutating canvas state", async () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("asset", assetNode);
+    canvas.commands.addNode("gen", genNode);
+    canvas.commands.connect("asset-1", "gen-1");
+    canvas.commands.selectNode("asset-1");
+    await flushHistoryBatch();
+
+    const asset2 = { ...assetNode, key: "asset-2", assetId: "asset-source-2" };
+    const gen2 = { ...genNode, key: "gen-2" };
+    const assetEntry = { type: "asset", data: asset2 } as const;
+    const genEntry = { type: "gen", data: gen2 } as const;
+    const validEdge = { id: "asset-2->gen-2", fromKey: "asset-2", toKey: "gen-2" };
+
+    const expectAtomicRejection = (insert: () => unknown, expectedMessage: string): void => {
+      const snapshotBefore = canvas.getSnapshot();
+      const historyBefore = canvas.getHistory();
+      expect(insert).toThrow(expectedMessage);
+      expect(canvas.getSnapshot()).toBe(snapshotBefore);
+      expect(canvas.getHistory()).toEqual(historyBefore);
+    };
+
+    expectAtomicRejection(
+      () => canvas.commands.insertSubgraph([assetEntry, assetEntry], []),
+      "Canvas subgraph contains duplicate node key: asset-2",
+    );
+    expectAtomicRejection(
+      () => canvas.commands.insertSubgraph([{ type: "asset", data: assetNode }], []),
+      "Canvas node key already exists: asset-1",
+    );
+    expectAtomicRejection(
+      () => canvas.commands.insertSubgraph([assetEntry, genEntry], [validEdge, validEdge]),
+      "Canvas subgraph contains duplicate edge id: asset-2->gen-2",
+    );
+    expectAtomicRejection(
+      () =>
+        canvas.commands.insertSubgraph(
+          [assetEntry, genEntry],
+          [{ ...validEdge, id: "asset-1->gen-1" }],
+        ),
+      "Canvas edge id already exists: asset-1->gen-1",
+    );
+    expectAtomicRejection(
+      () =>
+        canvas.commands.insertSubgraph(
+          [genEntry],
+          [{ id: "missing->gen-2", fromKey: "missing", toKey: "gen-2" }],
+        ),
+      "Canvas subgraph edge endpoint is missing: missing->gen-2",
+    );
+    expectAtomicRejection(
+      () =>
+        canvas.commands.insertSubgraph(
+          [assetEntry, genEntry],
+          [{ id: "gen-2->asset-2", fromKey: "gen-2", toKey: "asset-2" }],
+        ),
+      "Canvas subgraph connection is unsupported: gen-2->asset-2",
+    );
+    expectAtomicRejection(
+      () =>
+        canvas.commands.insertSubgraph([assetEntry, genEntry], [validEdge], {
+          selectNodeKey: "missing-selection",
+        }),
+      "Canvas selected node key is missing: missing-selection",
     );
   });
 
@@ -326,6 +464,183 @@ describe("canvas document interface", () => {
     expect(restored).toMatchObject({ ok: true, promptContents: { "gen-1": prompt } });
   });
 
+  it.each([
+    "fpv_path",
+    "fight_prompt_master",
+    "multi_grid_storyboard",
+    "storyboard_prompt",
+  ] as const)(
+    "retains %s mode, edited output, conversation and reference connections after JSON restore",
+    (mode) => {
+      const source = createCanvasState();
+      const config = {
+        ...createPromptNodeConfig({ providerId: "provider-1", modelDefinitionId: "text-1" }, true),
+        mode,
+        task: "optimize",
+        sourcePrompt: "在立柱前减速",
+        generatedPrompt: "FPV 穿越站台立柱，离地 1.5 米，在时钟前停下。",
+        conversation: [
+          { id: "turn-1", role: "user", content: "参考图片设计连续穿越站台的路径" },
+          { id: "turn-2", role: "assistant", content: "FPV 从站台起飞，绕过立柱。" },
+        ],
+      } as const;
+      source.commands.addNode("asset", assetNode);
+      source.commands.addNode("gen", { key: "fpv-1", kind: "prompt", x: 0, y: 0, config });
+      source.commands.addNode("gen", genNode);
+      source.commands.connect("asset-1", "fpv-1");
+      source.commands.connect("fpv-1", "gen-1");
+
+      const serialized = JSON.stringify(source.commands.snapshotV2({}));
+      const target = createCanvasState();
+      expect(target.commands.restoreDocument(JSON.parse(serialized))).toMatchObject({ ok: true });
+      expect(target.getSnapshot().nodes.gen.find((node) => node.key === "fpv-1")?.config).toEqual(
+        config,
+      );
+      expect(target.getSnapshot().graph.edges).toEqual([
+        { id: "asset-1->fpv-1", fromKey: "asset-1", toKey: "fpv-1" },
+        { id: "fpv-1->gen-1", fromKey: "fpv-1", toKey: "gen-1" },
+      ]);
+    },
+  );
+
+  it("persists and restores the composite workflow checkpoint in V2", () => {
+    const source = createCanvasState();
+    source.commands.addNode("knowledgeVideoWorkflow", {
+      ...knowledgeVideoWorkflowNode,
+      config: {
+        ...knowledgeVideoWorkflowNode.config,
+        checkpoint: {
+          ...knowledgeVideoWorkflowNode.config.checkpoint,
+          runId: "run-1",
+          phase: "awaiting_approval",
+          planRevision: 2,
+          decision: {
+            kind: "planning",
+            question: "是否保留公式？",
+            recommendation: "保留并配图解释",
+          },
+        },
+      },
+    });
+
+    const document = source.commands.snapshotV2({});
+    expect(document.knowledgeVideoWorkflowNodes).toHaveLength(1);
+
+    const target = createCanvasState();
+    expect(target.commands.restoreDocument(document)).toMatchObject({ ok: true });
+    expect(target.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config.checkpoint).toMatchObject({
+      runId: "run-1",
+      phase: "awaiting_approval",
+      planRevision: 2,
+      decision: { question: "是否保留公式？", recommendation: "保留并配图解释" },
+    });
+  });
+
+  it("retains cover references and a submitted image task when restoring an interrupted canvas", () => {
+    const source = createCanvasState();
+    const options = {
+      ...createXhsCoverOptions(),
+      title: "三步学会排版",
+      portraits: [
+        {
+          localPath: "C:/references/person.png",
+          displayName: "人物.png",
+          kind: "image" as const,
+          mimeType: "image/png",
+          byteSize: 1024,
+        },
+      ],
+    };
+    const coverCheckpoint = {
+      ...createXhsCoverCheckpoint(),
+      taskId: "submitted-cover-task",
+      inputSignature: "saved-input",
+    };
+    source.commands.addNode("knowledgeVideoWorkflow", {
+      ...knowledgeVideoWorkflowNode,
+      config: {
+        ...knowledgeVideoWorkflowNode.config,
+        xhsCover: options,
+        checkpoint: {
+          ...knowledgeVideoWorkflowNode.config.checkpoint,
+          phase: "generating",
+          lastActivePhase: "generating",
+          runId: "cover-run",
+          xhsCover: coverCheckpoint,
+        },
+      },
+    });
+    const restored = createCanvasState();
+    expect(restored.commands.restoreDocument(source.commands.snapshotV2({}))).toMatchObject({
+      ok: true,
+    });
+    expect(restored.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config).toMatchObject({
+      xhsCover: options,
+      checkpoint: { phase: "paused", lastActivePhase: "generating", xhsCover: coverCheckpoint },
+    });
+  });
+
+  it.each(["planning", "generating", "qc", "composing"] as const)(
+    "restores an interrupted %s workflow as resumable without losing its checkpoint",
+    (phase) => {
+      const manifest = JSON.stringify({
+        schemaVersion: "knowledge-video-director.manifest.v1",
+        project: { aspectRatio: "9:16" },
+      });
+      const source = createCanvasState();
+      source.commands.addNode("knowledgeVideoWorkflow", {
+        ...knowledgeVideoWorkflowNode,
+        config: {
+          ...knowledgeVideoWorkflowNode.config,
+          checkpoint: {
+            ...knowledgeVideoWorkflowNode.config.checkpoint,
+            runId: "run-restart",
+            phase,
+            lastActivePhase: phase,
+            manifest,
+            activeCompositionJobId: "composition-live",
+            shotRuns: {
+              "shot-01": {
+                shotId: "shot-01",
+                imageTaskId: "image-task-1",
+                videoTaskId: "video-task-1",
+                referenceImagePath: "C:\\output\\cover.png",
+                clipPath: "C:\\output\\shot-01.mp4",
+                qcStatus: "pending",
+                qcReport: "等待恢复",
+                repairPrompt: null,
+                retryCount: 1,
+              },
+            },
+          },
+        },
+      });
+
+      const document = source.commands.snapshotV2({});
+      expect(document.knowledgeVideoWorkflowNodes?.[0]?.config.checkpoint.phase).toBe(phase);
+
+      const target = createCanvasState();
+      expect(target.commands.restoreDocument(document)).toMatchObject({ ok: true });
+      expect(target.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config.checkpoint).toMatchObject(
+        {
+          runId: "run-restart",
+          phase: "paused",
+          lastActivePhase: phase,
+          manifest,
+          activeCompositionJobId: "composition-live",
+          shotRuns: {
+            "shot-01": {
+              imageTaskId: "image-task-1",
+              videoTaskId: "video-task-1",
+              clipPath: "C:\\output\\shot-01.mp4",
+              retryCount: 1,
+            },
+          },
+        },
+      );
+    },
+  );
+
   it("normalizes optional V1 arrays and ignores dangling legacy edges with a warning", () => {
     const canvas = createCanvasState();
     const document: CanvasDocumentV1 = {
@@ -343,6 +658,7 @@ describe("canvas document interface", () => {
     expect(restored).toMatchObject({ ok: true });
     expect(restored.ok && restored.warnings).toContain("已忽略端点缺失的连线: dangling");
     expect(canvas.getSnapshot().nodes.videoDownloader).toEqual([]);
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow).toEqual([]);
     expect(canvas.getSnapshot().graph.edges).toEqual([]);
   });
 

@@ -6,14 +6,29 @@ use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
     BackendState,
+    commerce_sources::{self, CommerceSource},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
+    cover_images::{
+        self, NormalizeCoverImageCommand, NormalizedCoverImage, ResumeCoverImageResultCommand,
+    },
     downloader::{VideoDownloadJobRecord, VideoDownloaderEngineStatus},
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider::MOYU_ADAPTER_ID,
+    remotion_renderer::{
+        RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
+    },
+    reverse_video::{
+        DeliverReverseVideoCommand, ReverseVideoDelivery, ReverseVideoEvidence,
+        ReverseVideoLearning, SaveReverseVideoEvidenceCommand,
+    },
     storage::now_ms,
+    storage::workflow_history::{
+        SaveWorkflowHistoryCommand, WorkflowHistoryDetail, WorkflowHistoryPage,
+        WorkflowHistoryQuery, WorkflowHistoryRecord,
+    },
     types::{
         AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
         ConnectivityTestResult, CreateRealPersonAuthLinkCommand, CredentialStatus,
@@ -29,6 +44,122 @@ use super::{
         UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
+
+#[tauri::command]
+pub async fn save_reverse_video_evidence(
+    state: State<'_, BackendState>,
+    command: SaveReverseVideoEvidenceCommand,
+) -> CommandResult<ReverseVideoEvidence> {
+    let service = state.reverse_video.clone();
+    tokio::task::spawn_blocking(move || service.save_evidence(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("视觉证据保存失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn get_reverse_video_learning(
+    state: State<'_, BackendState>,
+) -> CommandResult<ReverseVideoLearning> {
+    let service = state.reverse_video.clone();
+    tokio::task::spawn_blocking(move || service.get_learning())
+        .await
+        .map_err(|error| BackendError::Conflict(format!("案例统计读取失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn deliver_reverse_video(
+    state: State<'_, BackendState>,
+    command: DeliverReverseVideoCommand,
+) -> CommandResult<ReverseVideoDelivery> {
+    let service = state.reverse_video.clone();
+    tokio::task::spawn_blocking(move || service.deliver(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("反推交付保存失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn fetch_commerce_sources(urls: Vec<String>) -> CommandResult<Vec<CommerceSource>> {
+    commerce_sources::fetch_sources(urls).await.command()
+}
+
+#[tauri::command]
+pub fn save_workflow_history(
+    state: State<'_, BackendState>,
+    command: SaveWorkflowHistoryCommand,
+) -> CommandResult<WorkflowHistoryRecord> {
+    state.storage.save_workflow_history(command).command()
+}
+
+#[tauri::command]
+pub fn list_workflow_history(
+    state: State<'_, BackendState>,
+    query: WorkflowHistoryQuery,
+) -> CommandResult<WorkflowHistoryPage> {
+    state.storage.list_workflow_history(query).command()
+}
+
+#[tauri::command]
+pub fn get_workflow_history(
+    state: State<'_, BackendState>,
+    id: String,
+) -> CommandResult<WorkflowHistoryDetail> {
+    state.storage.get_workflow_history(&id).command()
+}
+
+#[tauri::command]
+pub fn recover_workflow_history(state: State<'_, BackendState>) -> CommandResult<u32> {
+    state.storage.recover_workflow_history().command()
+}
+
+#[tauri::command]
+pub async fn normalize_cover_image(
+    state: State<'_, BackendState>,
+    command: NormalizeCoverImageCommand,
+) -> CommandResult<NormalizedCoverImage> {
+    state.cover_images.normalize(command).await.command()
+}
+
+#[tauri::command]
+pub async fn resume_cover_image_result(
+    state: State<'_, BackendState>,
+    command: ResumeCoverImageResultCommand,
+) -> CommandResult<GenerationResultRecord> {
+    cover_images::resume_cover_image_result(&state.storage, &state.local_results, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub fn remotion_renderer_preflight(state: State<'_, BackendState>) -> RemotionRendererPreflight {
+    state.remotion_renderer.preflight()
+}
+
+#[tauri::command]
+pub fn start_remotion_render(
+    state: State<'_, BackendState>,
+    command: StartRemotionRenderCommand,
+) -> CommandResult<RemotionRenderRecord> {
+    state.remotion_renderer.start(command).command()
+}
+
+#[tauri::command]
+pub fn get_remotion_render(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<RemotionRenderRecord> {
+    state.remotion_renderer.get(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_remotion_render(state: State<'_, BackendState>, job_id: String) -> CommandResult<()> {
+    state.remotion_renderer.cancel(&job_id).command()
+}
 
 #[tauri::command]
 pub fn upsert_provider_connection(
@@ -788,7 +919,11 @@ pub fn start_video_frame_extraction(
 ) -> CommandResult<VideoFrameExtractionJobRecord> {
     state
         .frame_extractor
-        .start_extraction(&command.video_path, command.timestamps)
+        .start_extraction_with_percentages(
+            &command.video_path,
+            command.timestamps,
+            command.percentages,
+        )
         .command()
 }
 

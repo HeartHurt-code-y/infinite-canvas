@@ -18,6 +18,9 @@ export default defineConfig([
     "src-tauri/skills/**",
     "src-tauri/gen/**",
     "src-tauri/target/**",
+    "src-tauri/resources/remotion-runtime/**",
+    // 独立的本地渲染工程，由自身的校验测试和实际渲染验证。
+    "tools/remotion-runtime/**",
   ]),
   {
     files: ["**/*.{ts,tsx}"],

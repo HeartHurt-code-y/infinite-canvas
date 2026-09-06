@@ -33,3 +33,9 @@ coverage
 .zcode/
 .video_agent/
 .workbuddy/
+
+# Generated, bundled local animation engine (rebuilt by remotion:prepare)
+src-tauri/resources/remotion-runtime/
+tools/remotion-runtime/.remotion/
+tools/remotion-runtime/.smoke/
+tools/remotion-runtime/.build-node/

@@ -716,7 +716,9 @@ async function insertMention(generationNode: HTMLElement, name: string): Promise
   fireEvent.click(within(generationNode).getByRole("button", { name: /引用素材到提示词/ }));
   const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
   fireEvent.click(within(menu).getByRole("option", { name: new RegExp(name) }));
-  expect(within(generationNode).getByText(`@${name}`)).toBeInTheDocument();
+  expect(
+    within(generationNode).getByText(`@${name}`, { exact: false, selector: ".mention-chip" }),
+  ).toBeInTheDocument();
 }
 
 function submittedGenerationCommand(): Record<string, unknown> {
@@ -1283,6 +1285,476 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(generationCommand["prompt"]).toEqual([{ kind: "text", text: customPrompt }]);
   });
 
+  it("上游输出未变时保留手改和断线引用，保存恢复不按新编号重绑", async () => {
+    let storedDocument: unknown = null;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document") {
+        if (storedDocument == null) return Promise.reject(new Error("canvas not found"));
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "未命名画布",
+          document: storedDocument,
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      }
+      if (command === "save_canvas_document") {
+        const save = args?.["command"] as { id: string; title: string; document: unknown };
+        storedDocument = structuredClone(save.document);
+        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+      }
+      return baseInvokeImplementation(command);
+    });
+    const view = render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "@图片1 开场" },
+    });
+    const videoNode = await addGenerationNode("视频", 920, 180);
+    const firstAsset = await addAssetNode("图片", "站台参考图", 20, 500);
+    const secondAsset = await addAssetNode("图片", "站台参考图", 20, 760);
+    connectAssetToGeneration(firstAsset, videoNode);
+    connectAssetToGeneration(secondAsset, videoNode);
+    connectPromptToGeneration(promptNode, videoNode);
+    const videoKey = videoNode.dataset["connectionTarget"]!;
+    const firstKey = firstAsset.dataset["connectionTarget"]!;
+    const secondKey = secondAsset.dataset["connectionTarget"]!;
+    const input = within(videoNode).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    const originalChip = await waitFor(() => {
+      const chip = input.querySelector<HTMLElement>("[data-mention-id]")!;
+      expect(chip).toHaveAttribute("data-canvas-node-key", firstKey);
+      return chip;
+    });
+    const mentionId = originalChip.dataset["mentionId"]!;
+    appendPromptText(input, "，保留我的手改");
+    fireEvent.click(within(videoNode).getAllByRole("button", { name: "解除连线：站台参考图" })[0]!);
+    await waitFor(() => {
+      expect(input.querySelector(`[data-mention-id="${mentionId}"]`)).toHaveClass("is-stale");
+      expect(input).toHaveTextContent("保留我的手改");
+    });
+    expect(input.querySelector("[data-mention-id]")).toHaveAttribute(
+      "data-canvas-node-key",
+      firstKey,
+    );
+
+    view.unmount();
+    expect(storedDocument).not.toBeNull();
+    render(<App />);
+    const restoredVideo = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(`[data-connection-target="${videoKey}"]`);
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    await waitForNodeAccessible(restoredVideo);
+    const restoredInput = within(restoredVideo).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    await waitFor(() => {
+      expect(restoredInput.querySelector(`[data-mention-id="${mentionId}"]`)).toHaveClass(
+        "is-stale",
+      );
+      expect(restoredInput).toHaveTextContent("保留我的手改");
+    });
+    expect(restoredInput.querySelector("[data-mention-id]")).toHaveAttribute(
+      "data-canvas-node-key",
+      firstKey,
+    );
+
+    fireEvent.change(screen.getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "@图片1 上游新版本" },
+    });
+    await waitFor(() => {
+      expect(restoredInput).toHaveTextContent("上游新版本");
+      expect(restoredInput).not.toHaveTextContent("保留我的手改");
+      expect(restoredInput.querySelector("[data-mention-id]")).toHaveAttribute(
+        "data-canvas-node-key",
+        secondKey,
+      );
+    });
+  });
+
+  it("新连接的提示词源即使输出相同，也会重新同步下游内容", async () => {
+    render(<App />);
+    const firstSource = await addPromptNode(260, 180);
+    fireEvent.change(within(firstSource).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "上游共同输出" },
+    });
+    const target = await addGenerationNode("视频", 920, 180);
+    connectPromptToGeneration(firstSource, target);
+    const input = within(target).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    await waitFor(() => expect(input).toHaveTextContent("上游共同输出"));
+    setPromptText(input, "下游临时修改");
+    const secondSource = await addPromptNode(260, 720);
+    fireEvent.change(within(secondSource).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "上游共同输出" },
+    });
+    expect(input).toHaveTextContent("下游临时修改");
+    connectPromptToGeneration(secondSource, target);
+    await waitFor(() => expect(input).toHaveTextContent("上游共同输出"));
+    expect(input).not.toHaveTextContent("下游临时修改");
+  });
+
+  it("FPV 路径支持仅图片生成、基于手改输出继续优化并下发到视频请求", async () => {
+    const firstPrompt = "FPV 从雨夜站台低空起飞，绕过立柱后沿铁轨向前飞行。";
+    const editedPrompt = `${firstPrompt} 离地 1.5 米，终点停在站台尽头的时钟前。`;
+    const optimizedPrompt = `${editedPrompt} 在立柱前减速，保持朝向前方并连续出弯。`;
+    const cleanImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-clean",
+      name: "站台干净底图",
+      previewUrl: "https://cdn.example.com/station-clean.jpg",
+      assetUrl: "https://cdn.example.com/station-clean.jpg",
+    };
+    let promptRunCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "list_assets") return Promise.resolve([...CLOUD_ASSETS, cleanImage]);
+      if (command === "run_prompt_node") {
+        const output = promptRunCount++ === 0 ? firstPrompt : optimizedPrompt;
+        return Promise.resolve({ optimizedPrompt: output, rawModelOutput: output });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: "fpv_path" },
+    });
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveDisplayValue("FPV 路径");
+
+    const imageAsset = await addAssetNode("图片", "站台参考图", 20, 700);
+    connectAssetToGeneration(imageAsset, promptNode);
+    await waitFor(() =>
+      expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+        "站台参考图",
+      ),
+    );
+    expect(within(promptNode).getByRole("textbox", { name: "创意或需求" })).toHaveValue("");
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+
+    const output = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
+    await waitFor(() => expect(output).toHaveValue(firstPrompt));
+    const firstCommand = invokeMock.mock.calls.find(
+      ([command]) => command === "run_prompt_node",
+    )?.[1] as { command: Record<string, unknown> };
+    expect(firstCommand.command).toMatchObject({
+      providerConnectionId: PROVIDER.id,
+      modelDefinitionId: TEXT_MODEL.id,
+      mode: "fpv_path",
+      task: "generate",
+      contextHistory: [],
+      visionImages: [
+        {
+          displayName: "站台参考图",
+          target: {
+            kind: "asset",
+            assetId: "asset-image-1",
+            mediaType: "image",
+            providerConnectionId: PROVIDER.id,
+          },
+        },
+      ],
+    });
+    expect(firstCommand.command["userPrompt"]).toMatch(/\S/);
+
+    fireEvent.change(output, { target: { value: editedPrompt } });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
+    expect(within(promptNode).getByRole("textbox", { name: "待优化提示词" })).toHaveValue("");
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(output).toHaveValue(optimizedPrompt));
+
+    const secondCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[1]?.[1] as { command: Record<string, unknown> };
+    expect(secondCommand.command).toMatchObject({
+      mode: "fpv_path",
+      task: "optimize",
+      visionImages: firstCommand.command["visionImages"],
+    });
+    expect(secondCommand.command["userPrompt"]).toMatch(/\S/);
+    expect(secondCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        { role: "第 1 条 · 你", content: firstCommand.command["userPrompt"] },
+        { role: "第 2 条 · 提示词助手", content: firstPrompt },
+        { role: "当前输出提示词", content: editedPrompt },
+      ]),
+    );
+
+    const videoNode = await addGenerationNode("视频", 920, 180);
+    connectPromptToGeneration(promptNode, videoNode);
+    await waitFor(() =>
+      expect(
+        within(videoNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      ).toHaveTextContent(optimizedPrompt),
+    );
+    fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("start_generation", expect.anything()),
+    );
+    expect(submittedGenerationCommands().at(-1)?.["prompt"]).toEqual([
+      { kind: "text", text: optimizedPrompt },
+    ]);
+    expect(submittedGenerationCommands().at(-1)?.["explicitMedia"]).toEqual([]);
+
+    const cleanReference = await addAssetNode("图片", cleanImage.name, 20, 700);
+    connectAssetToGeneration(cleanReference, videoNode);
+    const videoReferences = within(videoNode).getByRole("list", {
+      name: "生成参考素材，按传入顺序排列",
+    });
+    expect(videoReferences).toHaveTextContent(cleanImage.name);
+    expect(videoReferences).not.toHaveTextContent("站台参考图");
+    await waitFor(() =>
+      expect(within(videoNode).getByRole("button", { name: "开始视频生成" })).toBeEnabled(),
+    );
+    fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+    expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual([
+      {
+        target: {
+          kind: "asset",
+          providerConnectionId: PROVIDER.id,
+          assetId: cleanImage.id,
+          canvasNodeKey: cleanReference.dataset["connectionTarget"],
+          mediaType: "image",
+        },
+        role: "",
+        displayNameSnapshot: cleanImage.name,
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ]);
+
+    // 下游干净底图的连接不改变提示词节点实际读取的路径图。
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node"),
+      ).toHaveLength(3),
+    );
+    const thirdCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[2]?.[1] as { command: Record<string, unknown> };
+    expect(thirdCommand.command["visionImages"]).toEqual(firstCommand.command["visionImages"]);
+  });
+
+  it.each([
+    ["FPV 路径", "fpv_path", "从站台入口穿过两根立柱，在时钟前停下，飞行高度 1.5 米"],
+    ["打斗导演", "fight_prompt_master", "SD2.5，15 秒，超高速，雨夜站台两人徒手近战"],
+    ["多宫格分镜", "multi_grid_storyboard", "6 宫格，12 秒，电影写实，女孩在站台发现一封信"],
+    ["故事板", "storyboard_prompt", "咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格"],
+  ])("%s 无图时拦截空请求，并允许仅文字描述生成", async (_label, mode, userPrompt) => {
+    const generatedPrompt = `根据要求完成的提示词方案：${userPrompt}`;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        return Promise.resolve({
+          optimizedPrompt: generatedPrompt,
+          rawModelOutput: generatedPrompt,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: mode },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    expect(await within(promptNode).findByRole("alert")).toHaveTextContent(/\S/);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node")).toEqual([]);
+
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    expect(await within(promptNode).findByRole("alert")).toHaveTextContent(
+      "请输入需要优化的提示词。",
+    );
+    expect(invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node")).toEqual([]);
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成" }));
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: userPrompt },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(within(promptNode).getByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
+        generatedPrompt,
+      ),
+    );
+    expect(within(promptNode).queryByRole("alert")).not.toBeInTheDocument();
+    const promptCommands = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    );
+    expect(promptCommands).toHaveLength(1);
+    expect(promptCommands[0]?.[1]).toMatchObject({
+      command: {
+        mode,
+        task: "generate",
+        userPrompt,
+        contextHistory: [],
+        visionImages: [],
+      },
+    });
+  });
+
+  it.each([
+    ["打斗导演", "fight_prompt_master"],
+    ["多宫格分镜", "multi_grid_storyboard"],
+    ["故事板", "storyboard_prompt"],
+  ])("%s 保留素材补问、完整方案与手改输出，并下发给图片和视频节点", async (label, mode) => {
+    const isMultiGrid = mode === "multi_grid_storyboard";
+    const isStoryboard = mode === "storyboard_prompt";
+    const clarification = isMultiGrid
+      ? "请补充 4 / 6 / 9 宫格、目标时长和风格，并确认女孩发现信封的剧情建议。"
+      : isStoryboard
+        ? "这张站台参考图将用于品牌广告还是电影叙事？请确认故事的核心情绪。"
+        : "请补充目标视频模型（SD2.0 / SD2.5 / H3）、时长和速度档。";
+    const generatedPrompts = isMultiGrid
+      ? "## 图片提示词\n2×3 六宫格，按阅读顺序展示女孩走入站台、发现信封、捡起、打开、阅读与抬头。\n\n## 视频提示词\n第一格缓慢推近，第二格以视线引导发现信封，逐格延续角色动作与场景光线。\n\n## 时长分配\n| 格 | 秒 |\n| --- | --- |\n| 1 | 2 |\n| 2 | 2 |\n| 3 | 2 |\n| 4 | 2 |\n| 5 | 2 |\n| 6 | 2 |\n总时长 12 秒。\n\n## 资产清单\n角色：红衣女孩；场景：雨夜站台；道具：信封。"
+      : isStoryboard
+        ? "生成一张 16:9 横向咖啡品牌故事板，2 行×3 列，共 6 格，按从左到右、从上到下阅读。全板采用温暖手绘风格、统一格间留白与角色设计。红衣女孩始终保留短发与左手纸杯。第一格：站台全景，清晨出发；第二格：中景等候；第三格：手握咖啡特写；第四格：目光转向抵站列车；第五格：与朋友相遇；第六格：双人共享温暖时刻与自然出现的咖啡杯。动作、服装、场景与光线跨格连续；无多余文字、水印或格外画面。"
+        : "## 高强度\n角色贴身抢攻，防守方格挡后反击。\n\n## 中间型\n双方试探后交锋。\n\n## 慢节奏\n凝视、蓄势，再完成一组攻防。";
+    const editedPrompt = `${generatedPrompts}\n手动补充：保留红衣角色的左手动作。`;
+    const optimizedPrompt = `${editedPrompt}\n优化：镜头清晰交代动作因果并保持场景一致。`;
+    const replies = [clarification, generatedPrompts, optimizedPrompt];
+    let runCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        const reply = replies[runCount++]!;
+        return Promise.resolve({ optimizedPrompt: reply, rawModelOutput: reply });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: mode },
+    });
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveDisplayValue(label);
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveAccessibleDescription(
+      isMultiGrid
+        ? /在对话中指定 4 \/ 6 \/ 9 宫格、目标时长和风格，已填写的参数会继续沿用/
+        : isStoryboard
+          ? /输出可直接交给图片节点的整张故事板提示词/
+          : /在对话中指定目标视频模型（SD2.0 \/ SD2.5 \/ H3）/,
+    );
+    const referenceImage = await addAssetNode("图片", "站台参考图", 20, 700);
+    connectAssetToGeneration(referenceImage, promptNode);
+    expect(within(promptNode).getByRole("textbox", { name: "创意或需求" })).toHaveValue("");
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    const output = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
+    await waitFor(() => expect(output).toHaveValue(clarification));
+    expect(within(promptNode).getByRole("log", { name: "提示词多轮对话" })).toHaveTextContent(
+      clarification,
+    );
+    const firstCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[0]?.[1] as {
+      command: Record<string, unknown>;
+    };
+    expect(firstCommand.command).toMatchObject({
+      mode,
+      task: "generate",
+      modelDefinitionId: TEXT_MODEL.id,
+      contextHistory: [],
+      visionImages: [
+        { displayName: "站台参考图", target: { kind: "asset", assetId: "asset-image-1" } },
+      ],
+    });
+    if (isStoryboard) {
+      expect(firstCommand.command["userPrompt"]).toContain("实际可见的人物、场景与风格");
+      expect(firstCommand.command["userPrompt"]).toContain("不把参考画面当作已确认的剧情");
+    }
+    const parameters = isMultiGrid
+      ? "6 宫格，12 秒，电影写实，采用女孩发现信封的剧情"
+      : isStoryboard
+        ? "咖啡品牌广告，6 格，16:9，温暖手绘风格，女孩在站台与朋友重逢"
+        : "SD2.5，15 秒，超高速，站台上的两人徒手近战";
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: parameters },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() => expect(output).toHaveValue(generatedPrompts));
+    fireEvent.change(output, { target: { value: editedPrompt } });
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(output).toHaveValue(optimizedPrompt));
+    const thirdCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[2]?.[1] as {
+      command: Record<string, unknown>;
+    };
+    expect(thirdCommand.command).toMatchObject({
+      mode,
+      task: "optimize",
+      visionImages: firstCommand.command["visionImages"],
+      contextHistory: [
+        { role: "第 1 条 · 你", content: firstCommand.command["userPrompt"] },
+        { role: "第 2 条 · 提示词助手", content: clarification },
+        { role: "第 3 条 · 你", content: parameters },
+        { role: "第 4 条 · 提示词助手", content: generatedPrompts },
+        { role: "当前输出提示词", content: editedPrompt },
+      ],
+    });
+    expect(thirdCommand.command["userPrompt"]).toMatch(/继续优化当前输出/);
+    expect(submittedGenerationCommands()).toHaveLength(0);
+    const videoNode = await addGenerationNode("视频", 920, 180);
+    connectPromptToGeneration(promptNode, videoNode);
+    await waitFor(() => expect(within(videoNode).getByText("随提示词")).toBeInTheDocument());
+    fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("start_generation", expect.anything()),
+    );
+    expect(submittedGenerationCommand()["prompt"]).toEqual([
+      { kind: "text", text: optimizedPrompt },
+    ]);
+    expect(submittedGenerationCommand()["explicitMedia"]).toEqual([
+      {
+        target: {
+          kind: "asset",
+          providerConnectionId: PROVIDER.id,
+          assetId: "asset-image-1",
+          canvasNodeKey: referenceImage.dataset["connectionTarget"],
+          mediaType: "image",
+        },
+        role: "",
+        displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ]);
+
+    const imageNode = await addGenerationNode("图片", 720, 520);
+    connectPromptToGeneration(promptNode, imageNode);
+    await waitFor(() =>
+      expect(
+        within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      ).toHaveTextContent("优化：镜头清晰交代动作因果并保持场景一致。"),
+    );
+    fireEvent.click(within(imageNode).getByRole("button", { name: "开始图片生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+    expect(submittedGenerationCommands().at(-1)?.["prompt"]).toEqual([
+      { kind: "text", text: optimizedPrompt },
+    ]);
+  });
+
   it("多轮生成与优化会携带之前的完整对话上下文", async () => {
     const firstPrompt = "电影感雨夜站台，女孩撑伞等候列车。";
     const secondPrompt = `${firstPrompt} 加入车灯在水面的暖色反射。`;
@@ -1513,86 +1985,99 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(visionImages[0]!["displayName"]).toBe("prompt-ref.png");
   });
 
-  it("已保存的视频产物可连入提示词节点并作为多模态视频素材传出", async () => {
-    invokeMock.mockImplementation((command) => {
-      if (command === "get_canvas_document") {
-        return Promise.resolve({
-          id: "canvas-scene-output-prompt-video",
-          title: "未命名画布",
-          document: {
-            version: 1,
-            assetNodes: [],
-            genNodes: [],
-            resultNodes: [],
-            outputNodes: [
-              {
-                key: "output-prompt-video",
-                resultKey: "output-prompt-video-task#2",
-                sourceNodeId: "output-prompt-video-node",
-                taskId: "output-prompt-video-task",
-                mediaType: "video",
-                finalPath: "C:\\generated\\prompt-motion.mp4",
-                name: "prompt-motion.mp4",
-                aspectRatio: 16 / 9,
-                x: 40,
-                y: 180,
-              },
-            ],
-            assetEdges: [],
-            view: { zoom: 74, pan: { x: 0, y: 0 } },
-            prompts: {},
-          },
-          revision: 1,
-          createdAt: 0,
-          updatedAt: 0,
-        });
-      }
-      if (command === "run_prompt_node") {
-        return Promise.resolve({
-          optimizedPrompt: "参考该视频片段，延续运镜与节奏写提示词。",
-          rawModelOutput: "参考该视频片段，延续运镜与节奏写提示词。",
-        });
-      }
-      return baseInvokeImplementation(command);
-    });
-    render(<App />);
+  it.each([
+    ["默认模式", "seedance_2_5", "参考这段生成视频，补充镜头语言"],
+    ["打斗导演仅视频", "fight_prompt_master", ""],
+    ["多宫格分镜仅视频", "multi_grid_storyboard", ""],
+    ["故事板仅视频", "storyboard_prompt", ""],
+  ])(
+    "%s：已保存的视频产物可连入提示词节点并作为多模态视频素材传出",
+    async (_label, mode, userPrompt) => {
+      invokeMock.mockImplementation((command) => {
+        if (command === "get_canvas_document") {
+          return Promise.resolve({
+            id: "canvas-scene-output-prompt-video",
+            title: "未命名画布",
+            document: {
+              version: 1,
+              assetNodes: [],
+              genNodes: [],
+              resultNodes: [],
+              outputNodes: [
+                {
+                  key: "output-prompt-video",
+                  resultKey: "output-prompt-video-task#2",
+                  sourceNodeId: "output-prompt-video-node",
+                  taskId: "output-prompt-video-task",
+                  mediaType: "video",
+                  finalPath: "C:\\generated\\prompt-motion.mp4",
+                  name: "prompt-motion.mp4",
+                  aspectRatio: 16 / 9,
+                  x: 40,
+                  y: 180,
+                },
+              ],
+              assetEdges: [],
+              view: { zoom: 74, pan: { x: 0, y: 0 } },
+              prompts: {},
+            },
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+          });
+        }
+        if (command === "run_prompt_node") {
+          return Promise.resolve({
+            optimizedPrompt: "参考该视频片段，延续运镜与节奏写提示词。",
+            rawModelOutput: "参考该视频片段，延续运镜与节奏写提示词。",
+          });
+        }
+        return baseInvokeImplementation(command);
+      });
+      render(<App />);
 
-    const output = await waitFor(() => {
-      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--video");
-      expect(node).not.toBeNull();
-      return node!;
-    });
-    const promptNode = await addPromptNode(260, 180);
-    await waitFor(() =>
-      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
-    );
-    connectAssetToGeneration(output, promptNode);
-    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
-    expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
-      "prompt-motion.mp4",
-    );
+      const output = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--video");
+        expect(node).not.toBeNull();
+        return node!;
+      });
+      const promptNode = await addPromptNode(260, 180);
+      await waitFor(() =>
+        expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+      );
+      fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+        target: { value: mode },
+      });
+      connectAssetToGeneration(output, promptNode);
+      await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
+      expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+        "prompt-motion.mp4",
+      );
 
-    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
-      target: { value: "参考这段生成视频，补充镜头语言" },
-    });
-    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
-    await waitFor(() =>
-      expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
-    );
-    const promptCommand = invokeMock.mock.calls.find(
-      ([command]) => command === "run_prompt_node",
-    )?.[1] as { command: Record<string, unknown> };
-    // 视频产物走多模态素材通道，不进入视觉理解图片列表。
-    expect(promptCommand.command["visionImages"]).toEqual([]);
-    expect(promptCommand.command["multimodalInputs"]).toEqual([
-      {
-        localPath: "C:\\generated\\prompt-motion.mp4",
-        displayName: "prompt-motion.mp4",
-        kind: "video",
-        mimeType: "video/mp4",
-      },
-    ]);
-  });
+      fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+        target: { value: userPrompt },
+      });
+      fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+      await waitFor(() =>
+        expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
+      );
+      const promptCommand = invokeMock.mock.calls.find(
+        ([command]) => command === "run_prompt_node",
+      )?.[1] as { command: Record<string, unknown> };
+      expect(promptCommand.command["mode"]).toBe(mode);
+      expect(promptCommand.command["userPrompt"]).toMatch(/\S/);
+      // 视频产物走多模态素材通道，不进入视觉理解图片列表。
+      expect(promptCommand.command["visionImages"]).toEqual([]);
+      expect(promptCommand.command["multimodalInputs"]).toEqual([
+        {
+          localPath: "C:\\generated\\prompt-motion.mp4",
+          displayName: "prompt-motion.mp4",
+          kind: "video",
+          mimeType: "video/mp4",
+        },
+      ]);
+    },
+  );
 
   it("视频节点自动继承提示词节点的视觉参考图，无需重复连线即可生成", async () => {
     const generatedPrompt = "电影感环绕镜头，角色与机甲对峙，衣摆随风摆动。";
@@ -1656,6 +2141,67 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         contentIndex: 1,
       },
     ]);
+  });
+
+  it("已有连线切换 FPV 路径模式时实时移除并恢复视频自动继承参考图", async () => {
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "沿站台向前飞行，保持连续镜头。" },
+    });
+    const pathImage = await addAssetNode("图片", "站台参考图", 20, 700);
+    connectAssetToGeneration(pathImage, promptNode);
+    const videoNode = await addGenerationNode("视频", 920, 520);
+    connectPromptToGeneration(promptNode, videoNode);
+    const modeSelect = within(promptNode).getByLabelText("提示词技能模式");
+    const generate = within(videoNode).getByRole("button", { name: "开始视频生成" });
+    const inheritedMedia = [
+      {
+        target: {
+          kind: "asset",
+          providerConnectionId: PROVIDER.id,
+          assetId: "asset-image-1",
+          canvasNodeKey: pathImage.dataset["connectionTarget"],
+          mediaType: "image",
+        },
+        role: "",
+        displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ];
+
+    expect(modeSelect).toHaveValue("seedance_2_5");
+    await waitFor(() => expect(within(videoNode).getByText("随提示词")).toBeInTheDocument());
+    fireEvent.click(generate);
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommands()[0]?.["explicitMedia"]).toEqual(inheritedMedia);
+
+    fireEvent.change(modeSelect, { target: { value: "fpv_path" } });
+    await waitFor(() =>
+      expect(
+        within(videoNode).queryByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).not.toBeInTheDocument(),
+    );
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+    expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual([]);
+
+    fireEvent.change(modeSelect, { target: { value: "seedance_2_5" } });
+    await waitFor(() =>
+      expect(
+        within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).toHaveTextContent("站台参考图"),
+    );
+    expect(within(videoNode).getByText("随提示词")).toBeInTheDocument();
+    await waitFor(() => expect(generate).toBeEnabled());
+    fireEvent.click(generate);
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(3));
+    expect(submittedGenerationCommands()[2]?.["explicitMedia"]).toEqual(inheritedMedia);
   });
 
   it("保存防抖尚未到期就退出，重启后仍恢复退出前创建的节点", async () => {
@@ -3202,7 +3748,19 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
     const command = submittedGenerationCommand();
-    expect(command["explicitMedia"]).toEqual([]);
+    expect(command["explicitMedia"]).toMatchObject([
+      {
+        target: {
+          kind: "local_result",
+          generationTaskId: "upstream-video-task",
+          resultIndex: 3,
+          canvasNodeKey: "output-upstream-video",
+          mediaType: "video",
+        },
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ]);
     const prompt = command["prompt"] as readonly { kind: string; mentionId?: string }[];
     const mentionId = prompt.find((segment) => segment.kind === "media_reference")?.mentionId;
     expect(mentionId).toMatch(/^mention-/);
@@ -3421,6 +3979,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   it("滚轮以鼠标位置为锚点缩放画布", async () => {
     render(<App />);
 
+    // 等待桌面恢复与首次布局完成；过早派发 wheel 时 d3 已能缩放，
+    // 但 React Flow 的 onMoveEnd 尚未订阅，缩放标签无法收到该次手势结果。
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith(
+        "plugin:event|listen",
+        expect.objectContaining({ event: "tauri://close-requested" }),
+      ),
+    );
+
     const pane = document.querySelector<HTMLElement>(".react-flow__pane");
     expect(pane).not.toBeNull();
     // d3-zoom 的 wheel 处理不依赖 event.view，可直接用 fireEvent。
@@ -3446,24 +4013,25 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     setPromptText(promptInput, "开场 ");
     fireEvent.keyDown(promptInput, { key: "@" });
     const instanceQuery = assetNode.dataset["connectionTarget"]!.slice(-6);
-    promptInput.appendChild(document.createTextNode("@"));
-    placeCaretAtEnd(promptInput);
-    fireEvent.input(promptInput);
+    appendPromptText(promptInput, "@");
 
     const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
-    promptInput.appendChild(document.createTextNode(instanceQuery));
-    placeCaretAtEnd(promptInput);
-    fireEvent.input(promptInput);
+    appendPromptText(promptInput, instanceQuery);
     await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+    fireEvent.compositionStart(promptInput);
     fireEvent.keyDown(promptInput, { key: "Enter", isComposing: true });
     expect(promptInput.querySelector(".mention-chip")).toBeNull();
+    fireEvent.compositionEnd(promptInput);
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
     fireEvent.click(within(menu).getByRole("option", { name: /站台参考图/ }));
 
-    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图");
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图 · 图片1");
     expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
   });
 
-  it("多素材连到视频节点后按 @ 顺序提交稳定引用，且不重复写入 explicitMedia", async () => {
+  it("多素材连到视频节点后统一冻结连线编号，@ 引用与媒体清单一一对应", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);
     const imageAsset = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3558,10 +4126,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       },
       { kind: "text", text: "，镜头向右推进" },
     ]);
-    expect(command["explicitMedia"]).toEqual([]);
+    expect(command["explicitMedia"]).toMatchObject([
+      { target: { canvasNodeKey: imageNodeKey }, typePosition: 1, contentIndex: 1 },
+      { target: { canvasNodeKey: videoNodeKey }, typePosition: 1, contentIndex: 2 },
+    ]);
   });
 
-  it("粘贴含素材名的提示词会被自动识别为高亮引用 chip，提交与手动 @ 等价", async () => {
+  it("粘贴含显式 @ 的提示词会被识别为高亮引用 chip，提交与手动选择等价", async () => {
     render(<App />);
     const imageGeneration = await addGenerationNode("图片", 518, 222);
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3573,7 +4144,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     // 粘贴事件：clipboardData 提供 text/plain，默认行为被组件拦截改为纯文本插入。
     placeCaretAtEnd(promptInput);
     fireEvent.paste(promptInput, {
-      clipboardData: { getData: () => "夜晚的站台参考图缓缓进站" },
+      clipboardData: { getData: () => "夜晚的@站台参考图缓缓进站" },
     });
 
     const chips = promptInput.querySelectorAll(".mention-chip");
@@ -3610,7 +4181,42 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     expect(segments[1]!.mentionId).toMatch(/^mention-/);
     expect(segments[2]).toMatchObject({ kind: "text", text: "缓缓进站" });
-    expect(command["explicitMedia"]).toEqual([]);
+    expect(command["explicitMedia"]).toMatchObject([
+      {
+        target: { canvasNodeKey: assetNode.dataset["connectionTarget"] },
+        typePosition: 1,
+        contentIndex: 1,
+      },
+    ]);
+  });
+
+  it("输入和粘贴普通素材名保持正文，只有显式 @ 自动转换", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    setPromptText(promptInput, "站台参考图与图片1作为文字说明");
+    await waitFor(() =>
+      expect(within(videoGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveAttribute(
+        "data-state",
+        "ready",
+      ),
+    );
+    expect(promptInput.querySelector(".mention-chip")).toBeNull();
+    placeCaretAtEnd(promptInput);
+    fireEvent.paste(promptInput, {
+      clipboardData: { getData: () => "，保留站台参考图，引用@图片1" },
+    });
+    expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1);
+    expect(promptInput).toHaveTextContent("站台参考图与图片1作为文字说明，保留站台参考图");
+    fireEvent.click(within(videoGeneration).getByRole("button", { name: "开始视频生成" }));
+    expect(submittedGenerationCommand()["prompt"]).toMatchObject([
+      { kind: "text", text: "站台参考图与图片1作为文字说明，保留站台参考图，引用" },
+      { kind: "media_reference", target: { canvasNodeKey: assetNode.dataset["connectionTarget"] } },
+    ]);
   });
 
   it("提示词操作按钮保持独立并列，放大按钮不会遮挡立即识别", async () => {
@@ -3637,7 +4243,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ]);
   });
 
-  it("点击「识别引用」按钮先显示扫描中，再把素材名转为引用 chip", async () => {
+  it("点击「识别素材名」按钮先显示扫描中，再把普通名称转为引用 chip", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3650,7 +4256,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(promptInput.querySelector(".mention-chip")).toBeNull();
 
     const detectButton = within(videoGeneration).getByRole("button", {
-      name: "自动识别提示词中的素材引用",
+      name: "识别素材名",
     });
     fireEvent.click(detectButton);
     expect(detectButton).toHaveAttribute("data-result", "scanning");
@@ -3687,20 +4293,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     setPromptText(promptInput, "机器人从雨夜中缓慢走来");
 
     const feedback = within(videoGeneration).getByRole("status", { name: /自动引用状态/ });
-    await waitFor(
-      () => {
-        expect(feedback).toHaveAttribute("data-state", "no-match");
-      },
-      { timeout: 1600 },
-    );
-    expect(feedback).toHaveClass("is-prominent");
-    expect(feedback).toHaveTextContent("没有识别到可绑定的素材");
-    expect(feedback).toHaveTextContent("提示词中没有出现已连接素材的名称");
-    expect(feedback).toHaveTextContent("站台参考图");
-    expect(feedback).toHaveTextContent("图片1");
+    await waitFor(() => expect(feedback).toHaveAttribute("data-state", "ready"));
+    expect(feedback).not.toHaveClass("is-prominent");
+    expect(feedback).toHaveTextContent("普通文字保持原样");
 
     const detectButton = within(videoGeneration).getByRole("button", {
-      name: "自动识别提示词中的素材引用",
+      name: "识别素材名",
     });
     fireEvent.click(detectButton);
     expect(detectButton).toHaveAttribute("data-result", "scanning");
@@ -3709,9 +4307,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(feedback).toHaveAttribute("data-state", "no-match");
       expect(detectButton).toHaveAttribute("data-result", "no-match");
     });
+    expect(feedback).toHaveClass("is-prominent");
+    expect(feedback).toHaveTextContent("本次未匹配到已连接素材名");
+    expect(feedback).toHaveTextContent("站台参考图");
+    expect(feedback).toHaveTextContent("图片1");
   });
 
-  it("手写输入停止后自动解析，并通过状态条和高亮 chip 明确反馈", async () => {
+  it("手写显式 @ 引用停止后解析，并通过状态条和高亮 chip 明确反馈", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3720,7 +4322,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "提示词输入框，输入 @ 引用素材",
     });
 
-    setPromptText(promptInput, "镜头掠过站台参考图后缓慢推进");
+    setPromptText(promptInput, "镜头掠过@站台参考图后缓慢推进");
     expect(within(videoGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveTextContent(
       "正在识别素材引用",
     );
@@ -3734,10 +4336,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       },
       { timeout: 1600 },
     );
-    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("镜头掠过@站台参考图后缓慢推进");
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe(
+      "镜头掠过@站台参考图 · 图片1后缓慢推进",
+    );
   });
 
-  it("同名素材原位高亮待确认，阻止误提交；确认一次后全部同名词与后续输入自动沿用", async () => {
+  it("同名 @ 引用批量确认仅影响当前待确认项，新输入仍需明确选择", async () => {
     render(<App />);
     const imageGeneration = await addGenerationNode("图片", 518, 222);
     const firstAsset = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3748,7 +4352,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "提示词输入框，输入 @ 引用素材",
     });
 
-    setPromptText(promptInput, "站台参考图在雨中，随后站台参考图切到近景");
+    setPromptText(promptInput, "@站台参考图在雨中，随后@站台参考图切到近景");
     await waitFor(
       () => {
         expect(promptInput.querySelectorAll("[data-ambiguous-pattern]")).toHaveLength(2);
@@ -3781,17 +4385,19 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     for (const chip of promptInput.querySelectorAll<HTMLElement>("[data-mention-id]")) {
       expect(chip.dataset["canvasNodeKey"]).toBe(secondAsset.dataset["connectionTarget"]);
-      expect(chip.dataset["autoPattern"]).toBe("站台参考图");
       expect(chip).toHaveTextContent(/图片2/);
     }
 
-    appendPromptText(promptInput, "，最后站台参考图淡出");
-    await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(3), {
-      timeout: 1_600,
+    appendPromptText(promptInput, "，最后@站台参考图淡出");
+    await waitFor(
+      () => expect(promptInput.querySelectorAll("[data-ambiguous-pattern]")).toHaveLength(1),
+      { timeout: 1_600 },
+    );
+    expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(2);
+    const nextChooser = within(imageGeneration).getByRole("group", {
+      name: "选择“站台参考图”引用的具体素材",
     });
-    expect(promptInput.querySelector("[data-ambiguous-pattern]")).toBeNull();
-    const lastChip = [...promptInput.querySelectorAll<HTMLElement>("[data-mention-id]")].at(-1)!;
-    expect(lastChip.dataset["canvasNodeKey"]).toBe(secondAsset.dataset["connectionTarget"]);
+    fireEvent.click(within(nextChooser).getByRole("option", { name: /选择 图片1/ }));
 
     fireEvent.click(within(imageGeneration).getByRole("button", { name: "开始图片生成" }));
     const mediaReferences = (
@@ -3801,11 +4407,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       }[]
     ).filter((segment) => segment.kind === "media_reference");
     expect(mediaReferences).toHaveLength(3);
-    expect(
-      mediaReferences.every(
-        (segment) => segment.target?.canvasNodeKey === secondAsset.dataset["connectionTarget"],
-      ),
-    ).toBe(true);
+    expect(mediaReferences.map((segment) => segment.target?.canvasNodeKey)).toEqual([
+      secondAsset.dataset["connectionTarget"],
+      secondAsset.dataset["connectionTarget"],
+      firstAsset.dataset["connectionTarget"],
+    ]);
   });
 
   it("输入自动别名可绕过同名选择器并精确引用对应连线实例", async () => {
@@ -3819,7 +4425,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "提示词输入框，输入 @ 引用素材",
     });
 
-    setPromptText(promptInput, "让图片2缓慢推进");
+    setPromptText(promptInput, "让@图片2缓慢推进");
     await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1), {
       timeout: 1_600,
     });
@@ -3829,7 +4435,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).toBe(secondAsset.dataset["connectionTarget"]);
   });
 
-  it("单一素材输入稳定别名「图片1」也能被识别并绑定", async () => {
+  it("单一素材输入稳定别名「@图片1」能被识别并绑定", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -3838,7 +4444,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "提示词输入框，输入 @ 引用素材",
     });
 
-    setPromptText(promptInput, "让图片1缓慢推进");
+    setPromptText(promptInput, "让@图片1缓慢推进");
     await waitFor(() => expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(1), {
       timeout: 1_600,
     });
@@ -3884,20 +4490,16 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     setPromptText(promptInput, "开场 ");
     fireEvent.keyDown(promptInput, { key: "@" });
-    promptInput.appendChild(document.createTextNode("@"));
-    placeCaretAtEnd(promptInput);
-    fireEvent.input(promptInput);
+    appendPromptText(promptInput, "@");
 
     const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
-    promptInput.appendChild(document.createTextNode("图片1"));
-    placeCaretAtEnd(promptInput);
-    fireEvent.input(promptInput);
+    appendPromptText(promptInput, "图片1");
     await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
     const option = within(menu).getByRole("option", { name: /站台参考图/ });
     expect(option).toHaveTextContent("图片1");
 
     fireEvent.click(option);
-    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图");
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图 · 图片1");
     expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
   });
 
@@ -3963,14 +4565,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
 
     expect(within(imageGeneration).getByRole("status", { name: /自动引用状态/ })).toHaveTextContent(
-      "连接素材后自动识别引用",
+      "连接素材后，输入 @ 选择引用",
     );
     setPromptText(promptInput, "一段没有参考素材的普通提示词");
     await waitFor(
       () =>
         expect(
           within(imageGeneration).getByRole("status", { name: /自动引用状态/ }),
-        ).toHaveTextContent("未连接素材，暂时无法自动引用"),
+        ).toHaveTextContent("未连接素材，暂时无法引用"),
       { timeout: 1600 },
     );
   });
@@ -3985,17 +4587,20 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "提示词输入框，输入 @ 引用素材",
     });
     const chip = promptInput.querySelector<HTMLElement>(".mention-chip")!;
+    const mentionId = chip.dataset["mentionId"];
+    const currentChip = () =>
+      promptInput.querySelector<HTMLElement>(`[data-mention-id="${mentionId}"]`)!;
     expect(chip).not.toHaveClass("is-stale");
 
     // 解除连线 → 灰化态标记，但引用数据保留。
     fireEvent.click(within(videoGeneration).getByRole("button", { name: "解除连线：站台参考图" }));
-    await waitFor(() => expect(chip).toHaveClass("is-stale"));
-    expect(chip).toHaveTextContent("@站台参考图");
+    await waitFor(() => expect(currentChip()).toHaveClass("is-stale"));
+    expect(currentChip()).toHaveTextContent("@站台参考图");
 
     // 重新连线 → 恢复正常展示与 title。
     connectAssetToGeneration(assetNode, videoGeneration);
-    await waitFor(() => expect(chip).not.toHaveClass("is-stale"));
-    expect(chip.title).toContain("站台参考图 · asset-image-1");
+    await waitFor(() => expect(currentChip()).not.toHaveClass("is-stale"));
+    expect(currentChip().title).toContain("站台参考图 · 图片1 · asset-image-1");
   });
 
   it("可从画布连线本身删除连接而保留两端节点", async () => {

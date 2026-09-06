@@ -2109,6 +2109,8 @@ dependencies = [
  "num-traits",
  "png 0.18.1",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -2153,6 +2155,7 @@ dependencies = [
  "futures-util",
  "hex",
  "hmac",
+ "image",
  "infer",
  "keyring",
  "rand 0.9.5",

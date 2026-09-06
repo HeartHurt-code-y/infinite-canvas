@@ -1837,8 +1837,17 @@ export function CanvasOutputNode({
           </button>
           <span className="canvas-asset-node__identity">
             <AssetKindIcon kind={node.mediaType} />
-            <span className="canvas-asset-node__name" title={node.name ?? undefined}>
-              {node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : "")}
+            <span
+              className="canvas-asset-node__name"
+              title={
+                node.layer?.description ?? node.name ?? undefined
+              }
+            >
+              {node.layer != null
+                ? node.layer.isBaseLayer
+                  ? `底图${node.layer.name ? ` · ${node.layer.name}` : ""}`
+                  : `图层 ${node.layer.zIndex}${node.layer.name ? ` · ${node.layer.name}` : ""}`
+                : node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : "")}
             </span>
           </span>
           <span className="canvas-asset-node__meta">

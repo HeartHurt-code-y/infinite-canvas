@@ -1,0 +1,36 @@
+图片上传顺序：
+@图片1：唐糖主参考，锁定面容、发型、服装和体型；忽略原图水印与界面文字
+@图片2：林浩主参考，锁定面容、发型、服装和体型；忽略原图水印与界面文字
+
+subject_definitions:
+<Subject 1>：唐糖，24 岁左右中国年轻女性，棕色长发中分披肩，戴银色船锚耳坠，穿蓝色横条纹短袖 T 恤，红蓝白编织带手环，蓝色牛仔背带裤。完全参照 <Picture 1> 外观。
+<Subject 2>：林浩，24 岁左右中国青年男子，黑色短发，穿浅蓝色短袖纽扣衬衫和黑色长裤。完全参照 <Picture 2> 外观。
+<Subject 3>：夜晚街头，路灯、车流、店铺灯光、城市天际线、街道、人行道、夜晚。无参考图，由文字描述定义。
+
+summary:
+10 秒一镜到底，场景是夜晚街头。唐糖和林浩并肩在街上行走，镜头从正面跟随拍摄，全程保持两人中景构图。
+
+retention_analysis:
+<Subject 1>：fully_preserved 唐糖全套外观，动作：挽着林浩的胳膊一起走路。
+<Subject 2>：fully_preserved 林浩全套外观，动作：和唐糖一起并肩走路。
+<Subject 3>：fully_preserved 夜晚街头场景（路灯、车流、店铺灯光、城市天际线、街道）。
+画面里只有唐糖、林浩，绝对没有其它人。
+
+detailed_description:
+[一镜到底] 0–10s，场景是夜晚街头。唐糖和林浩并肩在街上行走，镜头从正面跟随拍摄，全程保持和两人的距离。
+→林浩看着唐糖。
+→林浩说"唐糖，你今天真漂亮！"。
+→林浩看着镜头，唐糖笑了，看着林浩。
+→唐糖说"林大哥，你今天真会说话！"。
+→林浩拍了拍胸部。
+→林浩说"那是，做舔狗，我是专业的！"。
+→唐糖看着林浩，用手指着林浩。
+→唐糖说"舔狗舔狗，一无所有！"。
+→俩人看着镜头，继续走路。
+
+overall_soundscape:
+远处车流声，风吹过街道的声音。
+
+non_diegetic_music: N/A
+
+Negative: no other people, no exaggerated expression, no tears streaming, no sobbing, no text, no watermark, no camera static,

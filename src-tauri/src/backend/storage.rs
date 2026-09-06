@@ -31,6 +31,12 @@ use super::{
 #[path = "storage/generation_lifecycle.rs"]
 mod generation_lifecycle;
 
+#[path = "storage/workflow_history.rs"]
+pub mod workflow_history;
+
+#[path = "storage/reverse_video_cases.rs"]
+mod reverse_video_cases;
+
 pub use generation_lifecycle::{
     GenerationLifecycleFact, GenerationOperationalEvent, GenerationRemoteObservation,
     GenerationTaskLifecycle, PersistedTaskTransition, PersistedTaskTransitionEvent,
@@ -294,6 +300,8 @@ impl Storage {
         connection.pragma_update(None, "synchronous", "NORMAL")?;
         connection.pragma_update(None, "foreign_keys", "ON")?;
         connection.execute_batch(SCHEMA)?;
+        connection.execute_batch(workflow_history::SCHEMA)?;
+        connection.execute_batch(reverse_video_cases::SCHEMA)?;
         connection.execute(
             "INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES (1, ?1)",
             params![now_ms()],
@@ -944,6 +952,7 @@ impl Storage {
                 timestamp
             ],
         )?;
+        workflow_history::associate_task(&transaction, &task)?;
         transaction.commit()?;
         Ok(())
     }

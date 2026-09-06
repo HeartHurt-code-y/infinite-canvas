@@ -1,4 +1,7 @@
 import { Editor } from "@tiptap/core";
+import type { Node as ProseMirrorNode } from "@tiptap/pm/model";
+import { Selection } from "@tiptap/pm/state";
+import { diffArrays } from "diff";
 import type {
   ExplicitMediaInput,
   ExplicitMediaTarget,
@@ -7,43 +10,43 @@ import type {
   PromptSegment,
 } from "./backend";
 import {
-  AUTO_DETECT_DEBOUNCE_MS,
-  AUTO_MENTION_FRESH_MS,
-  ambiguousCandidatesForPattern,
-  autoMentionAliasForCandidate,
-  buildAutoMentionAliases,
-  confirmAmbiguousMentionChips,
-  countAmbiguousAutoMentionPatterns,
-  createMentionChipElement,
-  markStaleMentionChips,
-  normalizeAutoMentionText,
-  resolvePromptAutoMentions,
-  type AutoMentionResolutionResult,
-  type PromptAutoMentionCandidate,
-} from "./promptAutoMention";
+  buildReferenceCatalog,
+  candidateTarget,
+  createPromptReference,
+  normalizePromptReferenceText,
+  resolvePromptReferences,
+  referenceQueryInText,
+  referenceCandidateFromTarget,
+  type PromptReferenceCandidate,
+} from "./promptReferences";
+import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
   createPromptTiptapExtensions,
   plainTextToTiptapContent,
   promptDocumentFromTiptapJson,
   promptDocumentToTiptapJson,
   promptReferenceToTiptapNode,
+  promptReferenceTargetFromElement,
 } from "./promptTiptap";
 
-export const PROMPT_AUTO_DETECT_DEBOUNCE_MS = AUTO_DETECT_DEBOUNCE_MS;
+export const PROMPT_AUTO_DETECT_DEBOUNCE_MS = 420;
+const PROMPT_REFERENCE_FRESH_MS = 2200;
+export interface AutoMentionResolutionResult {
+  readonly converted: number;
+  readonly ambiguous: number;
+  readonly pending: number;
+}
 
-export function describePromptContentCandidates(
-  candidates: readonly PromptAutoMentionCandidate[],
+export function describePromptContentCandidates<T extends PromptReferenceCandidate>(
+  candidates: readonly T[],
   ambiguousPattern?: string,
-): {
-  readonly aliases: readonly { readonly candidateIndex: number; readonly label: string }[];
-  readonly ambiguousPatternCount: number;
-  readonly ambiguityOptions: ReturnType<typeof ambiguousCandidatesForPattern>;
-} {
+) {
+  const catalog = buildReferenceCatalog(candidates);
   return {
-    aliases: buildAutoMentionAliases(candidates),
-    ambiguousPatternCount: countAmbiguousAutoMentionPatterns(candidates),
-    ambiguityOptions:
-      ambiguousPattern == null ? [] : ambiguousCandidatesForPattern(candidates, ambiguousPattern),
+    aliases: catalog.aliases,
+    ambiguousPatternCount: catalog.ambiguousPatternCount,
+    ambiguityOptions: ambiguousPattern == null ? [] : catalog.options(ambiguousPattern),
+    search: (query: string) => catalog.search(query),
   };
 }
 
@@ -140,17 +143,23 @@ export type PromptPlainTextPreparation =
 
 export interface PromptContentEditorSession {
   attach(element: HTMLDivElement | null, attributes?: Readonly<Record<string, string>>): void;
-  updateConnections(candidates: readonly PromptAutoMentionCandidate[]): void;
+  isComposing(): boolean;
+  updateConnections(candidates: readonly PromptReferenceCandidate[]): void;
   acceptNativeInput(): PromptContentView;
-  insertReference(candidate: PromptAutoMentionCandidate): PromptContentView;
+  insertReference(candidate: PromptReferenceCandidate): PromptContentView;
   pastePlainText(text: string): AutoMentionResolutionResult;
-  autoResolve(options?: { readonly fresh?: boolean }): AutoMentionResolutionResult;
-  confirmPending(pattern: string, candidate: PromptAutoMentionCandidate, alias: string): number;
+  autoResolve(options?: {
+    readonly fresh?: boolean;
+    readonly mode?: "explicit" | "names";
+  }): AutoMentionResolutionResult;
+  confirmPending(pattern: string, candidate: PromptReferenceCandidate): number;
   reconcileConnections(): number;
   replaceText(text: string): AutoMentionResolutionResult;
   aliases(): readonly { readonly candidateIndex: number; readonly label: string }[];
   ambiguityCount(): number;
-  ambiguityOptions(pattern: string): ReturnType<typeof ambiguousCandidatesForPattern>;
+  ambiguityOptions(
+    pattern: string,
+  ): ReturnType<ReturnType<typeof buildReferenceCatalog>["options"]>;
   mentionQueryAtCaret(): string | null;
   removeMentionQueryAtCaret(): boolean;
   pendingAt(target: EventTarget | null): {
@@ -179,7 +188,7 @@ export interface PromptContentModule {
   replaceText(
     nodeKey: string,
     text: string,
-    candidates: readonly PromptAutoMentionCandidate[],
+    candidates: readonly PromptReferenceCandidate[],
   ): AutoMentionResolutionResult | null;
   preparePlainText(nodeKey: string): PromptPlainTextPreparation | null;
   prepareGeneration(
@@ -205,81 +214,8 @@ const EMPTY_DOCUMENT: PromptContentDocumentV1 = {
 
 const BLOCK_ELEMENTS = new Set(["DIV", "P", "LI"]);
 
-interface MentionQueryContext {
-  readonly query: string;
-  readonly range: Range;
-}
-
-function domMentionQueryAtCaret(input: HTMLDivElement): MentionQueryContext | null {
-  const selection = input.ownerDocument.defaultView?.getSelection() ?? null;
-  if (selection == null || selection.rangeCount === 0) return null;
-  const caret = selection.getRangeAt(0);
-  if (!input.contains(caret.endContainer)) return null;
-
-  const prefix = input.ownerDocument.createRange();
-  prefix.selectNodeContents(input);
-  prefix.setEnd(caret.endContainer, caret.endOffset);
-  const textNodes: { node: Text; start: number; end: number }[] = [];
-  const walker = input.ownerDocument.createTreeWalker(input, NodeFilter.SHOW_TEXT);
-  let text = "";
-  while (walker.nextNode()) {
-    const node = walker.currentNode as Text;
-    if (node.parentElement?.closest("[data-mention-id], [data-ambiguous-pattern]") != null) {
-      continue;
-    }
-    let includedLength = node.data.length;
-    if (node === caret.endContainer) {
-      includedLength = Math.min(caret.endOffset, node.data.length);
-    } else {
-      const nodeRange = input.ownerDocument.createRange();
-      nodeRange.selectNodeContents(node);
-      if (nodeRange.compareBoundaryPoints(Range.END_TO_END, prefix) > 0) continue;
-    }
-    if (includedLength === 0) continue;
-    const start = text.length;
-    text += node.data.slice(0, includedLength);
-    textNodes.push({ node, start, end: text.length });
-  }
-  const atIndex = text.lastIndexOf("@");
-  if (atIndex < 0) return null;
-  const startNode = textNodes.find((entry) => atIndex >= entry.start && atIndex < entry.end);
-  if (startNode == null) return null;
-  const queryRange = input.ownerDocument.createRange();
-  queryRange.setStart(startNode.node, atIndex - startNode.start);
-  queryRange.setEnd(caret.endContainer, caret.endOffset);
-  if (
-    queryRange.cloneContents().querySelector("[data-mention-id], [data-ambiguous-pattern]") != null
-  ) {
-    return null;
-  }
-  return { query: text.slice(atIndex + 1).replaceAll("\u200b", ""), range: queryRange };
-}
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value != null && !Array.isArray(value);
-}
-
-function mediaTargetFromDataset(element: HTMLElement): MediaReferenceTarget | null {
-  const mediaType = element.dataset["mediaKind"] as MediaType | undefined;
-  const canvasNodeKey = element.dataset["canvasNodeKey"] ?? "";
-  if (mediaType !== "image" && mediaType !== "video" && mediaType !== "audio") return null;
-  if (!canvasNodeKey) return null;
-  const referenceKind = element.dataset["referenceKind"];
-  if (referenceKind === "local_result") {
-    const generationTaskId = element.dataset["generationTaskId"] ?? "";
-    const resultIndex = Number.parseInt(element.dataset["resultIndex"] ?? "", 10);
-    if (!generationTaskId || !Number.isInteger(resultIndex) || resultIndex < 0) return null;
-    return { kind: "local_result", generationTaskId, resultIndex, canvasNodeKey, mediaType };
-  }
-  if (referenceKind === "local_asset" || element.dataset["assetSource"] === "local") {
-    const stagingJobId = element.dataset["assetId"] ?? "";
-    return stagingJobId ? { kind: "local_asset", stagingJobId, canvasNodeKey, mediaType } : null;
-  }
-  const providerConnectionId = element.dataset["providerId"] ?? "";
-  const assetId = element.dataset["assetId"] ?? "";
-  return providerConnectionId && assetId
-    ? { kind: "asset", providerConnectionId, assetId, canvasNodeKey, mediaType }
-    : null;
 }
 
 function appendText(items: PromptContentItem[], text: string): void {
@@ -316,7 +252,7 @@ function documentFromDom(root: HTMLElement): PromptContentDocumentV1 {
       }
       const mentionId = child.dataset["mentionId"];
       if (mentionId != null) {
-        const target = mediaTargetFromDataset(child);
+        const target = promptReferenceTargetFromElement(child);
         const canvasNodeKey = child.dataset["canvasNodeKey"] ?? "";
         if (mentionId && target && canvasNodeKey) {
           const learnedPattern = child.dataset["autoPattern"];
@@ -326,7 +262,9 @@ function documentFromDom(root: HTMLElement): PromptContentDocumentV1 {
             canvasNodeKey,
             target,
             displayNameSnapshot: child.dataset["displayName"] ?? "",
-            ...(learnedPattern ? { learnedPattern: normalizeAutoMentionText(learnedPattern) } : {}),
+            ...(learnedPattern
+              ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
+              : {}),
             ...(child.dataset["autoAlias"] ? { aliasSnapshot: child.dataset["autoAlias"] } : {}),
           });
         } else {
@@ -338,7 +276,7 @@ function documentFromDom(root: HTMLElement): PromptContentDocumentV1 {
       if (ambiguousPattern != null) {
         items.push({
           kind: "pending_reference",
-          normalizedPattern: normalizeAutoMentionText(ambiguousPattern),
+          normalizedPattern: normalizePromptReferenceText(ambiguousPattern),
           displayText: child.dataset["displayName"] ?? ambiguousPattern,
           candidateCount: Math.max(2, Number.parseInt(child.dataset["candidateCount"] ?? "2", 10)),
         });
@@ -355,87 +293,6 @@ function documentFromDom(root: HTMLElement): PromptContentDocumentV1 {
   return { schema: "prompt-content", version: 1, items };
 }
 
-function candidateFromItem(item: PromptContentMediaReferenceItem): PromptAutoMentionCandidate {
-  if (item.target.kind === "local_result") {
-    return {
-      canvasNodeKey: item.canvasNodeKey,
-      assetId: `${item.target.generationTaskId}#${item.target.resultIndex}`,
-      providerConnectionId: "",
-      referenceKind: "local_result",
-      generationTaskId: item.target.generationTaskId,
-      resultIndex: item.target.resultIndex,
-      kind: item.target.mediaType,
-      name: item.displayNameSnapshot,
-    };
-  }
-  if (item.target.kind === "local_asset") {
-    return {
-      canvasNodeKey: item.canvasNodeKey,
-      assetId: item.target.stagingJobId,
-      providerConnectionId: "",
-      source: "local",
-      referenceKind: "local_asset",
-      kind: item.target.mediaType,
-      name: item.displayNameSnapshot,
-    };
-  }
-  if (item.target.kind === "local_file") {
-    return {
-      canvasNodeKey: item.target.canvasNodeKey ?? item.canvasNodeKey,
-      assetId: item.target.path,
-      providerConnectionId: "",
-      source: "local",
-      referenceKind: "local_file",
-      kind: item.target.mediaType,
-      name: item.displayNameSnapshot,
-    };
-  }
-  return {
-    canvasNodeKey: item.canvasNodeKey,
-    assetId: item.target.assetId,
-    providerConnectionId: item.target.providerConnectionId,
-    source: "cloud",
-    referenceKind: "asset",
-    kind: item.target.mediaType,
-    name: item.displayNameSnapshot,
-  };
-}
-
-function renderDocument(root: HTMLElement, value: PromptContentDocumentV1): void {
-  root.replaceChildren();
-  const doc = root.ownerDocument;
-  for (const item of value.items) {
-    if (item.kind === "text") {
-      const lines = item.text.split("\n");
-      lines.forEach((line, index) => {
-        if (line) root.append(doc.createTextNode(line));
-        if (index < lines.length - 1) root.append(doc.createElement("br"));
-      });
-      continue;
-    }
-    if (item.kind === "pending_reference") {
-      const pending = doc.createElement("span");
-      pending.contentEditable = "false";
-      pending.className = "mention-chip mention-chip--ambiguous";
-      pending.dataset["ambiguousPattern"] = item.normalizedPattern;
-      pending.dataset["displayName"] = item.displayText;
-      pending.dataset["candidateCount"] = String(item.candidateCount);
-      pending.setAttribute("role", "button");
-      pending.tabIndex = 0;
-      pending.textContent = `@${item.displayText} · 待确认`;
-      pending.title = `找到 ${item.candidateCount} 个同名素材，点击选择具体对象`;
-      root.append(pending);
-      continue;
-    }
-    const chip = createMentionChipElement(candidateFromItem(item), {
-      ...(item.learnedPattern ? { learnedPattern: item.learnedPattern } : {}),
-      ...(item.aliasSnapshot ? { alias: item.aliasSnapshot } : {}),
-    });
-    chip.dataset["mentionId"] = item.mentionId;
-    root.append(chip, doc.createTextNode("\u200b"));
-  }
-}
-
 function decodePersistedPromptContent(value: unknown): PromptContentDocumentV1 | null {
   const structured = decodePromptContentDocument(value);
   if (structured != null) return structured;
@@ -445,54 +302,6 @@ function decodePersistedPromptContent(value: unknown): PromptContentDocumentV1 |
   const root = document.createElement("div");
   root.append(template.content.cloneNode(true));
   return documentFromDom(root);
-}
-
-function isMediaType(value: unknown): value is MediaType {
-  return value === "image" || value === "video" || value === "audio";
-}
-
-function parseTarget(value: unknown, canvasNodeKey: string): MediaReferenceTarget | null {
-  if (!isRecord(value) || !isMediaType(value["mediaType"])) return null;
-  const mediaType = value["mediaType"];
-  if (
-    value["kind"] === "asset" &&
-    typeof value["providerConnectionId"] === "string" &&
-    typeof value["assetId"] === "string" &&
-    value["providerConnectionId"] &&
-    value["assetId"]
-  ) {
-    return {
-      kind: "asset",
-      providerConnectionId: value["providerConnectionId"],
-      assetId: value["assetId"],
-      canvasNodeKey,
-      mediaType,
-    };
-  }
-  if (
-    value["kind"] === "local_asset" &&
-    typeof value["stagingJobId"] === "string" &&
-    value["stagingJobId"]
-  ) {
-    return { kind: "local_asset", stagingJobId: value["stagingJobId"], canvasNodeKey, mediaType };
-  }
-  if (
-    value["kind"] === "local_result" &&
-    typeof value["generationTaskId"] === "string" &&
-    value["generationTaskId"] &&
-    typeof value["resultIndex"] === "number" &&
-    Number.isInteger(value["resultIndex"]) &&
-    value["resultIndex"] >= 0
-  ) {
-    return {
-      kind: "local_result",
-      generationTaskId: value["generationTaskId"],
-      resultIndex: value["resultIndex"],
-      canvasNodeKey,
-      mediaType,
-    };
-  }
-  return null;
 }
 
 export function decodePromptContentDocument(value: unknown): PromptContentDocumentV1 | null {
@@ -520,7 +329,7 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
     ) {
       items.push({
         kind: "pending_reference",
-        normalizedPattern: normalizeAutoMentionText(raw["normalizedPattern"]),
+        normalizedPattern: normalizePromptReferenceText(raw["normalizedPattern"]),
         displayText: raw["displayText"],
         candidateCount: Math.max(2, Math.floor(raw["candidateCount"])),
       });
@@ -535,7 +344,7 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
       typeof raw["displayNameSnapshot"] === "string"
     ) {
       if (mentionIds.has(raw["mentionId"])) return null;
-      const target = parseTarget(raw["target"], raw["canvasNodeKey"]);
+      const target = decodeMediaReferenceTarget(raw["target"], raw["canvasNodeKey"]);
       if (target == null) return null;
       mentionIds.add(raw["mentionId"]);
       items.push({
@@ -545,7 +354,7 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         target,
         displayNameSnapshot: raw["displayNameSnapshot"],
         ...(typeof raw["learnedPattern"] === "string"
-          ? { learnedPattern: normalizeAutoMentionText(raw["learnedPattern"]) }
+          ? { learnedPattern: normalizePromptReferenceText(raw["learnedPattern"]) }
           : {}),
         ...(typeof raw["aliasSnapshot"] === "string"
           ? { aliasSnapshot: raw["aliasSnapshot"] }
@@ -560,30 +369,6 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
 
 export function isPromptContentDocument(value: unknown): value is PromptContentDocumentV1 {
   return decodePromptContentDocument(value) != null;
-}
-
-function sameTarget(first: MediaReferenceTarget, second: ExplicitMediaTarget): boolean {
-  if (first.kind !== second.kind || first.mediaType !== second.mediaType) return false;
-  if (first.kind === "asset" && second.kind === "asset") {
-    return (
-      first.providerConnectionId === second.providerConnectionId &&
-      first.assetId === second.assetId &&
-      first.canvasNodeKey === second.canvasNodeKey
-    );
-  }
-  if (first.kind === "local_asset" && second.kind === "local_asset") {
-    return (
-      first.stagingJobId === second.stagingJobId && first.canvasNodeKey === second.canvasNodeKey
-    );
-  }
-  if (first.kind === "local_result" && second.kind === "local_result") {
-    return (
-      first.generationTaskId === second.generationTaskId &&
-      first.resultIndex === second.resultIndex &&
-      first.canvasNodeKey === second.canvasNodeKey
-    );
-  }
-  return false;
 }
 
 function promptContentItemEqual(first: PromptContentItem, second: PromptContentItem): boolean {
@@ -606,7 +391,7 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
     first.displayNameSnapshot === second.displayNameSnapshot &&
     (first.learnedPattern ?? "") === (second.learnedPattern ?? "") &&
     (first.aliasSnapshot ?? "") === (second.aliasSnapshot ?? "") &&
-    sameTarget(first.target, second.target)
+    sameMediaReferenceTarget(first.target, second.target)
   );
 }
 
@@ -662,7 +447,7 @@ function viewFromDocument(
         canvasNodeKey: item.canvasNodeKey,
         displayName: item.displayNameSnapshot,
       });
-    } else if (!sameTarget(item.target, connection.target)) {
+    } else if (!sameMediaReferenceTarget(item.target, connection.target)) {
       issues.push({
         kind: "reference_identity_changed",
         mentionId: item.mentionId,
@@ -683,42 +468,97 @@ function viewFromDocument(
   };
 }
 
-function candidateTarget(candidate: PromptAutoMentionCandidate): MediaReferenceTarget {
-  const mediaType = candidate.kind;
-  if (candidate.referenceKind === "local_result") {
-    return {
-      kind: "local_result",
-      generationTaskId: candidate.generationTaskId ?? "",
-      resultIndex: candidate.resultIndex ?? 0,
-      canvasNodeKey: candidate.canvasNodeKey,
-      mediaType,
-    };
-  }
-  if (candidate.referenceKind === "local_asset" || candidate.source === "local") {
-    return {
-      kind: "local_asset",
-      stagingJobId: candidate.assetId,
-      canvasNodeKey: candidate.canvasNodeKey,
-      mediaType,
-    };
-  }
-  return {
-    kind: "asset",
-    providerConnectionId: candidate.providerConnectionId,
-    assetId: candidate.assetId,
-    canvasNodeKey: candidate.canvasNodeKey,
-    mediaType,
+/** 单个文字、引用和段落边界各占一个比较单元，位置使用 ProseMirror 的 UTF-16 坐标。 */
+function documentTokens(document: ProseMirrorNode) {
+  const tokens: { key: string; size: number }[] = [];
+  const visit = (node: ProseMirrorNode) => {
+    if (node.isText) {
+      const marks = JSON.stringify(node.marks.map((mark) => JSON.stringify(mark.toJSON())));
+      for (const character of node.text ?? "")
+        tokens.push({ key: `text:${marks}:${character}`, size: character.length });
+    } else if (node.isLeaf) {
+      tokens.push({ key: `leaf:${JSON.stringify(node.toJSON())}`, size: node.nodeSize });
+    } else {
+      tokens.push({ key: `open:${node.type.name}:${JSON.stringify(node.attrs)}`, size: 1 });
+      node.forEach(visit);
+      tokens.push({ key: `close:${node.type.name}`, size: 1 });
+    }
   };
+  document.forEach(visit);
+  return tokens;
+}
+
+function documentChanges(current: ProseMirrorNode, next: ProseMirrorNode) {
+  const changes = diffArrays(documentTokens(current), documentTokens(next), {
+    comparator: (left, right) => left.key === right.key,
+  });
+  const ranges: { from: number; to: number; nextFrom: number; nextTo: number }[] = [];
+  let oldPosition = 0;
+  let newPosition = 0;
+  let pending: (typeof ranges)[number] | null = null;
+  for (const change of changes) {
+    const size = change.value.reduce((sum, token) => sum + token.size, 0);
+    if (!change.added && !change.removed) {
+      if (pending) ranges.push(pending);
+      pending = null;
+      oldPosition += size;
+      newPosition += size;
+      continue;
+    }
+    pending ??= { from: oldPosition, to: oldPosition, nextFrom: newPosition, nextTo: newPosition };
+    if (change.removed) oldPosition += size;
+    if (change.added) newPosition += size;
+    pending.to = oldPosition;
+    pending.nextTo = newPosition;
+  }
+  if (pending) ranges.push(pending);
+  return ranges;
 }
 
 class PromptContentEditorSessionImplementation implements PromptContentEditorSession {
   private host: HTMLDivElement | null = null;
   private editor: Editor | null = null;
-  private candidates: readonly PromptAutoMentionCandidate[] = [];
+  private candidates: readonly PromptReferenceCandidate[] = [];
   private document: PromptContentDocumentV1 = EMPTY_DOCUMENT;
   private readonly freshMentionIds = new Set<string>();
   private readonly freshTimers = new Map<string, number>();
   private readonly handlePaste = () => true;
+  private composing = false;
+  private compositionEndTimer: number | null = null;
+  private pendingConnections = false;
+  private pendingRestore: PromptContentDocumentV1 | null = null;
+  private readonly handleCompositionStart = () => {
+    if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
+    this.compositionEndTimer = null;
+    this.composing = true;
+    return false;
+  };
+  private readonly handleCompositionEnd = () => {
+    // 等浏览器的最终 input 和 ProseMirror 的 compositionend 都结束，再读取提交值。
+    if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
+    this.compositionEndTimer = window.setTimeout(() => {
+      this.compositionEndTimer = null;
+      this.composing = false;
+      this.syncFromEditor();
+      const pendingRestore = this.pendingRestore;
+      this.pendingRestore = null;
+      if (pendingRestore != null) this.restore(pendingRestore);
+      if (this.pendingConnections) {
+        this.pendingConnections = false;
+        this.reconcileConnections();
+      }
+      this.notify();
+    }, 0);
+    return false;
+  };
+  private readonly handleDOMEvents = {
+    compositionstart: this.handleCompositionStart,
+    compositionend: this.handleCompositionEnd,
+  };
+
+  isComposing(): boolean {
+    return this.composing || (this.editor?.view.composing ?? false);
+  }
 
   attach(element: HTMLDivElement | null, attributes: Readonly<Record<string, string>> = {}): void {
     if (this.host === element && this.editor != null) {
@@ -726,6 +566,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         editorProps: {
           attributes: this.editorAttributes(attributes),
           handlePaste: this.handlePaste,
+          handleDOMEvents: this.handleDOMEvents,
         },
       });
       return;
@@ -735,25 +576,30 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       this.editor.destroy();
       this.editor = null;
     }
+    if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
+    this.compositionEndTimer = null;
+    this.composing = false;
     this.host = element;
     if (element == null) return;
     this.editor = new Editor({
       element,
-      extensions: createPromptTiptapExtensions("描述画面…输入 @ 或直接写素材名，自动引用素材"),
+      extensions: createPromptTiptapExtensions("描述画面…输入 @ 选择已连接素材"),
       content: promptDocumentToTiptapJson(this.document, this.presentation()),
       injectCSS: false,
       editorProps: {
         attributes: this.editorAttributes(attributes),
         // 富文本粘贴由 React 外层统一转成 text/plain，再走素材自动识别。
         handlePaste: this.handlePaste,
+        handleDOMEvents: this.handleDOMEvents,
       },
       onUpdate: ({ editor }) => {
+        if (this.isComposing()) return;
         this.document = promptDocumentFromTiptapJson(editor.getJSON());
       },
     });
   }
 
-  updateConnections(candidates: readonly PromptAutoMentionCandidate[]): void {
+  updateConnections(candidates: readonly PromptReferenceCandidate[]): void {
     this.candidates = candidates;
     this.reconcileConnections();
   }
@@ -774,8 +620,16 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   private presentation() {
+    const view = this.read();
+    const aliases = this.aliases();
     return {
       connectedCanvasNodeKeys: new Set(this.candidates.map((candidate) => candidate.canvasNodeKey)),
+      invalidMentionIds: new Set(
+        view.issues.flatMap((issue) => ("mentionId" in issue ? [issue.mentionId] : [])),
+      ),
+      referenceLabelsByKey: new Map(
+        this.candidates.map((candidate, index) => [candidate.canvasNodeKey, aliases[index]!.label]),
+      ),
       freshMentionIds: this.freshMentionIds,
     };
   }
@@ -795,36 +649,35 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     // IME 组合期间不读取/不强制同步 DOM：候选拼音尚未提交，提前 flush 会被
     // ProseMirror 当作已完成文本提交，破坏输入法组合状态。组合结束后的 input
     // 事件会再次触发同步。
-    if (this.editor.view.composing) return;
+    if (this.isComposing()) return;
     this.flushDomObserver();
     this.document = promptDocumentFromTiptapJson(this.editor.getJSON());
   }
 
-  private applyDocument(preserveSelection = true): void {
+  private applyDocument(preserveSelection = true, addToHistory = true): void {
     if (this.editor == null) return;
-    const selection = this.editor.state.selection;
-    this.editor.commands.setContent(
+    const next = this.editor.schema.nodeFromJSON(
       promptDocumentToTiptapJson(this.document, this.presentation()),
-      { emitUpdate: false, errorOnInvalidContent: true },
+    );
+    next.check();
+    const current = this.editor.state.doc;
+    if (current.eq(next)) return;
+    // 多处转换分别替换，保留它们之间未变化的正文及选区；从后向前应用以保持源坐标。
+    const transaction = this.editor.state.tr;
+    for (const change of documentChanges(current, next).reverse())
+      transaction.replace(change.from, change.to, next.slice(change.nextFrom, change.nextTo));
+    if (!preserveSelection) transaction.setSelection(Selection.atEnd(transaction.doc));
+    this.editor.view.dispatch(
+      transaction.setMeta("preventUpdate", true).setMeta("addToHistory", addToHistory),
     );
     this.document = promptDocumentFromTiptapJson(this.editor.getJSON());
-    if (!preserveSelection) return;
-    const max = Math.max(1, this.editor.state.doc.content.size - 1);
-    const from = Math.min(selection.from, max);
-    const to = Math.min(Math.max(selection.to, from), max);
-    this.editor.commands.setTextSelection({ from, to });
   }
 
   private notify(): void {
     this.editor?.view.dom.dispatchEvent(new Event("input", { bubbles: true }));
   }
 
-  private rememberFreshMentions(element: HTMLElement): void {
-    const ids = Array.from(
-      element.querySelectorAll<HTMLElement>("[data-mention-id][data-auto='true']"),
-    )
-      .map((chip) => chip.dataset["mentionId"] ?? "")
-      .filter(Boolean);
+  private rememberFreshMentions(ids: readonly string[]): void {
     for (const id of ids) {
       this.freshMentionIds.add(id);
       const previous = this.freshTimers.get(id);
@@ -832,55 +685,44 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       const timer = window.setTimeout(() => {
         this.freshTimers.delete(id);
         this.freshMentionIds.delete(id);
-        const selector = `[data-mention-id="${CSS.escape(id)}"]`;
-        const chip = this.editor?.view.dom.querySelector<HTMLElement>(selector);
+        const chip = this.editor?.view.dom.querySelector<HTMLElement>(
+          `[data-mention-id="${CSS.escape(id)}"]`,
+        );
         chip?.classList.remove("is-fresh");
         if (chip) delete chip.dataset["auto"];
-      }, AUTO_MENTION_FRESH_MS);
+      }, PROMPT_REFERENCE_FRESH_MS);
       this.freshTimers.set(id, timer);
     }
   }
 
-  private transformDocumentWithDom<T>(
-    change: (element: HTMLDivElement) => T,
-    syncFromEditor = true,
-    options?: { readonly forceApply?: boolean },
-  ): T {
-    if (syncFromEditor) this.syncFromEditor();
-    const element = document.createElement("div");
-    renderDocument(element, this.document);
-    const result = change(element);
-    this.rememberFreshMentions(element);
-    const next = documentFromDom(element);
-    // 没有实际内容变化时不要重建编辑器 DOM：重建（setContent）会打断 IME 组合，
-    // 把未完成的拼音候选提前提交成错乱字符，并重置光标位置导致删除方向错乱。
-    const changed = !promptDocumentsEqual(next, this.document);
-    if (changed || options?.forceApply) {
-      this.document = next;
-      this.applyDocument();
-    }
-    return result;
+  private resolveReferences(
+    mode: "explicit" | "names",
+    fresh = true,
+    forceApply = false,
+  ): AutoMentionResolutionResult {
+    const result = resolvePromptReferences(this.document, this.candidates, { mode });
+    if (fresh) this.rememberFreshMentions(result.freshMentionIds);
+    const changed = !promptDocumentsEqual(result.document, this.document);
+    this.document = result.document;
+    if (changed || forceApply) this.applyDocument();
+    return { converted: result.converted, ambiguous: result.ambiguous, pending: result.pending };
   }
 
-  insertReference(candidate: PromptAutoMentionCandidate): PromptContentView {
-    const candidateIndex = this.candidates.findIndex(
-      (entry) => entry.canvasNodeKey === candidate.canvasNodeKey,
+  insertReference(candidate: PromptReferenceCandidate): PromptContentView {
+    const connected = this.candidates.find(
+      (entry) =>
+        entry.canvasNodeKey === candidate.canvasNodeKey &&
+        sameMediaReferenceTarget(candidateTarget(entry), candidateTarget(candidate)),
     );
-    const hasSameName =
-      ambiguousCandidatesForPattern(this.candidates, normalizeAutoMentionText(candidate.name))
-        .length > 1;
-    const reference: PromptContentMediaReferenceItem = {
-      kind: "media_reference",
-      mentionId: `mention-${globalThis.crypto.randomUUID()}`,
-      canvasNodeKey: candidate.canvasNodeKey,
-      target: candidateTarget(candidate),
-      displayNameSnapshot: candidate.name,
-      ...(hasSameName && candidateIndex >= 0
-        ? { aliasSnapshot: autoMentionAliasForCandidate(this.candidates, candidateIndex) }
-        : {}),
-    };
+    if (connected == null || this.isComposing()) return this.read();
+    const index = this.candidates.indexOf(connected);
+    const reference = createPromptReference(connected, { alias: this.aliases()[index]!.label });
     if (this.editor != null) {
-      this.editor.chain().focus().insertContent(promptReferenceToTiptapNode(reference)).run();
+      this.editor
+        .chain()
+        .focus()
+        .insertContent(promptReferenceToTiptapNode(reference, this.presentation()))
+        .run();
       this.syncFromEditor();
     } else {
       this.document = {
@@ -904,98 +746,129 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       appendText(items, text);
       this.document = { schema: "prompt-content", version: 1, items };
     }
-    const pending = this.document.items.filter((item) => item.kind === "pending_reference").length;
+    const result = this.resolveReferences("explicit");
     this.notify();
-    return { converted: 0, ambiguous: 0, pending };
+    return result;
   }
 
-  autoResolve(options?: { readonly fresh?: boolean }): AutoMentionResolutionResult {
-    const result = this.transformDocumentWithDom((element) =>
-      resolvePromptAutoMentions(element, this.candidates, {
-        fresh: options?.fresh ?? true,
-      }),
-    );
+  autoResolve(options?: {
+    readonly fresh?: boolean;
+    readonly mode?: "explicit" | "names";
+  }): AutoMentionResolutionResult {
+    if (this.isComposing())
+      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount };
+    this.syncFromEditor();
+    const result = this.resolveReferences(options?.mode ?? "explicit", options?.fresh ?? true);
     if (result.converted > 0 || result.ambiguous > 0) this.notify();
     return result;
   }
 
-  confirmPending(pattern: string, candidate: PromptAutoMentionCandidate, alias: string): number {
-    const confirmed = this.transformDocumentWithDom((element) =>
-      confirmAmbiguousMentionChips(element, pattern, candidate, alias),
-    );
-    if (confirmed > 0) this.notify();
-    return confirmed;
+  confirmPending(pattern: string, candidate: PromptReferenceCandidate): number {
+    if (this.isComposing()) return 0;
+    this.syncFromEditor();
+    const catalog = buildReferenceCatalog(this.candidates);
+    const normalized = normalizePromptReferenceText(pattern);
+    const option = catalog
+      .options(normalized)
+      .find((entry) =>
+        sameMediaReferenceTarget(candidateTarget(entry.candidate), candidateTarget(candidate)),
+      );
+    if (option == null) return 0;
+    const freshIds: string[] = [];
+    this.document = {
+      ...this.document,
+      items: this.document.items.map((item) => {
+        if (item.kind !== "pending_reference" || item.normalizedPattern !== normalized) return item;
+        const reference = createPromptReference(option.candidate, { alias: option.alias });
+        freshIds.push(reference.mentionId);
+        return reference;
+      }),
+    };
+    this.rememberFreshMentions(freshIds);
+    this.applyDocument();
+    if (freshIds.length > 0) this.notify();
+    return freshIds.length;
   }
 
   reconcileConnections(): number {
+    if (this.isComposing()) {
+      this.pendingConnections = true;
+      return 0;
+    }
     this.syncFromEditor();
-    const element = document.createElement("div");
-    renderDocument(element, this.document);
-    let reconciled = 0;
-    for (const pending of element.querySelectorAll<HTMLElement>("[data-ambiguous-pattern]")) {
-      const pattern = pending.dataset["ambiguousPattern"] ?? "";
-      const options = ambiguousCandidatesForPattern(this.candidates, pattern);
-      if (options.length !== 1) continue;
-      const only = options[0]!;
-      reconciled += confirmAmbiguousMentionChips(element, pattern, only.candidate, only.alias);
-    }
-    if (reconciled > 0) {
-      this.rememberFreshMentions(element);
-      this.document = documentFromDom(element);
-      this.applyDocument();
-    } else if (this.editor != null) {
-      // 只改变断线展示时直接更新 node DOM，避免替换 atom 节点和打断当前选区。
-      markStaleMentionChips(
-        this.editor.view.dom,
-        new Set(this.candidates.map((candidate) => candidate.canvasNodeKey)),
+    // Presentation updates only touch atoms and never enter the user's undo history.
+    if (this.editor != null) {
+      const presentation = this.presentation();
+      const references = new Map(
+        this.document.items.flatMap((item) =>
+          item.kind === "media_reference" ? [[item.mentionId, item] as const] : [],
+        ),
       );
+      const transaction = this.editor.state.tr;
+      this.editor.state.doc.descendants((node, position) => {
+        const item = references.get(String(node.attrs["mentionId"] ?? ""));
+        if (item == null) return;
+        const attrs = { ...node.attrs, ...promptReferenceToTiptapNode(item, presentation).attrs };
+        if (!node.sameMarkup(node.type.create(attrs, null, node.marks)))
+          transaction.setNodeMarkup(position, undefined, attrs, node.marks);
+      });
+      if (transaction.docChanged)
+        this.editor.view.dispatch(
+          transaction.setMeta("preventUpdate", true).setMeta("addToHistory", false),
+        );
     }
-    if (reconciled > 0) this.notify();
-    return reconciled;
+    return 0;
   }
 
   replaceText(text: string): AutoMentionResolutionResult {
-    this.document = {
+    const next: PromptContentDocumentV1 = {
       schema: "prompt-content",
       version: 1,
       items: text ? [{ kind: "text", text }] : [],
     };
-    const result = this.transformDocumentWithDom(
-      (element) => resolvePromptAutoMentions(element, this.candidates, { fresh: true }),
-      false,
-      { forceApply: true },
-    );
+    if (this.isComposing()) {
+      this.pendingRestore = resolvePromptReferences(next, this.candidates, {
+        mode: "explicit",
+      }).document;
+      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount };
+    }
+    this.document = next;
+    const result = this.resolveReferences("explicit", true, true);
     this.notify();
     return result;
   }
 
   aliases() {
-    return buildAutoMentionAliases(this.candidates);
+    return buildReferenceCatalog(this.candidates).aliases;
   }
-
   ambiguityCount(): number {
-    return countAmbiguousAutoMentionPatterns(this.candidates);
+    return buildReferenceCatalog(this.candidates).ambiguousPatternCount;
+  }
+  ambiguityOptions(pattern: string) {
+    return buildReferenceCatalog(this.candidates).options(pattern);
   }
 
-  ambiguityOptions(pattern: string) {
-    return ambiguousCandidatesForPattern(this.candidates, pattern);
+  private mentionQueryContext(): { query: string; from: number; to: number } | null {
+    if (this.editor == null || this.isComposing()) return null;
+    this.flushDomObserver();
+    const { $from, empty } = this.editor.state.selection;
+    if (!empty) return null;
+    // Atom nodes and hard breaks terminate a query, as does the current text block.
+    const prefix = $from.parent.textBetween(0, $from.parentOffset, "\n", "\ufffc");
+    const query = referenceQueryInText(prefix);
+    return query == null
+      ? null
+      : { query: query.query, from: $from.pos - prefix.length + query.start, to: $from.pos };
   }
 
   mentionQueryAtCaret(): string | null {
-    if (this.editor == null) return null;
-    this.flushDomObserver();
-    return domMentionQueryAtCaret(this.editor.view.dom as HTMLDivElement)?.query ?? null;
+    return this.mentionQueryContext()?.query ?? null;
   }
 
   removeMentionQueryAtCaret(): boolean {
-    if (this.editor == null) return false;
-    const context = domMentionQueryAtCaret(this.editor.view.dom as HTMLDivElement);
-    if (context == null) return false;
-    const view = this.editor.view;
-    const from = view.posAtDOM(context.range.startContainer, context.range.startOffset, -1);
-    const to = view.posAtDOM(context.range.endContainer, context.range.endOffset, 1);
-    if (from >= to) return false;
-    this.editor.chain().focus().deleteRange({ from, to }).run();
+    const context = this.mentionQueryContext();
+    if (this.editor == null || context == null) return false;
+    this.editor.chain().focus().deleteRange({ from: context.from, to: context.to }).run();
     this.syncFromEditor();
     return true;
   }
@@ -1006,10 +879,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     if (pending == null || !this.host.contains(pending)) return null;
     const normalizedPattern = pending.dataset["ambiguousPattern"];
     if (!normalizedPattern) return null;
-    return {
-      normalizedPattern,
-      displayText: pending.dataset["displayName"] ?? normalizedPattern,
-    };
+    return { normalizedPattern, displayText: pending.dataset["displayName"] ?? normalizedPattern };
   }
 
   firstPending() {
@@ -1046,10 +916,20 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   restore(persisted: unknown): PromptContentView {
     const decoded = decodePersistedPromptContent(persisted);
     if (decoded == null) return this.read();
+    this.syncFromEditor();
+    // 父层回传同一份快照时，不重建 DOM，也不把光标映射到整段文档的末尾。
+    if (promptDocumentsEqual(decoded, this.document)) {
+      this.pendingRestore = null;
+      return this.read();
+    }
+    if (this.isComposing()) {
+      this.pendingRestore = decoded;
+      return this.read();
+    }
     this.document = decoded;
     this.freshMentionIds.clear();
     if (this.editor != null) {
-      this.applyDocument(false);
+      this.applyDocument(false, false);
       this.notify();
     }
     return this.read();
@@ -1067,7 +947,20 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     readonly connections: readonly PromptContentConnection[];
     readonly allowMediaOnly: boolean;
   }): PromptGenerationPreparation {
-    this.acceptNativeInput();
+    this.updateConnections(
+      context.connections.flatMap((connection) =>
+        connection.target.kind === "url"
+          ? []
+          : [
+              referenceCandidateFromTarget({
+                canvasNodeKey: connection.key,
+                name: connection.name,
+                target: connection.target,
+              }),
+            ],
+      ),
+    );
+    this.autoResolve({ fresh: false });
     const view = viewFromDocument(this.document, context.connections);
     const blocking = view.issues;
     if (blocking.length > 0) return { ok: false, issues: blocking };
@@ -1090,6 +983,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       positionByKey.set(connection.key, { typePosition, contentIndex: index + 1 });
     });
 
+    const connectionByKey = new Map(
+      context.connections.map((connection) => [connection.key, connection]),
+    );
     const segments = view.segments.map((segment) => {
       if (segment.kind !== "media_reference") return segment;
       const canvasNodeKey = segment.target.canvasNodeKey;
@@ -1097,6 +993,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       if (position == null) return segment;
       return {
         ...segment,
+        displayNameSnapshot:
+          connectionByKey.get(canvasNodeKey!)?.name ?? segment.displayNameSnapshot,
         typePosition: position.typePosition,
         contentIndex: position.contentIndex,
       };
@@ -1107,23 +1005,21 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         item.kind === "media_reference" ? [item.canvasNodeKey] : [],
       ),
     );
-    const explicitMedia: ExplicitMediaInput[] = context.connections
-      .filter((connection) => !mentionedCanvasNodeKeys.has(connection.key))
-      .map((connection) => {
-        const position = positionByKey.get(connection.key);
-        return {
-          target: structuredClone(connection.target),
-          role: connection.role ?? "",
-          displayNameSnapshot: connection.name,
-          ...(position
-            ? { typePosition: position.typePosition, contentIndex: position.contentIndex }
-            : {}),
-        };
-      });
+    const explicitMedia: ExplicitMediaInput[] = context.connections.map((connection) => {
+      const position = positionByKey.get(connection.key);
+      return {
+        target: structuredClone(connection.target),
+        role: connection.role ?? "",
+        displayNameSnapshot: connection.name,
+        ...(position
+          ? { typePosition: position.typePosition, contentIndex: position.contentIndex }
+          : {}),
+      };
+    });
     return {
       ok: true,
       frozen: {
-        segments,
+        segments: structuredClone(segments),
         explicitMedia,
         mentionedCanvasNodeKeys,
         plainText: view.plainText,
@@ -1150,7 +1046,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
 
 /** 每个生成节点只创建一个 handle；挂载、放大重挂与调用方共享同一 canonical document。 */
 export function createPromptContentEditorSession(
-  candidates: readonly PromptAutoMentionCandidate[] = [],
+  candidates: readonly PromptReferenceCandidate[] = [],
 ): PromptContentEditorSession {
   const session = new PromptContentEditorSessionImplementation();
   session.updateConnections(candidates);
@@ -1185,10 +1081,15 @@ class PromptContentModuleImplementation implements PromptContentModule {
   replaceText(
     nodeKey: string,
     text: string,
-    candidates: readonly PromptAutoMentionCandidate[],
+    candidates: readonly PromptReferenceCandidate[],
   ): AutoMentionResolutionResult | null {
-    const session = this.sessions.get(nodeKey);
-    if (session == null) return null;
+    let session = this.sessions.get(nodeKey);
+    if (session == null) {
+      // Source updates also apply to restored nodes that have never entered the viewport.
+      session = createPromptContentEditorSession(candidates);
+      this.sessions.set(nodeKey, session);
+      this.pendingRestore.delete(nodeKey);
+    }
     session.updateConnections(candidates);
     return session.replaceText(text);
   }

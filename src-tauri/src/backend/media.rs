@@ -17,8 +17,8 @@ use super::{
     staging::{StagingLease, StagingService},
     storage::TaskExecutionRecord,
     types::{
-        GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment, SaveStatus,
-        StartGenerationCommand,
+        ExplicitMediaInput, GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment,
+        SaveStatus, StartGenerationCommand,
     },
 };
 
@@ -48,6 +48,195 @@ struct ResolveTargetRequest<'a> {
     prompt_segment_index: Option<usize>,
     /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
     content_index: Option<u32>,
+}
+
+#[derive(Debug)]
+struct PlannedMediaInput<'a> {
+    target: &'a MediaReferenceTarget,
+    display_name: &'a str,
+    role: &'a str,
+    type_position: u32,
+    content_index: Option<u32>,
+    prompt_segment_index: Option<usize>,
+}
+
+#[derive(Debug)]
+struct MediaPlan<'a> {
+    inputs: Vec<PlannedMediaInput<'a>>,
+    rendered_prompt: String,
+    content: Vec<CompiledContentItem>,
+}
+
+struct MediaDeclaration<'a> {
+    target: &'a MediaReferenceTarget,
+    display_name: &'a str,
+    role: Option<&'a str>,
+    type_position: Option<u32>,
+    content_index: Option<u32>,
+    prompt_segment_index: Option<usize>,
+}
+
+/// 冻结后的输入位置只有一个来源。先验证完整计划，再读取文件或请求远程素材。
+/// 旧请求完全没有位置时，保留引用首次出现、未引用显式输入追加的历史顺序。
+fn build_media_plan<'a>(
+    prompt: &'a [PromptSegment],
+    explicit_media: &'a [ExplicitMediaInput],
+) -> BackendResult<MediaPlan<'a>> {
+    let declarations = prompt
+        .iter()
+        .enumerate()
+        .filter_map(|(index, segment)| match segment {
+            PromptSegment::Text { .. } => None,
+            PromptSegment::MediaReference {
+                target,
+                display_name_snapshot,
+                type_position,
+                content_index,
+                ..
+            } => Some(MediaDeclaration {
+                target,
+                display_name: display_name_snapshot,
+                role: None,
+                type_position: *type_position,
+                content_index: *content_index,
+                prompt_segment_index: Some(index),
+            }),
+        })
+        .chain(explicit_media.iter().map(|input| MediaDeclaration {
+            target: &input.target,
+            display_name: &input.display_name_snapshot,
+            role: Some(if input.role.trim().is_empty() {
+                default_reference_role(input.target.media_type())
+            } else {
+                input.role.as_str()
+            }),
+            type_position: input.type_position,
+            content_index: input.content_index,
+            prompt_segment_index: None,
+        }));
+    let mut targets = HashMap::<&MediaReferenceTarget, usize>::new();
+    let mut unique = Vec::<MediaDeclaration<'a>>::new();
+    for declaration in declarations {
+        if declaration.target.media_type() == MediaType::Text {
+            return Err(BackendError::validation(
+                "text results cannot be used as media inputs",
+                json!({ "target": declaration.target }),
+            ));
+        }
+        if let Some(&index) = targets.get(declaration.target) {
+            let existing = &mut unique[index];
+            if matches!((existing.role, declaration.role), (Some(a), Some(b)) if a != b)
+                || matches!((existing.type_position, declaration.type_position), (Some(a), Some(b)) if a != b)
+                || matches!((existing.content_index, declaration.content_index), (Some(a), Some(b)) if a != b)
+            {
+                return Err(BackendError::validation(
+                    "repeated media target has conflicting frozen metadata",
+                    json!({
+                        "target": declaration.target,
+                        "roles": [existing.role, declaration.role],
+                        "typePositions": [existing.type_position, declaration.type_position],
+                        "contentIndices": [existing.content_index, declaration.content_index]
+                    }),
+                ));
+            }
+            // 显示名不参与身份校验；旧芯片可保留旧快照，媒体归档采用显式输入的当前名称。
+            if declaration.role.is_some() {
+                existing.display_name = declaration.display_name;
+            }
+            existing.role = existing.role.or(declaration.role);
+            existing.type_position = existing.type_position.or(declaration.type_position);
+            existing.content_index = existing.content_index.or(declaration.content_index);
+        } else {
+            targets.insert(declaration.target, unique.len());
+            unique.push(declaration);
+        }
+    }
+
+    let has_positions = unique
+        .iter()
+        .any(|input| input.type_position.is_some() || input.content_index.is_some());
+    if has_positions {
+        // 缺少编号的旧式片段可以从同目标的显式输入继承，但独立目标不能混用两套编号。
+        if let Some(input) = unique
+            .iter()
+            .find(|input| input.type_position.is_none() || input.content_index.is_none())
+        {
+            return Err(BackendError::validation(
+                "numbered media inputs require both typePosition and contentIndex",
+                json!({ "target": input.target }),
+            ));
+        }
+        unique.sort_by_key(|input| input.content_index);
+    }
+    let mut counts = HashMap::<MediaType, u32>::new();
+    let mut inputs = Vec::with_capacity(unique.len());
+    for (index, input) in unique.into_iter().enumerate() {
+        let count = counts.entry(input.target.media_type()).or_default();
+        *count += 1;
+        let content_index = index as u32 + 1;
+        if has_positions
+            && (input.type_position != Some(*count) || input.content_index != Some(content_index))
+        {
+            return Err(BackendError::validation(
+                "media positions must be continuous and match their connection order",
+                json!({
+                    "target": input.target,
+                    "typePosition": input.type_position,
+                    "expectedTypePosition": count,
+                    "contentIndex": input.content_index,
+                    "expectedContentIndex": content_index
+                }),
+            ));
+        }
+        inputs.push(PlannedMediaInput {
+            target: input.target,
+            display_name: input.display_name,
+            role: input
+                .role
+                .unwrap_or_else(|| default_reference_role(input.target.media_type())),
+            type_position: *count,
+            // None keeps the provider's historical mixed-media expansion for old commands.
+            content_index: has_positions.then_some(content_index),
+            prompt_segment_index: input.prompt_segment_index,
+        });
+    }
+
+    let by_target = inputs
+        .iter()
+        .map(|input| (input.target, input))
+        .collect::<HashMap<_, _>>();
+    let mut rendered_prompt = String::new();
+    let mut content = Vec::with_capacity(prompt.len());
+    for segment in prompt {
+        match segment {
+            PromptSegment::Text { text } => {
+                rendered_prompt.push_str(text);
+                content.push(CompiledContentItem::Text(text.clone()));
+            }
+            PromptSegment::MediaReference {
+                target,
+                display_name_snapshot,
+                ..
+            } => {
+                let input = by_target[target];
+                rendered_prompt.push_str(&format!(
+                    "[{}{}：{}]",
+                    target.media_type().position_label(),
+                    input.type_position,
+                    display_name_snapshot
+                ));
+                content.push(CompiledContentItem::Media {
+                    media_type: target.media_type(),
+                    type_position: input.type_position,
+                });
+            }
+        }
+    }
+    Ok(MediaPlan {
+        inputs,
+        rendered_prompt,
+        content,
+    })
 }
 
 impl MediaResolver {
@@ -89,228 +278,61 @@ impl MediaResolver {
         let mut images = Vec::new();
         let mut videos = Vec::new();
         let mut audios = Vec::new();
-        let mut content = Vec::new();
-        let mut rendered_prompt = String::new();
+        let MediaPlan {
+            inputs,
+            rendered_prompt,
+            content,
+        } = build_media_plan(&command.prompt, &command.explicit_media)?;
         let mut staging_leases = Vec::new();
-        let mut resolved_targets = HashMap::<MediaReferenceTarget, u32>::new();
-
-        for (segment_index, segment) in command.prompt.iter().enumerate() {
-            match segment {
-                PromptSegment::Text { text } => {
-                    rendered_prompt.push_str(text);
-                    content.push(CompiledContentItem::Text(text.clone()));
-                }
-                PromptSegment::MediaReference {
-                    mention_id,
-                    target,
-                    display_name_snapshot,
-                    type_position: explicit_type_position,
-                    content_index: explicit_content_index,
-                } => {
-                    let media_type = target.media_type();
-                    // 统一编号来源：优先采用前端按输入顺序显式分配的同类序号（图片N）。
-                    // 缺失时回退到按出现顺序分配（兼容旧请求 / 纯文本迁移）。
-                    let type_position = match explicit_type_position {
-                        Some(position) => match resolved_type_position(&resolved_targets, target) {
-                            Some(existing) => {
-                                info!(
-                                    "[resolve] 复用已解析提示词媒体引用: taskId={}, 片段 #{}, {}{}, 名称={}",
-                                    task.id,
-                                    segment_index,
-                                    media_type.position_label(),
-                                    existing,
-                                    display_name_snapshot
-                                );
-                                existing
-                            }
-                            None => {
-                                info!(
-                                    "[resolve] 前端显式指定媒体序号: taskId={}, 片段 #{}, {}{}, 名称={}",
-                                    task.id,
-                                    segment_index,
-                                    media_type.position_label(),
-                                    position,
-                                    display_name_snapshot
-                                );
-                                *position
-                            }
-                        },
-                        None => match plan_target_resolution(
-                            &resolved_targets,
-                            target,
-                            &images,
-                            &videos,
-                            &audios,
-                        ) {
-                            TargetResolutionPlan::Reuse(type_position) => {
-                                info!(
-                                    "[resolve] 复用已解析提示词媒体引用: taskId={}, 片段 #{}, {}{}, 名称={}",
-                                    task.id,
-                                    segment_index,
-                                    media_type.position_label(),
-                                    type_position,
-                                    display_name_snapshot
-                                );
-                                type_position
-                            }
-                            TargetResolutionPlan::Resolve(type_position) => {
-                                info!(
-                                    "[resolve] 按出现顺序分配媒体序号: taskId={}, 片段 #{}, {}{}, 名称={}",
-                                    task.id,
-                                    segment_index,
-                                    media_type.position_label(),
-                                    type_position,
-                                    display_name_snapshot
-                                );
-                                type_position
-                            }
-                        },
-                    };
-                    if !resolved_targets.contains_key(target) {
-                        // 防错：前端显式编号与已有目标撞号 → 报错而非静默错位。
-                        if position_claimed_by_other(
-                            &resolved_targets,
-                            media_type,
-                            type_position,
-                            target,
-                        ) {
-                            return Err(BackendError::validation(
-                                "media reference position conflict: frontend assigned 图片N that is already claimed by another target",
-                                json!({
-                                    "mentionId": mention_id,
-                                    "segmentIndex": segment_index,
-                                    "mediaType": media_type,
-                                    "typePosition": type_position,
-                                    "target": target,
-                                }),
-                            ));
-                        }
-                        let role = default_reference_role(media_type).to_string();
-                        let (resolved, lease) = self
-                            .resolve_target(
-                                task,
-                                attempt_id,
-                                ResolveTargetRequest {
-                                    target,
-                                    type_position,
-                                    role: &role,
-                                    display_name: display_name_snapshot,
-                                    prompt_segment_index: Some(segment_index),
-                                    content_index: *explicit_content_index,
-                                },
-                            )
-                            .await
-                            .map_err(|error| {
-                                BackendError::protocol(
-                                    "media reference resolution failed",
-                                    json!({
-                                        "mentionId": mention_id,
-                                        "segmentIndex": segment_index,
-                                        "mediaType": media_type,
-                                        "typePosition": type_position,
-                                        "target": target,
-                                        "sourceError": error.runtime_record()
-                                    }),
-                                )
-                            })?;
-                        if let Some(lease) = lease {
-                            staging_leases.push(lease);
-                        }
-                        info!(
-                            "[resolve] 提示词引用解析成功: taskId={}, 片段 #{}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
-                            task.id,
-                            segment_index,
-                            media_type.position_label(),
-                            type_position,
-                            display_name_snapshot,
-                            role,
-                            resolved.byte_size,
-                            resolved.mime_type
-                        );
-                        resolved_targets.insert(target.clone(), type_position);
-                        push_media(resolved, &mut images, &mut videos, &mut audios);
-                    }
-                    let marker = format!(
-                        "[{}{}：{}]",
-                        media_type.position_label(),
-                        type_position,
-                        display_name_snapshot
-                    );
-                    rendered_prompt.push_str(&marker);
-                    content.push(CompiledContentItem::Media {
-                        media_type,
-                        type_position,
-                    });
-                }
-            }
-        }
-
-        for input in &command.explicit_media {
-            let media_type = input.target.media_type();
-            if let Some(type_position) = resolved_type_position(&resolved_targets, &input.target) {
-                info!(
-                    "[resolve] 跳过重复显式媒体输入: taskId={}, {}{}, 名称={}",
-                    task.id,
-                    media_type.position_label(),
-                    type_position,
-                    input.display_name_snapshot
-                );
-                continue;
-            }
-            // 统一编号来源：优先采用前端按输入顺序显式分配的同类序号（图片N），
-            // 缺失时回退到按连接顺序分配。
-            let type_position = input
-                .type_position
-                .unwrap_or_else(|| next_position(media_type, &images, &videos, &audios));
-            // 防错：前端显式编号与已有目标撞号 → 报错而非静默错位。
-            if position_claimed_by_other(
-                &resolved_targets,
-                media_type,
-                type_position,
-                &input.target,
-            ) {
-                return Err(BackendError::validation(
-                    "explicit media position conflict: frontend assigned 图片N that is already claimed by another target",
-                    json!({
-                        "mediaType": media_type,
-                        "typePosition": type_position,
-                        "target": input.target,
-                    }),
-                ));
-            }
-            let role = if input.role.trim().is_empty() {
-                default_reference_role(media_type)
-            } else {
-                input.role.as_str()
-            };
+        for input in inputs {
             let (resolved, lease) = self
                 .resolve_target(
                     task,
                     attempt_id,
                     ResolveTargetRequest {
-                        target: &input.target,
-                        type_position,
-                        role,
-                        display_name: &input.display_name_snapshot,
-                        prompt_segment_index: None,
+                        target: input.target,
+                        type_position: input.type_position,
+                        role: input.role,
+                        display_name: input.display_name,
+                        prompt_segment_index: input.prompt_segment_index,
                         content_index: input.content_index,
                     },
                 )
-                .await?;
+                .await
+                .map_err(|error| {
+                    if let Some(segment_index) = input.prompt_segment_index {
+                        let mention_id = match &command.prompt[segment_index] {
+                            PromptSegment::MediaReference { mention_id, .. } => mention_id,
+                            PromptSegment::Text { .. } => unreachable!("planned media reference"),
+                        };
+                        BackendError::protocol(
+                            "media reference resolution failed",
+                            json!({
+                                "mentionId": mention_id,
+                                "segmentIndex": segment_index,
+                                "mediaType": input.target.media_type(),
+                                "typePosition": input.type_position,
+                                "target": input.target,
+                                "sourceError": error.runtime_record()
+                            }),
+                        )
+                    } else {
+                        error
+                    }
+                })?;
             if let Some(lease) = lease {
                 staging_leases.push(lease);
             }
             info!(
-                "[resolve] 显式媒体输入解析成功: taskId={}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
+                "[resolve] 媒体输入解析成功: taskId={}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
                 task.id,
-                media_type.position_label(),
-                type_position,
-                input.display_name_snapshot,
-                role,
+                input.target.media_type().position_label(),
+                input.type_position,
+                input.display_name,
+                input.role,
                 resolved.byte_size,
                 resolved.mime_type
             );
-            resolved_targets.insert(input.target.clone(), type_position);
             push_media(resolved, &mut images, &mut videos, &mut audios);
         }
 
@@ -327,12 +349,10 @@ impl MediaResolver {
             &operation_schema,
         )?;
 
-        // 统一输出顺序：按前端输入（连线）顺序（content_index）排列各类媒体，
-        // 保证 wan 的 media 数组与「图N」标签、content 数组与「图片N」标签一一对应。
-        // content_index 缺失时保持在解析顺序中的相对位置（稳定排序）。
-        sort_media_by_content_index(&mut images);
-        sort_media_by_content_index(&mut videos);
-        sort_media_by_content_index(&mut audios);
+        // 每类数组直接遵循已经校验的同类编号；供应商不能再决定另一套顺序。
+        images.sort_by_key(|media| media.type_position);
+        videos.sort_by_key(|media| media.type_position);
+        audios.sort_by_key(|media| media.type_position);
 
         Ok(ResolvedBundle {
             generation: ResolvedGeneration {
@@ -370,10 +390,8 @@ impl MediaResolver {
                 canvas_node_key,
             } => {
                 let needs_bytes = task.operation == GenerationOperation::ImageToImage;
-                let resolved = with_transport_retry(
-                    "云端素材解析",
-                    ASSET_RESOLVE_RETRIES,
-                    || {
+                let resolved =
+                    with_transport_retry("云端素材解析", ASSET_RESOLVE_RETRIES, || {
                         self.assets.resolve(ResolveAsset {
                             identity: super::types::CloudAssetIdentity {
                                 provider_connection_id: provider_connection_id.clone(),
@@ -391,9 +409,8 @@ impl MediaResolver {
                             },
                             trace: AssetReadTrace { task, attempt_id },
                         })
-                    },
-                )
-                .await?;
+                    })
+                    .await?;
                 let (bytes, remote_reference) = match resolved.access {
                     ResolvedAssetAccess::Bytes(bytes) => (Some(bytes), None),
                     ResolvedAssetAccess::RemoteReference(reference) => {
@@ -744,70 +761,6 @@ fn media_retry_delay_ms(retry_index: u32) -> u64 {
     nominal + rand::rng().random_range(0..=(nominal / 5))
 }
 
-#[derive(Debug, PartialEq, Eq)]
-enum TargetResolutionPlan {
-    Reuse(u32),
-    Resolve(u32),
-}
-
-fn plan_target_resolution(
-    resolved_targets: &HashMap<MediaReferenceTarget, u32>,
-    target: &MediaReferenceTarget,
-    images: &[ResolvedMedia],
-    videos: &[ResolvedMedia],
-    audios: &[ResolvedMedia],
-) -> TargetResolutionPlan {
-    match resolved_type_position(resolved_targets, target) {
-        Some(type_position) => TargetResolutionPlan::Reuse(type_position),
-        None => TargetResolutionPlan::Resolve(next_position(
-            target.media_type(),
-            images,
-            videos,
-            audios,
-        )),
-    }
-}
-
-fn resolved_type_position(
-    resolved_targets: &HashMap<MediaReferenceTarget, u32>,
-    target: &MediaReferenceTarget,
-) -> Option<u32> {
-    resolved_targets.get(target).copied()
-}
-
-/// 防错：检查某个 (media_type, type_position) 是否已被「另一个」目标占用。
-/// 若前端显式分配的「图片N」与已有解析目标撞号，说明素材引用错位，
-/// 直接报错而不是静默覆盖，避免请求参数里两个素材共用同一编号。
-fn position_claimed_by_other(
-    resolved_targets: &HashMap<MediaReferenceTarget, u32>,
-    media_type: MediaType,
-    type_position: u32,
-    target: &MediaReferenceTarget,
-) -> bool {
-    resolved_targets
-        .iter()
-        .any(|(other, other_position)| {
-            other != target
-                && *other_position == type_position
-                && other.media_type() == media_type
-        })
-}
-
-fn next_position(
-    media_type: MediaType,
-    images: &[ResolvedMedia],
-    videos: &[ResolvedMedia],
-    audios: &[ResolvedMedia],
-) -> u32 {
-    let length = match media_type {
-        MediaType::Image => images.len(),
-        MediaType::Video => videos.len(),
-        MediaType::Audio => audios.len(),
-        MediaType::Text => 0,
-    };
-    length as u32 + 1
-}
-
 fn push_media(
     media: ResolvedMedia,
     images: &mut Vec<ResolvedMedia>,
@@ -821,11 +774,6 @@ fn push_media(
         // 文本产物不参与媒体输入解析，仅占位以保持穷尽性。
         MediaType::Text => {}
     }
-}
-
-/// 按前端输入顺序（content_index）稳定排序；content_index 为 None 的排在末尾并保持相对顺序。
-fn sort_media_by_content_index(media: &mut [ResolvedMedia]) {
-    media.sort_by_key(|item| item.content_index.unwrap_or(u32::MAX));
 }
 
 fn default_reference_role(media_type: MediaType) -> &'static str {
@@ -935,129 +883,328 @@ mod tests {
         }
     }
 
-    fn resolved_media(media_type: MediaType, type_position: u32) -> ResolvedMedia {
-        ResolvedMedia {
-            media_type,
-            type_position,
-            role: default_reference_role(media_type).into(),
-            display_name: "reference".into(),
-            stable_identity: json!({}),
-            mime_type: match media_type {
-                MediaType::Image => "image/png",
-                MediaType::Video => "video/mp4",
-                MediaType::Audio => "audio/mpeg",
-                MediaType::Text => "text/plain",
-            }
-            .into(),
-            byte_size: 1,
-            sha256: "x".into(),
-            file_name: "reference.bin".into(),
-            bytes: None,
-            remote_reference: None,
-            prompt_segment_index: Some(0),
-            content_index: Some(type_position),
+    fn mention(target: &MediaReferenceTarget, position: Option<(u32, u32)>) -> PromptSegment {
+        PromptSegment::MediaReference {
+            mention_id: "mention".into(),
+            target: target.clone(),
+            display_name_snapshot: "reference".into(),
+            type_position: position.map(|value| value.0),
+            content_index: position.map(|value| value.1),
+        }
+    }
+
+    fn explicit(
+        target: &MediaReferenceTarget,
+        role: &str,
+        position: Option<(u32, u32)>,
+    ) -> ExplicitMediaInput {
+        ExplicitMediaInput {
+            target: target.clone(),
+            role: role.into(),
+            display_name_snapshot: "reference".into(),
+            type_position: position.map(|value| value.0),
+            content_index: position.map(|value| value.1),
         }
     }
 
     #[test]
-    fn each_media_type_has_an_independent_position_sequence() {
-        let mut images = Vec::new();
-        let videos = Vec::new();
-        let audios = Vec::new();
+    fn numbered_plan_keeps_connection_order_when_prompt_mentions_are_reversed_and_repeated() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let second = asset_target("asset-2", Some("node-2"));
+        let prompt = vec![
+            mention(&second, Some((2, 2))),
+            PromptSegment::Text {
+                text: " follows ".into(),
+            },
+            mention(&first, Some((1, 1))),
+            mention(&second, Some((2, 2))),
+        ];
+        let inputs = vec![
+            explicit(&first, "reference_image", Some((1, 1))),
+            explicit(&second, "reference_image", Some((2, 2))),
+        ];
+        let plan = build_media_plan(&prompt, &inputs).unwrap();
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(plan.inputs[0].target, &first);
+        assert_eq!(plan.inputs[1].target, &second);
+        assert_eq!(plan.inputs[0].type_position, 1);
+        assert_eq!(plan.inputs[1].type_position, 2);
+        assert_eq!(plan.inputs[0].prompt_segment_index, Some(2));
+        assert_eq!(plan.inputs[1].prompt_segment_index, Some(0));
         assert_eq!(
-            next_position(MediaType::Image, &images, &videos, &audios),
-            1
+            plan.rendered_prompt,
+            "[图片2：reference] follows [图片1：reference][图片2：reference]"
         );
-        images.push(ResolvedMedia {
-            media_type: MediaType::Image,
-            type_position: 1,
-            role: "reference_image".into(),
-            display_name: "A".into(),
-            stable_identity: json!({}),
-            mime_type: "image/png".into(),
-            byte_size: 1,
-            sha256: "x".into(),
-            file_name: "a.png".into(),
-            bytes: None,
-            remote_reference: None,
-            prompt_segment_index: Some(0),
-            content_index: Some(1),
-        });
+        assert!(matches!(
+            plan.content[0],
+            CompiledContentItem::Media {
+                type_position: 2,
+                ..
+            }
+        ));
+        assert!(matches!(
+            plan.content[2],
+            CompiledContentItem::Media {
+                type_position: 1,
+                ..
+            }
+        ));
+        assert!(matches!(
+            plan.content[3],
+            CompiledContentItem::Media {
+                type_position: 2,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn mentioned_frame_inputs_keep_the_roles_of_their_connections() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let last = asset_target("asset-2", Some("node-2"));
+        let prompt = vec![
+            mention(&last, Some((2, 2))),
+            mention(&first, Some((1, 1))),
+            mention(&last, Some((2, 2))),
+        ];
+        let inputs = vec![
+            explicit(&first, "first_frame", Some((1, 1))),
+            explicit(&last, "last_frame", Some((2, 2))),
+        ];
+        let plan = build_media_plan(&prompt, &inputs).unwrap();
+        assert_eq!(plan.inputs.len(), 2);
+        assert_eq!(plan.inputs[0].role, "first_frame");
+        assert_eq!(plan.inputs[1].role, "last_frame");
+    }
+
+    #[test]
+    fn mixed_media_have_independent_positions_and_keep_unmentioned_inputs() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let second = asset_target("asset-2", Some("node-2"));
+        let video = local_result_target("video-task", 0, Some("video-node"));
+        let audio = MediaReferenceTarget::LocalFile {
+            path: "C:/reference.mp3".into(),
+            media_type: MediaType::Audio,
+            canvas_node_key: Some("audio-node".into()),
+        };
+        let prompt = vec![
+            mention(&audio, Some((1, 4))),
+            mention(&second, Some((2, 3))),
+            mention(&video, Some((1, 2))),
+        ];
+        let inputs = vec![
+            explicit(&first, "", Some((1, 1))),
+            explicit(&video, "", Some((1, 2))),
+            explicit(&second, "", Some((2, 3))),
+            explicit(&audio, "", Some((1, 4))),
+        ];
+        let plan = build_media_plan(&prompt, &inputs).unwrap();
         assert_eq!(
-            next_position(MediaType::Video, &images, &videos, &audios),
-            1
+            plan.inputs
+                .iter()
+                .map(|input| (
+                    input.target.media_type(),
+                    input.type_position,
+                    input.content_index
+                ))
+                .collect::<Vec<_>>(),
+            vec![
+                (MediaType::Image, 1, Some(1)),
+                (MediaType::Video, 1, Some(2)),
+                (MediaType::Image, 2, Some(3)),
+                (MediaType::Audio, 1, Some(4)),
+            ]
         );
+        assert_eq!(plan.inputs[0].prompt_segment_index, None);
+        assert_eq!(plan.inputs[0].role, "reference_image");
+        assert_eq!(plan.inputs[1].role, "reference_video");
+        assert_eq!(plan.inputs[3].role, "reference_audio");
         assert_eq!(
-            next_position(MediaType::Audio, &images, &videos, &audios),
-            1
-        );
-        assert_eq!(
-            next_position(MediaType::Image, &images, &videos, &audios),
-            2
+            plan.rendered_prompt,
+            "[音频1：reference][图片2：reference][视频1：reference]"
         );
     }
 
     #[test]
-    fn repeated_asset_target_reuses_the_first_resolution_and_position() {
+    fn same_source_on_distinct_canvas_instances_remains_distinct() {
+        for (first, second) in [
+            (
+                asset_target("same-asset", Some("node-1")),
+                asset_target("same-asset", Some("node-2")),
+            ),
+            (
+                local_result_target("same-task", 0, Some("node-1")),
+                local_result_target("same-task", 0, Some("node-2")),
+            ),
+        ] {
+            let prompt = vec![
+                mention(&first, Some((1, 1))),
+                mention(&first, Some((1, 1))),
+                mention(&second, Some((2, 2))),
+            ];
+            let inputs = vec![
+                explicit(&first, "", Some((1, 1))),
+                explicit(&second, "", Some((2, 2))),
+            ];
+            let plan = build_media_plan(&prompt, &inputs).unwrap();
+            assert_eq!(plan.inputs.len(), 2);
+            assert_eq!(plan.inputs[0].target, &first);
+            assert_eq!(plan.inputs[1].target, &second);
+        }
+    }
+
+    #[test]
+    fn conflicting_zero_sparse_or_reversed_positions_are_rejected_before_resolution() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let second = asset_target("asset-2", Some("node-2"));
+        for (a, b) in [
+            ((1, 1), (1, 2)), // duplicate type position
+            ((1, 1), (2, 1)), // duplicate global position
+            ((1, 1), (2, 3)), // global gap
+            ((1, 1), (3, 2)), // type gap
+            ((0, 1), (2, 2)), // zero type position
+            ((1, 0), (2, 2)), // zero global position
+            ((2, 1), (1, 2)), // type order disagrees with connection order
+        ] {
+            let inputs = vec![
+                explicit(&first, "", Some(a)),
+                explicit(&second, "", Some(b)),
+            ];
+            assert!(
+                matches!(
+                    build_media_plan(&[], &inputs),
+                    Err(BackendError::Validation { .. })
+                ),
+                "accepted {a:?}, {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repeated_target_cannot_change_its_position_or_role() {
         let target = asset_target("asset-1", Some("node-1"));
-        let first = resolved_media(MediaType::Image, 1);
-        let images = vec![first.clone()];
-        let mut resolved_targets = HashMap::new();
-        resolved_targets.insert(target.clone(), first.type_position);
-
-        assert_eq!(
-            plan_target_resolution(&resolved_targets, &target, &images, &[], &[]),
-            TargetResolutionPlan::Reuse(1)
-        );
-        assert_eq!(resolved_type_position(&resolved_targets, &target), Some(1));
+        let prompt = vec![mention(&target, Some((1, 1)))];
+        for position in [(2, 1), (1, 2)] {
+            let inputs = vec![explicit(&target, "", Some(position))];
+            assert!(build_media_plan(&prompt, &inputs).is_err());
+        }
+        let inputs = vec![
+            explicit(&target, "first_frame", Some((1, 1))),
+            explicit(&target, "last_frame", Some((1, 1))),
+        ];
+        assert!(build_media_plan(&prompt, &inputs).is_err());
+        let conflicting_mentions = vec![
+            mention(&target, Some((1, 1))),
+            mention(&target, Some((2, 2))),
+        ];
+        assert!(build_media_plan(&conflicting_mentions, &[]).is_err());
     }
 
     #[test]
-    fn same_asset_on_different_canvas_nodes_is_a_distinct_target() {
-        let first_target = asset_target("asset-1", Some("node-1"));
-        let second_target = asset_target("asset-1", Some("node-2"));
-        let first = resolved_media(MediaType::Image, 1);
-        let images = vec![first.clone()];
-        let mut resolved_targets = HashMap::new();
-        resolved_targets.insert(first_target, first.type_position);
+    fn renamed_snapshots_keep_the_same_identity_and_media_position() {
+        let target = asset_target("asset-1", Some("node-1"));
+        for position in [None, Some((1, 1))] {
+            let mut renamed_mention = mention(&target, position);
+            if let PromptSegment::MediaReference {
+                display_name_snapshot,
+                ..
+            } = &mut renamed_mention
+            {
+                *display_name_snapshot = "renamed reference".into();
+            }
+            let prompt = vec![mention(&target, position), renamed_mention];
+            let mut current_input = explicit(&target, "first_frame", position);
+            current_input.display_name_snapshot = "current connection name".into();
+            let inputs = vec![current_input];
+            let plan = build_media_plan(&prompt, &inputs).unwrap();
+            assert_eq!(plan.inputs.len(), 1);
+            assert_eq!(plan.inputs[0].target, &target);
+            assert_eq!(plan.inputs[0].display_name, "current connection name");
+            assert_eq!(plan.inputs[0].role, "first_frame");
+            assert_eq!(
+                plan.rendered_prompt,
+                "[图片1：reference][图片1：renamed reference]"
+            );
+        }
+    }
 
+    #[test]
+    fn reference_can_inherit_frozen_positions_but_independent_unnumbered_inputs_are_rejected() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let second = asset_target("asset-2", Some("node-2"));
+        let prompt = vec![mention(&second, None)];
+        let inputs = vec![
+            explicit(&first, "", Some((1, 1))),
+            explicit(&second, "last_frame", Some((2, 2))),
+        ];
+        let plan = build_media_plan(&prompt, &inputs).unwrap();
+        assert_eq!(plan.rendered_prompt, "[图片2：reference]");
+        assert_eq!(plan.inputs[1].role, "last_frame");
+        assert!(build_media_plan(&prompt, &inputs[..1]).is_err());
+        let mut partial = explicit(&first, "", Some((1, 1)));
+        partial.content_index = None;
+        assert!(build_media_plan(&[], &[partial]).is_err());
+    }
+
+    #[test]
+    fn legacy_plan_keeps_first_reference_order_and_appends_remaining_explicit_inputs() {
+        let first = asset_target("asset-1", Some("node-1"));
+        let second = asset_target("asset-2", Some("node-2"));
+        let third = asset_target("asset-3", Some("node-3"));
+        let prompt = vec![
+            mention(&second, None),
+            mention(&first, None),
+            mention(&second, None),
+        ];
+        let inputs = vec![
+            explicit(&third, "", None),
+            explicit(&first, "first_frame", None),
+            explicit(&second, "", None),
+        ];
+        let plan = build_media_plan(&prompt, &inputs).unwrap();
         assert_eq!(
-            plan_target_resolution(&resolved_targets, &second_target, &images, &[], &[]),
-            TargetResolutionPlan::Resolve(2)
+            plan.inputs
+                .iter()
+                .map(|input| input.target)
+                .collect::<Vec<_>>(),
+            vec![&second, &first, &third]
         );
         assert_eq!(
-            resolved_type_position(&resolved_targets, &second_target),
-            None
+            plan.inputs
+                .iter()
+                .map(|input| input.type_position)
+                .collect::<Vec<_>>(),
+            vec![1, 2, 3]
+        );
+        assert!(
+            plan.inputs
+                .iter()
+                .all(|input| input.content_index.is_none())
+        );
+        assert_eq!(plan.inputs[1].role, "first_frame");
+        assert_eq!(
+            plan.rendered_prompt,
+            "[图片1：reference][图片2：reference][图片1：reference]"
         );
     }
 
     #[test]
-    fn repeated_local_result_target_is_deduplicated_too() {
-        let target = local_result_target("task-1", 0, Some("output-node-1"));
-        let first = resolved_media(MediaType::Video, 1);
-        let videos = vec![first.clone()];
-        let mut resolved_targets = HashMap::new();
-        resolved_targets.insert(target.clone(), first.type_position);
-
+    fn text_and_unreferenced_workflow_inputs_keep_their_existing_contract() {
+        let prompt = vec![PromptSegment::Text {
+            text: "An ordinary prompt mentioning 图2 as text".into(),
+        }];
+        let pure_text = build_media_plan(&prompt, &[]).unwrap();
+        assert!(pure_text.inputs.is_empty());
         assert_eq!(
-            plan_target_resolution(&resolved_targets, &target, &[], &videos, &[]),
-            TargetResolutionPlan::Reuse(1)
+            pure_text.rendered_prompt,
+            "An ordinary prompt mentioning 图2 as text"
         );
-    }
-
-    #[test]
-    fn repeated_local_result_source_on_distinct_canvas_nodes_is_not_deduplicated() {
-        let first_target = local_result_target("task-1", 0, Some("output-node-1"));
-        let second_target = local_result_target("task-1", 0, Some("output-node-2"));
-        let first = resolved_media(MediaType::Video, 1);
-        let videos = vec![first.clone()];
-        let mut resolved_targets = HashMap::new();
-        resolved_targets.insert(first_target, first.type_position);
-
-        assert_eq!(
-            plan_target_resolution(&resolved_targets, &second_target, &[], &videos, &[]),
-            TargetResolutionPlan::Resolve(2)
-        );
+        let target = asset_target("workflow-asset", None);
+        let inputs = vec![explicit(&target, "reference_image", Some((1, 1)))];
+        let workflow = build_media_plan(&prompt, &inputs).unwrap();
+        assert_eq!(workflow.inputs.len(), 1);
+        assert_eq!(workflow.inputs[0].prompt_segment_index, None);
+        assert_eq!(workflow.rendered_prompt, pure_text.rendered_prompt);
     }
 
     /// 生成一个不依赖真实网络、确定性的传输层错误，用于验证重试控制流。
@@ -1069,16 +1216,21 @@ mod tests {
     #[tokio::test]
     async fn transport_retry_recovers_after_transient_failures() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result = with_transport_retry_inner("test", 3, |_| 0, || {
-            let attempts = &attempts;
-            async move {
-                if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
-                    Err(transport_error().await)
-                } else {
-                    Ok("ok")
+        let result = with_transport_retry_inner(
+            "test",
+            3,
+            |_| 0,
+            || {
+                let attempts = &attempts;
+                async move {
+                    if attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst) < 2 {
+                        Err(transport_error().await)
+                    } else {
+                        Ok("ok")
+                    }
                 }
-            }
-        })
+            },
+        )
         .await;
         assert_eq!(result.unwrap(), "ok");
         // 首次失败 + 1 次重试后成功，第 3 次尝试命中成功分支。
@@ -1088,13 +1240,18 @@ mod tests {
     #[tokio::test]
     async fn transport_retry_exhausts_after_configured_retries() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result: BackendResult<i32> = with_transport_retry_inner("test", 3, |_| 0, || {
-            let attempts = &attempts;
-            async move {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Err(transport_error().await)
-            }
-        })
+        let result: BackendResult<i32> = with_transport_retry_inner(
+            "test",
+            3,
+            |_| 0,
+            || {
+                let attempts = &attempts;
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(transport_error().await)
+                }
+            },
+        )
         .await;
         assert!(matches!(result, Err(BackendError::Transport(_))));
         // 首次尝试 + 3 次自动重试 = 共 4 次尝试。
@@ -1104,13 +1261,18 @@ mod tests {
     #[tokio::test]
     async fn transport_retry_does_not_retry_non_transport_errors() {
         let attempts = std::sync::atomic::AtomicU32::new(0);
-        let result: BackendResult<i32> = with_transport_retry_inner("test", 3, |_| 0, || {
-            let attempts = &attempts;
-            async move {
-                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                Err(BackendError::protocol("deterministic", json!({})))
-            }
-        })
+        let result: BackendResult<i32> = with_transport_retry_inner(
+            "test",
+            3,
+            |_| 0,
+            || {
+                let attempts = &attempts;
+                async move {
+                    attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    Err(BackendError::protocol("deterministic", json!({})))
+                }
+            },
+        )
         .await;
         assert!(matches!(result, Err(BackendError::Protocol { .. })));
         // 确定性错误不做重试，只尝试一次。

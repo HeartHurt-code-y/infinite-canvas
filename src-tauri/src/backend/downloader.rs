@@ -591,7 +591,9 @@ impl VideoDownloadService {
         ];
         // 画质路由对应的格式选择器：Sd480 一律封顶 480P，其余走最佳画质；
         // 有 ffmpeg 时分离音视频合并封装 MP4，并显式指定 ffmpeg 位置。
-        let cap_480p = quality.as_ref().is_some_and(|q| q.mode == VideoDownloadQualityMode::Sd480);
+        let cap_480p = quality
+            .as_ref()
+            .is_some_and(|q| q.mode == VideoDownloadQualityMode::Sd480);
         let append_ffmpeg_args = |args: &mut Vec<String>| {
             if let Some(location) = &ffmpeg_location {
                 args.extend([
@@ -1016,7 +1018,9 @@ fn sibling_with_suffix(path: &Path, suffix: &str) -> PathBuf {
         .file_stem()
         .map(|name| name.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let extension = path.extension().map(|ext| ext.to_string_lossy().into_owned());
+    let extension = path
+        .extension()
+        .map(|ext| ext.to_string_lossy().into_owned());
     let file_name = match extension {
         Some(extension) => format!("{stem}{suffix}.{extension}"),
         None => format!("{stem}{suffix}"),
@@ -1034,9 +1038,9 @@ async fn post_process_bilibili_watermark(
     source: &Path,
     composer: &VideoCompositionService,
 ) -> BackendResult<PathBuf> {
-    let ffmpeg = resolve_ffmpeg_binary(composer).await.ok_or_else(|| {
-        BackendError::protocol("ffmpeg 不可用，跳过去水印", Value::Null)
-    })?;
+    let ffmpeg = resolve_ffmpeg_binary(composer)
+        .await
+        .ok_or_else(|| BackendError::protocol("ffmpeg 不可用，跳过去水印", Value::Null))?;
     let (width, height) = probe_video_dimensions(&ffmpeg, source)
         .await
         .ok_or_else(|| BackendError::protocol("无法探测视频分辨率，跳过去水印", Value::Null))?;
@@ -1050,12 +1054,18 @@ async fn post_process_bilibili_watermark(
         .arg(source)
         .args(["-vf", filter.as_str()])
         .args([
-            "-c:v", "libx264",
-            "-preset", "veryfast",
-            "-crf", "19",
-            "-pix_fmt", "yuv420p",
-            "-c:a", "copy",
-            "-movflags", "+faststart",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "veryfast",
+            "-crf",
+            "19",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            "-movflags",
+            "+faststart",
         ])
         .arg(&output)
         .stdin(Stdio::null())
@@ -1076,10 +1086,7 @@ async fn post_process_bilibili_watermark(
         ));
     }
     if !output.is_file() {
-        return Err(BackendError::protocol(
-            "去水印未生成输出文件",
-            Value::Null,
-        ));
+        return Err(BackendError::protocol("去水印未生成输出文件", Value::Null));
     }
     Ok(output)
 }
@@ -1281,7 +1288,9 @@ mod tests {
 
     #[test]
     fn is_bilibili_url_detects_host_and_short_link() {
-        assert!(is_bilibili_url("https://www.bilibili.com/video/BV155j96nE27/"));
+        assert!(is_bilibili_url(
+            "https://www.bilibili.com/video/BV155j96nE27/"
+        ));
         assert!(is_bilibili_url("https://b23.tv/AbCdEf"));
         assert!(is_bilibili_url("https://BILIBILI.COM/video/BV1/"));
         assert!(!is_bilibili_url("https://v.douyin.com/iAbCdEf/"));
@@ -1334,19 +1343,16 @@ mod tests {
         assert!(guest.hint.contains("480P"));
 
         // B 站已登录 → 最高画质。
-        let logged = resolve_download_quality(
-            "https://www.bilibili.com/video/BV1YE6gBHEoN/",
-            &logged_in,
-        )
-        .unwrap();
+        let logged =
+            resolve_download_quality("https://www.bilibili.com/video/BV1YE6gBHEoN/", &logged_in)
+                .unwrap();
         assert_eq!(logged.mode, VideoDownloadQualityMode::Best);
 
         // 非 B 站 → 无路由。
-        assert!(resolve_download_quality(
-            "https://v.douyin.com/iAbCdEf/",
-            &dir.join("none.txt"),
-        )
-        .is_none());
+        assert!(
+            resolve_download_quality("https://v.douyin.com/iAbCdEf/", &dir.join("none.txt"),)
+                .is_none()
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1394,6 +1400,9 @@ yuv420p(tv, bt709), 1080x1920 [SAR 1:1 DAR 9:16], 1014 kb/s, 30 fps";
         );
         // 无扩展名时后缀直接拼接。
         let no_ext = Path::new(r"C:\下载\clip");
-        assert_eq!(sibling_with_suffix(no_ext, "（去水印）").to_string_lossy(), r"C:\下载\clip（去水印）");
+        assert_eq!(
+            sibling_with_suffix(no_ext, "（去水印）").to_string_lossy(),
+            r"C:\下载\clip（去水印）"
+        );
     }
 }

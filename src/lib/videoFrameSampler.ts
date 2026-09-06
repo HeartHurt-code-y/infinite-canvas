@@ -16,9 +16,16 @@ export interface VideoContactSheet {
 
 export interface VideoContactSheetResult {
   readonly duration: number;
+  readonly width: number;
+  readonly height: number;
   readonly overviewFrameCount: number;
   readonly tailFrameCount: number;
   readonly sheets: readonly VideoContactSheet[];
+  readonly representativeFrames?: readonly {
+    readonly dataUrl: string;
+    readonly displayName: string;
+    readonly time: number;
+  }[];
 }
 
 const DENSE_THRESHOLD_SECONDS = 30;
@@ -73,13 +80,16 @@ export function videoSamplingTimeline(duration: number): readonly VideoSamplingP
 function waitForEvent(
   element: HTMLMediaElement,
   successEvent: "loadedmetadata" | "loadeddata" | "seeked",
+  signal?: AbortSignal,
   timeoutMs = 15_000,
 ): Promise<void> {
+  if (signal?.aborted) return Promise.reject(new DOMException("已暂停视频抽帧。", "AbortError"));
   return new Promise((resolve, reject) => {
     const cleanup = () => {
       window.clearTimeout(timer);
       element.removeEventListener(successEvent, handleSuccess);
       element.removeEventListener("error", handleError);
+      signal?.removeEventListener("abort", handleAbort);
     };
     const handleSuccess = () => {
       cleanup();
@@ -89,16 +99,26 @@ function waitForEvent(
       cleanup();
       reject(new Error("视频无法解码，无法生成复刻联系表。"));
     };
+    const handleAbort = () => {
+      cleanup();
+      reject(new DOMException("已暂停视频抽帧。", "AbortError"));
+    };
     const timer = window.setTimeout(() => {
       cleanup();
       reject(new Error(`等待视频 ${successEvent} 超时。`));
     }, timeoutMs);
     element.addEventListener(successEvent, handleSuccess, { once: true });
     element.addEventListener("error", handleError, { once: true });
+    signal?.addEventListener("abort", handleAbort, { once: true });
   });
 }
 
-async function seekVideo(video: HTMLVideoElement, time: number): Promise<void> {
+async function seekVideo(
+  video: HTMLVideoElement,
+  time: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
   const target = Math.min(Math.max(0, time), safeLastTime(video.duration));
   if (
     video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
@@ -106,7 +126,7 @@ async function seekVideo(video: HTMLVideoElement, time: number): Promise<void> {
   ) {
     return;
   }
-  const ready = waitForEvent(video, "seeked");
+  const ready = waitForEvent(video, "seeked", signal);
   video.currentTime = target;
   await ready;
 }
@@ -200,7 +220,11 @@ function makeContactSheets(frames: readonly CapturedFrame[]): readonly VideoCont
 }
 
 /** Decode a video inside the Tauri WebView and return compact timestamped contact sheets. */
-export async function buildVideoContactSheets(videoSrc: string): Promise<VideoContactSheetResult> {
+export async function buildVideoContactSheets(
+  videoSrc: string,
+  signal?: AbortSignal,
+): Promise<VideoContactSheetResult> {
+  signal?.throwIfAborted();
   const video = document.createElement("video");
   video.preload = "auto";
   video.muted = true;
@@ -209,10 +233,10 @@ export async function buildVideoContactSheets(videoSrc: string): Promise<VideoCo
   try {
     if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
       video.load();
-      await waitForEvent(video, "loadedmetadata");
+      await waitForEvent(video, "loadedmetadata", signal);
     }
     if (video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA) {
-      await waitForEvent(video, "loadeddata");
+      await waitForEvent(video, "loadeddata", signal);
     }
     const duration = video.duration;
     const timeline = videoSamplingTimeline(duration);
@@ -226,7 +250,8 @@ export async function buildVideoContactSheets(videoSrc: string): Promise<VideoCo
     const captureHeight = Math.max(1, Math.round(video.videoHeight * captureScale));
     const frames: CapturedFrame[] = [];
     for (const [index, point] of timeline.entries()) {
-      await seekVideo(video, point.time);
+      await seekVideo(video, point.time, signal);
+      signal?.throwIfAborted();
       const canvas = document.createElement("canvas");
       canvas.width = captureWidth;
       canvas.height = captureHeight;
@@ -236,11 +261,26 @@ export async function buildVideoContactSheets(videoSrc: string): Promise<VideoCo
       frames.push({ canvas, point, index });
     }
     const sheets = makeContactSheets(frames);
+    const overview = frames.filter((frame) => frame.point.phase === "overview");
+    const representative = [
+      ...new Map(
+        [overview[0], overview[Math.floor(overview.length / 2)], frames.at(-1)]
+          .filter((frame) => frame !== undefined)
+          .map((frame) => [frame.point.time, frame]),
+      ).values(),
+    ];
     return {
       duration,
+      width: video.videoWidth,
+      height: video.videoHeight,
       overviewFrameCount: timeline.filter((point) => point.phase === "overview").length,
       tailFrameCount: timeline.filter((point) => point.phase === "tail").length,
       sheets,
+      representativeFrames: representative.map((frame, index) => ({
+        dataUrl: frame.canvas.toDataURL("image/jpeg", 0.82),
+        displayName: `${["开头", "中段", "结尾"][index] ?? "代表"}关键帧 ${timestampLabel(frame.point.time)}`,
+        time: frame.point.time,
+      })),
     };
   } finally {
     video.removeAttribute("src");

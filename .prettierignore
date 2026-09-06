@@ -3,6 +3,8 @@ dist/
 node_modules/
 src-tauri/gen/
 src-tauri/target/
+src-tauri/resources/remotion-runtime/
+tools/remotion-runtime/
 src-tauri/skills/screenplay/
 package-lock.json
 pnpm-lock.yaml
@@ -10,3 +12,7 @@ pnpm-lock.yaml
 .playwright-mcp/
 .workbuddy/
 src-tauri/skills/storyboard/
+src-tauri/skills/h3-ref2va-optimizer/
+src-tauri/skills/fight-prompt-master/
+src-tauri/skills/multi-grid-storyboard-prompter/
+src-tauri/skills/storyboard-prompt/references/

@@ -6,7 +6,7 @@ use std::{
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use futures_util::StreamExt;
 use rand::Rng as _;
-use serde_json::json;
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri_plugin_log::log::{error, info, warn};
 use tokio::io::AsyncWriteExt;
@@ -18,6 +18,38 @@ use super::{
     storage::{GenerationLifecycleFact, GenerationTaskLifecycle, Storage, now_ms},
     types::{GenerationResultRecord, MediaType, SaveStatus},
 };
+
+/// 把图片来源序列化为结果记录的 `source` 归档字段。Seedream 图层拆分场景下，
+/// 图层元数据（zIndex/name/description/boundingBox）一并写入，供前端把每个图层
+/// 单独落为可编辑对象。
+fn source_archive(source: &ImageSource) -> Value {
+    match source {
+        ImageSource::Url { url, layer } => {
+            let mut archive = json!({ "kind": "url", "url": url });
+            if let Some(layer) = layer {
+                archive["layer"] = json!({
+                    "zIndex": layer.z_index,
+                    "name": layer.name,
+                    "description": layer.description,
+                    "boundingBox": layer.bounding_box,
+                });
+            }
+            archive
+        }
+        ImageSource::Base64 { layer, .. } => {
+            let mut archive = json!({ "kind": "base64", "storedInRawProviderResponse": true });
+            if let Some(layer) = layer {
+                archive["layer"] = json!({
+                    "zIndex": layer.z_index,
+                    "name": layer.name,
+                    "description": layer.description,
+                    "boundingBox": layer.bounding_box,
+                });
+            }
+            archive
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct LocalResultService {
@@ -65,12 +97,7 @@ impl LocalResultService {
                 result_index: (offset + 1) as u32,
                 media_type: MediaType::Image,
                 remote_task_id: None,
-                source: match source {
-                    ImageSource::Url(url) => json!({ "kind": "url", "url": url }),
-                    ImageSource::Base64(_) => {
-                        json!({ "kind": "base64", "storedInRawProviderResponse": true })
-                    }
-                },
+                source: source_archive(source),
                 save_status: SaveStatus::Pending,
                 final_path: None,
                 relative_path: None,
@@ -144,12 +171,7 @@ impl LocalResultService {
         let mut pending = Vec::with_capacity(sources.len());
         for (offset, source) in sources.into_iter().enumerate() {
             let result_index = (offset + 1) as u32;
-            let source_archive = match &source {
-                ImageSource::Url(url) => json!({ "kind": "url", "url": url }),
-                ImageSource::Base64(_) => {
-                    json!({ "kind": "base64", "storedInRawProviderResponse": true })
-                }
-            };
+            let source_archive = source_archive(&source);
             info!(
                 "[save] 处理图片结果 {}/{}: taskId={}, resultIndex={}, 来源={}",
                 offset + 1,
@@ -157,8 +179,8 @@ impl LocalResultService {
                 task_id,
                 result_index,
                 match &source {
-                    ImageSource::Url(url) => format!("url（{}）", redact_url_string(url)),
-                    ImageSource::Base64(_) => "base64".to_string(),
+                    ImageSource::Url { url, .. } => format!("url（{}）", redact_url_string(url)),
+                    ImageSource::Base64 { .. } => "base64".to_string(),
                 }
             );
             let mut record = GenerationResultRecord {
@@ -187,8 +209,8 @@ impl LocalResultService {
         for (source, mut record) in pending {
             let result_index = record.result_index;
             let result = match source {
-                ImageSource::Url(url) => self.download_with_retry(&url).await,
-                ImageSource::Base64(value) => decode_base64_image(&value),
+                ImageSource::Url { url, .. } => self.download_with_retry(&url).await,
+                ImageSource::Base64 { data, .. } => decode_base64_image(&data),
             }
             .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Image));
 
@@ -600,16 +622,19 @@ impl LocalResultService {
                 .get("url")
                 .and_then(|value| value.as_str())
                 .filter(|value| !value.is_empty())
-                .map(|value| ImageSource::Url(value.to_string()))
+                .map(|value| ImageSource::Url {
+                    url: value.to_string(),
+                    layer: None,
+                })
                 .ok_or_else(|| {
                     BackendError::protocol(
                         "interrupted URL result has no source URL",
                         json!({ "result": record }),
                     )
                 }),
-            Some("base64") if record.media_type == MediaType::Image => {
-                self.recover_base64_source(&record).map(ImageSource::Base64)
-            }
+            Some("base64") if record.media_type == MediaType::Image => self
+                .recover_base64_source(&record)
+                .map(|data| ImageSource::Base64 { data, layer: None }),
             kind => Err(BackendError::protocol(
                 "interrupted result has an unsupported recovery source",
                 json!({ "sourceKind": kind, "result": record }),
@@ -617,11 +642,11 @@ impl LocalResultService {
         };
 
         let outcome = match source {
-            Ok(ImageSource::Url(url)) => self
+            Ok(ImageSource::Url { url, .. }) => self
                 .download_with_retry(&url)
                 .await
                 .and_then(|bytes| self.prepare_bytes(bytes, record.media_type)),
-            Ok(ImageSource::Base64(value)) => decode_base64_image(&value)
+            Ok(ImageSource::Base64 { data, .. }) => decode_base64_image(&data)
                 .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Image)),
             Err(error) => Err(error),
         };
@@ -1005,10 +1030,10 @@ fn decode_base64_image(value: &str) -> BackendResult<Vec<u8>> {
 /// 本地结果仍以 Downloads 中的最终文件为长期引用。
 pub fn preview_source(source: &ImageSource, expected: MediaType) -> Option<String> {
     match source {
-        ImageSource::Url(url) if !url.is_empty() => Some(url.clone()),
-        ImageSource::Url(_) => None,
-        ImageSource::Base64(value) => {
-            let bytes = decode_base64_image(value).ok()?;
+        ImageSource::Url { url, .. } if !url.is_empty() => Some(url.clone()),
+        ImageSource::Url { .. } => None,
+        ImageSource::Base64 { data, .. } => {
+            let bytes = decode_base64_image(data).ok()?;
             let inferred = infer::get(&bytes)?;
             let mime_type = inferred.mime_type();
             let valid = match expected {
@@ -1119,10 +1144,11 @@ mod tests {
 
     #[test]
     fn valid_base64_source_gets_an_image_preview_data_uri() {
-        let source = ImageSource::Base64(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        let source = ImageSource::Base64 {
+            data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
                 .to_string(),
-        );
+            layer: None,
+        };
         let preview = preview_source(&source, MediaType::Image).expect("preview");
         assert!(preview.starts_with("data:image/png;base64,"));
     }

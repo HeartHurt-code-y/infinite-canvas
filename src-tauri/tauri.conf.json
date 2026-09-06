@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.infinitecanvas.desktop",
   "build": {
-    "beforeDevCommand": "pnpm dev",
+    "beforeDevCommand": "pnpm remotion:prepare && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm build",
+    "beforeBuildCommand": "pnpm remotion:prepare && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -39,6 +39,9 @@
     "targets": "all",
     "publisher": "infinitecanvas",
     "copyright": "Copyright © 2026 infinitecanvas",
+    "resources": {
+      "resources/remotion-runtime/": "remotion-runtime/"
+    },
     "windows": {
       "wix": {
         "language": "zh-CN",

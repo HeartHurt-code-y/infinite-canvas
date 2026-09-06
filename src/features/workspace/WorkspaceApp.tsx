@@ -134,6 +134,32 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { AssetKindIcon } from "./PromptNodeViews";
+import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
+import { formatWorkflowError } from "../../lib/workflowErrors";
+import { WorkflowRepository } from "./WorkflowRepository";
+import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
+import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
+import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
+import {
+  MAX_WORKFLOW_MATERIALS,
+  MAX_WORKFLOW_MATERIAL_BYTES,
+  workflowReferenceMaterials,
+  workflowMaterialPathKey,
+} from "./workflowMaterials";
+import {
+  createKnowledgeVideoDirectorWorkflow,
+  createAiFilmWorkflow,
+  createComicDramaWorkflow,
+  createCommerceWorkflow,
+  createRemotionWorkflow,
+  createXhsCoverWorkflow,
+  createReverseVideoWorkflow,
+} from "./workflowTemplates";
+import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
+import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
+import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
+import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
+import { XHS_COVER_MAX_REFERENCE_BYTES, xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
 import type {
   AssetItem,
   AssetKind,
@@ -152,9 +178,13 @@ import type {
   GenerationMediaInput,
   ImageNodeConfig,
   InheritedAssetInput,
+  KnowledgeVideoWorkflowConfig,
+  KnowledgeVideoWorkflowNodeData,
+  KnowledgeVideoWorkflowRunState,
   MentionCandidate,
   MobilePanel,
   NodeModelSelections,
+  OutputLayerInfo,
   OutputNodeData,
   PromptNodeConfig,
   RetryInfo,
@@ -215,6 +245,9 @@ import {
   VIRAL_REMIX_NODE_COARSE_HEIGHT,
   VIRAL_REMIX_NODE_HEIGHT,
   VIRAL_REMIX_NODE_WIDTH,
+  KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT,
+  KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
+  KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
   ZOOM_STEP,
   assetGenerationInput,
   assetNodeDimensions,
@@ -262,6 +295,7 @@ import {
   resolveGenerationSelection,
   resolvePendingDocumentNodeConfig,
   resolvePendingGenerationNodeConfig,
+  resolvePendingKnowledgeVideoWorkflowConfig,
   saveComposedVideoBlob,
   screenplayMessageId,
   screenplayMaterialId,
@@ -381,8 +415,13 @@ export function WorkspaceApp() {
     readonly limit: number;
   }>({ key: "", limit: ASSET_RENDER_BATCH_SIZE });
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
+  const [workflowRepositoryExpanded, setWorkflowRepositoryExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyInitialTab, setHistoryInitialTab] = useState<"generation" | "workflow">(
+    "generation",
+  );
+  const [historyInitialWorkflowId, setHistoryInitialWorkflowId] = useState<string | null>(null);
   const [realPersonDialogOpen, setRealPersonDialogOpen] = useState(false);
   const {
     selectedNodeKey,
@@ -393,6 +432,7 @@ export function WorkspaceApp() {
     genNodes,
     screenplayNodes,
     storyboardNodes,
+    knowledgeVideoWorkflowNodes,
     viralRemixNodes,
     videoComposerNodes,
     videoDownloaderNodes,
@@ -421,6 +461,7 @@ export function WorkspaceApp() {
       genNodes: state.nodes.gen,
       screenplayNodes: state.nodes.screenplay,
       storyboardNodes: state.nodes.storyboard,
+      knowledgeVideoWorkflowNodes: state.nodes.knowledgeVideoWorkflow,
       viralRemixNodes: state.nodes.viralRemix,
       videoComposerNodes: state.nodes.videoComposer,
       videoDownloaderNodes: state.nodes.videoDownloader,
@@ -442,6 +483,7 @@ export function WorkspaceApp() {
     })),
   );
   const {
+    insertSubgraph,
     addNode,
     addOutput,
     patchNode,
@@ -547,6 +589,31 @@ export function WorkspaceApp() {
     Readonly<Record<string, VideoFrameExtractorRunState>>
   >({});
   const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
+  const [knowledgeVideoWorkflowRuns, setKnowledgeVideoWorkflowRuns] = useState<
+    Readonly<Record<string, KnowledgeVideoWorkflowRunState>>
+  >({});
+  const knowledgeVideoWorkflowAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
+  const recordedWorkflowRunner = useMemo(() => createRecordedWorkflowRunner(), []);
+  const activeWorkflowHistoryIdsRef = useRef(new Set<string>());
+  const [activeWorkflowHistoryIds, setActiveWorkflowHistoryIds] = useState<readonly string[]>([]);
+  const workflowHistoryRecoveryRef = useRef<Promise<number> | null>(null);
+  const recoverWorkflowHistory = useCallback(() => {
+    if (!workflowHistoryRecoveryRef.current) {
+      const pending = workflowHistoryClient.recover();
+      workflowHistoryRecoveryRef.current = pending;
+      void pending.catch(() => {
+        if (workflowHistoryRecoveryRef.current === pending)
+          workflowHistoryRecoveryRef.current = null;
+      });
+    }
+    return workflowHistoryRecoveryRef.current;
+  }, []);
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    void recoverWorkflowHistory().catch((error: unknown) => {
+      toast.error("工作流历史恢复失败", { description: formatWorkflowError(error) });
+    });
+  }, [recoverWorkflowHistory]);
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
   const [genNodeSizes, setGenNodeSizes] = useState<Record<string, CanvasNodeDimensions>>({});
   const [previewOutputNodeKey, setPreviewOutputNodeKey] = useState<string | null>(null);
@@ -588,6 +655,16 @@ export function WorkspaceApp() {
         ...(genNodeSizes[node.key] ?? {
           width: SCREENPLAY_NODE_WIDTH,
           height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
+        }),
+      })),
+      ...knowledgeVideoWorkflowNodes.map((node) => ({
+        x: node.x,
+        y: node.y,
+        ...(genNodeSizes[node.key] ?? {
+          width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+          height: usesCoarsePointer()
+            ? KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT
+            : KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
         }),
       })),
       ...viralRemixNodes.map((node) => ({
@@ -637,6 +714,7 @@ export function WorkspaceApp() {
       resultNodes,
       screenplayNodes,
       storyboardNodes,
+      knowledgeVideoWorkflowNodes,
       viralRemixNodes,
       videoComposerNodes,
       videoDownloaderNodes,
@@ -646,6 +724,10 @@ export function WorkspaceApp() {
   const mediaInputTargetKeysRef = useRef<ReadonlySet<string>>(new Set());
   // 提示内容 module 持有 canonical documents 与节点级 handle；视口裁剪不会丢内容。
   const [promptContents] = useState(createPromptContentModule);
+  // 追踪上游原始输出版本；结构化引用的显示文字和用户手改内容都不用于判定重新导入。
+  const importedPromptSourcesRef = useRef(
+    new Map<string, { edgeId: string; sourceKey: string; text: string }>(),
+  );
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
   // React Flow 实例引用：命令式视口操作（恢复视图/锚点缩放/坐标换算）的唯一入口。
   const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
@@ -660,6 +742,10 @@ export function WorkspaceApp() {
     // 不清空任务历史（生成节点删除/本地结果文件缺失都不能清理历史，详见 MVP 契约）。
     for (const controller of videoComposerAbortControllersRef.current.values()) controller.abort();
     videoComposerAbortControllersRef.current.clear();
+    for (const controller of knowledgeVideoWorkflowAbortControllersRef.current.values()) {
+      controller.abort();
+    }
+    knowledgeVideoWorkflowAbortControllersRef.current.clear();
     // 先撤销拼接产物仅会话内有效的 blob 预览，再原子清空画布持久状态。
     for (const node of outputNodes) {
       if (node.origin === "composition" && node.previewSrc?.startsWith("blob:")) {
@@ -670,6 +756,7 @@ export function WorkspaceApp() {
     setVideoComposerRuns({});
     setVideoDownloaderRuns({});
     setFrameExtractorRuns({});
+    setKnowledgeVideoWorkflowRuns({});
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
   }, [
@@ -678,6 +765,7 @@ export function WorkspaceApp() {
     setVideoComposerRuns,
     setVideoDownloaderRuns,
     setFrameExtractorRuns,
+    setKnowledgeVideoWorkflowRuns,
     setGenNodeSizes,
     setPreviewOutputNodeKey,
   ]);
@@ -688,6 +776,10 @@ export function WorkspaceApp() {
         controller.abort();
       }
       videoComposerAbortControllersRef.current.clear();
+      for (const controller of knowledgeVideoWorkflowAbortControllersRef.current.values()) {
+        controller.abort();
+      }
+      knowledgeVideoWorkflowAbortControllersRef.current.clear();
     },
     [],
   );
@@ -730,7 +822,7 @@ export function WorkspaceApp() {
         if (requestId !== canvasSaveRequestRef.current) return;
         frontendLog(
           "info",
-          `[canvas] 画布状态已保存: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
+          `[canvas] 画布状态已保存: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
         );
       })
       .catch((error: unknown) => {
@@ -773,10 +865,24 @@ export function WorkspaceApp() {
             "error",
             `[canvas] 提示内容恢复失败: ${promptRestore.invalidNodeKeys.join(", ")}`,
           );
+        } else {
+          // 恢复后的提示内容已经包含精确引用或用户修改，包括主动清空的文档。
+          // 用同时保存的上游版本初始化同步记录，避免首次 effect 按当前编号重新解析。
+          importedPromptSourcesRef.current.clear();
+          const restoredGenNodes = new Map(document.genNodes.map((node) => [node.key, node]));
+          for (const edge of document.assetEdges) {
+            const source = restoredGenNodes.get(edge.fromKey);
+            if (source?.kind !== "prompt" || !(edge.toKey in restored.promptContents)) continue;
+            importedPromptSourcesRef.current.set(edge.toKey, {
+              edgeId: edge.id,
+              sourceKey: source.key,
+              text: source.config.generatedPrompt,
+            });
+          }
         }
         frontendLog(
           "info",
-          `[canvas] 画布状态已恢复: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
+          `[canvas] 画布状态已恢复: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
         );
       })
       .catch(() => undefined)
@@ -810,6 +916,7 @@ export function WorkspaceApp() {
     viralRemixNodes,
     videoComposerNodes,
     outputNodes,
+    knowledgeVideoWorkflowNodes,
     pan,
     resultNodes,
     scheduleCanvasSave,
@@ -1510,6 +1617,766 @@ export function WorkspaceApp() {
     [addNode, dropPosition],
   );
 
+  /**
+   * 从底部工作流仓库一次性放入知识教学视频导演流程。
+   * 模板只保存当前项目供应商目录校准后的模型绑定；插入本身不会发起任何模型任务。
+   */
+  const insertWorkflow = useCallback(
+    (
+      kind:
+        "knowledge" | "film" | "comicDrama" | "commerce" | "remotion" | "xhsCover" | "reverseVideo",
+    ) => {
+      try {
+        const anchor = viewportCenterBoardCoordinates();
+        const scale = flowInstanceRef.current?.getZoom() ?? zoom / 100;
+        const visibleHeight =
+          (canvasViewportRef.current?.getBoundingClientRect().height ?? 0) / scale;
+        // 仓库展开时可视区域较矮，先保证折叠节点的标题与需求输入留在视口内。
+        const topInset =
+          visibleHeight > 0
+            ? Math.max(0, (KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT + 48 - visibleHeight) / 2)
+            : 0;
+        const createWorkflow = {
+          knowledge: createKnowledgeVideoDirectorWorkflow,
+          film: createAiFilmWorkflow,
+          comicDrama: createComicDramaWorkflow,
+          commerce: createCommerceWorkflow,
+          remotion: createRemotionWorkflow,
+          xhsCover: createXhsCoverWorkflow,
+          reverseVideo: createReverseVideoWorkflow,
+        }[kind];
+        const title = {
+          knowledge: "知识教学视频",
+          film: "AI影视",
+          comicDrama: "漫剧自动",
+          commerce: "剧情带货",
+          remotion: "动画逻辑图",
+          xhsCover: "小红书封面",
+          reverseVideo: "短视频反推",
+        }[kind];
+        const workflow = createWorkflow({
+          anchor: { x: anchor.x, y: anchor.y + topInset },
+          occupied: occupiedNodeRects,
+          nodeModelSelections,
+          providerCatalog,
+          providerCatalogLoaded,
+        });
+        insertSubgraph(workflow.nodes, workflow.edges, {
+          selectNodeKey: workflow.selectedNodeKey,
+        });
+        setWorkflowRepositoryExpanded(false);
+        frontendLog(
+          "info",
+          `[canvas] ${title}工作流已放入画布: 节点=${workflow.nodes.length}, 连线=${workflow.edges.length}, 位置=(${Math.round(workflow.bounds.x)}, ${Math.round(workflow.bounds.y)})`,
+        );
+        toast.success(`${title}工作流已放入画布`, {
+          description:
+            kind === "reverseVideo"
+              ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
+              : kind === "xhsCover"
+                ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
+                : kind === "remotion"
+                  ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
+                  : kind === "commerce"
+                    ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
+                    : kind === "comicDrama"
+                      ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
+                      : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+        });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        frontendLog("error", `[canvas] 工作流放入失败: ${message}`);
+        toast.error("工作流放入失败", { description: message });
+      }
+    },
+    [
+      insertSubgraph,
+      nodeModelSelections,
+      occupiedNodeRects,
+      providerCatalog,
+      providerCatalogLoaded,
+      viewportCenterBoardCoordinates,
+      zoom,
+    ],
+  );
+  const insertKnowledgeVideoDirectorWorkflow = useCallback(
+    () => insertWorkflow("knowledge"),
+    [insertWorkflow],
+  );
+  const insertAiFilmWorkflow = useCallback(() => insertWorkflow("film"), [insertWorkflow]);
+  const insertComicDramaWorkflow = useCallback(
+    () => insertWorkflow("comicDrama"),
+    [insertWorkflow],
+  );
+  const insertCommerceWorkflow = useCallback(() => insertWorkflow("commerce"), [insertWorkflow]);
+  const insertRemotionWorkflow = useCallback(() => insertWorkflow("remotion"), [insertWorkflow]);
+  const insertXhsCoverWorkflow = useCallback(() => insertWorkflow("xhsCover"), [insertWorkflow]);
+  const insertReverseVideoWorkflow = useCallback(
+    () => insertWorkflow("reverseVideo"),
+    [insertWorkflow],
+  );
+  const toggleWorkflowRepository = useCallback(
+    () => setWorkflowRepositoryExpanded((current) => !current),
+    [],
+  );
+
+  const updateKnowledgeVideoWorkflowConfig = useCallback(
+    (key: string, config: KnowledgeVideoWorkflowConfig) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
+    },
+    [patchNode],
+  );
+
+  const runKnowledgeVideoWorkflow = useCallback(
+    (
+      key: string,
+      resume: boolean,
+      decisionResolution?: string,
+      restoredNode?: KnowledgeVideoWorkflowNodeData,
+    ) => {
+      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      const sourceNode =
+        restoredNode ?? knowledgeVideoWorkflowNodes.find((candidate) => candidate.key === key);
+      if (!sourceNode) return;
+      if (!isDesktopRuntime()) {
+        setKnowledgeVideoWorkflowRuns((current) => ({
+          ...current,
+          [key]: {
+            phase: "failed",
+            progress: 0,
+            message: "请在桌面应用中执行工作流。",
+            error: "自动工作流需要桌面端的项目供应商和本地合成能力。",
+          },
+        }));
+        return;
+      }
+      const historyRunId =
+        resume && sourceNode.config.historyRunId
+          ? sourceNode.config.historyRunId
+          : crypto.randomUUID();
+      if (activeWorkflowHistoryIdsRef.current.has(historyRunId)) return;
+      const node = { ...sourceNode, config: { ...sourceNode.config, historyRunId } };
+      patchNode("knowledgeVideoWorkflow", key, () => node);
+      activeWorkflowHistoryIdsRef.current.add(historyRunId);
+      setActiveWorkflowHistoryIds([...activeWorkflowHistoryIdsRef.current]);
+      const controller = new AbortController();
+      knowledgeVideoWorkflowAbortControllersRef.current.set(key, controller);
+      setKnowledgeVideoWorkflowRuns((current) => ({
+        ...current,
+        [key]: {
+          phase: resume ? node.config.checkpoint.phase : "planning",
+          progress: resume ? 20 : 2,
+          message: resume ? "正在从已保存进度继续…" : "正在启动自动工作流…",
+          error: null,
+        },
+      }));
+      void recoverWorkflowHistory()
+        .then(() =>
+          recordedWorkflowRunner.run({
+            node,
+            providerCatalog,
+            resume,
+            newHistory: !sourceNode.config.historyRunId,
+            ...(decisionResolution === undefined ? {} : { decisionResolution }),
+            signal: controller.signal,
+            onCheckpoint: (checkpoint) => {
+              patchNode("knowledgeVideoWorkflow", key, (currentNode) => ({
+                ...currentNode,
+                config: { ...currentNode.config, checkpoint },
+              }));
+            },
+            onProgress: (runState) => {
+              setKnowledgeVideoWorkflowRuns((current) => ({ ...current, [key]: runState }));
+            },
+          }),
+        )
+        .then((checkpoint) => {
+          if (checkpoint.phase === "done") {
+            toast.success(
+              node.config.xhsCover
+                ? "小红书封面制作完成"
+                : node.config.remotion
+                  ? "动画逻辑图制作完成"
+                  : node.config.commerce
+                    ? "剧情带货制作完成"
+                    : node.config.comicDrama
+                      ? "漫剧制作完成"
+                      : node.config.film
+                        ? "影视制作完成"
+                        : "知识视频制作完成",
+              {
+                description: node.config.xhsCover
+                  ? "封面方案、提示词与交付物已保存在工作流节点中。"
+                  : node.config.remotion
+                    ? "动画、预览图和可编辑工程已保存在工作流节点中。"
+                    : checkpoint.documentsOnly
+                      ? "制作文档与提示词已保存在工作流节点中。"
+                      : "完整成片与过程文档已保存在工作流节点中。",
+              },
+            );
+          } else if (checkpoint.phase === "awaiting_approval") {
+            toast.info("工作流需要一项确认", {
+              description: checkpoint.decision?.question ?? "请在节点内确认后继续。",
+            });
+          }
+        })
+        .catch((error: unknown) => {
+          const message = formatWorkflowError(error);
+          setKnowledgeVideoWorkflowRuns((current) => ({
+            ...current,
+            [key]: { phase: "failed", progress: 0, message: "工作流执行失败。", error: message },
+          }));
+        })
+        .finally(() => {
+          activeWorkflowHistoryIdsRef.current.delete(historyRunId);
+          setActiveWorkflowHistoryIds([...activeWorkflowHistoryIdsRef.current]);
+          if (knowledgeVideoWorkflowAbortControllersRef.current.get(key) === controller) {
+            knowledgeVideoWorkflowAbortControllersRef.current.delete(key);
+          }
+        });
+    },
+    [
+      knowledgeVideoWorkflowNodes,
+      recordedWorkflowRunner,
+      recoverWorkflowHistory,
+      patchNode,
+      providerCatalog,
+    ],
+  );
+
+  const workflowHistoryActionsRef = useRef(new Set<string>());
+  const restoreStoredWorkflow = useCallback(
+    async (
+      record: WorkflowHistoryRecord,
+      action: "resume" | "restart" | "locate",
+      resolution?: string,
+    ) => {
+      if (workflowHistoryActionsRef.current.has(record.id)) return;
+      workflowHistoryActionsRef.current.add(record.id);
+      try {
+        await recoverWorkflowHistory();
+        const latest = (await workflowHistoryClient.get(record.id)).record;
+        if (latest.canvasId !== CANVAS_ID) throw new Error("请先打开这条工作流所属的画布。");
+        if (activeWorkflowHistoryIdsRef.current.has(latest.id) && action !== "locate")
+          throw new Error("这条工作流正在运行，请先在画布中暂停后再处理。");
+        const document = snapshotV2({});
+        const nodes = document.knowledgeVideoWorkflowNodes ?? [];
+        const activeNode = nodes.find(
+          (item) =>
+            item.config.historyRunId === latest.id &&
+            knowledgeVideoWorkflowAbortControllersRef.current.has(item.key),
+        );
+        if (activeNode && action === "locate") {
+          selectNode(activeNode.key);
+          void flowInstanceRef.current?.setCenter(
+            activeNode.x + KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+            activeNode.y + 100,
+            { zoom: zoom / 100, duration: 200 },
+          );
+          setHistoryOpen(false);
+          return;
+        }
+        const anchor = viewportCenterBoardCoordinates();
+        const occupiedKeys = new Set(
+          [
+            ...document.assetNodes,
+            ...document.genNodes,
+            ...document.resultNodes,
+            ...(document.outputNodes ?? []),
+            ...(document.screenplayNodes ?? []),
+            ...(document.storyboardNodes ?? []),
+            ...(document.viralRemixNodes ?? []),
+            ...(document.videoComposerNodes ?? []),
+            ...(document.videoDownloaderNodes ?? []),
+            ...(document.frameExtractorNodes ?? []),
+            ...nodes,
+          ].map((item) => item.key),
+        );
+        const restored = restoreWorkflowHistoryNode(latest, nodes, {
+          restart: action === "restart",
+          occupiedKeys,
+          newKey: `workflow-restored-${crypto.randomUUID()}`,
+          position: nearestAvailableNodePosition(
+            {
+              x: anchor.x - KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+              y: anchor.y - 180,
+              width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+              height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
+            },
+            occupiedNodeRects,
+          ),
+        });
+        if (restored.replace)
+          patchNode("knowledgeVideoWorkflow", restored.node.key, () => restored.node);
+        else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
+        selectNode(restored.node.key);
+        void flowInstanceRef.current?.setCenter(
+          restored.node.x + KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+          restored.node.y + 180,
+          { zoom: zoom / 100, duration: 200 },
+        );
+        if (action !== "locate") {
+          runKnowledgeVideoWorkflow(
+            restored.node.key,
+            action === "resume",
+            resolution,
+            restored.node,
+          );
+        }
+        setHistoryOpen(false);
+        if (!restored.replace)
+          toast.success(
+            action === "restart" ? "已按历史输入重新制作" : "工作流已从历史记录恢复到画布",
+          );
+      } finally {
+        workflowHistoryActionsRef.current.delete(record.id);
+      }
+    },
+    [
+      recoverWorkflowHistory,
+      snapshotV2,
+      selectNode,
+      zoom,
+      viewportCenterBoardCoordinates,
+      occupiedNodeRects,
+      patchNode,
+      addNode,
+      runKnowledgeVideoWorkflow,
+    ],
+  );
+  const resumeHistoryWorkflow = useCallback(
+    (record: WorkflowHistoryRecord, resolution?: string) =>
+      restoreStoredWorkflow(record, "resume", resolution),
+    [restoreStoredWorkflow],
+  );
+  const restartHistoryWorkflow = useCallback(
+    (record: WorkflowHistoryRecord) => restoreStoredWorkflow(record, "restart"),
+    [restoreStoredWorkflow],
+  );
+  const locateHistoryWorkflow = useCallback(
+    (record: WorkflowHistoryRecord) => {
+      void restoreStoredWorkflow(record, "locate").catch((error: unknown) =>
+        toast.error("恢复工作流失败", { description: formatWorkflowError(error) }),
+      );
+    },
+    [restoreStoredWorkflow],
+  );
+  const openWorkflowHistory = useCallback(
+    (key: string) => {
+      const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
+      setHistoryInitialTab("workflow");
+      setHistoryInitialWorkflowId(node?.config.historyRunId ?? null);
+      setHistoryOpen(true);
+    },
+    [knowledgeVideoWorkflowNodes],
+  );
+
+  const handlePickReverseVideo = useCallback(
+    async (key: string) => {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const selection = await open({
+          multiple: false,
+          directory: false,
+          title: "选择要反推的本地视频",
+          filters: [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv", "avi", "m4v"] }],
+        });
+        if (typeof selection !== "string" || !selection) return;
+        patchNode("knowledgeVideoWorkflow", key, (node) => {
+          if (
+            !node.config.reverseVideo ||
+            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+            node.config.checkpoint.phase === "awaiting_approval"
+          )
+            return node;
+          return {
+            ...node,
+            config: {
+              ...node.config,
+              reverseVideo: {
+                ...node.config.reverseVideo,
+                sourceUrl: "",
+                localVideoPath: selection,
+                localVideoName: selection.split(/[\\/]/).at(-1) ?? "本地视频",
+              },
+            },
+          };
+        });
+      } catch (error) {
+        toast.error("选择视频失败", { description: formatWorkflowError(error) });
+      }
+    },
+    [patchNode],
+  );
+
+  const handleRemoveReverseVideo = useCallback(
+    (key: string) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        if (
+          !node.config.reverseVideo ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            reverseVideo: {
+              ...node.config.reverseVideo,
+              localVideoPath: "",
+              localVideoName: "",
+            },
+          },
+        };
+      });
+    },
+    [patchNode],
+  );
+
+  const handlePickWorkflowMaterials = useCallback(
+    async (key: string) => {
+      const picked = await pickPromptMultimodalFiles({ title: "为工作流添加参考素材" });
+      if (!picked.length) return;
+      let rejected = 0;
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        if (
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        const materials = [...(node.config.materials ?? [])];
+        const existing = workflowReferenceMaterials(node.config);
+        const paths = new Set(existing.map(workflowMaterialPathKey));
+        const generalPaths = new Set(materials.map(workflowMaterialPathKey));
+        let totalBytes = existing.reduce((sum, item) => sum + item.byteSize, 0);
+        for (const item of picked) {
+          const path = workflowMaterialPathKey(item);
+          const alreadyCounted = paths.has(path);
+          if (
+            generalPaths.has(path) ||
+            !Number.isFinite(item.byteSize) ||
+            item.byteSize <= 0 ||
+            item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
+            (!alreadyCounted &&
+              (paths.size >= MAX_WORKFLOW_MATERIALS ||
+                totalBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+          ) {
+            rejected++;
+            continue;
+          }
+          if (!alreadyCounted) totalBytes += item.byteSize;
+          paths.add(path);
+          generalPaths.add(path);
+          materials.push(item);
+        }
+        return { ...node, config: { ...node.config, materials } };
+      });
+      if (rejected)
+        toast.info(`${rejected} 项参考素材未添加`, {
+          description: "重复文件会跳过；参考素材与专用资料合计最多 8 项、14 MB，不支持空文件。",
+        });
+    },
+    [patchNode],
+  );
+
+  const handleRemoveWorkflowMaterial = useCallback(
+    (key: string, localPath: string) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        if (
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            materials: (node.config.materials ?? []).filter((item) => item.localPath !== localPath),
+          },
+        };
+      });
+    },
+    [patchNode],
+  );
+
+  const handlePickCoverImages = useCallback(
+    async (key: string, role: "portrait" | "material") => {
+      const picked = await pickPromptMultimodalFiles({
+        title: role === "portrait" ? "添加同一人物的封面参考图" : "添加封面截图、产品图或标志",
+        kinds: ["image"],
+      });
+      if (!picked.length) return;
+      let rejected = 0;
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        const options = node.config.xhsCover;
+        if (
+          !options ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        const field = role === "portrait" ? "portraits" : "materials";
+        const items = [...options[field]];
+        const existing = [...options.portraits, ...options.materials];
+        const paths = new Set(existing.map(workflowMaterialPathKey));
+        let totalBytes = existing.reduce((sum, item) => sum + item.byteSize, 0);
+        const references = workflowReferenceMaterials(node.config);
+        const referencePaths = new Set(references.map(workflowMaterialPathKey));
+        let referenceBytes = references.reduce((sum, item) => sum + item.byteSize, 0);
+        for (const item of picked) {
+          const alreadyCounted = referencePaths.has(workflowMaterialPathKey(item));
+          if (
+            item.kind !== "image" ||
+            paths.has(workflowMaterialPathKey(item)) ||
+            items.length >= (role === "portrait" ? 3 : 5) ||
+            !Number.isFinite(item.byteSize) ||
+            item.byteSize <= 0 ||
+            totalBytes + item.byteSize > XHS_COVER_MAX_REFERENCE_BYTES ||
+            (!alreadyCounted &&
+              (referencePaths.size >= MAX_WORKFLOW_MATERIALS ||
+                referenceBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+          ) {
+            rejected++;
+            continue;
+          }
+          paths.add(workflowMaterialPathKey(item));
+          totalBytes += item.byteSize;
+          referencePaths.add(workflowMaterialPathKey(item));
+          if (!alreadyCounted) referenceBytes += item.byteSize;
+          items.push(item);
+        }
+        return { ...node, config: { ...node.config, xhsCover: { ...options, [field]: items } } };
+      });
+      if (rejected)
+        toast.info(`${rejected} 张图片未添加`, {
+          description:
+            "人物参考图最多 3 张，封面图片合计不超过 8 MB；与通用参考素材合计最多 8 项、14 MB，重复图片会跳过。",
+        });
+    },
+    [patchNode],
+  );
+
+  const handleRemoveCoverImage = useCallback(
+    (key: string, role: "portrait" | "material", path: string) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        const options = node.config.xhsCover;
+        if (
+          !options ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        const field = role === "portrait" ? "portraits" : "materials";
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            xhsCover: {
+              ...options,
+              [field]: options[field].filter((item) => item.localPath !== path),
+            },
+          },
+        };
+      });
+    },
+    [patchNode],
+  );
+
+  const handlePickCommerceMaterials = useCallback(
+    async (key: string) => {
+      const picked = await pickPromptMultimodalFiles({
+        title: "为带货工作流添加商品原图和资料",
+        kinds: ["image", "document"],
+      });
+      if (!picked.length) return;
+      let rejected = 0;
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        const options = node.config.commerce;
+        if (
+          !options ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        const materials = [...options.materials];
+        const paths = new Set(materials.map(workflowMaterialPathKey));
+        const references = workflowReferenceMaterials(node.config);
+        const referencePaths = new Set(references.map(workflowMaterialPathKey));
+        let totalBytes = references.reduce((total, item) => total + item.byteSize, 0);
+        for (const item of picked) {
+          const alreadyCounted = referencePaths.has(workflowMaterialPathKey(item));
+          if (
+            (item.kind !== "image" && item.kind !== "document") ||
+            paths.has(workflowMaterialPathKey(item)) ||
+            !Number.isFinite(item.byteSize) ||
+            item.byteSize <= 0 ||
+            item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
+            (!alreadyCounted &&
+              (referencePaths.size >= MAX_WORKFLOW_MATERIALS ||
+                totalBytes + item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES))
+          ) {
+            rejected++;
+            continue;
+          }
+          paths.add(workflowMaterialPathKey(item));
+          referencePaths.add(workflowMaterialPathKey(item));
+          if (!alreadyCounted) totalBytes += item.byteSize;
+          materials.push(item);
+        }
+        return { ...node, config: { ...node.config, commerce: { ...options, materials } } };
+      });
+      if (rejected)
+        toast.info(`${rejected} 项产品资料未添加`, {
+          description: "支持图片与文档，与通用参考素材合计最多 8 项、14 MB；重复文件会跳过。",
+        });
+    },
+    [patchNode],
+  );
+
+  const handleRemoveCommerceMaterial = useCallback(
+    (key: string, localPath: string) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        const options = node.config.commerce;
+        if (
+          !options ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            commerce: {
+              ...options,
+              materials: options.materials.filter((item) => item.localPath !== localPath),
+            },
+          },
+        };
+      });
+    },
+    [patchNode],
+  );
+
+  const executeKnowledgeVideoWorkflow = useCallback(
+    (key: string) => runKnowledgeVideoWorkflow(key, false),
+    [runKnowledgeVideoWorkflow],
+  );
+  const continueKnowledgeVideoWorkflow = useCallback(
+    (key: string, resolution?: string) => runKnowledgeVideoWorkflow(key, true, resolution),
+    [runKnowledgeVideoWorkflow],
+  );
+  const cancelKnowledgeVideoWorkflow = useCallback(
+    (key: string) => {
+      knowledgeVideoWorkflowAbortControllersRef.current.get(key)?.abort();
+      const node = knowledgeVideoWorkflowNodes.find((candidate) => candidate.key === key);
+      const jobId = node?.config.checkpoint.activeCompositionJobId;
+      if (jobId) void videoComposerClient.cancelJob(jobId).catch(() => undefined);
+    },
+    [knowledgeVideoWorkflowNodes],
+  );
+  const removeKnowledgeVideoWorkflow = useCallback(
+    (key: string) => {
+      knowledgeVideoWorkflowAbortControllersRef.current.get(key)?.abort();
+      knowledgeVideoWorkflowAbortControllersRef.current.delete(key);
+      removeCanvasNode(key);
+      setKnowledgeVideoWorkflowRuns((current) => {
+        if (!(key in current)) return current;
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+    },
+    [removeCanvasNode],
+  );
+  const revealKnowledgeVideoWorkflowResult = useCallback(
+    (key: string) => {
+      const checkpoint = knowledgeVideoWorkflowNodes.find((node) => node.key === key)?.config
+        .checkpoint;
+      const path =
+        checkpoint?.xhsCover?.finalPath ??
+        checkpoint?.xhsCover?.imagePath ??
+        checkpoint?.finalPath ??
+        checkpoint?.remotion?.renderJob?.gifPath ??
+        checkpoint?.remotion?.renderJob?.videoPath ??
+        checkpoint?.remotion?.renderJob?.previewPath;
+      if (path) void revealDesktopItem(path).catch(() => undefined);
+    },
+    [knowledgeVideoWorkflowNodes],
+  );
+
+  const revealRemotionProject = useCallback(
+    (key: string) => {
+      const path = knowledgeVideoWorkflowNodes.find((node) => node.key === key)?.config.checkpoint
+        .remotion?.renderJob?.projectPath;
+      if (path)
+        void revealDesktopItem(path).catch((error: unknown) =>
+          toast.error("打开动画工程失败", { description: formatRawBackendError(error) }),
+        );
+    },
+    [knowledgeVideoWorkflowNodes],
+  );
+
+  const exportFilmDocuments = useCallback(
+    (key: string) => {
+      const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
+      if (!node) return;
+      const isDrama = Boolean(node.config.comicDrama);
+      const isCommerce = Boolean(node.config.commerce);
+      const isRemotion = Boolean(node.config.remotion);
+      const isCover = Boolean(node.config.xhsCover);
+      if (
+        !isCover &&
+        !isRemotion &&
+        !isDrama &&
+        !isCommerce &&
+        !node.config.checkpoint.film?.artifacts.length
+      )
+        return;
+      const content = isCover
+        ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
+        : isRemotion
+          ? remotionDeliveryMarkdown(node.config.checkpoint)
+          : isCommerce
+            ? commerceDeliveryMarkdown(node.config.checkpoint)
+            : isDrama
+              ? comicDramaDeliveryMarkdown(node.config.checkpoint)
+              : aiFilmDeliveryMarkdown(node.config.checkpoint);
+      if (!content) return;
+      const title = isCover
+        ? "小红书封面制作文档"
+        : isRemotion
+          ? "动画逻辑图制作文档"
+          : isCommerce
+            ? "剧情带货制作文档"
+            : isDrama
+              ? "漫剧制作文档"
+              : "影视制作文档";
+      const fileName = markdownDocumentExportName(content, key, title);
+      void (async () => {
+        try {
+          if (isDesktopRuntime()) {
+            if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
+          } else {
+            const url = URL.createObjectURL(
+              new Blob([content], { type: "text/markdown;charset=utf-8" }),
+            );
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = fileName;
+            anchor.click();
+            URL.revokeObjectURL(url);
+          }
+          toast.success(`${title}已导出`);
+        } catch (error) {
+          toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
+        }
+      })();
+    },
+    [knowledgeVideoWorkflowNodes],
+  );
+
   const updateImageNodeConfig = useCallback(
     (key: string, config: ImageNodeConfig) => {
       patchNode("gen", key, (node) => (node.kind === "image" ? { ...node, config } : node));
@@ -1700,11 +2567,66 @@ export function WorkspaceApp() {
         failWith("提示词模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
         return;
       }
-      const sourcePrompt = node.config.sourcePrompt.trim();
+      const visionImages = promptVisionImages(nodeKey);
+      const videoMaterials = promptVideoMaterials(nodeKey);
+      const isFpvPath = node.config.mode === "fpv_path";
+      const isFightPromptMaster = node.config.mode === "fight_prompt_master";
+      const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
+      const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
+      const defaultFpvPrompt =
+        isFpvPath && node.config.task === "generate" && visionImages.length > 0
+          ? "请根据已连接参考图中的路径标记，生成完整的 FPV 飞行提示词方案。"
+          : isFpvPath && node.config.task === "optimize" && node.config.generatedPrompt.trim()
+            ? "请优化当前输出中的 FPV 飞行提示词方案，保留路径顺序与关键途经点。"
+            : "";
+      const defaultFightPrompt =
+        isFightPromptMaster &&
+        node.config.task === "generate" &&
+        (visionImages.length > 0 || videoMaterials.length > 0)
+          ? "请根据已连接的参考素材设计打斗提示词；先检查目标视频模型、时长和速度档，缺失时按技能规则补问。"
+          : isFightPromptMaster &&
+              node.config.task === "optimize" &&
+              node.config.generatedPrompt.trim()
+            ? "请继续优化当前输出中的打斗提示词，保留已确认的角色、动作逻辑与用户要求。"
+            : "";
+      const defaultMultiGridPrompt =
+        isMultiGridStoryboard &&
+        node.config.task === "generate" &&
+        (visionImages.length > 0 || videoMaterials.length > 0)
+          ? "请根据已连接参考素材中可见的人物、场景与动作提出多宫格分镜建议，参考画面不等于已有剧本；沿用对话中已确认的剧情和参数，仅在宫格数量、目标时长或风格缺失时补问，确认后生成图片与视频两套提示词。"
+          : isMultiGridStoryboard &&
+              node.config.task === "optimize" &&
+              node.config.generatedPrompt.trim()
+            ? "请继续优化当前输出中的多宫格分镜方案，沿用已确认的宫格数量、目标时长、风格、剧情与交付范围，完整保留本次所需的提示词和说明。"
+            : "";
+      const defaultStoryboardPrompt =
+        isStoryboardPrompt &&
+        node.config.task === "generate" &&
+        (visionImages.length > 0 || videoMaterials.length > 0)
+          ? "请根据已连接参考素材中实际可见的人物、场景与风格，结合对话中已确认的用途和剧情，生成可直接交给图片节点的完整整张故事板提示词。仅将可见内容作为参考，不把参考画面当作已确认的剧情；合理补全可推断细节，必要的核心信息缺失时再补问。"
+          : isStoryboardPrompt &&
+              node.config.task === "optimize" &&
+              node.config.generatedPrompt.trim()
+            ? "请继续优化当前输出中的故事板提示词，保留已确认的用途、角色、剧情、格数、画幅和风格，返回可直接交给图片节点的完整整张故事板提示词。"
+            : "";
+      const sourcePrompt =
+        node.config.sourcePrompt.trim() ||
+        defaultFpvPrompt ||
+        defaultFightPrompt ||
+        defaultMultiGridPrompt ||
+        defaultStoryboardPrompt;
       if (!sourcePrompt) {
         failWith(
           node.config.task === "generate"
-            ? "请输入创意或需求，再生成提示词。"
+            ? isFpvPath
+              ? "请连接带路径标记的参考图，或填写飞行路径描述。"
+              : isFightPromptMaster
+                ? "请连接参考图片或已保存的视频产物，或填写打斗创意与需求。"
+                : isMultiGridStoryboard
+                  ? "请填写剧情或分镜需求，或连接参考图片、已保存的视频产物。"
+                  : isStoryboardPrompt
+                    ? "请填写故事板用途与创意，或连接参考图片、已保存的视频产物。"
+                    : "请输入创意或需求，再生成提示词。"
             : "请输入需要优化的提示词。",
         );
         return;
@@ -1722,14 +2644,18 @@ export function WorkspaceApp() {
         failWith("请先在当前提示词节点中选择可用的文本模型。");
         return;
       }
-      const visionImages = promptVisionImages(nodeKey);
-      const videoMaterials = promptVideoMaterials(nodeKey);
       // 多轮对话：把全部已完成轮次逐条注入系统上下文，本轮输入作为新的用户消息。
       const conversation = node.config.conversation ?? [];
       const contextHistory: PromptOptimizationContextEntry[] = conversation.map((entry, index) => ({
         role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
         content: entry.content,
       }));
+      if (
+        (isFpvPath || isFightPromptMaster || isMultiGridStoryboard || isStoryboardPrompt) &&
+        node.config.generatedPrompt.trim()
+      ) {
+        contextHistory.push({ role: "当前输出提示词", content: node.config.generatedPrompt });
+      }
       setNodeStartError(nodeKey, null);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
@@ -2695,6 +3621,9 @@ export function WorkspaceApp() {
     );
     patchNodes("screenplay", (node) => resolvePendingDocumentNodeConfig(node, catalog));
     patchNodes("storyboard", (node) => resolvePendingDocumentNodeConfig(node, catalog));
+    patchNodes("knowledgeVideoWorkflow", (node) =>
+      resolvePendingKnowledgeVideoWorkflowConfig(node, catalog),
+    );
     patchNodes("viralRemix", (node) =>
       node.config.catalogResolved
         ? node
@@ -2745,6 +3674,9 @@ export function WorkspaceApp() {
         );
         patchNodes("screenplay", (node) => resolvePendingDocumentNodeConfig(node, catalog));
         patchNodes("storyboard", (node) => resolvePendingDocumentNodeConfig(node, catalog));
+        patchNodes("knowledgeVideoWorkflow", (node) =>
+          resolvePendingKnowledgeVideoWorkflowConfig(node, catalog),
+        );
         patchNodes("viralRemix", (node) =>
           node.config.catalogResolved
             ? node
@@ -2803,6 +3735,8 @@ export function WorkspaceApp() {
   /**
    * 生成结果填充：供应商返回的结果先原地填充 previewSrc，保存完成后再替换成
    * finalPath。previewSrc 只存在于当前会话，不会写进画布文档。
+   * Seedream 图层拆分场景下单任务返回多张图（底图+多个图层），占位卡片只有一个，
+   * 后续结果会动态新建独立卡片，每个图层单独落为可编辑对象。
    */
   const applyResultToOutputCard = useCallback(
     (record: GenerationResultRecord, previewSrc: string | null = null) => {
@@ -2818,6 +3752,30 @@ export function WorkspaceApp() {
       // Context-IR 文本产物：扩写正文内联在 source.text，随事件写入卡片展示。
       const textContent =
         mediaType === "text" ? (textResultFromSource(record.source) ?? null) : null;
+      // Seedream 图层拆分：从结果记录 source.layer 提取图层元数据，用于把每个图层
+      // 单独落为可编辑对象并展示图层名称/层级。
+      const layer = (() => {
+        const layerRaw = (record.source as { layer?: unknown } | null)?.layer;
+        if (!layerRaw || typeof layerRaw !== "object") return undefined;
+        const l = layerRaw as {
+          zIndex?: unknown;
+          name?: unknown;
+          description?: unknown;
+          boundingBox?: unknown;
+        };
+        const zIndex = typeof l.zIndex === "number" ? l.zIndex : 0;
+        const info: OutputLayerInfo = {
+          zIndex,
+          name: typeof l.name === "string" ? l.name : null,
+          description: typeof l.description === "string" ? l.description : null,
+          boundingBox:
+            l.boundingBox != null && typeof l.boundingBox === "object"
+              ? (l.boundingBox as Record<string, unknown>)
+              : null,
+          isBaseLayer: zIndex === 0,
+        };
+        return info;
+      })();
       let matched = false;
       patchNodes("output", (node) => {
         if (
@@ -2834,8 +3792,34 @@ export function WorkspaceApp() {
           mediaType,
           ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
           ...(textContent != null ? { textContent } : {}),
+          ...(layer != null ? { layer } : {}),
         };
       });
+      // 单任务多结果（如图层拆分）：占位卡片只有一个，后续结果匹配不到时动态新建卡片。
+      if (!matched) {
+        const existing = outputNodes.find((node) => node.taskId === record.taskId);
+        const sourceNodeId = existing?.sourceNodeId;
+        if (sourceNodeId) {
+          const genNode = genNodes.find((node) => node.key === sourceNodeId);
+          if (genNode) {
+            addOutput((current) => ({
+              key: outputNodeKey(),
+              resultKey,
+              sourceNodeId,
+              taskId: record.taskId,
+              mediaType,
+              origin: "generation",
+              finalPath,
+              previewSrc: saved ? null : previewSrc,
+              name,
+              ...(textContent != null ? { textContent } : {}),
+              ...(layer != null ? { layer } : {}),
+              ...nextOutputSlot(genNode, current),
+            }));
+            matched = true;
+          }
+        }
+      }
       if (saved) {
         seenOutputResultKeysRef.current.add(resultKey);
         frontendLog("info", `[canvas] 生成产物已落卡: ${name}`);
@@ -2843,7 +3827,7 @@ export function WorkspaceApp() {
         frontendLog("info", `[canvas] 生成结果已返回，先展示临时预览: task=${record.taskId}`);
       }
     },
-    [patchNodes],
+    [patchNodes, addOutput, genNodes, outputNodes],
   );
 
   const handleGenerationEvent = useCallback(
@@ -3724,9 +4708,11 @@ export function WorkspaceApp() {
         if (typeof selection !== "string" || selection.length === 0) return;
         const status = await videoDownloaderClient.importCookies(selection);
         setDownloaderEngineStatus(status);
+        toast.success("下载登录凭据已导入，可以重试下载步骤");
         frontendLog("info", "[downloader] Cookies 已导入，抖音下载将自动携带");
       } catch (error: unknown) {
         frontendLog("error", `[downloader] Cookies 导入失败: ${formatRawBackendError(error)}`);
+        toast.error("下载登录凭据导入失败", { description: formatWorkflowError(error) });
       }
     })();
   }, []);
@@ -4392,22 +5378,42 @@ export function WorkspaceApp() {
 
   /** 提示词节点输出变化或新建连线后，自动导入目标生成节点的提示内容。 */
   useEffect(() => {
+    if (!canvasHydrated) return;
+    const importedSources = importedPromptSourcesRef.current;
+    for (const targetKey of importedSources.keys()) {
+      if (!promptSourceByTarget.has(targetKey)) importedSources.delete(targetKey);
+    }
     for (const [targetKey, source] of promptSourceByTarget) {
+      const edgeId = assetEdges.find(
+        (edge) => edge.fromKey === source.key && edge.toKey === targetKey,
+      )?.id;
+      if (edgeId == null) continue;
+      const previous = importedSources.get(targetKey);
+      const sourceText = source.config.generatedPrompt;
+      if (
+        previous?.edgeId === edgeId &&
+        previous.sourceKey === source.key &&
+        previous.text === sourceText
+      )
+        continue;
       const generatedPrompt = source.config.generatedPrompt.trim();
-      if (!generatedPrompt) continue;
-      if (promptContents.read(targetKey)?.plainText.trim() === generatedPrompt) continue;
+      if (!generatedPrompt) {
+        importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
+        continue;
+      }
       const replaced = promptContents.replaceText(
         targetKey,
         generatedPrompt,
         mentionCandidatesFor(targetKey),
       );
       if (replaced == null) continue;
+      importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
       frontendLog(
         "info",
         `[canvas] 提示词节点输出已导入生成节点: source=${source.key}, target=${targetKey}, 字符 ${generatedPrompt.length}`,
       );
     }
-  }, [mentionCandidatesFor, promptContents, promptSourceByTarget]);
+  }, [assetEdges, canvasHydrated, mentionCandidatesFor, promptContents, promptSourceByTarget]);
 
   const nodeDescriptorContext = useMemo(
     () => ({ providerCatalog, nodeModelSelections }),
@@ -4755,6 +5761,83 @@ export function WorkspaceApp() {
       updateStoryboardNodeConfig,
       handleRunStoryboardNode,
       handleExportStoryboard,
+    ],
+  );
+
+  const knowledgeVideoWorkflowFlowNodes = useMemo<CanvasFlowNode[]>(
+    () =>
+      knowledgeVideoWorkflowNodes.map((node): CanvasFlowNode => ({
+        id: node.key,
+        type: "canvas",
+        position: { x: node.x, y: node.y },
+        ...measuredFor(node),
+        selected: selectedNodeKey === node.key,
+        data: {
+          hasSourceHandle: false,
+          hasTargetHandle: false,
+          content: (
+            <KnowledgeVideoWorkflowNode
+              key={node.key}
+              node={node}
+              providerCatalog={providerCatalog}
+              runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
+              selected={selectedNodeKey === node.key}
+              dragging={false}
+              onSelect={selectNode}
+              onNodeDragStart={ignoreLegacyNodeDrag}
+              onSizeChange={handleGenNodeSizeChange}
+              onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
+              onExecute={executeKnowledgeVideoWorkflow}
+              onContinue={continueKnowledgeVideoWorkflow}
+              onCancel={cancelKnowledgeVideoWorkflow}
+              onRemove={removeKnowledgeVideoWorkflow}
+              onRevealResult={revealKnowledgeVideoWorkflowResult}
+              onOpenHistory={openWorkflowHistory}
+              onPickMaterials={handlePickWorkflowMaterials}
+              onRemoveMaterial={handleRemoveWorkflowMaterial}
+              onPickReverseVideo={handlePickReverseVideo}
+              onRemoveReverseVideo={handleRemoveReverseVideo}
+              onOpenDownloadSettings={importDownloaderCookies}
+              onExportFilmDocuments={exportFilmDocuments}
+              onExportComicDramaDocuments={exportFilmDocuments}
+              onExportCommerceDocuments={exportFilmDocuments}
+              onExportRemotionDocuments={exportFilmDocuments}
+              onRevealRemotionProject={revealRemotionProject}
+              onPickCommerceMaterials={handlePickCommerceMaterials}
+              onRemoveCommerceMaterial={handleRemoveCommerceMaterial}
+              onPickCoverImages={handlePickCoverImages}
+              onRemoveCoverImage={handleRemoveCoverImage}
+              onExportCoverDocuments={exportFilmDocuments}
+            />
+          ),
+        },
+      })),
+    [
+      knowledgeVideoWorkflowNodes,
+      providerCatalog,
+      knowledgeVideoWorkflowRuns,
+      selectedNodeKey,
+      selectNode,
+      ignoreLegacyNodeDrag,
+      handleGenNodeSizeChange,
+      updateKnowledgeVideoWorkflowConfig,
+      executeKnowledgeVideoWorkflow,
+      continueKnowledgeVideoWorkflow,
+      cancelKnowledgeVideoWorkflow,
+      removeKnowledgeVideoWorkflow,
+      revealKnowledgeVideoWorkflowResult,
+      openWorkflowHistory,
+      handlePickWorkflowMaterials,
+      handleRemoveWorkflowMaterial,
+      handlePickReverseVideo,
+      handleRemoveReverseVideo,
+      importDownloaderCookies,
+      exportFilmDocuments,
+      revealRemotionProject,
+      handlePickCommerceMaterials,
+      handleRemoveCommerceMaterial,
+      handlePickCoverImages,
+      handleRemoveCoverImage,
     ],
   );
 
@@ -5111,6 +6194,7 @@ export function WorkspaceApp() {
       ...outputFlowNodes,
       ...screenplayFlowNodes,
       ...storyboardFlowNodes,
+      ...knowledgeVideoWorkflowFlowNodes,
       ...viralRemixFlowNodes,
       ...genFlowNodes,
       ...videoComposerFlowNodes,
@@ -5123,6 +6207,7 @@ export function WorkspaceApp() {
       outputFlowNodes,
       screenplayFlowNodes,
       storyboardFlowNodes,
+      knowledgeVideoWorkflowFlowNodes,
       viralRemixFlowNodes,
       genFlowNodes,
       videoComposerFlowNodes,
@@ -5357,7 +6442,11 @@ export function WorkspaceApp() {
               data-tooltip="历史记录"
               onMouseEnter={preloadHistoryDialog}
               onFocus={preloadHistoryDialog}
-              onClick={() => setHistoryOpen(true)}
+              onClick={() => {
+                setHistoryInitialTab("generation");
+                setHistoryInitialWorkflowId(null);
+                setHistoryOpen(true);
+              }}
             >
               <Clock size={18} weight="bold" aria-hidden="true" />
             </button>
@@ -5974,6 +7063,18 @@ export function WorkspaceApp() {
           </div>
         </section>
 
+        <WorkflowRepository
+          expanded={workflowRepositoryExpanded}
+          onToggle={toggleWorkflowRepository}
+          onInsertKnowledgeVideoWorkflow={insertKnowledgeVideoDirectorWorkflow}
+          onInsertAiFilmWorkflow={insertAiFilmWorkflow}
+          onInsertComicDramaWorkflow={insertComicDramaWorkflow}
+          onInsertCommerceWorkflow={insertCommerceWorkflow}
+          onInsertRemotionWorkflow={insertRemotionWorkflow}
+          onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
+          onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
+        />
+
         {mobilePanel ? (
           <button
             type="button"
@@ -6015,7 +7116,17 @@ export function WorkspaceApp() {
             />
           }
         >
-          <HistoryDialog open onClose={closeHistory} />
+          <HistoryDialog
+            open
+            onClose={closeHistory}
+            canvasId={CANVAS_ID}
+            initialTab={historyInitialTab}
+            initialWorkflowId={historyInitialWorkflowId}
+            onResumeWorkflow={resumeHistoryWorkflow}
+            onRestartWorkflow={restartHistoryWorkflow}
+            onLocateWorkflow={locateHistoryWorkflow}
+            activeWorkflowIds={activeWorkflowHistoryIds}
+          />
         </Suspense>
       ) : null}
       {previewAsset ? (

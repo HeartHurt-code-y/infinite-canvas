@@ -5,7 +5,8 @@ import Paragraph from "@tiptap/extension-paragraph";
 import Text from "@tiptap/extension-text";
 import { Placeholder, UndoRedo } from "@tiptap/extensions";
 import type { MediaReferenceTarget, MediaType } from "./backend";
-import { normalizeAutoMentionText } from "./promptAutoMention";
+import { normalizePromptReferenceText } from "./promptReferences";
+import { decodeMediaReferenceTarget } from "./promptReferenceTarget";
 import type {
   PromptContentDocumentV1,
   PromptContentItem,
@@ -18,6 +19,8 @@ export const PROMPT_TIPTAP_PENDING_REFERENCE_NODE = "pendingReference";
 export interface PromptTiptapPresentation {
   readonly connectedCanvasNodeKeys?: ReadonlySet<string>;
   readonly freshMentionIds?: ReadonlySet<string>;
+  readonly invalidMentionIds?: ReadonlySet<string>;
+  readonly referenceLabelsByKey?: ReadonlyMap<string, string>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -31,56 +34,6 @@ function jsonContentAttributes(node: JSONContent): Record<string, unknown> {
 
 function isMediaType(value: unknown): value is MediaType {
   return value === "image" || value === "video" || value === "audio";
-}
-
-function parseMediaReferenceTarget(value: unknown): MediaReferenceTarget | null {
-  if (!isRecord(value) || !isMediaType(value["mediaType"])) return null;
-  const canvasNodeKey = value["canvasNodeKey"];
-  if (typeof canvasNodeKey !== "string" || !canvasNodeKey) return null;
-  if (
-    value["kind"] === "asset" &&
-    typeof value["providerConnectionId"] === "string" &&
-    value["providerConnectionId"] &&
-    typeof value["assetId"] === "string" &&
-    value["assetId"]
-  ) {
-    return {
-      kind: "asset",
-      providerConnectionId: value["providerConnectionId"],
-      assetId: value["assetId"],
-      canvasNodeKey,
-      mediaType: value["mediaType"],
-    };
-  }
-  if (
-    value["kind"] === "local_asset" &&
-    typeof value["stagingJobId"] === "string" &&
-    value["stagingJobId"]
-  ) {
-    return {
-      kind: "local_asset",
-      stagingJobId: value["stagingJobId"],
-      canvasNodeKey,
-      mediaType: value["mediaType"],
-    };
-  }
-  if (
-    value["kind"] === "local_result" &&
-    typeof value["generationTaskId"] === "string" &&
-    value["generationTaskId"] &&
-    typeof value["resultIndex"] === "number" &&
-    Number.isInteger(value["resultIndex"]) &&
-    value["resultIndex"] >= 0
-  ) {
-    return {
-      kind: "local_result",
-      generationTaskId: value["generationTaskId"],
-      resultIndex: value["resultIndex"],
-      canvasNodeKey,
-      mediaType: value["mediaType"],
-    };
-  }
-  return null;
 }
 
 function datasetForTarget(target: MediaReferenceTarget): Record<string, string> {
@@ -123,7 +76,9 @@ function datasetForTarget(target: MediaReferenceTarget): Record<string, string> 
   };
 }
 
-function targetFromElement(element: HTMLElement): MediaReferenceTarget | null {
+export function promptReferenceTargetFromElement(
+  element: HTMLElement,
+): MediaReferenceTarget | null {
   const canvasNodeKey = element.dataset["canvasNodeKey"] ?? "";
   const mediaType = element.dataset["mediaKind"];
   if (!canvasNodeKey || !isMediaType(mediaType)) return null;
@@ -168,6 +123,7 @@ const MediaReference = Node.create({
       displayNameSnapshot: { default: "" },
       learnedPattern: { default: null },
       aliasSnapshot: { default: null },
+      referenceLabel: { default: null, rendered: false },
       fresh: { default: false, rendered: false },
       stale: { default: false, rendered: false },
     };
@@ -179,7 +135,7 @@ const MediaReference = Node.create({
         tag: "span[data-mention-id]",
         getAttrs: (node) => {
           if (!(node instanceof HTMLElement)) return false;
-          const target = targetFromElement(node);
+          const target = promptReferenceTargetFromElement(node);
           const mentionId = node.dataset["mentionId"] ?? "";
           const canvasNodeKey = node.dataset["canvasNodeKey"] ?? "";
           if (!target || !mentionId || !canvasNodeKey) return false;
@@ -190,6 +146,7 @@ const MediaReference = Node.create({
             displayNameSnapshot: node.dataset["displayName"] ?? "",
             learnedPattern: node.dataset["autoPattern"] ?? null,
             aliasSnapshot: node.dataset["autoAlias"] ?? null,
+            referenceLabel: node.dataset["referenceLabel"] ?? null,
             fresh: node.dataset["auto"] === "true",
             stale: node.classList.contains("is-stale"),
           };
@@ -199,10 +156,9 @@ const MediaReference = Node.create({
   },
 
   renderHTML({ node }) {
-    const target = parseMediaReferenceTarget(node.attrs["target"]);
+    const target = decodeMediaReferenceTarget(node.attrs["target"]);
     const displayName = String(node.attrs["displayNameSnapshot"] ?? "");
-    const alias =
-      typeof node.attrs["aliasSnapshot"] === "string" ? node.attrs["aliasSnapshot"] : "";
+    const alias = String(node.attrs["referenceLabel"] ?? node.attrs["aliasSnapshot"] ?? "");
     const attrs: Record<string, string> = {
       class: `mention-chip${node.attrs["fresh"] ? " is-fresh" : ""}${node.attrs["stale"] ? " is-stale" : ""}`,
       contenteditable: "false",
@@ -225,14 +181,15 @@ const MediaReference = Node.create({
     if (node.attrs["fresh"]) attrs["data-auto"] = "true";
     if (typeof node.attrs["learnedPattern"] === "string" && node.attrs["learnedPattern"])
       attrs["data-auto-pattern"] = node.attrs["learnedPattern"];
-    if (alias) attrs["data-auto-alias"] = alias;
+    if (typeof node.attrs["aliasSnapshot"] === "string" && node.attrs["aliasSnapshot"])
+      attrs["data-auto-alias"] = node.attrs["aliasSnapshot"];
+    if (alias) attrs["data-reference-label"] = alias;
     return ["span", attrs, `@${displayName}${alias ? ` · ${alias}` : ""}`];
   },
 
   renderText({ node }) {
     const displayName = String(node.attrs["displayNameSnapshot"] ?? "");
-    const alias =
-      typeof node.attrs["aliasSnapshot"] === "string" ? node.attrs["aliasSnapshot"] : "";
+    const alias = String(node.attrs["referenceLabel"] ?? node.attrs["aliasSnapshot"] ?? "");
     return `@${displayName}${alias ? ` · ${alias}` : ""}`;
   },
 });
@@ -341,10 +298,13 @@ export function promptReferenceToTiptapNode(
       displayNameSnapshot: item.displayNameSnapshot,
       learnedPattern: item.learnedPattern ?? null,
       aliasSnapshot: item.aliasSnapshot ?? null,
+      referenceLabel: presentation.referenceLabelsByKey?.get(item.canvasNodeKey) ?? null,
       fresh: presentation.freshMentionIds?.has(item.mentionId) ?? false,
-      stale: presentation.connectedCanvasNodeKeys
-        ? !presentation.connectedCanvasNodeKeys.has(item.canvasNodeKey)
-        : false,
+      stale:
+        presentation.invalidMentionIds?.has(item.mentionId) ??
+        (presentation.connectedCanvasNodeKeys
+          ? !presentation.connectedCanvasNodeKeys.has(item.canvasNodeKey)
+          : false),
     },
   };
 }
@@ -391,7 +351,7 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
     }
     if (node.type === PROMPT_TIPTAP_MEDIA_REFERENCE_NODE) {
       const attrs = jsonContentAttributes(node);
-      const target = parseMediaReferenceTarget(attrs["target"]);
+      const target = decodeMediaReferenceTarget(attrs["target"]);
       const canvasNodeKey = attrs["canvasNodeKey"];
       const displayNameSnapshot = attrs["displayNameSnapshot"];
       if (
@@ -418,7 +378,7 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
         target,
         displayNameSnapshot,
         ...(typeof learnedPattern === "string" && learnedPattern
-          ? { learnedPattern: normalizeAutoMentionText(learnedPattern) }
+          ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
           : {}),
         ...(typeof aliasSnapshot === "string" && aliasSnapshot ? { aliasSnapshot } : {}),
       });
@@ -432,7 +392,7 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
       if (typeof normalizedPattern === "string" && typeof displayText === "string") {
         items.push({
           kind: "pending_reference",
-          normalizedPattern: normalizeAutoMentionText(normalizedPattern),
+          normalizedPattern: normalizePromptReferenceText(normalizedPattern),
           displayText,
           candidateCount:
             typeof candidateCount === "number" && Number.isFinite(candidateCount)

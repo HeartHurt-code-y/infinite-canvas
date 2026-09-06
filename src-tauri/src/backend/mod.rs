@@ -1,6 +1,8 @@
 pub mod asset_library;
 pub mod commands;
+pub mod commerce_sources;
 pub mod composer;
+pub mod cover_images;
 pub mod credentials;
 pub mod downloader;
 pub mod error;
@@ -10,6 +12,8 @@ pub mod media;
 pub mod model_schema;
 pub mod prompt_optimize;
 pub mod provider;
+pub mod remotion_renderer;
+pub mod reverse_video;
 pub mod staging;
 pub mod storage;
 pub mod tasks;
@@ -20,6 +24,7 @@ use std::sync::Arc;
 
 use asset_library::AssetLibrary;
 use composer::VideoCompositionService;
+use cover_images::CoverImageService;
 use credentials::CredentialStore;
 use downloader::VideoDownloadService;
 use error::BackendResult;
@@ -27,6 +32,8 @@ use frame_extractor::VideoFrameExtractionService;
 use local_results::LocalResultService;
 use media::MediaResolver;
 use provider::ProviderRuntime;
+use remotion_renderer::RemotionRenderService;
+use reverse_video::ReverseVideoService;
 use staging::StagingService;
 use storage::{GenerationTaskLifecycle, Storage};
 use tasks::GenerationTaskService;
@@ -43,7 +50,10 @@ pub struct BackendState {
     pub tasks: GenerationTaskService,
     pub downloader: VideoDownloadService,
     pub composer: VideoCompositionService,
+    pub cover_images: CoverImageService,
     pub frame_extractor: VideoFrameExtractionService,
+    pub remotion_renderer: RemotionRenderService,
+    pub reverse_video: ReverseVideoService,
 }
 
 impl BackendState {
@@ -103,6 +113,11 @@ impl BackendState {
         // 视频抽帧复用同一套 FFmpeg 引擎；产物落在下载目录「无限画布/抽帧」。
         let frame_extractor =
             VideoFrameExtractionService::new(downloads_directory.clone(), composer.clone());
+        let cover_images = CoverImageService::new(downloads_directory.clone(), composer.clone());
+        let reverse_video =
+            ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
+        let remotion_renderer =
+            RemotionRenderService::new(downloads_directory, app.path().resource_dir()?);
 
         Ok(Self {
             storage,
@@ -115,7 +130,10 @@ impl BackendState {
             tasks,
             downloader,
             composer,
+            cover_images,
             frame_extractor,
+            remotion_renderer,
+            reverse_video,
         })
     }
 }

@@ -131,24 +131,24 @@ const MANUAL_AUTO_DETECT_DELAY_MS = 420;
 
 function readyAutoMentionFeedback(candidates: readonly MentionCandidate[]): AutoMentionFeedback {
   if (candidates.length === 0) {
-    return { kind: "empty", message: "连接素材后自动识别引用" };
+    return { kind: "empty", message: "连接素材后，输入 @ 选择引用" };
   }
   const ambiguousCount = describePromptContentCandidates(candidates).ambiguousPatternCount;
   if (ambiguousCount > 0) {
     return {
       kind: "ready",
-      message: `自动识别已开启 · ${candidates.length} 个素材 · 同名项会高亮确认`,
+      message: `输入 @ 引用素材 · ${candidates.length} 个素材 · 同名项需确认`,
     };
   }
   return {
     kind: "ready",
-    message: `自动识别已开启 · ${candidates.length} 个可引用素材`,
+    message: `输入 @ 引用素材 · ${candidates.length} 个可引用素材 · 普通文字保持原样`,
   };
 }
 
 /**
  * 生成节点内的提示词输入框：Tiptap 管理编辑态，V1 canonical document 管理持久化。
- * - 输入 "@" 或点击 "@" 按钮弹出候选下拉（连线的素材优先）；
+ * - 输入 "@" 或点击 "@" 按钮弹出当前已连接素材的候选下拉；
  * - 选中后由提示内容 adapter 插入 Tiptap 原子引用节点；
  * - canonical document、结构化持久化与冻结提交均由提示内容 module 负责。
  */
@@ -161,7 +161,7 @@ export function PromptMentionInput({
   expandable = false,
 }: {
   readonly nodeKey: string;
-  /** 候选素材：连线的素材节点在前，素材库其余素材在后。 */
+  /** 仅包含已连接到当前生成节点的素材实例。 */
   readonly candidates: readonly MentionCandidate[];
   readonly registerInput: (nodeKey: string, session: PromptContentEditorSession | null) => void;
   readonly labelledBy?: string;
@@ -212,26 +212,12 @@ export function PromptMentionInput({
     [describedBy, editorDescriptionId, expanded, labelledBy, nodeKey, registerInput],
   );
 
-  const candidateAliases = useMemo(
-    () => describePromptContentCandidates(candidates).aliases,
-    [candidates],
-  );
-  const filtered = useMemo(() => {
-    const keyword = query.trim().toLowerCase();
-    if (!keyword) return candidates;
-    return candidates.filter(
-      (candidate, index) =>
-        candidate.name.toLowerCase().includes(keyword) ||
-        candidate.assetId.toLowerCase().includes(keyword) ||
-        candidate.canvasNodeKey.toLowerCase().includes(keyword) ||
-        (candidateAliases[index]?.label ?? "").toLowerCase().includes(keyword),
-    );
-  }, [candidateAliases, candidates, query]);
-
   const candidateDescription = useMemo(
     () => describePromptContentCandidates(candidates, activeAmbiguity?.pattern),
     [activeAmbiguity?.pattern, candidates],
   );
+  const candidateAliases = candidateDescription.aliases;
+  const filtered = useMemo(() => candidateDescription.search(query), [candidateDescription, query]);
   const candidateConnectionSignature = JSON.stringify(
     candidates.map((candidate) => [
       candidate.canvasNodeKey,
@@ -378,13 +364,13 @@ export function PromptMentionInput({
   const composingRef = useRef(false);
   const autoDetectTimerRef = useRef<number | null>(null);
   const feedbackResetTimerRef = useRef<number | null>(null);
+  const manualScanRequestedRef = useRef(false);
 
   const confirmActiveAmbiguity = useCallback(
     (candidate: MentionCandidate, alias: string) => {
       const input = inputRef.current;
       if (input == null || activeAmbiguity == null) return;
-      const confirmed =
-        sessionRef.current?.confirmPending(activeAmbiguity.pattern, candidate, alias) ?? 0;
+      const confirmed = sessionRef.current?.confirmPending(activeAmbiguity.pattern, candidate) ?? 0;
       if (confirmed === 0) {
         openFirstPendingAmbiguity();
         return;
@@ -406,7 +392,7 @@ export function PromptMentionInput({
             }
           : {
               kind: "success",
-              message: `已确认 ${confirmed} 处为 ${alias} · 后续同名词自动沿用`,
+              message: `已将当前 ${confirmed} 处同名引用确认为 ${alias}`,
             },
       );
       if (!hasMorePending) {
@@ -425,13 +411,16 @@ export function PromptMentionInput({
   );
 
   /**
-   * 扫描输入框纯文本，把已连线素材名（完整名/词干）原地转成引用 chip。
-   * 粘贴与手动触发立即执行；手输走 scheduleAutoDetect 防抖。
+   * 输入与粘贴只解析显式 @ 引用；“识别素材名”额外扫描普通文字中的名称。
+   * 粘贴使用 session 的统一解析结果；手输走 scheduleAutoDetect 防抖。
    * 自动模式在 @ 候选菜单打开或 IME 组合中时跳过，避免干扰进行中的查询。
    */
   const runAutoDetect = useCallback(
-    (manual: boolean) => {
-      if (!manual && (menuOpen || composingRef.current)) return;
+    (
+      mode: "explicit" | "names" = "explicit",
+      resolved?: ReturnType<PromptContentEditorSession["autoResolve"]>,
+    ) => {
+      if (resolved == null && mode === "explicit" && (menuOpen || composingRef.current)) return;
       const input = inputRef.current;
       if (input == null) return;
       if (autoDetectTimerRef.current != null) {
@@ -442,11 +431,12 @@ export function PromptMentionInput({
         window.clearTimeout(feedbackResetTimerRef.current);
         feedbackResetTimerRef.current = null;
       }
-      const resolution = sessionRef.current?.autoResolve({ fresh: true }) ?? {
-        converted: 0,
-        ambiguous: 0,
-        pending: 0,
-      };
+      const resolution = resolved ??
+        sessionRef.current?.autoResolve({ fresh: true, mode }) ?? {
+          converted: 0,
+          ambiguous: 0,
+          pending: 0,
+        };
       const promptText = (input.textContent ?? "").replaceAll("\u200b", "").trim();
       if (resolution.converted > 0 || resolution.ambiguous > 0) {
         const resolvedNames = sessionRef.current?.freshResolvedNames() ?? [];
@@ -492,9 +482,11 @@ export function PromptMentionInput({
       } else if (!promptText) {
         setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
       } else if (candidates.length === 0) {
-        setAutoMentionFeedback({ kind: "empty", message: "未连接素材，暂时无法自动引用" });
-      } else {
+        setAutoMentionFeedback({ kind: "empty", message: "未连接素材，暂时无法引用" });
+      } else if (mode === "names") {
         setAutoMentionFeedback({ kind: "no-match", message: "未匹配到已连接素材名" });
+      } else {
+        setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
       }
     },
     [candidates, menuOpen, nodeKey, openFirstPendingAmbiguity],
@@ -502,6 +494,7 @@ export function PromptMentionInput({
 
   /** 手输防抖：停止键入一段时间后扫描一次。 */
   const scheduleAutoDetect = useCallback(() => {
+    manualScanRequestedRef.current = false;
     if (autoDetectTimerRef.current != null) window.clearTimeout(autoDetectTimerRef.current);
     if (feedbackResetTimerRef.current != null) {
       window.clearTimeout(feedbackResetTimerRef.current);
@@ -513,9 +506,18 @@ export function PromptMentionInput({
     }
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
-      runAutoDetect(false);
+      runAutoDetect();
     }, PROMPT_AUTO_DETECT_DEBOUNCE_MS);
   }, [menuOpen, runAutoDetect]);
+
+  const chooseMention = useCallback(
+    (candidate: MentionCandidate) => {
+      if (replaceTypedQueryOnSelectRef.current) removeActiveMentionQuery();
+      insertMention(candidate);
+      scheduleAutoDetect();
+    },
+    [insertMention, removeActiveMentionQuery, scheduleAutoDetect],
+  );
 
   /**
    * 候选菜单关闭后补一次重扫。手打 @ 会打开菜单，期间自动识别被跳过
@@ -540,7 +542,7 @@ export function PromptMentionInput({
   useEffect(() => {
     const wasOpen = previousMenuOpenRef.current;
     previousMenuOpenRef.current = menuOpen;
-    if (!wasOpen || menuOpen) return;
+    if (!wasOpen || menuOpen || manualScanRequestedRef.current) return;
     const input = inputRef.current;
     if (input == null) return;
     if (!hasUnboundPlainText(input)) return;
@@ -552,6 +554,7 @@ export function PromptMentionInput({
    * 将 scanning 与最终结果合并成一次绘制，用户看起来就像按钮没有生效。
    */
   const runManualAutoDetect = useCallback(() => {
+    manualScanRequestedRef.current = true;
     if (autoDetectTimerRef.current != null) window.clearTimeout(autoDetectTimerRef.current);
     if (feedbackResetTimerRef.current != null) {
       window.clearTimeout(feedbackResetTimerRef.current);
@@ -561,7 +564,8 @@ export function PromptMentionInput({
     setAutoMentionFeedback({ kind: "scanning", message: "正在重新扫描已连接素材…" });
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
-      runAutoDetect(true);
+      manualScanRequestedRef.current = false;
+      runAutoDetect("names");
     }, MANUAL_AUTO_DETECT_DELAY_MS);
   }, [runAutoDetect]);
 
@@ -575,7 +579,7 @@ export function PromptMentionInput({
     [],
   );
 
-  // 连线集合变化时同步断线灰化态；如果同名待确认项只剩唯一在线候选，直接安全收敛。
+  // 连线集合变化只同步候选和断线状态；既有待确认项继续要求用户选择。
   useEffect(() => {
     const input = inputRef.current;
     if (input == null) return;
@@ -612,7 +616,7 @@ export function PromptMentionInput({
     autoMentionFeedback.kind === "no-match";
   const autoMentionFeedbackTitle =
     autoMentionFeedback.kind === "ready"
-      ? "自动引用已开启"
+      ? "使用 @ 引用素材"
       : autoMentionFeedback.kind === "scanning"
         ? "正在识别素材引用…"
         : autoMentionFeedback.kind === "success"
@@ -624,7 +628,7 @@ export function PromptMentionInput({
               : "暂无可自动引用素材";
   const autoMentionFeedbackDetail =
     autoMentionFeedback.kind === "no-match"
-      ? "提示词中没有出现已连接素材的名称。可使用下方任一名称，或点击 @ 手动选择。"
+      ? "本次未匹配到已连接素材名。可输入 @ 后选择素材，普通文字保持原样。"
       : autoMentionFeedback.kind === "success"
         ? `${autoMentionFeedback.message}，已转换成高亮 @ 引用。`
         : autoMentionFeedback.kind === "ambiguous"
@@ -640,6 +644,7 @@ export function PromptMentionInput({
       aria-labelledby={expanded ? editorTitleId : undefined}
       aria-describedby={expanded ? editorDescriptionId : undefined}
       onKeyDown={(event) => {
+        if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return;
         if (activeAmbiguity != null && event.key === "Escape") {
           event.preventDefault();
           setActiveAmbiguity(null);
@@ -703,7 +708,13 @@ export function PromptMentionInput({
           <div
             ref={attachInput}
             className="prompt-mention__editor"
-            onInput={() => {
+            onInput={(event) => {
+              if (
+                composingRef.current ||
+                sessionRef.current?.isComposing() ||
+                event.nativeEvent.isComposing
+              )
+                return;
               const input = inputRef.current;
               // IME 组合期间不强制读取/同步编辑器 DOM：此时输入法仍持有未提交的
               // 候选拼音，提前 flush 会把组合文本错误提交成错乱字符。
@@ -713,19 +724,22 @@ export function PromptMentionInput({
             }}
             onCompositionStart={() => {
               composingRef.current = true;
+              if (autoDetectTimerRef.current != null)
+                window.clearTimeout(autoDetectTimerRef.current);
+              autoDetectTimerRef.current = null;
             }}
             onCompositionEnd={() => {
               composingRef.current = false;
               scheduleAutoDetect();
             }}
             onPaste={(event) => {
-              // 统一替换为纯文本插入（换行转 <br>），随后立即识别素材引用；
+              // 统一插入纯文本并解析显式 @ 引用；普通素材名保留为正文。
               // 同时杜绝富文本 HTML 直接混入提示词。
               const text = event.clipboardData?.getData("text/plain") ?? "";
               event.preventDefault();
               const resolution = sessionRef.current?.pastePlainText(text);
               if (resolution?.pending) openFirstPendingAmbiguity();
-              runAutoDetect(true);
+              runAutoDetect("explicit", resolution);
             }}
             onClick={(event) => {
               const pending = sessionRef.current?.pendingAt(event.target) ?? null;
@@ -733,9 +747,10 @@ export function PromptMentionInput({
                 openAmbiguityChip(pending);
               }
             }}
-            onBlur={() => window.setTimeout(() => setMenuOpen(false), 120)}
-            onKeyDown={(event) => {
-              if (event.nativeEvent.isComposing) return;
+            onBlur={() => window.setTimeout(closeMenu, 120)}
+            onKeyDownCapture={(event) => {
+              if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229)
+                return;
               const pending = sessionRef.current?.pendingAt(event.target) ?? null;
               if (pending != null && (event.key === "Enter" || event.key === " ")) {
                 event.preventDefault();
@@ -749,42 +764,44 @@ export function PromptMentionInput({
                 setActiveAmbiguity(null);
                 return;
               }
+              if (menuOpen && event.key === "Escape") {
+                event.preventDefault();
+                event.stopPropagation();
+                closeMenu();
+                return;
+              }
               if (menuOpen && filtered.length > 0) {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
+                  event.stopPropagation();
                   setActiveIndex((current) => (current + 1) % filtered.length);
                   return;
                 }
                 if (event.key === "ArrowUp") {
                   event.preventDefault();
+                  event.stopPropagation();
                   setActiveIndex((current) => (current - 1 + filtered.length) % filtered.length);
                   return;
                 }
                 if (event.key === "Enter" || event.key === "Tab") {
                   event.preventDefault();
+                  event.stopPropagation();
                   const candidate = filtered[activeIndex] ?? filtered[0];
                   if (candidate) {
-                    // 先移除已输入的 "@查询词"，再插入 chip。
-                    removeActiveMentionQuery();
-                    insertMention(candidate);
-                    // 插入不产生原生 input 事件，补一次防抖扫描让其余命中文本也能转换。
-                    scheduleAutoDetect();
+                    chooseMention(candidate);
                   }
-                  return;
-                }
-                if (event.key === "Escape") {
-                  event.preventDefault();
-                  closeMenu();
                   return;
                 }
               }
               if (event.key === "@") {
                 // 让 "@" 字符先落入输入框，再打开候选下拉。
                 window.setTimeout(() => {
+                  const caretQuery = sessionRef.current?.mentionQueryAtCaret();
+                  if (caretQuery == null) return;
                   setActiveAmbiguity(null);
                   replaceTypedQueryOnSelectRef.current = true;
                   setMenuOpen(true);
-                  setQuery("");
+                  setQuery(caretQuery);
                   setActiveIndex(0);
                 }, 0);
               }
@@ -815,11 +832,11 @@ export function PromptMentionInput({
             <button
               type="button"
               className="prompt-mention__trigger prompt-mention__trigger--detect"
-              aria-label="自动识别提示词中的素材引用"
+              aria-label="识别素材名"
               aria-describedby={autoMentionStatusId}
               aria-busy={autoMentionFeedback.kind === "scanning"}
               data-result={autoMentionFeedback.kind}
-              title="立即重扫引用：把已连线素材名转成 @ 引用"
+              title="识别素材名：将正文中的已连接素材名称转换为引用"
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 closeMenu();
@@ -836,6 +853,7 @@ export function PromptMentionInput({
               ) : (
                 <Sparkle size={12} weight="bold" aria-hidden="true" />
               )}
+              <span>识别素材名</span>
             </button>
             <button
               type="button"
@@ -847,13 +865,7 @@ export function PromptMentionInput({
                 const input = inputRef.current;
                 if (input == null) return;
                 input.focus();
-                // 光标移动到末尾后打开下拉。
-                const selection = window.getSelection();
-                const range = document.createRange();
-                range.selectNodeContents(input);
-                range.collapse(false);
-                selection?.removeAllRanges();
-                selection?.addRange(range);
+                // onMouseDown 保留编辑器当前选区，按钮与键入 @ 都在光标处插入。
                 replaceTypedQueryOnSelectRef.current = false;
                 setActiveAmbiguity(null);
                 setMenuOpen((open) => !open);
@@ -881,12 +893,7 @@ export function PromptMentionInput({
                     aria-selected={index === activeIndex}
                     onMouseDown={(event) => event.preventDefault()}
                     onMouseEnter={() => setActiveIndex(index)}
-                    onClick={() => {
-                      if (replaceTypedQueryOnSelectRef.current) removeActiveMentionQuery();
-                      insertMention(candidate);
-                      // 与键盘选中一致：插入后补一次防抖扫描。
-                      scheduleAutoDetect();
-                    }}
+                    onClick={() => chooseMention(candidate)}
                   >
                     <MentionOptionThumb candidate={candidate} />
                     <span className="prompt-mention__option-name">{candidate.name}</span>
@@ -914,7 +921,7 @@ export function PromptMentionInput({
                   <WarningCircle size={14} weight="fill" aria-hidden="true" />
                   <span>
                     <strong>“{activeAmbiguity.displayName}”有同名对象</strong>
-                    <small>选择一次，当前节点后续自动沿用</small>
+                    <small>此次选择应用于当前全部同名待确认项；新输入仍需确认</small>
                   </span>
                 </span>
                 <button
@@ -980,7 +987,7 @@ export function PromptMentionInput({
                 <span
                   key={candidate.canvasNodeKey}
                   className="prompt-mention__recognizable-tag"
-                  title={`${candidate.name}（也可输入 ${alias}）`}
+                  title={`输入 @${candidate.name} 或 @${alias}`}
                 >
                   <strong>{candidate.name}</strong>
                   <small>{alias}</small>
@@ -1005,7 +1012,7 @@ export function PromptMentionInput({
         {expanded ? (
           <div className="prompt-mention__expanded-footer">
             <span>
-              支持 <kbd>@</kbd> 引用已连素材 · 粘贴/输入素材名自动识别 · <kbd>Esc</kbd> 关闭
+              输入 <kbd>@</kbd> 引用已连素材 · 普通文字保持原样 · <kbd>Esc</kbd> 关闭
             </span>
             <span className="prompt-mention__character-count">{characterCount} 字</span>
             <button type="button" onClick={closeExpandedEditor}>
@@ -1061,8 +1068,13 @@ export function ImageNodeSettings({
       )
     : MAX_GENERATION_COUNT;
   // `n` 由上方「生成数量」字段承载，避免与模型参数区重复渲染。
+  // Seedream 组图数量 `max_images` 仅在组图模式为 auto 时展示。
+  const sequentialMode = String(
+    config.parameterValues["sequential_image_generation"] ?? "disabled",
+  );
   const modelParameterCapabilitiesWithoutCount = parameterCapabilities.filter(
-    (capability) => capability.key !== "n",
+    (capability) =>
+      capability.key !== "n" && !(capability.key === "max_images" && sequentialMode !== "auto"),
   );
 
   return (
@@ -1416,20 +1428,15 @@ export function VideoNodeSettings({
         );
       })}
 
-      {isWan30VideoModel(
-        selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "",
-      ) || isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "")
-        ? (
-            <VideoMediaRoleSection
-              inputs={mediaInputs ?? []}
-              roles={config.mediaRoles ?? {}}
-              onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
-            />
-          )
-        : null}
-      {isWan30VideoModel(
-        selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "",
-      ) ? (
+      {isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ||
+      isMinimaxH3VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
+        <VideoMediaRoleSection
+          inputs={mediaInputs ?? []}
+          roles={config.mediaRoles ?? {}}
+          onChange={(roles) => onChange({ ...config, mediaRoles: roles })}
+        />
+      ) : null}
+      {isWan30VideoModel(selectedModel?.definitionId ?? selectedModel?.remoteModelId ?? "") ? (
         <VideoUrlMediaSection
           urlMedia={config.urlMedia ?? []}
           hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
@@ -1459,9 +1466,7 @@ function VideoMediaRoleSection({
 }) {
   if (inputs.length === 0) return null;
   const effectiveRoles = inputs.map((input) => roles[input.key] ?? defaultWanMediaRole(input.kind));
-  const hasFrame = effectiveRoles.some(
-    (role) => role === "first_frame" || role === "last_frame",
-  );
+  const hasFrame = effectiveRoles.some((role) => role === "first_frame" || role === "last_frame");
   const hasReference = effectiveRoles.some((role) => role.startsWith("reference_"));
   const conflict = hasFrame && hasReference;
   return (
@@ -1502,7 +1507,9 @@ function VideoMediaRoleSection({
       {conflict ? (
         <div className="canvas-gen-node__media-role-warning" role="alert">
           <WarningCircle size={14} weight="fill" aria-hidden="true" />
-          <span>首帧/首尾帧与参考素材（参考图/参考视频/参考音频）不可在同一请求混用，请二选一。</span>
+          <span>
+            首帧/首尾帧与参考素材（参考图/参考视频/参考音频）不可在同一请求混用，请二选一。
+          </span>
         </div>
       ) : null}
     </div>
@@ -1572,9 +1579,7 @@ function VideoUrlMediaSection({
                 <Globe size={15} weight="bold" aria-hidden="true" />
               )}
               <span className="canvas-gen-node__url-copy">
-                <strong>
-                  {input.role === "file" ? "文档" : "网页"}
-                </strong>
+                <strong>{input.role === "file" ? "文档" : "网页"}</strong>
                 <small title={input.url}>{input.url}</small>
               </span>
               <button
@@ -1599,9 +1604,7 @@ function VideoUrlMediaSection({
             type="text"
             className="canvas-gen-node__url-draft-input"
             placeholder={
-              draftRole === "file"
-                ? "https://…/public-doc.pdf"
-                : "https://…/public-article"
+              draftRole === "file" ? "https://…/public-doc.pdf" : "https://…/public-article"
             }
             value={draftUrl}
             onChange={(event) => {

@@ -29,6 +29,7 @@ futures-util = "0.3"
 hex = "0.4"
 hmac = "0.12"
 infer = "0.19"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 rand = "0.9"
 regex = "1"

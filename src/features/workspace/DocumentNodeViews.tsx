@@ -60,12 +60,12 @@ function screenplayMaterialKindLabel(kind: PromptMaterialKind): string {
 
 function screenplayMaterialCompatibilityHint(remoteModelId: string | undefined): string {
   const identity = remoteModelId?.toLowerCase() ?? "";
-  if (identity.startsWith("gemini")) return "当前 Gemini 接口可读取全部受支持格式。";
-  if (identity.startsWith("claude")) return "当前 Claude 接口可读取图片、PDF 与文本。";
+  if (identity.startsWith("gemini")) return "当前所选模型接口可读取全部受支持格式。";
+  if (identity.startsWith("claude")) return "当前所选模型接口可读取图片、PDF 与文本。";
   if (identity.includes("audio")) {
-    return "当前接口可读取图片、MP3 / WAV 与文本；视频或 PDF 请切换 Gemini。";
+    return "当前所选模型接口可读取图片、MP3 / WAV 与文本；视频或 PDF 请在项目供应商中选择支持该格式的模型。";
   }
-  return "当前接口可读取图片与文本；音视频或 PDF 建议切换 Gemini。";
+  return "当前所选模型接口可读取图片与文本；音视频或 PDF 请在项目供应商中选择支持该格式的模型。";
 }
 
 /** 内置技能文档节点：完整多轮对话、可编辑稿件和 Markdown 导出。 */
@@ -993,6 +993,13 @@ export function CanvasPromptNode({
   );
   const selectionReady = Boolean(selectedProvider && selectedModel);
   const taskLabel = node.config.task === "generate" ? "生成提示词" : "优化提示词";
+  const isFpvPath = node.config.mode === "fpv_path";
+  const isFightPromptMaster = node.config.mode === "fight_prompt_master";
+  const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
+  const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
+  const hasModeHint =
+    isFpvPath || isFightPromptMaster || isMultiGridStoryboard || isStoryboardPrompt;
+  const modeHintId = `prompt-mode-hint-${node.key}`;
   const conversation = node.config.conversation ?? [];
   const conversationRef = useRef<HTMLDivElement>(null);
   const promptOutputId = `prompt-output-${node.key}`;
@@ -1087,9 +1094,13 @@ export function CanvasPromptNode({
 
       <div className="canvas-prompt-node__body">
         <div className="canvas-prompt-node__intro">
-          <strong>把创意变成可执行的提示词</strong>
+          <strong>
+            {isFpvPath ? "沿参考路径规划第一人称飞行镜头" : "把创意变成可执行的提示词"}
+          </strong>
           <span>
-            支持多轮对话：每次生成或优化都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。
+            {isFpvPath
+              ? "连接带红线或箭头的场景图，保留路径标记用于分析；也可直接描述路线。生成参考图版、纯文字版提示词，以及时长建议、运镜时间线和速度节奏。"
+              : "支持多轮对话：每次生成或优化都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。"}
           </span>
         </div>
         {sourceConnections.length > 0 ? (
@@ -1141,7 +1152,17 @@ export function CanvasPromptNode({
         >
           {conversation.length === 0 ? (
             <div className="canvas-screenplay-node__empty">
-              <strong>从一句创意或待优化提示词开始</strong>
+              <strong>
+                {isFpvPath
+                  ? "连接路径图，或写下起点、途经点和终点"
+                  : isFightPromptMaster
+                    ? "描述一场打斗，或连接角色、场景与动作参考素材"
+                    : isMultiGridStoryboard
+                      ? "提供剧情，或连接角色、场景与视频参考素材"
+                      : isStoryboardPrompt
+                        ? "描述故事与用途，或连接角色、场景与风格参考素材"
+                        : "从一句创意或待优化提示词开始"}
+              </strong>
               <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
             </div>
           ) : (
@@ -1166,10 +1187,27 @@ export function CanvasPromptNode({
           <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
           <textarea
             aria-label={node.config.task === "generate" ? "创意或需求" : "待优化提示词"}
+            aria-describedby={hasModeHint ? modeHintId : undefined}
             placeholder={
-              node.config.task === "generate"
-                ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
-                : "粘贴一段已有提示词，补充镜头、主体和风格细节"
+              isFpvPath
+                ? node.config.task === "generate"
+                  ? "例如：沿红线贴地切入，绕过塔楼后拉升到屋顶，15 秒一镜到底；已连接路径图时可直接生成"
+                  : "粘贴飞行提示词或填写修改要求，例如：保留路线，放慢环绕；留空可优化当前输出"
+                : isFightPromptMaster
+                  ? node.config.task === "generate"
+                    ? "例如：SD2.5，15 秒，超高速；雨夜站台双人近战。已连接参考素材时可直接生成"
+                    : "粘贴打斗提示词或填写修改要求，例如：加强攻防因果，减少镜头切换；留空可优化当前输出"
+                  : isMultiGridStoryboard
+                    ? node.config.task === "generate"
+                      ? "例如：6 宫格，12 秒，电影写实；女孩走进雨夜站台，发现遗落的信封。已连接参考素材时可直接生成"
+                      : "粘贴分镜方案或填写修改要求，例如：保留角色与总时长，强化最后一格；留空可优化当前输出"
+                    : isStoryboardPrompt
+                      ? node.config.task === "generate"
+                        ? "例如：咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格；已连接参考素材时可直接生成"
+                        : "粘贴故事板提示词或填写修改要求，例如：保留角色与版式，加强最后一格的情绪；留空可优化当前输出"
+                      : node.config.task === "generate"
+                        ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
+                        : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
             disabled={running}
@@ -1254,6 +1292,7 @@ export function CanvasPromptNode({
           <span>提示词技能模式</span>
           <select
             aria-label="提示词技能模式"
+            aria-describedby={hasModeHint ? modeHintId : undefined}
             value={node.config.mode}
             onChange={(event) =>
               onChange({
@@ -1271,6 +1310,34 @@ export function CanvasPromptNode({
             )}
           </select>
         </label>
+        {isFpvPath ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              读图请使用支持图片理解的文本模型。默认按 15
+              秒规划，可在需求中调整；复杂路线会建议分段并保留关键途经点。路径图仅用于分析；视频需要参考图时，请将干净场景图直接连接到视频节点。
+            </span>
+          </div>
+        ) : isFightPromptMaster ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              在对话中指定目标视频模型（SD2.0 / SD2.5 /
+              H3）、时长和速度档，缺失时会先补问；默认交付高强度、中间型、慢节奏三套方案。参考图片与视频画面需使用支持图片理解的文本模型。
+            </span>
+          </div>
+        ) : isMultiGridStoryboard ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              在对话中指定 4 / 6 / 9
+              宫格、目标时长和风格，已填写的参数会继续沿用；生成图片与视频两套提示词。参考图片与视频画面需使用支持图片理解的文本模型。
+            </span>
+          </div>
+        ) : isStoryboardPrompt ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              按电影、广告、短剧、动画、漫画、品牌、MV、游戏、社交、教程、体育或国漫视觉开发场景组织画面，输出可直接交给图片节点的整张故事板提示词。可指定格数、画幅与风格；参考图片与视频画面需使用支持图片理解的文本模型。
+            </span>
+          </div>
+        ) : null}
         <div className="canvas-prompt-node__field">
           <label htmlFor={promptOutputId}>输出提示词</label>
           <div className="canvas-prompt-node__output-editor">
@@ -1321,7 +1388,11 @@ export function CanvasPromptNode({
         type="button"
         className="node-port node-port--right node-port--prompt canvas-prompt-node__port"
         aria-label="拖出提示词连线"
-        title="拖到图片或视频生成节点，自动导入输出提示词；视频节点同时继承视觉参考图"
+        title={
+          isFpvPath
+            ? "拖到图片或视频生成节点，自动导入输出提示词；FPV 路径图仅用于分析，视频参考图请直接连接"
+            : "拖到图片或视频生成节点，自动导入输出提示词；视频节点同时继承视觉参考图"
+        }
         onMouseDown={(event) => {
           event.stopPropagation();
           onConnectionStart(node.key);

@@ -4,6 +4,7 @@ import {
   generationParameters,
   isGeminiImageModel,
   isMinimaxH3VideoModel,
+  isSeedreamImageModel,
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
   modelSupportsBatchCount,
@@ -209,6 +210,173 @@ describe("model capabilities", () => {
     expect(genericQuality?.defaultValue).toBe("standard");
     expect(genericQuality?.options.map((option) => option.value)).toEqual(["hd", "standard"]);
     expect(generic.find((capability) => capability.key === "n")).toBeUndefined();
+  });
+
+  it("uses the Seedream 2K contract for text-to-image models", () => {
+    expect(isSeedreamImageModel("doubao-seedream-4-5-251128")).toBe(true);
+    expect(isSeedreamImageModel("doubao-seedance-2-5-260628")).toBe(false);
+
+    const seedream45 = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-4-5-251128", ["text_to_image"]),
+      "text_to_image",
+      "doubao-seedream-4-5-251128",
+    );
+    const size = seedream45.find((capability) => capability.key === "size");
+    expect(size?.defaultValue).toBe("2K");
+    expect(size?.options.map((option) => option.value)).toEqual([
+      "2K",
+      "2048x2048",
+      "2848x1600",
+    ]);
+    expect(seedream45.find((capability) => capability.key === "quality")?.options).toEqual([
+      { value: "standard", label: "标准" },
+      { value: "hd", label: "高清 HD" },
+    ]);
+    expect(seedream45.find((capability) => capability.key === "watermark")).toMatchObject({
+      type: "boolean",
+      defaultValue: false,
+    });
+    // 文档参数表：返回格式默认 url，可选 b64_json。
+    const responseFormat = seedream45.find((capability) => capability.key === "response_format");
+    expect(responseFormat?.defaultValue).toBe("url");
+    expect(responseFormat?.options).toEqual([
+      { value: "url", label: "图片链接" },
+      { value: "b64_json", label: "Base64 数据" },
+    ]);
+    // 4.5 支持组图模式与组图数量（1~15）。
+    const sequential = seedream45.find(
+      (capability) => capability.key === "sequential_image_generation",
+    );
+    expect(sequential?.options).toEqual([
+      { value: "disabled", label: "关闭" },
+      { value: "auto", label: "自动" },
+    ]);
+    expect(seedream45.find((capability) => capability.key === "max_images")).toMatchObject({
+      type: "integer",
+      defaultValue: 4,
+      minimum: 1,
+      maximum: 15,
+    });
+    // 4.5 不支持提示词优化/联网搜索/输出格式。
+    expect(seedream45.some((capability) => capability.key === "optimize_prompt_mode")).toBe(false);
+    expect(seedream45.some((capability) => capability.key === "web_search")).toBe(false);
+    expect(seedream45.some((capability) => capability.key === "output_format")).toBe(false);
+    // 非 gpt-image/seedream 模型不受影响。
+    expect(seedream45.some((capability) => capability.key === "n")).toBe(false);
+  });
+
+  it("uses the Seedream 5.0 pro contract with image-edit-only parameters", () => {
+    const text = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-5-0-pro-260628", ["text_to_image"]),
+      "text_to_image",
+      "doubao-seedream-5-0-pro-260628",
+    );
+    expect(text.find((capability) => capability.key === "optimize_prompt_mode")?.options).toEqual([
+      { value: "fast", label: "快速" },
+      { value: "standard", label: "标准" },
+    ]);
+    expect(text.find((capability) => capability.key === "output_format")?.options).toEqual([
+      { value: "jpg", label: "JPG" },
+      { value: "png", label: "PNG" },
+      { value: "webp", label: "WEBP" },
+    ]);
+    expect(text.find((capability) => capability.key === "output_format")?.defaultValue).toBe("jpg");
+    expect(text.find((capability) => capability.key === "watermark")?.defaultValue).toBe(false);
+    expect(text.find((capability) => capability.key === "response_format")?.defaultValue).toBe(
+      "url",
+    );
+    // 5.0 pro 不支持组图模式。
+    expect(
+      text.some((capability) => capability.key === "sequential_image_generation"),
+    ).toBe(false);
+
+    const edit = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-5-0-pro-260628", ["image_to_image"]),
+      "image_to_image",
+      "doubao-seedream-5-0-pro-260628",
+    );
+    expect(edit.find((capability) => capability.key === "background")?.options).toEqual([
+      { value: "opaque", label: "实体背景" },
+      { value: "transparent", label: "透明背景" },
+    ]);
+    expect(edit.find((capability) => capability.key === "layer_decomposition")).toMatchObject({
+      type: "boolean",
+      defaultValue: false,
+    });
+    // 透明背景/图层拆分只在图生图出现，文生图不出现。
+    expect(text.some((capability) => capability.key === "background")).toBe(false);
+    expect(text.some((capability) => capability.key === "layer_decomposition")).toBe(false);
+  });
+
+  it("uses the Seedream 5.0 lite contract with web search", () => {
+    const capabilities = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-5-0-lite", ["text_to_image"]),
+      "text_to_image",
+      "doubao-seedream-5-0-lite",
+    );
+    expect(capabilities.map((capability) => capability.key)).toContain(
+      "sequential_image_generation",
+    );
+    expect(capabilities.map((capability) => capability.key)).toContain("optimize_prompt_mode");
+    expect(capabilities.map((capability) => capability.key)).toContain("web_search");
+    expect(capabilities.find((capability) => capability.key === "web_search")).toMatchObject({
+      requiresNoMedia: true,
+    });
+    // 组图数量仅在组图模式为 auto 时进入请求。
+    expect(
+      generationParameters(
+        capabilities,
+        { sequential_image_generation: "auto", max_images: 6 },
+        false,
+      ),
+    ).toMatchObject({ sequential_image_generation: "auto", max_images: 6 });
+    expect(
+      generationParameters(
+        capabilities,
+        { sequential_image_generation: "disabled", max_images: 6 },
+        false,
+      ),
+    ).toMatchObject({ sequential_image_generation: "disabled" });
+  });
+
+  it("uses the documented Seedream 5.0 contract for doubao-seedream-5-0-260128", () => {
+    // moyu 文档（https://doc.moyu.info/9280685m0.md）推荐的标准 Seedream 5.0：
+    // 基础参数 + 组图模式 + 输出格式（jpg/png/webp）；不声明提示词优化/联网搜索。
+    const text = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-5-0-260128", ["text_to_image"]),
+      "text_to_image",
+      "doubao-seedream-5-0-260128",
+    );
+    expect(text.find((capability) => capability.key === "watermark")?.defaultValue).toBe(false);
+    expect(text.find((capability) => capability.key === "response_format")?.options).toEqual([
+      { value: "url", label: "图片链接" },
+      { value: "b64_json", label: "Base64 数据" },
+    ]);
+    expect(text.find((capability) => capability.key === "sequential_image_generation")?.options).toEqual([
+      { value: "disabled", label: "关闭" },
+      { value: "auto", label: "自动" },
+    ]);
+    expect(text.find((capability) => capability.key === "output_format")).toMatchObject({
+      type: "string",
+      defaultValue: "jpg",
+    });
+    expect(text.find((capability) => capability.key === "output_format")?.options).toEqual([
+      { value: "jpg", label: "JPG" },
+      { value: "png", label: "PNG" },
+      { value: "webp", label: "WEBP" },
+    ]);
+    expect(text.some((capability) => capability.key === "optimize_prompt_mode")).toBe(false);
+    expect(text.some((capability) => capability.key === "web_search")).toBe(false);
+
+    // 图生图同样不声明透明背景/图层拆分（那是 5.0 pro 的能力）。
+    const edit = modelParameterCapabilities(
+      defaultModelOperationSchema("doubao-seedream-5-0-260128", ["image_to_image"]),
+      "image_to_image",
+      "doubao-seedream-5-0-260128",
+    );
+    expect(edit.find((capability) => capability.key === "output_format")?.defaultValue).toBe("jpg");
+    expect(edit.some((capability) => capability.key === "background")).toBe(false);
+    expect(edit.some((capability) => capability.key === "layer_decomposition")).toBe(false);
   });
 
   it("uses the Wan 3.0 root-contract parameters and keeps seed optional", () => {
@@ -541,6 +709,30 @@ describe("model capabilities", () => {
       });
       // Gemini 接口忽略 n：不声明批量数量参数，多张由业务侧拆分任务。
       expect(modelSupportsBatchCount(schema, "text_to_image", modelId)).toBe(false);
+
+      // 图生图（图片参考生成）同样只声明画幅比例 `size`（JSON data URI 契约），
+      // 不声明 quality / n。
+      const editSchema = defaultModelOperationSchema(modelId, ["image_to_image"]);
+      const editCapabilities = modelParameterCapabilities(editSchema, "image_to_image", modelId);
+      expect(editCapabilities.map((capability) => capability.key)).toEqual(["size"]);
+      expect(editCapabilities[0]).toMatchObject({
+        key: "size",
+        defaultValue: "1:1",
+        options: [
+          { value: "1:1", label: "1:1" },
+          { value: "16:9", label: "16:9" },
+          { value: "9:16", label: "9:16" },
+          { value: "4:3", label: "4:3" },
+          { value: "3:4", label: "3:4" },
+          { value: "3:2", label: "3:2" },
+          { value: "2:3", label: "2:3" },
+        ],
+      });
+      expect(generationParameters(editCapabilities, {}, true)).toEqual({ size: "1:1" });
+      expect(generationParameters(editCapabilities, { size: "3:4" }, true)).toEqual({
+        size: "3:4",
+      });
+      expect(modelSupportsBatchCount(editSchema, "image_to_image", modelId)).toBe(false);
 
       // 空参数档案（历史/供应商下发空对象）回退到 Gemini 图片当前档案。
       const repaired = modelParameterCapabilities(
