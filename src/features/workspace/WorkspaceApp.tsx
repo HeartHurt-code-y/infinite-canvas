@@ -152,20 +152,7 @@ import {
   workflowMaterialPathKey,
   workflowMaterialQuota,
 } from "./workflowMaterials";
-import {
-  createKnowledgeVideoDirectorWorkflow,
-  createAiFilmWorkflow,
-  createComicDramaWorkflow,
-  createCommerceWorkflow,
-  createRemotionWorkflow,
-  createXhsCoverWorkflow,
-  createReverseVideoWorkflow,
-} from "./workflowTemplates";
-import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
-import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
-import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
-import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
-import { XHS_COVER_MAX_REFERENCE_BYTES, xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
+import { XHS_COVER_MAX_REFERENCE_BYTES } from "./xhsCoverWorkflowModel";
 import type {
   AssetItem,
   AssetKind,
@@ -1797,7 +1784,7 @@ export function WorkspaceApp() {
    * 模板只保存当前项目供应商目录校准后的模型绑定；插入本身不会发起任何模型任务。
    */
   const insertWorkflow = useCallback(
-    (
+    async (
       kind:
         "knowledge" | "film" | "comicDrama" | "commerce" | "remotion" | "xhsCover" | "reverseVideo",
     ) => {
@@ -1811,14 +1798,15 @@ export function WorkspaceApp() {
           visibleHeight > 0
             ? Math.max(0, (KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT + 48 - visibleHeight) / 2)
             : 0;
+        const templateModule = await import("./workflowTemplates");
         const createWorkflow = {
-          knowledge: createKnowledgeVideoDirectorWorkflow,
-          film: createAiFilmWorkflow,
-          comicDrama: createComicDramaWorkflow,
-          commerce: createCommerceWorkflow,
-          remotion: createRemotionWorkflow,
-          xhsCover: createXhsCoverWorkflow,
-          reverseVideo: createReverseVideoWorkflow,
+          knowledge: templateModule.createKnowledgeVideoDirectorWorkflow,
+          film: templateModule.createAiFilmWorkflow,
+          comicDrama: templateModule.createComicDramaWorkflow,
+          commerce: templateModule.createCommerceWorkflow,
+          remotion: templateModule.createRemotionWorkflow,
+          xhsCover: templateModule.createXhsCoverWorkflow,
+          reverseVideo: templateModule.createReverseVideoWorkflow,
         }[kind];
         const title = {
           knowledge: "知识教学视频",
@@ -1874,22 +1862,27 @@ export function WorkspaceApp() {
       zoom,
     ],
   );
-  const insertKnowledgeVideoDirectorWorkflow = useCallback(
-    () => insertWorkflow("knowledge"),
-    [insertWorkflow],
-  );
-  const insertAiFilmWorkflow = useCallback(() => insertWorkflow("film"), [insertWorkflow]);
-  const insertComicDramaWorkflow = useCallback(
-    () => insertWorkflow("comicDrama"),
-    [insertWorkflow],
-  );
-  const insertCommerceWorkflow = useCallback(() => insertWorkflow("commerce"), [insertWorkflow]);
-  const insertRemotionWorkflow = useCallback(() => insertWorkflow("remotion"), [insertWorkflow]);
-  const insertXhsCoverWorkflow = useCallback(() => insertWorkflow("xhsCover"), [insertWorkflow]);
-  const insertReverseVideoWorkflow = useCallback(
-    () => insertWorkflow("reverseVideo"),
-    [insertWorkflow],
-  );
+  const insertKnowledgeVideoDirectorWorkflow = useCallback(() => {
+    void insertWorkflow("knowledge");
+  }, [insertWorkflow]);
+  const insertAiFilmWorkflow = useCallback(() => {
+    void insertWorkflow("film");
+  }, [insertWorkflow]);
+  const insertComicDramaWorkflow = useCallback(() => {
+    void insertWorkflow("comicDrama");
+  }, [insertWorkflow]);
+  const insertCommerceWorkflow = useCallback(() => {
+    void insertWorkflow("commerce");
+  }, [insertWorkflow]);
+  const insertRemotionWorkflow = useCallback(() => {
+    void insertWorkflow("remotion");
+  }, [insertWorkflow]);
+  const insertXhsCoverWorkflow = useCallback(() => {
+    void insertWorkflow("xhsCover");
+  }, [insertWorkflow]);
+  const insertReverseVideoWorkflow = useCallback(() => {
+    void insertWorkflow("reverseVideo");
+  }, [insertWorkflow]);
   const toggleWorkflowRepository = useCallback(
     () => setWorkflowRepositoryExpanded((current) => !current),
     [],
@@ -2516,58 +2509,70 @@ export function WorkspaceApp() {
 
   const exportFilmDocuments = useCallback(
     (key: string) => {
-      const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
-      if (!node) return;
-      const isDrama = Boolean(node.config.comicDrama);
-      const isCommerce = Boolean(node.config.commerce);
-      const isRemotion = Boolean(node.config.remotion);
-      const isCover = Boolean(node.config.xhsCover);
-      if (
-        !isCover &&
-        !isRemotion &&
-        !isDrama &&
-        !isCommerce &&
-        !node.config.checkpoint.film?.artifacts.length
-      )
-        return;
-      const content = isCover
-        ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
-        : isRemotion
-          ? remotionDeliveryMarkdown(node.config.checkpoint)
-          : isCommerce
-            ? commerceDeliveryMarkdown(node.config.checkpoint)
-            : isDrama
-              ? comicDramaDeliveryMarkdown(node.config.checkpoint)
-              : aiFilmDeliveryMarkdown(node.config.checkpoint);
-      if (!content) return;
-      const title = isCover
-        ? "小红书封面制作文档"
-        : isRemotion
-          ? "动画逻辑图制作文档"
-          : isCommerce
-            ? "剧情带货制作文档"
-            : isDrama
-              ? "漫剧制作文档"
-              : "影视制作文档";
-      const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
-        try {
-          if (isDesktopRuntime()) {
-            if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
-          } else {
-            const url = URL.createObjectURL(
-              new Blob([content], { type: "text/markdown;charset=utf-8" }),
-            );
-            const anchor = document.createElement("a");
-            anchor.href = url;
-            anchor.download = fileName;
-            anchor.click();
-            URL.revokeObjectURL(url);
+        const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
+        if (!node) return;
+        const isDrama = Boolean(node.config.comicDrama);
+        const isCommerce = Boolean(node.config.commerce);
+        const isRemotion = Boolean(node.config.remotion);
+        const isCover = Boolean(node.config.xhsCover);
+        if (
+          !isCover &&
+          !isRemotion &&
+          !isDrama &&
+          !isCommerce &&
+          !node.config.checkpoint.film?.artifacts.length
+        )
+          return;
+        const content = isCover
+          ? (await import("./xhsCoverWorkflowModel")).xhsCoverDeliveryMarkdown(
+              node.config.checkpoint,
+            )
+          : isRemotion
+            ? (await import("./remotionWorkflowModel")).remotionDeliveryMarkdown(
+                node.config.checkpoint,
+              )
+            : isCommerce
+              ? (await import("./commerceWorkflowModel")).commerceDeliveryMarkdown(
+                  node.config.checkpoint,
+                )
+              : isDrama
+                ? (await import("./comicDramaWorkflowModel")).comicDramaDeliveryMarkdown(
+                    node.config.checkpoint,
+                  )
+                : (await import("./aiFilmWorkflowModel")).aiFilmDeliveryMarkdown(
+                    node.config.checkpoint,
+                  );
+        if (!content) return;
+        const title = isCover
+          ? "小红书封面制作文档"
+          : isRemotion
+            ? "动画逻辑图制作文档"
+            : isCommerce
+              ? "剧情带货制作文档"
+              : isDrama
+                ? "漫剧制作文档"
+                : "影视制作文档";
+        const fileName = markdownDocumentExportName(content, key, title);
+        void (async () => {
+          try {
+            if (isDesktopRuntime()) {
+              if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
+            } else {
+              const url = URL.createObjectURL(
+                new Blob([content], { type: "text/markdown;charset=utf-8" }),
+              );
+              const anchor = document.createElement("a");
+              anchor.href = url;
+              anchor.download = fileName;
+              anchor.click();
+              URL.revokeObjectURL(url);
+            }
+            toast.success(`${title}已导出`);
+          } catch (error) {
+            toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
           }
-          toast.success(`${title}已导出`);
-        } catch (error) {
-          toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
-        }
+        })();
       })();
     },
     [knowledgeVideoWorkflowNodes],
