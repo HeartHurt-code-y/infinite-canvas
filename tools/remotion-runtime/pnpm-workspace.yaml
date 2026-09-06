@@ -1,0 +1,5 @@
+# 本目录作为独立 workspace 根（非仓库 workspace 成员），prepare 脚本在此
+# 直接 install，避免 pnpm 把安装提升到仓库根；同时放行 esbuild 的
+# postinstall（下载平台二进制），否则 pnpm 11 默认忽略构建脚本。
+packages: []
+dangerouslyAllowAllBuilds: true

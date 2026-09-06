@@ -110,7 +110,10 @@ if (
 }
 
 async function pnpmInstall(directory, production = false) {
-  // pnpm 11 已移除 --no-fund（fund 提示默认关闭），frozen-lockfile/prod 仍受支持。
+  // pnpm 11 已移除 --no-fund（fund 提示默认关闭）。目标目录必须自带
+  // pnpm-workspace.yaml（packages: []），使其成为独立 workspace 根：
+  // 否则 pnpm 会把 install 提升到仓库根执行，不创建本目录 node_modules；
+  // 也不能用 --ignore-workspace，那会让构建白名单 settings 一并失效。
   const args = ["install", "--frozen-lockfile", ...(production ? ["--prod"] : [])];
   await new Promise((resolve, reject) => {
     const child =
@@ -145,6 +148,12 @@ if (
   await writeFile(path.join(source, "node_modules", ".canvas-lock"), lockHash);
 }
 await mkdir(destination, { recursive: true });
+// 让 destination 成为独立 workspace 根（同 tools/remotion-runtime），
+// pnpm 才会在 destination 内安装而非提升到仓库根，并放行依赖构建脚本。
+await writeFile(
+  path.join(destination, "pnpm-workspace.yaml"),
+  "packages: []\ndangerouslyAllowAllBuilds: true\n",
+);
 for (const name of ["package.json", "pnpm-lock.yaml", "plan.mjs", "Composition.tsx", "render.mjs"])
   await copyFile(path.join(source, name), path.join(destination, name));
 if (
