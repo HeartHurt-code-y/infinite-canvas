@@ -3,6 +3,8 @@ import { listen } from "@tauri-apps/api/event";
 import * as v from "valibot";
 
 import {
+  assetGroupSchema,
+  assetGroupsSchema,
   canvasDocumentRecordSchema,
   cloudAssetsSchema,
   connectivityTestResultSchema,
@@ -635,10 +637,42 @@ export interface DeleteRealPersonGroupCommand {
   readonly id: number;
 }
 
+/** 云端素材库分组（`GET /v1/assets/groups`）。 */
+export interface AssetGroupRecord {
+  /** Positive platform group ID，上传素材时用作 `groupId`。 */
+  readonly id: number;
+  /** 纯展示名（上游已去除令牌前缀），前端只展示该字段。 */
+  readonly name: string;
+  /** 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。 */
+  readonly groupName: string;
+  readonly isDefault: boolean;
+  readonly assetCount: number;
+}
+
+export interface CreateAssetGroupCommand {
+  readonly providerConnectionId: string;
+  /** 用户自定义分组名称；上游会自动追加令牌前缀。 */
+  readonly name: string;
+}
+
+export interface RenameAssetCommand {
+  readonly providerConnectionId: string;
+  /** Cloud `asset-xxx` ID; an `asset://` prefix is accepted and stripped. */
+  readonly id: string;
+  /** 新名称，上限 64 字符。 */
+  readonly name: string;
+}
+
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
   /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
   deleteAsset(this: void, command: DeleteAssetCommand): Promise<string>;
+  /** 列出当前令牌作用域下的云端素材库分组（上游 `GET /v1/assets/groups`）。 */
+  listAssetGroups(this: void, providerConnectionId: string): Promise<AssetGroupRecord[]>;
+  /** 以用户自定义名称新建云端素材库分组（上游 `POST /v1/assets/groups`）。 */
+  createAssetGroup(this: void, command: CreateAssetGroupCommand): Promise<AssetGroupRecord>;
+  /** 更新云端素材名称（上游 `POST /v1/assets/update`），返回素材 ID。 */
+  renameAsset(this: void, command: RenameAssetCommand): Promise<string>;
 }
 
 export interface RealPersonAssetLibraryClient {
@@ -668,6 +702,25 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
       command: {
         providerConnectionId: command.providerConnectionId,
         id: command.id,
+      },
+    }),
+  listAssetGroups: (providerConnectionId) =>
+    invokeDesktop("list_asset_groups", assetGroupsSchema, {
+      command: { providerConnectionId },
+    }),
+  createAssetGroup: (command) =>
+    invokeDesktop("create_asset_group", assetGroupSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        name: command.name,
+      },
+    }),
+  renameAsset: (command) =>
+    invokeDesktop("rename_asset", stringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
+        name: command.name,
       },
     }),
   createRealPersonAuthLink: (command) =>

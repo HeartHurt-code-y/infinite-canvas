@@ -1,6 +1,7 @@
 import * as v from "valibot";
 
 import type {
+  AssetGroupRecord,
   CanvasDocumentRecord,
   CloudAsset,
   ConnectivityTestResult,
@@ -199,6 +200,18 @@ export const cloudAssetSchema = v.looseObject({
 }) satisfies v.GenericSchema<CloudAsset>;
 
 export const cloudAssetsSchema = v.array(cloudAssetSchema);
+
+export const assetGroupSchema = v.looseObject({
+  id: v.number(),
+  /** 纯展示名（上游已去除令牌前缀），前端只展示该字段。 */
+  name: v.string(),
+  /** 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。 */
+  groupName: v.string(),
+  isDefault: v.boolean(),
+  assetCount: v.number(),
+}) satisfies v.GenericSchema<AssetGroupRecord>;
+
+export const assetGroupsSchema = v.array(assetGroupSchema);
 
 export const realPersonAuthLinkSchema = v.looseObject({
   h5Url: v.string(),

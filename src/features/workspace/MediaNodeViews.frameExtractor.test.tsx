@@ -85,7 +85,7 @@ describe("CanvasVideoFrameExtractorNode", () => {
     renderHarness(makeNode({ timestamps: [3] }));
     const start = screen.getByRole("button", { name: "开始视频抽帧" });
     expect(start).toBeDisabled();
-    expect(screen.getByText(/请连入视频或填写视频文件路径/)).toBeTruthy();
+    expect(screen.getByText(/请连入视频或填写视频文件路径/)).toBeInTheDocument();
   });
 
   it("输入秒数后实时解析并写回配置", () => {
@@ -114,7 +114,7 @@ describe("CanvasVideoFrameExtractorNode", () => {
       inputs: [videoInput],
       runState: { status: "running", progress: 66, error: null },
     });
-    expect(screen.getByText(/正在抽帧/)).toBeTruthy();
+    expect(screen.getByText(/正在抽帧/)).toBeInTheDocument();
     const cancel = screen.getByRole("button", { name: "取消视频抽帧" });
     fireEvent.click(cancel);
     expect(onCancelExtraction).toHaveBeenCalledWith("frame-extractor-test");
@@ -126,7 +126,7 @@ describe("CanvasVideoFrameExtractorNode", () => {
       producedFrames: [producedFrame],
       runState: { status: "done", progress: 100, error: null },
     });
-    expect(screen.getByText(/sample@3\.jpg/)).toBeTruthy();
+    expect(screen.getByText(/sample@3\.jpg/)).toBeInTheDocument();
   });
 
   it("失败态展示错误信息", () => {
@@ -134,7 +134,7 @@ describe("CanvasVideoFrameExtractorNode", () => {
       inputs: [videoInput],
       runState: { status: "error", progress: null, error: "抽帧秒数超出视频时长" },
     });
-    expect(screen.getByText("抽帧秒数超出视频时长")).toBeTruthy();
+    expect(screen.getByText("抽帧秒数超出视频时长")).toBeInTheDocument();
   });
 
   it("手动填写视频路径也可作为来源", () => {

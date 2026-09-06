@@ -551,7 +551,8 @@ export function HistoryDialog({
       });
     return () => {
       cancelled = true;
-      ++listRequestRef.current;
+      // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 resetList 与下次请求递增，
+      // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
   }, [open, activeTab, statusFilter, dateRange, client]);
 

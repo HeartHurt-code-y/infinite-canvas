@@ -579,7 +579,8 @@ export function WorkflowHistoryPanel({
       });
     return () => {
       cancelled = true;
-      ++listRequestRef.current;
+      // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 loadMore 与下次请求递增，
+      // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
   }, [client, canvasId, filter, revision, dateRange]);
 

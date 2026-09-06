@@ -55,6 +55,17 @@ describe("AssetLibraryTokenSettings", () => {
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
           deleteAsset: vi.fn(() => Promise.resolve("")),
+          listAssetGroups: vi.fn(() => Promise.resolve([])),
+          createAssetGroup: vi.fn(() =>
+            Promise.resolve({
+              id: 1,
+              name: "mock",
+              groupName: "mock",
+              isDefault: false,
+              assetCount: 0,
+            }),
+          ),
+          renameAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -85,6 +96,17 @@ describe("AssetLibraryTokenSettings", () => {
     const libraryClient: AssetLibraryClient = {
       list: vi.fn(() => Promise.resolve([])),
       deleteAsset: vi.fn(() => Promise.resolve("")),
+      listAssetGroups: vi.fn(() => Promise.resolve([])),
+      createAssetGroup: vi.fn(() =>
+        Promise.resolve({
+          id: 1,
+          name: "mock",
+          groupName: "mock",
+          isDefault: false,
+          assetCount: 0,
+        }),
+      ),
+      renameAsset: vi.fn(() => Promise.resolve("")),
     };
 
     const view = render(
@@ -134,6 +156,17 @@ describe("AssetLibraryTokenSettings", () => {
     const libraryClient: AssetLibraryClient = {
       list: vi.fn(() => Promise.resolve(ASSETS)),
       deleteAsset: vi.fn(() => Promise.resolve("")),
+      listAssetGroups: vi.fn(() => Promise.resolve([])),
+      createAssetGroup: vi.fn(() =>
+        Promise.resolve({
+          id: 1,
+          name: "mock",
+          groupName: "mock",
+          isDefault: false,
+          assetCount: 0,
+        }),
+      ),
+      renameAsset: vi.fn(() => Promise.resolve("")),
     };
     const onAssetsLoaded = vi.fn();
     const onPullStarted = vi.fn();
@@ -186,6 +219,17 @@ describe("AssetLibraryTokenSettings", () => {
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
           deleteAsset: vi.fn(() => Promise.resolve("")),
+          listAssetGroups: vi.fn(() => Promise.resolve([])),
+          createAssetGroup: vi.fn(() =>
+            Promise.resolve({
+              id: 1,
+              name: "mock",
+              groupName: "mock",
+              isDefault: false,
+              assetCount: 0,
+            }),
+          ),
+          renameAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -211,6 +255,17 @@ describe("AssetLibraryTokenSettings", () => {
         libraryClient={{
           list: vi.fn(() => Promise.resolve([])),
           deleteAsset: vi.fn(() => Promise.resolve("")),
+          listAssetGroups: vi.fn(() => Promise.resolve([])),
+          createAssetGroup: vi.fn(() =>
+            Promise.resolve({
+              id: 1,
+              name: "mock",
+              groupName: "mock",
+              isDefault: false,
+              assetCount: 0,
+            }),
+          ),
+          renameAsset: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,

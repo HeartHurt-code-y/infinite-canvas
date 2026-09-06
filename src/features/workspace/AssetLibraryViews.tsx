@@ -3,7 +3,9 @@ import { ArrowSquareOut } from "@phosphor-icons/react/ArrowSquareOut";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { Copy } from "@phosphor-icons/react/Copy";
+import { FolderSimplePlus } from "@phosphor-icons/react/FolderSimplePlus";
 import { IdentificationBadge } from "@phosphor-icons/react/IdentificationBadge";
+import { PencilSimple } from "@phosphor-icons/react/PencilSimple";
 import { Trash } from "@phosphor-icons/react/Trash";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
@@ -448,6 +450,129 @@ export function RealPersonAssetDialog({
   );
 }
 
+export function AssetGroupCreateDialog({
+  providerDisplayName,
+  onClose,
+  onCreate,
+  busy,
+}: {
+  readonly providerDisplayName: string;
+  readonly onClose: () => void;
+  readonly onCreate: (name: string) => void;
+  readonly busy: boolean;
+}) {
+  const dialogRef = useRef<HTMLDialogElement | null>(null);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [name, setName] = useState("");
+  const trimmed = name.trim();
+  const canCreate = trimmed.length > 0 && !busy;
+
+  useEffect(() => {
+    const dialog = dialogRef.current;
+    if (dialog == null) return;
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    if (typeof dialog.showModal === "function") {
+      try {
+        dialog.showModal();
+      } catch {
+        dialog.setAttribute("open", "");
+      }
+    } else {
+      dialog.setAttribute("open", "");
+    }
+    inputRef.current?.focus();
+
+    return () => {
+      if (dialog.hasAttribute("open")) {
+        if (typeof dialog.close === "function") dialog.close();
+        else dialog.removeAttribute("open");
+      }
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, []);
+
+  return createPortal(
+    <dialog
+      ref={dialogRef}
+      className="asset-group-dialog"
+      aria-labelledby="asset-group-dialog-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        if (!busy) onClose();
+      }}
+    >
+      <header className="asset-group-dialog__header">
+        <div className="asset-group-dialog__title-row">
+          <span className="asset-group-dialog__mark" aria-hidden="true">
+            <FolderSimplePlus size={22} weight="duotone" />
+          </span>
+          <div>
+            <p className="asset-group-dialog__eyebrow">ASSET LIBRARY · GROUP</p>
+            <h2 id="asset-group-dialog-title">新建素材分组</h2>
+          </div>
+        </div>
+        <p>分组按当前令牌作用域隔离；所有供应商和平台共用同一套素材库接口。</p>
+        <button
+          type="button"
+          className="asset-group-dialog__close"
+          aria-label="关闭新建分组"
+          onClick={onClose}
+          disabled={busy}
+        >
+          <X size={20} weight="bold" aria-hidden="true" />
+        </button>
+      </header>
+
+      <div className="asset-group-dialog__body">
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (canCreate) onCreate(trimmed);
+          }}
+        >
+          <label htmlFor="asset-group-name">
+            分组名称
+            <span aria-hidden="true">*</span>
+          </label>
+          <input
+            ref={inputRef}
+            id="asset-group-name"
+            value={name}
+            maxLength={64}
+            required
+            autoComplete="off"
+            placeholder="例如：客户 A 品牌物料"
+            onChange={(event) => setName(event.target.value)}
+          />
+          <span className="asset-group-dialog__counter">{name.length} / 64</span>
+          <span className="asset-group-dialog__hint">
+            当前供应商连接：{providerDisplayName}
+          </span>
+          <div className="asset-group-dialog__actions">
+            <button type="button" onClick={onClose} disabled={busy}>
+              取消
+            </button>
+            <button
+              type="submit"
+              className="real-person-primary-action"
+              disabled={!canCreate}
+            >
+              {busy ? (
+                <CircleNotch size={16} weight="bold" data-spin="true" aria-hidden="true" />
+              ) : (
+                <FolderSimplePlus size={17} weight="bold" aria-hidden="true" />
+              )}
+              {busy ? "正在创建…" : "创建分组"}
+            </button>
+          </div>
+        </form>
+      </div>
+    </dialog>,
+    document.body,
+  );
+}
+
 export function AssetMediaState({
   kind,
   state,
@@ -585,14 +710,18 @@ export function AssetSourceDialog({
   asset,
   onClose,
   onDelete,
+  onRename,
 }: {
   readonly asset: AssetItem;
   readonly onClose: () => void;
   /** 云端素材提供删除；本地素材传 null 不渲染删除操作。 */
   readonly onDelete: (() => void) | null;
+  /** 云端素材提供改名；本地素材传 null 不渲染改名操作。 */
+  readonly onRename: ((name: string) => void) | null;
 }) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+  const renameInputRef = useRef<HTMLInputElement | null>(null);
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
   const mediaSrc = asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
@@ -601,12 +730,41 @@ export function AssetSourceDialog({
   // 避免误触；弹窗关闭时取消计时，不会在下次打开时残留。
   const [confirmingDelete, setConfirmingDelete] = useState(false);
   const deleteArmTimerRef = useRef<number | null>(null);
+  // 改名采用行内编辑：点「重命名」展开输入框，保存后调用 onRename 并关闭弹窗。
+  const [renaming, setRenaming] = useState(false);
+  const [renameValue, setRenameValue] = useState(asset.name);
+  const renameDirty = renameValue.trim() !== asset.name && renameValue.trim().length > 0;
 
   useEffect(() => {
     return () => {
       if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
     };
   }, []);
+
+  const startRenaming = () => {
+    setRenameValue(asset.name);
+    setRenaming(true);
+    // 输入框在同帧挂载，焦点延迟到微任务提交后设置。
+    void Promise.resolve().then(() => renameInputRef.current?.focus());
+  };
+  const cancelRenaming = () => {
+    setRenaming(false);
+    setRenameValue(asset.name);
+  };
+  const commitRename = () => {
+    if (!renaming || onRename == null) return;
+    const nextName = renameValue.trim();
+    if (nextName.length === 0) {
+      renameInputRef.current?.focus();
+      return;
+    }
+    if (nextName === asset.name) {
+      setRenaming(false);
+      return;
+    }
+    setRenaming(false);
+    onRename(nextName);
+  };
 
   const armDelete = () => {
     if (confirmingDelete) return;
@@ -718,7 +876,48 @@ export function AssetSourceDialog({
           <dl>
             <div>
               <dt>名称</dt>
-              <dd>{asset.name}</dd>
+              <dd className="asset-source-dialog__name">
+                {renaming ? (
+                  <span className="asset-source-dialog__rename-form">
+                    <input
+                      ref={renameInputRef}
+                      value={renameValue}
+                      maxLength={64}
+                      aria-label={`${asset.name}的新名称`}
+                      onChange={(event) => setRenameValue(event.target.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter") commitRename();
+                        if (event.key === "Escape") cancelRenaming();
+                      }}
+                    />
+                    <button
+                      type="button"
+                      disabled={!renameDirty}
+                      onClick={commitRename}
+                    >
+                      保存
+                    </button>
+                    <button type="button" onClick={cancelRenaming}>
+                      取消
+                    </button>
+                  </span>
+                ) : (
+                  <>
+                    <span className="asset-source-dialog__name-text">{asset.name}</span>
+                    {onRename ? (
+                      <button
+                        type="button"
+                        className="asset-source-dialog__rename-toggle"
+                        aria-label={`重命名素材：${asset.name}`}
+                        onClick={startRenaming}
+                      >
+                        <PencilSimple size={14} weight="bold" aria-hidden="true" />
+                        重命名
+                      </button>
+                    ) : null}
+                  </>
+                )}
+              </dd>
             </div>
             <div>
               <dt>素材 ID</dt>

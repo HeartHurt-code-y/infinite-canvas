@@ -748,6 +748,18 @@ function submittedGenerationCommands(): Record<string, unknown>[] {
 }
 
 /** 默认 invoke mock：单测可用 mockImplementation 包装并按需覆盖个别命令。 */
+/** 素材库分组 mock：创建分组后会被 refresh 拉回，贴近真实服务器行为。 */
+let mockAssetGroups: Array<{
+  id: number;
+  name: string;
+  groupName: string;
+  isDefault: boolean;
+  assetCount: number;
+}> = [
+  { id: 0, name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
+  { id: 21, name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
+];
+
 function baseInvokeImplementation(command: string): Promise<unknown> {
   switch (command) {
     case "list_provider_connections":
@@ -791,6 +803,21 @@ function baseInvokeImplementation(command: string): Promise<unknown> {
       return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
     case "list_assets":
       return Promise.resolve(CLOUD_ASSETS);
+    case "list_asset_groups":
+      return Promise.resolve(mockAssetGroups);
+    case "create_asset_group": {
+      const created = {
+        id: 22,
+        name: "新分组",
+        groupName: "新分组",
+        isDefault: false,
+        assetCount: 0,
+      };
+      mockAssetGroups = [...mockAssetGroups, created];
+      return Promise.resolve(created);
+    }
+    case "rename_asset":
+      return Promise.resolve("asset-image-1");
     case "start_generation":
       return Promise.resolve("task-1");
     case "plugin:event|listen":
@@ -806,6 +833,10 @@ function baseInvokeImplementation(command: string): Promise<unknown> {
 beforeEach(() => {
   tauriCallbacks.clear();
   nextTauriCallbackId = 1;
+  mockAssetGroups = [
+    { id: 0, name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
+    { id: 21, name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
+  ];
   mediaPlayMock.mockResolvedValue(undefined);
   vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => mediaPlayMock());
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => mediaPauseMock());
@@ -5037,5 +5068,115 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
         expect.stringContaining("雨势加强"),
       ),
     );
+  });
+});
+
+describe("素材库分组与云端素材改名（桌面运行时）", () => {
+  it("云端素材库展示分组选择：全部素材 + 各分组纯名称，不暴露令牌前缀", async () => {
+    render(<App />);
+    const groupSelect = await screen.findByLabelText("素材库分组");
+    const labels = within(groupSelect).getAllByRole("option").map((option) => option.textContent);
+    expect(labels).toContain("全部素材");
+    expect(labels).toContain("客户案例");
+    expect(labels).toContain("默认分组 · 默认");
+    for (const label of labels) {
+      expect(label).not.toMatch(/user-/i);
+      expect(label).not.toMatch(/token-/i);
+    }
+    expect(screen.getByRole("button", { name: "新建素材分组" })).toBeInTheDocument();
+  });
+
+  it("切换分组后按 group_id 重新拉取素材，切回全部素材恢复全量", async () => {
+    render(<App />);
+    await screen.findByLabelText("素材库分组");
+
+    fireEvent.change(screen.getByLabelText("素材库分组"), { target: { value: "21" } });
+    await waitFor(() => {
+      const listCalls = invokeMock.mock.calls.filter(([command]) => command === "list_assets");
+      const lastCall = listCalls.at(-1);
+      expect(lastCall?.[1]).toEqual({
+        command: {
+          providerConnectionId: PROVIDER.id,
+          pageNumber: 1,
+          pageSize: 100,
+          name: null,
+          groupId: 21,
+        },
+      });
+    });
+
+    fireEvent.change(screen.getByLabelText("素材库分组"), { target: { value: "" } });
+    await waitFor(() => {
+      const listCalls = invokeMock.mock.calls.filter(([command]) => command === "list_assets");
+      const lastCall = listCalls.at(-1);
+      expect(lastCall?.[1]).toEqual({
+        command: {
+          providerConnectionId: PROVIDER.id,
+          pageNumber: 1,
+          pageSize: 100,
+          name: null,
+          groupId: null,
+        },
+      });
+    });
+  });
+
+  it("新建分组：用户自定义名称，提交时去除首尾空白并写入新选项", async () => {
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "新建素材分组" }));
+
+    // label 文本含必填星号，用正则匹配。
+    const input = await screen.findByLabelText(/分组名称/);
+    fireEvent.change(input, { target: { value: "  新品物料  " } });
+    fireEvent.click(screen.getByRole("button", { name: "创建分组" }));
+
+    await waitFor(() => {
+      const createCall = invokeMock.mock.calls.find(
+        ([command]) => command === "create_asset_group",
+      );
+      expect(createCall?.[1]).toEqual({
+        command: {
+          providerConnectionId: PROVIDER.id,
+          name: "新品物料",
+        },
+      });
+    });
+
+    // mock 返回 id=22 name="新分组"；本地插入后选项立即可见，且被选中。
+    const groupSelect = await screen.findByLabelText("素材库分组");
+    await waitFor(() => {
+      expect(within(groupSelect).getByRole("option", { name: "新分组" })).toBeInTheDocument();
+    });
+    expect(groupSelect).toHaveValue("22");
+  });
+
+  it("素材详情内可重命名云端素材：保存后调用 rename_asset 并关闭弹窗", async () => {
+    render(<App />);
+    fireEvent.click(
+      await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" }),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "重命名素材：站台参考图" }));
+    const input = screen.getByRole("textbox", { name: "站台参考图的新名称" });
+    fireEvent.change(input, { target: { value: "站台新参考名" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存" }));
+
+    await waitFor(() => {
+      const renameCall = invokeMock.mock.calls.find(([command]) => command === "rename_asset");
+      expect(renameCall?.[1]).toEqual({
+        command: {
+          providerConnectionId: PROVIDER.id,
+          id: "asset-image-1",
+          name: "站台新参考名",
+        },
+      });
+    });
+    // 成功后关闭详情弹窗并重新拉取素材。
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    });
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "list_assets").length,
+    ).toBeGreaterThan(0);
   });
 });

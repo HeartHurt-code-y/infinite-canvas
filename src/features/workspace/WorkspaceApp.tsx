@@ -64,6 +64,7 @@ import {
   videoDownloaderClient,
   videoFrameExtractionClient,
   type CloudAsset,
+  type AssetGroupRecord,
   type GenerationOperation,
   type GenerationResultRecord,
   type GenerationTaskSummary,
@@ -109,6 +110,7 @@ import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import {
   AssetFlow,
+  AssetGroupCreateDialog,
   AssetPanelError,
   RealPersonAssetDialog,
   AssetSourceDialog,
@@ -582,6 +584,18 @@ export function WorkspaceApp() {
   const [retryInfoByTask, setRetryInfoByTask] = useState<Record<string, RetryInfo>>({});
   const [rawResponses, setRawResponses] = useState<Record<string, string>>({});
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[]>([]);
+  // 云端素材库分组：按令牌作用域隔离，所有供应商/平台共用同一套接口。
+  // 分组只展示 `name`（上游已去除 user-{uid}-token-{tid}- 前缀）。
+  const [assetGroups, setAssetGroups] = useState<readonly AssetGroupRecord[]>([]);
+  const [groupsLoading, setGroupsLoading] = useState(false);
+  const [groupsError, setGroupsError] = useState<string | null>(null);
+  const [selectedAssetGroupId, setSelectedAssetGroupId] = useState<number | null>(null);
+  // refreshCloudAssets 是稳定回调（依赖为空），通过 ref 读取当前分组避免重建。
+  const selectedAssetGroupIdRef = useRef<number | null>(null);
+  const [newGroupDialogOpen, setNewGroupDialogOpen] = useState(false);
+  const [creatingGroup, setCreatingGroup] = useState(false);
+  // 正在改名的云端素材 ID（详情弹窗显示保存中状态，并阻止重复提交）。
+  const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
   const [assetsLoading, setAssetsLoading] = useState(isDesktopRuntime());
   const [assetsError, setAssetsError] = useState<string | null>(null);
   // 上一次云端素材列表拉取是否失败。assetsError 同时承载列表错误与上传错误，
@@ -1088,6 +1102,10 @@ export function WorkspaceApp() {
       settingsAssetRequestRef.current = null;
       rememberAssetProvider(providerConnectionId);
       setCloudAssets([]);
+      setAssetGroups([]);
+      selectedAssetGroupIdRef.current = null;
+      setSelectedAssetGroupId(null);
+      setGroupsError(null);
       setAssetsError(null);
       setLibraryError(false);
       setAssetsLoading(isDesktopRuntime() && assetLibrarySource === "cloud");
@@ -1138,7 +1156,10 @@ export function WorkspaceApp() {
         setLibraryError(false);
       });
       void assetLibraryClient
-        .list({ providerConnectionId })
+        .list({
+          providerConnectionId,
+          groupId: selectedAssetGroupIdRef.current,
+        })
         .then(
           (assets) => {
             if (requestId !== cloudAssetsRequestRef.current) {
@@ -1212,6 +1233,126 @@ export function WorkspaceApp() {
       .finally(() => setLocalAssetsLoading(false));
   }, []);
 
+  // 拉取当前令牌作用域下的云端素材库分组。分组失败不阻塞素材浏览：
+  // 选中保持「全部素材」，仅记录错误并允许在界面上重试。
+  const refreshAssetGroups = useCallback(
+    (providerConnectionId: string, preferredGroupId: number | null = null): void => {
+      if (!isDesktopRuntime()) return;
+      // 状态重置延迟到微任务提交：effect 同步触发时避免在 effect 体内 setState
+      // 引发级联渲染（react-hooks/set-state-in-effect），与素材列表拉取一致。
+      void Promise.resolve().then(() => {
+        setGroupsLoading(true);
+      });
+      void assetLibraryClient
+        .listAssetGroups(providerConnectionId)
+        .then(
+          (groups) => {
+            setAssetGroups(groups);
+            const wanted = preferredGroupId ?? selectedAssetGroupIdRef.current;
+            const next =
+              wanted != null && groups.some((group) => group.id === wanted) ? wanted : null;
+            selectedAssetGroupIdRef.current = next;
+            setSelectedAssetGroupId(next);
+            setGroupsError(null);
+            frontendLog(
+              "info",
+              `[assets] 素材库分组拉取成功: providerConnectionId=${providerConnectionId}, 共 ${groups.length} 个分组`,
+            );
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 素材库分组拉取失败: providerConnectionId=${providerConnectionId}, 错误: ${formatted}`,
+            );
+            setGroupsError(error instanceof Error ? error.message : formatted);
+          },
+        )
+        .finally(() => {
+          setGroupsLoading(false);
+        });
+    },
+    [],
+  );
+
+  const handleAssetGroupChanged = useCallback(
+    (groupId: number | null, providerConnectionId: string) => {
+      selectedAssetGroupIdRef.current = groupId;
+      setSelectedAssetGroupId(groupId);
+      refreshCloudAssets(providerConnectionId, "group-changed");
+    },
+    [refreshCloudAssets],
+  );
+
+  const handleCreateAssetGroup = useCallback(
+    (providerConnectionId: string, name: string): void => {
+      setCreatingGroup(true);
+      void assetLibraryClient
+        .createAssetGroup({ providerConnectionId, name })
+        .then(
+          (group) => {
+            setNewGroupDialogOpen(false);
+            frontendLog(
+              "info",
+              `[assets] 素材库分组已创建: providerConnectionId=${providerConnectionId}, groupId=${group.id}, name=${group.name}`,
+            );
+            selectedAssetGroupIdRef.current = group.id;
+            setSelectedAssetGroupId(group.id);
+            // 服务器分组列表可能尚未包含刚创建的记录，本地先插入保证选择器立即可见，
+            // 后台刷新用于同步计数。
+            setAssetGroups((current) =>
+              current.some((entry) => entry.id === group.id) ? current : [...current, group],
+            );
+            refreshAssetGroups(providerConnectionId, group.id);
+            refreshCloudAssets(providerConnectionId, "group-created");
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 素材库分组创建失败: providerConnectionId=${providerConnectionId}, 错误: ${formatted}`,
+            );
+            setAssetsError(error instanceof Error ? error.message : formatted);
+          },
+        )
+        .finally(() => setCreatingGroup(false));
+    },
+    [refreshAssetGroups, refreshCloudAssets],
+  );
+
+  const handleRenameAsset = useCallback(
+    (asset: AssetItem, name: string) => {
+      if (asset.source !== "cloud" || !asset.providerConnectionId) return;
+      setRenamingAssetId(asset.id);
+      void assetLibraryClient
+        .renameAsset({
+          providerConnectionId: asset.providerConnectionId,
+          id: asset.id,
+          name,
+        })
+        .then(
+          (renamedId) => {
+            frontendLog(
+              "info",
+              `[assets] 云端素材已改名: assetId=${asset.id}, renamedId=${renamedId}, name=${name}`,
+            );
+            setPreviewAsset(null);
+            if (assetProvider) refreshCloudAssets(assetProvider.id, "rename");
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 云端素材改名失败: assetId=${asset.id}, 错误: ${formatted}`,
+            );
+            setAssetsError(error instanceof Error ? error.message : formatted);
+          },
+        )
+        .finally(() => setRenamingAssetId(null));
+    },
+    [assetProvider, refreshCloudAssets],
+  );
+
   const handleAssetLibraryLoaded = useCallback(
     (providerConnectionId: string, assets: readonly CloudAsset[]) => {
       const request = settingsAssetRequestRef.current;
@@ -1231,12 +1372,13 @@ export function WorkspaceApp() {
       setAssetsError(null);
       setLibraryError(false);
       setAssetsLoading(false);
+      refreshAssetGroups(providerConnectionId);
       frontendLog(
         "info",
         `[assets] 全局设置中的素材库令牌校验成功: providerConnectionId=${providerConnectionId}, 共 ${assets.length} 个素材`,
       );
     },
-    [rememberAssetProvider],
+    [rememberAssetProvider, refreshAssetGroups],
   );
 
   const handleAssetLibraryLoading = useCallback(
@@ -1279,12 +1421,13 @@ export function WorkspaceApp() {
     if (!isDesktopRuntime() || assetLibrarySource !== "cloud" || !assetProvider || settingsOpen)
       return;
     refreshCloudAssets(assetProvider.id, "initial");
+    refreshAssetGroups(assetProvider.id);
     return () => {
       // provider / 来源 / 设置面板改变或组件卸载时，当前请求不可再提交状态。
       cloudAssetsRequestRef.current += 1;
       settingsAssetRequestRef.current = null;
     };
-  }, [assetLibrarySource, assetProvider, refreshCloudAssets, settingsOpen]);
+  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, settingsOpen]);
 
   // 断网恢复时自动重拉云端素材列表（首次挂载不算）。
   useEffect(() => {
@@ -1298,10 +1441,11 @@ export function WorkspaceApp() {
           `[assets] 检测到断网恢复，自动刷新云端素材列表: providerConnectionId=${providerId}`,
         );
         refreshCloudAssets(providerId, "reconnect");
+        refreshAssetGroups(providerId);
       }
     }
     wasOfflineRef.current = isOffline;
-  }, [isOffline, assetLibrarySource, assetProvider, refreshCloudAssets]);
+  }, [isOffline, assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets]);
 
   const handleImportLocalAssets = useCallback(
     async (realPersonGroup?: RealPersonGroup): Promise<number> => {
@@ -1389,10 +1533,13 @@ export function WorkspaceApp() {
       if (payload.job?.purpose === "local_asset" && status === "staged") {
         refreshLocalAssets("upload-finished");
       } else if (assetLibrarySource === "cloud" && (status === "active" || status === "cleaned")) {
-        if (assetProvider) void refreshCloudAssets(assetProvider.id, "upload-finished");
+        if (assetProvider) {
+          void refreshCloudAssets(assetProvider.id, "upload-finished");
+          refreshAssetGroups(assetProvider.id);
+        }
       }
     });
-  }, [assetLibrarySource, assetProvider, refreshCloudAssets, refreshLocalAssets]);
+  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, refreshLocalAssets]);
 
   const dismissAssetUpload = useCallback((jobId: string) => {
     setAssetUploads((current) => current.filter((entry) => entry.jobId !== jobId));
@@ -5524,7 +5671,10 @@ export function WorkspaceApp() {
               "info",
               `[assets] 云端素材已删除: providerConnectionId=${asset.providerConnectionId}, assetId=${asset.id}, deletedId=${deletedId}`,
             );
-            if (assetProvider) refreshCloudAssets(assetProvider.id, "delete");
+            if (assetProvider) {
+              refreshCloudAssets(assetProvider.id, "delete");
+              refreshAssetGroups(assetProvider.id);
+            }
           },
           (error: unknown) => {
             const formatted = formatRawBackendError(error);
@@ -5536,7 +5686,7 @@ export function WorkspaceApp() {
           },
         );
     },
-    [assetProvider, refreshCloudAssets],
+    [assetProvider, refreshAssetGroups, refreshCloudAssets],
   );
 
   const previewOutputNode =
@@ -6859,6 +7009,57 @@ export function WorkspaceApp() {
               ))}
             </ul>
           ) : null}
+          {assetLibrarySource === "cloud" && isDesktopRuntime() && assetProvider ? (
+            <div className="asset-groups">
+              <div className="asset-groups__heading">
+                <span className="asset-groups__title">分组</span>
+                <button
+                  type="button"
+                  className="asset-groups__create"
+                  aria-label="新建素材分组"
+                  onClick={() => setNewGroupDialogOpen(true)}
+                >
+                  <Plus size={14} weight="bold" aria-hidden="true" />
+                  新建分组
+                </button>
+              </div>
+              <div className="asset-groups__select-row">
+                <label className="sr-only" htmlFor="asset-group-select">
+                  素材库分组
+                </label>
+                <select
+                  id="asset-group-select"
+                  aria-label="素材库分组"
+                  value={selectedAssetGroupId ?? ""}
+                  disabled={groupsLoading && assetGroups.length === 0}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    handleAssetGroupChanged(value ? Number(value) : null, assetProvider.id);
+                  }}
+                >
+                  <option value="">全部素材</option>
+                  {assetGroups.map((group) => (
+                    <option key={group.id} value={group.id}>
+                      {group.name}
+                      {group.isDefault ? " · 默认" : ""}
+                    </option>
+                  ))}
+                </select>
+                {groupsLoading ? (
+                  <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
+                ) : null}
+              </div>
+              {groupsError ? (
+                <span className="asset-groups__error" role="status">
+                  <WarningCircle size={13} weight="fill" aria-hidden="true" />
+                  分组加载失败，仍显示全部素材
+                  <button type="button" onClick={() => refreshAssetGroups(assetProvider.id)}>
+                    重试
+                  </button>
+                </span>
+              ) : null}
+            </div>
+          ) : null}
           <div className="asset-tabs" role="tablist" aria-label="素材类型">
             {(["image", "video", "audio"] as const).map((kind) => (
               <button
@@ -7206,6 +7407,13 @@ export function WorkspaceApp() {
               ? () => handleDeleteAsset(previewAsset)
               : null
           }
+          onRename={
+            previewAsset.source === "cloud" &&
+            previewAsset.providerConnectionId &&
+            renamingAssetId == null
+              ? (name) => handleRenameAsset(previewAsset, name)
+              : null
+          }
         />
       ) : null}
       {realPersonDialogOpen && assetProvider ? (
@@ -7214,6 +7422,14 @@ export function WorkspaceApp() {
           providerDisplayName={assetProvider.displayName}
           onClose={() => setRealPersonDialogOpen(false)}
           onUploadToGroup={handleImportLocalAssets}
+        />
+      ) : null}
+      {newGroupDialogOpen && assetProvider ? (
+        <AssetGroupCreateDialog
+          providerDisplayName={assetProvider.displayName}
+          busy={creatingGroup}
+          onClose={() => setNewGroupDialogOpen(false)}
+          onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
         />
       ) : null}
       {previewOutputNode ? (

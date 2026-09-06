@@ -159,7 +159,7 @@ describe("HistoryDialog diagnostics", () => {
     fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-01T00:00" } });
     fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
     await screen.findByText("没有符合条件的任务。");
-    await act(async () => {
+    act(() => {
       finishOldPage({ items: [{ ...SUMMARY, id: "obsolete" }], nextCursorCreatedBefore: 1 });
     });
     expect(screen.queryByText("文生图 · image-model")).not.toBeInTheDocument();

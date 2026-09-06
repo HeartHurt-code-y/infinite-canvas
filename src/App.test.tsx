@@ -1354,6 +1354,10 @@ describe("App workspace", () => {
     const cloudListCallsBeforeSwitch = invokeMock.mock.calls.filter(
       ([command]) => command === "list_assets",
     ).length;
+    // 初始云端挂载会拉取一次分组列表；切换本地后不应再出现新的云端分组请求。
+    const groupListCallsBeforeSwitch = invokeMock.mock.calls.filter(
+      ([command]) => command === "list_asset_groups",
+    ).length;
 
     fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
@@ -1379,8 +1383,12 @@ describe("App workspace", () => {
         },
       });
     });
-    expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_groups")).toBe(false);
-    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "list_asset_groups"),
+    ).toHaveLength(groupListCallsBeforeSwitch);
+    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(
+      false,
+    );
   });
 
   it("header 清空画布按钮：点击打开 modal 弹窗，确认后清空画布", () => {

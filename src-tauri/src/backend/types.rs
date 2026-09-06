@@ -817,6 +817,45 @@ pub struct DeleteRealPersonGroupCommand {
     pub id: i64,
 }
 
+/// 云端素材库分组（`GET /v1/assets/groups`）。
+/// `name` 是上游返回的纯展示名（不含 `user-{uid}-token-{tid}-` 前缀），前端只展示该字段；
+/// `group_name` 是带令牌前缀的全名，仅用于诊断。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetGroupRecord {
+    pub id: i64,
+    /// 纯展示名（上游已去除令牌前缀），前端只展示该字段。
+    pub name: String,
+    /// 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。
+    pub group_name: String,
+    pub is_default: bool,
+    pub asset_count: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListAssetGroupsCommand {
+    pub provider_connection_id: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateAssetGroupCommand {
+    pub provider_connection_id: String,
+    /// 用户自定义分组名称；上游会自动追加令牌前缀。
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RenameAssetCommand {
+    pub provider_connection_id: String,
+    /// 云端素材 ID（`asset-…`，不带 `asset://` 前缀）。
+    pub id: String,
+    /// 新名称，上限 64 字符。
+    pub name: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {

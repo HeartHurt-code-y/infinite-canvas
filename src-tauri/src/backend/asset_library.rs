@@ -17,10 +17,11 @@ use super::{
     provider::ProviderRuntime,
     storage::TaskExecutionRecord,
     types::{
-        AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
-        CreateRealPersonAuthLinkCommand, DeleteAssetCommand, DeleteRealPersonAssetCommand,
-        DeleteRealPersonGroupCommand, MediaType, RawProviderResponse, RealPersonAuthLink,
-        RealPersonGroup, RealPersonProviderCommand,
+        AssetGroupRecord, AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
+        CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
+        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
+        MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
+        RealPersonProviderCommand, RenameAssetCommand,
     },
 };
 
@@ -485,6 +486,113 @@ impl AssetLibrary {
             .filter(|value| !value.is_empty())
             .unwrap_or_else(|| id.to_string());
         Ok(returned_id)
+    }
+
+    /// List cloud 素材库 groups scoped to the selected provider token.
+    /// Upstream already returns `name` without the `user-{uid}-token-{tid}-` prefix,
+    /// so the UI displays that field directly and never shows the prefixed full name.
+    pub async fn list_asset_groups(
+        &self,
+        command: ListAssetGroupsCommand,
+    ) -> BackendResult<Vec<AssetGroupRecord>> {
+        require_asset_library_connection(&command.provider_connection_id)?;
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: command.provider_connection_id,
+                method: Method::GET,
+                path: "/v1/assets/groups",
+                body: None,
+            })
+            .await?;
+        require_success("list asset groups", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let groups = payload
+            .get("data")
+            .map(asset_array)
+            .filter(|groups| !groups.is_empty())
+            .unwrap_or_else(|| asset_array(&payload));
+        Ok(groups.into_iter().filter_map(parse_asset_group).collect())
+    }
+
+    /// Create a cloud 素材库 group with a user-defined display name.
+    pub async fn create_asset_group(
+        &self,
+        command: CreateAssetGroupCommand,
+    ) -> BackendResult<AssetGroupRecord> {
+        require_asset_library_connection(&command.provider_connection_id)?;
+        let name = command.name.trim();
+        if name.is_empty() {
+            return Err(BackendError::validation(
+                "asset group name must not be empty",
+                json!({ "field": "name" }),
+            ));
+        }
+        if name.chars().count() > 64 {
+            return Err(BackendError::validation(
+                "asset group name must not exceed 64 characters",
+                json!({ "field": "name", "maxLength": 64 }),
+            ));
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: command.provider_connection_id,
+                method: Method::POST,
+                path: "/v1/assets/groups",
+                body: Some(json!({ "name": name })),
+            })
+            .await?;
+        require_success("create asset group", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let data = payload.get("data").unwrap_or(&payload);
+        parse_asset_group(data).ok_or_else(|| {
+            BackendError::protocol(
+                "asset group creation did not return a group record",
+                json!({ "rawResponse": response.body }),
+            )
+        })
+    }
+
+    /// Rename a cloud 素材 in place (`POST /v1/assets/update`). Returns the asset id.
+    pub async fn rename_asset(&self, command: RenameAssetCommand) -> BackendResult<String> {
+        require_asset_library_connection(&command.provider_connection_id)?;
+        let id = command
+            .id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| command.id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset rename requires an asset id without the asset:// prefix",
+                json!({ "id": command.id }),
+            ));
+        }
+        let name = command.name.trim();
+        if name.is_empty() {
+            return Err(BackendError::validation(
+                "asset name must not be empty",
+                json!({ "field": "name" }),
+            ));
+        }
+        if name.chars().count() > 64 {
+            return Err(BackendError::validation(
+                "asset name must not exceed 64 characters",
+                json!({ "field": "name", "maxLength": 64 }),
+            ));
+        }
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: command.provider_connection_id,
+                method: Method::POST,
+                path: "/v1/assets/update",
+                body: Some(json!({ "id": id, "name": name })),
+            })
+            .await?;
+        require_success("rename asset", &response)?;
+        Ok(id.to_string())
     }
 
     /// Import an already staged public object and wait until the remote 素材 becomes readable.
@@ -1073,6 +1181,46 @@ fn require_provider_connection_id(value: &str) -> BackendResult<&str> {
         ));
     }
     Ok(value)
+}
+
+fn require_asset_library_connection(value: &str) -> BackendResult<()> {
+    if value.trim().is_empty() {
+        return Err(BackendError::validation(
+            "asset library operation requires a provider connection",
+            json!({ "field": "providerConnectionId" }),
+        ));
+    }
+    Ok(())
+}
+
+fn parse_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
+    let record = raw.as_object()?;
+    let id = record.get("id").and_then(Value::as_i64).filter(|id| *id > 0)?;
+    let name = record
+        .get("name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let group_name = record
+        .get("group_name")
+        .or_else(|| record.get("groupName"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(name);
+    Some(AssetGroupRecord {
+        id,
+        name: name.to_string(),
+        group_name: group_name.to_string(),
+        is_default: record
+            .get("is_default")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+        asset_count: record
+            .get("asset_count")
+            .and_then(Value::as_u64)
+            .unwrap_or_default(),
+    })
 }
 
 fn parse_real_person_group(raw: &Value) -> BackendResult<RealPersonGroup> {
@@ -1762,6 +1910,176 @@ mod tests {
             .expect_err("empty id must be rejected before any request");
 
         assert!(error.to_string().contains("asset id"));
+    }
+
+    #[tokio::test]
+    async fn list_asset_groups_returns_display_names_without_the_token_prefix() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "code": "success",
+                "data": [
+                    {
+                        "id": 7,
+                        "name": "广告图",
+                        "group_name": "user-u1-token-t9-广告图",
+                        "is_default": false,
+                        "asset_count": 4
+                    },
+                    {
+                        "id": 12,
+                        "name": "无限画布上传",
+                        "group_name": "user-u1-token-t9-无限画布上传",
+                        "is_default": true,
+                        "asset_count": 1
+                    }
+                ]
+            }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let groups = library
+            .list_asset_groups(ListAssetGroupsCommand {
+                provider_connection_id: "provider-1".into(),
+            })
+            .await
+            .expect("list asset groups");
+
+        assert_eq!(groups.len(), 2);
+        assert_eq!(groups[0].id, 7);
+        assert_eq!(groups[0].name, "广告图");
+        assert_eq!(groups[0].group_name, "user-u1-token-t9-广告图");
+        assert!(!groups[0].is_default);
+        assert_eq!(groups[0].asset_count, 4);
+        assert_eq!(groups[1].name, "无限画布上传");
+        assert!(groups[1].is_default);
+
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/groups");
+        assert_eq!(requests[0].method, Method::GET);
+        assert_eq!(requests[0].body, None);
+    }
+
+    #[tokio::test]
+    async fn create_asset_group_posts_the_user_defined_name_and_returns_the_record() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "code": "success",
+                "data": {
+                    "id": 21,
+                    "name": "客户物料",
+                    "group_name": "user-u1-token-t9-客户物料",
+                    "is_default": false,
+                    "asset_count": 0
+                }
+            }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let group = library
+            .create_asset_group(CreateAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                name: " 客户物料 ".into(),
+            })
+            .await
+            .expect("create asset group");
+
+        assert_eq!(group.id, 21);
+        assert_eq!(group.name, "客户物料");
+        assert_eq!(group.group_name, "user-u1-token-t9-客户物料");
+
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/groups");
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].body, Some(json!({ "name": "客户物料" })));
+    }
+
+    #[tokio::test]
+    async fn create_asset_group_rejects_empty_or_oversized_names() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(adapter, immediate_poll());
+
+        let empty_error = library
+            .create_asset_group(CreateAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                name: "   ".into(),
+            })
+            .await
+            .expect_err("empty group name must be rejected before any request");
+        assert!(empty_error.to_string().contains("group name must not be empty"));
+
+        let oversized_error = library
+            .create_asset_group(CreateAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                name: "很".repeat(65),
+            })
+            .await
+            .expect_err("oversized group name must be rejected before any request");
+        assert!(oversized_error.to_string().contains("64 characters"));
+    }
+
+    #[tokio::test]
+    async fn rename_asset_posts_id_and_name_to_the_update_endpoint() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "code": "success", "data": { "id": "asset-1", "name": "新名称" } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let renamed_id = library
+            .rename_asset(RenameAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset://asset-1".into(),
+                name: " 新名称 ".into(),
+            })
+            .await
+            .expect("rename asset");
+
+        assert_eq!(renamed_id, "asset-1");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/update");
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].body, Some(json!({ "id": "asset-1", "name": "新名称" })));
+    }
+
+    #[tokio::test]
+    async fn rename_asset_rejects_empty_ids_or_names() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(adapter, immediate_poll());
+
+        let empty_id_error = library
+            .rename_asset(RenameAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "  ".into(),
+                name: "新名称".into(),
+            })
+            .await
+            .expect_err("empty asset id must be rejected before any request");
+        assert!(empty_id_error.to_string().contains("asset id"));
+
+        let empty_name_error = library
+            .rename_asset(RenameAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-1".into(),
+                name: "  ".into(),
+            })
+            .await
+            .expect_err("empty asset name must be rejected before any request");
+        assert!(empty_name_error.to_string().contains("asset name must not be empty"));
+
+        let oversized_name_error = library
+            .rename_asset(RenameAssetCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-1".into(),
+                name: "长".repeat(65),
+            })
+            .await
+            .expect_err("oversized asset name must be rejected before any request");
+        assert!(oversized_name_error.to_string().contains("64 characters"));
     }
 
     #[tokio::test]

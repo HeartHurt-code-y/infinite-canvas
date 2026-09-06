@@ -85,6 +85,8 @@ export interface AssetItem {
   /** 视频源地址（素材卡片悬浮播放用）。 */
   readonly videoUrl?: string | null;
   readonly cloudStatus?: CloudAssetStatus;
+  /** 云端素材所属分组（平台分组 ID）；本地素材或旧记录缺省为 undefined。 */
+  readonly groupId?: number | null;
   /** 未声明时按历史行为视为云端素材。 */
   readonly source?: AssetLibrarySource;
   readonly providerConnectionId?: string;
@@ -1076,7 +1078,15 @@ export const EMPTY_GENERATION_TASKS: readonly GenerationTaskSummary[] = [];
 export const UPLOAD_STALL_HINT_MS = 15_000;
 
 // 云端素材列表刷新的触发来源，写入 [assets] 日志便于区分刷新路径。
-export type AssetRefreshSource = "initial" | "manual" | "reconnect" | "upload-finished" | "delete";
+export type AssetRefreshSource =
+  | "initial"
+  | "manual"
+  | "reconnect"
+  | "upload-finished"
+  | "delete"
+  | "group-changed"
+  | "group-created"
+  | "rename";
 
 // 云端单页最多 100 条，本地索引没有上限；分批挂载媒体卡片，避免一次创建无界 DOM。
 export const ASSET_RENDER_BATCH_SIZE = 40;
@@ -1809,6 +1819,7 @@ export function cloudAssetToItem(asset: CloudAsset): AssetItem {
     // assetUrl may be an opaque asset:// reference; only the signed preview URL is playable.
     videoUrl: asset.kind === "video" ? asset.previewUrl : null,
     cloudStatus: asset.status,
+    groupId: asset.groupId,
     source: "cloud",
     providerConnectionId: asset.providerConnectionId,
   };

@@ -1052,12 +1052,13 @@ export function CanvasVideoFrameExtractorNode({
   const [timestampsText, setTimestampsText] = useState(() =>
     node.config.timestamps.join(", "),
   );
-  useEffect(() => {
-    const serialized = node.config.timestamps.join(", ");
-    if (serialized !== timestampsText) setTimestampsText(serialized);
-    // 仅在节点配置变化时同步外部值；用户输入中的中间态不打断。
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [node.config.timestamps]);
+  // 节点配置变化时同步外部值到编辑框：在渲染期间比较并调整（React 官方
+  // "adjusting state when props change" 模式），避免 effect 内同步 setState；
+  // 用户输入中的中间态不打断（serialized 不变时 if 不触发）。
+  const serializedTimestamps = node.config.timestamps.join(", ");
+  if (serializedTimestamps !== timestampsText) {
+    setTimestampsText(serializedTimestamps);
+  }
   const handleTimestampsInput = (text: string) => {
     setTimestampsText(text);
     const timestamps = parseTimestampList(text);

@@ -174,7 +174,7 @@ export function RemoteVideoHistoryPanel({
     }
   };
 
-  const useVideoUrl = async (url: string, copy: boolean) => {
+  const handleVideoUrl = async (url: string, copy: boolean) => {
     const requestId = requestRef.current;
     try {
       if (copy) await copyTextToDesktopClipboard(url);
@@ -254,7 +254,7 @@ export function RemoteVideoHistoryPanel({
               {task.failureReason ? <p className="remote-video-history__error">{task.failureReason}</p> : null}
               {task.videoUrl ? <p className="remote-video-history__url">{task.videoUrl}</p> : null}
               <div className="remote-video-history__actions">
-                {task.videoUrl ? <><button type="button" onClick={() => void useVideoUrl(task.videoUrl!, false)}>打开视频</button><button type="button" onClick={() => void useVideoUrl(task.videoUrl!, true)}>复制视频地址</button></> : null}
+                {task.videoUrl ? <><button type="button" onClick={() => void handleVideoUrl(task.videoUrl!, false)}>打开视频</button><button type="button" onClick={() => void handleVideoUrl(task.videoUrl!, true)}>复制视频地址</button></> : null}
                 {task.localTaskId ? <button type="button" onClick={() => onSelectGenerationTask(task.localTaskId!)}>查看本地记录</button> : <span className="remote-video-history__hint">未关联本机记录</span>}
                 {task.canResumePolling && task.localTaskId ? <button type="button" disabled={resumingTaskId != null} onClick={() => void resumePolling(task.localTaskId!)}>{resumingTaskId === task.localTaskId ? "正在恢复查询…" : "继续本地查询"}</button> : null}
               </div>

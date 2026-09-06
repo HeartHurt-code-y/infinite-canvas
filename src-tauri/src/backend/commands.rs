@@ -29,18 +29,20 @@ use super::{
         WorkflowHistoryQuery, WorkflowHistoryRecord,
     },
     types::{
-        AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetRecord,
-        ConnectivityTestResult, CreateRealPersonAuthLinkCommand, CredentialStatus,
-        DeleteAssetCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        AssetGroupRecord, AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary,
+        CloudAssetRecord, ConnectivityTestResult, CreateAssetGroupCommand,
+        CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
+        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
-        ModelDefinition, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
-        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
-        RemoteModelOption, RemoteVideoTaskPage, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
-        StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
-        StartVideoFrameExtractionCommand, TosStagingConfig, UpsertProviderConnectionCommand,
-        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
+        LocalAssetRecord, ModelDefinition, ProviderConnection, ProviderModelBinding,
+        ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
+        RecoveryReport, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
+        StagingJobRecord, StartGenerationCommand, StartStagingCommand,
+        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
+        TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
+        VideoTaskListCommand,
     },
 };
 
@@ -477,6 +479,30 @@ pub async fn delete_asset(
     command: DeleteAssetCommand,
 ) -> CommandResult<String> {
     state.assets.delete_asset(command).await.command()
+}
+
+#[tauri::command]
+pub async fn list_asset_groups(
+    state: State<'_, BackendState>,
+    command: ListAssetGroupsCommand,
+) -> CommandResult<Vec<AssetGroupRecord>> {
+    state.assets.list_asset_groups(command).await.command()
+}
+
+#[tauri::command]
+pub async fn create_asset_group(
+    state: State<'_, BackendState>,
+    command: CreateAssetGroupCommand,
+) -> CommandResult<AssetGroupRecord> {
+    state.assets.create_asset_group(command).await.command()
+}
+
+#[tauri::command]
+pub async fn rename_asset(
+    state: State<'_, BackendState>,
+    command: RenameAssetCommand,
+) -> CommandResult<String> {
+    state.assets.rename_asset(command).await.command()
 }
 
 #[tauri::command]
