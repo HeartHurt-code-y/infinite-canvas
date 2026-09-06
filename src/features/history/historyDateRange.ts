@@ -26,15 +26,7 @@ export function parseHistoryDateRange(from: string, to: string): HistoryDateRang
     if (!Number.isFinite(millisecond) || millisecond < 0 || millisecond > 999) {
       throw new Error("请输入有效的日期和时间。");
     }
-    const timestamp = new Date(
-      year,
-      month - 1,
-      day,
-      hour,
-      minute,
-      second,
-      millisecond,
-    ).getTime();
+    const timestamp = new Date(year, month - 1, day, hour, minute, second, millisecond).getTime();
     const parsed = new Date(timestamp);
     if (
       !Number.isFinite(timestamp) ||

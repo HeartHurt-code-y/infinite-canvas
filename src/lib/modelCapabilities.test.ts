@@ -223,11 +223,7 @@ describe("model capabilities", () => {
     );
     const size = seedream45.find((capability) => capability.key === "size");
     expect(size?.defaultValue).toBe("2K");
-    expect(size?.options.map((option) => option.value)).toEqual([
-      "2K",
-      "2048x2048",
-      "2848x1600",
-    ]);
+    expect(size?.options.map((option) => option.value)).toEqual(["2K", "2048x2048", "2848x1600"]);
     expect(seedream45.find((capability) => capability.key === "quality")?.options).toEqual([
       { value: "standard", label: "标准" },
       { value: "hd", label: "高清 HD" },
@@ -286,9 +282,7 @@ describe("model capabilities", () => {
       "url",
     );
     // 5.0 pro 不支持组图模式。
-    expect(
-      text.some((capability) => capability.key === "sequential_image_generation"),
-    ).toBe(false);
+    expect(text.some((capability) => capability.key === "sequential_image_generation")).toBe(false);
 
     const edit = modelParameterCapabilities(
       defaultModelOperationSchema("doubao-seedream-5-0-pro-260628", ["image_to_image"]),
@@ -352,7 +346,9 @@ describe("model capabilities", () => {
       { value: "url", label: "图片链接" },
       { value: "b64_json", label: "Base64 数据" },
     ]);
-    expect(text.find((capability) => capability.key === "sequential_image_generation")?.options).toEqual([
+    expect(
+      text.find((capability) => capability.key === "sequential_image_generation")?.options,
+    ).toEqual([
       { value: "disabled", label: "关闭" },
       { value: "auto", label: "自动" },
     ]);

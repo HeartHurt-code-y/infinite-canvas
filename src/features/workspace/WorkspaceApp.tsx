@@ -108,12 +108,7 @@ import {
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
-import {
-  AssetFlow,
-  AssetPanelError,
-  AssetUploadRow,
-  RepositoryCard,
-} from "./AssetLibraryViews";
+import { AssetFlow, AssetPanelError, AssetUploadRow, RepositoryCard } from "./AssetLibraryViews";
 import {
   AssetGroupCreateDialog,
   AssetSourceDialog,
@@ -1543,7 +1538,13 @@ export function WorkspaceApp() {
         }
       }
     });
-  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, refreshLocalAssets]);
+  }, [
+    assetLibrarySource,
+    assetProvider,
+    refreshAssetGroups,
+    refreshCloudAssets,
+    refreshLocalAssets,
+  ]);
 
   const dismissAssetUpload = useCallback((jobId: string) => {
     setAssetUploads((current) => current.filter((entry) => entry.jobId !== jobId));

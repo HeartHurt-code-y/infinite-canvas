@@ -530,7 +530,11 @@ export function HistoryDialog({
     const requestId = ++listRequestRef.current;
     let cancelled = false;
     void client
-      .list({ ...dateRange, statuses: statusFilterToStatuses(statusFilter), limit: HISTORY_PAGE_SIZE })
+      .list({
+        ...dateRange,
+        statuses: statusFilterToStatuses(statusFilter),
+        limit: HISTORY_PAGE_SIZE,
+      })
       .then((page) => {
         if (cancelled || requestId !== listRequestRef.current) return;
         setTasks(page.items);
@@ -710,16 +714,16 @@ export function HistoryDialog({
           </p>
           <div className="history-tabs" role="tablist" aria-label="历史记录类型">
             {HISTORY_TABS.map((tab) => (
-                <button
-                  type="button"
-                  role="tab"
-                  key={tab.id}
-                  id={`${tab.id}-history-tab`}
-                  aria-controls={`${tab.id}-history-panel`}
-                  aria-selected={activeTab === tab.id}
-                  tabIndex={activeTab === tab.id ? 0 : -1}
-                  className={`history-tab${activeTab === tab.id ? " is-active" : ""}`}
-                  onClick={() => selectHistoryTab(tab.id)}
+              <button
+                type="button"
+                role="tab"
+                key={tab.id}
+                id={`${tab.id}-history-tab`}
+                aria-controls={`${tab.id}-history-panel`}
+                aria-selected={activeTab === tab.id}
+                tabIndex={activeTab === tab.id ? 0 : -1}
+                className={`history-tab${activeTab === tab.id ? " is-active" : ""}`}
+                onClick={() => selectHistoryTab(tab.id)}
                 onKeyDown={(event) => {
                   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
@@ -812,7 +816,7 @@ export function HistoryDialog({
                 }}
               />
             </div>
-              <div className="history-list__scroll">
+            <div className="history-list__scroll">
               {listError ? <p className="history-list__error">{listError}</p> : null}
               {!listError && !listLoaded ? (
                 <p className="history-list__empty">正在加载任务记录…</p>

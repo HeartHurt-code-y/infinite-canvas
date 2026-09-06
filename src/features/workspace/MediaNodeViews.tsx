@@ -947,9 +947,7 @@ export function CanvasVideoDownloaderNode({
           <span className="canvas-video-downloader__quality-hint">{runState.qualityHint}</span>
         ) : null}
         {runState?.watermarkRemoved ? (
-          <span className="canvas-video-downloader__watermark-hint">
-            已自动去除 B 站右上角水印
-          </span>
+          <span className="canvas-video-downloader__watermark-hint">已自动去除 B 站右上角水印</span>
         ) : null}
         {running && !runState?.preparingEngine ? (
           <span
@@ -1049,9 +1047,7 @@ export function CanvasVideoFrameExtractorNode({
         }
       : null);
   // 秒数编辑：用单个文本框输入多个秒数（逗号/空格/顿号分隔），实时解析并写回配置。
-  const [timestampsText, setTimestampsText] = useState(() =>
-    node.config.timestamps.join(", "),
-  );
+  const [timestampsText, setTimestampsText] = useState(() => node.config.timestamps.join(", "));
   // 节点配置变化时同步外部值到编辑框：在渲染期间比较并调整（React 官方
   // "adjusting state when props change" 模式），避免 effect 内同步 setState；
   // 用户输入中的中间态不打断（serialized 不变时 if 不触发）。
@@ -1187,7 +1183,10 @@ export function CanvasVideoFrameExtractorNode({
       </div>
 
       <div className="canvas-video-frame-extractor__field">
-        <label htmlFor={`frame-ts-${node.key}`} className="canvas-video-frame-extractor__field-label">
+        <label
+          htmlFor={`frame-ts-${node.key}`}
+          className="canvas-video-frame-extractor__field-label"
+        >
           抽帧秒数
         </label>
         <input
@@ -1198,7 +1197,7 @@ export function CanvasVideoFrameExtractorNode({
           value={timestampsText}
           placeholder="例如 3, 8.5, 12"
           aria-label="抽帧秒数，多个秒数用逗号分隔"
-          aria-invalid={timestampsText.length > 0 && timestamps.length === 0 || undefined}
+          aria-invalid={(timestampsText.length > 0 && timestamps.length === 0) || undefined}
           onMouseDown={(event) => event.stopPropagation()}
           onChange={(event) => handleTimestampsInput(event.target.value)}
         />
@@ -1219,7 +1218,9 @@ export function CanvasVideoFrameExtractorNode({
         className={`canvas-video-frame-extractor__status${runState?.status === "error" || runState?.status === "cancelled" ? " is-error" : ""}${runState?.status === "done" ? " is-done" : ""}`}
       >
         <span>
-          {runState?.status === "done" ? <CheckCircle size={14} weight="bold" aria-hidden="true" /> : null}
+          {runState?.status === "done" ? (
+            <CheckCircle size={14} weight="bold" aria-hidden="true" />
+          ) : null}
           {runState?.status === "error" || runState?.status === "cancelled" ? (
             <WarningCircle size={14} weight="bold" aria-hidden="true" />
           ) : null}
@@ -1742,9 +1743,7 @@ export function CanvasOutputNode({
       className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       aria-busy={
-        !(isTextResult && node.textContent != null) && (isRunning || isSaving)
-          ? "true"
-          : undefined
+        !(isTextResult && node.textContent != null) && (isRunning || isSaving) ? "true" : undefined
       }
       onMouseDown={(event) => {
         // 整卡任意位置可自由拖动；按在媒体区域上且未发生位移的抬起视为点按，
@@ -1840,15 +1839,13 @@ export function CanvasOutputNode({
             <AssetKindIcon kind={node.mediaType} />
             <span
               className="canvas-asset-node__name"
-              title={
-                node.layer?.description ?? node.name ?? undefined
-              }
+              title={node.layer?.description ?? node.name ?? undefined}
             >
               {node.layer != null
                 ? node.layer.isBaseLayer
                   ? `底图${node.layer.name ? ` · ${node.layer.name}` : ""}`
                   : `图层 ${node.layer.zIndex}${node.layer.name ? ` · ${node.layer.name}` : ""}`
-                : node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : "")}
+                : (node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : ""))}
             </span>
           </span>
           <span className="canvas-asset-node__meta">
@@ -2039,7 +2036,9 @@ export function CanvasResultNode({
       </div>
       <span className="keyframe-preview keyframe-preview--large" aria-hidden="true">
         {latestResult != null && latestResult.mediaType === "text" ? (
-          <pre className="canvas-result-node__text">{textResultFromSource(latestResult.source) ?? "（扩写文本未内联）"}</pre>
+          <pre className="canvas-result-node__text">
+            {textResultFromSource(latestResult.source) ?? "（扩写文本未内联）"}
+          </pre>
         ) : latestResult?.finalPath && isDesktopRuntime() ? (
           latestResult.mediaType === "video" ? (
             <video src={toMediaSrc(latestResult.finalPath)} muted playsInline preload="metadata" />

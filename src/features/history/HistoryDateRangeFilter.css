@@ -39,7 +39,9 @@
 .history-date-filter__actions button {
   flex: 1;
   cursor: pointer;
-  transition: border-color 150ms ease, color 150ms ease;
+  transition:
+    border-color 150ms ease,
+    color 150ms ease;
 }
 
 .history-date-filter__actions button:hover {

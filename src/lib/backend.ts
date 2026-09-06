@@ -1133,13 +1133,7 @@ export const generationClient: GenerationTaskClient = {
 };
 
 export type RemoteVideoTaskStatus =
-  | "NOT_START"
-  | "SUBMITTED"
-  | "QUEUED"
-  | "IN_PROGRESS"
-  | "SUCCESS"
-  | "FAILURE"
-  | "UNKNOWN";
+  "NOT_START" | "SUBMITTED" | "QUEUED" | "IN_PROGRESS" | "SUCCESS" | "FAILURE" | "UNKNOWN";
 
 export interface RemoteVideoTaskQuery {
   readonly providerConnectionId: string;

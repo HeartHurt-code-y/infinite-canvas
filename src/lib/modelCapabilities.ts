@@ -180,13 +180,7 @@ export function isSeedreamImageModel(modelId: string): boolean {
   return modelId.toLocaleLowerCase().includes("seedream");
 }
 
-type SeedreamImageVersion =
-  | "5.0"
-  | "5.0-pro"
-  | "5.0-lite"
-  | "4.5"
-  | "4.0"
-  | "generic";
+type SeedreamImageVersion = "5.0" | "5.0-pro" | "5.0-lite" | "4.5" | "4.0" | "generic";
 
 /** Seedream 能力版本：5.0（文档推荐，组图/输出格式）、5.0 pro（图层拆分/
  * 优化/输出格式/透明背景）、5.0 lite（组图/优化/联网搜索/输出格式）、

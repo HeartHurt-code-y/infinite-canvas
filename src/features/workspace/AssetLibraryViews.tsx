@@ -546,18 +546,12 @@ export function AssetGroupCreateDialog({
             onChange={(event) => setName(event.target.value)}
           />
           <span className="asset-group-dialog__counter">{name.length} / 64</span>
-          <span className="asset-group-dialog__hint">
-            当前供应商连接：{providerDisplayName}
-          </span>
+          <span className="asset-group-dialog__hint">当前供应商连接：{providerDisplayName}</span>
           <div className="asset-group-dialog__actions">
             <button type="button" onClick={onClose} disabled={busy}>
               取消
             </button>
-            <button
-              type="submit"
-              className="real-person-primary-action"
-              disabled={!canCreate}
-            >
+            <button type="submit" className="real-person-primary-action" disabled={!canCreate}>
               {busy ? (
                 <CircleNotch size={16} weight="bold" data-spin="true" aria-hidden="true" />
               ) : (
@@ -890,11 +884,7 @@ export function AssetSourceDialog({
                         if (event.key === "Escape") cancelRenaming();
                       }}
                     />
-                    <button
-                      type="button"
-                      disabled={!renameDirty}
-                      onClick={commitRename}
-                    >
+                    <button type="button" disabled={!renameDirty} onClick={commitRename}>
                       保存
                     </button>
                     <button type="button" onClick={cancelRenaming}>

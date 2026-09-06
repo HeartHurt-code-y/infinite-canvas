@@ -144,13 +144,7 @@ if (
   await writeFile(path.join(source, "node_modules", ".canvas-lock"), lockHash);
 }
 await mkdir(destination, { recursive: true });
-for (const name of [
-  "package.json",
-  "pnpm-lock.yaml",
-  "plan.mjs",
-  "Composition.tsx",
-  "render.mjs",
-])
+for (const name of ["package.json", "pnpm-lock.yaml", "plan.mjs", "Composition.tsx", "render.mjs"])
   await copyFile(path.join(source, name), path.join(destination, name));
 if (
   oldManifest?.lockHash !== lockHash ||

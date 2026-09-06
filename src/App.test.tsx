@@ -1386,9 +1386,7 @@ describe("App workspace", () => {
     expect(
       invokeMock.mock.calls.filter(([command]) => command === "list_asset_groups"),
     ).toHaveLength(groupListCallsBeforeSwitch);
-    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(
-      false,
-    );
+    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
   });
 
   it("header 清空画布按钮：点击打开 modal 弹窗，确认后清空画布", () => {

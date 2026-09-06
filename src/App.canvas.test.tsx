@@ -5075,7 +5075,9 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
   it("云端素材库展示分组选择：全部素材 + 各分组纯名称，不暴露令牌前缀", async () => {
     render(<App />);
     const groupSelect = await screen.findByLabelText("素材库分组");
-    const labels = within(groupSelect).getAllByRole("option").map((option) => option.textContent);
+    const labels = within(groupSelect)
+      .getAllByRole("option")
+      .map((option) => option.textContent);
     expect(labels).toContain("全部素材");
     expect(labels).toContain("客户案例");
     expect(labels).toContain("默认分组 · 默认");
@@ -5152,9 +5154,7 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
 
   it("素材详情内可重命名云端素材：保存后调用 rename_asset 并关闭弹窗", async () => {
     render(<App />);
-    fireEvent.click(
-      await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" }));
 
     fireEvent.click(screen.getByRole("button", { name: "重命名素材：站台参考图" }));
     const input = screen.getByRole("textbox", { name: "站台参考图的新名称" });

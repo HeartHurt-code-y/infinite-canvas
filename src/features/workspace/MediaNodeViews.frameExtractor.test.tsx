@@ -48,7 +48,11 @@ function renderHarness(
   options: {
     inputs?: readonly FrameExtractorVideoInput[];
     producedFrames?: readonly OutputNodeData[];
-    runState?: { status: "running" | "done" | "error" | "cancelled"; progress: number | null; error: string | null };
+    runState?: {
+      status: "running" | "done" | "error" | "cancelled";
+      progress: number | null;
+      error: string | null;
+    };
   } = {},
 ) {
   const onConfigChange = vi.fn();

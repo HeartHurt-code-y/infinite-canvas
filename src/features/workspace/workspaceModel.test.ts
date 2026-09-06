@@ -3,9 +3,9 @@ import { textResultFromSource } from "./workspaceModel";
 
 describe("textResultFromSource", () => {
   it("extracts Context-IR 扩写正文 from source { kind: 'text', text }", () => {
-    expect(
-      textResultFromSource({ kind: "text", text: "  扩写后的完整提示词  " }),
-    ).toBe("扩写后的完整提示词");
+    expect(textResultFromSource({ kind: "text", text: "  扩写后的完整提示词  " })).toBe(
+      "扩写后的完整提示词",
+    );
   });
 
   it("returns null for media sources or empty text", () => {

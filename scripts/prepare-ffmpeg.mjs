@@ -10,9 +10,7 @@
 // 其中 macOS 仅要求 ffmpeg 存在；若 ffprobe 缺失则进入“内置降级态”，
 // 让运行时按需回退下载完整引擎。
 
-import {
-  createHash,
-} from "node:crypto";
+import { createHash } from "node:crypto";
 import {
   existsSync,
   readFileSync,
@@ -95,8 +93,9 @@ function sha256(filePath) {
 
 function zipEntryBinaries(extractDir) {
   // gyan.dev zip 内部布局：ffmpeg-7.1-essentials_build/bin/ffmpeg.exe
-  const inner = readdirSync(extractDir, { withFileTypes: true })
-    .find((entry) => entry.isDirectory());
+  const inner = readdirSync(extractDir, { withFileTypes: true }).find((entry) =>
+    entry.isDirectory(),
+  );
   if (!inner) {
     throw new Error("解压目录中没有预期的顶层目录");
   }
@@ -113,8 +112,9 @@ function zipEntryBinaries(extractDir) {
 }
 
 function linuxEntryBinaries(extractDir) {
-  const inner = readdirSync(extractDir, { withFileTypes: true })
-    .find((entry) => entry.isDirectory());
+  const inner = readdirSync(extractDir, { withFileTypes: true }).find((entry) =>
+    entry.isDirectory(),
+  );
   if (!inner) {
     throw new Error("解压目录中没有预期的顶层目录");
   }

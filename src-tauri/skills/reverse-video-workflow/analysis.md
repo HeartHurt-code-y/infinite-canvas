@@ -20,24 +20,87 @@ replicationPrompt 是可直接粘贴的完整中文生成提示词，不是报�
 
 ```json
 {
-  "schemaVersion":"reverse-video-analysis.v1",
-  "title":"片段描述性标题",
-  "summary":"视频结构摘要与四阶段视觉证据",
-  "dimensions":{"subject":"主体","styling":"造型道具","scene":"场景","lighting":"光线","color":"色调","camera":"运镜","composition":"景别构图","emotion":"情绪","contentType":"类型","hook":"开头钩子"},
-  "globalSettings":"角色、场景、视觉、声音四个固定锚点",
-  "scenes":"每个场景名称、人物、起止时间、核心事件与连接方式",
-  "timeline":[{"start":0,"end":1,"action":"可见动作","camera":"摄影机行为","audio":"待听觉确认；建议配音另述","evidence":"联系表时间码与实际可见依据"}],
-  "ending":{"beats":[{"start":0,"end":1,"action":"精确收尾动作","camera":"摄影机行为","audio":"待听觉确认","evidence":"尾帧时间码证据"}],"finalFrame":"最终画面","evidence":"最终尾帧时间码证据"},
-  "replicationPrompt":"完整可粘贴中文提示词，含动作节拍及末尾一致性约束",
-  "viralDiagnosis":{"hook":"可能吸引注意的机制","emotion":"情绪","memory":"记忆点","replicable":"可复用部分","replace":"应替换部分"},
-  "remixes":[
-    {"route":"skin","title":"概念","retained":"保留结构","replaced":"至少两个变化维度","prompt":"完整提示词","expectedEffect":"预期效果","risk":"具体风险"},
-    {"route":"viewpoint","title":"概念","retained":"保留元素","replaced":"至少两个变化维度","prompt":"完整提示词","expectedEffect":"预期效果","risk":"具体风险"},
-    {"route":"narrative","title":"概念","retained":"保留元素","replaced":"至少两个变化维度","prompt":"完整提示词","expectedEffect":"预期效果","risk":"具体风险"}
+  "schemaVersion": "reverse-video-analysis.v1",
+  "title": "片段描述性标题",
+  "summary": "视频结构摘要与四阶段视觉证据",
+  "dimensions": {
+    "subject": "主体",
+    "styling": "造型道具",
+    "scene": "场景",
+    "lighting": "光线",
+    "color": "色调",
+    "camera": "运镜",
+    "composition": "景别构图",
+    "emotion": "情绪",
+    "contentType": "类型",
+    "hook": "开头钩子"
+  },
+  "globalSettings": "角色、场景、视觉、声音四个固定锚点",
+  "scenes": "每个场景名称、人物、起止时间、核心事件与连接方式",
+  "timeline": [
+    {
+      "start": 0,
+      "end": 1,
+      "action": "可见动作",
+      "camera": "摄影机行为",
+      "audio": "待听觉确认；建议配音另述",
+      "evidence": "联系表时间码与实际可见依据"
+    }
   ],
-  "priority":"推荐顺序和理由",
-  "pitfalls":["针对当前片段的具体避坑"],
-  "keywords":["可复用关键词"],
-  "tags":["本次内容标签"]
+  "ending": {
+    "beats": [
+      {
+        "start": 0,
+        "end": 1,
+        "action": "精确收尾动作",
+        "camera": "摄影机行为",
+        "audio": "待听觉确认",
+        "evidence": "尾帧时间码证据"
+      }
+    ],
+    "finalFrame": "最终画面",
+    "evidence": "最终尾帧时间码证据"
+  },
+  "replicationPrompt": "完整可粘贴中文提示词，含动作节拍及末尾一致性约束",
+  "viralDiagnosis": {
+    "hook": "可能吸引注意的机制",
+    "emotion": "情绪",
+    "memory": "记忆点",
+    "replicable": "可复用部分",
+    "replace": "应替换部分"
+  },
+  "remixes": [
+    {
+      "route": "skin",
+      "title": "概念",
+      "retained": "保留结构",
+      "replaced": "至少两个变化维度",
+      "prompt": "完整提示词",
+      "expectedEffect": "预期效果",
+      "risk": "具体风险"
+    },
+    {
+      "route": "viewpoint",
+      "title": "概念",
+      "retained": "保留元素",
+      "replaced": "至少两个变化维度",
+      "prompt": "完整提示词",
+      "expectedEffect": "预期效果",
+      "risk": "具体风险"
+    },
+    {
+      "route": "narrative",
+      "title": "概念",
+      "retained": "保留元素",
+      "replaced": "至少两个变化维度",
+      "prompt": "完整提示词",
+      "expectedEffect": "预期效果",
+      "risk": "具体风险"
+    }
+  ],
+  "priority": "推荐顺序和理由",
+  "pitfalls": ["针对当前片段的具体避坑"],
+  "keywords": ["可复用关键词"],
+  "tags": ["本次内容标签"]
 }
 ```
