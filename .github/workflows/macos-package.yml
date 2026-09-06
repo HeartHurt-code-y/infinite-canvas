@@ -47,6 +47,7 @@ jobs:
           CI: true
 
       - name: Upload installer artifacts
+        id: upload-artifacts
         uses: actions/upload-artifact@v4
         with:
           name: infinite-canvas-macos-${{ github.sha }}
@@ -55,3 +56,38 @@ jobs:
             src-tauri/target/release/bundle/macos/*.app
           if-no-files-found: error
           retention-days: 30
+
+      - name: Publish artifact download links
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const runId = context.runId;
+
+            const listUrl = `${{ github.server_url }}/${owner}/${repo}/actions/runs/${runId}`;
+            const response = await github.rest.actions.listWorkflowRunArtifacts({
+              owner,
+              repo,
+              run_id: runId,
+            });
+            const artifacts = response.data.artifacts.filter((artifact) =>
+              artifact.name.startsWith("infinite-canvas-macos-")
+            );
+            const lines = [
+              "## macOS 包已构建完成 ✅",
+              `- [本次运行页面](${listUrl})`,
+              "",
+              "### 可下载产物",
+            ];
+            if (artifacts.length === 0) {
+              lines.push("- 未检索到以 `infinite-canvas-macos-` 开头的产物，请检查构建日志。");
+            } else {
+              for (const artifact of artifacts) {
+                const artifactName = artifact.name || "unknown-artifact";
+                const downloadUrl = artifact.archive_download_url || listUrl;
+                lines.push(`- [${artifactName}](${downloadUrl})`);
+              }
+            }
+            await core.summary.addRaw(lines.join("\n")).write();
