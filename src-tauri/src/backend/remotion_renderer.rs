@@ -866,6 +866,12 @@ impl ProcessTree {
         Ok(Self)
     }
 }
+// 非 Windows 平台没有 OS Job 对象可回收；空 Drop 让调用点
+// drop(process_tree) 的意图保持一致，并通过 clippy::drop_non_drop。
+#[cfg(not(windows))]
+impl Drop for ProcessTree {
+    fn drop(&mut self) {}
+}
 
 #[cfg(test)]
 mod tests {
