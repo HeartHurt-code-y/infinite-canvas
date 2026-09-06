@@ -1163,7 +1163,12 @@ mod tests {
         );
         assert_eq!(
             service.engine_status().binary_path,
-            Some(builtin.join(VideoCompositionService::ffmpeg_binary_name()).to_string_lossy().into_owned())
+            Some(
+                builtin
+                    .join(VideoCompositionService::ffmpeg_binary_name())
+                    .to_string_lossy()
+                    .into_owned()
+            )
         );
     }
 
@@ -1180,11 +1185,15 @@ mod tests {
         assert!(!service.has_builtin_engine());
         assert_eq!(
             service.ffmpeg_binary(),
-            download.path().join(VideoCompositionService::ffmpeg_binary_name())
+            download
+                .path()
+                .join(VideoCompositionService::ffmpeg_binary_name())
         );
         assert_eq!(
             service.ffprobe_binary(),
-            download.path().join(VideoCompositionService::ffprobe_binary_name())
+            download
+                .path()
+                .join(VideoCompositionService::ffprobe_binary_name())
         );
 
         // 只放 ffmpeg 缺 ffprobe：仍视为不完整，整体回退到下载目录。
@@ -1198,7 +1207,9 @@ mod tests {
         assert!(!service.has_builtin_engine());
         assert_eq!(
             service.ffmpeg_binary(),
-            download.path().join(VideoCompositionService::ffmpeg_binary_name())
+            download
+                .path()
+                .join(VideoCompositionService::ffmpeg_binary_name())
         );
     }
 }

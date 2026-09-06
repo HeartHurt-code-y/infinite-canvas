@@ -1195,7 +1195,10 @@ fn require_asset_library_connection(value: &str) -> BackendResult<()> {
 
 fn parse_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
     let record = raw.as_object()?;
-    let id = record.get("id").and_then(Value::as_i64).filter(|id| *id > 0)?;
+    let id = record
+        .get("id")
+        .and_then(Value::as_i64)
+        .filter(|id| *id > 0)?;
     let name = record
         .get("name")
         .and_then(Value::as_str)
@@ -2009,7 +2012,11 @@ mod tests {
             })
             .await
             .expect_err("empty group name must be rejected before any request");
-        assert!(empty_error.to_string().contains("group name must not be empty"));
+        assert!(
+            empty_error
+                .to_string()
+                .contains("group name must not be empty")
+        );
 
         let oversized_error = library
             .create_asset_group(CreateAssetGroupCommand {
@@ -2043,7 +2050,10 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/v1/assets/update");
         assert_eq!(requests[0].method, Method::POST);
-        assert_eq!(requests[0].body, Some(json!({ "id": "asset-1", "name": "新名称" })));
+        assert_eq!(
+            requests[0].body,
+            Some(json!({ "id": "asset-1", "name": "新名称" }))
+        );
     }
 
     #[tokio::test]
@@ -2069,7 +2079,11 @@ mod tests {
             })
             .await
             .expect_err("empty asset name must be rejected before any request");
-        assert!(empty_name_error.to_string().contains("asset name must not be empty"));
+        assert!(
+            empty_name_error
+                .to_string()
+                .contains("asset name must not be empty")
+        );
 
         let oversized_name_error = library
             .rename_asset(RenameAssetCommand {
