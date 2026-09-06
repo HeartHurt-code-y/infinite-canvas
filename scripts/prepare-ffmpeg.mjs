@@ -101,6 +101,7 @@ async function prepare() {
     console.log(
       "[ffmpeg:prepare] 非 Windows 平台跳过内置 FFmpeg 预置，运行时将回退到 ffmpeg-sidecar 下载。",
     );
+    mkdirSync(destination, { recursive: true });
     process.exit(0);
   }
 
