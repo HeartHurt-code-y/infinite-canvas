@@ -12,6 +12,7 @@ pub mod media;
 pub mod model_schema;
 pub mod prompt_optimize;
 pub mod provider;
+pub mod remote_video_tasks;
 pub mod remotion_renderer;
 pub mod reverse_video;
 pub mod staging;

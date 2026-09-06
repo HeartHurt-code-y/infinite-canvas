@@ -37,6 +37,9 @@ pub mod workflow_history;
 #[path = "storage/reverse_video_cases.rs"]
 mod reverse_video_cases;
 
+#[path = "storage/remote_video_tasks.rs"]
+mod remote_video_tasks;
+
 pub use generation_lifecycle::{
     GenerationLifecycleFact, GenerationOperationalEvent, GenerationRemoteObservation,
     GenerationTaskLifecycle, PersistedTaskTransition, PersistedTaskTransitionEvent,
@@ -1235,51 +1238,45 @@ impl Storage {
     }
 
     pub fn list_tasks(&self, query: &GenerationTaskListQuery) -> BackendResult<GenerationTaskPage> {
+        validate_history_date_range(query.created_from, query.created_to)?;
         let connection = self.lock()?;
-        let scan_limit = query.limit.clamp(1, 200) as i64;
+        let limit = query.limit.clamp(1, 200) as i64;
+        let statuses = query
+            .statuses
+            .as_ref()
+            .map(serde_json::to_string)
+            .transpose()?;
         let mut statement = connection.prepare(&format!(
-            "{} ORDER BY created_at DESC LIMIT ?1",
-            task_summary_sql("")
+            "{} ORDER BY created_at DESC, id LIMIT ?7",
+            task_summary_sql(
+                "WHERE (?1 IS NULL OR canvas_id = ?1)
+                AND (?2 IS NULL OR source_node_id = ?2)
+                AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3)))
+                AND (?4 IS NULL OR created_at < ?4)
+                AND (?5 IS NULL OR created_at >= ?5)
+                AND (?6 IS NULL OR created_at <= ?6)"
+            )
         ))?;
-        let rows = statement.query_map(params![scan_limit * 20], task_summary_from_row)?;
-        let mut items = Vec::new();
-        for row in rows {
-            let item = row?;
-            if query
-                .canvas_id
-                .as_ref()
-                .is_some_and(|canvas_id| &item.canvas_id != canvas_id)
-            {
-                continue;
-            }
-            if query
-                .source_node_id
-                .as_ref()
-                .is_some_and(|node_id| &item.source_node_id != node_id)
-            {
-                continue;
-            }
-            if query
-                .statuses
-                .as_ref()
-                .is_some_and(|statuses| !statuses.contains(&item.status))
-            {
-                continue;
-            }
-            if query
-                .cursor_created_before
-                .is_some_and(|cursor| item.created_at >= cursor)
-            {
-                continue;
-            }
-            items.push(item);
-            if items.len() == scan_limit as usize {
-                break;
-            }
-        }
-        let next_cursor_created_before = (items.len() == scan_limit as usize)
-            .then(|| items.last().map(|item| item.created_at))
-            .flatten();
+        let mut items = statement
+            .query_map(
+                params![
+                    query.canvas_id,
+                    query.source_node_id,
+                    statuses,
+                    query.cursor_created_before,
+                    query.created_from,
+                    query.created_to,
+                    limit + 1
+                ],
+                task_summary_from_row,
+            )?
+            .collect::<Result<Vec<_>, _>>()?;
+        let next_cursor_created_before = if items.len() > limit as usize {
+            items.pop();
+            items.last().map(|item| item.created_at)
+        } else {
+            None
+        };
         Ok(GenerationTaskPage {
             items,
             next_cursor_created_before,
@@ -1531,6 +1528,22 @@ fn binding_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderModelBinding> {
         created_at: row.get(6)?,
         updated_at: row.get(7)?,
     })
+}
+
+fn validate_history_date_range(from: Option<i64>, to: Option<i64>) -> BackendResult<()> {
+    if from.is_some_and(|value| value < 0) || to.is_some_and(|value| value < 0) {
+        return Err(BackendError::validation(
+            "历史查询时间不能早于 1970 年",
+            Value::Null,
+        ));
+    }
+    if matches!((from, to), (Some(start), Some(end)) if start > end) {
+        return Err(BackendError::validation(
+            "开始时间不能晚于结束时间",
+            Value::Null,
+        ));
+    }
+    Ok(())
 }
 
 fn task_summary_sql(where_clause: &str) -> String {
@@ -1797,6 +1810,79 @@ mod tests {
 
     use super::*;
     use crate::backend::types::ProviderModelSelection;
+
+    #[test]
+    fn history_date_range_filters_before_pagination_and_validates_bounds() {
+        let directory = TempDir::new().unwrap();
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).unwrap();
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        // The previous bounded scan skipped old matches once enough newer records existed.
+        for index in 0..45 {
+            let id = format!("history-date-{index}");
+            storage
+                .insert_task(NewTask {
+                    id: &id,
+                    canvas_id: "date-canvas",
+                    source_node_id: "date-node",
+                    operation: GenerationOperation::TextToImage,
+                    provider: &provider,
+                    api_key_ref: &provider.api_key_ref,
+                    model_definition_id: "gpt-image-2",
+                    remote_model_id: Some("gpt-image-2"),
+                    logical_request: &json!({}),
+                })
+                .unwrap();
+            storage
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE generation_tasks SET created_at = ?1 WHERE id = ?2",
+                    params![index * 1000, id],
+                )
+                .unwrap();
+        }
+        let query: GenerationTaskListQuery = serde_json::from_value(json!({
+            "canvasId": "date-canvas", "sourceNodeId": "date-node", "statuses": ["created"],
+            "createdFrom": 1000, "createdTo": 3000, "limit": 2
+        }))
+        .unwrap();
+        let first = storage.list_tasks(&query).unwrap();
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.created_at)
+                .collect::<Vec<_>>(),
+            vec![3000, 2000]
+        );
+        assert_eq!(first.next_cursor_created_before, Some(2000));
+        let second = storage
+            .list_tasks(&GenerationTaskListQuery {
+                cursor_created_before: first.next_cursor_created_before,
+                ..query.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| item.created_at)
+                .collect::<Vec<_>>(),
+            vec![1000]
+        );
+        assert_eq!(second.next_cursor_created_before, None);
+        for (from, to) in [(Some(3001), Some(3000)), (Some(-1), None), (None, Some(-1))] {
+            assert!(
+                storage
+                    .list_tasks(&GenerationTaskListQuery {
+                        created_from: from,
+                        created_to: to,
+                        ..query.clone()
+                    })
+                    .is_err()
+            );
+        }
+    }
 
     #[test]
     fn local_asset_listing_only_returns_completed_object_storage_uploads() {

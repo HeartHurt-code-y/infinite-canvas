@@ -94,6 +94,57 @@ function createClient(detail = details()) {
 }
 
 describe("WorkflowHistoryPanel", () => {
+  it("combines creation-time bounds with canvas and status filters and keeps them on later pages", async () => {
+    const client = createClient();
+    render(
+      <WorkflowHistoryPanel client={client} canvasId="canvas-1" onSelectGenerationTask={vi.fn()} />,
+    );
+    await screen.findByText("RAG 知识视频 workflow-history-1", {
+      selector: ".history-item__title",
+    });
+    fireEvent.change(screen.getByLabelText("开始时间"), {
+      target: { value: "2026-09-01T01:02:03" },
+    });
+    fireEvent.change(screen.getByLabelText("结束时间"), {
+      target: { value: "2026-09-06T04:05:06" },
+    });
+    client.list.mockResolvedValueOnce({ items: [record()], nextCursor: "30" });
+    fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
+    const range = {
+      createdFrom: new Date(2026, 8, 1, 1, 2, 3).getTime(),
+      createdTo: new Date(2026, 8, 6, 4, 5, 6, 999).getTime(),
+    };
+    await waitFor(() =>
+      expect(client.list).toHaveBeenLastCalledWith({ ...range, canvasId: "canvas-1", limit: 30 }),
+    );
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多工作流" }));
+    await waitFor(() =>
+      expect(client.list).toHaveBeenLastCalledWith({
+        ...range,
+        canvasId: "canvas-1",
+        limit: 30,
+        cursor: "30",
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^失败$/ }));
+    await waitFor(() =>
+      expect(client.list).toHaveBeenLastCalledWith({
+        ...range,
+        canvasId: "canvas-1",
+        statuses: ["failed"],
+        limit: 30,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^重置$/ }));
+    await waitFor(() =>
+      expect(client.list).toHaveBeenLastCalledWith({
+        canvasId: "canvas-1",
+        statuses: ["failed"],
+        limit: 30,
+      }),
+    );
+  });
+
   it("keeps reverse workflow case and MD/TXT delivery available independently of its canvas node", async () => {
     const previous = record("done");
     const item: WorkflowHistoryRecord = {

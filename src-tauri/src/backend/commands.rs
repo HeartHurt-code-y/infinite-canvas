@@ -1,4 +1,3 @@
-use reqwest::Method;
 use serde_json::{Value, json};
 use std::path::Path;
 use tauri::{AppHandle, Emitter as _, State};
@@ -36,8 +35,8 @@ use super::{
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, LocalAssetRecord,
         ModelDefinition, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
-        RawProviderResponse, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
-        RecoveryReport, RemoteModelOption, ReplaceProviderModelBindingsCommand,
+        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
+        RemoteModelOption, RemoteVideoTaskPage, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
         StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
         StartVideoFrameExtractionCommand, TosStagingConfig, UpsertProviderConnectionCommand,
@@ -410,36 +409,8 @@ pub fn query_video_task_now(state: State<'_, BackendState>, task_id: String) -> 
 pub async fn list_remote_video_tasks(
     state: State<'_, BackendState>,
     command: VideoTaskListCommand,
-) -> CommandResult<RawProviderResponse> {
-    if command.start_timestamp < 0
-        || command.end_timestamp < command.start_timestamp
-        || command.page == 0
-        || command.page_size == 0
-    {
-        return Err(BackendError::validation(
-            "remote video task list requires an explicit valid time range and positive pagination",
-            json!({ "command": command }),
-        )
-        .payload());
-    }
-    let mut query = vec![
-        ("start_timestamp", command.start_timestamp.to_string()),
-        ("end_timestamp", command.end_timestamp.to_string()),
-        ("p", command.page.to_string()),
-        ("page_size", command.page_size.to_string()),
-    ];
-    if let Some(status) = command.status.filter(|value| !value.trim().is_empty()) {
-        query.push(("status", status));
-    }
-    let providers = state.providers.clone();
-    providers
-        .raw_json_request(
-            &command.provider_connection_id,
-            Method::GET,
-            "/v1/video/tasks",
-            &query,
-            None,
-        )
+) -> CommandResult<RemoteVideoTaskPage> {
+    super::remote_video_tasks::list(&state.providers, &state.storage, &command)
         .await
         .command()
 }

@@ -537,6 +537,8 @@ pub struct GenerationTaskListQuery {
     pub canvas_id: Option<String>,
     pub source_node_id: Option<String>,
     pub statuses: Option<Vec<GenerationTaskStatus>>,
+    pub created_from: Option<i64>,
+    pub created_to: Option<i64>,
     pub cursor_created_before: Option<i64>,
     #[serde(default = "default_page_size")]
     pub limit: u32,
@@ -566,8 +568,9 @@ pub struct RecoveryReport {
 #[serde(rename_all = "camelCase")]
 pub struct VideoTaskListCommand {
     pub provider_connection_id: String,
-    pub start_timestamp: i64,
-    pub end_timestamp: i64,
+    pub token_group: Option<String>,
+    pub start_timestamp: Option<i64>,
+    pub end_timestamp: Option<i64>,
     #[serde(default = "default_page_number")]
     pub page: u32,
     #[serde(default = "default_remote_page_size")]
@@ -575,12 +578,52 @@ pub struct VideoTaskListCommand {
     pub status: Option<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum RemoteVideoTaskStatus {
+    NotStart,
+    Submitted,
+    Queued,
+    InProgress,
+    Success,
+    Failure,
+    #[serde(other)]
+    Unknown,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteVideoTask {
+    pub task_id: String,
+    pub submit_time: i64,
+    pub start_time: i64,
+    pub finish_time: i64,
+    pub status: RemoteVideoTaskStatus,
+    pub progress: String,
+    pub video_url: Option<String>,
+    pub failure_reason: Option<String>,
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub local_task_id: Option<String>,
+    pub local_task_status: Option<GenerationTaskStatus>,
+    pub can_resume_polling: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RemoteVideoTaskPage {
+    pub page: u32,
+    pub page_size: u32,
+    pub total: u64,
+    pub items: Vec<RemoteVideoTask>,
+}
+
 fn default_page_number() -> u32 {
     1
 }
 
 fn default_remote_page_size() -> u32 {
-    100
+    10
 }
 
 /// 网络爆款视频下载节点的启动命令：url 支持直接粘贴分享口令整段文本，

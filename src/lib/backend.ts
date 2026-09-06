@@ -26,6 +26,7 @@ import {
   remoteModelOptionsSchema,
   realPersonAuthLinkSchema,
   realPersonGroupsSchema,
+  remoteVideoTaskPageSchema,
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
@@ -897,6 +898,8 @@ export interface GenerationTaskListQuery {
   readonly canvasId?: string | null;
   readonly sourceNodeId?: string | null;
   readonly statuses?: readonly GenerationTaskStatus[] | null;
+  readonly createdFrom?: number;
+  readonly createdTo?: number;
   readonly cursorCreatedBefore?: number | null;
   readonly limit?: number;
 }
@@ -1074,6 +1077,58 @@ export const generationClient: GenerationTaskClient = {
   list: (query) => invokeDesktop("list_generation_tasks", generationTaskPageSchema, { query }),
   get: (taskId) => invokeDesktop("get_generation_task", generationTaskDetailSchema, { taskId }),
   queryVideoTaskNow: (taskId) => invokeDesktopVoid("query_video_task_now", { taskId }),
+};
+
+export type RemoteVideoTaskStatus =
+  | "NOT_START"
+  | "SUBMITTED"
+  | "QUEUED"
+  | "IN_PROGRESS"
+  | "SUCCESS"
+  | "FAILURE"
+  | "UNKNOWN";
+
+export interface RemoteVideoTaskQuery {
+  readonly providerConnectionId: string;
+  readonly tokenGroup?: string | null;
+  /** Provider list timestamps use Unix seconds; local history uses milliseconds. */
+  readonly startTimestamp?: number | null;
+  readonly endTimestamp?: number | null;
+  readonly status?: RemoteVideoTaskStatus | null;
+  readonly page?: number;
+  readonly pageSize?: number;
+}
+
+export interface RemoteVideoTask {
+  readonly taskId: string;
+  readonly submitTime: number;
+  readonly startTime: number;
+  readonly finishTime: number;
+  readonly status: string;
+  readonly progress: string;
+  readonly videoUrl: string | null;
+  readonly failureReason: string | null;
+  readonly promptTokens: number;
+  readonly completionTokens: number;
+  readonly localTaskId: string | null;
+  readonly localTaskStatus: GenerationTaskStatus | null;
+  readonly canResumePolling: boolean;
+}
+
+export interface RemoteVideoTaskPage {
+  readonly page: number;
+  readonly pageSize: number;
+  readonly total: number;
+  readonly items: readonly RemoteVideoTask[];
+}
+
+export interface RemoteVideoTaskClient {
+  list(this: void, query: RemoteVideoTaskQuery): Promise<RemoteVideoTaskPage>;
+}
+
+export const remoteVideoTaskClient: RemoteVideoTaskClient = {
+  list: (command) =>
+    invokeDesktop("list_remote_video_tasks", remoteVideoTaskPageSchema, { command }),
 };
 
 /** 画布文档（本地 SQLite 持久化），document 为版本化的画布状态 JSON。 */

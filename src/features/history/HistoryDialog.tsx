@@ -31,6 +31,9 @@ import {
 import { textResultFromSource } from "../workspace/workspaceModel";
 import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
+import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
+import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
+import type { HistoryDateRange } from "./historyDateRange";
 
 async function revealDesktopItem(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -465,6 +468,14 @@ function HistoryLightbox({
   );
 }
 
+type HistoryTab = "generation" | "workflow" | "remoteVideo";
+
+const HISTORY_TABS: readonly { readonly id: HistoryTab; readonly label: string }[] = [
+  { id: "generation", label: "生成任务" },
+  { id: "workflow", label: "工作流" },
+  { id: "remoteVideo", label: "远程视频" },
+];
+
 export function HistoryDialog({
   open,
   onClose,
@@ -483,7 +494,7 @@ export function HistoryDialog({
   readonly client?: GenerationTaskClient;
   readonly workflowClient?: WorkflowHistoryClient;
   readonly canvasId?: string;
-  readonly initialTab?: "generation" | "workflow";
+  readonly initialTab?: HistoryTab;
   readonly initialWorkflowId?: string | null;
   readonly onResumeWorkflow?: (
     record: WorkflowHistoryRecord,
@@ -494,10 +505,12 @@ export function HistoryDialog({
   readonly activeWorkflowIds?: readonly string[];
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
-  const [activeTab, setActiveTab] = useState(initialTab);
+  const [activeTab, setActiveTab] = useState<HistoryTab>(initialTab ?? "generation");
   const [workflowVisited, setWorkflowVisited] = useState(initialTab === "workflow");
+  const [remoteVideoVisited, setRemoteVideoVisited] = useState(initialTab === "remoteVideo");
   const linkedTaskIdRef = useRef<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
+  const [dateRange, setDateRange] = useState<HistoryDateRange>({});
   const [tasks, setTasks] = useState<readonly GenerationTaskSummary[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
   // 首页是否已请求完成（含失败）：区分「加载中」与「确实没有任务」。
@@ -517,7 +530,7 @@ export function HistoryDialog({
     const requestId = ++listRequestRef.current;
     let cancelled = false;
     void client
-      .list({ statuses: statusFilterToStatuses(statusFilter), limit: HISTORY_PAGE_SIZE })
+      .list({ ...dateRange, statuses: statusFilterToStatuses(statusFilter), limit: HISTORY_PAGE_SIZE })
       .then((page) => {
         if (cancelled || requestId !== listRequestRef.current) return;
         setTasks(page.items);
@@ -538,8 +551,23 @@ export function HistoryDialog({
       });
     return () => {
       cancelled = true;
+      ++listRequestRef.current;
     };
-  }, [open, activeTab, statusFilter, client]);
+  }, [open, activeTab, statusFilter, dateRange, client]);
+
+  const resetList = () => {
+    ++listRequestRef.current;
+    linkedTaskIdRef.current = null;
+    setTasks([]);
+    setCursor(null);
+    setListLoaded(false);
+    setListLoading(false);
+    setListError(null);
+    setSelectedTaskId(null);
+    setDetail(null);
+    setDetailError(null);
+    setLightboxIndex(null);
+  };
 
   // 关闭时清空详情与浏览状态，避免下次打开闪现上一次的内容。
   // 清理放在关闭事件（而非 effect）中执行：setState 必须由事件驱动。
@@ -554,11 +582,12 @@ export function HistoryDialog({
   }, []);
 
   const loadMore = useCallback(async () => {
-    if (cursor == null || listLoading) return;
+    if (cursor == null || listLoading || !listLoaded) return;
     const requestId = ++listRequestRef.current;
     setListLoading(true);
     try {
       const page = await client.list({
+        ...dateRange,
         statuses: statusFilterToStatuses(statusFilter),
         cursorCreatedBefore: cursor,
         limit: HISTORY_PAGE_SIZE,
@@ -572,7 +601,7 @@ export function HistoryDialog({
     } finally {
       if (requestId === listRequestRef.current) setListLoading(false);
     }
-  }, [client, cursor, listLoading, statusFilter]);
+  }, [client, cursor, listLoading, listLoaded, statusFilter, dateRange]);
 
   // 选中任务后加载完整详情（含尝试、供应商调用、结果与最终错误）。
   // 请求期间保留旧详情（标准主从布局），响应到达后整体替换。
@@ -597,10 +626,11 @@ export function HistoryDialog({
     };
   }, [open, activeTab, client, selectedTaskId]);
 
-  const selectHistoryTab = (tab: "generation" | "workflow") => {
+  const selectHistoryTab = (tab: HistoryTab) => {
     setActiveTab(tab);
     setLightboxIndex(null);
     if (tab === "workflow") setWorkflowVisited(true);
+    if (tab === "remoteVideo") setRemoteVideoVisited(true);
   };
 
   const selectLinkedGenerationTask = (taskId: string) => {
@@ -624,6 +654,7 @@ export function HistoryDialog({
 
   const summary = detail?.summary ?? null;
   const promptSegments = useMemo(() => (detail ? promptSegmentsFromDetail(detail) : []), [detail]);
+  const resultErrorsExist = detail?.results.some((result) => result.error != null) === true;
   const attempts = useMemo(
     () => (detail ? (detail.attempts as readonly HistoryAttemptRecord[]) : []),
     [detail],
@@ -663,41 +694,49 @@ export function HistoryDialog({
             历史记录
           </span>
           <h2 id="generation-history-title">
-            {activeTab === "workflow" ? "工作流历史" : "生成任务历史"}
+            {activeTab === "workflow"
+              ? "工作流历史"
+              : activeTab === "remoteVideo"
+                ? "远程任务历史"
+                : "生成任务历史"}
           </h2>
           <p>
             {activeTab === "workflow"
               ? "查看每次工作流的输入、执行过程、交付物，从保存的步骤重试或继续。"
-              : "所有媒体与文本生成任务的调用、token 用量、完整产物与报错。"}
+              : activeTab === "remoteVideo"
+                ? "查询视频任务历史，并为应用异常关闭导致的任务续约远程查询。"
+                : "所有媒体与文本生成任务的调用、token 用量、完整产物与报错。"}
           </p>
-          <div className="workflow-history__tabs" role="tablist" aria-label="历史记录类型">
-            {(["generation", "workflow"] as const).map((tab) => (
-              <button
-                type="button"
-                role="tab"
-                key={tab}
-                id={`${tab}-history-tab`}
-                aria-controls={`${tab}-history-panel`}
-                aria-selected={activeTab === tab}
-                tabIndex={activeTab === tab ? 0 : -1}
-                className={`history-filter${activeTab === tab ? " is-active" : ""}`}
-                onClick={() => selectHistoryTab(tab)}
+          <div className="history-tabs" role="tablist" aria-label="历史记录类型">
+            {HISTORY_TABS.map((tab) => (
+                <button
+                  type="button"
+                  role="tab"
+                  key={tab.id}
+                  id={`${tab.id}-history-tab`}
+                  aria-controls={`${tab.id}-history-panel`}
+                  aria-selected={activeTab === tab.id}
+                  tabIndex={activeTab === tab.id ? 0 : -1}
+                  className={`history-tab${activeTab === tab.id ? " is-active" : ""}`}
+                  onClick={() => selectHistoryTab(tab.id)}
                 onKeyDown={(event) => {
                   if (!["ArrowLeft", "ArrowRight", "Home", "End"].includes(event.key)) return;
                   event.preventDefault();
-                  const next =
+                  const index = HISTORY_TABS.findIndex((entry) => entry.id === tab.id);
+                  const nextIndex =
                     event.key === "Home"
-                      ? "generation"
+                      ? 0
                       : event.key === "End"
-                        ? "workflow"
-                        : tab === "generation"
-                          ? "workflow"
-                          : "generation";
+                        ? HISTORY_TABS.length - 1
+                        : event.key === "ArrowLeft"
+                          ? (index - 1 + HISTORY_TABS.length) % HISTORY_TABS.length
+                          : (index + 1) % HISTORY_TABS.length;
+                  const next = HISTORY_TABS[nextIndex]?.id ?? "generation";
                   selectHistoryTab(next);
                   document.getElementById(`${next}-history-tab`)?.focus();
                 }}
               >
-                {tab === "generation" ? "生成任务" : "工作流"}
+                {tab.label}
               </button>
             ))}
           </div>
@@ -713,16 +752,29 @@ export function HistoryDialog({
 
         {workflowVisited && open ? (
           <div className="workflow-history__container" hidden={activeTab !== "workflow"}>
-            <WorkflowHistoryPanel
-              client={workflowClient}
-              canvasId={canvasId}
-              initialWorkflowId={initialWorkflowId}
-              activeWorkflowIds={activeWorkflowIds}
-              {...(onResumeWorkflow ? { onResumeWorkflow } : {})}
-              {...(onRestartWorkflow ? { onRestartWorkflow } : {})}
-              {...(onLocateWorkflow ? { onLocateWorkflow } : {})}
-              onSelectGenerationTask={selectLinkedGenerationTask}
-            />
+            <div id="workflow-history-panel" role="tabpanel" aria-labelledby="workflow-history-tab">
+              <WorkflowHistoryPanel
+                client={workflowClient}
+                canvasId={canvasId}
+                initialWorkflowId={initialWorkflowId}
+                activeWorkflowIds={activeWorkflowIds}
+                {...(onResumeWorkflow ? { onResumeWorkflow } : {})}
+                {...(onRestartWorkflow ? { onRestartWorkflow } : {})}
+                {...(onLocateWorkflow ? { onLocateWorkflow } : {})}
+                onSelectGenerationTask={selectLinkedGenerationTask}
+              />
+            </div>
+          </div>
+        ) : null}
+        {remoteVideoVisited && open ? (
+          <div
+            className="history-dialog__body history-dialog__body--single"
+            id="remoteVideo-history-panel"
+            role="tabpanel"
+            aria-labelledby="remoteVideo-history-tab"
+            hidden={activeTab !== "remoteVideo"}
+          >
+            <RemoteVideoHistoryPanel onSelectGenerationTask={selectLinkedGenerationTask} />
           </div>
         ) : null}
         <div
@@ -733,24 +785,33 @@ export function HistoryDialog({
           aria-labelledby="generation-history-tab"
         >
           <aside className="history-list" aria-label="任务列表">
-            <div className="history-filters" role="tablist" aria-label="状态筛选">
-              {HISTORY_FILTERS.map((filter) => (
-                <button
-                  key={filter.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={statusFilter === filter.id}
-                  className={`history-filter${statusFilter === filter.id ? " is-active" : ""}`}
-                  onClick={() => {
-                    linkedTaskIdRef.current = null;
-                    setStatusFilter(filter.id);
-                  }}
-                >
-                  {filter.label}
-                </button>
-              ))}
+            <div className="history-list__toolbar">
+              <div className="history-filters" role="tablist" aria-label="状态筛选">
+                {HISTORY_FILTERS.map((filter) => (
+                  <button
+                    key={filter.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={statusFilter === filter.id}
+                    className={`history-filter${statusFilter === filter.id ? " is-active" : ""}`}
+                    onClick={() => {
+                      if (filter.id === statusFilter) return;
+                      resetList();
+                      setStatusFilter(filter.id);
+                    }}
+                  >
+                    {filter.label}
+                  </button>
+                ))}
+              </div>
+              <HistoryDateRangeFilter
+                onApply={(range) => {
+                  resetList();
+                  setDateRange(range);
+                }}
+              />
             </div>
-            <div className="history-list__scroll">
+              <div className="history-list__scroll">
               {listError ? <p className="history-list__error">{listError}</p> : null}
               {!listError && !listLoaded ? (
                 <p className="history-list__empty">正在加载任务记录…</p>
@@ -759,51 +820,56 @@ export function HistoryDialog({
                 <p className="history-list__empty">没有符合条件的任务。</p>
               ) : null}
               <ul className="history-items">
-                {tasks.map((task) => (
-                  <li key={task.id}>
-                    <button
-                      type="button"
-                      className={`history-item${selectedTaskId === task.id ? " is-selected" : ""}`}
-                      onClick={() => {
-                        linkedTaskIdRef.current = null;
-                        setSelectedTaskId(task.id);
-                      }}
-                      aria-current={selectedTaskId === task.id ? "true" : undefined}
-                    >
-                      <span className="history-item__top">
-                        <span
-                          className={`history-item__status history-item__status--${task.status}`}
-                        >
-                          {task.status === "succeeded" ? (
-                            <CheckCircle size={14} weight="fill" aria-hidden="true" />
-                          ) : task.status === "failed" ||
-                            task.status === "unknown" ||
-                            task.status === "interrupted" ? (
-                            <WarningCircle size={14} weight="fill" aria-hidden="true" />
-                          ) : (
-                            <CircleNotch size={14} weight="bold" aria-hidden="true" />
-                          )}
-                          {TASK_STATUS_LABELS[task.status] ?? task.status}
-                        </span>
-                        {task.tokens?.totalTokens != null ? (
-                          <span className="history-item__tokens">
-                            {task.tokens.totalTokens.toLocaleString()} tokens
+                {tasks.map((task) => {
+                  const operationTitle = OPERATION_LABELS[task.operation] ?? task.operation;
+                  const modelTitle = task.remoteModelIdSnapshot ?? task.modelDefinitionId;
+                  const listItemTitle = `${operationTitle} · ${modelTitle}（${TASK_STATUS_LABELS[task.status] ?? task.status}）`;
+                  return (
+                    <li key={task.id}>
+                      <button
+                        type="button"
+                        className={`history-item${selectedTaskId === task.id ? " is-selected" : ""}`}
+                        title={listItemTitle}
+                        onClick={() => {
+                          linkedTaskIdRef.current = null;
+                          setSelectedTaskId(task.id);
+                        }}
+                        aria-current={selectedTaskId === task.id ? "true" : undefined}
+                      >
+                        <span className="history-item__top">
+                          <span
+                            className={`history-item__status history-item__status--${task.status}`}
+                          >
+                            {task.status === "succeeded" ? (
+                              <CheckCircle size={14} weight="fill" aria-hidden="true" />
+                            ) : task.status === "failed" ||
+                              task.status === "unknown" ||
+                              task.status === "interrupted" ? (
+                              <WarningCircle size={14} weight="fill" aria-hidden="true" />
+                            ) : (
+                              <CircleNotch size={14} weight="bold" aria-hidden="true" />
+                            )}
+                            {TASK_STATUS_LABELS[task.status] ?? task.status}
                           </span>
-                        ) : null}
-                      </span>
-                      <span className="history-item__title">
-                        {OPERATION_LABELS[task.operation] ?? task.operation} ·{" "}
-                        {task.remoteModelIdSnapshot ?? task.modelDefinitionId}
-                      </span>
-                      <span className="history-item__meta">
-                        {formatDateTime(task.createdAt)}
-                        {task.completedAt != null && task.completedAt > task.createdAt
-                          ? ` · 耗时 ${formatDuration(task.createdAt, task.completedAt) ?? "--"}`
-                          : ""}
-                      </span>
-                    </button>
-                  </li>
-                ))}
+                          {task.tokens?.totalTokens != null ? (
+                            <span className="history-item__tokens">
+                              {task.tokens.totalTokens.toLocaleString()} tokens
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="history-item__title">
+                          {operationTitle} · {modelTitle}
+                        </span>
+                        <span className="history-item__meta">
+                          {formatDateTime(task.createdAt)}
+                          {task.completedAt != null && task.completedAt > task.createdAt
+                            ? ` · 耗时 ${formatDuration(task.createdAt, task.completedAt) ?? "--"}`
+                            : ""}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })}
               </ul>
               {cursor != null ? (
                 <button
@@ -932,7 +998,9 @@ export function HistoryDialog({
                 ) : null}
 
                 {summary.operation !== "text_generation" || detail.results.length > 0 ? (
-                  <section className="history-section">
+                  <section
+                    className={`history-section${resultErrorsExist ? " history-section--with-inline-error" : ""}`}
+                  >
                     <h3>生成结果（{detail.results.length}）</h3>
                     {detail.results.length === 0 ? (
                       <p className="history-empty-note">该任务没有生成结果。</p>

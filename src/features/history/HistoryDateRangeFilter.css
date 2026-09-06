@@ -1,0 +1,62 @@
+.history-date-filter {
+  display: grid;
+  flex-shrink: 0;
+  gap: var(--space-2xs);
+  padding: var(--space-sm);
+  border-bottom: var(--rule-thin) solid var(--color-rule-2);
+  font-size: var(--text-xs);
+  background: color-mix(in oklch, var(--color-accent) 8%, transparent);
+}
+
+.history-date-filter p {
+  margin: 0 0 var(--space-2xs);
+  color: var(--color-muted);
+}
+
+.history-date-filter input,
+.history-date-filter button {
+  min-width: 0;
+  min-height: var(--size-control);
+  padding: var(--space-2xs) var(--space-sm);
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font: inherit;
+}
+
+.history-date-filter :is(input, button):focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.history-date-filter__actions {
+  display: flex;
+  gap: var(--space-xs);
+  margin-top: var(--space-xs);
+}
+
+.history-date-filter__actions button {
+  flex: 1;
+  cursor: pointer;
+  transition: border-color 150ms ease, color 150ms ease;
+}
+
+.history-date-filter__actions button:hover {
+  border-color: var(--color-rule-2);
+}
+
+.history-date-filter__actions button:focus-visible {
+  outline: 2px solid var(--color-focus);
+  outline-offset: 2px;
+}
+
+.history-date-filter__actions button[type="submit"] {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.history-date-filter [role="alert"] {
+  color: var(--color-error);
+}

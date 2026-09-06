@@ -1,8 +1,9 @@
-import { fireEvent, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 import type {
   GenerationTaskClient,
   GenerationTaskDetail,
+  GenerationTaskPage,
   GenerationTaskSummary,
 } from "../../lib/backend";
 import { HistoryDialog } from "./HistoryDialog";
@@ -95,6 +96,76 @@ function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClie
 }
 
 describe("HistoryDialog diagnostics", () => {
+  it("queries creation time in local time, carries the range into pagination, and resets it", async () => {
+    const client = createClient();
+    const list = vi.mocked(client.list);
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: null });
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+    await screen.findByText("文生图 · image-model");
+    fireEvent.change(screen.getByLabelText("开始时间"), {
+      target: { value: "2026-09-01T12:34:56" },
+    });
+    fireEvent.change(screen.getByLabelText("结束时间"), {
+      target: { value: "2026-09-05T23:59:59" },
+    });
+    expect(list).toHaveBeenCalledTimes(1);
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
+    const range = {
+      createdFrom: new Date(2026, 8, 1, 12, 34, 56).getTime(),
+      createdTo: new Date(2026, 8, 5, 23, 59, 59, 999).getTime(),
+    };
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({ ...range, statuses: null, limit: 30 }),
+    );
+    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    fireEvent.click(await screen.findByRole("button", { name: "加载更多" }));
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        ...range,
+        statuses: null,
+        limit: 30,
+        cursorCreatedBefore: SUMMARY.createdAt,
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^重置$/ }));
+    await waitFor(() => expect(list).toHaveBeenLastCalledWith({ statuses: null, limit: 30 }));
+    expect(screen.getByLabelText("开始时间")).toHaveValue("");
+    expect(screen.getByLabelText("结束时间")).toHaveValue("");
+  });
+
+  it("rejects inverted ranges without requesting and ignores an older page after a new search", async () => {
+    const client = createClient();
+    const list = vi.mocked(client.list);
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+    await screen.findByRole("button", { name: "加载更多" });
+    fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-06T00:00" } });
+    fireEvent.change(screen.getByLabelText("结束时间"), {
+      target: { value: "2026-09-05T23:59:59" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
+    expect(screen.getByRole("alert")).toHaveTextContent("开始时间不能晚于结束时间");
+    expect(list).toHaveBeenCalledTimes(1);
+    let finishOldPage!: (page: GenerationTaskPage) => void;
+    list.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishOldPage = resolve;
+        }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "加载更多" }));
+    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    fireEvent.change(screen.getByLabelText("开始时间"), { target: { value: "2026-09-01T00:00" } });
+    fireEvent.click(screen.getByRole("button", { name: /^查询$/ }));
+    await screen.findByText("没有符合条件的任务。");
+    await act(async () => {
+      finishOldPage({ items: [{ ...SUMMARY, id: "obsolete" }], nextCursorCreatedBefore: 1 });
+    });
+    expect(screen.queryByText("文生图 · image-model")).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument();
+  });
+
   it("shows the complete text-model product and archived provider payloads", async () => {
     const textSummary: GenerationTaskSummary = {
       ...SUMMARY,

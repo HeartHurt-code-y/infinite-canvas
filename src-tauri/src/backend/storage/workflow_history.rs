@@ -10,6 +10,7 @@ use uuid::Uuid;
 
 use super::{
     Storage, checked_sql_integer, json_sql_error, now_ms, task_summary_from_row, task_summary_sql,
+    validate_history_date_range,
 };
 use crate::backend::{
     error::{BackendError, BackendResult},
@@ -121,6 +122,8 @@ pub struct WorkflowHistoryQuery {
     pub canvas_id: Option<String>,
     pub source_node_id: Option<String>,
     pub statuses: Option<Vec<String>>,
+    pub created_from: Option<i64>,
+    pub created_to: Option<i64>,
     pub cursor: Option<String>,
     pub limit: Option<u32>,
 }
@@ -365,6 +368,7 @@ impl Storage {
         &self,
         query: WorkflowHistoryQuery,
     ) -> BackendResult<WorkflowHistoryPage> {
+        validate_history_date_range(query.created_from, query.created_to)?;
         let limit = query.limit.unwrap_or(50).clamp(1, 200) as i64;
         let offset = query
             .cursor
@@ -385,13 +389,23 @@ impl Storage {
             .map(serde_json::to_string)
             .transpose()?;
         let connection = self.lock()?;
-        let mut statement = connection.prepare("SELECT record_json FROM workflow_history WHERE (?1 IS NULL OR canvas_id=?1) AND (?2 IS NULL OR source_node_id=?2) AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3))) ORDER BY updated_at DESC,id LIMIT ?4 OFFSET ?5")?;
+        let mut statement = connection.prepare(
+            "SELECT record_json FROM workflow_history
+            WHERE (?1 IS NULL OR canvas_id=?1)
+            AND (?2 IS NULL OR source_node_id=?2)
+            AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3)))
+            AND (?4 IS NULL OR created_at >= ?4)
+            AND (?5 IS NULL OR created_at <= ?5)
+            ORDER BY updated_at DESC,id LIMIT ?6 OFFSET ?7",
+        )?;
         let mut items = statement
             .query_map(
                 params![
                     query.canvas_id,
                     query.source_node_id,
                     statuses,
+                    query.created_from,
+                    query.created_to,
                     limit + 1,
                     offset
                 ],
@@ -813,6 +827,68 @@ mod tests {
                 .list_workflow_history(WorkflowHistoryQuery {
                     cursor: Some("-1".into()),
                     ..Default::default()
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn history_date_range_uses_created_time_and_keeps_inclusive_bounds_on_each_page() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("history.sqlite")).unwrap();
+        for index in 0..5 {
+            let mut item = save(&storage, record(&format!("date-run-{index}"), "done")).unwrap();
+            item.created_at = index * 1000;
+            item.updated_at = 10000 + index;
+            storage.lock().unwrap().execute(
+                "UPDATE workflow_history SET created_at=?1,updated_at=?2,record_json=?3 WHERE id=?4",
+                params![item.created_at, item.updated_at, serde_json::to_string(&item).unwrap(), item.id],
+            ).unwrap();
+        }
+        let query = WorkflowHistoryQuery {
+            created_from: Some(1000),
+            created_to: Some(3000),
+            statuses: Some(vec!["done".into()]),
+            limit: Some(2),
+            ..Default::default()
+        };
+        let first = storage.list_workflow_history(query.clone()).unwrap();
+        assert_eq!(
+            first
+                .items
+                .iter()
+                .map(|item| item.created_at)
+                .collect::<Vec<_>>(),
+            vec![3000, 2000]
+        );
+        let second = storage
+            .list_workflow_history(WorkflowHistoryQuery {
+                cursor: first.next_cursor,
+                ..query.clone()
+            })
+            .unwrap();
+        assert_eq!(
+            second
+                .items
+                .iter()
+                .map(|item| item.created_at)
+                .collect::<Vec<_>>(),
+            vec![1000]
+        );
+        assert_eq!(second.next_cursor, None);
+        assert!(
+            storage
+                .list_workflow_history(WorkflowHistoryQuery {
+                    created_from: Some(3001),
+                    ..query.clone()
+                })
+                .is_err()
+        );
+        assert!(
+            storage
+                .list_workflow_history(WorkflowHistoryQuery {
+                    created_from: Some(-1),
+                    ..query
                 })
                 .is_err()
         );

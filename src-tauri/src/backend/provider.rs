@@ -1073,7 +1073,7 @@ impl ProviderRuntime {
     }
 
     #[allow(clippy::too_many_arguments)]
-    async fn send_raw_json_request(
+    pub(super) async fn send_raw_json_request(
         &self,
         context: &ResolvedProviderContext,
         method: Method,

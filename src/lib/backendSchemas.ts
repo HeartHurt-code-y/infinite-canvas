@@ -20,6 +20,7 @@ import type {
   RealPersonAuthLink,
   RealPersonGroup,
   RemoteModelOption,
+  RemoteVideoTaskPage,
   StagingJobRecord,
   StagingStateChangedEvent,
   TosStagingConfig,
@@ -258,6 +259,29 @@ export const generationTaskPageSchema = v.looseObject({
   items: v.array(generationTaskSummarySchema),
   nextCursorCreatedBefore: nullableNumberSchema,
 }) satisfies v.GenericSchema<GenerationTaskPage>;
+
+export const remoteVideoTaskPageSchema = v.looseObject({
+  page: v.pipe(v.number(), v.integer(), v.minValue(1)),
+  pageSize: v.pipe(v.number(), v.integer(), v.minValue(1), v.maxValue(100)),
+  total: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  items: v.array(
+    v.looseObject({
+      taskId: v.string(),
+      submitTime: v.number(),
+      startTime: v.number(),
+      finishTime: v.number(),
+      status: v.string(),
+      progress: v.string(),
+      videoUrl: nullableStringSchema,
+      failureReason: nullableStringSchema,
+      promptTokens: v.number(),
+      completionTokens: v.number(),
+      localTaskId: nullableStringSchema,
+      localTaskStatus: v.nullable(generationTaskStatusSchema),
+      canResumePolling: v.boolean(),
+    }),
+  ),
+}) satisfies v.GenericSchema<RemoteVideoTaskPage>;
 
 export const generationResultRecordSchema = v.looseObject({
   taskId: v.string(),

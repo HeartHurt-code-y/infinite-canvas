@@ -55,6 +55,8 @@ export interface WorkflowHistoryQuery {
   readonly canvasId?: string;
   readonly sourceNodeId?: string;
   readonly statuses?: readonly KnowledgeVideoWorkflowPhase[];
+  readonly createdFrom?: number;
+  readonly createdTo?: number;
   readonly cursor?: string | null;
   readonly limit?: number;
 }

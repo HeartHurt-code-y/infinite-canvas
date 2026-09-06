@@ -22,6 +22,8 @@ import type {
 import { xhsCoverDeliveryMarkdown } from "../workspace/xhsCoverWorkflowModel";
 import { reverseVideoDeliveryMarkdown } from "../workspace/reverseVideoWorkflowModel";
 import "./WorkflowHistoryPanel.css";
+import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
+import type { HistoryDateRange } from "./historyDateRange";
 
 const PHASE_LABELS: Record<KnowledgeVideoWorkflowPhase, string> = {
   idle: "等待开始",
@@ -517,6 +519,7 @@ export function WorkflowHistoryPanel({
   ...actions
 }: WorkflowHistoryPanelProps) {
   const [filterId, setFilterId] = useState("all");
+  const [dateRange, setDateRange] = useState<HistoryDateRange>({});
   const [items, setItems] = useState<readonly WorkflowHistoryRecord[]>([]);
   const [cursor, setCursor] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState(initialWorkflowId);
@@ -530,6 +533,18 @@ export function WorkflowHistoryPanel({
   const detailRequestRef = useRef(0);
   const moreLoadingRef = useRef(false);
   const filter = FILTERS.find((candidate) => candidate.id === filterId)!;
+  const resetList = () => {
+    ++listRequestRef.current;
+    moreLoadingRef.current = false;
+    setMoreLoading(false);
+    setCursor(null);
+    setItems([]);
+    setSelectedId(null);
+    setDetail(null);
+    setDetailError(null);
+    setListError(null);
+    setLoaded(false);
+  };
   const refresh = () => {
     setLoaded(false);
     setListError(null);
@@ -542,6 +557,7 @@ export function WorkflowHistoryPanel({
     let cancelled = false;
     void client
       .list({
+        ...dateRange,
         ...(canvasId ? { canvasId } : {}),
         ...(filter.statuses ? { statuses: filter.statuses } : {}),
         limit: 30,
@@ -557,12 +573,15 @@ export function WorkflowHistoryPanel({
       .catch((error) => {
         if (cancelled || request !== listRequestRef.current) return;
         setListError(readableError(error));
+        setItems([]);
+        setCursor(null);
         setLoaded(true);
       });
     return () => {
       cancelled = true;
+      ++listRequestRef.current;
     };
-  }, [client, canvasId, filter, revision]);
+  }, [client, canvasId, filter, revision, dateRange]);
 
   useEffect(() => {
     if (!selectedId) return;
@@ -591,6 +610,7 @@ export function WorkflowHistoryPanel({
     setMoreLoading(true);
     try {
       const page = await client.list({
+        ...dateRange,
         ...(canvasId ? { canvasId } : {}),
         ...(filter.statuses ? { statuses: filter.statuses } : {}),
         cursor,
@@ -605,8 +625,10 @@ export function WorkflowHistoryPanel({
     } catch (error) {
       if (request === listRequestRef.current) setListError(readableError(error));
     } finally {
-      moreLoadingRef.current = false;
-      setMoreLoading(false);
+      if (request === listRequestRef.current) {
+        moreLoadingRef.current = false;
+        setMoreLoading(false);
+      }
     }
   }
 
@@ -627,11 +649,8 @@ export function WorkflowHistoryPanel({
               className={`history-filter${candidate.id === filterId ? " is-active" : ""}`}
               onClick={() => {
                 if (candidate.id === filterId) return;
+                resetList();
                 setFilterId(candidate.id);
-                setSelectedId(null);
-                setDetail(null);
-                setDetailError(null);
-                setLoaded(false);
               }}
             >
               {candidate.label}
@@ -647,6 +666,12 @@ export function WorkflowHistoryPanel({
             <ArrowClockwise size={16} aria-hidden="true" />
           </button>
         </div>
+        <HistoryDateRangeFilter
+          onApply={(range) => {
+            resetList();
+            setDateRange(range);
+          }}
+        />
         <div className="history-list__scroll">
           {listError ? (
             <p className="history-list__error" role="alert">

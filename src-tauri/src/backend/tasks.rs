@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex, Weak},
+};
 
 use rand::Rng as _;
 use serde_json::{Value, json};
@@ -29,6 +32,33 @@ const MAX_AUTOMATIC_RETRIES: u32 = 3;
 const DEFAULT_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 const WAN_VIDEO_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
 
+#[derive(Default)]
+struct VideoPollRegistry {
+    slots: Mutex<HashMap<String, Weak<VideoPollSlot>>>,
+}
+
+#[derive(Default)]
+struct VideoPollSlot {
+    gate: Arc<tokio::sync::Mutex<()>>,
+    wake: tokio::sync::Notify,
+}
+
+impl VideoPollRegistry {
+    fn slot(&self, task_id: &str) -> BackendResult<Arc<VideoPollSlot>> {
+        let mut slots = self
+            .slots
+            .lock()
+            .map_err(|_| BackendError::Conflict("video polling registry is unavailable".into()))?;
+        slots.retain(|_, slot| slot.strong_count() > 0);
+        if let Some(slot) = slots.get(task_id).and_then(Weak::upgrade) {
+            return Ok(slot);
+        }
+        let slot = Arc::new(VideoPollSlot::default());
+        slots.insert(task_id.to_string(), Arc::downgrade(&slot));
+        Ok(slot)
+    }
+}
+
 struct SuccessfulSubmission {
     attempt_id: String,
     call_id: String,
@@ -52,6 +82,7 @@ pub struct GenerationTaskService {
     media: MediaResolver,
     local_results: LocalResultService,
     staging: StagingService,
+    video_polls: Arc<VideoPollRegistry>,
 }
 
 impl GenerationTaskService {
@@ -72,6 +103,7 @@ impl GenerationTaskService {
             media,
             local_results,
             staging,
+            video_polls: Arc::new(VideoPollRegistry::default()),
         }
     }
 
@@ -382,17 +414,36 @@ impl GenerationTaskService {
     pub fn query_remote_now(&self, task_id: &str) -> BackendResult<()> {
         info!("[generation] 用户手动触发视频任务状态查询: taskId={task_id}");
         let task = self.storage.get_task_execution(task_id)?;
-        if task.operation != GenerationOperation::VideoGeneration || task.remote_task_id.is_none() {
+        if task.operation != GenerationOperation::VideoGeneration
+            || task
+                .remote_task_id
+                .as_deref()
+                .is_none_or(|id| id.trim().is_empty())
+            || !matches!(
+                task.status,
+                GenerationTaskStatus::Queued | GenerationTaskStatus::Running
+            )
+        {
             return Err(BackendError::validation(
-                "only a video task with a remote task id can be queried",
-                json!({ "taskId": task_id }),
+                "only a queued or running video task with a remote task id can resume polling",
+                json!({ "taskId": task_id, "status": task.status }),
             ));
         }
+        let slot = self.video_polls.slot(task_id)?;
+        let Ok(poll_guard) = slot.gate.clone().try_lock_owned() else {
+            // Reuse the existing worker and leave its retry health untouched.
+            slot.wake.notify_one();
+            return Ok(());
+        };
         self.commit_fact(task_id, GenerationLifecycleFact::ManualObservationRequested)?;
         let service = self.clone();
         let task_id = task_id.to_string();
         tauri::async_runtime::spawn(async move {
-            if let Err(error) = service.poll_video(&task_id).await {
+            let _poll_guard = poll_guard;
+            if let Err(error) = service
+                .poll_video_loop(&task_id, Vec::new(), &slot.wake)
+                .await
+            {
                 let _ = service.finish_with_execution_error(&task_id, error);
             }
         });
@@ -631,6 +682,29 @@ impl GenerationTaskService {
         &self,
         task_id: &str,
         staging_leases: Vec<super::staging::StagingLease>,
+    ) -> BackendResult<()> {
+        let slot = self.video_polls.slot(task_id)?;
+        let _poll_guard = slot.gate.lock().await;
+        // A manual query may have finished before the submission/recovery worker
+        // acquired the gate. Its staging leases still need their normal cleanup.
+        if self
+            .storage
+            .get_task_execution(task_id)?
+            .status
+            .is_terminal()
+        {
+            self.cleanup_staging_leases(task_id, &staging_leases).await;
+            return Ok(());
+        }
+        self.poll_video_loop(task_id, staging_leases, &slot.wake)
+            .await
+    }
+
+    async fn poll_video_loop(
+        &self,
+        task_id: &str,
+        staging_leases: Vec<super::staging::StagingLease>,
+        wake: &tokio::sync::Notify,
     ) -> BackendResult<()> {
         let poll_interval = video_poll_interval(
             self.storage
@@ -984,7 +1058,7 @@ impl GenerationTaskService {
                     return Ok(());
                 }
             }
-            tokio::time::sleep(poll_interval).await;
+            let _ = tokio::time::timeout(poll_interval, wake.notified()).await;
         }
     }
 
@@ -1205,6 +1279,53 @@ fn video_poll_interval(model_id: Option<&str>) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn manual_queries_share_a_poll_worker_and_wake_its_next_observation() {
+        let registry = Arc::new(VideoPollRegistry::default());
+        let active = registry.slot("task-1").expect("active slot");
+        let active_guard = active.gate.clone().lock_owned().await;
+        let manual = registry.clone().slot("task-1").expect("manual slot");
+        assert!(Arc::ptr_eq(&active, &manual));
+        assert!(manual.gate.clone().try_lock_owned().is_err());
+
+        manual.wake.notify_one();
+        tokio::time::timeout(
+            std::time::Duration::from_millis(100),
+            active.wake.notified(),
+        )
+        .await
+        .expect("manual query wakes the existing worker");
+
+        let other = registry.slot("task-2").expect("independent slot");
+        assert!(other.gate.clone().try_lock_owned().is_ok());
+        drop(active_guard);
+        assert!(manual.gate.clone().try_lock_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancelled_poll_worker_releases_its_task_for_manual_recovery() {
+        let registry = VideoPollRegistry::default();
+        let slot = registry.slot("task-1").expect("slot");
+        let worker_slot = slot.clone();
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let worker = tokio::spawn(async move {
+            let _guard = worker_slot.gate.lock().await;
+            ready.send(()).expect("worker ready");
+            std::future::pending::<()>().await;
+        });
+        started.await.expect("worker started");
+        assert!(slot.gate.clone().try_lock_owned().is_err());
+        worker.abort();
+        assert!(worker.await.expect_err("worker cancelled").is_cancelled());
+        assert!(slot.gate.clone().try_lock_owned().is_ok());
+
+        let expired = Arc::downgrade(&slot);
+        drop(slot);
+        assert!(expired.upgrade().is_none());
+        let _next = registry.slot("task-2").expect("next task");
+        assert_eq!(registry.slots.lock().expect("registry").len(), 1);
+    }
 
     #[test]
     fn retry_delay_uses_two_four_eight_second_nominal_windows() {
