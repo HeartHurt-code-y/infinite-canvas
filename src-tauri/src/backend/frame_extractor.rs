@@ -21,6 +21,7 @@ use super::composer::VideoCompositionService;
 use super::error::{BackendError, BackendResult};
 
 /// Windows 下隐藏子进程控制台窗口。
+#[cfg(windows)]
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 /// 内存中最多保留的任务数；超出后清掉已终态的最旧记录，防止长会话无界增长。
