@@ -704,6 +704,7 @@ mod tests {
             VideoCompositionService::new(
                 PathBuf::from("C:\\tmp\\downloads"),
                 PathBuf::from("C:\\tmp\\engine"),
+                PathBuf::from("C:\\tmp\\resources"),
             )
             .expect("composer"),
         );

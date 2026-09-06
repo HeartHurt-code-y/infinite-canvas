@@ -76,12 +76,14 @@ impl BackendState {
             providers.client().clone(),
             downloads_directory.clone(),
         );
-        // FFmpeg 合成引擎同样放在应用数据目录；合成产物与下载产物同目录。
+        // FFmpeg 合成引擎：安装包内置构建（resources/ffmpeg）优先，缺失时
+        // 回退到应用数据目录并自动下载。合成产物与下载产物同目录。
         // 需在 StagingService 之前创建：素材导入遇到不支持格式（如 avif）时
         // 复用同一套 FFmpeg 引擎做本地转码。
         let composer = VideoCompositionService::new(
             downloads_directory.clone(),
             app.path().app_local_data_dir()?.join("ffmpeg-engine"),
+            app.path().resource_dir()?,
         )?;
         let staging = StagingService::new(
             Arc::clone(&storage),

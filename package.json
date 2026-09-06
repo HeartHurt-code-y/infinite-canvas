@@ -28,6 +28,7 @@
     "check": "pnpm check:frontend && pnpm rust:fmt && pnpm rust:clippy",
     "tauri": "tauri",
     "remotion:prepare": "node scripts/prepare-remotion-runtime.mjs",
+    "ffmpeg:prepare": "node scripts/prepare-ffmpeg.mjs",
     "remotion:test": "node --test tools/remotion-runtime/plan.test.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"

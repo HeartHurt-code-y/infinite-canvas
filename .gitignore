@@ -39,3 +39,6 @@ src-tauri/resources/remotion-runtime/
 tools/remotion-runtime/.remotion/
 tools/remotion-runtime/.smoke/
 tools/remotion-runtime/.build-node/
+
+# Generated, bundled FFmpeg engine (rebuilt by ffmpeg:prepare)
+src-tauri/resources/ffmpeg/

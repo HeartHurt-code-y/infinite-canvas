@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.infinitecanvas.desktop",
   "build": {
-    "beforeDevCommand": "pnpm remotion:prepare && pnpm dev",
+    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm remotion:prepare && pnpm build",
+    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -40,7 +40,8 @@
     "publisher": "infinitecanvas",
     "copyright": "Copyright © 2026 infinitecanvas",
     "resources": {
-      "resources/remotion-runtime/": "remotion-runtime/"
+      "resources/remotion-runtime/": "remotion-runtime/",
+      "resources/ffmpeg/": "ffmpeg/"
     },
     "windows": {
       "wix": {

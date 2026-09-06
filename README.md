@@ -23,13 +23,15 @@ pnpm tauri:dev
 | 命令               | 用途                                    |
 | ------------------ | --------------------------------------- |
 | `pnpm dev`         | 仅启动 Vite 前端                        |
-| `pnpm tauri:dev`   | 启动完整桌面应用                        |
+| `pnpm tauri:dev`   | 启动完整桌面应用（自动预置动画与 FFmpeg 引擎） |
 | `pnpm build`       | 类型检查并构建前端                      |
-| `pnpm tauri:build` | 构建桌面安装包                          |
+| `pnpm tauri:build` | 构建桌面安装包（内置 FFmpeg，离线可用） |
 | `pnpm test`        | 运行前端测试                            |
 | `pnpm lint`        | 执行类型感知 ESLint 检查                |
 | `pnpm format`      | 使用 Prettier 格式化工程文件            |
 | `pnpm check`       | 执行前端、Rust 格式化及 Clippy 全量检查 |
+| `pnpm ffmpeg:prepare` | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/` |
+| `pnpm remotion:prepare` | 准备内置动画渲染运行时               |
 
 ## 系统访问能力
 

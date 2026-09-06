@@ -1,10 +1,13 @@
 //! 画布视频合成：内置 FFmpeg 引擎的确定性合成服务。
 //!
-//! 引擎策略与 yt-dlp 下载器一致：首次使用（或用户手动触发）时把官方独立构建的
-//! FFmpeg 下载到应用数据目录。下载与解包复用 `ffmpeg-sidecar` crate（它会按平台
-//! 选择官方构建源），但安装位置由本服务指定为应用数据目录——crate 默认安装到
-//! 可执行文件同目录，打包安装后会落在不可写的 Program Files。合成产物与下载
-//! 产物、生成结果一致，落在系统下载目录的「无限画布」子目录。
+//! 引擎策略分两级：安装包内置构建优先（构建期由 `scripts/prepare-ffmpeg.mjs`
+//! 下载官方 Windows 构建到 `resources/ffmpeg/` 并随包分发，只读）；资源目录
+//! 缺失或不完整时，回退到与 yt-dlp 下载器一致的策略——首次使用（或用户手动
+//! 触发）时把官方独立构建的 FFmpeg 下载到应用数据目录。下载与解包复用
+//! `ffmpeg-sidecar` crate（它会按平台选择官方构建源），但安装位置由本服务
+//! 指定为应用数据目录——crate 默认安装到可执行文件同目录，打包安装后会落在
+//! 不可写的 Program Files。合成产物与下载产物、生成结果一致，落在系统下载
+//! 目录的「无限画布」子目录。
 //!
 //! 合成实现取代前端 MediaRecorder 实时录制：各输入（本地文件或 http(s) 地址）
 //! 先用 ffprobe 探测时长/尺寸/音轨，再经 filter_complex 统一缩放补边到首段尺寸
@@ -105,7 +108,10 @@ struct Inner {
     /// 串行化引擎安装，避免并发重复下载二进制。
     engine_lock: AsyncMutex<()>,
     downloads_dir: PathBuf,
+    /// 可写引擎目录（应用数据目录）；下载回退的落点与版本记录位置。
     engine_dir: PathBuf,
+    /// 安装包资源目录（只读）。其 `ffmpeg/` 子目录为构建期预置的内置引擎。
+    resource_dir: PathBuf,
 }
 
 /// 画布视频合成服务。可克隆后在异步任务中使用。
@@ -124,7 +130,11 @@ struct MediaProbe {
 }
 
 impl VideoCompositionService {
-    pub fn new(downloads_dir: PathBuf, engine_dir: PathBuf) -> BackendResult<Self> {
+    pub fn new(
+        downloads_dir: PathBuf,
+        engine_dir: PathBuf,
+        resource_dir: PathBuf,
+    ) -> BackendResult<Self> {
         Ok(Self {
             inner: Arc::new(Inner {
                 jobs: std::sync::Mutex::new(HashMap::new()),
@@ -135,28 +145,60 @@ impl VideoCompositionService {
                 engine_lock: AsyncMutex::new(()),
                 downloads_dir,
                 engine_dir,
+                resource_dir,
             }),
         })
     }
 
     // ---------- 引擎管理 ----------
 
-    fn ffmpeg_binary(&self) -> PathBuf {
-        self.inner.engine_dir.join(if cfg!(windows) {
+    fn ffmpeg_binary_name() -> &'static str {
+        if cfg!(windows) {
             "ffmpeg.exe"
         } else {
             "ffmpeg"
-        })
+        }
     }
 
-    fn ffprobe_binary(&self) -> PathBuf {
-        self.inner.engine_dir.join(if cfg!(windows) {
+    fn ffprobe_binary_name() -> &'static str {
+        if cfg!(windows) {
             "ffprobe.exe"
         } else {
             "ffprobe"
-        })
+        }
     }
 
+    /// 安装包内置引擎目录（只读资源）。
+    fn builtin_engine_dir(&self) -> PathBuf {
+        self.inner.resource_dir.join("ffmpeg")
+    }
+
+    /// 内置引擎是否完整可用（ffmpeg + ffprobe 都在资源目录中）。
+    fn has_builtin_engine(&self) -> bool {
+        let directory = self.builtin_engine_dir();
+        directory.join(Self::ffmpeg_binary_name()).is_file()
+            && directory.join(Self::ffprobe_binary_name()).is_file()
+    }
+
+    /// 生效引擎目录：内置构建完整时优先使用只读资源目录，否则回退到应用数据目录。
+    fn active_engine_dir(&self) -> PathBuf {
+        if self.has_builtin_engine() {
+            self.builtin_engine_dir()
+        } else {
+            self.inner.engine_dir.clone()
+        }
+    }
+
+    fn ffmpeg_binary(&self) -> PathBuf {
+        self.active_engine_dir().join(Self::ffmpeg_binary_name())
+    }
+
+    fn ffprobe_binary(&self) -> PathBuf {
+        self.active_engine_dir().join(Self::ffprobe_binary_name())
+    }
+
+    /// 生效引擎版本记录。version.txt 始终写在可写的应用数据目录
+    /// （资源目录只读不可写），内置与下载引擎共用同一记录位置。
     fn installed_version(&self) -> Option<String> {
         std::fs::read_to_string(self.inner.engine_dir.join("version.txt"))
             .ok()
@@ -205,7 +247,7 @@ impl VideoCompositionService {
         }
         let install_result: BackendResult<String> = async {
             let _guard = self.inner.engine_lock.lock().await;
-            if self.ffmpeg_binary().is_file() {
+            if self.ffmpeg_binary().is_file() && self.ffprobe_binary().is_file() {
                 return match self.installed_version() {
                     Some(version) => Ok(version),
                     None => self.probe_and_record_version().await,
@@ -292,6 +334,7 @@ impl VideoCompositionService {
     }
 
     /// 完整性之外还要求引擎能真实执行（拦截杀毒软件隔离、平台不匹配等）。
+    /// 探测对象是当前生效二进制（内置或下载回退），版本记录写入可写目录。
     async fn probe_and_record_version(&self) -> BackendResult<String> {
         let reported = self.probe_binary_version(&self.ffmpeg_binary()).await?;
         tokio::fs::write(self.inner.engine_dir.join("version.txt"), &reported).await?;
@@ -1085,5 +1128,77 @@ mod tests {
         assert!(is_remote_source("http://example.com/a.mp4"));
         assert!(!is_remote_source(r"C:\视频\a.mp4"));
         assert!(!is_remote_source("ftp://example.com/a.mp4"));
+    }
+
+    #[test]
+    fn builtin_engine_takes_precedence_over_download_dir() {
+        let resource = tempfile::tempdir().unwrap();
+        let builtin = resource.path().join("ffmpeg");
+        std::fs::create_dir_all(&builtin).unwrap();
+        std::fs::write(
+            builtin.join(VideoCompositionService::ffmpeg_binary_name()),
+            b"fixture",
+        )
+        .unwrap();
+        std::fs::write(
+            builtin.join(VideoCompositionService::ffprobe_binary_name()),
+            b"fixture",
+        )
+        .unwrap();
+        let download = tempfile::tempdir().unwrap();
+        let service = VideoCompositionService::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            download.path().to_path_buf(),
+            resource.path().to_path_buf(),
+        )
+        .unwrap();
+        assert!(service.has_builtin_engine());
+        assert_eq!(
+            service.ffmpeg_binary(),
+            builtin.join(VideoCompositionService::ffmpeg_binary_name())
+        );
+        assert_eq!(
+            service.ffprobe_binary(),
+            builtin.join(VideoCompositionService::ffprobe_binary_name())
+        );
+        assert_eq!(
+            service.engine_status().binary_path,
+            Some(builtin.join(VideoCompositionService::ffmpeg_binary_name()).to_string_lossy().into_owned())
+        );
+    }
+
+    #[test]
+    fn builtin_missing_or_partial_falls_back_to_download_dir() {
+        let resource = tempfile::tempdir().unwrap();
+        let download = tempfile::tempdir().unwrap();
+        let service = VideoCompositionService::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            download.path().to_path_buf(),
+            resource.path().to_path_buf(),
+        )
+        .unwrap();
+        assert!(!service.has_builtin_engine());
+        assert_eq!(
+            service.ffmpeg_binary(),
+            download.path().join(VideoCompositionService::ffmpeg_binary_name())
+        );
+        assert_eq!(
+            service.ffprobe_binary(),
+            download.path().join(VideoCompositionService::ffprobe_binary_name())
+        );
+
+        // 只放 ffmpeg 缺 ffprobe：仍视为不完整，整体回退到下载目录。
+        let partial = resource.path().join("ffmpeg");
+        std::fs::create_dir_all(&partial).unwrap();
+        std::fs::write(
+            partial.join(VideoCompositionService::ffmpeg_binary_name()),
+            b"fixture",
+        )
+        .unwrap();
+        assert!(!service.has_builtin_engine());
+        assert_eq!(
+            service.ffmpeg_binary(),
+            download.path().join(VideoCompositionService::ffmpeg_binary_name())
+        );
     }
 }
