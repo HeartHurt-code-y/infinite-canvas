@@ -286,7 +286,7 @@ describe("App workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("opens a streamlined full-screen source preview", () => {
+  it("opens a streamlined full-screen source preview", async () => {
     render(<App />);
 
     const card = screen.getByRole("button", { name: "预览图片素材详情：林遥·角色正面" });
@@ -295,7 +295,8 @@ describe("App workspace", () => {
     card.focus();
     fireEvent.click(card);
 
-    const dialog = screen.getByRole("dialog", { name: "林遥·角色正面" });
+    // 素材详情弹窗按需懒加载（deferredDialogs），首次打开需等待模块就绪。
+    const dialog = await screen.findByRole("dialog", { name: "林遥·角色正面" });
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByText("asset-image-01")).toBeInTheDocument();
     expect(within(dialog).getByText("云端素材库")).toBeInTheDocument();
@@ -656,7 +657,8 @@ describe("App workspace", () => {
     const card = await screen.findByRole("button", { name: "预览图片素材详情：待删除素材" });
     fireEvent.click(card);
 
-    const dialog = screen.getByRole("dialog", { name: "待删除素材" });
+    // 素材详情弹窗按需懒加载（deferredDialogs），首次打开需等待模块就绪。
+    const dialog = await screen.findByRole("dialog", { name: "待删除素材" });
     // 第一次点击「删除素材」只进入确认态，不触发删除接口。
     fireEvent.click(within(dialog).getByRole("button", { name: "删除素材：待删除素材" }));
     expect(deleteCalls).toHaveLength(0);
@@ -825,7 +827,8 @@ describe("App workspace", () => {
     expect(within(brokenImageCard).getByText("预览不可用")).toBeInTheDocument();
 
     fireEvent.click(brokenImageCard);
-    const dialog = screen.getByRole("dialog", { name: "img-alpha" });
+    // 素材详情弹窗按需懒加载（deferredDialogs），首次打开需等待模块就绪。
+    const dialog = await screen.findByRole("dialog", { name: "img-alpha" });
     fireEvent.error(within(dialog).getByRole("img", { name: "img-alpha" }));
     expect(within(dialog).getByText("预览不可用")).toBeInTheDocument();
     expect(within(dialog).queryByText(fullAssetReference)).not.toBeInTheDocument();
