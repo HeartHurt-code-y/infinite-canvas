@@ -162,15 +162,6 @@ pub enum ImageSource {
     },
 }
 
-impl ImageSource {
-    /// 图层元数据（仅 Seedream 图层拆分场景有值）。
-    pub fn layer(&self) -> Option<&ImageLayerMetadata> {
-        match self {
-            ImageSource::Url { layer, .. } | ImageSource::Base64 { layer, .. } => layer.as_ref(),
-        }
-    }
-}
-
 /// 媒体类型的稳定排序权重：image < video < audio，用于 content 数组稳定排序。
 fn media_kind_rank(media_type: MediaType) -> u8 {
     match media_type {
@@ -955,21 +946,8 @@ impl ProviderRuntime {
         })
     }
 
-    pub async fn raw_json_request(
-        &self,
-        provider_connection_id: &str,
-        method: Method,
-        path: &str,
-        query: &[(&str, String)],
-        body: Option<&Value>,
-    ) -> BackendResult<RawProviderResponse> {
-        self.raw_json_request_with_headers(provider_connection_id, method, path, query, body, &[])
-            .await
-    }
-
-    /// 与 `raw_json_request` 相同，但可指定模型令牌分组：
-    /// `token_group = Some(name)` 时使用该分组的密钥发起请求（不同分组能访问的
-    /// 模型目录不同，拉取模型与连通性测试需要按分组令牌进行）。
+    /// 可指定模型令牌分组：`token_group = Some(name)` 时使用该分组的密钥发起
+    /// 请求（不同分组能访问的模型目录不同，拉取模型与连通性测试需要按分组令牌进行）。
     pub async fn raw_json_request_with_token_group(
         &self,
         provider_connection_id: &str,
@@ -1053,23 +1031,6 @@ impl ProviderRuntime {
             headers,
             body,
         })
-    }
-
-    /// 与 `raw_json_request` 相同，但支持附加自定义请求头。
-    /// 文本模型适配层需要它传递协议特定头（如 Anthropic 的 `anthropic-version`）。
-    #[allow(clippy::too_many_arguments)]
-    pub async fn raw_json_request_with_headers(
-        &self,
-        provider_connection_id: &str,
-        method: Method,
-        path: &str,
-        query: &[(&str, String)],
-        body: Option<&Value>,
-        extra_headers: &[(&str, &str)],
-    ) -> BackendResult<RawProviderResponse> {
-        let context = self.resolve_current(provider_connection_id)?;
-        self.send_raw_json_request(&context, method, path, query, body, extra_headers)
-            .await
     }
 
     #[allow(clippy::too_many_arguments)]
