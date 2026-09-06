@@ -2,7 +2,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { describe, expect, it, vi } from "vitest";
 
 import type { RealPersonAssetLibraryClient, RealPersonGroup } from "../../lib/backend";
-import { RealPersonAssetDialog } from "./AssetLibraryViews";
+import { RealPersonAssetDialog } from "./AssetDialogs";
 
 const AUTHORIZED_GROUP: RealPersonGroup = {
   id: 128,
