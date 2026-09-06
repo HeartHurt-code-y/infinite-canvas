@@ -33,7 +33,12 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg"]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 rand = "0.9"
 regex = "1"
-reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls", "stream"] }
+# system-proxy: 启用 Windows 注册表 / macOS 系统配置代理读取（企业代理环境适配；
+# 环境变量 HTTP_PROXY/HTTPS_PROXY/NO_PROXY 由 reqwest 默认自动读取）
+# rustls-tls-native-roots: 信任操作系统证书存储（企业 MITM 解密代理把根证书装入
+# Windows 证书存储后即可通过 TLS 校验）；原 rustls-tls(webpki 内置根) 会被企业
+# 解密代理拦截而失败
+reqwest = { version = "0.12", default-features = false, features = ["json", "multipart", "rustls-tls-native-roots", "stream", "system-proxy"] }
 rusqlite = { version = "0.40", features = ["bundled"] }
 sha2 = "0.10"
 thiserror = "2"

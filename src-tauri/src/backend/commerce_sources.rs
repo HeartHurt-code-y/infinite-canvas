@@ -221,7 +221,10 @@ async fn client_for_public_url(url: &Url) -> Result<Client, String> {
         .connect_timeout(Duration::from_secs(6))
         .timeout(PAGE_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
-        .no_proxy()
+        // 走企业代理（系统/环境代理，与全局一致）：不再禁用代理。
+        // 无代理配置直连时 SSRF 防护完整（下方域名解析校验 + resolve_to_addrs）；
+        // 走代理时目标域名由代理服务器解析，防护强度依赖代理可信，
+        // 属"商品源抓取适配企业代理"的已知取舍。
         .user_agent("InfiniteCanvas/1.0 ProductSourceReader");
     if matches!(url.host(), Some(Host::Domain(_))) {
         let addresses: Vec<_> = tokio::net::lookup_host((host, port))
