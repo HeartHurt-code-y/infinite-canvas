@@ -5129,7 +5129,7 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
 
     // 新建分组弹窗按需懒加载（deferredDialogs），CI 首触发时加载可能超过
     // testing-library 默认 1s 轮询超时，这里显式放宽；输入框是弹窗的同步子节点。
-    const input = await screen.findByLabelText(/分组名称/, { timeout: 5_000 });
+    const input = await screen.findByLabelText(/分组名称/, {}, { timeout: 5_000 });
     fireEvent.change(input, { target: { value: "  新品物料  " } });
     fireEvent.click(screen.getByRole("button", { name: "创建分组" }));
 
