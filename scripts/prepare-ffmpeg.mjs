@@ -2,14 +2,12 @@
 // src-tauri/resources/ffmpeg/，随安装包分发给客户，使视频合成/转码/抽帧
 // 等能力离线可用（无需首次运行时联网下载）。
 //
-// 下载源与 ffmpeg-sidecar 2.5.2 的 ffmpeg_download_url() 保持一致
-// （gyan.dev essentials 构建），保证"内置优先、运行时下载回退"两条路径
-// 拿到的是同一类官方构建。
+// 下载源与 ffmpeg-sidecar 2.5.2 的 ffmpeg_download_url() 保持一致，
+// 保证“内置优先、运行时下载回退”两条路径拿到的是同一类官方构建。
 //
-// 平台策略：仅 Windows（x64/arm64）预置内置引擎；macOS/Linux 跳过并在
-// 运行时回退到下载（这些平台的 ffmpeg-sidecar 使用各自官方源）。
-// 失败会中断构建（与 remotion:prepare 一致），避免产出"宣称内置但实际
-// 缺失"的安装包。
+// 平台策略：Windows（x64/arm64）、macOS（x64/arm64）、Linux（x64/arm64）
+// 都在构建期预置内置引擎；失败会中断构建（与 remotion:prepare 一致），
+// 避免产出“宣称内置但实际缺失”的安装包。
 
 import {
   createHash,
@@ -22,6 +20,7 @@ import {
   rmSync,
   readdirSync,
   cpSync,
+  chmodSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,8 +30,36 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const destination = path.join(root, "src-tauri", "resources", "ffmpeg");
 const manifestPath = path.join(destination, "manifest.json");
 
-// 与 ffmpeg-sidecar::download::ffmpeg_download_url() 的 Windows 返回值一致。
-const FFMPEG_URL = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+function ffmpegDownloadUrl() {
+  if (process.platform === "win32") {
+    return "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip";
+  }
+  if (process.platform === "darwin" && process.arch === "x64") {
+    return "https://evermeet.cx/ffmpeg/getrelease/zip";
+  }
+  if (process.platform === "darwin" && process.arch === "arm64") {
+    return "https://www.osxexperts.net/ffmpeg80arm.zip";
+  }
+  if (process.platform === "linux" && process.arch === "x64") {
+    return "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-amd64-static.tar.xz";
+  }
+  if (process.platform === "linux" && process.arch === "arm64") {
+    return "https://johnvansickle.com/ffmpeg/releases/ffmpeg-release-arm64-static.tar.xz";
+  }
+  throw new Error(`当前平台不支持自动内置 ffmpeg：${process.platform}/${process.arch}`);
+}
+
+function isArchivePath(filepath) {
+  return filepath.endsWith(".zip") || filepath.endsWith(".tar.xz");
+}
+
+function commandResultToError(name, result) {
+  if (result.status === 0) {
+    return;
+  }
+  const stderr = typeof result.stderr === "string" ? result.stderr : "";
+  throw new Error(`${name} 失败（exit=${result.status}）：${stderr}`);
+}
 
 function ffmpegName() {
   return process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg";
@@ -79,32 +106,87 @@ function zipEntryBinaries(extractDir) {
   return { ffmpeg, ffprobe };
 }
 
-function extractZip(zipPath, extractDir) {
-  // Windows 自带 PowerShell Expand-Archive，避免为构建脚本引入第三方依赖。
-  const result = spawnSync(
-    "powershell",
-    [
-      "-NoProfile",
-      "-NonInteractive",
-      "-Command",
-      `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${extractDir}' -Force`,
-    ],
-    { stdio: "inherit", windowsHide: true },
-  );
-  if (result.status !== 0) {
-    throw new Error("PowerShell Expand-Archive 解压失败");
+function linuxEntryBinaries(extractDir) {
+  const inner = readdirSync(extractDir, { withFileTypes: true })
+    .find((entry) => entry.isDirectory());
+  if (!inner) {
+    throw new Error("解压目录中没有预期的顶层目录");
   }
+  const ffmpeg = path.join(extractDir, inner.name, ffmpegName());
+  const ffprobe = path.join(extractDir, inner.name, ffprobeName());
+  for (const file of [ffmpeg, ffprobe]) {
+    if (!existsSync(file)) {
+      throw new Error(`压缩包中缺少 ${path.basename(file)}`);
+    }
+  }
+  return { ffmpeg, ffprobe };
+}
+
+function macEntryBinaries(extractDir) {
+  const ffmpeg = path.join(extractDir, ffmpegName());
+  const ffprobe = path.join(extractDir, ffprobeName());
+  for (const file of [ffmpeg, ffprobe]) {
+    if (!existsSync(file)) {
+      throw new Error(`压缩包中缺少 ${path.basename(file)}`);
+    }
+  }
+  return { ffmpeg, ffprobe };
+}
+
+function entryBinaries(extractDir) {
+  if (process.platform === "win32") {
+    return zipEntryBinaries(extractDir);
+  }
+  if (process.platform === "linux") {
+    return linuxEntryBinaries(extractDir);
+  }
+  if (process.platform === "darwin") {
+    return macEntryBinaries(extractDir);
+  }
+  throw new Error(`当前平台不支持：${process.platform}`);
+}
+
+function extractZip(zipPath, extractDir) {
+  if (process.platform === "win32") {
+    const result = spawnSync(
+      "powershell",
+      [
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        `Expand-Archive -LiteralPath '${zipPath}' -DestinationPath '${extractDir}' -Force`,
+      ],
+      { stdio: "inherit", windowsHide: true },
+    );
+    commandResultToError("Expand-Archive", result);
+    return;
+  }
+  const result = spawnSync("unzip", ["-q", zipPath, "-d", extractDir], {
+    stdio: "inherit",
+  });
+  commandResultToError("unzip", result);
+}
+
+function extractTarXz(archivePath, extractDir) {
+  const result = spawnSync("tar", ["-xJf", archivePath, "-C", extractDir], {
+    stdio: "inherit",
+  });
+  commandResultToError("tar", result);
+}
+
+function extractArchive(archivePath, extractDir) {
+  if (!isArchivePath(archivePath)) {
+    throw new Error(`不支持的归档格式：${archivePath}`);
+  }
+  if (archivePath.endsWith(".zip")) {
+    extractZip(archivePath, extractDir);
+    return;
+  }
+  extractTarXz(archivePath, extractDir);
 }
 
 async function prepare() {
-  if (process.platform !== "win32") {
-    console.log(
-      "[ffmpeg:prepare] 非 Windows 平台跳过内置 FFmpeg 预置，运行时将回退到 ffmpeg-sidecar 下载。",
-    );
-    mkdirSync(destination, { recursive: true });
-    process.exit(0);
-  }
-
+  const ffmpegDownloadUrlValue = ffmpegDownloadUrl();
   const force = process.argv.includes("--force");
   const ffmpegPath = path.join(destination, ffmpegName());
   const ffprobePath = path.join(destination, ffprobeName());
@@ -125,17 +207,18 @@ async function prepare() {
     process.exit(0);
   }
 
-  console.log("[ffmpeg:prepare] 准备内置 FFmpeg 引擎（gyan.dev essentials）");
+  console.log("[ffmpeg:prepare] 准备内置 FFmpeg 引擎");
   const tempRoot = path.join(destination, ".prepare");
-  const zipPath = path.join(tempRoot, "ffmpeg-essentials.zip");
+  const archiveName = new URL(ffmpegDownloadUrlValue).pathname.split("/").pop() || "ffmpeg-archive";
+  const archivePath = path.join(tempRoot, archiveName);
   const extractDir = path.join(tempRoot, "out");
   try {
     rmSync(tempRoot, { recursive: true, force: true });
     mkdirSync(extractDir, { recursive: true });
 
-    console.log(`[ffmpeg:prepare] 下载 ${FFMPEG_URL}`);
+    console.log(`[ffmpeg:prepare] 下载 ${ffmpegDownloadUrlValue}`);
     // Node 22+ 全局 fetch；下载失败会抛错并中断构建。
-    const response = await fetch(FFMPEG_URL);
+    const response = await fetch(ffmpegDownloadUrlValue);
     if (!response.ok) {
       throw new Error(`下载失败：HTTP ${response.status}`);
     }
@@ -143,15 +226,19 @@ async function prepare() {
     if (bytes.length === 0) {
       throw new Error("下载内容为空");
     }
-    writeFileSync(zipPath, bytes);
+    writeFileSync(archivePath, bytes);
     console.log(`[ffmpeg:prepare] 下载完成：${(bytes.length / 1024 / 1024).toFixed(1)} MiB`);
 
-    extractZip(zipPath, extractDir);
-    const { ffmpeg, ffprobe } = zipEntryBinaries(extractDir);
+    extractArchive(archivePath, extractDir);
+    const { ffmpeg, ffprobe } = entryBinaries(extractDir);
 
     mkdirSync(destination, { recursive: true });
     cpSync(ffmpeg, ffmpegPath);
     cpSync(ffprobe, ffprobePath);
+    if (process.platform !== "win32") {
+      chmodSync(ffmpegPath, 0o755);
+      chmodSync(ffprobePath, 0o755);
+    }
 
     const { version, firstLine } = probeVersion(ffmpegPath);
     console.log(`[ffmpeg:prepare] 引擎就绪：${firstLine}`);
@@ -162,7 +249,7 @@ async function prepare() {
         {
           schemaVersion: 1,
           version,
-          source: FFMPEG_URL,
+          source: ffmpegDownloadUrlValue,
           ffmpegSha256: sha256(ffmpegPath),
           ffprobeSha256: sha256(ffprobePath),
           preparedAt: new Date().toISOString(),
