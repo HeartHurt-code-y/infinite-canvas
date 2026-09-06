@@ -5,9 +5,8 @@ const host = process.env.TAURI_DEV_HOST;
 const isWindows = process.env.TAURI_ENV_PLATFORM === "windows";
 
 // Stable framework chunks keep the application entry focused on product code and
-// let Tauri reuse cached React/canvas dependencies across releases. Feature-only
-// modules still use explicit dynamic imports and remain outside these groups.
-// `[\\/]` separators keep the tests correct on Windows paths.
+// let Tauri reuse cached React/canvas dependencies across releases.
+// `[\\/]` separators keep regex checks correct on Windows paths.
 const vendorGroups = [
   {
     name: "icons-vendor",
@@ -26,6 +25,13 @@ const vendorGroups = [
     test: /[\\/]node_modules[\\/](react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/](?:query-core|react-query)[\\/]|use-sync-external-store[\\/]|zustand[\\/])/,
   },
 ];
+
+function manualVendorChunk(id: string): string | undefined {
+  if (!id.includes("/node_modules/") && !id.includes("\\node_modules\\")) return;
+  for (const { name, test } of vendorGroups) {
+    if (test.test(id)) return name;
+  }
+}
 
 // https://vite.dev/config/
 export default defineConfig(() => ({
@@ -46,10 +52,8 @@ export default defineConfig(() => ({
     sourcemap: !!process.env.TAURI_ENV_DEBUG,
     rolldownOptions: {
       output: {
-        // Vite 8 (Rolldown) replacement for the deprecated `manualChunks` form.
-        codeSplitting: {
-          groups: vendorGroups,
-        },
+        // Keep framework-heavy dependencies in dedicated vendor chunks.
+        manualChunks: (id) => manualVendorChunk(id),
       },
     },
   },

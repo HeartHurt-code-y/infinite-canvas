@@ -1,13 +1,28 @@
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { X } from "@phosphor-icons/react/X";
 import { lazy } from "react";
-import { loadHistoryDialog, loadProviderSettingsDialog } from "./deferredDialogLoaders";
+import {
+  loadAssetGroupCreateDialog,
+  loadAssetSourceDialog,
+  loadHistoryDialog,
+  loadProviderSettingsDialog,
+  loadRealPersonAssetDialog,
+} from "./deferredDialogLoaders";
 
 export const HistoryDialog = lazy(() =>
   loadHistoryDialog().then((module) => ({ default: module.HistoryDialog })),
 );
 export const ProviderSettingsDialog = lazy(() =>
   loadProviderSettingsDialog().then((module) => ({ default: module.ProviderSettingsDialog })),
+);
+export const AssetSourceDialog = lazy(() =>
+  loadAssetSourceDialog().then((module) => ({ default: module.AssetSourceDialog })),
+);
+export const RealPersonAssetDialog = lazy(() =>
+  loadRealPersonAssetDialog().then((module) => ({ default: module.RealPersonAssetDialog })),
+);
+export const AssetGroupCreateDialog = lazy(() =>
+  loadAssetGroupCreateDialog().then((module) => ({ default: module.AssetGroupCreateDialog })),
 );
 
 export function DeferredDialogFallback({

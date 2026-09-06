@@ -110,14 +110,18 @@ import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import {
   AssetFlow,
-  AssetGroupCreateDialog,
   AssetPanelError,
-  RealPersonAssetDialog,
-  AssetSourceDialog,
   AssetUploadRow,
   RepositoryCard,
 } from "./AssetLibraryViews";
-import { DeferredDialogFallback, HistoryDialog, ProviderSettingsDialog } from "./deferredDialogs";
+import {
+  AssetGroupCreateDialog,
+  AssetSourceDialog,
+  DeferredDialogFallback,
+  HistoryDialog,
+  ProviderSettingsDialog,
+  RealPersonAssetDialog,
+} from "./deferredDialogs";
 import { preloadHistoryDialog, preloadProviderSettingsDialog } from "./deferredDialogLoaders";
 import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "./desktopActions";
 import {
@@ -7399,38 +7403,68 @@ export function WorkspaceApp() {
         </Suspense>
       ) : null}
       {previewAsset ? (
-        <AssetSourceDialog
-          asset={previewAsset}
-          onClose={() => setPreviewAsset(null)}
-          onDelete={
-            previewAsset.source === "cloud" && previewAsset.providerConnectionId
-              ? () => handleDeleteAsset(previewAsset)
-              : null
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="asset-source-dialog"
+              label="媒体预览"
+              onClose={() => setPreviewAsset(null)}
+            />
           }
-          onRename={
-            previewAsset.source === "cloud" &&
-            previewAsset.providerConnectionId &&
-            renamingAssetId == null
-              ? (name) => handleRenameAsset(previewAsset, name)
-              : null
-          }
-        />
+        >
+          <AssetSourceDialog
+            asset={previewAsset}
+            onClose={() => setPreviewAsset(null)}
+            onDelete={
+              previewAsset.source === "cloud" && previewAsset.providerConnectionId
+                ? () => handleDeleteAsset(previewAsset)
+                : null
+            }
+            onRename={
+              previewAsset.source === "cloud" &&
+              previewAsset.providerConnectionId &&
+              renamingAssetId == null
+                ? (name) => handleRenameAsset(previewAsset, name)
+                : null
+            }
+          />
+        </Suspense>
       ) : null}
       {realPersonDialogOpen && assetProvider ? (
-        <RealPersonAssetDialog
-          providerConnectionId={assetProvider.id}
-          providerDisplayName={assetProvider.displayName}
-          onClose={() => setRealPersonDialogOpen(false)}
-          onUploadToGroup={handleImportLocalAssets}
-        />
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="real-person-asset-dialog"
+              label="明星真人素材"
+              onClose={() => setRealPersonDialogOpen(false)}
+            />
+          }
+        >
+          <RealPersonAssetDialog
+            providerConnectionId={assetProvider.id}
+            providerDisplayName={assetProvider.displayName}
+            onClose={() => setRealPersonDialogOpen(false)}
+            onUploadToGroup={handleImportLocalAssets}
+          />
+        </Suspense>
       ) : null}
       {newGroupDialogOpen && assetProvider ? (
-        <AssetGroupCreateDialog
-          providerDisplayName={assetProvider.displayName}
-          busy={creatingGroup}
-          onClose={() => setNewGroupDialogOpen(false)}
-          onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
-        />
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="asset-group-create-dialog"
+              label="新建素材分组"
+              onClose={() => setNewGroupDialogOpen(false)}
+            />
+          }
+        >
+          <AssetGroupCreateDialog
+            providerDisplayName={assetProvider.displayName}
+            busy={creatingGroup}
+            onClose={() => setNewGroupDialogOpen(false)}
+            onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
+          />
+        </Suspense>
       ) : null}
       {previewOutputNode ? (
         <CanvasOutputLightbox
