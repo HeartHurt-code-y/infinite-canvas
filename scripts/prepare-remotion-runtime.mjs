@@ -110,7 +110,8 @@ if (
 }
 
 async function pnpmInstall(directory, production = false) {
-  const args = ["install", "--frozen-lockfile", "--no-fund", ...(production ? ["--prod"] : [])];
+  // pnpm 11 已移除 --no-fund（fund 提示默认关闭），frozen-lockfile/prod 仍受支持。
+  const args = ["install", "--frozen-lockfile", ...(production ? ["--prod"] : [])];
   await new Promise((resolve, reject) => {
     const child =
       process.platform === "win32"

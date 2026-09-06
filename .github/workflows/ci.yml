@@ -40,6 +40,12 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # bundle.resources 指向的两个引擎目录由 prepare 脚本生成且被 gitignore，
+      # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
+      # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
+      - name: Prepare bundled engines
+        run: pnpm ffmpeg:prepare && pnpm remotion:prepare
+
       - name: Run project checks
         run: pnpm check
 
