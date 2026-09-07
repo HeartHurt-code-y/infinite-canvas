@@ -229,6 +229,12 @@ export async function buildVideoContactSheets(
   video.preload = "auto";
   video.muted = true;
   video.playsInline = true;
+  // Tauri 桌面端经 convertFileSrc 得到的 http://asset.localhost/… 与页面 origin 不同，
+  // 必须声明 crossOrigin 才能在 drawImage 后调用 toDataURL / getImageData，
+  // 否则画布会被标记为 tainted 并抛出 SecurityError。
+  if (/^https?:\/\//i.test(videoSrc)) {
+    video.crossOrigin = "anonymous";
+  }
   video.src = videoSrc;
   try {
     if (video.readyState < HTMLMediaElement.HAVE_METADATA) {
