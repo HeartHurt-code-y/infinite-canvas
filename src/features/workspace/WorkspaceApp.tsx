@@ -884,18 +884,14 @@ export function WorkspaceApp() {
 
   // 启动时恢复画布（仅桌面端；首次运行无文档时后端返回 NotFound，保持空白画布）。
   useEffect(() => {
-    console.log("[canvas-restore-debug] useEffect triggered, isDesktop=", isDesktopRuntime(), "alreadyRestored=", canvasRestoredRef.current);
     if (!isDesktopRuntime() || canvasRestoredRef.current) {
-      console.log("[canvas-restore-debug] useEffect skipped, isDesktop=", isDesktopRuntime(), "alreadyRestored=", canvasRestoredRef.current);
       return;
     }
     canvasRestoredRef.current = true;
     let cancelled = false;
-    console.log("[canvas-restore-debug] starting canvas restore, CANVAS_ID=", CANVAS_ID);
     canvasDocumentClient
       .get(CANVAS_ID)
       .then((record) => {
-        console.log("[canvas-restore-debug] .then() called, cancelled=", cancelled, "recordExists=", record != null);
         if (cancelled) return;
         const restored = restoreDocument(record.document);
         if (!restored.ok) return;
@@ -943,11 +939,8 @@ export function WorkspaceApp() {
           `[canvas] 画布状态已恢复: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
         );
       })
-      .catch((error) => {
-        console.log("[canvas-restore-debug] .catch() called, error=", error);
-      })
+      .catch(() => undefined)
       .finally(() => {
-        console.log("[canvas-restore-debug] .finally() called, setting canvasHydrated=true");
         // 不检查 cancelled：即使 useEffect 被重新执行，也需要设置 canvasHydrated=true，
         // 否则会导致 canvasHydrated 永远为 false，提示词同步等依赖它的逻辑永远不执行。
         suppressNextCanvasSaveRef.current = true;
@@ -961,7 +954,6 @@ export function WorkspaceApp() {
   // 兜底：组件挂载后立即设置 canvasHydrated=true，避免画布恢复死锁导致永远为 false。
   // 画布恢复完成后会再次设置（幂等），不会有副作用。
   useEffect(() => {
-    console.log("[canvas-hydrate-debug] mount effect, setting canvasHydrated=true");
     setCanvasHydrated(true);
   }, []);
 
@@ -5960,11 +5952,7 @@ export function WorkspaceApp() {
 
   /** 提示词节点输出变化或新建连线后，自动导入目标生成节点的提示内容。 */
   useEffect(() => {
-    console.log("[prompt-debug] useEffect triggered, canvasHydrated=", canvasHydrated, "promptSourceByTarget size=", promptSourceByTarget.size, "importedSources size=", importedPromptSourcesRef.current.size);
-    if (!canvasHydrated) {
-      console.log("[prompt-debug] useEffect skipped: canvasHydrated=false");
-      return;
-    }
+    if (!canvasHydrated) return;
     const importedSources = importedPromptSourcesRef.current;
     for (const targetKey of importedSources.keys()) {
       if (!promptSourceByTarget.has(targetKey)) importedSources.delete(targetKey);
@@ -5973,7 +5961,6 @@ export function WorkspaceApp() {
       const edgeId = assetEdges.find(
         (edge) => edge.fromKey === source.key && edge.toKey === targetKey,
       )?.id;
-      console.log("[prompt-debug] processing target=", targetKey, "source=", source.key, "edgeId=", edgeId, "sourceTextLen=", source.config.generatedPrompt?.length ?? 0);
       if (edgeId == null) continue;
       const previous = importedSources.get(targetKey);
       const sourceText = source.config.generatedPrompt;
@@ -5981,9 +5968,7 @@ export function WorkspaceApp() {
       const strippedPrompt = stripMarkdown(rawPrompt);
       // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
       const generatedPrompt = strippedPrompt || rawPrompt.trim();
-      console.log("[prompt-debug] target=", targetKey, "strippedLen=", strippedPrompt.length, "generatedLen=", generatedPrompt.length, "previous=", previous ? { edgeId: previous.edgeId, sourceKey: previous.sourceKey, textLen: previous.text?.length ?? 0 } : null);
       if (!generatedPrompt) {
-        console.log("[prompt-debug] target=", targetKey, "generatedPrompt empty, skip");
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;
       }
@@ -5992,23 +5977,27 @@ export function WorkspaceApp() {
         previous?.edgeId === edgeId &&
         previous.sourceKey === source.key &&
         previous.text === sourceText;
-      console.log("[prompt-debug] target=", targetKey, "shouldSkip=", shouldSkip, "currentEditorLen=", currentContent?.plainText.length ?? 0);
       if (shouldSkip) {
-        // 如果编辑器内容为空但 previous 存在，说明之前同步失败或用户清空了，强制重新同步
-        if (currentContent == null || currentContent.plainText.trim() === "") {
-          console.log("[prompt-debug] target=", targetKey, "editor empty but previous exists, force resync");
-        } else {
+        // 如果编辑器内容为空，或包含 markdown 格式标记（说明之前同步的是原始文本，未经过 stripMarkdown 处理），
+        // 强制重新同步，自动修复历史遗留的 markdown 格式问题。
+        const editorText = currentContent?.plainText ?? "";
+        const containsMarkdown =
+          editorText.includes("```") ||
+          /^#{1,6}\s/m.test(editorText) ||
+          /^[-_*]{3,}\s*$/m.test(editorText) ||
+          /^\s*[-*+]\s+/m.test(editorText);
+        if (editorText.trim() !== "" && !containsMarkdown) {
+          // 编辑器内容非空且不包含 markdown 格式，说明是用户手动修改或已正确同步，跳过
           importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
           continue;
         }
+        // 否则强制重新同步
       }
       const replaced = promptContents.replaceText(
         targetKey,
         generatedPrompt,
         mentionCandidatesFor(targetKey),
       );
-      const afterContent = promptContents.read(targetKey);
-      console.log("[prompt-debug] target=", targetKey, "after replaceText replaced=", replaced != null, "afterEditorLen=", afterContent?.plainText.length ?? 0);
       if (replaced == null) continue;
       importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
       frontendLog(
