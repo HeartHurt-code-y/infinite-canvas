@@ -834,6 +834,11 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     }
     this.document = next;
     const result = this.resolveReferences("explicit", true, true);
+    // 将解析后的文档应用到 tiptap 编辑器，否则 UI 不会更新（仅设置 this.document 不够）。
+    // preserveSelection=false：完全替换后选区移到末尾；addToHistory=false：程序化替换不进入撤销历史。
+    if (this.editor != null) {
+      this.applyDocument(false, false);
+    }
     this.notify();
     return result;
   }
