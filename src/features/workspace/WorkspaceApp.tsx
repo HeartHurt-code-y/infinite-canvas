@@ -3095,7 +3095,12 @@ export function WorkspaceApp() {
         })
         .then((result) => {
           const sourceText = result.optimizedPrompt;
-          const generatedPrompt = stripMarkdown(sourceText);
+          const strippedPrompt = stripMarkdown(sourceText);
+          // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
+          const generatedPrompt = strippedPrompt || sourceText.trim();
+          if (strippedPrompt.length === 0 && sourceText.trim().length > 0) {
+            frontendLog("warn", `[canvas] stripMarkdown 返回空，使用原始文本: sourceLen=${sourceText.length}, trimmedLen=${sourceText.trim().length}`);
+          }
           if (generatedPrompt) {
             for (const edge of assetEdges) {
               if (edge.fromKey !== nodeKey) continue;
@@ -5954,7 +5959,13 @@ export function WorkspaceApp() {
         previous.text === sourceText
       )
         continue;
-      const generatedPrompt = stripMarkdown(source.config.generatedPrompt);
+      const rawPrompt = source.config.generatedPrompt;
+      const strippedPrompt = stripMarkdown(rawPrompt);
+      // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
+      const generatedPrompt = strippedPrompt || rawPrompt.trim();
+      if (strippedPrompt.length === 0 && rawPrompt.trim().length > 0) {
+        frontendLog("warn", `[canvas] stripMarkdown 返回空(effect)，使用原始文本: sourceLen=${rawPrompt.length}, trimmedLen=${rawPrompt.trim().length}`);
+      }
       if (!generatedPrompt) {
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;
