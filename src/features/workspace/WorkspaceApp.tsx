@@ -152,7 +152,11 @@ import {
   workflowMaterialPathKey,
   workflowMaterialQuota,
 } from "./workflowMaterials";
-import { XHS_COVER_MAX_REFERENCE_BYTES } from "./xhsCoverWorkflowModel";
+import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
+import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
+import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
+import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
+import { XHS_COVER_MAX_REFERENCE_BYTES, xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
 import type {
   AssetItem,
   AssetKind,
@@ -2509,70 +2513,58 @@ export function WorkspaceApp() {
 
   const exportFilmDocuments = useCallback(
     (key: string) => {
+      const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
+      if (!node) return;
+      const isDrama = Boolean(node.config.comicDrama);
+      const isCommerce = Boolean(node.config.commerce);
+      const isRemotion = Boolean(node.config.remotion);
+      const isCover = Boolean(node.config.xhsCover);
+      if (
+        !isCover &&
+        !isRemotion &&
+        !isDrama &&
+        !isCommerce &&
+        !node.config.checkpoint.film?.artifacts.length
+      )
+        return;
+      const content = isCover
+        ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
+        : isRemotion
+          ? remotionDeliveryMarkdown(node.config.checkpoint)
+          : isCommerce
+            ? commerceDeliveryMarkdown(node.config.checkpoint)
+            : isDrama
+              ? comicDramaDeliveryMarkdown(node.config.checkpoint)
+              : aiFilmDeliveryMarkdown(node.config.checkpoint);
+      if (!content) return;
+      const title = isCover
+        ? "小红书封面制作文档"
+        : isRemotion
+          ? "动画逻辑图制作文档"
+          : isCommerce
+            ? "剧情带货制作文档"
+            : isDrama
+              ? "漫剧制作文档"
+              : "影视制作文档";
+      const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
-        const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
-        if (!node) return;
-        const isDrama = Boolean(node.config.comicDrama);
-        const isCommerce = Boolean(node.config.commerce);
-        const isRemotion = Boolean(node.config.remotion);
-        const isCover = Boolean(node.config.xhsCover);
-        if (
-          !isCover &&
-          !isRemotion &&
-          !isDrama &&
-          !isCommerce &&
-          !node.config.checkpoint.film?.artifacts.length
-        )
-          return;
-        const content = isCover
-          ? (await import("./xhsCoverWorkflowModel")).xhsCoverDeliveryMarkdown(
-              node.config.checkpoint,
-            )
-          : isRemotion
-            ? (await import("./remotionWorkflowModel")).remotionDeliveryMarkdown(
-                node.config.checkpoint,
-              )
-            : isCommerce
-              ? (await import("./commerceWorkflowModel")).commerceDeliveryMarkdown(
-                  node.config.checkpoint,
-                )
-              : isDrama
-                ? (await import("./comicDramaWorkflowModel")).comicDramaDeliveryMarkdown(
-                    node.config.checkpoint,
-                  )
-                : (await import("./aiFilmWorkflowModel")).aiFilmDeliveryMarkdown(
-                    node.config.checkpoint,
-                  );
-        if (!content) return;
-        const title = isCover
-          ? "小红书封面制作文档"
-          : isRemotion
-            ? "动画逻辑图制作文档"
-            : isCommerce
-              ? "剧情带货制作文档"
-              : isDrama
-                ? "漫剧制作文档"
-                : "影视制作文档";
-        const fileName = markdownDocumentExportName(content, key, title);
-        void (async () => {
-          try {
-            if (isDesktopRuntime()) {
-              if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
-            } else {
-              const url = URL.createObjectURL(
-                new Blob([content], { type: "text/markdown;charset=utf-8" }),
-              );
-              const anchor = document.createElement("a");
-              anchor.href = url;
-              anchor.download = fileName;
-              anchor.click();
-              URL.revokeObjectURL(url);
-            }
-            toast.success(`${title}已导出`);
-          } catch (error) {
-            toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
+        try {
+          if (isDesktopRuntime()) {
+            if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
+          } else {
+            const url = URL.createObjectURL(
+              new Blob([content], { type: "text/markdown;charset=utf-8" }),
+            );
+            const anchor = document.createElement("a");
+            anchor.href = url;
+            anchor.download = fileName;
+            anchor.click();
+            URL.revokeObjectURL(url);
           }
-        })();
+          toast.success(`${title}已导出`);
+        } catch (error) {
+          toast.error(`${title}导出失败`, { description: formatRawBackendError(error) });
+        }
       })();
     },
     [knowledgeVideoWorkflowNodes],
