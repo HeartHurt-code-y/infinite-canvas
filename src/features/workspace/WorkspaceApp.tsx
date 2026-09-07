@@ -3953,23 +3953,38 @@ export function WorkspaceApp() {
     [removeAssetEdge, selectEdge, selectedEdgeId],
   );
 
-  /** 指定生成节点当前连接的素材/产物媒体（按建立顺序）。 */
+  /** 指定生成节点当前连接的素材/产物媒体（按建立顺序）。
+   * 支持素材链式连接：素材A→素材B→生成节点时，A 与 B 均作为生成节点输入。 */
   const generationInputs = useCallback(
     (nodeKey: string): readonly GenerationMediaInput[] => {
-      const direct = (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).flatMap((edge) => {
-        const asset = assetNodeByKey.get(edge.fromKey);
-        if (asset) return [assetGenerationInput(asset)];
-        const output = outputNodeByKey.get(edge.fromKey);
+      const visited = new Set<string>();
+      const collected: GenerationMediaInput[] = [];
+      // BFS 逐层收集：先直接连接的素材/产物，再其上游素材，避免循环引用。
+      const queue: string[] = (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).map((edge) => edge.fromKey);
+      while (queue.length > 0) {
+        const sourceKey = queue.shift()!;
+        if (visited.has(sourceKey)) continue;
+        visited.add(sourceKey);
+        const asset = assetNodeByKey.get(sourceKey);
+        if (asset) {
+          collected.push(assetGenerationInput(asset));
+          // 素材的上游素材继续入队，实现链式传递。
+          for (const upstreamEdge of canvasEdgeIndex.byTarget.get(sourceKey) ?? []) {
+            queue.push(upstreamEdge.fromKey);
+          }
+          continue;
+        }
+        const output = outputNodeByKey.get(sourceKey);
         const input = output ? outputGenerationInput(output) : null;
-        return input ? [input] : [];
-      });
+        if (input) collected.push(input);
+      }
       const inherited = inheritedVideoAssetInputs(
         nodeKey,
         canvasEdgeIndex.byTarget,
         assetNodeByKey,
         genTopologyByKey,
       ).map((input) => assetGenerationInput(input.node));
-      return [...direct, ...inherited];
+      return [...collected, ...inherited];
     },
     [assetNodeByKey, canvasEdgeIndex, genTopologyByKey, outputNodeByKey],
   );
