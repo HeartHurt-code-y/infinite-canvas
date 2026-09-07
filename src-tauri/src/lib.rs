@@ -5,6 +5,24 @@ use tauri::Manager as _;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Windows: 禁用 WebView2 跟踪预防，避免第三方存储/cookie 被阻止
+    // （例如素材库、登录等需要第三方存储的功能）
+    #[cfg(target_os = "windows")]
+    {
+        let existing = std::env::var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS").unwrap_or_default();
+        if !existing.contains("TrackingPrevention") {
+            let new_val = if existing.is_empty() {
+                "--disable-features=TrackingPrevention".to_string()
+            } else {
+                format!("{} --disable-features=TrackingPrevention", existing)
+            };
+            // SAFETY: 应用启动时设置环境变量，此时 WebView2 尚未初始化，无数据竞争
+            unsafe {
+                std::env::set_var("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", new_val);
+            }
+        }
+    }
+
     tauri::Builder::default()
         .register_uri_scheme_protocol(
             backend::media_proxy::MEDIA_PROXY_SCHEME,
