@@ -884,12 +884,18 @@ export function WorkspaceApp() {
 
   // 启动时恢复画布（仅桌面端；首次运行无文档时后端返回 NotFound，保持空白画布）。
   useEffect(() => {
-    if (!isDesktopRuntime() || canvasRestoredRef.current) return;
+    console.log("[canvas-restore-debug] useEffect triggered, isDesktop=", isDesktopRuntime(), "alreadyRestored=", canvasRestoredRef.current);
+    if (!isDesktopRuntime() || canvasRestoredRef.current) {
+      console.log("[canvas-restore-debug] useEffect skipped, isDesktop=", isDesktopRuntime(), "alreadyRestored=", canvasRestoredRef.current);
+      return;
+    }
     canvasRestoredRef.current = true;
     let cancelled = false;
+    console.log("[canvas-restore-debug] starting canvas restore, CANVAS_ID=", CANVAS_ID);
     canvasDocumentClient
       .get(CANVAS_ID)
       .then((record) => {
+        console.log("[canvas-restore-debug] .then() called, cancelled=", cancelled, "recordExists=", record != null);
         if (cancelled) return;
         const restored = restoreDocument(record.document);
         if (!restored.ok) return;
@@ -937,8 +943,11 @@ export function WorkspaceApp() {
           `[canvas] 画布状态已恢复: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
         );
       })
-      .catch(() => undefined)
+      .catch((error) => {
+        console.log("[canvas-restore-debug] .catch() called, error=", error);
+      })
       .finally(() => {
+        console.log("[canvas-restore-debug] .finally() called, setting canvasHydrated=true");
         // 不检查 cancelled：即使 useEffect 被重新执行，也需要设置 canvasHydrated=true，
         // 否则会导致 canvasHydrated 永远为 false，提示词同步等依赖它的逻辑永远不执行。
         suppressNextCanvasSaveRef.current = true;
@@ -948,6 +957,13 @@ export function WorkspaceApp() {
       cancelled = true;
     };
   }, [promptContents, restoreDocument]);
+
+  // 兜底：组件挂载后立即设置 canvasHydrated=true，避免画布恢复死锁导致永远为 false。
+  // 画布恢复完成后会再次设置（幂等），不会有副作用。
+  useEffect(() => {
+    console.log("[canvas-hydrate-debug] mount effect, setting canvasHydrated=true");
+    setCanvasHydrated(true);
+  }, []);
 
   // 画布结构/视图变化 → 防抖保存（仅桌面端；浏览器预览模式无本地 SQLite）。
   // 提示词由 Tiptap 在 React 状态外管理，由下方画布容器上的 input 事件监听兜底触发。
