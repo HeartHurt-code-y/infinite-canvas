@@ -5944,7 +5944,11 @@ export function WorkspaceApp() {
 
   /** 提示词节点输出变化或新建连线后，自动导入目标生成节点的提示内容。 */
   useEffect(() => {
-    if (!canvasHydrated) return;
+    console.log("[prompt-debug] useEffect triggered, canvasHydrated=", canvasHydrated, "promptSourceByTarget size=", promptSourceByTarget.size, "importedSources size=", importedPromptSourcesRef.current.size);
+    if (!canvasHydrated) {
+      console.log("[prompt-debug] useEffect skipped: canvasHydrated=false");
+      return;
+    }
     const importedSources = importedPromptSourcesRef.current;
     for (const targetKey of importedSources.keys()) {
       if (!promptSourceByTarget.has(targetKey)) importedSources.delete(targetKey);
@@ -5953,6 +5957,7 @@ export function WorkspaceApp() {
       const edgeId = assetEdges.find(
         (edge) => edge.fromKey === source.key && edge.toKey === targetKey,
       )?.id;
+      console.log("[prompt-debug] processing target=", targetKey, "source=", source.key, "edgeId=", edgeId, "sourceTextLen=", source.config.generatedPrompt?.length ?? 0);
       if (edgeId == null) continue;
       const previous = importedSources.get(targetKey);
       const sourceText = source.config.generatedPrompt;
@@ -5960,10 +5965,9 @@ export function WorkspaceApp() {
       const strippedPrompt = stripMarkdown(rawPrompt);
       // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
       const generatedPrompt = strippedPrompt || rawPrompt.trim();
-      if (strippedPrompt.length === 0 && rawPrompt.trim().length > 0) {
-        frontendLog("warn", `[canvas] stripMarkdown 返回空(effect)，使用原始文本: sourceLen=${rawPrompt.length}, trimmedLen=${rawPrompt.trim().length}`);
-      }
+      console.log("[prompt-debug] target=", targetKey, "strippedLen=", strippedPrompt.length, "generatedLen=", generatedPrompt.length, "previous=", previous ? { edgeId: previous.edgeId, sourceKey: previous.sourceKey, textLen: previous.text?.length ?? 0 } : null);
       if (!generatedPrompt) {
+        console.log("[prompt-debug] target=", targetKey, "generatedPrompt empty, skip");
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;
       }
@@ -5972,10 +5976,15 @@ export function WorkspaceApp() {
         previous?.edgeId === edgeId &&
         previous.sourceKey === source.key &&
         previous.text === sourceText;
-      frontendLog("info", `[canvas-prompt-sync] effect target=${targetKey} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+      console.log("[prompt-debug] target=", targetKey, "shouldSkip=", shouldSkip, "currentEditorLen=", currentContent?.plainText.length ?? 0);
       if (shouldSkip) {
-        importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
-        continue;
+        // 如果编辑器内容为空但 previous 存在，说明之前同步失败或用户清空了，强制重新同步
+        if (currentContent == null || currentContent.plainText.trim() === "") {
+          console.log("[prompt-debug] target=", targetKey, "editor empty but previous exists, force resync");
+        } else {
+          importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
+          continue;
+        }
       }
       const replaced = promptContents.replaceText(
         targetKey,
@@ -5983,7 +5992,7 @@ export function WorkspaceApp() {
         mentionCandidatesFor(targetKey),
       );
       const afterContent = promptContents.read(targetKey);
-      frontendLog("info", `[canvas-prompt-sync] effect after replaceText target=${targetKey} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
+      console.log("[prompt-debug] target=", targetKey, "after replaceText replaced=", replaced != null, "afterEditorLen=", afterContent?.plainText.length ?? 0);
       if (replaced == null) continue;
       importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
       frontendLog(
