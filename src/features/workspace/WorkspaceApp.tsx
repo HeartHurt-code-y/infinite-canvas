@@ -3113,11 +3113,11 @@ export function WorkspaceApp() {
                 previous?.edgeId === edge.id &&
                 previous.sourceKey === source.key &&
                 previous.text === sourceText;
-              frontendLog("info", `[canvas-prompt-sync] .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+              console.log("[prompt-sync-debug]", ` .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
               if (shouldSkip) continue;
               const replaced = promptContents.replaceText(target.key, generatedPrompt, []);
               const afterContent = promptContents.read(target.key);
-              frontendLog("info", `[canvas-prompt-sync] .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
+              console.log("[prompt-sync-debug]", ` .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
               if (replaced == null) continue;
               importedPromptSourcesRef.current.set(target.key, {
                 edgeId: edge.id,
@@ -5944,7 +5944,11 @@ export function WorkspaceApp() {
 
   /** 提示词节点输出变化或新建连线后，自动导入目标生成节点的提示内容。 */
   useEffect(() => {
-    if (!canvasHydrated) return;
+    console.log("[prompt-sync-debug] useEffect triggered, canvasHydrated=", canvasHydrated, "promptSourceByTarget size=", promptSourceByTarget.size);
+    if (!canvasHydrated) {
+      console.log("[prompt-sync-debug] useEffect skipped: canvasHydrated=false");
+      return;
+    }
     const importedSources = importedPromptSourcesRef.current;
     for (const targetKey of importedSources.keys()) {
       if (!promptSourceByTarget.has(targetKey)) importedSources.delete(targetKey);
@@ -5972,7 +5976,7 @@ export function WorkspaceApp() {
         previous?.edgeId === edgeId &&
         previous.sourceKey === source.key &&
         previous.text === sourceText;
-      frontendLog("info", `[canvas-prompt-sync] effect target=${targetKey} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+      console.log("[prompt-sync-debug]", ` effect target=${targetKey} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
       if (shouldSkip) {
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;
@@ -5983,7 +5987,7 @@ export function WorkspaceApp() {
         mentionCandidatesFor(targetKey),
       );
       const afterContent = promptContents.read(targetKey);
-      frontendLog("info", `[canvas-prompt-sync] effect after replaceText target=${targetKey} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
+      console.log("[prompt-sync-debug]", ` effect after replaceText target=${targetKey} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
       if (replaced == null) continue;
       importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
       frontendLog(
