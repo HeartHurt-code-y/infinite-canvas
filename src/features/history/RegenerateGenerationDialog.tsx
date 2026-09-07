@@ -1,4 +1,5 @@
 import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { Play } from "@phosphor-icons/react/Play";
 import { Plus } from "@phosphor-icons/react/Plus";
 import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
@@ -237,7 +238,7 @@ function MaterialThumb({
   return (
     <span className="regenerate-material__thumb">
       <img
-        src={previewUrl}
+        src={toMediaProxyUrl(previewUrl) ?? previewUrl}
         alt=""
         loading="lazy"
         onError={() => setFailedUrl(previewUrl)}
@@ -268,7 +269,7 @@ function AddListThumb({ previewUrl, kind }: { previewUrl: string | null; kind: M
   }
   return (
     <span className="regenerate-add__thumb">
-      <img src={previewUrl} alt="" loading="lazy" onError={() => setFailedUrl(previewUrl)} />
+      <img src={toMediaProxyUrl(previewUrl) ?? previewUrl} alt="" loading="lazy" onError={() => setFailedUrl(previewUrl)} />
     </span>
   );
 }

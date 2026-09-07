@@ -1,4 +1,5 @@
 import { BookOpenText } from "@phosphor-icons/react/BookOpenText";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { Check } from "@phosphor-icons/react/Check";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
@@ -84,7 +85,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
     >
       {showImage ? (
         <img
-          src={preview}
+          src={toMediaProxyUrl(preview) ?? preview}
           alt=""
           draggable={false}
           decoding="async"

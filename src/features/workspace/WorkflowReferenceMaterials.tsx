@@ -1,4 +1,5 @@
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { FileText } from "@phosphor-icons/react/FileText";
 import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
 import { Paperclip } from "@phosphor-icons/react/Paperclip";
@@ -182,7 +183,7 @@ export function WorkflowReferenceMaterials({
             ].map(({ input, key, label, action, remove, previewSrc }) => (
               <li key={key}>
                 {input.target.mediaType === "image" && previewSrc ? (
-                  <img src={previewSrc} alt={input.displayName} loading="lazy" />
+                  <img src={toMediaProxyUrl(previewSrc) ?? previewSrc} alt={input.displayName} loading="lazy" />
                 ) : (
                   <span className="canvas-workflow-references__icon" aria-hidden="true">
                     {input.target.mediaType === "audio" ? (

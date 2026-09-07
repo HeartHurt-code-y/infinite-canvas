@@ -302,7 +302,7 @@ function AssetCard({
               {asset.previewUrl && !imagePreviewFailed ? (
                 <img
                   className="asset-card__preview"
-                  src={asset.previewUrl}
+                  src={toMediaProxyUrl(asset.previewUrl) ?? asset.previewUrl}
                   alt=""
                   loading="lazy"
                   onLoad={(event) => {

@@ -1434,7 +1434,7 @@ export function CanvasAssetNode({
             ) : null}
             {node.previewUrl && !imageFailed ? (
               <img
-                src={node.previewUrl}
+                src={toMediaProxyUrl(node.previewUrl) ?? node.previewUrl}
                 alt=""
                 draggable={false}
                 decoding="async"
