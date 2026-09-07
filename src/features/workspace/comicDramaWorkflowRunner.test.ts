@@ -314,28 +314,20 @@ describe("comic drama composite workflow", () => {
     ]);
   });
 
-  it("asks again at the automatic revision limit and never treats customer confirmation as a review pass", async () => {
+  it("keeps reworking automatically on revise without a retry limit, accepting only a passed review", async () => {
     const { fake, runner, request, calls } = setup();
-    request.node = { ...request.node, config: { ...request.node.config, maxAutomaticRetries: 0 } };
+    let reviewCalls = 0;
     vi.mocked(fake.promptClient.run).mockImplementation((command) =>
       command.mode === "comic_drama_director_review"
-        ? response(revise("仍缺少关键剧情"))
+        ? (reviewCalls += 1) <= 2
+          ? response(revise("仍缺少关键剧情"))
+          : normalResponse(command)
         : normalResponse(command),
     );
-    const first = await runner.run(request);
-    expect(first.phase).toBe("awaiting_approval");
-    expect(first.decision?.question).toContain("达到自动修订次数");
-    const next = await runner.run({
-      ...request,
-      resume: true,
-      decisionResolution: "继续按意见修订",
-      node: { ...request.node, config: { ...request.node.config, checkpoint: first } },
-    });
-    expect(next.phase).toBe("awaiting_approval");
-    expect(calls()).toHaveLength(6);
-    expect(calls().some((command) => command.mode === "comic_drama_art")).toBe(false);
-    expect(next.comicDrama?.episodes[0]?.stages.director?.artifact?.version).toBe(2);
-    expect(fake.generation.start).not.toHaveBeenCalled();
+    const result = await runner.run(request);
+    expect(result.phase).toBe("done");
+    expect(reviewCalls).toBe(3);
+    expect(calls().filter((command) => command.mode === "comic_drama_director")).toHaveLength(3);
   });
 
   it("reuses fixed assets across episodes without mixing their scripts or colliding shot IDs", async () => {
@@ -422,7 +414,6 @@ describe("comic drama composite workflow", () => {
         ...request.node,
         config: {
           ...request.node.config,
-          maxAutomaticRetries: 0,
           checkpoint: {
             ...first,
             phase: "paused",
@@ -450,9 +441,9 @@ describe("comic drama composite workflow", () => {
         },
       },
     });
-    expect(result.phase).toBe("awaiting_approval");
-    expect(result.decision?.question).toContain("导演分析");
-    expect(calls()).toHaveLength(9);
+    expect(result.phase).toBe("done");
+    const reviewCommands = calls().filter((command) => command.mode === "comic_drama_director_review");
+    expect(reviewCommands.length).toBeGreaterThan(0);
   });
 
   it("rejects shared identity rewrites, missing local reference IDs, and conflicting PASS contracts", () => {

@@ -49,6 +49,21 @@ const PROBE_MAX_RETRIES: u32 = 3;
 /// 连通性测试重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
 const PROBE_RETRY_BASE_DELAY_MS: u64 = 500;
 
+/// 代理软件（Clash 类）fake-ip 模式使用的保留网段（RFC 2544 基准测试网段）。
+/// 该模式下系统 DNS 对任意域名返回 `198.18.0.0/15` 内的虚拟 IP，直连必然失败，
+/// 上传会报 `isConnect: true` 的 HTTP transport error。
+const FAKE_IP_PREFIX: (u8, u8) = (198, 18);
+
+/// 备用公共 DNS（国内可达）：穿透代理软件对系统 DNS 的 fake-ip 劫持时使用。
+const FALLBACK_DNS_SERVERS: [std::net::Ipv4Addr; 2] =
+    [std::net::Ipv4Addr::new(223, 5, 5, 5), std::net::Ipv4Addr::new(119, 29, 29, 29)];
+
+/// 对象存储上传 PUT 连接/传输失败的最大自动重试次数（指数退避）。
+const UPLOAD_MAX_RETRIES: u32 = 3;
+
+/// 对象存储上传重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
+const UPLOAD_RETRY_BASE_DELAY_MS: u64 = 500;
+
 /// 摸鱼素材服务（POST /v1/assets 上游）支持的图片扩展名白名单。
 /// avif 等不在列表内的格式必须先转码为 webp 再导入，否则上游会以
 /// `[InvalidParameter] unsupported asset URL format` 或 `DownloadFailed` 拒绝。
@@ -76,6 +91,175 @@ fn build_presign_http_client() -> reqwest::Result<reqwest::Client> {
         .user_agent("InfiniteCanvas/0.1")
         .redirect(reqwest::redirect::Policy::none())
         .build()
+}
+
+/// 判断 IPv4 是否落在代理软件 fake-ip 虚拟网段（`198.18.0.0/15`）。
+pub(crate) fn is_fake_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => {
+            let octets = v4.octets();
+            octets[0] == FAKE_IP_PREFIX.0 && (octets[1] == 18 || octets[1] == 19)
+        }
+        std::net::IpAddr::V6(_) => false,
+    }
+}
+
+/// 解析 TOS endpoint 主机名，返回「可直连的真实 IP 列表」。
+///
+/// 正常网络：直接采用系统 DNS 解析结果。
+/// 代理软件 fake-ip 环境：系统解析结果全部落在 `198.18.0.0/15` 虚拟网段时，
+/// 改用备用公共 DNS（223.5.5.5 / 119.29.29.29）重新解析，穿透 fake-ip 劫持。
+/// 返回空列表表示未能取得可靠的真实地址，调用方应保持原行为（原样报错）。
+pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAddr> {    if let Ok(addrs) = tokio::net::lookup_host((host, 443)).await {
+        let real: Vec<std::net::IpAddr> = addrs
+            .map(|addr| addr.ip())
+            .filter(|ip| !is_fake_ip(*ip))
+            .collect();
+        if !real.is_empty() {
+            return real;
+        }
+        warn!(
+            "[staging] 系统 DNS 解析 {host} 全部落在 fake-ip 虚拟网段（疑似代理软件劫持），改用备用 DNS 解析"
+        );
+    }
+    let mut fallback: Vec<std::net::IpAddr> = Vec::new();
+    for server in FALLBACK_DNS_SERVERS {
+        let name_servers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
+            &[std::net::IpAddr::V4(server)],
+            53,
+            false,
+        );
+        let config = hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), name_servers);
+        let resolver = hickory_resolver::TokioAsyncResolver::tokio(
+            config,
+            hickory_resolver::config::ResolverOpts::default(),
+        );
+        match resolver.lookup_ip(host).await {
+            Ok(lookup) => {
+                for ip in lookup.iter() {
+                    if !is_fake_ip(ip) && !fallback.contains(&ip) {
+                        fallback.push(ip);
+                    }
+                }
+                if !fallback.is_empty() {
+                    break;
+                }
+            }
+            Err(error) => {
+                warn!("[staging] 备用 DNS {server} 解析 {host} 失败: {error}");
+            }
+        }
+    }
+    fallback
+}
+
+/// 构建 TOS 上传 HTTP 客户端。
+///
+/// 代理 fake-ip 环境下，将 endpoint 域名强制映射到真实 IP（`resolve_to_addrs`），
+/// 直连真实地址并保持 Host/SNI/预签名不变，从而绕过虚拟 IP 导致的连接失败；
+/// 正常网络传入空列表时行为与 `build_presign_http_client` 一致。
+fn build_tos_upload_client(
+    host: &str,
+    real_ips: &[std::net::IpAddr],
+) -> reqwest::Result<reqwest::Client> {
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .timeout(std::time::Duration::from_secs(300))
+        .user_agent("InfiniteCanvas/0.1")
+        .redirect(reqwest::redirect::Policy::none());
+    if !real_ips.is_empty() {
+        let sockets: Vec<std::net::SocketAddr> = real_ips
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, 443))
+            .collect();
+        builder = builder.resolve_to_addrs(host, &sockets);
+    }
+    builder.build()
+}
+
+/// 为任意 URL（主要是 TOS 预签名 URL）构建 fake-ip 感知的 HTTP 客户端：
+/// 解析到真实 IP 时用 `resolve_to_addrs` 直连真实地址，否则回退到 `fallback`。
+pub(crate) async fn fake_ip_aware_client(
+    url: &str,
+    fallback: reqwest::Client,
+) -> reqwest::Client {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return fallback;
+    };
+    let Some(host) = parsed.host_str() else {
+        return fallback;
+    };
+    let real_ips = resolve_tos_host_real_ips(host).await;
+    if real_ips.is_empty() {
+        return fallback;
+    }
+    build_tos_upload_client(host, &real_ips).unwrap_or(fallback)
+}
+
+/// 判断 reqwest 错误是否属于「可重试的网络层失败」（连接、超时、请求传输失败）。
+/// HTTP 非 2xx 状态不在此列——那是 TOS 端拒绝，重试无意义。
+fn is_retryable_upload_error(error: &reqwest::Error) -> bool {
+    error.is_connect() || error.is_timeout() || error.is_request()
+}
+
+/// 上传发送阶段可能的失败类型：本地文件读取失败或 HTTP 传输失败。
+#[derive(Debug)]
+enum UploadAttemptError {
+    Io(std::io::Error),
+    Http(reqwest::Error),
+}
+
+impl UploadAttemptError {
+    /// 是否属于可重试的瞬时失败（本地文件瞬态错误或网络层错误）。
+    fn is_retryable(&self) -> bool {
+        match self {
+            UploadAttemptError::Io(_) => true,
+            UploadAttemptError::Http(error) => is_retryable_upload_error(error),
+        }
+    }
+}
+
+impl std::fmt::Display for UploadAttemptError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            UploadAttemptError::Io(error) => error.fmt(formatter),
+            UploadAttemptError::Http(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for UploadAttemptError {}
+
+/// 带指数退避重试的对象存储上传 PUT 发送。
+///
+/// 仅对可重试的瞬时失败（`UploadAttemptError::is_retryable`）重试，最多
+/// `UPLOAD_MAX_RETRIES` 次，每次重试前等待
+/// `UPLOAD_RETRY_BASE_DELAY_MS * 2^(attempt)` 毫秒；
+/// `send` 每次重试都会重新调用，调用方据此重建请求体（重新打开文件流）。
+async fn send_upload_with_retry<F, Fut>(
+    send: &mut F,
+) -> Result<reqwest::Response, UploadAttemptError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<reqwest::Response, UploadAttemptError>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match send().await {
+            Ok(response) => return Ok(response),
+            Err(error) if attempt < UPLOAD_MAX_RETRIES && error.is_retryable() => {
+                let delay_ms = UPLOAD_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+                warn!(
+                    "[staging] 对象存储上传网络失败，{delay_ms}ms 后重试 ({}/{})：{error}",
+                    attempt + 1,
+                    UPLOAD_MAX_RETRIES
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+                attempt += 1;
+            }
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 /// 带指数退避重试的连通性探针 GET 请求。
@@ -197,9 +381,23 @@ impl StagingService {
             config.bucket, config.region, config.endpoint, probe_key
         );
         let started_at = std::time::Instant::now();
+        // 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免连通性测试误报失败。
+        let real_ips = resolve_tos_host_real_ips(&host).await;
+        let probe_client = match build_tos_upload_client(&host, &real_ips) {
+            Ok(client) => client,
+            Err(error) => {
+                return Ok(ConnectivityTestResult {
+                    ok: false,
+                    http_status: None,
+                    elapsed_ms: started_at.elapsed().as_millis() as u64,
+                    reason: Some("client-build-error".to_string()),
+                    detail: Some(error.to_string()),
+                });
+            }
+        };
         // 网络层失败按指数退避重试（最多 PROBE_MAX_RETRIES 次）；每次重试重新生成
         // 预签名 URL，避免退避等待或单次连接超时（最长 30s）累计超过探针 URL 的 60s 有效期。
-        let response = match send_probe_with_retry(&self.client, || {
+        let response = match send_probe_with_retry(&probe_client, || {
             presign_url(&PresignParams {
                 method: "GET",
                 host: &host,
@@ -417,15 +615,31 @@ impl StagingService {
             return Ok(());
         };
 
+        // 进入素材库导入阶段：先落 importing 状态，让前端在对象存储上传完成后立即
+        // 切换展示"上传素材库"进度。导入字节进度通过回调写入 bytes_uploaded/bytes_total
+        // （海外路径：总工作量 = 2 × 文件大小；国内路径不触发回调，保持对象存储阶段字节）。
+        job.status = StagingStatus::Importing;
+        job.updated_at = now_ms();
+        self.storage.update_staging_job(job)?;
+        let import_progress = {
+            let storage = Arc::clone(&self.storage);
+            let job_id = job.id.clone();
+            move |done: u64, total: u64| {
+                let _ = storage.update_staging_import_progress(&job_id, done, total);
+            }
+        };
         let imported = self
             .assets
-            .import_staged(ImportStagedAsset {
-                provider_connection_id: import_target.provider_connection_id.clone(),
-                public_url: lease.get_url.clone(),
-                media_type: job.media_type,
-                display_name: import_target.name.clone(),
-                group_id: import_target.group_id,
-            })
+            .import_staged_with_progress(
+                ImportStagedAsset {
+                    provider_connection_id: import_target.provider_connection_id.clone(),
+                    public_url: lease.get_url.clone(),
+                    media_type: job.media_type,
+                    display_name: import_target.name.clone(),
+                    group_id: import_target.group_id,
+                },
+                Some(Arc::new(import_progress)),
+            )
             .await;
         let identity = match imported {
             Ok(identity) => identity,
@@ -568,50 +782,95 @@ impl StagingService {
             object_key,
             metadata.len()
         );
-        let file = tokio::fs::File::open(&upload_path).await?;
+        // 解析 endpoint 真实 IP：代理 fake-ip 环境下改用备用 DNS 穿透劫持，
+        // 直连真实地址（Host/SNI/预签名保持不变，签名不受影响）。
+        let real_ips = resolve_tos_host_real_ips(&host).await;
+        let upload_client = match build_tos_upload_client(&host, &real_ips) {
+            Ok(client) => client,
+            Err(error) => {
+                return Err(BackendError::validation(
+                    "failed to build TOS upload HTTP client",
+                    json!({ "source": error.to_string() }),
+                ));
+            }
+        };
+        if !real_ips.is_empty() {
+            info!(
+                "[staging] 检测到代理 fake-ip 环境，改用真实 IP 直连对象存储: jobId={}, host={}, ips={:?}",
+                job.id, host, real_ips
+            );
+        }
         let upload_started = std::time::Instant::now();
         let uploaded = Arc::new(AtomicU64::new(0));
         let last_logged_bytes = Arc::new(AtomicU64::new(0));
-        let progress_counter = Arc::clone(&uploaded);
-        let log_counter = Arc::clone(&last_logged_bytes);
         let storage = Arc::clone(&self.storage);
         let job_id = job.id.clone();
         let total_bytes = metadata.len();
-        let stream = ReaderStream::new(file).inspect_ok(move |chunk| {
-            let chunk_len = chunk.len() as u64;
-            let total = progress_counter.fetch_add(chunk_len, Ordering::Relaxed) + chunk_len;
-            let _ = storage.update_staging_progress(&job_id, total);
-            // 节流记录进度：每累计 1MB 或到达末尾记录一次，用于排查上传卡住。
-            let last = log_counter.load(Ordering::Relaxed);
-            let reached_end = total >= total_bytes;
-            if (total >= last + PROGRESS_LOG_INTERVAL_BYTES || reached_end)
-                && log_counter
-                    .compare_exchange(last, total, Ordering::Relaxed, Ordering::Relaxed)
-                    .is_ok()
-            {
-                let elapsed = upload_started.elapsed();
-                let percent = total
-                    .saturating_mul(100)
-                    .checked_div(total_bytes)
-                    .unwrap_or(100);
-                info!(
-                    "[staging] 上传进度更新: jobId={}, {}/{} 字节（{}%）, 已耗时 {}ms, 平均速度 {}/s",
-                    job_id,
-                    total,
-                    total_bytes,
-                    percent,
-                    elapsed.as_millis(),
-                    format_bytes_per_sec(total as usize, elapsed)
-                );
+        let upload_path_owned = upload_path.clone();
+        let put_url_owned = put_url.clone();
+        let mime_owned = mime_type.clone();
+        // 重试闭包：每次重试重新打开文件、重建流并重置进度，保证从头上传。
+        let mut send_once = move || {
+            let progress_counter = Arc::clone(&uploaded);
+            let log_counter = Arc::clone(&last_logged_bytes);
+            let storage = Arc::clone(&storage);
+            let job_id = job_id.clone();
+            let upload_path = upload_path_owned.clone();
+            let put_url = put_url_owned.clone();
+            let mime_type = mime_owned.clone();
+            let upload_client = upload_client.clone();
+            let upload_started = upload_started;
+            let total_bytes = total_bytes;
+            async move {
+                let file = tokio::fs::File::open(&upload_path)
+                    .await
+                    .map_err(UploadAttemptError::Io)?;
+                progress_counter.store(0, Ordering::Relaxed);
+                let _ = storage.update_staging_progress(&job_id, 0);
+                let stream = ReaderStream::new(file).inspect_ok(move |chunk| {
+                    let chunk_len = chunk.len() as u64;
+                    let total =
+                        progress_counter.fetch_add(chunk_len, Ordering::Relaxed) + chunk_len;
+                    let _ = storage.update_staging_progress(&job_id, total);
+                    // 节流记录进度：每累计 1MB 或到达末尾记录一次，用于排查上传卡住。
+                    let last = log_counter.load(Ordering::Relaxed);
+                    let reached_end = total >= total_bytes;
+                    if (total >= last + PROGRESS_LOG_INTERVAL_BYTES || reached_end)
+                        && log_counter
+                            .compare_exchange(last, total, Ordering::Relaxed, Ordering::Relaxed)
+                            .is_ok()
+                    {
+                        let elapsed = upload_started.elapsed();
+                        let percent = total
+                            .saturating_mul(100)
+                            .checked_div(total_bytes)
+                            .unwrap_or(100);
+                        info!(
+                            "[staging] 上传进度更新: jobId={}, {}/{} 字节（{}%）, 已耗时 {}ms, 平均速度 {}/s",
+                            job_id,
+                            total,
+                            total_bytes,
+                            percent,
+                            elapsed.as_millis(),
+                            format_bytes_per_sec(total as usize, elapsed)
+                        );
+                    }
+                });
+                upload_client
+                    .put(&put_url)
+                    .header(reqwest::header::CONTENT_TYPE, &mime_type)
+                    .header(reqwest::header::CONTENT_LENGTH, total_bytes)
+                    .body(reqwest::Body::wrap_stream(stream))
+                    .send()
+                    .await
+                    .map_err(UploadAttemptError::Http)
             }
-        });
-        let upload = self
-            .client
-            .put(&put_url)
-            .header(reqwest::header::CONTENT_TYPE, &mime_type)
-            .header(reqwest::header::CONTENT_LENGTH, metadata.len())
-            .body(reqwest::Body::wrap_stream(stream));
-        let response = upload.send().await?;
+        };
+        let response = match send_upload_with_retry(&mut send_once).await {
+            Ok(response) => response,
+            Err(UploadAttemptError::Io(error)) => return Err(BackendError::from(error)),
+            Err(UploadAttemptError::Http(error)) => return Err(BackendError::from(error)),
+        };
         info!(
             "[staging] 对象存储上传请求完成: jobId={}, HTTP {}, 耗时 {}ms",
             job.id,
@@ -1257,5 +1516,161 @@ mod tests {
             (PROBE_MAX_RETRIES + 1) as usize,
             "expected 1 initial attempt + PROBE_MAX_RETRIES retries"
         );
+    }
+
+    /// 单元测试：fake-ip 虚拟网段判定（`198.18.0.0/15` 为代理软件保留段）。
+    #[test]
+    fn is_fake_ip_classifies_proxy_virtual_ranges() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 1))));
+        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 18, 0, 146))));
+        assert!(is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 19, 255, 255))));
+        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 17, 255, 255))));
+        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 20, 0, 0))));
+        assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))));
+        assert!(!is_fake_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    /// 回归测试：上传 PUT 连接失败时按指数退避重试，直到成功。
+    ///
+    /// 复现客户「对象存储上传 `isConnect: true` transport error」——代理 fake-ip
+    /// 环境下连接可能瞬时失败。第一次请求打到未监听端口（connection refused，
+    /// 确定为 connect 错误），第二次打到本地正常服务，断言重试后成功且确已重试。
+    #[tokio::test]
+    async fn upload_retry_recovers_after_transient_connection_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let connections = Arc::new(AtomicUsize::new(0));
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server_connections = Arc::clone(&connections);
+        let server = std::thread::spawn(move || {
+            let Ok((mut stream, _)) = listener.accept() else {
+                return;
+            };
+            server_connections.fetch_add(1, Ordering::SeqCst);
+            let _ = stream.read(&mut [0u8; 4096]);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok");
+            let _ = stream.flush();
+        });
+
+        let client = build_presign_http_client().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_counter = Arc::clone(&calls);
+        let mut send = move || {
+            let client = client.clone();
+            let call_counter = Arc::clone(&call_counter);
+            async move {
+                let n = call_counter.fetch_add(1, Ordering::SeqCst) + 1;
+                let url = if n == 1 {
+                    "http://127.0.0.1:1/".to_string()
+                } else {
+                    format!("http://{addr}/upload")
+                };
+                client
+                    .put(url)
+                    .body("payload")
+                    .send()
+                    .await
+                    .map_err(UploadAttemptError::Http)
+            }
+        };
+        let response = send_upload_with_retry(&mut send)
+            .await
+            .expect("upload should recover after transient connection failure");
+        assert_eq!(response.status().as_u16(), 200);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "expected 1 initial attempt + 1 retry"
+        );
+
+        server.join().unwrap();
+        assert_eq!(connections.load(Ordering::SeqCst), 1);
+    }
+
+    /// 回归测试：持续连接失败时，重试次数严格受 `UPLOAD_MAX_RETRIES` 限制并最终放弃。
+    #[tokio::test]
+    async fn upload_retry_gives_up_after_max_retries() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let client = build_presign_http_client().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_counter = Arc::clone(&calls);
+        let mut send = move || {
+            let client = client.clone();
+            let call_counter = Arc::clone(&call_counter);
+            async move {
+                let _ = call_counter.fetch_add(1, Ordering::SeqCst);
+                client
+                    .put("http://127.0.0.1:1/")
+                    .body("payload")
+                    .send()
+                    .await
+                    .map_err(UploadAttemptError::Http)
+            }
+        };
+        let error = send_upload_with_retry(&mut send)
+            .await
+            .expect_err("upload must give up after exhausting retries");
+        assert!(
+            matches!(error, UploadAttemptError::Http(ref e) if e.is_connect()),
+            "expected connect error, got {error}"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            (UPLOAD_MAX_RETRIES + 1) as usize,
+            "expected 1 initial attempt + UPLOAD_MAX_RETRIES retries"
+        );
+    }
+
+    /// 回归测试：HTTP 非 2xx（TOS 端拒绝）不触发重试，原样返回响应。
+    #[tokio::test]
+    async fn upload_retry_does_not_retry_http_errors() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let _ = stream.read(&mut [0u8; 4096]);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
+                );
+                let _ = stream.flush();
+            }
+        });
+
+        let client = build_presign_http_client().unwrap();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let call_counter = Arc::clone(&calls);
+        let mut send = move || {
+            let client = client.clone();
+            let call_counter = Arc::clone(&call_counter);
+            async move {
+                let _ = call_counter.fetch_add(1, Ordering::SeqCst);
+                client
+                    .put(format!("http://{addr}/upload"))
+                    .body("payload")
+                    .send()
+                    .await
+                    .map_err(UploadAttemptError::Http)
+            }
+        };
+        let response = send_upload_with_retry(&mut send)
+            .await
+            .expect("HTTP error must surface as a response");
+        assert_eq!(response.status().as_u16(), 500);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "HTTP 5xx must not be retried"
+        );
+
+        server.join().unwrap();
     }
 }

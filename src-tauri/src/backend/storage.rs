@@ -1400,6 +1400,24 @@ impl Storage {
         Ok(())
     }
 
+    /// 素材库导入阶段的字节进度：同时写入已处理字节与总工作量（海外路径为
+    /// 2 × 文件大小，下载 + 上传各算一遍）。国内路径不调用此方法。
+    pub fn update_staging_import_progress(
+        &self,
+        id: &str,
+        done_bytes: u64,
+        total_bytes: u64,
+    ) -> BackendResult<()> {
+        let done_bytes = checked_sql_integer(done_bytes, "bytesUploaded")?;
+        let total_bytes = checked_sql_integer(total_bytes, "bytesTotal")?;
+        self.lock()?.execute(
+            "UPDATE staging_jobs SET bytes_uploaded = ?2, bytes_total = ?3, updated_at = ?4
+             WHERE id = ?1",
+            params![id, done_bytes, total_bytes, now_ms()],
+        )?;
+        Ok(())
+    }
+
     pub fn get_staging_job(&self, id: &str) -> BackendResult<StagingJobRecord> {
         self.lock()?
             .query_row(

@@ -453,14 +453,11 @@ export function createRemotionWorkflowRunner(
           }
           const review = state().review!;
           if (review.result === "PASS") break;
-          if (
-            !resolution &&
-            (review.result === "NEEDS_DECISION" ||
-              state().repairCount >= Math.max(0, node.config.maxAutomaticRetries))
-          ) {
+          // 审查不通过时自动返工不再受次数限制；只有必须由用户决策才暂停等待。
+          if (!resolution && review.result === "NEEDS_DECISION") {
             const decision = {
               kind: "planning" as const,
-              question: review.question ?? "动画方案达到自动修订上限，是否继续按检查意见修订？",
+              question: review.question ?? review.report,
               recommendation: review.recommendation ?? review.repairInstructions ?? review.report,
             };
             commit({ phase: "awaiting_approval", decision });

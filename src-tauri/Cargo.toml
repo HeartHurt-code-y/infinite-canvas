@@ -59,6 +59,7 @@ tauri-plugin-store = "2"
 tauri-plugin-upload = "2"
 tauri-plugin-websocket = "2"
 ffmpeg-sidecar = "2.5.2"
+hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 
 [dev-dependencies]
 tempfile = "3"

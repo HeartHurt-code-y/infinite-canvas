@@ -1043,6 +1043,12 @@ export const STAGING_STATUS_LABELS: Record<StagingStatus, string> = {
   cleaned: "已完成",
 };
 
+/** 上传队列的两段阶段名：对象存储直传 → 素材库导入（仅云端素材）。 */
+export const UPLOAD_PHASE_NAMES = {
+  objectStorage: "对象存储上传",
+  assetImport: "上传素材库",
+} as const;
+
 // 到达这些状态后停止轮询，显示可移除的终态记录。
 export const TERMINAL_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
   "active",
@@ -1133,6 +1139,16 @@ export function stagingErrorSummary(error: unknown): string | null {
     if (itemErrorText != null) return itemErrorText;
   }
   return formatRawBackendError(error);
+}
+
+export function stagingErrorFullText(error: unknown): string | null {
+  if (error == null) return null;
+  if (typeof error === "string") return error;
+  try {
+    return JSON.stringify(error, null, 2);
+  } catch {
+    return String(error);
+  }
 }
 
 function formatStagingItemError(value: unknown): string | null {

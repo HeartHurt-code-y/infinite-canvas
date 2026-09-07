@@ -1333,6 +1333,15 @@ describe("App workspace", () => {
           ]);
         case "plugin:dialog|open":
           return Promise.resolve(["C:\\media\\new-local.png"]);
+        case "get_tos_staging_config":
+          return Promise.resolve({
+            region: "cn-beijing",
+            endpoint: "tos-cn-beijing.volces.com",
+            bucket: "test-staging-bucket",
+            credentialRef: "tos-ak-sk",
+            objectPrefix: "staging",
+            enabled: true,
+          });
         case "start_staging_upload":
           return Promise.resolve("local-upload-2");
         case "plugin:event|listen":

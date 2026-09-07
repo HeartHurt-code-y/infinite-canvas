@@ -331,7 +331,6 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
       .filter((value): value is number => typeof value === "number" && value > 0) ?? [];
   if (!Number.isFinite(node.config.maxAutomaticRetries))
     throw new Error("自动修订次数必须是有限数字。");
-  const maxRepairs = Math.max(0, Math.floor(node.config.maxAutomaticRetries));
   const originalPending = getDrama().pending;
   let resolution = context.resolution?.trim();
   const checkAbort = () => {
@@ -568,19 +567,16 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
         const decisions = [checked.businessReview, checked.contentReview].filter(
           (review) => review?.result === "NEEDS_DECISION",
         );
-        if (!confirmed && (decisions.length > 0 || checked.repairCount >= maxRepairs)) {
+        // 审查不通过时自动返工不再受次数限制；只有必须由用户决策才暂停等待。
+        if (!confirmed && decisions.length > 0) {
           updateDrama((drama) => ({
             ...drama,
             pending: { episodeId: episode.id, stage, step: "review" },
           }));
           return planResult({
             kind: "planning",
-            question: decisions.length
-              ? decisions.map((review) => review!.question).join("\n")
-              : `${stageLabel}已达到自动修订次数，是否按以下合并意见继续修订？`,
-            recommendation: decisions.length
-              ? decisions.map((review) => review!.recommendation).join("\n")
-              : `继续修订，并重新完成业务与内容检查。\n${reviewFeedback(checked)}`,
+            question: decisions.map((review) => review!.question).join("\n"),
+            recommendation: decisions.map((review) => review!.recommendation).join("\n"),
           });
         }
         saveStage(stage, (run) => ({ ...run, repairCount: confirmed ? 0 : run.repairCount + 1 }));

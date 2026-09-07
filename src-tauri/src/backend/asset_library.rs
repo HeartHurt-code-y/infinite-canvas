@@ -6,6 +6,7 @@ use std::{
     time::Duration,
 };
 
+use futures_util::StreamExt as _;
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
@@ -71,6 +72,14 @@ trait AssetPort: Send + Sync {
     ) -> PortFuture<RawProviderResponse>;
 
     fn download(&self, url: String) -> PortFuture<Vec<u8>>;
+
+    /// 带字节进度回调的下载：`on_progress(done_bytes, total_bytes)`，`total` 未知（无
+    /// Content-Length）时为 0。用于海外素材导入阶段向调用方上报下载进度。
+    fn download_progressed(
+        &self,
+        url: String,
+        on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+    ) -> PortFuture<Vec<u8>>;
 }
 
 #[derive(Clone)]
@@ -145,6 +154,8 @@ impl AssetPort for ProviderAssetAdapter {
     fn download(&self, url: String) -> PortFuture<Vec<u8>> {
         let client = self.providers.client().clone();
         Box::pin(async move {
+            // 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免下载 TOS 暂存对象时连接失败。
+            let client = super::staging::fake_ip_aware_client(&url, client).await;
             let response = client.get(&url).send().await?;
             let status = response.status().as_u16();
             if !(200..300).contains(&status) {
@@ -158,6 +169,41 @@ impl AssetPort for ProviderAssetAdapter {
                 ));
             }
             Ok(response.bytes().await?.to_vec())
+        })
+    }
+
+    fn download_progressed(
+        &self,
+        url: String,
+        on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+    ) -> PortFuture<Vec<u8>> {
+        let client = self.providers.client().clone();
+        Box::pin(async move {
+            // 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免下载 TOS 暂存对象时连接失败。
+            let client = super::staging::fake_ip_aware_client(&url, client).await;
+            let response = client.get(&url).send().await?;
+            let status = response.status().as_u16();
+            if !(200..300).contains(&status) {
+                let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
+                return Err(BackendError::protocol(
+                    format!("asset content download returned HTTP {status}"),
+                    json!({
+                        "httpStatus": status,
+                        "rawResponse": body.chars().take(2000).collect::<String>()
+                    }),
+                ));
+            }
+            let total = response.content_length().unwrap_or(0);
+            let mut stream = response.bytes_stream();
+            let mut bytes = Vec::new();
+            let mut done: u64 = 0;
+            while let Some(chunk) = stream.next().await {
+                let chunk = chunk?;
+                done = done.saturating_add(chunk.len() as u64);
+                bytes.extend_from_slice(&chunk);
+                on_progress(done, total);
+            }
+            Ok(bytes)
         })
     }
 }
@@ -597,9 +643,23 @@ impl AssetLibrary {
 
     /// Import an already staged public object and wait until the remote 素材 becomes readable.
     /// Group discovery, single-flight creation, single-asset polling and terminal-state mapping stay local.
+    /// 无进度回调版本：生产路径使用 [`import_staged_with_progress`]，本方法保留给测试与
+    /// 无进度需求的调用方。
+    #[allow(dead_code)]
     pub async fn import_staged(
         &self,
         request: ImportStagedAsset,
+    ) -> BackendResult<CloudAssetIdentity> {
+        self.import_staged_with_progress(request, None).await
+    }
+
+    /// 与 [`import_staged`] 相同，但接受字节进度回调 `(done, total)`。
+    /// 海外路径（下载 + multipart 直传）在导入期间上报进度；国内路径
+    /// （`/v1/assets/async` 平台侧拉取）无字节进度，不触发回调。
+    pub async fn import_staged_with_progress(
+        &self,
+        request: ImportStagedAsset,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> BackendResult<CloudAssetIdentity> {
         if request.provider_connection_id.trim().is_empty()
             || !request.public_url.starts_with("http://")
@@ -621,7 +681,9 @@ impl AssetLibrary {
             .port
             .is_overseas_gateway(&request.provider_connection_id)?
         {
-            return self.import_staged_overseas(request).await;
+            return self
+                .import_staged_overseas(request, progress)
+                .await;
         }
         let group_id = match request.group_id {
             Some(group_id) if group_id > 0 => group_id,
@@ -692,9 +754,12 @@ impl AssetLibrary {
 
     /// 海外平台素材导入：从暂存 URL 下载字节后 multipart 直传 `POST /v1/assets/upload`，
     /// 再按 `db_id` 轮询 `/v1/assets/list` 直到 Active 取回真实素材 ID。
+    /// 有进度回调时上报 `(done, total)`：总工作量 = 2 × 文件大小（下载 + 上传各算一遍），
+    /// 下载阶段按流式字节推进（0 → 50%），multipart 直传完成后跳至 100%。
     async fn import_staged_overseas(
         &self,
         request: ImportStagedAsset,
+        progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> BackendResult<CloudAssetIdentity> {
         let group_id = match request.group_id {
             Some(group_id) if group_id > 0 => group_id,
@@ -713,8 +778,20 @@ impl AssetLibrary {
             .display_name
             .as_deref()
             .map(|value| value.chars().take(64).collect::<String>());
-        // 从暂存 URL 下载文件字节，供 multipart 直传。
-        let bytes = self.port.download(request.public_url.clone()).await?;
+        // 从暂存 URL 下载文件字节，供 multipart 直传。有回调时流式下载并上报进度。
+        let bytes = match progress.as_ref() {
+            Some(on_progress) => {
+                self.port
+                    .download_progressed(request.public_url.clone(), Arc::clone(on_progress))
+                    .await?
+            }
+            None => self.port.download(request.public_url.clone()).await?,
+        };
+        let total_work = (bytes.len() as u64).saturating_mul(2);
+        if let Some(on_progress) = progress.as_ref() {
+            // 下载完成（50%），multipart 直传期间保持该值，直传成功后跳 100%。
+            on_progress(bytes.len() as u64, total_work);
+        }
         let mut fields = vec![
             (
                 "kind".to_string(),
@@ -739,6 +816,9 @@ impl AssetLibrary {
             })
             .await?;
         require_success("submit asset upload", &response)?;
+        if let Some(on_progress) = progress.as_ref() {
+            on_progress(total_work, total_work);
+        }
         let payload: Value = serde_json::from_str(&response.body)?;
         // `/v1/assets/upload` 返回数值占位 ID（`db_id`，如 975），用于后续按 db_id 精确匹配。
         let placeholder_db_id = payload
@@ -1621,6 +1701,24 @@ mod tests {
                 .get(&url)
                 .cloned()
                 .ok_or_else(|| BackendError::NotFound(format!("missing download: {url}")));
+            Box::pin(async move { result })
+        }
+
+        fn download_progressed(
+            &self,
+            url: String,
+            on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
+        ) -> PortFuture<Vec<u8>> {
+            let result = self
+                .downloads
+                .lock()
+                .expect("download lock")
+                .get(&url)
+                .cloned()
+                .ok_or_else(|| BackendError::NotFound(format!("missing download: {url}")));
+            if let Ok(bytes) = &result {
+                on_progress(bytes.len() as u64, bytes.len() as u64);
+            }
             Box::pin(async move { result })
         }
     }

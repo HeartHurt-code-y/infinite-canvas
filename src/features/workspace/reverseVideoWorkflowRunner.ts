@@ -573,13 +573,11 @@ export function createReverseVideoWorkflowRunner(
           }
           const review = state().review!;
           if (review.result === "PASS") break;
-          if (
-            review.result === "NEEDS_DECISION" ||
-            state().repairCount >= node.config.maxAutomaticRetries
-          ) {
+          // 审查不通过时自动返工不再受次数限制；只有必须由用户决策才暂停等待。
+          if (review.result === "NEEDS_DECISION") {
             const decision = {
               kind: "qc" as const,
-              question: review.question ?? "反推已达到自动修订上限，是否继续按复核意见修订？",
+              question: review.question ?? review.report,
               recommendation: review.recommendation ?? review.repairInstructions ?? review.report,
             };
             commit({ phase: "awaiting_approval", lastActivePhase: "qc", decision });

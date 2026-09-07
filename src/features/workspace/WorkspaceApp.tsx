@@ -76,6 +76,7 @@ import {
   type ProviderConnection,
   type RealPersonGroup,
   type StagingJobRecord,
+  type TosStagingConfig,
   type VideoDownloadJobRecord,
   type VideoDownloaderEngineStatus,
   type VideoFrameExtractionJobRecord,
@@ -1446,14 +1447,35 @@ export function WorkspaceApp() {
       }
       if (destination === "cloud") setAssetsError(null);
       else setLocalAssetsError(null);
+      // 预检对象存储（TOS）配置：未配置或未启用时直接明确提示，避免后台异步静默失败。
+      let stagingConfig: TosStagingConfig | null = null;
+      try {
+        stagingConfig = await tosStagingClient.getConfig();
+      } catch (error) {
+        const message = `对象存储配置读取失败：${formatRawBackendError(error)}`;
+        if (destination === "cloud") setAssetsError(message);
+        else setLocalAssetsError(message);
+        return 0;
+      }
+      if (stagingConfig == null || !stagingConfig.enabled) {
+        const message =
+          "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存（桶名为空会停用上传）。";
+        if (destination === "cloud") setAssetsError(message);
+        else setLocalAssetsError(message);
+        return 0;
+      }
       const files = await pickLocalMediaFiles();
       if (files.length === 0) return 0;
       let startedCount = 0;
       let firstError: unknown = null;
+      const unsupportedFiles: string[] = [];
       for (const filePath of files) {
-        const kind = inferMediaKindFromName(filePath);
-        if (!kind) continue;
         const name = filePath.split(/[\\/]/).pop() ?? filePath;
+        const kind = inferMediaKindFromName(filePath);
+        if (!kind) {
+          unsupportedFiles.push(name);
+          continue;
+        }
         try {
           const jobId = await tosStagingClient.startUpload({
             localPath: filePath,
@@ -1489,6 +1511,11 @@ export function WorkspaceApp() {
           if (destination === "cloud") setAssetsError(formatRawBackendError(error));
           else setLocalAssetsError(formatRawBackendError(error));
         }
+      }
+      if (unsupportedFiles.length > 0) {
+        const message = `不支持的文件类型，已跳过：${unsupportedFiles.join("、")}。支持 mp4 / mov / webm / avi / mkv 等常见格式。`;
+        if (destination === "cloud") setAssetsError(message);
+        else setLocalAssetsError(message);
       }
       if (startedCount === 0 && firstError != null && realPersonGroup) {
         throw firstError instanceof Error

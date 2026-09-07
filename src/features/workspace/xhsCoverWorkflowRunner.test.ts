@@ -289,34 +289,26 @@ describe("single-node portrait cover workflow", () => {
     expect(result.xhsCover?.review?.result).toBe("PASS");
   });
 
-  it("pauses at retry limit and applies confirmation through regeneration and fresh QC, never accepting a failed image", async () => {
-    const { fake, runner, request, resume, calls, normalResponse } = setup();
+  it("keeps reworking automatically on REVISE without a retry limit, accepting only a passed review", async () => {
+    const { fake, runner, request, normalResponse } = setup();
+    let qcCalls = 0;
     vi.mocked(fake.promptClient.run).mockImplementation((command) =>
       command.mode === "xhs_cover_qc"
-        ? output({
-            result: "REVISE",
-            report: "人物脸部被标题挡住",
-            repairInstructions: "把人物向下移动",
-          })
+        ? (qcCalls += 1) <= 2
+          ? output({
+              result: "REVISE",
+              report: "人物脸部被标题挡住",
+              repairInstructions: "把人物向下移动",
+            })
+          : normalResponse(command)
         : normalResponse(command),
     );
-    const pending = await runner.run({
-      ...request,
-      node: { ...request.node, config: { ...request.node.config, maxAutomaticRetries: 0 } },
-    });
-    expect(pending.phase).toBe("awaiting_approval");
-    expect(pending.finalPath).toBeNull();
-    expect(pending.xhsCover?.review?.result).toBe("REVISE");
-    vi.mocked(fake.promptClient.run).mockImplementation(normalResponse);
-    const result = await runner.run({
-      ...resume(pending),
-      decisionResolution: "人物移至画面右下，保持标题原文",
-    });
+    const result = await runner.run(request);
     expect(result.phase).toBe("done");
-    expect(fake.generation.start).toHaveBeenCalledTimes(2);
-    expect(calls().at(-2)?.userPrompt).toContain("人物移至画面右下");
-    expect(calls().at(-1)?.userPrompt).toContain("人物移至画面右下");
+    expect(qcCalls).toBe(3);
+    expect(fake.generation.start).toHaveBeenCalledTimes(3);
     expect(result.xhsCover?.review?.result).toBe("PASS");
+    expect(result.xhsCover?.history).toHaveLength(2);
   });
 
   it("retains a necessary planning decision and makes no image request before confirmation", async () => {

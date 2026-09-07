@@ -562,25 +562,24 @@ describe("reverse video workflow", () => {
     expect(completed.reverseVideo?.confirmedDecisions).toHaveLength(1);
   });
 
-  it("stops at the configured automatic retry limit without silently accepting the failed review", async () => {
+  it("keeps reworking automatically on REVISE without a retry limit, accepting only a passed review", async () => {
     const run = setup();
+    let reviewCalls = 0;
     run.promptClient.run.mockImplementation((command) =>
       command.mode === "reverse_video_review"
-        ? result({
-            result: "REVISE",
-            report: "结尾证据不足",
-            repairInstructions: "重新明确转身位置",
-          })
+        ? (reviewCalls += 1) <= 2
+          ? result({
+              result: "REVISE",
+              report: "结尾证据不足",
+              repairInstructions: "重新明确转身位置",
+            })
+          : run.normalResponse(command)
         : run.normalResponse(command),
     );
-    const checkpoint = await run.runner.run({
-      ...run.request,
-      node: { ...run.request.node, config: { ...run.request.node.config, maxAutomaticRetries: 0 } },
-    });
-    expect(checkpoint.phase).toBe("awaiting_approval");
-    expect(checkpoint.decision?.question).toContain("自动修订上限");
-    expect(run.promptClient.run).toHaveBeenCalledTimes(2);
-    expect(run.artifacts.deliver).not.toHaveBeenCalled();
+    const checkpoint = await run.runner.run(run.request);
+    expect(checkpoint.phase).toBe("done");
+    expect(reviewCalls).toBe(3);
+    expect(run.artifacts.deliver).toHaveBeenCalled();
   });
 
   it("automatically removes generated external jumps through a corrective model request before review or delivery", async () => {

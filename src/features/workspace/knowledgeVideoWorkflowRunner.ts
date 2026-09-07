@@ -1414,28 +1414,8 @@ export function createKnowledgeVideoWorkflowRunner(
                 return checkpoint;
               }
               run = checkpoint.shotRuns[shot.id]!;
-              if (run.retryCount >= node.config.maxAutomaticRetries) {
-                commit((current) => ({
-                  ...current,
-                  phase: "awaiting_approval",
-                  lastActivePhase: "qc",
-                  decision: {
-                    kind: "qc",
-                    question: `镜头 ${shot.sequence} 自动返工已达到上限：${qc.report}`,
-                    recommendation: "采用当前生成结果并继续合成",
-                  },
-                  shotRuns: {
-                    ...current.shotRuns,
-                    [shot.id]: {
-                      ...current.shotRuns[shot.id]!,
-                      qcStatus: "failed",
-                      qcReport: qc.report,
-                    },
-                  },
-                }));
-                progress("awaiting_approval", 78, "自动返工达到上限，需要确认后继续。");
-                return checkpoint;
-              }
+              // 审查不通过时自动返工不再受次数限制：持续重新生成并再次质检，
+              // 直到 PASS、需要用户决策（NEEDS_DECISION）或用户取消为止。
               commit((current) => ({
                 ...current,
                 phase: "generating",

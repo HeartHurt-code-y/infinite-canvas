@@ -1086,6 +1086,16 @@ svg[data-spin="true"] {
   overflow: visible;
 }
 
+/* 展开态完整原始错误：保留 JSON 换行与缩进，等宽字体便于对齐诊断字段。 */
+.asset-upload__error-detail {
+  display: block;
+  overflow: visible;
+  -webkit-line-clamp: unset;
+  white-space: pre-wrap;
+  font-family: var(--font-mono);
+  line-height: 1.5;
+}
+
 .asset-upload__error-toggle {
   justify-self: start;
   min-height: 0;
@@ -1180,6 +1190,20 @@ svg[data-spin="true"] {
   font-size: var(--text-2xs);
 }
 
+.asset-upload__phase {
+  display: flex;
+  gap: var(--space-2xs);
+  align-items: baseline;
+}
+
+.asset-upload__phase-name {
+  color: var(--color-chrome-subtle);
+}
+
+.asset-upload__phase-value {
+  color: var(--color-chrome-ink);
+}
+
 .asset-upload__bar {
   display: block;
   height: var(--rule-active);
@@ -1194,6 +1218,21 @@ svg[data-spin="true"] {
   background: var(--color-accent);
   border-radius: inherit;
   transition: width var(--dur-progress) ease;
+}
+
+/* 素材库导入阶段没有字节进度，用不确定进度条表达"上传中"。 */
+.asset-upload__bar--indeterminate i {
+  width: 40%;
+  animation: asset-upload-indeterminate 1.4s ease-in-out infinite;
+}
+
+@keyframes asset-upload-indeterminate {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(250%);
+  }
 }
 
 .asset-upload__dismiss {

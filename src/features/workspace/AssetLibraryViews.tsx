@@ -11,9 +11,11 @@ import {
   ASSET_CLOUD_STATUS_LABELS,
   ASSET_KIND_LABELS,
   STAGING_STATUS_LABELS,
+  UPLOAD_PHASE_NAMES,
   assetErrorPresentation,
   isTerminalAssetUpload,
   measuredAspectRatio,
+  stagingErrorFullText,
   stagingErrorSummary,
 } from "./workspaceModel";
 
@@ -474,13 +476,57 @@ export function AssetUploadRow({
       ? Math.min(100, Math.round((entry.bytesUploaded / entry.bytesTotal) * 100))
       : null;
   const isStalled = entry.stalled && entry.status === "uploading";
+  // 两段进度：① 对象存储直传（validating/authorizing/uploading，有字节进度）；
+  // ② 素材库导入（staged/importing → active/cleaned，仅云端素材）。
+  const isObjectStoragePhase =
+    entry.status === "validating" ||
+    entry.status === "authorizing" ||
+    entry.status === "uploading";
+  const hasFailed = entry.status === "failed" || entry.status === "interrupted";
+  const objectStorageValue = hasFailed
+    ? "失败"
+    : isObjectStoragePhase
+      ? `${STAGING_STATUS_LABELS[entry.status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
+      : "已完成";
+  const showAssetImportPhase = entry.destination === "cloud";
+  const assetImportInProgress = entry.status === "staged" || entry.status === "importing";
+  const assetImportDone = entry.status === "active" || entry.status === "cleaned";
+  // 素材库导入字节进度：海外路径在 importing 期间由后端推进（bytesTotal = 2×文件大小，
+  // 下载 + 上传）；国内路径（/v1/assets/async 平台侧拉取）无字节进度，bytes 保持对象
+  // 存储阶段的值（bytesUploaded ≥ bytesTotal），因此走"平台处理中"。
+  const assetImportHasByteProgress =
+    entry.status === "importing" &&
+    entry.bytesTotal != null &&
+    entry.bytesTotal > 0 &&
+    entry.bytesUploaded < entry.bytesTotal;
+  const assetImportPercent =
+    assetImportHasByteProgress && entry.bytesTotal != null
+      ? Math.min(100, Math.round((entry.bytesUploaded / entry.bytesTotal) * 100))
+      : null;
+  const assetImportValue = hasFailed
+    ? "失败"
+    : assetImportInProgress
+      ? assetImportHasByteProgress
+        ? `上传中 ${assetImportPercent}%`
+        : entry.status === "importing"
+          ? "平台处理中…"
+          : "上传中…"
+      : assetImportDone
+        ? "已完成"
+        : "等待中";
+  // 折叠态展示人类可读摘要；展开态展示后端返回的完整原始错误（JSON，含
+  // message/kind/details/rawResponse/httpStatus 等全部诊断字段）。
   const errorSummary =
     entry.status === "failed" || entry.status === "interrupted"
       ? stagingErrorSummary(entry.error)
       : null;
+  const errorDetail =
+    entry.status === "failed" || entry.status === "interrupted"
+      ? stagingErrorFullText(entry.error)
+      : null;
   const [errorExpanded, setErrorExpanded] = useState(false);
-  // 短错误一行内可展示完，不需要展开按钮；超过阈值才提供折叠/展开。
-  const showErrorToggle = errorSummary != null && errorSummary.length > 80;
+  // 完整原始错误过长才提供折叠/展开；摘要本身也可能被 -webkit-line-clamp 收成两行。
+  const showErrorToggle = errorDetail != null && errorDetail.length > 80;
 
   return (
     <li className="asset-upload" data-state={entry.status}>
@@ -498,20 +544,28 @@ export function AssetUploadRow({
       <span className="asset-upload__body">
         <span className="asset-upload__name">{entry.name}</span>
         <span className="asset-upload__status">
-          {STAGING_STATUS_LABELS[entry.status]}
-          {progressPercent != null ? ` · ${progressPercent}%` : ""}
-          {` · ${progressLabel}`}
+          <span className="asset-upload__phase">
+            <span className="asset-upload__phase-name">{UPLOAD_PHASE_NAMES.objectStorage}</span>
+            <span className="asset-upload__phase-value">{objectStorageValue}</span>
+          </span>
+          {showAssetImportPhase ? (
+            <span className="asset-upload__phase">
+              <span className="asset-upload__phase-name">{UPLOAD_PHASE_NAMES.assetImport}</span>
+              <span className="asset-upload__phase-value">{assetImportValue}</span>
+            </span>
+          ) : null}
         </span>
         {isStalled ? (
           <span className="asset-upload__stalled" role="status">
             上传长时间无进展，疑似网络中断，等待后端超时判定…
           </span>
         ) : null}
-        {errorSummary != null ? (
-          <span
-            className={`asset-upload__error${errorExpanded ? " is-expanded" : ""}`}
-            role="alert"
-          >
+        {errorExpanded && errorDetail != null ? (
+          <span className="asset-upload__error asset-upload__error-detail" role="alert">
+            {errorDetail}
+          </span>
+        ) : errorSummary != null ? (
+          <span className="asset-upload__error" role="alert">
             {errorSummary}
           </span>
         ) : null}
@@ -525,10 +579,24 @@ export function AssetUploadRow({
             {errorExpanded ? "收起" : "展开完整报错"}
           </button>
         ) : null}
-        {progressPercent != null && !isTerminal ? (
+        {progressPercent != null && !isTerminal && isObjectStoragePhase ? (
           <span className="asset-upload__bar" aria-hidden="true">
             <i style={{ width: `${progressPercent}%` }} />
           </span>
+        ) : null}
+        {showAssetImportPhase && assetImportInProgress ? (
+          assetImportHasByteProgress ? (
+            <span className="asset-upload__bar" aria-hidden="true">
+              <i style={{ width: `${assetImportPercent ?? 0}%` }} />
+            </span>
+          ) : (
+            <span
+              className="asset-upload__bar asset-upload__bar--indeterminate"
+              aria-hidden="true"
+            >
+              <i />
+            </span>
+          )
         ) : null}
       </span>
       {isTerminal ? (

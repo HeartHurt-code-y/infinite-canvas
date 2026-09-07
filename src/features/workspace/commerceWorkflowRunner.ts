@@ -540,18 +540,12 @@ async function planCommerce(
         break;
       }
       const review = read().review!;
-      if (
-        !confirmed &&
-        (review.result === "NEEDS_DECISION" ||
-          read().repairCount >= Math.max(0, Math.floor(node.config.maxAutomaticRetries)))
-      )
+      // 审查不通过时自动返工不再受次数限制；只有必须由用户决策才暂停等待。
+      if (!confirmed && review.result === "NEEDS_DECISION")
         return plan({
           kind: "planning",
-          question:
-            review.question ??
-            `${COMMERCE_STAGE_LABELS[stage]}达到自动修订上限，是否继续按检查意见修订？`,
-          recommendation:
-            review.recommendation ?? `继续修订：${review.repairInstructions ?? review.report}`,
+          question: review.question ?? review.report,
+          recommendation: review.recommendation ?? `继续修订：${review.repairInstructions ?? review.report}`,
         });
       save((run) => ({ ...run, repairCount: confirmed ? 0 : run.repairCount + 1 }));
       generate = true;
