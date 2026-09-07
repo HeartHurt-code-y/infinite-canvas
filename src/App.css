@@ -1062,6 +1062,31 @@ svg[data-spin="true"] {
   word-break: break-all;
 }
 
+.asset-upload__error.is-expanded {
+  display: block;
+  -webkit-line-clamp: unset;
+  overflow: visible;
+}
+
+.asset-upload__error-toggle {
+  justify-self: start;
+  min-height: 0;
+  padding: 0;
+  color: var(--color-error);
+  background: none;
+  border: none;
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 1.4;
+  cursor: pointer;
+  opacity: 0.85;
+}
+
+.asset-upload__error-toggle:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .asset-uploads {
   display: grid;
   gap: var(--space-2xs);

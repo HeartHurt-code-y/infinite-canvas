@@ -477,6 +477,9 @@ export function AssetUploadRow({
     entry.status === "failed" || entry.status === "interrupted"
       ? stagingErrorSummary(entry.error)
       : null;
+  const [errorExpanded, setErrorExpanded] = useState(false);
+  // 短错误一行内可展示完，不需要展开按钮；超过阈值才提供折叠/展开。
+  const showErrorToggle = errorSummary != null && errorSummary.length > 80;
 
   return (
     <li className="asset-upload" data-state={entry.status}>
@@ -503,7 +506,24 @@ export function AssetUploadRow({
             上传长时间无进展，疑似网络中断，等待后端超时判定…
           </span>
         ) : null}
-        {errorSummary != null ? <span className="asset-upload__error">{errorSummary}</span> : null}
+        {errorSummary != null ? (
+          <span
+            className={`asset-upload__error${errorExpanded ? " is-expanded" : ""}`}
+            role="alert"
+          >
+            {errorSummary}
+          </span>
+        ) : null}
+        {showErrorToggle ? (
+          <button
+            type="button"
+            className="asset-upload__error-toggle"
+            aria-expanded={errorExpanded}
+            onClick={() => setErrorExpanded((value) => !value)}
+          >
+            {errorExpanded ? "收起" : "展开完整报错"}
+          </button>
+        ) : null}
         {progressPercent != null && !isTerminal ? (
           <span className="asset-upload__bar" aria-hidden="true">
             <i style={{ width: `${progressPercent}%` }} />
