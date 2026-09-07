@@ -723,6 +723,12 @@ impl AssetLibrary {
                 body: Some(body),
             })
             .await?;
+        // 兼容未实现 `/v1/assets/async` 的网关（如部分自建供应商）：
+        // 返回 404 Invalid URL 时自动回退到 multipart 直传路径（`/v1/assets/upload`），
+        // 无需硬编码域名即可适配任意不支持该端点的供应商。
+        if response.status == 404 {
+            return self.import_staged_overseas(request, progress).await;
+        }
         require_success("submit asset import", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
         let raw_id = payload

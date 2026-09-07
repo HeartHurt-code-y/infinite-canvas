@@ -1087,13 +1087,46 @@ svg[data-spin="true"] {
 }
 
 /* 展开态完整原始错误：保留 JSON 换行与缩进，等宽字体便于对齐诊断字段。 */
+.asset-upload__error-detail-wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3xs);
+}
+
 .asset-upload__error-detail {
   display: block;
-  overflow: visible;
+  max-height: 240px;
+  overflow-y: auto;
+  overflow-x: hidden;
   -webkit-line-clamp: unset;
   white-space: pre-wrap;
+  word-break: break-all;
   font-family: var(--font-mono);
   line-height: 1.5;
+  padding-right: var(--space-2xs);
+}
+
+.asset-upload__error-copy {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-3xs);
+  align-self: flex-start;
+  min-height: 0;
+  padding: 2px 6px;
+  color: var(--color-error);
+  background: rgba(220 38 38 / 8%);
+  border: 1px solid rgba(220 38 38 / 20%);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-2xs);
+  font-weight: 600;
+  line-height: 1.4;
+  cursor: pointer;
+  transition: background 120ms ease, border-color 120ms ease;
+}
+
+.asset-upload__error-copy:hover {
+  background: rgba(220 38 38 / 14%);
+  border-color: rgba(220 38 38 / 35%);
 }
 
 .asset-upload__error-toggle {

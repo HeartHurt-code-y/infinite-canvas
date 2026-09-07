@@ -1,11 +1,14 @@
+import { Check } from "@phosphor-icons/react/Check";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
+import { CopySimple } from "@phosphor-icons/react/CopySimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import { formatBytes } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon, NodeTypeIcon } from "./PromptNodeViews";
+import { copyTextToDesktopClipboard } from "./desktopActions";
 import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
@@ -529,6 +532,7 @@ export function AssetUploadRow({
       ? stagingErrorFullText(entry.error)
       : null;
   const [errorExpanded, setErrorExpanded] = useState(false);
+  const [errorCopied, setErrorCopied] = useState(false);
   // 完整原始错误过长才提供折叠/展开；摘要本身也可能被 -webkit-line-clamp 收成两行。
   const showErrorToggle = errorDetail != null && errorDetail.length > 80;
 
@@ -565,8 +569,34 @@ export function AssetUploadRow({
           </span>
         ) : null}
         {errorExpanded && errorDetail != null ? (
-          <span className="asset-upload__error asset-upload__error-detail" role="alert">
-            {errorDetail}
+          <span className="asset-upload__error-detail-wrapper">
+            <span className="asset-upload__error asset-upload__error-detail" role="alert">
+              {errorDetail}
+            </span>
+            <button
+              type="button"
+              className="asset-upload__error-copy"
+              aria-label={errorCopied ? "已复制报错" : "复制完整报错"}
+              title={errorCopied ? "已复制" : "复制完整报错"}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={async (event) => {
+                event.stopPropagation();
+                try {
+                  await copyTextToDesktopClipboard(errorDetail);
+                  setErrorCopied(true);
+                  window.setTimeout(() => setErrorCopied(false), 2000);
+                } catch {
+                  // 剪贴板不可用时静默失败
+                }
+              }}
+            >
+              {errorCopied ? (
+                <Check size={12} weight="bold" aria-hidden="true" />
+              ) : (
+                <CopySimple size={12} weight="bold" aria-hidden="true" />
+              )}
+              {errorCopied ? "已复制" : "复制"}
+            </button>
           </span>
         ) : errorSummary != null ? (
           <span className="asset-upload__error" role="alert">
