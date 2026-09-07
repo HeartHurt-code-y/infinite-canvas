@@ -1465,6 +1465,13 @@ export function CanvasAssetNode({
         <span className="canvas-asset-node__name" title={node.name}>
           {node.name}
         </span>
+        {node.source !== "local" ? (
+          <span
+            className="canvas-asset-node__cloud-badge"
+            title="已在云端素材库"
+            aria-label="已在云端素材库"
+          />
+        ) : null}
       </span>
       <span className="canvas-asset-node__meta">
         {typeLabel} · {edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}
