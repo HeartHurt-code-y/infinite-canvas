@@ -720,12 +720,25 @@ impl AssetLibrary {
                 provider_connection_id: request.provider_connection_id.clone(),
                 method: Method::POST,
                 path: "/v1/assets/async",
-                body: Some(body),
+                body: Some(body.clone()),
             })
             .await?;
-        // 兼容未实现 `/v1/assets/async` 的网关（如部分自建供应商）：
-        // 返回 404 Invalid URL 时自动回退到 multipart 直传路径（`/v1/assets/upload`），
-        // 无需硬编码域名即可适配任意不支持该端点的供应商。
+        // 兼容未实现 `/v1/assets/async` 的网关（如 SD2.0 等自建供应商）：
+        // 返回 404 Invalid URL 时尝试 SD2.0 风格端点 `/v1/assets`（同样是 JSON 方式，参数相同）。
+        let response = if response.status == 404 {
+            self.port
+                .send(RemoteAssetRequest {
+                    provider_connection_id: request.provider_connection_id.clone(),
+                    method: Method::POST,
+                    path: "/v1/assets",
+                    body: Some(body),
+                })
+                .await?
+        } else {
+            response
+        };
+        // 若两个 JSON 端点都返回 404，回退到海外平台 multipart 直传路径（`/v1/assets/upload`），
+        // 无需硬编码域名即可适配任意不支持 JSON 方式的供应商。
         if response.status == 404 {
             return self.import_staged_overseas(request, progress).await;
         }
@@ -821,6 +834,19 @@ impl AssetLibrary {
                 file_bytes: bytes,
             })
             .await?;
+        // 若 `/v1/assets/upload` 也返回 404，说明该供应商网关未实现任何已知素材上传端点
+        // （国内 `/v1/assets/async`、SD2.0 风格 `/v1/assets`、海外 `/v1/assets/upload` 均返回 404），
+        // 给出明确诊断。
+        if response.status == 404 {
+            return Err(BackendError::protocol(
+                "该供应商网关未实现任何已知素材上传端点（/v1/assets/async、/v1/assets 和 /v1/assets/upload 均返回 404），请确认供应商是否支持素材上传功能或联系供应商获取正确的 API 路径",
+                json!({
+                    "triedEndpoints": ["/v1/assets/async", "/v1/assets", "/v1/assets/upload"],
+                    "providerConnectionId": request.provider_connection_id,
+                    "rawResponse": response.body,
+                }),
+            ));
+        }
         require_success("submit asset upload", &response)?;
         if let Some(on_progress) = progress.as_ref() {
             on_progress(total_work, total_work);
