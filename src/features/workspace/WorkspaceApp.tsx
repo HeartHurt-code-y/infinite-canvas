@@ -93,7 +93,7 @@ import type {
   PromptContentEditorSession,
   PromptContentIssue,
 } from "../../lib/promptContent";
-import { createPromptContentModule } from "../../lib/promptContent";
+import { createPromptContentModule, stripMarkdown } from "../../lib/promptContent";
 import {
   composeVideosInOrder,
   composedVideoFileName,
@@ -3095,7 +3095,7 @@ export function WorkspaceApp() {
         })
         .then((result) => {
           const sourceText = result.optimizedPrompt;
-          const generatedPrompt = sourceText.trim();
+          const generatedPrompt = stripMarkdown(sourceText);
           if (generatedPrompt) {
             for (const edge of assetEdges) {
               if (edge.fromKey !== nodeKey) continue;
@@ -5954,7 +5954,7 @@ export function WorkspaceApp() {
         previous.text === sourceText
       )
         continue;
-      const generatedPrompt = source.config.generatedPrompt.trim();
+      const generatedPrompt = stripMarkdown(source.config.generatedPrompt);
       if (!generatedPrompt) {
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;

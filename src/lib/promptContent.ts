@@ -1156,3 +1156,62 @@ class PromptContentModuleImplementation implements PromptContentModule {
 export function createPromptContentModule(): PromptContentModule {
   return new PromptContentModuleImplementation();
 }
+
+
+/**
+ * 从提示词文本中摘除 markdown 格式，返回纯文本内容。
+ * 处理：代码块、分隔线、标题、列表、加粗、斜体、行内代码、多余空行。
+ * 用于提示词生成节点输出同步到图片/视频生成节点时，自动清理 markdown 格式。
+ */
+export function stripMarkdown(text: string): string {
+  if (!text) return "";
+  let result = text;
+
+  // 1. 提取 ```markdown ... ``` 代码块内的内容（去掉代码块标记）
+  result = result.replace(/```(?:markdown|md)?\s*\n([\s\S]*?)```/gi, "$1");
+  // 处理行内代码块（没有换行的情况）
+  result = result.replace(/```([\s\S]*?)```/g, "$1");
+
+  // 2. 删除分隔线 ---、___、***
+  result = result.replace(/^[-_*]{3,}\s*$/gm, "");
+
+  // 3. 标题 #、##、### 等 → 只保留标题文本
+  result = result.replace(/^#{1,6}\s+/gm, "");
+
+  // 4. 无序列表 -、*、+ → 只保留列表项文本（保留缩进）
+  result = result.replace(/^([ \t]*)[-*+]\s+/gm, "$1");
+
+  // 5. 有序列表 1.、2. → 只保留列表项文本（保留缩进）
+  result = result.replace(/^([ \t]*)\d+[.)]\s+/gm, "$1");
+
+  // 6. 加粗 **text** 或 __text__ → 只保留文本
+  result = result.replace(/\*\*([^*]+)\*\*/g, "$1");
+  result = result.replace(/__([^_]+)__/g, "$1");
+
+  // 7. 斜体 *text* 或 _text_ → 只保留文本
+  result = result.replace(/\*([^*]+)\*/g, "$1");
+  result = result.replace(/_([^_]+)_/g, "$1");
+
+  // 8. 行内代码 `text` → 只保留文本
+  result = result.replace(/`([^`]+)`/g, "$1");
+
+  // 9. 删除链接 [text](url) → 只保留文本
+  result = result.replace(/\[([^\]]+)\]\([^)]+\)/g, "$1");
+
+  // 10. 删除图片 ![alt](url) → 只保留 alt 文本
+  result = result.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
+
+  // 11. 删除引用 > 
+  result = result.replace(/^>\s?/gm, "");
+
+  // 12. 合并多余空行（3个及以上换行 → 2个换行）
+  result = result.replace(/\n{3,}/g, "\n\n");
+
+  // 13. 去除每行首尾空白（但保留缩进结构）
+  result = result
+    .split("\n")
+    .map((line) => line.trimEnd())
+    .join("\n");
+
+  return result.trim();
+}
