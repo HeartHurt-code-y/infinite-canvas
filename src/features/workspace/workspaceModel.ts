@@ -198,8 +198,8 @@ export interface GenerationMediaInput {
 }
 
 /**
- * 视频节点通过提示词连线自动继承上游提示词节点用于视觉理解的图片。
- * 直接连到视频节点的同一画布素材实例优先，避免同一素材被提交两次。
+ * 图片/视频节点通过提示词连线自动继承上游提示词节点用于视觉理解的图片。
+ * 直接连到目标节点的同一画布素材实例优先，避免同一素材被提交两次。
  * FPV 路径图只用于分析，视频参考由用户直接连接，避免把路径标记带进视频。
  */
 export function inheritedVideoAssetInputs(
@@ -209,7 +209,7 @@ export function inheritedVideoAssetInputs(
   genTopologyByKey: ReadonlyMap<string, GenNodeData>,
 ): readonly { readonly node: AssetNodeData; readonly promptNodeKey: string }[] {
   const target = genTopologyByKey.get(nodeKey);
-  if (target?.kind !== "video") return [];
+  if (target?.kind !== "video" && target?.kind !== "image") return [];
 
   let promptNodeKey: string | null = null;
   const incoming = edgesByTarget.get(nodeKey) ?? [];

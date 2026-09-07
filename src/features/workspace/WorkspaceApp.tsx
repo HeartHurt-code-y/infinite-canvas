@@ -5874,11 +5874,11 @@ export function WorkspaceApp() {
     [removeCanvasNode, frameExtractorRuns],
   );
 
-  /** 视频节点从上游提示词节点继承的视觉参考图；这是连线派生数据，不额外写入画布文档。 */
+  /** 图片/视频节点从上游提示词节点继承的视觉参考图；这是连线派生数据，不额外写入画布文档。 */
   const inheritedInputsByNode = useMemo(() => {
     const map = new Map<string, InheritedAssetInput[]>();
     for (const node of genTopologyByKey.values()) {
-      if (node.kind !== "video") continue;
+      if (node.kind !== "video" && node.kind !== "image") continue;
       const inherited = inheritedVideoAssetInputs(
         node.key,
         canvasEdgeIndex.byTarget,
