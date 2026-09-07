@@ -1118,9 +1118,39 @@ export function stagingErrorSummary(error: unknown): string | null {
     const record = error as Record<string, unknown>;
     const message = typeof record["message"] === "string" ? record["message"] : null;
     const kind = typeof record["kind"] === "string" ? record["kind"] : null;
-    if (message != null) return kind != null ? `${kind}：${message}` : message;
+    // 后端 BackendErrorPayload 的 details 中包含供应商返回的 itemError，
+    // 比通用的 "reached terminal status Failed" 更有诊断价值。
+    const details = record["details"];
+    const itemError =
+      details != null && typeof details === "object"
+        ? (details as Record<string, unknown>)["itemError"]
+        : null;
+    const itemErrorText = formatStagingItemError(itemError);
+    if (message != null) {
+      const base = kind != null ? `${kind}：${message}` : message;
+      return itemErrorText != null ? `${base}\n${itemErrorText}` : base;
+    }
+    if (itemErrorText != null) return itemErrorText;
   }
   return formatRawBackendError(error);
+}
+
+function formatStagingItemError(value: unknown): string | null {
+  if (value == null) return null;
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed || null;
+  }
+  if (typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    const message = typeof record["message"] === "string" ? record["message"] : null;
+    if (message != null) return message;
+  }
+  try {
+    return JSON.stringify(value, null, 2);
+  } catch {
+    return String(value);
+  }
 }
 
 export const ASSET_RAW_RESPONSE_MARKER = "原始响应：";
