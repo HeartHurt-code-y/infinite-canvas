@@ -178,9 +178,11 @@ import type {
   GenerationMediaInput,
   ImageNodeConfig,
   InheritedAssetInput,
+  KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowConfig,
   KnowledgeVideoWorkflowNodeData,
   KnowledgeVideoWorkflowRunState,
+  KnowledgeVideoWorkflowShotRun,
   MentionCandidate,
   MobilePanel,
   NodeModelSelections,
@@ -2550,6 +2552,49 @@ export function WorkspaceApp() {
     (key: string, resolution?: string) => runKnowledgeVideoWorkflow(key, true, resolution),
     [runKnowledgeVideoWorkflow],
   );
+  const redoKnowledgeVideoWorkflowShot = useCallback(
+    (key: string, shotId: string) => {
+      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      const node = knowledgeVideoWorkflowNodes.find((candidate) => candidate.key === key);
+      const checkpoint: KnowledgeVideoWorkflowCheckpoint | undefined = node?.config.checkpoint;
+      const run: KnowledgeVideoWorkflowShotRun | undefined = checkpoint?.shotRuns[shotId];
+      const shot = checkpoint?.shots.find((item) => item.id === shotId);
+      if (!node || !checkpoint || !run || !shot) return;
+      const supersededTaskId = run.videoTaskId ?? null;
+      const nextRun: KnowledgeVideoWorkflowShotRun = {
+        ...run,
+        redoRequested: true,
+        videoTaskId: null,
+        clipPath: null,
+        qcStatus: "pending",
+        retryCount: 0,
+        repairPrompt: null,
+        qcReport: "用户要求重做此镜头，已重新提交生成。",
+        ...(supersededTaskId
+          ? { supersededTaskIds: [...(run.supersededTaskIds ?? []), supersededTaskId] }
+          : {}),
+      };
+      const nextCheckpoint: KnowledgeVideoWorkflowCheckpoint = {
+        ...checkpoint,
+        phase: "paused",
+        lastActivePhase: checkpoint.lastActivePhase ?? "generating",
+        activeCompositionJobId: null,
+        error: null,
+        decision: null,
+        shotRuns: { ...checkpoint.shotRuns, [shotId]: nextRun },
+        updatedAt: Date.now(),
+      };
+      patchNode("knowledgeVideoWorkflow", key, (currentNode) => ({
+        ...currentNode,
+        config: { ...currentNode.config, checkpoint: nextCheckpoint },
+      }));
+      toast.info("正在重做该镜头", {
+        description: `镜头 ${shot.sequence} 只重跑这一个分镜，其他镜头保持不变。`,
+      });
+      runKnowledgeVideoWorkflow(key, true);
+    },
+    [knowledgeVideoWorkflowNodes, patchNode, runKnowledgeVideoWorkflow],
+  );
   const cancelKnowledgeVideoWorkflow = useCallback(
     (key: string) => {
       knowledgeVideoWorkflowAbortControllersRef.current.get(key)?.abort();
@@ -2959,6 +3004,53 @@ export function WorkspaceApp() {
           multimodalInputs: videoMaterials,
         })
         .then((result) => {
+          const sourceText = result.optimizedPrompt;
+          const generatedPrompt = sourceText.trim();
+          if (generatedPrompt) {
+            for (const edge of assetEdges) {
+              if (edge.fromKey !== nodeKey) continue;
+              const target = genTopologyByKey.get(edge.toKey);
+              const source = genNodeByKey.get(edge.fromKey);
+              if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
+              const previous = importedPromptSourcesRef.current.get(target.key);
+              if (
+                previous?.edgeId === edge.id &&
+                previous.sourceKey === source.key &&
+                previous.text === sourceText
+              )
+                continue;
+              const replaced = promptContents.replaceText(target.key, generatedPrompt, []);
+              if (replaced == null) continue;
+              importedPromptSourcesRef.current.set(target.key, {
+                edgeId: edge.id,
+                sourceKey: source.key,
+                text: sourceText,
+              });
+              frontendLog(
+                "info",
+                `[canvas] 提示词节点输出已导入生成节点: source=${source.key}, target=${target.key}, 字符 ${generatedPrompt.length}`,
+              );
+            }
+          } else {
+            for (const edge of assetEdges) {
+              if (edge.fromKey !== nodeKey) continue;
+              const target = genTopologyByKey.get(edge.toKey);
+              const source = genNodeByKey.get(edge.fromKey);
+              if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
+              const previous = importedPromptSourcesRef.current.get(target.key);
+              if (
+                previous?.edgeId === edge.id &&
+                previous.sourceKey === source.key &&
+                previous.text === sourceText
+              )
+                continue;
+              importedPromptSourcesRef.current.set(target.key, {
+                edgeId: edge.id,
+                sourceKey: source.key,
+                text: sourceText,
+              });
+            }
+          }
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
               ? {
@@ -2999,7 +3091,11 @@ export function WorkspaceApp() {
       genNodes,
       promptVideoMaterials,
       promptVisionImages,
+      assetEdges,
       providerCatalog,
+      genNodeByKey,
+      genTopologyByKey,
+      promptContents,
       setNodeStartError,
       startingNodeKeys,
       patchNode,
@@ -6163,6 +6259,7 @@ export function WorkspaceApp() {
               onExecute={executeKnowledgeVideoWorkflow}
               onContinue={continueKnowledgeVideoWorkflow}
               onCancel={cancelKnowledgeVideoWorkflow}
+              onRedoShot={redoKnowledgeVideoWorkflowShot}
               onRemove={removeKnowledgeVideoWorkflow}
               onRevealResult={revealKnowledgeVideoWorkflowResult}
               onOpenHistory={openWorkflowHistory}
@@ -6199,6 +6296,7 @@ export function WorkspaceApp() {
       updateKnowledgeVideoWorkflowConfig,
       executeKnowledgeVideoWorkflow,
       continueKnowledgeVideoWorkflow,
+      redoKnowledgeVideoWorkflowShot,
       cancelKnowledgeVideoWorkflow,
       removeKnowledgeVideoWorkflow,
       revealKnowledgeVideoWorkflowResult,

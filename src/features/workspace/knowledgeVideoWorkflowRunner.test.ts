@@ -709,4 +709,74 @@ describe("knowledge video workflow runner", () => {
     expect(result.decision).toMatchObject({ kind: "qc" });
     expect(fake.composer.startComposition).not.toHaveBeenCalled();
   });
+
+  it("resumes a single re-done shot while keeping every other clip untouched", async () => {
+    const fake = fakeDependencies(planJson());
+    const runner = createKnowledgeVideoWorkflowRunner({
+      promptClient: fake.promptClient,
+      generationClient: fake.generation,
+      frameClient: fake.frames,
+      composerClient: fake.composer,
+      now: () => 42,
+      createId: () => "run-shot-redo",
+      sleep: () => Promise.resolve(),
+    });
+    const source = node();
+    const request = {
+      node: source,
+      providerCatalog: catalog,
+      signal: new AbortController().signal,
+      onCheckpoint: vi.fn(),
+      onProgress: vi.fn(),
+    };
+    const done = await runner.run(request);
+    expect(done.phase).toBe("done");
+    expect(done.shotRuns["shot-02"]?.clipPath).toBeTruthy();
+
+    // 模拟用户重做镜头 02：清空生成结果与任务身份，保留旧任务 ID 防历史复用。
+    const redoRun = done.shotRuns["shot-02"]!;
+    const redoCheckpoint = {
+      ...done,
+      phase: "paused" as const,
+      shotRuns: {
+        ...done.shotRuns,
+        "shot-02": {
+          ...redoRun,
+          redoRequested: true,
+          videoTaskId: null,
+          clipPath: null,
+          qcStatus: "pending" as const,
+          retryCount: 0,
+          repairPrompt: null,
+          supersededTaskIds: [...(redoRun.supersededTaskIds ?? []), redoRun.videoTaskId!],
+        },
+      },
+    };
+
+    vi.mocked(fake.generation.start).mockClear();
+    vi.mocked(fake.composer.startComposition).mockClear();
+
+    const resumed = await runner.run({
+      ...request,
+      resume: true,
+      node: { ...source, config: { ...source.config, checkpoint: redoCheckpoint } },
+    });
+
+    expect(resumed.phase).toBe("done");
+    expect(resumed.shotRuns["shot-02"]?.redoRequested).toBe(true);
+    expect(resumed.shotRuns["shot-02"]?.clipPath).not.toBeNull();
+    // 只重新生成被重做的镜头，其余镜头复用原片段。
+    const videoStarts = vi
+      .mocked(fake.generation.start)
+      .mock.calls.filter(([command]) => command.operation === "video_generation");
+    expect(videoStarts).toHaveLength(1);
+    const prompts = videoStarts.flatMap(([command]) =>
+      command.prompt.flatMap((segment) => (segment.kind === "text" ? [segment.text] : [])),
+    );
+    expect(prompts[0]).toContain("CONCEPT 视频提示词");
+    expect(resumed.shotRuns["shot-01"]?.clipPath).toBe(done.shotRuns["shot-01"]?.clipPath);
+    expect(resumed.shotRuns["shot-03"]?.clipPath).toBe(done.shotRuns["shot-03"]?.clipPath);
+    // 重做镜头通过质检后仍会重新执行合成。
+    expect(fake.composer.startComposition).toHaveBeenCalledTimes(1);
+  });
 });

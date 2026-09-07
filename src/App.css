@@ -4299,6 +4299,124 @@ svg[data-spin="true"] {
   font-size: var(--text-2xs);
 }
 
+.canvas-knowledge-workflow__shots {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.canvas-knowledge-workflow__shots > h4 {
+  margin: 0;
+  font-size: var(--text-xs);
+}
+
+.canvas-knowledge-workflow__shots ol {
+  display: grid;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.canvas-knowledge-workflow__shots li {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  background: var(--color-paper-2);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.canvas-knowledge-workflow__shots li.canvas-knowledge-workflow__shot--redo {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.canvas-knowledge-workflow__shot-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+
+.canvas-knowledge-workflow__shot-head strong {
+  font-size: var(--text-xs);
+}
+
+.canvas-knowledge-workflow__shot-state {
+  color: var(--color-ink-2);
+  font-size: var(--text-2xs);
+  white-space: nowrap;
+}
+
+.canvas-knowledge-workflow__shots video {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: contain;
+  background: var(--color-chrome-field);
+  border-radius: var(--radius-control);
+}
+
+.canvas-knowledge-workflow__shots button {
+  justify-self: start;
+}
+
+.canvas-knowledge-workflow__shots li.canvas-knowledge-workflow__shot--edited {
+  border-color: var(--color-warning, #d4a017);
+}
+
+.canvas-knowledge-workflow__shot-meta {
+  margin: 0;
+  color: var(--color-ink-2);
+  font-size: var(--text-2xs);
+}
+
+.canvas-knowledge-workflow__shot-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
+.canvas-knowledge-workflow__shot-editor {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.canvas-knowledge-workflow__shot-editor label {
+  display: grid;
+  gap: 2px;
+  font-size: var(--text-2xs);
+  color: var(--color-ink-2);
+}
+
+.canvas-knowledge-workflow__shot-editor textarea,
+.canvas-knowledge-workflow__shot-editor input[type="number"] {
+  width: 100%;
+  box-sizing: border-box;
+  padding: 6px 8px;
+  font: inherit;
+  font-size: var(--text-xs);
+  color: var(--color-ink);
+  background: var(--color-chrome-field);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  resize: vertical;
+}
+
+.canvas-knowledge-workflow__shot-editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+}
+
 .canvas-knowledge-workflow__actions {
   display: flex;
   align-items: center;

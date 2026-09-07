@@ -9,8 +9,10 @@ import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWor
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import {
   createKnowledgeVideoWorkflowConfig,
+  type KnowledgeVideoWorkflowCheckpoint,
   type KnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowNodeData,
+  type KnowledgeVideoWorkflowShot,
   type NodeModelSelections,
 } from "./workspaceModel";
 
@@ -453,5 +455,173 @@ describe("KnowledgeVideoWorkflowNode", () => {
     expect(onRevealResult).toHaveBeenCalledWith("knowledge-video-workflow-1");
     fireEvent.click(screen.getByRole("button", { name: "重新制作" }));
     expect(onExecute).toHaveBeenCalledWith("knowledge-video-workflow-1");
+  });
+
+  it("lists generated shot clips and redoes a single shot through onRedoShot", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const shotFixture = (
+      id: string,
+      sequence: number,
+      section: string,
+    ): KnowledgeVideoWorkflowShot => ({
+      id,
+      sequence,
+      section: section as KnowledgeVideoWorkflowShot["section"],
+      track: "LECTURER",
+      title: `镜头 ${sequence}`,
+      durationSeconds: 5,
+      visual: "",
+      narration: "",
+      videoPrompt: `prompt-${id}`,
+      acceptance: "",
+    });
+    const checkpoint: KnowledgeVideoWorkflowCheckpoint = {
+      ...base.checkpoint,
+      phase: "done",
+      shots: [shotFixture("shot-a", 1, "HOOK"), shotFixture("shot-b", 2, "CONCEPT")],
+      shotRuns: {
+        "shot-a": {
+          shotId: "shot-a",
+          videoTaskId: "task-a",
+          clipPath: "C:\\output\\shot-a.mp4",
+          qcStatus: "passed",
+          retryCount: 0,
+        },
+        "shot-b": {
+          shotId: "shot-b",
+          videoTaskId: "task-b",
+          clipPath: "C:\\output\\shot-b.mp4",
+          qcStatus: "passed",
+          retryCount: 0,
+        },
+      },
+      finalPath: "C:\\output\\final.mp4",
+    };
+    const node = createNode({ ...base, brief: "重做测试", checkpoint });
+    const onRedoShot = vi.fn();
+    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onRedoShot={onRedoShot} />);
+
+    expect(screen.getByRole("region", { name: "分镜视频" })).toBeInTheDocument();
+    expect(screen.getByLabelText("镜头 1 视频预览")).toBeInTheDocument();
+    expect(screen.getByLabelText("镜头 2 视频预览")).toBeInTheDocument();
+    const redoButtons = screen.getAllByRole("button", { name: "重做此镜头" });
+    expect(redoButtons).toHaveLength(2);
+    fireEvent.click(redoButtons[1]!);
+    expect(onRedoShot).toHaveBeenCalledWith(node.key, "shot-b");
+  });
+
+  it("marks a re-done shot as pending without offering another redo while it has no clip", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const shotFixture = (
+      id: string,
+      sequence: number,
+      section: string,
+    ): KnowledgeVideoWorkflowShot => ({
+      id,
+      sequence,
+      section: section as KnowledgeVideoWorkflowShot["section"],
+      track: "LECTURER",
+      title: `镜头 ${sequence}`,
+      durationSeconds: 5,
+      visual: "",
+      narration: "",
+      videoPrompt: `prompt-${id}`,
+      acceptance: "",
+    });
+    const checkpoint: KnowledgeVideoWorkflowCheckpoint = {
+      ...base.checkpoint,
+      phase: "paused",
+      lastActivePhase: "generating",
+      shots: [shotFixture("shot-a", 1, "HOOK"), shotFixture("shot-b", 2, "CONCEPT")],
+      shotRuns: {
+        "shot-a": {
+          shotId: "shot-a",
+          videoTaskId: "task-a",
+          clipPath: "C:\\output\\shot-a.mp4",
+          qcStatus: "passed",
+          retryCount: 0,
+        },
+        "shot-b": {
+          shotId: "shot-b",
+          videoTaskId: null,
+          clipPath: null,
+          redoRequested: true,
+          qcStatus: "pending",
+          retryCount: 0,
+          supersededTaskIds: ["task-b"],
+        },
+      },
+      finalPath: "C:\\output\\final.mp4",
+    };
+    const node = createNode({ ...base, brief: "重做测试", checkpoint });
+    render(<KnowledgeVideoWorkflowNode {...commonProps(node)} onRedoShot={vi.fn()} />);
+
+    expect(screen.getByRole("region", { name: "分镜视频" })).toBeInTheDocument();
+    expect(screen.getByText("待重做")).toBeInTheDocument();
+    const redoButtons = screen.getAllByRole("button", { name: "重做此镜头" });
+    expect(redoButtons).toHaveLength(1);
+  });
+
+  it("edits a shot's prompt and narration, saves it, and marks the shot as prompt-edited", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const shotFixture = (
+      id: string,
+      sequence: number,
+      section: string,
+    ): KnowledgeVideoWorkflowShot => ({
+      id,
+      sequence,
+      section: section as KnowledgeVideoWorkflowShot["section"],
+      track: "LECTURER",
+      title: `镜头 ${sequence}`,
+      durationSeconds: 5,
+      visual: "原画面描述",
+      narration: "原旁白",
+      videoPrompt: "原视频提示词",
+      acceptance: "",
+    });
+    const checkpoint: KnowledgeVideoWorkflowCheckpoint = {
+      ...base.checkpoint,
+      phase: "done",
+      shots: [shotFixture("shot-a", 1, "HOOK")],
+      shotRuns: {
+        "shot-a": {
+          shotId: "shot-a",
+          videoTaskId: "task-a",
+          clipPath: "C:\\output\\shot-a.mp4",
+          qcStatus: "passed",
+          retryCount: 0,
+        },
+      },
+      finalPath: "C:\\output\\final.mp4",
+    };
+    const node = createNode({ ...base, brief: "编辑测试", checkpoint });
+    const onChange = vi.fn();
+    render(
+      <KnowledgeVideoWorkflowNode
+        {...commonProps(node)}
+        onChange={onChange}
+        onRedoShot={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "编辑分镜" }));
+    expect(screen.getByLabelText("视频提示词")).toBeInTheDocument();
+    expect(screen.getByLabelText("分镜画面描述")).toBeInTheDocument();
+    expect(screen.getByLabelText("旁白台词")).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText("视频提示词"), {
+      target: { value: "修改后的视频提示词" },
+    });
+    fireEvent.change(screen.getByLabelText("旁白台词"), {
+      target: { value: "修改后的旁白" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "保存修改" }));
+
+    expect(onChange).toHaveBeenCalledTimes(1);
+    const updatedConfig = onChange.mock.calls[0]![0] as KnowledgeVideoWorkflowConfig;
+    expect(updatedConfig.checkpoint.shots[0]?.videoPrompt).toBe("修改后的视频提示词");
+    expect(updatedConfig.checkpoint.shots[0]?.narration).toBe("修改后的旁白");
+    expect(updatedConfig.checkpoint.shotRuns["shot-a"]?.promptEdited).toBe(true);
   });
 });

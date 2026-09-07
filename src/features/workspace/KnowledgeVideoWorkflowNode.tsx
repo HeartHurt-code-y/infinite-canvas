@@ -242,6 +242,7 @@ export interface KnowledgeVideoWorkflowNodeProps {
   readonly onExecute: (key: string) => void;
   readonly onContinue: (key: string, resolution?: string) => void;
   readonly onCancel: (key: string) => void;
+  readonly onRedoShot?: (key: string, shotId: string) => void;
   readonly onRemove: (key: string) => void;
   readonly onRevealResult: (key: string) => void;
   readonly onOpenHistory?: (key: string) => void;
@@ -278,6 +279,7 @@ export function KnowledgeVideoWorkflowNode({
   onExecute,
   onContinue,
   onCancel,
+  onRedoShot,
   onRemove,
   onRevealResult,
   onOpenHistory,
@@ -300,6 +302,13 @@ export function KnowledgeVideoWorkflowNode({
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const pickingMaterialsRef = useRef(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
+  const [editingShotId, setEditingShotId] = useState<string | null>(null);
+  const [shotDraft, setShotDraft] = useState<{
+    videoPrompt: string;
+    visual: string;
+    narration: string;
+    durationSeconds: number;
+  } | null>(null);
   const filmOptions = node.config.film;
   const comicDramaOptions = node.config.comicDrama;
   const commerceOptions = node.config.commerce;
@@ -350,6 +359,7 @@ export function KnowledgeVideoWorkflowNode({
   const [decisionDraft, setDecisionDraft] = useState({ key: "", value: "" });
   const decisionResolution = decisionDraft.key === decisionKey ? decisionDraft.value : "";
   const finalPath = node.config.checkpoint.finalPath;
+  const checkpoint = node.config.checkpoint;
   const workflowStages = isReverse
     ? REVERSE_VIDEO_WORKFLOW_STAGES
     : isCover
@@ -1101,6 +1111,204 @@ export function KnowledgeVideoWorkflowNode({
                 </ol>
               </div>
             </details>
+          </section>
+        ) : null}
+
+        {!isReverse && !isCover && !isRemotion && checkpoint.shots.length > 0 ? (
+          <section className="canvas-knowledge-workflow__shots" aria-label="分镜视频">
+            <h4>分镜视频</h4>
+            <ol>
+              {checkpoint.shots.map((shot) => {
+                const run = checkpoint.shotRuns[shot.id];
+                const clipPath = run?.clipPath ?? null;
+                const canRedo = Boolean(onRedoShot) && Boolean(clipPath) && !isActivePhase(phase);
+                const canEdit = !isActivePhase(phase);
+                const isEditing = editingShotId === shot.id;
+                return (
+                  <li
+                    key={shot.id}
+                    className={
+                      run?.redoRequested
+                        ? "canvas-knowledge-workflow__shot--redo"
+                        : run?.promptEdited && clipPath
+                          ? "canvas-knowledge-workflow__shot--edited"
+                          : undefined
+                    }
+                  >
+                    <div className="canvas-knowledge-workflow__shot-head">
+                      <strong>
+                        {String(shot.sequence).padStart(2, "0")} ·{" "}
+                        {isCommerce || isFilm || isComicDrama ? shot.title : shot.section}
+                      </strong>
+                      <span className="canvas-knowledge-workflow__shot-state">
+                        {run?.redoRequested && !clipPath
+                          ? "待重做"
+                          : run?.promptEdited && clipPath
+                            ? "提示词已修改"
+                            : clipPath && run?.qcStatus === "passed"
+                              ? "已通过质检"
+                              : clipPath && run?.qcStatus === "failed"
+                                ? "质检未通过"
+                                : clipPath
+                                  ? "待质检"
+                                  : run?.videoTaskId
+                                    ? "生成中"
+                                    : "未生成"}
+                      </span>
+                    </div>
+                    {clipPath ? (
+                      <video
+                        controls
+                        preload="metadata"
+                        src={toMediaSrc(clipPath)}
+                        aria-label={`镜头 ${shot.sequence} 视频预览`}
+                      />
+                    ) : null}
+                    {shot.referenceAssetIds && shot.referenceAssetIds.length > 0 ? (
+                      <p className="canvas-knowledge-workflow__shot-meta">
+                        参考素材：{shot.referenceAssetIds.length} 项
+                      </p>
+                    ) : null}
+                    <div className="canvas-knowledge-workflow__shot-actions">
+                      {canEdit ? (
+                        <button
+                          type="button"
+                          className="canvas-knowledge-workflow__secondary"
+                          onClick={() => {
+                            if (isEditing) {
+                              setEditingShotId(null);
+                              setShotDraft(null);
+                            } else {
+                              setEditingShotId(shot.id);
+                              setShotDraft({
+                                videoPrompt: shot.videoPrompt,
+                                visual: shot.visual,
+                                narration: shot.narration,
+                                durationSeconds: shot.durationSeconds,
+                              });
+                            }
+                          }}
+                        >
+                          {isEditing ? "收起编辑" : "编辑分镜"}
+                        </button>
+                      ) : null}
+                      {canRedo ? (
+                        <button
+                          type="button"
+                          className="canvas-knowledge-workflow__secondary"
+                          onClick={() => onRedoShot!(node.key, shot.id)}
+                        >
+                          重做此镜头
+                        </button>
+                      ) : null}
+                    </div>
+                    {isEditing && shotDraft ? (
+                      <div className="canvas-knowledge-workflow__shot-editor">
+                        <label>
+                          <span>视频提示词</span>
+                          <textarea
+                            value={shotDraft.videoPrompt}
+                            onChange={(event) =>
+                              setShotDraft({ ...shotDraft, videoPrompt: event.target.value })
+                            }
+                            rows={4}
+                          />
+                        </label>
+                        <label>
+                          <span>分镜画面描述</span>
+                          <textarea
+                            value={shotDraft.visual}
+                            onChange={(event) =>
+                              setShotDraft({ ...shotDraft, visual: event.target.value })
+                            }
+                            rows={2}
+                          />
+                        </label>
+                        <label>
+                          <span>旁白台词</span>
+                          <textarea
+                            value={shotDraft.narration}
+                            onChange={(event) =>
+                              setShotDraft({ ...shotDraft, narration: event.target.value })
+                            }
+                            rows={2}
+                          />
+                        </label>
+                        <label>
+                          <span>时长（秒，4–15）</span>
+                          <input
+                            type="number"
+                            min={4}
+                            max={15}
+                            value={shotDraft.durationSeconds}
+                            onChange={(event) =>
+                              setShotDraft({
+                                ...shotDraft,
+                                durationSeconds: Number(event.target.value),
+                              })
+                            }
+                          />
+                        </label>
+                        <div className="canvas-knowledge-workflow__shot-editor-actions">
+                          <button
+                            type="button"
+                            className="canvas-knowledge-workflow__primary"
+                            onClick={() => {
+                              const duration = Math.min(
+                                15,
+                                Math.max(4, Math.round(shotDraft.durationSeconds) || 5),
+                              );
+                              onChange({
+                                ...node.config,
+                                checkpoint: {
+                                  ...checkpoint,
+                                  shots: checkpoint.shots.map((candidate) =>
+                                    candidate.id === shot.id
+                                      ? {
+                                          ...candidate,
+                                          videoPrompt: shotDraft.videoPrompt,
+                                          visual: shotDraft.visual,
+                                          narration: shotDraft.narration,
+                                          durationSeconds: duration,
+                                        }
+                                      : candidate,
+                                  ),
+                                  shotRuns: {
+                                    ...checkpoint.shotRuns,
+                                    [shot.id]: {
+                                      ...(run ?? {
+                                        shotId: shot.id,
+                                        qcStatus: "pending" as const,
+                                        retryCount: 0,
+                                      }),
+                                      promptEdited: true,
+                                    },
+                                  },
+                                },
+                              });
+                              setEditingShotId(null);
+                              setShotDraft(null);
+                            }}
+                          >
+                            保存修改
+                          </button>
+                          <button
+                            type="button"
+                            className="canvas-knowledge-workflow__secondary"
+                            onClick={() => {
+                              setEditingShotId(null);
+                              setShotDraft(null);
+                            }}
+                          >
+                            取消
+                          </button>
+                        </div>
+                      </div>
+                    ) : null}
+                  </li>
+                );
+              })}
+            </ol>
           </section>
         ) : null}
 

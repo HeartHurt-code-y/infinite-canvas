@@ -633,6 +633,12 @@ export interface KnowledgeVideoWorkflowShotRun {
   readonly shotId: string;
   readonly imageTaskId?: string | null;
   readonly videoTaskId?: string | null;
+  /** 用户主动重做该镜头后置为 true；重新生成期间该镜头的旧片段不参与合成。 */
+  readonly redoRequested?: boolean;
+  /** 用户修改过该镜头的分镜文本/提示词/参数后置为 true，提示当前片段可能不是最新提示词生成的。 */
+  readonly promptEdited?: boolean;
+  /** 重做时被替换掉的旧视频任务 ID。保留它们可阻止历史恢复时按请求指纹复用旧结果。 */
+  readonly supersededTaskIds?: readonly string[];
   readonly referenceImagePath?: string | null;
   readonly clipPath?: string | null;
   readonly qcStatus: "pending" | "passed" | "failed";
@@ -1160,7 +1166,20 @@ export function stagingErrorFullText(error: unknown): string | null {
   try {
     return JSON.stringify(error, null, 2);
   } catch {
-    return String(error);
+    if (error instanceof Error) return error.message;
+    if (typeof error === "object" && error !== null) {
+      try {
+        return JSON.stringify(error, Object.getOwnPropertyNames(error), 2);
+      } catch {
+        return "";
+      }
+    }
+    return typeof error === "number" ||
+      typeof error === "boolean" ||
+      typeof error === "symbol" ||
+      typeof error === "bigint"
+      ? String(error)
+      : "";
   }
 }
 
@@ -1178,7 +1197,20 @@ function formatStagingItemError(value: unknown): string | null {
   try {
     return JSON.stringify(value, null, 2);
   } catch {
-    return String(value);
+    if (value instanceof Error) return value.message;
+    if (typeof value === "object" && value !== null) {
+      try {
+        return JSON.stringify(value, Object.getOwnPropertyNames(value), 2);
+      } catch {
+        return "";
+      }
+    }
+    return typeof value === "number" ||
+      typeof value === "boolean" ||
+      typeof value === "symbol" ||
+      typeof value === "bigint"
+      ? String(value)
+      : "";
   }
 }
 
