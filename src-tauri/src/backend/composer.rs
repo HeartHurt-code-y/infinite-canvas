@@ -797,14 +797,13 @@ fn build_composition_filter(
             ));
         }
     }
-    let video_labels: String = (0..probes.len())
-        .map(|index| format!("[v{index}]"))
-        .collect();
-    let audio_labels: String = (0..probes.len())
-        .map(|index| format!("[a{index}]"))
+    // concat 滤镜的输入 pad 按段交替分配：段0视频→段0音频→段1视频→段1音频……
+    // 必须交替排列标签，否则音频会被连到视频 pad 上，报 Media type mismatch。
+    let concat_labels: String = (0..probes.len())
+        .map(|index| format!("[v{index}][a{index}]"))
         .collect();
     chains.push(format!(
-        "{video_labels}{audio_labels}concat=n={}:v=1:a=1[vout][aout]",
+        "{concat_labels}concat=n={}:v=1:a=1[vout][aout]",
         probes.len()
     ));
     chains.join(";")
@@ -1070,7 +1069,7 @@ mod tests {
         assert!(filter.contains("setsar=1,fps=30"));
         assert!(filter.contains("[0:a]aresample=48000"));
         assert!(filter.contains("anullsrc=r=48000:cl=stereo,atrim=duration=2.500"));
-        assert!(filter.contains("[v0][v1][a0][a1]concat=n=2:v=1:a=1[vout][aout]"));
+        assert!(filter.contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"));
     }
 
     #[test]
