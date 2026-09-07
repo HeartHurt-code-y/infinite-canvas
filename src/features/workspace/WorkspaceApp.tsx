@@ -3108,13 +3108,16 @@ export function WorkspaceApp() {
               const source = genNodeByKey.get(edge.fromKey);
               if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
               const previous = importedPromptSourcesRef.current.get(target.key);
-              if (
+              const currentContent = promptContents.read(target.key);
+              const shouldSkip =
                 previous?.edgeId === edge.id &&
                 previous.sourceKey === source.key &&
-                previous.text === sourceText
-              )
-                continue;
+                previous.text === sourceText;
+              frontendLog("info", `[canvas-prompt-sync] .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+              if (shouldSkip) continue;
               const replaced = promptContents.replaceText(target.key, generatedPrompt, []);
+              const afterContent = promptContents.read(target.key);
+              frontendLog("info", `[canvas-prompt-sync] .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
               if (replaced == null) continue;
               importedPromptSourcesRef.current.set(target.key, {
                 edgeId: edge.id,
@@ -5953,12 +5956,6 @@ export function WorkspaceApp() {
       if (edgeId == null) continue;
       const previous = importedSources.get(targetKey);
       const sourceText = source.config.generatedPrompt;
-      if (
-        previous?.edgeId === edgeId &&
-        previous.sourceKey === source.key &&
-        previous.text === sourceText
-      )
-        continue;
       const rawPrompt = source.config.generatedPrompt;
       const strippedPrompt = stripMarkdown(rawPrompt);
       // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
@@ -5970,11 +5967,23 @@ export function WorkspaceApp() {
         importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
         continue;
       }
+      const currentContent = promptContents.read(targetKey);
+      const shouldSkip =
+        previous?.edgeId === edgeId &&
+        previous.sourceKey === source.key &&
+        previous.text === sourceText;
+      frontendLog("info", `[canvas-prompt-sync] effect target=${targetKey} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+      if (shouldSkip) {
+        importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
+        continue;
+      }
       const replaced = promptContents.replaceText(
         targetKey,
         generatedPrompt,
         mentionCandidatesFor(targetKey),
       );
+      const afterContent = promptContents.read(targetKey);
+      frontendLog("info", `[canvas-prompt-sync] effect after replaceText target=${targetKey} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
       if (replaced == null) continue;
       importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
       frontendLog(
