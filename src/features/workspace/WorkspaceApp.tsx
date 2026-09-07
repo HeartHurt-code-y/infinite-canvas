@@ -909,11 +909,22 @@ export function WorkspaceApp() {
         } else {
           // 恢复后的提示内容已经包含精确引用或用户修改，包括主动清空的文档。
           // 用同时保存的上游版本初始化同步记录，避免首次 effect 按当前编号重新解析。
+          // 例外：若恢复内容为空文档，说明上次保存时同步可能未完成（或节点刚创建），
+          // 不初始化同步记录，让下方 effect 检测到差异后重新导入上游输出。
           importedPromptSourcesRef.current.clear();
           const restoredGenNodes = new Map(document.genNodes.map((node) => [node.key, node]));
           for (const edge of document.assetEdges) {
             const source = restoredGenNodes.get(edge.fromKey);
             if (source?.kind !== "prompt" || !(edge.toKey in restored.promptContents)) continue;
+            const restoredContent = restored.promptContents[edge.toKey];
+            const isEmptyContent =
+              restoredContent == null ||
+              (typeof restoredContent === "object" &&
+                (!("items" in restoredContent) ||
+                  (restoredContent as { items?: readonly unknown[] }).items?.length === 0)) ||
+              (typeof restoredContent === "string" &&
+                restoredContent.replace(/<[^>]*>/g, "").trim() === "");
+            if (isEmptyContent) continue;
             importedPromptSourcesRef.current.set(edge.toKey, {
               edgeId: edge.id,
               sourceKey: source.key,
