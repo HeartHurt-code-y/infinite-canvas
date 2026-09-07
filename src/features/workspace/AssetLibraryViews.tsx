@@ -13,6 +13,7 @@ import {
   STAGING_STATUS_LABELS,
   UPLOAD_PHASE_NAMES,
   assetErrorPresentation,
+  isStallTrackedStatus,
   isTerminalAssetUpload,
   measuredAspectRatio,
   stagingErrorFullText,
@@ -475,19 +476,22 @@ export function AssetUploadRow({
     entry.bytesTotal != null && entry.bytesTotal > 0
       ? Math.min(100, Math.round((entry.bytesUploaded / entry.bytesTotal) * 100))
       : null;
-  const isStalled = entry.stalled && entry.status === "uploading";
-  // 两段进度：① 对象存储直传（validating/authorizing/uploading，有字节进度）；
+  const isStalled = entry.stalled && isStallTrackedStatus(entry.status);
+  // 两段进度：① 对象存储直传（preparing/validating/authorizing/uploading，有字节进度）；
   // ② 素材库导入（staged/importing → active/cleaned，仅云端素材）。
   const isObjectStoragePhase =
+    entry.status === "preparing" ||
     entry.status === "validating" ||
     entry.status === "authorizing" ||
     entry.status === "uploading";
   const hasFailed = entry.status === "failed" || entry.status === "interrupted";
   const objectStorageValue = hasFailed
     ? "失败"
-    : isObjectStoragePhase
-      ? `${STAGING_STATUS_LABELS[entry.status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
-      : "已完成";
+    : entry.status === "preparing"
+      ? "准备中…"
+      : isObjectStoragePhase
+        ? `${STAGING_STATUS_LABELS[entry.status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
+        : "已完成";
   const showAssetImportPhase = entry.destination === "cloud";
   const assetImportInProgress = entry.status === "staged" || entry.status === "importing";
   const assetImportDone = entry.status === "active" || entry.status === "cleaned";
@@ -557,7 +561,7 @@ export function AssetUploadRow({
         </span>
         {isStalled ? (
           <span className="asset-upload__stalled" role="status">
-            上传长时间无进展，疑似网络中断，等待后端超时判定…
+            上传长时间无进展，疑似网络中断或后端无响应，等待超时判定…
           </span>
         ) : null}
         {errorExpanded && errorDetail != null ? (

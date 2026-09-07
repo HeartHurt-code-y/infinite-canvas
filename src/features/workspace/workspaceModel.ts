@@ -1030,6 +1030,7 @@ export const ASSET_CLOUD_STATUS_LABELS: Record<CloudAssetStatus, string> = {
 };
 
 export const STAGING_STATUS_LABELS: Record<StagingStatus, string> = {
+  preparing: "准备中",
   validating: "校验文件",
   authorizing: "申请上传地址",
   uploading: "上传中",
@@ -1056,6 +1057,18 @@ export const TERMINAL_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
   "failed",
   "interrupted",
 ]);
+
+/** 需要实时跟踪的对象存储阶段：每秒刷新并参与停滞检测（preparing 为提交前占位）。 */
+export const STALL_TRACKED_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
+  "preparing",
+  "validating",
+  "authorizing",
+  "uploading",
+]);
+
+export function isStallTrackedStatus(status: StagingStatus): boolean {
+  return STALL_TRACKED_UPLOAD_STATUSES.has(status);
+}
 
 export function isTerminalAssetUpload(entry: AssetUploadEntry): boolean {
   return (

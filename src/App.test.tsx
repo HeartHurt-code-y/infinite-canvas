@@ -1401,6 +1401,159 @@ describe("App workspace", () => {
     expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
   });
 
+  it("浏览器预览模式下点击上传给出明确错误提示，而非无任何反应", async () => {
+    const previousInternals = (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    const previousEventInternals = (window as unknown as Record<string, unknown>)[
+      DESKTOP_EVENT_INTERNALS_KEY
+    ];
+    delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    delete (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY];
+    try {
+      render(<App />);
+      const uploadButton = await screen.findByRole("button", {
+        name: "上传本地素材到云端素材库",
+      });
+      fireEvent.click(uploadButton);
+      expect(
+        await screen.findByText(/上传素材功能仅在桌面应用中使用/, {
+          selector: ".asset-panel__error-summary",
+        }),
+      ).toBeInTheDocument();
+    } finally {
+      if (previousInternals === undefined) {
+        delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+      } else {
+        (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = previousInternals;
+      }
+      if (previousEventInternals === undefined) {
+        delete (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY];
+      } else {
+        (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] =
+          previousEventInternals;
+      }
+    }
+  });
+
+  it("取消文件选择时给出 toast 提示，而非静默无反馈", async () => {
+    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
+      void _args;
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([]);
+        case "list_local_assets":
+          return Promise.resolve([]);
+        case "plugin:dialog|open":
+          // 用户在文件选择框中取消。
+          return Promise.resolve(null);
+        case "get_tos_staging_config":
+          return Promise.resolve({
+            region: "cn-beijing",
+            endpoint: "tos-cn-beijing.volces.com",
+            bucket: "test-staging-bucket",
+            credentialRef: "tos-ak-sk",
+            objectPrefix: "staging",
+            enabled: true,
+          });
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
+      target: { value: "local" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }),
+    );
+    expect(await screen.findByText("未选择文件，已取消上传。")).toBeInTheDocument();
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "start_staging_upload"),
+    ).toBe(false);
+  });
+
+  it("startUpload 返回前先显示「准备中」占位行，提交完成后切换为校验状态", async () => {
+    const startUploadDeferred = deferred<string>();
+    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
+      void _args;
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([]);
+        case "list_local_assets":
+          return Promise.resolve([]);
+        case "plugin:dialog|open":
+          return Promise.resolve(["C:\\media\\new-local.png"]);
+        case "get_tos_staging_config":
+          return Promise.resolve({
+            region: "cn-beijing",
+            endpoint: "tos-cn-beijing.volces.com",
+            bucket: "test-staging-bucket",
+            credentialRef: "tos-ak-sk",
+            objectPrefix: "staging",
+            enabled: true,
+          });
+        case "start_staging_upload":
+          return startUploadDeferred.promise;
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
+      target: { value: "local" },
+    });
+    fireEvent.click(
+      await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }),
+    );
+    // 提交尚未返回：占位行立即出现，提供明确反馈。
+    expect(await screen.findByText("准备中…")).toBeInTheDocument();
+    act(() => {
+      startUploadDeferred.resolve("local-upload-2");
+    });
+    await waitFor(() => {
+      expect(screen.queryByText("准备中…")).not.toBeInTheDocument();
+    });
+  });
+
   it("header 清空画布按钮：点击打开 modal 弹窗，确认后清空画布", () => {
     // 用户要求：破坏性操作直接弹窗确认，而非二次点击内联确认。
     // 原生 <dialog> 的 showModal() 提供 modal 语义（ESC 关闭、focus trap、::backdrop

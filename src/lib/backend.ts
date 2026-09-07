@@ -434,6 +434,8 @@ export interface TosStagingConfig {
 }
 
 export type StagingStatus =
+  // 仅前端占位：文件已选定、startUpload 尚未返回 jobId 前的等待期状态，后端任务记录不会出现该值。
+  | "preparing"
   | "validating"
   | "authorizing"
   | "uploading"

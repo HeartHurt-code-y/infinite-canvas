@@ -69,6 +69,7 @@ import {
   type GenerationResultRecord,
   type GenerationTaskSummary,
   type LocalAssetRecord,
+  type MediaType,
   type PromptOptimizationContextEntry,
   type PromptMultimodalInput,
   type PromptVisionImageInput,
@@ -233,6 +234,7 @@ import {
   SCREENPLAY_NODE_COARSE_HEIGHT,
   SCREENPLAY_NODE_HEIGHT,
   SCREENPLAY_NODE_WIDTH,
+  TERMINAL_UPLOAD_STATUSES,
   UPLOAD_POLL_INTERVAL_MS,
   UPLOAD_STALL_HINT_MS,
   VIDEO_COMPOSER_NODE_HEIGHT,
@@ -267,6 +269,7 @@ import {
   getNodeDescriptor,
   inheritedVideoAssetInputs,
   isRunningTaskStatus,
+  isStallTrackedStatus,
   textResultFromSource,
   isTerminalAssetUpload,
   isTerminalTaskStatus,
@@ -598,6 +601,13 @@ export function WorkspaceApp() {
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
+  // 供轮询订阅回调读取最新上传条目（destination 映射），避免闭包过期。
+  const uploadEntriesRef = useRef<readonly AssetUploadEntry[]>([]);
+  useEffect(() => {
+    uploadEntriesRef.current = assetUploads;
+  }, [assetUploads]);
+  // startUpload 返回 jobId 前，占位行的临时自增 id（前缀避免与后端真实 id 冲突）。
+  const pendingUploadSeqRef = useRef(0);
   const [videoComposerRuns, setVideoComposerRuns] = useState<
     Readonly<Record<string, VideoComposerRunState>>
   >({});
@@ -1442,6 +1452,13 @@ export function WorkspaceApp() {
   const handleImportLocalAssets = useCallback(
     async (realPersonGroup?: RealPersonGroup): Promise<number> => {
       const destination = realPersonGroup ? "cloud" : assetLibrarySource;
+      // 非桌面（浏览器预览）环境：文件选择器直接返回空，明确提示而非静默无反应。
+      if (!isDesktopRuntime()) {
+        const message = "上传素材功能仅在桌面应用中使用，浏览器预览模式暂不支持。";
+        if (destination === "cloud") setAssetsError(message);
+        else setLocalAssetsError(message);
+        return 0;
+      }
       if (destination === "cloud" && !assetProvider) {
         setAssetsError("请先在全局设置中配置并启用供应商连接，再上传本地素材。");
         return 0;
@@ -1466,9 +1483,18 @@ export function WorkspaceApp() {
         return 0;
       }
       const files = await pickLocalMediaFiles();
-      if (files.length === 0) return 0;
-      let startedCount = 0;
-      let firstError: unknown = null;
+      if (files.length === 0) {
+        toast.info("未选择文件，已取消上传。");
+        return 0;
+      }
+      // 先为每个可识别的文件插入「准备中」占位行，再逐个提交任务；
+      // 避免 startUpload 的 IPC 等待期界面无任何反馈。
+      const candidates: Array<{
+        readonly pendingId: string;
+        readonly filePath: string;
+        readonly name: string;
+        readonly kind: MediaType;
+      }> = [];
       const unsupportedFiles: string[] = [];
       for (const filePath of files) {
         const name = filePath.split(/[\\/]/).pop() ?? filePath;
@@ -1477,38 +1503,74 @@ export function WorkspaceApp() {
           unsupportedFiles.push(name);
           continue;
         }
+        candidates.push({
+          pendingId: `pending-upload-${pendingUploadSeqRef.current++}`,
+          filePath,
+          name,
+          kind,
+        });
+      }
+      if (candidates.length > 0) {
+        setAssetUploads((current) => [
+          ...current,
+          ...candidates.map((candidate) => ({
+            jobId: candidate.pendingId,
+            name: candidate.name,
+            kind: candidate.kind,
+            status: "preparing" as const,
+            bytesUploaded: 0,
+            bytesTotal: null,
+            error: null,
+            lastAdvancedAt: Date.now(),
+            stalled: false,
+            destination,
+          })),
+        ]);
+      }
+      let startedCount = 0;
+      let firstError: unknown = null;
+      for (const candidate of candidates) {
         try {
           const jobId = await tosStagingClient.startUpload({
-            localPath: filePath,
+            localPath: candidate.filePath,
             purpose: destination === "local" ? "local_asset" : "asset_import",
-            mediaType: kind,
+            mediaType: candidate.kind,
             import:
               destination === "cloud" && assetProvider
                 ? {
                     providerConnectionId: assetProvider.id,
-                    name,
+                    name: candidate.name,
                     groupId: realPersonGroup?.id ?? null,
                   }
                 : null,
           });
           startedCount += 1;
-          setAssetUploads((current) => [
-            ...current,
-            {
-              jobId,
-              name,
-              kind,
-              status: "validating",
-              bytesUploaded: 0,
-              bytesTotal: null,
-              error: null,
-              lastAdvancedAt: Date.now(),
-              stalled: false,
-              destination,
-            },
-          ]);
+          setAssetUploads((current) =>
+            current.map((entry) =>
+              entry.jobId === candidate.pendingId
+                ? {
+                    ...entry,
+                    jobId,
+                    status: "validating",
+                    lastAdvancedAt: Date.now(),
+                  }
+                : entry,
+            ),
+          );
         } catch (error) {
           firstError ??= error;
+          setAssetUploads((current) =>
+            current.map((entry) =>
+              entry.jobId === candidate.pendingId
+                ? {
+                    ...entry,
+                    status: "failed",
+                    error,
+                    lastAdvancedAt: Date.now(),
+                  }
+                : entry,
+            ),
+          );
           if (destination === "cloud") setAssetsError(formatRawBackendError(error));
           else setLocalAssetsError(formatRawBackendError(error));
         }
@@ -3780,18 +3842,46 @@ export function WorkspaceApp() {
       const jobs = event.query.state.data as readonly (StagingJobRecord | null)[] | undefined;
       if (jobs == null || jobs.length === 0) return;
       const now = Date.now();
+      // 兜底刷新：轮询发现任务到达终态时也刷新素材列表，覆盖终态事件丢失的场景。
+      // 事件通道仍是主路径，此处与事件刷新重复调用是幂等的列表拉取。
+      for (const job of jobs) {
+        if (job == null) continue;
+        const entry = uploadEntriesRef.current.find((item) => item.jobId === job.id);
+        if (entry == null || isTerminalAssetUpload(entry)) continue;
+        const reachedTerminal =
+          TERMINAL_UPLOAD_STATUSES.has(job.status) ||
+          (entry.destination === "local" && job.status === "staged");
+        if (!reachedTerminal) continue;
+        if (entry.destination === "local") {
+          refreshLocalAssets("upload-finished");
+        } else if (assetLibrarySource === "cloud" && assetProvider) {
+          void refreshCloudAssets(assetProvider.id, "upload-finished");
+          refreshAssetGroups(assetProvider.id);
+        }
+      }
       setAssetUploads((current) => {
         let changed = false;
         const next = current.map((entry) => {
           const job = jobs.find(
             (item): item is StagingJobRecord => item != null && item.id === entry.jobId,
           );
-          if (job == null) return entry;
+          if (job == null) {
+            // 占位行（preparing）在后端尚无任务记录：只推进停滞提示。
+            if (
+              isStallTrackedStatus(entry.status) &&
+              !entry.stalled &&
+              now - entry.lastAdvancedAt >= UPLOAD_STALL_HINT_MS
+            ) {
+              changed = true;
+              return { ...entry, stalled: true };
+            }
+            return entry;
+          }
           const bytesAdvanced = job.bytesUploaded > entry.bytesUploaded;
           const statusChanged = job.status !== entry.status;
-          // 非 uploading 阶段数据未变时跳过更新，避免无谓重渲染；
-          // uploading 阶段每秒刷新一次，让停滞提示能按时间出现。
-          if (!bytesAdvanced && !statusChanged && entry.status !== "uploading") {
+          // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
+          // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
+          if (!bytesAdvanced && !statusChanged && !isStallTrackedStatus(entry.status)) {
             return entry;
           }
           changed = true;
@@ -3803,13 +3893,21 @@ export function WorkspaceApp() {
             bytesTotal: job.bytesTotal ?? entry.bytesTotal,
             error: job.error ?? entry.error,
             lastAdvancedAt,
-            stalled: job.status === "uploading" && now - lastAdvancedAt >= UPLOAD_STALL_HINT_MS,
+            stalled:
+              isStallTrackedStatus(job.status) && now - lastAdvancedAt >= UPLOAD_STALL_HINT_MS,
           };
         });
         return changed ? next : current;
       });
     });
-  }, [queryClient]);
+  }, [
+    assetLibrarySource,
+    assetProvider,
+    queryClient,
+    refreshAssetGroups,
+    refreshCloudAssets,
+    refreshLocalAssets,
+  ]);
 
   const libraryAssets = useMemo<readonly AssetItem[]>(() => {
     if (!isDesktopRuntime()) {
@@ -7032,7 +7130,7 @@ export function WorkspaceApp() {
               </button>
             </>
           ) : null}
-          {isDesktopRuntime() && selectedAssetsError ? (
+          {selectedAssetsError ? (
             <AssetPanelError
               title={
                 selectedLibraryError
