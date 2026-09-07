@@ -16,6 +16,7 @@ import { X } from "@phosphor-icons/react/X";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { toast } from "sonner";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   formatBytes,
   formatRawBackendError,
@@ -1302,8 +1303,10 @@ function CanvasAssetNodeVideoVisual({
   /** 中间帧时间戳（loadedmetadata 后记录），作为封面帧与悬浮复播/复位位置。 */
   const coverTimeRef = useRef(0);
   const [coverReady, setCoverReady] = useState(false);
+  // 云端 TOS 签名 URL 走本地代理，避免 2 小时过期后画布视频节点加载失败。
+  const proxiedVideoUrl = toMediaProxyUrl(videoUrl) ?? videoUrl;
   const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
-  const videoFailed = failedVideoUrl === videoUrl;
+  const videoFailed = failedVideoUrl === proxiedVideoUrl;
 
   const seekToCover = (video: HTMLVideoElement) => {
     video.currentTime = coverTimeRef.current;
@@ -1334,7 +1337,7 @@ function CanvasAssetNodeVideoVisual({
         <video
           ref={videoRef}
           className={`canvas-asset-node__video${coverReady ? " is-ready" : ""}`}
-          src={videoUrl}
+          src={proxiedVideoUrl}
           muted
           loop
           playsInline
@@ -1357,7 +1360,7 @@ function CanvasAssetNodeVideoVisual({
           }}
           onError={() => {
             setCoverReady(false);
-            setFailedVideoUrl(videoUrl);
+            setFailedVideoUrl(proxiedVideoUrl);
           }}
         />
       ) : null}

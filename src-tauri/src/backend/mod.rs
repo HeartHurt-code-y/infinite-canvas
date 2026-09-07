@@ -9,6 +9,7 @@ pub mod error;
 pub mod frame_extractor;
 pub mod local_results;
 pub mod media;
+pub mod media_proxy;
 pub mod model_schema;
 pub mod prompt_optimize;
 pub mod provider;

@@ -4,6 +4,7 @@ import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import { formatBytes } from "../../lib/backend";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon, NodeTypeIcon } from "./PromptNodeViews";
 import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
 import {
@@ -53,7 +54,7 @@ function AssetCardVideoVisual({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wasPreviewingRef = useRef(false);
-  const videoSrc = asset.videoUrl ?? asset.previewUrl ?? null;
+  const videoSrc = toMediaProxyUrl(asset.videoUrl ?? asset.previewUrl ?? null);
   const [loadedVideoSrc, setLoadedVideoSrc] = useState<string | null>(null);
   const videoReady = loadedVideoSrc === videoSrc;
   const [failedVideoSrc, setFailedVideoSrc] = useState<string | null>(null);

@@ -6,6 +6,10 @@ use tauri::Manager as _;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        .register_uri_scheme_protocol(
+            backend::media_proxy::MEDIA_PROXY_SCHEME,
+            backend::media_proxy::handle_media_proxy_request,
+        )
         .plugin(tauri_plugin_websocket::init())
         .plugin(tauri_plugin_upload::init())
         .plugin(tauri_plugin_store::Builder::new().build())
