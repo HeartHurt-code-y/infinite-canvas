@@ -233,13 +233,13 @@ CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
 "#;
 
 /// 首次打开应用时提供的连接模板。凭据由用户按实际环境补充；保持禁用状态，
-/// 避免初始化后素材面板立即用空配置发起远程请求。MAIGateway 预置默认网关地址，
-/// 其余模板的地址留空由用户填写。使用稳定 ID + INSERT OR IGNORE，
+/// 避免初始化后素材面板立即用空配置发起远程请求。模板预置常用供应商地址，
+/// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str); 4] = [
-    ("provider-sd20", "SD2.0", ""),
-    ("provider-moyu-ai", "魔芋AI", ""),
-    ("provider-overseas", "海外平台", ""),
+    ("provider-sd20", "SD2.0", "https://47.94.250.161/"),
+    ("provider-moyu-ai", "魔芋AI", "https://www.moyu.info/"),
+    ("provider-overseas", "海外平台", "https://www.konjac.ai/v1"),
     (
         "provider-maigateway",
         "MAIGateway",
