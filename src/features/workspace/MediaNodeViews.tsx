@@ -11,6 +11,7 @@ import { Images } from "@phosphor-icons/react/Images";
 import { Play } from "@phosphor-icons/react/Play";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { TextT } from "@phosphor-icons/react/TextT";
+import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
@@ -1585,6 +1586,7 @@ export function CanvasOutputNode({
   onAspectRatioChange,
   onPreview,
   onConnectionStart,
+  onUploadToCloud,
   task,
   retryInfo,
   results,
@@ -1608,6 +1610,8 @@ export function CanvasOutputNode({
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   readonly onPreview: (key: string) => void;
   readonly onConnectionStart: (key: string) => void;
+  /** 图片产物一键上传到云端素材库；非图片或未传时不展示按钮。 */
+  readonly onUploadToCloud?: (key: string) => void;
   /** 卡片对应任务的最新摘要（任务列表查不到时为 null）。 */
   readonly task: GenerationTaskSummary | null;
   /** 重试等待信息（generation:retry 事件驱动）。 */
@@ -1927,6 +1931,21 @@ export function CanvasOutputNode({
           <span className="canvas-asset-node__meta">{metaLine}</span>
         </>
       )}
+      {onUploadToCloud != null && (node.mediaType === "image" || node.mediaType === "video") && node.finalPath != null ? (
+        <button
+          type="button"
+          className="canvas-asset-node__upload"
+          aria-label={`上传${node.mediaType === "video" ? "视频" : "图片"}产物到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`}
+          title="上传到云端素材库"
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => {
+            event.stopPropagation();
+            onUploadToCloud(node.key);
+          }}
+        >
+          <UploadSimple size={12} weight="bold" aria-hidden="true" />
+        </button>
+      ) : null}
       <button
         type="button"
         className="canvas-asset-node__remove"

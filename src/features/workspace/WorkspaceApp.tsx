@@ -1603,6 +1603,85 @@ export function WorkspaceApp() {
     [assetLibrarySource, assetProvider],
   );
 
+  /** 产物图片/视频一键上传到云端素材库：直接使用产物的本地 finalPath，跳过文件选择器。 */
+  const handleUploadOutputToCloud = useCallback(
+    async (outputKey: string): Promise<void> => {
+      const output = outputNodes.find((node) => node.key === outputKey);
+      if (output == null || (output.mediaType !== "image" && output.mediaType !== "video") || output.finalPath == null) {
+        toast.error("仅已保存到本地的图片/视频产物支持上传到云端素材库。");
+        return;
+      }
+      if (!isDesktopRuntime()) {
+        toast.error("上传素材功能仅在桌面应用中使用，浏览器预览模式暂不支持。");
+        return;
+      }
+      if (!assetProvider) {
+        toast.error("请先在全局设置中配置并启用供应商连接，再上传到云端素材库。");
+        return;
+      }
+      let stagingConfig: TosStagingConfig | null;
+      try {
+        stagingConfig = await tosStagingClient.getConfig();
+      } catch (error) {
+        toast.error(`对象存储配置读取失败：${formatRawBackendError(error)}`);
+        return;
+      }
+      if (stagingConfig == null || !stagingConfig.enabled) {
+        toast.error(
+          "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存。",
+        );
+        return;
+      }
+      const pendingId = `pending-upload-${pendingUploadSeqRef.current++}`;
+      const name = output.name ?? output.finalPath.split(/[\\/]/).pop() ?? `${output.mediaType === "video" ? "视频" : "图片"}产物`;
+      setAssetUploads((current) => [
+        ...current,
+        {
+          jobId: pendingId,
+          name,
+          kind: output.mediaType as "image" | "video",
+          status: "preparing",
+          bytesUploaded: 0,
+          bytesTotal: null,
+          error: null,
+          lastAdvancedAt: Date.now(),
+          stalled: false,
+          destination: "cloud",
+        },
+      ]);
+      try {
+        const jobId = await tosStagingClient.startUpload({
+          localPath: output.finalPath,
+          purpose: "asset_import",
+          mediaType: output.mediaType,
+          import: {
+            providerConnectionId: assetProvider.id,
+            name,
+            groupId: null,
+          },
+        });
+        setAssetUploads((current) =>
+          current.map((entry) =>
+            entry.jobId === pendingId
+              ? { ...entry, jobId, status: "validating", lastAdvancedAt: Date.now() }
+              : entry,
+          ),
+        );
+        toast.success(`已开始上传「${name}」到云端素材库，可在素材面板查看进度。`);
+      } catch (error) {
+        setAssetUploads((current) =>
+          current.map((entry) =>
+            entry.jobId === pendingId
+              ? { ...entry, status: "failed", error, lastAdvancedAt: Date.now() }
+              : entry,
+          ),
+        );
+        toast.error(`上传失败：${formatRawBackendError(error)}`);
+      }
+    },
+    [assetProvider, outputNodes],
+  );
+
   useEffect(() => {
     return subscribeStagingEvents((payload) => {
       setAssetUploads((current) => {
@@ -6100,6 +6179,7 @@ export function WorkspaceApp() {
                 onAspectRatioChange={handleOutputAspectRatioChange}
                 onPreview={setPreviewOutputNodeKey}
                 onConnectionStart={ignoreLegacyConnectionStart}
+                onUploadToCloud={handleUploadOutputToCloud}
                 task={task}
                 retryInfo={retryInfoByTask[node.taskId] ?? null}
                 results={taskResults[node.taskId] ?? []}
@@ -6119,6 +6199,7 @@ export function WorkspaceApp() {
       handleOutputAspectRatioChange,
       setPreviewOutputNodeKey,
       ignoreLegacyConnectionStart,
+      handleUploadOutputToCloud,
       retryInfoByTask,
       taskResults,
       rawResponses,

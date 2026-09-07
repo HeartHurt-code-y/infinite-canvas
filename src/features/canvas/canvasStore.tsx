@@ -897,12 +897,12 @@ function normalizeCanvasDocument(
 }
 
 function isOutputGenerationReference(node: OutputNodeData): boolean {
-  if (
-    node.origin === "composition" ||
-    node.origin === "download" ||
-    node.finalPath == null ||
-    node.resultKey == null
-  ) {
+  // 合成与下载产物不是 generation task 的结果，无法通过 local_result 校验，
+  // 但只要已落盘（finalPath 存在），即可作为 local_file 普通媒体文件连入生成节点。
+  if (node.origin === "composition" || node.origin === "download") {
+    return node.finalPath != null;
+  }
+  if (node.finalPath == null || node.resultKey == null) {
     return false;
   }
   const prefix = node.taskId + "#";

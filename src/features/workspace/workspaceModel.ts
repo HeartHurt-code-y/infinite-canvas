@@ -1966,13 +1966,17 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
     };
   }
   // 合成与下载产物不是 generation task 的结果，无法通过 local_result 校验，
-  // 只能作为视频拼接输入（下载产物同样是普通本地文件）。
-  if (
-    node.origin === "composition" ||
-    node.origin === "download" ||
-    node.finalPath == null ||
-    node.resultKey == null
-  ) {
+  // 但只要已落盘（finalPath 存在），即可作为 local_file 普通媒体文件连入生成节点。
+  if (node.origin === "composition" || node.origin === "download") {
+    if (node.finalPath == null) return null;
+    return {
+      kind: "local_file",
+      path: node.finalPath,
+      canvasNodeKey: node.key,
+      mediaType: node.mediaType,
+    };
+  }
+  if (node.finalPath == null || node.resultKey == null) {
     return null;
   }
   const resultKeyPrefix = `${node.taskId}#`;
