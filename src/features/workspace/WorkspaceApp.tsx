@@ -7097,6 +7097,17 @@ export function WorkspaceApp() {
                 value={assetSearch}
                 onChange={(event) => setAssetSearch(event.target.value)}
               />
+              {assetLibrarySource === "cloud" && assetProvider ? (
+                <button
+                  type="button"
+                  className="asset-search__refresh"
+                  aria-label="刷新素材列表（重新获取视频签名 URL）"
+                  data-tooltip="刷新素材列表"
+                  onClick={() => refreshCloudAssets(assetProvider.id, "manual")}
+                >
+                  <ArrowClockwise size={15} weight="bold" aria-hidden="true" />
+                </button>
+              ) : null}
               {assetSearch ? (
                 <button
                   type="button"

@@ -704,8 +704,26 @@ h3 {
   place-items: center;
 }
 
+.asset-search__refresh {
+  display: grid;
+  flex-shrink: 0;
+  width: 1.75rem;
+  height: 1.75rem;
+  padding: 0;
+  color: var(--color-chrome-muted);
+  background: var(--color-transparent);
+  border: 0;
+  border-radius: var(--radius-control);
+  place-items: center;
+  cursor: pointer;
+}
+
 @media (hover: hover) and (pointer: fine) {
   .asset-search__clear:hover {
+    color: var(--color-chrome-ink);
+    background: var(--color-chrome-3);
+  }
+  .asset-search__refresh:hover {
     color: var(--color-chrome-ink);
     background: var(--color-chrome-3);
   }
