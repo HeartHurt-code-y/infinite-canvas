@@ -3103,11 +3103,7 @@ export function WorkspaceApp() {
               const source = genNodeByKey.get(edge.fromKey);
               if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
               const previous = importedPromptSourcesRef.current.get(target.key);
-              const currentContent = promptContents.read(target.key);
-              const editorEmpty = currentContent == null || currentContent.plainText.trim() === "";
-              // 仅当编辑器内容非空且上游输出未变时才跳过；编辑器被清空时强制重新同步。
               if (
-                !editorEmpty &&
                 previous?.edgeId === edge.id &&
                 previous.sourceKey === source.key &&
                 previous.text === sourceText
@@ -5952,11 +5948,7 @@ export function WorkspaceApp() {
       if (edgeId == null) continue;
       const previous = importedSources.get(targetKey);
       const sourceText = source.config.generatedPrompt;
-      const currentContent = promptContents.read(targetKey);
-      const editorEmpty = currentContent == null || currentContent.plainText.trim() === "";
-      // 仅当编辑器内容非空且上游输出未变时才跳过；编辑器被清空时强制重新同步。
       if (
-        !editorEmpty &&
         previous?.edgeId === edgeId &&
         previous.sourceKey === source.key &&
         previous.text === sourceText
