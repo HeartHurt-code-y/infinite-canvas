@@ -1160,17 +1160,30 @@ export function createPromptContentModule(): PromptContentModule {
 
 /**
  * 从提示词文本中摘除 markdown 格式，返回纯文本内容。
- * 处理：代码块、分隔线、标题、列表、加粗、斜体、行内代码、多余空行。
+ *
+ * 核心逻辑：
+ * 1. 如果文本包含 ```markdown / ``` 代码块，只提取第一个代码块内的内容，
+ *    过滤掉代码块以外的所有解释性文字（LLM 常见输出模式）。
+ * 2. 对提取的内容（或全文，如果没有代码块）清理 markdown 格式标记：
+ *    分隔线、标题、列表、加粗、斜体、行内代码、链接、引用、多余空行。
+ *
  * 用于提示词生成节点输出同步到图片/视频生成节点时，自动清理 markdown 格式。
  */
 export function stripMarkdown(text: string): string {
   if (!text) return "";
   let result = text;
 
-  // 1. 提取 ```markdown ... ``` 代码块内的内容（去掉代码块标记）
-  result = result.replace(/```(?:markdown|md)?\s*\n([\s\S]*?)```/gi, "$1");
-  // 处理行内代码块（没有换行的情况）
-  result = result.replace(/```([\s\S]*?)```/g, "$1");
+  // 1. 如果包含代码块，只提取第一个代码块内的内容，过滤掉外面的所有文字
+  const codeBlockMatch = result.match(/```(?:markdown|md)?\s*\n([\s\S]*?)```/i);
+  if (codeBlockMatch && codeBlockMatch[1] != null) {
+    result = codeBlockMatch[1];
+  } else {
+    // 处理行内代码块（没有换行的情况）
+    const inlineCodeBlockMatch = result.match(/```([\s\S]*?)```/);
+    if (inlineCodeBlockMatch && inlineCodeBlockMatch[1] != null) {
+      result = inlineCodeBlockMatch[1];
+    }
+  }
 
   // 2. 删除分隔线 ---、___、***
   result = result.replace(/^[-_*]{3,}\s*$/gm, "");
@@ -1201,7 +1214,7 @@ export function stripMarkdown(text: string): string {
   // 10. 删除图片 ![alt](url) → 只保留 alt 文本
   result = result.replace(/!\[([^\]]*)\]\([^)]+\)/g, "$1");
 
-  // 11. 删除引用 > 
+  // 11. 删除引用 >
   result = result.replace(/^>\s?/gm, "");
 
   // 12. 合并多余空行（3个及以上换行 → 2个换行）
