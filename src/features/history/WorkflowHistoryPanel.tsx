@@ -641,38 +641,40 @@ export function WorkflowHistoryPanel({
       aria-labelledby="workflow-history-tab"
     >
       <aside className="history-list" aria-label="工作流历史列表">
-        <div className="history-filters workflow-history__filters">
-          {FILTERS.map((candidate) => (
+        <div className="history-list__toolbar">
+          <div className="history-filters workflow-history__filters">
+            {FILTERS.map((candidate) => (
+              <button
+                type="button"
+                key={candidate.id}
+                aria-pressed={candidate.id === filterId}
+                className={`history-filter${candidate.id === filterId ? " is-active" : ""}`}
+                onClick={() => {
+                  if (candidate.id === filterId) return;
+                  resetList();
+                  setFilterId(candidate.id);
+                }}
+              >
+                {candidate.label}
+              </button>
+            ))}
             <button
               type="button"
-              key={candidate.id}
-              aria-pressed={candidate.id === filterId}
-              className={`history-filter${candidate.id === filterId ? " is-active" : ""}`}
-              onClick={() => {
-                if (candidate.id === filterId) return;
-                resetList();
-                setFilterId(candidate.id);
-              }}
+              className="history-filter workflow-history__refresh"
+              aria-label="刷新工作流历史"
+              disabled={!loaded}
+              onClick={refresh}
             >
-              {candidate.label}
+              <ArrowClockwise size={16} aria-hidden="true" />
             </button>
-          ))}
-          <button
-            type="button"
-            className="history-filter workflow-history__refresh"
-            aria-label="刷新工作流历史"
-            disabled={!loaded}
-            onClick={refresh}
-          >
-            <ArrowClockwise size={16} aria-hidden="true" />
-          </button>
+          </div>
+          <HistoryDateRangeFilter
+            onApply={(range) => {
+              resetList();
+              setDateRange(range);
+            }}
+          />
         </div>
-        <HistoryDateRangeFilter
-          onApply={(range) => {
-            resetList();
-            setDateRange(range);
-          }}
-        />
         <div className="history-list__scroll">
           {listError ? (
             <p className="history-list__error" role="alert">
