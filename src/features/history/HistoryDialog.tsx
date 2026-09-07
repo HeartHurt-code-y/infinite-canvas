@@ -1,3 +1,4 @@
+import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { CaretLeft } from "@phosphor-icons/react/CaretLeft";
 import { CaretRight } from "@phosphor-icons/react/CaretRight";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
@@ -27,6 +28,7 @@ import {
   type GenerationTaskStatus,
   type GenerationTaskSummary,
   type PromptSegment,
+  type StartGenerationCommand,
 } from "../../lib/backend";
 import { textResultFromSource } from "../workspace/workspaceModel";
 import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
@@ -34,6 +36,8 @@ import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
 import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
 import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
 import type { HistoryDateRange } from "./historyDateRange";
+import { RegenerateGenerationDialog } from "./RegenerateGenerationDialog";
+import { frozenStartCommand, isRegenerableOperation } from "./regenerateGeneration";
 
 async function revealDesktopItem(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -487,6 +491,7 @@ export function HistoryDialog({
   onResumeWorkflow,
   onRestartWorkflow,
   onLocateWorkflow,
+  onRegenerateGeneration,
   activeWorkflowIds,
 }: {
   readonly open: boolean;
@@ -502,6 +507,8 @@ export function HistoryDialog({
   ) => Promise<void> | void;
   readonly onRestartWorkflow?: (record: WorkflowHistoryRecord) => Promise<void> | void;
   readonly onLocateWorkflow?: (record: WorkflowHistoryRecord) => void;
+  /** 从历史重新生成时由宿主创建全新任务（并负责画布占位卡片）；缺省时直接调用 client.start。 */
+  readonly onRegenerateGeneration?: (command: StartGenerationCommand) => Promise<string>;
   readonly activeWorkflowIds?: readonly string[];
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
@@ -517,12 +524,21 @@ export function HistoryDialog({
   const [listLoaded, setListLoaded] = useState(false);
   const [listLoading, setListLoading] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
+  // 重新生成成功后递增，强制列表回到第一页并选中新任务。
+  const [listRevision, setListRevision] = useState(0);
   const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [regenerateEditorTask, setRegenerateEditorTask] = useState<GenerationTaskDetail | null>(
+    null,
+  );
+  const [regenerateBusy, setRegenerateBusy] = useState(false);
+  const [regenerateError, setRegenerateError] = useState<string | null>(null);
+  const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
+  const regenerateBusyRef = useRef(false);
 
   // 打开对话框时加载第一页；筛选切换时重新加载（旧列表保留到新页返回，避免闪烁）。
   useEffect(() => {
@@ -558,7 +574,7 @@ export function HistoryDialog({
       // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 resetList 与下次请求递增，
       // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
-  }, [open, activeTab, statusFilter, dateRange, client]);
+  }, [open, activeTab, statusFilter, dateRange, client, listRevision]);
 
   const resetList = () => {
     ++listRequestRef.current;
@@ -657,7 +673,40 @@ export function HistoryDialog({
     handleClose();
   };
 
+  /** 原任务直接重新生成：按冻结请求创建全新任务，刷新列表并选中新任务。 */
+  const submitRegenerate = useCallback(
+    async (command: StartGenerationCommand) => {
+      if (regenerateBusyRef.current) return;
+      regenerateBusyRef.current = true;
+      setRegenerateBusy(true);
+      setRegenerateError(null);
+      setRegenerateMessage(null);
+      try {
+        const starter = onRegenerateGeneration ?? ((next: StartGenerationCommand) => client.start(next));
+        const newTaskId = await starter(command);
+        setRegenerateMessage(`已创建新的生成任务 ${newTaskId}。`);
+        setRegenerateEditorTask(null);
+        linkedTaskIdRef.current = newTaskId;
+        setListRevision((value) => value + 1);
+      } catch (error: unknown) {
+        setRegenerateError(formatRawBackendError(error));
+      } finally {
+        regenerateBusyRef.current = false;
+        setRegenerateBusy(false);
+      }
+    },
+    [client, onRegenerateGeneration],
+  );
+
+  const openRegenerateEditor = (task: GenerationTaskDetail) => {
+    setRegenerateError(null);
+    setRegenerateMessage(null);
+    setRegenerateEditorTask(task);
+  };
+
   const summary = detail?.summary ?? null;
+  const frozenCommand = useMemo(() => (detail ? frozenStartCommand(detail) : null), [detail]);
+  const canRegenerate = detail != null && isRegenerableOperation(summary?.operation ?? "");
   const promptSegments = useMemo(() => (detail ? promptSegmentsFromDetail(detail) : []), [detail]);
   const resultErrorsExist = detail?.results.some((result) => result.error != null) === true;
   const attempts = useMemo(
@@ -944,6 +993,53 @@ export function HistoryDialog({
                     </div>
                   </dl>
                 </section>
+
+                {canRegenerate ? (
+                  <section className="history-section">
+                    <h3>重新生成</h3>
+                    {frozenCommand == null ? (
+                      <p className="history-empty-note">
+                        该任务缺少可用的请求快照，无法重新生成。
+                      </p>
+                    ) : (
+                      <>
+                        <div className="history-regenerate">
+                          <button
+                            type="button"
+                            className="history-regenerate__primary"
+                            disabled={regenerateBusy}
+                            title="按原任务冻结的提示词与素材创建一次全新生成"
+                            onClick={() => void submitRegenerate(frozenCommand)}
+                          >
+                            <ArrowClockwise size={15} weight="bold" aria-hidden="true" />
+                            直接重新生成
+                          </button>
+                          <button
+                            type="button"
+                            disabled={regenerateBusy}
+                            title="修改原任务的提示词与素材后再重新生成"
+                            onClick={() => openRegenerateEditor(detail)}
+                          >
+                            修改后重新生成
+                          </button>
+                        </div>
+                        <p className="history-regenerate__note">
+                          按原任务冻结的提示词与素材创建全新任务，原任务记录保持不变。
+                        </p>
+                      </>
+                    )}
+                    {regenerateMessage ? (
+                      <p role="status" className="history-regenerate__message">
+                        {regenerateMessage}
+                      </p>
+                    ) : null}
+                    {regenerateError ? (
+                      <p role="alert" className="history-regenerate__error">
+                        {regenerateError}
+                      </p>
+                    ) : null}
+                  </section>
+                ) : null}
 
                 <section className="history-section">
                   <h3>Token 用量</h3>
@@ -1233,6 +1329,21 @@ export function HistoryDialog({
           index={Math.min(lightboxIndex, viewableResults.length - 1)}
           onIndexChange={setLightboxIndex}
           onClose={handleLightboxClose}
+        />
+      ) : null}
+
+      {regenerateEditorTask != null ? (
+        <RegenerateGenerationDialog
+          key={regenerateEditorTask.summary.id}
+          task={regenerateEditorTask}
+          client={client}
+          busy={regenerateBusy}
+          error={regenerateError}
+          onSubmit={submitRegenerate}
+          onCancel={() => {
+            if (regenerateBusy) return;
+            setRegenerateEditorTask(null);
+          }}
         />
       ) : null}
     </div>

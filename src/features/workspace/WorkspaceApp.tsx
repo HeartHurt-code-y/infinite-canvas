@@ -76,6 +76,7 @@ import {
   type ProviderConnection,
   type RealPersonGroup,
   type StagingJobRecord,
+  type StartGenerationCommand,
   type TosStagingConfig,
   type VideoDownloadJobRecord,
   type VideoDownloaderEngineStatus,
@@ -1448,7 +1449,7 @@ export function WorkspaceApp() {
       if (destination === "cloud") setAssetsError(null);
       else setLocalAssetsError(null);
       // 预检对象存储（TOS）配置：未配置或未启用时直接明确提示，避免后台异步静默失败。
-      let stagingConfig: TosStagingConfig | null = null;
+      let stagingConfig: TosStagingConfig | null;
       try {
         stagingConfig = await tosStagingClient.getConfig();
       } catch (error) {
@@ -4357,6 +4358,40 @@ export function WorkspaceApp() {
       startingNodeKeys,
       addOutput,
     ],
+  );
+
+  /** 从生成任务历史重新生成：创建全新任务；若来源节点仍在画布上，落下占位产物卡片。 */
+  const regenerateGenerationFromHistory = useCallback(
+    async (command: StartGenerationCommand): Promise<string> => {
+      const taskId = await generationClient.start(command);
+      const genNode = genNodes.find((node) => node.key === command.sourceNodeId);
+      if (genNode != null) {
+        const key = outputNodeKey();
+        addOutput((current) => ({
+          key,
+          resultKey: null,
+          sourceNodeId: genNode.key,
+          taskId,
+          mediaType: command.operation === "video_generation" ? "video" : "image",
+          finalPath: null,
+          previewSrc: null,
+          name: null,
+          ...nextOutputSlot(genNode, current),
+        }));
+        frontendLog(
+          "info",
+          `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key}`,
+        );
+      } else {
+        frontendLog(
+          "info",
+          `[canvas] 历史重新生成未找到来源节点，仅保留任务记录: task=${taskId} node=${command.sourceNodeId}`,
+        );
+      }
+      refreshTasks();
+      return taskId;
+    },
+    [addOutput, genNodes, refreshTasks],
   );
 
   // 各生成节点的活动任务与最近成功结果（按 sourceNodeId = 节点 key 关联）。
@@ -7434,6 +7469,7 @@ export function WorkspaceApp() {
             onResumeWorkflow={resumeHistoryWorkflow}
             onRestartWorkflow={restartHistoryWorkflow}
             onLocateWorkflow={locateHistoryWorkflow}
+            onRegenerateGeneration={regenerateGenerationFromHistory}
             activeWorkflowIds={activeWorkflowHistoryIds}
           />
         </Suspense>

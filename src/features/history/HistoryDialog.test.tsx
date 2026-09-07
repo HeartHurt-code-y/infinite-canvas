@@ -329,3 +329,203 @@ describe("HistoryDialog diagnostics", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 });
+
+const REGEN_SUMMARY: GenerationTaskSummary = {
+  ...SUMMARY,
+  id: "task-regen-1",
+  status: "succeeded",
+};
+
+const REGEN_LOGICAL_REQUEST = {
+  canvasId: "canvas-1",
+  sourceNodeId: "node-1",
+  operation: "text_to_image",
+  providerConnectionId: "provider-1",
+  modelDefinitionId: "remote::provider-1::image-model",
+  prompt: [
+    { kind: "text", text: "一个穿着" },
+    {
+      kind: "media_reference",
+      mentionId: "mention-1",
+      target: {
+        kind: "asset",
+        providerConnectionId: "provider-1",
+        assetId: "asset-1",
+        mediaType: "image",
+      },
+      displayNameSnapshot: "参考图A",
+      typePosition: 1,
+      contentIndex: 1,
+    },
+    { kind: "text", text: "的插画" },
+  ],
+  explicitMedia: [
+    {
+      target: {
+        kind: "asset",
+        providerConnectionId: "provider-1",
+        assetId: "asset-1",
+        mediaType: "image",
+      },
+      role: "",
+      displayNameSnapshot: "参考图A",
+      typePosition: 1,
+      contentIndex: 1,
+    },
+  ],
+  parameters: { size: "1:1" },
+  generationCount: 1,
+};
+
+const REGEN_DETAIL: GenerationTaskDetail = {
+  summary: REGEN_SUMMARY,
+  logicalRequest: REGEN_LOGICAL_REQUEST,
+  resolvedRequest: {},
+  attempts: [],
+  calls: [],
+  events: [],
+  results: [],
+  textOutput: null,
+  finalError: null,
+};
+
+describe("HistoryDialog regeneration", () => {
+  it("regenerates the original task from its frozen request", async () => {
+    const client = createClient(REGEN_DETAIL);
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+
+    await screen.findByText("任务概要");
+    fireEvent.click(screen.getByRole("button", { name: /直接重新生成/ }));
+
+    await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+    expect(client.start).toHaveBeenCalledWith({
+      canvasId: "canvas-1",
+      sourceNodeId: "node-1",
+      operation: "text_to_image",
+      providerConnectionId: "provider-1",
+      modelDefinitionId: "remote::provider-1::image-model",
+      prompt: REGEN_LOGICAL_REQUEST.prompt,
+      explicitMedia: REGEN_LOGICAL_REQUEST.explicitMedia,
+      parameters: { size: "1:1" },
+      generationCount: 1,
+    });
+    await waitFor(() =>
+      expect(screen.getByRole("status")).toHaveTextContent("已创建新的生成任务"),
+    );
+  });
+
+  it("edits the prompt, drops a material, and regenerates with the updated request", async () => {
+    const client = createClient(REGEN_DETAIL);
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+
+    await screen.findByText("任务概要");
+    fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+    const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+
+    // 提示词以高亮引用 chip 呈现；素材列表行与编辑器 chip 各出现一次名称。
+    const chip = await within(dialog).findByText(/@参考图A/);
+    expect(chip).toBeInTheDocument();
+    expect(within(dialog).getByText("参考图A")).toBeInTheDocument();
+
+    // 把「的插画」改成「的旗袍插画」。
+    const editor = within(dialog).getByRole("textbox", { name: "提示词" });
+    const paragraph = editor.querySelector("p");
+    const trailing = paragraph?.childNodes[2] as Text | undefined;
+    expect(trailing?.data).toBe("的插画");
+    await compositionMutation(editor, trailing!, "的旗袍插画");
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /移除素材/ }));
+    expect(within(dialog).queryByText(/@参考图A/)).not.toBeInTheDocument();
+    expect(within(dialog).queryByText("参考图A")).not.toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+    const command = vi.mocked(client.start).mock.calls[0]![0];
+    expect(
+      command.prompt.map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`)).join(
+        "",
+      ),
+    ).toBe("一个穿着的旗袍插画");
+    expect(command.explicitMedia).toEqual([]);
+    expect(command.canvasId).toBe("canvas-1");
+    expect(command.sourceNodeId).toBe("node-1");
+    expect(command.parameters).toEqual({ size: "1:1" });
+  });
+
+  it("keeps an added material as an explicit input without referencing it in the prompt", async () => {
+    const client = createClient(REGEN_DETAIL);
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+
+    await screen.findByText("任务概要");
+    fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+    const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+    await within(dialog).findByText(/@参考图A/);
+
+    fireEvent.click(within(dialog).getByText("添加素材"));
+    fireEvent.click(within(dialog).getByRole("tab", { name: "链接" }));
+    fireEvent.change(within(dialog).getByLabelText("链接素材名称"), {
+      target: { value: "参考网页" },
+    });
+    fireEvent.change(within(dialog).getByLabelText("链接素材地址"), {
+      target: { value: "https://example.com/reference" },
+    });
+    fireEvent.click(within(dialog).getByRole("button", { name: "添加链接素材" }));
+
+    expect(within(dialog).getByText("参考网页")).toBeInTheDocument();
+    expect(within(dialog).getByText("素材（2）")).toBeInTheDocument();
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新生成" }));
+
+    await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+    const command = vi.mocked(client.start).mock.calls[0]![0];
+    expect(
+      command.prompt.map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`)).join(
+        "",
+      ),
+    ).toBe("一个穿着@参考图A的插画");
+    expect(command.explicitMedia).toHaveLength(2);
+    expect(command.explicitMedia![0]!.target).toMatchObject({ kind: "asset", assetId: "asset-1" });
+    expect(command.explicitMedia![1]!.target).toMatchObject({
+      kind: "url",
+      url: "https://example.com/reference",
+      mediaType: "image",
+    });
+  });
+
+  it("shows a snapshot warning for tasks without a usable frozen request", async () => {
+    const client = createClient(DETAIL);
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+
+    await screen.findByText("任务概要");
+    expect(screen.getByText("该任务缺少可用的请求快照，无法重新生成。")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /重新生成/ })).not.toBeInTheDocument();
+  });
+});
+
+/**
+ * jsdom 没有操作系统 IME。保留真实 Tiptap 视图与 DOMObserver，只模拟浏览器的文本变更。
+ * （与 PromptNodeViews.ime.test.tsx 共用同一套注入方式。）
+ */
+function setCaret(text: Text, offset: number) {
+  const range = document.createRange();
+  range.setStart(text, offset);
+  range.collapse(true);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+async function compositionMutation(input: HTMLElement, text: Text, value: string) {
+  await act(async () => {
+    text.data = value;
+    setCaret(text, value.length);
+    input.dispatchEvent(
+      new InputEvent("input", {
+        bubbles: true,
+        inputType: "insertCompositionText",
+        data: value,
+        isComposing: true,
+      }),
+    );
+    await Promise.resolve();
+  });
+}

@@ -10467,6 +10467,71 @@ svg[data-spin="true"] {
   font-size: var(--text-sm);
 }
 
+/* 重新生成 */
+
+.history-regenerate {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+.history-regenerate button {
+  display: inline-flex;
+  gap: var(--space-2xs);
+  align-items: center;
+  min-height: var(--size-control);
+  padding: 0 var(--space-md);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-3);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .history-regenerate button:hover:not(:disabled) {
+    filter: brightness(1.05);
+  }
+}
+
+.history-regenerate button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.history-regenerate button:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+.history-regenerate .history-regenerate__primary {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.history-regenerate__note {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+
+.history-regenerate__message {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-success);
+  font-size: var(--text-sm);
+}
+
+.history-regenerate__error {
+  margin: var(--space-2xs) 0 0;
+  color: var(--color-error);
+  font-size: var(--text-sm);
+  white-space: pre-wrap;
+}
+
 .history-prompt-text {
   margin: 0;
   font-size: var(--text-sm);
