@@ -498,6 +498,33 @@ h3 {
   white-space: nowrap;
 }
 
+/* 素材库来源行的「拉取整桶」按钮：与下拉框同一套控件视觉。 */
+.asset-origin__pull {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--space-3xs);
+  height: calc(var(--size-control) - var(--space-2xs));
+  padding-inline: var(--space-2xs);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-2);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.asset-origin__pull:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.asset-origin__pull:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
 .asset-provider-switcher {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

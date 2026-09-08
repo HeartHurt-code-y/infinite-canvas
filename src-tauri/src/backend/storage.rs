@@ -1457,6 +1457,29 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    /// 按对象键查找本地素材（拉取存储桶素材时按对象键去重）。
+    pub fn find_local_asset_job_by_object_key(
+        &self,
+        object_key: &str,
+    ) -> BackendResult<Option<StagingJobRecord>> {
+        self.lock()?
+            .query_row(
+                "SELECT id, local_path, purpose, media_type, object_key, status,
+                        bytes_total, bytes_uploaded, asset_id, import_target_json,
+                        error_json, created_at, updated_at
+                 FROM staging_jobs
+                 WHERE purpose = 'local_asset'
+                   AND import_target_json IS NULL
+                   AND status = 'staged'
+                   AND object_key = ?1
+                 LIMIT 1",
+                params![object_key],
+                staging_job_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_recoverable_staging_jobs(&self) -> BackendResult<Vec<StagingJobRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(

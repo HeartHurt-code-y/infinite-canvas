@@ -102,6 +102,18 @@ pub struct PresignParams<'a> {
 /// 返回的 URL 形如：
 /// `https://{host}/{objectKey}?X-Tos-Algorithm=TOS4-HMAC-SHA256&...&X-Tos-Signature={signature}`
 pub fn presign_url(params: &PresignParams<'_>) -> BackendResult<String> {
+    presign_url_with_query(params, &[])
+}
+
+/// 生成携带额外业务查询参数的 TOS V4 预签名 URL。
+///
+/// 桶级操作（如 ListObjectsV2 列举对象，`GET /?list-type=2`）的 `object_key`
+/// 传空字符串（CanonicalURI 为 `/`）。额外查询参数与 `X-Tos-*` 签名参数合并后
+/// 统一按 key 的 ASCII 序排列并参与签名，请求时必须原样携带，否则签名不匹配。
+pub fn presign_url_with_query(
+    params: &PresignParams<'_>,
+    extra_query: &[(String, String)],
+) -> BackendResult<String> {
     if params.method.is_empty() || !params.method.bytes().all(|b| b.is_ascii_uppercase()) {
         return Err(BackendError::validation(
             "TOS presign method must be a non-empty uppercase HTTP method",
@@ -114,10 +126,10 @@ pub fn presign_url(params: &PresignParams<'_>) -> BackendResult<String> {
             serde_json::json!({ "expiresSecs": params.expires_secs }),
         ));
     }
-    if params.host.trim().is_empty() || params.object_key.is_empty() {
+    if params.host.trim().is_empty() {
         return Err(BackendError::validation(
-            "TOS presign host and object key must be non-empty",
-            serde_json::json!({ "host": params.host, "objectKey": params.object_key }),
+            "TOS presign host must be non-empty",
+            serde_json::json!({ "host": params.host }),
         ));
     }
 
@@ -126,21 +138,28 @@ pub fn presign_url(params: &PresignParams<'_>) -> BackendResult<String> {
     let credential_scope = format!("{}/{}/tos/request", date, params.region);
     let credential = format!("{}/{}", params.credentials.access_key, credential_scope);
 
-    // CanonicalURI：对象键整体编码，仅保留路径分隔符 `/`。
+    // CanonicalURI：对象键整体编码，仅保留路径分隔符 `/`；桶级操作（键为空）即 `/`。
     let canonical_uri = format!("/{}", uri_encode(params.object_key, false));
 
-    // CanonicalQueryString：所有参数按 key 的 ASCII 序排列；值全部 UriEncode（`/` 编码为 %2F）。
-    let canonical_query = [
-        ("X-Tos-Algorithm", "TOS4-HMAC-SHA256".to_string()),
-        ("X-Tos-Credential", credential),
-        ("X-Tos-Date", request_date.clone()),
-        ("X-Tos-Expires", params.expires_secs.to_string()),
-        ("X-Tos-SignedHeaders", "host".to_string()),
-    ]
-    .iter()
-    .map(|(key, value)| format!("{}={}", uri_encode(key, true), uri_encode(value, true)))
-    .collect::<Vec<_>>()
-    .join("&");
+    // CanonicalQueryString：签名参数与业务参数合并后按 key 的 ASCII 序排列；
+    // 值全部 UriEncode（`/` 编码为 %2F）。
+    let mut query_pairs: Vec<(String, String)> = vec![
+        (
+            "X-Tos-Algorithm".to_string(),
+            "TOS4-HMAC-SHA256".to_string(),
+        ),
+        ("X-Tos-Credential".to_string(), credential),
+        ("X-Tos-Date".to_string(), request_date.clone()),
+        ("X-Tos-Expires".to_string(), params.expires_secs.to_string()),
+        ("X-Tos-SignedHeaders".to_string(), "host".to_string()),
+    ];
+    query_pairs.extend(extra_query.iter().cloned());
+    query_pairs.sort_by(|left, right| left.0.cmp(&right.0));
+    let canonical_query = query_pairs
+        .iter()
+        .map(|(key, value)| format!("{}={}", uri_encode(key, true), uri_encode(value, true)))
+        .collect::<Vec<_>>()
+        .join("&");
 
     // CanonicalRequest：预签名使用 UNSIGNED-PAYLOAD，CanonicalHeaders 仅包含 host。
     let canonical_request = format!(
@@ -264,6 +283,78 @@ mod tests {
             });
             assert!(result.is_err(), "expiry {expires} should be rejected");
         }
+    }
+
+    /// 桶级操作（ListObjectsV2）允许空对象键，CanonicalURI 为 `/`，
+    /// 业务查询参数合并进 CanonicalQueryString 并按 key 的 ASCII 序排列。
+    #[test]
+    fn presign_with_query_supports_bucket_level_list_requests() {
+        let credentials = TosCredentials {
+            access_key: "testAK".into(),
+            secret_key: "testSK".into(),
+        };
+        let extra = vec![
+            ("max-keys".to_string(), "1000".to_string()),
+            ("list-type".to_string(), "2".to_string()),
+            ("continuation-token".to_string(), "a b/c".to_string()),
+        ];
+        let url = presign_url_with_query(
+            &PresignParams {
+                method: "GET",
+                host: "examplebucket.tos-cn-beijing.volces.com",
+                object_key: "",
+                region: "cn-beijing",
+                credentials: &credentials,
+                expires_secs: 3600,
+                now: Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap(),
+            },
+            &extra,
+        )
+        .expect("bucket level presign should succeed");
+        assert!(
+            url.starts_with("https://examplebucket.tos-cn-beijing.volces.com/?"),
+            "{url}"
+        );
+        // 合并后的查询串按 key 的 ASCII 序排列：X-Tos-*（大写）在前，业务参数按字典序；
+        // X-Tos-Signature 不参与 CanonicalQueryString，追加在整个查询串末尾。
+        let query = url.split('?').nth(1).expect("presigned url has a query");
+        let keys: Vec<&str> = query
+            .split('&')
+            .map(|pair| pair.split('=').next().expect("pair has a key"))
+            .collect();
+        assert_eq!(
+            keys,
+            vec![
+                "X-Tos-Algorithm",
+                "X-Tos-Credential",
+                "X-Tos-Date",
+                "X-Tos-Expires",
+                "X-Tos-SignedHeaders",
+                "continuation-token",
+                "list-type",
+                "max-keys",
+                "X-Tos-Signature",
+            ]
+        );
+        // 值按 UriEncode 规则编码（空格 %20、路径分隔符 %2F）。
+        assert!(url.contains("continuation-token=a%20b%2Fc"), "{url}");
+        assert!(url.contains("list-type=2"), "{url}");
+        assert!(url.contains("max-keys=1000"), "{url}");
+        // 带业务参数的签名必须与不带时不同（CanonicalQueryString 参与签名）。
+        let plain = presign_url(&PresignParams {
+            method: "GET",
+            host: "examplebucket.tos-cn-beijing.volces.com",
+            object_key: "",
+            region: "cn-beijing",
+            credentials: &credentials,
+            expires_secs: 3600,
+            now: Utc.with_ymd_and_hms(2022, 1, 1, 0, 0, 0).unwrap(),
+        })
+        .expect("plain presign should succeed");
+        assert_ne!(
+            plain.split("X-Tos-Signature=").nth(1),
+            url.split("X-Tos-Signature=").nth(1)
+        );
     }
 
     #[test]

@@ -24,10 +24,10 @@ use super::{
     local_results::{format_bytes_per_sec, safe_file_stem},
     provider::{redact_request_value, redact_url_string, truncate_connectivity_detail},
     storage::{Storage, now_ms},
-    tos_sign::{PresignParams, TosCredentials, presign_url},
+    tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
         ConnectivityTestResult, LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus,
-        StartStagingCommand, TosStagingConfig,
+        StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -65,6 +65,24 @@ const UPLOAD_MAX_RETRIES: u32 = 3;
 
 /// 对象存储上传重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
 const UPLOAD_RETRY_BASE_DELAY_MS: u64 = 500;
+
+/// 桶素材拉取：支持的图片扩展名。avif 等预览兼容性差的格式排除，
+/// 与远程导入白名单语义保持一致。
+const PULL_IMAGE_EXTENSIONS: &[&str] = &[
+    "jpeg", "jpg", "png", "webp", "bmp", "gif", "tiff", "tif", "heic", "heif",
+];
+
+/// 桶素材拉取：支持的视频扩展名。
+const PULL_VIDEO_EXTENSIONS: &[&str] = &[
+    "mp4", "mov", "webm", "mkv", "avi", "m4v", "mpg", "mpeg", "wmv", "flv", "ts", "3gp",
+];
+
+/// 桶素材拉取：支持的音频扩展名。
+const PULL_AUDIO_EXTENSIONS: &[&str] = &["mp3", "wav", "aac", "flac", "m4a", "ogg", "opus", "wma"];
+
+/// 桶素材拉取：ListObjectsV2 分页防御上限（每页最多 1000 个对象，即最多列举 100 万个），
+/// 防止异常响应（例如 continuation-token 永不推进）导致无限循环。
+const LIST_BUCKET_MAX_PAGES: u32 = 1000;
 
 /// 摸鱼素材服务（POST /v1/assets 上游）支持的图片扩展名白名单。
 /// avif 等不在列表内的格式必须先转码为 webp 再导入，否则上游会以
@@ -539,6 +557,225 @@ impl StagingService {
         self.presign_existing_object(staging_job_id, object_key)
     }
 
+    /// 拉取整个存储桶（或指定前缀）下的对象文件到本地素材索引。
+    ///
+    /// 依据火山引擎官方文档《ListObjectsV2》：
+    /// https://www.volcengine.com/docs/6349/357812
+    /// 通过预签名 GET `/?list-type=2` 分页列举（max-keys=1000，continuation-token 翻页），
+    /// 对图片/视频/音频扩展名的对象写入本地索引（staging job：purpose=local_asset、
+    /// status=staged），媒体正文不下载，预览仍按需签发对象存储预签名 URL；
+    /// 对象键已存在本地索引的自动跳过。
+    pub async fn pull_bucket_assets(
+        &self,
+        prefix: Option<&str>,
+    ) -> BackendResult<TosBucketPullSummary> {
+        let started_at = std::time::Instant::now();
+        let config = self.storage.get_tos_config()?.ok_or_else(|| {
+            BackendError::validation(
+                "TOS staging is not configured",
+                json!({ "required": ["bucket", "region", "endpoint", "objectPrefix"] }),
+            )
+        })?;
+        if !config.enabled {
+            return Err(BackendError::validation(
+                "TOS staging is disabled",
+                json!({}),
+            ));
+        }
+        let credential_ref = config.credential_ref.as_deref().ok_or_else(|| {
+            BackendError::validation(
+                "TOS staging credentials are not configured",
+                json!({ "required": ["accessKey", "secretKey"] }),
+            )
+        })?;
+        let credentials = TosCredentials::parse(&self.credentials.get(credential_ref)?)?;
+        let prefix = prefix.map(str::trim).unwrap_or_default();
+        info!(
+            "[staging] 开始拉取存储桶素材: bucket={}, prefix={:?}（空表示整个桶）",
+            config.bucket, prefix
+        );
+
+        let objects = self
+            .list_bucket_objects(&config, &credentials, prefix)
+            .await?;
+
+        let mut total_files: u64 = 0;
+        let mut imported: u64 = 0;
+        let mut skipped_existing: u64 = 0;
+        let mut ignored_unsupported: u64 = 0;
+        for object in &objects {
+            // TOS 控制台创建的文件夹占位对象（键以 `/` 结尾），不是素材文件。
+            if object.key.ends_with('/') {
+                continue;
+            }
+            total_files += 1;
+            let Some(media_type) = detect_media_type_by_extension(&object.key) else {
+                ignored_unsupported += 1;
+                continue;
+            };
+            if self
+                .storage
+                .find_local_asset_job_by_object_key(&object.key)?
+                .is_some()
+            {
+                skipped_existing += 1;
+                continue;
+            }
+            let timestamp = now_ms();
+            let name = object
+                .key
+                .rsplit('/')
+                .next()
+                .filter(|name| !name.is_empty())
+                .unwrap_or(&object.key)
+                .to_string();
+            let job = StagingJobRecord {
+                id: Uuid::new_v4().to_string(),
+                local_path: name,
+                purpose: "local_asset".into(),
+                media_type,
+                object_key: Some(object.key.clone()),
+                status: StagingStatus::Staged,
+                bytes_total: Some(object.size),
+                bytes_uploaded: object.size,
+                asset_id: None,
+                import_target: None,
+                error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            };
+            self.storage.insert_staging_job(&job)?;
+            imported += 1;
+            info!(
+                "[staging] 存储桶对象已写入本地索引: objectKey={}, size={} 字节, mediaType={}",
+                object.key,
+                object.size,
+                media_type.as_str()
+            );
+        }
+
+        let summary = TosBucketPullSummary {
+            total_objects: total_files,
+            imported,
+            skipped_existing,
+            ignored_unsupported,
+            prefix: prefix.to_string(),
+        };
+        info!(
+            "[staging] 存储桶素材拉取完成: 总对象 {}, 新导入 {}, 已存在跳过 {}, 非媒体忽略 {}, 耗时 {}ms",
+            summary.total_objects,
+            summary.imported,
+            summary.skipped_existing,
+            summary.ignored_unsupported,
+            started_at.elapsed().as_millis()
+        );
+        Ok(summary)
+    }
+
+    /// ListObjectsV2 分页列举桶内全部对象（官方文档：https://www.volcengine.com/docs/6349/357812）。
+    ///
+    /// 每页独立预签名（有效期覆盖一次请求即可，翻页参数参与签名）；
+    /// 代理 fake-ip 环境下通过备用 DNS 直连真实 IP。响应按官方文档为 JSON 形态
+    /// （`IsTruncated` / `NextContinuationToken` / `Contents`）。
+    async fn list_bucket_objects(
+        &self,
+        config: &TosStagingConfig,
+        credentials: &TosCredentials,
+        prefix: &str,
+    ) -> BackendResult<Vec<TosObjectSummary>> {
+        let host = format!("{}.{}", config.bucket, config.endpoint);
+        let mut continuation_token: Option<String> = None;
+        let mut objects: Vec<TosObjectSummary> = Vec::new();
+        for page in 1..=LIST_BUCKET_MAX_PAGES {
+            let mut extra_query = vec![
+                ("list-type".to_string(), "2".to_string()),
+                ("max-keys".to_string(), "1000".to_string()),
+            ];
+            if !prefix.is_empty() {
+                extra_query.push(("prefix".to_string(), prefix.to_string()));
+            }
+            if let Some(token) = continuation_token.as_deref() {
+                extra_query.push(("continuation-token".to_string(), token.to_string()));
+            }
+            let url = presign_url_with_query(
+                &PresignParams {
+                    method: "GET",
+                    host: &host,
+                    object_key: "",
+                    region: &config.region,
+                    credentials,
+                    expires_secs: LEASE_URL_EXPIRY_SECS,
+                    now: Utc::now(),
+                },
+                &extra_query,
+            )?;
+            let client = fake_ip_aware_client(&url, self.client.clone()).await;
+            let page_started_at = std::time::Instant::now();
+            let response = client.get(&url).send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                let body = response.text().await.unwrap_or_default();
+                return Err(BackendError::protocol(
+                    format!("TOS ListObjectsV2 returned HTTP {status}"),
+                    json!({
+                        "httpStatus": status.as_u16(),
+                        "bucket": config.bucket,
+                        "page": page,
+                        "body": truncate_connectivity_detail(&redact_url_string(&body)),
+                    }),
+                ));
+            }
+            let body = response.bytes().await?;
+            let parsed: ListObjectsV2ResponseBody =
+                serde_json::from_slice(&body).map_err(|error| {
+                    BackendError::protocol(
+                        "TOS ListObjectsV2 response does not match the documented JSON shape",
+                        json!({
+                            "source": error.to_string(),
+                            "page": page,
+                            "body": truncate_connectivity_detail(&redact_url_string(
+                                &String::from_utf8_lossy(&body),
+                            )),
+                        }),
+                    )
+                })?;
+            let returned = parsed.contents.len();
+            objects.extend(parsed.contents.into_iter().map(|content| TosObjectSummary {
+                key: content.key,
+                size: content.size,
+            }));
+            info!(
+                "[staging] ListObjectsV2 分页列举成功: page={page}, 返回 {returned} 个对象, 累计 {}, truncated={}, 耗时 {}ms",
+                objects.len(),
+                parsed.is_truncated,
+                page_started_at.elapsed().as_millis()
+            );
+            if parsed.is_truncated {
+                match parsed
+                    .next_continuation_token
+                    .filter(|token| !token.is_empty())
+                {
+                    Some(token) => continuation_token = Some(token),
+                    None => {
+                        return Err(BackendError::protocol(
+                            "TOS ListObjectsV2 is truncated but returned no NextContinuationToken",
+                            json!({ "page": page }),
+                        ));
+                    }
+                }
+            } else {
+                return Ok(objects);
+            }
+        }
+        Err(BackendError::protocol(
+            "bucket listing exceeded the maximum number of pages",
+            json!({
+                "maxPages": LIST_BUCKET_MAX_PAGES,
+                "pageLimitObjects": LIST_BUCKET_MAX_PAGES as u64 * 1000
+            }),
+        ))
+    }
+
     pub async fn run_job(&self, job_id: &str) -> BackendResult<StagingJobRecord> {
         let mut job = self.storage.get_staging_job(job_id)?;
         match self.run_job_inner(&mut job).await {
@@ -964,6 +1201,52 @@ impl StagingService {
     }
 }
 
+/// 桶内对象摘要（ListObjectsV2 `Contents` 元素的字段子集）。
+#[derive(Debug, Clone)]
+pub struct TosObjectSummary {
+    pub key: String,
+    pub size: u64,
+}
+
+/// ListObjectsV2 响应体（官方文档响应示例为 JSON 形态）。
+#[derive(Debug, serde::Deserialize)]
+struct ListObjectsV2ResponseBody {
+    #[serde(rename = "IsTruncated", default)]
+    is_truncated: bool,
+    #[serde(rename = "NextContinuationToken", default)]
+    next_continuation_token: Option<String>,
+    #[serde(rename = "Contents", default)]
+    contents: Vec<ListObjectsV2Content>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ListObjectsV2Content {
+    #[serde(rename = "Key")]
+    key: String,
+    #[serde(rename = "Size", default)]
+    size: u64,
+}
+
+/// 按扩展名判断对象键的素材类型；仅识别文件名（最后一段路径）的扩展名。
+fn detect_media_type_by_extension(object_key: &str) -> Option<MediaType> {
+    let file_name = object_key.rsplit('/').next().unwrap_or(object_key);
+    let dot = file_name.rfind('.')?;
+    let extension = &file_name[dot + 1..];
+    if extension.is_empty() {
+        return None;
+    }
+    let normalized = extension.to_ascii_lowercase();
+    if PULL_IMAGE_EXTENSIONS.contains(&normalized.as_str()) {
+        Some(MediaType::Image)
+    } else if PULL_VIDEO_EXTENSIONS.contains(&normalized.as_str()) {
+        Some(MediaType::Video)
+    } else if PULL_AUDIO_EXTENSIONS.contains(&normalized.as_str()) {
+        Some(MediaType::Audio)
+    } else {
+        None
+    }
+}
+
 async fn detect_local_media(path: &Path, expected: MediaType) -> BackendResult<(String, String)> {
     let mut file = tokio::fs::File::open(path).await?;
     let mut buffer = vec![0_u8; 16 * 1024];
@@ -1262,6 +1545,31 @@ mod tests {
         assert!(key.ends_with(".png"));
         assert!(!key.contains("tos-ak-sk"));
         assert!(!key.contains("example-staging-bucket"));
+    }
+
+    #[test]
+    fn detect_media_type_by_extension_matches_last_path_segment_only() {
+        // 常规大小写与中文目录前缀。
+        assert_eq!(
+            detect_media_type_by_extension("staging/素材/IMG_1.PNG"),
+            Some(MediaType::Image)
+        );
+        assert_eq!(
+            detect_media_type_by_extension("video/a.MP4"),
+            Some(MediaType::Video)
+        );
+        assert_eq!(
+            detect_media_type_by_extension("audio/b.Flac"),
+            Some(MediaType::Audio)
+        );
+        // 点出现在目录名而非文件名时不能误判。
+        assert_eq!(detect_media_type_by_extension("dir.v2/file"), None);
+        // 无扩展名 / 空扩展名 / 未收录格式。
+        assert_eq!(detect_media_type_by_extension("noext"), None);
+        assert_eq!(detect_media_type_by_extension("name."), None);
+        assert_eq!(detect_media_type_by_extension("doc.pdf"), None);
+        // 文件夹占位对象（键以 / 结尾）不做扩展名判断，调用方先行跳过。
+        assert_eq!(detect_media_type_by_extension("staging/folder/"), None);
     }
 
     #[test]

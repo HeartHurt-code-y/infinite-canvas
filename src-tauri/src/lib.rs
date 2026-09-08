@@ -114,6 +114,7 @@ pub fn run() {
             commands::start_staging_upload,
             commands::get_staging_job,
             commands::list_local_assets,
+            commands::pull_tos_bucket_assets,
             commands::verify_local_result,
             commands::get_video_downloader_engine,
             commands::install_video_downloader_engine,

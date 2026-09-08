@@ -25,6 +25,7 @@ import type {
   RemoteVideoTaskPage,
   StagingJobRecord,
   StagingStateChangedEvent,
+  TosBucketPullSummary,
   TosStagingConfig,
   VideoComposerEngineStatus,
   VideoCompositionJobRecord,
@@ -184,6 +185,14 @@ export const localAssetRecordSchema = v.looseObject({
 }) satisfies v.GenericSchema<LocalAssetRecord>;
 
 export const localAssetRecordsSchema = v.array(localAssetRecordSchema);
+
+export const tosBucketPullSummarySchema = v.looseObject({
+  totalObjects: v.number(),
+  imported: v.number(),
+  skippedExisting: v.number(),
+  ignoredUnsupported: v.number(),
+  prefix: v.string(),
+}) satisfies v.GenericSchema<TosBucketPullSummary>;
 
 const cloudAssetStatusSchema = v.picklist(["processing", "ready", "failed", "deleted", "unknown"]);
 

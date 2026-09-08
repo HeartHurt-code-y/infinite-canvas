@@ -41,8 +41,8 @@ use super::{
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
         StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
-        TosStagingConfig, UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
-        VideoTaskListCommand,
+        TosBucketPullSummary, TosStagingConfig, UpsertProviderConnectionCommand,
+        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
 
@@ -533,6 +533,40 @@ pub async fn test_tos_connectivity(
     state: State<'_, BackendState>,
 ) -> CommandResult<ConnectivityTestResult> {
     state.staging.test_connectivity().await.command()
+}
+
+/// 拉取整个存储桶（或指定前缀）下的对象文件到本地素材索引。
+/// 列举走火山引擎 TOS ListObjectsV2（分页预签名 GET），素材正文不下载，
+/// 本地索引写入后预览仍按需签发对象存储预签名 URL。
+#[tauri::command]
+pub async fn pull_tos_bucket_assets(
+    state: State<'_, BackendState>,
+    prefix: Option<String>,
+) -> CommandResult<TosBucketPullSummary> {
+    let started_at = std::time::Instant::now();
+    info!("[staging] pull_tos_bucket_assets 命令开始: prefix={prefix:?}（None/空表示整个桶）");
+    let staging = state.staging.clone();
+    match staging.pull_bucket_assets(prefix.as_deref()).await {
+        Ok(summary) => {
+            info!(
+                "[staging] pull_tos_bucket_assets 命令成功: 总对象 {}, 新导入 {}, 已存在跳过 {}, 非媒体忽略 {}, 耗时 {}ms",
+                summary.total_objects,
+                summary.imported,
+                summary.skipped_existing,
+                summary.ignored_unsupported,
+                started_at.elapsed().as_millis()
+            );
+            Ok(summary)
+        }
+        Err(bad_request) => {
+            let record = bad_request.runtime_record();
+            error!(
+                "[staging] pull_tos_bucket_assets 命令失败: 耗时 {}ms, 错误: {record}",
+                started_at.elapsed().as_millis()
+            );
+            Err(bad_request.payload())
+        }
+    }
 }
 
 #[tauri::command]

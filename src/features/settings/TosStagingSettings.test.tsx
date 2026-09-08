@@ -35,6 +35,15 @@ function createClient(
       throw new Error("not used in these tests");
     }),
     listLocalAssets: vi.fn(() => Promise.resolve([])),
+    pullBucketAssets: vi.fn(() =>
+      Promise.resolve({
+        totalObjects: 0,
+        imported: 0,
+        skippedExisting: 0,
+        ignoredUnsupported: 0,
+        prefix: "",
+      }),
+    ),
     ...overrides,
   };
 }

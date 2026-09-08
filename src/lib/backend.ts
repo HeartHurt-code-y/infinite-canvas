@@ -34,6 +34,7 @@ import {
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
+  tosBucketPullSummarySchema,
   unknownSchema,
   videoComposerEngineStatusSchema,
   videoCompositionJobRecordSchema,
@@ -491,6 +492,15 @@ export interface LocalAssetRecord {
   readonly createdAt: number;
 }
 
+/** 「拉取存储桶素材」结果汇总（后端通过 ListObjectsV2 分页列举桶内对象）。 */
+export interface TosBucketPullSummary {
+  readonly totalObjects: number;
+  readonly imported: number;
+  readonly skippedExisting: number;
+  readonly ignoredUnsupported: number;
+  readonly prefix: string;
+}
+
 export interface TosStagingClient {
   getConfig(this: void): Promise<TosStagingConfig | null>;
   configure(this: void, config: TosStagingConfig): Promise<void>;
@@ -507,6 +517,11 @@ export interface TosStagingClient {
   startUpload(this: void, command: StartStagingCommand): Promise<string>;
   getJob(this: void, jobId: string): Promise<StagingJobRecord>;
   listLocalAssets(this: void): Promise<LocalAssetRecord[]>;
+  /**
+   * 拉取整个对象存储桶（可选指定前缀）下的素材文件到本地素材索引。
+   * 后端走火山引擎 TOS ListObjectsV2 分页列举，按对象键去重。
+   */
+  pullBucketAssets(this: void, prefix?: string): Promise<TosBucketPullSummary>;
 }
 
 export const tosStagingClient: TosStagingClient = {
@@ -519,6 +534,10 @@ export const tosStagingClient: TosStagingClient = {
   startUpload: (command) => invokeDesktop("start_staging_upload", stringSchema, { command }),
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
   listLocalAssets: () => invokeDesktop("list_local_assets", localAssetRecordsSchema),
+  pullBucketAssets: (prefix) =>
+    invokeDesktop("pull_tos_bucket_assets", tosBucketPullSummarySchema, {
+      prefix: prefix ?? null,
+    }),
 };
 
 export interface StagingStateChangedEvent {

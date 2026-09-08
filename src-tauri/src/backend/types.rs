@@ -990,6 +990,22 @@ pub struct BackendErrorPayload {
     pub details: Value,
 }
 
+/// 「拉取存储桶素材」结果汇总。通过 ListObjectsV2 分页列举桶内对象后写入本地索引。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TosBucketPullSummary {
+    /// 列举到的对象总数（含已存在跳过与非媒体忽略，不含文件夹占位对象）。
+    pub total_objects: u64,
+    /// 本次新写入本地索引的素材数。
+    pub imported: u64,
+    /// 对象键已存在于本地索引而跳过的数量。
+    pub skipped_existing: u64,
+    /// 扩展名不属于图片/视频/音频而被忽略的数量。
+    pub ignored_unsupported: u64,
+    /// 列举使用的对象前缀；空字符串表示整个桶。
+    pub prefix: String,
+}
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;

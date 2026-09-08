@@ -30,6 +30,15 @@ const TOS_STUB: TosStagingClient = {
   startUpload: vi.fn(() => Promise.resolve("job-1")),
   getJob: vi.fn(() => Promise.reject(new Error("unused"))),
   listLocalAssets: vi.fn(() => Promise.resolve([])),
+  pullBucketAssets: vi.fn(() =>
+    Promise.resolve({
+      totalObjects: 0,
+      imported: 0,
+      skippedExisting: 0,
+      ignoredUnsupported: 0,
+      prefix: "",
+    }),
+  ),
 };
 
 const CONNECTIVITY_OK = {

@@ -1,6 +1,7 @@
 import { videoDownloadInputs } from "./videoDownloadInputs";
 import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
+import { ArrowsClockwise } from "@phosphor-icons/react/ArrowsClockwise";
 import { CaretRight } from "@phosphor-icons/react/CaretRight";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
@@ -643,6 +644,8 @@ export function WorkspaceApp({
   const [localAssetsLoading, setLocalAssetsLoading] = useState(false);
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
+  // 拉取整个存储桶素材（ListObjectsV2 分页列举 + 写入本地索引）进行中标记。
+  const [pullingBucket, setPullingBucket] = useState(false);
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
   // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点并标记已上传。
   const uploadJobToOutputKeyRef = useRef<Map<string, string>>(new Map());
@@ -1264,6 +1267,44 @@ export function WorkspaceApp({
       )
       .finally(() => setLocalAssetsLoading(false));
   }, []);
+
+  /** 拉取整个对象存储桶下的素材文件到本地素材索引（TOS ListObjectsV2 分页列举）。 */
+  const handlePullBucketAssets = useCallback(async (): Promise<void> => {
+    if (!isDesktopRuntime()) {
+      toast.error("拉取存储桶素材仅在桌面应用中可用，浏览器预览模式暂不支持。");
+      return;
+    }
+    if (pullingBucket) return;
+    setPullingBucket(true);
+    const startedAt = Date.now();
+    try {
+      const summary = await tosStagingClient.pullBucketAssets();
+      frontendLog(
+        "info",
+        `[assets] 存储桶素材拉取完成: 总对象 ${summary.totalObjects}, 新导入 ${summary.imported}, 已存在跳过 ${summary.skippedExisting}, 非媒体忽略 ${summary.ignoredUnsupported}, 耗时 ${Date.now() - startedAt}ms`,
+      );
+      const details: string[] = [];
+      if (summary.skippedExisting > 0) {
+        details.push(`跳过 ${summary.skippedExisting} 个已存在`);
+      }
+      if (summary.ignoredUnsupported > 0) {
+        details.push(`忽略 ${summary.ignoredUnsupported} 个非媒体文件`);
+      }
+      toast.success(
+        `已拉取 ${summary.imported} 个新素材${details.length > 0 ? `（${details.join("，")}）` : ""}`,
+      );
+      refreshLocalAssets("manual");
+    } catch (error) {
+      const formatted = formatRawBackendError(error);
+      frontendLog(
+        "error",
+        `[assets] 存储桶素材拉取失败: 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
+      );
+      toast.error(`拉取存储桶素材失败：${formatted}`);
+    } finally {
+      setPullingBucket(false);
+    }
+  }, [pullingBucket, refreshLocalAssets]);
 
   // 拉取当前令牌作用域下的云端素材库分组。分组失败不阻塞素材浏览：
   // 选中保持「全部素材」，仅记录错误并允许在界面上重试。
@@ -7449,6 +7490,24 @@ export function WorkspaceApp({
               <option value="cloud">云端素材</option>
               <option value="local">本地素材</option>
             </select>
+            {assetLibrarySource === "local" && isDesktopRuntime() ? (
+              <button
+                type="button"
+                className="asset-origin__pull"
+                aria-label="拉取整个存储桶的素材文件"
+                disabled={pullingBucket}
+                onClick={() => {
+                  void handlePullBucketAssets();
+                }}
+              >
+                {pullingBucket ? (
+                  <CircleNotch size={12} weight="bold" aria-hidden="true" data-spin="true" />
+                ) : (
+                  <ArrowsClockwise size={12} weight="bold" aria-hidden="true" />
+                )}
+                拉取整桶
+              </button>
+            ) : null}
             <span className="asset-origin__status">
               {assetLibrarySource === "local"
                 ? "本地索引 · 对象存储"
