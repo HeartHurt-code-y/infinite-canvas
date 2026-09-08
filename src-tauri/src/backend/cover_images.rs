@@ -21,9 +21,8 @@ use super::{
 
 const COVER_WIDTH: u32 = 1080;
 const COVER_HEIGHT: u32 = 1440;
-const MAX_SOURCE_BYTES: u64 = 100 * 1024 * 1024;
-// 1080×1440 RGB24 原始像素约4.67MB。5MiB上限额外容纳PNG过滤行和编码开销；
-// 与最多8MiB原始参考图一起Base64内联后小于18.18MB，给20MB请求留下约1.82MB文本余量。
+// 只约束归一化器产生的固定尺寸交付图，不限制输入源图文件大小。
+// 1080×1440 RGB24 原始像素约4.67MB，额外空间用于PNG过滤行和编码开销。
 const MAX_COVER_PNG_BYTES: u64 = 5 * 1024 * 1024;
 const COVER_FILTER: &str = "scale=1080:1440:force_original_aspect_ratio=decrease:flags=lanczos,pad=1080:1440:(ow-iw)/2:(oh-ih)/2:color=0x171717,setsar=1,format=rgb24";
 
@@ -175,11 +174,8 @@ fn validate_source(source: &str) -> BackendResult<PathBuf> {
     let path = path.canonicalize()?;
     let mut file = std::fs::File::open(&path)?;
     let size = file.metadata()?.len();
-    if size == 0 || size > MAX_SOURCE_BYTES {
-        return Err(BackendError::validation(
-            "封面图片不能为空，且不能超过100MB",
-            Value::Null,
-        ));
+    if size == 0 {
+        return Err(BackendError::validation("封面图片不能为空", Value::Null));
     }
     let mut header = [0u8; 8192];
     let read = file.read(&mut header)?;
@@ -332,6 +328,24 @@ mod tests {
         assert!(validate_source(temp.path().to_str().unwrap()).is_err());
         std::fs::write(&source, []).unwrap();
         assert!(validate_source(source.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn input_accepts_image_larger_than_former_source_byte_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("large.png");
+        std::fs::write(&source, b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR").unwrap();
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&source)
+            .unwrap()
+            .set_len(100 * 1024 * 1024 + 1)
+            .unwrap();
+
+        assert_eq!(
+            validate_source(source.to_str().unwrap()).unwrap(),
+            source.canonicalize().unwrap()
+        );
     }
 
     #[test]

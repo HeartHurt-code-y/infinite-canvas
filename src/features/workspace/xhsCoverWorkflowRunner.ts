@@ -231,7 +231,7 @@ export function createXhsCoverWorkflowRunner(
         const options = node.config.xhsCover;
         if (!options || !xhsCoverInputReady(node.config.brief, options))
           throw new Error(
-            "请填写封面主题或标题，并上传 1～3 张同一人物参考图；额外素材最多 5 张，图片合计不能超过 8 MiB，不能重复上传。局部出镜也需要真实参考图。",
+            "请填写封面主题或标题，并上传 1～3 张同一人物参考图；额外素材最多 5 张，图片必须非空，不能重复上传。局部出镜也需要真实参考图。",
           );
         if (
           (options.style !== "auto" && !Object.hasOwn(XHS_COVER_STYLES, options.style)) ||

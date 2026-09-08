@@ -47,7 +47,39 @@ const templates: readonly [string, Partial<KnowledgeVideoWorkflowConfig>][] = [
 ];
 
 describe("workflow reference materials", () => {
-  it("counts connected sources toward capacity and permits reusing a connected local file", () => {
+  it("shows multiple connected text outputs and enables a workflow with an otherwise empty brief", () => {
+    const props = nodeProps({ brief: "" });
+    const onUnlink = vi.fn();
+    render(
+      <KnowledgeVideoWorkflowNode
+        {...props}
+        connectedTexts={[
+          {
+            key: "source:script",
+            sourceKey: "source",
+            edgeId: "source->workflow",
+            name: "上游剧本",
+            text: "完整剧本内容",
+          },
+          {
+            key: "source:storyboard",
+            sourceKey: "source",
+            edgeId: "source->workflow",
+            name: "上游分镜",
+            text: "完整分镜内容",
+          },
+        ]}
+        onUnlink={onUnlink}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    const list = screen.getByRole("list", { name: "工作流连线文本" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(2);
+    fireEvent.click(within(list).getByRole("button", { name: "断开工作流文本：上游剧本" }));
+    expect(onUnlink).toHaveBeenCalledWith("source->workflow");
+  });
+
+  it("displays every connected source and permits more than eight references", () => {
     const materials = Array.from({ length: 7 }, (_, index) => ({
       ...material,
       localPath: `C:\\references\\${index}.png`,
@@ -66,7 +98,7 @@ describe("workflow reference materials", () => {
       <KnowledgeVideoWorkflowNode {...props} connectedInputs={[input]} />,
     );
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
-    expect(screen.getByText(/全部参考资料 8 \/ 8 项/)).toBeVisible();
+    expect(screen.getByText(/全部参考资料 8 项/)).toBeVisible();
     rerender(
       <KnowledgeVideoWorkflowNode
         {...props}
@@ -80,8 +112,9 @@ describe("workflow reference materials", () => {
         ]}
       />,
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("参考资料合计超过 8 项或 14 MB");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByText(/全部参考资料 9 项/)).toBeVisible();
   });
 
   it.each(templates)("shows shared multimodal references in %s", (title, options) => {
@@ -116,7 +149,7 @@ describe("workflow reference materials", () => {
     for (const kind of ["图片", "音频", "视频", "文档"]) {
       expect(within(references).getByText(`${kind} · 1.0 MB`)).toBeVisible();
     }
-    expect(within(references).getByText(/全部参考资料 4 \/ 8 项 · 4.0 MB \/ 14 MB/)).toBeVisible();
+    expect(within(references).getByText(/全部参考资料 4 项 · 4.0 MB/)).toBeVisible();
     fireEvent.click(
       within(references).getByRole("button", { name: "移除工作流参考素材：资料.json" }),
     );
@@ -134,11 +167,11 @@ describe("workflow reference materials", () => {
     });
     render(<KnowledgeVideoWorkflowNode {...props} />);
     const references = screen.getByRole("region", { name: "工作流参考素材" });
-    expect(within(references).getByText(/全部参考资料 8 \/ 8 项 · 8.0 MB \/ 14 MB/)).toBeVisible();
+    expect(within(references).getByText(/全部参考资料 8 项 · 8.0 MB/)).toBeVisible();
     expect(
       within(references).getByRole("button", { name: "添加工作流多模态参考素材" }),
     ).toBeEnabled();
-    expect(within(references).getByText(/可选择已有专用资料作为参考/)).toBeVisible();
+    expect(within(references).queryByText(/可选择已有专用资料作为参考/)).not.toBeInTheDocument();
     fireEvent.click(within(references).getByRole("button", { name: "添加工作流多模态参考素材" }));
     expect(props.onPickMaterials).toHaveBeenCalledWith(props.node.key);
     await waitFor(() =>
@@ -153,21 +186,21 @@ describe("workflow reference materials", () => {
     ).toBeEnabled();
   });
 
-  it("disables adding when all capacity is occupied by general references", () => {
+  it("keeps adding available beyond eight general references", () => {
     const materials = Array.from({ length: 8 }, (_, index) => ({
       ...material,
       localPath: `C:\\references\\${index}.png`,
     }));
     render(<KnowledgeVideoWorkflowNode {...nodeProps({ materials })} />);
-    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     expect(screen.queryByText(/可选择已有专用资料作为参考/)).not.toBeInTheDocument();
   });
 
-  it("allows reusing dedicated files at the byte limit and compares roles by normalized path", () => {
+  it("keeps adding available for large dedicated files and counts shared paths once", () => {
     const largeProduct = {
       ...material,
       localPath: "C:\\products\\cup.png",
-      byteSize: 14 * 1024 * 1024,
+      byteSize: 32 * 1024 * 1024,
     };
     const props = nodeProps({
       commerce: { ...createCommerceOptions(), materials: [largeProduct] },
@@ -186,21 +219,30 @@ describe("workflow reference materials", () => {
         }}
       />,
     );
-    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeDisabled();
-    expect(screen.queryByText(/可选择已有专用资料作为参考/)).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
+    expect(screen.getByText(/全部参考资料 1 项 · 32.0 MB/)).toBeVisible();
   });
 
-  it("reports combined size overflow and blocks execution until references are removed", () => {
+  it("shows large material sizes and permits execution", () => {
     render(
       <KnowledgeVideoWorkflowNode
         {...nodeProps({ materials: [{ ...material, byteSize: 15 * 1024 * 1024 }] })}
       />,
     );
-    expect(screen.getByRole("alert")).toHaveTextContent("参考资料合计超过 8 项或 14 MB");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
+    expect(screen.getByText(/全部参考资料 1 项 · 15.0 MB/)).toBeVisible();
     expect(
       screen.getByRole("button", { name: `移除工作流参考素材：${material.displayName}` }),
     ).toBeEnabled();
+  });
+
+  it.each([0, Number.NaN])("keeps invalid file-size metadata blocked: %s", (byteSize) => {
+    render(
+      <KnowledgeVideoWorkflowNode {...nodeProps({ materials: [{ ...material, byteSize }] })} />,
+    );
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
   });
 
   it.each<KnowledgeVideoWorkflowPhase>(["planning", "awaiting_approval"])(

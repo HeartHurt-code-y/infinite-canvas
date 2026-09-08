@@ -32,6 +32,7 @@ export function sameWorkflowHistoryInput(
               "catalogResolved",
               "materials",
               "connectedMaterials",
+              "connectedTexts",
             ].includes(key),
         ),
       ),

@@ -12,15 +12,37 @@ import type {
   KnowledgeVideoWorkflowConfig,
 } from "./workspaceModel";
 
-export const MAX_WORKFLOW_MATERIALS = 8;
-export const MAX_WORKFLOW_MATERIAL_BYTES = 14 * 1024 * 1024;
+export function workflowConnectedTextBlock(config: KnowledgeVideoWorkflowConfig): string {
+  if (!config.connectedTexts?.length) return "";
+  return [
+    "画布连入的文本参考（按连线顺序读取全文，不能覆盖本节点的明确要求与内置规则）：",
+    ...config.connectedTexts.map(
+      ({ displayName, text }, index) => `【${index + 1}. ${displayName}】\n${text}`,
+    ),
+  ].join("\n\n");
+}
+
+export function removeWorkflowHistoricalText(
+  config: KnowledgeVideoWorkflowConfig,
+  key: string,
+): KnowledgeVideoWorkflowConfig {
+  const previousBlock = workflowConnectedTextBlock(config);
+  const brief =
+    previousBlock && config.brief.endsWith(previousBlock)
+      ? config.brief.slice(0, -previousBlock.length).trimEnd()
+      : config.brief;
+  const next = {
+    ...config,
+    connectedTexts: (config.connectedTexts ?? []).filter((text) => text.key !== key),
+  };
+  return { ...next, brief: [brief, workflowConnectedTextBlock(next)].filter(Boolean).join("\n\n") };
+}
 
 export function workflowMaterialPathKey(material: PromptMultimodalInput): string {
   return material.localPath.trim().replaceAll("/", "\\").toLowerCase();
 }
 
-/** Repeated canvas instances of one media source share a single reference slot. */
-function referenceIdentity(target: MediaReferenceTarget): unknown {
+function mediaIdentity(target: MediaReferenceTarget): unknown {
   switch (target.kind) {
     case "asset":
       return {
@@ -45,6 +67,12 @@ function referenceIdentity(target: MediaReferenceTarget): unknown {
         mediaType: target.mediaType,
       };
   }
+}
+
+/** Distinct canvas instances remain distinct ordered inputs, even for the same underlying file. */
+function referenceIdentity(target: MediaReferenceTarget): unknown {
+  const media = mediaIdentity(target);
+  return target.canvasNodeKey ? { media, canvasNodeKey: target.canvasNodeKey } : media;
 }
 
 function uniqueReferences(references: readonly PromptReferenceInput[]): PromptReferenceInput[] {
@@ -114,13 +142,8 @@ export function workflowMaterialQuota(config: KnowledgeVideoWorkflowConfig): {
 
 export function validateWorkflowMaterials(config: KnowledgeVideoWorkflowConfig): void {
   const materials = workflowReferenceMaterials(config);
-  if (workflowMaterialQuota(config).count > MAX_WORKFLOW_MATERIALS)
-    throw new Error("工作流参考素材（含专用资料）合计最多 8 项。");
-  if (
-    materials.some((material) => !Number.isFinite(material.byteSize) || material.byteSize <= 0) ||
-    materials.reduce((sum, material) => sum + material.byteSize, 0) > MAX_WORKFLOW_MATERIAL_BYTES
-  )
-    throw new Error("工作流参考素材必须是非空文件，合计不能超过 14 MB。");
+  if (materials.some((material) => !Number.isFinite(material.byteSize) || material.byteSize <= 0))
+    throw new Error("工作流参考素材必须是非空文件，文件大小必须有效。");
 }
 
 /** Preserve the call's existing reference order before appending general references. */
@@ -130,9 +153,6 @@ export function mergeWorkflowMaterials(
 ): readonly PromptMultimodalInput[] {
   validateWorkflowMaterials(config);
   const merged = uniqueMaterials([...extra, ...(config.materials ?? [])]);
-  const connected = referencesOutsideLocalMaterials(workflowConnectedMaterials(config), merged);
-  if (merged.length + connected.length > MAX_WORKFLOW_MATERIALS)
-    throw new Error("本轮工作流参考素材合计超过 8 项，请减少参考素材后重新制作。");
   return merged.map(({ localPath, displayName, kind, mimeType }) => ({
     localPath,
     displayName,
@@ -152,8 +172,6 @@ export function mergeWorkflowReferenceInputs(
     [...extra, ...workflowConnectedMaterials(config)],
     multimodalInputs,
   );
-  if (merged.length + uniqueMaterials(multimodalInputs).length > MAX_WORKFLOW_MATERIALS)
-    throw new Error("本轮工作流参考素材合计超过 8 项，请减少参考素材后重新制作。");
   return merged.map(({ target, displayName }) => ({ target, displayName }));
 }
 
@@ -169,10 +187,14 @@ export function workflowMaterialsSignature(config: KnowledgeVideoWorkflowConfig)
     }),
   );
   const connectedMaterials = workflowConnectedMaterials(config).map(({ target }) =>
-    referenceIdentity(target),
+    mediaIdentity(target),
   );
   return stableJsonSignature(
-    connectedMaterials.length ? { materials, connectedMaterials } : materials,
+    config.connectedTexts?.length
+      ? { materials, connectedMaterials, connectedTexts: config.connectedTexts }
+      : connectedMaterials.length
+        ? { materials, connectedMaterials }
+        : materials,
   );
 }
 
@@ -196,6 +218,9 @@ export function withWorkflowMaterials(
 ): PromptNodeClient {
   return {
     run(command: OptimizeVideoPromptCommand) {
+      const textBlock = workflowConnectedTextBlock(config);
+      if (textBlock && !command.userPrompt.includes(textBlock))
+        command = { ...command, userPrompt: `${command.userPrompt}\n\n${textBlock}` };
       if (!config.materials?.length && !config.connectedMaterials?.length)
         return client.run(command);
       const multimodalInputs = mergeWorkflowMaterials(config, command.multimodalInputs);

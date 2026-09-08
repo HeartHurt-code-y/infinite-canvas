@@ -12,11 +12,8 @@ import {
   type PromptReferenceInput,
 } from "../../lib/backend";
 import type { WorkflowCanvasInput } from "./workflowCanvasInputs";
-import {
-  MAX_WORKFLOW_MATERIAL_BYTES,
-  MAX_WORKFLOW_MATERIALS,
-  workflowMaterialPathKey,
-} from "./workflowMaterials";
+import type { ConnectedCanvasTextInput } from "./canvasInputs";
+import type { KnowledgeVideoWorkflowConfig } from "./workspaceModel";
 import "./WorkflowReferenceMaterials.css";
 
 const MATERIAL_KIND_LABELS = {
@@ -31,7 +28,10 @@ interface WorkflowReferenceMaterialsProps {
   readonly allMaterials: readonly PickedPromptMaterial[];
   readonly totalCount?: number;
   readonly connectedInputs?: readonly WorkflowCanvasInput[];
+  readonly connectedTexts?: readonly ConnectedCanvasTextInput[];
   readonly historicalReferences?: readonly PromptReferenceInput[];
+  readonly historicalTexts?: NonNullable<KnowledgeVideoWorkflowConfig["connectedTexts"]>;
+  readonly onRemoveHistoricalText?: (key: string) => void;
   readonly onUnlink?: (edgeId: string) => void;
   readonly onRemoveHistoricalReference?: (index: number) => void;
   readonly disabled: boolean;
@@ -45,7 +45,10 @@ export function WorkflowReferenceMaterials({
   allMaterials,
   totalCount = allMaterials.length,
   connectedInputs = [],
+  connectedTexts = [],
   historicalReferences = [],
+  historicalTexts = [],
+  onRemoveHistoricalText,
   onUnlink,
   onRemoveHistoricalReference,
   disabled,
@@ -55,21 +58,9 @@ export function WorkflowReferenceMaterials({
 }: WorkflowReferenceMaterialsProps) {
   const [materialError, setMaterialError] = useState<string | null>(null);
   const totalBytes = allMaterials.reduce((total, material) => total + material.byteSize, 0);
-  const atCapacity =
-    totalCount >= MAX_WORKFLOW_MATERIALS || totalBytes >= MAX_WORKFLOW_MATERIAL_BYTES;
-  const overLimit = totalCount > MAX_WORKFLOW_MATERIALS || totalBytes > MAX_WORKFLOW_MATERIAL_BYTES;
-  const generalPaths = new Set(materials.map(workflowMaterialPathKey));
-  const canReuseSpecialized =
-    allMaterials.some((material) => !generalPaths.has(workflowMaterialPathKey(material))) ||
-    [...connectedInputs, ...historicalReferences].some(
-      ({ target }) =>
-        target.kind === "local_file" &&
-        !generalPaths.has(target.path.trim().replaceAll("/", "\\").toLowerCase()),
-    );
-  const full = overLimit || (atCapacity && !canReuseSpecialized);
 
   async function pickMaterials() {
-    if (!onPick || disabled || picking || full) return;
+    if (!onPick || disabled || picking) return;
     setMaterialError(null);
     try {
       await onPick();
@@ -89,7 +80,7 @@ export function WorkflowReferenceMaterials({
         <button
           type="button"
           aria-label="添加工作流多模态参考素材"
-          disabled={disabled || picking || !onPick || full}
+          disabled={disabled || picking || !onPick}
           onClick={() => void pickMaterials()}
         >
           {picking ? (
@@ -101,17 +92,14 @@ export function WorkflowReferenceMaterials({
         </button>
       </div>
       <p>图片、音频、视频、PDF、TXT / Markdown、JSON，用于文本模型理解、规划与检查。</p>
-      <p>可将画布上的图片、音频或视频素材连接到本节点左侧端口。</p>
+      <p>可连接任意画布节点，按连线顺序读取可用媒体和文本，连接数量不限。</p>
       <p className="canvas-workflow-references__quota" aria-live="polite">
-        已添加 {materials.length} 项 · 全部参考资料 {totalCount} / {MAX_WORKFLOW_MATERIALS} 项 ·{" "}
+        已添加 {materials.length} 项 · 全部参考资料 {totalCount} 项 ·{" "}
         {connectedInputs.length || historicalReferences.length ? "已选本地文件 " : ""}
-        {formatBytes(totalBytes) ?? "0 B"} / 14 MB
+        {formatBytes(totalBytes) ?? "0 B"}
       </p>
       {allMaterials.length > materials.length ? (
         <p>商品资料、人物参考图与补充素材计入合计。</p>
-      ) : null}
-      {atCapacity && canReuseSpecialized && !overLimit ? (
-        <p>可选择已有专用资料作为参考；添加新文件前请先移除部分素材。</p>
       ) : null}
       {materials.length ? (
         <ul>
@@ -144,12 +132,12 @@ export function WorkflowReferenceMaterials({
       ) : null}
       {connectedInputs.length || historicalReferences.length ? (
         <>
-          <p>已连接 {connectedInputs.length} 项；连线素材在请求时读取原文件并校验合计大小。</p>
+          <p>已连接 {connectedInputs.length} 项；连线素材在请求时读取原文件。</p>
           <ul aria-label="工作流连线参考素材">
             {[
               ...connectedInputs.map((input) => ({
                 input,
-                key: input.edgeId,
+                key: `${input.edgeId}:${input.sourceKey ?? JSON.stringify(input.target)}`,
                 label: "已连接",
                 action: `断开工作流素材：${input.displayName}`,
                 remove: onUnlink ? () => onUnlink(input.edgeId) : undefined,
@@ -199,7 +187,42 @@ export function WorkflowReferenceMaterials({
           </ul>
         </>
       ) : null}
-      {overLimit ? <p role="alert">参考资料合计超过 8 项或 14 MB，请移除部分素材后继续。</p> : null}
+      {connectedTexts.length || historicalTexts.length ? (
+        <ul aria-label="工作流连线文本">
+          {connectedTexts.map((input) => (
+            <li key={`${input.edgeId}:${input.key}`}>
+              <span>
+                <strong>{input.name}</strong>
+                <small>已连接 · 文本 · {input.text.length} 字符</small>
+              </span>
+              <button
+                type="button"
+                aria-label={`断开工作流文本：${input.name}`}
+                disabled={disabled || !onUnlink}
+                onClick={() => onUnlink?.(input.edgeId)}
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+          {historicalTexts.map((input) => (
+            <li key={`history:${input.key}`}>
+              <span>
+                <strong>{input.displayName}</strong>
+                <small>历史参考文本 · {input.text.length} 字符</small>
+              </span>
+              <button
+                type="button"
+                aria-label={`移除历史参考文本：${input.displayName}`}
+                disabled={disabled || picking || !onRemoveHistoricalText}
+                onClick={() => onRemoveHistoricalText?.(input.key)}
+              >
+                <X size={15} aria-hidden="true" />
+              </button>
+            </li>
+          ))}
+        </ul>
+      ) : null}
       {materialError ? <p role="alert">{materialError}</p> : null}
     </section>
   );

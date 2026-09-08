@@ -279,9 +279,9 @@ describe("canvas state interface", () => {
       () =>
         canvas.commands.insertSubgraph(
           [assetEntry, genEntry],
-          [{ id: "gen-2->asset-2", fromKey: "gen-2", toKey: "asset-2" }],
+          [{ id: "gen-2->gen-2", fromKey: "gen-2", toKey: "gen-2" }],
         ),
-      "Canvas subgraph connection is unsupported: gen-2->asset-2",
+      "Canvas subgraph connection is unsupported: gen-2->gen-2",
     );
     expectAtomicRejection(
       () =>
@@ -306,7 +306,7 @@ describe("canvas state interface", () => {
     expect(state.graph.byTarget.get("output-1")).toHaveLength(1);
   });
 
-  it("owns connection validation and single-input replacement rules", () => {
+  it("retains every prompt, document and video connection without replacing previous inputs", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("gen", genNode);
     canvas.commands.addNode("gen", promptNode("prompt-1"));
@@ -322,23 +322,20 @@ describe("canvas state interface", () => {
     const promptReplacement = canvas.commands.connect("prompt-2", "gen-1");
     expect(promptReplacement).toMatchObject({
       status: "connected",
-      replacedEdgeIds: ["prompt-1->gen-1"],
+      replacedEdgeIds: [],
     });
     expect(canvas.commands.connect("asset-video", "viral-1").status).toBe("connected");
     expect(canvas.commands.connect("asset-video", "composer-1").status).toBe("connected");
     expect(canvas.commands.connect("screenplay-1", "storyboard-1").status).toBe("connected");
     expect(canvas.commands.connect("screenplay-2", "storyboard-1")).toMatchObject({
       status: "connected",
-      replacedEdgeIds: ["screenplay-1->storyboard-1"],
+      replacedEdgeIds: [],
     });
-    expect(canvas.commands.connect("storyboard-1", "screenplay-1")).toMatchObject({
-      status: "rejected",
-      reason: "unsupported-connection",
-    });
-    expect(canvas.commands.connect("gen-1", "viral-1")).toMatchObject({
-      status: "rejected",
-      reason: "unsupported-connection",
-    });
+    expect(canvas.commands.connect("storyboard-1", "screenplay-1").status).toBe("connected");
+    expect(canvas.commands.connect("gen-1", "viral-1").status).toBe("connected");
+    expect(canvas.getSnapshot().graph.byTarget.get("gen-1")).toHaveLength(2);
+    expect(canvas.getSnapshot().graph.byTarget.get("storyboard-1")).toHaveLength(2);
+    expect(canvas.getSnapshot().graph.byTarget.get("viral-1")).toHaveLength(2);
   });
 
   it("accepts saved image/video artifacts as reference inputs to prompt nodes", () => {
@@ -434,18 +431,18 @@ describe("canvas state interface", () => {
       patch: { resultKey: "other-task#0" },
       accepted: false,
     },
-  ])("validates $name as a workflow input", ({ patch, accepted }) => {
+  ])("allows connecting $name before its payload is available", ({ patch }) => {
     const canvas = createCanvasState();
     canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
     canvas.commands.addOutput({ ...outputNode, ...patch });
 
     const connected = canvas.commands.connect("output-1", "knowledge-video-1");
 
-    expect(connected.status).toBe(accepted ? "connected" : "rejected");
-    expect(canvas.getSnapshot().graph.edges).toHaveLength(accepted ? 1 : 0);
+    expect(connected.status).toBe("connected");
+    expect(canvas.getSnapshot().graph.edges).toHaveLength(1);
   });
 
-  it("rejects reverse workflow connections and non-media source nodes", () => {
+  it("accepts reverse workflow connections and non-media source nodes", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
     canvas.commands.addNode("asset", assetNode);
@@ -457,18 +454,12 @@ describe("canvas state interface", () => {
     canvas.commands.addOutput(outputNode);
 
     for (const sourceKey of ["gen-1", "prompt-1", "screenplay-1", "storyboard-1", "composer-1"]) {
-      expect(canvas.commands.connect(sourceKey, "knowledge-video-1")).toEqual({
-        status: "rejected",
-        reason: "unsupported-connection",
-      });
+      expect(canvas.commands.connect(sourceKey, "knowledge-video-1").status).toBe("connected");
     }
     for (const targetKey of ["asset-1", "output-1", "gen-1"]) {
-      expect(canvas.commands.connect("knowledge-video-1", targetKey)).toEqual({
-        status: "rejected",
-        reason: "unsupported-connection",
-      });
+      expect(canvas.commands.connect("knowledge-video-1", targetKey).status).toBe("connected");
     }
-    expect(canvas.getSnapshot().graph.byTarget.get("knowledge-video-1")).toBeUndefined();
+    expect(canvas.getSnapshot().graph.byTarget.get("knowledge-video-1")).toHaveLength(5);
   });
 
   it("removes a node, incident edges, and invalid selections in one write", () => {
@@ -490,14 +481,14 @@ describe("canvas state interface", () => {
   it("keeps connection projections stable across layout-only changes", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", assetNode);
-    const connectionNodes = canvas.getSnapshot().nodeByKey.asset;
+    const connectionNodes = canvas.getSnapshot().nodeByKey;
 
     canvas.commands.applyNodeChanges([
       { type: "position", key: "asset-1", position: { x: 80, y: 90 } },
       { type: "dimensions", key: "asset-1", measured: { width: 320, height: 180 } },
     ]);
 
-    expect(canvas.getSnapshot().nodeByKey.asset).toBe(connectionNodes);
+    expect(canvas.getSnapshot().nodeByKey).toBe(connectionNodes);
     expect(canvas.getSnapshot().nodes.asset[0]).toMatchObject({
       x: 80,
       y: 90,

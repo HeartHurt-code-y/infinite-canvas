@@ -1,6 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
+import * as videoFrameSampler from "./lib/videoFrameSampler";
 import type { CloudAsset, GenerationTaskDetail, GenerationTaskSummary } from "./lib/backend";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import { fireCanvasMouse } from "./test/canvasEvents";
@@ -912,7 +913,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("拖线时高亮所有可连接目标的输入端口，结束拖线后高亮消失", async () => {
     render(<App />);
-    // 视频素材：可连图片生成节点，但不可连提示词节点（提示词仅接受图片素材做视觉理解）。
+    // 视频素材可以连接图片生成和提示词节点，源节点自身不能自连。
     const videoAsset = await addAssetNode("视频", "列车进站参考", 148, 148);
     const imageGeneration = await addGenerationNode("图片", 700, 148);
     const promptNode = await addPromptNode(700, 500);
@@ -936,9 +937,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(imageTarget).not.toBeNull();
     expect(promptTarget).not.toBeNull();
 
-    // 可连接目标高亮，不可连接目标不高亮。
+    // 所有不同节点的目标端口均高亮，源节点自己的输入端口不高亮。
     await waitFor(() => expect(imageTarget).toHaveClass("canvas-flow-handle--highlight"));
-    expect(promptTarget).not.toHaveClass("canvas-flow-handle--highlight");
+    expect(promptTarget).toHaveClass("canvas-flow-handle--highlight");
+    expect(rfWrapperOf(videoAsset).querySelector(".react-flow__handle.target")).not.toHaveClass(
+      "canvas-flow-handle--highlight",
+    );
 
     // 结束拖线：mouseup 后高亮消失。
     fireCanvasMouse(document, "mouseup", clientFromFlow(from.x + 10, from.y + 10));
@@ -979,7 +983,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(connections).toHaveTextContent("站台参考图已连接 · 图片");
     expect(connections).toHaveTextContent("列车进站参考已连接 · 视频");
     expect(connections).toHaveTextContent("旁白参考音频已连接 · 音频");
-    expect(references).toHaveTextContent("全部参考资料 3 / 8 项");
+    expect(references).toHaveTextContent("全部参考资料 3 项");
     expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(3);
 
     connectViaHandles(image, workflow);
@@ -993,7 +997,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(connections).not.toHaveTextContent("列车进站参考");
     expect(connections).toHaveTextContent("站台参考图");
     expect(connections).toHaveTextContent("旁白参考音频");
-    expect(references).toHaveTextContent("全部参考资料 2 / 8 项");
+    expect(references).toHaveTextContent("全部参考资料 2 项");
     expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(2);
     expect(
       document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
@@ -1179,6 +1183,222 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(within(extractor).getByText("抽帧完成 · 2 张图片已落在右侧")).toBeInTheDocument(),
     );
     expect(within(extractor).getAllByText(/@\d+(\.\d+)?\.jpg/).length).toBeGreaterThanOrEqual(1);
+  });
+
+  it("视频抽帧读取经中间节点传来的全部视频并逐个提交", async () => {
+    const sources: string[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "start_video_frame_extraction") {
+        const input = args?.["command"] as { videoPath: string; timestamps: number[] };
+        sources.push(input.videoPath);
+        expect(input.timestamps).toEqual([2]);
+        return Promise.resolve({
+          jobId: `batch-frame-${sources.length}`,
+          videoPath: input.videoPath,
+          status: "processing",
+          progress: 0,
+          frames: [],
+          error: null,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+      }
+      if (command === "get_video_frame_extraction_job") {
+        const jobId = args?.["jobId"] as string;
+        return Promise.resolve({
+          jobId,
+          videoPath: "C:/source.mp4",
+          status: "completed",
+          progress: 100,
+          frames: [
+            { path: `C:/frames/${jobId}.jpg`, timestampSeconds: 2, width: 100, height: 100 },
+          ],
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+    const first = await addAssetNode("视频", "列车进站参考", 180, 180);
+    const second = await addAssetNode("视频", "衣摆运动参考", 180, 640);
+    const relay = await addPromptNode(650, 180);
+    const extractor = await addFrameExtractorNode(1180, 300);
+    connectViaHandles(first, relay);
+    connectViaHandles(relay, extractor);
+    connectViaHandles(second, extractor);
+    const inputs = within(extractor).getByRole("list", { name: "视频抽帧输入" });
+    expect(within(inputs).getAllByRole("listitem")).toHaveLength(2);
+    fireEvent.change(within(extractor).getByLabelText("抽帧秒数，多个秒数用逗号分隔"), {
+      target: { value: "2" },
+    });
+    fireEvent.click(within(extractor).getByRole("button", { name: "开始视频抽帧" }));
+    await waitFor(
+      () =>
+        expect(sources).toEqual([
+          "https://cdn.example.com/train.mp4",
+          "https://cdn.example.com/hem.mp4",
+        ]),
+      { timeout: 4000 },
+    );
+    await waitFor(
+      () => expect(document.querySelectorAll(".canvas-asset-node--output")).toHaveLength(2),
+      { timeout: 4000 },
+    );
+    expect(within(extractor).getByText("抽帧完成 · 2 张图片已落在右侧")).toBeInTheDocument();
+  });
+
+  it("下载节点从上游文本读取所有链接并按序下载", async () => {
+    const urls: string[] = [];
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "start_video_download") {
+        urls.push((args?.["command"] as { url: string }).url);
+        return Promise.resolve({
+          jobId: `batch-download-${urls.length}`,
+          url: urls.at(-1),
+          status: "downloading",
+          progress: 0,
+          finalPath: null,
+          fileName: null,
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
+          error: null,
+          createdAt: 1,
+          updatedAt: 1,
+        });
+      }
+      if (command === "get_video_download_job") {
+        const jobId = args?.["jobId"] as string;
+        return Promise.resolve({
+          jobId,
+          url: "https://example.com/video",
+          status: "completed",
+          progress: 100,
+          finalPath: `C:/downloads/${jobId}.mp4`,
+          fileName: `${jobId}.mp4`,
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
+          error: null,
+          createdAt: 1,
+          updatedAt: 2,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+    const prompt = await addPromptNode(240, 180);
+    fireEvent.change(within(prompt).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "参考视频 https://example.com/one.mp4\n第二段 https://example.com/two.mp4" },
+    });
+    const downloader = await addVideoDownloaderNode(1050, 200);
+    connectViaHandles(prompt, downloader);
+    expect(within(downloader).getByRole("textbox", { name: "视频链接" })).toHaveValue("");
+    expect(within(downloader).getByLabelText("下载输入数量")).toHaveTextContent("2 个链接");
+    fireEvent.click(within(downloader).getByRole("button", { name: "开始下载视频" }));
+    await waitFor(
+      () => expect(urls).toEqual(["https://example.com/one.mp4", "https://example.com/two.mp4"]),
+      { timeout: 4000 },
+    );
+    await waitFor(
+      () => expect(document.querySelectorAll(".canvas-asset-node--output")).toHaveLength(2),
+      { timeout: 4000 },
+    );
+  });
+
+  it("下载提交尚未返回时卸载画布，会取消迟到任务并停止后续链接", async () => {
+    let resolveStart!: (value: unknown) => void;
+    invokeMock.mockImplementation((command) =>
+      command === "start_video_download"
+        ? new Promise((resolve) => {
+            resolveStart = resolve;
+          })
+        : baseInvokeImplementation(command),
+    );
+    const { unmount } = render(<App />);
+    const downloader = await addVideoDownloaderNode(800, 200);
+    fireEvent.change(within(downloader).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: "https://example.com/one.mp4 https://example.com/two.mp4" },
+    });
+    fireEvent.click(within(downloader).getByRole("button", { name: "开始下载视频" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("start_video_download", expect.anything()),
+    );
+    unmount();
+    await act(async () => {
+      resolveStart({
+        jobId: "late-download",
+        url: "https://example.com/one.mp4",
+        status: "downloading",
+        progress: 0,
+        finalPath: null,
+        fileName: null,
+        qualityMode: null,
+        qualityHint: null,
+        watermarkRemoved: false,
+        error: null,
+        createdAt: 1,
+        updatedAt: 1,
+      });
+      await Promise.resolve();
+    });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("cancel_video_download", { jobId: "late-download" }),
+    );
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "start_video_download"),
+    ).toHaveLength(1);
+  });
+
+  it("复刻节点分别分析所有视频并汇总文档", async () => {
+    const sample = vi.spyOn(videoFrameSampler, "buildVideoContactSheets").mockResolvedValue({
+      duration: 5,
+      width: 100,
+      height: 100,
+      overviewFrameCount: 2,
+      tailFrameCount: 2,
+      sheets: [
+        {
+          dataUrl: "data:image/jpeg;base64,dGVzdA==",
+          displayName: "联系表",
+          phase: "overview",
+          firstTime: 0,
+          lastTime: 4,
+          frameCount: 2,
+        },
+      ],
+    });
+    invokeMock.mockImplementation((command, args) =>
+      command === "run_prompt_node"
+        ? Promise.resolve({
+            optimizedPrompt: `分析完成：${(args?.["command"] as { userPrompt: string }).userPrompt.split("\n")[0]}`,
+            rawModelOutput: "",
+          })
+        : baseInvokeImplementation(command),
+    );
+    render(<App />);
+    const first = await addAssetNode("视频", "列车进站参考", 180, 180);
+    const second = await addAssetNode("视频", "衣摆运动参考", 180, 640);
+    const remix = await addViralRemixNode(1080, 180);
+    connectViaHandles(first, remix);
+    connectViaHandles(second, remix);
+    await waitFor(() =>
+      expect(within(remix).getByRole("button", { name: "开始复刻" })).toBeEnabled(),
+    );
+    fireEvent.click(within(remix).getByRole("button", { name: "开始复刻" }));
+    await waitFor(() => expect(sample).toHaveBeenCalledTimes(2));
+    expect(sample).toHaveBeenNthCalledWith(1, "https://cdn.example.com/train.mp4");
+    expect(sample).toHaveBeenNthCalledWith(2, "https://cdn.example.com/hem.mp4");
+    await waitFor(() =>
+      expect(within(remix).getByLabelText("当前复刻方案预览")).toHaveTextContent(
+        "分析完成：输入视频 2/2：衣摆运动参考",
+      ),
+    );
+    expect(within(remix).getByLabelText("当前复刻方案预览")).toHaveTextContent(
+      "分析完成：输入视频 1/2：列车进站参考",
+    );
   });
 
   it("B 站链接展示画质路由提醒：未登录提示 480P，其他站点不提示", async () => {
@@ -1663,7 +1883,20 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(submittedGenerationCommands().at(-1)?.["prompt"]).toEqual([
       { kind: "text", text: optimizedPrompt },
     ]);
-    expect(submittedGenerationCommands().at(-1)?.["explicitMedia"]).toEqual([]);
+    const pathReference = {
+      target: {
+        kind: "asset",
+        providerConnectionId: PROVIDER.id,
+        assetId: "asset-image-1",
+        canvasNodeKey: imageAsset.dataset["connectionTarget"],
+        mediaType: "image",
+      },
+      role: "",
+      displayNameSnapshot: "站台参考图",
+      typePosition: 1,
+      contentIndex: 1,
+    };
+    expect(submittedGenerationCommands().at(-1)?.["explicitMedia"]).toEqual([pathReference]);
 
     const cleanReference = await addAssetNode("图片", cleanImage.name, 20, 700);
     connectAssetToGeneration(cleanReference, videoNode);
@@ -1671,13 +1904,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       name: "生成参考素材，按传入顺序排列",
     });
     expect(videoReferences).toHaveTextContent(cleanImage.name);
-    expect(videoReferences).not.toHaveTextContent("站台参考图");
+    expect(videoReferences).toHaveTextContent("站台参考图");
+    expect(within(videoReferences).getAllByRole("listitem")).toHaveLength(2);
     await waitFor(() =>
       expect(within(videoNode).getByRole("button", { name: "开始视频生成" })).toBeEnabled(),
     );
     fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
     expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual([
+      pathReference,
       {
         target: {
           kind: "asset",
@@ -1688,8 +1923,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
         role: "",
         displayNameSnapshot: cleanImage.name,
-        typePosition: 1,
-        contentIndex: 1,
+        typePosition: 2,
+        contentIndex: 2,
       },
     ]);
 
@@ -1878,7 +2113,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(submittedGenerationCommands()).toHaveLength(0);
     const videoNode = await addGenerationNode("视频", 920, 180);
     connectPromptToGeneration(promptNode, videoNode);
-    await waitFor(() => expect(within(videoNode).getByText("随提示词")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).toHaveTextContent("站台参考图"),
+    );
     fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
     await waitFor(() =>
       expect(invokeMock).toHaveBeenCalledWith("start_generation", expect.anything()),
@@ -2014,14 +2253,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       target: { value: "参考这张图，写一份雨夜站台的提示词" },
     });
 
-    // 视觉理解仅支持图片：视频素材连入提示词节点应被视为无效连线。
+    // 图片和视频同时连接，分别保留图片视觉输入和视频引用身份。
     const videoAsset = await addAssetNode("视频", "列车进站参考", 20, 700);
     connectAssetToGeneration(videoAsset, promptNode);
-    expect(document.querySelectorAll(".edge--asset")).toHaveLength(0);
+    expect(document.querySelectorAll(".edge--asset")).toHaveLength(1);
 
     const imageAsset = await addAssetNode("图片", "站台参考图", 20, 700);
     connectAssetToGeneration(imageAsset, promptNode);
-    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
+    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(2));
     expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
       "站台参考图",
     );
@@ -2035,6 +2274,19 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     )?.[1] as { command: Record<string, unknown> };
     const visionImages = promptCommand.command["visionImages"] as Array<Record<string, unknown>>;
     expect(visionImages).toHaveLength(1);
+    const videoReferences = [
+      {
+        displayName: "列车进站参考",
+        target: {
+          kind: "asset",
+          providerConnectionId: PROVIDER.id,
+          assetId: "asset-video-1",
+          canvasNodeKey: videoAsset.dataset["connectionTarget"],
+          mediaType: "video",
+        },
+      },
+    ];
+    expect(promptCommand.command["referenceInputs"]).toEqual(videoReferences);
     const visionTarget = visionImages[0]!["target"] as Record<string, unknown>;
     expect(visionTarget).toMatchObject({
       kind: "asset",
@@ -2052,7 +2304,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     // 解除素材连线后再次执行，视觉素材列表随之清空。
     fireEvent.click(within(promptNode).getByRole("button", { name: "解除连线：站台参考图" }));
-    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(0));
+    await waitFor(() => expect(document.querySelectorAll(".edge--asset")).toHaveLength(1));
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
     await waitFor(() =>
       expect(
@@ -2063,6 +2315,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       ([command]) => command === "run_prompt_node",
     )[1]?.[1] as { command: Record<string, unknown> };
     expect(secondCommand.command["visionImages"]).toEqual([]);
+    expect(secondCommand.command["referenceInputs"]).toEqual(videoReferences);
   });
 
   it("已保存的图片产物可连入提示词节点并作为视觉理解输入传出", async () => {
@@ -2229,12 +2482,16 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(promptCommand.command["userPrompt"]).toMatch(/\S/);
       // 视频产物走多模态素材通道，不进入视觉理解图片列表。
       expect(promptCommand.command["visionImages"]).toEqual([]);
-      expect(promptCommand.command["multimodalInputs"]).toEqual([
+      expect(promptCommand.command["referenceInputs"]).toEqual([
         {
-          localPath: "C:\\generated\\prompt-motion.mp4",
+          target: {
+            kind: "local_result",
+            generationTaskId: "output-prompt-video-task",
+            resultIndex: 2,
+            canvasNodeKey: "output-prompt-video",
+            mediaType: "video",
+          },
           displayName: "prompt-motion.mp4",
-          kind: "video",
-          mimeType: "video/mp4",
         },
       ]);
     },
@@ -2266,12 +2523,18 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const videoNode = await addGenerationNode("视频", 920, 520);
     connectPromptToGeneration(promptNode, videoNode);
 
-    await waitFor(() => expect(within(videoNode).getByText("随提示词")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).toHaveTextContent("站台参考图"),
+    );
     expect(within(videoNode).getByText("参考素材生成")).toBeInTheDocument();
-    expect(within(videoNode).getByText("已使用直连或随提示词继承的素材")).toBeInTheDocument();
     expect(
-      within(videoNode).queryByRole("button", { name: "解除连线：站台参考图" }),
-    ).not.toBeInTheDocument();
+      within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+    ).toHaveTextContent("站台参考图");
+    expect(
+      within(videoNode).getByRole("button", { name: "解除连线：站台参考图" }),
+    ).toBeInTheDocument();
 
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
     await waitFor(() =>
@@ -2302,9 +2565,20 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         contentIndex: 1,
       },
     ]);
+    fireEvent.click(within(videoNode).getByRole("button", { name: "解除连线：站台参考图" }));
+    await waitFor(() =>
+      expect(
+        within(videoNode).queryByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(within(promptNode).getByRole("list", { name: "已连入的参考素材" })).toHaveTextContent(
+      "站台参考图",
+    );
+    expect(referenceImage).toBeInTheDocument();
+    expect(document.querySelector(".edge--prompt-generation")).toBeNull();
   });
 
-  it("已有连线切换 FPV 路径模式时实时移除并恢复视频自动继承参考图", async () => {
+  it("已有连线切换 FPV 路径模式时持续传递相同参考图身份和参数", async () => {
     render(<App />);
     const promptNode = await addPromptNode(260, 180);
     await waitFor(() =>
@@ -2336,7 +2610,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ];
 
     expect(modeSelect).toHaveValue("seedance_2_5");
-    await waitFor(() => expect(within(videoNode).getByText("随提示词")).toBeInTheDocument());
+    await waitFor(() =>
+      expect(
+        within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).toHaveTextContent("站台参考图"),
+    );
     fireEvent.click(generate);
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
     expect(submittedGenerationCommands()[0]?.["explicitMedia"]).toEqual(inheritedMedia);
@@ -2344,13 +2622,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.change(modeSelect, { target: { value: "fpv_path" } });
     await waitFor(() =>
       expect(
-        within(videoNode).queryByRole("list", { name: "生成参考素材，按传入顺序排列" }),
-      ).not.toBeInTheDocument(),
+        within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+      ).toHaveTextContent("站台参考图"),
     );
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
-    expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual([]);
+    expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual(inheritedMedia);
 
     fireEvent.change(modeSelect, { target: { value: "seedance_2_5" } });
     await waitFor(() =>
@@ -2358,7 +2636,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
       ).toHaveTextContent("站台参考图"),
     );
-    expect(within(videoNode).getByText("随提示词")).toBeInTheDocument();
+    expect(
+      within(videoNode).getByRole("list", { name: "生成参考素材，按传入顺序排列" }),
+    ).toHaveTextContent("站台参考图");
     await waitFor(() => expect(generate).toBeEnabled());
     fireEvent.click(generate);
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(3));
@@ -4816,10 +5096,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 });
 
 describe("剧本创作与优化节点（桌面运行时）", () => {
-  it("可添加、移除多模态素材，并在无额外文字时随创作请求发送", async () => {
-    dialogOpenMock.mockResolvedValue(["C:\\project\\reference.png", "C:\\project\\interview.md"]);
+  it("可添加、移除超过原大小限制的多模态素材，并保留空文件检查与请求传递", async () => {
+    dialogOpenMock.mockResolvedValue([
+      "C:\\project\\reference.png",
+      "C:\\project\\interview.md",
+      "C:\\project\\empty.md",
+    ]);
     fileStatMock.mockImplementation((path: string) =>
-      Promise.resolve({ isFile: true, size: path.endsWith(".png") ? 2048 : 4096 }),
+      Promise.resolve({ isFile: true, size: path.endsWith("empty.md") ? 0 : 100 * 1024 * 1024 }),
     );
     invokeMock.mockImplementation((command) => {
       if (command === "run_prompt_node") {
@@ -4840,6 +5124,7 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     await waitFor(() => expect(within(node).getByText("reference.png")).toBeInTheDocument());
     expect(within(node).getByText("interview.md")).toBeInTheDocument();
     expect(within(node).getByText("已添加 2 项")).toBeInTheDocument();
+    expect(within(node).queryByText("empty.md")).not.toBeInTheDocument();
 
     const sendButton = within(node).getByRole("button", { name: "发送" });
     expect(sendButton).toBeEnabled();
@@ -5220,5 +5505,84 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
     expect(
       invokeMock.mock.calls.filter(([command]) => command === "list_assets").length,
     ).toBeGreaterThan(0);
+  });
+});
+
+describe("任意节点多来源参数传递", () => {
+  it("两个剧本经素材中转同时进入分镜，媒体和最新文本完整提交，断开后不再使用", async () => {
+    invokeMock.mockImplementation((command) =>
+      command === "run_prompt_node"
+        ? Promise.resolve({ optimizedPrompt: "# 分镜交付\n完成", rawModelOutput: "ok" })
+        : baseInvokeImplementation(command),
+    );
+    render(<App />);
+    const first = await addScreenplayNode(350, 250);
+    const second = await addScreenplayNode(900, 250);
+    fireEvent.change(getDocumentEditor(first, "当前剧本"), {
+      target: { value: "# 甲剧本\n甲的正文" },
+    });
+    fireEvent.change(getDocumentEditor(second, "当前剧本"), {
+      target: { value: "# 乙剧本\n乙的正文" },
+    });
+    const relay = await addAssetNode("图片", "站台参考图", 150, 400);
+    const target = await addStoryboardNode(980, 360);
+    connectViaHandles(first, relay);
+    connectViaHandles(second, relay);
+    connectViaHandles(relay, target);
+    await waitFor(() => expect(within(target).getByText("甲剧本")).toBeInTheDocument());
+    expect(within(target).getByText("乙剧本")).toBeInTheDocument();
+    expect(within(target).getByText("站台参考图")).toBeInTheDocument();
+    fireEvent.change(getDocumentEditor(first, "当前剧本"), {
+      target: { value: "# 甲剧本\n甲的最新正文" },
+    });
+    fireEvent.click(within(target).getByRole("button", { name: "发送" }));
+    await waitFor(() =>
+      expect(getDocumentEditor(target, "当前工业级分镜脚本").value).toContain("分镜交付"),
+    );
+    const sent = invokeMock.mock.calls
+      .filter(([command]) => command === "run_prompt_node")
+      .at(-1)?.[1] as {
+      command: {
+        contextHistory: { content: string }[];
+        referenceInputs: { target: { canvasNodeKey: string } }[];
+      };
+    };
+    expect(sent.command.contextHistory.map((entry) => entry.content)).toEqual(
+      expect.arrayContaining(["# 甲剧本\n甲的最新正文", "# 乙剧本\n乙的正文"]),
+    );
+    expect(sent.command.referenceInputs).toHaveLength(1);
+    expect(sent.command.referenceInputs[0]?.target.canvasNodeKey).toBe(
+      rfWrapperOf(relay).dataset["id"],
+    );
+    fireEvent.click(within(target).getByRole("button", { name: "解除素材连线：站台参考图" }));
+    await waitFor(() => expect(within(target).queryByText("甲剧本")).not.toBeInTheDocument());
+    expect(document.body).toContainElement(relay);
+  });
+
+  it("分镜与剧本同时向图片节点传入文本，断开其中一个保留另一份", async () => {
+    render(<App />);
+    const screenplay = await addScreenplayNode(350, 250);
+    const storyboard = await addStoryboardNode(1000, 250);
+    const target = await addGenerationNode("图片", 980, 360);
+    fireEvent.change(getDocumentEditor(screenplay, "当前剧本"), {
+      target: { value: "场景：清晨站台" },
+    });
+    fireEvent.change(getDocumentEditor(storyboard, "当前工业级分镜脚本"), {
+      target: { value: "镜头：低角度远景" },
+    });
+    connectViaHandles(screenplay, target);
+    connectViaHandles(storyboard, target);
+    const editor = within(target).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" });
+    await waitFor(() => expect(editor).toHaveTextContent("场景：清晨站台"));
+    expect(editor).toHaveTextContent("镜头：低角度远景");
+    fireEvent.click(within(target).getByRole("button", { name: "开始图片生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(JSON.stringify(submittedGenerationCommands()[0])).toContain("场景：清晨站台");
+    expect(JSON.stringify(submittedGenerationCommands()[0])).toContain("镜头：低角度远景");
+    const edge = screen.getByRole("button", { name: /选择连线：场景：清晨站台.*图片生成节点/ });
+    fireEvent.click(edge);
+    fireEvent.keyDown(document.activeElement!, { key: "Delete" });
+    await waitFor(() => expect(editor).not.toHaveTextContent("场景：清晨站台"));
+    expect(editor).toHaveTextContent("镜头：低角度远景");
   });
 });

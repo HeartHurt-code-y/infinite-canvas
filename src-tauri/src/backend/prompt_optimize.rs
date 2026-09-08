@@ -2181,8 +2181,6 @@ fn validate_prompt_response_completeness(
 
 /// 视觉模型支持的图片格式（与 moyu 平台视觉接口约定一致）。
 const VISION_IMAGE_MIME_TYPES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
-const MAX_INLINE_VISION_IMAGE_BYTES: usize = 4 * 1024 * 1024;
-const MAX_VISION_IMAGES: usize = 16;
 
 /// 校验素材确实是视觉接口支持的图片格式，并编码为 Base64 载荷。
 fn vision_image_payload(display_name: &str, bytes: Vec<u8>) -> BackendResult<VisionImagePayload> {
@@ -2238,12 +2236,6 @@ fn inline_vision_image_payload(
             json!({ "displayName": display_name, "error": error.to_string() }),
         )
     })?;
-    if bytes.len() > MAX_INLINE_VISION_IMAGE_BYTES {
-        return Err(BackendError::validation(
-            "inline vision image exceeds the 4 MiB limit",
-            json!({ "displayName": display_name, "byteSize": bytes.len() }),
-        ));
-    }
     let payload = vision_image_payload(display_name, bytes)?;
     if payload.mime_type != declared_mime {
         return Err(BackendError::validation(
@@ -2265,7 +2257,15 @@ async fn download_reference_bytes(
     display_name: &str,
     byte_limit: Option<u64>,
 ) -> BackendResult<Vec<u8>> {
-    let mut response = providers.client().get(url).send().await?;
+    let response = providers.client().get(url).send().await?;
+    read_reference_response(response, display_name, byte_limit).await
+}
+
+async fn read_reference_response(
+    mut response: reqwest::Response,
+    display_name: &str,
+    byte_limit: Option<u64>,
+) -> BackendResult<Vec<u8>> {
     let status = response.status().as_u16();
     if !(200..300).contains(&status) {
         let raw = String::from_utf8_lossy(&response.bytes().await?).into_owned();
@@ -2282,7 +2282,7 @@ async fn download_reference_bytes(
     while let Some(chunk) = response.chunk().await? {
         if byte_limit.is_some_and(|limit| (bytes.len() + chunk.len()) as u64 > limit) {
             return Err(BackendError::validation(
-                "reference material download exceeds the 14 MiB limit",
+                "reference material download exceeds the configured byte limit",
                 json!({ "displayName": display_name, "maximum": byte_limit }),
             ));
         }
@@ -2326,12 +2326,6 @@ async fn resolve_vision_images(
     attempt_id: &str,
     images: &[PromptVisionImage],
 ) -> BackendResult<Vec<VisionImagePayload>> {
-    if images.len() > MAX_VISION_IMAGES {
-        return Err(BackendError::validation(
-            "vision understanding accepts at most 16 images per request",
-            json!({ "imageCount": images.len(), "maximum": MAX_VISION_IMAGES }),
-        ));
-    }
     let task = deps.storage.get_task_execution(task_id)?;
     let mut payloads = Vec::with_capacity(images.len());
     for image in images {
@@ -2339,12 +2333,6 @@ async fn resolve_vision_images(
     }
     Ok(payloads)
 }
-
-const MAX_MULTIMODAL_INPUTS: usize = 8;
-// Gemini 的内联媒体请求上限为 20 MB；Base64 约膨胀 1/3，原始文件合计限制
-// 在 14 MiB，为完整技能提示词与 JSON 包装保留余量。
-const MAX_MULTIMODAL_FILE_BYTES: u64 = 14 * 1024 * 1024;
-const MAX_MULTIMODAL_TOTAL_BYTES: u64 = 14 * 1024 * 1024;
 
 fn expected_multimodal_mime(kind: PromptMultimodalKind, extension: &str) -> Option<&'static str> {
     match (kind, extension) {
@@ -2386,13 +2374,6 @@ fn binary_signature_matches(expected: &str, detected: &str) -> bool {
 async fn resolve_multimodal_inputs(
     inputs: &[PromptMultimodalInput],
 ) -> BackendResult<Vec<MultimodalPayload>> {
-    if inputs.len() > MAX_MULTIMODAL_INPUTS {
-        return Err(BackendError::validation(
-            "a screenplay request accepts at most 8 multimodal materials",
-            json!({ "materialCount": inputs.len(), "maximum": MAX_MULTIMODAL_INPUTS }),
-        ));
-    }
-    let mut total_bytes = 0u64;
     let mut payloads = Vec::with_capacity(inputs.len());
     for input in inputs {
         let display_name = input.display_name.trim();
@@ -2438,21 +2419,19 @@ async fn resolve_multimodal_inputs(
                 }),
             )
         })?;
-        if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_MULTIMODAL_FILE_BYTES
-        {
+        if !metadata.is_file() || metadata.len() == 0 {
             return Err(BackendError::validation(
-                "multimodal material must be a non-empty file no larger than 14 MiB",
+                "multimodal material must be a non-empty regular file",
                 json!({ "displayName": display_name, "byteSize": metadata.len() }),
             ));
         }
-        total_bytes += metadata.len();
-        if total_bytes > MAX_MULTIMODAL_TOTAL_BYTES {
+        let bytes = tokio::fs::read(path).await?;
+        if bytes.is_empty() {
             return Err(BackendError::validation(
-                "multimodal materials exceed the 14 MiB total limit",
-                json!({ "displayName": display_name, "totalBytes": total_bytes }),
+                "multimodal material must be a non-empty regular file",
+                json!({ "displayName": display_name }),
             ));
         }
-        let bytes = tokio::fs::read(path).await?;
         if matches!(
             expected_mime,
             "text/plain" | "text/markdown" | "application/json"
@@ -2509,9 +2488,6 @@ async fn execute_recorded_text_call(
     remote_model_id: &str,
 ) -> BackendResult<(OptimizedPromptResult, CapturedHttpResponse)> {
     let skill_system_prompt = load_skill_system_prompt(command.mode)?;
-    reference_inputs::validate_material_count(
-        command.multimodal_inputs.len() + command.reference_inputs.len(),
-    )?;
     let vision_images =
         resolve_vision_images(deps, task_id, attempt_id, &command.vision_images).await?;
     let mut multimodal_inputs = resolve_multimodal_inputs(&command.multimodal_inputs).await?;
@@ -3146,6 +3122,86 @@ mod tests {
         assert!(error.to_string().contains("file signature"));
     }
 
+    #[tokio::test]
+    async fn local_multimodal_materials_allow_large_files_and_totals_but_keep_utf8_validation() {
+        let directory = tempfile::tempdir().unwrap();
+        for (bytes_per_file, count) in [(14 * 1024 * 1024 + 1, 1), (8 * 1024 * 1024, 2)] {
+            let text = "A".repeat(bytes_per_file);
+            let mut inputs = Vec::new();
+            for index in 0..count {
+                let path = directory.path().join(format!("large-{index}.txt"));
+                tokio::fs::write(&path, &text).await.unwrap();
+                inputs.push(PromptMultimodalInput {
+                    local_path: path.to_string_lossy().into_owned(),
+                    display_name: format!("large {index}"),
+                    kind: PromptMultimodalKind::Document,
+                    mime_type: "text/plain".to_string(),
+                });
+            }
+            let payloads = resolve_multimodal_inputs(&inputs).await.unwrap();
+            assert_eq!(payloads.len(), count);
+            for payload in payloads {
+                assert_eq!(payload.text.as_deref(), Some(text.as_str()));
+            }
+        }
+        let path = directory.path().join("invalid-utf8.txt");
+        tokio::fs::write(&path, [0xff, 0xfe, 0x80]).await.unwrap();
+        let input = PromptMultimodalInput {
+            local_path: path.to_string_lossy().into_owned(),
+            display_name: "invalid UTF-8".to_string(),
+            kind: PromptMultimodalKind::Document,
+            mime_type: "text/plain".to_string(),
+        };
+        assert!(
+            resolve_multimodal_inputs(std::slice::from_ref(&input))
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("UTF-8")
+        );
+        tokio::fs::write(&path, []).await.unwrap();
+        assert!(
+            resolve_multimodal_inputs(&[input])
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("non-empty")
+        );
+    }
+
+    #[tokio::test]
+    async fn remote_reference_downloads_keep_bytes_above_the_previous_material_limit() {
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let byte_count = 14 * 1024 * 1024 + 1;
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 2048];
+            let received = stream.read(&mut request).unwrap();
+            assert!(received > 0);
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {byte_count}\r\nConnection: close\r\n\r\n"
+            )
+            .unwrap();
+            stream.write_all(&vec![42; byte_count]).unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/reference.mp4"))
+            .send()
+            .await
+            .unwrap();
+        let bytes = read_reference_response(response, "large remote reference", None)
+            .await
+            .unwrap();
+        assert_eq!(bytes, vec![42; byte_count]);
+        server.join().unwrap();
+    }
+
     #[test]
     fn vision_payload_rejects_non_image_media() {
         let png = b"\x89PNG\r\n\x1a\n rest-of-png-bytes".to_vec();
@@ -3155,6 +3211,32 @@ mod tests {
 
         let error = vision_image_payload("不是图片", b"plain text bytes".to_vec()).unwrap_err();
         assert!(error.to_string().contains("could not be identified"));
+    }
+
+    #[tokio::test]
+    async fn reads_all_multimodal_materials_beyond_the_previous_count_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut inputs = Vec::new();
+        for index in 0..24 {
+            let path = directory.path().join(format!("source-{index}.txt"));
+            tokio::fs::write(&path, format!("reference body {index}"))
+                .await
+                .unwrap();
+            inputs.push(PromptMultimodalInput {
+                local_path: path.to_string_lossy().into_owned(),
+                display_name: format!("source {index}"),
+                kind: PromptMultimodalKind::Document,
+                mime_type: "text/plain".to_string(),
+            });
+        }
+        let payloads = resolve_multimodal_inputs(&inputs).await.unwrap();
+        assert_eq!(payloads.len(), 24);
+        for (index, payload) in payloads.iter().enumerate() {
+            assert_eq!(
+                payload.text.as_deref(),
+                Some(format!("reference body {index}").as_str())
+            );
+        }
     }
 
     #[test]
@@ -5445,6 +5527,24 @@ mod tests {
 
         let mismatch = data_url.replacen("image/png", "image/jpeg", 1);
         assert!(inline_vision_image_payload("伪装联系表", &mismatch).is_err());
+    }
+
+    #[test]
+    fn inline_images_above_the_previous_size_limit_keep_signature_and_encoding_checks() {
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(4 * 1024 * 1024 + 1, 42);
+        let data_url = format!("data:image/png;base64,{}", BASE64_STANDARD.encode(&bytes));
+        let payload = inline_vision_image_payload("large image", &data_url).unwrap();
+        assert_eq!(BASE64_STANDARD.decode(payload.base64).unwrap(), bytes);
+        assert!(
+            inline_vision_image_payload(
+                "mismatched",
+                &data_url.replacen("image/png", "image/jpeg", 1)
+            )
+            .is_err()
+        );
+        assert!(inline_vision_image_payload("invalid", "data:image/png;base64,!!!!").is_err());
+        assert!(inline_vision_image_payload("empty", "data:image/png;base64,").is_err());
     }
 
     #[test]

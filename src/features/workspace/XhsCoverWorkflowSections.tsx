@@ -6,11 +6,7 @@ import { MarkdownView } from "../../components/MarkdownView";
 import { formatRawBackendError, isDesktopRuntime, toMediaSrc } from "../../lib/backend";
 import { copyTextToDesktopClipboard } from "./desktopActions";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
-import {
-  XHS_COVER_STYLES,
-  XHS_COVER_MAX_REFERENCE_BYTES,
-  type XhsCoverWorkflowOptions,
-} from "./xhsCoverWorkflowModel";
+import { XHS_COVER_STYLES, type XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
 
 type ImageRole = "portrait" | "material";
 
@@ -140,12 +136,9 @@ export function XhsCoverConfiguration({
         );
       })}
       <small>
-        图片合计最多 8 张、8 MB。当前 {images.length} 张 · {(totalBytes / 1024 / 1024).toFixed(2)}{" "}
-        MB。
+        图片合计最多 8 张。当前 {images.length} 张 · {(totalBytes / 1024 / 1024).toFixed(2)} MB。
       </small>
-      {totalBytes > XHS_COVER_MAX_REFERENCE_BYTES || images.length > 8 ? (
-        <p role="alert">图片超过数量或大小限制，请移除部分图片后继续。</p>
-      ) : null}
+      {images.length > 8 ? <p role="alert">图片超过数量限制，请移除部分图片后继续。</p> : null}
       {imageError ? <p role="alert">{imageError}</p> : null}
       <details className="canvas-knowledge-workflow__models canvas-xhs-cover__preferences">
         <summary>

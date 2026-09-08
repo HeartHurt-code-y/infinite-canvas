@@ -1369,6 +1369,14 @@ svg[data-spin="true"] {
   width: max-content;
 }
 
+.canvas-flow-input-summary {
+  padding: 6px 12px;
+  color: var(--color-muted);
+  font-size: 12px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
 .canvas-react-flow
   .canvas-flow-node
   > :is(

@@ -287,13 +287,11 @@ async function planCommerce(
   )
     throw new Error("画幅必须为有效的 W:H 比例。");
   if (
-    options.materials.length > 8 ||
     options.materials.some(
       (item) => !["image", "document"].includes(item.kind) || item.byteSize <= 0,
-    ) ||
-    options.materials.reduce((sum, item) => sum + item.byteSize, 0) > 14 * 1024 * 1024
+    )
   )
-    throw new Error("产品资料仅支持图片与文档，最多 8 项，合计 14 MB。");
+    throw new Error("产品资料仅支持非空的图片与文档。");
   const urls = sourceUrls(options.productUrl);
   const stages: readonly CommerceStage[] = options.mode === "quick" ? ["quick"] : COMMERCE_STAGES;
   const get = () => context.checkpoint().commerce ?? createCommerceCheckpoint();

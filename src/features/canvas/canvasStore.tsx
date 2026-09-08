@@ -377,7 +377,8 @@ function sameConnectionData(
       first.origin === second.origin &&
       first.finalPath === second.finalPath &&
       first.previewSrc === second.previewSrc &&
-      first.name === second.name
+      first.name === second.name &&
+      first.textContent === second.textContent
     );
   }
   if (type === "gen") {
@@ -385,7 +386,7 @@ function sameConnectionData(
     const second = next as GenNodeData;
     return first.kind === second.kind && first.config === second.config;
   }
-  if (type === "screenplay") {
+  if (type === "screenplay" || type === "storyboard" || type === "viralRemix") {
     const first = previous as ScreenplayNodeData;
     const second = next as ScreenplayNodeData;
     return first.config.currentDocument === second.config.currentDocument;
@@ -395,7 +396,13 @@ function sameConnectionData(
     const second = next as VideoComposerNodeData;
     return first.config.inputOrder === second.config.inputOrder;
   }
-  // 其余节点在连线派生中仅用于 key 存在性判断。
+  if (type === "knowledgeVideoWorkflow") {
+    return (
+      (previous as KnowledgeVideoWorkflowNodeData).config ===
+      (next as KnowledgeVideoWorkflowNodeData).config
+    );
+  }
+  // 其余节点的自有连线载荷仅取自独立保存的产物。
   return true;
 }
 
@@ -478,10 +485,13 @@ function canvasNodeLists(nodesById: CanvasNodesById): CanvasNodeLists {
   return lists;
 }
 
-const nodesByKeyReadCache = new WeakMap<CanvasNodesById, CanvasNodesByKey>();
+const nodesByKeyReadCache = new WeakMap<CanvasConnectionProjectionCache, CanvasNodesByKey>();
 
 function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
-  const cached = nodesByKeyReadCache.get(nodesById);
+  // The wrapper is also semantic state: pointer movement must not invalidate graph resolvers
+  // that consume all families together while each family map remains unchanged.
+  const projection = connectionProjection(nodesById);
+  const cached = nodesByKeyReadCache.get(projection);
   if (cached != null) return cached;
   const byKey: CanvasNodesByKey = {
     asset: connectionTypeNodesByKey(nodesById, "asset"),
@@ -496,7 +506,7 @@ function canvasNodesByKey(nodesById: CanvasNodesById): CanvasNodesByKey {
     result: connectionTypeNodesByKey(nodesById, "result"),
     output: connectionTypeNodesByKey(nodesById, "output"),
   };
-  nodesByKeyReadCache.set(nodesById, byKey);
+  nodesByKeyReadCache.set(projection, byKey);
   return byKey;
 }
 
@@ -896,70 +906,9 @@ function normalizeCanvasDocument(
   return { ok: true, document: { nodesById, edges, view, promptContents, warnings } };
 }
 
-function isOutputGenerationReference(node: OutputNodeData): boolean {
-  // 合成与下载产物不是 generation task 的结果，无法通过 local_result 校验，
-  // 但只要已落盘（finalPath 存在），即可作为 local_file 普通媒体文件连入生成节点。
-  if (node.origin === "composition" || node.origin === "download") {
-    return node.finalPath != null;
-  }
-  if (node.finalPath == null || node.resultKey == null) {
-    return false;
-  }
-  const prefix = node.taskId + "#";
-  if (!node.resultKey.startsWith(prefix)) return false;
-  const resultIndex = Number.parseInt(node.resultKey.slice(prefix.length), 10);
-  return Number.isInteger(resultIndex) && resultIndex >= 0;
-}
-
+/** 节点类型不限制连线；媒体能力由实际执行入口验证，未完成来源可以先连线。 */
 export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
-  if (source.type === "screenplay") {
-    return target.type === "storyboard";
-  }
-  if (source.type === "gen" && source.data.kind === "prompt") {
-    return target.type === "gen" && target.data.kind !== "prompt";
-  }
-  if (source.type === "asset") {
-    if (target.type === "knowledgeVideoWorkflow") return true;
-    if (target.type === "videoComposer") return source.data.kind === "video";
-    if (target.type === "frameExtractor") return source.data.kind === "video";
-    if (target.type === "viralRemix") {
-      return source.data.kind === "video" && source.data.videoUrl != null;
-    }
-    if (target.type === "asset") return true;
-    if (target.type === "gen") {
-      return target.data.kind !== "prompt" || source.data.kind === "image";
-    }
-    return false;
-  }
-  if (source.type === "output") {
-    const hasArtifact = source.data.finalPath != null || source.data.previewSrc != null;
-    if (target.type === "knowledgeVideoWorkflow") {
-      if (source.data.mediaType !== "image" && source.data.mediaType !== "video") return false;
-      if (source.data.origin === "frame_extract") {
-        return source.data.mediaType === "image" && source.data.finalPath != null;
-      }
-      return isOutputGenerationReference(source.data);
-    }
-    if (target.type === "videoComposer" || target.type === "viralRemix") {
-      return source.data.mediaType === "video" && hasArtifact;
-    }
-    if (target.type === "frameExtractor") {
-      return source.data.mediaType === "video" && hasArtifact;
-    }
-    // 抽帧产物（本地图片文件）：作为参考媒体连入生成节点 / 提示词理解。
-    if (source.data.origin === "frame_extract") {
-      return target.type === "gen" && source.data.mediaType === "image" && hasArtifact;
-    }
-    // 已保存的图片/视频生成产物：连入图片/视频生成节点作为参考媒体，
-    // 连入提示词生成与优化节点作为参考理解素材（多模态参考理解）。
-    return target.type === "gen" && isOutputGenerationReference(source.data);
-  }
-  // 下载/合成节点完成产物自动跟随最新产物到抽帧节点。
-  if (source.type === "videoDownloader" || source.type === "videoComposer") {
-    if (target.type === "viralRemix") return source.type === "videoDownloader";
-    if (target.type === "frameExtractor") return true;
-  }
-  return false;
+  return source.data.key !== target.data.key;
 }
 
 /** 历史栈上限：超出后丢弃最旧记录，防止长会话内存无界增长。 */
@@ -1182,37 +1131,9 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
                 result = { status: "unchanged", edgeId };
                 return state;
               }
-              const replacedEdgeIds: string[] = [];
-              let edges = state.assetEdges;
-              if (source.type === "gen" && source.data.kind === "prompt") {
-                edges = edges.filter((edge) => {
-                  const edgeSource = state.nodesById[edge.fromKey];
-                  const replaced =
-                    edge.toKey === toKey &&
-                    edgeSource?.type === "gen" &&
-                    edgeSource.data.kind === "prompt";
-                  if (replaced) replacedEdgeIds.push(edge.id);
-                  return !replaced;
-                });
-              }
-              if (source.type === "screenplay" && target.type === "storyboard") {
-                edges = edges.filter((edge) => {
-                  const edgeSource = state.nodesById[edge.fromKey];
-                  const replaced = edge.toKey === toKey && edgeSource?.type === "screenplay";
-                  if (replaced) replacedEdgeIds.push(edge.id);
-                  return !replaced;
-                });
-              }
-              if (target.type === "viralRemix") {
-                edges = edges.filter((edge) => {
-                  const replaced = edge.toKey === toKey;
-                  if (replaced) replacedEdgeIds.push(edge.id);
-                  return !replaced;
-                });
-              }
               const edge = { id: edgeId, fromKey, toKey };
-              result = { status: "connected", edge, replacedEdgeIds };
-              return { assetEdges: [...edges, edge] };
+              result = { status: "connected", edge, replacedEdgeIds: [] };
+              return { assetEdges: [...state.assetEdges, edge] };
             });
             return result;
           },

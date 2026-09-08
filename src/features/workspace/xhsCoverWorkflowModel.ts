@@ -1,9 +1,6 @@
 import type { PickedPromptMaterial } from "../../lib/backend";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 
-// Leave room for the normalized cover and Base64 expansion in visual review requests.
-export const XHS_COVER_MAX_REFERENCE_BYTES = 8 * 1024 * 1024;
-
 export const XHS_COVER_STYLES = {
   headline: "爆款大字压顶",
   split: "巨字拆分冲击",
@@ -106,7 +103,6 @@ export function xhsCoverInputReady(brief: string, options: XhsCoverWorkflowOptio
         Number.isFinite(image.byteSize) &&
         image.byteSize > 0,
     ) &&
-    images.reduce((sum, image) => sum + image.byteSize, 0) <= XHS_COVER_MAX_REFERENCE_BYTES &&
     new Set(images.map((image) => image.localPath.toLowerCase())).size === images.length,
   );
 }

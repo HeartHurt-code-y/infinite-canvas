@@ -13,7 +13,6 @@ import type {
 import { catalog, completedTask, fakeDependencies, node } from "../../test/videoWorkflowFixtures";
 import {
   createXhsCoverOptions,
-  XHS_COVER_MAX_REFERENCE_BYTES,
   xhsCoverDeliveryMarkdown,
   xhsCoverInputReady,
   type XhsCoverPlan,
@@ -128,7 +127,7 @@ function setup() {
 }
 
 describe("single-node portrait cover workflow", () => {
-  it("preserves portrait and product order while reading every general reference through planning and QC", async () => {
+  it("preserves large portrait and product order through planning, image generation and QC", async () => {
     const { runner, request, calls, fake } = setup();
     const withMaterials = {
       ...request,
@@ -136,6 +135,11 @@ describe("single-node portrait cover workflow", () => {
         ...request.node,
         config: {
           ...request.node.config,
+          xhsCover: {
+            ...request.node.config.xhsCover!,
+            portraits: [{ ...portrait, byteSize: 32 * 1024 * 1024 }],
+            materials: [{ ...material, byteSize: 64 * 1024 * 1024 }],
+          },
           materials: workflowReferenceFixtures,
           connectedMaterials: workflowConnectedReferenceFixtures,
         },
@@ -524,7 +528,7 @@ describe("single-node portrait cover workflow", () => {
 });
 
 describe("cover input and model contracts", () => {
-  it("enforces original portrait presence, unique images and the total inline upload limit", () => {
+  it("keeps portrait, image type, nonempty file and count requirements without a byte ceiling", () => {
     const options = { ...createXhsCoverOptions(), portraits: [portrait] };
     expect(xhsCoverInputReady("教程", options)).toBe(true);
     expect(xhsCoverInputReady("", { ...options, title: "固定标题" })).toBe(true);
@@ -532,19 +536,30 @@ describe("cover input and model contracts", () => {
     expect(
       xhsCoverInputReady("教程", {
         ...options,
-        materials: [
-          { ...material, byteSize: XHS_COVER_MAX_REFERENCE_BYTES - portrait.byteSize + 1 },
-        ],
+        materials: [{ ...material, byteSize: 64 * 1024 * 1024 }],
       }),
-    ).toBe(false);
+    ).toBe(true);
     expect(
       xhsCoverInputReady("教程", {
         ...options,
-        materials: [{ ...material, byteSize: XHS_COVER_MAX_REFERENCE_BYTES - portrait.byteSize }],
+        materials: [{ ...material, byteSize: 8 * 1024 * 1024 }],
       }),
     ).toBe(true);
     expect(
       xhsCoverInputReady("教程", { ...options, portraits: [{ ...portrait, kind: "video" }] }),
+    ).toBe(false);
+    expect(xhsCoverInputReady("教程", { ...options, portraits: [] })).toBe(false);
+    expect(
+      xhsCoverInputReady("教程", { ...options, portraits: [{ ...portrait, byteSize: 0 }] }),
+    ).toBe(false);
+    expect(
+      xhsCoverInputReady("教程", {
+        ...options,
+        materials: Array.from({ length: 6 }, (_, index) => ({
+          ...material,
+          localPath: `C:/material-${index}.png`,
+        })),
+      }),
     ).toBe(false);
   });
   it("rejects invalid style names, missing candidate titles and empty repair instructions", () => {

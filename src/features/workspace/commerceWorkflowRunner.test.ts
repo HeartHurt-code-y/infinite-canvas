@@ -119,7 +119,7 @@ function setup(mode: "quick" | "full" = "quick", deliverable: "video" | "documen
 }
 
 describe("commerce composite workflow", () => {
-  it("retains product references before general materials and keeps all five QC frames", async () => {
+  it("retains large product references before general materials and keeps all five QC frames", async () => {
     const { runner, request, calls } = setup("quick", "video");
     const withMaterials = {
       ...request,
@@ -127,6 +127,10 @@ describe("commerce composite workflow", () => {
         ...request.node,
         config: {
           ...request.node.config,
+          commerce: {
+            ...request.node.config.commerce!,
+            materials: [{ ...productImage, byteSize: 64 * 1024 * 1024 }],
+          },
           materials: workflowReferenceFixtures,
           connectedMaterials: workflowConnectedReferenceFixtures,
         },

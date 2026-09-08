@@ -13,7 +13,6 @@ import {
 import { createCommerceOptions } from "./commerceWorkflowModel";
 import { createXhsCoverOptions } from "./xhsCoverWorkflowModel";
 import {
-  MAX_WORKFLOW_MATERIAL_BYTES,
   mergeWorkflowMaterials,
   mergeWorkflowReferenceInputs,
   validateWorkflowMaterials,
@@ -23,6 +22,8 @@ import {
   workflowReferenceMaterials,
   workflowConnectedMaterials,
   workflowMaterialQuota,
+  removeWorkflowHistoricalText,
+  workflowConnectedTextBlock,
 } from "./workflowMaterials";
 
 const command: OptimizeVideoPromptCommand = {
@@ -33,7 +34,27 @@ const command: OptimizeVideoPromptCommand = {
 };
 
 describe("workflow reference materials", () => {
-  it("shares capacity with connected media and deduplicates repeated source instances", () => {
+  it("removes historical text from both metadata and the effective brief", () => {
+    const source = node().config;
+    const config = {
+      ...source,
+      connectedTexts: [
+        { key: "doc:one", sourceKey: "doc", displayName: "剧本", text: "历史剧本正文" },
+        { key: "doc:two", sourceKey: "doc", displayName: "分镜", text: "历史分镜正文" },
+      ],
+    };
+    const restored = {
+      ...config,
+      brief: `${source.brief}\n\n${workflowConnectedTextBlock(config)}`,
+    };
+    const remaining = removeWorkflowHistoricalText(restored, "doc:one");
+    expect(remaining.connectedTexts).toEqual([config.connectedTexts[1]]);
+    expect(remaining.brief).not.toContain("历史剧本正文");
+    expect(remaining.brief).toContain("历史分镜正文");
+    expect(removeWorkflowHistoricalText(remaining, "doc:two").brief).toBe(source.brief);
+  });
+
+  it("preserves distinct connected instances while deduplicating repeated paths across upload roles", () => {
     const config = {
       ...node().config,
       materials: workflowReferenceFixtures,
@@ -56,11 +77,11 @@ describe("workflow reference materials", () => {
         },
       ],
     };
-    expect(workflowConnectedMaterials(config)).toHaveLength(3);
-    expect(workflowMaterialQuota(config)).toEqual({ count: 6, localBytes: 400, connectedCount: 2 });
+    expect(workflowConnectedMaterials(config)).toHaveLength(4);
+    expect(workflowMaterialQuota(config)).toEqual({ count: 7, localBytes: 400, connectedCount: 3 });
     expect(() => validateWorkflowMaterials(config)).not.toThrow();
     expect(mergeWorkflowReferenceInputs(config, [], workflowReferenceInputs)).toEqual(
-      workflowConnectedReferenceFixtures,
+      config.connectedMaterials.slice(0, 3),
     );
   });
 
@@ -90,7 +111,7 @@ describe("workflow reference materials", () => {
     expect(workflowMaterialQuota(config).count).toBe(5);
     expect(() =>
       validateWorkflowMaterials({ ...config, materials: workflowReferenceFixtures }),
-    ).toThrow("合计最多 8 项");
+    ).not.toThrow();
   });
 
   it("forwards connected-only context to every call while retaining dedicated evidence", async () => {
@@ -127,7 +148,7 @@ describe("workflow reference materials", () => {
     expect(config).not.toHaveProperty("xhsCover");
   });
 
-  it("merges per-call media references before connected inputs and rejects aggregate overflow", () => {
+  it("merges every per-call media reference before connected inputs without a count limit", () => {
     const config = { ...node().config, connectedMaterials: workflowConnectedReferenceFixtures };
     expect(mergeWorkflowReferenceInputs(config, [workflowConnectedReferenceFixtures[1]!])).toEqual([
       workflowConnectedReferenceFixtures[1],
@@ -137,9 +158,7 @@ describe("workflow reference materials", () => {
       ...workflowReferenceInputs[0]!,
       localPath: `C:\\frames\\${index}.png`,
     }));
-    expect(() => mergeWorkflowMaterials(config, extraFiles)).toThrow(
-      "本轮工作流参考素材合计超过 8 项",
-    );
+    expect(mergeWorkflowMaterials(config, extraFiles)).toEqual(extraFiles);
   });
 
   it("shares capacity across common and dedicated roles using Windows path identity", () => {
@@ -165,7 +184,7 @@ describe("workflow reference materials", () => {
     expect(references.every((material) => !Object.hasOwn(material, "byteSize"))).toBe(true);
   });
 
-  it("rejects overflow from different material roles before starting a paid request", () => {
+  it("accepts more than eight distinct references across different material roles", () => {
     const image = workflowReferenceFixtures[0]!;
     const config = {
       ...node().config,
@@ -175,23 +194,45 @@ describe("workflow reference materials", () => {
       })),
       commerce: { ...createCommerceOptions(), materials: [image] },
     };
-    expect(() => validateWorkflowMaterials(config)).toThrow("合计最多 8 项");
+    expect(() => validateWorkflowMaterials(config)).not.toThrow();
+    expect(workflowMaterialQuota(config).count).toBe(9);
   });
 
-  it("rejects oversized or empty material metadata", () => {
+  it("rejects empty or invalid file-size metadata while permitting large references", () => {
     const image = workflowReferenceFixtures[0]!;
-    for (const byteSize of [0, Number.NaN, MAX_WORKFLOW_MATERIAL_BYTES + 1]) {
+    for (const byteSize of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
       expect(() =>
         validateWorkflowMaterials({ ...node().config, materials: [{ ...image, byteSize }] }),
-      ).toThrow("14 MB");
+      ).toThrow("非空文件");
     }
     expect(() =>
       validateWorkflowMaterials({
         ...node().config,
-        materials: [{ ...image, byteSize: MAX_WORKFLOW_MATERIAL_BYTES }],
+        materials: [{ ...image, byteSize: 64 * 1024 * 1024 }],
         commerce: { ...createCommerceOptions(), materials: [workflowReferenceFixtures[3]!] },
       }),
-    ).toThrow("14 MB");
+    ).not.toThrow();
+  });
+
+  it("forwards large general references without truncating or changing their identity", async () => {
+    const large = { ...workflowReferenceFixtures[2]!, byteSize: 256 * 1024 * 1024 };
+    const client = {
+      run: vi
+        .fn<PromptNodeClient["run"]>()
+        .mockResolvedValue({ optimizedPrompt: "ok", rawModelOutput: "ok" }),
+    };
+    await withWorkflowMaterials(client, { ...node().config, materials: [large] }).run(command);
+    expect(client.run).toHaveBeenCalledWith({
+      ...command,
+      multimodalInputs: [
+        {
+          localPath: large.localPath,
+          displayName: large.displayName,
+          kind: large.kind,
+          mimeType: large.mimeType,
+        },
+      ],
+    });
   });
 
   it("keeps the exact legacy request when no general material was attached", async () => {

@@ -139,17 +139,12 @@ export function CommerceConfiguration({
         <section className="canvas-commerce-workflow__materials" aria-label="商品图片与文档">
           <div className="canvas-commerce-workflow__materials-heading">
             <strong>商品图片与文档</strong>
-            <button
-              type="button"
-              disabled={!onPickMaterials || options.materials.length >= 8}
-              onClick={() => void pickMaterials()}
-            >
+            <button type="button" disabled={!onPickMaterials} onClick={() => void pickMaterials()}>
               {picking ? "正在选择资料…" : "添加商品资料"}
             </button>
           </div>
           <small>
-            支持图片、PDF、TXT / Markdown，最多 8 项、合计 14
-            MB。制作成片需要真实商品图，生成时保留原图作为参考。
+            支持图片、PDF、TXT / Markdown。制作成片需要真实商品图，生成时保留原图作为参考。
           </small>
           {options.materials.length ? (
             <ul>

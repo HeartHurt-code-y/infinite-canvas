@@ -1,3 +1,4 @@
+import { videoDownloadInputs } from "./videoDownloadInputs";
 import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
 import { CaretRight } from "@phosphor-icons/react/CaretRight";
@@ -54,7 +55,6 @@ import {
   loadProviderCatalog,
   pickLocalMediaFiles,
   pickPromptMultimodalFiles,
-  promptMultimodalDefinitionForPath,
   promptNodeClient,
   subscribeGenerationEvents,
   subscribeStagingEvents,
@@ -111,6 +111,7 @@ import {
   type CanvasStoreNodeChange,
 } from "../canvas/canvasStore";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
+import { createCanvasInputResolver, canvasNodesByKeyFromDocument } from "./canvasInputs";
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import { AssetFlow, AssetPanelError, AssetUploadRow, RepositoryCard } from "./AssetLibraryViews";
@@ -142,26 +143,22 @@ import {
 import { AssetKindIcon } from "./PromptNodeViews";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import {
-  workflowCanvasInputs,
+  workflowCanvasInputsFromResolved,
   workflowCanvasInputsFromDocument,
   withCanvasWorkflowMaterials,
+  withLiveWorkflowCanvasInputs,
 } from "./workflowCanvasInputs";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { WorkflowRepository } from "./WorkflowRepository";
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
-import {
-  MAX_WORKFLOW_MATERIALS,
-  MAX_WORKFLOW_MATERIAL_BYTES,
-  workflowMaterialPathKey,
-  workflowMaterialQuota,
-} from "./workflowMaterials";
+import { workflowMaterialPathKey } from "./workflowMaterials";
 import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
-import { XHS_COVER_MAX_REFERENCE_BYTES, xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
+import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
 import type {
   AssetItem,
   AssetKind,
@@ -179,7 +176,6 @@ import type {
   GenNodeData,
   GenerationMediaInput,
   ImageNodeConfig,
-  InheritedAssetInput,
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowConfig,
   KnowledgeVideoWorkflowNodeData,
@@ -254,10 +250,8 @@ import {
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
   ZOOM_STEP,
-  assetGenerationInput,
   assetNodeDimensions,
   assetNodeKey,
-  assetNodeReferenceTarget,
   cloudAssetToItem,
   createImageNodeConfig,
   createPromptNodeConfig,
@@ -271,7 +265,6 @@ import {
   genNodeKey,
   generationInputMentionCandidate,
   getNodeDescriptor,
-  inheritedVideoAssetInputs,
   isRunningTaskStatus,
   isStallTrackedStatus,
   textResultFromSource,
@@ -288,10 +281,8 @@ import {
   nextOutputSlot,
   nextVideoComposerOutputSlot,
   nextVideoDownloaderOutputSlot,
-  outputGenerationInput,
   outputNodeDimensions,
   outputNodeKey,
-  outputNodeReferenceTarget,
   persistActiveAssetProviderId,
   promptConversationRoleLabel,
   promptMessageId,
@@ -387,11 +378,36 @@ function connectedScreenplayName(node: ScreenplayNodeData): string {
   return documentTitle?.length ? documentTitle : `剧本节点 · ${node.key.slice(-6)}`;
 }
 
-const MAX_SCREENPLAY_MATERIALS = 8;
-// Gemini 的内联媒体请求上限为 20 MB；Base64 约膨胀 1/3，因此原始文件合计
-// 控制在 14 MiB，给完整技能提示词与 JSON 包装预留空间。
-const MAX_SCREENPLAY_MATERIAL_BYTES = 14 * 1024 * 1024;
-const MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES = 14 * 1024 * 1024;
+function canvasNodeLabel(entry: CanvasNodeEntry | null): string {
+  if (!entry) return "节点";
+  switch (entry.type) {
+    case "asset":
+      return entry.data.name;
+    case "output":
+      return (
+        entry.data.name ??
+        `${entry.data.mediaType === "text" ? "文本" : entry.data.mediaType === "image" ? "图片" : "视频"}产物`
+      );
+    case "gen":
+      return `${entry.data.kind === "prompt" ? "提示词" : entry.data.kind === "image" ? "图片生成" : "视频生成"}节点`;
+    case "screenplay":
+      return connectedScreenplayName(entry.data);
+    case "storyboard":
+      return "剧本转工业级分镜脚本节点";
+    case "knowledgeVideoWorkflow":
+      return "工作流节点";
+    case "viralRemix":
+      return "爆款视频复刻节点";
+    case "videoComposer":
+      return "视频拼接与合成节点";
+    case "videoDownloader":
+      return "网络爆款视频下载节点";
+    case "frameExtractor":
+      return "视频抽帧节点";
+    case "result":
+      return "结果节点";
+  }
+}
 
 function screenplayMultimodalInputs(
   config: ScreenplayNodeConfig,
@@ -455,6 +471,7 @@ export function WorkspaceApp() {
     frameExtractorNodeByKey,
     viralRemixNodeByKey,
     assetEdges,
+    canvasNodeByKey,
     canvasEdgeIndex,
     hasCanvasNodes,
   } = useCanvas(
@@ -484,6 +501,7 @@ export function WorkspaceApp() {
       frameExtractorNodeByKey: state.nodeByKey.frameExtractor,
       viralRemixNodeByKey: state.nodeByKey.viralRemix,
       assetEdges: state.graph.edges,
+      canvasNodeByKey: state.nodeByKey,
       canvasEdgeIndex: state.graph,
       hasCanvasNodes: state.hasNodes,
     })),
@@ -510,38 +528,35 @@ export function WorkspaceApp() {
   // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
   const { pastCount, futureCount } = useCanvasHistoryCounts();
   const genTopologyByKey = genNodeByKey;
+  const canvasInputsFor = useMemo(
+    () => createCanvasInputResolver(canvasNodeByKey, assetEdges),
+    [canvasNodeByKey, assetEdges],
+  );
   const workflowInputsByNode = useMemo(
     () =>
       new Map(
         knowledgeVideoWorkflowNodes.map((node) => [
           node.key,
-          workflowCanvasInputs(
-            canvasEdgeIndex.byTarget.get(node.key) ?? [],
-            assetNodeByKey,
-            outputNodeByKey,
-          ),
+          workflowCanvasInputsFromResolved(canvasInputsFor(node.key)),
         ]),
       ),
-    [knowledgeVideoWorkflowNodes, canvasEdgeIndex, assetNodeByKey, outputNodeByKey],
+    [knowledgeVideoWorkflowNodes, canvasInputsFor],
   );
-  const workflowInputsRef = useRef(workflowInputsByNode);
-  useEffect(() => {
-    workflowInputsRef.current = workflowInputsByNode;
-  }, [workflowInputsByNode]);
-  const screenplayInputByStoryboard = useMemo(() => {
-    const inputs = new Map<string, ConnectedScreenplayInput>();
-    for (const edge of assetEdges) {
-      const source = screenplayNodeByKey.get(edge.fromKey);
-      if (source == null || !storyboardNodeByKey.has(edge.toKey)) continue;
-      inputs.set(edge.toKey, {
-        key: source.key,
-        name: connectedScreenplayName(source),
-        document: source.config.currentDocument,
-        edgeId: edge.id,
-      });
+  const documentInputsByNode = useMemo(() => {
+    const inputs = new Map<string, readonly ConnectedScreenplayInput[]>();
+    for (const node of [...screenplayNodes, ...storyboardNodes]) {
+      inputs.set(
+        node.key,
+        canvasInputsFor(node.key).texts.map((input) => ({
+          key: input.key,
+          name: input.name,
+          document: input.text,
+          edgeId: input.edgeId,
+        })),
+      );
     }
     return inputs;
-  }, [assetEdges, screenplayNodeByKey, storyboardNodeByKey]);
+  }, [canvasInputsFor, screenplayNodes, storyboardNodes]);
   // 空白处左键拖拽 / 任意位置中键拖拽平移画布时的指针状态。
   const [isPanning, setIsPanning] = useState(false);
   // 原生滚轮监听与缩放控制读取最新视图状态，避免监听器随状态变化反复重挂。
@@ -623,6 +638,16 @@ export function WorkspaceApp() {
   // 下载启动时的节点快照：产物卡片落点按启动时节点位置计算（轮询期间用户
   // 拖动节点不改变落点，与迁移前 setTimeout 轮询的语义一致）。
   const videoDownloaderStartNodesRef = useRef<Map<string, VideoDownloaderNodeData>>(new Map());
+  const videoDownloadQueuesRef = useRef(
+    new Map<
+      string,
+      {
+        sources: string[];
+        batchId: string;
+        activeJobId: string;
+      }
+    >(),
+  );
   const [downloaderEngineStatus, setDownloaderEngineStatus] =
     useState<VideoDownloaderEngineStatus | null>(null);
   const downloaderEngineLoadedRef = useRef(false);
@@ -632,6 +657,59 @@ export function WorkspaceApp() {
     Readonly<Record<string, VideoFrameExtractorRunState>>
   >({});
   const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
+  const frameExtractionQueuesRef = useRef(
+    new Map<
+      string,
+      {
+        sources: string[];
+        timestamps: readonly number[];
+        batchId: string;
+        activeJobId: string;
+      }
+    >(),
+  );
+  const cancelVideoToolBatches = useCallback(() => {
+    for (const queue of videoDownloadQueuesRef.current.values()) {
+      if (queue.activeJobId)
+        void videoDownloaderClient.cancelJob(queue.activeJobId).catch(() => undefined);
+    }
+    videoDownloadQueuesRef.current.clear();
+    videoDownloaderStartNodesRef.current.clear();
+    for (const queue of frameExtractionQueuesRef.current.values()) {
+      if (queue.activeJobId)
+        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch(() => undefined);
+    }
+    frameExtractionQueuesRef.current.clear();
+    frameExtractorStartNodesRef.current.clear();
+  }, []);
+  useEffect(() => {
+    const downloaderKeys = new Set(videoDownloaderNodes.map((node) => node.key));
+    for (const [key, queue] of videoDownloadQueuesRef.current) {
+      if (downloaderKeys.has(key)) continue;
+      videoDownloadQueuesRef.current.delete(key);
+      videoDownloaderStartNodesRef.current.delete(key);
+      setVideoDownloaderRuns((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      if (queue.activeJobId)
+        void videoDownloaderClient.cancelJob(queue.activeJobId).catch(() => undefined);
+    }
+    const extractorKeys = new Set(frameExtractorNodes.map((node) => node.key));
+    for (const [key, queue] of frameExtractionQueuesRef.current) {
+      if (extractorKeys.has(key)) continue;
+      frameExtractionQueuesRef.current.delete(key);
+      frameExtractorStartNodesRef.current.delete(key);
+      setFrameExtractorRuns((current) => {
+        const next = { ...current };
+        delete next[key];
+        return next;
+      });
+      if (queue.activeJobId)
+        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch(() => undefined);
+    }
+  }, [videoDownloaderNodes, frameExtractorNodes]);
   const [knowledgeVideoWorkflowRuns, setKnowledgeVideoWorkflowRuns] = useState<
     Readonly<Record<string, KnowledgeVideoWorkflowRunState>>
   >({});
@@ -795,6 +873,7 @@ export function WorkspaceApp() {
         URL.revokeObjectURL(node.previewSrc);
       }
     }
+    cancelVideoToolBatches();
     clearCanvasState();
     setVideoComposerRuns({});
     setVideoDownloaderRuns({});
@@ -803,6 +882,7 @@ export function WorkspaceApp() {
     setGenNodeSizes({});
     setPreviewOutputNodeKey(null);
   }, [
+    cancelVideoToolBatches,
     clearCanvasState,
     outputNodes,
     setVideoComposerRuns,
@@ -815,6 +895,7 @@ export function WorkspaceApp() {
 
   useEffect(
     () => () => {
+      cancelVideoToolBatches();
       for (const controller of videoComposerAbortControllersRef.current.values()) {
         controller.abort();
       }
@@ -824,7 +905,7 @@ export function WorkspaceApp() {
       }
       knowledgeVideoWorkflowAbortControllersRef.current.clear();
     },
-    [],
+    [cancelVideoToolBatches],
   );
 
   // ---- 画布状态持久化（canvas_documents 表）----
@@ -916,23 +997,18 @@ export function WorkspaceApp() {
           // 例外：若恢复内容为空文档，说明上次保存时同步可能未完成（或节点刚创建），
           // 不初始化同步记录，让下方 effect 检测到差异后重新导入上游输出。
           importedPromptSourcesRef.current.clear();
-          const restoredGenNodes = new Map(document.genNodes.map((node) => [node.key, node]));
-          for (const edge of document.assetEdges) {
-            const source = restoredGenNodes.get(edge.fromKey);
-            if (source?.kind !== "prompt" || !(edge.toKey in restored.promptContents)) continue;
-            const restoredContent = restored.promptContents[edge.toKey];
-            const isEmptyContent =
-              restoredContent == null ||
-              (typeof restoredContent === "object" &&
-                (!("items" in restoredContent) ||
-                  (restoredContent as { items?: readonly unknown[] }).items?.length === 0)) ||
-              (typeof restoredContent === "string" &&
-                restoredContent.replace(/<[^>]*>/g, "").trim() === "");
-            if (isEmptyContent) continue;
-            importedPromptSourcesRef.current.set(edge.toKey, {
-              edgeId: edge.id,
-              sourceKey: source.key,
-              text: source.config.generatedPrompt,
+          const restoredInputsFor = createCanvasInputResolver(
+            canvasNodesByKeyFromDocument(document),
+            document.assetEdges,
+          );
+          for (const node of document.genNodes) {
+            if (node.kind === "prompt") continue;
+            const sources = restoredInputsFor(node.key).texts;
+            if (!sources.length || !promptContents.read(node.key)?.plainText.trim()) continue;
+            importedPromptSourcesRef.current.set(node.key, {
+              edgeId: sources.map((source) => source.edgeId).join("\n"),
+              sourceKey: sources.map((source) => source.sourceKey).join("\n"),
+              text: sources.map((source) => source.text).join("\n\n"),
             });
           }
         }
@@ -1080,19 +1156,16 @@ export function WorkspaceApp() {
   }, [clearCanvas, closeClearCanvasDialog]);
 
   useEffect(() => {
-    const mediaSourceKeys = new Set<string>();
-    for (const node of assetNodeByKey.values()) {
-      if (node.kind === "image" || node.kind === "video") mediaSourceKeys.add(node.key);
-    }
-    for (const node of outputNodeByKey.values()) {
-      if (outputNodeReferenceTarget(node) != null) mediaSourceKeys.add(node.key);
-    }
-    const mediaInputTargetKeys = new Set<string>();
-    for (const edge of assetEdges) {
-      if (mediaSourceKeys.has(edge.fromKey)) mediaInputTargetKeys.add(edge.toKey);
-    }
-    mediaInputTargetKeysRef.current = mediaInputTargetKeys;
-  }, [assetEdges, assetNodeByKey, outputNodeByKey]);
+    mediaInputTargetKeysRef.current = new Set(
+      genNodes
+        .filter((node) =>
+          canvasInputsFor(node.key).media.some(
+            (input) => input.kind === "image" || input.kind === "video",
+          ),
+        )
+        .map((node) => node.key),
+    );
+  }, [canvasInputsFor, genNodes]);
 
   const availableAssetProviders = useMemo(
     () => providerCatalog.map((entry) => entry.provider).filter((provider) => provider.enabled),
@@ -2288,13 +2361,7 @@ export function WorkspaceApp() {
           const original = nodes.find((node) => node.key === restored.node.key);
           restored = {
             ...restored,
-            node: {
-              ...restored.node,
-              config: {
-                ...restored.node.config,
-                connectedMaterials: original?.config.connectedMaterials ?? [],
-              },
-            },
+            node: withLiveWorkflowCanvasInputs(restored.node, original),
           };
           patchNode("knowledgeVideoWorkflow", restored.node.key, () => restored.node);
         } else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
@@ -2435,25 +2502,10 @@ export function WorkspaceApp() {
         )
           return node;
         const materials = [...(node.config.materials ?? [])];
-        const effectiveConfig = withCanvasWorkflowMaterials(
-          node,
-          workflowInputsRef.current.get(key) ?? [],
-        ).config;
         const generalPaths = new Set(materials.map(workflowMaterialPathKey));
         for (const item of picked) {
           const path = workflowMaterialPathKey(item);
-          const nextQuota = workflowMaterialQuota({
-            ...effectiveConfig,
-            materials: [...materials, item],
-          });
-          if (
-            generalPaths.has(path) ||
-            !Number.isFinite(item.byteSize) ||
-            item.byteSize <= 0 ||
-            item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
-            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
-            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
-          ) {
+          if (generalPaths.has(path) || !Number.isFinite(item.byteSize) || item.byteSize <= 0) {
             rejected++;
             continue;
           }
@@ -2464,7 +2516,7 @@ export function WorkspaceApp() {
       });
       if (rejected)
         toast.info(`${rejected} 项参考素材未添加`, {
-          description: "重复文件会跳过；参考素材与专用资料合计最多 8 项、14 MB，不支持空文件。",
+          description: "重复文件会跳过，不支持空文件。",
         });
     },
     [patchNode],
@@ -2510,39 +2562,25 @@ export function WorkspaceApp() {
         const items = [...options[field]];
         const existing = [...options.portraits, ...options.materials];
         const paths = new Set(existing.map(workflowMaterialPathKey));
-        let totalBytes = existing.reduce((sum, item) => sum + item.byteSize, 0);
-        const effectiveConfig = withCanvasWorkflowMaterials(
-          node,
-          workflowInputsRef.current.get(key) ?? [],
-        ).config;
         for (const item of picked) {
-          const nextQuota = workflowMaterialQuota({
-            ...effectiveConfig,
-            xhsCover: { ...options, [field]: [...items, item] },
-          });
           if (
             item.kind !== "image" ||
             paths.has(workflowMaterialPathKey(item)) ||
             items.length >= (role === "portrait" ? 3 : 5) ||
             !Number.isFinite(item.byteSize) ||
-            item.byteSize <= 0 ||
-            totalBytes + item.byteSize > XHS_COVER_MAX_REFERENCE_BYTES ||
-            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
-            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
+            item.byteSize <= 0
           ) {
             rejected++;
             continue;
           }
           paths.add(workflowMaterialPathKey(item));
-          totalBytes += item.byteSize;
           items.push(item);
         }
         return { ...node, config: { ...node.config, xhsCover: { ...options, [field]: items } } };
       });
       if (rejected)
         toast.info(`${rejected} 张图片未添加`, {
-          description:
-            "人物参考图最多 3 张，封面图片合计不超过 8 MB；与通用参考素材合计最多 8 项、14 MB，重复图片会跳过。",
+          description: "人物参考图最多 3 张、补充图片最多 5 张，仅支持非空图片，重复图片会跳过。",
         });
     },
     [patchNode],
@@ -2592,23 +2630,12 @@ export function WorkspaceApp() {
           return node;
         const materials = [...options.materials];
         const paths = new Set(materials.map(workflowMaterialPathKey));
-        const effectiveConfig = withCanvasWorkflowMaterials(
-          node,
-          workflowInputsRef.current.get(key) ?? [],
-        ).config;
         for (const item of picked) {
-          const nextQuota = workflowMaterialQuota({
-            ...effectiveConfig,
-            commerce: { ...options, materials: [...materials, item] },
-          });
           if (
             (item.kind !== "image" && item.kind !== "document") ||
             paths.has(workflowMaterialPathKey(item)) ||
             !Number.isFinite(item.byteSize) ||
-            item.byteSize <= 0 ||
-            item.byteSize > MAX_WORKFLOW_MATERIAL_BYTES ||
-            nextQuota.count > MAX_WORKFLOW_MATERIALS ||
-            nextQuota.localBytes > MAX_WORKFLOW_MATERIAL_BYTES
+            item.byteSize <= 0
           ) {
             rejected++;
             continue;
@@ -2620,7 +2647,7 @@ export function WorkspaceApp() {
       });
       if (rejected)
         toast.info(`${rejected} 项产品资料未添加`, {
-          description: "支持图片与文档，与通用参考素材合计最多 8 项、14 MB；重复文件会跳过。",
+          description: "支持非空图片与文档，重复文件会跳过。",
         });
     },
     [patchNode],
@@ -2866,26 +2893,18 @@ export function WorkspaceApp() {
           const existingPaths = new Set(
             existing.map((material) => material.localPath.toLocaleLowerCase()),
           );
-          let totalBytes = existing.reduce((total, material) => total + material.byteSize, 0);
           const additions = [] as NonNullable<ScreenplayNodeConfig["materials"]>[number][];
           for (const material of picked) {
             const normalizedPath = material.localPath.toLocaleLowerCase();
-            const exceedsCount = existing.length + additions.length >= MAX_SCREENPLAY_MATERIALS;
-            const exceedsFileLimit =
-              material.byteSize <= 0 || material.byteSize > MAX_SCREENPLAY_MATERIAL_BYTES;
-            const exceedsTotalLimit =
-              totalBytes + material.byteSize > MAX_SCREENPLAY_MATERIAL_TOTAL_BYTES;
             if (
               existingPaths.has(normalizedPath) ||
-              exceedsCount ||
-              exceedsFileLimit ||
-              exceedsTotalLimit
+              !Number.isFinite(material.byteSize) ||
+              material.byteSize <= 0
             ) {
               rejectedCount += 1;
               continue;
             }
             existingPaths.add(normalizedPath);
-            totalBytes += material.byteSize;
             additions.push({ ...material, id: screenplayMaterialId() });
           }
           addedCount = additions.length;
@@ -2901,7 +2920,7 @@ export function WorkspaceApp() {
         }
         if (rejectedCount) {
           toast.info(`${rejectedCount} 项素材未添加`, {
-            description: "已存在、超过 8 项，或超出单项 / 合计 14 MB 限制。",
+            description: "文件已存在、为空或大小信息无效。",
           });
         }
       } catch (error) {
@@ -2947,45 +2966,20 @@ export function WorkspaceApp() {
     [patchNode],
   );
 
-  /** 提示词节点连入的图片素材与图片产物（按连线建立顺序），执行时作为视觉理解输入传给文本模型。 */
+  /** 图片沿用视觉输入协议；视频和音频保留引用身份交由后端读取。 */
   const promptVisionImages = useCallback(
-    (nodeKey: string): readonly PromptVisionImageInput[] => {
-      return (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).flatMap((edge) => {
-        const asset = assetNodeByKey.get(edge.fromKey);
-        if (asset && asset.kind === "image") {
-          return [{ target: assetNodeReferenceTarget(asset), displayName: asset.name }];
-        }
-        const output = outputNodeByKey.get(edge.fromKey);
-        if (output?.mediaType === "image") {
-          const target = outputNodeReferenceTarget(output);
-          return target ? [{ target, displayName: output.name ?? "图片产物" }] : [];
-        }
-        return [];
-      });
-    },
-    [assetNodeByKey, canvasEdgeIndex, outputNodeByKey],
+    (nodeKey: string): readonly PromptVisionImageInput[] =>
+      canvasInputsFor(nodeKey)
+        .media.filter((input) => input.kind === "image")
+        .map((input) => ({ target: input.target, displayName: input.name })),
+    [canvasInputsFor],
   );
-
-  /** 提示词节点连入的视频产物（已保存到本地的 generation 结果），作为多模态视频素材传给文本模型。 */
   const promptVideoMaterials = useCallback(
-    (nodeKey: string): readonly PromptMultimodalInput[] => {
-      return (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).flatMap((edge) => {
-        const output = outputNodeByKey.get(edge.fromKey);
-        if (output?.mediaType !== "video" || output.finalPath == null) return [];
-        const definition = promptMultimodalDefinitionForPath(output.finalPath);
-        return definition && definition.kind === "video"
-          ? [
-              {
-                localPath: output.finalPath,
-                displayName: output.name ?? "视频产物",
-                kind: "video",
-                mimeType: definition.mimeType,
-              },
-            ]
-          : [];
-      });
-    },
-    [canvasEdgeIndex, outputNodeByKey],
+    (nodeKey: string) =>
+      canvasInputsFor(nodeKey)
+        .media.filter((input) => input.kind !== "image")
+        .map((input) => ({ target: input.target, displayName: input.name })),
+    [canvasInputsFor],
   );
 
   /** 提示词节点调用已配置的文本模型，返回结果写入节点输出并由连线自动下发。 */
@@ -3049,7 +3043,10 @@ export function WorkspaceApp() {
         defaultFpvPrompt ||
         defaultFightPrompt ||
         defaultMultiGridPrompt ||
-        defaultStoryboardPrompt;
+        defaultStoryboardPrompt ||
+        (canvasInputsFor(nodeKey).texts.length || canvasInputsFor(nodeKey).media.length
+          ? "请依据已连接的文本和参考素材生成或优化提示词。"
+          : "");
       if (!sourcePrompt) {
         failWith(
           node.config.task === "generate"
@@ -3085,6 +3082,12 @@ export function WorkspaceApp() {
         role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
         content: entry.content,
       }));
+      contextHistory.push(
+        ...canvasInputsFor(nodeKey).texts.map((input) => ({
+          role: `已连接的上游文本 · ${input.name}`,
+          content: input.text,
+        })),
+      );
       if (
         (isFpvPath || isFightPromptMaster || isMultiGridStoryboard || isStoryboardPrompt) &&
         node.config.generatedPrompt.trim()
@@ -3108,73 +3111,9 @@ export function WorkspaceApp() {
           userPrompt: sourcePrompt,
           contextHistory,
           visionImages,
-          multimodalInputs: videoMaterials,
+          referenceInputs: videoMaterials,
         })
         .then((result) => {
-          const sourceText = result.optimizedPrompt;
-          const strippedPrompt = stripMarkdown(sourceText);
-          // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
-          const generatedPrompt = strippedPrompt || sourceText.trim();
-          if (strippedPrompt.length === 0 && sourceText.trim().length > 0) {
-            frontendLog(
-              "warn",
-              `[canvas] stripMarkdown 返回空，使用原始文本: sourceLen=${sourceText.length}, trimmedLen=${sourceText.trim().length}`,
-            );
-          }
-          if (generatedPrompt) {
-            for (const edge of assetEdges) {
-              if (edge.fromKey !== nodeKey) continue;
-              const target = genTopologyByKey.get(edge.toKey);
-              const source = genNodeByKey.get(edge.fromKey);
-              if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
-              const previous = importedPromptSourcesRef.current.get(target.key);
-              const currentContent = promptContents.read(target.key);
-              const shouldSkip =
-                previous?.edgeId === edge.id &&
-                previous.sourceKey === source.key &&
-                previous.text === sourceText;
-              frontendLog(
-                "info",
-                `[canvas-prompt-sync] .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`,
-              );
-              if (shouldSkip) continue;
-              const replaced = promptContents.replaceText(target.key, generatedPrompt, []);
-              const afterContent = promptContents.read(target.key);
-              frontendLog(
-                "info",
-                `[canvas-prompt-sync] .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`,
-              );
-              if (replaced == null) continue;
-              importedPromptSourcesRef.current.set(target.key, {
-                edgeId: edge.id,
-                sourceKey: source.key,
-                text: sourceText,
-              });
-              frontendLog(
-                "info",
-                `[canvas] 提示词节点输出已导入生成节点: source=${source.key}, target=${target.key}, 字符 ${generatedPrompt.length}`,
-              );
-            }
-          } else {
-            for (const edge of assetEdges) {
-              if (edge.fromKey !== nodeKey) continue;
-              const target = genTopologyByKey.get(edge.toKey);
-              const source = genNodeByKey.get(edge.fromKey);
-              if (source?.kind !== "prompt" || !target || target.kind === "prompt") continue;
-              const previous = importedPromptSourcesRef.current.get(target.key);
-              if (
-                previous?.edgeId === edge.id &&
-                previous.sourceKey === source.key &&
-                previous.text === sourceText
-              )
-                continue;
-              importedPromptSourcesRef.current.set(target.key, {
-                edgeId: edge.id,
-                sourceKey: source.key,
-                text: sourceText,
-              });
-            }
-          }
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
               ? {
@@ -3215,11 +3154,8 @@ export function WorkspaceApp() {
       genNodes,
       promptVideoMaterials,
       promptVisionImages,
-      assetEdges,
       providerCatalog,
-      genNodeByKey,
-      genTopologyByKey,
-      promptContents,
+      canvasInputsFor,
       setNodeStartError,
       startingNodeKeys,
       patchNode,
@@ -3240,7 +3176,13 @@ export function WorkspaceApp() {
       const materials = node.config.materials ?? [];
       const userPrompt =
         node.config.composer.trim() || "请分析附带的参考素材，并据此创作或优化剧本。";
-      if (!node.config.composer.trim() && !materials.length) {
+      const connected = canvasInputsFor(nodeKey);
+      if (
+        !node.config.composer.trim() &&
+        !materials.length &&
+        !connected.media.length &&
+        !connected.texts.length
+      ) {
         failWith("请输入本轮剧本创作或修改要求。");
         return;
       }
@@ -3269,6 +3211,12 @@ export function WorkspaceApp() {
           content: node.config.currentDocument,
         });
       }
+      contextHistory.push(
+        ...connected.texts.map((input) => ({
+          role: `已连接的上游文本 · ${input.name}`,
+          content: input.text,
+        })),
+      );
       const multimodalInputs = screenplayMultimodalInputs(node.config);
       setNodeStartError(nodeKey, null);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
@@ -3287,6 +3235,10 @@ export function WorkspaceApp() {
           userPrompt,
           contextHistory,
           multimodalInputs,
+          referenceInputs: connected.media.map((input) => ({
+            target: input.target,
+            displayName: input.name,
+          })),
         })
         .then((result) => {
           patchNode("screenplay", nodeKey, (item) => ({
@@ -3328,7 +3280,14 @@ export function WorkspaceApp() {
           });
         });
     },
-    [patchNode, providerCatalog, screenplayNodes, setNodeStartError, startingNodeKeys],
+    [
+      patchNode,
+      providerCatalog,
+      screenplayNodes,
+      setNodeStartError,
+      startingNodeKeys,
+      canvasInputsFor,
+    ],
   );
 
   const handleExportScreenplay = useCallback(
@@ -3376,13 +3335,14 @@ export function WorkspaceApp() {
         failWith("工业级分镜模型只能在桌面应用中调用。请通过 Tauri 桌面端运行。");
         return;
       }
-      const sourceInput = screenplayInputByStoryboard.get(nodeKey);
-      const sourceDocument = sourceInput?.document.trim() ?? "";
+      const connected = canvasInputsFor(nodeKey);
       const userPrompt =
         node.config.composer.trim() ||
-        (sourceDocument ? "请将已连接的剧本转换为工业级分镜脚本。" : "");
+        (connected.texts.length || connected.media.length
+          ? "请将已连接的剧本转换为工业级分镜脚本。"
+          : "");
       if (!userPrompt) {
-        failWith("请连接含有正文的剧本节点、粘贴剧本，或输入本轮分镜要求。");
+        failWith("请连接参考文本或素材、粘贴剧本，或输入本轮分镜要求。");
         return;
       }
       const provider = providerCatalog.find(
@@ -3398,13 +3358,10 @@ export function WorkspaceApp() {
         failWith("请先在当前分镜节点中选择可用的文本模型。");
         return;
       }
-      const contextHistory: PromptOptimizationContextEntry[] = [];
-      if (sourceInput && sourceDocument) {
-        contextHistory.push({
-          role: `已连接的上游 Markdown 剧本 · ${sourceInput.name}`,
-          content: sourceDocument,
-        });
-      }
+      const contextHistory: PromptOptimizationContextEntry[] = connected.texts.map((input) => ({
+        role: `已连接的上游 Markdown 剧本 · ${input.name}`,
+        content: input.text,
+      }));
       contextHistory.push(
         ...node.config.conversation.map((entry, index) => ({
           role: `第 ${index + 1} 条 · ${documentSkillRoleLabel(entry.role, "storyboard")}`,
@@ -3433,6 +3390,10 @@ export function WorkspaceApp() {
           task: "generate",
           userPrompt,
           contextHistory,
+          referenceInputs: connected.media.map((input) => ({
+            target: input.target,
+            displayName: input.name,
+          })),
         })
         .then((result) => {
           patchNode("storyboard", nodeKey, (item) => ({
@@ -3473,7 +3434,7 @@ export function WorkspaceApp() {
     [
       patchNode,
       providerCatalog,
-      screenplayInputByStoryboard,
+      canvasInputsFor,
       setNodeStartError,
       startingNodeKeys,
       storyboardNodes,
@@ -3522,72 +3483,18 @@ export function WorkspaceApp() {
     (nodeKey: string) => {
       if (startingNodeKeys.has(nodeKey)) return;
       const node = viralRemixNodes.find((item) => item.key === nodeKey);
-      const inputEdge = assetEdges.find((edge) => edge.toKey === nodeKey);
-      const input: ViralRemixVideoInput | null = (() => {
-        if (!inputEdge) return null;
-        const asset = assetNodes.find(
-          (item) =>
-            item.key === inputEdge.fromKey && item.kind === "video" && item.videoUrl != null,
-        );
-        if (asset?.kind === "video" && asset.videoUrl) {
-          return {
-            key: asset.key,
-            name: asset.name,
-            src: asset.videoUrl,
-            sourceLabel: "素材",
-            edgeId: inputEdge.id,
-          };
-        }
-        const output = outputNodes.find(
-          (item) =>
-            item.key === inputEdge.fromKey &&
-            item.mediaType === "video" &&
-            (item.finalPath != null || item.previewSrc != null),
-        );
-        if (output) {
-          return {
-            key: output.key,
-            name: output.name ?? "未命名视频产物",
-            src: output.finalPath ? toMediaSrc(output.finalPath) : (output.previewSrc ?? null),
-            sourceLabel: "产物",
-            edgeId: inputEdge.id,
-          };
-        }
-        const downloader = videoDownloaderNodes.find((item) => item.key === inputEdge.fromKey);
-        if (!downloader) return null;
-        const latestOutput = [...outputNodes]
-          .reverse()
-          .find(
-            (item) =>
-              item.sourceNodeId === downloader.key &&
-              item.origin === "download" &&
-              item.mediaType === "video",
-          );
-        return {
-          key: downloader.key,
-          name: latestOutput?.name ?? "网络爆款视频下载",
-          src: latestOutput?.finalPath
-            ? toMediaSrc(latestOutput.finalPath)
-            : (latestOutput?.previewSrc ?? null),
-          sourceLabel: "下载节点",
-          edgeId: inputEdge.id,
-        };
-      })();
+      const resolved = canvasInputsFor(nodeKey);
+      const inputs = resolved.media.filter((input) => input.kind === "video");
       if (!node) return;
       const failWith = (message: string) => setNodeStartError(nodeKey, message);
       if (!isDesktopRuntime()) {
         failWith("爆款视频复刻只能在桌面应用中运行。请通过 Tauri 桌面端使用。");
         return;
       }
-      if (!input) {
-        failWith("请先连接一个视频素材、视频产物或网络爆款视频下载节点。");
+      if (inputs.length === 0 || inputs.some((input) => !input.src)) {
+        failWith("当前上游没有可读取的视频。请提供视频来源，或先完成上游视频生成、下载。");
         return;
       }
-      if (!input.src) {
-        failWith("已连接下载节点，但还没有可用视频。请先完成下载。");
-        return;
-      }
-      const inputSrc = input.src;
       const provider = providerCatalog.find(
         (entry) =>
           entry.provider.enabled && entry.provider.id === node.config.modelSelection.providerId,
@@ -3605,47 +3512,50 @@ export function WorkspaceApp() {
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
       frontendLog(
         "info",
-        `[viral-remix] 开始本地密集抽帧: node=${nodeKey}, source=${input.sourceLabel}, name=${input.name}`,
+        `[viral-remix] 开始本地密集抽帧: node=${nodeKey}, inputs=${inputs.length}`,
       );
       void import("../../lib/videoFrameSampler")
-        .then(({ buildVideoContactSheets }) => buildVideoContactSheets(inputSrc))
-        .then((contactSheets) => {
-          const instructions = node.config.instructions.trim();
-          const userPrompt = [
-            `输入视频：${input.name}`,
-            `已验证时长：${contactSheets.duration.toFixed(3)} 秒`,
-            `全片抽帧：${contactSheets.overviewFrameCount} 帧；结尾 5 秒加密：${contactSheets.tailFrameCount} 帧；联系表：${contactSheets.sheets.length} 张。`,
-            instructions
-              ? `用户补充方向：${instructions}`
-              : "用户未指定额外方向，请执行技能默认复刻合同。",
-            "静态联系表不包含可听声音；任何对白、音乐或音效判断都必须标记为待听觉确认。",
-          ].join("\n");
+        .then(async ({ buildVideoContactSheets }) => {
+          const documents: string[] = [];
+          for (const [index, input] of inputs.entries()) {
+            const contactSheets = await buildVideoContactSheets(input.src!);
+            const instructions = node.config.instructions.trim();
+            const userPrompt = [
+              `输入视频 ${index + 1}/${inputs.length}：${input.name}`,
+              `已验证时长：${contactSheets.duration.toFixed(3)} 秒`,
+              `全片抽帧：${contactSheets.overviewFrameCount} 帧；结尾 5 秒加密：${contactSheets.tailFrameCount} 帧；联系表：${contactSheets.sheets.length} 张。`,
+              instructions
+                ? `用户补充方向：${instructions}`
+                : "用户未指定额外方向，请执行技能默认复刻合同。",
+              ...resolved.texts.map((text) => `上游文档（${text.name}）：\n${text.text}`),
+              "静态联系表不包含可听声音；任何对白、音乐或音效判断都必须标记为待听觉确认。",
+            ].join("\n");
+            const result = await promptNodeClient.run({
+              canvasId: CANVAS_ID,
+              sourceNodeId: nodeKey,
+              providerConnectionId: provider.provider.id,
+              modelDefinitionId: model.definitionId,
+              mode: "viral_remix",
+              task: "generate",
+              userPrompt,
+              visionImages: contactSheets.sheets.map((sheet) => ({
+                dataUrl: sheet.dataUrl,
+                displayName: `${input.name} · ${sheet.displayName}`,
+              })),
+            });
+            documents.push(
+              inputs.length === 1
+                ? result.optimizedPrompt
+                : `# 视频 ${index + 1}：${input.name}\n\n${result.optimizedPrompt}`,
+            );
+            patchNode("viralRemix", nodeKey, (item) => ({
+              ...item,
+              config: { ...item.config, currentDocument: documents.join("\n\n---\n\n") },
+            }));
+          }
           frontendLog(
             "info",
-            `[viral-remix] 联系表完成: node=${nodeKey}, duration=${contactSheets.duration.toFixed(3)}s, overview=${contactSheets.overviewFrameCount}, tail=${contactSheets.tailFrameCount}, sheets=${contactSheets.sheets.length}`,
-          );
-          return promptNodeClient.run({
-            canvasId: CANVAS_ID,
-            sourceNodeId: nodeKey,
-            providerConnectionId: provider.provider.id,
-            modelDefinitionId: model.definitionId,
-            mode: "viral_remix",
-            task: "generate",
-            userPrompt,
-            visionImages: contactSheets.sheets.map((sheet) => ({
-              dataUrl: sheet.dataUrl,
-              displayName: sheet.displayName,
-            })),
-          });
-        })
-        .then((result) => {
-          patchNode("viralRemix", nodeKey, (item) => ({
-            ...item,
-            config: { ...item.config, currentDocument: result.optimizedPrompt },
-          }));
-          frontendLog(
-            "info",
-            `[viral-remix] 复刻方案完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符`,
+            `[viral-remix] 全部复刻方案完成: node=${nodeKey}, inputs=${inputs.length}`,
           );
         })
         .catch((error: unknown) => {
@@ -3663,12 +3573,9 @@ export function WorkspaceApp() {
     },
     [
       providerCatalog,
-      assetEdges,
-      assetNodes,
-      outputNodes,
+      canvasInputsFor,
       setNodeStartError,
       startingNodeKeys,
-      videoDownloaderNodes,
       viralRemixNodes,
       patchNode,
     ],
@@ -3747,11 +3654,7 @@ export function WorkspaceApp() {
     [addNode, assetProvider?.id, dropPosition],
   );
 
-  /**
-   * 连线拖拽结束：素材与已保存产物可连入图片/视频生成节点作为参考媒体；
-   * 图片素材与已保存的图片/视频产物还可连入提示词节点做多模态参考理解，
-   * 提示词只可连入图片/视频节点；剧本节点可作为工业级分镜节点的实时文档输入。
-   */
+  /** 连线保存节点身份；全部参数通过共享解析器在执行时读取。 */
   const connectCanvasNodes = useCallback(
     (fromKey: string, toKey: string) => {
       const promptSource = genNodes.find((node) => node.key === fromKey && node.kind === "prompt");
@@ -3987,42 +3890,10 @@ export function WorkspaceApp() {
     [removeAssetEdge, selectEdge, selectedEdgeId],
   );
 
-  /** 指定生成节点当前连接的素材/产物媒体（按建立顺序）。
-   * 支持素材链式连接：素材A→素材B→生成节点时，A 与 B 均作为生成节点输入。 */
+  /** 所有上游路径共用身份、顺序和循环去重规则。 */
   const generationInputs = useCallback(
-    (nodeKey: string): readonly GenerationMediaInput[] => {
-      const visited = new Set<string>();
-      const collected: GenerationMediaInput[] = [];
-      // BFS 逐层收集：先直接连接的素材/产物，再其上游素材，避免循环引用。
-      const queue: string[] = (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).map(
-        (edge) => edge.fromKey,
-      );
-      while (queue.length > 0) {
-        const sourceKey = queue.shift()!;
-        if (visited.has(sourceKey)) continue;
-        visited.add(sourceKey);
-        const asset = assetNodeByKey.get(sourceKey);
-        if (asset) {
-          collected.push(assetGenerationInput(asset));
-          // 素材的上游素材继续入队，实现链式传递。
-          for (const upstreamEdge of canvasEdgeIndex.byTarget.get(sourceKey) ?? []) {
-            queue.push(upstreamEdge.fromKey);
-          }
-          continue;
-        }
-        const output = outputNodeByKey.get(sourceKey);
-        const input = output ? outputGenerationInput(output) : null;
-        if (input) collected.push(input);
-      }
-      const inherited = inheritedVideoAssetInputs(
-        nodeKey,
-        canvasEdgeIndex.byTarget,
-        assetNodeByKey,
-        genTopologyByKey,
-      ).map((input) => assetGenerationInput(input.node));
-      return [...collected, ...inherited];
-    },
-    [assetNodeByKey, canvasEdgeIndex, genTopologyByKey, outputNodeByKey],
+    (nodeKey: string): readonly GenerationMediaInput[] => canvasInputsFor(nodeKey).media,
+    [canvasInputsFor],
   );
 
   /** 以视口中心为锚点缩放到目标百分比（键盘与缩放按钮共用），落点由 onMoveEnd 同步回 store。 */
@@ -4758,73 +4629,32 @@ export function WorkspaceApp() {
   /** 每个生成节点当前连线的素材输入（按建立顺序，携带连线 id 供解绑）。 */
   const connectedInputsByNode = useMemo(() => {
     const map = new Map<string, ConnectedAssetInput[]>();
-    for (const edge of assetEdges) {
-      const asset = assetNodeByKey.get(edge.fromKey);
-      const output = outputNodeByKey.get(edge.fromKey);
-      const outputInput = output ? outputGenerationInput(output) : null;
-      if (asset == null && outputInput == null) continue;
-      const list = map.get(edge.toKey) ?? [];
-      list.push(
-        asset
-          ? {
-              key: asset.key,
-              name: asset.name,
-              kind: asset.kind,
-              edgeId: edge.id,
-              sourceLabel: "素材",
-              previewUrl: asset.previewUrl,
-            }
-          : {
-              key: outputInput!.key,
-              name: outputInput!.name,
-              kind: outputInput!.kind,
-              edgeId: edge.id,
-              sourceLabel: "产物",
-              previewUrl: outputInput!.previewUrl ?? null,
-            },
+    for (const node of genNodes) {
+      map.set(
+        node.key,
+        canvasInputsFor(node.key).media.map((input) => ({
+          ...input,
+          previewUrl: input.previewUrl ?? null,
+        })),
       );
-      map.set(edge.toKey, list);
     }
     return map;
-  }, [assetEdges, assetNodeByKey, outputNodeByKey]);
+  }, [canvasInputsFor, genNodes]);
 
-  /** 视频合成节点的有效输入：仅接收可播放的视频素材/产物，并按节点内保存顺序排列。 */
+  /** 所有上游节点中的可读取视频，按节点保存的顺序排列。 */
   const videoComposerInputsByNode = useMemo(() => {
     const map = new Map<string, VideoComposerInput[]>();
     for (const composer of videoComposerNodeByKey.values()) {
-      const connected: VideoComposerInput[] = [];
-      for (const edge of canvasEdgeIndex.byTarget.get(composer.key) ?? []) {
-        const asset = assetNodeByKey.get(edge.fromKey);
-        if (asset?.videoUrl) {
-          connected.push({
-            key: asset.key,
-            name: asset.name,
-            src: asset.videoUrl,
-            sourceLabel: "素材",
-            edgeId: edge.id,
-            // ffmpeg 可直读 http(s)；其余形式（如会话内 blob）留给 MediaRecorder 路径。
-            ffmpegSource: /^https?:\/\//i.test(asset.videoUrl) ? asset.videoUrl : null,
-          });
-          continue;
-        }
-        const candidate = outputNodeByKey.get(edge.fromKey);
-        const output =
-          candidate?.mediaType === "video" &&
-          (candidate.finalPath != null || candidate.previewSrc != null)
-            ? candidate
-            : null;
-        const src = output?.finalPath ? toMediaSrc(output.finalPath) : (output?.previewSrc ?? null);
-        if (output && src) {
-          connected.push({
-            key: output.key,
-            name: output.name ?? "未命名视频产物",
-            src,
-            sourceLabel: "产物",
-            edgeId: edge.id,
-            ffmpegSource: output.finalPath,
-          });
-        }
-      }
+      const connected: VideoComposerInput[] = canvasInputsFor(composer.key)
+        .media.filter((input) => input.kind === "video" && input.src != null)
+        .map((input) => ({
+          key: input.key,
+          name: input.name,
+          src: input.src!,
+          sourceLabel: input.sourceLabel,
+          edgeId: input.edgeId,
+          ffmpegSource: input.finalPath ?? (/^https?:\/\//i.test(input.src!) ? input.src : null),
+        }));
       const order = normalizeVideoInputOrder(
         composer.config.inputOrder,
         connected.map((input) => input.key),
@@ -4838,159 +4668,70 @@ export function WorkspaceApp() {
       map.set(composer.key, connected);
     }
     return map;
-  }, [assetNodeByKey, canvasEdgeIndex, outputNodeByKey, videoComposerNodeByKey]);
+  }, [canvasInputsFor, videoComposerNodeByKey]);
 
-  const inputOrderByEdge = useMemo(
-    () => buildInputOrderByEdge(connectedInputsByNode, videoComposerInputsByNode),
-    [connectedInputsByNode, videoComposerInputsByNode],
-  );
+  const inputOrderByEdge = useMemo(() => {
+    const direct = new Map(
+      [...canvasEdgeIndex.byTarget].map(([key, edges]) => [
+        key,
+        edges.map((edge) => ({ edgeId: edge.id })),
+      ]),
+    );
+    return buildInputOrderByEdge(direct);
+  }, [canvasEdgeIndex]);
 
-  const latestDownloadOutputBySource = useMemo(() => {
-    const map = new Map<string, OutputNodeData>();
-    for (const output of outputNodeByKey.values()) {
-      if (output.sourceNodeId && output.origin === "download" && output.mediaType === "video") {
-        map.set(output.sourceNodeId, output);
-      }
-    }
-    return map;
-  }, [outputNodeByKey]);
-
-  /** 视频合成节点的最近一次完成产物（供合成节点直接连线到下游工具时跟随）。 */
-  const latestCompositionOutputBySource = useMemo(() => {
-    const map = new Map<string, OutputNodeData>();
-    for (const output of outputNodeByKey.values()) {
-      if (output.sourceNodeId && output.origin === "composition" && output.mediaType === "video") {
-        map.set(output.sourceNodeId, output);
-      }
-    }
-    return map;
-  }, [outputNodeByKey]);
-
-  /** 爆款视频复刻节点的唯一视频输入；下载节点连接会自动跟随其最新完成产物。 */
   const viralRemixInputsByNode = useMemo(() => {
-    const map = new Map<string, ViralRemixVideoInput>();
-    for (const remixNode of viralRemixNodeByKey.values()) {
-      const edge = canvasEdgeIndex.byTarget.get(remixNode.key)?.[0];
-      if (!edge) continue;
-      const asset = assetNodeByKey.get(edge.fromKey);
-      if (asset?.kind === "video" && asset.videoUrl) {
-        map.set(remixNode.key, {
-          key: asset.key,
-          name: asset.name,
-          src: asset.videoUrl,
-          sourceLabel: "素材",
-          edgeId: edge.id,
-        });
-        continue;
-      }
-      const candidate = outputNodeByKey.get(edge.fromKey);
-      const output =
-        candidate?.mediaType === "video" &&
-        (candidate.finalPath != null || candidate.previewSrc != null)
-          ? candidate
-          : null;
-      if (output) {
-        map.set(remixNode.key, {
-          key: output.key,
-          name: output.name ?? "未命名视频产物",
-          src: output.finalPath ? toMediaSrc(output.finalPath) : (output.previewSrc ?? null),
-          sourceLabel: "产物",
-          edgeId: edge.id,
-        });
-        continue;
-      }
-      if (videoDownloaderNodeByKey.has(edge.fromKey)) {
-        const latestOutput = latestDownloadOutputBySource.get(edge.fromKey);
-        map.set(remixNode.key, {
-          key: edge.fromKey,
-          name: latestOutput?.name ?? "网络爆款视频下载",
-          src: latestOutput?.finalPath
-            ? toMediaSrc(latestOutput.finalPath)
-            : (latestOutput?.previewSrc ?? null),
+    const map = new Map<string, ViralRemixVideoInput[]>();
+    for (const node of viralRemixNodeByKey.values()) {
+      const resolved = canvasInputsFor(node.key);
+      const videos: ViralRemixVideoInput[] = resolved.media
+        .filter((input) => input.kind === "video")
+        .map((input) => ({
+          key: input.key,
+          name: input.name,
+          src: input.src,
+          sourceLabel: videoDownloaderNodeByKey.has(
+            outputNodeByKey.get(input.sourceKey)?.sourceNodeId ?? "",
+          )
+            ? "下载节点"
+            : input.sourceLabel,
+          edgeId: input.edgeId,
+        }));
+      for (const input of resolved.pending) {
+        if (!videoDownloaderNodeByKey.has(input.sourceKey)) continue;
+        videos.push({
+          key: input.sourceKey,
+          name: input.name,
+          src: null,
           sourceLabel: "下载节点",
-          edgeId: edge.id,
+          edgeId: input.edgeId,
         });
       }
+      map.set(node.key, videos);
     }
     return map;
-  }, [
-    assetNodeByKey,
-    canvasEdgeIndex,
-    latestDownloadOutputBySource,
-    outputNodeByKey,
-    videoDownloaderNodeByKey,
-    viralRemixNodeByKey,
-  ]);
+  }, [canvasInputsFor, videoDownloaderNodeByKey, outputNodeByKey, viralRemixNodeByKey]);
 
-  /** 视频抽帧节点的有效输入：仅接收可播放的视频（素材/产物/下载与合成节点），
-   *  解析出可交给 Rust FFmpeg 的本地路径或 http(s) 地址。 */
   const frameExtractorInputsByNode = useMemo(() => {
     const map = new Map<string, FrameExtractorVideoInput[]>();
     for (const node of frameExtractorNodeByKey.values()) {
-      const connected: FrameExtractorVideoInput[] = [];
-      for (const edge of canvasEdgeIndex.byTarget.get(node.key) ?? []) {
-        const asset = assetNodeByKey.get(edge.fromKey);
-        if (asset?.kind === "video" && asset.videoUrl) {
-          connected.push({
-            key: asset.key,
-            name: asset.name,
-            src: asset.videoUrl,
-            sourceLabel: "素材",
-            edgeId: edge.id,
-            finalPath: /^https?:\/\//i.test(asset.videoUrl) ? asset.videoUrl : null,
-          });
-          continue;
-        }
-        const candidate = outputNodeByKey.get(edge.fromKey);
-        const output =
-          candidate?.mediaType === "video" &&
-          (candidate.finalPath != null || candidate.previewSrc != null)
-            ? candidate
-            : null;
-        if (output) {
-          connected.push({
-            key: output.key,
-            name: output.name ?? "未命名视频产物",
-            src: output.finalPath ? toMediaSrc(output.finalPath) : (output.previewSrc ?? null),
-            sourceLabel: "产物",
-            edgeId: edge.id,
-            finalPath: output.finalPath,
-          });
-          continue;
-        }
-        // 下载/合成节点直接连线：跟随该节点最近一次完成的视频产物。
-        if (
-          videoDownloaderNodeByKey.has(edge.fromKey) ||
-          videoComposerNodeByKey.has(edge.fromKey)
-        ) {
-          const latestOutput =
-            latestDownloadOutputBySource.get(edge.fromKey) ??
-            latestCompositionOutputBySource.get(edge.fromKey);
-          if (latestOutput?.finalPath) {
-            connected.push({
-              key: edge.fromKey,
-              name: latestOutput.name ?? "视频工具产物",
-              src: toMediaSrc(latestOutput.finalPath),
-              sourceLabel: "产物",
-              edgeId: edge.id,
-              finalPath: latestOutput.finalPath,
-            });
-          }
-        }
-      }
-      map.set(node.key, connected);
+      map.set(
+        node.key,
+        canvasInputsFor(node.key)
+          .media.filter((input) => input.kind === "video")
+          .map((input) => ({
+            key: input.key,
+            name: input.name,
+            src: input.src,
+            sourceLabel: input.sourceLabel,
+            edgeId: input.edgeId,
+            finalPath:
+              input.finalPath ?? (input.src && /^https?:\/\//i.test(input.src) ? input.src : null),
+          })),
+      );
     }
     return map;
-  }, [
-    assetNodeByKey,
-    canvasEdgeIndex,
-    latestCompositionOutputBySource,
-    latestDownloadOutputBySource,
-    outputNodeByKey,
-    videoComposerNodeByKey,
-    videoDownloaderNodeByKey,
-    frameExtractorNodeByKey,
-  ]);
+  }, [canvasInputsFor, frameExtractorNodeByKey]);
 
   const videoCompositionFormat = useMemo(
     () => preferredVideoCompositionFormat()?.extension.toUpperCase() ?? null,
@@ -5115,6 +4856,17 @@ export function WorkspaceApp() {
       const node = videoComposerNodes.find((candidate) => candidate.key === nodeKey);
       const inputs = videoComposerInputsByNode.get(nodeKey) ?? [];
       if (!node || videoComposerRuns[nodeKey]?.status === "running") return;
+      if (canvasInputsFor(nodeKey).media.some((input) => input.kind === "video" && !input.src)) {
+        setVideoComposerRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            status: "error",
+            progress: 0,
+            error: "部分上游视频尚无可读取的地址，请先完成生成或保存视频。",
+          },
+        }));
+        return;
+      }
       if (inputs.length < 2) {
         setVideoComposerRuns((current) => ({
           ...current,
@@ -5225,6 +4977,7 @@ export function WorkspaceApp() {
         });
     },
     [
+      canvasInputsFor,
       videoComposerInputsByNode,
       videoComposerNodes,
       videoComposerRuns,
@@ -5338,6 +5091,82 @@ export function WorkspaceApp() {
     [outputNodes],
   );
 
+  const videoDownloadSourcesByNode = useMemo(
+    () =>
+      new Map(
+        videoDownloaderNodes.map((node) => {
+          const resolved = canvasInputsFor(node.key);
+          return [
+            node.key,
+            videoDownloadInputs(node.config.url, [
+              ...resolved.texts.map((input) => input.text),
+              ...resolved.media
+                .filter(
+                  (input) => input.kind === "video" && input.src && /^https?:\/\//i.test(input.src),
+                )
+                .map((input) => input.src!),
+            ]),
+          ] as const;
+        }),
+      ),
+    [canvasInputsFor, videoDownloaderNodes],
+  );
+  const submitNextVideoDownload = useCallback((nodeKey: string) => {
+    const queue = videoDownloadQueuesRef.current.get(nodeKey);
+    const source = queue?.sources.shift();
+    if (!queue || !source) return;
+    queue.activeJobId = "";
+    setVideoDownloaderRuns((current) => ({
+      ...current,
+      [nodeKey]: {
+        jobId: "",
+        status: "running",
+        preparingEngine: false,
+        progress: null,
+        qualityHint: null,
+        watermarkRemoved: false,
+        error: null,
+      },
+    }));
+    void videoDownloaderClient
+      .startDownload(source)
+      .then((record) => {
+        if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) {
+          void videoDownloaderClient.cancelJob(record.jobId).catch(() => undefined);
+          return;
+        }
+        queue.activeJobId = record.jobId;
+        setVideoDownloaderRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            jobId: record.jobId,
+            status: "running",
+            preparingEngine: false,
+            progress: null,
+            qualityHint: null,
+            watermarkRemoved: false,
+            error: null,
+          },
+        }));
+      })
+      .catch((error: unknown) => {
+        if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) return;
+        videoDownloadQueuesRef.current.delete(nodeKey);
+        setVideoDownloaderRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            jobId: "",
+            status: "error",
+            preparingEngine: false,
+            progress: null,
+            qualityHint: null,
+            watermarkRemoved: false,
+            error: formatRawBackendError(error),
+          },
+        }));
+      });
+  }, []);
+
   // 活动下载任务（运行中且已拿到 jobId）：查询 key 随该集合变化，任务到达
   // 终态后离开集合，轮询随之停止；定时与清理由 React Query 管理。
   const activeDownloadJobs = useMemo(
@@ -5391,6 +5220,8 @@ export function WorkspaceApp() {
         | undefined;
       if (results == null) return;
       for (const { nodeKey, jobId, job, error } of results) {
+        const queue = videoDownloadQueuesRef.current.get(nodeKey);
+        if (queue?.activeJobId !== jobId) continue;
         // 运行中：推进进度（updater 内用 jobId 守卫，节点换任务后旧结果不写入）。
         if (job != null && (job.status === "preparing_engine" || job.status === "downloading")) {
           const preparingEngine = job.status === "preparing_engine";
@@ -5436,7 +5267,7 @@ export function WorkspaceApp() {
               key: outputKey,
               resultKey: null,
               sourceNodeId: nodeKey,
-              taskId: job.jobId,
+              taskId: queue.batchId,
               mediaType: "video",
               origin: "download",
               finalPath: job.finalPath,
@@ -5445,6 +5276,11 @@ export function WorkspaceApp() {
               ...nextVideoDownloaderOutputSlot(startNode, current),
             }));
           }
+          if (queue.sources.length > 0) {
+            submitNextVideoDownload(nodeKey);
+            continue;
+          }
+          videoDownloadQueuesRef.current.delete(nodeKey);
           setVideoDownloaderRuns((current) => {
             const previous = current[nodeKey];
             if (previous?.jobId !== jobId) return current;
@@ -5464,6 +5300,7 @@ export function WorkspaceApp() {
           frontendLog("info", `[downloader] 视频下载完成: node=${nodeKey}, 文件=${fileName}`);
           continue;
         }
+        videoDownloadQueuesRef.current.delete(nodeKey);
         if (job != null && job.status === "cancelled") {
           setVideoDownloaderRuns((current) => {
             const previous = current[nodeKey];
@@ -5507,14 +5344,14 @@ export function WorkspaceApp() {
         frontendLog("error", `[downloader] 视频下载失败: node=${nodeKey}, ${message}`);
       }
     });
-  }, [addOutput, queryClient, videoDownloaderNodes]);
+  }, [addOutput, queryClient, videoDownloaderNodes, submitNextVideoDownload]);
 
   const handleStartVideoDownload = useCallback(
     (nodeKey: string) => {
       const node = videoDownloaderNodes.find((candidate) => candidate.key === nodeKey);
-      if (!node || videoDownloaderRuns[nodeKey]?.status === "running") return;
-      const url = node.config.url.trim();
-      if (url.length === 0) {
+      if (!node || videoDownloadQueuesRef.current.has(nodeKey)) return;
+      const sources = videoDownloadSourcesByNode.get(nodeKey) ?? [];
+      if (sources.length === 0) {
         setVideoDownloaderRuns((current) => ({
           ...current,
           [nodeKey]: {
@@ -5524,69 +5361,49 @@ export function WorkspaceApp() {
             progress: null,
             qualityHint: null,
             watermarkRemoved: false,
-            error: "请先粘贴要下载的视频链接。",
+            error: "请填写视频链接，或从上游文本、视频传入 HTTP(S) 地址。",
           },
         }));
         return;
       }
-      setVideoDownloaderRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: "",
-          status: "running",
-          preparingEngine: false,
-          progress: null,
-          qualityHint: null,
-          watermarkRemoved: false,
-          error: null,
-        },
-      }));
-      videoDownloaderClient
-        .startDownload(url)
-        .then((record) => {
-          setVideoDownloaderRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.status !== "running") return current;
-            return { ...current, [nodeKey]: { ...previous, jobId: record.jobId } };
-          });
-          // 查询按活动任务集合自动开始轮询；这里只记下启动时节点快照供落卡定位。
-          videoDownloaderStartNodesRef.current.set(nodeKey, node);
-          frontendLog("info", `[downloader] 下载任务已提交: node=${nodeKey}, job=${record.jobId}`);
-        })
-        .catch((error: unknown) => {
-          setVideoDownloaderRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.status !== "running") return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                ...previous,
-                status: "error",
-                error: formatRawBackendError(error),
-              },
-            };
-          });
-          frontendLog("error", `[downloader] 下载任务提交失败: ${formatRawBackendError(error)}`);
-        });
+      videoDownloaderStartNodesRef.current.set(nodeKey, node);
+      videoDownloadQueuesRef.current.set(nodeKey, {
+        sources: [...sources],
+        batchId: `download-batch:${Date.now()}:${nodeKey}`,
+        activeJobId: "",
+      });
+      submitNextVideoDownload(nodeKey);
     },
-    [videoDownloaderNodes, videoDownloaderRuns],
+    [videoDownloaderNodes, videoDownloadSourcesByNode, submitNextVideoDownload],
   );
 
-  const handleCancelVideoDownload = useCallback(
-    (nodeKey: string) => {
-      const run = videoDownloaderRuns[nodeKey];
-      if (run?.status !== "running" || run.jobId.length === 0) return;
-      videoDownloaderClient.cancelJob(run.jobId).catch((error: unknown) => {
+  const handleCancelVideoDownload = useCallback((nodeKey: string) => {
+    const queue = videoDownloadQueuesRef.current.get(nodeKey);
+    if (!queue) return;
+    videoDownloadQueuesRef.current.delete(nodeKey);
+    setVideoDownloaderRuns((current) => ({
+      ...current,
+      [nodeKey]: {
+        jobId: queue.activeJobId,
+        status: "cancelled",
+        preparingEngine: false,
+        progress: null,
+        qualityHint: null,
+        watermarkRemoved: false,
+        error: null,
+      },
+    }));
+    if (queue.activeJobId)
+      void videoDownloaderClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
         frontendLog("error", `[downloader] 取消请求失败: ${formatRawBackendError(error)}`);
       });
-    },
-    [videoDownloaderRuns],
-  );
+  }, []);
 
   /** 删除视频下载节点（保留已经生成的产物卡片）。 */
   const removeVideoDownloaderNode = useCallback(
     (key: string) => {
       videoDownloaderStartNodesRef.current.delete(key);
+      videoDownloadQueuesRef.current.delete(key);
       const run = videoDownloaderRuns[key];
       if (run?.status === "running" && run.jobId.length > 0) {
         void videoDownloaderClient.cancelJob(run.jobId).catch(() => undefined);
@@ -5603,6 +5420,56 @@ export function WorkspaceApp() {
   );
 
   // ---- 视频抽帧：任务轮询与终态落卡 ----
+
+  const submitNextFrameExtraction = useCallback((nodeKey: string) => {
+    const queue = frameExtractionQueuesRef.current.get(nodeKey);
+    const source = queue?.sources.shift();
+    if (!queue || !source) return;
+    queue.activeJobId = "";
+    setFrameExtractorRuns((current) => ({
+      ...current,
+      [nodeKey]: {
+        jobId: "",
+        status: "running",
+        preparingEngine: false,
+        progress: null,
+        error: null,
+      },
+    }));
+    void videoFrameExtractionClient
+      .startExtraction(source, queue.timestamps)
+      .then((record) => {
+        if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) {
+          void videoFrameExtractionClient.cancelJob(record.jobId).catch(() => undefined);
+          return;
+        }
+        queue.activeJobId = record.jobId;
+        setFrameExtractorRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            jobId: record.jobId,
+            status: "running",
+            preparingEngine: false,
+            progress: null,
+            error: null,
+          },
+        }));
+      })
+      .catch((error: unknown) => {
+        if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
+        frameExtractionQueuesRef.current.delete(nodeKey);
+        setFrameExtractorRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            jobId: "",
+            status: "error",
+            preparingEngine: false,
+            progress: null,
+            error: formatRawBackendError(error),
+          },
+        }));
+      });
+  }, []);
 
   // 活动抽帧任务：查询 key 随运行任务集合变化，任务到终态后离开集合停止轮询。
   const activeFrameExtractionJobs = useMemo(
@@ -5658,6 +5525,8 @@ export function WorkspaceApp() {
         | undefined;
       if (results == null) return;
       for (const { nodeKey, jobId, job, error } of results) {
+        const queue = frameExtractionQueuesRef.current.get(nodeKey);
+        if (queue?.activeJobId !== jobId) continue;
         if (job != null && (job.status === "preparing_engine" || job.status === "processing")) {
           const preparingEngine = job.status === "preparing_engine";
           setFrameExtractorRuns((current) => {
@@ -5700,7 +5569,7 @@ export function WorkspaceApp() {
                 key: outputNodeKey(),
                 resultKey: null,
                 sourceNodeId: nodeKey,
-                taskId: jobId,
+                taskId: queue.batchId,
                 mediaType: "image",
                 origin: "frame_extract",
                 finalPath: frame.path,
@@ -5710,6 +5579,11 @@ export function WorkspaceApp() {
               }));
             }
           }
+          if (queue.sources.length > 0) {
+            submitNextFrameExtraction(nodeKey);
+            continue;
+          }
+          frameExtractionQueuesRef.current.delete(nodeKey);
           setFrameExtractorRuns((current) => {
             const previous = current[nodeKey];
             if (previous?.jobId !== jobId) return current;
@@ -5730,6 +5604,7 @@ export function WorkspaceApp() {
           );
           continue;
         }
+        frameExtractionQueuesRef.current.delete(nodeKey);
         if (job != null && job.status === "cancelled") {
           setFrameExtractorRuns((current) => {
             const previous = current[nodeKey];
@@ -5769,30 +5644,29 @@ export function WorkspaceApp() {
         frontendLog("error", `[frame-extractor] 视频抽帧失败: node=${nodeKey}, ${message}`);
       }
     });
-  }, [addOutput, queryClient, frameExtractorNodes]);
+  }, [addOutput, queryClient, frameExtractorNodes, submitNextFrameExtraction]);
 
-  /** 开始抽帧：解析视频来源（连线优先，其次节点内手动路径），提交后端任务。 */
+  /** 每个上游视频依次抽帧；同一批次保留所有来源的完整帧产物。 */
   const handleStartFrameExtraction = useCallback(
     (nodeKey: string) => {
-      // 注意：config 变化必须读节点列表（typeNodes，永远新鲜）；frameExtractorNodeByKey 是
-      // 连线派生投影，对 config 变化会复用旧节点对象，会导致抽帧秒数读取为空。
       const node = frameExtractorNodes.find((candidate) => candidate.key === nodeKey);
-      if (!node || frameExtractorRuns[nodeKey]?.status === "running") return;
+      if (!node || frameExtractionQueuesRef.current.has(nodeKey)) return;
       const inputs = frameExtractorInputsByNode.get(nodeKey) ?? [];
-      const connected = inputs[0];
-      const source =
-        connected ??
-        (node.config.videoPath.trim().length > 0
-          ? {
-              key: "manual",
-              name: fileNameFromPath(node.config.videoPath.trim()),
-              src: node.config.videoPath.trim(),
-              sourceLabel: "素材" as const,
-              edgeId: "",
-              finalPath: node.config.videoPath.trim(),
-            }
-          : null);
-      if (source == null) {
+      const sources =
+        inputs.length > 0
+          ? inputs.map((input) => input.finalPath)
+          : node.config.videoPath.trim()
+            ? [node.config.videoPath.trim()]
+            : [];
+      const error =
+        sources.length === 0
+          ? "请提供上游视频或填写视频文件路径。"
+          : sources.some((source) => !source)
+            ? "部分上游视频没有可读取的本地路径或 HTTP(S) 地址，请先保存视频。"
+            : node.config.timestamps.length === 0
+              ? "请先添加至少一个抽帧秒数。"
+              : null;
+      if (error) {
         setFrameExtractorRuns((current) => ({
           ...current,
           [nodeKey]: {
@@ -5800,99 +5674,48 @@ export function WorkspaceApp() {
             status: "error",
             preparingEngine: false,
             progress: null,
-            error: "请先连入视频（素材/下载/合成产物）或填写视频文件路径。",
+            error,
           },
         }));
         return;
       }
-      if (source.finalPath == null) {
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            error: "当前视频来源不是本地文件，暂无法抽帧。",
-          },
-        }));
-        return;
-      }
-      const timestamps = node.config.timestamps;
-      if (timestamps.length === 0) {
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            error: "请先添加至少一个抽帧秒数。",
-          },
-        }));
-        return;
-      }
-      setFrameExtractorRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: "",
-          status: "running",
-          preparingEngine: false,
-          progress: null,
-          error: null,
-        },
-      }));
-      videoFrameExtractionClient
-        .startExtraction(source.finalPath, timestamps)
-        .then((record) => {
-          setFrameExtractorRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.status !== "running") return current;
-            return { ...current, [nodeKey]: { ...previous, jobId: record.jobId } };
-          });
-          frameExtractorStartNodesRef.current.set(nodeKey, node);
-          frontendLog(
-            "info",
-            `[frame-extractor] 抽帧任务已提交: node=${nodeKey}, job=${record.jobId}`,
-          );
-        })
-        .catch((error: unknown) => {
-          setFrameExtractorRuns((current) => {
-            const previous = current[nodeKey];
-            if (previous?.status !== "running") return current;
-            return {
-              ...current,
-              [nodeKey]: {
-                ...previous,
-                status: "error",
-                error: formatRawBackendError(error),
-              },
-            };
-          });
-          frontendLog(
-            "error",
-            `[frame-extractor] 抽帧任务提交失败: ${formatRawBackendError(error)}`,
-          );
-        });
+      frameExtractorStartNodesRef.current.set(nodeKey, node);
+      frameExtractionQueuesRef.current.set(nodeKey, {
+        sources: sources as string[],
+        timestamps: node.config.timestamps,
+        batchId: `frame-batch:${Date.now()}:${nodeKey}`,
+        activeJobId: "",
+      });
+      submitNextFrameExtraction(nodeKey);
     },
-    [frameExtractorNodes, frameExtractorInputsByNode, frameExtractorRuns],
+    [frameExtractorNodes, frameExtractorInputsByNode, submitNextFrameExtraction],
   );
 
-  const handleCancelFrameExtraction = useCallback(
-    (nodeKey: string) => {
-      const run = frameExtractorRuns[nodeKey];
-      if (run?.status !== "running" || run.jobId.length === 0) return;
-      videoFrameExtractionClient.cancelJob(run.jobId).catch((error: unknown) => {
+  const handleCancelFrameExtraction = useCallback((nodeKey: string) => {
+    const queue = frameExtractionQueuesRef.current.get(nodeKey);
+    if (!queue) return;
+    frameExtractionQueuesRef.current.delete(nodeKey);
+    setFrameExtractorRuns((current) => ({
+      ...current,
+      [nodeKey]: {
+        jobId: queue.activeJobId,
+        status: "cancelled",
+        preparingEngine: false,
+        progress: null,
+        error: null,
+      },
+    }));
+    if (queue.activeJobId)
+      void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
         frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
       });
-    },
-    [frameExtractorRuns],
-  );
+  }, []);
 
   /** 删除视频抽帧节点（保留已经生成的图片产物卡片）。 */
   const removeFrameExtractorNode = useCallback(
     (key: string) => {
       frameExtractorStartNodesRef.current.delete(key);
+      frameExtractionQueuesRef.current.delete(key);
       const run = frameExtractorRuns[key];
       if (run?.status === "running" && run.jobId.length > 0) {
         void videoFrameExtractionClient.cancelJob(run.jobId).catch(() => undefined);
@@ -5908,40 +5731,16 @@ export function WorkspaceApp() {
     [removeCanvasNode, frameExtractorRuns],
   );
 
-  /** 图片/视频节点从上游提示词节点继承的视觉参考图；这是连线派生数据，不额外写入画布文档。 */
-  const inheritedInputsByNode = useMemo(() => {
-    const map = new Map<string, InheritedAssetInput[]>();
-    for (const node of genTopologyByKey.values()) {
-      if (node.kind !== "video" && node.kind !== "image") continue;
-      const inherited = inheritedVideoAssetInputs(
-        node.key,
-        canvasEdgeIndex.byTarget,
-        assetNodeByKey,
-        genTopologyByKey,
-      ).map(({ node: asset, promptNodeKey }) => ({
-        key: asset.key,
-        name: asset.name,
-        kind: asset.kind,
-        promptNodeKey,
-        previewUrl: asset.previewUrl,
-      }));
-      if (inherited.length > 0) map.set(node.key, inherited);
-    }
-    return map;
-  }, [assetNodeByKey, canvasEdgeIndex, genTopologyByKey]);
-
-  /** 每个图片/视频节点当前接入的提示词节点（同一目标只保留最后一条）。 */
+  /** 文本输出可经任意中间节点传入；多个来源按连接顺序合并。 */
   const promptSourceByTarget = useMemo(() => {
-    const map = new Map<string, Extract<GenNodeData, { kind: "prompt" }>>();
-    for (const edge of assetEdges) {
-      const source = genNodeByKey.get(edge.fromKey);
-      const target = genTopologyByKey.get(edge.toKey);
-      if (source?.kind === "prompt" && target && target.kind !== "prompt") {
-        map.set(target.key, source);
-      }
+    const map = new Map<string, ReturnType<typeof canvasInputsFor>["texts"]>();
+    for (const node of genNodes) {
+      if (node.kind === "prompt") continue;
+      const texts = canvasInputsFor(node.key).texts;
+      if (texts.length) map.set(node.key, texts);
     }
     return map;
-  }, [assetEdges, genNodeByKey, genTopologyByKey]);
+  }, [canvasInputsFor, genNodes]);
 
   /** 提示词节点输出端显示的下游目标，供节点内解除单条连线。 */
   const promptTargetsBySource = useMemo(() => {
@@ -5973,62 +5772,38 @@ export function WorkspaceApp() {
     [generationInputs],
   );
 
-  /** 提示词节点输出变化或新建连线后，自动导入目标生成节点的提示内容。 */
+  /** 同步合并后的文本；同一上游版本保留用户手工编辑。 */
   useEffect(() => {
     if (!canvasHydrated) return;
-    const importedSources = importedPromptSourcesRef.current;
-    for (const targetKey of importedSources.keys()) {
-      if (!promptSourceByTarget.has(targetKey)) importedSources.delete(targetKey);
+    const imported = importedPromptSourcesRef.current;
+    for (const [targetKey, previous] of imported) {
+      if (promptSourceByTarget.has(targetKey)) continue;
+      // 断开最后一条来源时清除自动导入内容，保留用户另行修改的内容。
+      const generated = stripMarkdown(previous.text) || previous.text.trim();
+      if (promptContents.read(targetKey)?.plainText === generated) {
+        promptContents.replaceText(targetKey, "", mentionCandidatesFor(targetKey));
+      }
+      imported.delete(targetKey);
     }
-    for (const [targetKey, source] of promptSourceByTarget) {
-      const edgeId = assetEdges.find(
-        (edge) => edge.fromKey === source.key && edge.toKey === targetKey,
-      )?.id;
-      if (edgeId == null) continue;
-      const previous = importedSources.get(targetKey);
-      const sourceText = source.config.generatedPrompt;
-      const rawPrompt = source.config.generatedPrompt;
-      const strippedPrompt = stripMarkdown(rawPrompt);
-      // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
-      const generatedPrompt = strippedPrompt || rawPrompt.trim();
-      if (!generatedPrompt) {
-        importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
+    for (const [targetKey, sources] of promptSourceByTarget) {
+      const version = {
+        edgeId: sources.map((source) => source.edgeId).join("\n"),
+        sourceKey: sources.map((source) => source.sourceKey).join("\n"),
+        text: sources.map((source) => source.text).join("\n\n"),
+      };
+      const previous = imported.get(targetKey);
+      if (
+        previous?.edgeId === version.edgeId &&
+        previous.sourceKey === version.sourceKey &&
+        previous.text === version.text
+      )
         continue;
+      const text = stripMarkdown(version.text) || version.text.trim();
+      if (promptContents.replaceText(targetKey, text, mentionCandidatesFor(targetKey)) != null) {
+        imported.set(targetKey, version);
       }
-      const currentContent = promptContents.read(targetKey);
-      const shouldSkip =
-        previous?.edgeId === edgeId &&
-        previous.sourceKey === source.key &&
-        previous.text === sourceText;
-      if (shouldSkip) {
-        // 如果编辑器内容为空，或包含 markdown 格式标记（说明之前同步的是原始文本，未经过 stripMarkdown 处理），
-        // 强制重新同步，自动修复历史遗留的 markdown 格式问题。
-        const editorText = currentContent?.plainText ?? "";
-        const containsMarkdown =
-          editorText.includes("```") ||
-          /^#{1,6}\s/m.test(editorText) ||
-          /^[-_*]{3,}\s*$/m.test(editorText) ||
-          /^\s*[-*+]\s+/m.test(editorText);
-        if (editorText.trim() !== "" && !containsMarkdown) {
-          // 编辑器内容非空且不包含 markdown 格式，说明是用户手动修改或已正确同步，跳过
-          importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
-          continue;
-        }
-        // 否则强制重新同步
-      }
-      const replaced = promptContents.replaceText(
-        targetKey,
-        generatedPrompt,
-        mentionCandidatesFor(targetKey),
-      );
-      if (replaced == null) continue;
-      importedSources.set(targetKey, { edgeId, sourceKey: source.key, text: sourceText });
-      frontendLog(
-        "info",
-        `[canvas] 提示词节点输出已导入生成节点: source=${source.key}, target=${targetKey}, 字符 ${generatedPrompt.length}`,
-      );
     }
-  }, [assetEdges, canvasHydrated, mentionCandidatesFor, promptContents, promptSourceByTarget]);
+  }, [canvasHydrated, mentionCandidatesFor, promptContents, promptSourceByTarget]);
 
   const nodeDescriptorContext = useMemo(
     () => ({ providerCatalog, nodeModelSelections }),
@@ -6289,7 +6064,7 @@ export function WorkspaceApp() {
         selected: selectedNodeKey === node.key,
         data: {
           hasSourceHandle: true,
-          hasTargetHandle: false,
+          hasTargetHandle: true,
           content: (
             <CanvasDocumentSkillNode
               key={node.key}
@@ -6299,7 +6074,8 @@ export function WorkspaceApp() {
               running={startingNodeKeys.has(node.key)}
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
-              sourceInput={null}
+              sourceInputs={documentInputsByNode.get(node.key) ?? []}
+              connectedMedia={canvasInputsFor(node.key).media}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
               onRemove={removeScreenplayNode}
@@ -6330,6 +6106,8 @@ export function WorkspaceApp() {
       handleRemoveScreenplayMaterial,
       handleRunScreenplayNode,
       handleExportScreenplay,
+      documentInputsByNode,
+      canvasInputsFor,
     ],
   );
 
@@ -6342,7 +6120,7 @@ export function WorkspaceApp() {
         ...measuredFor(node),
         selected: selectedNodeKey === node.key,
         data: {
-          hasSourceHandle: false,
+          hasSourceHandle: true,
           hasTargetHandle: true,
           content: (
             <CanvasDocumentSkillNode
@@ -6353,7 +6131,8 @@ export function WorkspaceApp() {
               running={startingNodeKeys.has(node.key)}
               error={startErrorsByNode[node.key] ?? null}
               providerCatalog={providerCatalog}
-              sourceInput={screenplayInputByStoryboard.get(node.key) ?? null}
+              sourceInputs={documentInputsByNode.get(node.key) ?? []}
+              connectedMedia={canvasInputsFor(node.key).media}
               onSelect={selectNode}
               onNodeDragStart={ignoreLegacyNodeDrag}
               onRemove={removeStoryboardNode}
@@ -6372,7 +6151,8 @@ export function WorkspaceApp() {
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
-      screenplayInputByStoryboard,
+      documentInputsByNode,
+      canvasInputsFor,
       selectNode,
       ignoreLegacyNodeDrag,
       removeStoryboardNode,
@@ -6393,13 +6173,14 @@ export function WorkspaceApp() {
         ...measuredFor(node),
         selected: selectedNodeKey === node.key,
         data: {
-          hasSourceHandle: false,
+          hasSourceHandle: true,
           hasTargetHandle: true,
           content: (
             <KnowledgeVideoWorkflowNode
               key={node.key}
               node={node}
-              connectedInputs={workflowInputsByNode.get(node.key) ?? []}
+              connectedInputs={workflowInputsByNode.get(node.key)?.media ?? []}
+              connectedTexts={workflowInputsByNode.get(node.key)?.texts ?? []}
               onUnlink={removeAssetEdge}
               onRemoveHistoricalReference={(index) =>
                 patchNode("knowledgeVideoWorkflow", node.key, (current) => ({
@@ -6488,13 +6269,13 @@ export function WorkspaceApp() {
         ...measuredFor(node),
         selected: selectedNodeKey === node.key,
         data: {
-          hasSourceHandle: false,
+          hasSourceHandle: true,
           hasTargetHandle: true,
           content: (
             <CanvasViralRemixNode
               key={node.key}
               node={node}
-              input={viralRemixInputsByNode.get(node.key) ?? null}
+              inputs={viralRemixInputsByNode.get(node.key) ?? []}
               selected={selectedNodeKey === node.key}
               dragging={false}
               running={startingNodeKeys.has(node.key)}
@@ -6580,11 +6361,11 @@ export function WorkspaceApp() {
               startError={startErrorsByNode[node.key] ?? null}
               activeTask={activeTaskByNode.get(node.key) ?? null}
               connectedInputs={connectedInputsByNode.get(node.key) ?? []}
-              inheritedInputs={inheritedInputsByNode.get(node.key) ?? []}
+              inheritedInputs={[]}
               mentionCandidates={mentionCandidatesFor(node.key)}
               promptSourceName={
                 promptSourceByTarget.has(node.key)
-                  ? `提示词节点 ${promptSourceByTarget.get(node.key)?.key.slice(-6) ?? ""}`
+                  ? `${promptSourceByTarget.get(node.key)?.length ?? 0} 份文本`
                   : undefined
               }
               registerPromptInput={registerPromptInput}
@@ -6630,7 +6411,6 @@ export function WorkspaceApp() {
       updatePromptNodeConfig,
       handleRunPromptNode,
       activeTaskByNode,
-      inheritedInputsByNode,
       mentionCandidatesFor,
       promptSourceByTarget,
       registerPromptInput,
@@ -6697,11 +6477,12 @@ export function WorkspaceApp() {
         selected: selectedNodeKey === node.key,
         data: {
           hasSourceHandle: true,
-          hasTargetHandle: false,
+          hasTargetHandle: true,
           content: (
             <CanvasVideoDownloaderNode
               key={node.key}
               node={node}
+              downloadSources={videoDownloadSourcesByNode.get(node.key) ?? []}
               selected={selectedNodeKey === node.key}
               dragging={false}
               runState={videoDownloaderRuns[node.key]}
@@ -6725,6 +6506,7 @@ export function WorkspaceApp() {
       })),
     [
       videoDownloaderNodes,
+      videoDownloadSourcesByNode,
       selectedNodeKey,
       videoDownloaderRuns,
       downloaderEngineStatus,
@@ -6798,8 +6580,8 @@ export function WorkspaceApp() {
         ...measuredFor(node),
         selected: selectedNodeKey === node.key,
         data: {
-          hasSourceHandle: false,
-          hasTargetHandle: false,
+          hasSourceHandle: true,
+          hasTargetHandle: true,
           content: (
             <CanvasResultNode
               key={node.key}
@@ -6887,13 +6669,30 @@ export function WorkspaceApp() {
       ...frameExtractorFlowNodes,
       ...resultFlowNodes,
     ];
-    if (sourceEntry == null) return baseNodes;
     return baseNodes.map((node) => {
-      if (!node.data.hasTargetHandle) return node;
+      const incoming = (canvasEdgeIndex.byTarget.get(node.id) ?? []).filter(
+        (edge) => outputNodeByKey.get(node.id)?.sourceNodeId !== edge.fromKey,
+      );
+      const inputs = canvasInputsFor(node.id);
       const targetEntry = canvasEntryByKey(node.id);
-      if (targetEntry == null) return node;
-      if (!isSupportedConnection(sourceEntry, targetEntry)) return node;
-      return { ...node, data: { ...node.data, highlightTarget: true } };
+      return {
+        ...node,
+        data: {
+          ...node.data,
+          highlightTarget:
+            sourceEntry != null &&
+            targetEntry != null &&
+            isSupportedConnection(sourceEntry, targetEntry),
+          inputSummary: incoming.length
+            ? `已连接 ${incoming.length} 个来源 · ${inputs.media.length} 项媒体 · ${inputs.texts.length} 份文本${inputs.pending.length ? ` · 等待 ${inputs.pending.length} 项输出` : ""}`
+            : "",
+          inputDetails: [
+            ...inputs.media.map((input) => input.name),
+            ...inputs.texts.map((input) => input.name),
+            ...inputs.pending.map((input) => `${input.name}：等待可用输出`),
+          ].join("\n"),
+        },
+      };
     });
   }, [
     assetFlowNodes,
@@ -6909,6 +6708,9 @@ export function WorkspaceApp() {
     resultFlowNodes,
     connectionSourceKey,
     canvasEntryByKey,
+    canvasEdgeIndex,
+    canvasInputsFor,
+    outputNodeByKey,
   ]);
 
   const flowEdges = useMemo<CanvasFlowEdge[]>(
@@ -6942,7 +6744,9 @@ export function WorkspaceApp() {
                 ? "视频拼接与合成节点"
                 : frameExtractorSource
                   ? "视频抽帧节点"
-                  : (source?.name ?? outputSource?.name ?? "视频产物");
+                  : (source?.name ??
+                    outputSource?.name ??
+                    canvasNodeLabel(canvasEntryByKey(edge.fromKey)));
         const targetName = generationTarget
           ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}生成节点`
           : composerTarget
@@ -6955,13 +6759,8 @@ export function WorkspaceApp() {
                   ? "剧本转工业级分镜脚本节点"
                   : workflowTarget
                     ? "工作流节点"
-                    : (assetTarget?.name ?? "目标节点");
-        const connectionOrder =
-          workflowTarget || composerTarget != null || (generationTarget && !promptSource)
-            ? (inputOrderByEdge.get(edge.id) ?? 0)
-            : viralRemixTarget || frameExtractorTarget
-              ? 1
-              : 0;
+                    : (assetTarget?.name ?? canvasNodeLabel(canvasEntryByKey(edge.toKey)));
+        const connectionOrder = inputOrderByEdge.get(edge.id) ?? 0;
         return {
           id: edge.id,
           type: "canvas",
@@ -6969,9 +6768,9 @@ export function WorkspaceApp() {
           target: edge.toKey,
           sourceHandle: "source",
           targetHandle: "target",
-          selected: !isGenOutput && selectedEdgeId === edge.id,
-          selectable: !isGenOutput,
-          focusable: !isGenOutput,
+          selected: selectedEdgeId === edge.id,
+          selectable: true,
+          focusable: true,
           data: {
             label: `${sourceName} → ${targetName}`,
             edgeClassName: isGenOutput
@@ -6982,7 +6781,7 @@ export function WorkspaceApp() {
                   ? "edge edge--screenplay-storyboard"
                   : `edge edge--asset${workflowTarget || generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`,
             order: connectionOrder,
-            removable: !isGenOutput,
+            removable: true,
             onSelect: () => {
               selectEdge(edge.id);
               selectNode(null);
@@ -6993,6 +6792,7 @@ export function WorkspaceApp() {
       }),
     [
       assetEdges,
+      canvasEntryByKey,
       workflowInputsByNode,
       genTopologyByKey,
       videoComposerNodeByKey,

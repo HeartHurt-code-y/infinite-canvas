@@ -10,10 +10,16 @@ pub(super) struct ReferenceBytes {
     local_path: Option<PathBuf>,
 }
 
-fn validate_byte_size(display_name: &str, byte_size: u64, limit: u64) -> BackendResult<()> {
-    if byte_size == 0 || byte_size > limit {
+fn validate_byte_size(display_name: &str, byte_size: u64, limit: Option<u64>) -> BackendResult<()> {
+    if byte_size == 0 {
         return Err(BackendError::validation(
-            "reference material must be non-empty and no larger than 14 MiB",
+            "reference material must be non-empty",
+            json!({ "displayName": display_name, "byteSize": byte_size }),
+        ));
+    }
+    if limit.is_some_and(|maximum| byte_size > maximum) {
+        return Err(BackendError::validation(
+            "reference material exceeds the configured byte limit",
             json!({ "displayName": display_name, "byteSize": byte_size, "maximum": limit }),
         ));
     }
@@ -25,35 +31,36 @@ async fn read_local_bytes(
     display_name: &str,
     byte_limit: Option<u64>,
 ) -> BackendResult<ReferenceBytes> {
-    let bytes = if let Some(limit) = byte_limit {
-        if !path.is_absolute() {
-            return Err(BackendError::validation(
-                "reference material requires an absolute local path",
-                json!({ "displayName": display_name, "localPath": path }),
-            ));
-        }
-        let file = tokio::fs::File::open(path).await.map_err(|error| {
-            BackendError::validation(
-                "reference material is no longer available at its saved path",
-                json!({ "displayName": display_name, "localPath": path, "error": error.to_string() }),
-            )
-        })?;
-        let metadata = file.metadata().await?;
-        if !metadata.is_file() {
-            return Err(BackendError::validation(
-                "reference material must be a regular file",
-                json!({ "displayName": display_name, "localPath": path }),
-            ));
-        }
-        validate_byte_size(display_name, metadata.len(), limit)?;
-        // A file may grow after metadata is read; never buffer more than the limit plus one byte.
-        let mut bytes = Vec::new();
-        file.take(limit + 1).read_to_end(&mut bytes).await?;
-        validate_byte_size(display_name, bytes.len() as u64, limit)?;
-        bytes
+    if !path.is_absolute() {
+        return Err(BackendError::validation(
+            "reference material requires an absolute local path",
+            json!({ "displayName": display_name, "localPath": path }),
+        ));
+    }
+    let mut file = tokio::fs::File::open(path).await.map_err(|error| {
+        BackendError::validation(
+            "reference material is no longer available at its saved path",
+            json!({ "displayName": display_name, "localPath": path, "error": error.to_string() }),
+        )
+    })?;
+    let metadata = file.metadata().await?;
+    if !metadata.is_file() {
+        return Err(BackendError::validation(
+            "reference material must be a regular file",
+            json!({ "displayName": display_name, "localPath": path }),
+        ));
+    }
+    validate_byte_size(display_name, metadata.len(), byte_limit)?;
+    let mut bytes = Vec::new();
+    if let Some(limit) = byte_limit {
+        // Keep optional bounds for callers that explicitly request them, including a growing file.
+        file.take(limit.saturating_add(1))
+            .read_to_end(&mut bytes)
+            .await?;
     } else {
-        tokio::fs::read(path).await?
-    };
+        file.read_to_end(&mut bytes).await?;
+    }
+    validate_byte_size(display_name, bytes.len() as u64, byte_limit)?;
     Ok(ReferenceBytes {
         bytes,
         local_path: Some(path.to_path_buf()),
@@ -137,9 +144,7 @@ pub(super) async fn resolve_target_bytes(
             download_reference_bytes(deps.providers, url, display_name, byte_limit).await?
         }
     };
-    if let Some(limit) = byte_limit {
-        validate_byte_size(display_name, bytes.len() as u64, limit)?;
-    }
+    validate_byte_size(display_name, bytes.len() as u64, byte_limit)?;
     Ok(ReferenceBytes {
         bytes,
         local_path: None,
@@ -181,11 +186,7 @@ fn reference_payload(
 ) -> BackendResult<MultimodalPayload> {
     let display_name = input.display_name.trim();
     let kind = reference_kind(input.target.media_type())?;
-    validate_byte_size(
-        display_name,
-        material.bytes.len() as u64,
-        MAX_MULTIMODAL_FILE_BYTES,
-    )?;
+    validate_byte_size(display_name, material.bytes.len() as u64, None)?;
     let detected_mime = infer::get(&material.bytes)
         .map(|kind| kind.mime_type())
         .ok_or_else(|| {
@@ -239,45 +240,6 @@ fn reference_payload(
     })
 }
 
-pub(super) fn validate_material_count(count: usize) -> BackendResult<()> {
-    if count > MAX_MULTIMODAL_INPUTS {
-        return Err(BackendError::validation(
-            "a request accepts at most 8 local and connected multimodal materials",
-            json!({ "materialCount": count, "maximum": MAX_MULTIMODAL_INPUTS }),
-        ));
-    }
-    Ok(())
-}
-
-pub(super) fn validate_material_bytes(payloads: &[MultimodalPayload]) -> BackendResult<()> {
-    let total_bytes = payloads
-        .iter()
-        .map(|payload| {
-            payload.text.as_ref().map_or_else(
-                || {
-                    payload.base64.as_ref().map_or(0, |encoded| {
-                        // Base64 padding accounts for the original bytes without decoding a second copy.
-                        encoded.len() / 4 * 3
-                            - encoded
-                                .bytes()
-                                .rev()
-                                .take_while(|byte| *byte == b'=')
-                                .count()
-                    })
-                },
-                String::len,
-            ) as u64
-        })
-        .sum::<u64>();
-    if total_bytes > MAX_MULTIMODAL_TOTAL_BYTES {
-        return Err(BackendError::validation(
-            "local and connected multimodal materials exceed the 14 MiB total limit",
-            json!({ "totalBytes": total_bytes, "maximum": MAX_MULTIMODAL_TOTAL_BYTES }),
-        ));
-    }
-    Ok(())
-}
-
 pub(super) async fn append_reference_inputs(
     deps: &PromptVisionDeps<'_>,
     task_id: &str,
@@ -285,8 +247,6 @@ pub(super) async fn append_reference_inputs(
     inputs: &[PromptReferenceInput],
     payloads: &mut Vec<MultimodalPayload>,
 ) -> BackendResult<()> {
-    validate_material_count(payloads.len() + inputs.len())?;
-    validate_material_bytes(payloads)?;
     if inputs.is_empty() {
         return Ok(());
     }
@@ -300,17 +260,10 @@ pub(super) async fn append_reference_inputs(
             ));
         }
         reference_kind(input.target.media_type())?;
-        let material = resolve_target_bytes(
-            deps,
-            &task,
-            attempt_id,
-            &input.target,
-            display_name,
-            Some(MAX_MULTIMODAL_FILE_BYTES),
-        )
-        .await?;
+        let material =
+            resolve_target_bytes(deps, &task, attempt_id, &input.target, display_name, None)
+                .await?;
         payloads.push(reference_payload(input, material)?);
-        validate_material_bytes(payloads)?;
     }
     Ok(())
 }
@@ -359,9 +312,7 @@ mod tests {
             let mut original_bytes = signature.to_vec();
             original_bytes.extend_from_slice(&[42; 600]);
             tokio::fs::write(&path, &original_bytes).await.unwrap();
-            let material = read_local_bytes(&path, filename, Some(MAX_MULTIMODAL_FILE_BYTES))
-                .await
-                .unwrap();
+            let material = read_local_bytes(&path, filename, None).await.unwrap();
             let payload = reference_payload(&local_reference(&path, media_type), material).unwrap();
             assert_eq!(payload.mime_type, mime_type);
             assert_eq!(
@@ -413,25 +364,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connected_materials_reject_missing_oversized_and_mislabeled_files() {
+    async fn connected_materials_reject_missing_empty_relative_and_mislabeled_files() {
         let directory = tempfile::tempdir().unwrap();
         let missing = directory.path().join("missing.png");
         assert!(
-            read_local_bytes(&missing, "missing", Some(MAX_MULTIMODAL_FILE_BYTES))
+            read_local_bytes(&missing, "missing", None)
                 .await
                 .unwrap_err()
                 .to_string()
                 .contains("no longer available")
         );
-        let oversized = directory.path().join("oversized.mp4");
-        let file = tokio::fs::File::create(&oversized).await.unwrap();
-        file.set_len(MAX_MULTIMODAL_FILE_BYTES + 1).await.unwrap();
+        let empty = directory.path().join("empty.png");
+        tokio::fs::write(&empty, []).await.unwrap();
         assert!(
-            read_local_bytes(&oversized, "oversized", Some(MAX_MULTIMODAL_FILE_BYTES))
+            read_local_bytes(&empty, "empty", None)
                 .await
                 .unwrap_err()
                 .to_string()
-                .contains("14 MiB")
+                .contains("non-empty")
+        );
+        assert!(
+            read_local_bytes(Path::new("relative.png"), "relative", None)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("absolute local path")
+        );
+        assert!(
+            read_local_bytes(directory.path(), "directory", None)
+                .await
+                .is_err()
         );
         let thumbnail = b"\x89PNG\r\n\x1a\n rest-of-png-bytes".to_vec();
         let input = local_reference(&directory.path().join("video.mp4"), MediaType::Video);
@@ -463,38 +425,66 @@ mod tests {
         assert!(reference_kind(MediaType::Text).is_err());
     }
 
-    #[test]
-    fn local_and_connected_materials_share_count_and_raw_byte_limits() {
-        assert!(validate_material_count(8).is_ok());
+    #[tokio::test]
+    async fn connected_materials_above_previous_file_and_total_limits_keep_all_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("large.png");
+        let mut bytes = b"\x89PNG\r\n\x1a\n".to_vec();
+        bytes.resize(14 * 1024 * 1024 + 1, 42);
+        tokio::fs::write(&path, &bytes).await.unwrap();
+        let material = read_local_bytes(&path, "large", None).await.unwrap();
+        assert_eq!(material.bytes, bytes);
+        let payload =
+            reference_payload(&local_reference(&path, MediaType::Image), material).unwrap();
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(payload.base64.as_ref().unwrap())
+                .unwrap(),
+            bytes
+        );
+        // Optional bounds remain available for explicit bounded uses of the shared reader.
         assert!(
-            validate_material_count(9)
+            read_local_bytes(&path, "bounded", Some(1024))
+                .await
                 .unwrap_err()
                 .to_string()
-                .contains("at most 8")
+                .contains("configured byte limit")
         );
         let local_document = MultimodalPayload {
             display_name: "本地文档".to_string(),
             kind: PromptMultimodalKind::Document,
             mime_type: "text/plain".to_string(),
             base64: None,
-            text: Some("A".repeat(MAX_MULTIMODAL_TOTAL_BYTES as usize - 1)),
+            text: Some("reference document".to_string()),
         };
-        let mut connected_image = MultimodalPayload {
-            display_name: "连线图片".to_string(),
-            kind: PromptMultimodalKind::Image,
-            mime_type: "image/png".to_string(),
-            base64: Some(BASE64_STANDARD.encode([1])),
-            text: None,
-        };
-        assert!(
-            validate_material_bytes(&[local_document.clone(), connected_image.clone()]).is_ok()
+        let (_, _, body) = build_text_model_request(
+            "gemini_generate_content_v1",
+            "gemini",
+            "SYSTEM",
+            "USER",
+            &[],
+            &[payload.clone(), local_document],
+        )
+        .unwrap();
+        assert_eq!(
+            body["contents"][0]["parts"][0]["inline_data"]["data"],
+            *payload.base64.as_ref().unwrap()
         );
-        connected_image.base64 = Some(BASE64_STANDARD.encode([1, 2]));
         assert!(
-            validate_material_bytes(&[local_document, connected_image])
-                .unwrap_err()
-                .to_string()
-                .contains("14 MiB total")
+            body["contents"][0]["parts"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|part| part["text"]
+                    .as_str()
+                    .is_some_and(|text| text.contains("reference document")))
+        );
+        let archived = redacted_request_value(&body);
+        assert!(
+            archived["contents"][0]["parts"][0]["inline_data"]["data"]
+                .as_str()
+                .unwrap()
+                .starts_with("<base64 omitted:")
         );
     }
 }

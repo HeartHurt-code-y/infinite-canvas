@@ -2331,7 +2331,6 @@ fn wan_prompt(resolved: &ResolvedGeneration) -> String {
 }
 
 fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
-    const MAX_IMAGE_BYTES: u64 = 20 * 1024 * 1024;
     const ALLOWED_IMAGE_MIME_TYPES: [&str; 5] = [
         "image/jpeg",
         "image/png",
@@ -2373,24 +2372,15 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
                 ));
             }
         }
-        // 图片格式与体积约束只适用于真正的图片素材；`file`/`link` 是公网文档/网页 URL。
-        if media.media_type == MediaType::Image && !matches!(media.role.as_str(), "file" | "link") {
-            if !ALLOWED_IMAGE_MIME_TYPES.contains(&media.mime_type.as_str()) {
-                return Err(BackendError::validation(
-                    "Wan 3.0 image input uses an unsupported format",
-                    json!({ "mimeType": media.mime_type, "displayName": media.display_name }),
-                ));
-            }
-            if media.byte_size > MAX_IMAGE_BYTES {
-                return Err(BackendError::validation(
-                    "Wan 3.0 image input exceeds the 20 MB limit",
-                    json!({
-                        "byteSize": media.byte_size,
-                        "maximumByteSize": MAX_IMAGE_BYTES,
-                        "displayName": media.display_name
-                    }),
-                ));
-            }
+        // 图片格式约束只适用于真正的图片素材；`file`/`link` 是公网文档/网页 URL。
+        if media.media_type == MediaType::Image
+            && !matches!(media.role.as_str(), "file" | "link")
+            && !ALLOWED_IMAGE_MIME_TYPES.contains(&media.mime_type.as_str())
+        {
+            return Err(BackendError::validation(
+                "Wan 3.0 image input uses an unsupported format",
+                json!({ "mimeType": media.mime_type, "displayName": media.display_name }),
+            ));
         }
         // 文档/网页仅支持无需登录的公开页面：请求层至少校验引用是公网 http(s) URL。
         if matches!(media.role.as_str(), "file" | "link")
@@ -3839,6 +3829,37 @@ mod tests {
                 "url": "https://cdn.example.com/first.webp"
             }])
         );
+    }
+
+    #[test]
+    fn wan_video_builder_accepts_image_larger_than_former_byte_limit() {
+        let schema = super::super::model_schema::default_model_schema(
+            "wan3.0-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({"resolution": "720P", "ratio": "9:16", "duration": 5}),
+        );
+        let mut image = resolved_media(
+            MediaType::Image,
+            1,
+            "first_frame",
+            "https://cdn.example.com/large.png",
+            None,
+        );
+        image.byte_size = 20 * 1024 * 1024 + 1;
+        generation.images.push(image);
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+
+        let body = build_video_body(&video_task, &generation).expect("large image Wan body");
+        assert_eq!(
+            body["media"],
+            json!([{"type": "first_frame", "url": "https://cdn.example.com/large.png"}])
+        );
+        generation.images[0].mime_type = "image/gif".into();
+        assert!(build_video_body(&video_task, &generation).is_err());
     }
 
     #[test]

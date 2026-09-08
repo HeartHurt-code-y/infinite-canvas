@@ -55,6 +55,11 @@ export function CanvasFlowNodeView({ data }: NodeProps<CanvasFlowNode>) {
       }
     >
       {data.content}
+      {data.inputSummary ? (
+        <div className="canvas-flow-input-summary" role="status" title={data.inputDetails}>
+          {data.inputSummary}
+        </div>
+      ) : null}
       {data.hasTargetHandle ? (
         <Handle
           id="target"

@@ -654,11 +654,12 @@ function isBilibiliLink(url: string): boolean {
 
 /**
  * 画布网络爆款视频下载节点：内置 yt-dlp 引擎，粘贴抖音等站点链接下载为
- * 本地视频文件。不接收媒体连线；成功后右侧自动落一张可连入视频拼接与
+ * 本地视频文件。可读取上游文本链接和视频来源；成功后右侧自动落一张可连入视频拼接与
  * 合成节点的产物卡片。
  */
 export function CanvasVideoDownloaderNode({
   node,
+  downloadSources = [],
   selected,
   dragging,
   runState,
@@ -678,6 +679,7 @@ export function CanvasVideoDownloaderNode({
   onConnectionStart,
 }: {
   readonly node: VideoDownloaderNodeData;
+  readonly downloadSources?: readonly string[];
   readonly selected: boolean;
   readonly dragging: boolean;
   readonly runState: VideoDownloaderRunState | undefined;
@@ -704,7 +706,7 @@ export function CanvasVideoDownloaderNode({
 }) {
   const running = runState?.status === "running";
   const url = node.config.url;
-  const canStart = url.trim().length > 0 && !running;
+  const canStart = (downloadSources.length > 0 || url.trim().length > 0) && !running;
   const engineReady = engineStatus?.state === "ready";
   const engineStateLabel =
     enginePreparing || engineStatus?.state === "installing"
@@ -791,7 +793,7 @@ export function CanvasVideoDownloaderNode({
               className="canvas-video-downloader__start"
               disabled={!canStart}
               aria-label="开始下载视频"
-              title={url.trim().length > 0 ? "用内置 yt-dlp 引擎下载该链接" : "请先粘贴视频链接"}
+              title={canStart ? "依次下载当前输入链接" : "请填写或连接视频链接"}
               onMouseDown={(event) => event.stopPropagation()}
               onClick={(event) => {
                 event.stopPropagation();
@@ -835,6 +837,9 @@ export function CanvasVideoDownloaderNode({
         disabled={running}
       />
 
+      {downloadSources.length > 0 ? (
+        <p aria-label="下载输入数量">将依次下载 {downloadSources.length} 个链接</p>
+      ) : null}
       <div className="canvas-video-downloader__engine-row">
         <span
           className="canvas-video-downloader__engine-chip"
@@ -1163,11 +1168,18 @@ export function CanvasVideoFrameExtractorNode({
       <div className="canvas-video-frame-extractor__source">
         <span className="canvas-video-frame-extractor__source-label">
           {source
-            ? `视频输入 · ${source.name}`
+            ? `视频输入 · ${inputs.length} 段`
             : manualPath.length > 0
               ? `本地文件 · ${fileNameFromPath(manualPath)}`
               : "视频输入"}
         </span>
+        {inputs.length > 0 ? (
+          <ol aria-label="视频抽帧输入">
+            {inputs.map((input) => (
+              <li key={input.key}>{input.name}</li>
+            ))}
+          </ol>
+        ) : null}
         <input
           className="canvas-video-frame-extractor__path"
           type="text"
@@ -1180,7 +1192,7 @@ export function CanvasVideoFrameExtractorNode({
           }}
         />
         <p className="canvas-video-frame-extractor__helper">
-          连入素材视频 / 视频产物 / 下载·合成节点时会自动使用其最新产物。
+          按输入顺序对每段视频使用相同秒数抽帧；可通过任意上游节点传入视频。
         </p>
       </div>
 

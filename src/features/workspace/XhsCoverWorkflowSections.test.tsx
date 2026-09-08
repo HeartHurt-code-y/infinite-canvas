@@ -129,12 +129,12 @@ describe("XhsCoverConfiguration", () => {
       options,
       disabled: false,
       onChange: vi.fn(),
-      onPickImages: vi.fn(() => Promise.reject(new Error("图片合计超过 14 MB。"))),
+      onPickImages: vi.fn(() => Promise.reject(new Error("图片文件读取失败。"))),
       onRemoveImage: vi.fn(),
     };
     const { rerender } = render(<XhsCoverConfiguration {...props} />);
     fireEvent.click(screen.getByRole("button", { name: "添加补充素材" }));
-    expect(await screen.findByRole("alert")).toHaveTextContent("图片合计超过 14 MB。");
+    expect(await screen.findByRole("alert")).toHaveTextContent("图片文件读取失败。");
     expect(screen.getByRole("img", { name: portrait.displayName })).toBeInTheDocument();
     rerender(<XhsCoverConfiguration {...props} disabled />);
     expect(screen.getByRole("button", { name: "添加人物参考图" })).toBeDisabled();

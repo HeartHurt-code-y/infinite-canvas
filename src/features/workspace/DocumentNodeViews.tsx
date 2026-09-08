@@ -76,7 +76,9 @@ export function CanvasDocumentSkillNode({
   running,
   error,
   providerCatalog,
-  sourceInput,
+  sourceInput = null,
+  sourceInputs,
+  connectedMedia = [],
   onSelect,
   onNodeDragStart,
   onRemove,
@@ -94,7 +96,9 @@ export function CanvasDocumentSkillNode({
   readonly running: boolean;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
-  readonly sourceInput: ConnectedScreenplayInput | null;
+  readonly sourceInput?: ConnectedScreenplayInput | null;
+  readonly sourceInputs?: readonly ConnectedScreenplayInput[];
+  readonly connectedMedia?: readonly { key: string; name: string; edgeId: string }[];
   readonly onSelect: (key: string) => void;
   readonly onNodeDragStart: (
     key: string,
@@ -139,7 +143,9 @@ export function CanvasDocumentSkillNode({
   const selectionReady = Boolean(selectedProvider && selectedModel);
   const materials = node.config.materials ?? [];
   const screenplayHasMaterials = node.kind === "screenplay" && materials.length > 0;
-  const sourceDocumentReady = node.kind === "storyboard" && Boolean(sourceInput?.document.trim());
+  const textInputs = sourceInputs ?? (sourceInput ? [sourceInput] : []);
+  const sourceDocumentReady =
+    textInputs.some((input) => input.document.trim()) || connectedMedia.length > 0;
   // 文档区视图：无稿件时始终落在「编辑」，方便粘贴；有稿件时按用户选择的 预览/编辑 展示。
   const hasDocument = node.config.currentDocument.trim().length > 0;
   const effectiveDocumentMode = hasDocument ? documentMode : "edit";
@@ -257,33 +263,43 @@ export function CanvasDocumentSkillNode({
       </div>
 
       <div className="canvas-screenplay-node__body">
-        {node.kind === "storyboard" ? (
-          <div className={`canvas-screenplay-node__source${sourceInput ? " is-connected" : ""}`}>
+        {textInputs.map((input) => (
+          <div key={input.key} className="canvas-screenplay-node__source is-connected">
             <span className="canvas-screenplay-node__source-copy">
               <BookOpenText size={16} weight="bold" aria-hidden="true" />
               <span>
-                <small>输入剧本</small>
-                <strong>{sourceInput?.name ?? "尚未连接剧本节点"}</strong>
+                <small>输入文本</small>
+                <strong>{input.name}</strong>
               </span>
             </span>
-            {sourceInput ? (
-              <button
-                type="button"
-                aria-label={`解除剧本连线：${sourceInput.name}`}
-                title="解除剧本连线"
-                onMouseDown={(event) => event.stopPropagation()}
-                onClick={(event) => {
-                  event.stopPropagation();
-                  onUnlink(sourceInput.edgeId);
-                }}
-              >
-                <X size={14} weight="bold" aria-hidden="true" />
-              </button>
-            ) : (
-              <span className="canvas-screenplay-node__source-hint">从剧本节点右侧端口连入</span>
-            )}
+            <button
+              type="button"
+              aria-label={`解除剧本连线：${input.name}`}
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                onUnlink(input.edgeId);
+              }}
+            >
+              <X size={14} weight="bold" aria-hidden="true" />
+            </button>
           </div>
-        ) : null}
+        ))}
+        {connectedMedia.map((input) => (
+          <div key={input.key} className="canvas-screenplay-node__source is-connected">
+            <span className="canvas-screenplay-node__source-copy">
+              <small>参考素材</small>
+              <strong>{input.name}</strong>
+            </span>
+            <button
+              type="button"
+              aria-label={`解除素材连线：${input.name}`}
+              onClick={() => onUnlink(input.edgeId)}
+            >
+              <X size={14} aria-hidden="true" />
+            </button>
+          </div>
+        ))}
         <div className="canvas-screenplay-node__skill-badge">
           {node.kind === "storyboard" ? (
             <FilmSlate size={16} weight="bold" aria-hidden="true" />
@@ -436,8 +452,7 @@ export function CanvasDocumentSkillNode({
                 type="button"
                 className="canvas-screenplay-node__materials-add"
                 aria-label="添加多模态参考素材"
-                disabled={running || pickingMaterials || materials.length >= 8}
-                title={materials.length >= 8 ? "每个剧本节点最多添加 8 项素材" : undefined}
+                disabled={running || pickingMaterials}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={(event) => {
                   event.stopPropagation();
@@ -487,7 +502,7 @@ export function CanvasDocumentSkillNode({
                 ))}
               </ul>
             ) : (
-              <p>图片、音频、视频、PDF、TXT / Markdown；最多 8 项、合计 14 MB。</p>
+              <p>图片、音频、视频、PDF、TXT / Markdown。</p>
             )}
             <p className="canvas-screenplay-node__materials-hint">
               {screenplayMaterialCompatibilityHint(selectedModel?.remoteModelId)}
@@ -586,7 +601,7 @@ export function CanvasDocumentSkillNode({
 /** 爆款视频复刻节点：消费已存在的视频，在本地抽帧后调用内置纯复刻技能。 */
 export function CanvasViralRemixNode({
   node,
-  input,
+  inputs,
   selected,
   dragging,
   running,
@@ -602,7 +617,7 @@ export function CanvasViralRemixNode({
   onExport,
 }: {
   readonly node: ViralRemixNodeData;
-  readonly input: ViralRemixVideoInput | null;
+  readonly inputs: readonly ViralRemixVideoInput[];
   readonly selected: boolean;
   readonly dragging: boolean;
   readonly running: boolean;
@@ -660,13 +675,14 @@ export function CanvasViralRemixNode({
     return () => observer.disconnect();
   }, [node.key, onSizeChange]);
 
-  const unavailableReason = !input
-    ? "请先连接一个视频或网络爆款视频下载节点"
-    : !input.src
-      ? "已连接下载节点，请先完成视频下载"
-      : !selectionReady
-        ? "请先选择可用的多模态文本模型"
-        : null;
+  const unavailableReason =
+    inputs.length === 0
+      ? "请先连接视频来源"
+      : inputs.some((input) => !input.src)
+        ? "已连接下载节点，请先完成视频下载"
+        : !selectionReady
+          ? "请先选择可用的多模态文本模型"
+          : null;
 
   return (
     <div
@@ -736,33 +752,39 @@ export function CanvasViralRemixNode({
           </span>
         </div>
 
-        <div className={`canvas-viral-remix-node__input${input ? " is-connected" : ""}`}>
-          <span className="node-port node-port--left" aria-hidden="true" />
-          <div>
-            <strong>{input ? input.name : "连接待复刻视频"}</strong>
-            <small>
-              {!input
-                ? "可直接连接“网络爆款视频下载”节点、视频素材或本地视频产物"
-                : input.src
-                  ? `${input.sourceLabel}已就绪 · 运行时本地密集抽帧`
-                  : `${input.sourceLabel}已连接 · 等待下载完成`}
-            </small>
+        {inputs.length === 0 ? (
+          <div className="canvas-viral-remix-node__input">
+            <strong>连接待复刻视频</strong>
+            <small>可通过任何上游节点传入视频；多个视频按连接顺序分别分析。</small>
           </div>
-          {input ? (
-            <button
-              type="button"
-              aria-label={`解除复刻视频连线：${input.name}`}
-              title="解除视频连线"
-              onMouseDown={(event) => event.stopPropagation()}
-              onClick={(event) => {
-                event.stopPropagation();
-                onUnlink(input.edgeId);
-              }}
-            >
-              <X size={12} weight="bold" aria-hidden="true" />
-            </button>
-          ) : null}
-        </div>
+        ) : (
+          inputs.map((input, index) => (
+            <div className="canvas-viral-remix-node__input is-connected" key={input.key}>
+              <div>
+                <strong>
+                  {index + 1}. {input.name}
+                </strong>
+                <small>
+                  {input.src
+                    ? `${input.sourceLabel}已就绪 · 运行时本地密集抽帧`
+                    : `${input.sourceLabel}已连接 · 等待下载完成`}
+                </small>
+              </div>
+              <button
+                type="button"
+                aria-label={`解除复刻视频连线：${input.name}`}
+                title="解除视频连线"
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onUnlink(input.edgeId);
+                }}
+              >
+                <X size={12} weight="bold" aria-hidden="true" />
+              </button>
+            </div>
+          ))
+        )}
 
         <div className="canvas-prompt-node__fields">
           <label className="canvas-prompt-node__field">
@@ -1314,7 +1336,7 @@ export function CanvasPromptNode({
           <div id={modeHintId} className="canvas-prompt-node__intro">
             <span>
               读图请使用支持图片理解的文本模型。默认按 15
-              秒规划，可在需求中调整；复杂路线会建议分段并保留关键途经点。路径图仅用于分析；视频需要参考图时，请将干净场景图直接连接到视频节点。
+              秒规划，可在需求中调整；复杂路线会建议分段并保留关键途经点。下游节点会读取路径图；可断开不需要传入的参考图。
             </span>
           </div>
         ) : isFightPromptMaster ? (
@@ -1390,7 +1412,7 @@ export function CanvasPromptNode({
         aria-label="拖出提示词连线"
         title={
           isFpvPath
-            ? "拖到图片或视频生成节点，自动导入输出提示词；FPV 路径图仅用于分析，视频参考图请直接连接"
+            ? "连接其他节点，传递输出文本与上游参考素材"
             : "拖到图片或视频生成节点，自动导入输出提示词；视频节点同时继承视觉参考图"
         }
         onMouseDown={(event) => {

@@ -280,7 +280,7 @@ describe("workflow history canvas integration", () => {
     expect(mocks.run.mock.calls[1]![0].node.config.connectedMaterials ?? []).toEqual([]);
   });
 
-  it("snapshots connected image, audio and video identities and drops disconnected inputs on the next run", async () => {
+  it("snapshots more than eight connected image, audio and video identities and drops disconnected inputs on the next run", async () => {
     const workflow = node();
     const assets: CanvasDocumentV2["assetNodes"] = ["image", "audio", "video"].map(
       (kind, index) => ({
@@ -296,10 +296,17 @@ describe("workflow history canvas integration", () => {
         y: index * 250,
       }),
     );
+    const additionalAssets = Array.from({ length: 9 }, (_, index) => ({
+      ...assets[0]!,
+      key: `additional-reference-${index}`,
+      assetId: `additional-asset-${index}`,
+      name: `补充参考 ${index}`,
+    }));
+    const allAssets = [...assets, ...additionalAssets];
     const document = {
       ...canvasDocument([workflow]),
-      assetNodes: assets,
-      assetEdges: assets.map((asset) => ({
+      assetNodes: allAssets,
+      assetEdges: allAssets.map((asset) => ({
         id: `${asset.key}->${workflow.key}`,
         fromKey: asset.key,
         toKey: workflow.key,
@@ -315,7 +322,8 @@ describe("workflow history canvas integration", () => {
     });
     render(<App />);
     const region = await screen.findByRole("region", { name: "工作流参考素材" });
-    expect(within(region).getByText(/全部参考资料 3 \/ 8 项/)).toBeInTheDocument();
+    expect(within(region).getByText(/全部参考资料 12 项/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
     expect(mocks.run.mock.calls[0]![0].node.config.connectedMaterials).toEqual([
@@ -348,6 +356,16 @@ describe("workflow history canvas integration", () => {
           canvasNodeKey: "reference-video",
         },
       },
+      ...additionalAssets.map((asset) => ({
+        displayName: asset.name,
+        target: {
+          kind: "asset",
+          assetId: asset.assetId,
+          providerConnectionId: "original-asset-provider",
+          mediaType: "image",
+          canvasNodeKey: asset.key,
+        },
+      })),
     ]);
     const unlink = within(region).getByRole("button", { name: "断开工作流素材：参考audio" });
     await waitFor(() => expect(unlink).toBeEnabled());
@@ -359,12 +377,13 @@ describe("workflow history canvas integration", () => {
       mocks.run.mock.calls[1]![0].node.config.connectedMaterials?.map(
         (item) => item.target.mediaType,
       ),
-    ).toEqual(["image", "video"]);
+    ).toEqual(["image", "video", ...additionalAssets.map(() => "image")]);
     await waitFor(
       () => {
         const saved = mocks.saveCanvas.mock.calls.at(-1)?.[0].document as
           CanvasDocumentV2 | undefined;
-        expect(saved?.assetEdges).toHaveLength(2);
+        expect(saved?.assetEdges).toHaveLength(11);
+        expect(saved?.assetNodes).toHaveLength(12);
         expect(saved?.knowledgeVideoWorkflowNodes?.[0]?.config.connectedMaterials ?? []).toEqual(
           [],
         );
@@ -576,30 +595,37 @@ describe("workflow reference material integration", () => {
     expect(mocks.run).not.toHaveBeenCalled();
   });
 
-  it("accepts the exact total byte limit while skipping empty and oversized references", async () => {
+  it("accepts references beyond the old single and total byte limits while skipping empty files", async () => {
     const current = node();
     const existing = referenceMaterial("large.md", { byteSize: 14 * 1024 * 1024 - 1024 });
     loadCanvasNodes([{ ...current, config: { ...current.config, materials: [existing] } }]);
     render(<App />);
     const region = await screen.findByRole("region", { name: "工作流参考素材" });
     const accepted = referenceMaterial("last.md");
+    const large = referenceMaterial("large-reference.md", { byteSize: 100 * 1024 * 1024 });
+    const overflow = referenceMaterial("overflow.md", { byteSize: 1 });
     await pickWorkflowMaterials([
       referenceMaterial("empty.md", { byteSize: 0 }),
-      referenceMaterial("too-large.md", { byteSize: 14 * 1024 * 1024 + 1 }),
+      large,
       accepted,
-      referenceMaterial("overflow.md", { byteSize: 1 }),
+      overflow,
     ]);
     expect(within(region).getByText(accepted.displayName)).toBeInTheDocument();
     expect(within(region).queryByText("empty.md")).not.toBeInTheDocument();
-    expect(within(region).queryByText("too-large.md")).not.toBeInTheDocument();
-    expect(within(region).queryByText("overflow.md")).not.toBeInTheDocument();
+    expect(within(region).getByText(large.displayName)).toBeInTheDocument();
+    expect(within(region).getByText(overflow.displayName)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
-    expect(mocks.run.mock.calls[0]![0].node.config.materials).toEqual([existing, accepted]);
+    expect(mocks.run.mock.calls[0]![0].node.config.materials).toEqual([
+      existing,
+      large,
+      accepted,
+      overflow,
+    ]);
   });
 
   it.each(["commerce", "xhsCover"] as const)(
-    "counts %s dedicated references toward the common eight item limit",
+    "preserves every %s dedicated and common reference beyond eight items while bytes remain available",
     async (kind) => {
       const current = node();
       const images = Array.from({ length: 7 }, (_, index) =>
@@ -620,12 +646,17 @@ describe("workflow reference material integration", () => {
       render(<App />);
       const region = await screen.findByRole("region", { name: "工作流参考素材" });
       const accepted = referenceMaterial("brief.md");
+      const ninth = referenceMaterial("ninth.md");
       const shared = { ...images[0]!, localPath: images[0]!.localPath.toUpperCase() };
-      await pickWorkflowMaterials([shared, accepted, referenceMaterial("ninth.md")]);
+      await pickWorkflowMaterials([shared, accepted, ninth]);
       expect(within(region).getByText(accepted.displayName)).toBeInTheDocument();
       expect(within(region).getByText(shared.displayName)).toBeInTheDocument();
-      expect(within(region).getByText(/全部参考资料 8 \/ 8 项/)).toBeInTheDocument();
-      expect(within(region).queryByText("ninth.md")).not.toBeInTheDocument();
+      expect(within(region).getByText(/全部参考资料 9 项/)).toBeInTheDocument();
+      expect(within(region).getByText("ninth.md")).toBeInTheDocument();
+      expect(
+        within(region).getByRole("button", { name: "添加工作流多模态参考素材" }),
+      ).toBeEnabled();
+      expect(within(region).queryByRole("alert")).not.toBeInTheDocument();
       await waitFor(
         () => {
           const saved = mocks.saveCanvas.mock.calls.at(-1)?.[0].document as
@@ -633,10 +664,66 @@ describe("workflow reference material integration", () => {
           expect(saved?.knowledgeVideoWorkflowNodes?.[0]?.config.materials).toEqual([
             shared,
             accepted,
+            ninth,
           ]);
         },
         { timeout: 3000 },
       );
+    },
+  );
+
+  it.each([
+    ["commerce", "添加商品资料", "商品图片与文档"],
+    ["portrait", "添加人物参考图", "人物参考图"],
+    ["material", "添加补充素材", "补充素材"],
+  ] as const)(
+    "accepts large %s files through the dedicated picker and passes them to execution",
+    async (role, buttonName, regionName) => {
+      const current = node();
+      const portrait = referenceMaterial("existing-portrait.png", {
+        kind: "image",
+        mimeType: "image/png",
+      });
+      const config =
+        role === "commerce"
+          ? { ...current.config, commerce: { ...createCommerceOptions(), productName: "测试商品" } }
+          : {
+              ...current.config,
+              xhsCover: {
+                ...createXhsCoverOptions(),
+                title: "测试封面",
+                deliverable: "prompt" as const,
+                portraits: role === "material" ? [portrait] : [],
+              },
+            };
+      loadCanvasNodes([{ ...current, config }]);
+      render(<App />);
+      const region = await screen.findByRole("region", { name: regionName });
+      const large = referenceMaterial(`${role}-large.png`, {
+        kind: "image",
+        mimeType: "image/png",
+        byteSize: 150 * 1024 * 1024,
+      });
+      mocks.pickMaterials.mockResolvedValueOnce([
+        large,
+        { ...large, localPath: large.localPath.toUpperCase() },
+        referenceMaterial("empty.png", { kind: "image", mimeType: "image/png", byteSize: 0 }),
+      ]);
+      fireEvent.click(within(region).getByRole("button", { name: buttonName }));
+      expect(await within(region).findByText(large.displayName)).toBeInTheDocument();
+      expect(within(region).queryByText("empty.png")).not.toBeInTheDocument();
+      const start = screen.getByRole("button", { name: "开始制作" });
+      await waitFor(() => expect(start).toBeEnabled());
+      fireEvent.click(start);
+      await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
+      const submitted = mocks.run.mock.calls[0]![0].node.config;
+      expect(
+        role === "commerce"
+          ? submitted.commerce?.materials
+          : role === "portrait"
+            ? submitted.xhsCover?.portraits
+            : submitted.xhsCover?.materials,
+      ).toEqual([large]);
     },
   );
 });

@@ -142,6 +142,8 @@ export interface CanvasFlowNodeData extends Record<string, unknown> {
   readonly content: ReactNode;
   readonly hasSourceHandle: boolean;
   readonly hasTargetHandle: boolean;
+  readonly inputSummary?: string;
+  readonly inputDetails?: string;
   /** 拖线过程中标记该节点的输入端口为可连接目标，用于高亮提示。 */
   readonly highlightTarget?: boolean;
 }
@@ -720,6 +722,13 @@ export interface KnowledgeVideoWorkflowConfig {
   readonly materials?: readonly PickedPromptMaterial[];
   /** 连线在执行时解析，历史恢复只保存媒体身份，不保存临时读取地址。 */
   readonly connectedMaterials?: readonly PromptReferenceInput[];
+  /** 执行时冻结连线文本，保留来源身份与全文供历史恢复及检查点校验。 */
+  readonly connectedTexts?: readonly {
+    readonly key: string;
+    readonly sourceKey: string;
+    readonly displayName: string;
+    readonly text: string;
+  }[];
   readonly models: KnowledgeVideoWorkflowModelSelections;
   readonly imageParameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly videoParameterValues: Readonly<Record<string, ModelParameterValue>>;

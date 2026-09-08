@@ -36,11 +36,11 @@ import {
 import { reverseVideoInputReady } from "./reverseVideoWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 import { withCanvasWorkflowMaterials, type WorkflowCanvasInput } from "./workflowCanvasInputs";
+import type { ConnectedCanvasTextInput } from "./canvasInputs";
 import {
-  MAX_WORKFLOW_MATERIAL_BYTES,
-  MAX_WORKFLOW_MATERIALS,
   workflowReferenceMaterials,
   workflowMaterialQuota,
+  removeWorkflowHistoricalText,
 } from "./workflowMaterials";
 
 const REVERSE_VIDEO_WORKFLOW_STAGES = [
@@ -223,6 +223,7 @@ function stageIndexFor(phase: KnowledgeVideoWorkflowPhase): number {
 export interface KnowledgeVideoWorkflowNodeProps {
   readonly node: KnowledgeVideoWorkflowNodeData;
   readonly connectedInputs?: readonly WorkflowCanvasInput[];
+  readonly connectedTexts?: readonly ConnectedCanvasTextInput[];
   readonly onUnlink?: (edgeId: string) => void;
   readonly onRemoveHistoricalReference?: (index: number) => void;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
@@ -266,6 +267,7 @@ export interface KnowledgeVideoWorkflowNodeProps {
 export function KnowledgeVideoWorkflowNode({
   node,
   connectedInputs = [],
+  connectedTexts = [],
   onUnlink,
   onRemoveHistoricalReference,
   providerCatalog,
@@ -418,12 +420,16 @@ export function KnowledgeVideoWorkflowNode({
     : isReverse || isRemotion || documentsOnly
       ? configuredModels.text !== "待配置"
       : Object.values(configuredModels).every((label) => label !== "待配置");
+  const effectiveConfig = withCanvasWorkflowMaterials(node, {
+    media: connectedInputs,
+    texts: connectedTexts,
+  }).config;
   const inputReady = isReverse
-    ? reverseVideoInputReady(node.config.brief, reverseOptions)
+    ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
     : isCover
-      ? xhsCoverInputReady(node.config.brief, coverOptions)
+      ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
       : isRemotion
-        ? Boolean(node.config.brief.trim())
+        ? Boolean(effectiveConfig.brief.trim())
         : commerceOptions
           ? commerceInputReady(commerceOptions)
           : comicDramaOptions
@@ -432,13 +438,12 @@ export function KnowledgeVideoWorkflowNode({
               comicDramaOptions.episodes.every(
                 (episode) => episode.title.trim() && episode.script.trim(),
               )
-            : Boolean(node.config.brief.trim());
-  const effectiveConfig = withCanvasWorkflowMaterials(node, connectedInputs).config;
+            : Boolean(effectiveConfig.brief.trim());
   const allMaterials = workflowReferenceMaterials(effectiveConfig);
   const materialQuota = workflowMaterialQuota(effectiveConfig);
-  const materialsValid =
-    materialQuota.count <= MAX_WORKFLOW_MATERIALS &&
-    materialQuota.localBytes <= MAX_WORKFLOW_MATERIAL_BYTES;
+  const materialsValid = allMaterials.every(
+    (material) => Number.isFinite(material.byteSize) && material.byteSize > 0,
+  );
   const readyToExecute = inputReady && modelsReady && materialsValid && !pickingMaterials;
 
   async function pickReferenceMaterials(pick: () => Promise<void> | void) {
@@ -587,6 +592,9 @@ export function KnowledgeVideoWorkflowNode({
           allMaterials={allMaterials}
           totalCount={materialQuota.count}
           connectedInputs={connectedInputs}
+          connectedTexts={connectedTexts}
+          historicalTexts={node.config.connectedTexts ?? []}
+          onRemoveHistoricalText={(key) => onChange(removeWorkflowHistoricalText(node.config, key))}
           historicalReferences={node.config.connectedMaterials ?? []}
           {...(onUnlink ? { onUnlink } : {})}
           {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
