@@ -620,6 +620,10 @@ export function WorkspaceApp() {
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
+  // 已成功上传到云端素材库的产物节点 key（会话内状态，用于显示上传按钮绿色小点）。
+  const [uploadedOutputKeys, setUploadedOutputKeys] = useState<ReadonlySet<string>>(new Set());
+  // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点。
+  const uploadJobToOutputKeyRef = useRef<Map<string, string>>(new Map());
   // 供轮询订阅回调读取最新上传条目（destination 映射），避免闭包过期。
   const uploadEntriesRef = useRef<readonly AssetUploadEntry[]>([]);
   useEffect(() => {
@@ -1724,6 +1728,8 @@ export function WorkspaceApp() {
         output.name ??
         output.finalPath.split(/[\\/]/).pop() ??
         `${output.mediaType === "video" ? "视频" : "图片"}产物`;
+      // 记录 pendingId -> 产物节点 key 映射，上传成功后回查标记绿色小点。
+      uploadJobToOutputKeyRef.current.set(pendingId, outputKey);
       setAssetUploads((current) => [
         ...current,
         {
@@ -1750,6 +1756,9 @@ export function WorkspaceApp() {
             groupId: null,
           },
         });
+        // pendingId 替换为真实 jobId，保持映射连续。
+        uploadJobToOutputKeyRef.current.delete(pendingId);
+        uploadJobToOutputKeyRef.current.set(jobId, outputKey);
         setAssetUploads((current) =>
           current.map((entry) =>
             entry.jobId === pendingId
@@ -1799,6 +1808,22 @@ export function WorkspaceApp() {
           void refreshCloudAssets(assetProvider.id, "upload-finished");
           refreshAssetGroups(assetProvider.id);
         }
+      }
+      // 上传到云端素材库成功：标记对应产物节点显示绿色小点。
+      if (status === "active" || status === "cleaned") {
+        const outputKey = uploadJobToOutputKeyRef.current.get(payload.jobId);
+        if (outputKey) {
+          setUploadedOutputKeys((current) => {
+            if (current.has(outputKey)) return current;
+            const next = new Set(current);
+            next.add(outputKey);
+            return next;
+          });
+          uploadJobToOutputKeyRef.current.delete(payload.jobId);
+        }
+      } else if (status === "failed" || status === "interrupted") {
+        // 上传失败：清理映射，不标记绿色小点。
+        uploadJobToOutputKeyRef.current.delete(payload.jobId);
       }
     });
   }, [
@@ -6027,6 +6052,7 @@ export function WorkspaceApp() {
                 onPreview={setPreviewOutputNodeKey}
                 onConnectionStart={ignoreLegacyConnectionStart}
                 onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
+                uploadedToCloud={uploadedOutputKeys.has(node.key)}
                 task={task}
                 retryInfo={retryInfoByTask[node.taskId] ?? null}
                 results={taskResults[node.taskId] ?? []}
@@ -6047,6 +6073,7 @@ export function WorkspaceApp() {
       setPreviewOutputNodeKey,
       ignoreLegacyConnectionStart,
       handleUploadOutputToCloud,
+      uploadedOutputKeys,
       retryInfoByTask,
       taskResults,
       rawResponses,

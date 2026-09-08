@@ -1606,6 +1606,7 @@ export function CanvasOutputNode({
   onPreview,
   onConnectionStart,
   onUploadToCloud,
+  uploadedToCloud,
   task,
   retryInfo,
   results,
@@ -1631,6 +1632,8 @@ export function CanvasOutputNode({
   readonly onConnectionStart: (key: string) => void;
   /** 图片产物一键上传到云端素材库；非图片或未传时不展示按钮。 */
   readonly onUploadToCloud?: (key: string) => void;
+  /** 该产物已成功上传到云端素材库（上传按钮显示绿色小点）。 */
+  readonly uploadedToCloud?: boolean;
   /** 卡片对应任务的最新摘要（任务列表查不到时为 null）。 */
   readonly task: GenerationTaskSummary | null;
   /** 重试等待信息（generation:retry 事件驱动）。 */
@@ -1955,9 +1958,13 @@ export function CanvasOutputNode({
       node.finalPath != null ? (
         <button
           type="button"
-          className="canvas-asset-node__upload"
-          aria-label={`上传${node.mediaType === "video" ? "视频" : "图片"}产物到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`}
-          title="上传到云端素材库"
+          className={`canvas-asset-node__upload${uploadedToCloud ? " is-uploaded" : ""}`}
+          aria-label={
+            uploadedToCloud
+              ? `已上传到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`
+              : `上传${node.mediaType === "video" ? "视频" : "图片"}产物到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`
+          }
+          title={uploadedToCloud ? "已上传到云端素材库" : "上传到云端素材库"}
           onMouseDown={(event) => event.stopPropagation()}
           onClick={(event) => {
             event.stopPropagation();
@@ -1965,6 +1972,9 @@ export function CanvasOutputNode({
           }}
         >
           <UploadSimple size={12} weight="bold" aria-hidden="true" />
+          {uploadedToCloud ? (
+            <span className="canvas-asset-node__upload-dot" aria-hidden="true" />
+          ) : null}
         </button>
       ) : null}
       <button
