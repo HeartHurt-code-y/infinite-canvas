@@ -83,6 +83,7 @@ export function createCanvasDocumentRepository(
   const getStorage = options.storage ?? (() => window.localStorage);
   const now = options.now ?? Date.now;
   const pending = new Map<string, Promise<void>>();
+  const deletions = new Map<string, Promise<void>>();
 
   function enqueue<T>(canvasId: string, operation: () => Promise<T> | T): Promise<T> {
     const result = (pending.get(canvasId) ?? Promise.resolve()).then(operation);
@@ -158,6 +159,34 @@ export function createCanvasDocumentRepository(
     return record;
   }
 
+  function deleteDirect(canvasId: string): Promise<void> | void {
+    if (desktop()) return client.delete(canvasId);
+    const storage = getStorage();
+    const key = documentKey(canvasId);
+    const previousRaw = storage.getItem(key);
+    const catalog = browserList(storage);
+    const items = catalog.filter((item) => item.id !== canvasId);
+    // Read the raw record so a damaged document can still be explicitly removed.
+    storage.removeItem(key);
+    if (items.length === catalog.length) return;
+    try {
+      storage.setItem(CANVAS_CATALOG_STORAGE_KEY, JSON.stringify({ version: 1, items }));
+    } catch (error) {
+      try {
+        if (previousRaw !== null) storage.setItem(key, previousRaw);
+      } catch (rollbackError) {
+        throw new AggregateError([error, rollbackError], "画布删除失败，原存档恢复也失败。", {
+          cause: rollbackError,
+        });
+      }
+      throw error;
+    }
+  }
+
+  function deletedError(canvasId: string): Error {
+    return new Error(`画布正在删除或已删除，无法保存：${canvasId}`);
+  }
+
   return {
     async list() {
       await Promise.all(pending.values());
@@ -168,11 +197,13 @@ export function createCanvasDocumentRepository(
       return getDirect(canvasId);
     },
     async save(command) {
+      if (deletions.has(command.id)) throw deletedError(command.id);
       // Capture the JSON at call time; edits made while another write is pending belong to a later save.
       const snapshot = JSON.parse(JSON.stringify(command)) as SaveCanvasDocumentCommand;
       return await enqueue(command.id, () => saveDirect(snapshot));
     },
     rename(canvasId, title) {
+      if (deletions.has(canvasId)) return Promise.reject(deletedError(canvasId));
       return enqueue(canvasId, async () => {
         const current = await getDirect(canvasId);
         return saveDirect({
@@ -182,6 +213,18 @@ export function createCanvasDocumentRepository(
           expectedRevision: current.revision,
         });
       });
+    },
+    delete(canvasId) {
+      const existing = deletions.get(canvasId);
+      if (existing) return existing;
+      const deletion = enqueue(canvasId, () => deleteDirect(canvasId)).catch((error: unknown) => {
+        // A failed deletion retains the document and must allow saving and retrying it.
+        if (deletions.get(canvasId) === deletion) deletions.delete(canvasId);
+        throw error;
+      });
+      // Set before the queued operation starts, including while earlier saves are pending.
+      deletions.set(canvasId, deletion);
+      return deletion;
     },
   };
 }

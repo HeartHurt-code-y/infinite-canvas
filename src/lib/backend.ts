@@ -1204,12 +1204,14 @@ export interface CanvasDocumentClient {
   list(this: void): Promise<readonly CanvasDocumentSummary[]>;
   save(this: void, command: SaveCanvasDocumentCommand): Promise<CanvasDocumentRecord>;
   get(this: void, canvasId: string): Promise<CanvasDocumentRecord>;
+  delete(this: void, canvasId: string): Promise<void>;
 }
 
 export const canvasDocumentClient: CanvasDocumentClient = {
   list: () => invokeDesktop("list_canvas_documents", canvasDocumentSummariesSchema),
   save: (command) => invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, { command }),
   get: (canvasId) => invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
+  delete: (canvasId) => invokeDesktopVoid("delete_canvas_document", { canvasId }),
 };
 
 /** 提示词优化模式：决定注入哪份内置提示词方法作为文本模型的系统提示词。 */

@@ -352,6 +352,14 @@ pub fn list_canvas_documents(
 }
 
 #[tauri::command]
+pub fn delete_canvas_document(
+    state: State<'_, BackendState>,
+    canvas_id: String,
+) -> CommandResult<()> {
+    state.storage.delete_canvas_document(&canvas_id).command()
+}
+
+#[tauri::command]
 pub fn start_generation(
     state: State<'_, BackendState>,
     command: StartGenerationCommand,

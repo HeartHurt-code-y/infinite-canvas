@@ -20,6 +20,7 @@ function Harness(props: Partial<CanvasTabsProps>) {
       onSelect={setActiveCanvasId}
       onCreate={vi.fn()}
       onRename={vi.fn()}
+      onDelete={vi.fn()}
       {...props}
     />
   );
@@ -113,13 +114,39 @@ describe("CanvasTabs", () => {
     const user = userEvent.setup();
     const onCreate = vi.fn();
     const onSelect = vi.fn();
-    render(<Harness busy onCreate={onCreate} onSelect={onSelect} />);
+    const onDelete = vi.fn();
+    render(<Harness busy onCreate={onCreate} onSelect={onSelect} onDelete={onDelete} />);
     expect(screen.getByRole("button", { name: "新建画布" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "重命名画布 产品摄影" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "删除画布 产品摄影" })).toBeDisabled();
     await user.click(screen.getByRole("tab", { name: "故事分镜" }));
     await user.click(screen.getByRole("button", { name: "新建画布" }));
+    await user.click(screen.getByRole("button", { name: "删除画布 产品摄影" }));
     expect(onSelect).not.toHaveBeenCalled();
     expect(onCreate).not.toHaveBeenCalled();
+    expect(onDelete).not.toHaveBeenCalled();
+  });
+
+  it("offers deletion for only the selected canvas and passes its stable identity", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<Harness onDelete={onDelete} />);
+    expect(screen.queryByRole("button", { name: "删除画布 故事分镜" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("tab", { name: "故事分镜" }));
+    expect(screen.queryByRole("button", { name: "删除画布 产品摄影" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "删除画布 故事分镜" }));
+    expect(onDelete).toHaveBeenCalledExactlyOnceWith("second");
+  });
+
+  it("prevents deletion while a canvas name is being edited", async () => {
+    const user = userEvent.setup();
+    const onDelete = vi.fn();
+    render(<Harness onDelete={onDelete} />);
+    await user.click(screen.getByRole("button", { name: "重命名画布 产品摄影" }));
+    expect(screen.getByRole("button", { name: "删除画布 产品摄影" })).toBeDisabled();
+    expect(onDelete).not.toHaveBeenCalled();
+    await user.keyboard("{Escape}");
+    expect(screen.getByRole("button", { name: "删除画布 产品摄影" })).toBeEnabled();
   });
 
   it("retains tab focus through a busy cycle and resumes keyboard switching afterward", async () => {

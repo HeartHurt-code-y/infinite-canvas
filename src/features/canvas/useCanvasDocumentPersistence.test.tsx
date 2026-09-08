@@ -157,4 +157,134 @@ describe("useCanvasDocumentPersistence save safety", () => {
     expect(result.current.status).toBe("error");
     expect(result.current.error).toContain("磁盘拒绝写入");
   });
+
+  it("suspends pending saves and ignores late save completion before a deleted session unmounts", async () => {
+    const document = createCanvasState(74).commands.snapshotV2({});
+    vi.spyOn(canvasDocumentRepository, "get").mockResolvedValue(savedRecord(document));
+    let completeSave!: (record: CanvasDocumentRecord) => void;
+    const save = vi.spyOn(canvasDocumentRepository, "save").mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          completeSave = resolve;
+        }),
+    );
+    const restore = vi.fn();
+    const { handles, services } = sessionServices();
+    const { result, unmount } = renderHook(() =>
+      useCanvasDocumentPersistence({
+        canvasId: "scene-a",
+        collect: () => document,
+        restore,
+        services,
+      }),
+    );
+    await waitFor(() => expect(result.current.hydrated).toBe(true));
+    vi.useFakeTimers();
+    const session = handles.get("scene-a")!;
+    let pendingSave!: Promise<void>;
+    act(() => {
+      pendingSave = session.flush();
+    });
+    expect(result.current.status).toBe("saving");
+    act(() => result.current.schedule());
+    await act(() => session.prepareDelete());
+    expect(session.isReady()).toBe(false);
+
+    await act(async () => {
+      result.current.schedule();
+      result.current.documentChanged();
+      result.current.retry();
+      await session.flush();
+      completeSave(savedRecord(document));
+      await pendingSave;
+      await vi.advanceTimersByTimeAsync(CANVAS_SAVE_DEBOUNCE_MS);
+    });
+    expect(result.current.status).toBe("pending");
+    expect(save).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(save).toHaveBeenCalledTimes(1);
+  });
+
+  it("resumes autosaving the latest document when deleting the canvas fails", async () => {
+    let document = createCanvasState(74).commands.snapshotV2({});
+    vi.spyOn(canvasDocumentRepository, "get").mockResolvedValue(savedRecord(document));
+    const save = vi
+      .spyOn(canvasDocumentRepository, "save")
+      .mockImplementation((command) => Promise.resolve({ ...savedRecord(document), ...command }));
+    const restore = vi.fn();
+    const { handles, services } = sessionServices();
+    const { result } = renderHook(() =>
+      useCanvasDocumentPersistence({
+        canvasId: "scene-a",
+        collect: () => document,
+        restore,
+        services,
+      }),
+    );
+    await waitFor(() => expect(result.current.hydrated).toBe(true));
+    vi.useFakeTimers();
+    act(() => result.current.schedule());
+    const session = handles.get("scene-a")!;
+    await act(() => session.prepareDelete());
+    document = { ...document, view: { zoom: 150, pan: { x: 240, y: 120 } } };
+    act(() => session.resumeAfterDeleteFailure());
+    expect(session.isReady()).toBe(true);
+    await act(() => vi.advanceTimersByTimeAsync(CANVAS_SAVE_DEBOUNCE_MS));
+    expect(save).toHaveBeenCalledExactlyOnceWith({ id: "scene-a", title: "商品摄影", document });
+    expect(result.current.status).toBe("saved");
+  });
+
+  it("keeps the pending autosave when deletion validation rejects a running task", async () => {
+    const document = createCanvasState(74).commands.snapshotV2({});
+    vi.spyOn(canvasDocumentRepository, "get").mockResolvedValue(savedRecord(document));
+    const save = vi
+      .spyOn(canvasDocumentRepository, "save")
+      .mockResolvedValue(savedRecord(document));
+    const validateDelete = vi.fn().mockRejectedValue(new Error("请等待生成任务完成后再删除。"));
+    const restore = vi.fn();
+    const { handles, services } = sessionServices();
+    const { result } = renderHook(() =>
+      useCanvasDocumentPersistence({
+        canvasId: "scene-a",
+        collect: () => document,
+        restore,
+        services,
+        validateDelete,
+      }),
+    );
+    await waitFor(() => expect(result.current.hydrated).toBe(true));
+    vi.useFakeTimers();
+    act(() => result.current.schedule());
+    const session = handles.get("scene-a")!;
+    await act(async () => {
+      await expect(session.prepareDelete()).rejects.toThrow("请等待生成任务完成后再删除。");
+    });
+    expect(validateDelete).toHaveBeenCalledTimes(1);
+    expect(session.isReady()).toBe(true);
+    await act(() => vi.advanceTimersByTimeAsync(CANVAS_SAVE_DEBOUNCE_MS));
+    expect(save).toHaveBeenCalledTimes(1);
+    expect(result.current.status).toBe("saved");
+  });
+
+  it("validates deletion even when the stored document could not be read", async () => {
+    vi.spyOn(canvasDocumentRepository, "get").mockRejectedValue(new Error("存档无法读取"));
+    const save = vi.spyOn(canvasDocumentRepository, "save");
+    const validateDelete = vi.fn().mockResolvedValue(undefined);
+    const restore = vi.fn();
+    const { handles, services } = sessionServices();
+    const { result, unmount } = renderHook(() =>
+      useCanvasDocumentPersistence({
+        canvasId: "scene-a",
+        collect: () => createCanvasState(74).commands.snapshotV2({}),
+        restore,
+        services,
+        validateDelete,
+      }),
+    );
+    await waitFor(() => expect(result.current.status).toBe("error"));
+    await act(() => handles.get("scene-a")!.prepareDelete());
+    expect(validateDelete).toHaveBeenCalledTimes(1);
+    unmount();
+    expect(save).not.toHaveBeenCalled();
+  });
 });

@@ -1879,6 +1879,110 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
   });
 
+  it("删除画布时阻止尚未完成的提示词任务，取消删除后仍接收生成结果", async () => {
+    const generatedPrompt = "删除被阻止后完整保留的雨夜站台镜头提示词。";
+    let resolvePrompt!: (result: { optimizedPrompt: string; rawModelOutput: string }) => void;
+    const pendingPrompt = new Promise<{ optimizedPrompt: string; rawModelOutput: string }>(
+      (resolve) => {
+        resolvePrompt = resolve;
+      },
+    );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "run_prompt_node") return pendingPrompt;
+      return baseInvokeImplementation(command, args);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "新建画布" })).toBeEnabled());
+    await waitFor(() => expect(screen.queryByText("正在读取画布…")).not.toBeInTheDocument());
+    const originalTab = within(screen.getByRole("tablist", { name: "创作画布" })).getByRole("tab", {
+      selected: true,
+    });
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "广告场景：雨夜站台" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: /^删除画布 / }));
+    const dialog = await screen.findByRole("dialog", { name: "删除画布？" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("此画布仍有任务正在执行"),
+    );
+    expect(originalTab).toHaveAttribute("aria-selected", "true");
+    expect(invokeMock).not.toHaveBeenCalledWith("delete_canvas_document", expect.anything());
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog", { name: "删除画布？" })).not.toBeInTheDocument();
+
+    await act(async () => {
+      resolvePrompt({ optimizedPrompt: generatedPrompt, rawModelOutput: generatedPrompt });
+      await pendingPrompt;
+    });
+    expect(await screen.findByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
+      generatedPrompt,
+    );
+    expect(within(promptNode).getByRole("button", { name: "生成提示词" })).toBeEnabled();
+    expect(originalTab).toHaveAttribute("aria-selected", "true");
+    expect(invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node")).toHaveLength(
+      1,
+    );
+  });
+
+  it("删除画布时重新检查桌面生成任务，活动任务或检查失败均保留画布", async () => {
+    let failTaskCheck = false;
+    invokeMock.mockImplementation((command, args) => {
+      const query = args?.["query"] as
+        { canvasId?: string; statuses?: readonly string[] } | undefined;
+      if (command === "list_generation_tasks" && query?.statuses) {
+        if (failTaskCheck) return Promise.reject(new Error("无法检查生成任务状态"));
+        if (!query.canvasId) throw new Error("删除前检查必须指定所属画布");
+        return Promise.resolve({
+          items: [makeTaskSummary({ canvasId: query.canvasId, status: "running" })],
+          nextCursorCreatedBefore: null,
+        });
+      }
+      return baseInvokeImplementation(command, args);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "新建画布" })).toBeEnabled());
+    await waitFor(() => expect(screen.queryByText("正在读取画布…")).not.toBeInTheDocument());
+    const originalTab = within(screen.getByRole("tablist", { name: "创作画布" })).getByRole("tab", {
+      selected: true,
+    });
+    const canvasId = originalTab.id.replace("canvas-tab-", "");
+    fireEvent.click(screen.getByRole("button", { name: /^删除画布 / }));
+    const dialog = await screen.findByRole("dialog", { name: "删除画布？" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("此画布仍有生成任务正在执行"),
+    );
+    expect(invokeMock).toHaveBeenCalledWith("list_generation_tasks", {
+      query: {
+        canvasId,
+        statuses: ["created", "submitting", "retry_wait", "queued", "running"],
+        limit: 1,
+      },
+    });
+    expect(invokeMock).not.toHaveBeenCalledWith("delete_canvas_document", expect.anything());
+
+    failTaskCheck = true;
+    fireEvent.click(within(dialog).getByRole("button", { name: "确认删除" }));
+    await waitFor(() =>
+      expect(within(dialog).getByRole("alert")).toHaveTextContent("无法检查生成任务状态"),
+    );
+    expect(originalTab).toHaveAttribute("aria-selected", "true");
+    expect(invokeMock).not.toHaveBeenCalledWith("delete_canvas_document", expect.anything());
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+  });
+
   it("上游输出未变时保留手改和断线引用，保存恢复不按新编号重绑", async () => {
     let storedDocument: unknown = null;
     invokeMock.mockImplementation((command, args) => {

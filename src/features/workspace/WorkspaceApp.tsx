@@ -732,6 +732,7 @@ export function WorkspaceApp({
     [canvasId],
   );
   const activeWorkflowHistoryIdsRef = useRef(new Set<string>());
+  const workflowHistoryActionsRef = useRef(new Set<string>());
   const [activeWorkflowHistoryIds, setActiveWorkflowHistoryIds] = useState<readonly string[]>([]);
   const recoverWorkflowHistory = services.recoverWorkflowHistory;
   useEffect(() => {
@@ -959,11 +960,39 @@ export function WorkspaceApp({
     [promptContents, restoreDocument],
   );
 
+  const validateCanvasDelete = useCallback(async () => {
+    if (
+      startingNodeKeys.size > 0 ||
+      knowledgeVideoWorkflowAbortControllersRef.current.size > 0 ||
+      activeWorkflowHistoryIdsRef.current.size > 0 ||
+      workflowHistoryActionsRef.current.size > 0 ||
+      videoComposerAbortControllersRef.current.size > 0 ||
+      videoDownloadQueuesRef.current.size > 0 ||
+      frameExtractionQueuesRef.current.size > 0 ||
+      Object.values(videoComposerRuns).some((run) => run.status === "running") ||
+      Object.values(videoDownloaderRuns).some((run) => run.status === "running") ||
+      Object.values(frameExtractorRuns).some((run) => run.status === "running")
+    ) {
+      throw new Error("此画布仍有任务正在执行，请先暂停工作流或等待任务完成后再删除。");
+    }
+    if (!isDesktopRuntime()) return;
+    // Query when deletion is confirmed: the regular task list may be stale or limited.
+    const tasks = await generationClient.list({
+      canvasId,
+      statuses: ["created", "submitting", "retry_wait", "queued", "running"],
+      limit: 1,
+    });
+    if (tasks.items.length > 0) {
+      throw new Error("此画布仍有生成任务正在执行，请等待任务完成后再删除。");
+    }
+  }, [canvasId, startingNodeKeys, videoComposerRuns, videoDownloaderRuns, frameExtractorRuns]);
+
   const canvasPersistence = useCanvasDocumentPersistence({
     canvasId,
     collect: collectCanvasDocument,
     restore: restoreCanvasDocument,
     services,
+    validateDelete: validateCanvasDelete,
   });
   const {
     hydrated: canvasHydrated,
@@ -2204,7 +2233,6 @@ export function WorkspaceApp({
     [recordedWorkflowRunner, snapshotV2, recoverWorkflowHistory, patchNode, providerCatalog],
   );
 
-  const workflowHistoryActionsRef = useRef(new Set<string>());
   const restoreStoredWorkflow = useCallback(
     async (
       record: WorkflowHistoryRecord,

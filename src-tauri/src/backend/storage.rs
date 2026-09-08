@@ -1163,6 +1163,13 @@ impl Storage {
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
 
+    pub fn delete_canvas_document(&self, id: &str) -> BackendResult<()> {
+        // Task history, workflow checkpoints, and generated files outlive their canvas.
+        self.lock()?
+            .execute("DELETE FROM canvas_documents WHERE id = ?1", params![id])?;
+        Ok(())
+    }
+
     pub fn get_task_detail(&self, task_id: &str) -> BackendResult<GenerationTaskDetail> {
         let connection = self.lock()?;
         let summary = connection
@@ -2585,6 +2592,119 @@ mod tests {
             expected_revision: Some(1),
         });
         assert!(matches!(stale, Err(BackendError::Conflict(_))));
+    }
+
+    #[test]
+    fn canvas_delete_preserves_other_canvases_histories_and_files_after_reopen() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        let media_path = directory.path().join("generated.png");
+        std::fs::write(&media_path, b"saved media").expect("write media");
+        let storage = Storage::open(&path).expect("open db");
+        // A quoted ID also checks that deletion binds its target as a SQL parameter.
+        let deleted_id = "canvas-1'; DELETE FROM generation_tasks; --";
+        for id in [deleted_id, "canvas-2"] {
+            storage
+                .save_canvas_document(&SaveCanvasDocumentCommand {
+                    id: id.into(),
+                    title: id.into(),
+                    document: json!({ "nodes": [{ "path": media_path }] }),
+                    expected_revision: None,
+                })
+                .expect("save canvas");
+        }
+        let workflow = storage
+            .save_workflow_history(
+                serde_json::from_value(json!({
+                    "record": {
+                        "id": "run-1", "canvasId": deleted_id, "sourceNodeId": "node-1",
+                        "workflowKind": "knowledge", "title": "知识视频", "status": "planning",
+                        "progress": 10, "message": "制作中", "nodeSnapshot": {
+                            "key": "node-1", "kind": "knowledge_video_workflow",
+                            "config": { "checkpoint": { "phase": "planning", "imagePath": media_path } }
+                        },
+                        "models": [], "attemptCount": 1, "revision": 0, "createdAt": 0, "updatedAt": 0
+                    },
+                    "event": { "phase": "planning", "progress": 10, "message": "制作中" }
+                }))
+                .expect("workflow command"),
+            )
+            .expect("save workflow history");
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        storage
+            .insert_task(NewTask {
+                id: "task-1",
+                canvas_id: deleted_id,
+                source_node_id: "node-1",
+                operation: GenerationOperation::TextToImage,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "gpt-image-2",
+                remote_model_id: Some("gpt-image-2"),
+                logical_request: &json!({}),
+            })
+            .expect("save generation history");
+
+        storage.delete_canvas_document(deleted_id).expect("delete");
+        storage
+            .delete_canvas_document(deleted_id)
+            .expect("delete missing");
+        drop(storage);
+        let reopened = Storage::open(&path).expect("reopen db");
+        assert!(matches!(
+            reopened.get_canvas_document(deleted_id),
+            Err(BackendError::NotFound(_))
+        ));
+        let canvases = reopened.list_canvas_documents().expect("list");
+        assert_eq!(canvases.len(), 1);
+        assert_eq!(canvases[0].id, "canvas-2");
+        assert_eq!(
+            reopened
+                .get_task_execution("task-1")
+                .expect("task history")
+                .id,
+            "task-1"
+        );
+        let history = reopened
+            .get_workflow_history("run-1")
+            .expect("workflow history");
+        assert_eq!(history.record.node_snapshot, workflow.node_snapshot);
+        assert_eq!(history.events.len(), 1);
+        assert_eq!(
+            std::fs::read(&media_path).expect("read media"),
+            b"saved media"
+        );
+    }
+
+    #[test]
+    fn canvas_delete_failure_keeps_the_saved_document() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        let document = json!({ "nodes": [{ "id": "prompt-1", "text": "保留原稿" }] });
+        storage
+            .save_canvas_document(&SaveCanvasDocumentCommand {
+                id: "canvas-1".into(),
+                title: "故事板".into(),
+                document: document.clone(),
+                expected_revision: None,
+            })
+            .expect("save canvas");
+        storage
+            .lock()
+            .expect("connection")
+            .execute_batch(
+                "CREATE TRIGGER prevent_canvas_delete BEFORE DELETE ON canvas_documents
+                 BEGIN SELECT RAISE(FAIL, 'delete blocked'); END;",
+            )
+            .expect("block deletion");
+
+        assert!(storage.delete_canvas_document("canvas-1").is_err());
+        let retained = storage
+            .get_canvas_document("canvas-1")
+            .expect("retained canvas");
+        assert_eq!(retained.document, document);
+        assert_eq!(retained.revision, 1);
+        assert_eq!(storage.list_canvas_documents().expect("list").len(), 1);
     }
 
     #[test]

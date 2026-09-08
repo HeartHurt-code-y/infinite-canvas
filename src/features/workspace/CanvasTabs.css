@@ -41,6 +41,7 @@
 
 .canvas-tabs__tab,
 .canvas-tabs__rename,
+.canvas-tabs__delete,
 .canvas-tabs__create {
   display: inline-flex;
   align-items: center;
@@ -70,7 +71,8 @@
   font-weight: 600;
 }
 
-.canvas-tabs__rename {
+.canvas-tabs__rename,
+.canvas-tabs__delete {
   flex: 0 0 2rem;
   padding-inline: var(--space-xs);
 }
@@ -107,6 +109,11 @@
   .canvas-tabs__create:hover:not(:disabled) {
     background: var(--color-chrome-3);
     color: var(--color-chrome-ink);
+  }
+
+  .canvas-tabs__delete:hover:not(:disabled) {
+    background: var(--color-error-soft);
+    color: var(--color-error);
   }
 }
 

@@ -107,6 +107,74 @@ describe("browser canvas document repository", () => {
     await expect(repository.list()).resolves.toMatchObject([{ id: "a", title: "产品宣传" }]);
   });
 
+  it("deletes only the chosen canvas and keeps it absent after reopening", async () => {
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    await repository.save({ id: "a", title: "广告", document: document("产品") });
+    await repository.save({ id: "b", title: "短剧", document: document("剧本", 120) });
+    await repository.delete("a");
+    await repository.delete("a");
+    await repository.delete("missing");
+
+    const reopened = createCanvasDocumentRepository({ isDesktop: () => false });
+    await expect(reopened.get("a")).rejects.toMatchObject({ kind: "not_found" });
+    await expect(reopened.list()).resolves.toMatchObject([{ id: "b", title: "短剧" }]);
+    await expect(reopened.get("b")).resolves.toMatchObject({ document: document("剧本", 120) });
+    expect(localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`)).toBeNull();
+  });
+
+  it("allows deleting a damaged document without changing another canvas", async () => {
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    await repository.save({ id: "a", title: "广告", document: document("产品") });
+    await repository.save({ id: "b", title: "短剧", document: document("剧本") });
+    localStorage.setItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`, "{");
+    await expect(repository.delete("a")).resolves.toBeUndefined();
+    await expect(repository.list()).resolves.toMatchObject([{ id: "b" }]);
+    await expect(repository.get("a")).rejects.toMatchObject({ kind: "not_found" });
+  });
+
+  it("restores the document when catalog deletion fails and allows a save and deletion retry", async () => {
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    await repository.save({ id: "a", title: "广告", document: document("产品") });
+    const previousRaw = localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`);
+    const failure = new DOMException("Storage is denied", "SecurityError");
+    const originalSetItem = localStorage.setItem.bind(localStorage);
+    const setItem = vi.spyOn(localStorage, "setItem").mockImplementation((key, value) => {
+      if (key === CANVAS_CATALOG_STORAGE_KEY) throw failure;
+      originalSetItem(key, value);
+    });
+
+    await expect(repository.delete("a")).rejects.toBe(failure);
+    expect(localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`)).toBe(previousRaw);
+    await expect(repository.list()).resolves.toMatchObject([{ id: "a", title: "广告" }]);
+    setItem.mockRestore();
+    await expect(
+      repository.save({ id: "a", title: "新广告", document: document("修订") }),
+    ).resolves.toMatchObject({ title: "新广告", revision: 2 });
+    await repository.delete("a");
+    await expect(repository.list()).resolves.toEqual([]);
+  });
+
+  it("keeps the catalog and document when removing the document fails", async () => {
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    await repository.save({ id: "a", title: "广告", document: document("产品") });
+    const failure = new DOMException("Storage is denied", "SecurityError");
+    vi.spyOn(localStorage, "removeItem").mockImplementation(() => {
+      throw failure;
+    });
+    await expect(repository.delete("a")).rejects.toBe(failure);
+    await expect(repository.get("a")).resolves.toMatchObject({ document: document("产品") });
+    await expect(repository.list()).resolves.toMatchObject([{ id: "a", title: "广告" }]);
+  });
+
+  it("does not remove a document when its catalog cannot be read", async () => {
+    const repository = createCanvasDocumentRepository({ isDesktop: () => false });
+    await repository.save({ id: "a", title: "广告", document: document("产品") });
+    const previousRaw = localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`);
+    localStorage.setItem(CANVAS_CATALOG_STORAGE_KEY, "{");
+    await expect(repository.delete("a")).rejects.toBeInstanceOf(SyntaxError);
+    expect(localStorage.getItem(`${CANVAS_DOCUMENT_STORAGE_PREFIX}a`)).toBe(previousRaw);
+  });
+
   it("keeps the previous document and surfaces the original quota error when catalog save fails", async () => {
     const repository = createCanvasDocumentRepository({ isDesktop: () => false });
     await repository.save({ id: "a", title: "旧标题", document: document("原稿") });
@@ -163,6 +231,7 @@ describe("desktop canvas document write ordering", () => {
     const firstWrite = deferred<CanvasDocumentRecord>();
     const client: CanvasDocumentClient = {
       list: vi.fn(() => Promise.resolve([])),
+      delete: vi.fn(() => Promise.resolve()),
       get: vi.fn<CanvasDocumentClient["get"]>((id) => Promise.resolve(record(id, 2))),
       save: vi.fn<CanvasDocumentClient["save"]>((command) =>
         command.title === "first"
@@ -196,6 +265,7 @@ describe("desktop canvas document write ordering", () => {
     const saved = record("a", 1);
     const client: CanvasDocumentClient = {
       list: vi.fn(() => Promise.resolve([{ ...saved }])),
+      delete: vi.fn(() => Promise.resolve()),
       get: vi.fn(() => Promise.resolve(saved)),
       save: vi.fn(() => write.promise),
     };
@@ -223,6 +293,7 @@ describe("desktop canvas document write ordering", () => {
       isDesktop: () => true,
       desktopClient: {
         save: saveClient,
+        delete: vi.fn(() => Promise.resolve()),
         get: vi.fn(() => Promise.resolve(record("a", 1))),
         list: vi.fn(() => Promise.resolve([])),
       },
@@ -232,5 +303,78 @@ describe("desktop canvas document write ordering", () => {
     await expect(failed).rejects.toBe(failure);
     await expect(recovered).resolves.toMatchObject({ id: "a", revision: 1 });
     expect(saveClient).toHaveBeenCalledTimes(2);
+  });
+
+  it("finishes previously queued saves and renames before deletion and blocks late writes", async () => {
+    const firstWrite = deferred<CanvasDocumentRecord>();
+    const deleteWrite = deferred<void>();
+    const client: CanvasDocumentClient = {
+      list: vi.fn(() => Promise.resolve([])),
+      get: vi.fn(() => Promise.resolve(record("a", 2))),
+      save: vi
+        .fn<CanvasDocumentClient["save"]>()
+        .mockReturnValueOnce(firstWrite.promise)
+        .mockResolvedValue(record("a", 3)),
+      delete: vi.fn(() => deleteWrite.promise),
+    };
+    const repository = createCanvasDocumentRepository({
+      isDesktop: () => true,
+      desktopClient: client,
+    });
+    const first = repository.save({ id: "a", title: "广告", document: document("产品") });
+    const second = repository.save({ id: "a", title: "广告", document: document("修订") });
+    const rename = repository.rename("a", "产品宣传");
+    const deletion = repository.delete("a");
+    expect(repository.delete("a")).toBe(deletion);
+    await expect(
+      repository.save({ id: "a", title: "过期", document: document("后台结果") }),
+    ).rejects.toThrow("画布正在删除或已删除");
+    await expect(repository.rename("a", "过期标题")).rejects.toThrow("画布正在删除或已删除");
+    expect(client.delete).not.toHaveBeenCalled();
+    firstWrite.resolve(record("a", 1));
+    await Promise.all([first, second, rename]);
+    expect(client.save).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() => expect(client.delete).toHaveBeenCalledWith("a"));
+    await expect(
+      repository.save({ id: "a", title: "过期", document: document("后台结果") }),
+    ).rejects.toThrow("画布正在删除或已删除");
+    deleteWrite.resolve();
+    await deletion;
+    await expect(repository.rename("a", "复活")).rejects.toThrow("画布正在删除或已删除");
+    await expect(
+      repository.save({ id: "a", title: "复活", document: document("后台结果") }),
+    ).rejects.toThrow("画布正在删除或已删除");
+    await repository.delete("a");
+    expect(client.delete).toHaveBeenCalledOnce();
+  });
+
+  it("allows other canvases to save while deleting and permits retries after a deletion failure", async () => {
+    const deleteWrite = deferred<void>();
+    const failure = new Error("database unavailable");
+    const client: CanvasDocumentClient = {
+      list: vi.fn(() => Promise.resolve([])),
+      get: vi.fn<CanvasDocumentClient["get"]>((id) => Promise.resolve(record(id, 1))),
+      save: vi.fn<CanvasDocumentClient["save"]>((command) =>
+        Promise.resolve(record(command.id, 2)),
+      ),
+      delete: vi
+        .fn<CanvasDocumentClient["delete"]>()
+        .mockReturnValueOnce(deleteWrite.promise)
+        .mockResolvedValue(undefined),
+    };
+    const repository = createCanvasDocumentRepository({
+      isDesktop: () => true,
+      desktopClient: client,
+    });
+    const deletion = repository.delete("a");
+    const rejected = expect(deletion).rejects.toBe(failure);
+    await expect(
+      repository.save({ id: "b", title: "短剧", document: document("剧本") }),
+    ).resolves.toMatchObject({ id: "b" });
+    deleteWrite.reject(failure);
+    await rejected;
+    await expect(repository.rename("a", "重命名")).resolves.toMatchObject({ id: "a" });
+    await repository.delete("a");
+    expect(client.delete).toHaveBeenCalledTimes(2);
   });
 });

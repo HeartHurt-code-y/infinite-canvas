@@ -28,3 +28,23 @@ describe("canvas document list IPC", () => {
     await expect(canvasDocumentClient.list()).rejects.toBe(databaseError);
   });
 });
+
+describe("canvas document deletion IPC", () => {
+  it("deletes the requested canvas through the desktop command", async () => {
+    const invoke = vi.fn(() => Promise.resolve(null));
+    (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = { invoke };
+    await expect(canvasDocumentClient.delete("广告 / canvas-2")).resolves.toBeUndefined();
+    expect(invoke).toHaveBeenCalledWith(
+      "delete_canvas_document",
+      { canvasId: "广告 / canvas-2" },
+      undefined,
+    );
+  });
+
+  it("preserves the original deletion failure", async () => {
+    const databaseError = { kind: "database", message: "database unavailable" };
+    const invoke = vi.fn().mockRejectedValue(databaseError);
+    (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = { invoke };
+    await expect(canvasDocumentClient.delete("a")).rejects.toBe(databaseError);
+  });
+});

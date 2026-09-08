@@ -163,6 +163,152 @@ afterEach(() => {
 });
 
 describe("App independent canvases", () => {
+  it("confirms deletion, selects the next or previous canvas, and retains the other scenes after reload", async () => {
+    const originalId = `canvas-${crypto.randomUUID()}`;
+    window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, originalId);
+    const view = render(<App />);
+    await waitForCanvasReady();
+    setPromptText(await addNode("image"), "保留的商品场景");
+    await createCanvas("画布 2");
+    const secondId = window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)!;
+    setPromptText(await addNode("video"), "即将删除的镜头场景");
+    await createCanvas("画布 3");
+    const thirdId = window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)!;
+    await selectCanvas("画布 2");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 画布 2" }));
+    const dialog = screen.getByRole("dialog", { name: "删除画布？" });
+    expect(within(dialog).getByRole("button", { name: "取消" })).toHaveFocus();
+    expect(screen.getByRole("tabpanel")).toHaveAttribute("inert");
+    fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "画布 2" })).toHaveAttribute("aria-selected", "true");
+    expect(
+      within(activeCanvas()).getByRole("textbox", { name: PROMPT_INPUT_LABEL }),
+    ).toHaveTextContent("即将删除的镜头场景");
+
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 画布 2" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitForCanvasReady();
+    expect(screen.queryByRole("tab", { name: "画布 2" })).not.toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "画布 3" })).toHaveAttribute("aria-selected", "true");
+    await waitFor(() => expect(screen.getByRole("tab", { name: "画布 3" })).toHaveFocus());
+    await expect(canvasDocumentRepository.get(secondId)).rejects.toMatchObject({
+      kind: "not_found",
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 画布 3" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitForCanvasReady();
+    expect(screen.getByRole("tab", { name: "未命名画布" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)).toBe(originalId);
+    await expect(canvasDocumentRepository.get(thirdId)).rejects.toMatchObject({
+      kind: "not_found",
+    });
+
+    await act(async () => {
+      view.unmount();
+      await canvasDocumentRepository.list();
+    });
+    render(<App />);
+    await waitForCanvasReady();
+    expect(
+      within(screen.getByRole("tablist", { name: "创作画布" })).getAllByRole("tab"),
+    ).toHaveLength(1);
+    await waitFor(() =>
+      expect(
+        within(activeCanvas()).getByRole("textbox", { name: PROMPT_INPUT_LABEL }),
+      ).toHaveTextContent("保留的商品场景"),
+    );
+  });
+
+  it("replaces the last deleted canvas with a persisted blank canvas without restoring the old canvas", async () => {
+    const originalId = `canvas-${crypto.randomUUID()}`;
+    window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, originalId);
+    const view = render(<App />);
+    await waitForCanvasReady();
+    setPromptText(await addNode("image"), "删除后不应复活的内容");
+    await renameCanvas("未命名画布", "旧场景");
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 旧场景" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitForCanvasReady();
+    const replacementId = window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)!;
+    expect(replacementId).not.toBe(originalId);
+    expect(
+      within(screen.getByRole("tablist", { name: "创作画布" })).getAllByRole("tab"),
+    ).toHaveLength(1);
+    await waitFor(() => expect(within(activeCanvas()).getByText("画布为空")).toBeInTheDocument());
+    expect(screen.getByRole("button", { name: "撤销画布操作" })).toBeDisabled();
+    expect((await canvasDocumentRepository.list()).map((canvas) => canvas.id)).toEqual([
+      replacementId,
+    ]);
+
+    await act(async () => {
+      view.unmount();
+      await canvasDocumentRepository.list();
+    });
+    render(<App />);
+    await waitForCanvasReady();
+    expect(
+      within(screen.getByRole("tablist", { name: "创作画布" })).getAllByRole("tab"),
+    ).toHaveLength(1);
+    expect(window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)).toBe(replacementId);
+    expect(screen.queryByRole("tab", { name: "旧场景" })).not.toBeInTheDocument();
+    await waitFor(() => expect(within(activeCanvas()).getByText("画布为空")).toBeInTheDocument());
+    await expect(canvasDocumentRepository.get(originalId)).rejects.toMatchObject({
+      kind: "not_found",
+    });
+  });
+
+  it("retains the original canvas on deletion failure, resumes saving, and permits another deletion attempt", async () => {
+    const originalId = `canvas-${crypto.randomUUID()}`;
+    window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, originalId);
+    render(<App />);
+    await waitForCanvasReady();
+    const image = await addNode("image");
+    setPromptText(image, "删除失败时保留");
+    await renameCanvas("未命名画布", "需要保留的场景");
+    const remove = vi
+      .spyOn(canvasDocumentRepository, "delete")
+      .mockRejectedValueOnce(new Error("磁盘暂时不可用"));
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 需要保留的场景" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("磁盘暂时不可用"));
+    expect(
+      within(screen.getByRole("tablist", { name: "创作画布" })).getAllByRole("tab"),
+    ).toHaveLength(1);
+    expect(window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)).toBe(originalId);
+    expect((await canvasDocumentRepository.list()).map((canvas) => canvas.id)).toEqual([
+      originalId,
+    ]);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    setPromptText(image, "失败后仍然可以编辑并自动保存");
+    await waitFor(
+      async () => {
+        expect(JSON.stringify((await canvasDocumentRepository.get(originalId)).document)).toContain(
+          "失败后仍然可以编辑并自动保存",
+        );
+      },
+      { timeout: 2500 },
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 需要保留的场景" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).not.toBeInTheDocument());
+    await waitForCanvasReady();
+    expect(remove.mock.calls.filter(([id]) => id === originalId)).toHaveLength(2);
+    expect(screen.queryByRole("tab", { name: "需要保留的场景" })).not.toBeInTheDocument();
+    await expect(canvasDocumentRepository.get(originalId)).rejects.toMatchObject({
+      kind: "not_found",
+    });
+  });
+
   it("keeps a requested rename when autosave runs while the rename response is pending", async () => {
     render(<App />);
     await waitForCanvasReady();
@@ -337,5 +483,63 @@ describe("App independent canvases", () => {
       ),
     );
     expect(activeCanvas().querySelectorAll(".react-flow__node")).toHaveLength(1);
+  });
+
+  it("retains the replacement when deletion and active preference rollback fail, restoring both real canvases on remount", async () => {
+    const originalId = `canvas-${crypto.randomUUID()}`;
+    window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, originalId);
+    const view = render(<App />);
+    await waitForCanvasReady();
+    setPromptText(await addNode("image"), "删除和偏好回滚失败时仍需保留的提示词");
+    await renameCanvas("未命名画布", "保留场景");
+
+    const setStorageItem = window.localStorage.setItem.bind(window.localStorage);
+    const setItem = vi.spyOn(window.localStorage, "setItem").mockImplementation((key, value) => {
+      if (key === ACTIVE_CANVAS_STORAGE_KEY && value === originalId) {
+        throw new Error("无法恢复原画布偏好");
+      }
+      setStorageItem(key, value);
+    });
+    const remove = vi
+      .spyOn(canvasDocumentRepository, "delete")
+      .mockRejectedValueOnce(new Error("删除画布存档失败"));
+    fireEvent.click(screen.getByRole("button", { name: "删除画布 保留场景" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除" }));
+    await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("无法恢复原画布偏好"));
+
+    const replacementId = window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)!;
+    expect(replacementId).not.toBe(originalId);
+    expect(remove).toHaveBeenCalledExactlyOnceWith(originalId);
+    expect(screen.getByRole("tab", { name: "保留场景" })).toHaveAttribute("aria-selected", "true");
+    expect(screen.getByRole("tab", { name: "未命名画布" })).toBeInTheDocument();
+    expect((await canvasDocumentRepository.list()).map((canvas) => canvas.id).sort()).toEqual(
+      [originalId, replacementId].sort(),
+    );
+    expect((await canvasDocumentRepository.get(replacementId)).id).toBe(replacementId);
+    fireEvent.click(screen.getByRole("button", { name: "取消" }));
+    setItem.mockRestore();
+
+    await act(async () => {
+      view.unmount();
+      await canvasDocumentRepository.list();
+    });
+    render(<App />);
+    await waitForCanvasReady();
+    const tabs = within(screen.getByRole("tablist", { name: "创作画布" })).getAllByRole("tab");
+    expect(tabs).toHaveLength(2);
+    expect(tabs.map((tab) => tab.id.replace("canvas-tab-", "")).sort()).toEqual(
+      [originalId, replacementId].sort(),
+    );
+    expect(screen.getByRole("tab", { name: "未命名画布" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    expect(window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)).toBe(replacementId);
+    await selectCanvas("保留场景");
+    await waitFor(() =>
+      expect(
+        within(activeCanvas()).getByRole("textbox", { name: PROMPT_INPUT_LABEL }),
+      ).toHaveTextContent("删除和偏好回滚失败时仍需保留的提示词"),
+    );
   });
 });

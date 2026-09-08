@@ -72,6 +72,7 @@ pub fn run() {
             commands::upsert_provider_token_group,
             commands::delete_provider_token_group,
             commands::save_canvas_document,
+            commands::delete_canvas_document,
             commands::save_workflow_history,
             commands::list_workflow_history,
             commands::get_workflow_history,

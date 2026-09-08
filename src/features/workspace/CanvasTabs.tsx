@@ -1,5 +1,6 @@
 import { PencilSimple } from "@phosphor-icons/react/PencilSimple";
 import { Plus } from "@phosphor-icons/react/Plus";
+import { Trash } from "@phosphor-icons/react/Trash";
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import "./CanvasTabs.css";
@@ -11,6 +12,7 @@ export interface CanvasTabsProps {
   readonly onSelect: (id: string) => void;
   readonly onCreate: () => void;
   readonly onRename: (id: string, name: string) => void;
+  readonly onDelete: (id: string) => void;
 }
 
 interface CanvasNameEdit {
@@ -26,6 +28,7 @@ export const CanvasTabs = memo(function CanvasTabs({
   onSelect,
   onCreate,
   onRename,
+  onDelete,
 }: CanvasTabsProps) {
   const [editing, setEditing] = useState<CanvasNameEdit | null>(null);
   const editingRef = useRef<CanvasNameEdit | null>(null);
@@ -141,6 +144,18 @@ export const CanvasTabs = memo(function CanvasTabs({
                   disabled={busy}
                 >
                   <PencilSimple size={14} aria-hidden="true" />
+                </button>
+              )}
+              {selected && (
+                <button
+                  type="button"
+                  className="canvas-tabs__delete"
+                  aria-label={`删除画布 ${canvas.name}`}
+                  title="删除画布"
+                  onClick={() => onDelete(canvas.id)}
+                  disabled={busy || editing !== null}
+                >
+                  <Trash size={14} aria-hidden="true" />
                 </button>
               )}
               {isEditing && (

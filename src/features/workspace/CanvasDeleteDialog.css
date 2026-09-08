@@ -1,0 +1,108 @@
+.canvas-delete-dialog {
+  width: min(28rem, calc(100vw - var(--space-lg) * 2));
+  max-height: calc(100dvh - var(--space-lg) * 2);
+  padding: 0;
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-panel);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-raised);
+  overflow: auto;
+}
+
+.canvas-delete-dialog::backdrop {
+  background: var(--color-scrim);
+}
+
+.canvas-delete-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  background: var(--color-chrome-2);
+  color: var(--color-chrome-ink);
+}
+
+.canvas-delete-dialog__header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.canvas-delete-dialog__icon {
+  display: grid;
+  flex: 0 0 var(--size-control);
+  height: var(--size-control);
+  border-radius: var(--radius-control);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  place-items: center;
+}
+
+.canvas-delete-dialog__body {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-lg);
+  font-size: var(--text-base);
+  line-height: 1.65;
+  overflow-wrap: anywhere;
+}
+
+.canvas-delete-dialog__body p {
+  margin: 0;
+}
+
+.canvas-delete-dialog__retained {
+  color: var(--color-muted);
+}
+
+.canvas-delete-dialog__error {
+  margin: 0 var(--space-lg) var(--space-md);
+  padding: var(--space-sm);
+  border-radius: var(--radius-control);
+  background: var(--color-error-soft);
+  color: var(--color-error);
+  font-size: var(--text-base);
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.canvas-delete-dialog__actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: var(--space-sm);
+  padding: 0 var(--space-lg) var(--space-lg);
+}
+
+.canvas-delete-dialog__actions button {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-md);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.canvas-delete-dialog__actions .canvas-delete-dialog__confirm {
+  border-color: var(--color-error);
+  background: var(--color-error);
+  color: var(--color-accent-ink);
+}
+
+.canvas-delete-dialog button:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+.canvas-delete-dialog button:disabled {
+  cursor: wait;
+  opacity: 0.65;
+}
+
+@media (hover: hover) {
+  .canvas-delete-dialog__actions button:hover:not(:disabled) {
+    border-color: var(--color-ink-2);
+  }
+}

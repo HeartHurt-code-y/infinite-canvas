@@ -7,6 +7,8 @@ import type { CanvasDocumentV2 } from "./canvasStore";
 export interface CanvasSessionHandle {
   flush(title?: string): Promise<void>;
   isReady(): boolean;
+  prepareDelete(): Promise<void>;
+  resumeAfterDeleteFailure(): void;
 }
 
 export interface CanvasSessionServices {
@@ -22,11 +24,13 @@ export function useCanvasDocumentPersistence({
   collect,
   restore,
   services,
+  validateDelete,
 }: {
   readonly canvasId: string;
   readonly collect: () => CanvasDocumentV2;
   readonly restore: (document: unknown) => void;
   readonly services: CanvasSessionServices;
+  readonly validateDelete?: () => Promise<void>;
 }) {
   const [hydrated, setHydrated] = useState(false);
   const [status, setStatus] = useState<"loading" | "pending" | "saving" | "saved" | "error">(
@@ -39,16 +43,22 @@ export function useCanvasDocumentPersistence({
   const ready = useRef(false);
   const skipInitialSave = useRef(true);
   const request = useRef(0);
+  const suspended = useRef(false);
+  const deleteValidator = useRef(validateDelete);
 
   useEffect(() => {
     collector.current = collect;
   }, [collect]);
 
   useEffect(() => {
+    deleteValidator.current = validateDelete;
+  }, [validateDelete]);
+
+  useEffect(() => {
     let cancelled = false;
     void canvasDocumentRepository.get(canvasId).then(
       (record) => {
-        if (cancelled) return;
+        if (cancelled || suspended.current) return;
         try {
           restore(record.document);
           services.titleLoaded(canvasId, record.title);
@@ -62,7 +72,7 @@ export function useCanvasDocumentPersistence({
         }
       },
       (failure: unknown) => {
-        if (cancelled) return;
+        if (cancelled || suspended.current) return;
         if (isCanvasDocumentNotFound(failure)) {
           ready.current = true;
           setHydrated(true);
@@ -81,6 +91,7 @@ export function useCanvasDocumentPersistence({
 
   const flush = useCallback(
     async (title?: string) => {
+      if (suspended.current) return;
       // An unhydrated canvas cannot be edited and must never overwrite its stored document.
       if (!ready.current) {
         if (title !== undefined) throw new Error("请等待画布读取完成后再重命名。");
@@ -99,13 +110,13 @@ export function useCanvasDocumentPersistence({
           title: title ?? services.getTitle(canvasId),
           document,
         });
-        if (request.current === currentRequest) {
+        if (!suspended.current && request.current === currentRequest) {
           setStatus("saved");
           setError(null);
         }
       } catch (failure) {
         const message = formatRawBackendError(failure);
-        if (request.current === currentRequest) {
+        if (!suspended.current && request.current === currentRequest) {
           setStatus("error");
           setError(message);
         }
@@ -117,7 +128,7 @@ export function useCanvasDocumentPersistence({
   );
 
   const schedule = useCallback(() => {
-    if (!ready.current) return;
+    if (!ready.current || suspended.current) return;
     // A previous save must not announce "saved" over a newer unsaved edit.
     request.current += 1;
     if (timer.current !== null) clearTimeout(timer.current);
@@ -129,7 +140,7 @@ export function useCanvasDocumentPersistence({
   }, [flush]);
 
   const documentChanged = useCallback(() => {
-    if (!ready.current) return;
+    if (!ready.current || suspended.current) return;
     if (skipInitialSave.current) {
       skipInitialSave.current = false;
       return;
@@ -137,9 +148,33 @@ export function useCanvasDocumentPersistence({
     schedule();
   }, [schedule]);
 
+  const prepareDelete = useCallback(async () => {
+    await deleteValidator.current?.();
+    // Validation must succeed first so a rejected deletion keeps normal autosaving.
+    // Existing writes are already queued before the repository's delete operation.
+    suspended.current = true;
+    request.current += 1;
+    if (timer.current !== null) {
+      clearTimeout(timer.current);
+      timer.current = null;
+    }
+  }, []);
+
+  const resumeAfterDeleteFailure = useCallback(() => {
+    if (!suspended.current) return;
+    suspended.current = false;
+    if (ready.current) schedule();
+    else setLoadAttempt((value) => value + 1);
+  }, [schedule]);
+
   useEffect(() => {
-    return services.register(canvasId, { flush, isReady: () => ready.current });
-  }, [canvasId, flush, services]);
+    return services.register(canvasId, {
+      flush,
+      isReady: () => ready.current && !suspended.current,
+      prepareDelete,
+      resumeAfterDeleteFailure,
+    });
+  }, [canvasId, flush, prepareDelete, resumeAfterDeleteFailure, services]);
 
   useEffect(
     () => () => {
@@ -149,6 +184,7 @@ export function useCanvasDocumentPersistence({
   );
 
   const retry = () => {
+    if (suspended.current) return;
     if (hydrated) void flush().catch(() => undefined);
     else {
       setError(null);

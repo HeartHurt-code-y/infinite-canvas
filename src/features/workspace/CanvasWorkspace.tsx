@@ -13,6 +13,7 @@ import type {
   CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { CanvasTabs } from "./CanvasTabs";
+import { CanvasDeleteDialog } from "./CanvasDeleteDialog";
 import { WorkspaceApp } from "./WorkspaceApp";
 import { CANVAS_ID, CANVAS_DOCUMENT_TITLE, DEFAULT_ZOOM } from "./workspaceModel";
 import "./CanvasWorkspace.css";
@@ -35,6 +36,7 @@ export function CanvasWorkspace() {
   ]);
   const canvasNames = useRef(new Map([[initialCanvasId, CANVAS_DOCUMENT_TITLE]]));
   const [activeCanvasId, setActiveCanvasId] = useState(initialCanvasId);
+  const activeId = useRef(initialCanvasId);
   const [visited, setVisited] = useState<readonly string[]>([initialCanvasId]);
   const sessions = useRef(new Map<string, CanvasSessionHandle>());
   const [readyIds, setReadyIds] = useState<ReadonlySet<string>>(new Set());
@@ -42,6 +44,8 @@ export function CanvasWorkspace() {
   const [busy, setBusy] = useState(false);
   const mutation = useRef(false);
   const [error, setError] = useState<string | null>(null);
+  const [deleteTarget, setDeleteTarget] = useState<CanvasTab | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
   const recovery = useRef<Promise<number> | null>(null);
 
   const services = useMemo<CanvasSessionServices>(
@@ -80,10 +84,11 @@ export function CanvasWorkspace() {
       const tabs = [...records]
         .sort((a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id))
         .map((record) => ({ id: record.id, name: record.title }));
-      if (!tabs.some((canvas) => canvas.id === initialCanvasId)) {
+      const currentId = activeId.current;
+      if (!tabs.some((canvas) => canvas.id === currentId)) {
         tabs.unshift({
-          id: initialCanvasId,
-          name: canvasNames.current.get(initialCanvasId) ?? CANVAS_DOCUMENT_TITLE,
+          id: currentId,
+          name: canvasNames.current.get(currentId) ?? CANVAS_DOCUMENT_TITLE,
         });
       }
       for (const canvas of tabs) canvasNames.current.set(canvas.id, canvas.name);
@@ -94,7 +99,7 @@ export function CanvasWorkspace() {
     } finally {
       setLoading(false);
     }
-  }, [initialCanvasId]);
+  }, []);
 
   useEffect(() => {
     // The catalog is external storage; results update the tab list after the read completes.
@@ -154,6 +159,7 @@ export function CanvasWorkspace() {
   }, [flushAll]);
 
   const activate = (id: string) => {
+    activeId.current = id;
     setVisited((current) => (current.includes(id) ? current : [...current, id]));
     setActiveCanvasId(id);
     try {
@@ -220,6 +226,85 @@ export function CanvasWorkspace() {
     });
   };
 
+  const confirmDelete = () => {
+    if (!deleteTarget) return;
+    const target = deleteTarget;
+    runMutation(async () => {
+      setDeleteError(null);
+      const session = sessions.current.get(target.id);
+      let replacement: CanvasTab | undefined;
+      let preferenceChanged = false;
+      try {
+        if (!session) throw new Error("当前画布尚未加载完成。");
+        await session.prepareDelete();
+        const index = canvases.findIndex((canvas) => canvas.id === target.id);
+        let next = canvases[index + 1] ?? canvases[index - 1];
+        if (!next) {
+          replacement = {
+            id: `canvas-${crypto.randomUUID()}`,
+            name: CANVAS_DOCUMENT_TITLE,
+          };
+          await canvasDocumentRepository.save({
+            id: replacement.id,
+            title: replacement.name,
+            document: createCanvasState(DEFAULT_ZOOM).commands.snapshotV2({}),
+          });
+          next = replacement;
+        }
+        // Remember the surviving canvas first so a restart cannot recreate the deleted ID.
+        writeActiveCanvasId(next.id);
+        preferenceChanged = true;
+        await canvasDocumentRepository.delete(target.id);
+        canvasNames.current.delete(target.id);
+        if (replacement) canvasNames.current.set(replacement.id, replacement.name);
+        sessions.current.delete(target.id);
+        setReadyIds((current) => {
+          const remaining = new Set(current);
+          remaining.delete(target.id);
+          return remaining;
+        });
+        setCanvases((current) => [
+          ...current.filter((canvas) => canvas.id !== target.id),
+          ...(replacement ? [replacement] : []),
+        ]);
+        setVisited((current) => current.filter((id) => id !== target.id));
+        activate(next.id);
+        setDeleteTarget(null);
+        requestAnimationFrame(() => {
+          document.getElementById(`canvas-tab-${next.id}`)?.focus();
+        });
+      } catch (failure) {
+        const messages = [`删除失败：${formatRawBackendError(failure)}`];
+        let retainReplacement = false;
+        if (preferenceChanged) {
+          try {
+            writeActiveCanvasId(activeId.current);
+          } catch (restoreFailure) {
+            retainReplacement = true;
+            messages.push(`恢复当前画布记录失败：${formatRawBackendError(restoreFailure)}`);
+          }
+        }
+        session?.resumeAfterDeleteFailure();
+        if (replacement) {
+          try {
+            // The persisted active ID must never point at a replacement we also removed.
+            if (!retainReplacement) await canvasDocumentRepository.delete(replacement.id);
+          } catch (cleanupFailure) {
+            retainReplacement = true;
+            messages.push(`清理空白画布失败：${formatRawBackendError(cleanupFailure)}`);
+          }
+          if (retainReplacement) {
+            const retained = replacement;
+            canvasNames.current.set(retained.id, retained.name);
+            setCanvases((current) => [...current, retained]);
+            messages.push("新建的空白画布已保留。");
+          }
+        }
+        setDeleteError(messages.join("\n"));
+      }
+    });
+  };
+
   return (
     <div className="multi-canvas-workspace">
       <div
@@ -227,6 +312,7 @@ export function CanvasWorkspace() {
         role="tabpanel"
         id={`canvas-panel-${activeCanvasId}`}
         aria-labelledby={`canvas-tab-${activeCanvasId}`}
+        inert={deleteTarget !== null}
       >
         {visited.map((id) => (
           <CanvasStoreProvider key={id} initialZoom={DEFAULT_ZOOM}>
@@ -239,7 +325,7 @@ export function CanvasWorkspace() {
           <span>{error}</span>
           <button
             type="button"
-            disabled={busy || loading}
+            disabled={busy || loading || deleteTarget !== null}
             onClick={() => {
               runMutation(async () => {
                 await flushAll();
@@ -257,11 +343,28 @@ export function CanvasWorkspace() {
       <CanvasTabs
         canvases={canvases}
         activeCanvasId={activeCanvasId}
-        busy={loading || busy || !readyIds.has(activeCanvasId)}
+        busy={loading || busy || deleteTarget !== null || !readyIds.has(activeCanvasId)}
         onSelect={selectCanvas}
         onCreate={createCanvas}
         onRename={renameCanvas}
+        onDelete={(id) => {
+          const target = canvases.find((canvas) => canvas.id === id);
+          if (!target || mutation.current) return;
+          setDeleteError(null);
+          setDeleteTarget(target);
+        }}
       />
+      {deleteTarget ? (
+        <CanvasDeleteDialog
+          canvasName={deleteTarget.name}
+          busy={busy}
+          error={deleteError}
+          onConfirm={confirmDelete}
+          onClose={() => {
+            if (!mutation.current) setDeleteTarget(null);
+          }}
+        />
+      ) : null}
     </div>
   );
 }
