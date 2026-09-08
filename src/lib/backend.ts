@@ -6,6 +6,7 @@ import {
   assetGroupSchema,
   assetGroupsSchema,
   canvasDocumentRecordSchema,
+  canvasDocumentSummariesSchema,
   cloudAssetsSchema,
   connectivityTestResultSchema,
   generationCreatedEventSchema,
@@ -1190,6 +1191,8 @@ export interface CanvasDocumentRecord {
   readonly updatedAt: number;
 }
 
+export type CanvasDocumentSummary = Omit<CanvasDocumentRecord, "document">;
+
 export interface SaveCanvasDocumentCommand {
   readonly id: string;
   readonly title: string;
@@ -1198,11 +1201,13 @@ export interface SaveCanvasDocumentCommand {
 }
 
 export interface CanvasDocumentClient {
+  list(this: void): Promise<readonly CanvasDocumentSummary[]>;
   save(this: void, command: SaveCanvasDocumentCommand): Promise<CanvasDocumentRecord>;
   get(this: void, canvasId: string): Promise<CanvasDocumentRecord>;
 }
 
 export const canvasDocumentClient: CanvasDocumentClient = {
+  list: () => invokeDesktop("list_canvas_documents", canvasDocumentSummariesSchema),
   save: (command) => invokeDesktop("save_canvas_document", canvasDocumentRecordSchema, { command }),
   get: (canvasId) => invokeDesktop("get_canvas_document", canvasDocumentRecordSchema, { canvasId }),
 };

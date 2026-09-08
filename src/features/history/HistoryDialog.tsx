@@ -548,6 +548,7 @@ export function HistoryDialog({
     void client
       .list({
         ...dateRange,
+        ...(canvasId ? { canvasId } : {}),
         statuses: statusFilterToStatuses(statusFilter),
         limit: HISTORY_PAGE_SIZE,
       })
@@ -574,7 +575,7 @@ export function HistoryDialog({
       // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 resetList 与下次请求递增，
       // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
-  }, [open, activeTab, statusFilter, dateRange, client, listRevision]);
+  }, [open, activeTab, statusFilter, dateRange, canvasId, client, listRevision]);
 
   const resetList = () => {
     ++listRequestRef.current;
@@ -609,6 +610,7 @@ export function HistoryDialog({
     try {
       const page = await client.list({
         ...dateRange,
+        ...(canvasId ? { canvasId } : {}),
         statuses: statusFilterToStatuses(statusFilter),
         cursorCreatedBefore: cursor,
         limit: HISTORY_PAGE_SIZE,
@@ -622,7 +624,7 @@ export function HistoryDialog({
     } finally {
       if (requestId === listRequestRef.current) setListLoading(false);
     }
-  }, [client, cursor, listLoading, listLoaded, statusFilter, dateRange]);
+  }, [client, cursor, listLoading, listLoaded, statusFilter, dateRange, canvasId]);
 
   // 选中任务后加载完整详情（含尝试、供应商调用、结果与最终错误）。
   // 请求期间保留旧详情（标准主从布局），响应到达后整体替换。

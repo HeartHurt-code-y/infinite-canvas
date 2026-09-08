@@ -31,6 +31,7 @@ const mocks = vi.hoisted(() => ({
   historyGet: vi.fn<WorkflowHistoryClient["get"]>(),
   recover: vi.fn<WorkflowHistoryClient["recover"]>(),
   getCanvas: vi.fn<CanvasDocumentClient["get"]>(),
+  listCanvases: vi.fn<CanvasDocumentClient["list"]>(),
   saveCanvas: vi.fn<CanvasDocumentClient["save"]>(),
   loadProviders: vi.fn<() => Promise<readonly ProviderCatalogEntry[]>>(),
   listTasks: vi.fn<GenerationTaskClient["list"]>(),
@@ -57,7 +58,11 @@ vi.mock("./lib/backend", async (importOriginal) => {
     frontendLog: vi.fn(),
     loadProviderCatalog: mocks.loadProviders,
     pickPromptMultimodalFiles: mocks.pickMaterials,
-    canvasDocumentClient: { get: mocks.getCanvas, save: mocks.saveCanvas },
+    canvasDocumentClient: {
+      list: mocks.listCanvases,
+      get: mocks.getCanvas,
+      save: mocks.saveCanvas,
+    },
     generationClient: { ...actual.generationClient, list: mocks.listTasks },
     subscribeGenerationEvents: () => () => {},
     subscribeStagingEvents: () => () => {},
@@ -174,6 +179,9 @@ beforeEach(() => {
   mocks.recover.mockResolvedValue(0);
   mocks.listTasks.mockResolvedValue({ items: [], nextCursorCreatedBefore: null });
   mocks.pickMaterials.mockReset().mockResolvedValue([]);
+  mocks.listCanvases.mockResolvedValue([
+    { id: CANVAS_ID, title: "测试画布", revision: 1, createdAt: 1, updatedAt: 1 },
+  ]);
   mocks.getCanvas.mockResolvedValue({
     id: CANVAS_ID,
     title: "测试画布",

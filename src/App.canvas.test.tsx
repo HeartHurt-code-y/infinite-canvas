@@ -2,7 +2,12 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import * as videoFrameSampler from "./lib/videoFrameSampler";
-import type { CloudAsset, GenerationTaskDetail, GenerationTaskSummary } from "./lib/backend";
+import type {
+  CloudAsset,
+  GenerationTaskDetail,
+  GenerationTaskSummary,
+  SaveCanvasDocumentCommand,
+} from "./lib/backend";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
@@ -761,8 +766,21 @@ let mockAssetGroups: Array<{
   { id: 21, name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
 ];
 
-function baseInvokeImplementation(command: string): Promise<unknown> {
+function baseInvokeImplementation(
+  command: string,
+  args: Record<string, unknown> | undefined = invokeMock.mock.calls.at(-1)?.[1],
+): Promise<unknown> {
   switch (command) {
+    case "list_canvas_documents":
+      return Promise.resolve([]);
+    case "get_canvas_document":
+      return Promise.reject(
+        Object.assign(new Error("canvas document does not exist"), { kind: "not_found" }),
+      );
+    case "save_canvas_document": {
+      const saved = args?.["command"] as SaveCanvasDocumentCommand;
+      return Promise.resolve({ ...saved, revision: 1, createdAt: 1, updatedAt: 1 });
+    }
     case "list_provider_connections":
       return Promise.resolve([PROVIDER, SECOND_PROVIDER]);
     case "list_model_definitions":
@@ -832,6 +850,7 @@ function baseInvokeImplementation(command: string): Promise<unknown> {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   tauriCallbacks.clear();
   nextTauriCallbackId = 1;
   mockAssetGroups = [
@@ -841,7 +860,7 @@ beforeEach(() => {
   mediaPlayMock.mockResolvedValue(undefined);
   vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => mediaPlayMock());
   vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => mediaPauseMock());
-  invokeMock.mockImplementation((command) => baseInvokeImplementation(command));
+  invokeMock.mockImplementation((command, args) => baseInvokeImplementation(command, args));
   dialogOpenMock.mockResolvedValue(null);
   dialogSaveMock.mockResolvedValue(null);
   fileStatMock.mockResolvedValue({ isFile: true, size: 1024 });
@@ -1668,11 +1687,76 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(generationCommand["prompt"]).toEqual([{ kind: "text", text: customPrompt }]);
   });
 
+  it("提示词生成期间切换独立画布，迟到结果只回到原画布", async () => {
+    const generatedPrompt = "属于广告画布的雨夜站台镜头提示词。";
+    let resolvePrompt!: (result: { optimizedPrompt: string; rawModelOutput: string }) => void;
+    const pendingPrompt = new Promise<{ optimizedPrompt: string; rawModelOutput: string }>(
+      (resolve) => {
+        resolvePrompt = resolve;
+      },
+    );
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "run_prompt_node") return pendingPrompt;
+      return baseInvokeImplementation(command, args);
+    });
+
+    render(<App />);
+    await waitFor(() => expect(screen.getByRole("button", { name: "新建画布" })).toBeEnabled());
+    await waitFor(() => expect(screen.queryByText("正在读取画布…")).not.toBeInTheDocument());
+    const originalTab = within(screen.getByRole("tablist", { name: "创作画布" })).getByRole("tab", {
+      selected: true,
+    });
+    const originalCanvasId = originalTab.id.replace("canvas-tab-", "");
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "广告场景：雨夜站台" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("run_prompt_node", expect.anything()),
+    );
+    const request = invokeMock.mock.calls.find(([command]) => command === "run_prompt_node")?.[1]?.[
+      "command"
+    ];
+    expect(request).toMatchObject({ canvasId: originalCanvasId, userPrompt: "广告场景：雨夜站台" });
+
+    fireEvent.click(screen.getByRole("button", { name: "新建画布" }));
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: "画布 2" })).toHaveAttribute("aria-selected", "true"),
+    );
+    expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
+    await act(async () => {
+      resolvePrompt({ optimizedPrompt: generatedPrompt, rawModelOutput: generatedPrompt });
+      await pendingPrompt;
+    });
+    expect(screen.queryByRole("textbox", { name: "生成提示词输出" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
+    expect(screen.getByText("画布为空")).toBeInTheDocument();
+
+    await waitFor(() => expect(originalTab).toBeEnabled());
+    fireEvent.click(originalTab);
+    await waitFor(() => expect(originalTab).toHaveAttribute("aria-selected", "true"));
+    expect(await screen.findByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
+      generatedPrompt,
+    );
+    expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(1);
+    expect(invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node")).toHaveLength(
+      1,
+    );
+  });
+
   it("上游输出未变时保留手改和断线引用，保存恢复不按新编号重绑", async () => {
     let storedDocument: unknown = null;
     invokeMock.mockImplementation((command, args) => {
       if (command === "get_canvas_document") {
-        if (storedDocument == null) return Promise.reject(new Error("canvas not found"));
+        if (storedDocument == null) {
+          return Promise.reject(
+            Object.assign(new Error("canvas not found"), { kind: "not_found" }),
+          );
+        }
         return Promise.resolve({
           id: "canvas-scene-03",
           title: "未命名画布",
@@ -1724,7 +1808,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
 
     view.unmount();
-    expect(storedDocument).not.toBeNull();
+    await waitFor(() => expect(storedDocument).not.toBeNull());
     render(<App />);
     const restoredVideo = await waitFor(() => {
       const node = document.querySelector<HTMLElement>(`[data-connection-target="${videoKey}"]`);
@@ -2649,9 +2733,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     let storedDocument: unknown = null;
     let revision = 0;
     let resolveSave!: () => void;
+    let delayFirstSave = true;
     invokeMock.mockImplementation((command, args) => {
       if (command === "get_canvas_document") {
-        if (storedDocument == null) return Promise.reject(new Error("canvas not found"));
+        if (storedDocument == null) {
+          return Promise.reject(
+            Object.assign(new Error("canvas not found"), { kind: "not_found" }),
+          );
+        }
         return Promise.resolve({
           id: "canvas-scene-03",
           title: "未命名画布",
@@ -2667,9 +2756,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           title: string;
           document: unknown;
         };
-        return new Promise<void>((resolve) => {
-          resolveSave = resolve;
-        }).then(() => {
+        const saved = delayFirstSave
+          ? new Promise<void>((resolve) => {
+              resolveSave = resolve;
+              delayFirstSave = false;
+            })
+          : Promise.resolve();
+        return saved.then(() => {
           storedDocument = saveCommand.document;
           revision += 1;
           return {
@@ -2717,6 +2810,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         id: 1,
         payload: null,
       }) as Promise<unknown>;
+      await act(async () => {
+        await Promise.resolve();
+      });
       expect(invokeMock).toHaveBeenCalledWith("save_canvas_document", expect.any(Object));
       // SQLite 尚未确认落盘时窗口必须保持存活。
       expect(invokeMock).not.toHaveBeenCalledWith("plugin:window|destroy", expect.any(Object));
@@ -2727,13 +2823,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       });
       expect(invokeMock).toHaveBeenCalledWith("plugin:window|destroy", { label: "main" });
       view.unmount();
+      vi.useRealTimers();
       render(<App />);
-
-      await act(async () => {
-        await Promise.resolve();
-        await Promise.resolve();
-      });
-      expect(document.querySelectorAll(".canvas-gen-node--image")).toHaveLength(1);
+      await waitFor(() =>
+        expect(document.querySelectorAll(".canvas-gen-node--image")).toHaveLength(1),
+      );
     } finally {
       vi.useRealTimers();
     }

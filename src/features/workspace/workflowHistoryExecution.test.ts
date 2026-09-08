@@ -48,7 +48,7 @@ const mediaCommand: StartGenerationCommand = {
   generationCount: 1,
 };
 
-function setup() {
+function setup(canvasId = CANVAS_ID) {
   const fake = fakeDependencies("");
   const records = new Map<string, WorkflowHistoryRecord>();
   let tasks: readonly GenerationTaskDetail[] = [];
@@ -93,6 +93,7 @@ function setup() {
   }));
   let id = 0;
   const runner = createRecordedWorkflowRunner({
+    canvasId,
     historyClient,
     promptClient: fake.promptClient,
     generationClient: fake.generation,
@@ -115,7 +116,7 @@ function setup() {
     tasks = priorTasks;
     records.set("history-1", {
       id: "history-1",
-      canvasId: CANVAS_ID,
+      canvasId,
       sourceNodeId: source.key,
       workflowKind: "knowledge",
       title: "历史测试",
@@ -140,6 +141,57 @@ function setup() {
 }
 
 describe("recorded workflow execution", () => {
+  it("binds new history and nested model requests to the owning canvas", async () => {
+    const canvasId = "canvas-scene-two";
+    const { runner, request, fake, records } = setup(canvasId);
+
+    const result = await runner.run(request);
+
+    expect(result.phase).toBe("done");
+    expect(records.get("history-1")?.canvasId).toBe(canvasId);
+    expect(fake.promptClient.run).toHaveBeenCalledWith({
+      ...promptCommand,
+      canvasId,
+      workflowRunId: "history-1",
+    });
+    expect(fake.generation.start).toHaveBeenCalledWith({
+      ...mediaCommand,
+      canvasId,
+      workflowRunId: "history-1",
+    });
+  });
+
+  it("resumes a non-default canvas history and rejects history owned by another canvas", async () => {
+    const canvasId = "canvas-scene-two";
+    const { runner, request, seed, historyClient, runnerFactory, fake, records } = setup(canvasId);
+    const resumed = seed({
+      ...request.node.config.checkpoint,
+      phase: "paused",
+      runId: "internal-run",
+    });
+
+    const result = await runner.run(resumed);
+    expect(result.phase).toBe("done");
+    expect(records.get("history-1")?.attemptCount).toBe(2);
+
+    const archived = { ...records.get("history-1")!, canvasId: "canvas-another-scene" };
+    records.set(archived.id, archived);
+    historyClient.save.mockClear();
+    runnerFactory.mockClear();
+    vi.mocked(fake.promptClient.run).mockClear();
+    vi.mocked(fake.generation.start).mockClear();
+
+    const rejected = await runner.run(resumed);
+
+    expect(rejected.phase).toBe("failed");
+    expect(rejected.error).toContain("历史记录与当前工作流类型或画布不匹配");
+    expect(historyClient.save).not.toHaveBeenCalled();
+    expect(runnerFactory).not.toHaveBeenCalled();
+    expect(fake.promptClient.run).not.toHaveBeenCalled();
+    expect(fake.generation.start).not.toHaveBeenCalled();
+    expect(records.get(archived.id)).toBe(archived);
+  });
+
   it.each([
     ["knowledge", {}],
     ["film", { film: createAiFilmWorkflowOptions() }],

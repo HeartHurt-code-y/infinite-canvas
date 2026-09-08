@@ -48,6 +48,7 @@ export interface RecordedWorkflowRunner {
   run(request: RecordedWorkflowRunRequest): Promise<KnowledgeVideoWorkflowCheckpoint>;
 }
 export interface RecordedWorkflowDependencies extends RecordedClients {
+  readonly canvasId: string;
   readonly historyClient: Pick<WorkflowHistoryClient, "get" | "save">;
   readonly runnerFactory: (
     kind: WorkflowHistoryKind,
@@ -197,6 +198,7 @@ export function createRecordedWorkflowRunner(
   overrides: Partial<RecordedWorkflowDependencies> = {},
 ): RecordedWorkflowRunner {
   const dependencies: RecordedWorkflowDependencies = {
+    canvasId: CANVAS_ID,
     historyClient: workflowHistoryClient,
     promptClient: promptNodeClient,
     generationClient,
@@ -310,7 +312,10 @@ export function createRecordedWorkflowRunner(
           }
         }
         if (detail) {
-          if (detail.record.workflowKind !== kind || detail.record.canvasId !== CANVAS_ID)
+          if (
+            detail.record.workflowKind !== kind ||
+            detail.record.canvasId !== dependencies.canvasId
+          )
             throw new Error("历史记录与当前工作流类型或画布不匹配。");
           // Reject edited references before enqueue can replace the archived original input.
           validateWorkflowMaterialsResume(request.node.config, {
@@ -343,7 +348,7 @@ export function createRecordedWorkflowRunner(
             .slice(0, 48);
           record = {
             id: historyId,
-            canvasId: CANVAS_ID,
+            canvasId: dependencies.canvasId,
             sourceNodeId: request.node.key,
             workflowKind: kind,
             title: `${TITLES[kind]} · ${title ? title : "未命名"}`,
@@ -403,7 +408,11 @@ export function createRecordedWorkflowRunner(
                   `历史文本任务 ${previous.summary.id} 的输出尚不能确认（${previous.summary.status}），已阻止重复调用。请先核实该任务。`,
                 );
               }
-              return dependencies.promptClient.run({ ...command, workflowRunId: historyId });
+              return dependencies.promptClient.run({
+                ...command,
+                canvasId: dependencies.canvasId,
+                workflowRunId: historyId,
+              });
             },
           },
           generationClient: {
@@ -412,7 +421,11 @@ export function createRecordedWorkflowRunner(
               await beforeModelCall();
               const previous = reusable(command, "media");
               if (previous) return previous.summary.id;
-              return dependencies.generationClient.start({ ...command, workflowRunId: historyId });
+              return dependencies.generationClient.start({
+                ...command,
+                canvasId: dependencies.canvasId,
+                workflowRunId: historyId,
+              });
             },
           },
         };

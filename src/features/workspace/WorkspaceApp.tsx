@@ -46,7 +46,6 @@ import { toast } from "sonner";
 import { useShallow } from "zustand/react/shallow";
 import {
   assetLibraryClient,
-  canvasDocumentClient,
   formatRawBackendError,
   frontendLog,
   generationClient,
@@ -110,6 +109,10 @@ import {
   type CanvasNodeEntry,
   type CanvasStoreNodeChange,
 } from "../canvas/canvasStore";
+import {
+  useCanvasDocumentPersistence,
+  type CanvasSessionServices,
+} from "../canvas/useCanvasDocumentPersistence";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import { createCanvasInputResolver, canvasNodesByKeyFromDocument } from "./canvasInputs";
 
@@ -215,9 +218,6 @@ import {
   ASSET_NODE_WIDTH,
   ASSET_RENDER_BATCH_SIZE,
   CANVAS_CONNECTION_RADIUS,
-  CANVAS_DOCUMENT_TITLE,
-  CANVAS_ID,
-  CANVAS_SAVE_DEBOUNCE_MS,
   DEFAULT_NODE_MODEL_SELECTIONS,
   DEFAULT_ZOOM,
   DEMO_PROVIDER_CATALOG,
@@ -428,7 +428,15 @@ function screenplayConversationUserMessage(
   return `${userPrompt}\n\n> 参考素材：${materials.map((material) => material.displayName).join("、")}`;
 }
 
-export function WorkspaceApp() {
+export function WorkspaceApp({
+  canvasId,
+  active,
+  services,
+}: {
+  readonly canvasId: string;
+  readonly active: boolean;
+  readonly services: CanvasSessionServices;
+}) {
   const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>("cloud");
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
@@ -718,21 +726,13 @@ export function WorkspaceApp() {
     Readonly<Record<string, KnowledgeVideoWorkflowRunState>>
   >({});
   const knowledgeVideoWorkflowAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
-  const recordedWorkflowRunner = useMemo(() => createRecordedWorkflowRunner(), []);
+  const recordedWorkflowRunner = useMemo(
+    () => createRecordedWorkflowRunner({ canvasId }),
+    [canvasId],
+  );
   const activeWorkflowHistoryIdsRef = useRef(new Set<string>());
   const [activeWorkflowHistoryIds, setActiveWorkflowHistoryIds] = useState<readonly string[]>([]);
-  const workflowHistoryRecoveryRef = useRef<Promise<number> | null>(null);
-  const recoverWorkflowHistory = useCallback(() => {
-    if (!workflowHistoryRecoveryRef.current) {
-      const pending = workflowHistoryClient.recover();
-      workflowHistoryRecoveryRef.current = pending;
-      void pending.catch(() => {
-        if (workflowHistoryRecoveryRef.current === pending)
-          workflowHistoryRecoveryRef.current = null;
-      });
-    }
-    return workflowHistoryRecoveryRef.current;
-  }, []);
+  const recoverWorkflowHistory = services.recoverWorkflowHistory;
   useEffect(() => {
     if (!isDesktopRuntime()) return;
     void recoverWorkflowHistory().catch((error: unknown) => {
@@ -912,20 +912,6 @@ export function WorkspaceApp() {
     [cancelVideoToolBatches],
   );
 
-  // ---- 画布状态持久化（canvas_documents 表）----
-  // 启动恢复 + 防抖自动保存。V2 保存提示内容 canonical document；旧 V1 HTML
-  // 仅通过提示内容 module 的白名单 adapter 迁移读取。
-  const [canvasHydrated, setCanvasHydrated] = useState(!isDesktopRuntime());
-  const canvasRestoredRef = useRef(false);
-  const canvasSaveTimerRef = useRef<number | null>(null);
-  const canvasSaveRequestRef = useRef(0);
-  // 跳过恢复完成后由状态回填触发的第一次保存（内容与磁盘一致，无需写一次）。
-  const suppressNextCanvasSaveRef = useRef(false);
-  // 最新画布状态收集器：保存定时器触发时读取，避免闭包捕获旧状态。
-  const collectCanvasDocumentRef = useRef<() => CanvasDocumentV2>(() => {
-    throw new Error("canvas document collector not ready");
-  });
-
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
     const generationNodeKeys = new Set(
       genNodes.filter((node) => node.kind !== "prompt").map((node) => node.key),
@@ -933,123 +919,62 @@ export function WorkspaceApp() {
     return snapshotV2(promptContents.snapshotAll(generationNodeKeys));
   }, [genNodes, promptContents, snapshotV2]);
 
-  useEffect(() => {
-    collectCanvasDocumentRef.current = collectCanvasDocument;
-  }, [collectCanvasDocument]);
-
-  const flushCanvasSave = useCallback((): Promise<void> => {
-    if (canvasSaveTimerRef.current != null) {
-      window.clearTimeout(canvasSaveTimerRef.current);
-      canvasSaveTimerRef.current = null;
-    }
-    const requestId = ++canvasSaveRequestRef.current;
-    const document = collectCanvasDocumentRef.current();
-    return canvasDocumentClient
-      .save({ id: CANVAS_ID, title: CANVAS_DOCUMENT_TITLE, document })
-      .then((record) => {
-        if (requestId !== canvasSaveRequestRef.current) return;
-        frontendLog(
-          "info",
-          `[canvas] 画布状态已保存: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
-        );
-      })
-      .catch((error: unknown) => {
-        if (requestId !== canvasSaveRequestRef.current) return;
-        frontendLog("error", `[canvas] 画布状态保存失败: ${formatRawBackendError(error)}`);
+  const restoreCanvasDocument = useCallback(
+    (raw: unknown) => {
+      const restored = restoreDocument(raw);
+      if (!restored.ok) throw new Error(`画布存档无法恢复：${restored.issues.join("；")}`);
+      const document = raw as CanvasDocument;
+      // restoreDocument 已原子替换节点、连线、视图与选择并清空历史；这里只同步 RF 与提示内容 adapter。
+      void flowInstanceRef.current?.setViewport({
+        x: restored.view.pan.x,
+        y: restored.view.pan.y,
+        zoom: restored.view.zoom / 100,
       });
-  }, []);
-
-  const scheduleCanvasSave = useCallback(() => {
-    if (canvasSaveTimerRef.current != null) {
-      window.clearTimeout(canvasSaveTimerRef.current);
-    }
-    canvasSaveTimerRef.current = window.setTimeout(() => {
-      canvasSaveTimerRef.current = null;
-      void flushCanvasSave();
-    }, CANVAS_SAVE_DEBOUNCE_MS);
-  }, [flushCanvasSave]);
-
-  // 启动时恢复画布（仅桌面端；首次运行无文档时后端返回 NotFound，保持空白画布）。
-  useEffect(() => {
-    if (!isDesktopRuntime() || canvasRestoredRef.current) {
-      return;
-    }
-    canvasRestoredRef.current = true;
-    let cancelled = false;
-    canvasDocumentClient
-      .get(CANVAS_ID)
-      .then((record) => {
-        if (cancelled) return;
-        const restored = restoreDocument(record.document);
-        if (!restored.ok) return;
-        const document = record.document as CanvasDocument;
-        // restoreDocument 已原子替换节点、连线、视图与选择并清空历史；这里只同步 RF 与提示内容 adapter。
-        void flowInstanceRef.current?.setViewport({
-          x: restored.view.pan.x,
-          y: restored.view.pan.y,
-          zoom: restored.view.zoom / 100,
-        });
-        const promptRestore = promptContents.restoreAll(restored.promptContents);
-        if (!promptRestore.ok) {
-          frontendLog(
-            "error",
-            `[canvas] 提示内容恢复失败: ${promptRestore.invalidNodeKeys.join(", ")}`,
-          );
-        } else {
-          // 恢复后的提示内容已经包含精确引用或用户修改，包括主动清空的文档。
-          // 用同时保存的上游版本初始化同步记录，避免首次 effect 按当前编号重新解析。
-          // 例外：若恢复内容为空文档，说明上次保存时同步可能未完成（或节点刚创建），
-          // 不初始化同步记录，让下方 effect 检测到差异后重新导入上游输出。
-          importedPromptSourcesRef.current.clear();
-          const restoredInputsFor = createCanvasInputResolver(
-            canvasNodesByKeyFromDocument(document),
-            document.assetEdges,
-          );
-          for (const node of document.genNodes) {
-            if (node.kind === "prompt") continue;
-            const sources = restoredInputsFor(node.key).texts;
-            if (!sources.length || !promptContents.read(node.key)?.plainText.trim()) continue;
-            importedPromptSourcesRef.current.set(node.key, {
-              edgeId: sources.map((source) => source.edgeId).join("\n"),
-              sourceKey: sources.map((source) => source.sourceKey).join("\n"),
-              text: sources.map((source) => source.text).join("\n\n"),
-            });
-          }
+      const promptRestore = promptContents.restoreAll(restored.promptContents);
+      if (!promptRestore.ok) {
+        throw new Error(`提示内容恢复失败: ${promptRestore.invalidNodeKeys.join(", ")}`);
+      } else {
+        // 恢复后的提示内容已经包含精确引用或用户修改，包括主动清空的文档。
+        // 用同时保存的上游版本初始化同步记录，避免首次 effect 按当前编号重新解析。
+        // 例外：若恢复内容为空文档，说明上次保存时同步可能未完成（或节点刚创建），
+        // 不初始化同步记录，让下方 effect 检测到差异后重新导入上游输出。
+        importedPromptSourcesRef.current.clear();
+        const restoredInputsFor = createCanvasInputResolver(
+          canvasNodesByKeyFromDocument(document),
+          document.assetEdges,
+        );
+        for (const node of document.genNodes) {
+          if (node.kind === "prompt") continue;
+          const sources = restoredInputsFor(node.key).texts;
+          if (!sources.length || !promptContents.read(node.key)?.plainText.trim()) continue;
+          importedPromptSourcesRef.current.set(node.key, {
+            edgeId: sources.map((source) => source.edgeId).join("\n"),
+            sourceKey: sources.map((source) => source.sourceKey).join("\n"),
+            text: sources.map((source) => source.text).join("\n\n"),
+          });
         }
-        frontendLog(
-          "info",
-          `[canvas] 画布状态已恢复: 节点=${document.assetNodes.length + document.genNodes.length + (document.screenplayNodes?.length ?? 0) + (document.storyboardNodes?.length ?? 0) + (document.knowledgeVideoWorkflowNodes?.length ?? 0) + (document.viralRemixNodes?.length ?? 0) + (document.videoComposerNodes?.length ?? 0) + (document.videoDownloaderNodes?.length ?? 0) + (document.frameExtractorNodes?.length ?? 0) + document.resultNodes.length + (document.outputNodes?.length ?? 0)}, 连线=${document.assetEdges.length}, revision=${record.revision}`,
-        );
-      })
-      .catch(() => undefined)
-      .finally(() => {
-        // 不检查 cancelled：即使 useEffect 被重新执行，也需要设置 canvasHydrated=true，
-        // 否则会导致 canvasHydrated 永远为 false，提示词同步等依赖它的逻辑永远不执行。
-        suppressNextCanvasSaveRef.current = true;
-        setCanvasHydrated(true);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [promptContents, restoreDocument]);
+      }
+    },
+    [promptContents, restoreDocument],
+  );
 
-  // 兜底：组件挂载后立即设置 canvasHydrated=true，避免画布恢复死锁导致永远为 false。
-  // 画布恢复完成后会再次设置（幂等），不会有副作用。
-  useEffect(() => {
-    setCanvasHydrated(true);
-  }, []);
+  const canvasPersistence = useCanvasDocumentPersistence({
+    canvasId,
+    collect: collectCanvasDocument,
+    restore: restoreCanvasDocument,
+    services,
+  });
+  const {
+    hydrated: canvasHydrated,
+    schedule: scheduleCanvasSave,
+    documentChanged,
+  } = canvasPersistence;
 
-  // 画布结构/视图变化 → 防抖保存（仅桌面端；浏览器预览模式无本地 SQLite）。
-  // 提示词由 Tiptap 在 React 状态外管理，由下方画布容器上的 input 事件监听兜底触发。
   useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
-    if (suppressNextCanvasSaveRef.current) {
-      suppressNextCanvasSaveRef.current = false;
-      return;
-    }
-    scheduleCanvasSave();
+    if (canvasHydrated) documentChanged();
   }, [
     canvasHydrated,
+    documentChanged,
     assetEdges,
     assetNodes,
     genNodes,
@@ -1057,69 +982,26 @@ export function WorkspaceApp() {
     storyboardNodes,
     viralRemixNodes,
     videoComposerNodes,
+    videoDownloaderNodes,
+    frameExtractorNodes,
     outputNodes,
     knowledgeVideoWorkflowNodes,
     pan,
     resultNodes,
-    scheduleCanvasSave,
     zoom,
   ]);
 
-  // Tiptap 提示词输入不进 React 状态，监听画布容器 input 事件触发防抖保存。
   useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
+    if (!canvasHydrated || !active) return;
     const viewport = canvasViewportRef.current;
     if (viewport == null) return;
     viewport.addEventListener("input", scheduleCanvasSave);
     return () => viewport.removeEventListener("input", scheduleCanvasSave);
-  }, [canvasHydrated, scheduleCanvasSave]);
+  }, [active, canvasHydrated, scheduleCanvasSave]);
 
-  // Tauri 关闭请求必须先阻止默认关闭，等待 SQLite 保存完成后再销毁窗口；否则
-  // beforeunload 中发出的异步 invoke 可能随着 WebView 一同销毁，最近的画布变更会丢失。
   useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
-    let disposed = false;
-    let unlisten: (() => void) | undefined;
-    let closing = false;
-
-    void (async () => {
-      const { getCurrentWindow } = await import("@tauri-apps/api/window");
-      if (disposed) return;
-      const appWindow = getCurrentWindow();
-      const stopListening = await appWindow.onCloseRequested(async (event) => {
-        event.preventDefault();
-        if (closing) return;
-        closing = true;
-        await flushCanvasSave();
-        await appWindow.destroy();
-      });
-      if (disposed) {
-        stopListening();
-        return;
-      }
-      unlisten = stopListening;
-    })().catch((error: unknown) => {
-      frontendLog("error", `[canvas] 注册窗口关闭保存失败: ${formatRawBackendError(error)}`);
-    });
-
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, [canvasHydrated, flushCanvasSave]);
-
-  // beforeunload 作为非标准关闭路径的兜底；React 卸载时也立即刷新尚未到期的防抖保存。
-  useEffect(() => {
-    if (!canvasHydrated || !isDesktopRuntime()) return;
-    const handleBeforeUnload = () => {
-      if (canvasSaveTimerRef.current != null) void flushCanvasSave();
-    };
-    window.addEventListener("beforeunload", handleBeforeUnload);
-    return () => {
-      window.removeEventListener("beforeunload", handleBeforeUnload);
-      if (canvasSaveTimerRef.current != null) void flushCanvasSave();
-    };
-  }, [canvasHydrated, flushCanvasSave]);
+    if (!active) flowInstanceRef.current = null;
+  }, [active]);
 
   const closeClearCanvasDialog = useCallback(() => {
     const dialog = clearCanvasDialogRef.current;
@@ -2325,7 +2207,7 @@ export function WorkspaceApp() {
       try {
         await recoverWorkflowHistory();
         const latest = (await workflowHistoryClient.get(record.id)).record;
-        if (latest.canvasId !== CANVAS_ID) throw new Error("请先打开这条工作流所属的画布。");
+        if (latest.canvasId !== canvasId) throw new Error("请先打开这条工作流所属的画布。");
         if (activeWorkflowHistoryIdsRef.current.has(latest.id) && action !== "locate")
           throw new Error("这条工作流正在运行，请先在画布中暂停后再处理。");
         const document = snapshotV2({});
@@ -2414,6 +2296,7 @@ export function WorkspaceApp() {
       }
     },
     [
+      canvasId,
       recoverWorkflowHistory,
       snapshotV2,
       selectNode,
@@ -3127,7 +3010,7 @@ export function WorkspaceApp() {
       );
       void promptNodeClient
         .run({
-          canvasId: CANVAS_ID,
+          canvasId: canvasId,
           sourceNodeId: nodeKey,
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
@@ -3176,6 +3059,7 @@ export function WorkspaceApp() {
         });
     },
     [
+      canvasId,
       genNodes,
       promptVideoMaterials,
       promptVisionImages,
@@ -3251,7 +3135,7 @@ export function WorkspaceApp() {
       );
       void promptNodeClient
         .run({
-          canvasId: CANVAS_ID,
+          canvasId: canvasId,
           sourceNodeId: nodeKey,
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
@@ -3306,6 +3190,7 @@ export function WorkspaceApp() {
         });
     },
     [
+      canvasId,
       patchNode,
       providerCatalog,
       screenplayNodes,
@@ -3407,7 +3292,7 @@ export function WorkspaceApp() {
       );
       void promptNodeClient
         .run({
-          canvasId: CANVAS_ID,
+          canvasId: canvasId,
           sourceNodeId: nodeKey,
           providerConnectionId: provider.provider.id,
           modelDefinitionId: model.definitionId,
@@ -3457,6 +3342,7 @@ export function WorkspaceApp() {
         });
     },
     [
+      canvasId,
       patchNode,
       providerCatalog,
       canvasInputsFor,
@@ -3556,7 +3442,7 @@ export function WorkspaceApp() {
               "静态联系表不包含可听声音；任何对白、音乐或音效判断都必须标记为待听觉确认。",
             ].join("\n");
             const result = await promptNodeClient.run({
-              canvasId: CANVAS_ID,
+              canvasId: canvasId,
               sourceNodeId: nodeKey,
               providerConnectionId: provider.provider.id,
               modelDefinitionId: model.definitionId,
@@ -3597,6 +3483,7 @@ export function WorkspaceApp() {
         });
     },
     [
+      canvasId,
       providerCatalog,
       canvasInputsFor,
       setNodeStartError,
@@ -3911,8 +3798,8 @@ export function WorkspaceApp() {
       event.preventDefault();
       if (selectedEdgeId != null) removeAssetEdge(selectedEdgeId);
     },
-    { enabled: selectedEdgeId != null },
-    [removeAssetEdge, selectEdge, selectedEdgeId],
+    { enabled: active && selectedEdgeId != null },
+    [active, removeAssetEdge, selectEdge, selectedEdgeId],
   );
 
   /** 所有上游路径共用身份、顺序和循环去重规则。 */
@@ -4099,8 +3986,8 @@ export function WorkspaceApp() {
   // 重新拉取），refetchInterval 仅在有未到终态任务时兜底轮询，防止漏接事件。
   // 拉取失败时 React Query 保留上一次成功数据，与原“失败保留现有状态”一致。
   const generationTasksQuery = useQuery({
-    queryKey: GENERATION_TASKS_QUERY_KEY,
-    queryFn: () => generationClient.list({ limit: 50 }),
+    queryKey: [...GENERATION_TASKS_QUERY_KEY, canvasId],
+    queryFn: () => generationClient.list({ canvasId, limit: 50 }),
     enabled: isDesktopRuntime(),
     refetchInterval: (query) => {
       const tasks = query.state.data?.items ?? [];
@@ -4109,7 +3996,12 @@ export function WorkspaceApp() {
         : false;
     },
   });
-  const generationTasks = generationTasksQuery.data?.items ?? EMPTY_GENERATION_TASKS;
+  const generationTasks = useMemo(
+    () =>
+      generationTasksQuery.data?.items.filter((task) => task.canvasId === canvasId) ??
+      EMPTY_GENERATION_TASKS,
+    [generationTasksQuery.data, canvasId],
+  );
 
   const refreshTasks = useCallback(() => {
     if (!isDesktopRuntime()) return;
@@ -4117,12 +4009,12 @@ export function WorkspaceApp() {
   }, [queryClient]);
 
   useEffect(() => {
-    if (!isDesktopRuntime()) return;
-    let active = true;
+    if (!isDesktopRuntime() || !active) return;
+    let current = true;
     const providerCatalogRequestId = ++providerCatalogRequestRef.current;
     void loadProviderCatalog()
       .then((catalog) => {
-        if (!active || providerCatalogRequestId !== providerCatalogRequestRef.current) return;
+        if (!current || providerCatalogRequestId !== providerCatalogRequestRef.current) return;
         setProviderCatalog(catalog);
         setNodeModelSelections((current) => reconcileNodeModelSelections(current, catalog));
         patchNodes("gen", (node) =>
@@ -4149,9 +4041,9 @@ export function WorkspaceApp() {
       })
       .catch(() => undefined);
     return () => {
-      active = false;
+      current = false;
     };
-  }, [patchNodes]);
+  }, [active, patchNodes]);
 
   // 应用启动后一次性回填：最近成功（非文本）任务的产物结果写入 taskResults，
   // 供产物卡片与“最新产物”展示使用；会话内落卡由事件驱动，不经过这里。
@@ -4545,7 +4437,7 @@ export function WorkspaceApp() {
       for (let index = 0; index < taskCount; index += 1) {
         void generationClient
           .start({
-            canvasId: CANVAS_ID,
+            canvasId: canvasId,
             sourceNodeId: nodeKey,
             operation,
             providerConnectionId: selection.providerId,
@@ -4580,6 +4472,7 @@ export function WorkspaceApp() {
       }
     },
     [
+      canvasId,
       generationInputs,
       genNodes,
       providerCatalog,
@@ -4595,7 +4488,10 @@ export function WorkspaceApp() {
   const regenerateGenerationFromHistory = useCallback(
     async (command: StartGenerationCommand): Promise<string> => {
       const taskId = await generationClient.start(command);
-      const genNode = genNodes.find((node) => node.key === command.sourceNodeId);
+      const genNode =
+        command.canvasId === canvasId
+          ? genNodes.find((node) => node.key === command.sourceNodeId)
+          : undefined;
       if (genNode != null) {
         const key = outputNodeKey();
         addOutput((current) => ({
@@ -4622,7 +4518,7 @@ export function WorkspaceApp() {
       refreshTasks();
       return taskId;
     },
-    [addOutput, genNodes, refreshTasks],
+    [canvasId, addOutput, genNodes, refreshTasks],
   );
 
   // 各生成节点的活动任务与最近成功结果（按 sourceNodeId = 节点 key 关联）。
@@ -4636,12 +4532,17 @@ export function WorkspaceApp() {
   }, [generationTasks]);
 
   const latestResult = useMemo(() => {
+    const canvasTaskIds = new Set(generationTasks.map((task) => task.id));
+    for (const node of outputNodes) if (node.taskId) canvasTaskIds.add(node.taskId);
     const results = Object.values(taskResults)
       .flat()
-      .filter((result) => result.saveStatus === "succeeded" && result.finalPath)
+      .filter(
+        (result) =>
+          canvasTaskIds.has(result.taskId) && result.saveStatus === "succeeded" && result.finalPath,
+      )
       .sort((a, b) => (b.savedAt ?? 0) - (a.savedAt ?? 0));
     return results[0] ?? null;
-  }, [taskResults]);
+  }, [generationTasks, outputNodes, taskResults]);
 
   /** 注册节点级提示内容 handle；DOM implementation 不越过此 seam。 */
   const registerPromptInput = useCallback(
@@ -5938,7 +5839,7 @@ export function WorkspaceApp() {
   };
 
   useEffect(() => {
-    if (!mobilePanel || !window.matchMedia?.("(max-width: 59.999rem)").matches) return;
+    if (!active || !mobilePanel || !window.matchMedia?.("(max-width: 59.999rem)").matches) return;
 
     const closeButton = document.querySelector<HTMLButtonElement>(
       mobilePanel === "nodes" ? ".mobile-panel-close--nodes" : ".mobile-panel-close--assets",
@@ -5946,7 +5847,7 @@ export function WorkspaceApp() {
     const animationFrame = window.requestAnimationFrame(() => closeButton?.focus());
 
     return () => window.cancelAnimationFrame(animationFrame);
-  }, [mobilePanel]);
+  }, [active, mobilePanel]);
 
   useHotkeys(
     "esc",
@@ -5954,8 +5855,8 @@ export function WorkspaceApp() {
       setMobilePanel(null);
       window.requestAnimationFrame(() => mobilePanelTriggerRef.current?.focus());
     },
-    { enabled: !settingsOpen },
-    [settingsOpen],
+    { enabled: active && canvasHydrated && !settingsOpen },
+    [active, canvasHydrated, settingsOpen],
   );
 
   // 文本输入框内默认不触发这些快捷键，继续使用浏览器原生的文本撤销行为。
@@ -5965,8 +5866,8 @@ export function WorkspaceApp() {
       if (hotkey.hotkey === "mod+z") undo();
       else redo();
     },
-    { enabled: !settingsOpen, preventDefault: true },
-    [settingsOpen, undo, redo],
+    { enabled: active && canvasHydrated && !settingsOpen, preventDefault: true },
+    [active, canvasHydrated, settingsOpen, undo, redo],
   );
 
   useHotkeys(
@@ -5981,12 +5882,12 @@ export function WorkspaceApp() {
       }
     },
     {
-      enabled: !settingsOpen,
+      enabled: active && canvasHydrated && !settingsOpen,
       preventDefault: true,
       splitKey: "_",
       useKey: true,
     },
-    [settingsOpen, zoomAroundViewportCenter],
+    [active, canvasHydrated, settingsOpen, zoomAroundViewportCenter],
   );
 
   const ignoreLegacyNodeDrag = useCallback(() => undefined, []);
@@ -6927,9 +6828,24 @@ export function WorkspaceApp() {
   const uploadActionLabel =
     assetLibrarySource === "local" ? "上传到本地素材库（仅对象存储）" : "上传本地素材到云端素材库";
 
+  if (!active) return null;
+
   return (
     <main className="workspace-shell">
-      <div className="workspace-content" inert={settingsOpen ? true : undefined}>
+      {!canvasHydrated ? (
+        <div className="canvas-load-notice" role="status">
+          <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
+          {canvasPersistence.error ? (
+            <>
+              <p>{canvasPersistence.error}</p>
+              <button type="button" onClick={canvasPersistence.retry}>
+                重试读取画布
+              </button>
+            </>
+          ) : null}
+        </div>
+      ) : null}
+      <div className="workspace-content" inert={settingsOpen || !canvasHydrated ? true : undefined}>
         <a className="skip-link" href="#canvas-workspace">
           跳到画布
         </a>
@@ -6942,9 +6858,30 @@ export function WorkspaceApp() {
             </span>
             <span className="brand-name">无限画布</span>
           </div>
-          <div className="save-state">
-            <CheckCircle size={14} weight="fill" aria-hidden="true" />
-            已保存
+          <div
+            className={`save-state${canvasPersistence.error ? " save-state--error" : ""}`}
+            title={canvasPersistence.error ?? undefined}
+            role="status"
+          >
+            {canvasPersistence.error ? (
+              <WarningCircle size={14} aria-hidden="true" />
+            ) : (
+              <CheckCircle size={14} weight="fill" aria-hidden="true" />
+            )}
+            {canvasPersistence.status === "saved"
+              ? "已保存"
+              : canvasPersistence.status === "saving"
+                ? "正在保存…"
+                : canvasPersistence.status === "pending"
+                  ? "待保存"
+                  : canvasPersistence.status === "loading"
+                    ? "正在读取…"
+                    : "保存失败"}
+            {canvasPersistence.error && canvasHydrated ? (
+              <button type="button" onClick={canvasPersistence.retry}>
+                重试保存
+              </button>
+            ) : null}
           </div>
           <div className="header-actions">
             <button
@@ -7719,7 +7656,7 @@ export function WorkspaceApp() {
           <HistoryDialog
             open
             onClose={closeHistory}
-            canvasId={CANVAS_ID}
+            canvasId={canvasId}
             initialTab={historyInitialTab}
             initialWorkflowId={historyInitialWorkflowId}
             onResumeWorkflow={resumeHistoryWorkflow}

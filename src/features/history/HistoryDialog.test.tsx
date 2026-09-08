@@ -96,6 +96,38 @@ function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClie
 }
 
 describe("HistoryDialog diagnostics", () => {
+  it("keeps generation history scoped to the canvas across pagination and canvas changes", async () => {
+    const client = createClient();
+    const list = vi.mocked(client.list);
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: SUMMARY.createdAt });
+    const onClose = vi.fn();
+    const { rerender } = render(
+      <HistoryDialog open onClose={onClose} client={client} canvasId="canvas-1" />,
+    );
+
+    const loadMore = await screen.findByRole("button", { name: "加载更多" });
+    expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-1", statuses: null, limit: 30 });
+    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    fireEvent.click(loadMore);
+    await waitFor(() =>
+      expect(list).toHaveBeenLastCalledWith({
+        canvasId: "canvas-1",
+        statuses: null,
+        limit: 30,
+        cursorCreatedBefore: SUMMARY.createdAt,
+      }),
+    );
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "加载更多" })).not.toBeInTheDocument(),
+    );
+
+    list.mockResolvedValueOnce({ items: [], nextCursorCreatedBefore: null });
+    rerender(<HistoryDialog open onClose={onClose} client={client} canvasId="canvas-2" />);
+    await screen.findByText("没有符合条件的任务。");
+    expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-2", statuses: null, limit: 30 });
+    expect(screen.queryByText("文生图 · image-model")).not.toBeInTheDocument();
+  });
+
   it("queries creation time in local time, carries the range into pagination, and resets it", async () => {
     const client = createClient();
     const list = vi.mocked(client.list);

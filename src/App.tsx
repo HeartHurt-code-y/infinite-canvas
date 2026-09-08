@@ -3,9 +3,7 @@ import "@xyflow/react/dist/style.css";
 import { useState } from "react";
 import { Toaster } from "sonner";
 import "./App.css";
-import { CanvasStoreProvider } from "./features/canvas/canvasStore";
-import { WorkspaceApp } from "./features/workspace/WorkspaceApp";
-import { DEFAULT_ZOOM } from "./features/workspace/workspaceModel";
+import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { createQueryClient } from "./lib/queryClient";
 
 export { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./features/workspace/workspaceModel";
@@ -26,9 +24,7 @@ function App() {
   const [queryClient] = useState(createQueryClient);
   return (
     <QueryClientProvider client={queryClient}>
-      <CanvasStoreProvider initialZoom={DEFAULT_ZOOM}>
-        <WorkspaceApp />
-      </CanvasStoreProvider>
+      <CanvasWorkspace />
       <Toaster
         className="app-toaster"
         closeButton

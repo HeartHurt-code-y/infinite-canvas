@@ -3,6 +3,7 @@ import * as v from "valibot";
 import type {
   AssetGroupRecord,
   CanvasDocumentRecord,
+  CanvasDocumentSummary,
   CloudAsset,
   ConnectivityTestResult,
   GenerationResultReadyEvent,
@@ -360,6 +361,16 @@ export const canvasDocumentRecordSchema = v.looseObject({
   createdAt: v.number(),
   updatedAt: v.number(),
 }) satisfies v.GenericSchema<CanvasDocumentRecord>;
+
+export const canvasDocumentSummarySchema = v.looseObject({
+  id: v.string(),
+  title: v.string(),
+  revision: v.number(),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+}) satisfies v.GenericSchema<CanvasDocumentSummary>;
+
+export const canvasDocumentSummariesSchema = v.array(canvasDocumentSummarySchema);
 
 export const optimizedPromptResultSchema = v.looseObject({
   optimizedPrompt: v.string(),

@@ -1,11 +1,29 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./App";
-import type { CloudAsset } from "./lib/backend";
+import type { CloudAsset, SaveCanvasDocumentCommand } from "./lib/backend";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
 const DESKTOP_INTERNALS_KEY = "__TAURI_INTERNALS__";
 const DESKTOP_EVENT_INTERNALS_KEY = "__TAURI_EVENT_PLUGIN_INTERNALS__";
+
+function defaultCanvasInvoke(command: string, args?: Record<string, unknown>): Promise<unknown> {
+  if (command === "list_canvas_documents") return Promise.resolve([]);
+  if (command === "get_canvas_document") {
+    return Promise.reject(
+      Object.assign(new Error("canvas document does not exist"), { kind: "not_found" }),
+    );
+  }
+  if (command === "save_canvas_document") {
+    const saved = args?.["command"] as SaveCanvasDocumentCommand;
+    return Promise.resolve({ ...saved, revision: 1, createdAt: 1, updatedAt: 1 });
+  }
+  return Promise.resolve(null);
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+});
 
 function cloudAsset(
   providerConnectionId: string,
@@ -475,16 +493,17 @@ describe("App workspace", () => {
     expect(trigger).toHaveAttribute("aria-expanded", "false");
   });
 
-  it("supports canvas zoom keyboard shortcuts without tool switching", () => {
+  it("supports canvas zoom keyboard shortcuts without tool switching", async () => {
     render(<App />);
+    await waitFor(() => expect(screen.queryByText("正在读取画布…")).not.toBeInTheDocument());
 
     expect(screen.queryByRole("button", { name: "选择工具" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "平移工具" })).not.toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: "+" });
-    expect(screen.getByText("82%")).toBeInTheDocument();
+    expect(await screen.findByText("82%")).toBeInTheDocument();
     fireEvent.keyDown(document, { key: "0" });
-    expect(screen.getByText("74%")).toBeInTheDocument();
+    expect(await screen.findByText("74%")).toBeInTheDocument();
   });
 
   it("pans the infinite canvas by dragging empty space with the mouse", () => {
@@ -511,7 +530,7 @@ describe("App workspace", () => {
   it("shows a video keyframe and plays its preview on hover or keyboard focus", async () => {
     const coverUrl = "https://cdn.example.com/train-cover.jpg";
     const videoUrl = "https://cdn.example.com/train-preview.mp4";
-    const invokeMock = vi.fn((command: string) => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -547,7 +566,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -640,7 +659,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -693,7 +712,7 @@ describe("App workspace", () => {
     // 断言切换到「视频」tab 后只渲染视频卡片（数量与种类都正确）。
     const fullAssetReference =
       "Asset://asset-2026-08-27/production-library/characters/img-alpha-original";
-    const invokeMock = vi.fn((command: string) => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -761,7 +780,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -838,7 +857,7 @@ describe("App workspace", () => {
 
   it("替换素材库令牌被拒绝时清空旧供应商素材", async () => {
     let assetListCalls = 0;
-    const invokeMock = vi.fn((command: string) => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -879,7 +898,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -920,7 +939,7 @@ describe("App workspace", () => {
   });
 
   it("云端素材库错误默认显示可读摘要，并按需展开完整响应", async () => {
-    const invokeMock = vi.fn((command: string) => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -951,7 +970,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -979,8 +998,8 @@ describe("App workspace", () => {
 
   it("重启后仍使用已选素材库供应商而不是名称排序第一项", async () => {
     window.localStorage.setItem(ACTIVE_ASSET_PROVIDER_STORAGE_KEY, "overseas-provider");
-    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
-      void _args;
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      void args;
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -1017,7 +1036,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1099,7 +1118,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1182,7 +1201,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1240,7 +1259,7 @@ describe("App workspace", () => {
         previewUrl: `https://assets.example/paged-${index + 1}.png`,
       }),
     }));
-    const invokeMock = vi.fn((command: string) => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -1267,7 +1286,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1290,8 +1309,8 @@ describe("App workspace", () => {
   });
 
   it("切换到本地素材后只读本地索引，上传任务只写对象存储", async () => {
-    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
-      void _args;
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      void args;
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
@@ -1349,7 +1368,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1435,8 +1454,8 @@ describe("App workspace", () => {
   });
 
   it("取消文件选择时给出 toast 提示，而非静默无反馈", async () => {
-    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
-      void _args;
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      void args;
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([]);
@@ -1466,7 +1485,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
@@ -1491,8 +1510,8 @@ describe("App workspace", () => {
 
   it("startUpload 返回前先显示「准备中」占位行，提交完成后切换为校验状态", async () => {
     const startUploadDeferred = deferred<string>();
-    const invokeMock = vi.fn((command: string, _args?: Record<string, unknown>) => {
-      void _args;
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      void args;
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([]);
@@ -1523,7 +1542,7 @@ describe("App workspace", () => {
         case "plugin:event|unlisten":
           return Promise.resolve(null);
         default:
-          return Promise.resolve(null);
+          return defaultCanvasInvoke(command, args);
       }
     });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {

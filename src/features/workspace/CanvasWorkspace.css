@@ -1,0 +1,62 @@
+.multi-canvas-workspace {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  height: 100dvh;
+  overflow: hidden;
+}
+
+.canvas-session-panel {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+}
+.canvas-session-panel > .workspace-shell {
+  height: 100%;
+}
+.multi-canvas-workspace > .canvas-tabs {
+  flex-shrink: 0;
+}
+
+.canvas-session-error {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  padding: var(--space-xs) var(--space-md);
+  color: var(--color-error);
+  background: var(--color-paper);
+  border-top: var(--rule-thin) solid var(--color-rule);
+  font-size: var(--text-sm);
+  max-height: 8rem;
+  overflow: auto;
+}
+.canvas-session-error > span {
+  flex: 1;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.canvas-session-error button {
+  padding: var(--space-xs);
+  background: transparent;
+  border: var(--rule-thin) solid currentColor;
+}
+.save-state--error {
+  color: var(--color-error);
+}
+.canvas-load-notice {
+  position: absolute;
+  inset: 0;
+  z-index: var(--z-sticky);
+  display: grid;
+  place-content: center;
+  gap: var(--space-sm);
+  padding: var(--space-lg);
+  background: var(--color-paper);
+  text-align: center;
+}
+.canvas-load-notice p {
+  max-width: 42rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}

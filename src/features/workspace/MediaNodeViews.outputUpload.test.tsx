@@ -79,6 +79,8 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点", () => {
     renderHarness(makeOutputNode({ mediaType: "text", finalPath: null, textContent: "hello" }), {
       uploadedToCloud: true,
     });
-    expect(screen.queryByRole("button", { name: /上传|已上传到云端素材库/ })).toBeNull();
+    expect(
+      screen.queryByRole("button", { name: /上传|已上传到云端素材库/ }),
+    ).not.toBeInTheDocument();
   });
 });
