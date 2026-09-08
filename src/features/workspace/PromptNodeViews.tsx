@@ -176,6 +176,8 @@ export function PromptMentionInput({
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreExpandFocusRef = useRef(false);
   const replaceTypedQueryOnSelectRef = useRef(false);
+  // 跟踪最后一次 mousedown 的目标，用于判断 blur 是否由拖拽节点/点击下拉栏触发
+  const lastMouseDownTargetRef = useRef<EventTarget | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [activeIndex, setActiveIndex] = useState(0);
@@ -251,6 +253,15 @@ export function PromptMentionInput({
     setMenuOpen(false);
     setQuery("");
     setActiveIndex(0);
+  }, []);
+
+  // 全局监听 mousedown，记录最后一次点击目标，用于判断 blur 是否由拖拽节点/点击下拉栏触发
+  useEffect(() => {
+    const handleMouseDown = (event: MouseEvent) => {
+      lastMouseDownTargetRef.current = event.target;
+    };
+    document.addEventListener("mousedown", handleMouseDown);
+    return () => document.removeEventListener("mousedown", handleMouseDown);
   }, []);
 
   const openAmbiguityChip = useCallback(
@@ -748,7 +759,20 @@ export function PromptMentionInput({
                 openAmbiguityChip(pending);
               }
             }}
-            onBlur={() => window.setTimeout(closeMenu, 120)}
+            onBlur={() => {
+              // 检查最后一次 mousedown 的目标：如果是在节点或下拉栏内，不关闭下拉栏
+              // （拖拽节点或点击下拉栏选项时，编辑器会失去焦点，但不应关闭下拉栏）
+              const target = lastMouseDownTargetRef.current;
+              if (target instanceof Element) {
+                const isInMenu = target.closest(".prompt-mention__menu") != null;
+                const isInNode = target.closest(".react-flow__node") != null;
+                const isInAmbiguityMenu = target.closest(".prompt-ambiguity__menu") != null;
+                if (isInMenu || isInNode || isInAmbiguityMenu) {
+                  return;
+                }
+              }
+              window.setTimeout(closeMenu, 120);
+            }}
             onKeyDownCapture={(event) => {
               if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229)
                 return;
