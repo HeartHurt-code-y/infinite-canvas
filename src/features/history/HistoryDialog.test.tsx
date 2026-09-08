@@ -409,9 +409,7 @@ describe("HistoryDialog regeneration", () => {
       parameters: { size: "1:1" },
       generationCount: 1,
     });
-    await waitFor(() =>
-      expect(screen.getByRole("status")).toHaveTextContent("已创建新的生成任务"),
-    );
+    await waitFor(() => expect(screen.getByRole("status")).toHaveTextContent("已创建新的生成任务"));
   });
 
   it("edits the prompt, drops a material, and regenerates with the updated request", async () => {
@@ -442,9 +440,9 @@ describe("HistoryDialog regeneration", () => {
     await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
     const command = vi.mocked(client.start).mock.calls[0]![0];
     expect(
-      command.prompt.map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`)).join(
-        "",
-      ),
+      command.prompt
+        .map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`))
+        .join(""),
     ).toBe("一个穿着的旗袍插画");
     expect(command.explicitMedia).toEqual([]);
     expect(command.canvasId).toBe("canvas-1");
@@ -478,9 +476,9 @@ describe("HistoryDialog regeneration", () => {
     await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
     const command = vi.mocked(client.start).mock.calls[0]![0];
     expect(
-      command.prompt.map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`)).join(
-        "",
-      ),
+      command.prompt
+        .map((s) => (s.kind === "text" ? s.text : `@${s.displayNameSnapshot}`))
+        .join(""),
     ).toBe("一个穿着@参考图A的插画");
     expect(command.explicitMedia).toHaveLength(2);
     expect(command.explicitMedia![0]!.target).toMatchObject({ kind: "asset", assetId: "asset-1" });

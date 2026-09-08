@@ -9,11 +9,11 @@
 use std::collections::HashMap;
 
 use tauri::{
-    http::{
-        response::Builder as ResponseBuilder, HeaderMap, HeaderName, HeaderValue, Method,
-        Request, Response, Uri,
-    },
     UriSchemeContext,
+    http::{
+        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri,
+        response::Builder as ResponseBuilder,
+    },
 };
 use url::Url;
 
@@ -69,9 +69,7 @@ fn extract_upstream_url(uri: &Uri) -> Option<String> {
     let params: HashMap<&str, &str> = query
         .split('&')
         .filter_map(|pair| {
-            let mut iter = pair.splitn(2, '=');
-            let key = iter.next()?;
-            let value = iter.next()?;
+            let (key, value) = pair.split_once('=')?;
             Some((key, value))
         })
         .collect();

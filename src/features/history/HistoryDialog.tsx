@@ -682,7 +682,8 @@ export function HistoryDialog({
       setRegenerateError(null);
       setRegenerateMessage(null);
       try {
-        const starter = onRegenerateGeneration ?? ((next: StartGenerationCommand) => client.start(next));
+        const starter =
+          onRegenerateGeneration ?? ((next: StartGenerationCommand) => client.start(next));
         const newTaskId = await starter(command);
         setRegenerateMessage(`已创建新的生成任务 ${newTaskId}。`);
         setRegenerateEditorTask(null);
@@ -998,9 +999,7 @@ export function HistoryDialog({
                   <section className="history-section">
                     <h3>重新生成</h3>
                     {frozenCommand == null ? (
-                      <p className="history-empty-note">
-                        该任务缺少可用的请求快照，无法重新生成。
-                      </p>
+                      <p className="history-empty-note">该任务缺少可用的请求快照，无法重新生成。</p>
                     ) : (
                       <>
                         <div className="history-regenerate">

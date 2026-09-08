@@ -358,11 +358,8 @@ describe("canvas state interface", () => {
     expect(canvas.commands.connect("output-1", "prompt-1").status).toBe("connected");
     expect(canvas.commands.connect("output-video", "prompt-1").status).toBe("connected");
     expect(canvas.commands.connect("output-1", "prompt-2").status).toBe("connected");
-    // 合成产物不是 generation task 结果，不能作为提示词节点的参考理解素材。
-    expect(canvas.commands.connect("output-composition", "prompt-1")).toMatchObject({
-      status: "rejected",
-      reason: "unsupported-connection",
-    });
+    // 合成产物与下载产物同样可作为提示词节点的参考理解素材。
+    expect(canvas.commands.connect("output-composition", "prompt-1").status).toBe("connected");
     // 产物连入图片/视频生成节点的既有能力保持可用。
     expect(canvas.commands.connect("output-1", "gen-1").status).toBe("connected");
   });
@@ -430,8 +427,8 @@ describe("canvas state interface", () => {
       accepted: false,
     },
     { name: "text output", patch: { mediaType: "text" }, accepted: false },
-    { name: "composition output", patch: { origin: "composition" }, accepted: false },
-    { name: "download output", patch: { origin: "download" }, accepted: false },
+    { name: "composition output", patch: { origin: "composition" }, accepted: true },
+    { name: "download output", patch: { origin: "download" }, accepted: true },
     {
       name: "mismatched generation identity",
       patch: { resultKey: "other-task#0" },

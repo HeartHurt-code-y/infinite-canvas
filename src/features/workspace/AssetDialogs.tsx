@@ -567,9 +567,8 @@ export function AssetSourceDialog({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
-  const mediaSrc = asset.kind === "video"
-    ? toMediaProxyUrl(asset.videoUrl ?? asset.previewUrl)
-    : asset.previewUrl;
+  const mediaSrc =
+    asset.kind === "video" ? toMediaProxyUrl(asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
   // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，

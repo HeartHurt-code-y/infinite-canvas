@@ -545,7 +545,8 @@ async function planCommerce(
         return plan({
           kind: "planning",
           question: review.question ?? review.report,
-          recommendation: review.recommendation ?? `继续修订：${review.repairInstructions ?? review.report}`,
+          recommendation:
+            review.recommendation ?? `继续修订：${review.repairInstructions ?? review.report}`,
         });
       save((run) => ({ ...run, repairCount: confirmed ? 0 : run.repairCount + 1 }));
       generate = true;

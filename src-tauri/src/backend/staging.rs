@@ -1,4 +1,4 @@
-﻿use std::{
+use std::{
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -55,8 +55,10 @@ const PROBE_RETRY_BASE_DELAY_MS: u64 = 500;
 const FAKE_IP_PREFIX: (u8, u8) = (198, 18);
 
 /// 备用公共 DNS（国内可达）：穿透代理软件对系统 DNS 的 fake-ip 劫持时使用。
-const FALLBACK_DNS_SERVERS: [std::net::Ipv4Addr; 2] =
-    [std::net::Ipv4Addr::new(223, 5, 5, 5), std::net::Ipv4Addr::new(119, 29, 29, 29)];
+const FALLBACK_DNS_SERVERS: [std::net::Ipv4Addr; 2] = [
+    std::net::Ipv4Addr::new(223, 5, 5, 5),
+    std::net::Ipv4Addr::new(119, 29, 29, 29),
+];
 
 /// 对象存储上传 PUT 连接/传输失败的最大自动重试次数（指数退避）。
 const UPLOAD_MAX_RETRIES: u32 = 3;
@@ -110,7 +112,8 @@ pub(crate) fn is_fake_ip(ip: std::net::IpAddr) -> bool {
 /// 代理软件 fake-ip 环境：系统解析结果全部落在 `198.18.0.0/15` 虚拟网段时，
 /// 改用备用公共 DNS（223.5.5.5 / 119.29.29.29）重新解析，穿透 fake-ip 劫持。
 /// 返回空列表表示未能取得可靠的真实地址，调用方应保持原行为（原样报错）。
-pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAddr> {    if let Ok(addrs) = tokio::net::lookup_host((host, 443)).await {
+pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAddr> {
+    if let Ok(addrs) = tokio::net::lookup_host((host, 443)).await {
         let real: Vec<std::net::IpAddr> = addrs
             .map(|addr| addr.ip())
             .filter(|ip| !is_fake_ip(*ip))
@@ -129,7 +132,8 @@ pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAdd
             53,
             false,
         );
-        let config = hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), name_servers);
+        let config =
+            hickory_resolver::config::ResolverConfig::from_parts(None, Vec::new(), name_servers);
         let resolver = hickory_resolver::TokioAsyncResolver::tokio(
             config,
             hickory_resolver::config::ResolverOpts::default(),
@@ -179,10 +183,7 @@ fn build_tos_upload_client(
 
 /// 为任意 URL（主要是 TOS 预签名 URL）构建 fake-ip 感知的 HTTP 客户端：
 /// 解析到真实 IP 时用 `resolve_to_addrs` 直连真实地址，否则回退到 `fallback`。
-pub(crate) async fn fake_ip_aware_client(
-    url: &str,
-    fallback: reqwest::Client,
-) -> reqwest::Client {
+pub(crate) async fn fake_ip_aware_client(url: &str, fallback: reqwest::Client) -> reqwest::Client {
     let Ok(parsed) = url::Url::parse(url) else {
         return fallback;
     };
@@ -1638,9 +1639,8 @@ mod tests {
         let server = std::thread::spawn(move || {
             if let Ok((mut stream, _)) = listener.accept() {
                 let _ = stream.read(&mut [0u8; 4096]);
-                let _ = stream.write_all(
-                    b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n",
-                );
+                let _ = stream
+                    .write_all(b"HTTP/1.1 500 Internal Server Error\r\nContent-Length: 0\r\n\r\n");
                 let _ = stream.flush();
             }
         });

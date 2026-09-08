@@ -1157,7 +1157,6 @@ export function createPromptContentModule(): PromptContentModule {
   return new PromptContentModuleImplementation();
 }
 
-
 /**
  * 从提示词文本中摘除 markdown 格式，返回纯文本内容。
  *

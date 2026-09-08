@@ -89,9 +89,10 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
 
   // 限制最大宽度，避免宽图占用过多空间；高度固定为 2.75rem
   const maxWidth = "8rem";
-  const thumbStyle = aspectRatio != null
-    ? { width: `min(${maxWidth}, calc(2.75rem * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
-    : undefined;
+  const thumbStyle =
+    aspectRatio != null
+      ? { width: `min(${maxWidth}, calc(2.75rem * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
+      : undefined;
 
   return (
     <span

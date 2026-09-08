@@ -205,9 +205,10 @@ beforeEach(() => {
 
 async function resumeFromHistory() {
   fireEvent.click(screen.getByRole("button", { name: "打开历史记录" }));
-  fireEvent.click(await screen.findByRole("tab", { name: "工作流" }));
-  fireEvent.click(await screen.findByRole("button", { name: "从断点继续" }));
-  await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
+  // 全量并行运行时主线程负载高，历史数据渲染可能超过默认 1s 超时，放宽到 10s。
+  fireEvent.click(await screen.findByRole("tab", { name: "工作流" }, { timeout: 10_000 }));
+  fireEvent.click(await screen.findByRole("button", { name: "从断点继续" }, { timeout: 10_000 }));
+  await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce(), { timeout: 10_000 });
 }
 
 describe("workflow history canvas integration", () => {

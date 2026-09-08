@@ -442,7 +442,9 @@ describe("comic drama composite workflow", () => {
       },
     });
     expect(result.phase).toBe("done");
-    const reviewCommands = calls().filter((command) => command.mode === "comic_drama_director_review");
+    const reviewCommands = calls().filter(
+      (command) => command.mode === "comic_drama_director_review",
+    );
     expect(reviewCommands.length).toBeGreaterThan(0);
   });
 

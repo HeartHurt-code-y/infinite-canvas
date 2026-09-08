@@ -1121,7 +1121,9 @@ svg[data-spin="true"] {
   font-weight: 600;
   line-height: 1.4;
   cursor: pointer;
-  transition: background 120ms ease, border-color 120ms ease;
+  transition:
+    background 120ms ease,
+    border-color 120ms ease;
 }
 
 .asset-upload__error-copy:hover {
@@ -2058,7 +2060,8 @@ svg[data-spin="true"] {
   color: rgba(255 255 255 / 78%);
 }
 
-.canvas-asset-node--media > :is(.canvas-asset-node__remove, .canvas-asset-node__upload, .canvas-asset-node__port) {
+.canvas-asset-node--media
+  > :is(.canvas-asset-node__remove, .canvas-asset-node__upload, .canvas-asset-node__port) {
   z-index: 3;
 }
 

@@ -1482,13 +1482,11 @@ describe("App workspace", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
     });
-    fireEvent.click(
-      await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }));
     expect(await screen.findByText("未选择文件，已取消上传。")).toBeInTheDocument();
-    expect(
-      invokeMock.mock.calls.some(([command]) => command === "start_staging_upload"),
-    ).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+      false,
+    );
   });
 
   it("startUpload 返回前先显示「准备中」占位行，提交完成后切换为校验状态", async () => {
@@ -1541,9 +1539,7 @@ describe("App workspace", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
     });
-    fireEvent.click(
-      await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }),
-    );
+    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }));
     // 提交尚未返回：占位行立即出现，提供明确反馈。
     expect(await screen.findByText("准备中…")).toBeInTheDocument();
     act(() => {

@@ -579,15 +579,17 @@ export function AssetUploadRow({
               aria-label={errorCopied ? "已复制报错" : "复制完整报错"}
               title={errorCopied ? "已复制" : "复制完整报错"}
               onMouseDown={(event) => event.stopPropagation()}
-              onClick={async (event) => {
+              onClick={(event) => {
                 event.stopPropagation();
-                try {
-                  await copyTextToDesktopClipboard(errorDetail);
-                  setErrorCopied(true);
-                  window.setTimeout(() => setErrorCopied(false), 2000);
-                } catch {
-                  // 剪贴板不可用时静默失败
-                }
+                void (async () => {
+                  try {
+                    await copyTextToDesktopClipboard(errorDetail);
+                    setErrorCopied(true);
+                    window.setTimeout(() => setErrorCopied(false), 2000);
+                  } catch {
+                    // 剪贴板不可用时静默失败
+                  }
+                })();
               }}
             >
               {errorCopied ? (
@@ -624,10 +626,7 @@ export function AssetUploadRow({
               <i style={{ width: `${assetImportPercent ?? 0}%` }} />
             </span>
           ) : (
-            <span
-              className="asset-upload__bar asset-upload__bar--indeterminate"
-              aria-hidden="true"
-            >
+            <span className="asset-upload__bar asset-upload__bar--indeterminate" aria-hidden="true">
               <i />
             </span>
           )

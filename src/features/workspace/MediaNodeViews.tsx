@@ -1938,7 +1938,9 @@ export function CanvasOutputNode({
           <span className="canvas-asset-node__meta">{metaLine}</span>
         </>
       )}
-      {onUploadToCloud != null && (node.mediaType === "image" || node.mediaType === "video") && node.finalPath != null ? (
+      {onUploadToCloud != null &&
+      (node.mediaType === "image" || node.mediaType === "video") &&
+      node.finalPath != null ? (
         <button
           type="button"
           className="canvas-asset-node__upload"
@@ -2120,16 +2122,16 @@ export function AutoSizeThumb({
     }
   };
 
-  const thumbStyle: CSSProperties = aspectRatio != null
-    ? { width: `min(${maxWidth}, calc(${height} * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
-    : { width: height };
+  const thumbStyle: CSSProperties =
+    aspectRatio != null
+      ? {
+          width: `min(${maxWidth}, calc(${height} * ${aspectRatio}))`,
+          aspectRatio: `${aspectRatio}`,
+        }
+      : { width: height };
 
   return (
-    <span
-      className="auto-size-thumb"
-      style={{ ...thumbStyle, height }}
-      aria-hidden="true"
-    >
+    <span className="auto-size-thumb" style={{ ...thumbStyle, height }} aria-hidden="true">
       {showImage ? (
         <img
           src={toMediaProxyUrl(previewUrl) ?? previewUrl}
@@ -2141,7 +2143,10 @@ export function AutoSizeThumb({
           onLoad={handleImageLoad}
         />
       ) : (
-        <AssetKindIcon kind={kind === "document" ? "text" : (kind as "image" | "video" | "audio" | "text")} size={16} />
+        <AssetKindIcon
+          kind={kind === "document" ? "text" : (kind as "image" | "video" | "audio" | "text")}
+          size={16}
+        />
       )}
     </span>
   );
@@ -2173,7 +2178,12 @@ function GenerationInputChips({
             >
               {index + 1}
             </span>
-            <AutoSizeThumb previewUrl={input.previewUrl} kind={input.kind} height="1.75rem" maxWidth="5rem" />
+            <AutoSizeThumb
+              previewUrl={input.previewUrl}
+              kind={input.kind}
+              height="1.75rem"
+              maxWidth="5rem"
+            />
             <span className="node-media-chip__name" title={input.name}>
               {input.name}
             </span>

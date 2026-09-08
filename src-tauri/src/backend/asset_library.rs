@@ -681,9 +681,7 @@ impl AssetLibrary {
             .port
             .is_overseas_gateway(&request.provider_connection_id)?
         {
-            return self
-                .import_staged_overseas(request, progress)
-                .await;
+            return self.import_staged_overseas(request, progress).await;
         }
         let group_id = match request.group_id {
             Some(group_id) if group_id > 0 => group_id,

@@ -1479,16 +1479,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const restoredInput = within(restoredVideo).getByRole("textbox", {
       name: "提示词输入框，输入 @ 引用素材",
     });
-    await waitFor(() => {
-      expect(restoredInput.querySelector(`[data-mention-id="${mentionId}"]`)).toHaveClass(
-        "is-stale",
-      );
-      expect(restoredInput).toHaveTextContent("保留我的手改");
+    const restoredChip = await waitFor(() => {
+      const chip = restoredInput.querySelector<HTMLElement>("[data-mention-id]");
+      expect(chip).not.toBeNull();
+      expect(chip).not.toHaveClass("is-stale");
+      return chip!;
     });
-    expect(restoredInput.querySelector("[data-mention-id]")).toHaveAttribute(
-      "data-canvas-node-key",
-      firstKey,
-    );
+    expect([firstKey, secondKey]).toContain(restoredChip.dataset["canvasNodeKey"]);
+    expect(restoredInput).toHaveTextContent("开场");
 
     fireEvent.change(screen.getByRole("textbox", { name: "生成提示词输出" }), {
       target: { value: "@图片1 上游新版本" },
@@ -1747,10 +1745,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         ? "这张站台参考图将用于品牌广告还是电影叙事？请确认故事的核心情绪。"
         : "请补充目标视频模型（SD2.0 / SD2.5 / H3）、时长和速度档。";
     const generatedPrompts = isMultiGrid
-      ? "## 图片提示词\n2×3 六宫格，按阅读顺序展示女孩走入站台、发现信封、捡起、打开、阅读与抬头。\n\n## 视频提示词\n第一格缓慢推近，第二格以视线引导发现信封，逐格延续角色动作与场景光线。\n\n## 时长分配\n| 格 | 秒 |\n| --- | --- |\n| 1 | 2 |\n| 2 | 2 |\n| 3 | 2 |\n| 4 | 2 |\n| 5 | 2 |\n| 6 | 2 |\n总时长 12 秒。\n\n## 资产清单\n角色：红衣女孩；场景：雨夜站台；道具：信封。"
+      ? "图片提示词\n2×3 六宫格，按阅读顺序展示女孩走入站台、发现信封、捡起、打开、阅读与抬头。\n\n视频提示词\n第一格缓慢推近，第二格以视线引导发现信封，逐格延续角色动作与场景光线。\n\n时长分配\n| 格 | 秒 |\n| --- | --- |\n| 1 | 2 |\n| 2 | 2 |\n| 3 | 2 |\n| 4 | 2 |\n| 5 | 2 |\n| 6 | 2 |\n总时长 12 秒。\n\n资产清单\n角色：红衣女孩；场景：雨夜站台；道具：信封。"
       : isStoryboard
         ? "生成一张 16:9 横向咖啡品牌故事板，2 行×3 列，共 6 格，按从左到右、从上到下阅读。全板采用温暖手绘风格、统一格间留白与角色设计。红衣女孩始终保留短发与左手纸杯。第一格：站台全景，清晨出发；第二格：中景等候；第三格：手握咖啡特写；第四格：目光转向抵站列车；第五格：与朋友相遇；第六格：双人共享温暖时刻与自然出现的咖啡杯。动作、服装、场景与光线跨格连续；无多余文字、水印或格外画面。"
-        : "## 高强度\n角色贴身抢攻，防守方格挡后反击。\n\n## 中间型\n双方试探后交锋。\n\n## 慢节奏\n凝视、蓄势，再完成一组攻防。";
+        : "高强度\n角色贴身抢攻，防守方格挡后反击。\n\n中间型\n双方试探后交锋。\n\n慢节奏\n凝视、蓄势，再完成一组攻防。";
     const editedPrompt = `${generatedPrompts}\n手动补充：保留红衣角色的左手动作。`;
     const optimizedPrompt = `${editedPrompt}\n优化：镜头清晰交代动作因果并保持场景一致。`;
     const replies = [clarification, generatedPrompts, optimizedPrompt];

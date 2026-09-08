@@ -5,7 +5,13 @@ import { Plus } from "@phosphor-icons/react/Plus";
 import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { Waveform } from "@phosphor-icons/react/Waveform";
 import { X } from "@phosphor-icons/react/X";
-import { useEffect, useMemo, useCallback, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useCallback,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
 
 import { ImeInput } from "../../components/ImeTextField";
 import {
@@ -66,10 +72,7 @@ interface EditableMaterial {
 }
 
 /** 素材按「来源身份」比较：显式输入与提示词 @引用可能携带不同的画布实例键，不算不同素材。 */
-function sameMaterialTarget(
-  first: ExplicitMediaTarget,
-  second: ExplicitMediaTarget,
-): boolean {
+function sameMaterialTarget(first: ExplicitMediaTarget, second: ExplicitMediaTarget): boolean {
   if (first.kind === "url" || second.kind === "url") {
     return (
       first.kind === "url" &&
@@ -269,7 +272,12 @@ function AddListThumb({ previewUrl, kind }: { previewUrl: string | null; kind: M
   }
   return (
     <span className="regenerate-add__thumb">
-      <img src={toMediaProxyUrl(previewUrl) ?? previewUrl} alt="" loading="lazy" onError={() => setFailedUrl(previewUrl)} />
+      <img
+        src={toMediaProxyUrl(previewUrl) ?? previewUrl}
+        alt=""
+        loading="lazy"
+        onError={() => setFailedUrl(previewUrl)}
+      />
     </span>
   );
 }
@@ -615,7 +623,8 @@ export function RegenerateGenerationDialog({
               describedBy="regenerate-prompt-hint"
             />
             <span className="regenerate-field__hint" id="regenerate-prompt-hint">
-              输入 @ 引用素材；未引用的素材仍会作为输入传入。点击「识别素材名」可把正文中的素材名称转换为引用。
+              输入 @
+              引用素材；未引用的素材仍会作为输入传入。点击「识别素材名」可把正文中的素材名称转换为引用。
             </span>
           </div>
 
@@ -642,7 +651,8 @@ export function RegenerateGenerationDialog({
                         {material.role ? (
                           <>
                             {" "}
-                            · <span className="regenerate-material__role">
+                            ·{" "}
+                            <span className="regenerate-material__role">
                               {materialRoleLabel(material.role)}
                             </span>
                           </>

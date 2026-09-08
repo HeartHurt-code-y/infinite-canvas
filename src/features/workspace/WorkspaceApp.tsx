@@ -1615,7 +1615,11 @@ export function WorkspaceApp() {
   const handleUploadOutputToCloud = useCallback(
     async (outputKey: string): Promise<void> => {
       const output = outputNodes.find((node) => node.key === outputKey);
-      if (output == null || (output.mediaType !== "image" && output.mediaType !== "video") || output.finalPath == null) {
+      if (
+        output == null ||
+        (output.mediaType !== "image" && output.mediaType !== "video") ||
+        output.finalPath == null
+      ) {
         toast.error("仅已保存到本地的图片/视频产物支持上传到云端素材库。");
         return;
       }
@@ -1641,7 +1645,10 @@ export function WorkspaceApp() {
         return;
       }
       const pendingId = `pending-upload-${pendingUploadSeqRef.current++}`;
-      const name = output.name ?? output.finalPath.split(/[\\/]/).pop() ?? `${output.mediaType === "video" ? "视频" : "图片"}产物`;
+      const name =
+        output.name ??
+        output.finalPath.split(/[\\/]/).pop() ??
+        `${output.mediaType === "video" ? "视频" : "图片"}产物`;
       setAssetUploads((current) => [
         ...current,
         {
@@ -3107,7 +3114,10 @@ export function WorkspaceApp() {
           // fallback：如果 stripMarkdown 返回空，使用原始文本 trim，避免提示词同步丢失
           const generatedPrompt = strippedPrompt || sourceText.trim();
           if (strippedPrompt.length === 0 && sourceText.trim().length > 0) {
-            frontendLog("warn", `[canvas] stripMarkdown 返回空，使用原始文本: sourceLen=${sourceText.length}, trimmedLen=${sourceText.trim().length}`);
+            frontendLog(
+              "warn",
+              `[canvas] stripMarkdown 返回空，使用原始文本: sourceLen=${sourceText.length}, trimmedLen=${sourceText.trim().length}`,
+            );
           }
           if (generatedPrompt) {
             for (const edge of assetEdges) {
@@ -3121,11 +3131,17 @@ export function WorkspaceApp() {
                 previous?.edgeId === edge.id &&
                 previous.sourceKey === source.key &&
                 previous.text === sourceText;
-              frontendLog("info", `[canvas-prompt-sync] .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`);
+              frontendLog(
+                "info",
+                `[canvas-prompt-sync] .then() target=${target.key} skip=${shouldSkip} prevTextLen=${previous?.text?.length ?? 0} sourceTextLen=${sourceText.length} currentEditorLen=${currentContent?.plainText.length ?? 0}`,
+              );
               if (shouldSkip) continue;
               const replaced = promptContents.replaceText(target.key, generatedPrompt, []);
               const afterContent = promptContents.read(target.key);
-              frontendLog("info", `[canvas-prompt-sync] .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`);
+              frontendLog(
+                "info",
+                `[canvas-prompt-sync] .then() after replaceText target=${target.key} replaced=${replaced != null} afterEditorLen=${afterContent?.plainText.length ?? 0}`,
+              );
               if (replaced == null) continue;
               importedPromptSourcesRef.current.set(target.key, {
                 edgeId: edge.id,
@@ -3976,7 +3992,9 @@ export function WorkspaceApp() {
       const visited = new Set<string>();
       const collected: GenerationMediaInput[] = [];
       // BFS 逐层收集：先直接连接的素材/产物，再其上游素材，避免循环引用。
-      const queue: string[] = (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).map((edge) => edge.fromKey);
+      const queue: string[] = (canvasEdgeIndex.byTarget.get(nodeKey) ?? []).map(
+        (edge) => edge.fromKey,
+      );
       while (queue.length > 0) {
         const sourceKey = queue.shift()!;
         if (visited.has(sourceKey)) continue;
@@ -6231,7 +6249,7 @@ export function WorkspaceApp() {
                 onAspectRatioChange={handleOutputAspectRatioChange}
                 onPreview={setPreviewOutputNodeKey}
                 onConnectionStart={ignoreLegacyConnectionStart}
-                onUploadToCloud={handleUploadOutputToCloud}
+                onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
                 task={task}
                 retryInfo={retryInfoByTask[node.taskId] ?? null}
                 results={taskResults[node.taskId] ?? []}

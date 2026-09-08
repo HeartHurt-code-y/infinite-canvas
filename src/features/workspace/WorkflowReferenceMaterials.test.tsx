@@ -107,10 +107,12 @@ describe("workflow reference materials", () => {
     const props = nodeProps({ materials });
     render(<KnowledgeVideoWorkflowNode {...props} />);
     const references = screen.getByRole("region", { name: "工作流参考素材" });
-    expect(within(references).getByRole("img", { name: material.displayName })).toHaveAttribute(
-      "src",
-      material.localPath,
+    // 缩略图是装饰性图片（aria-hidden 子树内的 img，无可访问名称），文件名由旁边的标题文本提供。
+    const thumb = Array.from(references.querySelectorAll<HTMLImageElement>("img")).find(
+      (img) => img.getAttribute("src") === material.localPath,
     );
+    expect(thumb).not.toBeNull();
+    expect(within(references).getByText(material.displayName)).toBeVisible();
     for (const kind of ["图片", "音频", "视频", "文档"]) {
       expect(within(references).getByText(`${kind} · 1.0 MB`)).toBeVisible();
     }
@@ -238,7 +240,12 @@ describe("workflow reference materials", () => {
     rejectPick(new Error("文件已移动，请重新选择"));
     expect(await screen.findByRole("alert")).toHaveTextContent("文件已移动，请重新选择");
     expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
-    expect(screen.getByRole("img", { name: material.displayName })).toBeVisible();
+    expect(
+      Array.from(document.querySelectorAll<HTMLImageElement>("img")).some(
+        (img) => img.getAttribute("src") === material.localPath,
+      ),
+    ).toBe(true);
+    expect(screen.getByText(material.displayName)).toBeVisible();
   });
 
   it.each<KnowledgeVideoWorkflowPhase>(["paused", "failed", "done"])(

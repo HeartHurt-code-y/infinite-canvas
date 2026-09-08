@@ -63,9 +63,7 @@ export function frozenStartCommand(detail: GenerationTaskDetail): StartGeneratio
     ...(Array.isArray(explicitMedia) && explicitMedia.length > 0
       ? { explicitMedia: explicitMedia as readonly ExplicitMediaInput[] }
       : {}),
-    ...(isRecord(parameters) && Object.keys(parameters).length > 0
-      ? { parameters }
-      : {}),
+    ...(isRecord(parameters) && Object.keys(parameters).length > 0 ? { parameters } : {}),
     ...(typeof generationCount === "number" &&
     Number.isInteger(generationCount) &&
     generationCount >= 1
