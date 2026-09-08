@@ -23,7 +23,7 @@ function makeOutputNode(overrides: Partial<OutputNodeData> = {}): OutputNodeData
 
 function renderHarness(
   node: OutputNodeData,
-  options: { uploadedToCloud?: boolean; onUploadToCloud?: (key: string) => void } = {},
+  options: { onUploadToCloud?: (key: string) => void } = {},
 ) {
   render(
     <CanvasOutputNode
@@ -35,7 +35,6 @@ function renderHarness(
       onPreview={vi.fn()}
       onConnectionStart={vi.fn()}
       onUploadToCloud={options.onUploadToCloud ?? vi.fn()}
-      uploadedToCloud={options.uploadedToCloud ?? false}
       task={null}
       retryInfo={null}
       results={[]}
@@ -45,16 +44,23 @@ function renderHarness(
   );
 }
 
-describe("CanvasOutputNode 上传到云端素材库绿色小点", () => {
+describe("CanvasOutputNode 上传到云端素材库绿色小点（持久化到节点数据）", () => {
   it("未上传时上传按钮不显示绿色小点", () => {
-    renderHarness(makeOutputNode(), { uploadedToCloud: false });
+    renderHarness(makeOutputNode({ uploadedToCloud: false }));
+    const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
+    expect(button).not.toHaveClass("is-uploaded");
+    expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
+  });
+
+  it("未设置 uploadedToCloud 时视为未上传（旧文档兼容）", () => {
+    renderHarness(makeOutputNode());
     const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
     expect(button).not.toHaveClass("is-uploaded");
     expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
   });
 
   it("已上传时上传按钮显示绿色小点和已上传样式", () => {
-    renderHarness(makeOutputNode(), { uploadedToCloud: true });
+    renderHarness(makeOutputNode({ uploadedToCloud: true }));
     const button = screen.getByRole("button", { name: /已上传到云端素材库/ });
     expect(button).toHaveClass("is-uploaded");
     expect(button.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
@@ -67,8 +73,8 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点", () => {
         mediaType: "video",
         finalPath: "C:/outputs/sample.mp4",
         name: "sample.mp4",
+        uploadedToCloud: true,
       }),
-      { uploadedToCloud: true },
     );
     const button = screen.getByRole("button", { name: /已上传到云端素材库/ });
     expect(button).toHaveClass("is-uploaded");
@@ -76,9 +82,14 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点", () => {
   });
 
   it("文本产物不显示上传按钮", () => {
-    renderHarness(makeOutputNode({ mediaType: "text", finalPath: null, textContent: "hello" }), {
-      uploadedToCloud: true,
-    });
+    renderHarness(
+      makeOutputNode({
+        mediaType: "text",
+        finalPath: null,
+        textContent: "hello",
+        uploadedToCloud: true,
+      }),
+    );
     expect(
       screen.queryByRole("button", { name: /上传|已上传到云端素材库/ }),
     ).not.toBeInTheDocument();

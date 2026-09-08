@@ -834,6 +834,8 @@ export interface OutputNodeData {
   readonly aspectRatio?: number;
   /** Seedream 图层拆分场景的图层元数据；普通生成结果为 undefined。 */
   readonly layer?: OutputLayerInfo;
+  /** 该产物已成功上传到云端素材库（随画布文档持久化，重启后保留）。 */
+  readonly uploadedToCloud?: boolean;
   readonly x: number;
   readonly y: number;
   /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */

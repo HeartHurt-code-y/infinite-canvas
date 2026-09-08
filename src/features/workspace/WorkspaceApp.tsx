@@ -631,9 +631,7 @@ export function WorkspaceApp({
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
-  // 已成功上传到云端素材库的产物节点 key（会话内状态，用于显示上传按钮绿色小点）。
-  const [uploadedOutputKeys, setUploadedOutputKeys] = useState<ReadonlySet<string>>(new Set());
-  // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点。
+  // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点并标记已上传。
   const uploadJobToOutputKeyRef = useRef<Map<string, string>>(new Map());
   // 供轮询订阅回调读取最新上传条目（destination 映射），避免闭包过期。
   const uploadEntriesRef = useRef<readonly AssetUploadEntry[]>([]);
@@ -1694,26 +1692,26 @@ export function WorkspaceApp({
           refreshAssetGroups(assetProvider.id);
         }
       }
-      // 上传到云端素材库成功：标记对应产物节点显示绿色小点。
+      // 上传到云端素材库成功：标记对应产物节点已上传（写入节点数据，随画布文档持久化）。
       if (status === "active" || status === "cleaned") {
         const outputKey = uploadJobToOutputKeyRef.current.get(payload.jobId);
         if (outputKey) {
-          setUploadedOutputKeys((current) => {
-            if (current.has(outputKey)) return current;
-            const next = new Set(current);
-            next.add(outputKey);
-            return next;
-          });
+          patchNodes("output", (node) =>
+            node.key === outputKey && !node.uploadedToCloud
+              ? { ...node, uploadedToCloud: true }
+              : node,
+          );
           uploadJobToOutputKeyRef.current.delete(payload.jobId);
         }
       } else if (status === "failed" || status === "interrupted") {
-        // 上传失败：清理映射，不标记绿色小点。
+        // 上传失败：清理映射，不标记已上传。
         uploadJobToOutputKeyRef.current.delete(payload.jobId);
       }
     });
   }, [
     assetLibrarySource,
     assetProvider,
+    patchNodes,
     refreshAssetGroups,
     refreshCloudAssets,
     refreshLocalAssets,
@@ -5964,7 +5962,6 @@ export function WorkspaceApp({
                 onPreview={setPreviewOutputNodeKey}
                 onConnectionStart={ignoreLegacyConnectionStart}
                 onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
-                uploadedToCloud={uploadedOutputKeys.has(node.key)}
                 task={task}
                 retryInfo={retryInfoByTask[node.taskId] ?? null}
                 results={taskResults[node.taskId] ?? []}
@@ -5985,7 +5982,6 @@ export function WorkspaceApp({
       setPreviewOutputNodeKey,
       ignoreLegacyConnectionStart,
       handleUploadOutputToCloud,
-      uploadedOutputKeys,
       retryInfoByTask,
       taskResults,
       rawResponses,
