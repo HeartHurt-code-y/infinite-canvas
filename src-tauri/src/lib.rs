@@ -100,6 +100,7 @@ pub fn run() {
             commands::query_video_task_now,
             commands::list_remote_video_tasks,
             commands::list_assets,
+            commands::refresh_asset_cover,
             commands::list_asset_groups,
             commands::create_asset_group,
             commands::rename_asset,

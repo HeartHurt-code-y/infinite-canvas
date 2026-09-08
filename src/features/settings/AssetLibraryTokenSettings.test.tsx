@@ -66,6 +66,7 @@ describe("AssetLibraryTokenSettings", () => {
             }),
           ),
           renameAsset: vi.fn(() => Promise.resolve("")),
+          refreshAssetCover: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -107,6 +108,7 @@ describe("AssetLibraryTokenSettings", () => {
         }),
       ),
       renameAsset: vi.fn(() => Promise.resolve("")),
+      refreshAssetCover: vi.fn(() => Promise.resolve("")),
     };
 
     const view = render(
@@ -167,6 +169,7 @@ describe("AssetLibraryTokenSettings", () => {
         }),
       ),
       renameAsset: vi.fn(() => Promise.resolve("")),
+      refreshAssetCover: vi.fn(() => Promise.resolve("")),
     };
     const onAssetsLoaded = vi.fn();
     const onPullStarted = vi.fn();
@@ -230,6 +233,7 @@ describe("AssetLibraryTokenSettings", () => {
             }),
           ),
           renameAsset: vi.fn(() => Promise.resolve("")),
+          refreshAssetCover: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,
@@ -266,6 +270,7 @@ describe("AssetLibraryTokenSettings", () => {
             }),
           ),
           renameAsset: vi.fn(() => Promise.resolve("")),
+          refreshAssetCover: vi.fn(() => Promise.resolve("")),
         }}
         onAssetsLoaded={vi.fn()}
       />,

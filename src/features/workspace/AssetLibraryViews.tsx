@@ -5,7 +5,7 @@ import { CopySimple } from "@phosphor-icons/react/CopySimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
-import { formatBytes } from "../../lib/backend";
+import { formatBytes, assetLibraryClient } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon, NodeTypeIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
@@ -67,8 +67,13 @@ function AssetCardVideoVisual({
   const videoFailed = videoSrc == null || failedVideoSrc === videoSrc;
   const [loadedCoverUrl, setLoadedCoverUrl] = useState<string | null>(null);
   const [failedCoverUrl, setFailedCoverUrl] = useState<string | null>(null);
+  // 供应商封面签名过期时向后端续签一次得到的新封面地址；未刷新时保持原始封面。
+  const [refreshedCoverUrl, setRefreshedCoverUrl] = useState<string | null>(null);
+  // 每个卡片实例只尝试续签一次，新封面仍失败时直接回退视频中间帧，避免反复请求。
+  const coverRefreshAttemptedRef = useRef(false);
+  const candidateCoverUrl = refreshedCoverUrl ?? asset.coverUrl;
   const effectiveCoverUrl =
-    asset.coverUrl != null && failedCoverUrl !== asset.coverUrl ? asset.coverUrl : null;
+    candidateCoverUrl != null && failedCoverUrl !== candidateCoverUrl ? candidateCoverUrl : null;
   const coverReady = effectiveCoverUrl != null && loadedCoverUrl === effectiveCoverUrl;
   // 供应商封面缺失或加载失败时，抽取视频中间帧作静止封面（与画布素材节点一致）。
   const useVideoCover = effectiveCoverUrl == null && videoSrc != null;
@@ -117,8 +122,31 @@ function AssetCardVideoVisual({
             setLoadedCoverUrl(effectiveCoverUrl);
           }}
           onError={() => {
+            const failedUrl = effectiveCoverUrl;
             setLoadedCoverUrl(null);
-            setFailedCoverUrl(effectiveCoverUrl);
+            setFailedCoverUrl(failedUrl);
+            // 供应商封面签名过期：云端素材首次失败时向后端续签一次新封面；
+            // 续签失败或新封面仍无法加载时回退视频中间帧（与画布素材节点一致）。
+            if (
+              failedUrl != null &&
+              !coverRefreshAttemptedRef.current &&
+              asset.source === "cloud" &&
+              asset.providerConnectionId != null
+            ) {
+              coverRefreshAttemptedRef.current = true;
+              void assetLibraryClient
+                .refreshAssetCover({
+                  providerConnectionId: asset.providerConnectionId,
+                  id: asset.id,
+                })
+                .then((freshUrl) => {
+                  if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+                    setRefreshedCoverUrl(freshUrl);
+                    setFailedCoverUrl(null);
+                  }
+                })
+                .catch(() => undefined);
+            }
             const video = videoRef.current;
             if (video != null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
               setVideoCoverReady(true);

@@ -881,6 +881,15 @@ pub struct RenameAssetCommand {
     pub name: String,
 }
 
+/// 按素材身份重新向供应商读取关键帧封面 URL（自动续签过期的签名地址）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshAssetCoverCommand {
+    pub provider_connection_id: String,
+    /// 云端素材 ID（`asset-…`，不带 `asset://` 前缀）。
+    pub id: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {

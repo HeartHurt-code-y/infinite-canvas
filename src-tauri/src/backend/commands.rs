@@ -37,9 +37,9 @@ use super::{
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetRecord, ModelDefinition, ProviderConnection, ProviderModelBinding,
         ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
-        RecoveryReport, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
-        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
-        StagingJobRecord, StartGenerationCommand, StartStagingCommand,
+        RecoveryReport, RefreshAssetCoverCommand, RemoteModelOption, RemoteVideoTaskPage,
+        RenameAssetCommand, ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand,
+        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
         TosBucketPullSummary, TosStagingConfig, UpsertProviderConnectionCommand,
         UpsertProviderTokenGroupCommand, VideoTaskListCommand,
@@ -431,6 +431,14 @@ pub async fn list_assets(
     command: AssetListCommand,
 ) -> CommandResult<Vec<CloudAssetRecord>> {
     state.assets.browse(command).await.command()
+}
+
+#[tauri::command]
+pub async fn refresh_asset_cover(
+    state: State<'_, BackendState>,
+    command: RefreshAssetCoverCommand,
+) -> CommandResult<String> {
+    state.assets.refresh_asset_cover(command).await.command()
 }
 
 #[tauri::command]

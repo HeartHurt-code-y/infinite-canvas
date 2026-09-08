@@ -654,6 +654,12 @@ export interface DeleteAssetCommand {
   readonly id: string;
 }
 
+export interface RefreshAssetCoverCommand {
+  readonly providerConnectionId: string;
+  /** Cloud `asset-xxx` ID; an `asset://` prefix is accepted and stripped. */
+  readonly id: string;
+}
+
 export interface DeleteRealPersonGroupCommand {
   readonly providerConnectionId: string;
   /** Positive platform group ID, not `remoteGroupId`. */
@@ -690,6 +696,8 @@ export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
   /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
   deleteAsset(this: void, command: DeleteAssetCommand): Promise<string>;
+  /** 按素材身份重新读取关键帧封面 URL（上游 `POST /v1/assets/get`），续签过期的签名封面。 */
+  refreshAssetCover(this: void, command: RefreshAssetCoverCommand): Promise<string>;
   /** 列出当前令牌作用域下的云端素材库分组（上游 `GET /v1/assets/groups`）。 */
   listAssetGroups(this: void, providerConnectionId: string): Promise<AssetGroupRecord[]>;
   /** 以用户自定义名称新建云端素材库分组（上游 `POST /v1/assets/groups`）。 */
@@ -722,6 +730,13 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
     }),
   deleteAsset: (command) =>
     invokeDesktop("delete_asset", stringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
+      },
+    }),
+  refreshAssetCover: (command) =>
+    invokeDesktop("refresh_asset_cover", stringSchema, {
       command: {
         providerConnectionId: command.providerConnectionId,
         id: command.id,

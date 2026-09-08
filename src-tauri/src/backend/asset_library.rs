@@ -22,7 +22,7 @@ use super::{
         CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
         DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
         MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RenameAssetCommand,
+        RealPersonProviderCommand, RefreshAssetCoverCommand, RenameAssetCommand,
     },
 };
 
@@ -999,11 +999,12 @@ impl AssetLibrary {
     }
 
     /// Refresh the authenticated asset record for a local preview, without a generation task.
-    pub async fn preview_content_url(
+    /// 返回重新读取的素材记录，供调用方取不同字段（视频正文地址、关键帧封面地址等）。
+    async fn refresh_asset_record(
         &self,
         identity: CloudAssetIdentity,
         expected_media_type: MediaType,
-    ) -> BackendResult<String> {
+    ) -> BackendResult<CloudAssetRecord> {
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -1052,9 +1053,56 @@ impl AssetLibrary {
                 json!({}),
             ));
         }
+        Ok(asset)
+    }
+
+    /// Refresh the authenticated asset record for a local preview, without a generation task.
+    pub async fn preview_content_url(
+        &self,
+        identity: CloudAssetIdentity,
+        expected_media_type: MediaType,
+    ) -> BackendResult<String> {
+        let asset = self
+            .refresh_asset_record(identity, expected_media_type)
+            .await?;
         asset
             .preview_url
             .ok_or_else(|| BackendError::validation("云素材没有可下载的视频正文地址。", json!({})))
+    }
+
+    /// 按素材身份重新向供应商读取关键帧封面地址，自动续签已过期的签名封面。
+    ///
+    /// 对应上游契约 `POST /v1/assets/get`，body `{"id":"asset-…"}`，返回新封面 URL。
+    /// 接受 `asset://` 前缀以便前端直接传引用；素材未就绪、类型不符或没有封面时返回校验错误。
+    pub async fn refresh_asset_cover(
+        &self,
+        command: RefreshAssetCoverCommand,
+    ) -> BackendResult<String> {
+        require_provider_connection_id(&command.provider_connection_id)?;
+        let id = command
+            .id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| command.id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset cover refresh requires an asset id without the asset:// prefix",
+                json!({ "id": command.id }),
+            ));
+        }
+        let asset = self
+            .refresh_asset_record(
+                CloudAssetIdentity {
+                    provider_connection_id: command.provider_connection_id,
+                    asset_id: id.to_string(),
+                },
+                MediaType::Video,
+            )
+            .await?;
+        asset
+            .cover_url
+            .ok_or_else(|| BackendError::validation("云素材没有可下载的封面地址。", json!({})))
     }
 
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
@@ -1919,6 +1967,72 @@ mod tests {
                     .contains("secret")
             );
         }
+    }
+
+    #[tokio::test]
+    async fn video_cover_refresh_returns_fresh_cover_url_and_strips_asset_uri() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "data": { "id": "video-1", "name": "clip.mp4", "status": "ready", "type": "video",
+                    "url": "https://cdn.example/clip.mp4?signature=fresh",
+                    "cover_url": "https://cdn.example/cover.jpg?signature=fresh",
+                    "asset_url": "asset://video-1" }
+            }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+        let cover = library
+            .refresh_asset_cover(RefreshAssetCoverCommand {
+                provider_connection_id: "provider-original".into(),
+                id: "asset://video-1".into(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(cover, "https://cdn.example/cover.jpg?signature=fresh");
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].provider_connection_id, "provider-original");
+        assert_eq!(requests[0].path, "/v1/assets/get");
+        assert_eq!(requests[0].body, Some(json!({ "id": "video-1" })));
+    }
+
+    #[tokio::test]
+    async fn video_cover_refresh_rejects_coverless_wrong_type_and_blank_ids() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": { "id": "video-1", "status": "ready", "type": "video", "url": "https://cdn.example/clip?token=secret" } }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "video-1", "status": "ready", "type": "image", "cover_url": "https://cdn.example/cover?token=secret" } }),
+            ),
+        ]));
+        let library = test_library(adapter, immediate_poll());
+        let coverless = library
+            .refresh_asset_cover(RefreshAssetCoverCommand {
+                provider_connection_id: "provider".into(),
+                id: "video-1".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(coverless, BackendError::Validation { .. }));
+        let wrong_type = library
+            .refresh_asset_cover(RefreshAssetCoverCommand {
+                provider_connection_id: "provider".into(),
+                id: "video-1".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_type, BackendError::Validation { .. }));
+        let blank = library
+            .refresh_asset_cover(RefreshAssetCoverCommand {
+                provider_connection_id: "provider".into(),
+                id: "   ".into(),
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(blank, BackendError::Validation { .. }));
     }
 
     fn immediate_poll() -> PollPolicy {
