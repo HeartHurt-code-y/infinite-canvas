@@ -572,6 +572,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -591,7 +592,10 @@ describe("App workspace", () => {
     const visual = card.querySelector<HTMLElement>(".asset-card__visual--video");
 
     expect(cover).toHaveAttribute("src", coverUrl);
-    expect(video).toHaveAttribute("src", videoUrl);
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(videoUrl)}`,
+    );
     expect(video).toHaveAttribute("poster", coverUrl);
     expect(video?.muted).toBe(true);
     expect(video?.loop).toBe(true);
@@ -615,6 +619,90 @@ describe("App workspace", () => {
     expect(pause).toHaveBeenCalledTimes(2);
     expect(video).toHaveProperty("currentTime", 0);
     expect(visual).not.toHaveClass("is-playing");
+  });
+
+  it("视频卡封面签名过期时向后端续签一次，用新封面重试而非直接切中间帧", async () => {
+    const staleCoverUrl = "https://cdn.example.com/stale-cover.jpg?signature=expired";
+    const freshCoverUrl = "https://cdn.example.com/fresh-cover.jpg?signature=fresh";
+    const videoUrl = "https://cdn.example.com/train-preview.mp4";
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-production",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 2,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([
+            cloudAsset("moyu-production", {
+              id: "video-asset-1",
+              kind: "video",
+              name: "过期封面续签",
+              previewUrl: videoUrl,
+              assetUrl: videoUrl,
+              coverUrl: staleCoverUrl,
+            }),
+          ]);
+        case "list_asset_groups":
+          return Promise.resolve([]);
+        case "refresh_asset_cover":
+          return Promise.resolve(freshCoverUrl);
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "视频 1" }));
+    const card = await screen.findByRole("button", {
+      name: "预览视频素材详情：过期封面续签",
+    });
+    const cover = card.querySelector<HTMLImageElement>(".asset-card__preview");
+    expect(cover).toHaveAttribute("src", staleCoverUrl);
+
+    // 旧封面签名过期：加载失败后先向后端续签（携带素材身份），
+    // 拿到新签名后用新封面重试加载，而不是直接回退视频中间帧。
+    fireEvent.error(cover!);
+    await waitFor(() => {
+      const coverRefreshCall = invokeMock.mock.calls.find(
+        ([name]) => name === "refresh_asset_cover",
+      ) as [string, { command: { providerConnectionId: string; id: string } }] | undefined;
+      expect(coverRefreshCall?.[1]?.command).toEqual({
+        providerConnectionId: "moyu-production",
+        id: "video-asset-1",
+      });
+    });
+    await waitFor(() => {
+      const freshCover = card.querySelector<HTMLImageElement>(".asset-card__preview");
+      expect(freshCover).not.toBeNull();
+      expect(freshCover).toHaveAttribute("src", freshCoverUrl);
+    });
   });
 
   it("从素材详情弹窗两段式删除云端素材：确认后才调用删除接口并关闭弹窗", async () => {
@@ -665,6 +753,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -786,6 +875,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -839,7 +929,10 @@ describe("App workspace", () => {
       name: "预览图片素材详情：img-alpha",
     });
     const brokenImage = brokenImageCard.querySelector(".asset-card__preview");
-    expect(brokenImage).toHaveAttribute("src", "https://cdn.example.com/a.png");
+    expect(brokenImage).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/a.png")}`,
+    );
 
     // 图片签名 URL 过期时不能只把 img 隐藏并留下无说明的空卡片。
     fireEvent.error(brokenImage!);
@@ -904,6 +997,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -976,6 +1070,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1042,6 +1137,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1124,6 +1220,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1207,6 +1304,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1292,6 +1390,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1374,6 +1473,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1491,6 +1591,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
@@ -1548,6 +1649,7 @@ describe("App workspace", () => {
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: invokeMock,
       transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
       metadata: { currentWindow: { label: "main" } },
     };
     (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {

@@ -4752,7 +4752,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     expect(visual).not.toBeNull();
     expect(cover).toHaveAttribute("src", "https://cdn.example.com/train-keyframe.jpg");
-    expect(video).toHaveAttribute("src", "https://cdn.example.com/train.mp4");
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train.mp4")}`,
+    );
     expect(video).toHaveAttribute("poster", "https://cdn.example.com/train-keyframe.jpg");
     fireEvent.loadedData(video!);
     expect(video).toHaveClass("is-ready");
@@ -4799,7 +4802,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const video = card.querySelector<HTMLVideoElement>("video");
 
     // 封面就绪前只显示中性加载状态。
-    expect(video).toHaveAttribute("src", "https://cdn.example.com/hem.mp4");
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/hem.mp4")}`,
+    );
     expect(video).not.toHaveAttribute("poster");
     expect(within(card).getByText("正在加载预览")).toBeInTheDocument();
 
@@ -4826,7 +4832,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     const video = node.querySelector<HTMLVideoElement>("video");
     expect(video).not.toBeNull();
-    expect(video).toHaveAttribute("src", "https://cdn.example.com/train.mp4");
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train.mp4")}`,
+    );
     expect(video).toHaveAttribute("preload", "metadata");
     expect(within(node).getByText("正在加载预览")).toBeInTheDocument();
 
@@ -5866,7 +5875,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const option = within(menu).getByRole("option", { name: /站台参考图/ });
     const thumbImage = option.querySelector<HTMLElement>(".prompt-mention__thumb img");
     expect(thumbImage).not.toBeNull();
-    expect(thumbImage).toHaveAttribute("src", "https://cdn.example.com/station.jpg");
+    expect(thumbImage).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/station.jpg")}`,
+    );
     expect(option.querySelector(".prompt-mention__thumb--fallback")).toBeNull();
   });
 
