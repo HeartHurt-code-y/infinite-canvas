@@ -1,0 +1,83 @@
+.connection-quick-add-menu {
+  position: fixed;
+  z-index: var(--z-modal);
+  width: 14rem;
+  max-width: calc(100vw - var(--space-md));
+  max-height: calc(100dvh - var(--space-md));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-panel);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-raised);
+  text-align: left;
+}
+
+.connection-quick-add-menu__heading {
+  display: grid;
+  gap: var(--space-2xs);
+  padding: var(--space-xs) var(--space-xs) var(--space-sm);
+  border-bottom: var(--rule-thin) solid var(--color-rule);
+  margin-bottom: var(--space-xs);
+}
+
+.connection-quick-add-menu__heading strong {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.connection-quick-add-menu__heading span {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.connection-quick-add-menu__item {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: 100%;
+  min-height: var(--size-control);
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-transparent);
+  border-radius: var(--radius-control);
+  background: var(--color-transparent);
+  color: var(--color-ink);
+  font-size: var(--text-base);
+  text-align: left;
+}
+
+.connection-quick-add-menu__item svg {
+  flex: 0 0 auto;
+}
+
+.connection-quick-add-menu__item--image svg {
+  color: var(--color-image-strong);
+}
+
+.connection-quick-add-menu__item--video svg {
+  color: var(--color-video-strong);
+}
+
+.connection-quick-add-menu__item--prompt svg {
+  color: var(--color-accent);
+}
+
+.connection-quick-add-menu__item:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: calc(-1 * var(--rule-active));
+  background: var(--color-accent-soft);
+}
+
+@media (hover: hover) {
+  .connection-quick-add-menu__item:hover {
+    background: var(--color-paper-2);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .connection-quick-add-menu__item {
+    transition: none;
+  }
+}

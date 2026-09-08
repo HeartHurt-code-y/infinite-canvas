@@ -26,6 +26,8 @@ import {
   type Connection,
   type EdgeChange,
   type NodeChange,
+  type OnConnectEnd,
+  type OnConnectStart,
   type OnNodeDrag,
   type ReactFlowInstance,
   type ReactFlowProps,
@@ -117,6 +119,7 @@ import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import { createCanvasInputResolver, canvasNodesByKeyFromDocument } from "./canvasInputs";
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
+import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
 import { AssetFlow, AssetPanelError, AssetUploadRow, RepositoryCard } from "./AssetLibraryViews";
 import {
   AssetGroupCreateDialog,
@@ -1789,8 +1792,8 @@ export function WorkspaceApp({
     [occupiedNodeRects],
   );
 
-  /** 在画布上创建一个生成节点（来自节点仓库拖拽或键盘新增）。 */
-  const addGenNode = useCallback(
+  /** 各创建入口共用模型默认值与落点避让；由调用方提交节点或完整子图。 */
+  const createGenNode = useCallback(
     (kind: CanvasGenNodeKind, x: number, y: number) => {
       const { width, height } = genNodeDimensions(kind);
       const position = dropPosition(x, y, width, height);
@@ -1815,11 +1818,6 @@ export function WorkspaceApp({
                 config: createImageNodeConfig(nodeModelSelections.image, providerCatalogLoaded),
                 ...position,
               };
-      addNode("gen", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 生成节点已创建: key=${node.key}, kind=${kind}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
     [
@@ -1828,8 +1826,21 @@ export function WorkspaceApp({
       nodeModelSelections.prompt,
       nodeModelSelections.video,
       providerCatalogLoaded,
-      addNode,
     ],
+  );
+
+  /** 在画布上创建一个生成节点（来自节点仓库拖拽或键盘新增）。 */
+  const addGenNode = useCallback(
+    (kind: CanvasGenNodeKind, x: number, y: number) => {
+      const node = createGenNode(kind, x, y);
+      addNode("gen", node, { select: true });
+      frontendLog(
+        "info",
+        `[canvas] 生成节点已创建: key=${node.key}, kind=${kind}, 位置=(${Math.round(node.x)}, ${Math.round(node.y)})`,
+      );
+      return node;
+    },
+    [addNode, createGenNode],
   );
 
   /** 创建独立剧本节点；它不接媒体连线，只复用全局文本模型连接。 */
@@ -6538,6 +6549,40 @@ export function WorkspaceApp({
 
   // 拖线过程中记录源节点 key，用于高亮所有可连接目标的输入端口。
   const [connectionSourceKey, setConnectionSourceKey] = useState<string | null>(null);
+  const connectionStartRef = useRef<{
+    nodeKey: string;
+    handleType: "source" | "target";
+    x: number;
+    y: number;
+  } | null>(null);
+  const [connectionQuickAdd, setConnectionQuickAdd] = useState<{
+    nodeKey: string;
+    handleType: "source" | "target";
+    position: { x: number; y: number };
+    boardPosition: { x: number; y: number };
+  } | null>(null);
+
+  const closeConnectionQuickAdd = useCallback(() => setConnectionQuickAdd(null), []);
+
+  useEffect(() => {
+    if (!active) {
+      connectionStartRef.current = null;
+      // Switching canvases cancels the transient gesture and its menu.
+      setConnectionQuickAdd(null);
+      setConnectionSourceKey(null);
+    }
+  }, [active]);
+
+  useEffect(() => {
+    if (!active || !connectionSourceKey) return;
+    const cancelConnection = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      connectionStartRef.current = null;
+      setConnectionSourceKey(null);
+    };
+    window.addEventListener("keydown", cancelConnection);
+    return () => window.removeEventListener("keydown", cancelConnection);
+  }, [active, connectionSourceKey]);
 
   // 从各类节点索引中按 key 查找并组装 CanvasNodeEntry，供连接合法性判断复用。
   const canvasEntryByKey = useCallback(
@@ -6580,6 +6625,12 @@ export function WorkspaceApp({
       resultNodes,
     ],
   );
+
+  const quickAddEndpointExists =
+    connectionQuickAdd != null && canvasEntryByKey(connectionQuickAdd.nodeKey) != null;
+  useEffect(() => {
+    if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
+  }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
 
   const flowNodes = useMemo<CanvasFlowNode[]>(() => {
     const sourceEntry: CanvasNodeEntry | null =
@@ -6790,15 +6841,65 @@ export function WorkspaceApp({
     }
   };
 
-  const handleConnectStart = (
-    _event: MouseEvent | TouchEvent,
-    params: { nodeId: string | null; handleId: string | null },
-  ) => {
+  const handleConnectStart: OnConnectStart = (event, params) => {
+    closeConnectionQuickAdd();
+    const point = "touches" in event ? event.touches[0] : event;
+    connectionStartRef.current =
+      params.nodeId && params.handleType && point
+        ? {
+            nodeKey: params.nodeId,
+            handleType: params.handleType,
+            x: point.clientX,
+            y: point.clientY,
+          }
+        : null;
     setConnectionSourceKey(params.nodeId);
   };
 
-  const handleConnectEnd = () => {
+  const handleConnectEnd: OnConnectEnd = (event, connection) => {
+    const start = connectionStartRef.current;
+    connectionStartRef.current = null;
     setConnectionSourceKey(null);
+    if (!active || !start || connection.isValid || event.type === "touchcancel") return;
+    const point = "changedTouches" in event ? event.changedTouches[0] : event;
+    if (!point || Math.hypot(point.clientX - start.x, point.clientY - start.y) < 4) return;
+    // Touch events retain the starting handle as their target, so hit-test the release point.
+    const target =
+      "changedTouches" in event
+        ? document.elementFromPoint(point.clientX, point.clientY)
+        : event.target;
+    if (!(target instanceof Element) || !target.classList.contains("react-flow__pane")) return;
+    const boardPosition = dropClientPointToBoard(point.clientX, point.clientY);
+    if (!boardPosition || !canvasEntryByKey(start.nodeKey)) return;
+    setConnectionQuickAdd({
+      nodeKey: start.nodeKey,
+      handleType: start.handleType,
+      position: { x: point.clientX, y: point.clientY },
+      boardPosition,
+    });
+  };
+
+  const handleConnectionQuickAdd = (kind: CanvasGenNodeKind) => {
+    if (!connectionQuickAdd) return;
+    const endpoint = canvasEntryByKey(connectionQuickAdd.nodeKey);
+    closeConnectionQuickAdd();
+    if (!endpoint) return;
+    const node = createGenNode(
+      kind,
+      connectionQuickAdd.boardPosition.x,
+      connectionQuickAdd.boardPosition.y,
+    );
+    const entry: CanvasNodeEntry = { type: "gen", data: node };
+    const [source, target] =
+      connectionQuickAdd.handleType === "source" ? [endpoint, entry] : [entry, endpoint];
+    if (!isSupportedConnection(source, target)) return;
+    const fromKey = source.data.key;
+    const toKey = target.data.key;
+    insertSubgraph([entry], [{ id: `${fromKey}->${toKey}`, fromKey, toKey }], {
+      selectNodeKey: node.key,
+    });
+    selectEdge(null);
+    frontendLog("info", `[canvas] 拖线创建生成节点并连接: ${fromKey} → ${toKey}, kind=${kind}`);
   };
 
   const handleFlowConnect = (connection: Connection) => {
@@ -7499,7 +7600,10 @@ export function WorkspaceApp({
               onConnect={handleFlowConnect}
               onConnectStart={handleConnectStart}
               onConnectEnd={handleConnectEnd}
-              onMoveStart={() => setIsPanning(true)}
+              onMoveStart={() => {
+                closeConnectionQuickAdd();
+                setIsPanning(true);
+              }}
               onMoveEnd={handleFlowMoveEnd}
               onPaneClick={() => {
                 selectNode(null);
@@ -7534,6 +7638,14 @@ export function WorkspaceApp({
                 className="canvas-flow-bg canvas-flow-bg--major"
               />
             </LiveCanvasFlow>
+
+            {connectionQuickAdd && quickAddEndpointExists ? (
+              <ConnectionQuickAddMenu
+                position={connectionQuickAdd.position}
+                onSelect={handleConnectionQuickAdd}
+                onClose={closeConnectionQuickAdd}
+              />
+            ) : null}
 
             {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
             {!hasCanvasNodes ? (

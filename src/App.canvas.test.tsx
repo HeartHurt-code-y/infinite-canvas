@@ -510,6 +510,23 @@ function connectViaHandles(
   fireCanvasMouse(document, "mouseup", dropPoint);
 }
 
+/** 从真实端口拖到指定落点，让 mouseup 的 DOM target 区分画布空白与节点本体。 */
+function dropConnectionFromHandle(
+  node: HTMLElement,
+  handleType: "source" | "target",
+  dropTarget: Element,
+  flowPoint: { x: number; y: number },
+): void {
+  const handle = rfWrapperOf(node).querySelector<HTMLElement>(`.react-flow__handle.${handleType}`);
+  expect(handle).not.toBeNull();
+  const from = rfNodeFlowPosition(node);
+  fireCanvasMouse(handle!, "mousedown", clientFromFlow(from.x, from.y));
+  fireCanvasMouse(document, "mousemove", clientFromFlow(from.x + 2, from.y + 2));
+  const dropPoint = clientFromFlow(flowPoint.x, flowPoint.y);
+  fireCanvasMouse(document, "mousemove", dropPoint);
+  fireCanvasMouse(dropTarget, "mouseup", dropPoint);
+}
+
 async function addGenerationNode(
   kind: "图片" | "视频",
   clientX: number,
@@ -902,6 +919,120 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() =>
       expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
     );
+    expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+  });
+
+  it.each([
+    ["图片生成", "image", "图片生成节点", 580, 480],
+    ["视频生成", "video", "视频生成节点", 580, 900],
+    ["提示词生成与优化", "prompt", "提示词生成节点", 520, 650],
+  ] as const)(
+    "拖线到空白后选择%s，在落点创建节点并自动连接素材",
+    async (menuName, kind, nodeName, width, height) => {
+      render(<App />);
+      const asset = await addAssetNode("图片", "站台参考图", 180, 180);
+      const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
+      const dropPoint = { x: 980, y: 600 };
+
+      dropConnectionFromHandle(asset, "source", pane, dropPoint);
+
+      const menu = await screen.findByRole("menu", { name: "常用生成节点" });
+      expect(within(menu).getAllByRole("menuitem")).toHaveLength(3);
+      for (const name of ["图片生成", "视频生成", "提示词生成与优化"]) {
+        expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
+      }
+      // 松开只显示选择菜单；确认类型后才创建节点及连线。
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+      fireEvent.click(within(menu).getByRole("menuitem", { name: menuName }));
+
+      const created = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`.canvas-gen-node--${kind}`);
+        expect(node).not.toBeNull();
+        return node!;
+      });
+      await waitForNodeAccessible(created);
+      // 与节点仓库拖入一致：无碰撞时，新节点中心对齐画布落点。
+      expect(rfNodeFlowPosition(created)).toEqual({
+        x: dropPoint.x - width / 2,
+        y: dropPoint.y - height / 2,
+      });
+      expect(
+        await screen.findByRole("button", {
+          name: `选择连线：站台参考图 → ${nodeName}；按 Delete 删除`,
+        }),
+      ).toBeInTheDocument();
+      expect(
+        within(created).getAllByRole("button", { name: "解除连线：站台参考图" }).length,
+      ).toBeGreaterThan(0);
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
+      expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+    },
+  );
+
+  it("从输入端口反向拖线到空白可创建上游提示词，创建与连接可一次撤销重做", async () => {
+    render(<App />);
+    const generation = await addGenerationNode("图片", 980, 180);
+    const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
+
+    dropConnectionFromHandle(generation, "target", pane, { x: 180, y: 600 });
+    const menu = await screen.findByRole("menu", { name: "常用生成节点" });
+    fireEvent.click(within(menu).getByRole("menuitem", { name: "提示词生成与优化" }));
+
+    const edgeName = "选择连线：提示词节点 → 图片生成节点；按 Delete 删除";
+    expect(await screen.findByRole("button", { name: edgeName })).toBeInTheDocument();
+    expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(1);
+    expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(0);
+      expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    });
+    expect(document.querySelectorAll(".canvas-gen-node--image")).toHaveLength(1);
+
+    fireEvent.click(screen.getByRole("button", { name: "重做画布操作" }));
+    expect(await screen.findByRole("button", { name: edgeName })).toBeInTheDocument();
+    expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(1);
+    expect(document.querySelectorAll(".canvas-gen-node--image")).toHaveLength(1);
+  });
+
+  it.each(["Escape", "点击画布空白"])("拖线菜单通过%s取消后不创建节点或连线", async (cancelBy) => {
+    render(<App />);
+    const asset = await addAssetNode("图片", "站台参考图", 180, 180);
+    const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
+    dropConnectionFromHandle(asset, "source", pane, { x: 980, y: 600 });
+    const menu = await screen.findByRole("menu", { name: "常用生成节点" });
+
+    if (cancelBy === "Escape") {
+      fireEvent.keyDown(menu, { key: "Escape" });
+    } else {
+      fireEvent.pointerDown(pane, { pointerId: 1, button: 0, clientX: 1200, clientY: 760 });
+      fireEvent.click(pane, { clientX: 1200, clientY: 760 });
+    }
+
+    await waitFor(() =>
+      expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument(),
+    );
+    expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
+    expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    expect(document.body).toContainElement(asset);
+  });
+
+  it("拖线落在已有节点本体时不弹出常用生成节点菜单", async () => {
+    render(<App />);
+    const asset = await addAssetNode("图片", "站台参考图", 180, 180);
+    const generation = await addGenerationNode("图片", 980, 180);
+    const targetPosition = rfNodeFlowPosition(generation);
+
+    dropConnectionFromHandle(asset, "source", generation, {
+      x: targetPosition.x + 220,
+      y: targetPosition.y + 140,
+    });
+
+    expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
+    expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
   });
 
   it.each([
