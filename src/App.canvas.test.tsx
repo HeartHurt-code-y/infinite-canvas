@@ -4751,12 +4751,18 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const video = card.querySelector<HTMLVideoElement>("video");
 
     expect(visual).not.toBeNull();
-    expect(cover).toHaveAttribute("src", "https://cdn.example.com/train-keyframe.jpg");
+    expect(cover).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train-keyframe.jpg")}`,
+    );
     expect(video).toHaveAttribute(
       "src",
       `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train.mp4")}`,
     );
-    expect(video).toHaveAttribute("poster", "https://cdn.example.com/train-keyframe.jpg");
+    expect(video).toHaveAttribute(
+      "poster",
+      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train-keyframe.jpg")}`,
+    );
     fireEvent.loadedData(video!);
     expect(video).toHaveClass("is-ready");
 

@@ -74,6 +74,9 @@ function AssetCardVideoVisual({
   const candidateCoverUrl = refreshedCoverUrl ?? asset.coverUrl;
   const effectiveCoverUrl =
     candidateCoverUrl != null && failedCoverUrl !== candidateCoverUrl ? candidateCoverUrl : null;
+  // 封面与海报帧同样走媒体代理，避免 WebView 对跨域签名地址的 CORS/混合内容限制；
+  // 代理只传输字节，签名过期仍由 onError 触发的续签解决。
+  const coverProxySrc = effectiveCoverUrl ? toMediaProxyUrl(effectiveCoverUrl) : null;
   const coverReady = effectiveCoverUrl != null && loadedCoverUrl === effectiveCoverUrl;
   // 供应商封面缺失或加载失败时，抽取视频中间帧作静止封面（与画布素材节点一致）。
   const useVideoCover = effectiveCoverUrl == null && videoSrc != null;
@@ -112,7 +115,7 @@ function AssetCardVideoVisual({
       {effectiveCoverUrl ? (
         <img
           className="asset-card__preview"
-          src={effectiveCoverUrl}
+          src={coverProxySrc ?? undefined}
           alt=""
           loading="lazy"
           onLoad={(event) => {
@@ -159,7 +162,7 @@ function AssetCardVideoVisual({
           ref={videoRef}
           className={videoClassName}
           src={videoSrc}
-          poster={effectiveCoverUrl ?? undefined}
+          poster={coverProxySrc ?? undefined}
           muted
           loop
           playsInline

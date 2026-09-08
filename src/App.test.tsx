@@ -591,12 +591,18 @@ describe("App workspace", () => {
     const video = card.querySelector<HTMLVideoElement>(".asset-card__video");
     const visual = card.querySelector<HTMLElement>(".asset-card__visual--video");
 
-    expect(cover).toHaveAttribute("src", coverUrl);
+    expect(cover).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(coverUrl)}`,
+    );
     expect(video).toHaveAttribute(
       "src",
       `asset://localhost/video?src=${encodeURIComponent(videoUrl)}`,
     );
-    expect(video).toHaveAttribute("poster", coverUrl);
+    expect(video).toHaveAttribute(
+      "poster",
+      `asset://localhost/video?src=${encodeURIComponent(coverUrl)}`,
+    );
     expect(video?.muted).toBe(true);
     expect(video?.loop).toBe(true);
     fireEvent.loadedData(video!);
@@ -684,7 +690,10 @@ describe("App workspace", () => {
       name: "预览视频素材详情：过期封面续签",
     });
     const cover = card.querySelector<HTMLImageElement>(".asset-card__preview");
-    expect(cover).toHaveAttribute("src", staleCoverUrl);
+    expect(cover).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleCoverUrl)}`,
+    );
 
     // 旧封面签名过期：加载失败后先向后端续签（携带素材身份），
     // 拿到新签名后用新封面重试加载，而不是直接回退视频中间帧。
@@ -701,7 +710,10 @@ describe("App workspace", () => {
     await waitFor(() => {
       const freshCover = card.querySelector<HTMLImageElement>(".asset-card__preview");
       expect(freshCover).not.toBeNull();
-      expect(freshCover).toHaveAttribute("src", freshCoverUrl);
+      expect(freshCover).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshCoverUrl)}`,
+      );
     });
   });
 
