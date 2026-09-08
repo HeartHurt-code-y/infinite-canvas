@@ -38,6 +38,9 @@ jobs:
         with:
           components: clippy,rustfmt
 
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
