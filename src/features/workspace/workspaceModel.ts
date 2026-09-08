@@ -142,6 +142,8 @@ export interface CanvasFlowNodeData extends Record<string, unknown> {
   readonly content: ReactNode;
   readonly hasSourceHandle: boolean;
   readonly hasTargetHandle: boolean;
+  /** 拖线过程中标记该节点的输入端口为可连接目标，用于高亮提示。 */
+  readonly highlightTarget?: boolean;
 }
 
 export type CanvasFlowNode = ReactFlowNode<CanvasFlowNodeData, "canvas">;

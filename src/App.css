@@ -1412,6 +1412,27 @@ svg[data-spin="true"] {
   transform: translate(100%, -50%);
 }
 
+.canvas-flow-handle--highlight {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  transform: translate(-100%, -50%) scale(1.4);
+  animation: canvas-flow-handle-pulse 1.1s ease-in-out infinite;
+}
+
+@keyframes canvas-flow-handle-pulse {
+  0%,
+  100% {
+    box-shadow:
+      0 0 0 4px color-mix(in srgb, var(--color-accent) 22%, transparent),
+      0 0 14px color-mix(in srgb, var(--color-accent) 52%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 0 0 9px color-mix(in srgb, var(--color-accent) 14%, transparent),
+      0 0 22px color-mix(in srgb, var(--color-accent) 68%, transparent);
+  }
+}
+
 .canvas-flow-edge__hit {
   fill: none;
   stroke: transparent;

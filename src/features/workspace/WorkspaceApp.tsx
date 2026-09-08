@@ -104,8 +104,10 @@ import {
   useCanvas,
   useCanvasCommands,
   useCanvasHistoryCounts,
+  isSupportedConnection,
   type CanvasDocument,
   type CanvasDocumentV2,
+  type CanvasNodeEntry,
   type CanvasStoreNodeChange,
 } from "../canvas/canvasStore";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
@@ -6824,8 +6826,55 @@ export function WorkspaceApp() {
     ],
   );
 
-  const flowNodes = useMemo<CanvasFlowNode[]>(
-    () => [
+  // 拖线过程中记录源节点 key，用于高亮所有可连接目标的输入端口。
+  const [connectionSourceKey, setConnectionSourceKey] = useState<string | null>(null);
+
+  // 从各类节点索引中按 key 查找并组装 CanvasNodeEntry，供连接合法性判断复用。
+  const canvasEntryByKey = useCallback(
+    (key: string): CanvasNodeEntry | null => {
+      const asset = assetNodeByKey.get(key);
+      if (asset) return { type: "asset", data: asset };
+      const gen = genTopologyByKey.get(key);
+      if (gen) return { type: "gen", data: gen };
+      const screenplay = screenplayNodeByKey.get(key);
+      if (screenplay) return { type: "screenplay", data: screenplay };
+      const storyboard = storyboardNodeByKey.get(key);
+      if (storyboard) return { type: "storyboard", data: storyboard };
+      const viralRemix = viralRemixNodeByKey.get(key);
+      if (viralRemix) return { type: "viralRemix", data: viralRemix };
+      const composer = videoComposerNodeByKey.get(key);
+      if (composer) return { type: "videoComposer", data: composer };
+      const downloader = videoDownloaderNodeByKey.get(key);
+      if (downloader) return { type: "videoDownloader", data: downloader };
+      const extractor = frameExtractorNodeByKey.get(key);
+      if (extractor) return { type: "frameExtractor", data: extractor };
+      const output = outputNodeByKey.get(key);
+      if (output) return { type: "output", data: output };
+      const workflow = knowledgeVideoWorkflowNodes.find((n) => n.key === key);
+      if (workflow) return { type: "knowledgeVideoWorkflow", data: workflow };
+      const result = resultNodes.find((n) => n.key === key);
+      if (result) return { type: "result", data: result };
+      return null;
+    },
+    [
+      assetNodeByKey,
+      genTopologyByKey,
+      screenplayNodeByKey,
+      storyboardNodeByKey,
+      viralRemixNodeByKey,
+      videoComposerNodeByKey,
+      videoDownloaderNodeByKey,
+      frameExtractorNodeByKey,
+      outputNodeByKey,
+      knowledgeVideoWorkflowNodes,
+      resultNodes,
+    ],
+  );
+
+  const flowNodes = useMemo<CanvasFlowNode[]>(() => {
+    const sourceEntry: CanvasNodeEntry | null =
+      connectionSourceKey != null ? canvasEntryByKey(connectionSourceKey) : null;
+    const baseNodes: CanvasFlowNode[] = [
       ...assetFlowNodes,
       ...outputFlowNodes,
       ...screenplayFlowNodes,
@@ -6837,21 +6886,30 @@ export function WorkspaceApp() {
       ...videoDownloaderFlowNodes,
       ...frameExtractorFlowNodes,
       ...resultFlowNodes,
-    ],
-    [
-      assetFlowNodes,
-      outputFlowNodes,
-      screenplayFlowNodes,
-      storyboardFlowNodes,
-      knowledgeVideoWorkflowFlowNodes,
-      viralRemixFlowNodes,
-      genFlowNodes,
-      videoComposerFlowNodes,
-      videoDownloaderFlowNodes,
-      frameExtractorFlowNodes,
-      resultFlowNodes,
-    ],
-  );
+    ];
+    if (sourceEntry == null) return baseNodes;
+    return baseNodes.map((node) => {
+      if (!node.data.hasTargetHandle) return node;
+      const targetEntry = canvasEntryByKey(node.id);
+      if (targetEntry == null) return node;
+      if (!isSupportedConnection(sourceEntry, targetEntry)) return node;
+      return { ...node, data: { ...node.data, highlightTarget: true } };
+    });
+  }, [
+    assetFlowNodes,
+    outputFlowNodes,
+    screenplayFlowNodes,
+    storyboardFlowNodes,
+    knowledgeVideoWorkflowFlowNodes,
+    viralRemixFlowNodes,
+    genFlowNodes,
+    videoComposerFlowNodes,
+    videoDownloaderFlowNodes,
+    frameExtractorFlowNodes,
+    resultFlowNodes,
+    connectionSourceKey,
+    canvasEntryByKey,
+  ]);
 
   const flowEdges = useMemo<CanvasFlowEdge[]>(
     () =>
@@ -7002,6 +7060,17 @@ export function WorkspaceApp() {
         selectEdge(change.selected ? change.id : null);
       }
     }
+  };
+
+  const handleConnectStart = (
+    _event: MouseEvent | TouchEvent,
+    params: { nodeId: string | null; handleId: string | null },
+  ) => {
+    setConnectionSourceKey(params.nodeId);
+  };
+
+  const handleConnectEnd = () => {
+    setConnectionSourceKey(null);
   };
 
   const handleFlowConnect = (connection: Connection) => {
@@ -7664,6 +7733,8 @@ export function WorkspaceApp() {
               onNodeDragStop={handleFlowNodeDragStop}
               onEdgesChange={handleFlowEdgesChange}
               onConnect={handleFlowConnect}
+              onConnectStart={handleConnectStart}
+              onConnectEnd={handleConnectEnd}
               onMoveStart={() => setIsPanning(true)}
               onMoveEnd={handleFlowMoveEnd}
               onPaneClick={() => {

@@ -910,6 +910,42 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1);
   });
 
+  it("拖线时高亮所有可连接目标的输入端口，结束拖线后高亮消失", async () => {
+    render(<App />);
+    // 视频素材：可连图片生成节点，但不可连提示词节点（提示词仅接受图片素材做视觉理解）。
+    const videoAsset = await addAssetNode("视频", "列车进站参考", 148, 148);
+    const imageGeneration = await addGenerationNode("图片", 700, 148);
+    const promptNode = await addPromptNode(700, 500);
+
+    const sourceHandle = rfWrapperOf(videoAsset).querySelector<HTMLElement>(
+      ".react-flow__handle.source",
+    );
+    expect(sourceHandle).not.toBeNull();
+    const from = rfNodeFlowPosition(videoAsset);
+
+    // 开始拖线：mousedown 源端口 + 一次 mousemove 进入连接状态。
+    fireCanvasMouse(sourceHandle!, "mousedown", clientFromFlow(from.x, from.y));
+    fireCanvasMouse(document, "mousemove", clientFromFlow(from.x + 10, from.y + 10));
+
+    const imageTarget = rfWrapperOf(imageGeneration).querySelector<HTMLElement>(
+      ".react-flow__handle.target",
+    );
+    const promptTarget = rfWrapperOf(promptNode).querySelector<HTMLElement>(
+      ".react-flow__handle.target",
+    );
+    expect(imageTarget).not.toBeNull();
+    expect(promptTarget).not.toBeNull();
+
+    // 可连接目标高亮，不可连接目标不高亮。
+    await waitFor(() => expect(imageTarget).toHaveClass("canvas-flow-handle--highlight"));
+    expect(promptTarget).not.toHaveClass("canvas-flow-handle--highlight");
+
+    // 结束拖线：mouseup 后高亮消失。
+    fireCanvasMouse(document, "mouseup", clientFromFlow(from.x + 10, from.y + 10));
+    await waitFor(() => expect(imageTarget).not.toHaveClass("canvas-flow-handle--highlight"));
+    expect(promptTarget).not.toHaveClass("canvas-flow-handle--highlight");
+  });
+
   it("工作流同时接收图片视频音频连线，断开单条连线后保留其他参考与节点", async () => {
     const audioAsset: CloudAsset = {
       providerConnectionId: PROVIDER.id,

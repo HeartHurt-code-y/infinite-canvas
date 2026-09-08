@@ -911,7 +911,7 @@ function isOutputGenerationReference(node: OutputNodeData): boolean {
   return Number.isInteger(resultIndex) && resultIndex >= 0;
 }
 
-function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
+export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
   if (source.type === "screenplay") {
     return target.type === "storyboard";
   }

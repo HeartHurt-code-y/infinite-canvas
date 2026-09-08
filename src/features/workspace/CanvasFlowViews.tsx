@@ -60,7 +60,7 @@ export function CanvasFlowNodeView({ data }: NodeProps<CanvasFlowNode>) {
           id="target"
           type="target"
           position={Position.Left}
-          className="canvas-flow-handle canvas-flow-handle--target"
+          className={`canvas-flow-handle canvas-flow-handle--target${data.highlightTarget ? " canvas-flow-handle--highlight" : ""}`}
           aria-label="节点输入端口"
         />
       ) : null}
