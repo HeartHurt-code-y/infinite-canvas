@@ -3,7 +3,7 @@ use std::{
     future::Future,
     pin::Pin,
     sync::Arc,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use futures_util::StreamExt as _;
@@ -592,11 +592,33 @@ impl AssetLibrary {
         require_success("create asset group", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
         let data = payload.get("data").unwrap_or(&payload);
-        parse_asset_group(data).ok_or_else(|| {
-            BackendError::protocol(
-                "asset group creation did not return a group record",
-                json!({ "rawResponse": response.body }),
-            )
+        // 上游创建接口通常回完整记录；部分环境只回 `group_name`，此时用请求名兜底，
+        // 生成临时负数 id（真实 id 均为正数），后台 list 刷新后同步真实 id。
+        if let Some(record) = parse_asset_group(data) {
+            return Ok(record);
+        }
+        let group_name = data
+            .get("group_name")
+            .or_else(|| data.get("groupName"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "asset group creation did not return a group record",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        let temp_id = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| -(d.as_millis() as i64))
+            .unwrap_or(-1);
+        Ok(AssetGroupRecord {
+            id: temp_id,
+            name: name.to_string(),
+            group_name: group_name.to_string(),
+            is_default: false,
+            asset_count: 0,
         })
     }
 
@@ -2126,6 +2148,40 @@ mod tests {
         assert_eq!(requests[0].path, "/v1/assets/groups");
         assert_eq!(requests[0].method, Method::POST);
         assert_eq!(requests[0].body, Some(json!({ "name": "客户物料" })));
+    }
+
+    #[tokio::test]
+    async fn create_asset_group_falls_back_to_temp_record_when_upstream_returns_only_group_name() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "code": "success",
+                "data": {
+                    "group_name": "user-23-token-32456-1"
+                }
+            }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let group = library
+            .create_asset_group(CreateAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                name: "客户物料".into(),
+            })
+            .await
+            .expect("create asset group with partial response");
+
+        // 临时 id 为负数（真实 id 均为正数），name 用请求名，group_name 用上游返回值。
+        assert!(group.id < 0);
+        assert_eq!(group.name, "客户物料");
+        assert_eq!(group.group_name, "user-23-token-32456-1");
+        assert!(!group.is_default);
+        assert_eq!(group.asset_count, 0);
+
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/groups");
+        assert_eq!(requests[0].method, Method::POST);
     }
 
     #[tokio::test]
