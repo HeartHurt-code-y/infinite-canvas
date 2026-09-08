@@ -6,16 +6,26 @@ import type {
   CloudAsset,
   GenerationTaskDetail,
   GenerationTaskSummary,
+  MediaReferenceTarget,
   SaveCanvasDocumentCommand,
 } from "./lib/backend";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
+import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
+import type { VideoLocalEditDialogProps } from "./features/workspace/VideoLocalEditDialog";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
-const { dialogOpenMock, dialogSaveMock, fileStatMock, writeTextFileMock } = vi.hoisted(() => ({
+const {
+  dialogOpenMock,
+  dialogSaveMock,
+  fileStatMock,
+  writeTextFileMock,
+  videoLocalEditSourceMock,
+} = vi.hoisted(() => ({
   dialogOpenMock: vi.fn(),
   dialogSaveMock: vi.fn(),
   fileStatMock: vi.fn(),
   writeTextFileMock: vi.fn(),
+  videoLocalEditSourceMock: vi.fn(),
 }));
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
@@ -26,6 +36,30 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
 vi.mock("@tauri-apps/plugin-fs", () => ({
   stat: fileStatMock,
   writeTextFile: writeTextFileMock,
+}));
+
+// Drawing interactions are exercised by the dialog tests; this boundary checks canvas persistence and IPC.
+vi.mock("./features/workspace/VideoLocalEditDialog", () => ({
+  VideoLocalEditDialog: ({ source, onApply }: VideoLocalEditDialogProps) => {
+    videoLocalEditSourceMock(source);
+    return (
+      <button
+        type="button"
+        onClick={() =>
+          void onApply({
+            imageDataUrl: "data:image/png;base64,c2FtcGxl",
+            timeSeconds: 2.25,
+            instruction: "删除标记区域中的路人",
+            operation: "remove",
+            sourceKey: source.key,
+            timeRange: null,
+          })
+        }
+      >
+        应用测试局部标注 · {source.label}
+      </button>
+    );
+  },
 }));
 
 // 桌面运行时 mock：@tauri-apps/api 的 invoke / listen 都会走到这里。
@@ -856,6 +890,10 @@ function baseInvokeImplementation(
       return Promise.resolve("asset-image-1");
     case "start_generation":
       return Promise.resolve("task-1");
+    case "prepare_video_edit_source":
+      return Promise.resolve({ previewId: "preview-id", path: "C:/preview.mp4" });
+    case "release_video_edit_source":
+      return Promise.resolve(undefined);
     case "plugin:event|listen":
       return Promise.resolve(1);
     case "plugin:event|unlisten":
@@ -2057,11 +2095,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const restoredChip = await waitFor(() => {
       const chip = restoredInput.querySelector<HTMLElement>("[data-mention-id]");
       expect(chip).not.toBeNull();
-      expect(chip).not.toHaveClass("is-stale");
+      expect(chip).toHaveClass("is-stale");
       return chip!;
     });
-    expect([firstKey, secondKey]).toContain(restoredChip.dataset["canvasNodeKey"]);
+    expect(restoredChip).toHaveAttribute("data-canvas-node-key", firstKey);
+    expect(restoredChip).toHaveAttribute("data-mention-id", mentionId);
     expect(restoredInput).toHaveTextContent("开场");
+    expect(restoredInput).toHaveTextContent("保留我的手改");
 
     fireEvent.change(screen.getByRole("textbox", { name: "生成提示词输出" }), {
       target: { value: "@图片1 上游新版本" },
@@ -2210,7 +2250,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         canvasNodeKey: imageAsset.dataset["connectionTarget"],
         mediaType: "image",
       },
-      role: "",
+      role: "reference_image",
       displayNameSnapshot: "站台参考图",
       typePosition: 1,
       contentIndex: 1,
@@ -2240,7 +2280,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           canvasNodeKey: cleanReference.dataset["connectionTarget"],
           mediaType: "image",
         },
-        role: "",
+        role: "reference_image",
         displayNameSnapshot: cleanImage.name,
         typePosition: 2,
         contentIndex: 2,
@@ -2453,7 +2493,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           canvasNodeKey: referenceImage.dataset["connectionTarget"],
           mediaType: "image",
         },
-        role: "",
+        role: "reference_image",
         displayNameSnapshot: "站台参考图",
         typePosition: 1,
         contentIndex: 1,
@@ -2878,7 +2918,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           canvasNodeKey: referenceImage.dataset["connectionTarget"],
           mediaType: "image",
         },
-        role: "",
+        role: "reference_image",
         displayNameSnapshot: "站台参考图",
         typePosition: 1,
         contentIndex: 1,
@@ -2921,7 +2961,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           canvasNodeKey: pathImage.dataset["connectionTarget"],
           mediaType: "image",
         },
-        role: "",
+        role: "reference_image",
         displayNameSnapshot: "站台参考图",
         typePosition: 1,
         contentIndex: 1,
@@ -3368,6 +3408,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(within(first).getByRole("checkbox", { name: "生成音频" }));
     fireEvent.change(within(first).getByLabelText("输出格式"), { target: { value: "mov" } });
     fireEvent.change(within(first).getByLabelText("任务类型"), { target: { value: "edit" } });
+    const originalVideo = await addAssetNode("视频", "列车进站参考", 148, 148);
+    connectAssetToGeneration(originalVideo, first);
 
     fireEvent.change(within(second).getByLabelText("视频模型"), {
       target: { value: ALT_VIDEO_MODEL.id },
@@ -3389,9 +3431,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(first).getByLabelText("供应商")).toHaveValue(PROVIDER.id);
     expect(within(first).getByLabelText("视频模型")).toHaveValue(ALT_VIDEO_MODEL.id);
     expect(within(first).getByRole("spinbutton", { name: "生成数量" })).toHaveValue(1);
-    expect(within(first).getByLabelText("画幅")).toHaveValue("9:16");
+    expect(within(first).getByLabelText("画幅")).toHaveValue("adaptive");
+    expect(within(first).getByLabelText("画幅")).toBeDisabled();
     expect(within(first).getByLabelText("分辨率")).toHaveValue("480p");
-    expect(within(first).getByLabelText("时长")).toHaveValue("5");
+    expect(within(first).getByLabelText("时长")).toHaveValue("-1");
+    expect(within(first).getByLabelText("时长")).toBeDisabled();
     expect(within(first).getByRole("checkbox", { name: "生成音频" })).not.toBeChecked();
     expect(within(first).getByLabelText("输出格式")).toHaveValue("mov");
     expect(within(first).getByLabelText("任务类型")).toHaveValue("edit");
@@ -3406,7 +3450,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     setPromptText(
       within(first).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
-      "第一个镜头",
+      "编辑视频，去掉第一个镜头中的路人",
     );
     setPromptText(
       within(second).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
@@ -3425,10 +3469,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       providerConnectionId: PROVIDER.id,
       modelDefinitionId: ALT_VIDEO_MODEL.id,
       generationCount: 1,
+      videoTaskType: "edit",
       parameters: {
-        ratio: "9:16",
+        ratio: "adaptive",
         resolution: "480p",
-        duration: 5,
+        duration: -1,
         generate_audio: false,
         output_format: "mov",
         omni_reference_task_type: "edit",
@@ -3448,6 +3493,504 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     expect(secondCommand["parameters"]).not.toHaveProperty("output_format");
     expect(secondCommand["parameters"]).not.toHaveProperty("omni_reference_task_type");
+  });
+
+  it.each([VIDEO_MODEL.id, "dreamina-seedance-2.5"])(
+    "Seedance 任务切换对 %s 提交正确字段并前置阻止缺视频",
+    async (modelId) => {
+      if (modelId.startsWith("dreamina")) {
+        invokeMock.mockImplementation(async (command, args) => {
+          const value = await baseInvokeImplementation(command, args);
+          if (command === "list_model_definitions")
+            return [
+              ...(value as unknown[]),
+              {
+                ...VIDEO_MODEL,
+                id: modelId,
+                displayName: modelId,
+                remoteModelId: modelId,
+                operations: defaultModelOperationSchema(modelId, ["video_generation"]),
+              },
+            ];
+          if (command === "list_provider_model_bindings")
+            return [...(value as unknown[]), { ...VIDEO_BINDING, modelDefinitionId: modelId }];
+          return value;
+        });
+      }
+      render(<App />);
+      const node = await addGenerationNode("视频", 555, 222);
+      await waitFor(() => expect(within(node).getByLabelText("供应商")).toHaveValue(PROVIDER.id));
+      fireEvent.change(within(node).getByLabelText("视频模型"), { target: { value: modelId } });
+      fireEvent.change(within(node).getByLabelText("画幅"), { target: { value: "9:16" } });
+      fireEvent.change(within(node).getByLabelText("时长"), { target: { value: "10" } });
+      fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+      setPromptText(
+        within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+        "编辑视频，去掉画面里的路人",
+      );
+      const generate = within(node).getByRole("button", { name: "开始视频生成" });
+      fireEvent.click(generate);
+      expect(submittedGenerationCommands()).toHaveLength(0);
+      expect(await screen.findByLabelText("发起任务失败")).toHaveTextContent(
+        "请连接至少 1 个待编辑的视频",
+      );
+      const originalVideo = await addAssetNode("视频", "列车进站参考", 148, 148);
+      connectAssetToGeneration(originalVideo, node);
+      fireEvent.click(generate);
+      await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+      expect(submittedGenerationCommands()[0]).toMatchObject({
+        videoTaskType: "edit",
+        parameters: { ratio: "adaptive", duration: -1 },
+        explicitMedia: [
+          {
+            role: "reference_video",
+            target: { canvasNodeKey: originalVideo.dataset["connectionTarget"] },
+          },
+        ],
+      });
+      if (modelId.startsWith("dreamina"))
+        expect(submittedGenerationCommands()[0]!["parameters"]).not.toHaveProperty(
+          "omni_reference_task_type",
+        );
+      else
+        expect(submittedGenerationCommands()[0]!["parameters"]).toHaveProperty(
+          "omni_reference_task_type",
+          "edit",
+        );
+      await waitFor(() => expect(generate).toBeEnabled());
+      fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "extend" } });
+      fireEvent.change(within(node).getByLabelText("时长"), { target: { value: "8" } });
+      setPromptText(
+        within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+        "向后延长视频，列车继续驶入站台",
+      );
+      fireEvent.click(generate);
+      await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+      expect(submittedGenerationCommands()[1]).toMatchObject({
+        videoTaskType: "extend",
+        parameters: { ratio: "adaptive", duration: 8 },
+      });
+      if (modelId.startsWith("dreamina"))
+        expect(submittedGenerationCommands()[1]!["parameters"]).not.toHaveProperty(
+          "omni_reference_task_type",
+        );
+      else
+        expect(submittedGenerationCommands()[1]!["parameters"]).toHaveProperty(
+          "omni_reference_task_type",
+          "extend",
+        );
+    },
+  );
+
+  it("Seedance 首尾帧将稳定素材身份映射为首帧尾帧，并阻止混入参考视频", async () => {
+    render(<App />);
+    const node = await addGenerationNode("视频", 555, 222);
+    const firstImage = await addAssetNode("图片", "站台参考图", 148, 148);
+    const lastImage = await addAssetNode("图片", "站台参考图", 148, 333);
+    connectAssetToGeneration(firstImage, node);
+    connectAssetToGeneration(lastImage, node);
+    fireEvent.change(within(node).getByLabelText("任务类型"), {
+      target: { value: "first_last_frame" },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "交换首尾帧" }));
+    setPromptText(
+      within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      "镜头从首帧平稳过渡到尾帧",
+    );
+    const generate = within(node).getByRole("button", { name: "开始视频生成" });
+    fireEvent.click(generate);
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommands()[0]).toMatchObject({
+      videoTaskType: "first_last_frame",
+      parameters: { ratio: "adaptive" },
+      explicitMedia: [
+        { role: "last_frame", target: { canvasNodeKey: firstImage.dataset["connectionTarget"] } },
+        { role: "first_frame", target: { canvasNodeKey: lastImage.dataset["connectionTarget"] } },
+      ],
+    });
+    expect(submittedGenerationCommands()[0]!["parameters"]).not.toHaveProperty(
+      "omni_reference_task_type",
+    );
+    await waitFor(() => expect(generate).toBeEnabled());
+    const originalVideo = await addAssetNode("视频", "列车进站参考", 148, 518);
+    connectAssetToGeneration(originalVideo, node);
+    fireEvent.click(generate);
+    expect(await screen.findByLabelText("发起任务失败")).toHaveTextContent(
+      "需要且只能连接 2 张图片",
+    );
+    expect(submittedGenerationCommands()).toHaveLength(1);
+  });
+
+  it.each([
+    {
+      label: "云素材原视频",
+      source: "cloud",
+      src: "https://cdn.example.com/no-cors-video.mp4",
+      target: { kind: "asset", providerConnectionId: "luma-production", assetId: "source-video" },
+    },
+    {
+      label: "云素材签名视频",
+      source: "cloud",
+      src: "https://tos-cn.example.com/video.mp4?X-Tos-Signature=expired",
+      target: { kind: "asset", providerConnectionId: "luma-production", assetId: "source-video" },
+    },
+    {
+      label: "云素材缺少预览",
+      source: "cloud",
+      src: null,
+      target: { kind: "asset", providerConnectionId: "luma-production", assetId: "source-video" },
+    },
+    {
+      label: "本地素材对象存储视频",
+      source: "local",
+      src: "https://objects.example.com/staged-video.mp4",
+      target: { kind: "local_asset", stagingJobId: "source-video" },
+    },
+    {
+      label: "本地素材缺少预览",
+      source: "local",
+      src: null,
+      target: { kind: "local_asset", stagingJobId: "source-video" },
+    },
+    {
+      label: "生成产物视频",
+      source: "generation",
+      src: "C:\\generated\\source-video.mp4",
+      target: { kind: "local_result", generationTaskId: "source-task", resultIndex: 0 },
+    },
+    {
+      label: "下载产物视频",
+      source: "download",
+      src: "C:\\downloads\\source-video.mp4",
+      target: { kind: "local_file", path: "C:\\downloads\\source-video.mp4" },
+    },
+    {
+      label: "合成产物视频",
+      source: "composition",
+      src: "C:\\compositions\\source-video.mp4",
+      target: { kind: "local_file", path: "C:\\compositions\\source-video.mp4" },
+    },
+  ] as const)(
+    "局部编辑按稳定来源解析 $label，不依赖封面或跨域预览",
+    async ({ label, source, src, target }) => {
+      const isAsset = source === "cloud" || source === "local";
+      invokeMock.mockImplementation((command, args) => {
+        if (command === "get_canvas_document")
+          return Promise.resolve({
+            id: "canvas-scene-03",
+            title: "未命名画布",
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+            document: {
+              version: 1,
+              assetNodes: isAsset
+                ? [
+                    {
+                      key: "source-node",
+                      assetId: "source-video",
+                      providerConnectionId: "luma-production",
+                      source,
+                      kind: "video",
+                      name: label,
+                      previewUrl: src == null ? null : "https://cdn.example.com/cover.jpg",
+                      videoUrl: src,
+                      x: 40,
+                      y: 180,
+                    },
+                  ]
+                : [],
+              outputNodes: isAsset
+                ? []
+                : [
+                    {
+                      key: "source-node",
+                      resultKey: "source-task#0",
+                      sourceNodeId: "old-node",
+                      taskId: "source-task",
+                      mediaType: "video",
+                      origin: source,
+                      finalPath: src,
+                      name: label,
+                      aspectRatio: 16 / 9,
+                      x: 40,
+                      y: 180,
+                    },
+                  ],
+              genNodes: [],
+              resultNodes: [],
+              assetEdges: [],
+              view: { zoom: 74, pan: { x: 0, y: 0 } },
+              prompts: {},
+            },
+          });
+        return baseInvokeImplementation(command, args);
+      });
+      render(<App />);
+      const original = await waitFor(() => {
+        const found = document.querySelector<HTMLElement>(
+          isAsset ? '[data-connection-target="source-node"]' : ".canvas-asset-node--output--video",
+        );
+        expect(found).not.toBeNull();
+        return found!;
+      });
+      const node = await addGenerationNode("视频", 555, 222);
+      connectAssetToGeneration(original, node);
+      fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+      fireEvent.click(within(node).getByRole("button", { name: `局部消除与编辑 · ${label}` }));
+      expect(
+        await screen.findByRole("button", { name: `应用测试局部标注 · ${label}` }),
+      ).toBeInTheDocument();
+      const expectedTarget: MediaReferenceTarget = {
+        ...target,
+        canvasNodeKey: "source-node",
+        mediaType: "video",
+      };
+      expect(videoLocalEditSourceMock).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          key: "source-node",
+          label,
+          target: expectedTarget,
+        }),
+      );
+      if (isAsset) {
+        expect(videoLocalEditSourceMock).toHaveBeenLastCalledWith(
+          expect.objectContaining({
+            src: src ?? "",
+          }),
+        );
+      }
+      expect(submittedGenerationCommands()).toHaveLength(0);
+    },
+  );
+
+  it("视频局部标注保存为独立素材，并将原视频与标注图稳定引用提交到编辑任务", async () => {
+    let savedDocument: CanvasDocumentV2 | null = null;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            outputNodes: [
+              {
+                key: "restored-video",
+                resultKey: "restored-task#0",
+                sourceNodeId: "old-node",
+                taskId: "restored-task",
+                mediaType: "video",
+                finalPath: "C:\\generated\\original.mp4",
+                name: "原视频.mp4",
+                aspectRatio: 16 / 9,
+                x: 40,
+                y: 180,
+              },
+            ],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "save_video_edit_frame")
+        return Promise.resolve({
+          path: "C:\\generated\\annotation.png",
+          width: 1920,
+          height: 1080,
+        });
+      if (command === "save_canvas_document")
+        savedDocument = (args?.["command"] as SaveCanvasDocumentCommand)
+          .document as CanvasDocumentV2;
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const restored = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".canvas-asset-node--output--video");
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const node = await addGenerationNode("视频", 555, 222);
+    connectAssetToGeneration(restored, node);
+    fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+    fireEvent.click(within(node).getByRole("button", { name: "局部消除与编辑 · 原视频.mp4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用测试局部标注 · 原视频.mp4" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("save_video_edit_frame", {
+        imageDataUrl: "data:image/png;base64,c2FtcGxl",
+      }),
+    );
+    expect(
+      await within(node).findByRole("button", { name: "解除连线：原视频.mp4 · 2.250s 标注" }),
+    ).toBeInTheDocument();
+    const prompt = within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" });
+    expect(prompt).toHaveTextContent("删除标记区域中的路人");
+    expect(prompt.querySelectorAll(".mention-chip")).toHaveLength(2);
+    await waitFor(
+      () => {
+        expect(
+          savedDocument?.outputNodes?.find((output) => output.origin === "video_edit"),
+        ).toMatchObject({
+          finalPath: "C:\\generated\\annotation.png",
+          sourceNodeId: "restored-video",
+          mediaType: "image",
+        });
+      },
+      { timeout: 4000 },
+    );
+    const annotation = savedDocument!.outputNodes!.find(
+      (output) => output.origin === "video_edit",
+    )!;
+    expect(savedDocument!.assetEdges).toContainEqual(
+      expect.objectContaining({ fromKey: annotation.key, toKey: node.dataset["connectionTarget"] }),
+    );
+    fireEvent.click(within(node).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommands()[0]).toMatchObject({
+      videoTaskType: "edit",
+      parameters: { ratio: "adaptive", duration: -1 },
+      explicitMedia: [
+        {
+          role: "reference_video",
+          target: { canvasNodeKey: "restored-video", mediaType: "video" },
+        },
+        {
+          role: "reference_image",
+          target: {
+            kind: "local_file",
+            path: "C:\\generated\\annotation.png",
+            canvasNodeKey: annotation.key,
+            mediaType: "image",
+          },
+        },
+      ],
+    });
+  });
+
+  it("恢复含上游提示词的局部编辑画布时保留编辑指令与原视频标注图稳定引用", async () => {
+    let storedDocument: CanvasDocumentV2 | null = null;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document" && storedDocument)
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "未命名画布",
+          document: structuredClone(storedDocument),
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      if (command === "save_canvas_document") {
+        const save = args?.["command"] as SaveCanvasDocumentCommand;
+        storedDocument = structuredClone(save.document) as CanvasDocumentV2;
+        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+      }
+      if (command === "save_video_edit_frame")
+        return Promise.resolve({
+          path: "C:\\generated\\restored-annotation.png",
+          width: 1920,
+          height: 1080,
+        });
+      return baseInvokeImplementation(command, args);
+    });
+    const view = render(<App />);
+    const sourcePrompt = await addPromptNode(260, 180);
+    fireEvent.change(within(sourcePrompt).getByRole("textbox", { name: "生成提示词输出" }), {
+      target: { value: "上游要求：保留列车进站镜头" },
+    });
+    const node = await addGenerationNode("视频", 920, 180);
+    const original = await addAssetNode("视频", "列车进站参考", 20, 500);
+    connectAssetToGeneration(original, node);
+    connectPromptToGeneration(sourcePrompt, node);
+    const prompt = within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" });
+    await waitFor(() => expect(prompt).toHaveTextContent("上游要求：保留列车进站镜头"));
+    fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+    fireEvent.click(within(node).getByRole("button", { name: "局部消除与编辑 · 列车进站参考" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用测试局部标注 · 列车进站参考" }));
+    await waitFor(() => expect(prompt).toHaveTextContent("删除标记区域中的路人"));
+    const nodeKey = node.dataset["connectionTarget"]!;
+    const originalKey = original.dataset["connectionTarget"]!;
+    const originalMentions = Array.from(prompt.querySelectorAll<HTMLElement>(".mention-chip")).map(
+      (chip) => ({ mentionId: chip.dataset["mentionId"], nodeKey: chip.dataset["canvasNodeKey"] }),
+    );
+    expect(originalMentions).toHaveLength(2);
+    await waitFor(
+      () => {
+        expect(
+          storedDocument?.promptContents[nodeKey]?.items.filter(
+            (item) => item.kind === "media_reference",
+          ),
+        ).toHaveLength(2);
+        expect(
+          storedDocument?.outputNodes?.find((output) => output.origin === "video_edit"),
+        ).toBeDefined();
+      },
+      { timeout: 4000 },
+    );
+    const annotationKey = storedDocument!.outputNodes!.find(
+      (output) => output.origin === "video_edit",
+    )!.key;
+    view.unmount();
+    render(<App />);
+    const restoredNode = await waitFor(() => {
+      const restored = document.querySelector<HTMLElement>(`[data-connection-target="${nodeKey}"]`);
+      expect(restored).not.toBeNull();
+      return restored!;
+    });
+    await waitForNodeAccessible(restoredNode);
+    const restoredPrompt = within(restoredNode).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    await waitFor(() => expect(restoredPrompt).toHaveTextContent("删除标记区域中的路人"));
+    expect(restoredPrompt).toHaveTextContent("上游要求：保留列车进站镜头");
+    expect(
+      Array.from(restoredPrompt.querySelectorAll<HTMLElement>(".mention-chip")).map((chip) => ({
+        mentionId: chip.dataset["mentionId"],
+        nodeKey: chip.dataset["canvasNodeKey"],
+      })),
+    ).toEqual(originalMentions);
+    expect(within(restoredNode).getByLabelText("任务类型")).toHaveValue("edit");
+    fireEvent.click(within(restoredNode).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    const command = submittedGenerationCommands()[0]!;
+    expect(command).toMatchObject({
+      videoTaskType: "edit",
+      parameters: { ratio: "adaptive", duration: -1 },
+      explicitMedia: [
+        {
+          role: "reference_video",
+          target: { canvasNodeKey: originalKey, assetId: "asset-video-1" },
+        },
+        {
+          role: "reference_image",
+          target: {
+            kind: "local_file",
+            path: "C:\\generated\\restored-annotation.png",
+            canvasNodeKey: annotationKey,
+          },
+        },
+      ],
+    });
+    const segments = command["prompt"] as readonly {
+      kind: string;
+      text?: string;
+      mentionId?: string;
+    }[];
+    expect(
+      segments
+        .filter((segment) => segment.kind === "text")
+        .map((segment) => segment.text)
+        .join(""),
+    ).toContain("删除标记区域中的路人");
+    expect(
+      segments
+        .filter((segment) => segment.kind === "media_reference")
+        .map((segment) => segment.mentionId),
+    ).toEqual(originalMentions.map((mention) => mention.mentionId));
   });
 
   it("已有空能力快照的 Wan 3.0 模型仍在视频节点显示完整请求参数", async () => {

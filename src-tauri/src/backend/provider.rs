@@ -11,14 +11,15 @@ use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     model_schema::{
-        infer_catalog_schema, operations_from_schema, provider_scoped_model_definition_id,
+        infer_catalog_schema, is_seedance_25_video_model, operations_from_schema,
+        provider_scoped_model_definition_id,
     },
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
     },
     types::{
         ConnectivityTestResult, GenerationOperation, MediaType, RawProviderResponse,
-        RemoteModelOption, TokenUsage,
+        RemoteModelOption, TokenUsage, VideoTaskType,
     },
 };
 
@@ -59,6 +60,8 @@ pub struct ResolvedMedia {
     pub stable_identity: Value,
     pub mime_type: String,
     pub byte_size: u64,
+    /// 后端 ffprobe 从真实视频读取，不能由调用方元数据代填。
+    pub duration_seconds: Option<f64>,
     pub sha256: String,
     pub file_name: String,
     pub bytes: Option<Vec<u8>>,
@@ -78,6 +81,7 @@ impl ResolvedMedia {
             "stableIdentity": self.stable_identity,
             "mimeType": self.mime_type,
             "byteSize": self.byte_size,
+            "durationSeconds": self.duration_seconds,
             "sha256": self.sha256,
             "fileName": self.file_name,
             "promptSegmentIndex": self.prompt_segment_index,
@@ -104,6 +108,7 @@ pub struct ResolvedGeneration {
     pub videos: Vec<ResolvedMedia>,
     pub audios: Vec<ResolvedMedia>,
     pub parameters: Value,
+    pub video_task_type: Option<VideoTaskType>,
     pub operation_schema: Value,
 }
 
@@ -133,6 +138,7 @@ impl ResolvedGeneration {
             "videos": self.videos.iter().map(ResolvedMedia::archive).collect::<Vec<_>>(),
             "audios": self.audios.iter().map(ResolvedMedia::archive).collect::<Vec<_>>(),
             "parameters": self.parameters,
+            "videoTaskType": self.video_task_type,
             "operationSchema": self.operation_schema,
         })
     }
@@ -1714,6 +1720,7 @@ fn build_video_body(
         ));
     }
     ensure_request_encoding(&resolved.operation_schema, "json")?;
+    validate_seedance_25_video_task(model, resolved)?;
     match resolved
         .operation_schema
         .pointer("/request/mediaEncoding")
@@ -1812,7 +1819,7 @@ fn build_video_body(
     // 这里把渲染后的提示词作为 content 首个 text 条目写入（媒体项随后），并保持
     // 顶层 prompt 非空以满足平台校验；纯文生视频（无媒体）维持 content 为空，
     // 由平台按既有行为回退到顶层 prompt。
-    let prompt = video_prompt(resolved);
+    let prompt = seedance_task_prompt(model, resolved, video_prompt(resolved));
     if !prompt.trim().is_empty() {
         body.insert(prompt_field, Value::String(prompt.clone()));
         if has_media {
@@ -1841,6 +1848,215 @@ fn build_video_body(
         mapped_parameters(resolved, "metadata")?,
     )?;
     Ok(Value::Object(body))
+}
+
+pub(crate) fn seedance_video_task_type(
+    local_type: Option<VideoTaskType>,
+    parameters: &Value,
+) -> VideoTaskType {
+    local_type.unwrap_or_else(|| match parameters["omni_reference_task_type"].as_str() {
+        Some("reference") => VideoTaskType::Reference,
+        Some("edit") => VideoTaskType::Edit,
+        Some("extend") => VideoTaskType::Extend,
+        _ => VideoTaskType::Auto,
+    })
+}
+
+fn seedance_task_prompt(model: &str, resolved: &ResolvedGeneration, prompt: String) -> String {
+    if !is_seedance_25_video_model(model) {
+        return prompt;
+    }
+    match seedance_video_task_type(resolved.video_task_type, &resolved.parameters) {
+        VideoTaskType::Edit
+            if ![
+                "编辑视频",
+                "增加",
+                "加上",
+                "删除",
+                "去掉",
+                "修改",
+                "替换",
+                "改成",
+            ]
+            .iter()
+            .any(|keyword| prompt.contains(keyword)) =>
+        {
+            format!("编辑视频：\n{prompt}")
+        }
+        VideoTaskType::Extend
+            if !["向前延长", "向后延长", "延续", "续写"]
+                .iter()
+                .any(|keyword| prompt.contains(keyword)) =>
+        {
+            format!("续写视频：\n{prompt}")
+        }
+        _ => prompt,
+    }
+}
+
+/// 官方 2.5 特殊任务约束在付费提交前再次校验。海外模型的本地意图只参与
+/// 校验，远端字段依旧由冻结 schema 白名单决定。
+fn validate_seedance_25_video_task(
+    model: &str,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<()> {
+    if !is_seedance_25_video_model(model) {
+        if resolved.video_task_type.is_some() {
+            return Err(BackendError::validation(
+                "所选模型不支持 Seedance 2.5 任务类型，请重新选择模型或任务类型",
+                json!({ "model": model }),
+            ));
+        }
+        return Ok(());
+    }
+    let task_type = seedance_video_task_type(resolved.video_task_type, &resolved.parameters);
+    if let Some(local_type) = resolved.video_task_type
+        && let Some(remote_type) = resolved.parameters["omni_reference_task_type"].as_str()
+        && remote_type != local_type.omni_reference_task_type()
+    {
+        return Err(BackendError::validation(
+            "视频任务类型与模型参数不一致，请重新选择任务类型",
+            json!({ "videoTaskType": local_type, "omniReferenceTaskType": remote_type }),
+        ));
+    }
+    let mut first_frames = 0;
+    let mut last_frames = 0;
+    let mut references = 0;
+    let mut reference_videos = 0;
+    for media in resolved
+        .images
+        .iter()
+        .chain(&resolved.videos)
+        .chain(&resolved.audios)
+    {
+        match (media.media_type, media.role.as_str()) {
+            (MediaType::Image, "first_frame") => first_frames += 1,
+            (MediaType::Image, "last_frame") => last_frames += 1,
+            (MediaType::Image, "reference_image") | (MediaType::Audio, "reference_audio") => {
+                references += 1
+            }
+            (MediaType::Video, "reference_video") => {
+                references += 1;
+                reference_videos += 1;
+            }
+            _ => {
+                return Err(BackendError::validation(
+                    "Seedance 2.5 素材类型与用途不匹配",
+                    media.archive(),
+                ));
+            }
+        }
+    }
+    let has_frames = first_frames > 0 || last_frames > 0;
+    let selected_frames = matches!(
+        task_type,
+        VideoTaskType::FirstFrame | VideoTaskType::FirstLastFrame
+    );
+    if first_frames > 1 || last_frames > 1 || (has_frames && first_frames != 1) {
+        return Err(BackendError::validation(
+            "首帧/首尾帧任务必须有且仅有一张首帧，尾帧最多一张",
+            json!({ "firstFrames": first_frames, "lastFrames": last_frames }),
+        ));
+    }
+    if (has_frames && references > 0)
+        || (has_frames
+            && matches!(
+                task_type,
+                VideoTaskType::Reference | VideoTaskType::Edit | VideoTaskType::Extend
+            ))
+    {
+        return Err(BackendError::validation(
+            "首帧/首尾帧与全参考、视频编辑、视频延长不能混用，请调整素材用途或任务类型",
+            json!({ "videoTaskType": task_type, "firstFrames": first_frames, "lastFrames": last_frames, "references": references }),
+        ));
+    }
+    if (selected_frames && first_frames != 1)
+        || (task_type == VideoTaskType::FirstLastFrame && last_frames != 1)
+        || (task_type == VideoTaskType::FirstFrame && last_frames != 0)
+    {
+        return Err(BackendError::validation(
+            "首帧任务需要一张首帧；首尾帧任务需要各一张首帧和尾帧",
+            json!({ "videoTaskType": task_type, "firstFrames": first_frames, "lastFrames": last_frames }),
+        ));
+    }
+    if matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend) && reference_videos == 0 {
+        return Err(BackendError::validation(
+            "视频编辑和视频延长至少需要一个参考视频",
+            json!({ "videoTaskType": task_type }),
+        ));
+    }
+    if task_type == VideoTaskType::Reference && references == 0 {
+        return Err(BackendError::validation(
+            "全参考任务至少需要一个参考素材",
+            json!({ "videoTaskType": task_type }),
+        ));
+    }
+    if (has_frames
+        || selected_frames
+        || matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend))
+        && resolved.parameters["ratio"].as_str() != Some("adaptive")
+    {
+        return Err(BackendError::validation(
+            "Seedance 2.5 首帧/首尾帧、视频编辑和视频延长的画幅必须为自适应（adaptive）",
+            json!({ "ratio": resolved.parameters["ratio"] }),
+        ));
+    }
+    if has_frames
+        || selected_frames
+        || matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend)
+    {
+        let duration = resolved.parameters["duration"].as_i64();
+        if !duration.is_some_and(|value| value == -1 || (4..=30).contains(&value)) {
+            return Err(BackendError::validation(
+                "Seedance 2.5 输出时长必须为智能（-1）或 4–30 秒",
+                json!({ "duration": resolved.parameters["duration"] }),
+            ));
+        }
+    }
+    if task_type == VideoTaskType::Edit && resolved.parameters["duration"].as_i64() != Some(-1) {
+        return Err(BackendError::validation(
+            "视频编辑的输出时长必须为智能（-1），自动跟随待编辑视频",
+            json!({ "duration": resolved.parameters["duration"] }),
+        ));
+    }
+    if matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend) {
+        if reference_videos > 10 {
+            return Err(BackendError::validation(
+                "视频编辑和视频延长最多支持 10 个参考视频",
+                json!({ "referenceVideos": reference_videos }),
+            ));
+        }
+        let minimum_seconds = if task_type == VideoTaskType::Edit {
+            4.0
+        } else {
+            2.0
+        };
+        for video in &resolved.videos {
+            if !video.duration_seconds.is_some_and(|duration| {
+                duration.is_finite() && (minimum_seconds..=30.0).contains(&duration)
+            }) {
+                return Err(BackendError::validation(
+                    format!(
+                        "当前视频任务要求每个参考视频的实际时长为 {minimum_seconds}–30 秒：{}",
+                        video.display_name
+                    ),
+                    video.archive(),
+                ));
+            }
+        }
+        let total_seconds: f64 = resolved
+            .videos
+            .iter()
+            .filter_map(|video| video.duration_seconds)
+            .sum();
+        if total_seconds > 30.0 {
+            return Err(BackendError::validation(
+                "视频编辑和视频延长的参考视频实际总时长不能超过 30 秒",
+                json!({ "totalDurationSeconds": total_seconds }),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// 通用视频 body 的 prompt 渲染：由结构化 `content` 重建，媒体引用渲染为
@@ -3057,6 +3273,7 @@ mod tests {
             videos: Vec::new(),
             audios: Vec::new(),
             parameters,
+            video_task_type: None,
             operation_schema,
         }
     }
@@ -3082,6 +3299,7 @@ mod tests {
             }
             .into(),
             byte_size: 1024,
+            duration_seconds: None,
             sha256: "abc".into(),
             file_name: format!("asset-{type_position}"),
             bytes: None,
@@ -3666,6 +3884,295 @@ mod tests {
         );
     }
 
+    fn seedance_task_fixture(
+        model: &str,
+        mode: VideoTaskType,
+    ) -> (TaskExecutionRecord, ResolvedGeneration) {
+        let schema = super::super::model_schema::default_model_schema(
+            model,
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut parameters = json!({ "ratio": "adaptive", "duration": -1 });
+        if schema["video_generation"]["parameters"]
+            .get("omni_reference_task_type")
+            .is_some()
+        {
+            parameters["omni_reference_task_type"] = json!(mode.omni_reference_task_type());
+        }
+        let mut generation = resolved(schema["video_generation"].clone(), parameters);
+        generation.video_task_type = Some(mode);
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some(model.into());
+        (video_task, generation)
+    }
+
+    #[test]
+    fn seedance_edit_requires_real_video_duration_and_keeps_local_mode_out_of_remote_body() {
+        for model in ["doubao-seedance-2-5-260628", "dreamina-seedance-2.5"] {
+            let (task, mut generation) = seedance_task_fixture(model, VideoTaskType::Edit);
+            assert!(
+                build_video_body(&task, &generation).is_err(),
+                "edit needs video"
+            );
+            generation.videos.push(resolved_media(
+                MediaType::Video,
+                1,
+                "reference_video",
+                "https://cdn.example.com/edit.mp4",
+                None,
+            ));
+            for duration in [
+                None,
+                Some(3.99),
+                Some(30.01),
+                Some(f64::NAN),
+                Some(f64::INFINITY),
+            ] {
+                generation.videos[0].duration_seconds = duration;
+                assert!(
+                    build_video_body(&task, &generation).is_err(),
+                    "invalid actual duration: {duration:?}"
+                );
+            }
+            for duration in [4.0, 16.5, 30.0] {
+                generation.videos[0].duration_seconds = Some(duration);
+                let body = build_video_body(&task, &generation).expect("valid edit");
+                assert!(body.get("videoTaskType").is_none());
+                assert!(body["metadata"].get("videoTaskType").is_none());
+                assert_eq!(body["metadata"]["ratio"], "adaptive");
+                assert_eq!(body["metadata"]["duration"], -1);
+                if model.starts_with("dreamina") {
+                    assert!(body["metadata"].get("omni_reference_task_type").is_none());
+                } else {
+                    assert_eq!(body["metadata"]["omni_reference_task_type"], "edit");
+                }
+            }
+            generation.parameters["duration"] = json!(10);
+            assert!(build_video_body(&task, &generation).is_err());
+            generation.parameters["duration"] = json!(-1);
+            generation.parameters["ratio"] = json!("16:9");
+            assert!(build_video_body(&task, &generation).is_err());
+        }
+    }
+
+    #[test]
+    fn seedance_frames_require_first_frame_and_cannot_mix_reference_media() {
+        let (task, mut generation) =
+            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::FirstFrame);
+        assert!(build_video_body(&task, &generation).is_err());
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "first_frame",
+            "https://cdn.example.com/first.png",
+            None,
+        ));
+        assert!(build_video_body(&task, &generation).is_ok());
+        generation.parameters["ratio"] = json!("1:1");
+        assert!(build_video_body(&task, &generation).is_err());
+        generation.parameters["ratio"] = json!("adaptive");
+        generation.video_task_type = Some(VideoTaskType::FirstLastFrame);
+        assert!(
+            build_video_body(&task, &generation).is_err(),
+            "missing last frame"
+        );
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            2,
+            "last_frame",
+            "https://cdn.example.com/last.png",
+            None,
+        ));
+        assert!(build_video_body(&task, &generation).is_ok());
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            3,
+            "reference_image",
+            "https://cdn.example.com/reference.png",
+            None,
+        ));
+        assert!(
+            build_video_body(&task, &generation).is_err(),
+            "mixed reference image"
+        );
+        generation.images.pop();
+        generation.images.remove(0);
+        generation.video_task_type = None;
+        assert!(
+            build_video_body(&task, &generation).is_err(),
+            "legacy last frame alone"
+        );
+    }
+
+    #[test]
+    fn seedance_extend_requires_video_and_adaptive_ratio_with_legal_output_duration() {
+        let (task, mut generation) =
+            seedance_task_fixture("dreamina-seedance-2.5", VideoTaskType::Extend);
+        assert!(build_video_body(&task, &generation).is_err());
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/extend.mp4",
+            None,
+        ));
+        for duration in [None, Some(1.99), Some(30.01)] {
+            generation.videos[0].duration_seconds = duration;
+            assert!(build_video_body(&task, &generation).is_err());
+        }
+        generation.videos[0].duration_seconds = Some(2.0);
+        for duration in [-1, 4, 15, 30] {
+            generation.parameters["duration"] = json!(duration);
+            assert!(build_video_body(&task, &generation).is_ok());
+        }
+        for duration in [json!(0), json!(3), json!(31), json!(4.5), json!("10")] {
+            generation.parameters["duration"] = duration;
+            assert!(build_video_body(&task, &generation).is_err());
+        }
+        generation.parameters["duration"] = json!(-1);
+        generation.parameters["ratio"] = json!("16:9");
+        assert!(build_video_body(&task, &generation).is_err());
+    }
+
+    #[test]
+    fn seedance_legacy_edit_parameter_is_validated_and_conflicting_local_intent_is_rejected() {
+        let (task, mut generation) =
+            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::Edit);
+        generation.video_task_type = None;
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/edit.mp4",
+            None,
+        ));
+        assert!(build_video_body(&task, &generation).is_err());
+        generation.videos[0].duration_seconds = Some(10.0);
+        assert!(build_video_body(&task, &generation).is_ok());
+        generation.video_task_type = Some(VideoTaskType::Extend);
+        assert!(build_video_body(&task, &generation).is_err());
+    }
+
+    #[test]
+    fn seedance_edit_and_extend_limit_actual_total_duration_and_video_count() {
+        for model in ["doubao-seedance-2-5-260628", "dreamina-seedance-2.5"] {
+            for mode in [VideoTaskType::Edit, VideoTaskType::Extend] {
+                let (task, mut generation) = seedance_task_fixture(model, mode);
+                for position in 1..=2 {
+                    let mut video = resolved_media(
+                        MediaType::Video,
+                        position,
+                        "reference_video",
+                        "https://cdn.example.com/source.mp4",
+                        None,
+                    );
+                    video.duration_seconds = Some(15.0);
+                    generation.videos.push(video);
+                }
+                assert!(
+                    build_video_body(&task, &generation).is_ok(),
+                    "30 seconds total"
+                );
+                generation.videos[1].duration_seconds = Some(15.01);
+                assert!(
+                    build_video_body(&task, &generation).is_err(),
+                    "more than 30 seconds total"
+                );
+                generation.videos.clear();
+                for position in 1..=11 {
+                    let mut video = resolved_media(
+                        MediaType::Video,
+                        position,
+                        "reference_video",
+                        "https://cdn.example.com/source.mp4",
+                        None,
+                    );
+                    video.duration_seconds = Some(if mode == VideoTaskType::Edit {
+                        4.0
+                    } else {
+                        2.0
+                    });
+                    generation.videos.push(video);
+                }
+                assert!(
+                    build_video_body(&task, &generation)
+                        .unwrap_err()
+                        .to_string()
+                        .contains("10 个")
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn seedance_reference_needs_at_least_one_reference() {
+        let (task, mut generation) =
+            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::Reference);
+        assert!(build_video_body(&task, &generation).is_err());
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/reference.png",
+            None,
+        ));
+        assert!(build_video_body(&task, &generation).is_ok());
+    }
+
+    #[test]
+    fn seedance_task_intent_roundtrips_without_breaking_legacy_generation_commands() {
+        let legacy = json!({ "canvasId": "canvas", "sourceNodeId": "node", "operation": "video_generation", "providerConnectionId": "provider", "modelDefinitionId": "model", "prompt": [], "parameters": {} });
+        let mut command: super::super::types::StartGenerationCommand =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert!(command.video_task_type.is_none());
+        assert!(
+            serde_json::to_value(&command)
+                .unwrap()
+                .get("videoTaskType")
+                .is_none()
+        );
+        command.video_task_type = Some(VideoTaskType::FirstLastFrame);
+        let frozen = serde_json::to_value(&command).unwrap();
+        assert_eq!(frozen["videoTaskType"], "first_last_frame");
+        let restored: super::super::types::StartGenerationCommand =
+            serde_json::from_value(frozen).unwrap();
+        assert_eq!(
+            restored.video_task_type,
+            Some(VideoTaskType::FirstLastFrame)
+        );
+    }
+
+    #[test]
+    fn seedance_task_prompt_adds_required_intent_without_changing_user_media_order() {
+        for mode in [VideoTaskType::Edit, VideoTaskType::Extend] {
+            let (task, mut generation) = seedance_task_fixture("dreamina-seedance-2.5", mode);
+            generation.videos.push(resolved_media(
+                MediaType::Video,
+                1,
+                "reference_video",
+                "https://cdn.example.com/source.mp4",
+                Some(1),
+            ));
+            generation.videos[0].duration_seconds = Some(10.0);
+            generation.content = vec![
+                CompiledContentItem::Text("请按原来的风格处理".into()),
+                CompiledContentItem::Media {
+                    media_type: MediaType::Video,
+                    type_position: 1,
+                },
+            ];
+            let body = build_video_body(&task, &generation).unwrap();
+            let prefix = if mode == VideoTaskType::Edit {
+                "编辑视频："
+            } else {
+                "续写视频："
+            };
+            assert_eq!(body["prompt"], format!("{prefix}\n请按原来的风格处理视频1"));
+            assert_eq!(body["metadata"]["content"][0]["text"], body["prompt"]);
+            assert_eq!(body["metadata"]["content"][1]["role"], "reference_video");
+        }
+    }
+
     #[test]
     fn seedance_extend_with_reference_video_includes_text_item_in_content() {
         // 回归：带媒体（参考视频延长）的 Seedance 请求必须把渲染提示词写入
@@ -3686,9 +4193,9 @@ mod tests {
                 "omni_reference_task_type": "extend"
             }),
         );
-        generation.rendered_prompt = "【生成目标】\n延长视频1，生成一段对峙戏".into();
+        generation.rendered_prompt = "【生成目标】\n向后延长视频1，生成一段对峙戏".into();
         generation.content = vec![
-            CompiledContentItem::Text("【生成目标】\n延长".into()),
+            CompiledContentItem::Text("【生成目标】\n向后延长".into()),
             CompiledContentItem::Media {
                 media_type: MediaType::Video,
                 type_position: 1,
@@ -3702,6 +4209,7 @@ mod tests {
             "https://cdn.example.com/ref.mp4",
             Some(1),
         ));
+        generation.videos[0].duration_seconds = Some(10.0);
         let mut video_task = task(GenerationOperation::VideoGeneration);
         video_task.remote_model_id_snapshot = Some("doubao-seedance-2.5".into());
 
@@ -3710,7 +4218,7 @@ mod tests {
         assert_eq!(body["metadata"]["omni_reference_task_type"], "extend");
         assert_eq!(
             body["metadata"]["content"][0],
-            json!({ "type": "text", "text": "【生成目标】\n延长视频1，生成一段对峙戏" })
+            json!({ "type": "text", "text": "【生成目标】\n向后延长视频1，生成一段对峙戏" })
         );
         assert_eq!(body["metadata"]["content"][1]["type"], "video_url");
         assert_eq!(body["metadata"]["content"][1]["role"], "reference_video");

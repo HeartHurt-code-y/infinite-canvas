@@ -35,6 +35,12 @@ import {
   type ModelParameterValue,
 } from "../../lib/modelCapabilities";
 import {
+  resolveSeedanceTask,
+  selectSeedanceTask,
+  SEEDANCE_TASK_OPTIONS,
+  type SeedanceTaskMode,
+} from "../../lib/seedanceTasks";
+import {
   createPromptContentEditorSession,
   describePromptContentCandidates,
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
@@ -1247,14 +1253,16 @@ function GenerationParameterField({
   capability,
   value,
   hasMediaInputs,
+  locked = false,
   onChange,
 }: {
   readonly capability: ModelParameterCapability;
   readonly value: ModelParameterValue;
   readonly hasMediaInputs: boolean;
+  readonly locked?: boolean;
   readonly onChange: (value: ModelParameterValue) => void;
 }) {
-  const disabled = capability.requiresNoMedia && hasMediaInputs;
+  const disabled = locked || (capability.requiresNoMedia && hasMediaInputs);
   if (capability.type === "boolean") {
     const checked = !disabled && value === true;
     return (
@@ -1280,6 +1288,8 @@ function GenerationParameterField({
         <span>{capability.label}</span>
         <select
           value={String(value)}
+          disabled={disabled}
+          title={locked ? "由当前任务类型自动设置" : undefined}
           onChange={(event) => {
             const selected = capability.options.find(
               (option) => String(option.value) === event.target.value,
@@ -1303,6 +1313,8 @@ function GenerationParameterField({
       <span>{capability.label}</span>
       <input
         type={numeric ? "number" : "text"}
+        disabled={disabled}
+        title={locked ? "由当前任务类型自动设置" : undefined}
         inputMode={numeric ? "numeric" : "text"}
         min={capability.minimum}
         max={capability.maximum}
@@ -1332,12 +1344,14 @@ export function VideoNodeSettings({
   hasMediaInputs,
   mediaInputs,
   onChange,
+  onAnnotateVideo,
 }: {
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
   readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly onChange: (config: VideoNodeConfig) => void;
+  readonly onAnnotateVideo?: (input: ConnectedAssetInput | InheritedAssetInput) => void;
 }) {
   const availableProviders = providerCatalog.filter(
     (entry) =>
@@ -1360,6 +1374,16 @@ export function VideoNodeSettings({
       )
     : [];
 
+  const taskState = resolveSeedanceTask(
+    selectedModel?.remoteModelId ?? "",
+    parameterCapabilities,
+    config,
+    mediaInputs ?? [],
+  );
+  const currentTaskLabel = SEEDANCE_TASK_OPTIONS.find(
+    (option) => option.value === taskState.mode,
+  )?.label;
+
   return (
     <div className="canvas-gen-node__settings" aria-label="视频生成参数">
       <div className="canvas-gen-node__operation" role="status" aria-live="polite">
@@ -1367,7 +1391,13 @@ export function VideoNodeSettings({
           <VideoCamera size={16} weight="bold" />
         </span>
         <span className="canvas-gen-node__operation-copy">
-          <strong>{hasMediaInputs ? "参考素材生成" : "文生视频"}</strong>
+          <strong>
+            {taskState.enabled && taskState.mode !== "auto"
+              ? currentTaskLabel
+              : hasMediaInputs
+                ? "参考素材生成"
+                : "文生视频"}
+          </strong>
           <small>{hasMediaInputs ? "已使用直连或随提示词继承的素材" : "连接素材后自动切换"}</small>
         </span>
       </div>
@@ -1387,6 +1417,8 @@ export function VideoNodeSettings({
               ...config,
               modelSelection: { providerId, modelDefinitionId },
               parameterValues: {},
+              seedanceTaskMode: "auto",
+              mediaRoles: {},
             });
           }}
         >
@@ -1433,6 +1465,8 @@ export function VideoNodeSettings({
                 modelDefinitionId: event.target.value,
               },
               parameterValues: {},
+              seedanceTaskMode: "auto",
+              mediaRoles: {},
             })
           }
         >
@@ -1452,7 +1486,114 @@ export function VideoNodeSettings({
         </select>
       </label>
 
-      {parameterCapabilities.map((capability) => {
+      {taskState.enabled ? (
+        <>
+          <label className="canvas-gen-node__field canvas-gen-node__field--model">
+            <span>任务类型</span>
+            <select
+              value={taskState.mode}
+              onChange={(event) =>
+                onChange(
+                  selectSeedanceTask(
+                    selectedModel?.remoteModelId ?? "",
+                    parameterCapabilities,
+                    config,
+                    mediaInputs ?? [],
+                    event.target.value as SeedanceTaskMode,
+                  ),
+                )
+              }
+            >
+              {SEEDANCE_TASK_OPTIONS.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+            </select>
+          </label>
+          <div className="canvas-gen-node__media-roles" role="status" aria-live="polite">
+            <small>{taskState.hint}</small>
+            {!parameterCapabilities.some(
+              (capability) => capability.key === "omni_reference_task_type",
+            ) &&
+            (taskState.mode === "edit" || taskState.mode === "extend") ? (
+              <small>
+                此模型通过提示词识别任务，请写明{taskState.mode === "edit" ? "编辑" : "延长"}意图。
+              </small>
+            ) : null}
+          </div>
+          {taskState.issue ? (
+            <div className="canvas-gen-node__media-role-warning" role="alert">
+              <WarningCircle size={14} weight="fill" aria-hidden="true" />
+              <span>{taskState.issue}</span>
+            </div>
+          ) : null}
+          {(taskState.mode === "first_frame" || taskState.mode === "first_last_frame") &&
+          (mediaInputs?.length ?? 0) > 0 ? (
+            <div className="canvas-gen-node__media-roles" aria-label="首尾帧素材">
+              <ol className="canvas-gen-node__media-role-list">
+                {mediaInputs?.map((input) => (
+                  <li key={input.key} className="canvas-gen-node__media-role">
+                    <AssetKindIcon kind={input.kind} size={15} />
+                    <span className="canvas-gen-node__media-role-name">{input.name}</span>
+                    <span>
+                      {taskState.mediaRoles[input.key] === "first_frame"
+                        ? "首帧"
+                        : taskState.mediaRoles[input.key] === "last_frame"
+                          ? "尾帧"
+                          : "不兼容，请断开"}
+                    </span>
+                  </li>
+                ))}
+              </ol>
+              {taskState.mode === "first_last_frame" && !taskState.issue ? (
+                <button
+                  type="button"
+                  className="canvas-gen-node__url-add"
+                  onClick={() =>
+                    onChange({
+                      ...config,
+                      seedanceTaskMode: taskState.mode,
+                      parameterValues: taskState.parameterValues,
+                      mediaRoles: Object.fromEntries(
+                        Object.entries(taskState.mediaRoles).map(([key, role]) => [
+                          key,
+                          role === "first_frame"
+                            ? "last_frame"
+                            : role === "last_frame"
+                              ? "first_frame"
+                              : role,
+                        ]),
+                      ),
+                    })
+                  }
+                >
+                  交换首尾帧
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+          {taskState.mode === "edit" && onAnnotateVideo ? (
+            <div className="canvas-gen-node__media-roles" aria-label="视频局部编辑">
+              {(mediaInputs ?? [])
+                .filter((input) => input.kind === "video")
+                .map((input) => (
+                  <button
+                    type="button"
+                    className="canvas-gen-node__url-add"
+                    key={input.key}
+                    onClick={() => onAnnotateVideo(input)}
+                  >
+                    局部消除与编辑 · {input.name}
+                  </button>
+                ))}
+            </div>
+          ) : null}
+        </>
+      ) : null}
+
+      {taskState.parameterCapabilities.map((capability) => {
+        if (taskState.enabled && capability.key === "omni_reference_task_type") return null;
         // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
         const taskType = String(config.parameterValues["task_type"] ?? "generation");
         if (capability.key === "resolution" && taskType === "h3_context_ir") return null;
@@ -1460,12 +1601,13 @@ export function VideoNodeSettings({
           <GenerationParameterField
             key={capability.key}
             capability={capability}
-            value={resolvedParameterValue(capability, config.parameterValues)}
+            value={resolvedParameterValue(capability, taskState.parameterValues)}
             hasMediaInputs={hasMediaInputs}
+            locked={taskState.lockedParameters.includes(capability.key)}
             onChange={(value) =>
               onChange({
                 ...config,
-                parameterValues: { ...config.parameterValues, [capability.key]: value },
+                parameterValues: { ...taskState.parameterValues, [capability.key]: value },
               })
             }
           />

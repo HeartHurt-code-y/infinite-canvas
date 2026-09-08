@@ -80,7 +80,7 @@ fn is_seedance_20_video_model(model_id: &str) -> bool {
     identity.contains("seedance-2-0") || identity.contains("seedance-2.0")
 }
 
-fn is_seedance_25_video_model(model_id: &str) -> bool {
+pub(crate) fn is_seedance_25_video_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
     identity.contains("seedance-2-5") || identity.contains("seedance-2.5")
 }

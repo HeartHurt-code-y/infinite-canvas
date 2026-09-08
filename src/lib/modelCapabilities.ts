@@ -478,7 +478,7 @@ function isSeedance20VideoModel(modelId: string): boolean {
   return normalized.includes("seedance-2-0") || normalized.includes("seedance-2.0");
 }
 
-function isSeedance25VideoModel(modelId: string): boolean {
+export function isSeedance25VideoModel(modelId: string): boolean {
   const normalized = modelId.toLocaleLowerCase();
   return normalized.includes("seedance-2-5") || normalized.includes("seedance-2.5");
 }

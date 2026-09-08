@@ -101,6 +101,7 @@ export function CanvasGenNode({
   onSizeChange,
   onImageConfigChange,
   onVideoConfigChange,
+  onAnnotateVideo,
   onStartGeneration,
   startError,
 }: {
@@ -133,6 +134,10 @@ export function CanvasGenNode({
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
+  readonly onAnnotateVideo?: (
+    nodeKey: string,
+    input: ConnectedAssetInput | InheritedAssetInput,
+  ) => void;
   readonly onStartGeneration: (key: string) => void;
 }) {
   const isVideo = node.kind === "video";
@@ -283,6 +288,12 @@ export function CanvasGenNode({
           providerCatalog={providerCatalog}
           hasMediaInputs={effectiveInputs.length > 0}
           mediaInputs={effectiveInputs}
+          {...(onAnnotateVideo
+            ? {
+                onAnnotateVideo: (input: ConnectedAssetInput | InheritedAssetInput) =>
+                  onAnnotateVideo(node.key, input),
+              }
+            : {})}
           onChange={(config) => onVideoConfigChange(node.key, config)}
         />
       ) : (
@@ -1756,13 +1767,15 @@ export function CanvasOutputNode({
       ? "视频拼接与合成 · 本地结果"
       : node.origin === "download"
         ? "网络爆款视频下载 · 本地结果"
-        : task
-          ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
-              isFailed
-                ? formatTaskClock(task.completedAt ?? task.updatedAt)
-                : formatTaskClock(task.createdAt)
-            }`
-          : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
+        : node.origin === "video_edit"
+          ? "视频局部编辑 · 标注参考帧"
+          : task
+            ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
+                isFailed
+                  ? formatTaskClock(task.completedAt ?? task.updatedAt)
+                  : formatTaskClock(task.createdAt)
+              }`
+            : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   return (
     <div

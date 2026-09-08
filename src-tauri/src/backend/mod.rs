@@ -21,6 +21,8 @@ pub mod storage;
 pub mod tasks;
 pub mod tos_sign;
 pub mod types;
+pub mod video_edit_source;
+pub mod video_local_edit;
 
 use std::sync::Arc;
 
@@ -40,6 +42,7 @@ use staging::StagingService;
 use storage::{GenerationTaskLifecycle, Storage};
 use tasks::GenerationTaskService;
 use tauri::{AppHandle, Manager as _};
+use video_edit_source::VideoEditSourceService;
 
 pub struct BackendState {
     pub storage: Arc<Storage>,
@@ -56,6 +59,7 @@ pub struct BackendState {
     pub frame_extractor: VideoFrameExtractionService,
     pub remotion_renderer: RemotionRenderService,
     pub reverse_video: ReverseVideoService,
+    pub video_edit_sources: VideoEditSourceService,
 }
 
 impl BackendState {
@@ -97,7 +101,14 @@ impl BackendState {
             assets.clone(),
             local_results.clone(),
             staging.clone(),
+            composer.clone(),
         );
+        let video_edit_sources = VideoEditSourceService::new(
+            assets.clone(),
+            staging.clone(),
+            local_results.clone(),
+            app.path().app_local_data_dir()?.join("video-edit-previews"),
+        )?;
         let tasks = GenerationTaskService::new(
             app.clone(),
             Arc::clone(&storage),
@@ -138,6 +149,7 @@ impl BackendState {
             frame_extractor,
             remotion_renderer,
             reverse_video,
+            video_edit_sources,
         })
     }
 }

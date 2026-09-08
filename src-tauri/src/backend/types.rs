@@ -263,6 +263,29 @@ fn default_generation_count() -> u32 {
     1
 }
 
+/// 本地视频任务意图，用于跨供应商校验；不会作为未知字段写入远端请求。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VideoTaskType {
+    Auto,
+    Reference,
+    FirstFrame,
+    FirstLastFrame,
+    Edit,
+    Extend,
+}
+
+impl VideoTaskType {
+    pub fn omni_reference_task_type(self) -> &'static str {
+        match self {
+            Self::Auto | Self::FirstFrame | Self::FirstLastFrame => "auto",
+            Self::Reference => "reference",
+            Self::Edit => "edit",
+            Self::Extend => "extend",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartGenerationCommand {
@@ -278,6 +301,8 @@ pub struct StartGenerationCommand {
     pub explicit_media: Vec<ExplicitMediaInput>,
     #[serde(default)]
     pub parameters: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub video_task_type: Option<VideoTaskType>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_operation_schema_snapshot: Option<Value>,
     #[serde(default = "default_generation_count")]

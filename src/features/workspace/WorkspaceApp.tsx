@@ -36,6 +36,7 @@ import {
 } from "@xyflow/react";
 import {
   Suspense,
+  lazy,
   useCallback,
   useDeferredValue,
   useEffect,
@@ -147,6 +148,10 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { AssetKindIcon } from "./PromptNodeViews";
+import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
+import { appendVideoLocalEditPrompt, saveVideoEditFrame } from "../../lib/videoLocalEdit";
+import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
+import type { VideoLocalEditResult, VideoLocalEditSource } from "./VideoLocalEditDialog";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import {
   workflowCanvasInputsFromResolved,
@@ -310,6 +315,9 @@ import {
 } from "./workspaceModel";
 
 const CANVAS_FLOW_NODE_TYPES = { canvas: CanvasFlowNodeView };
+const VideoLocalEditDialog = lazy(() =>
+  import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
+);
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
 /**
@@ -456,6 +464,11 @@ export function WorkspaceApp({
   );
   const [historyInitialWorkflowId, setHistoryInitialWorkflowId] = useState<string | null>(null);
   const [realPersonDialogOpen, setRealPersonDialogOpen] = useState(false);
+  const [videoLocalEdit, setVideoLocalEdit] = useState<{
+    readonly nodeKey: string;
+    readonly source: VideoLocalEditSource;
+    readonly input: GenerationMediaInput;
+  } | null>(null);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -936,11 +949,13 @@ export function WorkspaceApp({
       if (!promptRestore.ok) {
         throw new Error(`提示内容恢复失败: ${promptRestore.invalidNodeKeys.join(", ")}`);
       } else {
-        // 恢复后的提示内容已经包含精确引用或用户修改，包括主动清空的文档。
+        // 恢复后的提示内容已经包含精确引用或用户修改。
         // 用同时保存的上游版本初始化同步记录，避免首次 effect 按当前编号重新解析。
         // 例外：若恢复内容为空文档，说明上次保存时同步可能未完成（或节点刚创建），
         // 不初始化同步记录，让下方 effect 检测到差异后重新导入上游输出。
         importedPromptSourcesRef.current.clear();
+        // 首次挂载时编辑器尚未创建，read() 读不到 pendingRestore 中的存档。
+        const restoredPromptDocuments = promptContents.snapshotAll();
         const restoredInputsFor = createCanvasInputResolver(
           canvasNodesByKeyFromDocument(document),
           document.assetEdges,
@@ -948,7 +963,10 @@ export function WorkspaceApp({
         for (const node of document.genNodes) {
           if (node.kind === "prompt") continue;
           const sources = restoredInputsFor(node.key).texts;
-          if (!sources.length || !promptContents.read(node.key)?.plainText.trim()) continue;
+          const hasSavedContent = restoredPromptDocuments[node.key]?.items.some(
+            (item) => item.kind !== "text" || item.text.trim().length > 0,
+          );
+          if (!sources.length || !hasSavedContent) continue;
           importedPromptSourcesRef.current.set(node.key, {
             edgeId: sources.map((source) => source.edgeId).join("\n"),
             sourceKey: sources.map((source) => source.sourceKey).join("\n"),
@@ -3845,6 +3863,135 @@ export function WorkspaceApp({
     [canvasInputsFor],
   );
 
+  const openVideoLocalEdit = useCallback(
+    (nodeKey: string, input: { readonly key: string }) => {
+      const source = canvasInputsFor(nodeKey).media.find(
+        (item) => item.key === input.key && item.kind === "video",
+      );
+      if (!source) {
+        setNodeStartError(nodeKey, "待编辑视频当前无法读取，请检查源视频及连线。");
+        return;
+      }
+      setVideoLocalEdit({
+        nodeKey,
+        source: {
+          key: source.key,
+          label: source.name,
+          src: source.src ?? "",
+          target: source.target,
+        },
+        input: source,
+      });
+    },
+    [canvasInputsFor, setNodeStartError],
+  );
+
+  const applyVideoLocalEdit = useCallback(
+    async (edit: VideoLocalEditResult) => {
+      if (!videoLocalEdit || edit.sourceKey !== videoLocalEdit.input.key)
+        throw new Error("待编辑视频已变化，请重新打开标注。");
+      const saved = await saveVideoEditFrame(edit.imageDataUrl);
+      // Read the live graph after disk I/O: never bind a late annotation to a removed/replaced source.
+      const current = snapshotV2({});
+      const target = current.genNodes.find((node) => node.key === videoLocalEdit.nodeKey);
+      const inputs = createCanvasInputResolver(
+        canvasNodesByKeyFromDocument(current),
+        current.assetEdges,
+      )(videoLocalEdit.nodeKey).media;
+      const source = inputs.find((input) => input.key === edit.sourceKey);
+      if (
+        target?.kind !== "video" ||
+        !source ||
+        !sameMediaReferenceTarget(videoLocalEdit.input.target, source.target)
+      ) {
+        throw new Error("源视频或生成节点已变化，标注图已保存，请重新打开视频编辑。");
+      }
+      const selection = resolveGenerationSelection(
+        "video",
+        target.config.modelSelection,
+        providerCatalog,
+      );
+      if (!selection) throw new Error("请先选择可用的 Seedance 2.5 模型。");
+      const capabilities = modelParameterCapabilities(
+        selection.model.operationSchema,
+        "video_generation",
+        selection.model.remoteModelId,
+      );
+      const key = outputNodeKey();
+      const name = `${source.name} · ${edit.timeSeconds.toFixed(3)}s 标注`;
+      const frame = {
+        key,
+        name,
+        kind: "image" as const,
+        target: {
+          kind: "local_file" as const,
+          path: saved.path,
+          canvasNodeKey: key,
+          mediaType: "image" as const,
+        },
+      };
+      const nextConfig = selectSeedanceTask(
+        selection.model.remoteModelId,
+        capabilities,
+        target.config,
+        [...inputs, frame],
+        "edit",
+      );
+      const taskState = resolveSeedanceTask(
+        selection.model.remoteModelId,
+        capabilities,
+        nextConfig,
+        [...inputs, frame],
+      );
+      if (!taskState.enabled || taskState.issue)
+        throw new Error(taskState.issue ?? "当前模型不支持 Seedance 2.5 视频局部编辑。");
+      const document = appendVideoLocalEditPrompt(
+        promptContents.snapshotAll(new Set([target.key]))[target.key],
+        source,
+        frame,
+        edit,
+      );
+      insertSubgraph(
+        [
+          {
+            type: "output",
+            data: {
+              key,
+              resultKey: null,
+              sourceNodeId: source.key,
+              taskId: `video-edit-${key}`,
+              mediaType: "image",
+              origin: "video_edit",
+              finalPath: saved.path,
+              name,
+              aspectRatio: saved.width / saved.height,
+              x: target.x - 360,
+              y: target.y + inputs.length * 24,
+            },
+          },
+        ],
+        [{ id: `video-edit-${key}-${target.key}`, fromKey: key, toKey: target.key }],
+        { selectNodeKey: target.key },
+      );
+      updateVideoNodeConfig(target.key, nextConfig);
+      promptContents.restoreDocument(target.key, document);
+      setNodeStartError(target.key, null);
+      setVideoLocalEdit(null);
+      toast.success("局部编辑已添加到输入框", {
+        description: "已连接标注帧并锁定编辑参数，可检查提示词后开始生成。",
+      });
+    },
+    [
+      videoLocalEdit,
+      snapshotV2,
+      providerCatalog,
+      promptContents,
+      insertSubgraph,
+      updateVideoNodeConfig,
+      setNodeStartError,
+    ],
+  );
+
   /** 以视口中心为锚点缩放到目标百分比（键盘与缩放按钮共用），落点由 onMoveEnd 同步回 store。 */
   const zoomAroundViewportCenter = useCallback(
     (targetZoom: number) => {
@@ -4371,7 +4518,7 @@ export function WorkspaceApp({
         target: { kind: "url", url: input.url, mediaType: "image" },
         role: input.role,
       }));
-      const connections: PromptContentConnection[] = [
+      let connections: PromptContentConnection[] = [
         ...connectedAssets.map((input) => ({
           ...input,
           role: genNode.kind === "video" ? (genNode.config.mediaRoles?.[input.key] ?? "") : "",
@@ -4402,6 +4549,30 @@ export function WorkspaceApp({
         return;
       }
 
+      const parameterCapabilities = modelParameterCapabilities(
+        resolvedSelection.model.operationSchema,
+        operation,
+        resolvedSelection.model.remoteModelId,
+      );
+      const seedanceTask =
+        genNode.kind === "video"
+          ? resolveSeedanceTask(
+              resolvedSelection.model.remoteModelId,
+              parameterCapabilities,
+              genNode.config,
+              connectedAssets,
+            )
+          : null;
+      if (seedanceTask?.issue) {
+        setNodeStartError(nodeKey, seedanceTask.issue);
+        return;
+      }
+      if (seedanceTask?.enabled) {
+        connections = connections.map((connection) => ({
+          ...connection,
+          role: seedanceTask.mediaRoles[connection.key] ?? connection.role ?? "",
+        }));
+      }
       const preparedPrompt = promptContents.prepareGeneration(nodeKey, {
         connections,
         allowMediaOnly: modelAllowsMediaOnlyPrompt(
@@ -4420,16 +4591,13 @@ export function WorkspaceApp({
 
       setNodeStartError(nodeKey, null);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
-      const parameterCapabilities = modelParameterCapabilities(
-        resolvedSelection.model.operationSchema,
-        operation,
-        resolvedSelection.model.remoteModelId,
-      );
-      const parameters: Record<string, unknown> = generationParameters(
-        parameterCapabilities,
-        genNode.config.parameterValues,
-        connections.length > 0,
-      );
+      const parameters: Record<string, unknown> = seedanceTask?.enabled
+        ? seedanceTask.parameters
+        : generationParameters(
+            parameterCapabilities,
+            genNode.config.parameterValues,
+            connections.length > 0,
+          );
 
       // GPT-Image 契约的模型支持 `n` 参数：一次请求生成 n 张图片，不再拆分任务。
       // 其余供应商 API 无数量参数：数量 > 1 时拆分为 N 个独立任务（每个任务数量 1），
@@ -4482,6 +4650,7 @@ export function WorkspaceApp({
             prompt: promptSegments,
             explicitMedia,
             parameters,
+            ...(seedanceTask?.enabled ? { videoTaskType: seedanceTask.mode } : {}),
             generationCount: 1,
           })
           .then((taskId) => {
@@ -6340,6 +6509,7 @@ export function WorkspaceApp({
               onSizeChange={handleGenNodeSizeChange}
               onImageConfigChange={updateImageNodeConfig}
               onVideoConfigChange={updateVideoNodeConfig}
+              onAnnotateVideo={openVideoLocalEdit}
               onStartGeneration={handleStartGeneration}
             />
           );
@@ -6379,6 +6549,7 @@ export function WorkspaceApp({
       registerPromptInput,
       updateImageNodeConfig,
       updateVideoNodeConfig,
+      openVideoLocalEdit,
       handleStartGeneration,
     ],
   );
@@ -7872,6 +8043,23 @@ export function WorkspaceApp({
           node={previewOutputNode}
           onClose={() => setPreviewOutputNodeKey(null)}
         />
+      ) : null}
+      {active && videoLocalEdit ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="video-local-edit"
+              label="视频局部编辑"
+              onClose={() => setVideoLocalEdit(null)}
+            />
+          }
+        >
+          <VideoLocalEditDialog
+            source={videoLocalEdit.source}
+            onClose={() => setVideoLocalEdit(null)}
+            onApply={applyVideoLocalEdit}
+          />
+        </Suspense>
       ) : null}
       <dialog
         ref={clearCanvasDialogRef}

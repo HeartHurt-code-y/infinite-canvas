@@ -8,17 +8,19 @@ use super::{
     asset_library::{
         AssetDelivery, AssetLibrary, AssetReadTrace, ResolveAsset, ResolvedAssetAccess,
     },
+    composer::VideoCompositionService,
     error::{BackendError, BackendResult},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
+    model_schema::is_seedance_25_video_model,
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
-        redact_request_value, redact_url_string,
+        redact_request_value, redact_url_string, seedance_video_task_type,
     },
     staging::{StagingLease, StagingService},
     storage::TaskExecutionRecord,
     types::{
         ExplicitMediaInput, GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment,
-        SaveStatus, StartGenerationCommand,
+        SaveStatus, StartGenerationCommand, VideoTaskType,
     },
 };
 
@@ -33,6 +35,7 @@ pub struct MediaResolver {
     assets: AssetLibrary,
     local_results: LocalResultService,
     staging: StagingService,
+    composer: VideoCompositionService,
 }
 
 pub struct ResolvedBundle {
@@ -245,12 +248,14 @@ impl MediaResolver {
         assets: AssetLibrary,
         local_results: LocalResultService,
         staging: StagingService,
+        composer: VideoCompositionService,
     ) -> Self {
         Self {
             providers,
             assets,
             local_results,
             staging,
+            composer,
         }
     }
 
@@ -259,6 +264,39 @@ impl MediaResolver {
         task: &TaskExecutionRecord,
         attempt_id: &str,
     ) -> BackendResult<ResolvedBundle> {
+        let mut staging_leases = Vec::new();
+        match self
+            .resolve_generation(task, attempt_id, &mut staging_leases)
+            .await
+        {
+            Ok(generation) => Ok(ResolvedBundle {
+                generation,
+                staging_leases,
+            }),
+            Err(error) => {
+                // resolve 未返回 bundle 时，任务服务无法取得租约；在这里回收已创建
+                // 的暂存对象，包含当前视频探测失败前刚取得的租约。
+                for lease in &staging_leases {
+                    if let Err(cleanup_error) = self.staging.cleanup_lease(lease).await {
+                        warn!(
+                            "[resolve] 失败任务暂存回收失败: taskId={}, jobId={}, error={}",
+                            task.id,
+                            lease.job_id,
+                            cleanup_error.runtime_record()
+                        );
+                    }
+                }
+                Err(error)
+            }
+        }
+    }
+
+    async fn resolve_generation(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        staging_leases: &mut Vec<StagingLease>,
+    ) -> BackendResult<ResolvedGeneration> {
         let command: StartGenerationCommand = serde_json::from_value(task.logical_request.clone())?;
         if command.generation_count != 1 {
             return Err(BackendError::validation(
@@ -283,9 +321,15 @@ impl MediaResolver {
             rendered_prompt,
             content,
         } = build_media_plan(&command.prompt, &command.explicit_media)?;
-        let mut staging_leases = Vec::new();
+        let task_type = seedance_video_task_type(command.video_task_type, &command.parameters);
+        let probe_task_videos = task.operation == GenerationOperation::VideoGeneration
+            && task
+                .remote_model_id_snapshot
+                .as_deref()
+                .is_some_and(is_seedance_25_video_model)
+            && matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend);
         for input in inputs {
-            let (resolved, lease) = self
+            let (mut resolved, lease) = self
                 .resolve_target(
                     task,
                     attempt_id,
@@ -323,6 +367,20 @@ impl MediaResolver {
             if let Some(lease) = lease {
                 staging_leases.push(lease);
             }
+            if probe_task_videos && resolved.media_type == MediaType::Video {
+                let minimum_seconds = if task_type == VideoTaskType::Edit {
+                    4
+                } else {
+                    2
+                };
+                let duration = self.probe_input_video_duration(task, attempt_id, input.target, &resolved).await.map_err(|error| {
+                    BackendError::validation(
+                        format!("无法确认参考视频「{}」的实际时长，当前任务要求 {minimum_seconds}–30 秒，请检查素材是否可读取", input.display_name),
+                        redact_request_value(&json!({ "media": resolved.archive(), "sourceError": error.runtime_record() })),
+                    )
+                })?;
+                resolved.duration_seconds = Some(duration);
+            }
             info!(
                 "[resolve] 媒体输入解析成功: taskId={}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
                 task.id,
@@ -354,18 +412,77 @@ impl MediaResolver {
         videos.sort_by_key(|media| media.type_position);
         audios.sort_by_key(|media| media.type_position);
 
-        Ok(ResolvedBundle {
-            generation: ResolvedGeneration {
-                rendered_prompt,
-                content,
-                images,
-                videos,
-                audios,
-                parameters: command.parameters,
-                operation_schema,
-            },
-            staging_leases,
+        Ok(ResolvedGeneration {
+            rendered_prompt,
+            content,
+            images,
+            videos,
+            audios,
+            parameters: command.parameters,
+            video_task_type: command.video_task_type,
+            operation_schema,
         })
+    }
+
+    async fn probe_input_video_duration(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        target: &MediaReferenceTarget,
+        media: &ResolvedMedia,
+    ) -> BackendResult<f64> {
+        match target {
+            MediaReferenceTarget::LocalFile { path, .. } => {
+                self.composer.probe_video_duration(path).await
+            }
+            MediaReferenceTarget::LocalResult {
+                generation_task_id,
+                result_index,
+                ..
+            } => {
+                let record = self
+                    .local_results
+                    .verify_local_result(generation_task_id, *result_index)
+                    .await?;
+                let path = record.final_path.ok_or_else(|| {
+                    BackendError::validation("本地视频结果没有可读取的文件", media.archive())
+                })?;
+                self.composer.probe_video_duration(&path).await
+            }
+            MediaReferenceTarget::Asset {
+                provider_connection_id,
+                asset_id,
+                ..
+            } => {
+                // Asset:// 是模型引用身份，不能交给 ffprobe。使用同一素材服务解析
+                // 可下载的真实字节，避免相信名称、封面或前端 duration 元数据。
+                let asset = self
+                    .assets
+                    .resolve(ResolveAsset {
+                        identity: super::types::CloudAssetIdentity {
+                            provider_connection_id: provider_connection_id.clone(),
+                            asset_id: asset_id.clone(),
+                        },
+                        expected_media_type: MediaType::Video,
+                        delivery: AssetDelivery::Bytes,
+                        trace: AssetReadTrace { task, attempt_id },
+                    })
+                    .await?;
+                let ResolvedAssetAccess::Bytes(bytes) = asset.access else {
+                    return Err(BackendError::protocol(
+                        "视频时长校验未取得可读取的素材字节",
+                        media.archive(),
+                    ));
+                };
+                self.composer.probe_video_bytes_duration(&bytes).await
+            }
+            MediaReferenceTarget::LocalAsset { .. } | MediaReferenceTarget::Url { .. } => {
+                let source = media.remote_reference.as_deref().ok_or_else(|| {
+                    BackendError::validation("视频没有可读取的来源", media.archive())
+                })?;
+                self.composer.probe_video_duration(source).await
+            }
+        }
     }
 
     async fn resolve_target(
@@ -434,6 +551,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: resolved.mime_type,
+                        duration_seconds: None,
                         byte_size: resolved.byte_size as u64,
                         sha256: resolved.sha256,
                         file_name: media_file_name(display_name, &resolved.file_extension),
@@ -479,6 +597,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
+                        duration_seconds: None,
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
@@ -549,6 +668,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
+                        duration_seconds: None,
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
@@ -599,6 +719,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: detected.mime_type().to_string(),
+                        duration_seconds: None,
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
@@ -642,6 +763,7 @@ impl MediaResolver {
                             "canvasNodeKey": canvas_node_key
                         }),
                         mime_type: String::new(),
+                        duration_seconds: None,
                         byte_size: 0,
                         sha256: String::new(),
                         file_name: media_file_name(display_name, url_extension),

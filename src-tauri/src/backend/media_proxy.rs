@@ -1,225 +1,453 @@
-//! 媒体代理自定义协议：把云端 TOS 临时签名 URL 转换为同源的 `assetproxy://` URL，
-//! 避免签名过期（2 小时）导致视频预览不可用。
-//!
-//! 前端把视频的 TOS 签名 URL 编码为：
-//! `assetproxy://video?src=<url_encoded_tos_url>`
-//! 本协议处理器收到请求后，用 reqwest 转发到上游 TOS URL，并把响应（含 Range 支持）
-//! 原样返回给前端。
+//! Native media protocol for HTTP(S) videos whose origins do not allow WebView CORS.
+//! This transports bytes; refreshing expiring provider URLs belongs to the asset library.
 
-use std::collections::HashMap;
+use std::time::Duration;
 
 use tauri::{
-    UriSchemeContext,
-    http::{
-        HeaderMap, HeaderName, HeaderValue, Method, Request, Response, Uri,
-        response::Builder as ResponseBuilder,
-    },
+    UriSchemeContext, UriSchemeResponder,
+    http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri},
 };
 use url::Url;
 
-/// 注册自定义协议时使用的 scheme 名。
 pub const MEDIA_PROXY_SCHEME: &str = "assetproxy";
 
-/// 协议处理入口：解析 `assetproxy://video?src=...` 请求，转发到上游 TOS URL。
-///
-/// Tauri 2 自定义协议回调签名：`Fn(UriSchemeContext, Request<Vec<u8>>) -> Response<T>`。
-/// 参数按值传递，返回值直接是 Response（错误时返回 502 响应而非 Err）。
+/// Use Tauri's persistent async runtime; never block a WebView callback or create a
+/// short-lived runtime whose I/O drivers have already been dropped.
 pub fn handle_media_proxy_request<R: tauri::Runtime>(
     _context: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
-) -> Response<Vec<u8>> {
-    // 只允许 GET 请求（视频播放用 GET + Range）。
-    if request.method() != Method::GET {
-        return method_not_allowed();
-    }
+    responder: UriSchemeResponder,
+) {
+    tauri::async_runtime::spawn(async move {
+        responder.respond(proxy_response(request).await);
+    });
+}
 
-    let uri = request.uri().clone();
-    let upstream_url = match extract_upstream_url(&uri) {
-        Some(url) => url,
-        None => return bad_request("missing or invalid 'src' query parameter"),
+async fn proxy_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+    if request.method() == Method::OPTIONS {
+        return build_response(StatusCode::NO_CONTENT, HeaderMap::new(), Vec::new());
+    }
+    if request.method() != Method::GET && request.method() != Method::HEAD {
+        return error_response(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed", false);
+    }
+    let is_head = request.method() == Method::HEAD;
+    let Some(upstream_url) = extract_upstream_url(request.uri()) else {
+        return error_response(StatusCode::BAD_REQUEST, "invalid_media_source", is_head);
     };
-
-    // 转发请求到上游，传递 Range 头（视频 seek 必需）。
-    // 自定义协议回调在 Tauri 运行时线程执行，用 block_on 驱动异步请求。
-    let result = tokio::runtime::Handle::try_current()
-        .ok()
-        .unwrap_or_else(|| {
-            tokio::runtime::Runtime::new()
-                .expect("failed to create tokio runtime")
-                .handle()
-                .clone()
-        })
-        .block_on(async move { fetch_upstream(&upstream_url, request.headers()).await });
-
-    match result {
-        Ok((status, headers, body)) => build_response(status, headers, body),
+    match fetch_upstream(&upstream_url, request.method().clone(), request.headers()).await {
+        Ok((status, mut headers, body)) => {
+            if status == StatusCode::RANGE_NOT_SATISFIABLE {
+                headers.insert("content-length", HeaderValue::from_static("0"));
+                build_response(status, headers, Vec::new())
+            } else if status.is_success() {
+                build_response(status, headers, body)
+            } else {
+                // Upstream error pages can echo signed URLs or authentication details.
+                let status = if status.is_redirection() {
+                    StatusCode::BAD_GATEWAY
+                } else {
+                    status
+                };
+                error_response(status, "upstream_media_error", is_head)
+            }
+        }
         Err(error) => {
-            tauri_plugin_log::log::warn!("media proxy upstream error: {error}");
-            bad_gateway(&error.to_string())
+            let kind = if error.is_timeout() {
+                "media_source_timeout"
+            } else if error.is_redirect() {
+                "media_source_redirect_error"
+            } else {
+                "media_source_unavailable"
+            };
+            // Reqwest's Display may include a signed URL; record only a fixed category.
+            tauri_plugin_log::log::warn!("media proxy failed: {kind}");
+            error_response(StatusCode::BAD_GATEWAY, kind, is_head)
         }
     }
 }
 
-/// 从 `assetproxy://video?src=<encoded>` URI 中提取并解码上游 URL。
-fn extract_upstream_url(uri: &Uri) -> Option<String> {
-    let path_and_query = uri.path_and_query()?.as_str();
-    // path_and_query 形如 "/video?src=https%3A%2F%2F..."
-    let query_start = path_and_query.find('?')?;
-    let query = &path_and_query[query_start + 1..];
-    let params: HashMap<&str, &str> = query
-        .split('&')
-        .filter_map(|pair| {
-            let (key, value) = pair.split_once('=')?;
-            Some((key, value))
-        })
-        .collect();
-
-    let encoded = params.get("src")?;
-    let decoded = percent_decode(encoded)?;
-    // 校验是 http/https URL。
-    let parsed = Url::parse(&decoded).ok()?;
-    if parsed.scheme() != "http" && parsed.scheme() != "https" {
-        return None;
-    }
-    Some(decoded)
+fn extract_upstream_url(uri: &Uri) -> Option<Url> {
+    let query = uri.query()?;
+    let source = url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == "src")?
+        .1;
+    let url = Url::parse(&source).ok()?;
+    valid_upstream(&url).then_some(url)
 }
 
-/// 简易 percent-decode（不依赖 serde_urlencoded，避免新增依赖）。
-fn percent_decode(input: &str) -> Option<String> {
-    let bytes = input.as_bytes();
-    let mut output = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'%' if i + 2 < bytes.len() => {
-                let hi = hex_digit(bytes[i + 1])?;
-                let lo = hex_digit(bytes[i + 2])?;
-                output.push((hi << 4) | lo);
-                i += 3;
-            }
-            b'+' => {
-                output.push(b' ');
-                i += 1;
-            }
-            other => {
-                output.push(other);
-                i += 1;
-            }
-        }
-    }
-    String::from_utf8(output).ok()
+fn valid_upstream(url: &Url) -> bool {
+    matches!(url.scheme(), "http" | "https")
+        && url.host_str().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
 }
 
-fn hex_digit(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
-    }
-}
-
-/// 用 reqwest 请求上游 URL，传递 Range 等必要请求头。
 async fn fetch_upstream(
-    url: &str,
+    url: &Url,
+    method: Method,
     request_headers: &HeaderMap,
-) -> Result<(u16, HeaderMap, Vec<u8>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(StatusCode, HeaderMap, Vec<u8>), reqwest::Error> {
     let client = reqwest::Client::builder()
-        // 不跟随重定向：TOS 签名 URL 若被重定向到其他 Host，签名会失效；
-        // 与 staging 专用客户端保持一致。
-        .redirect(reqwest::redirect::Policy::none())
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .connect_timeout(Duration::from_secs(15))
+        .read_timeout(Duration::from_secs(30))
+        .timeout(Duration::from_secs(120))
+        .referer(false)
+        .redirect(reqwest::redirect::Policy::custom(|attempt| {
+            if attempt.previous().len() >= 5 {
+                attempt.error("media redirect limit reached")
+            } else if !valid_upstream(attempt.url()) {
+                attempt.error("unsupported media redirect")
+            } else {
+                attempt.follow()
+            }
+        }))
         .build()?;
-
-    let mut request_builder = client.get(url);
-
-    // 透传 Range 头（视频 seek）。
-    if let Some(range) = request_headers.get("range") {
-        if let Ok(value) = range.to_str() {
-            request_builder = request_builder.header("Range", value);
+    let mut builder = client
+        .request(method, url.clone())
+        .header("accept-encoding", "identity");
+    // Intentionally do not forward WebView cookies, authorization, origin or referer.
+    // These two validators are needed for seek and resumed media requests.
+    for name in ["range", "if-range"] {
+        if let Some(value) = request_headers.get(name) {
+            builder = builder.header(name, value.clone());
         }
     }
-
-    let response = request_builder.send().await?;
-    let status = response.status().as_u16();
-
-    // 复制响应头（过滤掉 hop-by-hop 头）。
+    let response = builder.send().await?;
+    let status = response.status();
     let mut headers = HeaderMap::new();
-    for (key, value) in response.headers().iter() {
-        let name = key.as_str().to_lowercase();
-        if matches!(
-            name.as_str(),
-            "connection"
-                | "keep-alive"
-                | "proxy-authenticate"
-                | "proxy-authorization"
-                | "te"
-                | "trailers"
-                | "transfer-encoding"
-                | "upgrade"
-        ) {
-            continue;
-        }
-        if let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(key.as_str().as_bytes()),
-            HeaderValue::from_bytes(value.as_bytes()),
-        ) {
-            headers.insert(name, value);
+    // A response allowlist excludes hop-by-hop headers, Set-Cookie and upstream CORS.
+    // Preserve range metadata and validators, including on HEAD and 416 responses.
+    for name in [
+        "content-type",
+        "content-length",
+        "content-range",
+        "content-encoding",
+        "accept-ranges",
+        "etag",
+        "last-modified",
+        "cache-control",
+        "expires",
+    ] {
+        if let Some(value) = response.headers().get(name) {
+            headers.insert(name, value.clone());
         }
     }
-
     let body = response.bytes().await?.to_vec();
     Ok((status, headers, body))
 }
 
-/// 构建 Tauri HTTP 响应。
-fn build_response(status: u16, headers: HeaderMap, body: Vec<u8>) -> Response<Vec<u8>> {
-    let mut builder = ResponseBuilder::new().status(status);
-    for (key, value) in headers.iter() {
-        if let Ok(value_str) = value.to_str() {
-            builder = builder.header(key.as_str(), value_str);
+fn build_response(status: StatusCode, mut headers: HeaderMap, body: Vec<u8>) -> Response<Vec<u8>> {
+    headers.insert("access-control-allow-origin", HeaderValue::from_static("*"));
+    headers.insert(
+        "access-control-allow-methods",
+        HeaderValue::from_static("GET, HEAD, OPTIONS"),
+    );
+    headers.insert(
+        "access-control-allow-headers",
+        HeaderValue::from_static("Range, If-Range, Content-Type"),
+    );
+    headers.insert(
+        "access-control-expose-headers",
+        HeaderValue::from_static(
+            "Content-Length, Content-Range, Accept-Ranges, ETag, Last-Modified",
+        ),
+    );
+    headers.insert("allow", HeaderValue::from_static("GET, HEAD, OPTIONS"));
+    let mut response = Response::new(body);
+    *response.status_mut() = status;
+    *response.headers_mut() = headers;
+    response
+}
+
+fn error_response(status: StatusCode, error: &str, is_head: bool) -> Response<Vec<u8>> {
+    let mut headers = HeaderMap::new();
+    headers.insert("content-type", HeaderValue::from_static("application/json"));
+    headers.insert("cache-control", HeaderValue::from_static("no-store"));
+    let body = if is_head {
+        Vec::new()
+    } else {
+        serde_json::json!({ "error": error })
+            .to_string()
+            .into_bytes()
+    };
+    build_response(status, headers, body)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::{
+            Arc, Mutex,
+            atomic::{AtomicBool, Ordering},
+        },
+        thread,
+    };
+
+    struct HttpFixture {
+        url: String,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<thread::JoinHandle<()>>,
+    }
+
+    impl HttpFixture {
+        fn new() -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            listener.set_nonblocking(true).unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let captured = requests.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let stopping = stop.clone();
+            let worker = thread::spawn(move || {
+                while !stopping.load(Ordering::Relaxed) {
+                    let Ok((mut stream, _)) = listener.accept() else {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut buffer = Vec::new();
+                    loop {
+                        let mut chunk = [0u8; 1024];
+                        let Ok(count) = stream.read(&mut chunk) else {
+                            break;
+                        };
+                        if count == 0 {
+                            break;
+                        }
+                        buffer.extend_from_slice(&chunk[..count]);
+                        if buffer.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                            break;
+                        }
+                    }
+                    let request = String::from_utf8_lossy(&buffer).into_owned();
+                    let first = request.lines().next().unwrap_or_default();
+                    let path = first.split_whitespace().nth(1).unwrap_or("/");
+                    let is_head = first.starts_with("HEAD ");
+                    let lower = request.to_ascii_lowercase();
+                    let (status, mut headers, body) = match path {
+                        "/redirect" => (
+                            "302 Found",
+                            format!("Location: http://localhost:{port}/media\r\n"),
+                            "",
+                        ),
+                        "/loop" => ("302 Found", "Location: /loop\r\n".into(), ""),
+                        "/unsupported" => ("302 Found", "Location: file:///secret.mp4\r\n".into(), ""),
+                        "/fail" => ("503 Service Unavailable", String::new(), "secret-signed-url"),
+                        "/media" if lower.contains("range: bytes=1-3") => (
+                            "206 Partial Content",
+                            "Content-Range: bytes 1-3/5\r\n".into(),
+                            "ide",
+                        ),
+                        "/media" if lower.contains("range: bytes=99-") => (
+                            "416 Range Not Satisfiable",
+                            "Content-Range: bytes */5\r\n".into(),
+                            "",
+                        ),
+                        "/cors" => (
+                            "200 OK",
+                            "Access-Control-Allow-Origin: https://upstream.example\r\nSet-Cookie: secret=1\r\n".into(),
+                            "video",
+                        ),
+                        _ => ("200 OK", String::new(), "video"),
+                    };
+                    captured.lock().unwrap().push(request);
+                    headers.push_str(&format!(
+                        "Content-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"media-v1\"\r\nConnection: close\r\n",
+                        body.len(),
+                    ));
+                    let response = format!(
+                        "HTTP/1.1 {status}\r\n{headers}\r\n{}",
+                        if is_head { "" } else { body },
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self {
+                url: format!("http://127.0.0.1:{port}"),
+                requests,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn request(&self, method: Method, path: &str) -> tauri::http::request::Builder {
+            let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+            url.query_pairs_mut()
+                .append_pair("src", &format!("{}{path}", self.url));
+            Request::builder().method(method).uri(url.as_str())
         }
     }
-    // 确保 CORS 头（Tauri WebView 中自定义协议通常同源，但加上更安全）。
-    builder = builder.header("Access-Control-Allow-Origin", "*");
-    builder
-        .body(body)
-        .unwrap_or_else(|error| internal_error_response(&error.to_string()))
-}
 
-// --- 错误响应辅助 ---
+    impl Drop for HttpFixture {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Relaxed);
+            self.worker.take().unwrap().join().unwrap();
+        }
+    }
 
-fn bad_request(message: &str) -> Response<Vec<u8>> {
-    let body = format!("{{\"error\":\"bad_request\",\"message\":\"{message}\"}}");
-    ResponseBuilder::new()
-        .status(400)
-        .header("Content-Type", "application/json")
-        .body(body.into_bytes())
-        .unwrap_or_else(|_| internal_error_response("bad request"))
-}
+    #[tokio::test]
+    async fn follows_a_no_cors_http_redirect_and_preserves_the_media_body() {
+        let server = HttpFixture::new();
+        let response = proxy_response(
+            server
+                .request(Method::GET, "/redirect")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"video");
+        assert_eq!(response.headers()["content-type"], "video/mp4");
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert_eq!(server.requests.lock().unwrap().len(), 2);
+    }
 
-fn method_not_allowed() -> Response<Vec<u8>> {
-    ResponseBuilder::new()
-        .status(405)
-        .header("Content-Type", "application/json")
-        .body(b"{\"error\":\"method_not_allowed\"}".to_vec())
-        .unwrap_or_else(|_| internal_error_response("method not allowed"))
-}
+    #[tokio::test]
+    async fn forwards_range_and_if_range_but_not_webview_credentials_across_hosts() {
+        let server = HttpFixture::new();
+        let response = proxy_response(
+            server
+                .request(Method::GET, "/redirect")
+                .header("range", "bytes=1-3")
+                .header("if-range", "\"media-v1\"")
+                .header("cookie", "session=secret")
+                .header("authorization", "Bearer secret")
+                .header("referer", "https://app.example/?signed=secret")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.body(), b"ide");
+        assert_eq!(response.headers()["content-range"], "bytes 1-3/5");
+        assert_eq!(response.headers()["content-length"], "3");
+        for request in server.requests.lock().unwrap().iter() {
+            let request = request.to_ascii_lowercase();
+            assert!(request.contains("range: bytes=1-3"));
+            assert!(request.contains("if-range: \"media-v1\""));
+            assert!(!request.contains("secret"));
+        }
+    }
 
-fn bad_gateway(message: &str) -> Response<Vec<u8>> {
-    let escaped = message.replace('"', "\\\"").replace('\n', " ");
-    let body = format!("{{\"error\":\"bad_gateway\",\"message\":\"{escaped}\"}}");
-    ResponseBuilder::new()
-        .status(502)
-        .header("Content-Type", "application/json")
-        .body(body.into_bytes())
-        .unwrap_or_else(|_| internal_error_response("bad gateway"))
-}
+    #[tokio::test]
+    async fn preserves_head_and_unsatisfiable_ranges() {
+        let server = HttpFixture::new();
+        let head = proxy_response(
+            server
+                .request(Method::HEAD, "/media")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(head.status(), StatusCode::OK);
+        assert!(head.body().is_empty());
+        assert_eq!(head.headers()["content-length"], "5");
+        let range = proxy_response(
+            server
+                .request(Method::GET, "/media")
+                .header("range", "bytes=99-")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(range.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(range.headers()["content-range"], "bytes */5");
+        assert_eq!(range.headers()["access-control-allow-origin"], "*");
+    }
 
-fn internal_error_response(message: &str) -> Response<Vec<u8>> {
-    let body = format!("{{\"error\":\"internal_error\",\"message\":\"{message}\"}}");
-    ResponseBuilder::new()
-        .status(500)
-        .header("Content-Type", "application/json")
-        .body(body.into_bytes())
-        .unwrap_or_else(|_| Response::new(b"{\"error\":\"internal_error\"}".to_vec()))
+    #[tokio::test]
+    async fn replaces_upstream_cors_and_omits_cookies() {
+        let server = HttpFixture::new();
+        let response = proxy_response(
+            server
+                .request(Method::GET, "/cors")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(
+            response
+                .headers()
+                .get_all("access-control-allow-origin")
+                .iter()
+                .count(),
+            1
+        );
+        assert_eq!(response.headers()["access-control-allow-origin"], "*");
+        assert!(!response.headers().contains_key("set-cookie"));
+    }
+
+    #[tokio::test]
+    async fn bounds_redirects_and_redacts_upstream_failures() {
+        let server = HttpFixture::new();
+        for path in ["/loop", "/unsupported", "/fail"] {
+            let response =
+                proxy_response(server.request(Method::GET, path).body(Vec::new()).unwrap()).await;
+            assert!(response.status().is_server_error());
+            assert_eq!(response.headers()["access-control-allow-origin"], "*");
+            let body = String::from_utf8_lossy(response.body());
+            assert!(!body.contains("secret"));
+            assert!(!body.contains(&server.url));
+        }
+        assert!(server.requests.lock().unwrap().len() <= 8);
+    }
+
+    #[tokio::test]
+    async fn provides_cors_for_preflight_invalid_sources_and_unsupported_methods() {
+        for (method, status) in [
+            (Method::OPTIONS, StatusCode::NO_CONTENT),
+            (Method::POST, StatusCode::METHOD_NOT_ALLOWED),
+            (Method::GET, StatusCode::BAD_REQUEST),
+        ] {
+            let response = proxy_response(
+                Request::builder()
+                    .method(method)
+                    .uri("http://assetproxy.localhost/video")
+                    .body(Vec::new())
+                    .unwrap(),
+            )
+            .await;
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()["access-control-allow-origin"], "*");
+            assert_eq!(
+                response.headers()["access-control-allow-headers"],
+                "Range, If-Range, Content-Type"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_native_and_webview_proxy_uris_without_corrupting_signed_queries() {
+        let original = "https://cdn.example/video.mp4?token=a%2Bb&signature=x+y";
+        for prefix in [
+            "assetproxy://video",
+            "assetproxy://localhost/video",
+            "http://assetproxy.localhost/video",
+        ] {
+            let mut url = Url::parse(prefix).unwrap();
+            url.query_pairs_mut().append_pair("src", original);
+            let uri: Uri = url.as_str().parse().unwrap();
+            assert_eq!(extract_upstream_url(&uri).unwrap().as_str(), original);
+        }
+        for source in [
+            "file:///C:/video.mp4",
+            "data:video/mp4,test",
+            "https://user:secret@cdn.example/video",
+        ] {
+            let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+            url.query_pairs_mut().append_pair("src", source);
+            assert!(extract_upstream_url(&url.as_str().parse().unwrap()).is_none());
+        }
+    }
 }

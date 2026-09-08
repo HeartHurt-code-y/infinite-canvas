@@ -26,6 +26,7 @@ import {
   toMediaSrc,
 } from "../../lib/backend";
 import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib/modelCapabilities";
+import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./commerceWorkflowModel";
@@ -821,7 +822,7 @@ export interface OutputNodeData {
   /** 文本产物（Context-IR 等）为 "text"，无法作为媒体参考输入。 */
   readonly mediaType: "image" | "video" | "text";
   /** 旧文档未保存时默认为 generation。 */
-  readonly origin?: "generation" | "composition" | "download" | "frame_extract";
+  readonly origin?: "generation" | "composition" | "download" | "frame_extract" | "video_edit";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
   readonly finalPath: string | null;
   /** 供应商返回后、保存完成前的会话内预览地址；不写入画布文档。 */
@@ -1622,7 +1623,9 @@ export interface VideoNodeConfig {
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly catalogResolved: boolean;
-  /** 连接素材的显式角色：素材 key → 万相角色（first_frame/last_frame/reference_*）。 */
+  /** Seedance 2.5 本地任务选择；独立于各供应商开放的请求字段。 */
+  readonly seedanceTaskMode?: SeedanceTaskMode;
+  /** 连接素材的显式角色：素材 key → first_frame/last_frame/reference_*。 */
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
   readonly urlMedia?: readonly VideoUrlMediaInput[];
@@ -1971,7 +1974,7 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   if (node.mediaType === "text") return null;
   // 抽帧产物是带本地绝对路径的普通图片文件，直接作为 local_file 引用
   // （生成节点 / 提示词理解都可直接读取磁盘）。
-  if (node.origin === "frame_extract") {
+  if (node.origin === "frame_extract" || node.origin === "video_edit") {
     if (node.mediaType !== "image" || node.finalPath == null) return null;
     return {
       kind: "local_file",

@@ -1,0 +1,290 @@
+.video-local-edit-dialog {
+  width: min(58rem, calc(100vw - var(--space-lg) * 2));
+  max-height: calc(100dvh - var(--space-lg) * 2);
+  padding: 0;
+  overflow: auto;
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-panel);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-2);
+  box-shadow: var(--shadow-raised);
+}
+
+.video-local-edit-dialog::backdrop {
+  background: var(--color-scrim);
+}
+.video-local-edit-dialog__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md) var(--space-lg);
+  border-bottom: var(--rule-thin) solid var(--color-chrome-rule);
+}
+.video-local-edit-dialog__header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+.video-local-edit-dialog__header p {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+.video-local-edit-dialog__body {
+  display: grid;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+}
+.video-local-edit-dialog__hint {
+  margin: 0 0 var(--space-xs);
+  font-size: var(--text-xs);
+  color: var(--color-chrome-muted);
+  line-height: 1.6;
+}
+.video-local-edit-dialog__viewport {
+  position: relative;
+  height: min(44dvh, 30rem);
+  min-height: 10rem;
+  overflow: hidden;
+  border-radius: var(--radius-control);
+  background: var(--color-chrome);
+}
+.video-local-edit-dialog__viewport video,
+.video-local-edit-dialog__marks {
+  display: block;
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+.video-local-edit-dialog__marks {
+  touch-action: none;
+  cursor: crosshair;
+}
+.video-local-edit-dialog__marks[aria-disabled="true"] {
+  cursor: default;
+}
+.video-local-edit-dialog__loading {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  background: var(--color-scrim);
+  font-size: var(--text-base);
+  pointer-events: none;
+}
+.video-local-edit-dialog button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  gap: var(--space-xs);
+  min-height: 2.25rem;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-field);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.video-local-edit-dialog button[aria-pressed="true"] {
+  border-color: var(--color-accent);
+  background: color-mix(in oklch, var(--color-accent) 20%, var(--color-chrome-field));
+}
+.video-local-edit-dialog button:disabled,
+.video-local-edit-dialog fieldset:disabled button {
+  opacity: 0.5;
+  cursor: default;
+}
+.video-local-edit-dialog button:focus-visible,
+.video-local-edit-dialog input:focus-visible,
+.video-local-edit-dialog textarea:focus-visible,
+.video-local-edit-dialog summary:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+.video-local-edit-dialog__timeline {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+}
+.video-local-edit-dialog__timeline input {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--color-accent);
+}
+.video-local-edit-dialog__timeline output {
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.video-local-edit-dialog__toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+}
+.video-local-edit-dialog__separator {
+  width: 1px;
+  height: 1.4rem;
+  margin: 0 var(--space-xs);
+  background: var(--color-chrome-rule-2);
+}
+.video-local-edit-dialog .video-local-edit-dialog__color {
+  width: 2.25rem;
+  padding: 0;
+  border-radius: 50%;
+  background: var(--annotation-color);
+  color: var(--color-chrome);
+  border: 2px solid transparent;
+}
+.video-local-edit-dialog .video-local-edit-dialog__color[aria-pressed="true"] {
+  background: var(--annotation-color);
+  border-color: var(--color-chrome-ink);
+  box-shadow: inset 0 0 0 2px var(--color-chrome);
+}
+.video-local-edit-dialog__count {
+  margin-inline-start: auto;
+  padding: 0 var(--space-xs);
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+}
+.video-local-edit-dialog fieldset {
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  border: 0;
+}
+.video-local-edit-dialog__keyboard-region {
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+}
+.video-local-edit-dialog__keyboard-region summary {
+  padding: var(--space-xs) 0;
+  cursor: pointer;
+}
+.video-local-edit-dialog__keyboard-region fieldset {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
+}
+.video-local-edit-dialog__keyboard-region legend {
+  padding: var(--space-xs) 0;
+}
+.video-local-edit-dialog__keyboard-region label {
+  display: grid;
+  gap: var(--space-xs);
+}
+.video-local-edit-dialog__keyboard-region input {
+  width: 5.5rem;
+}
+.video-local-edit-dialog input[type="number"],
+.video-local-edit-dialog textarea {
+  min-height: 2.25rem;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-field);
+  font: inherit;
+}
+.video-local-edit-dialog__instruction {
+  display: grid;
+  gap: var(--space-sm);
+  font-size: var(--text-xs);
+}
+.video-local-edit-dialog__instruction legend {
+  padding: 0 0 var(--space-sm);
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+.video-local-edit-dialog__operation {
+  display: flex;
+  gap: var(--space-sm);
+}
+.video-local-edit-dialog__range {
+  display: flex;
+  align-items: end;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+.video-local-edit-dialog__range label {
+  display: grid;
+  gap: var(--space-xs);
+}
+.video-local-edit-dialog__range input {
+  width: 7rem;
+}
+.video-local-edit-dialog__range p {
+  margin: 0;
+  color: var(--color-error);
+}
+.video-local-edit-dialog textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  line-height: 1.6;
+}
+.video-local-edit-dialog__error {
+  margin: 0;
+  padding: var(--space-sm);
+  border-radius: var(--radius-control);
+  color: var(--color-error);
+  background: var(--color-error-soft);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.video-local-edit-dialog__footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: var(--space-md) var(--space-lg);
+  border-top: var(--rule-thin) solid var(--color-chrome-rule);
+}
+.video-local-edit-dialog__footer p {
+  flex: 1;
+  min-width: 12rem;
+  margin: 0;
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+  line-height: 1.6;
+}
+.video-local-edit-dialog .video-local-edit-dialog__apply {
+  background: var(--color-accent);
+  color: var(--color-accent-ink);
+  border-color: var(--color-accent);
+}
+@media (hover: hover) {
+  .video-local-edit-dialog button:hover:not(:disabled) {
+    border-color: var(--color-focus);
+  }
+}
+@media (max-width: 560px) {
+  .video-local-edit-dialog {
+    width: calc(100vw - var(--space-sm) * 2);
+    max-height: calc(100dvh - var(--space-sm) * 2);
+  }
+  .video-local-edit-dialog__header,
+  .video-local-edit-dialog__body,
+  .video-local-edit-dialog__footer {
+    padding-inline: var(--space-sm);
+  }
+  .video-local-edit-dialog__viewport {
+    height: 34dvh;
+  }
+  .video-local-edit-dialog__timeline output {
+    font-size: var(--text-2xs);
+  }
+}

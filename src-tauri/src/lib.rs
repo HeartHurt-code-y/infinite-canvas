@@ -24,7 +24,7 @@ pub fn run() {
     }
 
     tauri::Builder::default()
-        .register_uri_scheme_protocol(
+        .register_asynchronous_uri_scheme_protocol(
             backend::media_proxy::MEDIA_PROXY_SCHEME,
             backend::media_proxy::handle_media_proxy_request,
         )
@@ -83,6 +83,9 @@ pub fn run() {
             commands::run_prompt_node,
             commands::fetch_commerce_sources,
             commands::save_reverse_video_evidence,
+            backend::video_local_edit::save_video_edit_frame,
+            backend::video_edit_source::prepare_video_edit_source,
+            backend::video_edit_source::release_video_edit_source,
             commands::get_reverse_video_learning,
             commands::deliver_reverse_video,
             commands::normalize_cover_image,

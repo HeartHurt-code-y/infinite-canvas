@@ -998,6 +998,65 @@ impl AssetLibrary {
         }
     }
 
+    /// Refresh the authenticated asset record for a local preview, without a generation task.
+    pub async fn preview_content_url(
+        &self,
+        identity: CloudAssetIdentity,
+        expected_media_type: MediaType,
+    ) -> BackendResult<String> {
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: identity.provider_connection_id.clone(),
+                method: Method::POST,
+                path: "/v1/assets/get",
+                body: Some(json!({ "id": identity.asset_id })),
+            })
+            .await
+            .map_err(|error| match error {
+                BackendError::Transport(error) => BackendError::Transport(error.without_url()),
+                other => other,
+            })?;
+        // Preview failures must not expose signed media addresses or arbitrary upstream bodies.
+        if !(200..300).contains(&response.status) {
+            return Err(BackendError::protocol(
+                format!(
+                    "云素材读取失败（HTTP {}），请检查对应供应商的素材库连接。",
+                    response.status
+                ),
+                json!({ "httpStatus": response.status }),
+            ));
+        }
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let asset = parse_asset_entry(
+            &identity.provider_connection_id,
+            payload.get("data").unwrap_or(&payload),
+            Some(&identity.asset_id),
+        )
+        .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
+        if asset.id != identity.asset_id {
+            return Err(BackendError::validation(
+                "云素材返回的身份与所选视频不一致，请重新选择素材。",
+                json!({}),
+            ));
+        }
+        if asset.status != CloudAssetStatus::Ready {
+            return Err(BackendError::validation(
+                "云素材尚未就绪或不可读取。",
+                json!({}),
+            ));
+        }
+        if asset.kind != expected_media_type {
+            return Err(BackendError::validation(
+                "云素材的实际类型与引用不一致。",
+                json!({}),
+            ));
+        }
+        asset
+            .preview_url
+            .ok_or_else(|| BackendError::validation("云素材没有可下载的视频正文地址。", json!({})))
+    }
+
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
     /// The caller chooses intent; this implementation owns remote fields, status and content access.
     pub async fn resolve(&self, request: ResolveAsset<'_>) -> BackendResult<ResolvedAsset> {
@@ -1786,6 +1845,80 @@ mod tests {
     fn test_library(adapter: Arc<InMemoryAssetAdapter>, poll_policy: PollPolicy) -> AssetLibrary {
         let port: Arc<dyn AssetPort> = adapter;
         AssetLibrary::with_port(port, poll_policy)
+    }
+
+    #[tokio::test]
+    async fn video_preview_refreshes_provider_scoped_content_url_not_cover_or_asset_uri() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "data": { "id": "video-1", "name": "clip.mp4", "status": "ready", "type": "video",
+                    "url": "https://cdn.example/clip.mp4?signature=fresh",
+                    "cover_url": "https://cdn.example/cover.jpg", "asset_url": "asset://video-1" }
+            }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+        let url = library
+            .preview_content_url(
+                CloudAssetIdentity {
+                    provider_connection_id: "provider-original".into(),
+                    asset_id: "video-1".into(),
+                },
+                MediaType::Video,
+            )
+            .await
+            .unwrap();
+        assert_eq!(url, "https://cdn.example/clip.mp4?signature=fresh");
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].provider_connection_id, "provider-original");
+        assert_eq!(requests[0].path, "/v1/assets/get");
+        assert_eq!(requests[0].body, Some(json!({ "id": "video-1" })));
+    }
+
+    #[tokio::test]
+    async fn video_preview_rejects_unready_wrong_type_and_cover_only_records_without_disclosing_urls()
+     {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": { "id": "video-1", "status": "processing", "type": "video", "url": "https://cdn.example/clip?token=secret" } }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "video-1", "status": "ready", "type": "image", "url": "https://cdn.example/image?token=secret" } }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "video-1", "status": "ready", "type": "video", "cover_url": "https://cdn.example/cover?token=secret", "asset_url": "asset://video-1" } }),
+            ),
+            response(
+                403,
+                json!({ "message": "https://cdn.example/private?token=secret" }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "different-video", "status": "ready", "type": "video", "url": "https://cdn.example/wrong?token=secret" } }),
+            ),
+        ]));
+        let library = test_library(adapter, immediate_poll());
+        for _ in 0..5 {
+            let error = library
+                .preview_content_url(
+                    CloudAssetIdentity {
+                        provider_connection_id: "provider".into(),
+                        asset_id: "video-1".into(),
+                    },
+                    MediaType::Video,
+                )
+                .await
+                .unwrap_err();
+            assert!(
+                !serde_json::to_string(&error.payload())
+                    .unwrap()
+                    .contains("secret")
+            );
+        }
     }
 
     fn immediate_poll() -> PollPolicy {

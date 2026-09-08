@@ -129,6 +129,15 @@ struct MediaProbe {
     has_audio: bool,
 }
 
+/// 即使异步探测被取消，也移除临时媒体副本。
+struct VideoProbeFile(PathBuf);
+
+impl Drop for VideoProbeFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
 impl VideoCompositionService {
     pub fn new(
         downloads_dir: PathBuf,
@@ -297,6 +306,22 @@ impl VideoCompositionService {
                 }
             }
         }
+    }
+
+    /// 生成提交前复用真实媒体探测，不接受调用方填写的时长元数据。
+    pub async fn probe_video_duration(&self, source: &str) -> BackendResult<f64> {
+        self.ensure_ffmpeg().await?;
+        let probe = probe_media(&self.ffprobe_binary(), source).await?;
+        Ok(probe.duration_seconds)
+    }
+
+    pub async fn probe_video_bytes_duration(&self, bytes: &[u8]) -> BackendResult<f64> {
+        let temporary = VideoProbeFile(
+            std::env::temp_dir().join(format!("infinite-canvas-video-probe-{}", Uuid::new_v4())),
+        );
+        tokio::fs::write(&temporary.0, bytes).await?;
+        self.probe_video_duration(&temporary.0.to_string_lossy())
+            .await
     }
 
     /// 用 ffmpeg-sidecar 的平台感知下载逻辑把官方构建拉到自建引擎目录。
@@ -874,6 +899,9 @@ fn parse_probe_json(payload: &str) -> BackendResult<MediaProbe> {
 /// ffprobe 单个输入并提取合成所需的元数据。
 async fn probe_media(ffprobe: &Path, source: &str) -> BackendResult<MediaProbe> {
     let mut command = tokio::process::Command::new(ffprobe);
+    if is_remote_source(source) {
+        command.args(["-rw_timeout", REMOTE_READ_TIMEOUT_MICROS]);
+    }
     command
         .args([
             "-v".to_string(),
@@ -884,16 +912,26 @@ async fn probe_media(ffprobe: &Path, source: &str) -> BackendResult<MediaProbe> 
             "-show_streams".to_string(),
             source.to_string(),
         ])
-        .stdin(Stdio::null());
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().await?;
+    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
+        .await
+        .map_err(|_| {
+            BackendError::protocol(
+                "视频时长探测超时，请检查素材是否可读取",
+                json!({ "timeoutSeconds": 45 }),
+            )
+        })??;
     if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr)
+            .replace(source, &super::provider::redact_url_string(source));
         return Err(BackendError::protocol(
             "ffprobe exited with non-zero status",
             serde_json::json!({
                 "exitCode": output.status.code(),
-                "stderr": String::from_utf8_lossy(&output.stderr).trim(),
+                "stderr": stderr.trim(),
             }),
         ));
     }
@@ -1070,6 +1108,70 @@ mod tests {
         assert!(filter.contains("[0:a]aresample=48000"));
         assert!(filter.contains("anullsrc=r=48000:cl=stereo,atrim=duration=2.500"));
         assert!(filter.contains("[v0][a0][v1][a1]concat=n=2:v=1:a=1[vout][aout]"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires packaged FFmpeg binaries; run explicitly for media submission validation"]
+    async fn seedance_edit_duration_probe_reads_real_video() {
+        let workspace = tempfile::tempdir().unwrap();
+        let service = VideoCompositionService::new(
+            workspace.path().join("downloads"),
+            workspace.path().join("engine"),
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
+        )
+        .unwrap();
+        assert!(
+            service.has_builtin_engine(),
+            "prepare packaged FFmpeg first"
+        );
+        let source = workspace.path().join("actual-four-seconds.mp4");
+        let mut command = tokio::process::Command::new(service.ffmpeg_binary());
+        command
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=black:s=320x320:r=25",
+                "-t",
+                "4",
+                "-an",
+                "-c:v",
+                "libx264",
+                "-pix_fmt",
+                "yuv420p",
+            ])
+            .arg(&source)
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        #[cfg(windows)]
+        command.creation_flags(CREATE_NO_WINDOW);
+        let output = command.output().await.unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let duration = service
+            .probe_video_duration(&source.to_string_lossy())
+            .await
+            .unwrap();
+        assert!(
+            (duration - 4.0).abs() < 0.001,
+            "actual duration: {duration}"
+        );
+        let bytes = tokio::fs::read(source).await.unwrap();
+        assert_eq!(
+            service.probe_video_bytes_duration(&bytes).await.unwrap(),
+            duration
+        );
+        assert!(
+            service
+                .probe_video_bytes_duration(b"invalid media")
+                .await
+                .is_err()
+        );
     }
 
     #[test]

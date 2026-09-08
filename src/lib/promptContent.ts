@@ -185,6 +185,7 @@ export interface PromptContentEditorSession {
 export interface PromptContentModule {
   adoptEditor(nodeKey: string, session: PromptContentEditorSession | null): void;
   remove(nodeKey: string): PromptContentDocumentV1 | null;
+  restoreDocument(nodeKey: string, document: PromptContentDocumentV1): void;
   replaceText(
     nodeKey: string,
     text: string,
@@ -1097,6 +1098,14 @@ class PromptContentModuleImplementation implements PromptContentModule {
     }
     session.updateConnections(candidates);
     return session.replaceText(text);
+  }
+
+  restoreDocument(nodeKey: string, document: PromptContentDocumentV1): void {
+    const decoded = decodePersistedPromptContent(document);
+    if (decoded == null) throw new Error("提示内容存档无效。");
+    const session = this.sessions.get(nodeKey);
+    if (session) session.restore(decoded);
+    else this.pendingRestore.set(nodeKey, decoded);
   }
 
   preparePlainText(nodeKey: string): PromptPlainTextPreparation | null {

@@ -1,6 +1,7 @@
 import { convertFileSrc, invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import * as v from "valibot";
+import type { SeedanceTaskMode } from "./seedanceTasks";
 
 import {
   assetGroupSchema,
@@ -1109,6 +1110,8 @@ export interface ExplicitMediaInput {
 }
 
 export interface StartGenerationCommand {
+  /** 本地视频任务意图，仅用于参数校验及重试，不原样发送给供应商。 */
+  readonly videoTaskType?: SeedanceTaskMode;
   readonly workflowRunId?: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
