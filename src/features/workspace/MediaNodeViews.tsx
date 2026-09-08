@@ -2097,6 +2097,56 @@ export function CanvasResultNode({
   );
 }
 
+/** 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪。 */
+export function AutoSizeThumb({
+  previewUrl,
+  kind,
+  height = "2rem",
+  maxWidth = "6rem",
+}: {
+  readonly previewUrl: string | null;
+  readonly kind: string;
+  readonly height?: string;
+  readonly maxWidth?: string;
+}) {
+  const [failed, setFailed] = useState(false);
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const showImage = previewUrl != null && !failed && kind !== "audio" && kind !== "document";
+
+  const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget;
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      setAspectRatio(img.naturalWidth / img.naturalHeight);
+    }
+  };
+
+  const thumbStyle: CSSProperties = aspectRatio != null
+    ? { width: `min(${maxWidth}, calc(${height} * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
+    : { width: height };
+
+  return (
+    <span
+      className="auto-size-thumb"
+      style={{ ...thumbStyle, height }}
+      aria-hidden="true"
+    >
+      {showImage ? (
+        <img
+          src={toMediaProxyUrl(previewUrl) ?? previewUrl}
+          alt=""
+          draggable={false}
+          decoding="async"
+          loading="lazy"
+          onError={() => setFailed(true)}
+          onLoad={handleImageLoad}
+        />
+      ) : (
+        <AssetKindIcon kind={kind === "document" ? "text" : (kind as "image" | "video" | "audio" | "text")} size={16} />
+      )}
+    </span>
+  );
+}
+
 /** 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。 */
 function GenerationInputChips({
   inputs,
@@ -2123,6 +2173,7 @@ function GenerationInputChips({
             >
               {index + 1}
             </span>
+            <AutoSizeThumb previewUrl={input.previewUrl} kind={input.kind} height="1.75rem" maxWidth="5rem" />
             <span className="node-media-chip__name" title={input.name}>
               {input.name}
             </span>

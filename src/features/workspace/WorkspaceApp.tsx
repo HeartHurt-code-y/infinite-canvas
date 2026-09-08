@@ -4752,6 +4752,7 @@ export function WorkspaceApp() {
               kind: asset.kind,
               edgeId: edge.id,
               sourceLabel: "素材",
+              previewUrl: asset.previewUrl,
             }
           : {
               key: outputInput!.key,
@@ -4759,6 +4760,7 @@ export function WorkspaceApp() {
               kind: outputInput!.kind,
               edgeId: edge.id,
               sourceLabel: "产物",
+              previewUrl: outputInput!.previewUrl ?? null,
             },
       );
       map.set(edge.toKey, list);
@@ -5901,6 +5903,7 @@ export function WorkspaceApp() {
         name: asset.name,
         kind: asset.kind,
         promptNodeKey,
+        previewUrl: asset.previewUrl,
       }));
       if (inherited.length > 0) map.set(node.key, inherited);
     }

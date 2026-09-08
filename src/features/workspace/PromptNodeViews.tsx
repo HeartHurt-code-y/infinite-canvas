@@ -73,14 +73,30 @@ export function AssetKindIcon({
   return <WaveformIcon {...iconProps} />;
 }
 
-/** @ 候选缩略图：优先展示素材预览图，无图或加载失败时回退到类型图标。 */
+/** @ 候选缩略图：自动适应原始图片宽高比，完整显示不裁剪。 */
 function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidate }) {
   const [failed, setFailed] = useState(false);
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   const preview = candidate.previewUrl;
   const showImage = preview != null && !failed && candidate.kind !== "audio";
+
+  const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
+    const img = event.currentTarget;
+    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+      setAspectRatio(img.naturalWidth / img.naturalHeight);
+    }
+  };
+
+  // 限制最大宽度，避免宽图占用过多空间；高度固定为 2.75rem
+  const maxWidth = "8rem";
+  const thumbStyle = aspectRatio != null
+    ? { width: `min(${maxWidth}, calc(2.75rem * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
+    : undefined;
+
   return (
     <span
-      className={`prompt-mention__thumb${showImage ? "" : " prompt-mention__thumb--fallback"}`}
+      className={`prompt-mention__thumb prompt-mention__thumb--auto-size${showImage ? "" : " prompt-mention__thumb--fallback"}`}
+      style={thumbStyle}
       aria-hidden="true"
     >
       {showImage ? (
@@ -89,7 +105,9 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
           alt=""
           draggable={false}
           decoding="async"
+          loading="lazy"
           onError={() => setFailed(true)}
+          onLoad={handleImageLoad}
         />
       ) : (
         <AssetKindIcon kind={candidate.kind} size={20} />

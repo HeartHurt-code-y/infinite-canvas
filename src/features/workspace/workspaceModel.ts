@@ -170,6 +170,7 @@ export interface ConnectedAssetInput {
   readonly kind: AssetKind;
   readonly edgeId: string;
   readonly sourceLabel: "素材" | "产物";
+  readonly previewUrl: string | null;
 }
 
 /** 分镜节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
@@ -185,6 +186,7 @@ export interface InheritedAssetInput {
   readonly name: string;
   readonly kind: AssetKind;
   readonly promptNodeKey: string;
+  readonly previewUrl: string | null;
 }
 
 /** 图片/视频生成节点统一消费的媒体输入；可来自素材节点或已保存的生成产物。 */

@@ -2215,6 +2215,24 @@ svg[data-spin="true"] {
   border-radius: var(--radius-round);
 }
 
+/* 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
+.auto-size-thumb {
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  min-width: 1.75rem;
+  border-radius: calc(var(--radius-panel) * 0.5);
+  overflow: hidden;
+  background: var(--color-paper-3);
+}
+
+.auto-size-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+}
+
 .node-media-chip__name {
   min-width: 0;
   flex: 1;
@@ -8232,6 +8250,16 @@ svg[data-spin="true"] {
   height: 100%;
   object-fit: cover;
   display: block;
+}
+
+/* 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
+.prompt-mention__thumb--auto-size {
+  width: auto;
+  min-width: 2.75rem;
+}
+
+.prompt-mention__thumb--auto-size img {
+  object-fit: contain;
 }
 
 .prompt-mention__thumb--fallback {

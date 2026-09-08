@@ -1,12 +1,9 @@
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { toMediaProxyUrl } from "../../lib/mediaProxy";
-import { FileText } from "@phosphor-icons/react/FileText";
-import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
 import { Paperclip } from "@phosphor-icons/react/Paperclip";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { X } from "@phosphor-icons/react/X";
 import { useState } from "react";
 
+import { AutoSizeThumb } from "./MediaNodeViews";
 import {
   formatBytes,
   formatRawBackendError,
@@ -120,23 +117,12 @@ export function WorkflowReferenceMaterials({
         <ul>
           {materials.map((material) => (
             <li key={material.localPath}>
-              {material.kind === "image" ? (
-                <img
-                  src={toMediaSrc(material.localPath)}
-                  alt={material.displayName}
-                  loading="lazy"
-                />
-              ) : (
-                <span className="canvas-workflow-references__icon" aria-hidden="true">
-                  {material.kind === "audio" ? (
-                    <MusicNotes size={20} />
-                  ) : material.kind === "video" ? (
-                    <VideoCamera size={20} />
-                  ) : (
-                    <FileText size={20} />
-                  )}
-                </span>
-              )}
+              <AutoSizeThumb
+                previewUrl={material.kind === "image" ? toMediaSrc(material.localPath) : null}
+                kind={material.kind}
+                height="2.5rem"
+                maxWidth="6rem"
+              />
               <span>
                 <strong title={material.displayName}>{material.displayName}</strong>
                 <small>
@@ -182,19 +168,12 @@ export function WorkflowReferenceMaterials({
               })),
             ].map(({ input, key, label, action, remove, previewSrc }) => (
               <li key={key}>
-                {input.target.mediaType === "image" && previewSrc ? (
-                  <img src={toMediaProxyUrl(previewSrc) ?? previewSrc} alt={input.displayName} loading="lazy" />
-                ) : (
-                  <span className="canvas-workflow-references__icon" aria-hidden="true">
-                    {input.target.mediaType === "audio" ? (
-                      <MusicNotes size={20} />
-                    ) : input.target.mediaType === "video" ? (
-                      <VideoCamera size={20} />
-                    ) : (
-                      <Paperclip size={20} />
-                    )}
-                  </span>
-                )}
+                <AutoSizeThumb
+                  previewUrl={input.target.mediaType === "image" && previewSrc ? previewSrc : null}
+                  kind={input.target.mediaType}
+                  height="2.5rem"
+                  maxWidth="6rem"
+                />
                 <span>
                   <strong title={input.displayName}>{input.displayName}</strong>
                   <small>
