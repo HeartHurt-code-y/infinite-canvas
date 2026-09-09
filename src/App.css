@@ -7602,8 +7602,7 @@ svg[data-spin="true"] {
   display: block;
   width: 100%;
   height: auto;
-  aspect-ratio: 16 / 10;
-  object-fit: cover;
+  object-fit: contain;
   border-radius: calc(var(--radius-control) - 2px);
 }
 
