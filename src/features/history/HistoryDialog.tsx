@@ -14,6 +14,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
@@ -473,6 +474,53 @@ function HistoryLightbox({
 }
 
 type HistoryTab = "generation" | "workflow" | "remoteVideo";
+
+/** 历史记录生成结果缩略图：宽度 100%，高度按媒体原始比例自适应，object-fit: contain 保证不裁剪。 */
+function HistoryResultVisual({
+  src,
+  mediaType,
+  alt,
+}: {
+  readonly src: string;
+  readonly mediaType: "image" | "video";
+  readonly alt: string;
+}) {
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const containerStyle: CSSProperties =
+    aspectRatio != null ? { aspectRatio: `${aspectRatio}` } : {};
+
+  return (
+    <span className="history-result__visual history-result__visual--auto" style={containerStyle}>
+      {mediaType === "video" ? (
+        <video
+          src={src}
+          muted
+          playsInline
+          preload="metadata"
+          onLoadedMetadata={(event) => {
+            const video = event.currentTarget;
+            if (video.videoWidth > 0 && video.videoHeight > 0) {
+              setAspectRatio(video.videoWidth / video.videoHeight);
+            }
+          }}
+        />
+      ) : (
+        <img
+          src={src}
+          alt={alt}
+          loading="lazy"
+          draggable={false}
+          onLoad={(event) => {
+            const img = event.currentTarget;
+            if (img.naturalWidth > 0 && img.naturalHeight > 0) {
+              setAspectRatio(img.naturalWidth / img.naturalHeight);
+            }
+          }}
+        />
+      )}
+    </span>
+  );
+}
 
 const HISTORY_TABS: readonly { readonly id: HistoryTab; readonly label: string }[] = [
   { id: "generation", label: "生成任务" },
@@ -1125,29 +1173,19 @@ export function HistoryDialog({
                                   if (viewIndex >= 0) setLightboxIndex(viewIndex);
                                 }}
                               >
-                                <span className="history-result__visual">
-                                  {isViewable && isDesktopRuntime() ? (
-                                    result.mediaType === "video" ? (
-                                      <video
-                                        src={toMediaSrc(result.finalPath)}
-                                        muted
-                                        playsInline
-                                        preload="metadata"
-                                      />
-                                    ) : (
-                                      <img
-                                        src={toMediaSrc(result.finalPath)}
-                                        alt={`结果 ${result.resultIndex + 1}`}
-                                        loading="lazy"
-                                        draggable={false}
-                                      />
-                                    )
-                                  ) : (
+                                {isViewable && isDesktopRuntime() ? (
+                                  <HistoryResultVisual
+                                    src={toMediaSrc(result.finalPath)}
+                                    mediaType={result.mediaType === "video" ? "video" : "image"}
+                                    alt={`结果 ${result.resultIndex + 1}`}
+                                  />
+                                ) : (
+                                  <span className="history-result__visual">
                                     <span className="history-result__missing">
                                       {SAVE_STATUS_LABELS[result.saveStatus] ?? result.saveStatus}
                                     </span>
-                                  )}
-                                </span>
+                                  </span>
+                                )}
                                 <span className="history-result__facts">
                                   <span>
                                     结果 {result.resultIndex + 1} ·{" "}

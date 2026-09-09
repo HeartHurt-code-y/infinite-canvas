@@ -10938,6 +10938,11 @@ svg[data-spin="true"] {
   place-items: center;
 }
 
+.history-result__visual--auto {
+  aspect-ratio: auto;
+  width: 100%;
+}
+
 .history-result__visual img,
 .history-result__visual video {
   width: 100%;
