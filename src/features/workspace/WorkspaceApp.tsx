@@ -91,7 +91,11 @@ import type {
   PromptContentEditorSession,
   PromptContentIssue,
 } from "../../lib/promptContent";
-import { createPromptContentModule, stripMarkdown } from "../../lib/promptContent";
+import {
+  cleanGeneratedPrompt,
+  createPromptContentModule,
+  stripMarkdown,
+} from "../../lib/promptContent";
 import {
   composeVideosInOrder,
   composedVideoFileName,
@@ -3279,17 +3283,18 @@ export function WorkspaceApp({
           referenceInputs: videoMaterials,
         })
         .then((result) => {
+          const cleanedPrompt = cleanGeneratedPrompt(result.optimizedPrompt);
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
               ? {
                   ...item,
                   config: {
                     ...item.config,
-                    generatedPrompt: result.optimizedPrompt,
+                    generatedPrompt: cleanedPrompt,
                     conversation: [
                       ...(item.config.conversation ?? []),
                       { id: promptMessageId(), role: "user", content: sourcePrompt },
-                      { id: promptMessageId(), role: "assistant", content: result.optimizedPrompt },
+                      { id: promptMessageId(), role: "assistant", content: cleanedPrompt },
                     ],
                   },
                 }
@@ -3297,7 +3302,7 @@ export function WorkspaceApp({
           );
           frontendLog(
             "info",
-            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符`,
+            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符，清洗后 ${cleanedPrompt.length} 字符`,
           );
           toast.success("提示词已生成");
         })

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { MediaReferenceTarget } from "./backend";
 import {
+  cleanGeneratedPrompt,
   createPromptContentEditorSession,
   createPromptContentModule,
   decodePromptContentDocument,
@@ -718,5 +719,49 @@ describe("prompt content interface", () => {
       .join("");
     expect(plainText).not.toContain("@@");
     expect(plainText).not.toContain("@");
+  });
+});
+
+describe("cleanGeneratedPrompt", () => {
+  it("移除正文之后的「无需额外补问」类附加说明段落", () => {
+    const input = [
+      "生成一张16:9横版高清电影制作板，主题为「艾莉丝·伯雷亚斯·格雷拉特 剑士修炼记录」。",
+      "整体呈现写实奇幻电影前期制作板风格，布局简洁、分区明确。",
+      "",
+      "无需额外补问，角色外观、风格与修炼主题均已依据参考图完成设定，可直接用于生成制作板图片。",
+    ].join("\n\n");
+    const result = cleanGeneratedPrompt(input);
+    expect(result).not.toContain("无需额外补问");
+    expect(result).not.toContain("可直接用于生成");
+    expect(result).toContain("生成一张16:9横版高清电影制作板");
+    expect(result).toContain("整体呈现写实奇幻电影前期制作板风格");
+  });
+
+  it("不移除正文内容，即使正文较长", () => {
+    const input = [
+      "第一段正文内容，描述画面主体与氛围。",
+      "第二段正文内容，描述镜头与构图。",
+      "第三段正文内容，描述灯光与色彩。",
+    ].join("\n\n");
+    const result = cleanGeneratedPrompt(input);
+    expect(result).toBe(input);
+  });
+
+  it("移除段落开头的省略号（三点号）", () => {
+    const input = "……正文内容开始。\n\n…另一段正文。";
+    const result = cleanGeneratedPrompt(input);
+    expect(result).not.toMatch(/^[…。.]/);
+    expect(result).toContain("正文内容开始");
+    expect(result).toContain("另一段正文");
+  });
+
+  it("连续多个附加说明段落都移除", () => {
+    const input = ["正文内容。", "", "注：以上内容仅供参考。", "", "希望对你有帮助。"].join("\n\n");
+    const result = cleanGeneratedPrompt(input);
+    expect(result).toBe("正文内容。");
+  });
+
+  it("空字符串返回空字符串", () => {
+    expect(cleanGeneratedPrompt("")).toBe("");
   });
 });

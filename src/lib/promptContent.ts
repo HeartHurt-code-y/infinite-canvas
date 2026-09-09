@@ -1239,3 +1239,57 @@ export function stripMarkdown(text: string): string {
 
   return result.trim();
 }
+
+/**
+ * 清洗模型生成的提示词正文：移除正文之后的附加说明（元信息）与多余省略号。
+ *
+ * 模型常在提示词正文后追加类似「无需额外补问，…可直接用于生成…」的说明段落，
+ * 这类内容不属于提示词本身，输出到画布前应剥离。
+ *
+ * 策略：
+ * 1. 按段落分割，从末尾向前移除匹配附加说明模式的段落；
+ * 2. 移除段落开头的省略号（… / ... / 。。。）；
+ * 3. 修剪首尾空白与多余空行。
+ */
+export function cleanGeneratedPrompt(text: string): string {
+  if (!text) return "";
+  // 附加说明模式：出现在正文之后的元信息段落。
+  const trailingMetaPatterns = [
+    /^无需额外补问/i,
+    /^可直接用于/i,
+    /^以上(提示词|内容|是|为|已)/i,
+    /^注[：:]/,
+    /^说明[：:]/,
+    /^请注意/i,
+    /^希望(这|对|能)/i,
+    /^如果(你|您|需要)/i,
+    /^如有/i,
+    /^祝你/i,
+    /^谢谢/i,
+    /^以下是/i,
+    /^下面是/i,
+    /^根据(你的|您的|以上|参考图)/i,
+    /^已(经|根据|完成)/i,
+    /^这段(提示词|内容)/i,
+    /^该(提示词|内容)/i,
+    /^此(提示词|内容)/i,
+  ];
+  const isTrailingMeta = (paragraph: string): boolean => {
+    const trimmed = paragraph.trim().replace(/^[…。.\s]+/, "");
+    return trailingMetaPatterns.some((pattern) => pattern.test(trimmed));
+  };
+
+  const paragraphs = text.split(/\n{2,}/);
+  // 从末尾向前移除附加说明段落，遇到非附加说明段落即停止。
+  while (paragraphs.length > 0 && isTrailingMeta(paragraphs[paragraphs.length - 1]!)) {
+    paragraphs.pop();
+  }
+  let result = paragraphs.join("\n\n");
+
+  // 移除段落开头的省略号（三点号）。
+  result = result.replace(/^[…。.]{2,}\s*/gm, "");
+
+  // 合并多余空行并修剪。
+  result = result.replace(/\n{3,}/g, "\n\n").trim();
+  return result;
+}
