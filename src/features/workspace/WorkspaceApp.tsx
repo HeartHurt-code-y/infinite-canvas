@@ -4924,44 +4924,74 @@ export function WorkspaceApp({
   /** 从生成任务历史重新生成：创建全新任务；若来源节点仍在画布上，落下占位产物卡片。 */
   const regenerateGenerationFromHistory = useCallback(
     async (command: StartGenerationCommand): Promise<string> => {
-      const taskId = await generationClient.start(command);
       const genNode =
         command.canvasId === canvasId
           ? genNodes.find((node) => node.key === command.sourceNodeId)
           : undefined;
-      if (genNode != null) {
-        // 支持 n 参数的模型一次请求返回多张图：重新生成时也落下与数量相等的占位卡片，
-        // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
-        const batchCount =
-          typeof command.parameters?.["n"] === "number" && command.parameters["n"] > 1
-            ? Math.min(GPT_IMAGE_MAX_GENERATION_COUNT, Math.floor(command.parameters["n"]))
-            : 1;
-        for (let resultIndex = 0; resultIndex < batchCount; resultIndex += 1) {
-          const key = outputNodeKey();
-          addOutput((current) => ({
-            key,
-            resultKey: batchCount > 1 ? `${taskId}#${resultIndex}` : null,
-            sourceNodeId: genNode.key,
-            taskId,
-            mediaType: command.operation === "video_generation" ? "video" : "image",
-            finalPath: null,
-            previewSrc: null,
-            name: null,
-            ...nextOutputSlot(genNode, current),
-          }));
+      // 支持 n 参数的模型一次请求返回多张图；其余模型数量 > 1 时拆分为多个独立任务。
+      const supportsBatchCount =
+        typeof command.parameters?.["n"] === "number" && command.parameters["n"] > 1;
+      const taskCount = supportsBatchCount ? 1 : Math.max(1, command.generationCount ?? 1);
+      let firstTaskId = "";
+
+      for (let taskIndex = 0; taskIndex < taskCount; taskIndex += 1) {
+        const taskCommand = supportsBatchCount ? command : { ...command, generationCount: 1 };
+        const taskId = await generationClient.start(taskCommand);
+        if (taskIndex === 0) firstTaskId = taskId;
+
+        if (genNode != null) {
+          if (supportsBatchCount) {
+            // 单任务多结果：创建 n 个占位卡片，每个预设 resultKey=taskId#index
+            const batchCount = Math.min(
+              GPT_IMAGE_MAX_GENERATION_COUNT,
+              Math.floor(command.parameters!["n"] as number),
+            );
+            for (let resultIndex = 0; resultIndex < batchCount; resultIndex += 1) {
+              const key = outputNodeKey();
+              addOutput((current) => ({
+                key,
+                resultKey: `${taskId}#${resultIndex}`,
+                sourceNodeId: genNode.key,
+                taskId,
+                mediaType: command.operation === "video_generation" ? "video" : "image",
+                finalPath: null,
+                previewSrc: null,
+                name: null,
+                ...nextOutputSlot(genNode, current),
+              }));
+            }
+            frontendLog(
+              "info",
+              `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key} 数量=${batchCount}（单任务多结果）`,
+            );
+          } else {
+            // 多任务：每个任务一个占位卡片
+            const key = outputNodeKey();
+            addOutput((current) => ({
+              key,
+              resultKey: null,
+              sourceNodeId: genNode.key,
+              taskId,
+              mediaType: command.operation === "video_generation" ? "video" : "image",
+              finalPath: null,
+              previewSrc: null,
+              name: null,
+              ...nextOutputSlot(genNode, current),
+            }));
+            frontendLog(
+              "info",
+              `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key}（任务 ${taskIndex + 1}/${taskCount}）`,
+            );
+          }
+        } else {
+          frontendLog(
+            "info",
+            `[canvas] 历史重新生成未找到来源节点，仅保留任务记录: task=${taskId} node=${command.sourceNodeId}`,
+          );
         }
-        frontendLog(
-          "info",
-          `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key} 数量=${batchCount}`,
-        );
-      } else {
-        frontendLog(
-          "info",
-          `[canvas] 历史重新生成未找到来源节点，仅保留任务记录: task=${taskId} node=${command.sourceNodeId}`,
-        );
       }
       refreshTasks();
-      return taskId;
+      return firstTaskId;
     },
     [canvasId, addOutput, genNodes, refreshTasks],
   );
