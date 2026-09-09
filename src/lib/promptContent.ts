@@ -603,6 +603,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   updateConnections(candidates: readonly PromptReferenceCandidate[]): void {
     this.candidates = candidates;
     this.reconcileConnections();
+    // 连线集合变化后自动识别提示词中已有的 @素材名 纯文本，转换为高亮引用。
+    // fresh=false：不触发新引用的高亮动画，避免连接素材时闪烁。
+    this.autoResolve({ fresh: false });
   }
 
   acceptNativeInput(): PromptContentView {
