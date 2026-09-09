@@ -808,14 +808,14 @@ function submittedGenerationCommands(): Record<string, unknown>[] {
 /** 默认 invoke mock：单测可用 mockImplementation 包装并按需覆盖个别命令。 */
 /** 素材库分组 mock：创建分组后会被 refresh 拉回，贴近真实服务器行为。 */
 let mockAssetGroups: Array<{
-  id: number;
+  id: string;
   name: string;
   groupName: string;
   isDefault: boolean;
   assetCount: number;
 }> = [
-  { id: 0, name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
-  { id: 21, name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
+  { id: "0", name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
+  { id: "21", name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
 ];
 
 function baseInvokeImplementation(
@@ -878,7 +878,7 @@ function baseInvokeImplementation(
       return Promise.resolve(mockAssetGroups);
     case "create_asset_group": {
       const created = {
-        id: 22,
+        id: "22",
         name: "新分组",
         groupName: "新分组",
         isDefault: false,
@@ -910,8 +910,8 @@ beforeEach(() => {
   tauriCallbacks.clear();
   nextTauriCallbackId = 1;
   mockAssetGroups = [
-    { id: 0, name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
-    { id: 21, name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
+    { id: "0", name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
+    { id: "21", name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
   ];
   mediaPlayMock.mockResolvedValue(undefined);
   vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => mediaPlayMock());
@@ -6459,7 +6459,7 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
           pageNumber: 1,
           pageSize: 40,
           name: null,
-          groupId: 21,
+          groupId: "21",
           kind: "image",
         },
       });

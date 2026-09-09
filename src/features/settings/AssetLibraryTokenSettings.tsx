@@ -18,6 +18,30 @@ import {
 
 type CredentialClient = Pick<ProviderSettingsClient, "getCredential" | "setCredential">;
 
+/** 把 AK/SK 组合为后端期望的 JSON 形态。 */
+function composeArkToken(accessKey: string, secretKey: string): string {
+  return JSON.stringify({ accessKey: accessKey.trim(), secretKey: secretKey.trim() });
+}
+
+/** 从已保存的 JSON 令牌中解析出 AK/SK；解析失败时返回空字符串。 */
+function parseArkToken(token: string): { accessKey: string; secretKey: string } {
+  try {
+    const parsed: unknown = JSON.parse(token);
+    const record = parsed as Record<string, unknown> | null;
+    if (
+      typeof record === "object" &&
+      record !== null &&
+      typeof record["accessKey"] === "string" &&
+      typeof record["secretKey"] === "string"
+    ) {
+      return { accessKey: record["accessKey"], secretKey: record["secretKey"] };
+    }
+  } catch {
+    // 非 JSON 令牌（如魔芋 Bearer）按原样保留在单字段场景；此处返回空。
+  }
+  return { accessKey: "", secretKey: "" };
+}
+
 export function AssetLibraryTokenSettings({
   provider,
   providers = provider ? [provider] : [],
@@ -38,15 +62,23 @@ export function AssetLibraryTokenSettings({
   readonly onPullFailed?: (providerConnectionId: string, error: string) => void;
 }) {
   const inputId = useId();
+  const accessKeyId = `${inputId}-ak`;
+  const secretKeyId = `${inputId}-sk`;
   const hintId = `${inputId}-hint`;
   const errorId = `${inputId}-error`;
   const providerSelectId = `${inputId}-provider`;
+  // 非火山引擎连接沿用单字段 Bearer 令牌；火山引擎连接拆为 AK/SK 两字段。
   const [token, setToken] = useState("");
+  const [accessKey, setAccessKey] = useState("");
+  const [secretKey, setSecretKey] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [fieldError, setFieldError] = useState<string | null>(null);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
+
+  const isArk = provider?.adapterId === "volcengine_ark_v1";
+  const hasToken = isArk ? accessKey.trim() !== "" && secretKey.trim() !== "" : token.trim() !== "";
 
   useEffect(() => {
     let active = true;
@@ -55,6 +87,8 @@ export function AssetLibraryTokenSettings({
       if (!active) return "";
       setLoading(true);
       setToken("");
+      setAccessKey("");
+      setSecretKey("");
       setFieldError(null);
       setRequestError(null);
       setSuccessMessage(null);
@@ -74,7 +108,14 @@ export function AssetLibraryTokenSettings({
       }
     })()
       .then((savedToken) => {
-        if (active) setToken(savedToken);
+        if (!active) return;
+        if (provider?.adapterId === "volcengine_ark_v1") {
+          const parsed = parseArkToken(savedToken);
+          setAccessKey(parsed.accessKey);
+          setSecretKey(parsed.secretKey);
+        } else {
+          setToken(savedToken);
+        }
       })
       .finally(() => {
         if (active) setLoading(false);
@@ -85,10 +126,15 @@ export function AssetLibraryTokenSettings({
   }, [credentialClient, provider]);
 
   const validate = (): string | null => {
-    if (!token.trim()) return "请输入素材库令牌。";
     if (!provider) return "请先保存至少一条供应商连接，用它的 Base URL 访问素材接口。";
     if (!provider.enabled) return "请先在上方保存该供应商连接，再配置素材库令牌。";
     if (!provider.baseUrl.trim()) return "请先在上方填写并保存该供应商的 Base URL。";
+    if (provider.adapterId === "volcengine_ark_v1") {
+      if (!accessKey.trim()) return "请输入火山引擎 Access Key（AK）。";
+      if (!secretKey.trim()) return "请输入火山引擎 Secret Key（SK）。";
+    } else if (!token.trim()) {
+      return "请输入素材库令牌。";
+    }
     return null;
   };
 
@@ -99,15 +145,24 @@ export function AssetLibraryTokenSettings({
     setSuccessMessage(null);
     if (validationError || !provider) return;
 
+    const normalizedToken =
+      provider.adapterId === "volcengine_ark_v1"
+        ? composeArkToken(accessKey, secretKey)
+        : token.trim();
+
     onPullStarted(provider.id);
     setSaving(true);
     try {
-      const normalizedToken = token.trim();
       await credentialClient.setCredential({
         credentialRef: assetLibraryCredentialRef(provider.id),
         secret: normalizedToken,
       });
-      setToken(normalizedToken);
+      if (provider.adapterId === "volcengine_ark_v1") {
+        setAccessKey(accessKey.trim());
+        setSecretKey(secretKey.trim());
+      } else {
+        setToken(normalizedToken);
+      }
       const assets = await libraryClient.list({ providerConnectionId: provider.id });
       onAssetsLoaded(provider.id, assets);
       setSuccessMessage(`令牌已保存，并拉取到 ${assets.length} 个素材。`);
@@ -132,16 +187,16 @@ export function AssetLibraryTokenSettings({
         </div>
         <span
           className="asset-token-status"
-          data-state={loading ? "loading" : token.trim() ? "configured" : "empty"}
+          data-state={loading ? "loading" : hasToken ? "configured" : "empty"}
         >
           {loading ? (
             <CircleNotch size={13} weight="bold" aria-hidden="true" />
-          ) : token.trim() ? (
+          ) : hasToken ? (
             <CheckCircle size={13} weight="fill" aria-hidden="true" />
           ) : (
             <WarningCircle size={13} weight="fill" aria-hidden="true" />
           )}
-          {loading ? "读取中" : token.trim() ? "已配置" : "未配置"}
+          {loading ? "读取中" : hasToken ? "已配置" : "未配置"}
         </span>
       </div>
 
@@ -170,25 +225,62 @@ export function AssetLibraryTokenSettings({
       ) : null}
 
       <div className="asset-token-settings__control">
-        <label htmlFor={inputId}>素材库令牌值</label>
+        {isArk ? (
+          <>
+            <label htmlFor={accessKeyId}>Access Key（AK）</label>
+            <input
+              id={accessKeyId}
+              type="text"
+              value={accessKey}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="输入火山引擎 Access Key，例如 AKLT…"
+              aria-describedby={`${hintId}${fieldError ? ` ${errorId}` : ""}`}
+              aria-invalid={fieldError ? "true" : undefined}
+              onChange={(event) => {
+                setAccessKey(event.target.value);
+                if (fieldError && event.target.value.trim()) setFieldError(null);
+              }}
+            />
+            <label htmlFor={secretKeyId}>Secret Key（SK）</label>
+            <input
+              id={secretKeyId}
+              type="password"
+              value={secretKey}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="输入火山引擎 Secret Key"
+              aria-describedby={`${hintId}${fieldError ? ` ${errorId}` : ""}`}
+              aria-invalid={fieldError ? "true" : undefined}
+              onChange={(event) => {
+                setSecretKey(event.target.value);
+                if (fieldError && event.target.value.trim()) setFieldError(null);
+              }}
+            />
+          </>
+        ) : (
+          <>
+            <label htmlFor={inputId}>素材库令牌值</label>
+            <input
+              id={inputId}
+              type="text"
+              value={token}
+              autoComplete="off"
+              spellCheck={false}
+              placeholder="输入素材库对应的 Bearer 令牌"
+              aria-describedby={`${hintId}${fieldError ? ` ${errorId}` : ""}`}
+              aria-invalid={fieldError ? "true" : undefined}
+              onChange={(event) => {
+                setToken(event.target.value);
+                if (fieldError && event.target.value.trim()) setFieldError(null);
+              }}
+              onBlur={() => {
+                if (!token.trim()) setFieldError("请输入素材库令牌。");
+              }}
+            />
+          </>
+        )}
         <div>
-          <input
-            id={inputId}
-            type="text"
-            value={token}
-            autoComplete="off"
-            spellCheck={false}
-            placeholder="输入素材库对应的 Bearer 令牌"
-            aria-describedby={`${hintId}${fieldError ? ` ${errorId}` : ""}`}
-            aria-invalid={fieldError ? "true" : undefined}
-            onChange={(event) => {
-              setToken(event.target.value);
-              if (fieldError && event.target.value.trim()) setFieldError(null);
-            }}
-            onBlur={() => {
-              if (!token.trim()) setFieldError("请输入素材库令牌。");
-            }}
-          />
           <button
             type="button"
             className="asset-token-save-action"
@@ -209,11 +301,13 @@ export function AssetLibraryTokenSettings({
           </button>
         </div>
         <small id={hintId}>
-          {provider?.enabled && provider.baseUrl.trim()
-            ? `通过「${provider.displayName}」的 Base URL 访问素材接口；令牌只保存在 Windows 凭据管理器。`
-            : provider
-              ? "请先在上方填写并保存该供应商的 Base URL，再配置素材库令牌。"
-              : "请先保存供应商连接，再配置素材库令牌。"}
+          {isArk
+            ? `通过「${provider?.displayName ?? ""}」的火山引擎方舟素材资产接口访问素材库；AK 与 SK 分别输入，保存时组合为 JSON，只保存在 Windows 凭据管理器。`
+            : provider?.enabled && provider.baseUrl.trim()
+              ? `通过「${provider.displayName}」的 Base URL 访问素材接口；令牌只保存在 Windows 凭据管理器。`
+              : provider
+                ? "请先在上方填写并保存该供应商的 Base URL，再配置素材库令牌。"
+                : "请先保存供应商连接，再配置素材库令牌。"}
         </small>
         {fieldError ? (
           <small id={errorId} className="asset-token-settings__field-error">

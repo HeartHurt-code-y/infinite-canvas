@@ -951,7 +951,8 @@ impl StagingService {
                     public_url: lease.get_url.clone(),
                     media_type: job.media_type,
                     display_name: import_target.name.clone(),
-                    group_id: import_target.group_id,
+                    // 真人平台分组 ID（魔芋数值）转字符串形态，由方言各自解析/透传。
+                    group_id: import_target.group_id.map(|id| id.to_string()),
                 },
                 Some(Arc::new(import_progress)),
             )

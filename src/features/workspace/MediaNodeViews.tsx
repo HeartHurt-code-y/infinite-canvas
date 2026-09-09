@@ -14,7 +14,14 @@ import { TextT } from "@phosphor-icons/react/TextT";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type CSSProperties,
+  type RefObject,
+} from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -1358,7 +1365,13 @@ function useMediaThumbnailSrc(finalPath: string | null): string | null {
 }
 
 /** 抽帧结果单帧缩略图：成批本地图片走缩略图管线，避免逐帧全量解码。 */
-function FrameExtractorThumb({ finalPath, label }: { readonly finalPath: string; readonly label: string }) {
+function FrameExtractorThumb({
+  finalPath,
+  label,
+}: {
+  readonly finalPath: string;
+  readonly label: string;
+}) {
   const thumbnailSrc = useMediaThumbnailSrc(finalPath);
   return <img src={thumbnailSrc ?? toMediaSrc(finalPath)} alt={label} draggable={false} />;
 }
@@ -1531,14 +1544,7 @@ export function CanvasAssetNode({
         })
         .catch(() => undefined);
     },
-    [
-      node.assetId,
-      node.key,
-      node.kind,
-      node.providerConnectionId,
-      node.source,
-      onRefreshMediaUrls,
-    ],
+    [node.assetId, node.key, node.kind, node.providerConnectionId, node.source, onRefreshMediaUrls],
   );
   return (
     <div

@@ -756,7 +756,9 @@ pub struct CloudAssetRecord {
     pub preview_url: Option<String>,
     pub asset_url: Option<String>,
     pub cover_url: Option<String>,
-    pub group_id: Option<i64>,
+    /// 所属云端素材库分组 ID。魔芋平台为数值 ID 的字符串形态，火山引擎为
+    /// `asset-group-…` 形态；跨方言统一按字符串传递。
+    pub group_id: Option<String>,
 }
 
 /// 连通性测试的统一结果。`ok` 表示请求到达服务端并通过鉴权；
@@ -782,7 +784,8 @@ pub struct AssetListCommand {
     pub page_number: Option<u32>,
     pub page_size: Option<u32>,
     pub name: Option<String>,
-    pub group_id: Option<i64>,
+    /// 所属云端素材库分组 ID（字符串形态，兼容魔芽数值 ID 与火山引擎组 ID）。
+    pub group_id: Option<String>,
     /// 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现。
     pub kind: Option<MediaType>,
 }
@@ -844,16 +847,17 @@ pub struct DeleteRealPersonGroupCommand {
     pub id: i64,
 }
 
-/// 云端素材库分组（`GET /v1/assets/groups`）。
+/// 云端素材库分组（魔芋 `GET /v1/assets/groups` / 火山引擎 ListAssetGroups）。
+/// `id` 统一为字符串：魔芋为数值 ID 的字符串形态，火山引擎为 `asset-group-…`。
 /// `name` 是上游返回的纯展示名（不含 `user-{uid}-token-{tid}-` 前缀），前端只展示该字段；
-/// `group_name` 是带令牌前缀的全名，仅用于诊断。
+/// `group_name` 是带令牌前缀的全名（火山方言下等于 `name`），仅用于诊断。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AssetGroupRecord {
-    pub id: i64,
+    pub id: String,
     /// 纯展示名（上游已去除令牌前缀），前端只展示该字段。
     pub name: String,
-    /// 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。
+    /// 带 `user-{uid}-token-{tid}-` 前缀的全名（火山方言下等于 `name`），仅用于诊断。
     pub group_name: String,
     pub is_default: bool,
     pub asset_count: u64,
@@ -881,6 +885,29 @@ pub struct RenameAssetCommand {
     pub id: String,
     /// 新名称，上限 64 字符。
     pub name: String,
+}
+
+/// 更新云端素材库分组信息（火山引擎 `UpdateAssetGroup`：名称/描述）。
+/// `name` 与 `description` 至少提供一个；均上限见火山引擎文档（64/300 字符）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UpdateAssetGroupCommand {
+    pub provider_connection_id: String,
+    /// 云端素材库分组 ID（字符串形态）。
+    pub id: String,
+    /// 新名称，上限 64 字符；`None` 表示不修改。
+    pub name: Option<String>,
+    /// 新描述，上限 300 字符；`None` 表示不修改。
+    pub description: Option<String>,
+}
+
+/// 删除云端素材库分组及其全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteAssetGroupCommand {
+    pub provider_connection_id: String,
+    /// 云端素材库分组 ID（字符串形态）。
+    pub id: String,
 }
 
 /// 按素材身份重新向供应商读取关键帧封面 URL（自动续签过期的签名地址）。

@@ -18,19 +18,22 @@ use url::Url;
 
 use super::{
     error::{BackendError, BackendResult},
-    provider::ProviderRuntime,
+    provider::{ARK_ADAPTER_ID, ProviderRuntime},
     storage::TaskExecutionRecord,
     types::{
         AssetGroupRecord, AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
         CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
-        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
-        MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RefreshAssetCoverCommand, RefreshAssetMediaCommand,
-        RenameAssetCommand,
+        DeleteAssetGroupCommand, DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand,
+        ListAssetGroupsCommand, MediaType, RawProviderResponse, RealPersonAuthLink,
+        RealPersonGroup, RealPersonProviderCommand, RefreshAssetCoverCommand,
+        RefreshAssetMediaCommand, RenameAssetCommand, UpdateAssetGroupCommand,
     },
 };
 
 const UPLOAD_GROUP_NAME: &str = "无限画布上传";
+/// 火山引擎方舟素材组的类型：桌面端上传/管理的素材统一落在 AIGC（虚拟人像）组。
+/// Ark ListAssets / ListAssetGroups / CreateAssetGroup 均要求或使用该字段。
+const ARK_GROUP_TYPE: &str = "AIGC";
 const IMPORT_POLL_FAILURE_LIMIT: u32 = 5;
 const IMPORT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const IMPORT_POLL_TIMEOUT: Duration = Duration::from_secs(300);
@@ -47,6 +50,24 @@ const SUBMIT_MAX_RETRIES: u32 = 3;
 const SUBMIT_RETRY_BASE_DELAY_MS: u64 = 1000;
 
 type PortFuture<T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send>>;
+
+/// 云端素材库的接口方言：同一套素材域操作在不同上游有不同的请求契约。
+///
+/// - `Moyu`：OpenAI 兼容路径风格（`/v1/assets/list` 等 + Bearer 令牌）；
+/// - `VolcengineArk`：火山引擎方舟 OpenAPI（`?Action=ListAssets&Version=…` + V4 签名）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AssetDialect {
+    Moyu,
+    VolcengineArk,
+}
+
+/// 火山引擎 Ark OpenAPI 请求（Action + JSON body），由 ProviderAssetAdapter 签名转发。
+#[derive(Debug, Clone)]
+struct ArkAssetRequest {
+    provider_connection_id: String,
+    action: &'static str,
+    body: Value,
+}
 
 #[derive(Debug, Clone)]
 struct RemoteAssetRequest {
@@ -77,6 +98,12 @@ trait AssetPort: Send + Sync {
     fn send(&self, request: RemoteAssetRequest) -> PortFuture<RawProviderResponse>;
 
     fn send_multipart(&self, request: MultipartAssetRequest) -> PortFuture<RawProviderResponse>;
+
+    /// 发送一次火山引擎 Ark OpenAPI 请求（已由实现方完成 V4 签名）。
+    fn send_ark(&self, request: ArkAssetRequest) -> PortFuture<RawProviderResponse>;
+
+    /// 解析素材库连接使用的接口方言（依据供应商连接的 adapter_id）。
+    fn dialect(&self, provider_connection_id: &str) -> BackendResult<AssetDialect>;
 
     /// 素材库网关判定：给定 provider_connection_id 对应的 base_url 是否为海外平台。
     /// 海外平台（如 konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传。
@@ -138,6 +165,29 @@ impl AssetPort for ProviderAssetAdapter {
                     request.file_size,
                 )
                 .await
+        })
+    }
+
+    fn send_ark(&self, request: ArkAssetRequest) -> PortFuture<RawProviderResponse> {
+        let providers = self.providers.clone();
+        Box::pin(async move {
+            providers
+                .raw_ark_action_request(
+                    &request.provider_connection_id,
+                    request.action,
+                    &request.body,
+                )
+                .await
+        })
+    }
+
+    fn dialect(&self, provider_connection_id: &str) -> BackendResult<AssetDialect> {
+        let context = self
+            .providers
+            .resolve_asset_library(provider_connection_id)?;
+        Ok(match context.adapter_id.as_str() {
+            ARK_ADAPTER_ID => AssetDialect::VolcengineArk,
+            _ => AssetDialect::Moyu,
         })
     }
 
@@ -240,7 +290,9 @@ pub struct ImportStagedAsset {
     pub public_url: String,
     pub media_type: MediaType,
     pub display_name: Option<String>,
-    pub group_id: Option<i64>,
+    /// 目标云端素材库分组 ID（字符串形态）。魔芋方言解析为正整数平台分组；
+    /// 火山方言直接作为 `GroupId` 使用。`None` 时按方言各自发现/创建上传分组。
+    pub group_id: Option<String>,
 }
 
 /// 导入临时文件守卫：作用域结束（含错误路径）时删除落盘文件。
@@ -347,6 +399,9 @@ impl AssetLibrary {
     /// 跳过 `(page_number-1)*page_size` 条命中后收集一页；扫描在命中数集齐、
     /// 上游翻完或到达 [`KIND_SCAN_PAGE_CAP`] 时提前结束。
     pub async fn browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
+        if self.dialect(&query.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self.ark_browse(query).await;
+        }
         let page_number = query.page_number.unwrap_or(1).max(1);
         let page_size = query.page_size.unwrap_or(100).clamp(1, 100);
         let Some(kind) = query.kind else {
@@ -380,6 +435,26 @@ impl AssetLibrary {
             .collect())
     }
 
+    /// 解析素材库连接的接口方言。
+    fn dialect(&self, provider_connection_id: &str) -> BackendResult<AssetDialect> {
+        self.port.dialect(provider_connection_id)
+    }
+
+    /// 真人素材 H5 授权契约仅存在于魔芋方言；火山引擎连接调用时返回明确错误。
+    fn require_moyu_dialect(
+        &self,
+        provider_connection_id: &str,
+        operation: &str,
+    ) -> BackendResult<()> {
+        match self.port.dialect(provider_connection_id)? {
+            AssetDialect::Moyu => Ok(()),
+            AssetDialect::VolcengineArk => Err(BackendError::validation(
+                "火山引擎素材库不支持真人素材 H5 授权流程",
+                json!({ "operation": operation, "providerConnectionId": provider_connection_id }),
+            )),
+        }
+    }
+
     /// 发起一次上游 `/v1/assets/list` 分页请求并解析为规范素材记录（跨响应去重）。
     async fn browse_upstream_page(
         &self,
@@ -399,7 +474,13 @@ impl AssetLibrary {
         {
             body.insert("name".into(), value.into());
         }
-        if let Some(value) = query.group_id {
+        // 魔芋契约的 group_id 为数值：字符串分组 ID 仅在可解析为整数时透传
+        // （火山形态的组 ID 在魔芋方言下天然查不到，行为等同未命中）。
+        if let Some(value) = query
+            .group_id
+            .as_deref()
+            .and_then(|group| group.trim().parse::<i64>().ok())
+        {
             body.insert("group_id".into(), value.into());
         }
         let response = self
@@ -423,6 +504,7 @@ impl AssetLibrary {
     ) -> BackendResult<RealPersonAuthLink> {
         let provider_connection_id =
             require_provider_connection_id(&command.provider_connection_id)?;
+        self.require_moyu_dialect(provider_connection_id, "create real-person auth link")?;
         let artist_name = command.artist_name.trim();
         if artist_name.is_empty() {
             return Err(BackendError::validation(
@@ -492,6 +574,7 @@ impl AssetLibrary {
     ) -> BackendResult<Vec<RealPersonGroup>> {
         let provider_connection_id =
             require_provider_connection_id(&command.provider_connection_id)?;
+        self.require_moyu_dialect(provider_connection_id, "list real-person groups")?;
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -521,6 +604,7 @@ impl AssetLibrary {
     ) -> BackendResult<String> {
         let provider_connection_id =
             require_provider_connection_id(&command.provider_connection_id)?;
+        self.require_moyu_dialect(provider_connection_id, "delete real-person asset")?;
         let id = command.id.trim();
         if id.is_empty() || id.starts_with("asset://") {
             return Err(BackendError::validation(
@@ -561,6 +645,7 @@ impl AssetLibrary {
     ) -> BackendResult<()> {
         let provider_connection_id =
             require_provider_connection_id(&command.provider_connection_id)?;
+        self.require_moyu_dialect(provider_connection_id, "delete real-person group")?;
         if command.id <= 0 {
             return Err(BackendError::validation(
                 "real-person group deletion requires a positive platform group id",
@@ -586,6 +671,11 @@ impl AssetLibrary {
     pub async fn delete_asset(&self, command: DeleteAssetCommand) -> BackendResult<String> {
         let provider_connection_id =
             require_provider_connection_id(&command.provider_connection_id)?;
+        if self.dialect(provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_delete_asset(provider_connection_id, command.id)
+                .await;
+        }
         let id = command
             .id
             .trim()
@@ -633,6 +723,11 @@ impl AssetLibrary {
         command: ListAssetGroupsCommand,
     ) -> BackendResult<Vec<AssetGroupRecord>> {
         require_asset_library_connection(&command.provider_connection_id)?;
+        if self.dialect(&command.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_list_asset_groups(&command.provider_connection_id)
+                .await;
+        }
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -658,6 +753,11 @@ impl AssetLibrary {
         command: CreateAssetGroupCommand,
     ) -> BackendResult<AssetGroupRecord> {
         require_asset_library_connection(&command.provider_connection_id)?;
+        if self.dialect(&command.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_create_asset_group(&command.provider_connection_id, &command.name)
+                .await;
+        }
         let name = command.name.trim();
         if name.is_empty() {
             return Err(BackendError::validation(
@@ -705,7 +805,8 @@ impl AssetLibrary {
             .map(|d| -(d.as_millis() as i64))
             .unwrap_or(-1);
         Ok(AssetGroupRecord {
-            id: temp_id,
+            // 临时负数 ID 的字符串形态（魔芋真实 id 均为正数），后台 list 刷新后同步真实 id。
+            id: temp_id.to_string(),
             name: name.to_string(),
             group_name: group_name.to_string(),
             is_default: false,
@@ -716,6 +817,11 @@ impl AssetLibrary {
     /// Rename a cloud 素材 in place (`POST /v1/assets/update`). Returns the asset id.
     pub async fn rename_asset(&self, command: RenameAssetCommand) -> BackendResult<String> {
         require_asset_library_connection(&command.provider_connection_id)?;
+        if self.dialect(&command.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_rename_asset(&command.provider_connection_id, &command.id, &command.name)
+                .await;
+        }
         let id = command
             .id
             .trim()
@@ -754,6 +860,612 @@ impl AssetLibrary {
         Ok(id.to_string())
     }
 
+    /// 更新云端素材库分组信息（火山引擎 `UpdateAssetGroup`：名称与描述）。
+    /// 返回被更新的分组 ID。魔芋方言未提供对应端点，返回明确错误。
+    pub async fn update_asset_group(
+        &self,
+        command: UpdateAssetGroupCommand,
+    ) -> BackendResult<String> {
+        require_asset_library_connection(&command.provider_connection_id)?;
+        if self.dialect(&command.provider_connection_id)? != AssetDialect::VolcengineArk {
+            return Err(BackendError::validation(
+                "当前素材库供应商不支持更新素材分组信息",
+                json!({
+                    "providerConnectionId": command.provider_connection_id,
+                    "supported": ["volcengine_ark_v1"],
+                }),
+            ));
+        }
+        let id = command.id.trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset group update requires a group id",
+                json!({ "field": "id" }),
+            ));
+        }
+        let name = command
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        let description = command
+            .description
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        if name.is_none() && description.is_none() {
+            return Err(BackendError::validation(
+                "asset group update requires a new name or description",
+                json!({ "field": "name" }),
+            ));
+        }
+        if let Some(name) = name {
+            if name.chars().count() > 64 {
+                return Err(BackendError::validation(
+                    "asset group name must not exceed 64 characters",
+                    json!({ "field": "name", "maxLength": 64 }),
+                ));
+            }
+        }
+        if let Some(description) = description {
+            if description.chars().count() > 300 {
+                return Err(BackendError::validation(
+                    "asset group description must not exceed 300 characters",
+                    json!({ "field": "description", "maxLength": 300 }),
+                ));
+            }
+        }
+        let mut body = Map::new();
+        body.insert("Id".into(), json!(id));
+        if let Some(name) = name {
+            body.insert("Name".into(), json!(name));
+        }
+        if let Some(description) = description {
+            body.insert("Description".into(), json!(description));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: command.provider_connection_id,
+                action: "UpdateAssetGroup",
+                body: Value::Object(body),
+            })
+            .await?;
+        require_success("update asset group", &response)?;
+        Ok(id.to_string())
+    }
+
+    /// 删除云端素材库分组及组内全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。
+    /// 返回被删除的分组 ID。魔芋方言未提供对应端点，返回明确错误。
+    pub async fn delete_asset_group(
+        &self,
+        command: DeleteAssetGroupCommand,
+    ) -> BackendResult<String> {
+        require_asset_library_connection(&command.provider_connection_id)?;
+        if self.dialect(&command.provider_connection_id)? != AssetDialect::VolcengineArk {
+            return Err(BackendError::validation(
+                "当前素材库供应商不支持删除素材分组",
+                json!({
+                    "providerConnectionId": command.provider_connection_id,
+                    "supported": ["volcengine_ark_v1"],
+                }),
+            ));
+        }
+        let id = command.id.trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset group deletion requires a group id",
+                json!({ "field": "id" }),
+            ));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: command.provider_connection_id,
+                action: "DeleteAssetGroup",
+                body: json!({ "Id": id }),
+            })
+            .await?;
+        // 删除为幂等操作：分组已不存在（HTTP 404）时按成功处理。
+        if response.status == 404 {
+            return Ok(id.to_string());
+        }
+        require_success("delete asset group", &response)?;
+        Ok(id.to_string())
+    }
+
+    // ===================== 火山引擎方舟（Ark）方言实现 =====================
+    //
+    // Ark 素材 OpenAPI 为 Action 风格（ListAssets / GetAsset / CreateAsset /
+    // UpdateAsset / DeleteAsset / ListAssetGroups / GetAssetGroup /
+    // CreateAssetGroup / UpdateAssetGroup / DeleteAssetGroup），请求体为
+    // PascalCase 字段的 JSON，鉴权由 [`AssetPort::send_ark`] 完成 V4 签名。
+
+    /// 火山方言素材列表：`ListAssets`（页码分页）。
+    ///
+    /// `Filter.GroupType` 为必选参数，桌面端素材统一落在 `AIGC` 组；`kind`
+    /// 过滤上游不支持（`Filter` 只有 GroupIds/Name/Statuses），沿用魔芋方言的
+    /// 逐页扫描 + 本地过滤策略（每页 100 条，最多 [`KIND_SCAN_PAGE_CAP`] 页）。
+    async fn ark_browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
+        let page_number = query.page_number.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(100).clamp(1, 100);
+        let Some(kind) = query.kind else {
+            let records = self
+                .ark_browse_page(&query, u64::from(page_number), u64::from(page_size))
+                .await?;
+            return Ok(records);
+        };
+        let skip = (page_number as u64 - 1) * page_size as u64;
+        let want = page_size as u64;
+        let mut matched: Vec<CloudAssetRecord> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for upstream_page in 1..=KIND_SCAN_PAGE_CAP {
+            let records = self.ark_browse_page(&query, upstream_page, 100).await?;
+            let exhausted = records.len() < 100;
+            matched.extend(
+                records
+                    .into_iter()
+                    .filter(|record| record.kind == kind)
+                    .filter(|record| seen.insert(record.id.clone())),
+            );
+            if exhausted || matched.len() as u64 >= skip + want {
+                break;
+            }
+        }
+        Ok(matched
+            .into_iter()
+            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+            .take(usize::try_from(want).unwrap_or(usize::MAX))
+            .collect())
+    }
+
+    /// 发起一次 `ListAssets` 页码分页请求并解析为规范素材记录。
+    async fn ark_browse_page(
+        &self,
+        query: &AssetListCommand,
+        page_number: u64,
+        page_size: u64,
+    ) -> BackendResult<Vec<CloudAssetRecord>> {
+        let mut filter = Map::new();
+        filter.insert("GroupType".into(), json!(ARK_GROUP_TYPE));
+        if let Some(group_id) = query
+            .group_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            filter.insert("GroupIds".into(), json!([group_id]));
+        }
+        if let Some(name) = query
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            filter.insert("Name".into(), json!(name));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: query.provider_connection_id.clone(),
+                action: "ListAssets",
+                body: json!({
+                    "Filter": Value::Object(filter),
+                    "PageNumber": page_number,
+                    "PageSize": page_size,
+                }),
+            })
+            .await?;
+        require_success("ark browse assets", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let items = payload
+            .get("Items")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let provider_connection_id = query.provider_connection_id.clone();
+        Ok(items
+            .iter()
+            .filter_map(|entry| parse_ark_asset_entry(&provider_connection_id, entry))
+            .collect())
+    }
+
+    /// 火山方言素材删除：`DeleteAsset`（幂等，404 视为已删除）。
+    async fn ark_delete_asset(
+        &self,
+        provider_connection_id: &str,
+        id: String,
+    ) -> BackendResult<String> {
+        let id = id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset deletion requires an asset id without the asset:// prefix",
+                json!({ "id": id }),
+            ));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                action: "DeleteAsset",
+                body: json!({ "Id": id }),
+            })
+            .await?;
+        // 幂等：素材不存在（HTTP 404）时删除目标已达成，按成功处理。
+        if response.status == 404 {
+            return Ok(id.to_string());
+        }
+        require_success("ark delete asset", &response)?;
+        Ok(id.to_string())
+    }
+
+    /// 火山方言分组列表：`ListAssetGroups` 页码分页翻完全部页。
+    async fn ark_list_asset_groups(
+        &self,
+        provider_connection_id: &str,
+    ) -> BackendResult<Vec<AssetGroupRecord>> {
+        let mut groups: Vec<AssetGroupRecord> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for page in 1..=KIND_SCAN_PAGE_CAP {
+            let response = self
+                .port
+                .send_ark(ArkAssetRequest {
+                    provider_connection_id: provider_connection_id.to_string(),
+                    action: "ListAssetGroups",
+                    body: json!({
+                        "Filter": { "GroupType": ARK_GROUP_TYPE },
+                        "PageNumber": page,
+                        "PageSize": 100,
+                    }),
+                })
+                .await?;
+            require_success("ark list asset groups", &response)?;
+            let payload: Value = serde_json::from_str(&response.body)?;
+            let items = payload
+                .get("Items")
+                .and_then(Value::as_array)
+                .cloned()
+                .unwrap_or_default();
+            let page_len = items.len();
+            for item in &items {
+                if let Some(record) = parse_ark_asset_group(item) {
+                    if seen.insert(record.id.clone()) {
+                        groups.push(record);
+                    }
+                }
+            }
+            if page_len < 100 {
+                break;
+            }
+        }
+        Ok(groups)
+    }
+
+    /// 火山方言分组创建：`CreateAssetGroup`（GroupType=AIGC），响应回 `Id`。
+    async fn ark_create_asset_group(
+        &self,
+        provider_connection_id: &str,
+        name: &str,
+    ) -> BackendResult<AssetGroupRecord> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(BackendError::validation(
+                "asset group name must not be empty",
+                json!({ "field": "name" }),
+            ));
+        }
+        if name.chars().count() > 64 {
+            return Err(BackendError::validation(
+                "asset group name must not exceed 64 characters",
+                json!({ "field": "name", "maxLength": 64 }),
+            ));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                action: "CreateAssetGroup",
+                body: json!({ "Name": name, "GroupType": ARK_GROUP_TYPE }),
+            })
+            .await?;
+        require_success("ark create asset group", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let id = payload
+            .get("Id")
+            .and_then(asset_id_string)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "ark asset group creation did not return a group id",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        Ok(AssetGroupRecord {
+            id,
+            name: name.to_string(),
+            group_name: name.to_string(),
+            is_default: false,
+            asset_count: 0,
+        })
+    }
+
+    /// 火山方言素材改名：`UpdateAsset`（当前仅支持更新 Name），响应回 `Id`。
+    async fn ark_rename_asset(
+        &self,
+        provider_connection_id: &str,
+        id: &str,
+        name: &str,
+    ) -> BackendResult<String> {
+        let id = id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset rename requires an asset id without the asset:// prefix",
+                json!({ "id": id }),
+            ));
+        }
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(BackendError::validation(
+                "asset name must not be empty",
+                json!({ "field": "name" }),
+            ));
+        }
+        if name.chars().count() > 64 {
+            return Err(BackendError::validation(
+                "asset name must not exceed 64 characters",
+                json!({ "field": "name", "maxLength": 64 }),
+            ));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                action: "UpdateAsset",
+                body: json!({ "Id": id, "Name": name }),
+            })
+            .await?;
+        require_success("ark rename asset", &response)?;
+        Ok(id.to_string())
+    }
+
+    /// 火山方言素材读取：`GetAsset`，用于预览/播放地址续签（URL 有效期 12 小时）。
+    /// 记录结构与 `refresh_asset_record` 的校验保持一致（身份、就绪状态、类型）。
+    async fn ark_refresh_asset_record(
+        &self,
+        identity: CloudAssetIdentity,
+        expected_media_type: MediaType,
+    ) -> BackendResult<CloudAssetRecord> {
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: identity.provider_connection_id.clone(),
+                action: "GetAsset",
+                body: json!({ "Id": identity.asset_id }),
+            })
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(BackendError::protocol(
+                format!(
+                    "云素材读取失败（HTTP {}），请检查对应供应商的素材库连接。",
+                    response.status
+                ),
+                json!({ "httpStatus": response.status }),
+            ));
+        }
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let asset = parse_ark_asset_entry(&identity.provider_connection_id, &payload)
+            .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
+        if asset.id != identity.asset_id {
+            return Err(BackendError::validation(
+                "云素材返回的身份与所选素材不一致，请重新选择素材。",
+                json!({}),
+            ));
+        }
+        if asset.status != CloudAssetStatus::Ready {
+            return Err(BackendError::validation(
+                "云素材尚未就绪或不可读取。",
+                json!({ "status": asset.raw_status }),
+            ));
+        }
+        if asset.kind != expected_media_type {
+            return Err(BackendError::validation(
+                "云素材的实际类型与引用不一致。",
+                json!({}),
+            ));
+        }
+        Ok(asset)
+    }
+
+    /// 火山方言素材导入：`CreateAsset`（URL 直传，异步预处理）+ `GetAsset` 轮询。
+    ///
+    /// Ark 不支持 multipart/JSON 字节直传，只接受公共可访问 URL；暂存对象 URL
+    /// （TOS 预签名）满足该条件。分组为字符串 `GroupId`；未指定时发现/创建
+    /// 「无限画布上传」AIGC 组。
+    async fn ark_import_staged(
+        &self,
+        request: ImportStagedAsset,
+    ) -> BackendResult<CloudAssetIdentity> {
+        if !matches!(
+            request.media_type,
+            MediaType::Image | MediaType::Video | MediaType::Audio
+        ) {
+            return Err(BackendError::validation(
+                "火山引擎素材库仅支持图片、视频与音频素材",
+                json!({ "mediaType": media_type_name(request.media_type) }),
+            ));
+        }
+        let group_id = match request.group_id.as_deref().map(str::trim) {
+            Some(group_id) if !group_id.is_empty() => group_id.to_string(),
+            _ => {
+                self.ark_resolve_upload_group(&request.provider_connection_id)
+                    .await?
+            }
+        };
+        let display_name = request
+            .display_name
+            .as_deref()
+            .map(|value| value.chars().take(64).collect::<String>());
+        let mut body = Map::new();
+        body.insert("GroupId".into(), json!(group_id));
+        body.insert("URL".into(), json!(request.public_url));
+        body.insert(
+            "AssetType".into(),
+            json!(media_type_name(request.media_type)),
+        );
+        if let Some(name) = display_name.as_deref() {
+            body.insert("Name".into(), json!(name));
+        }
+        let port = Arc::clone(&self.port);
+        let provider_connection_id = request.provider_connection_id.clone();
+        // 提交为异步接口，瞬时网关故障（502/503/504）时素材尚未在上游创建，可安全重试。
+        let response = send_submit_with_retry("ark submit asset import", || {
+            let port = Arc::clone(&port);
+            let provider_connection_id = provider_connection_id.clone();
+            let body = Value::Object(body.clone());
+            async move {
+                port.send_ark(ArkAssetRequest {
+                    provider_connection_id,
+                    action: "CreateAsset",
+                    body,
+                })
+                .await
+            }
+        })
+        .await?;
+        require_success("ark submit asset import", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let asset_id = payload
+            .get("Id")
+            .and_then(asset_id_string)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                BackendError::protocol(
+                    "ark asset import did not return an asset id",
+                    json!({ "rawResponse": response.body }),
+                )
+            })?;
+        self.ark_wait_for_import(&request.provider_connection_id, &asset_id)
+            .await
+    }
+
+    /// 火山方言导入轮询：`GetAsset` 直到 Active/Failed（Failed 时携带 Error.Code/Message）。
+    async fn ark_wait_for_import(
+        &self,
+        provider_connection_id: &str,
+        asset_id: &str,
+    ) -> BackendResult<CloudAssetIdentity> {
+        let started = tokio::time::Instant::now();
+        let mut consecutive_failures = 0;
+        loop {
+            if started.elapsed() >= self.poll_policy.timeout {
+                return Err(BackendError::protocol(
+                    "ark asset import did not become ready before the local wait deadline",
+                    json!({ "assetId": asset_id, "waitedMs": started.elapsed().as_millis() }),
+                ));
+            }
+            let response = match self
+                .port
+                .send_ark(ArkAssetRequest {
+                    provider_connection_id: provider_connection_id.to_string(),
+                    action: "GetAsset",
+                    body: json!({ "Id": asset_id }),
+                })
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => {
+                    consecutive_failures += 1;
+                    if consecutive_failures >= self.poll_policy.failure_limit {
+                        return Err(error);
+                    }
+                    self.wait_before_next_import_poll().await;
+                    continue;
+                }
+            };
+            if let Err(error) = require_success("observe ark asset import", &response) {
+                consecutive_failures += 1;
+                if consecutive_failures >= self.poll_policy.failure_limit {
+                    return Err(error);
+                }
+                self.wait_before_next_import_poll().await;
+                continue;
+            }
+            let payload: Value = serde_json::from_str(&response.body)?;
+            consecutive_failures = 0;
+            let record = parse_ark_asset_entry(provider_connection_id, &payload);
+            let Some(asset) = record else {
+                return Err(BackendError::protocol(
+                    "ark asset lookup did not return a readable record",
+                    json!({ "assetId": asset_id, "rawResponse": response.body }),
+                ));
+            };
+            match asset.status {
+                CloudAssetStatus::Ready => {
+                    return Ok(CloudAssetIdentity {
+                        provider_connection_id: provider_connection_id.to_string(),
+                        asset_id: asset_id.to_string(),
+                    });
+                }
+                CloudAssetStatus::Failed | CloudAssetStatus::Deleted => {
+                    // GetAsset 对失败素材仍返回 HTTP 200，失败原因在 Error.Code/Message。
+                    let error_detail = payload
+                        .pointer("/Error/Code")
+                        .and_then(Value::as_str)
+                        .map(|code| {
+                            let message = payload
+                                .pointer("/Error/Message")
+                                .and_then(Value::as_str)
+                                .unwrap_or_default();
+                            format!("{code}: {message}")
+                        })
+                        .unwrap_or_else(|| asset.raw_status.clone());
+                    return Err(BackendError::protocol(
+                        format!("火山引擎素材导入失败：{error_detail}"),
+                        json!({ "assetId": asset_id, "rawResponse": response.body }),
+                    ));
+                }
+                CloudAssetStatus::Processing | CloudAssetStatus::Unknown => {
+                    self.wait_before_next_import_poll().await;
+                }
+            }
+        }
+    }
+
+    /// 火山方言上传分组发现/创建：按名称精确匹配「无限画布上传」，缺失时创建。
+    /// 与魔芋方言的 `resolve_upload_group` 语义一致，但 ID 为字符串形态。
+    async fn ark_resolve_upload_group(
+        &self,
+        provider_connection_id: &str,
+    ) -> BackendResult<String> {
+        let gate = {
+            let mut gates = self.upload_group_gates.lock().await;
+            Arc::clone(
+                gates
+                    .entry(provider_connection_id.to_string())
+                    .or_insert_with(|| Arc::new(Mutex::new(()))),
+            )
+        };
+        let _guard = gate.lock().await;
+        let groups = self.ark_list_asset_groups(provider_connection_id).await?;
+        if let Some(group) = groups.iter().find(|group| group.name == UPLOAD_GROUP_NAME) {
+            return Ok(group.id.clone());
+        }
+        let created = self
+            .ark_create_asset_group(provider_connection_id, UPLOAD_GROUP_NAME)
+            .await?;
+        Ok(created.id)
+    }
+
+    // ===================== 火山引擎方舟（Ark）方言实现结束 =====================
+
     /// Import an already staged public object and wait until the remote 素材 becomes readable.
     /// Group discovery, single-flight creation, single-asset polling and terminal-state mapping stay local.
     /// 无进度回调版本：生产路径使用 [`import_staged_with_progress`]，本方法保留给测试与
@@ -786,6 +1498,10 @@ impl AssetLibrary {
                 }),
             ));
         }
+        // 火山引擎方舟素材库：CreateAsset（URL 直传）+ GetAsset 轮询，分组 ID 为字符串形态。
+        if self.dialect(&request.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self.ark_import_staged(request).await;
+        }
         // 海外平台（konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传：
         // 其网关未实现 JSON 方式（`/v1/assets/async` 返回 404 Invalid URL），且 `/v1/assets/upload`
         // 需要文件字节而非远端 URL。此处从暂存 URL 下载字节后 multipart 直传，并按 `db_id`
@@ -796,15 +1512,18 @@ impl AssetLibrary {
         {
             return self.import_staged_overseas(request, progress).await;
         }
-        let group_id = match request.group_id {
-            Some(group_id) if group_id > 0 => group_id,
-            Some(group_id) => {
-                return Err(BackendError::validation(
-                    "real-person asset import requires a positive platform group id",
-                    json!({ "groupId": group_id }),
-                ));
-            }
-            None => {
+        let group_id = match request.group_id.as_deref().map(str::trim) {
+            Some(group_id) if !group_id.is_empty() => group_id
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    BackendError::validation(
+                        "real-person asset import requires a positive platform group id",
+                        json!({ "groupId": group_id }),
+                    )
+                })?,
+            _ => {
                 self.resolve_upload_group(&request.provider_connection_id)
                     .await?
             }
@@ -901,15 +1620,18 @@ impl AssetLibrary {
         request: ImportStagedAsset,
         progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
     ) -> BackendResult<CloudAssetIdentity> {
-        let group_id = match request.group_id {
-            Some(group_id) if group_id > 0 => group_id,
-            Some(group_id) => {
-                return Err(BackendError::validation(
-                    "real-person asset import requires a positive platform group id",
-                    json!({ "groupId": group_id }),
-                ));
-            }
-            None => {
+        let group_id = match request.group_id.as_deref().map(str::trim) {
+            Some(group_id) if !group_id.is_empty() => group_id
+                .parse::<i64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .ok_or_else(|| {
+                    BackendError::validation(
+                        "real-person asset import requires a positive platform group id",
+                        json!({ "groupId": group_id }),
+                    )
+                })?,
+            _ => {
                 self.resolve_upload_group(&request.provider_connection_id)
                     .await?
             }
@@ -1113,6 +1835,12 @@ impl AssetLibrary {
         identity: CloudAssetIdentity,
         expected_media_type: MediaType,
     ) -> BackendResult<CloudAssetRecord> {
+        // 火山方言走 Ark OpenAPI 的 GetAsset（Action 风格 + V4 签名）。
+        if self.dialect(&identity.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_refresh_asset_record(identity, expected_media_type)
+                .await;
+        }
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -1529,7 +2257,7 @@ fn asset_id_string(value: &Value) -> Option<String> {
 /// HTTP 500 不重试：该上游网关会用 500 承载**永久性业务拒绝**（如
 /// `FaceMismatch` 上传素材与授权人脸不一致），重试无意义且徒增等待。
 fn is_transient_submit_status(status: u16) -> bool {
-    matches!(status, 502 | 503 | 504)
+    matches!(status, 502..=504)
 }
 
 /// 素材提交类请求的瞬时 5xx 指数退避重试。
@@ -1618,10 +2346,12 @@ fn require_asset_library_connection(value: &str) -> BackendResult<()> {
 
 fn parse_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
     let record = raw.as_object()?;
+    // 魔芋数值 ID 与火山字符串 ID（asset-group-…）统一按字符串承载；
+    // 魔芋负数临时 ID 兜底场景由创建路径另行处理。
     let id = record
         .get("id")
-        .and_then(Value::as_i64)
-        .filter(|id| *id > 0)?;
+        .and_then(asset_id_string)
+        .filter(|id| !id.is_empty() && !id.starts_with('-'))?;
     let name = record
         .get("name")
         .and_then(Value::as_str)
@@ -1796,7 +2526,11 @@ fn parse_asset_entry(
         preview_url,
         asset_url,
         cover_url,
-        group_id: record.get("group_id").and_then(Value::as_i64),
+        // 魔节数值分组 ID（兼容数值与字符串两种 JSON 形态）与火山字符串分组 ID 统一为字符串。
+        group_id: record
+            .get("group_id")
+            .or_else(|| record.get("GroupId"))
+            .and_then(asset_id_string),
     })
 }
 
@@ -1804,6 +2538,97 @@ fn string_field<'a>(record: &'a Map<String, Value>, fields: &[&str]) -> Option<&
     fields
         .iter()
         .find_map(|field| record.get(*field).and_then(Value::as_str))
+}
+
+/// 解析火山引擎方舟（PascalCase）素材记录为规范 [`CloudAssetRecord`]。
+///
+/// Ark 契约：`Id`/`Name`/`AssetType`（Image|Video|Audio）/`Status`（Active|
+/// Processing|Failed）/`URL`（12 小时有效的公共地址）/`GroupId`。失败原因在
+/// `Error.Code`/`Error.Message`，由调用方按需读取；视频素材无独立关键帧封面，
+/// 前端卡片回退到本地抽帧。
+fn parse_ark_asset_entry(provider_connection_id: &str, raw: &Value) -> Option<CloudAssetRecord> {
+    let record = raw.as_object()?;
+    let id = record
+        .get("Id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let raw_name = record
+        .get("Name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let preview_url = record
+        .get("URL")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| value.starts_with("http://") || value.starts_with("https://"))
+        .map(ToOwned::to_owned);
+    // AssetType 为 PascalCase（Image/Video/Audio），parse_media_type 内部做小写归一。
+    let kind = record
+        .get("AssetType")
+        .and_then(Value::as_str)
+        .and_then(parse_media_type)
+        .or_else(|| infer_media_type_from_name(raw_name))
+        .or_else(|| preview_url.as_deref().and_then(infer_media_type_from_name))
+        .unwrap_or(MediaType::Image);
+    let raw_status = record
+        .get("Status")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("unknown")
+        .to_string();
+    let status = normalize_asset_status(&raw_status);
+    let group_id = record
+        .get("GroupId")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned);
+    let fallback_name = match kind {
+        MediaType::Image => "图片素材",
+        MediaType::Video => "视频素材",
+        MediaType::Audio => "音频素材",
+        MediaType::Text => "文本素材",
+    };
+    Some(CloudAssetRecord {
+        provider_connection_id: provider_connection_id.to_string(),
+        id: id.to_string(),
+        name: if raw_name.trim().is_empty() {
+            fallback_name.to_string()
+        } else {
+            raw_name.to_string()
+        },
+        kind,
+        status,
+        raw_status,
+        preview_url,
+        asset_url: None,
+        cover_url: None,
+        group_id,
+    })
+}
+
+/// 解析火山引擎方舟（PascalCase）素材组记录为规范 [`AssetGroupRecord`]。
+fn parse_ark_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
+    let record = raw.as_object()?;
+    let id = record
+        .get("Id")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    let name = record
+        .get("Name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())?;
+    Some(AssetGroupRecord {
+        id: id.to_string(),
+        name: name.to_string(),
+        group_name: name.to_string(),
+        is_default: false,
+        asset_count: 0,
+    })
 }
 
 fn http_url_field(record: &Map<String, Value>, fields: &[&str]) -> Option<String> {
@@ -1949,9 +2774,12 @@ mod tests {
         responses: StdMutex<VecDeque<RawProviderResponse>>,
         requests: StdMutex<Vec<RemoteAssetRequest>>,
         multipart_requests: StdMutex<Vec<(MultipartAssetRequest, Vec<u8>)>>,
+        ark_requests: StdMutex<Vec<ArkAssetRequest>>,
         downloads: StdMutex<StdHashMap<String, Vec<u8>>>,
         /// 是否为海外平台网关（默认 false，即国内 JSON 契约）。
         overseas: StdMutex<bool>,
+        /// 是否为火山引擎方舟方言（默认 false，即魔芋方言）。
+        ark: StdMutex<bool>,
     }
 
     impl InMemoryAssetAdapter {
@@ -1965,6 +2793,20 @@ mod tests {
         fn with_overseas(self, overseas: bool) -> Self {
             *self.overseas.lock().expect("overseas lock") = overseas;
             self
+        }
+
+        fn with_ark(self, ark: bool) -> Self {
+            *self.ark.lock().expect("ark lock") = ark;
+            self
+        }
+
+        fn ark_request_actions(&self) -> Vec<&'static str> {
+            self.ark_requests
+                .lock()
+                .expect("ark request lock")
+                .iter()
+                .map(|request| request.action)
+                .collect()
         }
 
         fn request_paths(&self) -> Vec<&'static str> {
@@ -2013,6 +2855,23 @@ mod tests {
                 .push((request, file_body));
             let response = self.take_response();
             Box::pin(async move { response })
+        }
+
+        fn send_ark(&self, request: ArkAssetRequest) -> PortFuture<RawProviderResponse> {
+            self.ark_requests
+                .lock()
+                .expect("ark request lock")
+                .push(request);
+            let response = self.take_response();
+            Box::pin(async move { response })
+        }
+
+        fn dialect(&self, _provider_connection_id: &str) -> BackendResult<AssetDialect> {
+            Ok(if *self.ark.lock().expect("ark lock") {
+                AssetDialect::VolcengineArk
+            } else {
+                AssetDialect::Moyu
+            })
         }
 
         fn is_overseas_gateway(&self, _provider_connection_id: &str) -> BackendResult<bool> {
@@ -2258,10 +3117,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(fresh, "https://cdn.example/pic.jpg?signature=fresh");
-        let requests = adapter.requests.lock().unwrap();
-        assert_eq!(requests[0].path, "/v1/assets/get");
-        assert_eq!(requests[0].body, Some(json!({ "id": "image-1" })));
-        drop(requests);
+        {
+            let requests = adapter.requests.lock().unwrap();
+            assert_eq!(requests[0].path, "/v1/assets/get");
+            assert_eq!(requests[0].body, Some(json!({ "id": "image-1" })));
+        }
         // 上游类型与期望不符时报错，不把错误素材的地址喂给节点。
         let wrong_type = library
             .refresh_asset_media(RefreshAssetMediaCommand {
@@ -2360,6 +3220,62 @@ mod tests {
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[0].path, "/v1/assets/list");
         assert_eq!(requests[0].body.as_ref().unwrap()["page_size"], 100);
+    }
+
+    /// 火山引擎方舟方言：浏览走 `ListAssets` 动作（`send_ark` 端口），
+    /// 并按 PascalCase（Id/Name/AssetType/URL）解析条目。
+    #[tokio::test]
+    async fn ark_dialect_browse_uses_ark_actions_and_parses_pascal_case_entries() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([response(
+                200,
+                json!({
+                    "Items": [
+                        {
+                            "Id": "asset-ark-1",
+                            "Name": "封面.png",
+                            "AssetType": "Image",
+                            "Status": "Active",
+                            "URL": "https://cdn.ark.example/cover.png"
+                        },
+                        {
+                            "Id": "asset-ark-2",
+                            "Name": "clip.mp4",
+                            "AssetType": "Video",
+                            "Status": "Processing"
+                        }
+                    ]
+                }),
+            )])
+            .with_ark(true),
+        );
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let assets = library
+            .browse(AssetListCommand {
+                provider_connection_id: "provider-ark".into(),
+                page_number: None,
+                page_size: Some(100),
+                name: None,
+                group_id: None,
+                kind: None,
+            })
+            .await
+            .expect("ark browse");
+
+        assert_eq!(assets.len(), 2);
+        assert_eq!(assets[0].id, "asset-ark-1");
+        assert_eq!(assets[0].name, "封面.png");
+        assert_eq!(assets[0].kind, MediaType::Image);
+        assert_eq!(assets[0].status, CloudAssetStatus::Ready);
+        assert_eq!(
+            assets[0].preview_url.as_deref(),
+            Some("https://cdn.ark.example/cover.png")
+        );
+        assert_eq!(assets[1].id, "asset-ark-2");
+        assert_eq!(assets[1].kind, MediaType::Video);
+        assert_eq!(assets[1].status, CloudAssetStatus::Processing);
+        assert_eq!(adapter.ark_request_actions(), ["ListAssets"]);
     }
 
     /// 构造上游素材列表条目：`asset_type` 为 Video 的视频素材。
@@ -2704,7 +3620,7 @@ mod tests {
             .expect("list asset groups");
 
         assert_eq!(groups.len(), 2);
-        assert_eq!(groups[0].id, 7);
+        assert_eq!(groups[0].id, "7");
         assert_eq!(groups[0].name, "广告图");
         assert_eq!(groups[0].group_name, "user-u1-token-t9-广告图");
         assert!(!groups[0].is_default);
@@ -2744,7 +3660,7 @@ mod tests {
             .await
             .expect("create asset group");
 
-        assert_eq!(group.id, 21);
+        assert_eq!(group.id, "21");
         assert_eq!(group.name, "客户物料");
         assert_eq!(group.group_name, "user-u1-token-t9-客户物料");
 
@@ -2777,7 +3693,7 @@ mod tests {
             .expect("create asset group with partial response");
 
         // 临时 id 为负数（真实 id 均为正数），name 用请求名，group_name 用上游返回值。
-        assert!(group.id < 0);
+        assert!(group.id.starts_with('-'));
         assert_eq!(group.name, "客户物料");
         assert_eq!(group.group_name, "user-23-token-32456-1");
         assert!(!group.is_default);
@@ -2935,7 +3851,7 @@ mod tests {
                 public_url: "https://tos.example.com/face.png".into(),
                 media_type: MediaType::Image,
                 display_name: Some("张三-正脸".into()),
-                group_id: Some(128),
+                group_id: Some("128".into()),
             })
             .await
             .expect("import real-person asset");
@@ -2963,7 +3879,7 @@ mod tests {
                 public_url: "https://tos.example.com/not-the-artist.png".into(),
                 media_type: MediaType::Image,
                 display_name: Some("错误人脸".into()),
-                group_id: Some(128),
+                group_id: Some("128".into()),
             })
             .await
             .expect_err("face mismatch must fail");
@@ -3469,7 +4385,11 @@ mod tests {
         // multipart 通道共尝试 3 次 /v1/assets/upload（两次 502 + 一次成功）。
         assert_eq!(
             adapter.multipart_request_paths(),
-            vec!["/v1/assets/upload", "/v1/assets/upload", "/v1/assets/upload"]
+            vec![
+                "/v1/assets/upload",
+                "/v1/assets/upload",
+                "/v1/assets/upload"
+            ]
         );
     }
 
@@ -3501,7 +4421,7 @@ mod tests {
                 public_url: "https://tos.example.com/a.png".into(),
                 media_type: MediaType::Image,
                 display_name: Some("参考图".into()),
-                group_id: Some(12),
+                group_id: Some("12".into()),
             })
             .await
             .expect("import after transient 5xx retry");

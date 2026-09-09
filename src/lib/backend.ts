@@ -202,7 +202,8 @@ export interface ProviderSettingsClient {
     command: {
       readonly id: string;
       readonly displayName: string;
-      readonly adapterId: "moyu_v1";
+      /** 适配器方言：`moyu_v1`（魔芋 OpenAI 兼容）或 `volcengine_ark_v1`（火山引擎方舟 OpenAPI）。 */
+      readonly adapterId: string;
       readonly baseUrl: string;
       readonly enabled: boolean;
     },
@@ -640,7 +641,8 @@ export interface CloudAsset {
   readonly assetUrl: string | null;
   /** 关键帧封面（视频素材的缩略图），缺失时由前端抽取视频中间帧兜底。 */
   readonly coverUrl: string | null;
-  readonly groupId: number | null;
+  /** 所属云端素材库分组 ID（字符串形态，兼容魔芋数值 ID 与火山引擎 `asset-group-…`）。 */
+  readonly groupId: string | null;
 }
 
 export interface AssetListQuery {
@@ -648,7 +650,8 @@ export interface AssetListQuery {
   readonly pageNumber?: number;
   readonly pageSize?: number;
   readonly name?: string | null;
-  readonly groupId?: number | null;
+  /** 分组 ID（字符串形态，兼容魔芋数值 ID 与火山引擎 `asset-group-…`）。 */
+  readonly groupId?: string | null;
   /**
    * 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现；
    * 不传时单次透传上游分页。
@@ -712,13 +715,13 @@ export interface DeleteRealPersonGroupCommand {
   readonly id: number;
 }
 
-/** 云端素材库分组（`GET /v1/assets/groups`）。 */
+/** 云端素材库分组（魔芋 `GET /v1/assets/groups` / 火山引擎 `ListAssetGroups`）。 */
 export interface AssetGroupRecord {
-  /** Positive platform group ID，上传素材时用作 `groupId`。 */
-  readonly id: number;
+  /** 分组 ID（字符串形态：魔芋数值 ID 的字符串形态，火山引擎 `asset-group-…`）。 */
+  readonly id: string;
   /** 纯展示名（上游已去除令牌前缀），前端只展示该字段。 */
   readonly name: string;
-  /** 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。 */
+  /** 带 `user-{uid}-token-{tid}-` 前缀的全名（火山方言下等于 `name`），仅用于诊断。 */
   readonly groupName: string;
   readonly isDefault: boolean;
   readonly assetCount: number;
@@ -738,6 +741,24 @@ export interface RenameAssetCommand {
   readonly name: string;
 }
 
+/** 更新云端素材库分组信息（火山引擎 `UpdateAssetGroup`：名称/描述）。 */
+export interface UpdateAssetGroupCommand {
+  readonly providerConnectionId: string;
+  /** 云端素材库分组 ID（字符串形态）。 */
+  readonly id: string;
+  /** 新名称，上限 64 字符；缺省表示不修改。 */
+  readonly name?: string | null;
+  /** 新描述，上限 300 字符；缺省表示不修改。 */
+  readonly description?: string | null;
+}
+
+/** 删除云端素材库分组及其全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。 */
+export interface DeleteAssetGroupCommand {
+  readonly providerConnectionId: string;
+  /** 云端素材库分组 ID（字符串形态）。 */
+  readonly id: string;
+}
+
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
   /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
@@ -755,6 +776,10 @@ export interface AssetLibraryClient {
   createAssetGroup(this: void, command: CreateAssetGroupCommand): Promise<AssetGroupRecord>;
   /** 更新云端素材名称（上游 `POST /v1/assets/update`），返回素材 ID。 */
   renameAsset(this: void, command: RenameAssetCommand): Promise<string>;
+  /** 更新云端素材库分组信息（火山引擎 `UpdateAssetGroup`），返回分组 ID。 */
+  updateAssetGroup(this: void, command: UpdateAssetGroupCommand): Promise<string>;
+  /** 删除云端素材库分组及组内全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。 */
+  deleteAssetGroup(this: void, command: DeleteAssetGroupCommand): Promise<string>;
 }
 
 export interface RealPersonAssetLibraryClient {
@@ -819,6 +844,22 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
         providerConnectionId: command.providerConnectionId,
         id: command.id,
         name: command.name,
+      },
+    }),
+  updateAssetGroup: (command) =>
+    invokeDesktop("update_asset_group", stringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
+        name: command.name ?? null,
+        description: command.description ?? null,
+      },
+    }),
+  deleteAssetGroup: (command) =>
+    invokeDesktop("delete_asset_group", stringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
       },
     }),
   createRealPersonAuthLink: (command) =>

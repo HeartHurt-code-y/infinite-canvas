@@ -572,7 +572,7 @@ export function AssetSourceDialog({
   const mediaRefreshAttemptedRef = useRef(false);
   const rawMediaUrl =
     refreshedMediaUrl ??
-    (asset.kind === "video" ? asset.videoUrl ?? asset.previewUrl : asset.previewUrl);
+    (asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl);
   const mediaSrc = asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl) : rawMediaUrl;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;

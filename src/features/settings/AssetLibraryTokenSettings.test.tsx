@@ -31,9 +31,31 @@ const ASSETS: CloudAsset[] = [
     previewUrl: "https://cdn.example.com/asset-1.png",
     assetUrl: "asset://asset-1",
     coverUrl: null,
-    groupId: 12,
+    groupId: "12",
   },
 ];
+
+function mockLibraryClient(assets: CloudAsset[] = []): AssetLibraryClient {
+  return {
+    list: vi.fn(() => Promise.resolve(assets)),
+    deleteAsset: vi.fn(() => Promise.resolve("")),
+    listAssetGroups: vi.fn(() => Promise.resolve([])),
+    createAssetGroup: vi.fn(() =>
+      Promise.resolve({
+        id: "1",
+        name: "mock",
+        groupName: "mock",
+        isDefault: false,
+        assetCount: 0,
+      }),
+    ),
+    renameAsset: vi.fn(() => Promise.resolve("")),
+    refreshAssetCover: vi.fn(() => Promise.resolve("")),
+    refreshAssetMedia: vi.fn(() => Promise.resolve("")),
+    updateAssetGroup: vi.fn(() => Promise.resolve("1")),
+    deleteAssetGroup: vi.fn(() => Promise.resolve("1")),
+  };
+}
 
 describe("AssetLibraryTokenSettings", () => {
   it("供应商选项只显示名称，不附加待配置文案", () => {
@@ -52,23 +74,7 @@ describe("AssetLibraryTokenSettings", () => {
           getCredential: vi.fn(() => Promise.resolve("")),
           setCredential: vi.fn(() => Promise.resolve()),
         }}
-        libraryClient={{
-          list: vi.fn(() => Promise.resolve([])),
-          deleteAsset: vi.fn(() => Promise.resolve("")),
-          listAssetGroups: vi.fn(() => Promise.resolve([])),
-          createAssetGroup: vi.fn(() =>
-            Promise.resolve({
-              id: 1,
-              name: "mock",
-              groupName: "mock",
-              isDefault: false,
-              assetCount: 0,
-            }),
-          ),
-          renameAsset: vi.fn(() => Promise.resolve("")),
-          refreshAssetCover: vi.fn(() => Promise.resolve("")),
-      refreshAssetMedia: vi.fn(() => Promise.resolve("")),
-        }}
+        libraryClient={mockLibraryClient()}
         onAssetsLoaded={vi.fn()}
       />,
     );
@@ -95,23 +101,7 @@ describe("AssetLibraryTokenSettings", () => {
       ),
       setCredential: vi.fn(() => Promise.resolve()),
     };
-    const libraryClient: AssetLibraryClient = {
-      list: vi.fn(() => Promise.resolve([])),
-      deleteAsset: vi.fn(() => Promise.resolve("")),
-      listAssetGroups: vi.fn(() => Promise.resolve([])),
-      createAssetGroup: vi.fn(() =>
-        Promise.resolve({
-          id: 1,
-          name: "mock",
-          groupName: "mock",
-          isDefault: false,
-          assetCount: 0,
-        }),
-      ),
-      renameAsset: vi.fn(() => Promise.resolve("")),
-      refreshAssetCover: vi.fn(() => Promise.resolve("")),
-      refreshAssetMedia: vi.fn(() => Promise.resolve("")),
-    };
+    const libraryClient = mockLibraryClient();
 
     const view = render(
       <AssetLibraryTokenSettings
@@ -157,23 +147,7 @@ describe("AssetLibraryTokenSettings", () => {
       getCredential: vi.fn(() => Promise.resolve("saved-library-token")),
       setCredential: vi.fn(() => Promise.resolve()),
     };
-    const libraryClient: AssetLibraryClient = {
-      list: vi.fn(() => Promise.resolve(ASSETS)),
-      deleteAsset: vi.fn(() => Promise.resolve("")),
-      listAssetGroups: vi.fn(() => Promise.resolve([])),
-      createAssetGroup: vi.fn(() =>
-        Promise.resolve({
-          id: 1,
-          name: "mock",
-          groupName: "mock",
-          isDefault: false,
-          assetCount: 0,
-        }),
-      ),
-      renameAsset: vi.fn(() => Promise.resolve("")),
-      refreshAssetCover: vi.fn(() => Promise.resolve("")),
-      refreshAssetMedia: vi.fn(() => Promise.resolve("")),
-    };
+    const libraryClient = mockLibraryClient(ASSETS);
     const onAssetsLoaded = vi.fn();
     const onPullStarted = vi.fn();
 
@@ -222,23 +196,7 @@ describe("AssetLibraryTokenSettings", () => {
       <AssetLibraryTokenSettings
         provider={PROVIDER}
         credentialClient={credentialClient}
-        libraryClient={{
-          list: vi.fn(() => Promise.resolve([])),
-          deleteAsset: vi.fn(() => Promise.resolve("")),
-          listAssetGroups: vi.fn(() => Promise.resolve([])),
-          createAssetGroup: vi.fn(() =>
-            Promise.resolve({
-              id: 1,
-              name: "mock",
-              groupName: "mock",
-              isDefault: false,
-              assetCount: 0,
-            }),
-          ),
-          renameAsset: vi.fn(() => Promise.resolve("")),
-          refreshAssetCover: vi.fn(() => Promise.resolve("")),
-      refreshAssetMedia: vi.fn(() => Promise.resolve("")),
-        }}
+        libraryClient={mockLibraryClient()}
         onAssetsLoaded={vi.fn()}
       />,
     );
@@ -260,28 +218,99 @@ describe("AssetLibraryTokenSettings", () => {
           getCredential: vi.fn(() => Promise.resolve("token")),
           setCredential: vi.fn(() => Promise.resolve()),
         }}
-        libraryClient={{
-          list: vi.fn(() => Promise.resolve([])),
-          deleteAsset: vi.fn(() => Promise.resolve("")),
-          listAssetGroups: vi.fn(() => Promise.resolve([])),
-          createAssetGroup: vi.fn(() =>
-            Promise.resolve({
-              id: 1,
-              name: "mock",
-              groupName: "mock",
-              isDefault: false,
-              assetCount: 0,
-            }),
-          ),
-          renameAsset: vi.fn(() => Promise.resolve("")),
-          refreshAssetCover: vi.fn(() => Promise.resolve("")),
-      refreshAssetMedia: vi.fn(() => Promise.resolve("")),
-        }}
+        libraryClient={mockLibraryClient()}
         onAssetsLoaded={vi.fn()}
       />,
     );
 
     expect(await screen.findByText("请先保存供应商连接，再配置素材库令牌。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "保存并拉取素材" })).toBeDisabled();
+  });
+
+  it("火山引擎连接使用 AK/SK 双输入框并组合为 JSON 保存", async () => {
+    const arkProvider: ProviderConnection = {
+      ...PROVIDER,
+      id: "provider-ark",
+      displayName: "火山引擎",
+      adapterId: "volcengine_ark_v1",
+      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+      apiKeyRef: "provider:provider-ark:api-key",
+    };
+    const credentialClient = {
+      getCredential: vi.fn(() => Promise.resolve("")),
+      setCredential: vi.fn(() => Promise.resolve()),
+    };
+    const libraryClient = mockLibraryClient();
+    const onAssetsLoaded = vi.fn();
+
+    render(
+      <AssetLibraryTokenSettings
+        provider={arkProvider}
+        credentialClient={credentialClient}
+        libraryClient={libraryClient}
+        onAssetsLoaded={onAssetsLoaded}
+      />,
+    );
+
+    const akInput = screen.getByRole("textbox", { name: "Access Key（AK）" });
+    const skInput = screen.getByLabelText("Secret Key（SK）");
+    await waitFor(() => expect(akInput).toHaveValue(""));
+    await waitFor(() => expect(skInput).toHaveValue(""));
+    expect(akInput).toHaveAttribute("placeholder", "输入火山引擎 Access Key，例如 AKLT…");
+    // 非火山引擎的单字段令牌输入框不应出现。
+    expect(screen.queryByRole("textbox", { name: "素材库令牌值" })).not.toBeInTheDocument();
+
+    // AK 为空时拒绝保存。
+    fireEvent.click(screen.getByRole("button", { name: "保存并拉取素材" }));
+    await expect(screen.findByText(/请输入火山引擎 Access Key/)).resolves.toBeInTheDocument();
+    expect(credentialClient.setCredential).not.toHaveBeenCalled();
+
+    // 仅填 AK、SK 为空时拒绝保存。
+    fireEvent.change(akInput, { target: { value: "AK-test" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并拉取素材" }));
+    await expect(screen.findByText(/请输入火山引擎 Secret Key/)).resolves.toBeInTheDocument();
+    expect(credentialClient.setCredential).not.toHaveBeenCalled();
+
+    // 填入 AK/SK 后通过校验并组合为 JSON 保存。
+    fireEvent.change(skInput, { target: { value: "SK-test" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存并拉取素材" }));
+    await waitFor(() =>
+      expect(credentialClient.setCredential).toHaveBeenCalledWith({
+        credentialRef: assetLibraryCredentialRef(arkProvider.id),
+        secret: '{"accessKey":"AK-test","secretKey":"SK-test"}',
+      }),
+    );
+    expect(libraryClient.list).toHaveBeenCalledWith({ providerConnectionId: arkProvider.id });
+  });
+
+  it("火山引擎连接回显已保存的 AK/SK JSON 到两个输入框", async () => {
+    const arkProvider: ProviderConnection = {
+      ...PROVIDER,
+      id: "provider-ark-echo",
+      displayName: "火山引擎",
+      adapterId: "volcengine_ark_v1",
+      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+      apiKeyRef: "provider:provider-ark-echo:api-key",
+    };
+    const credentialClient = {
+      getCredential: vi.fn(() =>
+        Promise.resolve('{"accessKey":"AK-saved","secretKey":"SK-saved"}'),
+      ),
+      setCredential: vi.fn(() => Promise.resolve()),
+    };
+
+    render(
+      <AssetLibraryTokenSettings
+        provider={arkProvider}
+        credentialClient={credentialClient}
+        libraryClient={mockLibraryClient()}
+        onAssetsLoaded={vi.fn()}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByRole("textbox", { name: "Access Key（AK）" })).toHaveValue("AK-saved"),
+    );
+    expect(screen.getByLabelText("Secret Key（SK）")).toHaveValue("SK-saved");
   });
 });

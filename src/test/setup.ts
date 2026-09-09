@@ -62,7 +62,8 @@ class ResizeObserverStub implements ResizeObserver {
   unobserve(): void {}
   disconnect(): void {}
 }
-if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined") {  Object.defineProperty(window, "ResizeObserver", {
+if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined") {
+  Object.defineProperty(window, "ResizeObserver", {
     configurable: true,
     writable: true,
     value: ResizeObserverStub,

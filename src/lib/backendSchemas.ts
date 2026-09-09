@@ -220,13 +220,13 @@ export const cloudAssetSchema = v.looseObject({
   previewUrl: nullableStringSchema,
   assetUrl: nullableStringSchema,
   coverUrl: nullableStringSchema,
-  groupId: nullableNumberSchema,
+  groupId: nullableStringSchema,
 }) satisfies v.GenericSchema<CloudAsset>;
 
 export const cloudAssetsSchema = v.array(cloudAssetSchema);
 
 export const assetGroupSchema = v.looseObject({
-  id: v.number(),
+  id: v.string(),
   /** 纯展示名（上游已去除令牌前缀），前端只展示该字段。 */
   name: v.string(),
   /** 带 `user-{uid}-token-{tid}-` 前缀的全名，仅用于诊断。 */

@@ -105,6 +105,8 @@ pub fn run() {
             commands::list_asset_groups,
             commands::create_asset_group,
             commands::rename_asset,
+            commands::update_asset_group,
+            commands::delete_asset_group,
             commands::create_real_person_auth_link,
             commands::list_real_person_groups,
             commands::delete_real_person_asset,

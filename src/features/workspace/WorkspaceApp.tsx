@@ -672,9 +672,9 @@ export function WorkspaceApp({
   const [assetGroups, setAssetGroups] = useState<readonly AssetGroupRecord[]>([]);
   const [groupsLoading, setGroupsLoading] = useState(false);
   const [groupsError, setGroupsError] = useState<string | null>(null);
-  const [selectedAssetGroupId, setSelectedAssetGroupId] = useState<number | null>(null);
+  const [selectedAssetGroupId, setSelectedAssetGroupId] = useState<string | null>(null);
   // refreshCloudAssets 是稳定回调（依赖为空），通过 ref 读取当前分组避免重建。
-  const selectedAssetGroupIdRef = useRef<number | null>(null);
+  const selectedAssetGroupIdRef = useRef<string | null>(null);
   // 分页查询稳定回调读取的当前类型 / 防抖搜索词 / 页码。
   const assetKindRef = useRef<AssetKind>("image");
   const committedAssetSearchRef = useRef("");
@@ -1381,7 +1381,7 @@ export function WorkspaceApp({
   // 拉取当前令牌作用域下的云端素材库分组。分组失败不阻塞素材浏览：
   // 选中保持「全部素材」，仅记录错误并允许在界面上重试。
   const refreshAssetGroups = useCallback(
-    (providerConnectionId: string, preferredGroupId: number | null = null): void => {
+    (providerConnectionId: string, preferredGroupId: string | null = null): void => {
       if (!isDesktopRuntime()) return;
       // 状态重置延迟到微任务提交：effect 同步触发时避免在 effect 体内 setState
       // 引发级联渲染（react-hooks/set-state-in-effect），与素材列表拉取一致。
@@ -1421,7 +1421,7 @@ export function WorkspaceApp({
   );
 
   const handleAssetGroupChanged = useCallback(
-    (groupId: number | null, providerConnectionId: string) => {
+    (groupId: string | null, providerConnectionId: string) => {
       selectedAssetGroupIdRef.current = groupId;
       setSelectedAssetGroupId(groupId);
       refreshCloudAssets(providerConnectionId, "group-changed");
@@ -1603,7 +1603,14 @@ export function WorkspaceApp({
       refreshLocalAssets("initial");
     }
     // refreshCloudAssets / refreshLocalAssets / refreshAssetGroups 均为稳定回调（依赖为空）。
-  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, refreshLocalAssets, settingsOpen]);
+  }, [
+    assetLibrarySource,
+    assetProvider,
+    refreshAssetGroups,
+    refreshCloudAssets,
+    refreshLocalAssets,
+    settingsOpen,
+  ]);
 
   // 类型 Tab / 防抖搜索词 / 分组选择变化：回到第 1 页并重查当前来源（查询键去重）。
   // 来源 / 供应商切换由上方 scope effect 负责，故 key 不含来源；首次运行只登记 key，
@@ -6158,8 +6165,7 @@ export function WorkspaceApp({
   const visibleAssets = useMemo(() => {
     if (isDesktopRuntime()) return libraryAssets;
     return libraryAssets.filter(
-      (asset) =>
-        asset.kind === assetKind && asset.name.toLowerCase().includes(browserAssetSearch),
+      (asset) => asset.kind === assetKind && asset.name.toLowerCase().includes(browserAssetSearch),
     );
   }, [assetKind, browserAssetSearch, libraryAssets]);
   // 输入中的瞬时过滤反馈：桌面端以 350ms 防抖提交值为准，浏览器端沿用 deferred 值。
@@ -6812,14 +6818,11 @@ export function WorkspaceApp({
 
   // gen 节点的 @ 候选按 key 缓存成稳定引用（mentionCandidatesFor 每次调用新建数组，
   // 会让 per-node 浅比较永远失效）。派生来源（canvasInputsFor/genNodes）变化时整表重算。
-  const mentionCandidatesByNode = useMemo(
-    () => {
-      const map = new Map<string, readonly MentionCandidate[]>();
-      for (const node of genNodes) map.set(node.key, mentionCandidatesFor(node.key));
-      return map;
-    },
-    [genNodes, mentionCandidatesFor],
-  );
+  const mentionCandidatesByNode = useMemo(() => {
+    const map = new Map<string, readonly MentionCandidate[]>();
+    for (const node of genNodes) map.set(node.key, mentionCandidatesFor(node.key));
+    return map;
+  }, [genNodes, mentionCandidatesFor]);
 
   const genFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>

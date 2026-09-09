@@ -42,7 +42,52 @@ interface ProviderDraft {
   readonly id: string;
   readonly displayName: string;
   readonly baseUrl: string;
+  readonly adapterId: string;
 }
+
+/** 预置供应商连接模板：与后端 DEFAULT_PROVIDER_CONNECTIONS 保持一致。 */
+interface ProviderPreset {
+  readonly id: string;
+  readonly displayName: string;
+  readonly baseUrl: string;
+  readonly adapterId: string;
+}
+
+const PROVIDER_PRESETS: readonly ProviderPreset[] = [
+  {
+    id: "volcengine-ark",
+    displayName: "火山引擎",
+    baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    adapterId: "volcengine_ark_v1",
+  },
+  {
+    id: "moyu-ai",
+    displayName: "魔芋AI",
+    baseUrl: "https://www.moyu.info/",
+    adapterId: "moyu_v1",
+  },
+  {
+    id: "overseas",
+    displayName: "海外平台",
+    baseUrl: "https://www.konjac.ai/v1",
+    adapterId: "moyu_v1",
+  },
+  {
+    id: "sd20",
+    displayName: "SD2.0",
+    baseUrl: "https://47.94.250.161/",
+    adapterId: "moyu_v1",
+  },
+  {
+    id: "maigateway",
+    displayName: "MAIGateway",
+    baseUrl: "https://mai.anquan.info/v1",
+    adapterId: "moyu_v1",
+  },
+];
+
+/** 新建连接时是否启用预置模板选择。 */
+const CUSTOM_PRESET_ID = "__custom__";
 
 interface ModelUsage {
   readonly kind: "none" | "image" | "video" | "text";
@@ -73,6 +118,17 @@ function emptyProviderDraft(): ProviderDraft {
     id: createProviderId(),
     displayName: "公司接口",
     baseUrl: "",
+    adapterId: "moyu_v1",
+  };
+}
+
+/** 应用预置模板到新建连接草稿（保持草稿 id 不变）。 */
+function applyProviderPreset(draft: ProviderDraft, preset: ProviderPreset): ProviderDraft {
+  return {
+    id: draft.id,
+    displayName: preset.displayName,
+    baseUrl: preset.baseUrl,
+    adapterId: preset.adapterId,
   };
 }
 
@@ -134,6 +190,7 @@ function providerDraft(provider: ProviderConnection): ProviderDraft {
     id: provider.id,
     displayName: provider.displayName,
     baseUrl: provider.baseUrl,
+    adapterId: provider.adapterId,
   };
 }
 
@@ -342,6 +399,9 @@ export function ProviderSettingsDialog({
     }
   };
 
+  const isNewProvider = !providers.some((provider) => provider.id === draft.id);
+  const isVolcengineArkConnection = draft.adapterId === "volcengine_ark_v1";
+
   const validateConnectionDraft = (): { readonly apiKey: string } | null => {
     const existingProvider = providers.some((provider) => provider.id === draft.id);
     const apiKey = apiKeyRef.current?.value ?? "";
@@ -349,7 +409,8 @@ export function ProviderSettingsDialog({
       setRawError("供应商名称和 Base URL 不能为空。完整地址会交给后端继续校验。");
       return null;
     }
-    if (!existingProvider && !apiKey) {
+    // 火山引擎方舟连接通过素材库令牌（AK/SK JSON）鉴权，供应商级 API Key 允许留空。
+    if (!existingProvider && !apiKey && !isVolcengineArkConnection) {
       setRawError("新供应商连接需要输入 API Key；保存后密钥只进入 Windows 凭据管理器。");
       return null;
     }
@@ -360,7 +421,7 @@ export function ProviderSettingsDialog({
     const provider = await client.upsertProviderConnection({
       id: draft.id,
       displayName: draft.displayName.trim(),
-      adapterId: "moyu_v1",
+      adapterId: draft.adapterId,
       baseUrl: draft.baseUrl.trim(),
       enabled: true,
     });
@@ -588,6 +649,30 @@ export function ProviderSettingsDialog({
             </div>
 
             <div className="provider-field-grid">
+              {isNewProvider ? (
+                <label className="provider-field--preset">
+                  <span>预置模板</span>
+                  <select
+                    aria-label="预置模板"
+                    value={CUSTOM_PRESET_ID}
+                    onChange={(event) => {
+                      const preset = PROVIDER_PRESETS.find((p) => p.id === event.target.value);
+                      if (preset) setDraft((current) => applyProviderPreset(current, preset));
+                    }}
+                    aria-describedby="preset-hint"
+                  >
+                    <option value={CUSTOM_PRESET_ID}>自定义（手动填写）</option>
+                    {PROVIDER_PRESETS.map((preset) => (
+                      <option key={preset.id} value={preset.id}>
+                        {preset.displayName}
+                      </option>
+                    ))}
+                  </select>
+                  <small id="preset-hint">
+                    选择预置模板会自动填入供应商名称、Base URL 与适配器（如火山引擎素材库）。
+                  </small>
+                </label>
+              ) : null}
               <label>
                 <span>供应商名称</span>
                 <input
@@ -630,7 +715,9 @@ export function ProviderSettingsDialog({
                   aria-describedby="api-key-hint"
                 />
                 <small id="api-key-hint">
-                  只保存到 Windows 凭据管理器，不写入数据库、画布或任务日志。
+                  {isVolcengineArkConnection
+                    ? "用于拉取模型目录的方舟 API Key（Bearer 令牌）；素材库鉴权在下方「素材库令牌」处分别填写 AK 和 SK。"
+                    : "只保存到 Windows 凭据管理器，不写入数据库、画布或任务日志。"}
                 </small>
               </label>
             </div>

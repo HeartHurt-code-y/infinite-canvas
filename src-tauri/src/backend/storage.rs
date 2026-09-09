@@ -236,14 +236,37 @@ CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
 /// 避免初始化后素材面板立即用空配置发起远程请求。模板预置常用供应商地址，
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str); 4] = [
-    ("provider-sd20", "SD2.0", "https://47.94.250.161/"),
-    ("provider-moyu-ai", "魔芋AI", "https://www.moyu.info/"),
-    ("provider-overseas", "海外平台", "https://www.konjac.ai/v1"),
+/// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 5] = [
+    (
+        "provider-sd20",
+        "SD2.0",
+        "https://47.94.250.161/",
+        "moyu_v1",
+    ),
+    (
+        "provider-moyu-ai",
+        "魔芋AI",
+        "https://www.moyu.info/",
+        "moyu_v1",
+    ),
+    (
+        "provider-overseas",
+        "海外平台",
+        "https://www.konjac.ai/v1",
+        "moyu_v1",
+    ),
     (
         "provider-maigateway",
         "MAIGateway",
         "https://mai.anquan.info/v1",
+        "moyu_v1",
+    ),
+    (
+        "provider-volcengine-ark",
+        "火山引擎",
+        "https://ark.cn-beijing.volces.com/api/v3",
+        "volcengine_ark_v1",
     ),
 ];
 
@@ -413,15 +436,16 @@ impl Storage {
         let timestamp = now_ms();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
-        for (id, display_name, base_url) in DEFAULT_PROVIDER_CONNECTIONS {
+        for (id, display_name, base_url, adapter_id) in DEFAULT_PROVIDER_CONNECTIONS {
             transaction.execute(
                 "INSERT OR IGNORE INTO provider_connections
                  (id, display_name, adapter_id, base_url, api_key_ref, enabled, created_at, updated_at)
-                 VALUES (?1, ?2, 'moyu_v1', ?3, ?4, 0, ?5, ?5)",
+                 VALUES (?1, ?2, ?4, ?3, ?5, 0, ?6, ?6)",
                 params![
                     id,
                     display_name,
                     base_url,
+                    adapter_id,
                     format!("provider:{id}:api-key"),
                     timestamp
                 ],
@@ -2011,7 +2035,7 @@ mod tests {
                 .iter()
                 .map(|provider| provider.display_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["MAIGateway", "SD2.0", "海外平台", "魔芋AI"]
+            vec!["MAIGateway", "SD2.0", "海外平台", "火山引擎", "魔芋AI"]
         );
         assert!(providers.iter().all(|provider| !provider.enabled));
         let encoding: String = storage

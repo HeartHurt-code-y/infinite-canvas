@@ -33,7 +33,7 @@ describe("assetLibraryClient.list", () => {
         previewUrl: "https://cdn.example.com/asset-1.png",
         assetUrl: "asset://asset-1",
         coverUrl: null,
-        groupId: 7,
+        groupId: "7",
       },
     ];
     mockDesktopInvoke((command, args) => {
@@ -65,6 +65,57 @@ describe("assetLibraryClient.list", () => {
     await expect(assetLibraryClient.list({ providerConnectionId: "provider-1" })).rejects.toBe(
       error,
     );
+  });
+});
+
+describe("assetLibraryClient group management", () => {
+  it("forwards an asset group update with name and description", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve("asset-group-1");
+    });
+
+    await expect(
+      assetLibraryClient.updateAssetGroup({
+        providerConnectionId: "provider-1",
+        id: "asset-group-1",
+        name: "客户 A 品牌物料",
+        description: "2026 夏季主视觉",
+      }),
+    ).resolves.toBe("asset-group-1");
+    expect(capturedCommand).toBe("update_asset_group");
+    expect(capturedArgs).toEqual({
+      command: {
+        providerConnectionId: "provider-1",
+        id: "asset-group-1",
+        name: "客户 A 品牌物料",
+        description: "2026 夏季主视觉",
+      },
+    });
+  });
+
+  it("forwards a permanent asset group deletion", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve("asset-group-9");
+    });
+
+    await expect(
+      assetLibraryClient.deleteAssetGroup({
+        providerConnectionId: "provider-1",
+        id: "asset-group-9",
+      }),
+    ).resolves.toBe("asset-group-9");
+    expect(capturedCommand).toBe("delete_asset_group");
+    expect(capturedArgs).toEqual({
+      command: { providerConnectionId: "provider-1", id: "asset-group-9" },
+    });
   });
 });
 

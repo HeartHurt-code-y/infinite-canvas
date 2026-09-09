@@ -792,9 +792,9 @@ describe("App workspace", () => {
 
     fireEvent.error(image!);
     await waitFor(() => {
-      const refreshCall = invokeMock.mock.calls.find(
-        ([name]) => name === "refresh_asset_media",
-      ) as [string, { command: { providerConnectionId: string; id: string; mediaType: string } }] | undefined;
+      const refreshCall = invokeMock.mock.calls.find(([name]) => name === "refresh_asset_media") as
+        | [string, { command: { providerConnectionId: string; id: string; mediaType: string } }]
+        | undefined;
       expect(refreshCall?.[1]?.command).toEqual({
         providerConnectionId: "moyu-production",
         id: "image-asset-1",
@@ -812,9 +812,9 @@ describe("App workspace", () => {
     // 每个卡片实例只续签一次：新地址仍失败时不重复请求。
     fireEvent.error(card.querySelector<HTMLImageElement>(".asset-card__preview")!);
     await waitFor(() => {
-      expect(
-        invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media"),
-      ).toHaveLength(1);
+      expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
+        1,
+      );
     });
   });
 
@@ -891,9 +891,9 @@ describe("App workspace", () => {
 
     fireEvent.error(video!);
     await waitFor(() => {
-      const refreshCall = invokeMock.mock.calls.find(
-        ([name]) => name === "refresh_asset_media",
-      ) as [string, { command: { providerConnectionId: string; id: string; mediaType: string } }] | undefined;
+      const refreshCall = invokeMock.mock.calls.find(([name]) => name === "refresh_asset_media") as
+        | [string, { command: { providerConnectionId: string; id: string; mediaType: string } }]
+        | undefined;
       expect(refreshCall?.[1]?.command).toEqual({
         providerConnectionId: "moyu-production",
         id: "video-asset-2",

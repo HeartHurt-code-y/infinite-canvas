@@ -1,6 +1,7 @@
 use std::{collections::HashSet, sync::Arc};
 
 use base64::Engine as _;
+use chrono::Utc;
 use reqwest::{Method, multipart};
 use serde_json::{Map, Value, json};
 use tauri_plugin_log::log::{error, info};
@@ -21,9 +22,13 @@ use super::{
         ConnectivityTestResult, GenerationOperation, MediaType, RawProviderResponse,
         RemoteModelOption, TokenUsage, VideoTaskType,
     },
+    volcengine_ark::{self, ArkCredentials},
 };
 
 pub const MOYU_ADAPTER_ID: &str = "moyu_v1";
+/// 火山引擎方舟（Ark）素材资产库适配器：OpenAPI Action 风格 + V4 签名（AK/SK）。
+/// 仅用于素材库连接；生成请求仍走 `moyu_v1` 的 OpenAI 兼容路径。
+pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
 /// 历史全局素材库令牌引用；仅用于兼容旧版本凭据。
 ///
 /// 新版本优先使用 `asset-library-token:{provider_connection_id}`，避免不同
@@ -317,14 +322,24 @@ impl ProviderRuntime {
         base_url: String,
         api_key_ref: String,
     ) -> BackendResult<ResolvedProviderContext> {
-        if adapter_id != MOYU_ADAPTER_ID {
+        if adapter_id != MOYU_ADAPTER_ID && adapter_id != ARK_ADAPTER_ID {
             return Err(BackendError::validation(
                 "unsupported provider adapter",
-                json!({ "adapterId": adapter_id, "supported": [MOYU_ADAPTER_ID] }),
+                json!({
+                    "adapterId": adapter_id,
+                    "supported": [MOYU_ADAPTER_ID, ARK_ADAPTER_ID],
+                }),
             ));
         }
         validate_base_url(&base_url)?;
-        let api_key = self.credentials.get(&api_key_ref)?;
+        // ark 连接的主 API Key 允许缺失：素材请求全部走 asset-library 作用域的
+        // AK/SK 凭据（`resolve_asset_library` 会覆盖 api_key）；ark 连接不参与
+        // Bearer 鉴权的生成路径，空主密钥不会泄漏到任何请求头。
+        let api_key = if adapter_id == ARK_ADAPTER_ID {
+            self.credentials.get(&api_key_ref).unwrap_or_default()
+        } else {
+            self.credentials.get(&api_key_ref)?
+        };
         Ok(ResolvedProviderContext {
             provider_connection_id,
             adapter_id,
@@ -1093,6 +1108,98 @@ impl ProviderRuntime {
         })
     }
 
+    /// 火山引擎方舟素材 OpenAPI 请求：`POST {base_url}/?Action={action}&Version=2024-01-01`，
+    /// 请求体为 JSON，鉴权使用 AK/SK 派生的 V4 签名头（X-Date / X-Content-Sha256 / Authorization）。
+    ///
+    /// 签名与发送共用同一份 `payload` 字符串（serde_json 序列化一次），保证
+    /// `HexEncode(SHA256(payload))` 与实际发送字节完全一致，否则上游报
+    /// SignatureDoesNotMatch。
+    pub(super) async fn raw_ark_action_request(
+        &self,
+        provider_connection_id: &str,
+        action: &str,
+        body: &Value,
+    ) -> BackendResult<RawProviderResponse> {
+        let context = self.resolve_asset_library(provider_connection_id)?;
+        if context.adapter_id != ARK_ADAPTER_ID {
+            return Err(BackendError::validation(
+                "ark asset request requires a volcengine_ark_v1 provider connection",
+                json!({
+                    "providerConnectionId": provider_connection_id,
+                    "adapterId": context.adapter_id,
+                }),
+            ));
+        }
+        let credentials = ArkCredentials::parse(&context.api_key)?;
+        let mut url = endpoint(&context.base_url, "/")?;
+        let canonical_uri = url.path().to_string();
+        let host = url
+            .host_str()
+            .ok_or_else(|| {
+                BackendError::validation(
+                    "ark base URL must be an absolute HTTP(S) URL",
+                    json!({ "baseUrl": context.base_url }),
+                )
+            })?
+            .to_string();
+        let (service, region) = volcengine_ark::service_region_from_host(&host);
+        let query_pairs = [
+            ("Action".to_string(), action.to_string()),
+            (
+                "Version".to_string(),
+                volcengine_ark::ARK_API_VERSION.to_string(),
+            ),
+        ];
+        for (key, value) in &query_pairs {
+            url.query_pairs_mut().append_pair(key, value);
+        }
+        // reqwest 会按自己的规则序列化 query；签名侧使用火山引擎 UriEncode 规则。
+        // Action/Version 均为字母数字，两种编码结果一致（无保留字符），签名不会错位。
+        let payload = serde_json::to_string(body)?;
+        let signature = volcengine_ark::sign_request(
+            &credentials,
+            &service,
+            &region,
+            "POST",
+            &canonical_uri,
+            &query_pairs,
+            &host,
+            "application/json",
+            &payload,
+            &Utc::now(),
+        );
+        let sanitized_url = sanitize_url(&url);
+        let request = self
+            .client
+            .post(url)
+            .header("content-type", "application/json")
+            .header("x-date", signature.x_date)
+            .header("x-content-sha256", signature.x_content_sha256)
+            .header("authorization", signature.authorization)
+            .body(payload);
+        info!(
+            "[provider] 发起 Ark 直连请求: providerConnectionId={}, credentialReference={}, POST {sanitized_url} (Action={action})",
+            context.provider_connection_id, context.api_key_ref
+        );
+        let started_at = std::time::Instant::now();
+        let response = request.send().await?;
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let body = String::from_utf8_lossy(&response.bytes().await?).into_owned();
+        info!(
+            "[provider] 收到 Ark 直连响应: providerConnectionId={}, credentialReference={}, POST {sanitized_url} (Action={action}), HTTP {status}, 耗时 {}ms, 响应体 {} 字符",
+            context.provider_connection_id,
+            context.api_key_ref,
+            started_at.elapsed().as_millis(),
+            body.len()
+        );
+        Ok(RawProviderResponse {
+            status,
+            headers,
+            body,
+        })
+    }
+
     /// 连通性测试：向供应商 `/v1/models` 发起一次真实的鉴权请求。
     ///
     /// 失败（网络不可达、凭据错误、非 2xx）转换为 `ok=false` 的结果而不是错误，
@@ -1107,8 +1214,27 @@ impl ProviderRuntime {
     ) -> BackendResult<ConnectivityTestResult> {
         let started_at = std::time::Instant::now();
         let elapsed_ms = || started_at.elapsed().as_millis() as u64;
-        match self
-            .raw_json_request_with_token_group(
+        // 火山引擎 Ark 连接没有 `/v1/models` Bearer 语义，改用素材 OpenAPI 的
+        // ListAssetGroups（最小分页）做探测：能同时验证 AK/SK 签名与网关可达性。
+        let ark_connection = token_group.is_none()
+            && self
+                .storage
+                .get_provider_connection(provider_connection_id)
+                .map(|provider| provider.adapter_id == ARK_ADAPTER_ID)
+                .unwrap_or(false);
+        let probe = if ark_connection {
+            self.raw_ark_action_request(
+                provider_connection_id,
+                "ListAssetGroups",
+                &json!({
+                    "Filter": { "GroupType": "AIGC" },
+                    "PageNumber": 1,
+                    "PageSize": 1,
+                }),
+            )
+            .await
+        } else {
+            self.raw_json_request_with_token_group(
                 provider_connection_id,
                 token_group,
                 Method::GET,
@@ -1117,7 +1243,8 @@ impl ProviderRuntime {
                 None,
             )
             .await
-        {
+        };
+        match probe {
             Ok(response) => {
                 let ok = (200..300).contains(&response.status);
                 Ok(ConnectivityTestResult {

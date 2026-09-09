@@ -15,7 +15,7 @@ use super::{
     frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
-    provider::MOYU_ADAPTER_ID,
+    provider::{ARK_ADAPTER_ID, MOYU_ADAPTER_ID},
     remotion_renderer::{
         RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
     },
@@ -32,17 +32,17 @@ use super::{
         AssetGroupRecord, AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary,
         CloudAssetRecord, ConnectivityTestResult, CreateAssetGroupCommand,
         CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
-        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
         RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RemoteModelOption,
-        RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
-        StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
-        StartVideoFrameExtractionCommand, TosBucketPullSummary, TosStagingConfig,
+        RefreshAssetMediaCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
+        StagingJobRecord, StartGenerationCommand, StartStagingCommand,
+        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
+        TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
         UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
@@ -530,6 +530,24 @@ pub async fn rename_asset(
     state.assets.rename_asset(command).await.command()
 }
 
+/// 更新云端素材库分组信息（火山引擎 `UpdateAssetGroup`：名称/描述）。
+#[tauri::command]
+pub async fn update_asset_group(
+    state: State<'_, BackendState>,
+    command: UpdateAssetGroupCommand,
+) -> CommandResult<String> {
+    state.assets.update_asset_group(command).await.command()
+}
+
+/// 删除云端素材库分组及其全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。
+#[tauri::command]
+pub async fn delete_asset_group(
+    state: State<'_, BackendState>,
+    command: DeleteAssetGroupCommand,
+) -> CommandResult<String> {
+    state.assets.delete_asset_group(command).await.command()
+}
+
 #[tauri::command]
 pub fn configure_tos_staging(
     state: State<'_, BackendState>,
@@ -752,10 +770,13 @@ fn validate_provider_command(
             json!({ "command": command }),
         ));
     }
-    if command.adapter_id != MOYU_ADAPTER_ID {
+    if command.adapter_id != MOYU_ADAPTER_ID && command.adapter_id != ARK_ADAPTER_ID {
         return Err(BackendError::validation(
             "provider adapter is not supported",
-            json!({ "adapterId": command.adapter_id, "supported": [MOYU_ADAPTER_ID] }),
+            json!({
+                "adapterId": command.adapter_id,
+                "supported": [MOYU_ADAPTER_ID, ARK_ADAPTER_ID],
+            }),
         ));
     }
     let url = url::Url::parse(&command.base_url)?;
@@ -1034,6 +1055,13 @@ mod tests {
         let mut command = provider("https://api.example.com/v1");
         command.adapter_id = "unknown".into();
         assert!(validate_provider_command(&command).is_err());
+    }
+
+    #[test]
+    fn provider_validation_accepts_volcengine_ark_adapter() {
+        let mut command = provider("https://ark.cn-beijing.volces.com/api/v3");
+        command.adapter_id = ARK_ADAPTER_ID.into();
+        assert!(validate_provider_command(&command).is_ok());
     }
 
     fn model_selection(

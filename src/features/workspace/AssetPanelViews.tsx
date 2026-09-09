@@ -216,10 +216,10 @@ export function AssetGroupsPicker({
   onRetry,
 }: {
   readonly groups: readonly AssetGroupRecord[];
-  readonly selectedGroupId: number | null;
+  readonly selectedGroupId: string | null;
   readonly loading: boolean;
   readonly error: string | null;
-  readonly onGroupChange: (groupId: number | null, providerConnectionId: string) => void;
+  readonly onGroupChange: (groupId: string | null, providerConnectionId: string) => void;
   readonly onCreateGroup: () => void;
   /** 分组重试需要供应商 ID（分组区仅在已连接供应商时渲染）。 */
   readonly onRetry: (providerConnectionId: string) => void;
@@ -250,7 +250,7 @@ export function AssetGroupsPicker({
           disabled={loading && groups.length === 0}
           onChange={(event) => {
             const value = event.target.value;
-            onGroupChange(value ? Number(value) : null, providerConnectionId);
+            onGroupChange(value ? value : null, providerConnectionId);
           }}
         >
           <option value="">全部素材</option>
@@ -261,7 +261,9 @@ export function AssetGroupsPicker({
             </option>
           ))}
         </select>
-        {loading ? <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" /> : null}
+        {loading ? (
+          <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
+        ) : null}
       </div>
       {error ? (
         <span className="asset-groups__error" role="status">
@@ -296,7 +298,9 @@ export function AssetKindTabs({
             type="button"
             role="tab"
             aria-label={
-              kindCount == null ? ASSET_KIND_LABELS[tabKind] : `${ASSET_KIND_LABELS[tabKind]} ${kindCount}`
+              kindCount == null
+                ? ASSET_KIND_LABELS[tabKind]
+                : `${ASSET_KIND_LABELS[tabKind]} ${kindCount}`
             }
             aria-selected={kind === tabKind}
             onClick={() => {
@@ -635,8 +639,8 @@ export function AssetPanel({
   readonly groups: readonly AssetGroupRecord[];
   readonly groupsLoading: boolean;
   readonly groupsError: string | null;
-  readonly selectedGroupId: number | null;
-  readonly onGroupChange: (groupId: number | null, providerConnectionId: string) => void;
+  readonly selectedGroupId: string | null;
+  readonly onGroupChange: (groupId: string | null, providerConnectionId: string) => void;
   readonly onRefreshGroups: (providerConnectionId: string) => void;
   readonly onCreateGroup: () => void;
   readonly kind: AssetKind;
@@ -720,7 +724,11 @@ export function AssetPanel({
       {uploads.length > 0 ? (
         <ul className="asset-uploads" aria-label="本地上传进度">
           {uploads.map((entry) => (
-            <AssetUploadRow key={entry.jobId} entry={entry} onDismiss={() => onDismissUpload(entry.jobId)} />
+            <AssetUploadRow
+              key={entry.jobId}
+              entry={entry}
+              onDismiss={() => onDismissUpload(entry.jobId)}
+            />
           ))}
         </ul>
       ) : null}

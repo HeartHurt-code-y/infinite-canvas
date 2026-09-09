@@ -24,6 +24,7 @@ pub mod tos_sign;
 pub mod types;
 pub mod video_edit_source;
 pub mod video_local_edit;
+pub mod volcengine_ark;
 
 use std::sync::Arc;
 

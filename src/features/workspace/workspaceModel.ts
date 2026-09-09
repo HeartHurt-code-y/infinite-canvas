@@ -86,8 +86,8 @@ export interface AssetItem {
   /** 视频源地址（素材卡片悬浮播放用）。 */
   readonly videoUrl?: string | null;
   readonly cloudStatus?: CloudAssetStatus;
-  /** 云端素材所属分组（平台分组 ID）；本地素材或旧记录缺省为 undefined。 */
-  readonly groupId?: number | null;
+  /** 云端素材所属分组（平台分组 ID 的字符串形态）；本地素材或旧记录缺省为 undefined。 */
+  readonly groupId?: string | null;
   /** 未声明时按历史行为视为云端素材。 */
   readonly source?: AssetLibrarySource;
   readonly providerConnectionId?: string;

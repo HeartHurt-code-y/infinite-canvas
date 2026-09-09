@@ -206,6 +206,54 @@ describe("ProviderSettingsDialog", () => {
     expect(onAssetProviderChanged).toHaveBeenCalledWith(otherProvider.id);
   });
 
+  it("新建连接选择火山引擎预置模板后保存为 volcengine_ark_v1 适配器", async () => {
+    const arkProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-new-ark",
+      displayName: "火山引擎",
+      adapterId: "volcengine_ark_v1",
+      baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+    };
+    const client = createClient({
+      upsertProviderConnection: vi.fn(() => Promise.resolve(arkProvider)),
+    });
+    const onCatalogChanged = vi.fn(() => Promise.resolve());
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={onCatalogChanged}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("预置模板"), {
+      target: { value: "volcengine-ark" },
+    });
+    await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("火山引擎"));
+    expect(screen.getByLabelText(/^Base URL/)).toHaveValue(
+      "https://ark.cn-beijing.volces.com/api/v3",
+    );
+
+    // 火山引擎连接通过素材库令牌（AK/SK）鉴权，无需供应商级 API Key。
+    const saveButton = screen.getByRole("button", { name: "保存连接" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(client.upsertProviderConnection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
+          adapterId: "volcengine_ark_v1",
+        }),
+      ),
+    );
+    expect(client.setCredential).not.toHaveBeenCalled();
+    expect(client.fetchProviderModels).not.toHaveBeenCalled();
+    expect(await screen.findByText(/已保存 火山引擎 的连接信息/)).toBeInTheDocument();
+  });
+
   it("requires a key for a new connection and saves without pulling models", async () => {
     const client = createClient();
     const onCatalogChanged = vi.fn(() => Promise.resolve());
