@@ -2504,8 +2504,8 @@ function GenerationInputChips({
             <AutoSizeThumb
               previewUrl={input.previewUrl}
               kind={input.kind}
-              height="1.75rem"
-              maxWidth="5rem"
+              height="2.5rem"
+              maxWidth="7rem"
             />
             <span className="node-media-chip__name" title={input.name}>
               {input.name}
