@@ -12,6 +12,7 @@ import {
   connectivityTestResultSchema,
   generationCreatedEventSchema,
   generationResultReadyEventSchema,
+  generationResultRecordSchema,
   generationResultSavedEventSchema,
   generationRetryEventSchema,
   generationRetryExhaustedEventSchema,
@@ -428,6 +429,18 @@ export async function loadProviderCatalog(): Promise<ProviderCatalogEntry[]> {
         ];
       }),
   }));
+}
+
+/**
+ * 手动触发恢复单个生成结果的本地保存（图片/视频均可）。
+ * 仅对 saveStatus 为 failed/interrupted/local_missing/conflict 的结果生效；
+ * 内部复用后端恢复流程（含指数退避重试下载 + 校验 + 原子落盘）。
+ */
+export async function resumeGenerationResult(command: {
+  readonly taskId: string;
+  readonly resultIndex: number;
+}): Promise<GenerationResultRecord> {
+  return invokeDesktop("resume_generation_result", generationResultRecordSchema, { command });
 }
 
 export interface TosStagingConfig {

@@ -710,10 +710,17 @@ impl LocalResultService {
         Ok(record)
     }
 
+    /// 下载远程结果字节，带指数退避自动重试。
+    ///
+    /// 重试策略：共 6 次尝试（1 次首次 + 5 次重试），仅对传输层错误
+    /// （`BackendError::Transport`，如连接超时、连接拒绝、读取中断等）和
+    /// 5xx HTTP 错误重试；退避节奏：第 1/2/3/4/5 次重试前约等待
+    /// 2s / 4s / 8s / 16s / 32s（含 ±20% 随机抖动），避免雪崩式重试。
     async fn download_with_retry(&self, url: &str) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         let mut last_error = None;
-        for attempt in 0..=3_u32 {
+        const MAX_ATTEMPTS: u32 = 6;
+        for attempt in 0..MAX_ATTEMPTS {
             if attempt > 0 {
                 let nominal = 2_000_u64 * 2_u64.pow(attempt - 1);
                 let jitter = rand::rng().random_range(0..=(nominal / 5));
@@ -721,13 +728,20 @@ impl LocalResultService {
             }
             match self.download_once(url).await {
                 Ok(bytes) => {
+                    if attempt > 0 {
+                        info!(
+                            "[save] 结果下载在第 {} 次尝试成功: url={redacted_url}",
+                            attempt + 1
+                        );
+                    }
                     return Ok(bytes);
                 }
                 Err(error) => {
                     let retryable = matches!(&error, BackendError::Transport(_))
                         || matches!(&error, BackendError::Protocol { details, .. }
                             if details.get("httpStatus").and_then(|value| value.as_u64()).is_some_and(|status| (500..600).contains(&status)));
-                    if !retryable || attempt == 3 {
+                    let is_last_attempt = attempt == MAX_ATTEMPTS - 1;
+                    if !retryable || is_last_attempt {
                         error!(
                             "[save] 结果下载最终失败: 共尝试 {} 次, 可重试错误={retryable}, url={redacted_url}, 错误: {}",
                             attempt + 1,
@@ -756,7 +770,14 @@ impl LocalResultService {
     async fn download_once(&self, url: &str) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         let started_at = std::time::Instant::now();
-        let response = self.client.get(url).send().await?;
+        // 结果文件下载单请求上限 90s：覆盖大文件慢速传输，同时避免单次卡死
+        // 拖累整体重试节奏（provider 共享 client 的全局 timeout 为 300s）。
+        let response = self
+            .client
+            .get(url)
+            .timeout(std::time::Duration::from_secs(90))
+            .send()
+            .await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let headers = response

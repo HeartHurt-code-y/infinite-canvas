@@ -90,6 +90,7 @@ pub fn run() {
             commands::deliver_reverse_video,
             commands::normalize_cover_image,
             commands::resume_cover_image_result,
+            commands::resume_generation_result,
             commands::remotion_renderer_preflight,
             commands::start_remotion_render,
             commands::get_remotion_render,

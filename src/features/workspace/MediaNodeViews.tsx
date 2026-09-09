@@ -1,3 +1,4 @@
+import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { ArrowDown } from "@phosphor-icons/react/ArrowDown";
 import { ArrowUp } from "@phosphor-icons/react/ArrowUp";
 import { Check } from "@phosphor-icons/react/Check";
@@ -33,6 +34,7 @@ import {
   isDesktopRuntime,
   assetLibraryClient,
   mediaClient,
+  resumeGenerationResult,
   toMediaSrc,
   type GenerationResultRecord,
   type GenerationTaskSummary,
@@ -1779,6 +1781,7 @@ export function CanvasOutputNode({
   const isVideo = node.mediaType === "video";
   const [previewing, setPreviewing] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [resuming, setResuming] = useState(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   // 视口懒挂载与本地图片缩略图：滚出视口卸载 <video>；本地产物图片走缩略图管线。
   const { containerRef: previewButtonRef, inView: previewInView } =
@@ -1862,6 +1865,30 @@ export function CanvasOutputNode({
       frontendLog("error", `[canvas] 复制错误信息失败: ${message}`);
     }
   }, [failedDetail]);
+
+  // 手动重试保存失败的生成结果（图片/视频）：走后端 resume_generation_result 命令，
+  // 内部复用指数退避重试下载 + 校验 + 原子落盘；成功后后端 emit generation:result-saved
+  // 事件，前端结果卡片自动刷新为已保存状态。
+  const handleResumeSave = useCallback(async () => {
+    if (failedSaveResult == null || resuming) return;
+    setResuming(true);
+    try {
+      await resumeGenerationResult({
+        taskId: node.taskId,
+        resultIndex: failedSaveResult.resultIndex,
+      });
+      toast.success("已重新保存到本机");
+    } catch (error) {
+      const message = formatRawBackendError(error);
+      toast.error("重试保存失败", { description: message });
+      frontendLog(
+        "error",
+        `[canvas] 手动重试保存失败: taskId=${node.taskId}, resultIndex=${failedSaveResult.resultIndex}, ${message}`,
+      );
+    } finally {
+      setResuming(false);
+    }
+  }, [failedSaveResult, node.taskId, resuming]);
 
   // 一键复制扩写正文（Context-IR 文本产物）。
   const copyTextContent = useCallback(async () => {
@@ -2026,6 +2053,33 @@ export function CanvasOutputNode({
                     : "已连线来源节点 · 可作为参考输入"
                 }`}
           </span>
+          {isPreviewOnly && failedSaveResult != null ? (
+            <span className="canvas-output-node__actions">
+              <button
+                type="button"
+                className="canvas-output-node__copy"
+                aria-label="重试保存到本机"
+                disabled={resuming}
+                onMouseDown={(event) => event.stopPropagation()}
+                onClick={(event) => {
+                  event.stopPropagation();
+                  void handleResumeSave();
+                }}
+              >
+                {resuming ? (
+                  <>
+                    <CircleNotch size={12} weight="bold" className="spin-icon" aria-hidden="true" />
+                    正在保存…
+                  </>
+                ) : (
+                  <>
+                    <ArrowClockwise size={12} weight="bold" aria-hidden="true" />
+                    重试保存
+                  </>
+                )}
+              </button>
+            </span>
+          ) : null}
         </>
       ) : isFailed ? (
         <>

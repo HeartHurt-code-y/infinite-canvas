@@ -37,7 +37,7 @@ use super::{
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
+        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand, SaveStatus,
         RefreshAssetMediaCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
         StagingJobRecord, StartGenerationCommand, StartStagingCommand,
@@ -135,6 +135,80 @@ pub async fn resume_cover_image_result(
     cover_images::resume_cover_image_result(&state.storage, &state.local_results, command)
         .await
         .command()
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResumeGenerationResultCommand {
+    pub task_id: String,
+    pub result_index: u32,
+}
+
+/// 手动触发恢复单个生成结果的本地保存（图片/视频均可）。
+///
+/// 仅对 save_status 为 failed / interrupted / local_missing / conflict 的结果生效；
+/// 成功或进行中的结果拒绝恢复。内部复用 `LocalResultService::resume_interrupted_result`，
+/// 走与应用启动自动恢复相同的下载 + 校验 + 落盘流程（含指数退避重试）。
+/// 成功后 emit `generation:result-saved` 事件，前端结果卡片自动刷新。
+#[tauri::command]
+pub async fn resume_generation_result(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: ResumeGenerationResultCommand,
+) -> CommandResult<GenerationResultRecord> {
+    if command.task_id.trim().is_empty() || command.result_index == 0 {
+        return Err(BackendError::validation(
+            "请指定需要恢复保存的生成结果",
+            Value::Null,
+        ))
+        .command();
+    }
+    let result = match state.storage.get_result(&command.task_id, command.result_index) {
+        Ok(result) => result,
+        Err(error) => return Err(error).command(),
+    };
+    if !matches!(
+        result.save_status,
+        SaveStatus::Failed
+            | SaveStatus::Interrupted
+            | SaveStatus::LocalMissing
+            | SaveStatus::Conflict
+    ) {
+        return Err(BackendError::validation(
+            "该结果保存状态无需恢复（仅 failed/interrupted/local_missing/conflict 可手动恢复）",
+            json!({
+                "taskId": command.task_id,
+                "resultIndex": command.result_index,
+                "saveStatus": result.save_status.as_str(),
+            }),
+        ))
+        .command();
+    }
+    info!(
+        "[command] 手动触发恢复生成结果保存: taskId={}, resultIndex={}, mediaType={}, 当前saveStatus={}",
+        command.task_id,
+        command.result_index,
+        result.media_type.as_str(),
+        result.save_status.as_str()
+    );
+    match state
+        .local_results
+        .resume_interrupted_result(result)
+        .await
+    {
+        Ok(saved) => {
+            let _ = app.emit(
+                "generation:result-saved",
+                json!({
+                    "taskId": command.task_id,
+                    "resultIndex": command.result_index,
+                    "result": saved,
+                }),
+            );
+            Ok(saved).command()
+        }
+        Err(error) => Err(error).command(),
+    }
 }
 
 #[tauri::command]
