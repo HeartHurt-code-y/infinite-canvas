@@ -4930,21 +4930,29 @@ export function WorkspaceApp({
           ? genNodes.find((node) => node.key === command.sourceNodeId)
           : undefined;
       if (genNode != null) {
-        const key = outputNodeKey();
-        addOutput((current) => ({
-          key,
-          resultKey: null,
-          sourceNodeId: genNode.key,
-          taskId,
-          mediaType: command.operation === "video_generation" ? "video" : "image",
-          finalPath: null,
-          previewSrc: null,
-          name: null,
-          ...nextOutputSlot(genNode, current),
-        }));
+        // 支持 n 参数的模型一次请求返回多张图：重新生成时也落下与数量相等的占位卡片，
+        // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
+        const batchCount =
+          typeof command.parameters?.["n"] === "number" && command.parameters["n"] > 1
+            ? Math.min(GPT_IMAGE_MAX_GENERATION_COUNT, Math.floor(command.parameters["n"]))
+            : 1;
+        for (let resultIndex = 0; resultIndex < batchCount; resultIndex += 1) {
+          const key = outputNodeKey();
+          addOutput((current) => ({
+            key,
+            resultKey: batchCount > 1 ? `${taskId}#${resultIndex}` : null,
+            sourceNodeId: genNode.key,
+            taskId,
+            mediaType: command.operation === "video_generation" ? "video" : "image",
+            finalPath: null,
+            previewSrc: null,
+            name: null,
+            ...nextOutputSlot(genNode, current),
+          }));
+        }
         frontendLog(
           "info",
-          `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key}`,
+          `[canvas] 历史重新生成已创建占位产物卡片: task=${taskId} node=${genNode.key} 数量=${batchCount}`,
         );
       } else {
         frontendLog(
