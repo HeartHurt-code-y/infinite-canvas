@@ -25,7 +25,8 @@ use super::{
         CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
         DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
         MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RefreshAssetCoverCommand, RenameAssetCommand,
+        RealPersonProviderCommand, RefreshAssetCoverCommand, RefreshAssetMediaCommand,
+        RenameAssetCommand,
     },
 };
 
@@ -1212,6 +1213,39 @@ impl AssetLibrary {
             .ok_or_else(|| BackendError::validation("云素材没有可下载的封面地址。", json!({})))
     }
 
+    /// 画布素材节点预览续签：重新读取云端素材记录，返回最新的签名预览地址。
+    /// 图片节点用它加载预览，视频节点把它同时当作播放地址（与列表映射语义一致）。
+    pub async fn refresh_asset_media(
+        &self,
+        command: RefreshAssetMediaCommand,
+    ) -> BackendResult<String> {
+        require_provider_connection_id(&command.provider_connection_id)?;
+        let id = command
+            .id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| command.id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset media refresh requires an asset id without the asset:// prefix",
+                json!({ "id": command.id }),
+            ));
+        }
+        let asset = self
+            .refresh_asset_record(
+                CloudAssetIdentity {
+                    provider_connection_id: command.provider_connection_id,
+                    asset_id: id.to_string(),
+                },
+                command.media_type,
+            )
+            .await?;
+        asset
+            .preview_url
+            .ok_or_else(|| BackendError::validation("云素材没有可用的预览地址。", json!({})))
+    }
+
     /// Resolve a cloud 素材 into the representation requested by a generation caller.
     /// The caller chooses intent; this implementation owns remote fields, status and content access.
     pub async fn resolve(&self, request: ResolveAsset<'_>) -> BackendResult<ResolvedAsset> {
@@ -2190,6 +2224,64 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(blank, BackendError::Validation { .. }));
+    }
+
+    #[tokio::test]
+    async fn asset_media_refresh_returns_fresh_preview_url_and_validates_type() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({
+                    "data": { "id": "image-1", "name": "pic.jpg", "status": "ready", "type": "image",
+                        "url": "https://cdn.example/pic.jpg?signature=fresh" }
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "data": { "id": "image-1", "name": "pic.jpg", "status": "ready", "type": "video",
+                        "url": "https://cdn.example/clip.mp4?signature=secret" }
+                }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "image-1", "status": "ready", "type": "image" } }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+        let fresh = library
+            .refresh_asset_media(RefreshAssetMediaCommand {
+                provider_connection_id: "provider-original".into(),
+                id: "asset://image-1".into(),
+                media_type: MediaType::Image,
+            })
+            .await
+            .unwrap();
+        assert_eq!(fresh, "https://cdn.example/pic.jpg?signature=fresh");
+        let requests = adapter.requests.lock().unwrap();
+        assert_eq!(requests[0].path, "/v1/assets/get");
+        assert_eq!(requests[0].body, Some(json!({ "id": "image-1" })));
+        drop(requests);
+        // 上游类型与期望不符时报错，不把错误素材的地址喂给节点。
+        let wrong_type = library
+            .refresh_asset_media(RefreshAssetMediaCommand {
+                provider_connection_id: "provider".into(),
+                id: "image-1".into(),
+                media_type: MediaType::Image,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(wrong_type, BackendError::Validation { .. }));
+        // 无预览地址时返回校验错误（前端保持置灰，不回写）。
+        let previewless = library
+            .refresh_asset_media(RefreshAssetMediaCommand {
+                provider_connection_id: "provider".into(),
+                id: "image-1".into(),
+                media_type: MediaType::Image,
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(previewless, BackendError::Validation { .. }));
     }
 
     fn immediate_poll() -> PollPolicy {

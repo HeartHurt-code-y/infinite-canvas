@@ -3873,6 +3873,22 @@ export function WorkspaceApp({
     [patchNode],
   );
 
+  // 云端素材节点预览续签成功：把新签名地址回写节点数据并随画布文档持久化。
+  const handleAssetMediaRefresh = useCallback(
+    (key: string, freshPreviewUrl: string) => {
+      patchNode("asset", key, (node) => {
+        return node.previewUrl === freshPreviewUrl
+          ? node
+          : {
+              ...node,
+              previewUrl: freshPreviewUrl,
+              videoUrl: node.kind === "video" ? freshPreviewUrl : node.videoUrl,
+            };
+      });
+    },
+    [patchNode],
+  );
+
   const handleOutputAspectRatioChange = useCallback(
     (key: string, aspectRatio: number) => {
       patchNode("output", key, (node) => {
@@ -6315,6 +6331,7 @@ export function WorkspaceApp({
             ignoreLegacyConnectionStart,
             removeAssetNode,
             handleAssetAspectRatioChange,
+            handleAssetMediaRefresh,
           ],
           () => ({
             id: node.key,
@@ -6335,6 +6352,7 @@ export function WorkspaceApp({
                   onConnectionStart={ignoreLegacyConnectionStart}
                   onRemove={removeAssetNode}
                   onAspectRatioChange={handleAssetAspectRatioChange}
+                  onRefreshMediaUrls={handleAssetMediaRefresh}
                 />
               ),
             },
@@ -6349,6 +6367,7 @@ export function WorkspaceApp({
       ignoreLegacyConnectionStart,
       removeAssetNode,
       handleAssetAspectRatioChange,
+      handleAssetMediaRefresh,
     ],
   );
 

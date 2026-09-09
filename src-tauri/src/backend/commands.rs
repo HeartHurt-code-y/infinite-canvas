@@ -37,7 +37,8 @@ use super::{
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand, RemoteModelOption,
+        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
+        RefreshAssetMediaCommand, RemoteModelOption,
         RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
         StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
@@ -439,6 +440,14 @@ pub async fn refresh_asset_cover(
     command: RefreshAssetCoverCommand,
 ) -> CommandResult<String> {
     state.assets.refresh_asset_cover(command).await.command()
+}
+
+#[tauri::command]
+pub async fn refresh_asset_media(
+    state: State<'_, BackendState>,
+    command: RefreshAssetMediaCommand,
+) -> CommandResult<String> {
+    state.assets.refresh_asset_media(command).await.command()
 }
 
 #[tauri::command]

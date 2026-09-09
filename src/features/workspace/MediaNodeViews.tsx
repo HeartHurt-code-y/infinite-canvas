@@ -24,6 +24,7 @@ import {
   formatRawBackendError,
   frontendLog,
   isDesktopRuntime,
+  assetLibraryClient,
   mediaClient,
   toMediaSrc,
   type GenerationResultRecord,
@@ -1374,6 +1375,7 @@ function CanvasAssetNodeVideoVisual({
   isRealAsset,
   mountMedia,
   onAspectRatioChange,
+  onLoadError,
 }: {
   readonly videoUrl: string;
   readonly previewing: boolean;
@@ -1381,6 +1383,8 @@ function CanvasAssetNodeVideoVisual({
   /** 节点是否在视口内（含余量）；false 时卸载视频元素。 */
   readonly mountMedia: boolean;
   readonly onAspectRatioChange: (aspectRatio: number) => void;
+  /** 视频加载失败（签名过期等）：向上冒泡给节点触发一次性续签。 */
+  readonly onLoadError?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wasPreviewingRef = useRef(false);
@@ -1450,6 +1454,7 @@ function CanvasAssetNodeVideoVisual({
               onError={() => {
                 setCoverReady(false);
                 setFailedVideoUrl(proxiedVideoUrl);
+                onLoadError?.();
               }}
             />
           ) : null}
@@ -1468,6 +1473,7 @@ export function CanvasAssetNode({
   onConnectionStart,
   onRemove,
   onAspectRatioChange,
+  onRefreshMediaUrls,
 }: {
   readonly node: AssetNodeData;
   readonly edgeCount: number;
@@ -1484,6 +1490,8 @@ export function CanvasAssetNode({
   readonly onConnectionStart: (key: string) => void;
   readonly onRemove: (key: string) => void;
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
+  /** 云端素材预览续签成功：用新签名地址回写节点数据（持久化到画布文档）。 */
+  readonly onRefreshMediaUrls: (key: string, freshPreviewUrl: string) => void;
 }) {
   const typeLabel = ASSET_KIND_LABELS[node.kind];
   const isVideo = node.kind === "video";
@@ -1495,6 +1503,43 @@ export function CanvasAssetNode({
   const imageFailed = node.previewUrl == null || failedImageUrl === node.previewUrl;
   const isRealAsset = node.source != null || isDesktopRuntime();
   const dimensions = assetNodeDimensions(node);
+  // 云端素材签名地址（约 2 小时）过期后预览失败：每个节点实例只向后端续签一次，
+  // 新地址回写节点数据持久化；续签失败保持置灰，不反复请求（与素材库卡片一致）。
+  const mediaRefreshAttemptedRef = useRef(false);
+  const attemptMediaRefresh = useCallback(
+    (failedUrl: string | null) => {
+      if (mediaRefreshAttemptedRef.current) return;
+      if (
+        failedUrl == null ||
+        node.source !== "cloud" ||
+        node.providerConnectionId === "" ||
+        node.assetId === ""
+      ) {
+        return;
+      }
+      mediaRefreshAttemptedRef.current = true;
+      assetLibraryClient
+        .refreshAssetMedia({
+          providerConnectionId: node.providerConnectionId,
+          id: node.assetId,
+          mediaType: node.kind,
+        })
+        .then((freshUrl) => {
+          if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+            onRefreshMediaUrls(node.key, freshUrl);
+          }
+        })
+        .catch(() => undefined);
+    },
+    [
+      node.assetId,
+      node.key,
+      node.kind,
+      node.providerConnectionId,
+      node.source,
+      onRefreshMediaUrls,
+    ],
+  );
   return (
     <div
       className={`canvas-asset-node${node.kind === "image" || node.kind === "video" ? " canvas-asset-node--media" : ""}${dragging ? " is-dragging" : ""}`}
@@ -1518,6 +1563,7 @@ export function CanvasAssetNode({
             isRealAsset={isRealAsset}
             mountMedia={visualInView}
             onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
+            onLoadError={() => attemptMediaRefresh(node.videoUrl)}
           />
         ) : node.kind === "image" ? (
           <>
@@ -1540,6 +1586,7 @@ export function CanvasAssetNode({
                 onError={() => {
                   setLoadedImageUrl(null);
                   setFailedImageUrl(node.previewUrl);
+                  attemptMediaRefresh(node.previewUrl);
                 }}
               />
             ) : null}

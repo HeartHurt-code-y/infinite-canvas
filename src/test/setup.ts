@@ -62,8 +62,7 @@ class ResizeObserverStub implements ResizeObserver {
   unobserve(): void {}
   disconnect(): void {}
 }
-if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined") {
-  Object.defineProperty(window, "ResizeObserver", {
+if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined") {  Object.defineProperty(window, "ResizeObserver", {
     configurable: true,
     writable: true,
     value: ResizeObserverStub,
@@ -112,6 +111,40 @@ if (typeof window !== "undefined" && typeof window.ResizeObserver === "undefined
       if (this.classList.contains("react-flow__handle")) return 16;
       return measureSizeFor(this).height;
     },
+  });
+}
+
+// jsdom 自带的 IntersectionObserver（新版已暴露）不会派发回调，而浏览器在
+// observe() 后总会异步派发一次初始相交状态。无条件用 stub 覆盖：observe 即派发
+// isIntersecting=true，让画布视频节点（视口懒挂载）在测试中与真实浏览器一致地挂载
+// 媒体元素；个别测试需要自定义 IO 时在用例内重新 defineProperty 即可。
+class IntersectionObserverStub {
+  private readonly callback: IntersectionObserverCallback;
+  constructor(callback: IntersectionObserverCallback) {
+    this.callback = callback;
+  }
+  observe(target: Element): void {
+    queueMicrotask(() => {
+      this.callback.call(
+        this as unknown as IntersectionObserver,
+        [{ isIntersecting: true, target } as IntersectionObserverEntry],
+        this as unknown as IntersectionObserver,
+      );
+    });
+  }
+  unobserve(): void {}
+  disconnect(): void {}
+}
+if (typeof window !== "undefined") {
+  Object.defineProperty(window, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: IntersectionObserverStub,
+  });
+  Object.defineProperty(globalThis, "IntersectionObserver", {
+    configurable: true,
+    writable: true,
+    value: IntersectionObserverStub,
   });
 }
 

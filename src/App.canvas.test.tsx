@@ -3765,6 +3765,153 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     },
   );
 
+  it("云端图片素材节点预览签名过期时向后端续签一次，用新地址重新加载", async () => {
+    const staleUrl = "https://tos-cn.example.com/stale.jpg?X-Tos-Signature=expired";
+    const freshUrl = "https://tos-cn.example.com/fresh.jpg?X-Tos-Signature=fresh";
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-04",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [
+              {
+                key: "stale-image-node",
+                assetId: "image-asset-1",
+                providerConnectionId: "luma-production",
+                source: "cloud",
+                kind: "image",
+                name: "过期签名图片",
+                previewUrl: staleUrl,
+                videoUrl: null,
+                x: 40,
+                y: 180,
+              },
+            ],
+            outputNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "refresh_asset_media") return Promise.resolve(freshUrl);
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="stale-image-node"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const image = node.querySelector("img");
+    expect(image).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleUrl)}`,
+    );
+
+    // 旧签名过期：加载失败后按素材身份向后端续签一次，节点数据回写新地址。
+    fireEvent.error(image!);
+    await waitFor(() => {
+      const refreshed = node.querySelector("img");
+      expect(refreshed).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+      );
+    });
+    const refreshCalls = invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media");
+    expect(refreshCalls).toHaveLength(1);
+    expect((refreshCalls[0]![1] as { command: unknown }).command).toEqual({
+      providerConnectionId: "luma-production",
+      id: "image-asset-1",
+      mediaType: "image",
+    });
+
+    // 新地址仍失败时不再续签（每节点实例一次），避免循环请求。
+    fireEvent.error(node.querySelector("img")!);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
+        1,
+      );
+    });
+  });
+
+  it("云端视频素材节点播放签名过期时同样触发续签并回写播放地址", async () => {
+    const staleVideoUrl = "https://tos-cn.example.com/stale.mp4?X-Tos-Signature=expired";
+    const freshVideoUrl = "https://tos-cn.example.com/fresh.mp4?X-Tos-Signature=fresh";
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-05",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [
+              {
+                key: "stale-video-node",
+                assetId: "video-asset-1",
+                providerConnectionId: "luma-production",
+                source: "cloud",
+                kind: "video",
+                name: "过期签名视频",
+                previewUrl: staleVideoUrl,
+                videoUrl: staleVideoUrl,
+                x: 40,
+                y: 180,
+              },
+            ],
+            outputNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "refresh_asset_media") return Promise.resolve(freshVideoUrl);
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="stale-video-node"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const video = node.querySelector("video");
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleVideoUrl)}`,
+    );
+
+    fireEvent.error(video!);
+    await waitFor(() => {
+      const refreshed = node.querySelector("video");
+      expect(refreshed).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshVideoUrl)}`,
+      );
+    });
+    const refreshCalls = invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media");
+    expect(refreshCalls).toHaveLength(1);
+    expect((refreshCalls[0]![1] as { command: unknown }).command).toEqual({
+      providerConnectionId: "luma-production",
+      id: "video-asset-1",
+      mediaType: "video",
+    });
+  });
+
   it("视频局部标注保存为独立素材，并将原视频与标注图稳定引用提交到编辑任务", async () => {
     let savedDocument: CanvasDocumentV2 | null = null;
     invokeMock.mockImplementation((command, args) => {

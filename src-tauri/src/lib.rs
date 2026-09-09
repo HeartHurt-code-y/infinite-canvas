@@ -101,6 +101,7 @@ pub fn run() {
             commands::list_remote_video_tasks,
             commands::list_assets,
             commands::refresh_asset_cover,
+            commands::refresh_asset_media,
             commands::list_asset_groups,
             commands::create_asset_group,
             commands::rename_asset,

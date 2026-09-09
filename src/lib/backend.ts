@@ -21,6 +21,7 @@ import {
   localAssetPageSchema,
   modelDefinitionsSchema,
   nullableMediaThumbnailSchema,
+  nullableStringSchema,
   nullableTosStagingConfigSchema,
   optimizedPromptResultSchema,
   providerConnectionSchema,
@@ -655,6 +656,15 @@ export interface AssetListQuery {
   readonly kind?: MediaType | null;
 }
 
+/** 画布素材节点预览续签：按素材身份重新读取签名预览地址。 */
+export interface RefreshAssetMediaCommand {
+  readonly providerConnectionId: string;
+  /** Cloud `asset-xxx` ID; an `asset://` prefix is accepted and stripped. */
+  readonly id: string;
+  /** 期望素材类型；上游返回类型不符时报错。 */
+  readonly mediaType: MediaType;
+}
+
 export interface RealPersonAuthLink {
   readonly h5Url: string;
   readonly tip: string | null;
@@ -734,6 +744,11 @@ export interface AssetLibraryClient {
   deleteAsset(this: void, command: DeleteAssetCommand): Promise<string>;
   /** 按素材身份重新读取关键帧封面 URL（上游 `POST /v1/assets/get`），续签过期的签名封面。 */
   refreshAssetCover(this: void, command: RefreshAssetCoverCommand): Promise<string>;
+  /**
+   * 画布素材节点预览续签（上游 `POST /v1/assets/get`）：重新读取签名预览地址，
+   * 图片预览与视频播放共用；上游记录无预览地址时返回 null。
+   */
+  refreshAssetMedia(this: void, command: RefreshAssetMediaCommand): Promise<string | null>;
   /** 列出当前令牌作用域下的云端素材库分组（上游 `GET /v1/assets/groups`）。 */
   listAssetGroups(this: void, providerConnectionId: string): Promise<AssetGroupRecord[]>;
   /** 以用户自定义名称新建云端素材库分组（上游 `POST /v1/assets/groups`）。 */
@@ -777,6 +792,14 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
       command: {
         providerConnectionId: command.providerConnectionId,
         id: command.id,
+      },
+    }),
+  refreshAssetMedia: (command) =>
+    invokeDesktop("refresh_asset_media", nullableStringSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
+        mediaType: command.mediaType,
       },
     }),
   listAssetGroups: (providerConnectionId) =>

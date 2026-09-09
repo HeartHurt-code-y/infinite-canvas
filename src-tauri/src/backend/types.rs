@@ -892,6 +892,17 @@ pub struct RefreshAssetCoverCommand {
     pub id: String,
 }
 
+/// 画布素材节点预览续签：按素材身份重新读取签名预览地址（图片预览与视频播放共用）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshAssetMediaCommand {
+    pub provider_connection_id: String,
+    /// 云端素材 ID（`asset-…`，不带 `asset://` 前缀）。
+    pub id: String,
+    /// 期望的素材类型；上游返回类型不符时报错，避免把错误素材的地址喂给节点。
+    pub media_type: MediaType,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {

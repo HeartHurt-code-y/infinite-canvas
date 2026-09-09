@@ -36,7 +36,7 @@ import type {
   VideoFrameExtractionJobRecord,
 } from "./backend";
 
-const nullableStringSchema = v.nullable(v.string());
+export const nullableStringSchema = v.nullable(v.string());
 const nullableNumberSchema = v.nullable(v.number());
 const jsonObjectSchema = v.record(v.string(), v.unknown());
 
