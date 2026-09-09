@@ -11,6 +11,7 @@ use futures_util::StreamExt as _;
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
+use tauri_plugin_log::log::warn;
 use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Mutex;
 use url::Url;
@@ -35,6 +36,14 @@ const IMPORT_POLL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 类型过滤扫描的上游页数上限（每页 100 条）。到达上限仍未集齐目标页时按已有结果返回，
 /// 避免类型分布极端或翻深页时无界地请求上游。
 const KIND_SCAN_PAGE_CAP: u64 = 50;
+
+/// 素材提交类请求（`/v1/assets/async`、`/v1/assets/upload`）对上游瞬时网关故障
+/// （HTTP 502/503/504，如审核服务暂不可用）的最大额外重试次数。这类响应可安全重试：
+/// 提交失败时素材尚未在上游创建。HTTP 500 属业务拒绝（如 FaceMismatch），不重试。
+const SUBMIT_MAX_RETRIES: u32 = 3;
+
+/// 素材提交重试的指数退避基准延迟（毫秒）：第 n 次重试前等待 `BASE_MS * 2^(n-1)`。
+const SUBMIT_RETRY_BASE_DELAY_MS: u64 = 1000;
 
 type PortFuture<T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send>>;
 
@@ -815,29 +824,39 @@ impl AssetLibrary {
         // （`asset-…`，初始状态 `Pending`），可直接作为 `/v1/assets/get` 的 `id` 轮询。
         // 这规避了旧端点返回数值占位 ID（`db_id`/`id`）无法查询的问题，也无需再按名称
         // 在素材列表里猜测真实素材（按名称匹配存在同名歧义，可能误认同名旧素材）。
-        let response = self
-            .port
-            .send(RemoteAssetRequest {
-                provider_connection_id: request.provider_connection_id.clone(),
-                method: Method::POST,
-                path: "/v1/assets/async",
-                body: Some(body.clone()),
-            })
-            .await?;
-        // 兼容未实现 `/v1/assets/async` 的网关（如 SD2.0 等自建供应商）：
-        // 返回 404 Invalid URL 时尝试 SD2.0 风格端点 `/v1/assets`（同样是 JSON 方式，参数相同）。
-        let response = if response.status == 404 {
-            self.port
-                .send(RemoteAssetRequest {
-                    provider_connection_id: request.provider_connection_id.clone(),
-                    method: Method::POST,
-                    path: "/v1/assets",
-                    body: Some(body),
-                })
-                .await?
-        } else {
-            response
-        };
+        // 提交阶段对上游瞬时 5xx（如审核服务暂不可用）做指数退避重试；404 属网关未实现
+        // 对应端点（不重试），在闭包内逐级回退到 SD2.0 风格端点。
+        let port = Arc::clone(&self.port);
+        let provider_connection_id = request.provider_connection_id.clone();
+        let response = send_submit_with_retry("submit asset import", || {
+            let port = Arc::clone(&port);
+            let provider_connection_id = provider_connection_id.clone();
+            let body = body.clone();
+            async move {
+                let first = port
+                    .send(RemoteAssetRequest {
+                        provider_connection_id: provider_connection_id.clone(),
+                        method: Method::POST,
+                        path: "/v1/assets/async",
+                        body: Some(body.clone()),
+                    })
+                    .await?;
+                // 兼容未实现 `/v1/assets/async` 的网关（如 SD2.0 等自建供应商）：
+                // 返回 404 Invalid URL 时尝试 SD2.0 风格端点 `/v1/assets`（同样是 JSON 方式，参数相同）。
+                if first.status == 404 {
+                    port.send(RemoteAssetRequest {
+                        provider_connection_id,
+                        method: Method::POST,
+                        path: "/v1/assets",
+                        body: Some(body),
+                    })
+                    .await
+                } else {
+                    Ok(first)
+                }
+            }
+        })
+        .await?;
         // 若两个 JSON 端点都返回 404，回退到海外平台 multipart 直传路径（`/v1/assets/upload`），
         // 无需硬编码域名即可适配任意不支持 JSON 方式的供应商。
         if response.status == 404 {
@@ -914,30 +933,34 @@ impl AssetLibrary {
             // 下载完成（50%），multipart 直传期间保持该值，直传成功后跳 100%。
             on_progress(total, total_work);
         }
-        let mut fields = vec![
-            (
-                "kind".to_string(),
-                media_type_kind(request.media_type).to_string(),
-            ),
-            ("group_id".to_string(), group_id.to_string()),
-        ];
-        if let Some(name) = display_name.as_deref() {
-            fields.push(("name".to_string(), name.to_string()));
-        }
         let file_name = display_name.clone().unwrap_or_else(|| "upload".to_string());
-        let response = self
-            .port
-            .send_multipart(MultipartAssetRequest {
+        // multipart 直传提交对上游瞬时 5xx（如审核服务暂不可用）做指数退避重试；
+        // 404 属网关未实现该端点（不重试），直接报错。每次重试重建请求（重新流式读取文件）。
+        let port = Arc::clone(&self.port);
+        let response = send_submit_with_retry("submit asset upload", || {
+            let port = Arc::clone(&port);
+            let mut fields = vec![
+                (
+                    "kind".to_string(),
+                    media_type_kind(request.media_type).to_string(),
+                ),
+                ("group_id".to_string(), group_id.to_string()),
+            ];
+            if let Some(name) = display_name.as_deref() {
+                fields.push(("name".to_string(), name.to_string()));
+            }
+            port.send_multipart(MultipartAssetRequest {
                 provider_connection_id: request.provider_connection_id.clone(),
                 path: "/v1/assets/upload",
                 fields,
                 file_field: "file".to_string(),
-                file_name,
+                file_name: file_name.clone(),
                 mime_type: media_type_mime(request.media_type).to_string(),
                 file_path: temp_file.path.clone(),
                 file_size: total,
             })
-            .await?;
+        })
+        .await?;
         // 若 `/v1/assets/upload` 也返回 404，说明该供应商网关未实现任何已知素材上传端点
         // （国内 `/v1/assets/async`、SD2.0 风格 `/v1/assets`、海外 `/v1/assets/upload` 均返回 404），
         // 给出明确诊断。
@@ -1466,6 +1489,48 @@ fn asset_id_string(value: &Value) -> Option<String> {
         .or_else(|| value.as_u64().map(|id| id.to_string()))
 }
 
+/// 判断素材提交响应状态码是否属于可安全重试的瞬时网关故障。
+///
+/// 仅 502/503/504（网关无法连通上游服务，如审核服务暂不可用）可重试。
+/// HTTP 500 不重试：该上游网关会用 500 承载**永久性业务拒绝**（如
+/// `FaceMismatch` 上传素材与授权人脸不一致），重试无意义且徒增等待。
+fn is_transient_submit_status(status: u16) -> bool {
+    matches!(status, 502 | 503 | 504)
+}
+
+/// 素材提交类请求的瞬时 5xx 指数退避重试。
+///
+/// 上游网关的审核服务偶发不可用时会返回 502/503/504 并提示"请稍后重试"，此时素材尚未
+/// 在上游创建，可安全重发（见 [`is_transient_submit_status`]）。最多重试
+/// `SUBMIT_MAX_RETRIES` 次，每次重试前等待 `SUBMIT_RETRY_BASE_DELAY_MS * 2^(attempt)`
+/// 毫秒；`send` 每次重试都会重新调用（重建请求体）。其余 4xx/5xx 与传输错误不重试，
+/// 直接返回。
+async fn send_submit_with_retry<F, Fut>(
+    operation: &str,
+    send: F,
+) -> BackendResult<RawProviderResponse>
+where
+    F: Fn() -> Fut,
+    Fut: Future<Output = BackendResult<RawProviderResponse>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        let response = send().await?;
+        if !is_transient_submit_status(response.status) || attempt >= SUBMIT_MAX_RETRIES {
+            return Ok(response);
+        }
+        let delay_ms = SUBMIT_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
+        warn!(
+            "[assets] {operation} 收到上游 {} 响应（瞬时失败），{delay_ms}ms 后重试 ({}/{})",
+            response.status,
+            attempt + 1,
+            SUBMIT_MAX_RETRIES
+        );
+        tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+        attempt += 1;
+    }
+}
+
 fn require_success(operation: &str, response: &RawProviderResponse) -> BackendResult<()> {
     if (200..300).contains(&response.status) {
         return Ok(());
@@ -1490,7 +1555,8 @@ fn require_success(operation: &str, response: &RawProviderResponse) -> BackendRe
         json!({
             "httpStatus": response.status,
             "headers": response.headers,
-            "rawResponse": response.body
+            "rawResponse": response.body,
+            "retryable": is_transient_submit_status(response.status),
         }),
     ))
 }
@@ -3251,6 +3317,108 @@ mod tests {
                 .0
                 .fields
                 .contains(&("name".to_string(), "参考图".to_string()))
+        );
+    }
+
+    /// 回归测试：海外 multipart 提交返回瞬时 5xx（如素材审核服务暂时不可用的 HTTP 502）
+    /// 时应指数退避重试，而不是直接判失败——上游错误信息本身即提示"请稍后重试"。
+    #[tokio::test(start_paused = true)]
+    async fn import_staged_overseas_retries_transient_5xx_submit_responses() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([
+                // 1) find_upload_group: 列出分组
+                response(
+                    200,
+                    json!({ "data": [{ "id": 16, "name": UPLOAD_GROUP_NAME }] }),
+                ),
+                // 2) 前两次 multipart 直传返回 502（上游审核服务暂不可用）
+                response(
+                    502,
+                    json!({ "error": { "message": "素材审核服务暂时不可用，请稍后重试" } }),
+                ),
+                response(
+                    502,
+                    json!({ "error": { "message": "素材审核服务暂时不可用，请稍后重试" } }),
+                ),
+                // 3) 第三次提交成功，返回数值占位 db_id
+                response(
+                    200,
+                    json!({ "code": "success", "data": { "db_id": 975, "id": 975, "status": "Processing" }, "success": true }),
+                ),
+                // 4) 轮询 list：Active，取回真实 asset id
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "asset-20260909-retry", "db_id": 975, "asset_type": "image", "status": "Active" }
+                    ] } }),
+                ),
+            ])
+            .with_overseas(true),
+        );
+        adapter
+            .downloads
+            .lock()
+            .expect("download lock")
+            .insert("https://tos.example.com/a.png".into(), vec![1, 2, 3, 4]);
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect("overseas import after transient 5xx retries");
+
+        assert_eq!(identity.asset_id, "asset-20260909-retry");
+        // multipart 通道共尝试 3 次 /v1/assets/upload（两次 502 + 一次成功）。
+        assert_eq!(
+            adapter.multipart_request_paths(),
+            vec!["/v1/assets/upload", "/v1/assets/upload", "/v1/assets/upload"]
+        );
+    }
+
+    /// 回归测试：国内 JSON 提交 `/v1/assets/async` 返回瞬时 5xx 时应指数退避重试。
+    #[tokio::test(start_paused = true)]
+    async fn import_staged_retries_transient_5xx_async_submit_responses() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            // 第 1 次 async 提交返回 502（上游审核服务暂不可用）
+            response(
+                502,
+                json!({ "error": { "message": "素材审核服务暂时不可用，请稍后重试" } }),
+            ),
+            // 第 2 次提交成功，返回真实素材 ID
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-retry-1", "asset_url": "asset://asset-retry-1" } }),
+            ),
+            // 轮询 get：Active
+            response(
+                200,
+                json!({ "code": "success", "data": { "id": "asset-retry-1", "asset_type": "Image", "status": "Active" } }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: Some(12),
+            })
+            .await
+            .expect("import after transient 5xx retry");
+
+        assert_eq!(identity.asset_id, "asset-retry-1");
+        // `/v1/assets/async` 共尝试 2 次（一次 502 + 一次成功），随后轮询一次 get。
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/async", "/v1/assets/async", "/v1/assets/get"]
         );
     }
 
