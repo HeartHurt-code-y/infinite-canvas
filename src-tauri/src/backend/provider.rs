@@ -1270,12 +1270,25 @@ impl ProviderRuntime {
         provider_connection_id: &str,
         token_group: Option<&str>,
     ) -> BackendResult<Vec<RemoteModelOption>> {
+        // 火山引擎方舟推理 API 的 Base URL 已含 /api/v3 前缀，模型列表端点为 /models；
+        // 其他 OpenAI 兼容供应商沿用 /v1/models。
+        let models_path = self
+            .storage
+            .get_provider_connection(provider_connection_id)
+            .map(|provider| {
+                if provider.adapter_id == ARK_ADAPTER_ID {
+                    "/models"
+                } else {
+                    "/v1/models"
+                }
+            })
+            .unwrap_or("/v1/models");
         let response = self
             .raw_json_request_with_token_group(
                 provider_connection_id,
                 token_group,
                 Method::GET,
-                "/v1/models",
+                models_path,
                 &[],
                 None,
             )
