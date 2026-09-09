@@ -25,6 +25,13 @@ import {
   type KnowledgeVideoWorkflowCheckpoint,
   type KnowledgeVideoWorkflowShot,
 } from "./workspaceModel";
+import {
+  comicDramaReviewOutputSchema,
+  comicDramaStageOutputSchema,
+  formatValibotError,
+  parseModelJson,
+} from "./workflowOutputSchemas";
+import * as v from "valibot";
 
 const GENERATION_MODES: Record<ComicDramaStage, TextSkillMode> = {
   director: "comic_drama_director",
@@ -37,25 +44,6 @@ const REVIEW_MODES: Record<ComicDramaStage, TextSkillMode> = {
   storyboard: "comic_drama_storyboard_review",
 };
 
-function object(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value))
-    throw new Error("漫剧模型输出必须是 JSON 对象。");
-  return value as Record<string, unknown>;
-}
-function requiredText(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`漫剧模型输出缺少 ${field}。`);
-  return value.trim();
-}
-function parseJson(raw: string): Record<string, unknown> {
-  return object(
-    JSON.parse(
-      raw
-        .trim()
-        .replace(/^```(?:json)?\s*/i, "")
-        .replace(/\s*```$/, ""),
-    ) as unknown,
-  );
-}
 function sameAsset(left: AiFilmAsset, right: AiFilmAsset): boolean {
   return left.kind === right.kind && left.name === right.name && left.prompt === right.prompt;
 }
@@ -102,11 +90,16 @@ export function parseComicDramaStage(
   episodeId: string,
   knownAssets: readonly AiFilmAsset[],
 ): ComicDramaStageResult {
-  const data = parseJson(raw);
-  if (data["schemaVersion"] !== "comic-drama-stage.v1" || data["stage"] !== stage)
-    throw new Error("漫剧模型越过当前阶段或返回了错误协议。");
-  if (data["status"] === "needs_confirmation") {
-    const pending = object(data["decision"]);
+  let data: v.InferOutput<typeof comicDramaStageOutputSchema>;
+  try {
+    data = v.parse(comicDramaStageOutputSchema, parseModelJson(raw));
+  } catch (error) {
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    throw error;
+  }
+  if (data.stage !== stage) throw new Error("漫剧模型越过当前阶段或返回了错误协议。");
+  if (data.status === "needs_confirmation") {
+    if (data.decision == null) throw new Error("needs_confirmation 状态必须提供 decision。");
     return {
       content: "",
       inputSummary: "",
@@ -114,90 +107,68 @@ export function parseComicDramaStage(
       shots: [],
       decision: {
         kind: "planning",
-        question: requiredText(pending["question"], "decision.question"),
-        recommendation: requiredText(pending["recommendation"], "decision.recommendation"),
+        question: data.decision.question,
+        recommendation: data.decision.recommendation,
       },
     };
   }
-  if (data["status"] !== "ready" || data["decision"] != null)
-    throw new Error("漫剧 ready 成果不能保留待确认决定。");
-  if (!Array.isArray(data["assets"]) || !Array.isArray(data["shots"]))
-    throw new Error("每个漫剧阶段必须明确提供 assets 与 shots 数组。");
+  if (data.decision != null) throw new Error("漫剧 ready 成果不能保留待确认决定。");
   if (
-    (stage !== "art" && data["assets"].length) ||
-    (stage !== "storyboard" && data["shots"].length)
+    (stage !== "art" && data.assets.length > 0) ||
+    (stage !== "storyboard" && data.shots.length > 0)
   )
     throw new Error("当前阶段不能擅自生成下游资产或分镜。");
   const assets: AiFilmAsset[] = [];
   if (stage === "art") {
-    if (!data["assets"].length || data["assets"].length > 64)
+    if (data.assets.length === 0 || data.assets.length > 64)
       throw new Error("服化道阶段必须列出本集使用的 1～64 个资产。");
-    for (const value of data["assets"]) {
-      const item = object(value);
-      const id = requiredText(item["id"], "asset.id");
-      const kind = item["kind"];
-      if (kind !== "character" && kind !== "scene" && kind !== "prop")
-        throw new Error("漫剧资产类型无效。");
-      if (assets.some((asset) => asset.id === id)) throw new Error("本集资产 ID 重复。");
+    for (const item of data.assets) {
+      if (assets.some((asset) => asset.id === item.id)) throw new Error("本集资产 ID 重复。");
       const asset: AiFilmAsset = {
-        id,
-        kind,
-        name: requiredText(item["name"], "asset.name"),
-        prompt: requiredText(item["prompt"], "asset.prompt"),
+        id: item.id,
+        kind: item.kind,
+        name: item.name,
+        prompt: item.prompt,
       };
-      const previous = knownAssets.find((entry) => entry.id === id);
+      const previous = knownAssets.find((entry) => entry.id === item.id);
       if (previous && !sameAsset(previous, asset))
-        throw new Error(`共享资产 ${id} 的固定描述被改写；造型或状态变体必须使用新 ID。`);
+        throw new Error(`共享资产 ${item.id} 的固定描述被改写；造型或状态变体必须使用新 ID。`);
       assets.push(previous ?? asset);
     }
   }
   const shots: KnowledgeVideoWorkflowShot[] = [];
   if (stage === "storyboard") {
-    if (!data["shots"].length || data["shots"].length > 120)
+    if (data.shots.length === 0 || data.shots.length > 120)
       throw new Error("分镜阶段必须提供本集 1～120 个可执行镜头。");
-    for (const value of data["shots"]) {
-      const item = object(value);
-      const id = `${episodeId}:${requiredText(item["id"], "shot.id")}`;
+    for (const item of data.shots) {
+      const id = `${episodeId}:${item.id}`;
       if (shots.some((shot) => shot.id === id)) throw new Error("本集镜头 ID 重复。");
-      const duration = item["durationSeconds"];
-      if (
-        typeof duration !== "number" ||
-        !Number.isFinite(duration) ||
-        duration < 1 ||
-        duration > 30
-      )
+      if (item.durationSeconds < 1 || item.durationSeconds > 30)
         throw new Error("漫剧单镜头时长必须为 1～30 秒。");
-      if (!Array.isArray(item["referenceAssetIds"]))
-        throw new Error("镜头缺少 referenceAssetIds。");
-      const references = item["referenceAssetIds"].map((ref) =>
-        requiredText(ref, "referenceAssetId"),
-      );
+      const references = item.referenceAssetIds;
       if (new Set(references).size !== references.length) throw new Error("镜头重复引用同一资产。");
       if (references.some((ref) => !knownAssets.some((asset) => asset.id === ref)))
         throw new Error(`镜头 ${id} 引用了本集服化道未确认的资产。`);
-      if (typeof item["dialogue"] !== "string")
-        throw new Error("镜头对白必须是字符串，无对白时填空字符串。");
-      if (!Array.isArray(item["acceptance"]) || !item["acceptance"].length)
-        throw new Error("镜头缺少验收标准。");
-      const dialogue = item["dialogue"];
+      if (item.acceptance.length === 0) throw new Error("镜头缺少验收标准。");
+      const dialogue = item.dialogue;
       shots.push({
         id,
         sequence: shots.length + 1,
         section: "FILM",
         track: "FILM",
-        title: `${requiredText(item["sceneId"], "sceneId")} · ${requiredText(item["title"], "title")}`,
-        durationSeconds: duration,
-        visual: requiredText(item["visual"], "visual"),
+        title: `${item.sceneId} · ${item.title}`,
+        durationSeconds: item.durationSeconds,
+        visual: item.visual,
         narration: dialogue,
-        videoPrompt: `${requiredText(item["videoPrompt"], "videoPrompt")}${dialogue ? `\n【逐字对白】${dialogue}` : ""}`,
+        videoPrompt: `${item.videoPrompt}${dialogue ? `\n【逐字对白】${dialogue}` : ""}`,
         referenceAssetIds: references,
-        acceptance: item["acceptance"].map((value) => requiredText(value, "acceptance")).join("；"),
+        acceptance: item.acceptance.join("；"),
       });
     }
   }
   return {
-    content: requiredText(data["content"], "content"),
-    inputSummary: requiredText(data["inputSummary"], "inputSummary"),
+    content: data.content,
+    inputSummary: data.inputSummary,
     assets,
     shots,
     decision: null,
@@ -205,32 +176,36 @@ export function parseComicDramaStage(
 }
 
 export function parseComicDramaReview(raw: string): ComicDramaReview {
-  const data = parseJson(raw);
-  const result = data["result"];
-  const report = requiredText(data["report"], "report");
-  if (result === "PASS") {
-    if (
-      data["repairInstructions"] != null ||
-      data["question"] != null ||
-      data["recommendation"] != null
-    )
-      throw new Error("PASS 审查不能同时保留修订或待确认决定。");
-    return { result, report };
+  let data: v.InferOutput<typeof comicDramaReviewOutputSchema>;
+  try {
+    data = v.parse(comicDramaReviewOutputSchema, parseModelJson(raw));
+  } catch (error) {
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    throw error;
   }
-  if (result === "REVISE")
+  if (data.result === "PASS") {
+    if (data.repairInstructions != null || data.question != null || data.recommendation != null)
+      throw new Error("PASS 审查不能同时保留修订或待确认决定。");
+    return { result: data.result, report: data.report };
+  }
+  if (data.result === "REVISE") {
+    if (data.repairInstructions == null || !data.repairInstructions.trim())
+      throw new Error("REVISE 审查必须提供 repairInstructions。");
     return {
-      result,
-      report,
-      repairInstructions: requiredText(data["repairInstructions"], "repairInstructions"),
+      result: data.result,
+      report: data.report,
+      repairInstructions: data.repairInstructions,
     };
-  if (result === "NEEDS_DECISION")
-    return {
-      result,
-      report,
-      question: requiredText(data["question"], "question"),
-      recommendation: requiredText(data["recommendation"], "recommendation"),
-    };
-  throw new Error("漫剧审查结果必须为 PASS、REVISE 或 NEEDS_DECISION。");
+  }
+  // NEEDS_DECISION
+  if (data.question == null || !data.question.trim())
+    throw new Error("NEEDS_DECISION 审查必须提供 question。");
+  return {
+    result: data.result,
+    report: data.report,
+    question: data.question,
+    recommendation: data.recommendation ?? "",
+  };
 }
 
 function emptyStage(history: readonly ComicDramaArtifact[] = []): ComicDramaStageRun {

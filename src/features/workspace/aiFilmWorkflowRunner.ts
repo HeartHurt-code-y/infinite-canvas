@@ -22,6 +22,13 @@ import {
   type KnowledgeVideoWorkflowCheckpoint,
   type KnowledgeVideoWorkflowShot,
 } from "./workspaceModel";
+import {
+  aiFilmRouteOutputSchema,
+  aiFilmStageOutputSchema,
+  formatValibotError,
+  parseModelJson,
+} from "./workflowOutputSchemas";
+import * as v from "valibot";
 
 const STAGE_MODES: Record<AiFilmStage, TextSkillMode> = {
   synopsis: "ai_film_synopsis",
@@ -44,63 +51,20 @@ const INPUT_STAGES: Record<AiFilmStage, readonly AiFilmStage[]> = {
   prompts: ["characters", "screenplay", "assets", "acting"],
 };
 
-function record(value: unknown): Record<string, unknown> {
-  if (typeof value !== "object" || value == null || Array.isArray(value))
-    throw new Error("影视模型输出必须是 JSON 对象。");
-  return value as Record<string, unknown>;
-}
-function text(value: unknown, field: string): string {
-  if (typeof value !== "string" || !value.trim()) throw new Error(`影视模型输出缺少 ${field}。`);
-  return value.trim();
-}
-function stage(value: unknown): AiFilmStage {
-  if (typeof value !== "string" || !AI_FILM_STAGES.includes(value as AiFilmStage))
-    throw new Error("影视制作阶段无效。");
-  return value as AiFilmStage;
-}
-function json(raw: string): Record<string, unknown> {
-  const clean = raw
-    .trim()
-    .replace(/^```(?:json)?\s*/i, "")
-    .replace(/\s*```$/, "");
-  return record(JSON.parse(clean) as unknown);
-}
-function decision(data: Record<string, unknown>): KnowledgeVideoWorkflowCheckpoint["decision"] {
-  if (data["status"] === "ready") {
-    if (data["decision"] != null) throw new Error("ready 输出不能保留未解决的决定。");
-    return null;
-  }
-  if (data["status"] !== "needs_confirmation") throw new Error("影视制作状态无效。");
-  const item = record(data["decision"]);
-  return {
-    kind: "planning",
-    question: text(item["question"], "decision.question"),
-    recommendation: text(item["recommendation"], "decision.recommendation"),
-  };
-}
-function aspectRatio(value: unknown): string {
-  const result = text(value, "aspectRatio");
-  if (
-    !/^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(result) ||
-    result.split(":").some((part) => Number(part) <= 0)
-  )
-    throw new Error("影视画幅必须为有效的 W:H 比例。");
-  return result;
-}
-
 export function parseAiFilmRoute(raw: string): {
   route: AiFilmRoute;
   decision: KnowledgeVideoWorkflowCheckpoint["decision"];
 } {
-  const data = json(raw);
-  if (data["schemaVersion"] !== "ai-film-route.v1") throw new Error("影视路由协议版本无效。");
-  const pending = decision(data);
-  const mode = data["mode"];
-  if (mode !== "full" && mode !== "stage" && mode !== "handoff" && mode !== "revision")
-    throw new Error("影视路由模式无效。");
-  if (!Array.isArray(data["stages"]) || !data["stages"].length)
-    throw new Error("影视路由没有指定执行阶段。");
-  const stages = data["stages"].map(stage);
+  let data: v.InferOutput<typeof aiFilmRouteOutputSchema>;
+  try {
+    data = v.parse(aiFilmRouteOutputSchema, parseModelJson(raw));
+  } catch (error) {
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    throw error;
+  }
+  // 业务规则校验：阶段唯一且按依赖顺序排列
+  const stages = data.stages;
+  if (stages.length === 0) throw new Error("影视路由没有指定执行阶段。");
   if (
     new Set(stages).size !== stages.length ||
     stages.some(
@@ -109,19 +73,38 @@ export function parseAiFilmRoute(raw: string): {
     )
   )
     throw new Error("影视阶段必须唯一且按依赖顺序排列。");
-  if (mode === "stage" && stages.length !== 1) throw new Error("指定阶段模式只能执行一个阶段。");
+  if (data.mode === "stage" && stages.length !== 1)
+    throw new Error("指定阶段模式只能执行一个阶段。");
   if (
-    mode === "full" &&
+    data.mode === "full" &&
     AI_FILM_STAGES.some((item) => item !== "worldbuilding" && !stages.includes(item))
   )
     throw new Error("全流程缺少必要制作阶段。");
+  // decision 业务规则：ready 时不能有 decision
+  let pending: KnowledgeVideoWorkflowCheckpoint["decision"] = null;
+  if (data.status === "ready") {
+    if (data.decision != null) throw new Error("ready 输出不能保留未解决的决定。");
+  } else {
+    if (data.decision == null) throw new Error("needs_confirmation 状态必须提供 decision。");
+    pending = {
+      kind: "planning",
+      question: data.decision.question,
+      recommendation: data.decision.recommendation,
+    };
+  }
+  // aspectRatio 业务规则校验
+  if (
+    !/^\d+(?:\.\d+)?:\d+(?:\.\d+)?$/.test(data.aspectRatio) ||
+    data.aspectRatio.split(":").some((part) => Number(part) <= 0)
+  )
+    throw new Error("影视画幅必须为有效的 W:H 比例。");
   return {
     route: {
-      mode,
+      mode: data.mode,
       stages,
-      title: text(data["title"], "title"),
-      aspectRatio: aspectRatio(data["aspectRatio"]),
-      reason: text(data["reason"], "reason"),
+      title: data.title,
+      aspectRatio: data.aspectRatio,
+      reason: data.reason,
     },
     decision: pending,
   };
@@ -140,13 +123,29 @@ export function parseAiFilmStage(
   expectedStage: AiFilmStage,
   knownAssets: readonly AiFilmAsset[],
 ): StageResult {
-  const data = json(raw);
-  if (data["schemaVersion"] !== "ai-film-stage.v1" || stage(data["stage"]) !== expectedStage)
-    throw new Error("影视模型越过了当前阶段或返回了错误协议。");
-  const pending = decision(data);
+  let data: v.InferOutput<typeof aiFilmStageOutputSchema>;
+  try {
+    data = v.parse(aiFilmStageOutputSchema, parseModelJson(raw));
+  } catch (error) {
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    throw error;
+  }
+  if (data.stage !== expectedStage) throw new Error("影视模型越过了当前阶段或返回了错误协议。");
+  // decision 业务规则
+  let pending: KnowledgeVideoWorkflowCheckpoint["decision"] = null;
+  if (data.status === "ready") {
+    if (data.decision != null) throw new Error("ready 输出不能保留未解决的决定。");
+  } else {
+    if (data.decision == null) throw new Error("needs_confirmation 状态必须提供 decision。");
+    pending = {
+      kind: "planning",
+      question: data.decision.question,
+      recommendation: data.decision.recommendation,
+    };
+  }
   if (pending)
     return {
-      content: typeof data["content"] === "string" ? data["content"] : "",
+      content: typeof data.content === "string" ? data.content : "",
       inputSummary: "",
       decision: pending,
       assets: [],
@@ -154,22 +153,18 @@ export function parseAiFilmStage(
     };
   const assets: AiFilmAsset[] = [];
   if (expectedStage === "assets") {
-    if (!Array.isArray(data["assets"]) || !data["assets"].length || data["assets"].length > 48)
+    if (data.assets == null || data.assets.length === 0 || data.assets.length > 48)
       throw new Error("资产阶段应提供 1～48 个角色、场景或道具资产。");
-    for (const rawAsset of data["assets"]) {
-      const item = record(rawAsset);
-      const id = text(item["id"], "asset.id");
-      if (assets.some((asset) => asset.id === id)) throw new Error("影视资产 ID 重复。");
-      const kind = item["kind"];
-      if (kind !== "character" && kind !== "scene" && kind !== "prop")
-        throw new Error("影视资产类型无效。");
-      const prompt = text(item["prompt"], "asset.prompt");
-      const previous = knownAssets.find((asset) => asset.id === id && asset.prompt === prompt);
+    for (const item of data.assets) {
+      if (assets.some((asset) => asset.id === item.id)) throw new Error("影视资产 ID 重复。");
+      const previous = knownAssets.find(
+        (asset) => asset.id === item.id && asset.prompt === item.prompt,
+      );
       assets.push({
-        id,
-        kind,
-        name: text(item["name"], "asset.name"),
-        prompt,
+        id: item.id,
+        kind: item.kind,
+        name: item.name,
+        prompt: item.prompt,
         taskId: previous?.taskId ?? null,
         path: previous?.path ?? null,
       });
@@ -177,48 +172,35 @@ export function parseAiFilmStage(
   }
   const shots: KnowledgeVideoWorkflowShot[] = [];
   if (expectedStage === "prompts") {
-    if (!Array.isArray(data["shots"]) || !data["shots"].length || data["shots"].length > 60)
+    if (data.shots == null || data.shots.length === 0 || data.shots.length > 60)
       throw new Error("提示词阶段应提供 1～60 个可执行镜头。");
-    for (const rawShot of data["shots"]) {
-      const item = record(rawShot);
-      const id = text(item["id"], "shot.id");
-      if (shots.some((shot) => shot.id === id)) throw new Error("影视镜头 ID 重复。");
-      const durationSeconds = item["durationSeconds"];
-      if (
-        typeof durationSeconds !== "number" ||
-        !Number.isFinite(durationSeconds) ||
-        durationSeconds < 4 ||
-        durationSeconds > 30
-      )
+    for (const item of data.shots) {
+      if (shots.some((shot) => shot.id === item.id)) throw new Error("影视镜头 ID 重复。");
+      if (item.durationSeconds < 4 || item.durationSeconds > 30)
         throw new Error("影视单段时长必须在 4～30 秒内。");
-      if (!Array.isArray(item["referenceAssetIds"]))
-        throw new Error("镜头必须明确列出 referenceAssetIds。");
-      const references = item["referenceAssetIds"].map((value) => text(value, "referenceAssetId"));
+      const references = item.referenceAssetIds;
       if (references.some((ref) => !knownAssets.some((asset) => asset.id === ref)))
-        throw new Error(`镜头 ${id} 引用了不存在的资产。`);
-      if (!Array.isArray(item["acceptance"]) || !item["acceptance"].length)
-        throw new Error("镜头缺少验收标准。");
-      if (typeof item["dialogue"] !== "string")
-        throw new Error("镜头对白必须是字符串，没有对白时为空字符串。");
-      const dialogue = item["dialogue"];
+        throw new Error(`镜头 ${item.id} 引用了不存在的资产。`);
+      if (item.acceptance.length === 0) throw new Error("镜头缺少验收标准。");
+      const dialogue = item.dialogue;
       shots.push({
-        id,
+        id: item.id,
         sequence: shots.length + 1,
         section: "FILM",
         track: "FILM",
-        title: `${text(item["sceneId"], "sceneId")} · ${text(item["title"], "title")}`,
-        durationSeconds,
-        visual: text(item["visual"], "visual"),
+        title: `${item.sceneId} · ${item.title}`,
+        durationSeconds: item.durationSeconds,
+        visual: item.visual,
         narration: dialogue,
-        videoPrompt: `${text(item["videoPrompt"], "videoPrompt")}${dialogue ? `\n【逐字对白】${dialogue}` : ""}`,
-        acceptance: item["acceptance"].map((value) => text(value, "acceptance")).join("；"),
+        videoPrompt: `${item.videoPrompt}${dialogue ? `\n【逐字对白】${dialogue}` : ""}`,
+        acceptance: item.acceptance.join("；"),
         referenceAssetIds: references,
       });
     }
   }
   return {
-    content: text(data["content"], "content"),
-    inputSummary: text(data["inputSummary"], "inputSummary"),
+    content: data.content,
+    inputSummary: data.inputSummary ?? "",
     decision: null,
     assets,
     shots,
