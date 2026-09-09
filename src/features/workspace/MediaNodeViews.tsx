@@ -1493,6 +1493,7 @@ export function CanvasAssetNode({
   onRemove,
   onAspectRatioChange,
   onRefreshMediaUrls,
+  onPreview,
 }: {
   readonly node: AssetNodeData;
   readonly edgeCount: number;
@@ -1511,6 +1512,8 @@ export function CanvasAssetNode({
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   /** 云端素材预览续签成功：用新签名地址回写节点数据（持久化到画布文档）。 */
   readonly onRefreshMediaUrls: (key: string, freshPreviewUrl: string) => void;
+  /** 点击素材卡片视觉区域：放大查看原图或视频。 */
+  readonly onPreview?: (key: string) => void;
 }) {
   const typeLabel = ASSET_KIND_LABELS[node.kind];
   const isVideo = node.kind === "video";
@@ -1567,7 +1570,20 @@ export function CanvasAssetNode({
         if (isVideo) setPreviewing(false);
       }}
     >
-      <span className="canvas-asset-node__visual" ref={visualRef}>
+      <span
+        className={`canvas-asset-node__visual${onPreview ? " canvas-asset-node__preview-button" : ""}`}
+        ref={visualRef}
+        onClick={(event) => {
+          if (onPreview) {
+            event.stopPropagation();
+            onPreview(node.key);
+          }
+        }}
+        role={onPreview ? "button" : undefined}
+        tabIndex={onPreview ? 0 : undefined}
+        aria-label={onPreview ? `放大查看${node.name}` : undefined}
+        title={onPreview ? "点击放大查看原图或视频" : undefined}
+      >
         {isVideo && node.videoUrl ? (
           <CanvasAssetNodeVideoVisual
             videoUrl={node.videoUrl}
@@ -1721,6 +1737,80 @@ export function CanvasOutputLightbox({
             className="history-lightbox__media"
             src={mediaSrc}
             alt={mediaName}
+            draggable={false}
+          />
+        )}
+      </div>
+    </div>,
+    document.body,
+  );
+}
+
+/** 画布素材节点的全屏媒体浏览器：点击素材卡片放大查看原图或视频。 */
+export function CanvasAssetLightbox({
+  node,
+  onClose,
+}: {
+  readonly node: AssetNodeData;
+  readonly onClose: () => void;
+}) {
+  const closeButtonRef = useRef<HTMLButtonElement | null>(null);
+
+  useEffect(() => {
+    const previouslyFocused =
+      document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      onClose();
+    };
+
+    window.addEventListener("keydown", handleKeyDown, true);
+    closeButtonRef.current?.focus();
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      if (previouslyFocused?.isConnected) previouslyFocused.focus();
+    };
+  }, [onClose]);
+
+  const mediaSrc =
+    node.kind === "video"
+      ? (toMediaProxyUrl(node.videoUrl ?? node.previewUrl) ?? node.videoUrl ?? node.previewUrl)
+      : (toMediaProxyUrl(node.previewUrl) ?? node.previewUrl);
+  if (mediaSrc == null) return null;
+
+  return createPortal(
+    <div className="history-lightbox" role="dialog" aria-modal="true" aria-label="素材预览">
+      <button
+        ref={closeButtonRef}
+        type="button"
+        className="history-lightbox__close"
+        aria-label="关闭素材预览"
+        onClick={onClose}
+      >
+        <X size={22} weight="bold" aria-hidden="true" />
+      </button>
+      <div
+        className="history-lightbox__stage"
+        onClick={(event) => {
+          if (event.target === event.currentTarget) onClose();
+        }}
+      >
+        {node.kind === "video" ? (
+          <video
+            className="history-lightbox__media"
+            src={mediaSrc}
+            aria-label={node.name}
+            controls
+            autoPlay
+            playsInline
+          />
+        ) : (
+          <img
+            className="history-lightbox__media"
+            src={mediaSrc}
+            alt={node.name}
             draggable={false}
           />
         )}

@@ -135,6 +135,7 @@ import {
   CanvasViralRemixNode,
 } from "./DocumentNodeViews";
 import {
+  CanvasAssetLightbox,
   CanvasAssetNode,
   CanvasGenNode,
   CanvasOutputLightbox,
@@ -809,6 +810,7 @@ export function WorkspaceApp({
   // 生成节点改为内容自适应高度后，记录 DOM 实际尺寸供避让、命中与 SVG 边界使用。
   const [genNodeSizes, setGenNodeSizes] = useState<Record<string, CanvasNodeDimensions>>({});
   const [previewOutputNodeKey, setPreviewOutputNodeKey] = useState<string | null>(null);
+  const [previewAssetNodeKey, setPreviewAssetNodeKey] = useState<string | null>(null);
   const [previewAsset, setPreviewAsset] = useState<AssetItem | null>(null);
   const handleGenNodeSizeChange = useCallback((key: string, dimensions: CanvasNodeDimensions) => {
     setGenNodeSizes((current) => {
@@ -6242,6 +6244,12 @@ export function WorkspaceApp({
         node.key === previewOutputNodeKey && (node.finalPath != null || node.previewSrc != null),
     ) ?? null;
 
+  const previewAssetNode =
+    assetNodes.find(
+      (node) =>
+        node.key === previewAssetNodeKey && (node.previewUrl != null || node.videoUrl != null),
+    ) ?? null;
+
   const closeMobilePanel = () => {
     setMobilePanel(null);
     window.requestAnimationFrame(() => mobilePanelTriggerRef.current?.focus());
@@ -6359,6 +6367,7 @@ export function WorkspaceApp({
                   onRemove={removeAssetNode}
                   onAspectRatioChange={handleAssetAspectRatioChange}
                   onRefreshMediaUrls={handleAssetMediaRefresh}
+                  onPreview={setPreviewAssetNodeKey}
                 />
               ),
             },
@@ -8262,6 +8271,9 @@ export function WorkspaceApp({
           node={previewOutputNode}
           onClose={() => setPreviewOutputNodeKey(null)}
         />
+      ) : null}
+      {previewAssetNode ? (
+        <CanvasAssetLightbox node={previewAssetNode} onClose={() => setPreviewAssetNodeKey(null)} />
       ) : null}
       {active && videoLocalEdit ? (
         <Suspense
