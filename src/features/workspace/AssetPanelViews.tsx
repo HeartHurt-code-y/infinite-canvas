@@ -15,6 +15,7 @@ import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { UserFocus } from "@phosphor-icons/react/UserFocus";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
+import { useState } from "react";
 import {
   isDesktopRuntime,
   type AssetGroupRecord,
@@ -480,6 +481,22 @@ export function AssetPagination({
   readonly onLocalPageChange: (page: number) => void;
   readonly onCloudPageChange: (page: number) => void;
 }) {
+  const currentPage = source === "local" ? localPage : cloudPage;
+  // 云端上游无过滤总数，无法钳制上限；超出范围的页码会返回空页，用上一页/跳转自然纠正。
+  const maxPage = source === "local" ? localTotalPages : null;
+  const [pageDraft, setPageDraft] = useState("");
+
+  const submitPageJump = () => {
+    const parsed = Number.parseInt(pageDraft, 10);
+    if (Number.isNaN(parsed)) return;
+    let target = Math.max(1, parsed);
+    if (maxPage != null) target = Math.min(maxPage, target);
+    setPageDraft("");
+    if (target === currentPage) return;
+    if (source === "local") onLocalPageChange(target);
+    else onCloudPageChange(target);
+  };
+
   return (
     <div className="asset-pagination">
       <span>
@@ -510,6 +527,32 @@ export function AssetPagination({
         >
           下一页
         </button>
+        <span className="asset-pagination__jump">
+          <label className="sr-only" htmlFor="asset-page-jump-input">
+            跳转到指定页码
+          </label>
+          <span aria-hidden="true">跳至</span>
+          <input
+            id="asset-page-jump-input"
+            type="number"
+            inputMode="numeric"
+            min={1}
+            max={maxPage ?? undefined}
+            placeholder={String(currentPage)}
+            value={pageDraft}
+            aria-label="跳转到指定页码"
+            onChange={(event) => {
+              setPageDraft(event.target.value);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") submitPageJump();
+            }}
+          />
+          <span aria-hidden="true">页</span>
+          <button type="button" aria-label="跳转到输入的页码" onClick={submitPageJump}>
+            跳转
+          </button>
+        </span>
       </span>
     </div>
   );

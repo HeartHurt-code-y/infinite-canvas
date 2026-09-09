@@ -800,6 +800,31 @@ h3 {
   font-size: var(--text-2xs);
 }
 
+/* 跳页输入：与翻页按钮同高的窄数字框，隐藏 number 自带步进箭头。 */
+.asset-pagination__jump {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.asset-pagination__jump input {
+  width: 3.5em;
+  min-height: 2rem;
+  padding-inline: var(--space-2xs);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-3);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  text-align: center;
+}
+
+.asset-pagination__jump input::-webkit-outer-spin-button,
+.asset-pagination__jump input::-webkit-inner-spin-button {
+  appearance: none;
+  margin: 0;
+}
+
 .asset-card {
   position: relative;
   display: grid;
