@@ -6958,6 +6958,9 @@ export function WorkspaceApp({
                   onSizeChange={handleGenNodeSizeChange}
                   onChange={(config) => updatePromptNodeConfig(node.key, config)}
                   onRun={handleRunPromptNode}
+                  promptContents={promptContents}
+                  registerPromptInput={registerPromptInput}
+                  mentionCandidates={mentionCandidates ?? []}
                 />
               ) : (
                 <CanvasGenNode

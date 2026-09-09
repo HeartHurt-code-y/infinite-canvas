@@ -11,7 +11,7 @@ import { PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { X } from "@phosphor-icons/react/X";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatBytes,
   type PromptMaterialKind,
@@ -21,7 +21,7 @@ import {
 
 import { MarkdownView } from "../../components/MarkdownView";
 
-import { NodeTypeIcon } from "./PromptNodeViews";
+import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
 import { AutoSizeThumb } from "./MediaNodeViews";
 import type {
   AssetKind,
@@ -29,6 +29,7 @@ import type {
   ConnectedScreenplayInput,
   DocumentSkillNodeData,
   GenNodeData,
+  MentionCandidate,
   PromptNodeConfig,
   ScreenplayNodeConfig,
   StaticNodeDescriptor,
@@ -36,6 +37,7 @@ import type {
   ViralRemixNodeData,
   ViralRemixVideoInput,
 } from "./workspaceModel";
+import type { PromptContentEditorSession, PromptContentModule } from "../../lib/promptContent";
 import {
   DOCUMENT_SKILL_NODE_COPY,
   PROMPT_OPTIMIZATION_MODE_LABELS,
@@ -964,6 +966,9 @@ export function CanvasPromptNode({
   onSizeChange,
   onChange,
   onRun,
+  promptContents,
+  registerPromptInput,
+  mentionCandidates,
 }: {
   readonly node: Extract<GenNodeData, { kind: "prompt" }>;
   readonly descriptor: StaticNodeDescriptor;
@@ -1000,6 +1005,12 @@ export function CanvasPromptNode({
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onChange: (config: PromptNodeConfig) => void;
   readonly onRun: (key: string) => void;
+  readonly promptContents: PromptContentModule;
+  readonly registerPromptInput: (
+    nodeKey: string,
+    session: PromptContentEditorSession | null,
+  ) => void;
+  readonly mentionCandidates: readonly MentionCandidate[];
 }) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const textModelProviders = providerCatalog
@@ -1030,6 +1041,26 @@ export function CanvasPromptNode({
   const promptStatusText = node.config.generatedPrompt
     ? `已生成 ${node.config.generatedPrompt.length} 字${conversation.length > 0 ? `，累计 ${conversation.length} 条对话` : ""}${sourceConnections.length > 0 ? `，并携带 ${sourceConnections.length} 个参考素材` : ""}`
     : "输出会作为下游节点的提示词请求参数";
+
+  // 跟踪最后一次由外部（大模型生成）写入的文本，避免 onTextChange 回写时触发循环。
+  const lastExternalTextRef = useRef<string>(node.config.generatedPrompt);
+  // 大模型生成新提示词时，同步到 PromptMentionInput 的 session，并自动识别 @素材名。
+  useEffect(() => {
+    const next = node.config.generatedPrompt;
+    if (next === lastExternalTextRef.current) return;
+    lastExternalTextRef.current = next;
+    promptContents.replaceText(node.key, next, mentionCandidates);
+  }, [node.config.generatedPrompt, node.key, promptContents, mentionCandidates]);
+
+  const handlePromptTextChange = useCallback(
+    (text: string) => {
+      // 用户编辑产生的变化才回写到 generatedPrompt；外部写入触发的变化跳过。
+      if (text === lastExternalTextRef.current) return;
+      lastExternalTextRef.current = text;
+      onChange({ ...node.config, generatedPrompt: text });
+    },
+    [node.config, onChange],
+  );
 
   // 新消息出现时把对话区滚动到底部。
   useEffect(() => {
@@ -1371,15 +1402,14 @@ export function CanvasPromptNode({
         <div className="canvas-prompt-node__field">
           <label htmlFor={promptOutputId}>输出提示词</label>
           <div className="canvas-prompt-node__output-editor">
-            <textarea
-              id={promptOutputId}
-              aria-label="生成提示词输出"
-              className="canvas-prompt-node__output"
-              placeholder="调用文本模型后，生成结果会出现在这里；也可以直接编辑"
-              value={node.config.generatedPrompt}
-              onChange={(event) =>
-                onChange({ ...node.config, generatedPrompt: event.target.value })
-              }
+            <PromptMentionInput
+              nodeKey={node.key}
+              candidates={mentionCandidates}
+              registerInput={registerPromptInput}
+              labelledBy={promptOutputId}
+              describedBy={promptOutputId}
+              expandable
+              onTextChange={handlePromptTextChange}
             />
           </div>
         </div>

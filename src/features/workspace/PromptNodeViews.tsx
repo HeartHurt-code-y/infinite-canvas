@@ -216,6 +216,7 @@ export function PromptMentionInput({
   labelledBy,
   describedBy,
   expandable = false,
+  onTextChange,
 }: {
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
@@ -224,6 +225,8 @@ export function PromptMentionInput({
   readonly labelledBy?: string;
   readonly describedBy?: string;
   readonly expandable?: boolean;
+  /** 内容变化时的回调，传递纯文本（用于外部持久化，如提示词生成节点的 generatedPrompt）。 */
+  readonly onTextChange?: (text: string) => void;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
   const sessionRef = useRef<PromptContentEditorSession | null>(null);
@@ -343,12 +346,15 @@ export function PromptMentionInput({
     return true;
   }, [openAmbiguityChip]);
 
-  const updatePromptSnapshot = useCallback((input: HTMLDivElement) => {
-    const view = sessionRef.current?.acceptNativeInput();
-    setCharacterCount(
-      view?.characterCount ?? (input.textContent ?? "").replaceAll("\u200b", "").length,
-    );
-  }, []);
+  const updatePromptSnapshot = useCallback(
+    (input: HTMLDivElement) => {
+      const view = sessionRef.current?.acceptNativeInput();
+      const plainText = view?.plainText ?? (input.textContent ?? "").replaceAll("\u200b", "");
+      setCharacterCount(view?.characterCount ?? plainText.length);
+      onTextChange?.(plainText);
+    },
+    [onTextChange],
+  );
 
   const closeExpandedEditor = useCallback(() => {
     if (inputRef.current) updatePromptSnapshot(inputRef.current);
