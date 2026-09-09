@@ -567,10 +567,41 @@ export function AssetSourceDialog({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
-  const mediaSrc =
-    asset.kind === "video" ? toMediaProxyUrl(asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
+  // 云端素材签名地址过期时续签一次：图片预览与视频播放共用新预览地址。
+  const [refreshedMediaUrl, setRefreshedMediaUrl] = useState<string | null>(null);
+  const mediaRefreshAttemptedRef = useRef(false);
+  const rawMediaUrl =
+    refreshedMediaUrl ??
+    (asset.kind === "video" ? asset.videoUrl ?? asset.previewUrl : asset.previewUrl);
+  const mediaSrc = asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl) : rawMediaUrl;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
+  const handleMediaError = () => {
+    if (mediaSrc != null) setFailedMediaSrc(mediaSrc);
+    if (
+      mediaRefreshAttemptedRef.current ||
+      rawMediaUrl == null ||
+      asset.source !== "cloud" ||
+      asset.providerConnectionId == null ||
+      asset.providerConnectionId === ""
+    ) {
+      return;
+    }
+    mediaRefreshAttemptedRef.current = true;
+    void assetLibraryClient
+      .refreshAssetMedia({
+        providerConnectionId: asset.providerConnectionId,
+        id: asset.id,
+        mediaType: asset.kind,
+      })
+      .then((freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== rawMediaUrl) {
+          setRefreshedMediaUrl(freshUrl);
+          setFailedMediaSrc(null);
+        }
+      })
+      .catch(() => undefined);
+  };
   // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，
   // 避免误触；弹窗关闭时取消计时，不会在下次打开时残留。
   const [confirmingDelete, setConfirmingDelete] = useState(false);
@@ -678,7 +709,7 @@ export function AssetSourceDialog({
               src={mediaSrc}
               alt={asset.name}
               draggable={false}
-              onError={() => setFailedMediaSrc(mediaSrc)}
+              onError={handleMediaError}
             />
           ) : asset.kind === "video" && mediaSrc && !mediaFailed ? (
             <video
@@ -688,7 +719,7 @@ export function AssetSourceDialog({
               controls
               playsInline
               preload="metadata"
-              onError={() => setFailedMediaSrc(mediaSrc)}
+              onError={handleMediaError}
             />
           ) : asset.kind === "audio" && mediaSrc && !mediaFailed ? (
             <div className="asset-source-dialog__audio">
@@ -698,7 +729,7 @@ export function AssetSourceDialog({
                 aria-label={asset.name}
                 controls
                 preload="metadata"
-                onError={() => setFailedMediaSrc(mediaSrc)}
+                onError={handleMediaError}
               />
             </div>
           ) : asset.kind === "audio" ? (

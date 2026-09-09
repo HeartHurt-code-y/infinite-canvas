@@ -9,6 +9,7 @@ import {
   useEffect,
   useMemo,
   useCallback,
+  useRef,
   useState,
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
@@ -219,13 +220,44 @@ function targetSourceLabel(target: ExplicitMediaTarget): string {
 function MaterialThumb({
   previewUrl,
   mediaType,
+  renewIdentity,
 }: {
   previewUrl: string | null;
   mediaType: MediaType;
+  /** 云端素材身份：预览签名过期时向后端续签一次（本地素材不传）。 */
+  renewIdentity?: { readonly providerConnectionId: string; readonly assetId: string } | null;
 }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const failed = previewUrl != null && failedUrl === previewUrl;
-  if (previewUrl == null || failed) {
+  const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
+  const refreshAttemptedRef = useRef(false);
+  const effectiveUrl = refreshedUrl ?? previewUrl;
+  const failed = effectiveUrl != null && failedUrl === effectiveUrl;
+  const handleImageError = () => {
+    setFailedUrl(effectiveUrl);
+    if (
+      effectiveUrl == null ||
+      refreshAttemptedRef.current ||
+      renewIdentity == null ||
+      renewIdentity.providerConnectionId === ""
+    ) {
+      return;
+    }
+    refreshAttemptedRef.current = true;
+    void assetLibraryClient
+      .refreshAssetMedia({
+        providerConnectionId: renewIdentity.providerConnectionId,
+        id: renewIdentity.assetId,
+        mediaType,
+      })
+      .then((freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
+          setRefreshedUrl(freshUrl);
+          setFailedUrl(null);
+        }
+      })
+      .catch(() => undefined);
+  };
+  if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-material__thumb" aria-hidden="true">
         {mediaType === "video" ? (
@@ -241,10 +273,10 @@ function MaterialThumb({
   return (
     <span className="regenerate-material__thumb">
       <img
-        src={toMediaProxyUrl(previewUrl) ?? previewUrl}
+        src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
         alt=""
         loading="lazy"
-        onError={() => setFailedUrl(previewUrl)}
+        onError={handleImageError}
       />
       {mediaType === "video" ? (
         <span className="regenerate-material__thumb-badge" aria-hidden="true">
@@ -256,10 +288,46 @@ function MaterialThumb({
 }
 
 /** 添加列表行缩略图：图片/视频展示预览图，缺失时回退为类型图标。 */
-function AddListThumb({ previewUrl, kind }: { previewUrl: string | null; kind: MediaType }) {
+function AddListThumb({
+  previewUrl,
+  kind,
+  renewIdentity,
+}: {
+  previewUrl: string | null;
+  kind: MediaType;
+  renewIdentity?: { readonly providerConnectionId: string; readonly assetId: string } | null;
+}) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const failed = previewUrl != null && failedUrl === previewUrl;
-  if (previewUrl == null || failed) {
+  const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
+  const refreshAttemptedRef = useRef(false);
+  const effectiveUrl = refreshedUrl ?? previewUrl;
+  const failed = effectiveUrl != null && failedUrl === effectiveUrl;
+  const handleImageError = () => {
+    setFailedUrl(effectiveUrl);
+    if (
+      effectiveUrl == null ||
+      refreshAttemptedRef.current ||
+      renewIdentity == null ||
+      renewIdentity.providerConnectionId === ""
+    ) {
+      return;
+    }
+    refreshAttemptedRef.current = true;
+    void assetLibraryClient
+      .refreshAssetMedia({
+        providerConnectionId: renewIdentity.providerConnectionId,
+        id: renewIdentity.assetId,
+        mediaType: kind,
+      })
+      .then((freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
+          setRefreshedUrl(freshUrl);
+          setFailedUrl(null);
+        }
+      })
+      .catch(() => undefined);
+  };
+  if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-add__thumb" aria-hidden="true">
         {kind === "video" ? (
@@ -273,10 +341,10 @@ function AddListThumb({ previewUrl, kind }: { previewUrl: string | null; kind: M
   return (
     <span className="regenerate-add__thumb">
       <img
-        src={toMediaProxyUrl(previewUrl) ?? previewUrl}
+        src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
         alt=""
         loading="lazy"
-        onError={() => setFailedUrl(previewUrl)}
+        onError={handleImageError}
       />
     </span>
   );
@@ -726,6 +794,10 @@ export function RegenerateGenerationDialog({
                             <AddListThumb
                               previewUrl={asset.previewUrl ?? asset.coverUrl}
                               kind={asset.kind}
+                              renewIdentity={{
+                                providerConnectionId: asset.providerConnectionId,
+                                assetId: asset.id,
+                              }}
                             />
                             <span>{asset.name}</span>
                             <span className="regenerate-add__kind">

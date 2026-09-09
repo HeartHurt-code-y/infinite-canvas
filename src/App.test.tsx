@@ -723,6 +723,192 @@ describe("App workspace", () => {
     });
   });
 
+  it("图片卡预览签名过期时向后端续签一次，用新地址重试加载", async () => {
+    const stalePreviewUrl = "https://cdn.example.com/stale-image.jpg?signature=expired";
+    const freshPreviewUrl = "https://cdn.example.com/fresh-image.jpg?signature=fresh";
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-production",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 2,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets": {
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          if (commandPayload["kind"] != null && commandPayload["kind"] !== "image") {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([
+            cloudAsset("moyu-production", {
+              id: "image-asset-1",
+              kind: "image",
+              name: "过期图片续签",
+              previewUrl: stalePreviewUrl,
+            }),
+          ]);
+        }
+        case "list_asset_groups":
+          return Promise.resolve([]);
+        case "refresh_asset_media":
+          return Promise.resolve(freshPreviewUrl);
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    const card = await screen.findByRole("button", { name: "预览图片素材详情：过期图片续签" });
+    const image = card.querySelector<HTMLImageElement>(".asset-card__preview");
+    expect(image).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(stalePreviewUrl)}`,
+    );
+
+    fireEvent.error(image!);
+    await waitFor(() => {
+      const refreshCall = invokeMock.mock.calls.find(
+        ([name]) => name === "refresh_asset_media",
+      ) as [string, { command: { providerConnectionId: string; id: string; mediaType: string } }] | undefined;
+      expect(refreshCall?.[1]?.command).toEqual({
+        providerConnectionId: "moyu-production",
+        id: "image-asset-1",
+        mediaType: "image",
+      });
+    });
+    await waitFor(() => {
+      const refreshed = card.querySelector<HTMLImageElement>(".asset-card__preview");
+      expect(refreshed).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshPreviewUrl)}`,
+      );
+    });
+
+    // 每个卡片实例只续签一次：新地址仍失败时不重复请求。
+    fireEvent.error(card.querySelector<HTMLImageElement>(".asset-card__preview")!);
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media"),
+      ).toHaveLength(1);
+    });
+  });
+
+  it("视频卡播放地址签名过期时向后端续签一次，用新地址重新加载", async () => {
+    const staleVideoUrl = "https://cdn.example.com/stale-play.mp4?signature=expired";
+    const freshVideoUrl = "https://cdn.example.com/fresh-play.mp4?signature=fresh";
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-production",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 2,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets": {
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          if (commandPayload["kind"] != null && commandPayload["kind"] !== "video") {
+            return Promise.resolve([]);
+          }
+          return Promise.resolve([
+            cloudAsset("moyu-production", {
+              id: "video-asset-2",
+              kind: "video",
+              name: "过期播放续签",
+              previewUrl: staleVideoUrl,
+              assetUrl: staleVideoUrl,
+            }),
+          ]);
+        }
+        case "list_asset_groups":
+          return Promise.resolve([]);
+        case "refresh_asset_media":
+          return Promise.resolve(freshVideoUrl);
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.click(await screen.findByRole("tab", { name: "视频" }));
+    const card = await screen.findByRole("button", {
+      name: "预览视频素材详情：过期播放续签",
+    });
+    const video = card.querySelector<HTMLVideoElement>("video");
+    expect(video).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleVideoUrl)}`,
+    );
+
+    fireEvent.error(video!);
+    await waitFor(() => {
+      const refreshCall = invokeMock.mock.calls.find(
+        ([name]) => name === "refresh_asset_media",
+      ) as [string, { command: { providerConnectionId: string; id: string; mediaType: string } }] | undefined;
+      expect(refreshCall?.[1]?.command).toEqual({
+        providerConnectionId: "moyu-production",
+        id: "video-asset-2",
+        mediaType: "video",
+      });
+    });
+    await waitFor(() => {
+      const refreshed = card.querySelector<HTMLVideoElement>("video");
+      expect(refreshed).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshVideoUrl)}`,
+      );
+    });
+  });
+
   it("从素材详情弹窗两段式删除云端素材：确认后才调用删除接口并关闭弹窗", async () => {
     const deleteCalls: Array<Record<string, unknown>> = [];
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {

@@ -60,7 +60,11 @@ function AssetCardVideoVisual({
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wasPreviewingRef = useRef(false);
-  const videoSrc = toMediaProxyUrl(asset.videoUrl ?? asset.previewUrl ?? null);
+  // 播放地址签名过期时向后端续签一次得到的新地址；未刷新时用列表原始地址。
+  const [refreshedVideoUrl, setRefreshedVideoUrl] = useState<string | null>(null);
+  const playbackRefreshAttemptedRef = useRef(false);
+  const candidateVideoUrl = refreshedVideoUrl ?? asset.videoUrl ?? asset.previewUrl ?? null;
+  const videoSrc = toMediaProxyUrl(candidateVideoUrl);
   const [loadedVideoSrc, setLoadedVideoSrc] = useState<string | null>(null);
   const videoReady = loadedVideoSrc === videoSrc;
   const [failedVideoSrc, setFailedVideoSrc] = useState<string | null>(null);
@@ -178,6 +182,29 @@ function AssetCardVideoVisual({
             setLoadedVideoSrc(null);
             setFailedVideoSrc(videoSrc);
             setVideoCoverReady(false);
+            // 播放地址签名过期：每个卡片实例续签一次（与封面续签相互独立），
+            // 拿到新地址后重新加载；续签失败保持置灰，不反复请求。
+            if (
+              candidateVideoUrl != null &&
+              !playbackRefreshAttemptedRef.current &&
+              asset.source === "cloud" &&
+              asset.providerConnectionId != null
+            ) {
+              playbackRefreshAttemptedRef.current = true;
+              void assetLibraryClient
+                .refreshAssetMedia({
+                  providerConnectionId: asset.providerConnectionId,
+                  id: asset.id,
+                  mediaType: "video",
+                })
+                .then((freshUrl) => {
+                  if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
+                    setRefreshedVideoUrl(freshUrl);
+                    setFailedVideoSrc(null);
+                  }
+                })
+                .catch(() => undefined);
+            }
           }}
           onLoadedMetadata={(event) => {
             const video = event.currentTarget;
@@ -224,8 +251,14 @@ function AssetCard({
   const previewing = asset.kind === "video" && (hovered || focused);
   const [loadedImagePreviewUrl, setLoadedImagePreviewUrl] = useState<string | null>(null);
   const [failedImagePreviewUrl, setFailedImagePreviewUrl] = useState<string | null>(null);
-  const imagePreviewReady = asset.previewUrl != null && loadedImagePreviewUrl === asset.previewUrl;
-  const imagePreviewFailed = asset.previewUrl == null || failedImagePreviewUrl === asset.previewUrl;
+  // 图片预览签名过期时向后端续签一次得到的新地址；每个卡片实例只尝试一次。
+  const [refreshedImagePreviewUrl, setRefreshedImagePreviewUrl] = useState<string | null>(null);
+  const imageRefreshAttemptedRef = useRef(false);
+  const candidateImagePreviewUrl = refreshedImagePreviewUrl ?? asset.previewUrl;
+  const imagePreviewReady =
+    candidateImagePreviewUrl != null && loadedImagePreviewUrl === candidateImagePreviewUrl;
+  const imagePreviewFailed =
+    candidateImagePreviewUrl == null || failedImagePreviewUrl === candidateImagePreviewUrl;
   const isRealAsset = asset.source != null;
   // 瀑布流布局：媒体加载后量取原始宽高比，覆盖视觉区的 4:3 占位比例。
   const [intrinsicRatio, setIntrinsicRatio] = useState<number | null>(null);
@@ -330,22 +363,48 @@ function AssetCard({
                   state={imagePreviewFailed ? "unavailable" : "loading"}
                 />
               ) : null}
-              {asset.previewUrl && !imagePreviewFailed ? (
+              {candidateImagePreviewUrl && !imagePreviewFailed ? (
                 <img
                   className="asset-card__preview"
-                  src={toMediaProxyUrl(asset.previewUrl) ?? asset.previewUrl}
+                  src={toMediaProxyUrl(candidateImagePreviewUrl) ?? candidateImagePreviewUrl}
                   alt=""
                   loading="lazy"
                   onLoad={(event) => {
                     const image = event.currentTarget;
                     const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
                     if (ratio != null) setIntrinsicRatio(ratio);
-                    setLoadedImagePreviewUrl(asset.previewUrl ?? null);
+                    setLoadedImagePreviewUrl(candidateImagePreviewUrl ?? null);
                     setFailedImagePreviewUrl(null);
                   }}
                   onError={() => {
                     setLoadedImagePreviewUrl(null);
-                    setFailedImagePreviewUrl(asset.previewUrl ?? null);
+                    setFailedImagePreviewUrl(candidateImagePreviewUrl ?? null);
+                    // 预览签名过期：云端素材每个卡片实例续签一次，新地址重新加载。
+                    if (
+                      candidateImagePreviewUrl != null &&
+                      !imageRefreshAttemptedRef.current &&
+                      asset.source === "cloud" &&
+                      asset.providerConnectionId != null
+                    ) {
+                      imageRefreshAttemptedRef.current = true;
+                      void assetLibraryClient
+                        .refreshAssetMedia({
+                          providerConnectionId: asset.providerConnectionId,
+                          id: asset.id,
+                          mediaType: "image",
+                        })
+                        .then((freshUrl) => {
+                          if (
+                            freshUrl != null &&
+                            freshUrl !== "" &&
+                            freshUrl !== candidateImagePreviewUrl
+                          ) {
+                            setRefreshedImagePreviewUrl(freshUrl);
+                            setFailedImagePreviewUrl(null);
+                          }
+                        })
+                        .catch(() => undefined);
+                    }
                   }}
                 />
               ) : null}

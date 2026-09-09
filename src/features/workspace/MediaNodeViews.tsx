@@ -2265,7 +2265,9 @@ export function AutoSizeThumb({
   readonly height?: string;
   readonly maxWidth?: string;
 }) {
-  const [failed, setFailed] = useState(false);
+  // 失败按 URL 记忆而非布尔值：来源节点续签出新地址后，新 URL 会自动重试加载。
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const failed = previewUrl != null && failedUrl === previewUrl;
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   const showImage = previewUrl != null && !failed && kind !== "audio" && kind !== "document";
 
@@ -2293,7 +2295,7 @@ export function AutoSizeThumb({
           draggable={false}
           decoding="async"
           loading="lazy"
-          onError={() => setFailed(true)}
+          onError={() => setFailedUrl(previewUrl)}
           onLoad={handleImageLoad}
         />
       ) : (

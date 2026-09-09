@@ -20,6 +20,7 @@ import { X } from "@phosphor-icons/react/X";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import {
+  assetLibraryClient,
   frontendLog,
   type GenerationOperation,
   type ProviderCatalogEntry,
@@ -81,10 +82,40 @@ export function AssetKindIcon({
 
 /** @ 候选缩略图：自动适应原始图片宽高比，完整显示不裁剪。 */
 function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidate }) {
-  const [failed, setFailed] = useState(false);
-  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
-  const preview = candidate.previewUrl;
+  const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  // 云端素材签名过期时续签一次得到的新地址；未刷新时用候选携带的原始地址。
+  const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
+  const refreshAttemptedRef = useRef(false);
+  const preview = refreshedUrl ?? candidate.previewUrl ?? null;
+  const failed = preview != null && failedUrl === preview;
   const showImage = preview != null && !failed && candidate.kind !== "audio";
+  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+
+  const handleImageError = () => {
+    setFailedUrl(preview);
+    if (
+      preview == null ||
+      refreshAttemptedRef.current ||
+      candidate.source !== "cloud" ||
+      candidate.providerConnectionId === ""
+    ) {
+      return;
+    }
+    refreshAttemptedRef.current = true;
+    void assetLibraryClient
+      .refreshAssetMedia({
+        providerConnectionId: candidate.providerConnectionId,
+        id: candidate.assetId,
+        mediaType: candidate.kind,
+      })
+      .then((freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== preview) {
+          setRefreshedUrl(freshUrl);
+          setFailedUrl(null);
+        }
+      })
+      .catch(() => undefined);
+  };
 
   const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
     const img = event.currentTarget;
@@ -113,7 +144,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
           draggable={false}
           decoding="async"
           loading="lazy"
-          onError={() => setFailed(true)}
+          onError={handleImageError}
           onLoad={handleImageLoad}
         />
       ) : (
