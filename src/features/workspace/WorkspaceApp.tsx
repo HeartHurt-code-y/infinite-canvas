@@ -4879,19 +4879,27 @@ export function WorkspaceApp({
           .then((taskId) => {
             // 任务创建成功 → 立即在来源生成节点右侧落下占位产物卡片并连虚线，
             // 卡片承担任务状态栏职责：进行中展示进度，成功填充产物，失败展示完整错误。
-            const key = outputNodeKey();
-            addOutput((current) => ({
-              key,
-              resultKey: null,
-              sourceNodeId: genNode.key,
-              taskId,
-              mediaType: genNode.kind === "video" ? "video" : "image",
-              finalPath: null,
-              previewSrc: null,
-              name: null,
-              ...nextOutputSlot(genNode, current),
-            }));
-            frontendLog("info", `[canvas] 已创建生成占位产物卡片: task=${taskId}`);
+            // 支持 n 参数的模型一次请求返回多张图：生成开始时就落下与数量相等的占位卡片，
+            // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
+            const placeholderCount = supportsBatchCount ? generationCount : 1;
+            for (let resultIndex = 0; resultIndex < placeholderCount; resultIndex += 1) {
+              const key = outputNodeKey();
+              addOutput((current) => ({
+                key,
+                resultKey: supportsBatchCount ? `${taskId}#${resultIndex}` : null,
+                sourceNodeId: genNode.key,
+                taskId,
+                mediaType: genNode.kind === "video" ? "video" : "image",
+                finalPath: null,
+                previewSrc: null,
+                name: null,
+                ...nextOutputSlot(genNode, current),
+              }));
+            }
+            frontendLog(
+              "info",
+              `[canvas] 已创建生成占位产物卡片: task=${taskId}, 数量=${placeholderCount}`,
+            );
             return refreshTasks();
           })
           .catch((error: unknown) => {
