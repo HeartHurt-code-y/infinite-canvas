@@ -22,6 +22,7 @@ import {
 import { MarkdownView } from "../../components/MarkdownView";
 
 import { NodeTypeIcon } from "./PromptNodeViews";
+import { AutoSizeThumb } from "./MediaNodeViews";
 import type {
   AssetKind,
   CanvasNodeDimensions,
@@ -977,6 +978,7 @@ export function CanvasPromptNode({
     readonly name: string;
     readonly kind: AssetKind;
     readonly edgeId: string;
+    readonly previewUrl: string | null;
   }[];
   readonly targetConnections: readonly {
     readonly key: string;
@@ -1131,6 +1133,12 @@ export function CanvasPromptNode({
             <ul aria-label="已连入的参考素材">
               {sourceConnections.map((connection) => (
                 <li key={connection.edgeId}>
+                  <AutoSizeThumb
+                    previewUrl={connection.previewUrl}
+                    kind={connection.kind}
+                    height="2.5rem"
+                    maxWidth="7rem"
+                  />
                   <span>{connection.name}</span>
                   <button
                     type="button"
