@@ -11,6 +11,24 @@ use url::Url;
 
 pub const MEDIA_PROXY_SCHEME: &str = "assetproxy";
 
+/// 上游单次返回的最大分块（8 MiB）。WebView 视频栈用 `Range: bytes=X-` 探测/续播大媒体，
+/// 把开放区间钳制为固定窗口后，每个请求的内存上界恒定，避免整段视频常驻内存。
+/// 说明：Tauri 自定义协议的响应体必须是完整 `Vec<u8>`，无法向 WebView 真流式；
+/// 分块是约束内存的唯一手段。若上游不支持 Range 返回 200 全量，则退化为旧行为（全量缓冲）。
+const MAX_RANGE_CHUNK_BYTES: u64 = 8 * 1024 * 1024;
+
+/// 把开放区间 `bytes=X-` 钳制为 `bytes=X-{X+chunk-1}`；有界区间、后缀区间与
+/// 多区间请求保持原样（返回 None 即不修改）。
+fn clamp_open_ended_range(header: &HeaderValue) -> Option<HeaderValue> {
+    let raw = header.to_str().ok()?;
+    let start = raw.trim().strip_prefix("bytes=")?.strip_suffix('-')?;
+    let start: u64 = start.parse().ok()?;
+    let end = start
+        .saturating_add(MAX_RANGE_CHUNK_BYTES)
+        .saturating_sub(1);
+    HeaderValue::from_str(&format!("bytes={start}-{end}")).ok()
+}
+
 /// Use Tauri's persistent async runtime; never block a WebView callback or create a
 /// short-lived runtime whose I/O drivers have already been dropped.
 pub fn handle_media_proxy_request<R: tauri::Runtime>(
@@ -106,15 +124,25 @@ async fn fetch_upstream(
             }
         }))
         .build()?;
+    // Range 单独处理：开放区间钳制为固定窗口，约束单请求内存；其余区间原样转发。
+    // 先计算 outgoing（method 之后被 move），再构建请求。
+    let outgoing_range = request_headers.get("range").map(|value| {
+        if method == Method::GET {
+            clamp_open_ended_range(value).unwrap_or_else(|| value.clone())
+        } else {
+            value.clone()
+        }
+    });
     let mut builder = client
         .request(method, url.clone())
         .header("accept-encoding", "identity");
     // Intentionally do not forward WebView cookies, authorization, origin or referer.
     // These two validators are needed for seek and resumed media requests.
-    for name in ["range", "if-range"] {
-        if let Some(value) = request_headers.get(name) {
-            builder = builder.header(name, value.clone());
-        }
+    if let Some(value) = request_headers.get("if-range") {
+        builder = builder.header("if-range", value.clone());
+    }
+    if let Some(outgoing) = outgoing_range {
+        builder = builder.header("range", outgoing);
     }
     let response = builder.send().await?;
     let status = response.status();
@@ -249,6 +277,12 @@ mod tests {
                             "Content-Range: bytes 1-3/5\r\n".into(),
                             "ide",
                         ),
+                        // 代理对开放区间 `bytes=0-` 的钳制请求：上游以分块 206 响应。
+                        "/media" if lower.contains("range: bytes=0-") => (
+                            "206 Partial Content",
+                            format!("Content-Range: bytes 0-{}/5\r\n", MAX_RANGE_CHUNK_BYTES - 1),
+                            "video",
+                        ),
                         "/media" if lower.contains("range: bytes=99-") => (
                             "416 Range Not Satisfiable",
                             "Content-Range: bytes */5\r\n".into(),
@@ -338,6 +372,47 @@ mod tests {
             assert!(request.contains("if-range: \"media-v1\""));
             assert!(!request.contains("secret"));
         }
+    }
+
+    #[tokio::test]
+    async fn clamps_open_ended_ranges_to_a_bounded_chunk_and_passes_the_partial_response() {
+        let server = HttpFixture::new();
+        let response = proxy_response(
+            server
+                .request(Method::GET, "/media")
+                .header("range", "bytes=0-")
+                .body(Vec::new())
+                .unwrap(),
+        )
+        .await;
+        // 上游收到钳制后的分块请求，206 分块响应（头/体）原样透传给 WebView。
+        assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(response.body(), b"video");
+        assert_eq!(
+            response.headers()["content-range"],
+            format!("bytes 0-{}/5", MAX_RANGE_CHUNK_BYTES - 1)
+        );
+        let requests = server.requests.lock().unwrap();
+        let last = requests.last().unwrap().to_ascii_lowercase();
+        assert!(last.contains(&format!("range: bytes=0-{}", MAX_RANGE_CHUNK_BYTES - 1)));
+        assert!(!last.contains("\nrange: bytes=0-\r\n"));
+    }
+
+    #[test]
+    fn range_clamping_only_rewrites_open_ended_byte_ranges() {
+        let clamp = |value: &str| {
+            clamp_open_ended_range(&HeaderValue::from_str(value).unwrap())
+                .and_then(|header| header.to_str().ok().map(str::to_owned))
+        };
+        assert_eq!(
+            clamp("bytes=8388607-").as_deref(),
+            Some("bytes=8388607-16777214")
+        );
+        // 有界区间、后缀区间、多区间与非 bytes 单位不重写。
+        assert_eq!(clamp("bytes=1-3").as_deref(), None);
+        assert_eq!(clamp("bytes=-500").as_deref(), None);
+        assert_eq!(clamp("bytes=0-1,5-6").as_deref(), None);
+        assert_eq!(clamp("chunks=0-").as_deref(), None);
     }
 
     #[tokio::test]

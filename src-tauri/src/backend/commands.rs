@@ -39,11 +39,10 @@ use super::{
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
         RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand, RemoteModelOption,
         RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand,
-        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
-        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
-        TosBucketPullSummary, TosStagingConfig, UpsertProviderConnectionCommand,
-        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
+        SaveCanvasDocumentCommand, SetCredentialCommand, StagingJobRecord, StartGenerationCommand,
+        StartStagingCommand, StartVideoCompositionCommand, StartVideoDownloadCommand,
+        StartVideoFrameExtractionCommand, TosBucketPullSummary, TosStagingConfig,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
 

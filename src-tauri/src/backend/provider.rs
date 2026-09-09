@@ -988,6 +988,7 @@ impl ProviderRuntime {
     /// 海外平台（如 konjac.ai）的素材导入不使用 JSON `url` 方式（旧端点 `/v1/assets/async`
     /// 返回 404 Invalid URL），而是直接 multipart 上传文件字节。本方法复用素材库直连
     /// 通道（供应商连接 + Bearer 素材库令牌），构造 `file` 文件 part 与文本字段 part。
+    /// 文件 part 从磁盘路径流式读取（ReaderStream + 已知长度），文件不整段驻留内存。
     #[allow(clippy::too_many_arguments)]
     pub(super) async fn raw_asset_multipart_request(
         &self,
@@ -997,7 +998,8 @@ impl ProviderRuntime {
         file_field: &str,
         file_name: &str,
         mime_type: &str,
-        file_bytes: Vec<u8>,
+        file_path: &std::path::Path,
+        file_size: u64,
     ) -> BackendResult<RawProviderResponse> {
         let context = self.resolve_asset_library(provider_connection_id)?;
         let url = endpoint(&context.base_url, path)?;
@@ -1006,10 +1008,13 @@ impl ProviderRuntime {
         for (name, value) in fields {
             form = form.text(name.clone(), value.clone());
         }
-        let part = multipart::Part::bytes(file_bytes)
-            .file_name(file_name.to_string())
-            .mime_str(mime_type)
-            .map_err(BackendError::Transport)?;
+        let file = tokio::fs::File::open(file_path).await?;
+        let stream = tokio_util::io::ReaderStream::new(file);
+        let part =
+            multipart::Part::stream_with_length(reqwest::Body::wrap_stream(stream), file_size)
+                .file_name(file_name.to_string())
+                .mime_str(mime_type)
+                .map_err(BackendError::Transport)?;
         form = form.part(file_field.to_string(), part);
         let request = self
             .client

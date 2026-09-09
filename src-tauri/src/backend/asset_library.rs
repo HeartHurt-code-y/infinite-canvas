@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     future::Future,
+    path::PathBuf,
     pin::Pin,
     sync::Arc,
     time::{Duration, SystemTime, UNIX_EPOCH},
@@ -10,6 +11,7 @@ use futures_util::StreamExt as _;
 use reqwest::Method;
 use serde_json::{Map, Value, json};
 use sha2::{Digest as _, Sha256};
+use tokio::io::AsyncWriteExt as _;
 use tokio::sync::Mutex;
 use url::Url;
 
@@ -45,6 +47,7 @@ struct RemoteAssetRequest {
 }
 
 /// multipart 文件上传请求（海外平台素材上传 `POST /v1/assets/upload`）。
+/// 文件以磁盘路径 + 大小传递：生产端用流式 part 直传，避免整个文件驻留内存。
 #[derive(Debug, Clone)]
 struct MultipartAssetRequest {
     provider_connection_id: String,
@@ -55,7 +58,9 @@ struct MultipartAssetRequest {
     file_field: String,
     file_name: String,
     mime_type: String,
-    file_bytes: Vec<u8>,
+    file_path: PathBuf,
+    /// 文件字节数（流式 part 的 content-length）。
+    file_size: u64,
 }
 
 trait AssetPort: Send + Sync {
@@ -76,13 +81,15 @@ trait AssetPort: Send + Sync {
 
     fn download(&self, url: String) -> PortFuture<Vec<u8>>;
 
-    /// 带字节进度回调的下载：`on_progress(done_bytes, total_bytes)`，`total` 未知（无
-    /// Content-Length）时为 0。用于海外素材导入阶段向调用方上报下载进度。
-    fn download_progressed(
+    /// 流式下载远端素材到指定文件（覆盖写），返回写入的总字节数。
+    /// `on_progress(done_bytes, total_bytes)`，`total` 未知（无 Content-Length）时为 0。
+    /// 用于海外素材导入：下载落盘后以流式 multipart 直传，文件全程不整段驻留内存。
+    fn download_to_file(
         &self,
         url: String,
-        on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
-    ) -> PortFuture<Vec<u8>>;
+        destination: PathBuf,
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> PortFuture<u64>;
 }
 
 #[derive(Clone)]
@@ -117,7 +124,8 @@ impl AssetPort for ProviderAssetAdapter {
                     &request.file_field,
                     &request.file_name,
                     &request.mime_type,
-                    request.file_bytes,
+                    &request.file_path,
+                    request.file_size,
                 )
                 .await
         })
@@ -175,11 +183,12 @@ impl AssetPort for ProviderAssetAdapter {
         })
     }
 
-    fn download_progressed(
+    fn download_to_file(
         &self,
         url: String,
-        on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
-    ) -> PortFuture<Vec<u8>> {
+        destination: PathBuf,
+        on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+    ) -> PortFuture<u64> {
         let client = self.providers.client().clone();
         Box::pin(async move {
             // 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免下载 TOS 暂存对象时连接失败。
@@ -197,16 +206,20 @@ impl AssetPort for ProviderAssetAdapter {
                 ));
             }
             let total = response.content_length().unwrap_or(0);
+            // 分块流式写盘：内存中任意时刻只有单个网络 chunk，不再累积整文件。
             let mut stream = response.bytes_stream();
-            let mut bytes = Vec::new();
+            let mut file = tokio::fs::File::create(&destination).await?;
             let mut done: u64 = 0;
             while let Some(chunk) = stream.next().await {
                 let chunk = chunk?;
+                file.write_all(&chunk).await?;
                 done = done.saturating_add(chunk.len() as u64);
-                bytes.extend_from_slice(&chunk);
-                on_progress(done, total);
+                if let Some(on_progress) = on_progress.as_ref() {
+                    on_progress(done, total);
+                }
             }
-            Ok(bytes)
+            file.flush().await?;
+            Ok(done)
         })
     }
 }
@@ -218,6 +231,27 @@ pub struct ImportStagedAsset {
     pub media_type: MediaType,
     pub display_name: Option<String>,
     pub group_id: Option<i64>,
+}
+
+/// 导入临时文件守卫：作用域结束（含错误路径）时删除落盘文件。
+struct TempMediaFile {
+    path: PathBuf,
+}
+
+impl TempMediaFile {
+    fn create() -> Self {
+        let path = std::env::temp_dir().join(format!(
+            "infinite-canvas-asset-import-{}.bin",
+            uuid::Uuid::new_v4()
+        ));
+        Self { path }
+    }
+}
+
+impl Drop for TempMediaFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.path);
+    }
 }
 
 pub struct AssetReadTrace<'a> {
@@ -304,7 +338,7 @@ impl AssetLibrary {
     /// 上游翻完或到达 [`KIND_SCAN_PAGE_CAP`] 时提前结束。
     pub async fn browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
         let page_number = query.page_number.unwrap_or(1).max(1);
-        let page_size = query.page_size.unwrap_or(100).min(100).max(1);
+        let page_size = query.page_size.unwrap_or(100).clamp(1, 100);
         let Some(kind) = query.kind else {
             return self
                 .browse_upstream_page(&query, u64::from(page_number), u64::from(page_size))
@@ -347,7 +381,12 @@ impl AssetLibrary {
         let mut body = Map::new();
         body.insert("page_number".into(), json!(page_number));
         body.insert("page_size".into(), json!(page_size));
-        if let Some(value) = query.name.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
+        if let Some(value) = query
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+        {
             body.insert("name".into(), value.into());
         }
         if let Some(value) = query.group_id {
@@ -859,19 +898,21 @@ impl AssetLibrary {
             .display_name
             .as_deref()
             .map(|value| value.chars().take(64).collect::<String>());
-        // 从暂存 URL 下载文件字节，供 multipart 直传。有回调时流式下载并上报进度。
-        let bytes = match progress.as_ref() {
-            Some(on_progress) => {
-                self.port
-                    .download_progressed(request.public_url.clone(), Arc::clone(on_progress))
-                    .await?
-            }
-            None => self.port.download(request.public_url.clone()).await?,
-        };
-        let total_work = (bytes.len() as u64).saturating_mul(2);
+        // 从暂存 URL 流式下载文件到临时文件（分块写盘，不整段驻留内存），再以
+        // 流式 multipart 直传。有回调时按下载字节推进（total = Content-Length）。
+        let temp_file = TempMediaFile::create();
+        let total = self
+            .port
+            .download_to_file(
+                request.public_url.clone(),
+                temp_file.path.clone(),
+                progress.as_ref().map(Arc::clone),
+            )
+            .await?;
+        let total_work = total.saturating_mul(2);
         if let Some(on_progress) = progress.as_ref() {
             // 下载完成（50%），multipart 直传期间保持该值，直传成功后跳 100%。
-            on_progress(bytes.len() as u64, total_work);
+            on_progress(total, total_work);
         }
         let mut fields = vec![
             (
@@ -893,7 +934,8 @@ impl AssetLibrary {
                 file_field: "file".to_string(),
                 file_name,
                 mime_type: media_type_mime(request.media_type).to_string(),
-                file_bytes: bytes,
+                file_path: temp_file.path.clone(),
+                file_size: total,
             })
             .await?;
         // 若 `/v1/assets/upload` 也返回 404，说明该供应商网关未实现任何已知素材上传端点
@@ -1806,7 +1848,7 @@ mod tests {
     struct InMemoryAssetAdapter {
         responses: StdMutex<VecDeque<RawProviderResponse>>,
         requests: StdMutex<Vec<RemoteAssetRequest>>,
-        multipart_requests: StdMutex<Vec<MultipartAssetRequest>>,
+        multipart_requests: StdMutex<Vec<(MultipartAssetRequest, Vec<u8>)>>,
         downloads: StdMutex<StdHashMap<String, Vec<u8>>>,
         /// 是否为海外平台网关（默认 false，即国内 JSON 契约）。
         overseas: StdMutex<bool>,
@@ -1839,7 +1881,7 @@ mod tests {
                 .lock()
                 .expect("multipart lock")
                 .iter()
-                .map(|request| request.path)
+                .map(|(request, _)| request.path)
                 .collect()
         }
 
@@ -1863,10 +1905,12 @@ mod tests {
             &self,
             request: MultipartAssetRequest,
         ) -> PortFuture<RawProviderResponse> {
+            // 发送时读取文件内容并随请求一起记录，供测试在临时文件被守卫删除后断言。
+            let file_body = std::fs::read(&request.file_path).unwrap_or_default();
             self.multipart_requests
                 .lock()
                 .expect("multipart lock")
-                .push(request);
+                .push((request, file_body));
             let response = self.take_response();
             Box::pin(async move { response })
         }
@@ -1905,11 +1949,12 @@ mod tests {
             Box::pin(async move { result })
         }
 
-        fn download_progressed(
+        fn download_to_file(
             &self,
             url: String,
-            on_progress: Arc<dyn Fn(u64, u64) + Send + Sync>,
-        ) -> PortFuture<Vec<u8>> {
+            destination: PathBuf,
+            on_progress: Option<Arc<dyn Fn(u64, u64) + Send + Sync>>,
+        ) -> PortFuture<u64> {
             let result = self
                 .downloads
                 .lock()
@@ -1917,10 +1962,14 @@ mod tests {
                 .get(&url)
                 .cloned()
                 .ok_or_else(|| BackendError::NotFound(format!("missing download: {url}")));
-            if let Ok(bytes) = &result {
-                on_progress(bytes.len() as u64, bytes.len() as u64);
-            }
-            Box::pin(async move { result })
+            Box::pin(async move {
+                let bytes = result?;
+                std::fs::write(&destination, &bytes)?;
+                if let Some(on_progress) = on_progress.as_ref() {
+                    on_progress(bytes.len() as u64, bytes.len() as u64);
+                }
+                Ok(bytes.len() as u64)
+            })
         }
     }
 
@@ -2193,7 +2242,10 @@ mod tests {
             .expect("browse");
 
         assert_eq!(
-            assets.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            assets
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
             ["vid-0", "vid-1"]
         );
         let requests = adapter.requests.lock().expect("request lock");
@@ -2234,7 +2286,10 @@ mod tests {
             .expect("browse");
 
         assert_eq!(
-            assets.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            assets
+                .iter()
+                .map(|asset| asset.id.as_str())
+                .collect::<Vec<_>>(),
             ["vid-2", "vid-3"]
         );
         let requests = adapter.requests.lock().expect("request lock");
@@ -3173,23 +3228,27 @@ mod tests {
         // multipart 通道只走一次 /v1/assets/upload。
         assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
         let uploads = adapter.multipart_requests.lock().expect("multipart lock");
-        assert_eq!(uploads[0].path, "/v1/assets/upload");
-        assert_eq!(uploads[0].file_field, "file");
-        assert_eq!(uploads[0].file_name, "参考图");
-        assert_eq!(uploads[0].mime_type, "image/jpeg");
-        assert_eq!(uploads[0].file_bytes, vec![1, 2, 3, 4]);
+        assert_eq!(uploads[0].0.path, "/v1/assets/upload");
+        assert_eq!(uploads[0].0.file_field, "file");
+        assert_eq!(uploads[0].0.file_name, "参考图");
+        assert_eq!(uploads[0].0.mime_type, "image/jpeg");
+        assert_eq!(uploads[0].0.file_size, 4);
+        assert_eq!(uploads[0].1, vec![1, 2, 3, 4]);
         assert!(
             uploads[0]
+                .0
                 .fields
                 .contains(&("kind".to_string(), "image".to_string()))
         );
         assert!(
             uploads[0]
+                .0
                 .fields
                 .contains(&("group_id".to_string(), "16".to_string()))
         );
         assert!(
             uploads[0]
+                .0
                 .fields
                 .contains(&("name".to_string(), "参考图".to_string()))
         );
