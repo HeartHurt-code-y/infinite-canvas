@@ -348,6 +348,26 @@ export function createCanvasInputResolver(
       }
     }
     const result = { media, texts, pending };
+    // 链式连接时按源头优先排序：从目标节点出发，深度越大（越上游的源头）越靠前。
+    // 例如 A → B → 生成节点，当前 DFS 会先收集 B 再收集 A，此处重排为 [A, B]。
+    // 直连素材深度相同，相对顺序保持不变，后续 inputSlots 排序再调整直连素材间的顺序。
+    const depthByKey = new Map<string, number>();
+    const depthVisited = new Set<string>();
+    const computeDepth = (key: string): number => {
+      if (depthByKey.has(key)) return depthByKey.get(key)!;
+      if (depthVisited.has(key)) return 0; // 防循环引用
+      depthVisited.add(key);
+      const parents = incoming.get(key) ?? [];
+      let maxParentDepth = 0;
+      for (const parent of parents) {
+        maxParentDepth = Math.max(maxParentDepth, computeDepth(parent.fromKey));
+      }
+      depthVisited.delete(key);
+      const depth = maxParentDepth + 1;
+      depthByKey.set(key, depth);
+      return depth;
+    };
+    media.sort((a, b) => computeDepth(b.sourceKey) - computeDepth(a.sourceKey));
     // 生成节点（图片/视频）若配置了 inputSlots，则对直连素材按槽位顺序排序；
     // 只重排有槽位的素材之间的相对顺序，保持它们在原数组中的位置区间，
     // 不影响继承素材（来自提示词节点）与直连素材之间的先后关系。
