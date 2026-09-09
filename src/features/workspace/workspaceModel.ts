@@ -1621,6 +1621,9 @@ export interface ImageNodeConfig {
   readonly generationCount: number;
   readonly parameterValues: Readonly<Record<string, ModelParameterValue>>;
   readonly catalogResolved: boolean;
+  /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
+   *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
+  readonly inputSlots?: readonly (string | null)[];
 }
 
 export interface VideoNodeConfig {
@@ -1634,6 +1637,9 @@ export interface VideoNodeConfig {
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
   readonly urlMedia?: readonly VideoUrlMediaInput[];
+  /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
+   *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
+  readonly inputSlots?: readonly (string | null)[];
 }
 
 /** 视频节点的 URL 素材：公网 http(s) 文档或网页，角色为 file（文档）或 link（网页）。 */

@@ -348,6 +348,40 @@ export function createCanvasInputResolver(
       }
     }
     const result = { media, texts, pending };
+    // 生成节点（图片/视频）若配置了 inputSlots，则对直连素材按槽位顺序排序；
+    // 只重排有槽位的素材之间的相对顺序，保持它们在原数组中的位置区间，
+    // 不影响继承素材（来自提示词节点）与直连素材之间的先后关系。
+    const targetEntry = nodes.get(targetKey);
+    if (
+      targetEntry &&
+      targetEntry.type === "gen" &&
+      (targetEntry.data.kind === "image" || targetEntry.data.kind === "video") &&
+      targetEntry.data.config.inputSlots &&
+      targetEntry.data.config.inputSlots.length > 0
+    ) {
+      const slotOrder = new Map<string, number>();
+      targetEntry.data.config.inputSlots.forEach((slot, index) => {
+        if (slot !== null) slotOrder.set(slot, index);
+      });
+      const slottedIndices: number[] = [];
+      const slottedItems: ConnectedCanvasMediaInput[] = [];
+      media.forEach((item, index) => {
+        if (slotOrder.has(item.sourceKey)) {
+          slottedIndices.push(index);
+          slottedItems.push(item);
+        }
+      });
+      slottedItems.sort(
+        (left, right) =>
+          (slotOrder.get(left.sourceKey) ?? Number.MAX_SAFE_INTEGER) -
+          (slotOrder.get(right.sourceKey) ?? Number.MAX_SAFE_INTEGER),
+      );
+      const resultMedia = [...media];
+      slottedIndices.forEach((arrayIndex, i) => {
+        resultMedia[arrayIndex] = slottedItems[i]!;
+      });
+      result.media = resultMedia;
+    }
     resolved.set(targetKey, result);
     return result;
   };

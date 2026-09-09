@@ -1133,6 +1133,27 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
               }
               const edge = { id: edgeId, fromKey, toKey };
               result = { status: "connected", edge, replacedEdgeIds: [] };
+              // 生成节点（图片/视频）维护 inputSlots：新素材填充最小空槽，无空槽则追加。
+              if (
+                target.type === "gen" &&
+                (target.data.kind === "image" || target.data.kind === "video")
+              ) {
+                const slots = [...(target.data.config.inputSlots ?? [])];
+                const emptyIndex = slots.findIndex((slot) => slot === null);
+                if (emptyIndex >= 0) {
+                  slots[emptyIndex] = fromKey;
+                } else {
+                  slots.push(fromKey);
+                }
+                const nextData = {
+                  ...target.data,
+                  config: { ...target.data.config, inputSlots: slots },
+                };
+                return {
+                  assetEdges: [...state.assetEdges, edge],
+                  nodesById: { ...state.nodesById, [toKey]: { type: "gen", data: nextData } },
+                };
+              }
               return { assetEdges: [...state.assetEdges, edge] };
             });
             return result;
@@ -1140,10 +1161,38 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
           disconnect: (edgeId) => {
             let result: CanvasWriteResult = "missing";
             set((state) => {
-              if (!state.assetEdges.some((edge) => edge.id === edgeId)) return state;
+              const edge = state.assetEdges.find((candidate) => candidate.id === edgeId);
+              if (!edge) return state;
               result = "applied";
+              const nextEdges = state.assetEdges.filter((candidate) => candidate.id !== edgeId);
+              // 生成节点（图片/视频）维护 inputSlots：被删除素材的槽位保留为 null（不压缩），
+              // 保证其余素材顺序不变，下次新增时填充该空槽。
+              const target = state.nodesById[edge.toKey];
+              if (
+                target &&
+                target.type === "gen" &&
+                (target.data.kind === "image" || target.data.kind === "video")
+              ) {
+                const slots = [...(target.data.config.inputSlots ?? [])];
+                const slotIndex = slots.indexOf(edge.fromKey);
+                if (slotIndex >= 0) {
+                  slots[slotIndex] = null;
+                  const nextData = {
+                    ...target.data,
+                    config: { ...target.data.config, inputSlots: slots },
+                  };
+                  return {
+                    assetEdges: nextEdges,
+                    nodesById: {
+                      ...state.nodesById,
+                      [edge.toKey]: { type: "gen", data: nextData },
+                    },
+                    selectedEdgeId: state.selectedEdgeId === edgeId ? null : state.selectedEdgeId,
+                  };
+                }
+              }
               return {
-                assetEdges: state.assetEdges.filter((edge) => edge.id !== edgeId),
+                assetEdges: nextEdges,
                 selectedEdgeId: state.selectedEdgeId === edgeId ? null : state.selectedEdgeId,
               };
             });
