@@ -1086,7 +1086,13 @@ export function CanvasVideoFrameExtractorNode({
   // "adjusting state when props change" 模式），避免 effect 内同步 setState；
   // 用户输入中的中间态不打断（serialized 不变时 if 不触发）。
   const serializedTimestamps = node.config.timestamps.join(", ");
-  if (serializedTimestamps !== timestampsText) {
+  // 用户输入中间态（如 "8." 小数点后未输完）解析后与配置一致，不强制覆盖，避免小数点被吃掉。
+  // 仅当外部配置真正变化（解析结果不同）时才同步文本框。
+  const parsedCurrentInput = parseTimestampList(timestampsText);
+  const inputMatchesConfig =
+    parsedCurrentInput.length === node.config.timestamps.length &&
+    parsedCurrentInput.every((value, index) => value === node.config.timestamps[index]);
+  if (serializedTimestamps !== timestampsText && !inputMatchesConfig) {
     setTimestampsText(serializedTimestamps);
   }
   const handleTimestampsInput = (text: string) => {
