@@ -2072,6 +2072,13 @@ svg[data-spin="true"] {
   pointer-events: none;
 }
 
+/* 视口懒挂载占位：视频滚出视口被卸载时保持 visual 尺寸，滚回后由视频顶替。 */
+.canvas-asset-node__visual .canvas-asset-node__video-lazy {
+  position: absolute;
+  inset: 0;
+  background: rgba(16 13 10 / 30%);
+}
+
 /* 图片与视频卡片按媒体原始比例缩放，完整全出血展示，文字浮在底部渐变上。 */
 .canvas-asset-node--media {
   gap: 0;

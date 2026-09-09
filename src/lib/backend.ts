@@ -20,6 +20,7 @@ import {
   generationTaskPageSchema,
   localAssetPageSchema,
   modelDefinitionsSchema,
+  nullableMediaThumbnailSchema,
   nullableTosStagingConfigSchema,
   optimizedPromptResultSchema,
   providerConnectionSchema,
@@ -1622,6 +1623,31 @@ export const videoFrameExtractionClient: VideoFrameExtractionClient = {
   cancelJob: (jobId) =>
     invokeDesktop("cancel_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
       jobId,
+    }),
+};
+
+// ---------- 本地媒体缩略图 ----------
+
+export interface MediaThumbnail {
+  /** 缩略图绝对路径（可能命中磁盘缓存），前端转 asset:// 协议展示。 */
+  readonly path: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+export interface MediaClient {
+  /**
+   * 生成本地图片的缩略图（磁盘缓存，源文件变化或尺寸变化时重新生成）。
+   * 格式不可缩放（未启用解码的 webp/gif 等）或文件缺失时返回 null，前端回退原图。
+   */
+  createThumbnail: (sourcePath: string, maxDimension?: number) => Promise<MediaThumbnail | null>;
+}
+
+export const mediaClient: MediaClient = {
+  createThumbnail: (sourcePath, maxDimension) =>
+    invokeDesktop("create_media_thumbnail", nullableMediaThumbnailSchema, {
+      sourcePath,
+      maxDimension: maxDimension ?? null,
     }),
 };
 

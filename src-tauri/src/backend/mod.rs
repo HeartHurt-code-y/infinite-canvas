@@ -19,6 +19,7 @@ pub mod reverse_video;
 pub mod staging;
 pub mod storage;
 pub mod tasks;
+pub mod thumbnail;
 pub mod tos_sign;
 pub mod types;
 pub mod video_edit_source;

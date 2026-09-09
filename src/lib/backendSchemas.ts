@@ -15,6 +15,7 @@ import type {
   GenerationTaskPage,
   LocalAssetPage,
   LocalAssetRecord,
+  MediaThumbnail,
   ModelDefinition,
   OptimizedPromptResult,
   ProviderConnection,
@@ -490,6 +491,14 @@ export const videoComposerEngineStatusSchema = v.looseObject({
   binaryPath: nullableStringSchema,
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoComposerEngineStatus>;
+
+export const mediaThumbnailSchema = v.looseObject({
+  path: v.string(),
+  width: v.number(),
+  height: v.number(),
+}) satisfies v.GenericSchema<MediaThumbnail>;
+
+export const nullableMediaThumbnailSchema = v.nullable(mediaThumbnailSchema);
 
 export const videoFrameExtractionJobRecordSchema = v.looseObject({
   jobId: v.string(),

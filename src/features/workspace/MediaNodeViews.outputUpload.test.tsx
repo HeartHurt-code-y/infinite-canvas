@@ -1,6 +1,8 @@
 import { render, screen } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
+import { createQueryClient } from "../../lib/queryClient";
 import { CanvasOutputNode } from "./MediaNodeViews";
 import type { OutputNodeData } from "./workspaceModel";
 
@@ -26,21 +28,23 @@ function renderHarness(
   options: { onUploadToCloud?: (key: string) => void } = {},
 ) {
   render(
-    <CanvasOutputNode
-      node={node}
-      dragging={false}
-      onNodeDragStart={vi.fn()}
-      onRemove={vi.fn()}
-      onAspectRatioChange={vi.fn()}
-      onPreview={vi.fn()}
-      onConnectionStart={vi.fn()}
-      onUploadToCloud={options.onUploadToCloud ?? vi.fn()}
-      task={null}
-      retryInfo={null}
-      results={[]}
-      rawResponse={null}
-      modelLabel={null}
-    />,
+    <QueryClientProvider client={createQueryClient()}>
+      <CanvasOutputNode
+        node={node}
+        dragging={false}
+        onNodeDragStart={vi.fn()}
+        onRemove={vi.fn()}
+        onAspectRatioChange={vi.fn()}
+        onPreview={vi.fn()}
+        onConnectionStart={vi.fn()}
+        onUploadToCloud={options.onUploadToCloud ?? vi.fn()}
+        task={null}
+        retryInfo={null}
+        results={[]}
+        rawResponse={null}
+        modelLabel={null}
+      />
+    </QueryClientProvider>,
   );
 }
 

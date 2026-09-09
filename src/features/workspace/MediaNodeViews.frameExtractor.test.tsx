@@ -1,6 +1,8 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
+import { createQueryClient } from "../../lib/queryClient";
 import { CanvasVideoFrameExtractorNode } from "./MediaNodeViews";
 import type {
   FrameExtractorVideoInput,
@@ -62,24 +64,26 @@ function renderHarness(
   const onSelect = vi.fn();
   const onNodeDragStart = vi.fn();
   render(
-    <CanvasVideoFrameExtractorNode
-      node={node}
-      inputs={options.inputs ?? []}
-      producedFrames={options.producedFrames ?? []}
-      selected
-      dragging={false}
-      runState={
-        options.runState
-          ? { jobId: "frame-extract-x", preparingEngine: false, ...options.runState }
-          : undefined
-      }
-      onSelect={onSelect}
-      onNodeDragStart={onNodeDragStart}
-      onRemove={onRemove}
-      onConfigChange={onConfigChange}
-      onStartExtraction={onStartExtraction}
-      onCancelExtraction={onCancelExtraction}
-    />,
+    <QueryClientProvider client={createQueryClient()}>
+      <CanvasVideoFrameExtractorNode
+        node={node}
+        inputs={options.inputs ?? []}
+        producedFrames={options.producedFrames ?? []}
+        selected
+        dragging={false}
+        runState={
+          options.runState
+            ? { jobId: "frame-extract-x", preparingEngine: false, ...options.runState }
+            : undefined
+        }
+        onSelect={onSelect}
+        onNodeDragStart={onNodeDragStart}
+        onRemove={onRemove}
+        onConfigChange={onConfigChange}
+        onStartExtraction={onStartExtraction}
+        onCancelExtraction={onCancelExtraction}
+      />
+    </QueryClientProvider>,
   );
   return { onConfigChange, onStartExtraction, onCancelExtraction, onRemove };
 }

@@ -14,8 +14,9 @@ import { TextT } from "@phosphor-icons/react/TextT";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
-import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { createPortal } from "react-dom";
+import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
@@ -23,6 +24,7 @@ import {
   formatRawBackendError,
   frontendLog,
   isDesktopRuntime,
+  mediaClient,
   toMediaSrc,
   type GenerationResultRecord,
   type GenerationTaskSummary,
@@ -1273,11 +1275,12 @@ export function CanvasVideoFrameExtractorNode({
       {producedFrames.length > 0 ? (
         <div className="canvas-video-frame-extractor__frames" aria-label="抽帧结果预览">
           {producedFrames.map((frame) => {
-            const src = frame.finalPath != null ? toMediaSrc(frame.finalPath) : null;
             const label = frame.name ?? "抽帧图片";
             return (
               <figure key={frame.key} className="canvas-video-frame-extractor__frame">
-                {src != null ? <img src={src} alt={label} draggable={false} /> : null}
+                {frame.finalPath != null ? (
+                  <FrameExtractorThumb finalPath={frame.finalPath} label={label} />
+                ) : null}
                 <figcaption>{frame.name != null ? fileNameFromPath(frame.name) : label}</figcaption>
               </figure>
             );
@@ -1307,19 +1310,76 @@ function formatTimestampSeconds(value: number): string {
 }
 
 /**
+ * 视口懒挂载：节点滚出画布视口（含 512px 余量）时卸载 `<video>` 释放解码器，
+ * 滚回时重新挂载。React Flow 渲染所有节点，几十个视频节点常驻会让解码器与
+ * 缓冲内存线性增长；IntersectionObserver（兼容 React Flow 的 transform 视口）按
+ * 实际可见性驱动挂载。IO 不可用（测试环境）时视为可见，保持原行为。
+ */
+const LAZY_MOUNT_ROOT_MARGIN_PX = 512;
+
+function useNodeInView<T extends HTMLElement>(): {
+  readonly containerRef: RefObject<T | null>;
+  readonly inView: boolean;
+} {
+  const containerRef = useRef<T | null>(null);
+  // IO 不可用（测试环境）时恒为可见，保持原行为；否则由 IO 按实际可见性驱动挂载。
+  const [inView, setInView] = useState(() => typeof IntersectionObserver === "undefined");
+  useEffect(() => {
+    const element = containerRef.current;
+    if (element == null || typeof IntersectionObserver === "undefined") return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) setInView(entry.isIntersecting);
+      },
+      { rootMargin: `${LAZY_MOUNT_ROOT_MARGIN_PX}px` },
+    );
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
+  return { containerRef, inView };
+}
+
+/** 本地图片缩略图：后端磁盘缓存（sha256 键），不可缩放/失败返回 null 回退原图。 */
+const MEDIA_THUMBNAIL_MAX_DIMENSION = 512;
+
+function useMediaThumbnailSrc(finalPath: string | null): string | null {
+  const enabled = isDesktopRuntime() && finalPath != null;
+  const { data } = useQuery({
+    queryKey: ["media-thumbnail", finalPath, MEDIA_THUMBNAIL_MAX_DIMENSION],
+    queryFn: () => mediaClient.createThumbnail(finalPath as string, MEDIA_THUMBNAIL_MAX_DIMENSION),
+    enabled,
+    staleTime: Infinity,
+    gcTime: 30 * 60 * 1000,
+    retry: false,
+  });
+  if (data == null || finalPath == null) return null;
+  return toMediaSrc(data.path);
+}
+
+/** 抽帧结果单帧缩略图：成批本地图片走缩略图管线，避免逐帧全量解码。 */
+function FrameExtractorThumb({ finalPath, label }: { readonly finalPath: string; readonly label: string }) {
+  const thumbnailSrc = useMediaThumbnailSrc(finalPath);
+  return <img src={thumbnailSrc ?? toMediaSrc(finalPath)} alt={label} draggable={false} />;
+}
+
+/**
  * 画布视频素材节点的可视化区域：
  * - 元数据加载后把视频 seek 到中点，用中间帧作为静止封面；
- * - 悬浮时从封面位置静音循环播放，移开后暂停并回到中间帧。
+ * - 悬浮时从封面位置静音循环播放，移开后暂停并回到中间帧；
+ * - `mountMedia` 为 false（节点滚出视口）时卸载 `<video>` 释放解码器，仅留占位。
  */
 function CanvasAssetNodeVideoVisual({
   videoUrl,
   previewing,
   isRealAsset,
+  mountMedia,
   onAspectRatioChange,
 }: {
   readonly videoUrl: string;
   readonly previewing: boolean;
   readonly isRealAsset: boolean;
+  /** 节点是否在视口内（含余量）；false 时卸载视频元素。 */
+  readonly mountMedia: boolean;
   readonly onAspectRatioChange: (aspectRatio: number) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
@@ -1354,40 +1414,47 @@ function CanvasAssetNodeVideoVisual({
 
   return (
     <>
-      {!coverReady && isRealAsset ? (
-        <AssetMediaState kind="video" state={videoFailed ? "unavailable" : "loading"} />
-      ) : null}
-      {!videoFailed ? (
-        <video
-          ref={videoRef}
-          className={`canvas-asset-node__video${coverReady ? " is-ready" : ""}`}
-          src={proxiedVideoUrl}
-          muted
-          loop
-          playsInline
-          preload="metadata"
-          aria-hidden="true"
-          tabIndex={-1}
-          onLoadedMetadata={(event) => {
-            const video = event.currentTarget;
-            const aspectRatio = measuredAspectRatio(video.videoWidth, video.videoHeight);
-            if (aspectRatio != null) onAspectRatioChange(aspectRatio);
-            if (Number.isFinite(video.duration) && video.duration > 0) {
-              coverTimeRef.current = video.duration / 2;
-            }
-            if (!previewing) seekToCover(video);
-          }}
-          onSeeked={() => setCoverReady(true)}
-          onLoadedData={() => {
-            setFailedVideoUrl(null);
-            setCoverReady(true);
-          }}
-          onError={() => {
-            setCoverReady(false);
-            setFailedVideoUrl(proxiedVideoUrl);
-          }}
-        />
-      ) : null}
+      {!mountMedia ? (
+        // 节点滚出视口：卸载 <video>，留轻量占位（用户此时看不见该节点）。
+        <span className="canvas-asset-node__video-lazy" aria-hidden="true" />
+      ) : (
+        <>
+          {!coverReady && isRealAsset ? (
+            <AssetMediaState kind="video" state={videoFailed ? "unavailable" : "loading"} />
+          ) : null}
+          {!videoFailed ? (
+            <video
+              ref={videoRef}
+              className={`canvas-asset-node__video${coverReady ? " is-ready" : ""}`}
+              src={proxiedVideoUrl}
+              muted
+              loop
+              playsInline
+              preload="metadata"
+              aria-hidden="true"
+              tabIndex={-1}
+              onLoadedMetadata={(event) => {
+                const video = event.currentTarget;
+                const aspectRatio = measuredAspectRatio(video.videoWidth, video.videoHeight);
+                if (aspectRatio != null) onAspectRatioChange(aspectRatio);
+                if (Number.isFinite(video.duration) && video.duration > 0) {
+                  coverTimeRef.current = video.duration / 2;
+                }
+                if (!previewing) seekToCover(video);
+              }}
+              onSeeked={() => setCoverReady(true)}
+              onLoadedData={() => {
+                setFailedVideoUrl(null);
+                setCoverReady(true);
+              }}
+              onError={() => {
+                setCoverReady(false);
+                setFailedVideoUrl(proxiedVideoUrl);
+              }}
+            />
+          ) : null}
+        </>
+      )}
     </>
   );
 }
@@ -1423,6 +1490,7 @@ export function CanvasAssetNode({
   const [previewing, setPreviewing] = useState(false);
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
+  const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>();
   const imageReady = node.previewUrl != null && loadedImageUrl === node.previewUrl;
   const imageFailed = node.previewUrl == null || failedImageUrl === node.previewUrl;
   const isRealAsset = node.source != null || isDesktopRuntime();
@@ -1442,12 +1510,13 @@ export function CanvasAssetNode({
         if (isVideo) setPreviewing(false);
       }}
     >
-      <span className="canvas-asset-node__visual">
+      <span className="canvas-asset-node__visual" ref={visualRef}>
         {isVideo && node.videoUrl ? (
           <CanvasAssetNodeVideoVisual
             videoUrl={node.videoUrl}
             previewing={previewing}
             isRealAsset={isRealAsset}
+            mountMedia={visualInView}
             onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
           />
         ) : node.kind === "image" ? (
@@ -1658,6 +1727,10 @@ export function CanvasOutputNode({
   const [previewing, setPreviewing] = useState(false);
   const [copied, setCopied] = useState(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
+  // 视口懒挂载与本地图片缩略图：滚出视口卸载 <video>；本地产物图片走缩略图管线。
+  const { containerRef: previewButtonRef, inView: previewInView } =
+    useNodeInView<HTMLButtonElement>();
+  const imageThumbnailSrc = useMediaThumbnailSrc(node.finalPath);
   const mediaSrc = node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null);
 
   // 供应商结果已返回 → 立即展示媒体/文本；本地 finalPath 到达后再切换为长期引用。
@@ -1843,6 +1916,7 @@ export function CanvasOutputNode({
         <>
           <button
             type="button"
+            ref={previewButtonRef}
             className="canvas-asset-node__visual canvas-asset-node__preview-button"
             aria-label={`全屏浏览产物：${node.name ?? (isVideo ? "视频" : "图片")}`}
             title="拖动移动卡片 · 点击全屏浏览源媒体"
@@ -1858,11 +1932,12 @@ export function CanvasOutputNode({
                 videoUrl={mediaSrc}
                 previewing={previewing}
                 isRealAsset
+                mountMedia={previewInView}
                 onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
               />
             ) : (
               <img
-                src={mediaSrc}
+                src={imageThumbnailSrc ?? mediaSrc}
                 alt=""
                 draggable={false}
                 decoding="async"
