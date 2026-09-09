@@ -1,21 +1,15 @@
 import { videoDownloadInputs } from "./videoDownloadInputs";
 import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
 import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
-import { ArrowsClockwise } from "@phosphor-icons/react/ArrowsClockwise";
-import { CaretRight } from "@phosphor-icons/react/CaretRight";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { Clock } from "@phosphor-icons/react/Clock";
 import { CornersOut } from "@phosphor-icons/react/CornersOut";
 import { GearSix } from "@phosphor-icons/react/GearSix";
-import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
 import { Minus } from "@phosphor-icons/react/Minus";
 import { Plus } from "@phosphor-icons/react/Plus";
 import { Sparkle } from "@phosphor-icons/react/Sparkle";
 import { StackSimple } from "@phosphor-icons/react/StackSimple";
 import { TrashSimple } from "@phosphor-icons/react/TrashSimple";
-import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
-import { UserFocus } from "@phosphor-icons/react/UserFocus";
 import { Warning } from "@phosphor-icons/react/Warning";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
@@ -123,7 +117,8 @@ import { createCanvasInputResolver, canvasNodesByKeyFromDocument } from "./canva
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
-import { AssetFlow, AssetPanelError, AssetUploadRow, RepositoryCard } from "./AssetLibraryViews";
+import { RepositoryCard } from "./AssetLibraryViews";
+import { AssetPanel } from "./AssetPanelViews";
 import {
   AssetGroupCreateDialog,
   AssetSourceDialog,
@@ -149,7 +144,6 @@ import {
   CanvasVideoDownloaderNode,
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
-import { AssetKindIcon } from "./PromptNodeViews";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
 import { appendVideoLocalEditPrompt, saveVideoEditFrame } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
@@ -7887,458 +7881,84 @@ export function WorkspaceApp({
           </div>
         </aside>
 
-        <aside
-          id="asset-panel"
-          className={`asset-panel${mobilePanel === "assets" ? " is-mobile-open" : ""}`}
-          aria-label="素材库"
-        >
-          <button
-            type="button"
-            className="mobile-panel-close mobile-panel-close--assets"
-            aria-label="关闭素材库"
-            onClick={closeMobilePanel}
-          >
-            <X size={18} weight="bold" aria-hidden="true" />
-          </button>
-          <div className="panel-title-row">
-            <div className="panel-title-row__identity">
-              <StackSimple size={18} weight="bold" aria-hidden="true" />
-              <h2>素材库</h2>
-            </div>
-            <button
-              type="button"
-              className="square-action"
-              aria-label={uploadActionLabel}
-              data-tooltip={uploadActionLabel}
-              onClick={() => {
-                void handleImportLocalAssets();
-              }}
-            >
-              <UploadSimple size={18} weight="bold" aria-hidden="true" />
-            </button>
-          </div>
-          {isDesktopRuntime() && isOffline ? (
-            <div className="asset-panel__offline" role="status">
-              <WarningCircle size={14} weight="fill" aria-hidden="true" />
-              <span>
-                {assetLibrarySource === "local"
-                  ? "网络连接已断开，对象存储预览与上传暂时不可用。"
-                  : "网络连接已断开，云端拉取与上传暂时不可用；恢复后会自动刷新素材列表。"}
-              </span>
-            </div>
-          ) : null}
-          <div className="asset-origin">
-            <label className="sr-only" htmlFor="asset-library-source">
-              素材库来源
-            </label>
-            <select
-              id="asset-library-source"
-              aria-label="素材库来源"
-              value={assetLibrarySource}
-              onChange={(event) => {
-                const nextSource = event.target.value as AssetLibrarySource;
-                setAssetLibrarySource(nextSource);
-                setAssetSearch("");
-                if (!isDesktopRuntime()) return;
-                if (nextSource === "local") refreshLocalAssets("initial");
-                else setAssetsLoading(Boolean(assetProvider));
-              }}
-            >
-              <option value="cloud">云端素材</option>
-              <option value="local">本地素材</option>
-            </select>
-            {assetLibrarySource === "local" && isDesktopRuntime() ? (
-              <button
-                type="button"
-                className="asset-origin__pull"
-                aria-label="拉取整个存储桶的素材文件"
-                disabled={pullingBucket}
-                onClick={() => {
-                  void handlePullBucketAssets();
-                }}
-              >
-                {pullingBucket ? (
-                  <CircleNotch size={12} weight="bold" aria-hidden="true" data-spin="true" />
-                ) : (
-                  <ArrowsClockwise size={12} weight="bold" aria-hidden="true" />
-                )}
-                拉取整桶
-              </button>
-            ) : null}
-            <span className="asset-origin__status">
-              {assetLibrarySource === "local"
-                ? "本地索引 · 对象存储"
-                : isDesktopRuntime()
-                  ? assetProvider
-                    ? "已连接"
-                    : "未连接"
-                  : "Moyu · 制作库"}
-            </span>
-            {selectedAssetsLoading ? (
-              <CircleNotch size={14} weight="bold" aria-hidden="true" data-spin="true" />
-            ) : selectedLibraryError ? (
-              <WarningCircle size={14} weight="fill" aria-hidden="true" />
-            ) : assetLibrarySource === "local" || assetProvider || !isDesktopRuntime() ? (
-              <CheckCircle size={14} weight="fill" aria-hidden="true" />
-            ) : (
-              <WarningCircle size={14} weight="fill" aria-hidden="true" />
-            )}
-          </div>
-          {assetLibrarySource === "cloud" ? (
-            <>
-              <div className="asset-provider-switcher">
-                <label htmlFor="asset-library-provider">供应商</label>
-                <select
-                  id="asset-library-provider"
-                  aria-label="素材库供应商"
-                  value={assetProvider?.id ?? ""}
-                  disabled={availableAssetProviders.length === 0}
-                  onChange={(event) => {
-                    const nextProvider = availableAssetProviders.find(
-                      (provider) => provider.id === event.target.value,
-                    );
-                    if (nextProvider) handleAssetProviderChanged(nextProvider.id);
-                  }}
-                >
-                  {availableAssetProviders.length > 0 ? (
-                    availableAssetProviders.map((provider) => (
-                      <option key={provider.id} value={provider.id}>
-                        {provider.displayName}
-                      </option>
-                    ))
-                  ) : (
-                    <option value="">未配置启用的供应商</option>
-                  )}
-                </select>
-              </div>
-              <button
-                type="button"
-                className="real-person-entry"
-                disabled={!isDesktopRuntime() || !assetProvider || isOffline}
-                aria-label="打开明星真人素材 H5 认证与上传"
-                onClick={() => setRealPersonDialogOpen(true)}
-              >
-                <span className="real-person-entry__icon" aria-hidden="true">
-                  <UserFocus size={20} weight="duotone" />
-                </span>
-                <span className="real-person-entry__copy">
-                  <strong>明星真人素材</strong>
-                  <small>
-                    {!assetProvider
-                      ? "先配置供应商与素材库令牌"
-                      : isOffline
-                        ? "网络恢复后可进行 H5 认证"
-                        : "H5 人脸认证 · 同人素材上传"}
-                  </small>
-                </span>
-                <CaretRight size={16} weight="bold" aria-hidden="true" />
-              </button>
-            </>
-          ) : null}
-          {selectedAssetsError ? (
-            <AssetPanelError
-              title={
-                selectedLibraryError
-                  ? assetLibrarySource === "local"
-                    ? "本地素材库不可用"
-                    : "云端素材库不可用"
-                  : "素材上传失败"
-              }
-              error={selectedAssetsError}
-              actionLabel={
-                selectedLibraryError
-                  ? assetLibrarySource === "local"
-                    ? "重新读取"
-                    : "重新拉取"
-                  : undefined
-              }
-              onAction={
-                selectedLibraryError && (assetLibrarySource === "local" || assetProvider)
-                  ? () => {
-                      if (assetLibrarySource === "local") {
-                        refreshLocalAssets("manual");
-                      } else if (assetProvider) {
-                        refreshCloudAssets(assetProvider.id, "manual");
-                      }
-                    }
-                  : undefined
-              }
-            />
-          ) : null}
-          {assetUploads.length > 0 ? (
-            <ul className="asset-uploads" aria-label="本地上传进度">
-              {assetUploads.map((entry) => (
-                <AssetUploadRow
-                  key={entry.jobId}
-                  entry={entry}
-                  onDismiss={() => dismissAssetUpload(entry.jobId)}
-                />
-              ))}
-            </ul>
-          ) : null}
-          {assetLibrarySource === "cloud" && isDesktopRuntime() && assetProvider ? (
-            <div className="asset-groups">
-              <div className="asset-groups__heading">
-                <span className="asset-groups__title">分组</span>
-                <button
-                  type="button"
-                  className="asset-groups__create"
-                  aria-label="新建素材分组"
-                  onClick={() => setNewGroupDialogOpen(true)}
-                >
-                  <Plus size={14} weight="bold" aria-hidden="true" />
-                  新建分组
-                </button>
-              </div>
-              <div className="asset-groups__select-row">
-                <label className="sr-only" htmlFor="asset-group-select">
-                  素材库分组
-                </label>
-                <select
-                  id="asset-group-select"
-                  aria-label="素材库分组"
-                  value={selectedAssetGroupId ?? ""}
-                  disabled={groupsLoading && assetGroups.length === 0}
-                  onChange={(event) => {
-                    const value = event.target.value;
-                    handleAssetGroupChanged(value ? Number(value) : null, assetProvider.id);
-                  }}
-                >
-                  <option value="">全部素材</option>
-                  {assetGroups.map((group) => (
-                    <option key={group.id} value={group.id}>
-                      {group.name}
-                      {group.isDefault ? " · 默认" : ""}
-                    </option>
-                  ))}
-                </select>
-                {groupsLoading ? (
-                  <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
-                ) : null}
-              </div>
-              {groupsError ? (
-                <span className="asset-groups__error" role="status">
-                  <WarningCircle size={13} weight="fill" aria-hidden="true" />
-                  分组加载失败，仍显示全部素材
-                  <button type="button" onClick={() => refreshAssetGroups(assetProvider.id)}>
-                    重试
-                  </button>
-                </span>
-              ) : null}
-            </div>
-          ) : null}
-          <div className="asset-tabs" role="tablist" aria-label="素材类型">
-            {(["image", "video", "audio"] as const).map((kind) => {
-              // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
-              // 云端上游不支持类型计数，不显示角标。
-              const kindCount = !isDesktopRuntime()
-                ? libraryAssets.filter((asset) => asset.kind === kind).length
-                : assetLibrarySource === "local"
-                  ? localAssetKindTotals[kind]
-                  : null;
-              return (
-                <button
-                  key={kind}
-                  type="button"
-                  role="tab"
-                  aria-label={
-                    kindCount == null
-                      ? ASSET_KIND_LABELS[kind]
-                      : `${ASSET_KIND_LABELS[kind]} ${kindCount}`
-                  }
-                  aria-selected={assetKind === kind}
-                  onClick={() => {
-                    setAssetKind(kind);
-                    setAssetSearch("");
-                  }}
-                >
-                  <AssetKindIcon kind={kind} />
-                  <span className="asset-tab__label">{ASSET_KIND_LABELS[kind]}</span>
-                  {kindCount != null ? <span>{kindCount}</span> : null}
-                </button>
-              );
-            })}
-          </div>
-          <div className="asset-search-group">
-            <label className="asset-search-label" htmlFor="asset-search-input">
-              筛选当前素材
-            </label>
-            <div className="asset-search">
-              <MagnifyingGlass size={16} weight="bold" aria-hidden="true" />
-              <input
-                id="asset-search-input"
-                type="search"
-                aria-label={`搜索${ASSET_KIND_LABELS[assetKind]}素材`}
-                aria-describedby="asset-search-status"
-                aria-controls="asset-grid"
-                placeholder={`搜索${ASSET_KIND_LABELS[assetKind]}素材`}
-                value={assetSearch}
-                onChange={(event) => setAssetSearch(event.target.value)}
-              />
-              {assetLibrarySource === "cloud" && assetProvider ? (
-                <button
-                  type="button"
-                  className="asset-search__refresh"
-                  aria-label="刷新素材列表（重新获取视频签名 URL）"
-                  data-tooltip="刷新素材列表"
-                  onClick={() => refreshCloudAssets(assetProvider.id, "manual")}
-                >
-                  <ArrowClockwise size={15} weight="bold" aria-hidden="true" />
-                </button>
-              ) : null}
-              {assetSearch ? (
-                <button
-                  type="button"
-                  className="asset-search__clear"
-                  aria-label="清除素材搜索"
-                  onClick={() => setAssetSearch("")}
-                >
-                  <X size={14} weight="bold" aria-hidden="true" />
-                </button>
-              ) : null}
-            </div>
-            <span
-              id="asset-search-status"
-              className="sr-only"
-              role="status"
-              aria-atomic="true"
-              aria-busy={assetSearchPending}
-            >
-              {!isDesktopRuntime()
-                ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                : assetLibrarySource === "local"
-                  ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                  : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`}
-            </span>
-          </div>
-          <div
-            id="asset-grid"
-            className="asset-grid"
-            aria-busy={selectedAssetsLoading || assetSearchPending}
-          >
-            {visibleAssets.length > 0 ? (
-              <AssetFlow
-                assets={visibleAssets}
-                onPreview={handlePreviewAsset}
-                onDropToCanvas={handleDropAssetToCanvas}
-              />
-            ) : (
-              <div className="asset-empty">
-                {selectedAssetsLoading ? (
-                  <CircleNotch size={24} weight="bold" aria-hidden="true" data-spin="true" />
-                ) : selectedLibraryError ? (
-                  <WarningCircle size={24} weight="fill" aria-hidden="true" />
-                ) : (
-                  <MagnifyingGlass size={24} weight="regular" aria-hidden="true" />
-                )}
-                <strong>
-                  {selectedAssetsLoading
-                    ? assetLibrarySource === "local"
-                      ? "正在读取本地素材…"
-                      : "正在拉取云端素材…"
-                    : selectedLibraryError
-                      ? assetLibrarySource === "local"
-                        ? "本地素材库不可用"
-                        : "云端素材库不可用"
-                      : "没有找到素材"}
-                </strong>
-                <span>
-                  {selectedAssetsLoading
-                    ? assetLibrarySource === "local"
-                      ? "正在从本机索引签发对象存储预览地址。"
-                      : "云端素材库正在同步，稍候即可看到最新素材。"
-                    : selectedLibraryError
-                      ? assetLibrarySource === "local"
-                        ? "无法读取本地索引或对象存储配置，详情见上方错误信息。"
-                        : "云端请求失败（可能是供应商故障或鉴权问题），详情见上方错误信息，稍后可点击「重新拉取」重试。"
-                      : assetLibrarySource === "cloud" && isDesktopRuntime() && !assetProvider
-                        ? "请先在全局设置中配置并启用供应商连接。"
-                        : isDesktopRuntime()
-                          ? assetLibrarySource === "local"
-                            ? "上传的素材只会写入对象存储，不会导入云端素材库。"
-                            : "试试上传本地素材，或切换素材类型。"
-                          : "试试更短的名称，或切换素材类型。"}
-                </span>
-                {!selectedAssetsLoading && assetSearch ? (
-                  <button type="button" onClick={() => setAssetSearch("")}>
-                    <X size={14} weight="bold" aria-hidden="true" />
-                    清除搜索
-                  </button>
-                ) : null}
-                {!selectedAssetsLoading &&
-                isDesktopRuntime() &&
-                (assetLibrarySource === "local" || assetProvider) ? (
-                  <button
-                    type="button"
-                    onClick={() => {
-                      void handleImportLocalAssets();
-                    }}
-                  >
-                    <UploadSimple size={14} weight="bold" aria-hidden="true" />
-                    {assetLibrarySource === "local" ? "上传到本地素材库" : "上传本地素材"}
-                  </button>
-                ) : null}
-              </div>
-            )}
-            {isDesktopRuntime() &&
-            !selectedAssetsLoading &&
-            !selectedLibraryError &&
-            (assetLibrarySource === "local"
-              ? localAssetTotal > 0 || localAssetPageNumber > 1
-              : visibleAssets.length > 0 || cloudAssetPageNumber > 1) ? (
-              <div className="asset-pagination">
-                <span>
-                  {assetLibrarySource === "local"
-                    ? `第 ${localAssetPageNumber} / ${localAssetTotalPages} 页 · 共 ${localAssetTotal} 个`
-                    : `第 ${cloudAssetPageNumber} 页`}
-                </span>
-                <span className="asset-pagination__controls">
-                  {assetLibrarySource === "local" ? (
-                    <button
-                      type="button"
-                      disabled={localAssetPageNumber <= 1}
-                      aria-label="上一页素材"
-                      onClick={() => goToLocalAssetPage(localAssetPageNumber - 1)}
-                    >
-                      上一页
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={cloudAssetPageNumber <= 1}
-                      aria-label="上一页素材"
-                      onClick={() => goToCloudAssetPage(cloudAssetPageNumber - 1)}
-                    >
-                      上一页
-                    </button>
-                  )}
-                  {assetLibrarySource === "local" ? (
-                    <button
-                      type="button"
-                      disabled={localAssetPageNumber >= localAssetTotalPages}
-                      aria-label="下一页素材"
-                      onClick={() => goToLocalAssetPage(localAssetPageNumber + 1)}
-                    >
-                      下一页
-                    </button>
-                  ) : (
-                    <button
-                      type="button"
-                      disabled={!cloudAssetHasMore}
-                      aria-label="下一页素材"
-                      onClick={() => goToCloudAssetPage(cloudAssetPageNumber + 1)}
-                    >
-                      下一页
-                    </button>
-                  )}
-                </span>
-              </div>
-            ) : null}
-          </div>
-          <p className="asset-panel__hint">
-            单击素材查看源媒体与完整信息；拖到画布创建节点，连线后可在提示词中 @ 引用。
-          </p>
-        </aside>
+        <AssetPanel
+          mobileOpen={mobilePanel === "assets"}
+          onCloseMobilePanel={closeMobilePanel}
+          uploadActionLabel={uploadActionLabel}
+          onImportLocalAssets={() => {
+            void handleImportLocalAssets();
+          }}
+          isOffline={isOffline}
+          source={assetLibrarySource}
+          onSourceChange={(next) => {
+            setAssetLibrarySource(next);
+            setAssetSearch("");
+            if (!isDesktopRuntime()) return;
+            if (next === "local") refreshLocalAssets("initial");
+            else setAssetsLoading(Boolean(assetProvider));
+          }}
+          pullingBucket={pullingBucket}
+          onPullBucket={() => {
+            void handlePullBucketAssets();
+          }}
+          providerId={assetProvider?.id ?? null}
+          availableProviders={availableAssetProviders}
+          onProviderChange={(nextId) => {
+            const nextProvider = availableAssetProviders.find((provider) => provider.id === nextId);
+            if (nextProvider) handleAssetProviderChanged(nextProvider.id);
+          }}
+          onOpenRealPersonDialog={() => setRealPersonDialogOpen(true)}
+          assetsLoading={selectedAssetsLoading}
+          libraryError={selectedLibraryError}
+          assetsError={selectedAssetsError}
+          onRetryLocal={() => refreshLocalAssets("manual")}
+          onRetryCloud={() => {
+            if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
+          }}
+          uploads={assetUploads}
+          onDismissUpload={dismissAssetUpload}
+          groups={assetGroups}
+          groupsLoading={groupsLoading}
+          groupsError={groupsError}
+          selectedGroupId={selectedAssetGroupId}
+          onGroupChange={handleAssetGroupChanged}
+          onRefreshGroups={refreshAssetGroups}
+          onCreateGroup={() => setNewGroupDialogOpen(true)}
+          kind={assetKind}
+          getKindCount={(tabKind) =>
+            // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
+            // 云端上游不支持类型计数，不显示角标。
+            !isDesktopRuntime()
+              ? libraryAssets.filter((asset) => asset.kind === tabKind).length
+              : assetLibrarySource === "local"
+                ? localAssetKindTotals[tabKind]
+                : null
+          }
+          onKindChange={(tabKind) => {
+            setAssetKind(tabKind);
+            setAssetSearch("");
+          }}
+          search={assetSearch}
+          onSearchChange={setAssetSearch}
+          searchPending={assetSearchPending}
+          resultSummary={
+            !isDesktopRuntime()
+              ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+              : assetLibrarySource === "local"
+                ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+          }
+          visibleAssets={visibleAssets}
+          onPreviewAsset={handlePreviewAsset}
+          onDropAssetToCanvas={handleDropAssetToCanvas}
+          localPage={localAssetPageNumber}
+          localTotalPages={localAssetTotalPages}
+          localTotal={localAssetTotal}
+          cloudPage={cloudAssetPageNumber}
+          cloudHasMore={cloudAssetHasMore}
+          onLocalPageChange={goToLocalAssetPage}
+          onCloudPageChange={goToCloudAssetPage}
+        />
 
         <section
           id="canvas-workspace"
