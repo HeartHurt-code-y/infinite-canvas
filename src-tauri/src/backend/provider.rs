@@ -1131,14 +1131,19 @@ impl ProviderRuntime {
             ));
         }
         let credentials = ArkCredentials::parse(&context.api_key)?;
-        let mut url = endpoint(&context.base_url, "/")?;
+        // 火山引擎方舟有两套独立 API：
+        // - 推理 API（模型拉取/生成）：供应商连接的 base_url，如 https://ark.cn-beijing.volces.com/api/v3
+        // - 素材资产 API（浏览/分组/上传/删除）：固定 OpenAPI 端点 https://ark.cn-beijing.volcengineapi.com
+        // 两者域名、鉴权方式、协议格式均不同，素材请求必须走素材资产 API 端点。
+        const ARK_ASSET_API_BASE_URL: &str = "https://ark.cn-beijing.volcengineapi.com";
+        let mut url = endpoint(ARK_ASSET_API_BASE_URL, "/")?;
         let canonical_uri = url.path().to_string();
         let host = url
             .host_str()
             .ok_or_else(|| {
                 BackendError::validation(
-                    "ark base URL must be an absolute HTTP(S) URL",
-                    json!({ "baseUrl": context.base_url }),
+                    "ark asset API base URL must be an absolute HTTP(S) URL",
+                    json!({ "baseUrl": ARK_ASSET_API_BASE_URL }),
                 )
             })?
             .to_string();
