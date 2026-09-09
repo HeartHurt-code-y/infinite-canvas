@@ -332,6 +332,25 @@ impl ProviderRuntime {
             ));
         }
         validate_base_url(&base_url)?;
+        // 火山引擎方舟推理 API 与素材资产 API 使用不同域名：
+        // - 推理 API：https://ark.cn-beijing.volces.com/api/v3（OpenAI 兼容，Bearer 鉴权）
+        // - 素材资产 API：https://ark.cn-beijing.volcengineapi.com（OpenAPI Action，AK/SK 签名）
+        // 若用户把连接的 Base URL 误填为素材资产 API 域名，自动规范化为推理 API 端点，
+        // 避免模型拉取/生成请求发到 OpenAPI 网关后返回 MissingParameter。
+        let base_url = if adapter_id == ARK_ADAPTER_ID {
+            let parsed = Url::parse(&base_url)?;
+            if parsed
+                .host_str()
+                .map(|host| host.ends_with("volcengineapi.com"))
+                .unwrap_or(false)
+            {
+                "https://ark.cn-beijing.volces.com/api/v3".to_string()
+            } else {
+                base_url
+            }
+        } else {
+            base_url
+        };
         // ark 连接的主 API Key 允许缺失：素材请求全部走 asset-library 作用域的
         // AK/SK 凭据（`resolve_asset_library` 会覆盖 api_key）；ark 连接不参与
         // Bearer 鉴权的生成路径，空主密钥不会泄漏到任何请求头。
