@@ -323,6 +323,46 @@ const VideoLocalEditDialog = lazy(() =>
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
 /**
+ * 画布节点的 per-node 引用稳定缓存：inputs 浅比较全部相等时复用上次的
+ * CanvasFlowNode 对象（含 data.content 的 JSX 元素引用），让 memo 化的
+ * CanvasFlowNodeView 跳过未变化节点的整棵子树渲染。
+ *
+ * inputs 必须逐项使用 per-node 提取值（`map.get(key)` 直接用 undefined 表示缺失、
+ * 布尔/字符串派生值、稳定回调引用），禁止用 `?? []` 之类每次新建的兜底对象。
+ * cacheId 按节点类别分桶；节点删除后残留的 entry 是小对象，低频操作可接受。
+ */
+type CanvasFlowNodeCacheEntry = {
+  readonly inputs: unknown[];
+  readonly node: CanvasFlowNode;
+};
+type CanvasFlowNodeCache = Map<string, Map<string, CanvasFlowNodeCacheEntry>>;
+
+function stableCanvasFlowNode(
+  caches: CanvasFlowNodeCache,
+  cacheId: string,
+  key: string,
+  inputs: unknown[],
+  build: () => CanvasFlowNode,
+): CanvasFlowNode {
+  let cache = caches.get(cacheId);
+  if (cache == null) {
+    cache = new Map();
+    caches.set(cacheId, cache);
+  }
+  const previous = cache.get(key);
+  if (
+    previous != null &&
+    previous.inputs.length === inputs.length &&
+    inputs.every((value, index) => value === previous.inputs[index])
+  ) {
+    return previous.node;
+  }
+  const node = build();
+  cache.set(key, { inputs, node });
+  return node;
+}
+
+/**
  * React Flow 的受控节点层：拖动帧只更新这个窄组件，避免让 WorkspaceApp 与画布文档
  * 每个 pointer move 都重渲染；上游节点内容变化时仍以业务状态为准同步进来。
  */
@@ -6263,31 +6303,50 @@ export function WorkspaceApp({
   const ignoreLegacyNodeDrag = useCallback(() => undefined, []);
   const ignoreLegacyConnectionStart = useCallback(() => undefined, []);
 
+  // 画布节点 per-node 引用稳定缓存（配合 memo 化的 CanvasFlowNodeView）。
+  const canvasFlowNodeCachesRef = useRef<CanvasFlowNodeCache>(new Map());
+
   const assetFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      assetNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasAssetNode
-              key={node.key}
-              node={node}
-              edgeCount={canvasEdgeIndex.countByNode.get(node.key) ?? 0}
-              dragging={false}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onConnectionStart={ignoreLegacyConnectionStart}
-              onRemove={removeAssetNode}
-              onAspectRatioChange={handleAssetAspectRatioChange}
-            />
-          ),
-        },
-      })),
+      assetNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "asset",
+          node.key,
+          [
+            node,
+            selectedNodeKey === node.key,
+            canvasEdgeIndex.countByNode.get(node.key) ?? 0,
+            ignoreLegacyNodeDrag,
+            ignoreLegacyConnectionStart,
+            removeAssetNode,
+            handleAssetAspectRatioChange,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasAssetNode
+                  key={node.key}
+                  node={node}
+                  edgeCount={canvasEdgeIndex.countByNode.get(node.key) ?? 0}
+                  dragging={false}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onConnectionStart={ignoreLegacyConnectionStart}
+                  onRemove={removeAssetNode}
+                  onAspectRatioChange={handleAssetAspectRatioChange}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       assetNodes,
       canvasEdgeIndex,
@@ -6301,37 +6360,57 @@ export function WorkspaceApp({
 
   const outputFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      outputNodes.map((node): CanvasFlowNode => {
+      outputNodes.map((node) => {
         const task = taskById.get(node.taskId) ?? null;
-        return {
-          id: node.key,
-          type: "canvas",
-          position: { x: node.x, y: node.y },
-          ...measuredFor(node),
-          selected: selectedNodeKey === node.key,
-          data: {
-            hasSourceHandle: true,
-            hasTargetHandle: true,
-            content: (
-              <CanvasOutputNode
-                key={node.key}
-                node={node}
-                dragging={false}
-                onNodeDragStart={ignoreLegacyNodeDrag}
-                onRemove={removeOutputNode}
-                onAspectRatioChange={handleOutputAspectRatioChange}
-                onPreview={setPreviewOutputNodeKey}
-                onConnectionStart={ignoreLegacyConnectionStart}
-                onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
-                task={task}
-                retryInfo={retryInfoByTask[node.taskId] ?? null}
-                results={taskResults[node.taskId] ?? []}
-                rawResponse={rawResponses[node.taskId] ?? null}
-                modelLabel={task ? modelDisplayNameForTask(task, providerCatalog) : null}
-              />
-            ),
-          },
-        };
+        return stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "output",
+          node.key,
+          [
+            node,
+            task,
+            selectedNodeKey === node.key,
+            retryInfoByTask[node.taskId] ?? null,
+            taskResults[node.taskId],
+            rawResponses[node.taskId] ?? null,
+            providerCatalog,
+            ignoreLegacyNodeDrag,
+            removeOutputNode,
+            handleOutputAspectRatioChange,
+            setPreviewOutputNodeKey,
+            ignoreLegacyConnectionStart,
+            handleUploadOutputToCloud,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasOutputNode
+                  key={node.key}
+                  node={node}
+                  dragging={false}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeOutputNode}
+                  onAspectRatioChange={handleOutputAspectRatioChange}
+                  onPreview={setPreviewOutputNodeKey}
+                  onConnectionStart={ignoreLegacyConnectionStart}
+                  onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
+                  task={task}
+                  retryInfo={retryInfoByTask[node.taskId] ?? null}
+                  results={taskResults[node.taskId] ?? []}
+                  rawResponse={rawResponses[node.taskId] ?? null}
+                  modelLabel={task ? modelDisplayNameForTask(task, providerCatalog) : null}
+                />
+              ),
+            },
+          }),
+        );
       }),
     [
       outputNodes,
@@ -6352,40 +6431,66 @@ export function WorkspaceApp({
 
   const screenplayFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      screenplayNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasDocumentSkillNode
-              key={node.key}
-              node={node}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              running={startingNodeKeys.has(node.key)}
-              error={startErrorsByNode[node.key] ?? null}
-              providerCatalog={providerCatalog}
-              sourceInputs={documentInputsByNode.get(node.key) ?? []}
-              connectedMedia={canvasInputsFor(node.key).media}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeScreenplayNode}
-              onUnlink={removeAssetEdge}
-              onSizeChange={handleGenNodeSizeChange}
-              onChange={(config) => updateScreenplayNodeConfig(node.key, config)}
-              onPickMaterials={handlePickScreenplayMaterials}
-              onRemoveMaterial={handleRemoveScreenplayMaterial}
-              onSend={handleRunScreenplayNode}
-              onExport={handleExportScreenplay}
-            />
-          ),
-        },
-      })),
+      screenplayNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "screenplay",
+          node.key,
+          [
+            node,
+            selectedNodeKey === node.key,
+            startingNodeKeys.has(node.key),
+            startErrorsByNode[node.key] ?? null,
+            providerCatalog,
+            documentInputsByNode.get(node.key),
+            canvasInputsFor,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeScreenplayNode,
+            removeAssetEdge,
+            handleGenNodeSizeChange,
+            updateScreenplayNodeConfig,
+            handlePickScreenplayMaterials,
+            handleRemoveScreenplayMaterial,
+            handleRunScreenplayNode,
+            handleExportScreenplay,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasDocumentSkillNode
+                  key={node.key}
+                  node={node}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  running={startingNodeKeys.has(node.key)}
+                  error={startErrorsByNode[node.key] ?? null}
+                  providerCatalog={providerCatalog}
+                  sourceInputs={documentInputsByNode.get(node.key) ?? []}
+                  connectedMedia={canvasInputsFor(node.key).media}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeScreenplayNode}
+                  onUnlink={removeAssetEdge}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onChange={(config) => updateScreenplayNodeConfig(node.key, config)}
+                  onPickMaterials={handlePickScreenplayMaterials}
+                  onRemoveMaterial={handleRemoveScreenplayMaterial}
+                  onSend={handleRunScreenplayNode}
+                  onExport={handleExportScreenplay}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       screenplayNodes,
       selectedNodeKey,
@@ -6409,38 +6514,62 @@ export function WorkspaceApp({
 
   const storyboardFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      storyboardNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasDocumentSkillNode
-              key={node.key}
-              node={node}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              running={startingNodeKeys.has(node.key)}
-              error={startErrorsByNode[node.key] ?? null}
-              providerCatalog={providerCatalog}
-              sourceInputs={documentInputsByNode.get(node.key) ?? []}
-              connectedMedia={canvasInputsFor(node.key).media}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeStoryboardNode}
-              onUnlink={removeAssetEdge}
-              onSizeChange={handleGenNodeSizeChange}
-              onChange={(config) => updateStoryboardNodeConfig(node.key, config)}
-              onSend={handleRunStoryboardNode}
-              onExport={handleExportStoryboard}
-            />
-          ),
-        },
-      })),
+      storyboardNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "storyboard",
+          node.key,
+          [
+            node,
+            selectedNodeKey === node.key,
+            startingNodeKeys.has(node.key),
+            startErrorsByNode[node.key] ?? null,
+            providerCatalog,
+            documentInputsByNode.get(node.key),
+            canvasInputsFor,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeStoryboardNode,
+            removeAssetEdge,
+            handleGenNodeSizeChange,
+            updateStoryboardNodeConfig,
+            handleRunStoryboardNode,
+            handleExportStoryboard,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasDocumentSkillNode
+                  key={node.key}
+                  node={node}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  running={startingNodeKeys.has(node.key)}
+                  error={startErrorsByNode[node.key] ?? null}
+                  providerCatalog={providerCatalog}
+                  sourceInputs={documentInputsByNode.get(node.key) ?? []}
+                  connectedMedia={canvasInputsFor(node.key).media}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeStoryboardNode}
+                  onUnlink={removeAssetEdge}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onChange={(config) => updateStoryboardNodeConfig(node.key, config)}
+                  onSend={handleRunStoryboardNode}
+                  onExport={handleExportStoryboard}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       storyboardNodes,
       selectedNodeKey,
@@ -6462,67 +6591,105 @@ export function WorkspaceApp({
 
   const knowledgeVideoWorkflowFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      knowledgeVideoWorkflowNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <KnowledgeVideoWorkflowNode
-              key={node.key}
-              node={node}
-              connectedInputs={workflowInputsByNode.get(node.key)?.media ?? []}
-              connectedTexts={workflowInputsByNode.get(node.key)?.texts ?? []}
-              onUnlink={removeAssetEdge}
-              onRemoveHistoricalReference={(index) =>
-                patchNode("knowledgeVideoWorkflow", node.key, (current) => ({
-                  ...current,
-                  config: {
-                    ...current.config,
-                    connectedMaterials: (current.config.connectedMaterials ?? []).filter(
-                      (_, itemIndex) => itemIndex !== index,
-                    ),
-                  },
-                }))
-              }
-              providerCatalog={providerCatalog}
-              runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onSizeChange={handleGenNodeSizeChange}
-              onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
-              onExecute={executeKnowledgeVideoWorkflow}
-              onContinue={continueKnowledgeVideoWorkflow}
-              onCancel={cancelKnowledgeVideoWorkflow}
-              onRedoShot={redoKnowledgeVideoWorkflowShot}
-              onRemove={removeKnowledgeVideoWorkflow}
-              onRevealResult={revealKnowledgeVideoWorkflowResult}
-              onOpenHistory={openWorkflowHistory}
-              onPickMaterials={handlePickWorkflowMaterials}
-              onRemoveMaterial={handleRemoveWorkflowMaterial}
-              onPickReverseVideo={handlePickReverseVideo}
-              onRemoveReverseVideo={handleRemoveReverseVideo}
-              onOpenDownloadSettings={importDownloaderCookies}
-              onExportFilmDocuments={exportFilmDocuments}
-              onExportComicDramaDocuments={exportFilmDocuments}
-              onExportCommerceDocuments={exportFilmDocuments}
-              onExportRemotionDocuments={exportFilmDocuments}
-              onRevealRemotionProject={revealRemotionProject}
-              onPickCommerceMaterials={handlePickCommerceMaterials}
-              onRemoveCommerceMaterial={handleRemoveCommerceMaterial}
-              onPickCoverImages={handlePickCoverImages}
-              onRemoveCoverImage={handleRemoveCoverImage}
-              onExportCoverDocuments={exportFilmDocuments}
-            />
-          ),
-        },
-      })),
+      knowledgeVideoWorkflowNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "knowledgeVideoWorkflow",
+          node.key,
+          [
+            node,
+            workflowInputsByNode.get(node.key),
+            selectedNodeKey === node.key,
+            knowledgeVideoWorkflowRuns[node.key] ?? null,
+            providerCatalog,
+            removeAssetEdge,
+            patchNode,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            handleGenNodeSizeChange,
+            updateKnowledgeVideoWorkflowConfig,
+            executeKnowledgeVideoWorkflow,
+            continueKnowledgeVideoWorkflow,
+            cancelKnowledgeVideoWorkflow,
+            redoKnowledgeVideoWorkflowShot,
+            removeKnowledgeVideoWorkflow,
+            revealKnowledgeVideoWorkflowResult,
+            openWorkflowHistory,
+            handlePickWorkflowMaterials,
+            handleRemoveWorkflowMaterial,
+            handlePickReverseVideo,
+            handleRemoveReverseVideo,
+            importDownloaderCookies,
+            exportFilmDocuments,
+            revealRemotionProject,
+            handlePickCommerceMaterials,
+            handleRemoveCommerceMaterial,
+            handlePickCoverImages,
+            handleRemoveCoverImage,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <KnowledgeVideoWorkflowNode
+                  key={node.key}
+                  node={node}
+                  connectedInputs={workflowInputsByNode.get(node.key)?.media ?? []}
+                  connectedTexts={workflowInputsByNode.get(node.key)?.texts ?? []}
+                  onUnlink={removeAssetEdge}
+                  onRemoveHistoricalReference={(index) =>
+                    patchNode("knowledgeVideoWorkflow", node.key, (current) => ({
+                      ...current,
+                      config: {
+                        ...current.config,
+                        connectedMaterials: (current.config.connectedMaterials ?? []).filter(
+                          (_, itemIndex) => itemIndex !== index,
+                        ),
+                      },
+                    }))
+                  }
+                  providerCatalog={providerCatalog}
+                  runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
+                  onExecute={executeKnowledgeVideoWorkflow}
+                  onContinue={continueKnowledgeVideoWorkflow}
+                  onCancel={cancelKnowledgeVideoWorkflow}
+                  onRedoShot={redoKnowledgeVideoWorkflowShot}
+                  onRemove={removeKnowledgeVideoWorkflow}
+                  onRevealResult={revealKnowledgeVideoWorkflowResult}
+                  onOpenHistory={openWorkflowHistory}
+                  onPickMaterials={handlePickWorkflowMaterials}
+                  onRemoveMaterial={handleRemoveWorkflowMaterial}
+                  onPickReverseVideo={handlePickReverseVideo}
+                  onRemoveReverseVideo={handleRemoveReverseVideo}
+                  onOpenDownloadSettings={importDownloaderCookies}
+                  onExportFilmDocuments={exportFilmDocuments}
+                  onExportComicDramaDocuments={exportFilmDocuments}
+                  onExportCommerceDocuments={exportFilmDocuments}
+                  onExportRemotionDocuments={exportFilmDocuments}
+                  onRevealRemotionProject={revealRemotionProject}
+                  onPickCommerceMaterials={handlePickCommerceMaterials}
+                  onRemoveCommerceMaterial={handleRemoveCommerceMaterial}
+                  onPickCoverImages={handlePickCoverImages}
+                  onRemoveCoverImage={handleRemoveCoverImage}
+                  onExportCoverDocuments={exportFilmDocuments}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       knowledgeVideoWorkflowNodes,
       workflowInputsByNode,
@@ -6558,37 +6725,60 @@ export function WorkspaceApp({
 
   const viralRemixFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      viralRemixNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasViralRemixNode
-              key={node.key}
-              node={node}
-              inputs={viralRemixInputsByNode.get(node.key) ?? []}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              running={startingNodeKeys.has(node.key)}
-              error={startErrorsByNode[node.key] ?? null}
-              providerCatalog={providerCatalog}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeViralRemixNode}
-              onUnlink={removeAssetEdge}
-              onSizeChange={handleGenNodeSizeChange}
-              onChange={(config) => updateViralRemixNodeConfig(node.key, config)}
-              onRun={handleRunViralRemixNode}
-              onExport={handleExportViralRemix}
-            />
-          ),
-        },
-      })),
+      viralRemixNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "viralRemix",
+          node.key,
+          [
+            node,
+            viralRemixInputsByNode.get(node.key),
+            selectedNodeKey === node.key,
+            startingNodeKeys.has(node.key),
+            startErrorsByNode[node.key] ?? null,
+            providerCatalog,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeViralRemixNode,
+            removeAssetEdge,
+            handleGenNodeSizeChange,
+            updateViralRemixNodeConfig,
+            handleRunViralRemixNode,
+            handleExportViralRemix,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasViralRemixNode
+                  key={node.key}
+                  node={node}
+                  inputs={viralRemixInputsByNode.get(node.key) ?? []}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  running={startingNodeKeys.has(node.key)}
+                  error={startErrorsByNode[node.key] ?? null}
+                  providerCatalog={providerCatalog}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeViralRemixNode}
+                  onUnlink={removeAssetEdge}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onChange={(config) => updateViralRemixNodeConfig(node.key, config)}
+                  onRun={handleRunViralRemixNode}
+                  onExport={handleExportViralRemix}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       viralRemixNodes,
       viralRemixInputsByNode,
@@ -6607,88 +6797,137 @@ export function WorkspaceApp({
     ],
   );
 
+  // gen 节点的 @ 候选按 key 缓存成稳定引用（mentionCandidatesFor 每次调用新建数组，
+  // 会让 per-node 浅比较永远失效）。派生来源（canvasInputsFor/genNodes）变化时整表重算。
+  const mentionCandidatesByNode = useMemo(
+    () => {
+      const map = new Map<string, readonly MentionCandidate[]>();
+      for (const node of genNodes) map.set(node.key, mentionCandidatesFor(node.key));
+      return map;
+    },
+    [genNodes, mentionCandidatesFor],
+  );
+
   const genFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      genNodes.map((node): CanvasFlowNode => {
-        const descriptor = getNodeDescriptor(
-          node.kind,
-          nodeDescriptorContext,
-          node.config.modelSelection,
-          node.kind === "video"
-            ? "video_generation"
-            : node.kind === "image"
-              ? (connectedInputsByNode.get(node.key) ?? []).some(
-                  (input) => input.kind === "image" || input.kind === "video",
-                )
-                ? "image_to_image"
-                : "text_to_image"
-              : undefined,
-        );
-        const content =
-          node.kind === "prompt" ? (
-            <CanvasPromptNode
-              key={node.key}
-              node={node}
-              descriptor={descriptor}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              running={startingNodeKeys.has(node.key)}
-              error={startErrorsByNode[node.key] ?? null}
-              providerCatalog={providerCatalog}
-              sourceConnections={connectedInputsByNode.get(node.key) ?? []}
-              targetConnections={promptTargetsBySource.get(node.key) ?? []}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeGenNode}
-              onUnlink={removeAssetEdge}
-              onConnectionStart={ignoreLegacyConnectionStart}
-              onSizeChange={handleGenNodeSizeChange}
-              onChange={(config) => updatePromptNodeConfig(node.key, config)}
-              onRun={handleRunPromptNode}
-            />
-          ) : (
-            <CanvasGenNode
-              key={node.key}
-              node={node}
-              descriptor={descriptor}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              starting={startingNodeKeys.has(node.key)}
-              startError={startErrorsByNode[node.key] ?? null}
-              activeTask={activeTaskByNode.get(node.key) ?? null}
-              connectedInputs={connectedInputsByNode.get(node.key) ?? []}
-              inheritedInputs={[]}
-              mentionCandidates={mentionCandidatesFor(node.key)}
-              promptSourceName={
-                promptSourceByTarget.has(node.key)
-                  ? `${promptSourceByTarget.get(node.key)?.length ?? 0} 份文本`
-                  : undefined
-              }
-              registerPromptInput={registerPromptInput}
-              providerCatalog={providerCatalog}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeGenNode}
-              onUnlink={removeAssetEdge}
-              onSizeChange={handleGenNodeSizeChange}
-              onImageConfigChange={updateImageNodeConfig}
-              onVideoConfigChange={updateVideoNodeConfig}
-              onAnnotateVideo={openVideoLocalEdit}
-              onStartGeneration={handleStartGeneration}
-            />
-          );
-        return {
-          id: node.key,
-          type: "canvas",
-          position: { x: node.x, y: node.y },
-          ...measuredFor(node),
-          selected: selectedNodeKey === node.key,
-          data: {
-            hasSourceHandle: true,
-            hasTargetHandle: true,
-            content,
+      genNodes.map((node) => {
+        const connectedInputs = connectedInputsByNode.get(node.key);
+        const mentionCandidates = mentionCandidatesByNode.get(node.key);
+        const isPrompt = node.kind === "prompt";
+        return stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "gen",
+          node.key,
+          [
+            node,
+            isPrompt,
+            nodeDescriptorContext,
+            selectedNodeKey === node.key,
+            startingNodeKeys.has(node.key),
+            startErrorsByNode[node.key] ?? null,
+            connectedInputs,
+            promptTargetsBySource.get(node.key),
+            promptSourceByTarget.has(node.key),
+            promptSourceByTarget.get(node.key)?.length ?? 0,
+            activeTaskByNode.get(node.key) ?? null,
+            mentionCandidates,
+            providerCatalog,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeGenNode,
+            removeAssetEdge,
+            ignoreLegacyConnectionStart,
+            handleGenNodeSizeChange,
+            updatePromptNodeConfig,
+            handleRunPromptNode,
+            registerPromptInput,
+            updateImageNodeConfig,
+            updateVideoNodeConfig,
+            openVideoLocalEdit,
+            handleStartGeneration,
+          ],
+          () => {
+            const descriptor = getNodeDescriptor(
+              node.kind,
+              nodeDescriptorContext,
+              node.config.modelSelection,
+              node.kind === "video"
+                ? "video_generation"
+                : node.kind === "image"
+                  ? (connectedInputs ?? []).some(
+                      (input) => input.kind === "image" || input.kind === "video",
+                    )
+                    ? "image_to_image"
+                    : "text_to_image"
+                  : undefined,
+            );
+            const content =
+              node.kind === "prompt" ? (
+                <CanvasPromptNode
+                  key={node.key}
+                  node={node}
+                  descriptor={descriptor}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  running={startingNodeKeys.has(node.key)}
+                  error={startErrorsByNode[node.key] ?? null}
+                  providerCatalog={providerCatalog}
+                  sourceConnections={connectedInputs ?? []}
+                  targetConnections={promptTargetsBySource.get(node.key) ?? []}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeGenNode}
+                  onUnlink={removeAssetEdge}
+                  onConnectionStart={ignoreLegacyConnectionStart}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onChange={(config) => updatePromptNodeConfig(node.key, config)}
+                  onRun={handleRunPromptNode}
+                />
+              ) : (
+                <CanvasGenNode
+                  key={node.key}
+                  node={node}
+                  descriptor={descriptor}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  starting={startingNodeKeys.has(node.key)}
+                  startError={startErrorsByNode[node.key] ?? null}
+                  activeTask={activeTaskByNode.get(node.key) ?? null}
+                  connectedInputs={connectedInputs ?? []}
+                  inheritedInputs={[]}
+                  mentionCandidates={mentionCandidates ?? []}
+                  promptSourceName={
+                    promptSourceByTarget.has(node.key)
+                      ? `${promptSourceByTarget.get(node.key)?.length ?? 0} 份文本`
+                      : undefined
+                  }
+                  registerPromptInput={registerPromptInput}
+                  providerCatalog={providerCatalog}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeGenNode}
+                  onUnlink={removeAssetEdge}
+                  onSizeChange={handleGenNodeSizeChange}
+                  onImageConfigChange={updateImageNodeConfig}
+                  onVideoConfigChange={updateVideoNodeConfig}
+                  onAnnotateVideo={openVideoLocalEdit}
+                  onStartGeneration={handleStartGeneration}
+                />
+              );
+            return {
+              id: node.key,
+              type: "canvas",
+              position: { x: node.x, y: node.y },
+              ...measuredFor(node),
+              selected: selectedNodeKey === node.key,
+              data: {
+                hasSourceHandle: true,
+                hasTargetHandle: true,
+                content,
+              },
+            };
           },
-        };
+        );
       }),
     [
       genNodes,
@@ -6708,7 +6947,7 @@ export function WorkspaceApp({
       updatePromptNodeConfig,
       handleRunPromptNode,
       activeTaskByNode,
-      mentionCandidatesFor,
+      mentionCandidatesByNode,
       promptSourceByTarget,
       registerPromptInput,
       updateImageNodeConfig,
@@ -6720,35 +6959,56 @@ export function WorkspaceApp({
 
   const videoComposerFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      videoComposerNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasVideoComposerNode
-              key={node.key}
-              node={node}
-              inputs={videoComposerInputsByNode.get(node.key) ?? []}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              runState={videoComposerRuns[node.key]}
-              recordingFormat={videoCompositionFormat}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeVideoComposerNode}
-              onUnlink={removeAssetEdge}
-              onConfigChange={updateVideoComposerConfig}
-              onMoveInput={moveVideoComposerInput}
-              onCompose={handleComposeVideos}
-            />
-          ),
-        },
-      })),
+      videoComposerNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "videoComposer",
+          node.key,
+          [
+            node,
+            videoComposerInputsByNode.get(node.key),
+            selectedNodeKey === node.key,
+            videoComposerRuns[node.key],
+            videoCompositionFormat,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeVideoComposerNode,
+            removeAssetEdge,
+            updateVideoComposerConfig,
+            moveVideoComposerInput,
+            handleComposeVideos,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasVideoComposerNode
+                  key={node.key}
+                  node={node}
+                  inputs={videoComposerInputsByNode.get(node.key) ?? []}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  runState={videoComposerRuns[node.key]}
+                  recordingFormat={videoCompositionFormat}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeVideoComposerNode}
+                  onUnlink={removeAssetEdge}
+                  onConfigChange={updateVideoComposerConfig}
+                  onMoveInput={moveVideoComposerInput}
+                  onCompose={handleComposeVideos}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       videoComposerNodes,
       videoComposerInputsByNode,
@@ -6767,41 +7027,68 @@ export function WorkspaceApp({
 
   const videoDownloaderFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      videoDownloaderNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasVideoDownloaderNode
-              key={node.key}
-              node={node}
-              downloadSources={videoDownloadSourcesByNode.get(node.key) ?? []}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              runState={videoDownloaderRuns[node.key]}
-              engineStatus={downloaderEngineStatus}
-              enginePreparing={downloaderEngineBusy}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeVideoDownloaderNode}
-              onConfigChange={updateVideoDownloaderConfig}
-              onStartDownload={handleStartVideoDownload}
-              onCancelDownload={handleCancelVideoDownload}
-              onPrepareEngine={prepareDownloaderEngine}
-              onUpdateEngine={updateDownloaderEngine}
-              onImportCookies={importDownloaderCookies}
-              onClearCookies={clearDownloaderCookies}
-              onRevealResult={revealDownloaderResult}
-              onConnectionStart={ignoreLegacyConnectionStart}
-            />
-          ),
-        },
-      })),
+      videoDownloaderNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "videoDownloader",
+          node.key,
+          [
+            node,
+            videoDownloadSourcesByNode.get(node.key),
+            selectedNodeKey === node.key,
+            videoDownloaderRuns[node.key],
+            downloaderEngineStatus,
+            downloaderEngineBusy,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeVideoDownloaderNode,
+            updateVideoDownloaderConfig,
+            handleStartVideoDownload,
+            handleCancelVideoDownload,
+            prepareDownloaderEngine,
+            updateDownloaderEngine,
+            importDownloaderCookies,
+            clearDownloaderCookies,
+            revealDownloaderResult,
+            ignoreLegacyConnectionStart,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasVideoDownloaderNode
+                  key={node.key}
+                  node={node}
+                  downloadSources={videoDownloadSourcesByNode.get(node.key) ?? []}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  runState={videoDownloaderRuns[node.key]}
+                  engineStatus={downloaderEngineStatus}
+                  enginePreparing={downloaderEngineBusy}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeVideoDownloaderNode}
+                  onConfigChange={updateVideoDownloaderConfig}
+                  onStartDownload={handleStartVideoDownload}
+                  onCancelDownload={handleCancelVideoDownload}
+                  onPrepareEngine={prepareDownloaderEngine}
+                  onUpdateEngine={updateDownloaderEngine}
+                  onImportCookies={importDownloaderCookies}
+                  onClearCookies={clearDownloaderCookies}
+                  onRevealResult={revealDownloaderResult}
+                  onConnectionStart={ignoreLegacyConnectionStart}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       videoDownloaderNodes,
       videoDownloadSourcesByNode,
@@ -6826,34 +7113,54 @@ export function WorkspaceApp({
 
   const frameExtractorFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      frameExtractorNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasVideoFrameExtractorNode
-              key={node.key}
-              node={node}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              inputs={frameExtractorInputsByNode.get(node.key) ?? []}
-              producedFrames={frameExtractorOutputsByNode.get(node.key) ?? []}
-              runState={frameExtractorRuns[node.key]}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeFrameExtractorNode}
-              onConfigChange={updateFrameExtractorConfig}
-              onStartExtraction={handleStartFrameExtraction}
-              onCancelExtraction={handleCancelFrameExtraction}
-            />
-          ),
-        },
-      })),
+      frameExtractorNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "frameExtractor",
+          node.key,
+          [
+            node,
+            selectedNodeKey === node.key,
+            frameExtractorInputsByNode.get(node.key),
+            frameExtractorOutputsByNode.get(node.key),
+            frameExtractorRuns[node.key],
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeFrameExtractorNode,
+            updateFrameExtractorConfig,
+            handleStartFrameExtraction,
+            handleCancelFrameExtraction,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasVideoFrameExtractorNode
+                  key={node.key}
+                  node={node}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  inputs={frameExtractorInputsByNode.get(node.key) ?? []}
+                  producedFrames={frameExtractorOutputsByNode.get(node.key) ?? []}
+                  runState={frameExtractorRuns[node.key]}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeFrameExtractorNode}
+                  onConfigChange={updateFrameExtractorConfig}
+                  onStartExtraction={handleStartFrameExtraction}
+                  onCancelExtraction={handleCancelFrameExtraction}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       frameExtractorNodes,
       selectedNodeKey,
@@ -6871,30 +7178,46 @@ export function WorkspaceApp({
 
   const resultFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
-      resultNodes.map((node): CanvasFlowNode => ({
-        id: node.key,
-        type: "canvas",
-        position: { x: node.x, y: node.y },
-        ...measuredFor(node),
-        selected: selectedNodeKey === node.key,
-        data: {
-          hasSourceHandle: true,
-          hasTargetHandle: true,
-          content: (
-            <CanvasResultNode
-              key={node.key}
-              node={node}
-              descriptor={getNodeDescriptor("result", nodeDescriptorContext)}
-              selected={selectedNodeKey === node.key}
-              dragging={false}
-              latestResult={latestResult}
-              onSelect={selectNode}
-              onNodeDragStart={ignoreLegacyNodeDrag}
-              onRemove={removeResultNode}
-            />
-          ),
-        },
-      })),
+      resultNodes.map((node) =>
+        stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "result",
+          node.key,
+          [
+            node,
+            nodeDescriptorContext,
+            selectedNodeKey === node.key,
+            latestResult,
+            selectNode,
+            ignoreLegacyNodeDrag,
+            removeResultNode,
+          ],
+          () => ({
+            id: node.key,
+            type: "canvas",
+            position: { x: node.x, y: node.y },
+            ...measuredFor(node),
+            selected: selectedNodeKey === node.key,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: true,
+              content: (
+                <CanvasResultNode
+                  key={node.key}
+                  node={node}
+                  descriptor={getNodeDescriptor("result", nodeDescriptorContext)}
+                  selected={selectedNodeKey === node.key}
+                  dragging={false}
+                  latestResult={latestResult}
+                  onSelect={selectNode}
+                  onNodeDragStart={ignoreLegacyNodeDrag}
+                  onRemove={removeResultNode}
+                />
+              ),
+            },
+          }),
+        ),
+      ),
     [
       resultNodes,
       nodeDescriptorContext,
@@ -7007,30 +7330,41 @@ export function WorkspaceApp({
       ...frameExtractorFlowNodes,
       ...resultFlowNodes,
     ];
-    return baseNodes.map((node) => {
-      const incoming = (canvasEdgeIndex.byTarget.get(node.id) ?? []).filter(
-        (edge) => outputNodeByKey.get(node.id)?.sourceNodeId !== edge.fromKey,
+    return baseNodes.map((baseNode) => {
+      // 最终层同样做 per-node 引用稳定：baseNode 引用与三个派生值不变时复用整个
+      // 节点对象（含 data 引用），memo 化的节点视图因此能跳过未变化节点。
+      const incoming = (canvasEdgeIndex.byTarget.get(baseNode.id) ?? []).filter(
+        (edge) => outputNodeByKey.get(baseNode.id)?.sourceNodeId !== edge.fromKey,
       );
-      const inputs = canvasInputsFor(node.id);
-      const targetEntry = canvasEntryByKey(node.id);
-      return {
-        ...node,
-        data: {
-          ...node.data,
-          highlightTarget:
-            sourceEntry != null &&
-            targetEntry != null &&
-            isSupportedConnection(sourceEntry, targetEntry),
-          inputSummary: incoming.length
-            ? `已连接 ${incoming.length} 个来源 · ${inputs.media.length} 项媒体 · ${inputs.texts.length} 份文本${inputs.pending.length ? ` · 等待 ${inputs.pending.length} 项输出` : ""}`
-            : "",
-          inputDetails: [
-            ...inputs.media.map((input) => input.name),
-            ...inputs.texts.map((input) => input.name),
-            ...inputs.pending.map((input) => `${input.name}：等待可用输出`),
-          ].join("\n"),
-        },
-      };
+      const inputs = canvasInputsFor(baseNode.id);
+      const targetEntry = canvasEntryByKey(baseNode.id);
+      const highlightTarget =
+        sourceEntry != null &&
+        targetEntry != null &&
+        isSupportedConnection(sourceEntry, targetEntry);
+      const inputSummary = incoming.length
+        ? `已连接 ${incoming.length} 个来源 · ${inputs.media.length} 项媒体 · ${inputs.texts.length} 份文本${inputs.pending.length ? ` · 等待 ${inputs.pending.length} 项输出` : ""}`
+        : "";
+      const inputDetails = [
+        ...inputs.media.map((input) => input.name),
+        ...inputs.texts.map((input) => input.name),
+        ...inputs.pending.map((input) => `${input.name}：等待可用输出`),
+      ].join("\n");
+      return stableCanvasFlowNode(
+        canvasFlowNodeCachesRef.current,
+        "final",
+        baseNode.id,
+        [baseNode, highlightTarget, inputSummary, inputDetails],
+        () => ({
+          ...baseNode,
+          data: {
+            ...baseNode.data,
+            highlightTarget,
+            inputSummary,
+            inputDetails,
+          },
+        }),
+      );
     });
   }, [
     assetFlowNodes,

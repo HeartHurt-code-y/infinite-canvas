@@ -8,6 +8,7 @@ import {
   type EdgeProps,
   type NodeProps,
 } from "@xyflow/react";
+import { memo } from "react";
 import type { CanvasFlowEdge, CanvasFlowNode } from "./workspaceModel";
 
 const CANVAS_NODE_INTERACTIVE_SELECTOR = [
@@ -40,7 +41,14 @@ function protectCanvasControlFromDrag(target: EventTarget | null, boundary: HTML
   if (control != null && boundary.contains(control)) control.classList.add("nodrag");
 }
 
-export function CanvasFlowNodeView({ data }: NodeProps<CanvasFlowNode>) {
+/**
+ * 节点视图以 memo 包裹：上游（WorkspaceApp）用 per-node 输入浅比较保证 data 引用
+ * 在节点内容未变化时保持稳定，因此这里按引用比较即可跳过整棵卡片子树的渲染。
+ * 选中高亮由 React Flow 加在包装层的 `selected` 类驱动，不经过 data。
+ */
+export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
+  data,
+}: NodeProps<CanvasFlowNode>) {
   return (
     <div
       className="canvas-flow-node"
@@ -80,7 +88,7 @@ export function CanvasFlowNodeView({ data }: NodeProps<CanvasFlowNode>) {
       ) : null}
     </div>
   );
-}
+});
 
 export function CanvasFlowEdgeView({
   id,
