@@ -30,6 +30,9 @@ const UPLOAD_GROUP_NAME: &str = "无限画布上传";
 const IMPORT_POLL_FAILURE_LIMIT: u32 = 5;
 const IMPORT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const IMPORT_POLL_TIMEOUT: Duration = Duration::from_secs(300);
+/// 类型过滤扫描的上游页数上限（每页 100 条）。到达上限仍未集齐目标页时按已有结果返回，
+/// 避免类型分布极端或翻深页时无界地请求上游。
+const KIND_SCAN_PAGE_CAP: u64 = 50;
 
 type PortFuture<T> = Pin<Box<dyn Future<Output = BackendResult<T>> + Send>>;
 
@@ -294,18 +297,57 @@ impl AssetLibrary {
 
     /// Browse the remote 素材库 through canonical domain records.
     /// Remote envelope shapes, status spelling and duplicate rows remain behind this interface.
+    ///
+    /// 未指定 `kind` 时单次转发上游分页（`page_number`/`page_size` 透传）。
+    /// 指定 `kind` 时上游不支持类型参数，改为逐页扫描（每页 100 条）并按类型过滤，
+    /// 跳过 `(page_number-1)*page_size` 条命中后收集一页；扫描在命中数集齐、
+    /// 上游翻完或到达 [`KIND_SCAN_PAGE_CAP`] 时提前结束。
     pub async fn browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
-        let provider_connection_id = query.provider_connection_id;
+        let page_number = query.page_number.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(100).min(100).max(1);
+        let Some(kind) = query.kind else {
+            return self
+                .browse_upstream_page(&query, u64::from(page_number), u64::from(page_size))
+                .await;
+        };
+        let skip = (page_number as u64 - 1) * page_size as u64;
+        let want = page_size as u64;
+        let mut matched: Vec<CloudAssetRecord> = Vec::new();
+        let mut seen: HashSet<String> = HashSet::new();
+        for upstream_page in 1..=KIND_SCAN_PAGE_CAP {
+            let records = self
+                .browse_upstream_page(&query, upstream_page, 100)
+                .await?;
+            let exhausted = records.len() < 100;
+            matched.extend(
+                records
+                    .into_iter()
+                    .filter(|record| record.kind == kind)
+                    .filter(|record| seen.insert(record.id.clone())),
+            );
+            if exhausted || matched.len() as u64 >= skip + want {
+                break;
+            }
+        }
+        Ok(matched
+            .into_iter()
+            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+            .take(usize::try_from(want).unwrap_or(usize::MAX))
+            .collect())
+    }
+
+    /// 发起一次上游 `/v1/assets/list` 分页请求并解析为规范素材记录（跨响应去重）。
+    async fn browse_upstream_page(
+        &self,
+        query: &AssetListCommand,
+        page_number: u64,
+        page_size: u64,
+    ) -> BackendResult<Vec<CloudAssetRecord>> {
+        let provider_connection_id = query.provider_connection_id.clone();
         let mut body = Map::new();
-        body.insert(
-            "page_number".into(),
-            u64::from(query.page_number.unwrap_or(1)).into(),
-        );
-        body.insert(
-            "page_size".into(),
-            u64::from(query.page_size.unwrap_or(100).min(100)).into(),
-        );
-        if let Some(value) = query.name.filter(|value| !value.trim().is_empty()) {
+        body.insert("page_number".into(), json!(page_number));
+        body.insert("page_size".into(), json!(page_size));
+        if let Some(value) = query.name.as_deref().map(str::trim).filter(|v| !v.is_empty()) {
             body.insert("name".into(), value.into());
         }
         if let Some(value) = query.group_id {
@@ -2094,6 +2136,7 @@ mod tests {
                 page_size: Some(500),
                 name: None,
                 group_id: None,
+                kind: None,
             })
             .await
             .expect("browse");
@@ -2110,6 +2153,108 @@ mod tests {
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[0].path, "/v1/assets/list");
         assert_eq!(requests[0].body.as_ref().unwrap()["page_size"], 100);
+    }
+
+    /// 构造上游素材列表条目：`asset_type` 为 Video 的视频素材。
+    fn video_entries(prefix: &str, range: std::ops::Range<usize>) -> Vec<Value> {
+        range
+            .map(|index| {
+                json!({
+                    "id": format!("{prefix}-{index}"),
+                    "name": format!("{prefix}-{index}.mp4"),
+                    "asset_type": "Video",
+                    "status": "Active"
+                })
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn browse_kind_filter_stops_scanning_once_page_is_full() {
+        // 上游第 1 页：2 个视频命中 + 98 个图片干扰项；请求第 1 页 2 条应只扫描 1 次。
+        let mut entries = video_entries("vid", 0..2);
+        entries.extend(image_filler_entries(0..98));
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "data": { "items": entries } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let assets = library
+            .browse(AssetListCommand {
+                provider_connection_id: "provider-1".into(),
+                page_number: Some(1),
+                page_size: Some(2),
+                name: None,
+                group_id: None,
+                kind: Some(MediaType::Video),
+            })
+            .await
+            .expect("browse");
+
+        assert_eq!(
+            assets.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            ["vid-0", "vid-1"]
+        );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].body.as_ref().unwrap()["page_number"], 1);
+        assert_eq!(requests[0].body.as_ref().unwrap()["page_size"], 100);
+    }
+
+    #[tokio::test]
+    async fn browse_kind_filter_scans_upstream_pages_until_page_is_satisfied() {
+        // 上游第 1 页满 100 条（3 视频 + 97 图片，命中不足第 2 页所需 4 条），继续扫描；
+        // 第 2 页 3 视频 + 1 图片后结束：请求第 2 页 2 条应跳过前 2 个命中，返回 vid-2/vid-3。
+        let mut entries = video_entries("vid", 0..3);
+        entries.extend(image_filler_entries(0..97));
+        let mut tail = video_entries("vid", 3..6);
+        tail.push(json!({
+            "id": "img-1",
+            "name": "img-1.png",
+            "asset_type": "Image",
+            "status": "Active"
+        }));
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(200, json!({ "data": { "items": entries } })),
+            response(200, json!({ "data": { "items": tail } })),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let assets = library
+            .browse(AssetListCommand {
+                provider_connection_id: "provider-1".into(),
+                page_number: Some(2),
+                page_size: Some(2),
+                name: None,
+                group_id: None,
+                kind: Some(MediaType::Video),
+            })
+            .await
+            .expect("browse");
+
+        assert_eq!(
+            assets.iter().map(|asset| asset.id.as_str()).collect::<Vec<_>>(),
+            ["vid-2", "vid-3"]
+        );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0].body.as_ref().unwrap()["page_number"], 1);
+        assert_eq!(requests[1].body.as_ref().unwrap()["page_number"], 2);
+    }
+
+    /// 与 [`video_entries`] 同形但 `asset_type` 为 Image 的干扰条目。
+    fn image_filler_entries(range: std::ops::Range<usize>) -> Vec<Value> {
+        range
+            .map(|index| {
+                json!({
+                    "id": format!("img-filler-{index}"),
+                    "name": format!("img-filler-{index}.png"),
+                    "asset_type": "Image",
+                    "status": "Active"
+                })
+            })
+            .collect()
     }
 
     #[tokio::test]
@@ -2962,6 +3107,7 @@ mod tests {
                 page_size: None,
                 name: None,
                 group_id: None,
+                kind: None,
             })
             .await
             .expect_err("HTTP 401 should fail");

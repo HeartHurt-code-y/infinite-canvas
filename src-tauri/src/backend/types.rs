@@ -783,6 +783,8 @@ pub struct AssetListCommand {
     pub page_size: Option<u32>,
     pub name: Option<String>,
     pub group_id: Option<i64>,
+    /// 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现。
+    pub kind: Option<MediaType>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -989,6 +991,37 @@ pub struct LocalAssetRecord {
     pub preview_url: String,
     pub byte_size: u64,
     pub created_at: i64,
+}
+
+/// 本地素材分页查询参数：按类型与文件名子串过滤后返回单页。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAssetListQuery {
+    pub media_type: Option<MediaType>,
+    pub name: Option<String>,
+    /// 1-based 页码，缺省 1。
+    pub page: Option<u32>,
+    pub page_size: Option<u32>,
+}
+
+/// 本地素材库按类型计数（全库范围，不受查询过滤影响），驱动素材面板类型 Tab 计数。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAssetKindTotals {
+    pub image: u64,
+    pub video: u64,
+    pub audio: u64,
+}
+
+/// 本地素材分页结果。`total` 为应用过滤后的总条数，用于计算总页数。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalAssetPage {
+    pub items: Vec<LocalAssetRecord>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub kind_totals: LocalAssetKindTotals,
 }
 
 #[derive(Debug, Clone, Serialize)]

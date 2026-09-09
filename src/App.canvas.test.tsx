@@ -691,7 +691,8 @@ async function addAssetNode(
   clientX: number,
   clientY: number,
 ): Promise<HTMLElement> {
-  fireEvent.click(screen.getByRole("tab", { name: new RegExp(`^${kind} \\d+$`) }));
+  // 云端分页查询不提供类型计数，Tab 可能不带角标（本地来源带角标）。
+  fireEvent.click(screen.getByRole("tab", { name: new RegExp(`^${kind}( \\d+)?$`) }));
   const card = await screen.findByRole("button", {
     name: `预览${kind}素材详情：${name}`,
   });
@@ -4703,7 +4704,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("素材库图片卡片按原图比例设置视觉区，瀑布流中不裁切", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: /^图片 \d+$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /^图片( \d+)?$/ }));
     const card = await screen.findByRole("button", {
       name: "预览图片素材详情：站台参考图",
     });
@@ -4727,7 +4728,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("素材拖入后的浏览器 click 不会重复创建节点", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: /^图片 \d+$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /^图片( \d+)?$/ }));
     const card = await screen.findByRole("button", {
       name: "预览图片素材详情：站台参考图",
     });
@@ -4742,7 +4743,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("视频素材卡片展示关键帧，悬浮播放并在移开后复位", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: /^视频 \d+$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /^视频( \d+)?$/ }));
     const card = await screen.findByRole("button", {
       name: "预览视频素材详情：列车进站参考",
     });
@@ -4778,7 +4779,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("素材库视频卡片按视频比例设置视觉区，瀑布流中不裁切", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: /^视频 \d+$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /^视频( \d+)?$/ }));
     const card = await screen.findByRole("button", {
       name: "预览视频素材详情：列车进站参考",
     });
@@ -4801,7 +4802,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
   it("无供应商封面时素材卡片抽取视频中间帧作静止封面", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("tab", { name: /^视频 \d+$/ }));
+    fireEvent.click(screen.getByRole("tab", { name: /^视频( \d+)?$/ }));
     const card = await screen.findByRole("button", {
       name: "预览视频素材详情：衣摆运动参考",
     });
@@ -6309,9 +6310,10 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
         command: {
           providerConnectionId: PROVIDER.id,
           pageNumber: 1,
-          pageSize: 100,
+          pageSize: 40,
           name: null,
           groupId: 21,
+          kind: "image",
         },
       });
     });
@@ -6324,9 +6326,10 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
         command: {
           providerConnectionId: PROVIDER.id,
           pageNumber: 1,
-          pageSize: 100,
+          pageSize: 40,
           name: null,
           groupId: null,
+          kind: "image",
         },
       });
     });

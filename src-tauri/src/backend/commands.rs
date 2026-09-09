@@ -35,10 +35,11 @@ use super::{
         DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
-        LocalAssetRecord, ModelDefinition, ProviderConnection, ProviderModelBinding,
-        ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand,
-        RecoveryReport, RefreshAssetCoverCommand, RemoteModelOption, RemoteVideoTaskPage,
-        RenameAssetCommand, ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand,
+        LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
+        ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
+        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand, RemoteModelOption,
+        RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
+        SaveCanvasDocumentCommand,
         SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
         TosBucketPullSummary, TosStagingConfig, UpsertProviderConnectionCommand,
@@ -663,8 +664,11 @@ pub fn start_staging_upload(
 }
 
 #[tauri::command]
-pub fn list_local_assets(state: State<'_, BackendState>) -> CommandResult<Vec<LocalAssetRecord>> {
-    state.staging.list_local_assets().command()
+pub fn list_local_assets(
+    state: State<'_, BackendState>,
+    query: Option<LocalAssetListQuery>,
+) -> CommandResult<LocalAssetPage> {
+    state.staging.list_local_assets(query).command()
 }
 
 #[tauri::command]

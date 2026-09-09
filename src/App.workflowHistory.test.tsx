@@ -67,7 +67,17 @@ vi.mock("./lib/backend", async (importOriginal) => {
     subscribeGenerationEvents: () => () => {},
     subscribeStagingEvents: () => () => {},
     assetLibraryClient: { ...actual.assetLibraryClient, list: () => Promise.resolve([]) },
-    tosStagingClient: { ...actual.tosStagingClient, listLocalAssets: () => Promise.resolve([]) },
+    tosStagingClient: {
+      ...actual.tosStagingClient,
+      listLocalAssets: () =>
+        Promise.resolve({
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 40,
+          kindTotals: { image: 0, video: 0, audio: 0 },
+        }),
+    },
   };
 });
 vi.mock("@tauri-apps/api/window", () => ({

@@ -784,6 +784,12 @@ h3 {
   font-size: var(--text-2xs);
 }
 
+.asset-pagination__controls {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
 .asset-pagination button {
   min-height: 2rem;
   padding-inline: var(--space-xs);

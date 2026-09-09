@@ -583,7 +583,7 @@ describe("App workspace", () => {
     const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => undefined);
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("tab", { name: "视频 1" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "视频" }));
     const card = await screen.findByRole("button", {
       name: "预览视频素材详情：列车进站关键帧",
     });
@@ -651,7 +651,12 @@ describe("App workspace", () => {
           return Promise.resolve([]);
         case "list_generation_tasks":
           return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
-        case "list_assets":
+        case "list_assets": {
+          // 后端按类型扫描分页：图片 tab 的请求不返回视频素材。
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          if (commandPayload["kind"] != null && commandPayload["kind"] !== "video") {
+            return Promise.resolve([]);
+          }
           return Promise.resolve([
             cloudAsset("moyu-production", {
               id: "video-asset-1",
@@ -662,6 +667,7 @@ describe("App workspace", () => {
               coverUrl: staleCoverUrl,
             }),
           ]);
+        }
         case "list_asset_groups":
           return Promise.resolve([]);
         case "refresh_asset_cover":
@@ -685,7 +691,7 @@ describe("App workspace", () => {
     };
 
     render(<App />);
-    fireEvent.click(await screen.findByRole("tab", { name: "视频 1" }));
+    fireEvent.click(await screen.findByRole("tab", { name: "视频" }));
     const card = await screen.findByRole("button", {
       name: "预览视频素材详情：过期封面续签",
     });
@@ -834,7 +840,10 @@ describe("App workspace", () => {
         case "list_generation_tasks":
           return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
         case "list_assets": {
-          // Rust 素材库 module 已把国际版 data.items/preview_url 归一为稳定记录。
+          // Rust 素材库 module 已把国际版 data.items/preview_url 归一为稳定记录；
+          // 类型过滤由后端 browse 扫描实现，这里模拟其行为（按 command.kind 过滤）。
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          const kindFilter = commandPayload["kind"];
           const items = [
             cloudAsset("moyu-prod", {
               id: "img-1",
@@ -872,7 +881,11 @@ describe("App workspace", () => {
               assetUrl: "Asset://vid-2",
             }),
           ];
-          return Promise.resolve(items);
+          return Promise.resolve(
+            typeof kindFilter === "string"
+              ? items.filter((item) => item.kind === kindFilter)
+              : items,
+          );
         }
         case "list_real_person_groups":
           return Promise.resolve([]);
@@ -907,16 +920,19 @@ describe("App workspace", () => {
     expect(within(realPersonDialog).getByText("创建 H5 认证链接")).toBeInTheDocument();
     fireEvent.click(within(realPersonDialog).getByRole("button", { name: "关闭明星素材" }));
 
-    // 等真实云端素材加载完成。Tab 计数会变为「图片 3 / 视频 2 / 音频 0」。
-    const videoTab = await screen.findByRole("tab", { name: /视频\s*2/ });
-    expect(screen.getByRole("tab", { name: /图片\s*3/ })).toBeInTheDocument();
-    expect(screen.getByRole("tab", { name: /音频\s*0/ })).toBeInTheDocument();
+    // 等真实云端素材加载完成。云端分页查询不支持类型计数，Tab 不再显示角标。
+    const videoTab = await screen.findByRole("tab", { name: "视频" });
+    expect(screen.getByRole("tab", { name: "图片" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "音频" })).toBeInTheDocument();
 
-    // 切到视频 tab，断言：
+    // 切到视频 tab（触发按类型的分页重查），断言：
     // (a) 渲染的 .asset-card 数量 == 2（不是 5）；
     // (b) 渲染的两个卡都是视频（aria-label 含 "预览视频素材详情"）；
     // (c) 不渲染任何 image 卡片（queryByRole 找不到）。
     fireEvent.click(videoTab);
+    expect(
+      await screen.findByRole("button", { name: "预览视频素材详情：vid-alpha" }),
+    ).toBeInTheDocument();
 
     const cards = document.querySelectorAll<HTMLElement>(".asset-card");
     expect(cards.length).toBe(2);
@@ -933,7 +949,11 @@ describe("App workspace", () => {
     expect(within(brokenVideoCard).getByText("预览不可用")).toBeInTheDocument();
 
     // 切回图片 tab，断言 3 张图、且不含 video 卡片。
-    fireEvent.click(screen.getByRole("tab", { name: /图片\s*3/ }));
+    fireEvent.click(screen.getByRole("tab", { name: "图片" }));
+    expect(
+      await screen.findByRole("button", { name: "预览图片素材详情：img-alpha" }),
+    ).toBeInTheDocument();
+
     const imageCards = document.querySelectorAll<HTMLElement>(".asset-card");
     expect(imageCards.length).toBe(3);
     expect(screen.queryByRole("button", { name: /预览视频素材详情/ })).not.toBeInTheDocument();
@@ -1164,9 +1184,10 @@ describe("App workspace", () => {
         command: {
           providerConnectionId: "overseas-provider",
           pageNumber: 1,
-          pageSize: 100,
+          pageSize: 40,
           name: null,
           groupId: null,
+          kind: "image",
         },
       });
     });
@@ -1360,15 +1381,17 @@ describe("App workspace", () => {
     expect(assetGrid).toHaveAttribute("aria-busy", "false");
   });
 
-  it("分批渲染大型素材结果，并按需加载下一批卡片", async () => {
-    const items = Array.from({ length: 45 }, (_, index) => ({
-      ...cloudAsset("paged-provider", {
-        id: `paged-${index + 1}`,
-        kind: "image",
-        name: `分页素材 ${index + 1}`,
-        previewUrl: `https://assets.example/paged-${index + 1}.png`,
-      }),
-    }));
+  it("云端素材分页查询：满页启用下一页，翻页按页码重新拉取", async () => {
+    const buildItems = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) => ({
+        ...cloudAsset("paged-provider", {
+          id: `paged-${from + index + 1}`,
+          kind: "image",
+          name: `分页素材 ${from + index + 1}`,
+          previewUrl: `https://assets.example/paged-${from + index + 1}.png`,
+        }),
+      }));
+    const listAssetCalls: Array<Record<string, unknown>> = [];
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
@@ -1389,8 +1412,15 @@ describe("App workspace", () => {
           return Promise.resolve([]);
         case "list_generation_tasks":
           return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
-        case "list_assets":
-          return Promise.resolve(items);
+        case "list_assets": {
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          listAssetCalls.push(commandPayload);
+          const pageNumber = Number(commandPayload["pageNumber"] ?? 1);
+          // 共 45 条：第 1 页满 40 条，第 2 页 5 条。
+          return Promise.resolve(
+            pageNumber === 1 ? buildItems(0, 40) : pageNumber === 2 ? buildItems(40, 45) : [],
+          );
+        }
         case "plugin:event|listen":
           return Promise.resolve(1);
         case "plugin:event|unlisten":
@@ -1411,12 +1441,20 @@ describe("App workspace", () => {
 
     render(<App />);
 
-    expect(await screen.findByText("找到 45 个图片素材")).toBeInTheDocument();
+    expect(await screen.findByText("本页 40 个图片素材")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /预览图片素材详情：分页素材/ })).toHaveLength(40);
-    fireEvent.click(screen.getByRole("button", { name: "加载更多素材（还有 5 个）" }));
+    expect(screen.getByRole("button", { name: "下一页素材" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "上一页素材" })).toBeDisabled();
 
-    expect(screen.getAllByRole("button", { name: /预览图片素材详情：分页素材/ })).toHaveLength(45);
-    expect(screen.queryByRole("button", { name: /加载更多素材/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "下一页素材" }));
+
+    expect(await screen.findByText("本页 5 个图片素材")).toBeInTheDocument();
+    expect(screen.getAllByRole("button", { name: /预览图片素材详情：分页素材/ })).toHaveLength(5);
+    expect(screen.getByRole("button", { name: "下一页素材" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "上一页素材" })).toBeEnabled();
+    expect(listAssetCalls).toHaveLength(2);
+    expect(listAssetCalls[0]).toMatchObject({ pageNumber: 1, pageSize: 40, kind: "image" });
+    expect(listAssetCalls[1]).toMatchObject({ pageNumber: 2, pageSize: 40, kind: "image" });
   });
 
   it("切换到本地素材后只读本地索引，上传任务只写对象存储", async () => {
@@ -1450,17 +1488,23 @@ describe("App workspace", () => {
             }),
           ]);
         case "list_local_assets":
-          return Promise.resolve([
-            {
-              id: "local-upload-1",
-              name: "本地参考图.png",
-              mediaType: "image",
-              objectKey: "local/asset.png",
-              previewUrl: "https://tos.example.com/local/asset.png?sign=fresh",
-              byteSize: 2048,
-              createdAt: 1,
-            },
-          ]);
+          return Promise.resolve({
+            items: [
+              {
+                id: "local-upload-1",
+                name: "本地参考图.png",
+                mediaType: "image",
+                objectKey: "local/asset.png",
+                previewUrl: "https://tos.example.com/local/asset.png?sign=fresh",
+                byteSize: 2048,
+                createdAt: 1,
+              },
+            ],
+            total: 1,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 1, video: 0, audio: 0 },
+          });
         case "plugin:dialog|open":
           return Promise.resolve(["C:\\media\\new-local.png"]);
         case "get_tos_staging_config":
@@ -1579,7 +1623,13 @@ describe("App workspace", () => {
         case "list_assets":
           return Promise.resolve([]);
         case "list_local_assets":
-          return Promise.resolve([]);
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
         case "plugin:dialog|open":
           // 用户在文件选择框中取消。
           return Promise.resolve(null);

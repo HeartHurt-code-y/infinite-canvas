@@ -18,7 +18,7 @@ import {
   generationStateChangedEventSchema,
   generationTaskDetailSchema,
   generationTaskPageSchema,
-  localAssetRecordsSchema,
+  localAssetPageSchema,
   modelDefinitionsSchema,
   nullableTosStagingConfigSchema,
   optimizedPromptResultSchema,
@@ -492,6 +492,31 @@ export interface LocalAssetRecord {
   readonly createdAt: number;
 }
 
+/** 本地素材库按类型计数（全库范围，不受查询过滤影响）。 */
+export interface LocalAssetKindTotals {
+  readonly image: number;
+  readonly video: number;
+  readonly audio: number;
+}
+
+/** 本地素材分页查询参数：按类型与文件名子串过滤后返回单页。 */
+export interface LocalAssetListQuery {
+  readonly mediaType?: MediaType | null;
+  readonly name?: string | null;
+  /** 1-based 页码，缺省 1。 */
+  readonly page?: number | null;
+  readonly pageSize?: number | null;
+}
+
+/** 本地素材分页结果。`total` 为应用过滤后的总条数，用于计算总页数。 */
+export interface LocalAssetPage {
+  readonly items: readonly LocalAssetRecord[];
+  readonly total: number;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly kindTotals: LocalAssetKindTotals;
+}
+
 /** 「拉取存储桶素材」结果汇总（后端通过 ListObjectsV2 分页列举桶内对象）。 */
 export interface TosBucketPullSummary {
   readonly totalObjects: number;
@@ -516,7 +541,11 @@ export interface TosStagingClient {
   getCredential(this: void, credentialRef: string): Promise<string>;
   startUpload(this: void, command: StartStagingCommand): Promise<string>;
   getJob(this: void, jobId: string): Promise<StagingJobRecord>;
-  listLocalAssets(this: void): Promise<LocalAssetRecord[]>;
+  /**
+   * 分页查询本地素材索引：按类型与文件名子串过滤后返回单页（仅页内条目签发预签名 URL）。
+   * 不传查询时返回全量。
+   */
+  listLocalAssets(this: void, query?: LocalAssetListQuery): Promise<LocalAssetPage>;
   /**
    * 拉取整个对象存储桶（可选指定前缀）下的素材文件到本地素材索引。
    * 后端走火山引擎 TOS ListObjectsV2 分页列举，按对象键去重。
@@ -533,7 +562,8 @@ export const tosStagingClient: TosStagingClient = {
     invokeDesktop("get_credential", stringSchema, { credentialRef }),
   startUpload: (command) => invokeDesktop("start_staging_upload", stringSchema, { command }),
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
-  listLocalAssets: () => invokeDesktop("list_local_assets", localAssetRecordsSchema),
+  listLocalAssets: (query) =>
+    invokeDesktop("list_local_assets", localAssetPageSchema, { query: query ?? null }),
   pullBucketAssets: (prefix) =>
     invokeDesktop("pull_tos_bucket_assets", tosBucketPullSummarySchema, {
       prefix: prefix ?? null,
@@ -617,6 +647,11 @@ export interface AssetListQuery {
   readonly pageSize?: number;
   readonly name?: string | null;
   readonly groupId?: number | null;
+  /**
+   * 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现；
+   * 不传时单次透传上游分页。
+   */
+  readonly kind?: MediaType | null;
 }
 
 export interface RealPersonAuthLink {
@@ -726,6 +761,7 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
         pageSize: query.pageSize ?? 100,
         name: query.name ?? null,
         groupId: query.groupId ?? null,
+        kind: query.kind ?? null,
       },
     }),
   deleteAsset: (command) =>

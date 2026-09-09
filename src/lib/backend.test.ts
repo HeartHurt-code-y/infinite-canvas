@@ -53,6 +53,7 @@ describe("assetLibraryClient.list", () => {
         pageSize: 100,
         name: null,
         groupId: null,
+        kind: null,
       },
     });
   });
@@ -191,38 +192,58 @@ describe("tosStagingClient.listLocalAssets", () => {
     mockDesktopInvoke((command, args) => {
       capturedCommand = command;
       capturedArgs = args;
-      return Promise.resolve([
-        {
-          id: "upload-1",
-          name: "reference.png",
-          mediaType: "image",
-          objectKey: "assets/reference.png",
-          previewUrl: "https://tos.example.com/reference.png?sign=fresh",
-          byteSize: 128,
-          createdAt: 1,
-        },
-      ]);
+      return Promise.resolve({
+        items: [
+          {
+            id: "upload-1",
+            name: "reference.png",
+            mediaType: "image",
+            objectKey: "assets/reference.png",
+            previewUrl: "https://tos.example.com/reference.png?sign=fresh",
+            byteSize: 128,
+            createdAt: 1,
+          },
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 40,
+        kindTotals: { image: 1, video: 0, audio: 0 },
+      });
     });
 
-    const assets = await tosStagingClient.listLocalAssets();
+    const page = await tosStagingClient.listLocalAssets({
+      mediaType: "image",
+      name: null,
+      page: 1,
+      pageSize: 40,
+    });
     expect(capturedCommand).toBe("list_local_assets");
-    expect(capturedArgs).toEqual({});
-    expect(assets[0]?.id).toBe("upload-1");
+    expect(capturedArgs).toEqual({
+      query: { mediaType: "image", name: null, page: 1, pageSize: 40 },
+    });
+    expect(page.items[0]?.id).toBe("upload-1");
+    expect(page.total).toBe(1);
   });
 
   it("rejects malformed desktop payloads at the IPC boundary", async () => {
     mockDesktopInvoke(() =>
-      Promise.resolve([
-        {
-          id: "upload-1",
-          name: "reference.png",
-          mediaType: "document",
-          objectKey: "assets/reference.png",
-          previewUrl: "https://tos.example.com/reference.png?secret=must-not-leak",
-          byteSize: 128,
-          createdAt: 1,
-        },
-      ]),
+      Promise.resolve({
+        items: [
+          {
+            id: "upload-1",
+            name: "reference.png",
+            mediaType: "document",
+            objectKey: "assets/reference.png",
+            previewUrl: "https://tos.example.com/reference.png?secret=must-not-leak",
+            byteSize: 128,
+            createdAt: 1,
+          },
+        ],
+        total: 1,
+        page: 1,
+        pageSize: 40,
+        kindTotals: { image: 0, video: 0, audio: 0 },
+      }),
     );
 
     const request = tosStagingClient.listLocalAssets();
@@ -230,7 +251,7 @@ describe("tosStagingClient.listLocalAssets", () => {
     await expect(request).rejects.toMatchObject({
       details: {
         command: "list_local_assets",
-        issues: [expect.objectContaining({ path: "0.mediaType" })],
+        issues: [expect.objectContaining({ path: "items.0.mediaType" })],
       },
     });
     await expect(request).rejects.not.toThrow(/must-not-leak/);

@@ -26,8 +26,9 @@ use super::{
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
-        ConnectivityTestResult, LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus,
-        StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
+        ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery, LocalAssetPage,
+        LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus, StartStagingCommand,
+        TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -488,35 +489,111 @@ impl StagingService {
 
     /// 列出本机索引中的素材，并为每个对象生成新的只读预签名 URL。
     /// 此路径不访问供应商素材库，也不要求存在供应商连接。
-    pub fn list_local_assets(&self) -> BackendResult<Vec<LocalAssetRecord>> {
-        self.storage
-            .list_local_asset_jobs()?
+    ///
+    /// 传入 [`LocalAssetListQuery`] 时按类型与文件名子串过滤后分页返回（仅对页内条目
+    /// 预签名）；不传查询时返回全量（素材选择器等需要完整列表的场景）。
+    /// `kind_totals` 始终是全库按类型计数，不受过滤影响。
+    pub fn list_local_assets(
+        &self,
+        query: Option<LocalAssetListQuery>,
+    ) -> BackendResult<LocalAssetPage> {
+        let jobs = self.storage.list_local_asset_jobs()?;
+        let mut kind_totals = LocalAssetKindTotals::default();
+        // 先构造 (job, 文件名) 全集并校验 object_key，保证缺 object_key 的坏数据
+        // 与旧行为一致地直接报错，同时支撑全库类型计数。
+        let mut rows: Vec<(StagingJobRecord, String)> = Vec::with_capacity(jobs.len());
+        for job in jobs {
+            if job.object_key.is_none() {
+                return Err(BackendError::protocol(
+                    "local asset upload has no object key",
+                    json!({ "stagingJobId": job.id }),
+                ));
+            }
+            match job.media_type {
+                MediaType::Image => kind_totals.image += 1,
+                MediaType::Video => kind_totals.video += 1,
+                MediaType::Audio => kind_totals.audio += 1,
+                MediaType::Text => {}
+            }
+            let name = Path::new(&job.local_path)
+                .file_name()
+                .and_then(|value| value.to_str())
+                .filter(|value| !value.is_empty())
+                .unwrap_or(&job.local_path)
+                .to_string();
+            rows.push((job, name));
+        }
+        let Some(query) = query else {
+            let total = rows.len() as u64;
+            let page_size = total.max(1) as u32;
+            let items = rows
+                .into_iter()
+                .map(|(job, _)| self.local_asset_record(&job))
+                .collect::<BackendResult<Vec<_>>>()?;
+            return Ok(LocalAssetPage {
+                items,
+                total,
+                page: 1,
+                page_size,
+                kind_totals,
+            });
+        };
+        let media_filter = query.media_type;
+        let name_filter = query
+            .name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_lowercase);
+        rows.retain(|(job, name)| {
+            media_filter.is_none_or(|media| job.media_type == media)
+                && name_filter
+                    .as_ref()
+                    .is_none_or(|needle| name.to_lowercase().contains(needle))
+        });
+        let total = rows.len() as u64;
+        let page = query.page.unwrap_or(1).max(1);
+        let page_size = query.page_size.unwrap_or(40).clamp(1, 200);
+        let skip = (page as u64 - 1) * u64::from(page_size);
+        let items = rows
             .into_iter()
-            .map(|job| {
-                let object_key = job.object_key.as_deref().ok_or_else(|| {
-                    BackendError::protocol(
-                        "local asset upload has no object key",
-                        json!({ "stagingJobId": job.id }),
-                    )
-                })?;
-                let lease = self.presign_existing_object(&job.id, object_key)?;
-                let name = Path::new(&job.local_path)
-                    .file_name()
-                    .and_then(|value| value.to_str())
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or(&job.local_path)
-                    .to_string();
-                Ok(LocalAssetRecord {
-                    id: job.id,
-                    name,
-                    media_type: job.media_type,
-                    object_key: object_key.to_string(),
-                    preview_url: lease.get_url,
-                    byte_size: job.bytes_total.unwrap_or(job.bytes_uploaded),
-                    created_at: job.created_at,
-                })
-            })
-            .collect()
+            .skip(usize::try_from(skip).unwrap_or(usize::MAX))
+            .take(page_size as usize)
+            .map(|(job, _)| self.local_asset_record(&job))
+            .collect::<BackendResult<Vec<_>>>()?;
+        Ok(LocalAssetPage {
+            items,
+            total,
+            page,
+            page_size,
+            kind_totals,
+        })
+    }
+
+    /// 将一个本地素材 staging job 转换为素材记录（含按次签发的只读预签名 URL）。
+    fn local_asset_record(&self, job: &StagingJobRecord) -> BackendResult<LocalAssetRecord> {
+        let object_key = job.object_key.as_deref().ok_or_else(|| {
+            BackendError::protocol(
+                "local asset upload has no object key",
+                json!({ "stagingJobId": job.id }),
+            )
+        })?;
+        let lease = self.presign_existing_object(&job.id, object_key)?;
+        let name = Path::new(&job.local_path)
+            .file_name()
+            .and_then(|value| value.to_str())
+            .filter(|value| !value.is_empty())
+            .unwrap_or(&job.local_path)
+            .to_string();
+        Ok(LocalAssetRecord {
+            id: job.id.clone(),
+            name,
+            media_type: job.media_type,
+            object_key: object_key.to_string(),
+            preview_url: lease.get_url,
+            byte_size: job.bytes_total.unwrap_or(job.bytes_uploaded),
+            created_at: job.created_at,
+        })
     }
 
     /// 为一个本地素材签发新的读取地址。对象是素材正文，不返回给任务清理流程。

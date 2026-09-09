@@ -1127,10 +1127,15 @@ export type AssetRefreshSource =
   | "delete"
   | "group-changed"
   | "group-created"
-  | "rename";
+  | "rename"
+  /** 类型 Tab / 搜索 / 分组变化触发的第 1 页重查。 */
+  | "filter"
+  /** 分页控件翻页。 */
+  | "page";
 
-// 云端单页最多 100 条，本地索引没有上限；分批挂载媒体卡片，避免一次创建无界 DOM。
-export const ASSET_RENDER_BATCH_SIZE = 40;
+// 素材库分页查询的页大小：云端与本地统一。上游单页上限 100 条，类型过滤由后端扫描；
+// 本地索引在 SQLite 中分页。UI 用「上一页/下一页」翻页，不再一次性挂载全部卡片。
+export const ASSET_PAGE_SIZE = 40;
 
 export const ACTIVE_ASSET_PROVIDER_STORAGE_KEY = "infinite-canvas:active-asset-provider-connection";
 

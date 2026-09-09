@@ -71,6 +71,7 @@ import {
   type GenerationOperation,
   type GenerationResultRecord,
   type GenerationTaskSummary,
+  type LocalAssetKindTotals,
   type LocalAssetRecord,
   type MediaType,
   type PromptOptimizationContextEntry,
@@ -225,7 +226,7 @@ import {
   ASSET_KIND_LABELS,
   ASSET_NODE_HEIGHT,
   ASSET_NODE_WIDTH,
-  ASSET_RENDER_BATCH_SIZE,
+  ASSET_PAGE_SIZE,
   CANVAS_CONNECTION_RADIUS,
   DEFAULT_NODE_MODEL_SELECTIONS,
   DEFAULT_ZOOM,
@@ -452,10 +453,19 @@ export function WorkspaceApp({
   const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>("cloud");
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
-  const [assetRenderPage, setAssetRenderPage] = useState<{
-    readonly key: string;
-    readonly limit: number;
-  }>({ key: "", limit: ASSET_RENDER_BATCH_SIZE });
+  // 搜索防抖提交值：桌面端分页查询把它发给后端过滤，避免每次击键都发起请求。
+  const [committedAssetSearch, setCommittedAssetSearch] = useState("");
+  // 云端素材分页状态：当前页码与「可能有下一页」（当前页返回满页条数时为 true）。
+  const [cloudAssetPageNumber, setCloudAssetPageNumber] = useState(1);
+  const [cloudAssetHasMore, setCloudAssetHasMore] = useState(false);
+  // 本地素材分页状态：当前页码、过滤后总数与全库类型计数（驱动类型 Tab 角标）。
+  const [localAssetPageNumber, setLocalAssetPageNumber] = useState(1);
+  const [localAssetTotal, setLocalAssetTotal] = useState(0);
+  const [localAssetKindTotals, setLocalAssetKindTotals] = useState<LocalAssetKindTotals>({
+    image: 0,
+    video: 0,
+    audio: 0,
+  });
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [workflowRepositoryExpanded, setWorkflowRepositoryExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -631,6 +641,11 @@ export function WorkspaceApp({
   const [selectedAssetGroupId, setSelectedAssetGroupId] = useState<number | null>(null);
   // refreshCloudAssets 是稳定回调（依赖为空），通过 ref 读取当前分组避免重建。
   const selectedAssetGroupIdRef = useRef<number | null>(null);
+  // 分页查询稳定回调读取的当前类型 / 防抖搜索词 / 页码。
+  const assetKindRef = useRef<AssetKind>("image");
+  const committedAssetSearchRef = useRef("");
+  const cloudAssetPageRef = useRef(1);
+  const localAssetPageRef = useRef(1);
   const [newGroupDialogOpen, setNewGroupDialogOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   // 正在改名的云端素材 ID（详情弹窗显示保存中状态，并阻止重复提交）。
@@ -1175,10 +1190,14 @@ export function WorkspaceApp({
     (providerConnectionId: string, source: AssetRefreshSource): void => {
       const requestId = ++cloudAssetsRequestRef.current;
       settingsAssetRequestRef.current = null;
+      // 分页参数在调用时从 ref 快照：类型 / 防抖搜索词 / 页码 / 分组。
+      const pageNumber = cloudAssetPageRef.current;
+      const kind = assetKindRef.current;
+      const name = committedAssetSearchRef.current.trim();
       const startedAt = Date.now();
       frontendLog(
         "info",
-        `[assets] 云端素材列表开始拉取: providerConnectionId=${providerConnectionId}, 触发来源=${source}`,
+        `[assets] 云端素材列表开始拉取: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 类型=${kind}, 页码=${pageNumber}`,
       );
       // 状态重置延迟到微任务提交：effect 同步触发时避免在 effect 体内 setState
       // 引发级联渲染（react-hooks/set-state-in-effect）。微任务先于任何网络响应
@@ -1194,6 +1213,10 @@ export function WorkspaceApp({
         .list({
           providerConnectionId,
           groupId: selectedAssetGroupIdRef.current,
+          pageNumber,
+          pageSize: ASSET_PAGE_SIZE,
+          kind,
+          name: name || null,
         })
         .then(
           (assets) => {
@@ -1205,11 +1228,13 @@ export function WorkspaceApp({
               return;
             }
             setCloudAssets(assets);
+            // 满页说明可能还有下一页；不足一页即最后一页（上游无过滤总数）。
+            setCloudAssetHasMore(assets.length >= ASSET_PAGE_SIZE);
             setAssetsError(null);
             setLibraryError(false);
             frontendLog(
               "info",
-              `[assets] 云端素材列表拉取成功: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 共 ${assets.length} 个素材, 耗时 ${Date.now() - startedAt}ms`,
+              `[assets] 云端素材列表拉取成功: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 页码=${pageNumber}, 共 ${assets.length} 个素材, 耗时 ${Date.now() - startedAt}ms`,
             );
           },
           (error: unknown) => {
@@ -1228,7 +1253,7 @@ export function WorkspaceApp({
             setLibraryError(true);
             frontendLog(
               "error",
-              `[assets] 云端素材列表拉取失败: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
+              `[assets] 云端素材列表拉取失败: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 页码=${pageNumber}, 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
             );
           },
         )
@@ -1240,19 +1265,32 @@ export function WorkspaceApp({
   );
 
   const refreshLocalAssets = useCallback((source: AssetRefreshSource): void => {
+    const pageNumber = localAssetPageRef.current;
+    const mediaType = assetKindRef.current;
+    const name = committedAssetSearchRef.current.trim();
     const startedAt = Date.now();
     setLocalAssetsLoading(true);
-    frontendLog("info", `[assets] 本地素材索引开始读取: 触发来源=${source}`);
+    frontendLog(
+      "info",
+      `[assets] 本地素材索引开始读取: 触发来源=${source}, 类型=${mediaType}, 页码=${pageNumber}`,
+    );
     void tosStagingClient
-      .listLocalAssets()
+      .listLocalAssets({
+        mediaType,
+        name: name || null,
+        page: pageNumber,
+        pageSize: ASSET_PAGE_SIZE,
+      })
       .then(
-        (assets) => {
-          setLocalAssets(assets);
+        (page) => {
+          setLocalAssets(page.items);
+          setLocalAssetTotal(page.total);
+          setLocalAssetKindTotals(page.kindTotals);
           setLocalAssetsError(null);
           setLocalLibraryError(false);
           frontendLog(
             "info",
-            `[assets] 本地素材索引读取成功: 触发来源=${source}, 共 ${assets.length} 个素材, 耗时 ${Date.now() - startedAt}ms`,
+            `[assets] 本地素材索引读取成功: 触发来源=${source}, 类型=${mediaType}, 页码=${pageNumber}, 本页 ${page.items.length} 个 / 共 ${page.total} 个素材, 耗时 ${Date.now() - startedAt}ms`,
           );
         },
         (error: unknown) => {
@@ -1261,7 +1299,7 @@ export function WorkspaceApp({
           setLocalLibraryError(true);
           frontendLog(
             "error",
-            `[assets] 本地素材索引读取失败: 触发来源=${source}, 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
+            `[assets] 本地素材索引读取失败: 触发来源=${source}, 页码=${pageNumber}, 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
           );
         },
       )
@@ -1377,7 +1415,7 @@ export function WorkspaceApp({
               current.some((entry) => entry.id === group.id) ? current : [...current, group],
             );
             refreshAssetGroups(providerConnectionId, group.id);
-            refreshCloudAssets(providerConnectionId, "group-created");
+            // 分组选择变化触发的重查由分页查询 filter effect 统一处理。
           },
           (error: unknown) => {
             const formatted = formatRawBackendError(error);
@@ -1390,7 +1428,7 @@ export function WorkspaceApp({
         )
         .finally(() => setCreatingGroup(false));
     },
-    [refreshAssetGroups, refreshCloudAssets],
+    [refreshAssetGroups],
   );
 
   const handleRenameAsset = useCallback(
@@ -1490,17 +1528,97 @@ export function WorkspaceApp({
     [rememberAssetProvider],
   );
 
+  // 同步稳定回调读取的 ref：声明顺序必须早于 scope / filter 查询 effect，
+  // 保证同一次提交内先同步再发起分页查询（否则查询会拿到上一次的类型/搜索词）。
   useEffect(() => {
-    if (!isDesktopRuntime() || assetLibrarySource !== "cloud" || !assetProvider || settingsOpen)
-      return;
-    refreshCloudAssets(assetProvider.id, "initial");
-    refreshAssetGroups(assetProvider.id);
-    return () => {
-      // provider / 来源 / 设置面板改变或组件卸载时，当前请求不可再提交状态。
-      cloudAssetsRequestRef.current += 1;
-      settingsAssetRequestRef.current = null;
+    assetKindRef.current = assetKind;
+  }, [assetKind]);
+  useEffect(() => {
+    committedAssetSearchRef.current = committedAssetSearch;
+  }, [committedAssetSearch]);
+
+  // 素材库分页查询统一入口：来源 / 供应商 / 设置面板开关变化时回到第 1 页重查。
+  // 查询键去重避免同一状态组合重复请求；分组列表仍在云端来源下单独刷新。
+  const assetQueryScopeKeyRef = useRef("");
+  useEffect(() => {
+    const resetToFirstPage = () => {
+      cloudAssetPageRef.current = 1;
+      localAssetPageRef.current = 1;
+      setCloudAssetPageNumber(1);
+      setLocalAssetPageNumber(1);
     };
-  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, settingsOpen]);
+    if (!isDesktopRuntime()) {
+      assetQueryScopeKeyRef.current = "";
+      return;
+    }
+    const scopeKey =
+      assetLibrarySource === "cloud"
+        ? `cloud|${assetProvider?.id ?? ""}|${settingsOpen ? "settings" : ""}`
+        : `local|`;
+    if (assetQueryScopeKeyRef.current === scopeKey) return;
+    assetQueryScopeKeyRef.current = scopeKey;
+    resetToFirstPage();
+    if (assetLibrarySource === "cloud") {
+      if (!assetProvider || settingsOpen) return;
+      refreshCloudAssets(assetProvider.id, "initial");
+      refreshAssetGroups(assetProvider.id);
+      // 不用 cleanup 失效在途请求：provider/settings 等路径已显式递增请求号，
+      // 而 refresh 本身也会递增；这里 cleanup 会在依赖变化但 key 未变时
+      // 误杀在途响应且不重发，导致面板卡在空列表。
+    } else {
+      refreshLocalAssets("initial");
+    }
+    // refreshCloudAssets / refreshLocalAssets / refreshAssetGroups 均为稳定回调（依赖为空）。
+  }, [assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets, refreshLocalAssets, settingsOpen]);
+
+  // 类型 Tab / 防抖搜索词 / 分组选择变化：回到第 1 页并重查当前来源（查询键去重）。
+  // 来源 / 供应商切换由上方 scope effect 负责，故 key 不含来源；首次运行只登记 key，
+  // 首查由 scope effect 发起，避免挂载时重复请求。
+  const assetQueryFilterKeyRef = useRef("");
+  const assetQueryFilterArmedRef = useRef(false);
+  useEffect(() => {
+    if (!isDesktopRuntime()) {
+      assetQueryFilterArmedRef.current = false;
+      assetQueryFilterKeyRef.current = "";
+      return;
+    }
+    const filterKey = `${assetKind}|${committedAssetSearch}|${selectedAssetGroupId ?? ""}`;
+    if (assetQueryFilterKeyRef.current === filterKey) return;
+    assetQueryFilterKeyRef.current = filterKey;
+    if (!assetQueryFilterArmedRef.current) {
+      assetQueryFilterArmedRef.current = true;
+      return;
+    }
+    cloudAssetPageRef.current = 1;
+    localAssetPageRef.current = 1;
+    setCloudAssetPageNumber(1);
+    setLocalAssetPageNumber(1);
+    if (assetLibrarySource === "cloud") {
+      if (!assetProvider || settingsOpen) return;
+      refreshCloudAssets(assetProvider.id, "filter");
+    } else {
+      refreshLocalAssets("filter");
+    }
+  }, [
+    assetKind,
+    assetLibrarySource,
+    assetProvider,
+    committedAssetSearch,
+    refreshCloudAssets,
+    refreshLocalAssets,
+    selectedAssetGroupId,
+    settingsOpen,
+  ]);
+
+  // 搜索输入防抖提交：停止输入 350ms 后才发起分页查询。
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const committed = assetSearch.trim();
+      committedAssetSearchRef.current = committed;
+      setCommittedAssetSearch(committed);
+    }, 350);
+    return () => window.clearTimeout(timer);
+  }, [assetSearch]);
 
   // 断网恢复时自动重拉云端素材列表（首次挂载不算）。
   useEffect(() => {
@@ -5983,35 +6101,40 @@ export function WorkspaceApp({
     [providerCatalog, nodeModelSelections],
   );
 
+  // 桌面端：服务端分页查询已按类型与名称过滤，前端不再二次筛选。
+  // 浏览器预览模式：静态演示数据，保留客户端类型 + 名称过滤（useDeferredValue 即时反馈）。
   const deferredAssetSearch = useDeferredValue(assetSearch);
-  const normalizedAssetSearch = deferredAssetSearch.trim().toLowerCase();
-  const assetSearchPending = assetSearch !== deferredAssetSearch;
-  const visibleAssets = useMemo(
-    () =>
-      libraryAssets.filter(
-        (asset) =>
-          asset.kind === assetKind && asset.name.toLowerCase().includes(normalizedAssetSearch),
-      ),
-    [assetKind, libraryAssets, normalizedAssetSearch],
+  const browserAssetSearch = deferredAssetSearch.trim().toLowerCase();
+  const visibleAssets = useMemo(() => {
+    if (isDesktopRuntime()) return libraryAssets;
+    return libraryAssets.filter(
+      (asset) =>
+        asset.kind === assetKind && asset.name.toLowerCase().includes(browserAssetSearch),
+    );
+  }, [assetKind, browserAssetSearch, libraryAssets]);
+  // 输入中的瞬时过滤反馈：桌面端以 350ms 防抖提交值为准，浏览器端沿用 deferred 值。
+  const assetSearchPending = isDesktopRuntime()
+    ? assetSearch.trim() !== committedAssetSearch
+    : assetSearch !== deferredAssetSearch;
+  const localAssetTotalPages = Math.max(1, Math.ceil(localAssetTotal / ASSET_PAGE_SIZE));
+  const goToCloudAssetPage = useCallback(
+    (page: number) => {
+      if (!assetProvider || page === cloudAssetPageRef.current) return;
+      cloudAssetPageRef.current = page;
+      setCloudAssetPageNumber(page);
+      refreshCloudAssets(assetProvider.id, "page");
+    },
+    [assetProvider, refreshCloudAssets],
   );
-  const assetResultKey = `${assetLibrarySource}\u0000${assetProvider?.id ?? "local"}\u0000${assetKind}\u0000${normalizedAssetSearch}`;
-  const assetRenderLimit =
-    assetRenderPage.key === assetResultKey ? assetRenderPage.limit : ASSET_RENDER_BATCH_SIZE;
-  const renderedAssets = useMemo(
-    () => visibleAssets.slice(0, assetRenderLimit),
-    [assetRenderLimit, visibleAssets],
+  const goToLocalAssetPage = useCallback(
+    (page: number) => {
+      if (page === localAssetPageRef.current) return;
+      localAssetPageRef.current = page;
+      setLocalAssetPageNumber(page);
+      refreshLocalAssets("page");
+    },
+    [refreshLocalAssets],
   );
-  const remainingAssetCount = visibleAssets.length - renderedAssets.length;
-  const loadMoreAssets = useCallback(() => {
-    setAssetRenderPage((current) => ({
-      key: assetResultKey,
-      limit: Math.min(
-        visibleAssets.length,
-        (current.key === assetResultKey ? current.limit : ASSET_RENDER_BATCH_SIZE) +
-          ASSET_RENDER_BATCH_SIZE,
-      ),
-    }));
-  }, [assetResultKey, visibleAssets.length]);
   const handlePreviewAsset = useCallback((asset: AssetItem) => setPreviewAsset(asset), []);
   const handleDropAssetToCanvas = useCallback(
     (asset: AssetItem, clientX: number, clientY: number) => {
@@ -7671,23 +7794,36 @@ export function WorkspaceApp({
             </div>
           ) : null}
           <div className="asset-tabs" role="tablist" aria-label="素材类型">
-            {(["image", "video", "audio"] as const).map((kind) => (
-              <button
-                key={kind}
-                type="button"
-                role="tab"
-                aria-label={`${ASSET_KIND_LABELS[kind]} ${libraryAssets.filter((asset) => asset.kind === kind).length}`}
-                aria-selected={assetKind === kind}
-                onClick={() => {
-                  setAssetKind(kind);
-                  setAssetSearch("");
-                }}
-              >
-                <AssetKindIcon kind={kind} />
-                <span className="asset-tab__label">{ASSET_KIND_LABELS[kind]}</span>
-                <span>{libraryAssets.filter((asset) => asset.kind === kind).length}</span>
-              </button>
-            ))}
+            {(["image", "video", "audio"] as const).map((kind) => {
+              // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
+              // 云端上游不支持类型计数，不显示角标。
+              const kindCount = !isDesktopRuntime()
+                ? libraryAssets.filter((asset) => asset.kind === kind).length
+                : assetLibrarySource === "local"
+                  ? localAssetKindTotals[kind]
+                  : null;
+              return (
+                <button
+                  key={kind}
+                  type="button"
+                  role="tab"
+                  aria-label={
+                    kindCount == null
+                      ? ASSET_KIND_LABELS[kind]
+                      : `${ASSET_KIND_LABELS[kind]} ${kindCount}`
+                  }
+                  aria-selected={assetKind === kind}
+                  onClick={() => {
+                    setAssetKind(kind);
+                    setAssetSearch("");
+                  }}
+                >
+                  <AssetKindIcon kind={kind} />
+                  <span className="asset-tab__label">{ASSET_KIND_LABELS[kind]}</span>
+                  {kindCount != null ? <span>{kindCount}</span> : null}
+                </button>
+              );
+            })}
           </div>
           <div className="asset-search-group">
             <label className="asset-search-label" htmlFor="asset-search-input">
@@ -7734,7 +7870,11 @@ export function WorkspaceApp({
               aria-atomic="true"
               aria-busy={assetSearchPending}
             >
-              找到 {visibleAssets.length} 个{ASSET_KIND_LABELS[assetKind]}素材
+              {!isDesktopRuntime()
+                ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                : assetLibrarySource === "local"
+                  ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                  : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`}
             </span>
           </div>
           <div
@@ -7744,7 +7884,7 @@ export function WorkspaceApp({
           >
             {visibleAssets.length > 0 ? (
               <AssetFlow
-                assets={renderedAssets}
+                assets={visibleAssets}
                 onPreview={handlePreviewAsset}
                 onDropToCanvas={handleDropAssetToCanvas}
               />
@@ -7806,14 +7946,58 @@ export function WorkspaceApp({
                 ) : null}
               </div>
             )}
-            {remainingAssetCount > 0 ? (
+            {isDesktopRuntime() &&
+            !selectedAssetsLoading &&
+            !selectedLibraryError &&
+            (assetLibrarySource === "local"
+              ? localAssetTotal > 0 || localAssetPageNumber > 1
+              : visibleAssets.length > 0 || cloudAssetPageNumber > 1) ? (
               <div className="asset-pagination">
                 <span>
-                  已显示 {renderedAssets.length} / {visibleAssets.length}
+                  {assetLibrarySource === "local"
+                    ? `第 ${localAssetPageNumber} / ${localAssetTotalPages} 页 · 共 ${localAssetTotal} 个`
+                    : `第 ${cloudAssetPageNumber} 页`}
                 </span>
-                <button type="button" disabled={assetSearchPending} onClick={loadMoreAssets}>
-                  加载更多素材（还有 {remainingAssetCount} 个）
-                </button>
+                <span className="asset-pagination__controls">
+                  {assetLibrarySource === "local" ? (
+                    <button
+                      type="button"
+                      disabled={localAssetPageNumber <= 1}
+                      aria-label="上一页素材"
+                      onClick={() => goToLocalAssetPage(localAssetPageNumber - 1)}
+                    >
+                      上一页
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={cloudAssetPageNumber <= 1}
+                      aria-label="上一页素材"
+                      onClick={() => goToCloudAssetPage(cloudAssetPageNumber - 1)}
+                    >
+                      上一页
+                    </button>
+                  )}
+                  {assetLibrarySource === "local" ? (
+                    <button
+                      type="button"
+                      disabled={localAssetPageNumber >= localAssetTotalPages}
+                      aria-label="下一页素材"
+                      onClick={() => goToLocalAssetPage(localAssetPageNumber + 1)}
+                    >
+                      下一页
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={!cloudAssetHasMore}
+                      aria-label="下一页素材"
+                      onClick={() => goToCloudAssetPage(cloudAssetPageNumber + 1)}
+                    >
+                      下一页
+                    </button>
+                  )}
+                </span>
               </div>
             ) : null}
           </div>

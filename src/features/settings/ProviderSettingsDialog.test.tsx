@@ -29,7 +29,15 @@ const TOS_STUB: TosStagingClient = {
   getCredential: vi.fn(() => Promise.resolve("")),
   startUpload: vi.fn(() => Promise.resolve("job-1")),
   getJob: vi.fn(() => Promise.reject(new Error("unused"))),
-  listLocalAssets: vi.fn(() => Promise.resolve([])),
+  listLocalAssets: vi.fn(() =>
+    Promise.resolve({
+      items: [],
+      total: 0,
+      page: 1,
+      pageSize: 40,
+      kindTotals: { image: 0, video: 0, audio: 0 },
+    }),
+  ),
   pullBucketAssets: vi.fn(() =>
     Promise.resolve({
       totalObjects: 0,

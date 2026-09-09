@@ -370,7 +370,7 @@ export function RegenerateGenerationDialog({
       .catch((reason: unknown) => setCloudError(formatRawBackendError(reason)));
     void tosStagingClient
       .listLocalAssets()
-      .then(setLocalAssets)
+      .then((page) => setLocalAssets(page.items))
       .catch((reason: unknown) => setLocalError(formatRawBackendError(reason)));
   }, [runtime, frozen?.providerConnectionId]);
 

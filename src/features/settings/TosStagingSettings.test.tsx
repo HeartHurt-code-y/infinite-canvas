@@ -34,7 +34,15 @@ function createClient(
     getJob: vi.fn(() => {
       throw new Error("not used in these tests");
     }),
-    listLocalAssets: vi.fn(() => Promise.resolve([])),
+    listLocalAssets: vi.fn(() =>
+      Promise.resolve({
+        items: [],
+        total: 0,
+        page: 1,
+        pageSize: 40,
+        kindTotals: { image: 0, video: 0, audio: 0 },
+      }),
+    ),
     pullBucketAssets: vi.fn(() =>
       Promise.resolve({
         totalObjects: 0,

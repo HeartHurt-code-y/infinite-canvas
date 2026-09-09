@@ -13,6 +13,7 @@ import type {
   GenerationStateChangedEvent,
   GenerationTaskDetail,
   GenerationTaskPage,
+  LocalAssetPage,
   LocalAssetRecord,
   ModelDefinition,
   OptimizedPromptResult,
@@ -185,6 +186,18 @@ export const localAssetRecordSchema = v.looseObject({
 }) satisfies v.GenericSchema<LocalAssetRecord>;
 
 export const localAssetRecordsSchema = v.array(localAssetRecordSchema);
+
+export const localAssetPageSchema = v.looseObject({
+  items: localAssetRecordsSchema,
+  total: v.number(),
+  page: v.number(),
+  pageSize: v.number(),
+  kindTotals: v.looseObject({
+    image: v.number(),
+    video: v.number(),
+    audio: v.number(),
+  }),
+}) satisfies v.GenericSchema<LocalAssetPage>;
 
 export const tosBucketPullSummarySchema = v.looseObject({
   totalObjects: v.number(),
