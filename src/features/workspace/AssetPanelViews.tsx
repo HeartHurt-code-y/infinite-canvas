@@ -294,7 +294,7 @@ export function AssetGroupsPicker({
             aria-label="新建素材分组"
             onClick={onCreateGroup}
           >
-            <Plus size={14} weight="bold" aria-hidden="true" />
+            <Plus size={12} weight="bold" aria-hidden="true" />
             新建分组
           </button>
           {selectedGroupId != null ? (
@@ -308,7 +308,7 @@ export function AssetGroupsPicker({
               }
               onClick={confirmingDelete ? confirmDelete : armDelete}
             >
-              <Trash size={14} weight="bold" aria-hidden="true" />
+              <Trash size={12} weight="bold" aria-hidden="true" />
               {confirmingDelete ? "确认删除？" : "删除分组"}
             </button>
           ) : null}

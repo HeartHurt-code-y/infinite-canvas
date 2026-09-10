@@ -11658,8 +11658,8 @@ details[open] > summary .history-disclosure__caret {
   align-items: center;
   justify-content: center;
   gap: var(--space-2xs);
-  min-height: var(--size-control);
-  padding-inline: var(--space-xs);
+  min-height: 1.75rem;
+  padding-inline: 0.375rem;
   color: var(--color-accent);
   background: color-mix(in oklch, var(--color-accent) 12%, var(--color-chrome-3));
   border: var(--rule-thin) solid
@@ -11700,12 +11700,13 @@ details[open] > summary .history-disclosure__caret {
   flex-direction: column;
   flex: 0 0 auto;
   gap: var(--space-2xs);
-  min-width: 6.5rem;
+  min-width: 0;
 }
 
 .asset-groups__actions .asset-groups__create,
 .asset-groups__actions .asset-groups__delete {
   width: 100%;
+  white-space: nowrap;
 }
 
 .asset-groups__delete {
@@ -11714,8 +11715,8 @@ details[open] > summary .history-disclosure__caret {
   justify-content: center;
   flex: 0 0 auto;
   gap: var(--space-2xs);
-  min-height: var(--size-control);
-  padding-inline: var(--space-xs);
+  min-height: 1.75rem;
+  padding-inline: 0.375rem;
   color: var(--color-muted);
   background: var(--color-chrome-3);
   border: var(--rule-thin) solid var(--color-chrome-rule);
