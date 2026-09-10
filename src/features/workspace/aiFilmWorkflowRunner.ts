@@ -59,7 +59,7 @@ export function parseAiFilmRoute(raw: string): {
   try {
     data = v.parse(aiFilmRouteOutputSchema, parseModelJson(raw));
   } catch (error) {
-    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error), { cause: error });
     throw error;
   }
   // 业务规则校验：阶段唯一且按依赖顺序排列
@@ -127,7 +127,7 @@ export function parseAiFilmStage(
   try {
     data = v.parse(aiFilmStageOutputSchema, parseModelJson(raw));
   } catch (error) {
-    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error), { cause: error });
     throw error;
   }
   if (data.stage !== expectedStage) throw new Error("影视模型越过了当前阶段或返回了错误协议。");

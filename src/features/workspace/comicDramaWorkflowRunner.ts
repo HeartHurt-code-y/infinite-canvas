@@ -94,7 +94,7 @@ export function parseComicDramaStage(
   try {
     data = v.parse(comicDramaStageOutputSchema, parseModelJson(raw));
   } catch (error) {
-    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error), { cause: error });
     throw error;
   }
   if (data.stage !== stage) throw new Error("漫剧模型越过当前阶段或返回了错误协议。");
@@ -180,7 +180,7 @@ export function parseComicDramaReview(raw: string): ComicDramaReview {
   try {
     data = v.parse(comicDramaReviewOutputSchema, parseModelJson(raw));
   } catch (error) {
-    if (error instanceof v.ValiError) throw new Error(formatValibotError(error));
+    if (error instanceof v.ValiError) throw new Error(formatValibotError(error), { cause: error });
     throw error;
   }
   if (data.result === "PASS") {

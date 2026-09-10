@@ -4944,7 +4944,7 @@ export function WorkspaceApp({
             // 单任务多结果：创建 n 个占位卡片，每个预设 resultKey=taskId#index
             const batchCount = Math.min(
               GPT_IMAGE_MAX_GENERATION_COUNT,
-              Math.floor(command.parameters!["n"] as number),
+              Math.floor(command.parameters["n"] as number),
             );
             for (let resultIndex = 0; resultIndex < batchCount; resultIndex += 1) {
               const key = outputNodeKey();
@@ -7017,6 +7017,7 @@ export function WorkspaceApp({
       startErrorsByNode,
       providerCatalog,
       promptTargetsBySource,
+      promptContents,
       selectNode,
       ignoreLegacyNodeDrag,
       removeGenNode,
