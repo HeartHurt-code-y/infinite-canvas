@@ -742,19 +742,20 @@ describe("ProviderSettingsDialog", () => {
       />,
     );
 
-    // 已保存的供应商加载后，「拉取令牌」下拉应列出令牌分组。
+    // 已保存的供应商加载后，「拉取令牌」多选下拉应列出令牌分组。
     await waitFor(() => expect(screen.getByLabelText("供应商连接")).toHaveValue(SAVED_PROVIDER.id));
-    const pullTokenSelect = screen.getByLabelText(/拉取令牌/);
-    await waitFor(() =>
-      expect(within(pullTokenSelect).getByRole("option", { name: "as分组" })).toBeInTheDocument(),
-    );
-    fireEvent.change(pullTokenSelect, { target: { value: "as分组" } });
+    const pullTokenTrigger = screen.getByRole("button", { name: "选择拉取模型的令牌分组" });
+    fireEvent.click(pullTokenTrigger);
+    const asGroupOption = await screen.findByRole("option", { name: "as分组" });
+    fireEvent.click(asGroupOption);
+    // 点击外部关闭下拉
+    fireEvent.pointerDown(document.body);
 
     const fetchButton = screen.getByRole("button", { name: "拉取模型" });
     await waitFor(() => expect(fetchButton).toBeEnabled());
     fireEvent.click(fetchButton);
 
-    // 拉取请求应携带所选令牌分组。
+    // 拉取请求应携带所选令牌分组（多选：默认令牌 + as分组）。
     await waitFor(() =>
       expect(client.fetchProviderModels).toHaveBeenCalledWith(SAVED_PROVIDER.id, "as分组"),
     );

@@ -85,13 +85,20 @@ export function SearchableMultiSelect({
 
   return (
     <div className="searchable-multi-select" ref={containerRef}>
-      <button
-        type="button"
+      <div
         className="searchable-multi-select__trigger"
-        disabled={disabled}
+        role="button"
+        tabIndex={disabled ? -1 : 0}
         aria-label={ariaLabel}
         aria-expanded={open}
         onClick={() => !disabled && setOpen((prev) => !prev)}
+        onKeyDown={(event) => {
+          if (disabled) return;
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            setOpen((prev) => !prev);
+          }
+        }}
       >
         {selectedLabels.length > 0 ? (
           <span className="searchable-multi-select__chips">
@@ -115,7 +122,7 @@ export function SearchableMultiSelect({
         <span className="searchable-multi-select__arrow" aria-hidden="true">
           ▾
         </span>
-      </button>
+      </div>
       {open ? (
         <div className="searchable-multi-select__dropdown">
           <input
