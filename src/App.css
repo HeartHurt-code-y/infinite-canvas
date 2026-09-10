@@ -11658,7 +11658,7 @@ details[open] > summary .history-disclosure__caret {
   align-items: center;
   justify-content: center;
   gap: var(--space-2xs);
-  min-height: 1.75rem;
+  min-height: var(--size-control);
   padding-inline: var(--space-xs);
   color: var(--color-accent);
   background: color-mix(in oklch, var(--color-accent) 12%, var(--color-chrome-3));
@@ -11678,7 +11678,7 @@ details[open] > summary .history-disclosure__caret {
 
 .asset-groups__select-row {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--space-xs);
 }
 
@@ -11693,6 +11693,19 @@ details[open] > summary .history-disclosure__caret {
   border-radius: var(--radius-control);
   font: inherit;
   font-size: var(--text-xs);
+}
+
+.asset-groups__actions {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 auto;
+  gap: var(--space-2xs);
+  min-width: 6.5rem;
+}
+
+.asset-groups__actions .asset-groups__create,
+.asset-groups__actions .asset-groups__delete {
+  width: 100%;
 }
 
 .asset-groups__delete {

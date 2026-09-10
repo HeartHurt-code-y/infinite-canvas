@@ -908,7 +908,7 @@ function baseInvokeImplementation(
       return Promise.resolve(created);
     }
     case "delete_asset_group": {
-      const groupId = String(args.command.id);
+      const groupId = (args?.["command"] as { id: string }).id;
       mockAssetGroups = mockAssetGroups.filter((group) => group.id !== groupId);
       return Promise.resolve(groupId);
     }

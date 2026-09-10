@@ -259,15 +259,6 @@ export function AssetGroupsPicker({
     <div className="asset-groups">
       <div className="asset-groups__heading">
         <span className="asset-groups__title">分组</span>
-        <button
-          type="button"
-          className="asset-groups__create"
-          aria-label="新建素材分组"
-          onClick={onCreateGroup}
-        >
-          <Plus size={14} weight="bold" aria-hidden="true" />
-          新建分组
-        </button>
       </div>
       <div className="asset-groups__select-row">
         <label className="sr-only" htmlFor="asset-group-select">
@@ -296,21 +287,32 @@ export function AssetGroupsPicker({
         {loading ? (
           <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
         ) : null}
-        {selectedGroupId != null ? (
+        <div className="asset-groups__actions">
           <button
             type="button"
-            className={`asset-groups__delete${confirmingDelete ? " is-armed" : ""}`}
-            aria-label={
-              confirmingDelete
-                ? `确认删除分组：${selectedGroup?.name ?? ""}`
-                : `删除分组：${selectedGroup?.name ?? ""}`
-            }
-            onClick={confirmingDelete ? confirmDelete : armDelete}
+            className="asset-groups__create"
+            aria-label="新建素材分组"
+            onClick={onCreateGroup}
           >
-            <Trash size={14} weight="bold" aria-hidden="true" />
-            {confirmingDelete ? "确认删除？" : "删除分组"}
+            <Plus size={14} weight="bold" aria-hidden="true" />
+            新建分组
           </button>
-        ) : null}
+          {selectedGroupId != null ? (
+            <button
+              type="button"
+              className={`asset-groups__delete${confirmingDelete ? " is-armed" : ""}`}
+              aria-label={
+                confirmingDelete
+                  ? `确认删除分组：${selectedGroup?.name ?? ""}`
+                  : `删除分组：${selectedGroup?.name ?? ""}`
+              }
+              onClick={confirmingDelete ? confirmDelete : armDelete}
+            >
+              <Trash size={14} weight="bold" aria-hidden="true" />
+              {confirmingDelete ? "确认删除？" : "删除分组"}
+            </button>
+          ) : null}
+        </div>
       </div>
       {confirmingDelete ? (
         <span className="asset-groups__delete-hint" role="status">
