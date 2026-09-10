@@ -55,11 +55,26 @@ const PROBE_RETRY_BASE_DELAY_MS: u64 = 500;
 /// 上传会报 `isConnect: true` 的 HTTP transport error。
 const FAKE_IP_PREFIX: (u8, u8) = (198, 18);
 
-/// 备用公共 DNS（国内可达）：穿透代理软件对系统 DNS 的 fake-ip 劫持时使用。
+/// 备用公共 DNS（国内可达）：**最后兜底**，走 UDP:53。
+///
+/// 注意：在 fake-ip 环境里 UDP:53 往往也被透明劫持（实测连直接问 `223.5.5.5`
+/// 都会返回 `198.18.0.21`），所以真正有效的第一选择是下面的 DoH。
 const FALLBACK_DNS_SERVERS: [std::net::Ipv4Addr; 2] = [
     std::net::Ipv4Addr::new(223, 5, 5, 5),
     std::net::Ipv4Addr::new(119, 29, 29, 29),
 ];
+
+/// DoH（DNS-over-HTTPS）JSON 接口，按序尝试。
+///
+/// 为什么需要 DoH：代理软件的 fake-ip 劫持发生在 **UDP:53** 这一层，本机的
+/// `resolve_host_real_ips` 备用 DNS 因此同样拿不到真实地址（返回空 → 兜底失效）。
+/// DoH 走 HTTPS、不在 53 端口上，实测能穿透该劫持拿到真实 A 记录：
+/// `nslookup <域名> 223.5.5.5` 返回 `198.18.0.21`，而 `https://223.5.5.5/resolve`
+/// 返回真实 IP。两个端点都选国内服务，与目标用户群一致。
+const DOH_ENDPOINTS: [&str; 2] = ["https://223.5.5.5/resolve", "https://doh.pub/resolve"];
+
+/// 单次 DoH 查询超时。这条路径只在连接已经失败过后才走到，不能拖慢整次下载。
+const DOH_TIMEOUT_MS: u64 = 4_000;
 
 /// 对象存储上传 PUT 连接/传输失败的最大自动重试次数（指数退避）。
 const UPLOAD_MAX_RETRIES: u32 = 3;
@@ -125,13 +140,97 @@ pub(crate) fn is_fake_ip(ip: std::net::IpAddr) -> bool {
     }
 }
 
-/// 解析 TOS endpoint 主机名，返回「可直连的真实 IP 列表」。
+/// 解析主机名，返回「可直连的真实 IP 列表」。
 ///
 /// 正常网络：直接采用系统 DNS 解析结果。
 /// 代理软件 fake-ip 环境：系统解析结果全部落在 `198.18.0.0/15` 虚拟网段时，
 /// 改用备用公共 DNS（223.5.5.5 / 119.29.29.29）重新解析，穿透 fake-ip 劫持。
 /// 返回空列表表示未能取得可靠的真实地址，调用方应保持原行为（原样报错）。
-pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAddr> {
+///
+/// 该解析与具体业务无关（对象存储 endpoint、生成结果直链共用）：只要客户端可能
+/// 绕过代理直连某个域名，fake-ip 都会让连接落在一个不可路由的虚拟地址上。
+/// 从 DoH 的 JSON 响应里取出 A 记录（`type == 1`），并过滤 fake-ip 虚拟地址。
+///
+/// 响应形如（两个端点一致）：
+/// `{"Status":0,"Answer":[{"name":"h.","type":1,"TTL":60,"data":"1.2.3.4"}]}`
+/// CNAME 链会产生 `type == 5` 的条目，必须忽略——那不是地址。
+fn doh_a_records(body: &str) -> Vec<std::net::IpAddr> {
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Vec::new();
+    };
+    value
+        .get("Answer")
+        .and_then(Value::as_array)
+        .map(|answers| {
+            answers
+                .iter()
+                .filter(|answer| answer.get("type").and_then(Value::as_u64) == Some(1))
+                .filter_map(|answer| answer.get("data").and_then(Value::as_str))
+                .filter_map(|data| data.parse::<std::net::IpAddr>().ok())
+                .filter(|ip| !is_fake_ip(*ip))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// 用 DoH 解析主机名，返回真实 A 记录；失败时返回空列表。
+///
+/// 复用调用方传入的共享 client，因此同样遵循系统代理配置；但会盖上自己的短超时。
+async fn resolve_via_doh(client: &reqwest::Client, host: &str) -> Vec<std::net::IpAddr> {
+    for endpoint in DOH_ENDPOINTS {
+        let Ok(mut url) = url::Url::parse(endpoint) else {
+            continue;
+        };
+        url.query_pairs_mut()
+            .clear()
+            .append_pair("name", host)
+            .append_pair("type", "A");
+        let response = client
+            .get(url)
+            .timeout(std::time::Duration::from_millis(DOH_TIMEOUT_MS))
+            .send()
+            .await;
+        let response = match response {
+            Ok(response) if response.status().is_success() => response,
+            Ok(response) => {
+                warn!(
+                    "[staging] DoH 查询返回 HTTP {}: endpoint={endpoint}, host={host}",
+                    response.status()
+                );
+                continue;
+            }
+            Err(error) => {
+                warn!("[staging] DoH 查询失败: endpoint={endpoint}, host={host}, 错误={error}");
+                continue;
+            }
+        };
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                warn!("[staging] DoH 响应读取失败: endpoint={endpoint}, host={host}, 错误={error}");
+                continue;
+            }
+        };
+        let ips = doh_a_records(&body);
+        if !ips.is_empty() {
+            return ips;
+        }
+        // 端点本身也可能被劫持（返回虚拟地址），继续试下一个。
+        warn!(
+            "[staging] DoH 未给出可用地址: endpoint={endpoint}, host={host}, 条目数={}",
+            serde_json::from_str::<Value>(&body)
+                .ok()
+                .and_then(|value| value.get("Answer").and_then(Value::as_array).map(Vec::len))
+                .unwrap_or(0)
+        );
+    }
+    Vec::new()
+}
+
+pub(crate) async fn resolve_host_real_ips(
+    client: &reqwest::Client,
+    host: &str,
+) -> Vec<std::net::IpAddr> {
     if let Ok(addrs) = tokio::net::lookup_host((host, 443)).await {
         let real: Vec<std::net::IpAddr> = addrs
             .map(|addr| addr.ip())
@@ -141,9 +240,19 @@ pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAdd
             return real;
         }
         warn!(
-            "[staging] 系统 DNS 解析 {host} 全部落在 fake-ip 虚拟网段（疑似代理软件劫持），改用备用 DNS 解析"
+            "[staging] 系统 DNS 解析 {host} 全部落在 fake-ip 虚拟网段（疑似代理软件劫持），改用 DoH 解析"
         );
     }
+    // 第一选择是 DoH：UDP:53 在 fake-ip 环境下同样会被劫持，DoH 走 HTTPS 能穿透。
+    let doh = resolve_via_doh(client, host).await;
+    if !doh.is_empty() {
+        info!(
+            "[staging] DoH 拿到 {host} 的真实地址 {} 条，绕过 fake-ip 劫持",
+            doh.len()
+        );
+        return doh;
+    }
+    // 最后退到 UDP:53：部分环境没有被劫持，仍可能拿到结果。
     let mut fallback: Vec<std::net::IpAddr> = Vec::new();
     for server in FALLBACK_DNS_SERVERS {
         let name_servers = hickory_resolver::config::NameServerConfigGroup::from_ips_clear(
@@ -176,28 +285,39 @@ pub(crate) async fn resolve_tos_host_real_ips(host: &str) -> Vec<std::net::IpAdd
     fallback
 }
 
-/// 构建 TOS 上传 HTTP 客户端。
+/// 构建「把主机名固定到真实 IP」的 HTTP 客户端。
 ///
-/// 代理 fake-ip 环境下，将 endpoint 域名强制映射到真实 IP（`resolve_to_addrs`），
-/// 直连真实地址并保持 Host/SNI/预签名不变，从而绕过虚拟 IP 导致的连接失败；
-/// 正常网络传入空列表时行为与 `build_presign_http_client` 一致。
-fn build_tos_upload_client(
+/// 代理 fake-ip 环境下，将域名强制映射到真实 IP（`resolve_to_addrs`），直连真实
+/// 地址并保持 Host/SNI 不变，从而绕过虚拟 IP 导致的连接失败；`real_ips` 为空时
+/// 行为与普通客户端一致。`redirect` 由调用方决定：预签名请求必须禁止跟随，
+/// 结果直链下载则需要跟随 CDN 的 3xx。
+fn build_fake_ip_pinned_client(
     host: &str,
+    port: u16,
     real_ips: &[std::net::IpAddr],
+    redirect: reqwest::redirect::Policy,
 ) -> reqwest::Result<reqwest::Client> {
     let mut builder = reqwest::Client::builder()
         .connect_timeout(std::time::Duration::from_secs(30))
         .timeout(std::time::Duration::from_secs(300))
         .user_agent("InfiniteCanvas/0.1")
-        .redirect(reqwest::redirect::Policy::none());
+        .redirect(redirect);
     if !real_ips.is_empty() {
         let sockets: Vec<std::net::SocketAddr> = real_ips
             .iter()
-            .map(|ip| std::net::SocketAddr::new(*ip, 443))
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
             .collect();
         builder = builder.resolve_to_addrs(host, &sockets);
     }
     builder.build()
+}
+
+/// 构建 TOS 上传 HTTP 客户端（https，禁止跟随重定向）。
+fn build_tos_upload_client(
+    host: &str,
+    real_ips: &[std::net::IpAddr],
+) -> reqwest::Result<reqwest::Client> {
+    build_fake_ip_pinned_client(host, 443, real_ips, reqwest::redirect::Policy::none())
 }
 
 /// 为任意 URL（主要是 TOS 预签名 URL）构建 fake-ip 感知的 HTTP 客户端：
@@ -209,11 +329,49 @@ pub(crate) async fn fake_ip_aware_client(url: &str, fallback: reqwest::Client) -
     let Some(host) = parsed.host_str() else {
         return fallback;
     };
-    let real_ips = resolve_tos_host_real_ips(host).await;
+    let real_ips = resolve_host_real_ips(&fallback, host).await;
     if real_ips.is_empty() {
         return fallback;
     }
     build_tos_upload_client(host, &real_ips).unwrap_or(fallback)
+}
+
+/// 为「生成结果直链下载」构建 fake-ip 感知的客户端。
+///
+/// 只有**确认**被代理软件劫持（系统 DNS 把该主机解析到 `198.18.0.0/15` 虚拟网段，
+/// 且没有任何真实地址）时才另建客户端，把主机名固定到备用 DNS 解析出的真实地址，
+/// 并保留 Host/SNI。正常网络原样返回 `fallback`，继续使用共享客户端——保留连接池，
+/// 也不干扰 reqwest 已启用的系统代理自动读取。
+///
+/// 重定向策略保持默认（跟随 3xx）：结果直链没有预签名 Host 绑定约束，上游 CDN 用
+/// 302 做实际分发是常见行为。
+pub(crate) async fn fake_ip_aware_download_client(
+    url: &str,
+    fallback: reqwest::Client,
+) -> reqwest::Client {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return fallback;
+    };
+    let Some(host) = parsed.host_str() else {
+        return fallback;
+    };
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let Ok(addresses) = tokio::net::lookup_host((host, port)).await else {
+        return fallback;
+    };
+    let system_ips: Vec<std::net::IpAddr> = addresses.map(|address| address.ip()).collect();
+    if system_ips.is_empty() || system_ips.iter().any(|ip| !is_fake_ip(*ip)) {
+        return fallback;
+    }
+    let real_ips = resolve_host_real_ips(&fallback, host).await;
+    if real_ips.is_empty() {
+        return fallback;
+    }
+    warn!(
+        "[save] {host} 被代理软件 fake-ip 劫持（系统解析 {system_ips:?}），改用备用 DNS 的真实地址直连下载"
+    );
+    build_fake_ip_pinned_client(host, port, &real_ips, reqwest::redirect::Policy::default())
+        .unwrap_or(fallback)
 }
 
 /// 判断 reqwest 错误是否属于「可重试的网络层失败」（连接、超时、请求传输失败）。
@@ -402,7 +560,7 @@ impl StagingService {
         );
         let started_at = std::time::Instant::now();
         // 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免连通性测试误报失败。
-        let real_ips = resolve_tos_host_real_ips(&host).await;
+        let real_ips = resolve_host_real_ips(&self.client, &host).await;
         let probe_client = match build_tos_upload_client(&host, &real_ips) {
             Ok(client) => client,
             Err(error) => {
@@ -1100,7 +1258,7 @@ impl StagingService {
         );
         // 解析 endpoint 真实 IP：代理 fake-ip 环境下改用备用 DNS 穿透劫持，
         // 直连真实地址（Host/SNI/预签名保持不变，签名不受影响）。
-        let real_ips = resolve_tos_host_real_ips(&host).await;
+        let real_ips = resolve_host_real_ips(&self.client, &host).await;
         let upload_client = match build_tos_upload_client(&host, &real_ips) {
             Ok(client) => client,
             Err(error) => {
@@ -1916,6 +2074,92 @@ mod tests {
         assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(198, 20, 0, 0))));
         assert!(!is_fake_ip(IpAddr::V4(Ipv4Addr::new(223, 5, 5, 5))));
         assert!(!is_fake_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+    }
+
+    /// 单元测试：DoH 响应解析——只取 A 记录（`type == 1`），
+    /// CNAME（`type == 5`）与 fake-ip 虚拟地址都必须排除，否则会把一个
+    /// 不可路由的虚拟地址当成"真实地址"拿去直连。
+    #[test]
+    fn doh_a_records_picks_only_real_addresses() {
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // 阿里 DoH 的实际形状（单条 A 记录）。
+        let alidns = r#"{"Status":0,"TC":false,"RD":true,"RA":true,"AD":false,"CD":false,
+            "Question":{"name":"cdn.example.com.","type":1},
+            "Answer":[{"name":"cdn.example.com.","TTL":251,"type":1,"data":"80.87.199.46"}]}"#;
+        assert_eq!(
+            doh_a_records(alidns),
+            vec![IpAddr::V4(Ipv4Addr::new(80, 87, 199, 46))]
+        );
+
+        // doh.pub 的实际形状：CNAME 在前、A 记录在后——只能取 A。
+        let dnspod = r#"{"Status":0,"Answer":[
+            {"name":"www.example.com.","type":5,"TTL":277,"data":"www.example.com.eo.dnse2.com."},
+            {"name":"www.example.com.eo.dnse2.com.","type":1,"TTL":60,"data":"43.159.109.55"}]}"#;
+        assert_eq!(
+            doh_a_records(dnspod),
+            vec![IpAddr::V4(Ipv4Addr::new(43, 159, 109, 55))]
+        );
+
+        // DoH 端点本身也被劫持时：虚拟地址必须被过滤，函数返回空以便换下一个端点。
+        let hijacked =
+            r#"{"Status":0,"Answer":[{"name":"cdn.example.com.","type":1,"data":"198.18.0.21"}]}"#;
+        assert!(
+            doh_a_records(hijacked).is_empty(),
+            "fake-ip 地址不能作为兜底地址使用"
+        );
+
+        // 畸变输入一律返回空，由调用方继续尝试。
+        assert!(doh_a_records("<html>502 Bad Gateway</html>").is_empty());
+        assert!(doh_a_records("{}").is_empty());
+        assert!(doh_a_records(r#"{"Answer":[]}"#).is_empty());
+        assert!(
+            doh_a_records(r#"{"Status":0,"Answer":[{"name":"h.","type":1,"data":"not-an-ip"}]}"#)
+                .is_empty()
+        );
+    }
+
+    /// 配置锁：`reqwest` 必须保留 `system-proxy` feature。
+    ///
+    /// 该 feature 让客户端自动读取 Windows 注册表 / macOS 系统配置里的代理设置
+    /// （配合 `auto_sys_proxy` 默认开启）。一旦被移除，企业代理或「系统代理 + VPN」
+    /// 环境下会出现「浏览器能打开直链、应用连接超时」的静默退化——没有任何编译或
+    /// 运行时报错。这里用编译期嵌入的清单文本把它锁死。
+    #[test]
+    fn reqwest_manifest_keeps_system_proxy_support() {
+        let manifest = include_str!("../../Cargo.toml");
+        assert!(
+            manifest.contains("system-proxy"),
+            "reqwest 的 system-proxy feature 被移除：客户端将不再读取系统代理设置"
+        );
+        assert!(
+            manifest.contains("rustls-tls-native-roots"),
+            "reqwest 不再信任操作系统证书存储：企业解密代理下 TLS 校验会失败"
+        );
+    }
+
+    /// 结果直链下载的 fake-ip 兜底只在**确认被劫持**时才另建客户端：
+    /// 正常解析（含 IP 字面量）与不可解析输入都必须原样返回共享客户端，
+    /// 避免每次下载都丢掉连接池、或对非 HTTP 输入做无意义的 DNS 解析。
+    ///
+    /// 用 `Debug` 中的自定义 UA 作为「同一个客户端」的可读标识。
+    #[tokio::test]
+    async fn fake_ip_aware_download_client_keeps_shared_client_unless_hijacked() {
+        fn marked_client() -> reqwest::Client {
+            reqwest::Client::builder()
+                .user_agent("shared-client-marker/1")
+                .build()
+                .unwrap()
+        }
+
+        // 不可解析：不解析 DNS，直接回退。
+        let client = fake_ip_aware_download_client("不是 URL", marked_client()).await;
+        assert!(format!("{client:?}").contains("shared-client-marker/1"));
+
+        // IP 字面量的正常解析：不是 fake-ip，回退到共享客户端。
+        let client =
+            fake_ip_aware_download_client("http://127.0.0.1:8080/a.png", marked_client()).await;
+        assert!(format!("{client:?}").contains("shared-client-marker/1"));
     }
 
     /// 回归测试：上传 PUT 连接失败时按指数退避重试，直到成功。

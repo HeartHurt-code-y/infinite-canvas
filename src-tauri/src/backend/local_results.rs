@@ -14,7 +14,8 @@ use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
-    provider::{ImageSource, redact_url_string},
+    provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
+    staging::fake_ip_aware_download_client,
     storage::{GenerationLifecycleFact, GenerationTaskLifecycle, Storage, now_ms},
     types::{GenerationResultRecord, MediaType, SaveStatus},
 };
@@ -51,12 +52,32 @@ fn source_archive(source: &ImageSource) -> Value {
     }
 }
 
+/// 从供应商的原始响应正文里取出指定结果索引的 `b64_json`。
+///
+/// `result_index` 是 1 起的业务索引，对应 `data[]` 中的 `result_index - 1` 项；
+/// 空字符串与缺失字段都视为「没有可用的 Base64」，由调用方决定是报错还是保留原始错误。
+fn base64_from_provider_response(raw: &str, result_index: u32) -> Option<String> {
+    let value: Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("data")
+        .and_then(Value::as_array)
+        .and_then(|items| items.get(result_index.saturating_sub(1) as usize))
+        .and_then(|item| item.get("b64_json"))
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+}
+
 #[derive(Clone)]
 pub struct LocalResultService {
     storage: Arc<Storage>,
     lifecycle: GenerationTaskLifecycle,
     client: reqwest::Client,
     downloads_directory: PathBuf,
+    /// 结果直链下载需要复用生成请求的身份（Bearer / Referer）。这里持有供应商运行时
+    /// 而不是让每个调用方传参：保存、恢复、命令入口三条路径都要按 `taskId` 反查
+    /// 冻结连接快照，集中在这里解析可以保证三条路径行为一致。
+    providers: ProviderRuntime,
 }
 
 impl LocalResultService {
@@ -65,13 +86,28 @@ impl LocalResultService {
         lifecycle: GenerationTaskLifecycle,
         client: reqwest::Client,
         downloads_directory: PathBuf,
+        providers: ProviderRuntime,
     ) -> Self {
         Self {
             storage,
             lifecycle,
             client,
             downloads_directory,
+            providers,
         }
+    }
+
+    /// 按任务冻结的连接快照解析下载鉴权上下文。
+    ///
+    /// 这是尽力而为的增强：任务记录缺失、供应商连接已删除或凭据已撤销时返回空上下文，
+    /// 下载退回原来的裸 GET，不因为拿不到身份而让保存失败。
+    fn download_auth(&self, task_id: &str) -> ResultDownloadAuth {
+        self.storage
+            .get_task_execution(task_id)
+            .ok()
+            .and_then(|task| self.providers.resolve_frozen(&task).ok())
+            .map(|context| ResultDownloadAuth::from_context(&context))
+            .unwrap_or_default()
     }
 
     fn persist_result(&self, result: &GenerationResultRecord) -> BackendResult<()> {
@@ -206,10 +242,15 @@ impl LocalResultService {
         }
 
         let mut records = Vec::with_capacity(pending.len());
+        // 下载鉴权按任务解析一次：同一个任务的全部结果共用同一份冻结连接身份。
+        let auth = self.download_auth(task_id);
         for (source, mut record) in pending {
             let result_index = record.result_index;
             let result = match source {
-                ImageSource::Url { url, .. } => self.download_with_retry(&url).await,
+                ImageSource::Url { url, .. } => match self.download_with_retry(&url, &auth).await {
+                    Ok(bytes) => Ok(bytes),
+                    Err(error) => self.fallback_to_base64(task_id, result_index, &url, error),
+                },
                 ImageSource::Base64 { data, .. } => decode_base64_image(&data),
             }
             .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Image));
@@ -295,7 +336,7 @@ impl LocalResultService {
         on_ready(&record, Some(video_url.to_string()));
 
         let result = self
-            .download_with_retry(video_url)
+            .download_with_retry(video_url, &self.download_auth(task_id))
             .await
             .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Video));
         match result {
@@ -633,7 +674,7 @@ impl LocalResultService {
                     )
                 }),
             Some("base64") if record.media_type == MediaType::Image => self
-                .recover_base64_source(&record)
+                .recover_base64_source(&record.task_id, record.result_index)
                 .map(|data| ImageSource::Base64 { data, layer: None }),
             kind => Err(BackendError::protocol(
                 "interrupted result has an unsupported recovery source",
@@ -641,11 +682,21 @@ impl LocalResultService {
             )),
         };
 
+        // 恢复同样按任务解析下载身份：断点续跑不能因为少了请求头而再次失败。
+        let auth = self.download_auth(&record.task_id);
+        let media_type = record.media_type;
         let outcome = match source {
-            Ok(ImageSource::Url { url, .. }) => self
-                .download_with_retry(&url)
-                .await
-                .and_then(|bytes| self.prepare_bytes(bytes, record.media_type)),
+            Ok(ImageSource::Url { url, .. }) => {
+                match self.download_with_retry(&url, &auth).await {
+                    Ok(bytes) => Ok(bytes),
+                    // 只有图片结果才有内联 Base64 兜底（视频接口不返回 Base64）。
+                    Err(error) if media_type == MediaType::Image => {
+                        self.fallback_to_base64(&record.task_id, record.result_index, &url, error)
+                    }
+                    Err(error) => Err(error),
+                }
+                .and_then(|bytes| self.prepare_bytes(bytes, media_type))
+            }
             Ok(ImageSource::Base64 { data, .. }) => decode_base64_image(&data)
                 .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Image)),
             Err(error) => Err(error),
@@ -664,29 +715,55 @@ impl LocalResultService {
         }
     }
 
-    fn recover_base64_source(&self, record: &GenerationResultRecord) -> BackendResult<String> {
-        let raw = self
-            .storage
-            .last_successful_submit_response(&record.task_id)?;
-        let value: serde_json::Value = serde_json::from_str(&raw)?;
-        value
-            .get("data")
-            .and_then(|value| value.as_array())
-            .and_then(|items| items.get(record.result_index.saturating_sub(1) as usize))
-            .and_then(|item| item.get("b64_json"))
-            .and_then(|value| value.as_str())
-            .filter(|value| !value.is_empty())
-            .map(ToOwned::to_owned)
-            .ok_or_else(|| {
-                BackendError::protocol(
-                    "persisted provider response has no Base64 value for the interrupted result",
-                    json!({
-                        "taskId": record.task_id,
-                        "resultIndex": record.result_index,
-                        "rawResponse": raw
-                    }),
-                )
-            })
+    /// 从已持久化的供应商原始响应里取出指定结果索引的 `b64_json`。
+    ///
+    /// 两个场景复用同一份数据：恢复中断的保存（`source` 归档只记了 `kind`，正文从
+    /// 原始响应回读），以及 URL 直链下载失败后的兜底（供应商同时返回链接与 Base64 时
+    /// 仍有第二条路可取）。
+    fn recover_base64_source(&self, task_id: &str, result_index: u32) -> BackendResult<String> {
+        let raw = self.storage.last_successful_submit_response(task_id)?;
+        base64_from_provider_response(&raw, result_index).ok_or_else(|| {
+            BackendError::protocol(
+                "persisted provider response has no Base64 value for the result",
+                json!({
+                    "taskId": task_id,
+                    "resultIndex": result_index,
+                    "rawResponse": raw
+                }),
+            )
+        })
+    }
+
+    /// URL 直链下载失败后的兜底：改用同一份供应商响应里的内联 Base64。
+    ///
+    /// 默认返回 Base64 的供应商本来就不需要这一跳；返回链接的供应商只要响应里同时
+    /// 带了 Base64（文档允许二者同时存在），结果仍能保存成功，不再因为「生成成功但
+    /// 直链所在域名连不上」而整张图丢失。
+    ///
+    /// 兜底不可用时返回**原来的下载错误**——那是用户唯一能据此排查网络/代理问题的信息。
+    fn fallback_to_base64(
+        &self,
+        task_id: &str,
+        result_index: u32,
+        url: &str,
+        cause: BackendError,
+    ) -> BackendResult<Vec<u8>> {
+        match self.recover_base64_source(task_id, result_index) {
+            Ok(data) => {
+                warn!(
+                    "[save] 结果直链下载失败，改用同一响应中的内联 Base64 保存: taskId={task_id}, resultIndex={result_index}, url={}",
+                    redact_url_string(url)
+                );
+                decode_base64_image(&data)
+            }
+            Err(absent) => {
+                info!(
+                    "[save] 结果直链下载失败，响应中没有可用的内联 Base64，保留原始下载错误: taskId={task_id}, resultIndex={result_index}, 兜底不可用原因={}",
+                    absent.payload().message
+                );
+                Err(cause)
+            }
+        }
     }
 
     fn finish_resumed_result_failure(
@@ -716,7 +793,11 @@ impl LocalResultService {
     /// （`BackendError::Transport`，如连接超时、连接拒绝、读取中断等）和
     /// 5xx HTTP 错误重试；退避节奏：第 1/2/3/4/5 次重试前约等待
     /// 2s / 4s / 8s / 16s / 32s（含 ±20% 随机抖动），避免雪崩式重试。
-    async fn download_with_retry(&self, url: &str) -> BackendResult<Vec<u8>> {
+    async fn download_with_retry(
+        &self,
+        url: &str,
+        auth: &ResultDownloadAuth,
+    ) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         let mut last_error = None;
         const MAX_ATTEMPTS: u32 = 6;
@@ -726,7 +807,7 @@ impl LocalResultService {
                 let jitter = rand::rng().random_range(0..=(nominal / 5));
                 tokio::time::sleep(std::time::Duration::from_millis(nominal + jitter)).await;
             }
-            match self.download_once(url).await {
+            match self.download_once(url, auth).await {
                 Ok(bytes) => {
                     if attempt > 0 {
                         info!(
@@ -767,14 +848,17 @@ impl LocalResultService {
         }))
     }
 
-    async fn download_once(&self, url: &str) -> BackendResult<Vec<u8>> {
+    async fn download_once(&self, url: &str, auth: &ResultDownloadAuth) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         let started_at = std::time::Instant::now();
+        // 代理软件 fake-ip 环境下，直链域名会被解析到不可路由的虚拟地址，这一跳
+        // 不经过代理（供应商存储域名通常不在代理规则内），会稳定连接超时。这里复用
+        // 对象存储那条链路已经验证过的兜底：命中 fake-ip 时改用备用 DNS 的真实地址。
+        let client = fake_ip_aware_download_client(url, self.client.clone()).await;
         // 结果文件下载单请求上限 90s：覆盖大文件慢速传输，同时避免单次卡死
         // 拖累整体重试节奏（provider 共享 client 的全局 timeout 为 300s）。
-        let response = self
-            .client
-            .get(url)
+        let response = auth
+            .apply(client.get(url), url)
             .timeout(std::time::Duration::from_secs(90))
             .send()
             .await?;
@@ -1148,6 +1232,117 @@ pub fn safe_file_stem(value: &str) -> String {
 mod tests {
     use super::*;
 
+    fn test_service(storage: &Arc<Storage>) -> LocalResultService {
+        let lifecycle = crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(storage));
+        let providers = crate::backend::provider::ProviderRuntime::new(
+            Arc::clone(storage),
+            lifecycle.clone(),
+            crate::backend::credentials::CredentialStore,
+        )
+        .expect("provider runtime");
+        LocalResultService::new(
+            Arc::clone(storage),
+            lifecycle,
+            // 测试直连本地回环端口，必须绕开系统/环境变量代理，
+            // 否则请求会被开发机上的代理拦成 502。
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("build test client"),
+            std::env::temp_dir(),
+            providers,
+        )
+    }
+
+    /// URL 直链下载失败后的兜底依赖「按 1 起的结果索引取回 `b64_json`」。
+    /// 索引错位、空字符串或响应不可解析都必须判为「没有可用的 Base64」，
+    /// 否则会把另一张图当成这张图保存下来。
+    #[test]
+    fn base64_fallback_reads_the_matching_result_index() {
+        let raw = json!({
+            "data": [
+                { "url": "https://cdn.example.com/0.png", "b64_json": "first" },
+                { "url": "https://cdn.example.com/1.png", "b64_json": "second" }
+            ]
+        })
+        .to_string();
+
+        assert_eq!(
+            base64_from_provider_response(&raw, 1).as_deref(),
+            Some("first")
+        );
+        assert_eq!(
+            base64_from_provider_response(&raw, 2).as_deref(),
+            Some("second")
+        );
+        // 文档允许结果项只有 url 没有 b64_json —— 兜底此时不可用，必须返回 None。
+        let url_only = json!({ "data": [{ "url": "https://cdn.example.com/a.png" }] }).to_string();
+        assert_eq!(base64_from_provider_response(&url_only, 1), None);
+        // 空串与越界索引同样不可用。
+        let empty = json!({ "data": [{ "b64_json": "" }] }).to_string();
+        assert_eq!(base64_from_provider_response(&empty, 1), None);
+        assert_eq!(base64_from_provider_response(&raw, 9), None);
+        // 响应不是 JSON 时不能抛出，只表示兜底不可用。
+        assert_eq!(base64_from_provider_response("<html>502</html>", 1), None);
+    }
+
+    /// 结果直链下载必须带上生成侧的身份：同源时附 `Authorization` 与 `Referer`。
+    /// 这条用例真的发一次请求并检查落到线上的请求头，而不是只看构造结果。
+    #[tokio::test]
+    async fn url_download_sends_generation_identity_headers() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let captured = Arc::new(std::sync::Mutex::new(String::new()));
+        let captured_server = Arc::clone(&captured);
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read request");
+            captured_server
+                .lock()
+                .expect("capture lock")
+                .push_str(&String::from_utf8_lossy(&buffer[..read]));
+            let body: &[u8] = &[0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a];
+            let head = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: image/png\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                body.len()
+            );
+            stream.write_all(head.as_bytes()).expect("write head");
+            stream.write_all(body).expect("write body");
+            stream.flush().expect("flush");
+        });
+
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage = Arc::new(
+            crate::backend::storage::Storage::open(&directory.path().join("backend.sqlite"))
+                .expect("open db"),
+        );
+        let service = test_service(&storage);
+        let url = format!("http://127.0.0.1:{port}/images/a.png");
+        let auth =
+            ResultDownloadAuth::from_parts(&format!("http://127.0.0.1:{port}/v1"), "sk-secret");
+
+        let bytes = service
+            .download_with_retry(&url, &auth)
+            .await
+            .expect("download succeeds");
+        server.join().expect("server joins");
+        assert_eq!(bytes, vec![0x89, b'P', b'N', b'G', 0x0d, 0x0a, 0x1a, 0x0a]);
+
+        let request = captured.lock().expect("capture lock").to_ascii_lowercase();
+        assert!(
+            request.contains("authorization: bearer sk-secret"),
+            "same-host download must carry the bearer token, got: {request}"
+        );
+        assert!(
+            request.contains(&format!("referer: http://127.0.0.1:{port}")),
+            "download must carry a referer, got: {request}"
+        );
+    }
+
     #[test]
     fn windows_unsafe_file_names_are_deterministically_sanitized() {
         assert_eq!(safe_file_stem("task:abc/def?"), "task_abc_def_");
@@ -1182,12 +1377,7 @@ mod tests {
             crate::backend::storage::Storage::open(&directory.path().join("backend.sqlite"))
                 .expect("open db"),
         );
-        let service = LocalResultService::new(
-            Arc::clone(&storage),
-            crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(&storage)),
-            reqwest::Client::new(),
-            directory.path().to_path_buf(),
-        );
+        let service = test_service(&storage);
         let record = service.pending_text_result("task-1", "remote-1", "扩写后的完整提示词");
         assert_eq!(record.media_type, MediaType::Text);
         assert_eq!(record.media_type.as_str(), "text");

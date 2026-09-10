@@ -558,6 +558,11 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
 /// 控制水印（应用侧默认无水印；文档 API 默认值为 true）、`response_format`
 /// 控制返回链接或 Base64。
 /// 版本附加参数由 `seedream_append_version_parameters` 按能力追加。
+///
+/// `response_format` 默认 `b64_json`：返回链接时客户端必须再直连供应商的存储域名
+/// 下载一次，而该域名常与可连通的 API 域名不同（上游存储/CDN、境外或被代理软件
+/// fake-ip 劫持），会把「生成成功」变成「保存失败」。内联 Base64 只需生成这一条
+/// 通道即可拿到结果，是唯一不依赖第二次连接的返回方式。
 fn seedream_text_to_image_parameters() -> Value {
     json!({
         "size": {
@@ -583,7 +588,7 @@ fn seedream_text_to_image_parameters() -> Value {
         "response_format": {
             "type": "string",
             "label": "返回格式",
-            "default": "url",
+            "default": "b64_json",
             "enum": ["url", "b64_json"],
             "order": 9
         }
@@ -724,6 +729,24 @@ fn gpt_image_count_parameter() -> Value {
     })
 }
 
+/// OpenAI Images 契约（`/v1/images/generations`）的返回格式参数：`url` 返回可下载
+/// 的链接，`b64_json` 把图片内联在响应里。
+///
+/// 默认 `b64_json`：`url` 需要客户端再对供应商返回的存储地址发第二次请求，而该地址
+/// 与生成接口的域名往往不同（上游自有存储/CDN）。当这台机器连得上生成接口却连不上
+/// 那个存储域名时，生成成功但结果永远保存不下来；内联 Base64 不引入第二次连接。
+/// 兼容性由「下载失败回退 Base64」与用户可改的「返回格式」参数共同兜底：供应商若
+/// 忽略该字段仍返回链接，保存阶段会照旧下载。
+fn openai_image_response_format_parameter() -> Value {
+    json!({
+        "type": "string",
+        "label": "返回格式",
+        "default": "b64_json",
+        "enum": ["url", "b64_json"],
+        "order": 3
+    })
+}
+
 /// Gemini 图片生成契约的尺寸参数：接口只接受画幅比例（非像素尺寸），默认 `1:1`。
 fn gemini_image_size_parameter() -> Value {
     json!({
@@ -740,6 +763,16 @@ fn gpt_image_text_to_image_parameters_before_n() -> Value {
     json!({
         "size": gpt_image_size_parameter(),
         "quality": gpt_image_quality_parameter()
+    })
+}
+
+/// 尚未声明「返回格式」的 GPT Image 文生图默认参数（加入 `response_format` 前的
+/// 形状），用于识别需要补上 `response_format` 键的已保存定义。
+fn gpt_image_text_to_image_parameters_before_response_format() -> Value {
+    json!({
+        "size": gpt_image_size_parameter(),
+        "quality": gpt_image_quality_parameter(),
+        "n": gpt_image_count_parameter()
     })
 }
 
@@ -867,6 +900,11 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             if gpt_image {
                 parameters.insert("n".into(), gpt_image_count_parameter());
             }
+            // 返回格式：默认内联 Base64，避免结果保存阶段再直连供应商的存储域名。
+            parameters.insert(
+                "response_format".into(),
+                openai_image_response_format_parameter(),
+            );
             json!({
                 "resultType": "image",
                 "requestProfileId": "openai_images_v1",
@@ -1778,24 +1816,35 @@ fn legacy_text_to_image_parameters() -> Value {
 }
 
 /// 历史版本把 dall-e 契约当作所有文生图模型的默认参数持久化进了
-/// `model_definitions`。若 gpt-image 模型的参数仍是旧默认值（说明并非服务商
-/// 下发的自定义参数），则原位替换为当前默认值；其余情况一律不动。
+/// `model_definitions`。若参数仍是历史默认值（说明并非服务商下发的自定义参数），
+/// 则原位替换为当前默认值；其余情况一律不动。
+///
+/// 迁移的三类历史形状：
+/// - dall-e 旧契约（`1024x1024` + `standard`）——gpt-image 供应商会以 HTTP 400 拒绝；
+/// - 尚未加入 `n` 的早期 GPT Image 契约；
+/// - 尚未声明「返回格式」的 GPT Image 契约（补上默认 `b64_json`）。
+///
+/// Gemini 与 Seedream 各有自己的契约刷新（`refresh_gemini_image_parameter_defaults`、
+/// `refresh_seedream_image_parameter_defaults`），这里显式让出，避免互相覆盖。
 /// 也把 gpt-image 图生图的历史空参数（旧契约不支持 size/quality/n）刷新为当前契约。
 /// 返回是否发生了替换。
 pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &str) -> bool {
-    if !model_id.to_ascii_lowercase().contains("gpt-image") {
+    if is_gemini_image_model(model_id) || is_seedream_image_model(model_id) {
         return false;
     }
+    let gpt_image = model_id.to_ascii_lowercase().contains("gpt-image");
     let mut changed = false;
-    // 文生图：dall-e 旧契约，或尚未包含 n 的早期 GPT Image 契约 → 刷新为当前契约。
+    // 文生图：dall-e 旧契约、早期 GPT Image 契约或尚未声明返回格式的契约 → 刷新为当前契约。
     if let Some(definition) = schema
         .get_mut("text_to_image")
         .and_then(Value::as_object_mut)
     {
         let legacy = legacy_text_to_image_parameters();
         let before_n = gpt_image_text_to_image_parameters_before_n();
+        let before_response_format = gpt_image_text_to_image_parameters_before_response_format();
         if definition.get("parameters") == Some(&legacy)
             || definition.get("parameters") == Some(&before_n)
+            || definition.get("parameters") == Some(&before_response_format)
         {
             if let Some(parameters) =
                 default_operation_schema(model_id, GenerationOperation::TextToImage)
@@ -1808,9 +1857,11 @@ pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &st
         }
     }
     // 图生图：历史契约（旧接口不支持 size/quality/n）持久化为空参数 → 刷新为当前契约。
-    if let Some(definition) = schema
-        .get_mut("image_to_image")
-        .and_then(Value::as_object_mut)
+    // 仅对 gpt-image 生效：其他模型（如通用 dall-e 契约）的图生图当前默认本就是空参数。
+    if gpt_image
+        && let Some(definition) = schema
+            .get_mut("image_to_image")
+            .and_then(Value::as_object_mut)
     {
         let parameters_empty = definition
             .get("parameters")
@@ -2927,6 +2978,12 @@ mod tests {
         assert_eq!(parameters["n"]["default"], 1);
         assert_eq!(parameters["n"]["minimum"], 1);
         assert_eq!(parameters["n"]["maximum"], 10);
+        // 返回格式默认内联 Base64：结果下载不再依赖供应商的第三方存储域名。
+        assert_eq!(parameters["response_format"]["default"], "b64_json");
+        assert_eq!(
+            parameters["response_format"]["enum"],
+            json!(["url", "b64_json"])
+        );
 
         // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
         let edit_parameters = &schema["image_to_image"]["parameters"];
@@ -2943,6 +3000,7 @@ mod tests {
             json!(["hd", "standard"])
         );
         assert!(generic_parameters.get("n").is_none());
+        assert_eq!(generic_parameters["response_format"]["default"], "b64_json");
     }
 
     #[test]
@@ -2967,8 +3025,8 @@ mod tests {
         assert_eq!(parameters["quality"]["enum"], json!(["standard", "hd"]));
         assert_eq!(parameters["watermark"]["type"], "boolean");
         assert_eq!(parameters["watermark"]["default"], false);
-        // 返回格式：默认 url，可选 b64_json（文档参数表）。
-        assert_eq!(parameters["response_format"]["default"], "url");
+        // 返回格式：默认内联 b64_json，避免保存阶段再直连供应商存储域名（文档参数表）。
+        assert_eq!(parameters["response_format"]["default"], "b64_json");
         assert_eq!(
             parameters["response_format"]["enum"],
             json!(["url", "b64_json"])
@@ -3021,7 +3079,7 @@ mod tests {
             json!(["jpg", "png", "webp"])
         );
         assert_eq!(text_parameters["watermark"]["default"], false);
-        assert_eq!(text_parameters["response_format"]["default"], "url");
+        assert_eq!(text_parameters["response_format"]["default"], "b64_json");
         // 5.0 pro 不支持组图模式与联网搜索。
         assert!(text_parameters.get("sequential_image_generation").is_none());
         assert!(text_parameters.get("web_search").is_none());
@@ -3042,7 +3100,7 @@ mod tests {
         );
         assert_eq!(edit_parameters["layer_decomposition"]["type"], "boolean");
         assert_eq!(edit_parameters["layer_decomposition"]["default"], false);
-        assert_eq!(edit_parameters["response_format"]["default"], "url");
+        assert_eq!(edit_parameters["response_format"]["default"], "b64_json");
     }
 
     #[test]
@@ -3081,7 +3139,7 @@ mod tests {
             let parameters = &schema[operation.as_str()]["parameters"];
             assert_eq!(parameters["size"]["default"], "2K");
             assert_eq!(parameters["watermark"]["default"], false);
-            assert_eq!(parameters["response_format"]["default"], "url");
+            assert_eq!(parameters["response_format"]["default"], "b64_json");
             assert_eq!(
                 parameters["sequential_image_generation"]["enum"],
                 json!(["disabled", "auto"])
@@ -3141,7 +3199,7 @@ mod tests {
         assert_eq!(edit_parameters["layer_decomposition"]["default"], false);
 
         // 上一版 Seedream 默认形状（watermark 默认 false、无 response_format、
-        // output_format 为 jpeg/png）→ 原位刷新为当前文档契约。
+        // output_format 为 jpeg/png）→ 原位刷新为当前文档契约（含默认 b64_json）。
         let mut stale = json!({
             "text_to_image": {
                 "resultType": "image",
@@ -3157,7 +3215,7 @@ mod tests {
         ));
         let refreshed = &stale["text_to_image"]["parameters"];
         assert_eq!(refreshed["watermark"]["default"], false);
-        assert_eq!(refreshed["response_format"]["default"], "url");
+        assert_eq!(refreshed["response_format"]["default"], "b64_json");
         assert_eq!(
             refreshed["response_format"]["enum"],
             json!(["url", "b64_json"])
@@ -3180,7 +3238,7 @@ mod tests {
         ));
         let refreshed50 = &stale50["text_to_image"]["parameters"];
         assert_eq!(refreshed50["watermark"]["default"], false);
-        assert_eq!(refreshed50["response_format"]["default"], "url");
+        assert_eq!(refreshed50["response_format"]["default"], "b64_json");
         assert_eq!(
             refreshed50["sequential_image_generation"]["default"],
             "disabled"
@@ -3238,6 +3296,21 @@ mod tests {
         ));
         assert_eq!(before_n["text_to_image"]["parameters"]["n"]["default"], 1);
 
+        // 尚未声明返回格式的 GPT Image 契约也会被刷新（补上 response_format）。
+        let mut before_response_format = json!({
+            "text_to_image": {
+                "parameters": gpt_image_text_to_image_parameters_before_response_format()
+            }
+        });
+        assert!(refresh_legacy_image_parameter_defaults(
+            &mut before_response_format,
+            "gpt-image-2"
+        ));
+        assert_eq!(
+            before_response_format["text_to_image"]["parameters"]["response_format"]["default"],
+            "b64_json"
+        );
+
         // 图生图的历史空参数会被刷新为当前契约（含 n/size/quality）。
         let mut edit = json!({
             "image_to_image": { "resultType": "image", "parameters": {} }
@@ -3265,14 +3338,31 @@ mod tests {
             json!(["hd"])
         );
 
-        // 非 gpt-image 模型的旧默认值保持原样（其供应商仍接受 standard/hd）。
+        // 非 gpt-image 的通用 OpenAI Images 模型同样补上返回格式键：
+        // 尺寸与质量默认值保持通用契约不变（其供应商仍接受 standard/hd）。
         let mut generic = json!({
             "text_to_image": { "parameters": legacy_text_to_image_parameters() }
         });
-        assert!(!refresh_legacy_image_parameter_defaults(
+        assert!(refresh_legacy_image_parameter_defaults(
             &mut generic,
             "photon-1"
         ));
+        let generic_parameters = &generic["text_to_image"]["parameters"];
+        assert_eq!(generic_parameters["size"]["default"], "1024x1024");
+        assert_eq!(generic_parameters["quality"]["default"], "standard");
+        assert_eq!(generic_parameters["response_format"]["default"], "b64_json");
+
+        // Gemini 与 Seedream 各有自己的契约刷新，这里不越界（否则会把画幅比例 /
+        // 2K 尺寸的默认值改写成通用 dall-e 尺寸）。
+        for model_id in ["gemini-2.5-flash-image", "doubao-seedream-4-5-251128"] {
+            let mut other = json!({
+                "text_to_image": { "parameters": legacy_text_to_image_parameters() }
+            });
+            assert!(
+                !refresh_legacy_image_parameter_defaults(&mut other, model_id),
+                "model {model_id}"
+            );
+        }
     }
 
     #[test]

@@ -56,6 +56,97 @@ pub struct ResolvedProviderContext {
     api_key: String,
 }
 
+/// 生成结果「直链二次下载」的鉴权与来源上下文。
+///
+/// 图片/视频接口返回的是结果文件的 `url`，下载由客户端自己发起。既有实现是一个
+/// 完全裸的 GET（没有 `Authorization`、没有 `Referer`），上游只要做防盗链或要求
+/// 同令牌访问就必然失败，而错误信息只会显示「HTTP 403」，看不出是缺请求头。
+/// 这里把生成请求已经持有的身份整理成可复用的请求头。
+///
+/// **决策：`Authorization` 无条件发送**，即「与生成请求带同一把凭据」，不按目标主机
+/// 设信任边界。产品侧明确接受它的代价：供应商返回的直链可能指向第三方存储域名，
+/// 那把 API Key 也会发给该域名（供应商本身就是把这些直链交给我们的，凭据作用域的
+/// 扩大由供应商的返回内容决定）。
+///
+/// 残余风险与既有缓解：
+/// - 若直链主机 3xx 到另一个主机，reqwest 会剥离敏感头（含 `Authorization`），
+///   不会把密钥转发出去；
+/// - 若要收回这条策略，改回「仅同源发送」只需在 `apply` 里恢复 `trusts_host` 守卫
+///   （`trusts_host` 仍被 `Referer` 使用，未删除）。
+#[derive(Debug, Clone, Default)]
+pub struct ResultDownloadAuth {
+    provider_host: Option<String>,
+    provider_origin: Option<String>,
+    bearer_token: Option<String>,
+}
+
+impl ResultDownloadAuth {
+    /// 从连接 base URL 与密钥构造。
+    ///
+    /// `from_context` 是生成链路的入口；单独暴露这一层，是为了让结果保存这类只有
+    /// `taskId` 之外信息的调用方（以及测试）不必先拼出一个完整的
+    /// `ResolvedProviderContext`。
+    pub fn from_parts(base_url: &str, api_key: &str) -> Self {
+        let parsed = match Url::parse(base_url) {
+            Ok(parsed) => parsed,
+            Err(_) => return Self::default(),
+        };
+        let Some(host) = parsed.host_str().map(str::to_ascii_lowercase) else {
+            return Self::default();
+        };
+        Self {
+            provider_host: Some(host),
+            provider_origin: Some(parsed.origin().ascii_serialization()),
+            bearer_token: Some(api_key.to_string()).filter(|key| !key.is_empty()),
+        }
+    }
+
+    /// 从生成任务的冻结连接上下文构造：`api_key` 已按模型的令牌分组解析，
+    /// 与本次生成实际使用的身份一致。
+    pub fn from_context(context: &ResolvedProviderContext) -> Self {
+        Self::from_parts(&context.base_url, &context.api_key)
+    }
+
+    /// 目标直链的主机是否是「同一个供应商」：同主机或其子域。
+    ///
+    /// 只用于决定 `Referer` 取哪一个 origin，不再约束 `Authorization`。
+    fn trusts_host(&self, target: &Url) -> bool {
+        let Some(provider_host) = self.provider_host.as_deref() else {
+            return false;
+        };
+        let Some(target_host) = target.host_str().map(str::to_ascii_lowercase) else {
+            return false;
+        };
+        target_host == provider_host || target_host.ends_with(&format!(".{provider_host}"))
+    }
+
+    /// 把结果下载需要的请求头应用到请求上。
+    ///
+    /// - `Accept` 与 `Authorization`：恒定发送（凭据存在时），与生成请求使用同一把
+    ///   `api_key`，不随目标主机变化；`Authorization` 不依赖 URL 能否解析。
+    /// - `Referer`：同源时用供应商 origin；跨域时退化为直链自身的 origin——后者是
+    ///   真正会校验防盗链的那个主机，用它的 origin 才能过检查，同时不把供应商地址
+    ///   泄露给第三方。URL 无法解析时不构造该头。
+    pub fn apply(&self, request: reqwest::RequestBuilder, url: &str) -> reqwest::RequestBuilder {
+        let mut request = request.header(reqwest::header::ACCEPT, "image/*,video/*,*/*");
+        if let Some(token) = self.bearer_token.as_deref() {
+            request = request.bearer_auth(token);
+        }
+        let Ok(parsed) = Url::parse(url) else {
+            return request;
+        };
+        let referer = if self.trusts_host(&parsed) {
+            self.provider_origin.clone()
+        } else {
+            Some(parsed.origin().ascii_serialization())
+        };
+        if let Some(referer) = referer {
+            request = request.header(reqwest::header::REFERER, referer);
+        }
+        request
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ResolvedMedia {
     pub media_type: MediaType,
@@ -3415,6 +3506,137 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn download_auth(base_url: &str, api_key: &str) -> ResultDownloadAuth {
+        ResultDownloadAuth::from_parts(base_url, api_key)
+    }
+
+    /// 构造一个下载请求并取出最终的请求头。
+    ///
+    /// `request_url` 是 reqwest 必须能解析的请求地址（真实下载里就是供应商给的直链）；
+    /// `applied_url` 是传给 `apply` 做信任判定的地址，二者在「目标不可解析」的用例里
+    /// 故意不同——`apply` 必须自己容忍解析失败，而不是依赖调用方保证。
+    fn download_headers(
+        auth: &ResultDownloadAuth,
+        request_url: &str,
+        applied_url: &str,
+    ) -> reqwest::header::HeaderMap {
+        auth.apply(reqwest::Client::new().get(request_url), applied_url)
+            .build()
+            .expect("build download request")
+            .headers()
+            .clone()
+    }
+
+    fn headers_for(auth: &ResultDownloadAuth, url: &str) -> reqwest::header::HeaderMap {
+        download_headers(auth, url, url)
+    }
+
+    /// 结果下载的 `Authorization` 与生成请求完全一致：**不按目标主机设信任边界**，
+    /// 只要凭据存在就发送；`Referer` 才按同源/跨域分别取值。
+    ///
+    /// 这是产品侧明确接受的取舍：直链可能指向第三方存储域名，那把 API Key 也会发过去。
+    /// 用例把「无条件发送」与「Referer 仍按同源区分」两条都钉死，避免以后被无声改回。
+    #[test]
+    fn result_download_auth_matches_generation_identity_for_every_host() {
+        let auth = download_auth("https://api.moyu.info/v1", "sk-secret");
+
+        // 同源：带 Bearer，Referer 用供应商 origin。
+        let same_host = headers_for(&auth, "https://api.moyu.info/images/a.png");
+        assert_eq!(
+            same_host
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("same-host download keeps the bearer token"),
+            "Bearer sk-secret"
+        );
+        assert_eq!(
+            same_host.get(reqwest::header::REFERER).expect("referer"),
+            "https://api.moyu.info"
+        );
+
+        // 子域：同样带 Bearer，Referer 仍是供应商 origin。
+        let subdomain = headers_for(&auth, "https://img.api.moyu.info/b.png");
+        assert_eq!(
+            subdomain
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("subdomain keeps the bearer token"),
+            "Bearer sk-secret"
+        );
+        assert_eq!(
+            subdomain.get(reqwest::header::REFERER).expect("referer"),
+            "https://api.moyu.info"
+        );
+
+        // 跨域（上游自有存储域名）：Bearer 照发；Referer 退化为直链自身 origin。
+        let cross_host = headers_for(&auth, "https://chatgpt2api.example.com/c.png");
+        assert_eq!(
+            cross_host
+                .get(reqwest::header::AUTHORIZATION)
+                .expect("cross-host download carries the same credential as generation"),
+            "Bearer sk-secret"
+        );
+        assert_eq!(
+            cross_host.get(reqwest::header::REFERER).expect("referer"),
+            "https://chatgpt2api.example.com"
+        );
+
+        // 形近域名：Bearer 一样发送（不再有信任边界），但 Referer 不会被当成同源。
+        for lookalike in [
+            "https://notapi.moyu.info/d.png",
+            "https://api.moyu.info.attacker.test/e.png",
+        ] {
+            let headers = headers_for(&auth, lookalike);
+            assert_eq!(
+                headers.get(reqwest::header::AUTHORIZATION).expect("bearer"),
+                "Bearer sk-secret"
+            );
+            assert_ne!(
+                headers.get(reqwest::header::REFERER).expect("referer"),
+                "https://api.moyu.info"
+            );
+        }
+
+        // 未配置密钥（或已撤销）时不发送 Authorization，行为与原裸 GET 一致。
+        let keyless = download_auth("https://api.moyu.info/v1", "");
+        assert!(
+            headers_for(&keyless, "https://api.moyu.info/images/a.png")
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
+
+        // base_url 无法解析 → 没有可用凭据，不带 Authorization；
+        // Referer 退化为直链自身 origin（不把没解析出来的地址当身份）。
+        let unparsable = download_auth("not a url", "sk-x");
+        let unparsable_headers = headers_for(&unparsable, "https://api.moyu.info/images/a.png");
+        assert!(
+            unparsable_headers
+                .get(reqwest::header::AUTHORIZATION)
+                .is_none()
+        );
+        assert_eq!(
+            unparsable_headers
+                .get(reqwest::header::REFERER)
+                .expect("referer"),
+            "https://api.moyu.info"
+        );
+    }
+
+    /// `Authorization` 与 URL 能否解析无关：凭据存在就发；只有 `Referer` 需要解析结果，
+    /// 解析失败时跳过它。`apply` 必须自己容忍解析失败——真实调用方不会先替它校验。
+    #[test]
+    fn result_download_auth_applies_identity_without_parsing_target() {
+        let auth = download_auth("https://api.moyu.info/v1", "sk-secret");
+        let headers = download_headers(&auth, "https://api.moyu.info/images/a.png", "不是 URL");
+        assert_eq!(
+            headers.get(reqwest::header::AUTHORIZATION).expect("bearer"),
+            "Bearer sk-secret"
+        );
+        assert!(headers.get(reqwest::header::REFERER).is_none());
+        assert_eq!(
+            headers.get(reqwest::header::ACCEPT).expect("accept"),
+            "image/*,video/*,*/*"
+        );
+    }
 
     fn task(operation: GenerationOperation) -> TaskExecutionRecord {
         TaskExecutionRecord {

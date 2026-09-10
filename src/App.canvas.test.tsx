@@ -5382,7 +5382,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const command = submittedGenerationCommand();
     expect(command["operation"]).toBe("text_to_image");
     expect(command["explicitMedia"]).toEqual([]);
-    expect(command["parameters"]).toEqual({ size: "1536x1024", quality: "high", n: 1 });
+    expect(command["parameters"]).toEqual({
+      size: "1536x1024",
+      quality: "high",
+      n: 1,
+      response_format: "b64_json",
+    });
   });
 
   it("断线后的 @ 实例不能继续提交", async () => {

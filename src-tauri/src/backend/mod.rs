@@ -82,6 +82,7 @@ impl BackendState {
             lifecycle.clone(),
             providers.client().clone(),
             downloads_directory.clone(),
+            providers.clone(),
         );
         // FFmpeg 合成引擎：安装包内置构建（resources/ffmpeg）优先，缺失时
         // 回退到应用数据目录并自动下载。合成产物与下载产物同目录。

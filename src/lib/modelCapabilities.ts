@@ -203,7 +203,8 @@ function seedreamImageVersion(modelId: string): SeedreamImageVersion | null {
 }
 
 /** Seedream 基础参数：2K 契约尺寸、standard/hd 质量、水印开关（应用侧默认无水印，
- * 与后端一致）、返回格式（url/b64_json）。 */
+ * 与后端一致）、返回格式（url/b64_json，默认内联 b64_json 以避免保存阶段再直连
+ * 供应商的存储域名）。 */
 function seedreamTextToImageBaseParameters(): Record<string, unknown> {
   return {
     size: {
@@ -229,9 +230,24 @@ function seedreamTextToImageBaseParameters(): Record<string, unknown> {
     response_format: {
       type: "string",
       label: "返回格式",
-      default: "url",
+      default: "b64_json",
       enum: ["url", "b64_json"],
       order: 9,
+    },
+  };
+}
+
+/** OpenAI Images 契约（`/v1/images/generations`）的返回格式参数。
+ *  默认内联 `b64_json`：`url` 需要客户端再对供应商返回的存储地址发第二次请求，
+ *  而该地址与生成接口的域名往往不同；内联结果不引入第二次连接。 */
+function openaiImageResponseFormatParameter(): Record<string, unknown> {
+  return {
+    response_format: {
+      type: "string",
+      label: "返回格式",
+      default: "b64_json",
+      enum: ["url", "b64_json"],
+      order: 3,
     },
   };
 }
@@ -329,6 +345,7 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   // gpt-image 系列（gpt-image-1/1.5/2 …）遵循 GPT Image 契约：
   // 质量只接受 auto/high/medium/low，尺寸只接受 auto 与三种标准尺寸，并声明生成数量 n；
   // 其余模型沿用通用文生图契约（standard/hd）。
+  // 两者都声明返回格式并默认内联 b64_json，避免结果保存阶段再直连供应商存储域名。
   if (modelId.toLocaleLowerCase().includes("gpt-image")) {
     return {
       size: {
@@ -350,6 +367,7 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
         minimum: 1,
         maximum: 10,
       },
+      ...openaiImageResponseFormatParameter(),
     };
   }
   return {
@@ -365,6 +383,7 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
       default: "standard",
       enum: ["hd", "standard"],
     },
+    ...openaiImageResponseFormatParameter(),
   };
 }
 

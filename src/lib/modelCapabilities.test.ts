@@ -185,6 +185,15 @@ describe("model capabilities", () => {
     // GPT Image 契约：文生图声明生成数量 n（1~10，默认 1）。
     const count = gptImage.find((capability) => capability.key === "n");
     expect(count).toMatchObject({ type: "integer", defaultValue: 1, minimum: 1, maximum: 10 });
+    // 返回格式默认内联 Base64：结果保存不再依赖对供应商存储域名的第二次连接。
+    const gptImageResponseFormat = gptImage.find(
+      (capability) => capability.key === "response_format",
+    );
+    expect(gptImageResponseFormat?.defaultValue).toBe("b64_json");
+    expect(gptImageResponseFormat?.options.map((option) => option.value)).toEqual([
+      "url",
+      "b64_json",
+    ]);
 
     // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
     const gptImageEdit = modelParameterCapabilities(
@@ -210,6 +219,10 @@ describe("model capabilities", () => {
     expect(genericQuality?.defaultValue).toBe("standard");
     expect(genericQuality?.options.map((option) => option.value)).toEqual(["hd", "standard"]);
     expect(generic.find((capability) => capability.key === "n")).toBeUndefined();
+    // 通用 dall-e 契约同样声明返回格式，默认内联 Base64。
+    expect(generic.find((capability) => capability.key === "response_format")?.defaultValue).toBe(
+      "b64_json",
+    );
   });
 
   it("uses the Seedream 2K contract for text-to-image models", () => {
@@ -232,9 +245,9 @@ describe("model capabilities", () => {
       type: "boolean",
       defaultValue: false,
     });
-    // 文档参数表：返回格式默认 url，可选 b64_json。
+    // 文档参数表：返回格式默认内联 b64_json，可选 url（链接需要客户端再直连存储域名）。
     const responseFormat = seedream45.find((capability) => capability.key === "response_format");
-    expect(responseFormat?.defaultValue).toBe("url");
+    expect(responseFormat?.defaultValue).toBe("b64_json");
     expect(responseFormat?.options).toEqual([
       { value: "url", label: "图片链接" },
       { value: "b64_json", label: "Base64 数据" },
@@ -279,7 +292,7 @@ describe("model capabilities", () => {
     expect(text.find((capability) => capability.key === "output_format")?.defaultValue).toBe("jpg");
     expect(text.find((capability) => capability.key === "watermark")?.defaultValue).toBe(false);
     expect(text.find((capability) => capability.key === "response_format")?.defaultValue).toBe(
-      "url",
+      "b64_json",
     );
     // 5.0 pro 不支持组图模式。
     expect(text.some((capability) => capability.key === "sequential_image_generation")).toBe(false);
