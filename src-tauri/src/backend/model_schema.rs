@@ -1360,20 +1360,16 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             // 国内火山引擎原生 Seedance（doubao-seedance-*）走方舟官方
             // `/contents/generations/tasks` 异步任务接口，参数平铺在顶层；
             // 海外 Dreamina Seedance 保持魔芋聚合平台的 `/v1/video/generations`
-            // + metadata 容器协议。
+            // + metadata 容器协议。requestProfileId 保持不变，业务逻辑不动。
             let domestic_seedance = (seedance_20 || seedance_25) && !dreamina;
-            let (path, parameter_container, request_profile) = if domestic_seedance {
-                (
-                    "/contents/generations/tasks",
-                    "root",
-                    "volcengine_seedance_video_v1",
-                )
+            let (path, parameter_container) = if domestic_seedance {
+                ("/contents/generations/tasks", "root")
             } else {
-                ("/v1/video/generations", "metadata", "moyu_video_metadata_v1")
+                ("/v1/video/generations", "metadata")
             };
             json!({
                 "resultType": "video",
-                "requestProfileId": request_profile,
+                "requestProfileId": "moyu_video_metadata_v1",
                 "profileVersion": 1,
                 "request": {
                     "path": path,
