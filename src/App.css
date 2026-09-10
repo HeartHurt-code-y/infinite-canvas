@@ -2328,7 +2328,7 @@ svg[data-spin="true"] {
   border-radius: var(--radius-round);
 }
 
-/* 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
+/* 自动适应原始媒体宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
 .auto-size-thumb {
   flex-shrink: 0;
   display: grid;
@@ -2339,11 +2339,29 @@ svg[data-spin="true"] {
   background: var(--color-paper-3);
 }
 
+/* 占位图标与视频帧叠在同一格：帧就绪后由组件移除占位，视频自身淡入。 */
+.auto-size-thumb > * {
+  grid-area: 1 / 1;
+}
+
 .auto-size-thumb img {
   width: 100%;
   height: 100%;
   object-fit: contain;
   display: block;
+}
+
+/* 视频中间帧封面：seek 到中点前保持透明，露出底下的占位图标。 */
+.media-frame-video {
+  width: 100%;
+  height: 100%;
+  display: block;
+  opacity: 0;
+  transition: opacity 160ms ease;
+}
+
+.media-frame-video.is-frame-ready {
+  opacity: 1;
 }
 
 .node-media-chip__name {
@@ -8364,10 +8382,15 @@ svg[data-spin="true"] {
   display: block;
 }
 
-/* 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
+/* 自动适应原始媒体宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪 */
 .prompt-mention__thumb--auto-size {
   width: auto;
   min-width: 2.75rem;
+}
+
+/* 占位图标与视频帧叠在同一格，帧就绪后组件移除占位。 */
+.prompt-mention__thumb > * {
+  grid-area: 1 / 1;
 }
 
 .prompt-mention__thumb--auto-size img {

@@ -15,14 +15,7 @@ import { TextT } from "@phosphor-icons/react/TextT";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
-import {
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-  type CSSProperties,
-  type RefObject,
-} from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
@@ -45,6 +38,8 @@ import type { PromptContentEditorSession } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
 import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
+import { VideoMiddleFrame } from "./VideoMiddleFrame";
+import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
   AssetKindIcon,
   ImageNodeSettings,
@@ -1329,36 +1324,6 @@ function formatTimestampSeconds(value: number): string {
   return String(Number(value.toFixed(2)));
 }
 
-/**
- * 视口懒挂载：节点滚出画布视口（含 512px 余量）时卸载 `<video>` 释放解码器，
- * 滚回时重新挂载。React Flow 渲染所有节点，几十个视频节点常驻会让解码器与
- * 缓冲内存线性增长；IntersectionObserver（兼容 React Flow 的 transform 视口）按
- * 实际可见性驱动挂载。IO 不可用（测试环境）时视为可见，保持原行为。
- */
-const LAZY_MOUNT_ROOT_MARGIN_PX = 512;
-
-function useNodeInView<T extends HTMLElement>(): {
-  readonly containerRef: RefObject<T | null>;
-  readonly inView: boolean;
-} {
-  const containerRef = useRef<T | null>(null);
-  // IO 不可用（测试环境）时恒为可见，保持原行为；否则由 IO 按实际可见性驱动挂载。
-  const [inView, setInView] = useState(() => typeof IntersectionObserver === "undefined");
-  useEffect(() => {
-    const element = containerRef.current;
-    if (element == null || typeof IntersectionObserver === "undefined") return;
-    const observer = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) setInView(entry.isIntersecting);
-      },
-      { rootMargin: `${LAZY_MOUNT_ROOT_MARGIN_PX}px` },
-    );
-    observer.observe(element);
-    return () => observer.disconnect();
-  }, []);
-  return { containerRef, inView };
-}
-
 /** 本地图片缩略图：后端磁盘缓存（sha256 键），不可缩放/失败返回 null 回退原图。 */
 const MEDIA_THUMBNAIL_MAX_DIMENSION = 512;
 
@@ -2413,7 +2378,11 @@ export function CanvasResultNode({
   );
 }
 
-/** 自动适应原始图片宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪。 */
+/**
+ * 自动适应原始媒体宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪。
+ * 参考视频素材取中间帧作静止封面（与素材卡片、画布素材节点一致），
+ * 封面图/首帧尚未就绪时先显示类型图标。
+ */
 export function AutoSizeThumb({
   previewUrl,
   kind,
@@ -2428,35 +2397,48 @@ export function AutoSizeThumb({
   // 失败按 URL 记忆而非布尔值：来源节点续签出新地址后，新 URL 会自动重试加载。
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   const failed = previewUrl != null && failedUrl === previewUrl;
-  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
-  const showImage = previewUrl != null && !failed && kind !== "audio" && kind !== "document";
-
-  const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = event.currentTarget;
-    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-      setAspectRatio(img.naturalWidth / img.naturalHeight);
-    }
+  // 宽高比与来源地址一起记忆：来源换地址后旧比例立即失效，避免沿用上一份媒体的比例。
+  const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
+  const measuredRatio = measured != null && measured.url === previewUrl ? measured.ratio : null;
+  const videoSource = kind === "video" && isVideoSourceUrl(previewUrl) ? previewUrl : null;
+  const showVideo = videoSource != null && !failed;
+  const imageSource =
+    videoSource == null && previewUrl != null && !failed && kind !== "audio" && kind !== "document"
+      ? previewUrl
+      : null;
+  const measure = (url: string, ratio: number) => {
+    if (Number.isFinite(ratio) && ratio > 0) setMeasured({ url, ratio });
   };
 
   const thumbStyle: CSSProperties =
-    aspectRatio != null
+    measuredRatio != null
       ? {
-          width: `min(${maxWidth}, calc(${height} * ${aspectRatio}))`,
-          aspectRatio: `${aspectRatio}`,
+          width: `min(${maxWidth}, calc(${height} * ${measuredRatio}))`,
+          aspectRatio: `${measuredRatio}`,
         }
       : { width: height };
 
   return (
     <span className="auto-size-thumb" style={{ ...thumbStyle, height }} aria-hidden="true">
-      {showImage ? (
+      {showVideo ? (
+        <VideoMiddleFrame
+          src={videoSource}
+          placeholder={<AssetKindIcon kind="video" size={16} />}
+          onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
+          onLoadError={() => setFailedUrl(videoSource)}
+        />
+      ) : imageSource != null ? (
         <img
-          src={toMediaProxyUrl(previewUrl) ?? previewUrl}
+          src={toMediaProxyUrl(imageSource) ?? imageSource}
           alt=""
           draggable={false}
           decoding="async"
           loading="lazy"
-          onError={() => setFailedUrl(previewUrl)}
-          onLoad={handleImageLoad}
+          onError={() => setFailedUrl(imageSource)}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            measure(imageSource, image.naturalWidth / image.naturalHeight);
+          }}
         />
       ) : (
         <AssetKindIcon

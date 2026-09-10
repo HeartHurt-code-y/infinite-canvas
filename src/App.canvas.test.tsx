@@ -5622,6 +5622,31 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       { order: "1", name: "站台参考图" },
       { order: "2", name: "列车进站参考" },
     ]);
+
+    // 参考视频素材取中间帧作芯片缩略图：视频本体不再当作 <img> 加载。
+    const videoChip = within(connectedInputList)
+      .getAllByRole("listitem")
+      .find(
+        (item) => item.querySelector(".node-media-chip__name")?.textContent === "列车进站参考",
+      )!;
+    const videoThumb = videoChip.querySelector<HTMLVideoElement>(".auto-size-thumb video")!;
+    const videoThumbBox = videoChip.querySelector<HTMLElement>(".auto-size-thumb")!;
+    expect(videoChip.querySelector(".auto-size-thumb img")).toBeNull();
+    expect(videoThumb).toHaveAttribute(
+      "src",
+      expect.stringContaining(encodeURIComponent("https://cdn.example.com/train.mp4")),
+    );
+    Object.defineProperties(videoThumb, {
+      duration: { value: 8, configurable: true },
+      videoWidth: { value: 1920, configurable: true },
+      videoHeight: { value: 1080, configurable: true },
+    });
+    fireEvent.loadedMetadata(videoThumb);
+    expect(videoThumb.currentTime).toBe(4);
+    fireEvent.seeked(videoThumb);
+    await waitFor(() => expect(videoThumb).toHaveClass("is-frame-ready"));
+    // 高度固定 2.5rem，宽度按 16:9 自适应（2.5rem × 16/9 ≈ 4.444rem）。
+    expect(parseFloat(videoThumbBox.style.aspectRatio)).toBeCloseTo(1920 / 1080, 3);
     expect(
       Array.from(document.querySelectorAll(".canvas-flow-edge__order")).map(
         (marker) => marker.textContent,
@@ -6118,6 +6143,47 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/station.jpg")}`,
     );
     expect(option.querySelector(".prompt-mention__thumb--fallback")).toBeNull();
+  });
+
+  it("@ 候选菜单中的参考视频素材展示中间帧缩略图", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const assetNode = await addAssetNode("视频", "列车进站参考", 148, 148);
+    connectAssetToGeneration(assetNode, videoGeneration);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    setPromptText(promptInput, "开场 ");
+    fireEvent.keyDown(promptInput, { key: "@" });
+    appendPromptText(promptInput, "@");
+
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    appendPromptText(promptInput, "视频1");
+    await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+
+    const option = within(menu).getByRole("option", { name: /列车进站参考/ });
+    // 候选视频不再当作图片加载：缩略图是中间帧，且不进入类型图标回退态。
+    expect(option.querySelector(".prompt-mention__thumb img")).toBeNull();
+    expect(option.querySelector(".prompt-mention__thumb--fallback")).toBeNull();
+    const frame = option.querySelector<HTMLVideoElement>(".prompt-mention__thumb video")!;
+    expect(frame).toHaveAttribute(
+      "src",
+      expect.stringContaining(encodeURIComponent("https://cdn.example.com/train.mp4")),
+    );
+
+    Object.defineProperties(frame, {
+      duration: { value: 8, configurable: true },
+      videoWidth: { value: 1920, configurable: true },
+      videoHeight: { value: 1080, configurable: true },
+    });
+    fireEvent.loadedMetadata(frame);
+    expect(frame.currentTime).toBe(4);
+    fireEvent.seeked(frame);
+    const thumbBox = option.querySelector<HTMLElement>(".prompt-mention__thumb")!;
+    await waitFor(() => {
+      expect(parseFloat(thumbBox.style.aspectRatio)).toBeCloseTo(1920 / 1080, 3);
+    });
   });
 
   it("未命中或未连接素材时也给出明确的自动解析状态", async () => {

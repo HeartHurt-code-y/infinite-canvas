@@ -106,7 +106,11 @@ export function WorkflowReferenceMaterials({
           {materials.map((material) => (
             <li key={material.localPath}>
               <AutoSizeThumb
-                previewUrl={material.kind === "image" ? toMediaSrc(material.localPath) : null}
+                previewUrl={
+                  material.kind === "image" || material.kind === "video"
+                    ? toMediaSrc(material.localPath)
+                    : null
+                }
                 kind={material.kind}
                 height="2.5rem"
                 maxWidth="6rem"
@@ -157,7 +161,12 @@ export function WorkflowReferenceMaterials({
             ].map(({ input, key, label, action, remove, previewSrc }) => (
               <li key={key}>
                 <AutoSizeThumb
-                  previewUrl={input.target.mediaType === "image" && previewSrc ? previewSrc : null}
+                  previewUrl={
+                    (input.target.mediaType === "image" || input.target.mediaType === "video") &&
+                    previewSrc
+                      ? previewSrc
+                      : null
+                  }
                   kind={input.target.mediaType}
                   height="2.5rem"
                   maxWidth="6rem"

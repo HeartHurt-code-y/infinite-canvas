@@ -32,6 +32,7 @@ import {
   type StartGenerationCommand,
 } from "../../lib/backend";
 import { textResultFromSource } from "../workspace/workspaceModel";
+import { VideoMiddleFrame } from "../workspace/VideoMiddleFrame";
 import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
 import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
@@ -492,18 +493,8 @@ function HistoryResultVisual({
   return (
     <span className="history-result__visual history-result__visual--auto" style={containerStyle}>
       {mediaType === "video" ? (
-        <video
-          src={src}
-          muted
-          playsInline
-          preload="metadata"
-          onLoadedMetadata={(event) => {
-            const video = event.currentTarget;
-            if (video.videoWidth > 0 && video.videoHeight > 0) {
-              setAspectRatio(video.videoWidth / video.videoHeight);
-            }
-          }}
-        />
+        // 视频结果取中间帧作静止封面：首帧常是黑场，中间帧更能辨认内容。
+        <VideoMiddleFrame src={src} onAspectRatioChange={setAspectRatio} />
       ) : (
         <img
           src={src}

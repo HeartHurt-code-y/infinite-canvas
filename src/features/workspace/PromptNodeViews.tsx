@@ -47,6 +47,8 @@ import {
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
   type PromptContentEditorSession,
 } from "../../lib/promptContent";
+import { VideoMiddleFrame } from "./VideoMiddleFrame";
+import { isVideoSourceUrl } from "./mediaPreview";
 
 import type {
   AssetKind,
@@ -80,7 +82,7 @@ export function AssetKindIcon({
   return <WaveformIcon {...iconProps} />;
 }
 
-/** @ 候选缩略图：自动适应原始图片宽高比，完整显示不裁剪。 */
+/** @ 候选缩略图：自动适应原始媒体宽高比，完整显示不裁剪；视频取中间帧作封面。 */
 function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidate }) {
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
   // 云端素材签名过期时续签一次得到的新地址；未刷新时用候选携带的原始地址。
@@ -88,8 +90,15 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
   const refreshAttemptedRef = useRef(false);
   const preview = refreshedUrl ?? candidate.previewUrl ?? null;
   const failed = preview != null && failedUrl === preview;
-  const showImage = preview != null && !failed && candidate.kind !== "audio";
-  const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const videoSource = candidate.kind === "video" && isVideoSourceUrl(preview) ? preview : null;
+  const showVideo = videoSource != null && !failed;
+  const imageSource =
+    videoSource == null && preview != null && !failed && candidate.kind !== "audio"
+      ? preview
+      : null;
+  // 宽高比与来源地址一起记忆：封面续签换地址后旧比例立即失效。
+  const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
+  const aspectRatio = measured != null && measured.url === preview ? measured.ratio : null;
 
   const handleImageError = () => {
     setFailedUrl(preview);
@@ -117,11 +126,8 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
       .catch(() => undefined);
   };
 
-  const handleImageLoad = (event: React.SyntheticEvent<HTMLImageElement>) => {
-    const img = event.currentTarget;
-    if (img.naturalWidth > 0 && img.naturalHeight > 0) {
-      setAspectRatio(img.naturalWidth / img.naturalHeight);
-    }
+  const measure = (url: string, ratio: number) => {
+    if (Number.isFinite(ratio) && ratio > 0) setMeasured({ url, ratio });
   };
 
   // 限制最大宽度，避免宽图占用过多空间；高度固定为 2.75rem
@@ -130,22 +136,35 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
     aspectRatio != null
       ? { width: `min(${maxWidth}, calc(2.75rem * ${aspectRatio}))`, aspectRatio: `${aspectRatio}` }
       : undefined;
+  const fallback = !showVideo && imageSource == null;
 
   return (
     <span
-      className={`prompt-mention__thumb prompt-mention__thumb--auto-size${showImage ? "" : " prompt-mention__thumb--fallback"}`}
+      className={`prompt-mention__thumb prompt-mention__thumb--auto-size${
+        fallback ? " prompt-mention__thumb--fallback" : ""
+      }`}
       style={thumbStyle}
       aria-hidden="true"
     >
-      {showImage ? (
+      {showVideo ? (
+        <VideoMiddleFrame
+          src={videoSource}
+          placeholder={<AssetKindIcon kind="video" size={20} />}
+          onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
+          onLoadError={() => setFailedUrl(videoSource)}
+        />
+      ) : imageSource != null ? (
         <img
-          src={toMediaProxyUrl(preview) ?? preview}
+          src={toMediaProxyUrl(imageSource) ?? imageSource}
           alt=""
           draggable={false}
           decoding="async"
           loading="lazy"
           onError={handleImageError}
-          onLoad={handleImageLoad}
+          onLoad={(event) => {
+            const image = event.currentTarget;
+            measure(imageSource, image.naturalWidth / image.naturalHeight);
+          }}
         />
       ) : (
         <AssetKindIcon kind={candidate.kind} size={20} />

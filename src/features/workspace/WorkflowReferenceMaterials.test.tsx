@@ -156,6 +156,42 @@ describe("workflow reference materials", () => {
     expect(props.onRemoveMaterial).toHaveBeenCalledWith(props.node.key, "C:\\notes.json");
   });
 
+  it("参考视频素材取中间帧作缩略图，并按原始宽高比自适应宽度", async () => {
+    const video: PickedPromptMaterial = {
+      ...material,
+      kind: "video",
+      localPath: "C:\\references\\motion.mp4",
+      displayName: "动作参考.mp4",
+    };
+    render(<KnowledgeVideoWorkflowNode {...nodeProps({ materials: [video] })} />);
+    const references = screen.getByRole("region", { name: "工作流参考素材" });
+    const thumb = references.querySelector<HTMLElement>(".auto-size-thumb")!;
+    const frame = thumb.querySelector<HTMLVideoElement>("video")!;
+
+    // 参考视频不再当作图片加载：中间帧定位前先显示类型图标占位。
+    expect(thumb.querySelector("img")).toBeNull();
+    expect(thumb.querySelector("svg")).not.toBeNull();
+    expect(frame).toHaveAttribute("preload", "metadata");
+    // 视口懒挂载：IntersectionObserver 首帧相交后才挂上媒体地址。
+    await waitFor(() => expect(frame).toHaveAttribute("src", video.localPath));
+
+    Object.defineProperties(frame, {
+      duration: { value: 6, configurable: true },
+      videoWidth: { value: 1080, configurable: true },
+      videoHeight: { value: 1920, configurable: true },
+    });
+    fireEvent.loadedMetadata(frame);
+    expect(frame.currentTime).toBe(3);
+    fireEvent.seeked(frame);
+
+    // 中间帧就绪后收起占位图标，容器宽度按 9:16 自适应（高度固定 2.5rem）。
+    expect(frame).toHaveClass("is-frame-ready");
+    expect(thumb.querySelector("svg")).toBeNull();
+    expect(parseFloat(thumb.style.aspectRatio)).toBeCloseTo(1080 / 1920, 3);
+    // 宽度按高度 × 原始比例收敛（2.5rem × 0.5625 = 1.40625rem）；jsdom 只保留 min() 内层。
+    expect(thumb.style.getPropertyValue("width")).toBe("calc(1.40625rem)");
+  });
+
   it("includes dedicated files once in shared quota and allows reusing them when capacity is full", async () => {
     const productFiles = Array.from({ length: 8 }, (_, index) => ({
       ...material,

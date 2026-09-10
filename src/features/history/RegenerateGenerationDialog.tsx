@@ -34,6 +34,8 @@ import {
   type StartGenerationCommand,
 } from "../../lib/backend";
 import { modelAllowsMediaOnlyPrompt } from "../../lib/modelCapabilities";
+import { VideoMiddleFrame } from "../workspace/VideoMiddleFrame";
+import { isVideoSourceUrl } from "../workspace/mediaPreview";
 import {
   createPromptContentModule,
   type PromptContentConnection,
@@ -257,6 +259,8 @@ function MaterialThumb({
       })
       .catch(() => undefined);
   };
+  // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
+  const videoSource = mediaType === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;
   if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-material__thumb" aria-hidden="true">
@@ -272,12 +276,16 @@ function MaterialThumb({
   }
   return (
     <span className="regenerate-material__thumb">
-      <img
-        src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
-        alt=""
-        loading="lazy"
-        onError={handleImageError}
-      />
+      {videoSource != null ? (
+        <VideoMiddleFrame src={videoSource} objectFit="cover" onLoadError={handleImageError} />
+      ) : (
+        <img
+          src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
+          alt=""
+          loading="lazy"
+          onError={handleImageError}
+        />
+      )}
       {mediaType === "video" ? (
         <span className="regenerate-material__thumb-badge" aria-hidden="true">
           <Play size={10} weight="fill" />
@@ -327,6 +335,8 @@ function AddListThumb({
       })
       .catch(() => undefined);
   };
+  // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
+  const videoSource = kind === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;
   if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-add__thumb" aria-hidden="true">
@@ -340,12 +350,16 @@ function AddListThumb({
   }
   return (
     <span className="regenerate-add__thumb">
-      <img
-        src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
-        alt=""
-        loading="lazy"
-        onError={handleImageError}
-      />
+      {videoSource != null ? (
+        <VideoMiddleFrame src={videoSource} objectFit="cover" onLoadError={handleImageError} />
+      ) : (
+        <img
+          src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
+          alt=""
+          loading="lazy"
+          onError={handleImageError}
+        />
+      )}
     </span>
   );
 }
