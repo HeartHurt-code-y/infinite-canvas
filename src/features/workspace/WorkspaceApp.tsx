@@ -687,6 +687,8 @@ export function WorkspaceApp({
   const localAssetPageRef = useRef(1);
   const [newGroupDialogOpen, setNewGroupDialogOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
+  // 正在删除的云端素材库分组 ID（删除期间禁用入口，并阻止重复提交）。
+  const [deletingAssetGroupId, setDeletingAssetGroupId] = useState<string | null>(null);
   // 正在改名的云端素材 ID（详情弹窗显示保存中状态，并阻止重复提交）。
   const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
   const [assetsLoading, setAssetsLoading] = useState(isDesktopRuntime());
@@ -1469,6 +1471,40 @@ export function WorkspaceApp({
         .finally(() => setCreatingGroup(false));
     },
     [refreshAssetGroups],
+  );
+
+  const handleDeleteAssetGroup = useCallback(
+    (providerConnectionId: string, groupId: string): void => {
+      if (deletingAssetGroupId != null) return;
+      setDeletingAssetGroupId(groupId);
+      void assetLibraryClient
+        .deleteAssetGroup({ providerConnectionId, id: groupId })
+        .then(
+          (deletedId) => {
+            frontendLog(
+              "info",
+              `[assets] 素材库分组已删除: providerConnectionId=${providerConnectionId}, groupId=${deletedId}`,
+            );
+            // 被删分组不再存在：清空本地选中并移除本地记录，后台刷新同步计数。
+            if (selectedAssetGroupIdRef.current === groupId) {
+              selectedAssetGroupIdRef.current = null;
+              setSelectedAssetGroupId(null);
+            }
+            setAssetGroups((current) => current.filter((group) => group.id !== groupId));
+            refreshAssetGroups(providerConnectionId);
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 素材库分组删除失败: providerConnectionId=${providerConnectionId}, groupId=${groupId}, 错误: ${formatted}`,
+            );
+            setAssetsError(error instanceof Error ? error.message : formatted);
+          },
+        )
+        .finally(() => setDeletingAssetGroupId(null));
+    },
+    [deletingAssetGroupId, refreshAssetGroups],
   );
 
   const handleRenameAsset = useCallback(
@@ -8010,6 +8046,9 @@ export function WorkspaceApp({
           onGroupChange={handleAssetGroupChanged}
           onRefreshGroups={refreshAssetGroups}
           onCreateGroup={() => setNewGroupDialogOpen(true)}
+          onDeleteGroup={(groupId) => {
+            if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
+          }}
           kind={assetKind}
           getKindCount={(tabKind) =>
             // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；

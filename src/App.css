@@ -11695,6 +11695,49 @@ details[open] > summary .history-disclosure__caret {
   font-size: var(--text-xs);
 }
 
+.asset-groups__delete {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 auto;
+  gap: var(--space-2xs);
+  min-height: var(--size-control);
+  padding-inline: var(--space-xs);
+  color: var(--color-muted);
+  background: var(--color-chrome-3);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+  font: inherit;
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    color var(--dur-micro) var(--ease-out),
+    background var(--dur-micro) var(--ease-out),
+    border-color var(--dur-micro) var(--ease-out);
+}
+
+.asset-groups__delete:hover,
+.asset-groups__delete:focus-visible {
+  color: var(--color-error);
+  border-color: color-mix(in oklch, var(--color-error) 45%, transparent);
+}
+
+.asset-groups__delete.is-armed {
+  color: var(--color-paper, white);
+  background: var(--color-error);
+  border-color: var(--color-error);
+}
+
+.asset-groups__delete-hint {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  color: var(--color-error);
+  font-size: var(--text-2xs);
+  line-height: 1.5;
+}
+
 .asset-groups__error {
   display: flex;
   align-items: center;

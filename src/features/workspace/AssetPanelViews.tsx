@@ -11,11 +11,12 @@ import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
 import { Plus } from "@phosphor-icons/react/Plus";
 import { StackSimple } from "@phosphor-icons/react/StackSimple";
+import { Trash } from "@phosphor-icons/react/Trash";
 import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
 import { UserFocus } from "@phosphor-icons/react/UserFocus";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { X } from "@phosphor-icons/react/X";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   isDesktopRuntime,
   type AssetGroupRecord,
@@ -204,7 +205,7 @@ export function AssetCloudControls({
   );
 }
 
-/** 云端素材分组：新建分组、分组下拉、加载失败重试。 */
+/** 云端素材分组：新建/删除分组、分组下拉、加载失败重试。 */
 export function AssetGroupsPicker({
   groups,
   selectedGroupId,
@@ -213,6 +214,7 @@ export function AssetGroupsPicker({
   providerConnectionId,
   onGroupChange,
   onCreateGroup,
+  onDeleteGroup,
   onRetry,
 }: {
   readonly groups: readonly AssetGroupRecord[];
@@ -221,10 +223,38 @@ export function AssetGroupsPicker({
   readonly error: string | null;
   readonly onGroupChange: (groupId: string | null, providerConnectionId: string) => void;
   readonly onCreateGroup: () => void;
+  /** 删除云端素材库分组（连带组内全部素材，不可逆）；选中「全部素材」时不触发。 */
+  readonly onDeleteGroup: (groupId: string) => void;
   /** 分组重试需要供应商 ID（分组区仅在已连接供应商时渲染）。 */
   readonly onRetry: (providerConnectionId: string) => void;
   readonly providerConnectionId: string;
 }) {
+  // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，
+  // 避免误触；组件卸载或切换分组时取消计时，不残留到下次。
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const deleteArmTimerRef = useRef<number | null>(null);
+
+  const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? null;
+
+  useEffect(() => {
+    return () => {
+      if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    };
+  }, []);
+
+  const armDelete = () => {
+    if (confirmingDelete || selectedGroupId == null) return;
+    setConfirmingDelete(true);
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    deleteArmTimerRef.current = window.setTimeout(() => setConfirmingDelete(false), 4_000);
+  };
+  const confirmDelete = () => {
+    if (!confirmingDelete || selectedGroupId == null) return;
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    setConfirmingDelete(false);
+    onDeleteGroup(selectedGroupId);
+  };
+
   return (
     <div className="asset-groups">
       <div className="asset-groups__heading">
@@ -250,6 +280,8 @@ export function AssetGroupsPicker({
           disabled={loading && groups.length === 0}
           onChange={(event) => {
             const value = event.target.value;
+            setConfirmingDelete(false);
+            if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
             onGroupChange(value ? value : null, providerConnectionId);
           }}
         >
@@ -264,7 +296,28 @@ export function AssetGroupsPicker({
         {loading ? (
           <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
         ) : null}
+        {selectedGroupId != null ? (
+          <button
+            type="button"
+            className={`asset-groups__delete${confirmingDelete ? " is-armed" : ""}`}
+            aria-label={
+              confirmingDelete
+                ? `确认删除分组：${selectedGroup?.name ?? ""}`
+                : `删除分组：${selectedGroup?.name ?? ""}`
+            }
+            onClick={confirmingDelete ? confirmDelete : armDelete}
+          >
+            <Trash size={14} weight="bold" aria-hidden="true" />
+            {confirmingDelete ? "确认删除？" : "删除分组"}
+          </button>
+        ) : null}
       </div>
+      {confirmingDelete ? (
+        <span className="asset-groups__delete-hint" role="status">
+          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          分组及组内全部素材将从云端永久删除，此操作不可撤销。
+        </span>
+      ) : null}
       {error ? (
         <span className="asset-groups__error" role="status">
           <WarningCircle size={13} weight="fill" aria-hidden="true" />
@@ -594,6 +647,7 @@ export function AssetPanel({
   onGroupChange,
   onRefreshGroups,
   onCreateGroup,
+  onDeleteGroup,
   kind,
   getKindCount,
   onKindChange,
@@ -643,6 +697,8 @@ export function AssetPanel({
   readonly onGroupChange: (groupId: string | null, providerConnectionId: string) => void;
   readonly onRefreshGroups: (providerConnectionId: string) => void;
   readonly onCreateGroup: () => void;
+  /** 删除云端素材库分组（连带组内全部素材，不可逆）。 */
+  readonly onDeleteGroup: (groupId: string) => void;
   readonly kind: AssetKind;
   /** Tab 角标计数：浏览器=演示数据计数，本地=分页响应全库计数，云端=null。 */
   readonly getKindCount: (kind: AssetKind) => number | null;
@@ -741,6 +797,7 @@ export function AssetPanel({
           providerConnectionId={providerId}
           onGroupChange={onGroupChange}
           onCreateGroup={onCreateGroup}
+          onDeleteGroup={onDeleteGroup}
           onRetry={onRefreshGroups}
         />
       ) : null}

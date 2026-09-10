@@ -907,6 +907,11 @@ function baseInvokeImplementation(
       mockAssetGroups = [...mockAssetGroups, created];
       return Promise.resolve(created);
     }
+    case "delete_asset_group": {
+      const groupId = String(args.command.id);
+      mockAssetGroups = mockAssetGroups.filter((group) => group.id !== groupId);
+      return Promise.resolve(groupId);
+    }
     case "rename_asset":
       return Promise.resolve("asset-image-1");
     case "start_generation":
@@ -6518,6 +6523,41 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
       expect(within(groupSelect).getByRole("option", { name: "新分组" })).toBeInTheDocument();
     });
     expect(groupSelect).toHaveValue("22");
+  });
+
+  it("删除分组：两段式确认后调用 delete_asset_group，选中分组从下拉消失", async () => {
+    render(<App />);
+    const groupSelect = await screen.findByLabelText("素材库分组");
+
+    // 选中「客户案例」（id=21）后出现删除按钮。
+    fireEvent.change(groupSelect, { target: { value: "21" } });
+    const deleteButton = await screen.findByRole("button", { name: "删除分组：客户案例" });
+
+    // 第一次点击仅进入确认态（4 秒内二次点击才真正删除），不发起请求。
+    fireEvent.click(deleteButton);
+    screen.getByRole("button", { name: "确认删除分组：客户案例" });
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "delete_asset_group"),
+    ).toBe(false);
+
+    // 确认态下再次点击才调用删除接口。
+    fireEvent.click(screen.getByRole("button", { name: "确认删除分组：客户案例" }));
+    await waitFor(() => {
+      const deleteCall = invokeMock.mock.calls.find(
+        ([command]) => command === "delete_asset_group",
+      );
+      expect(deleteCall?.[1]).toEqual({
+        command: { providerConnectionId: PROVIDER.id, id: "21" },
+      });
+    });
+
+    // 删除后「客户案例」选项消失，下拉回到「全部素材」。
+    await waitFor(() => {
+      expect(
+        within(groupSelect).queryByRole("option", { name: "客户案例" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(groupSelect).toHaveValue("");
   });
 
   it("素材详情内可重命名云端素材：保存后调用 rename_asset 并关闭弹窗", async () => {

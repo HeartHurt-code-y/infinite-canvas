@@ -935,22 +935,19 @@ impl AssetLibrary {
         Ok(id.to_string())
     }
 
-    /// 删除云端素材库分组及组内全部素材（火山引擎 `DeleteAssetGroup`，不可逆）。
-    /// 返回被删除的分组 ID。魔芋方言未提供对应端点，返回明确错误。
+    /// 删除云端素材库分组及组内全部素材（不可逆），返回被删除的分组 ID。
+    /// 魔芋方言走 `POST /v1/assets/groups/delete`，火山引擎方舟方言走 `DeleteAssetGroup`。
     pub async fn delete_asset_group(
         &self,
         command: DeleteAssetGroupCommand,
     ) -> BackendResult<String> {
         require_asset_library_connection(&command.provider_connection_id)?;
-        if self.dialect(&command.provider_connection_id)? != AssetDialect::VolcengineArk {
-            return Err(BackendError::validation(
-                "当前素材库供应商不支持删除素材分组",
-                json!({
-                    "providerConnectionId": command.provider_connection_id,
-                    "supported": ["volcengine_ark_v1"],
-                }),
-            ));
+        if self.dialect(&command.provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .ark_delete_asset_group(&command.provider_connection_id, &command.id)
+                .await;
         }
+        // 魔芋方言：`POST /v1/assets/groups/delete`，请求体为 `{"id": <group id>}`。
         let id = command.id.trim();
         if id.is_empty() {
             return Err(BackendError::validation(
@@ -960,10 +957,11 @@ impl AssetLibrary {
         }
         let response = self
             .port
-            .send_ark(ArkAssetRequest {
+            .send(RemoteAssetRequest {
                 provider_connection_id: command.provider_connection_id,
-                action: "DeleteAssetGroup",
-                body: json!({ "Id": id }),
+                method: Method::POST,
+                path: "/v1/assets/groups/delete",
+                body: Some(json!({ "id": id })),
             })
             .await?;
         // 删除为幂等操作：分组已不存在（HTTP 404）时按成功处理。
@@ -1191,6 +1189,35 @@ impl AssetLibrary {
             is_default: false,
             asset_count: 0,
         })
+    }
+
+    /// 火山方言分组删除：`DeleteAssetGroup`（请求体 PascalCase 的 `Id`），不可逆。
+    async fn ark_delete_asset_group(
+        &self,
+        provider_connection_id: &str,
+        id: &str,
+    ) -> BackendResult<String> {
+        let id = id.trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset group deletion requires a group id",
+                json!({ "field": "id" }),
+            ));
+        }
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                action: "DeleteAssetGroup",
+                body: json!({ "Id": id }),
+            })
+            .await?;
+        // 删除为幂等操作：分组已不存在（HTTP 404）时按成功处理。
+        if response.status == 404 {
+            return Ok(id.to_string());
+        }
+        require_success("delete asset group", &response)?;
+        Ok(id.to_string())
     }
 
     /// 火山方言素材改名：`UpdateAsset`（当前仅支持更新 Name），响应回 `Id`。
@@ -3584,6 +3611,69 @@ mod tests {
             .expect_err("empty id must be rejected before any request");
 
         assert!(error.to_string().contains("asset id"));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_group_posts_the_group_id_to_the_documented_endpoint() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "code": "success" }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset_group(DeleteAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "8".into(),
+            })
+            .await
+            .expect("delete asset group via moyu dialect");
+
+        assert_eq!(deleted_id, "8");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/groups/delete");
+        assert_eq!(requests[0].method, Method::POST);
+        assert_eq!(requests[0].body, Some(json!({ "id": "8" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_group_treats_a_gone_group_404_as_idempotent_success() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            404,
+            json!({ "error": { "message": "素材库分组不存在或已删除" } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let deleted_id = library
+            .delete_asset_group(DeleteAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "99".into(),
+            })
+            .await
+            .expect("a 404 gone-group delete should be idempotent success");
+
+        assert_eq!(deleted_id, "99");
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].path, "/v1/assets/groups/delete");
+        assert_eq!(requests[0].body, Some(json!({ "id": "99" })));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_group_rejects_an_empty_or_whitespace_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(adapter, immediate_poll());
+
+        let error = library
+            .delete_asset_group(DeleteAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "  ".into(),
+            })
+            .await
+            .expect_err("empty group id must be rejected before any request");
+
+        assert!(error.to_string().contains("group id"));
     }
 
     #[tokio::test]
