@@ -1043,13 +1043,16 @@ export function CanvasPromptNode({
     : "输出会作为下游节点的提示词请求参数";
 
   // 跟踪最后一次由外部（大模型生成）写入的文本，避免 onTextChange 回写时触发循环。
-  const lastExternalTextRef = useRef<string>(node.config.generatedPrompt);
+  // 初始化为 null，确保节点挂载时即使 generatedPrompt 已有值也会同步到编辑器。
+  const lastExternalTextRef = useRef<string | null>(null);
   // 大模型生成新提示词时，同步到 PromptMentionInput 的 session，并自动识别 @素材名。
   useEffect(() => {
     const next = node.config.generatedPrompt;
     if (next === lastExternalTextRef.current) return;
     lastExternalTextRef.current = next;
-    promptContents.replaceText(node.key, next, mentionCandidates);
+    if (next) {
+      promptContents.replaceText(node.key, next, mentionCandidates);
+    }
   }, [node.config.generatedPrompt, node.key, promptContents, mentionCandidates]);
 
   const handlePromptTextChange = useCallback(
