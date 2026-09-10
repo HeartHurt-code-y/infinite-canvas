@@ -747,9 +747,14 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
     match operation {
         GenerationOperation::TextGeneration => {
             let profile = text_request_profile(model_id);
+            // 国内火山引擎原生 doubao 文本模型走方舟官方 `/chat/completions`
+            // 接口；其他 OpenAI 兼容模型保持 `/v1/chat/completions`。
+            let identity = model_id.to_ascii_lowercase();
+            let domestic_doubao = identity.starts_with("doubao-") || identity == "doubao";
             let (path, parameter_container) = match profile {
                 "anthropic_messages_v1" => ("/v1/messages", "root"),
                 "gemini_generate_content_v1" => ("/v1beta/models/{model}:generateContent", "root"),
+                _ if domestic_doubao => ("/chat/completions", "root"),
                 _ => ("/v1/chat/completions", "root"),
             };
             json!({
@@ -774,12 +779,20 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                 if let Some(parameters_object) = parameters.as_object_mut() {
                     seedream_append_version_parameters(parameters_object, version, false);
                 }
+                // 国内火山引擎原生 Seedream（doubao-seedream-*）走方舟官方
+                // `/images/generations` 接口；魔芋聚合平台保持 `/v1/images/generations`。
+                let domestic_seedream = model_id.to_ascii_lowercase().starts_with("doubao-");
+                let image_path = if domestic_seedream {
+                    "/images/generations"
+                } else {
+                    "/v1/images/generations"
+                };
                 return json!({
                     "resultType": "image",
                     "requestProfileId": "moyu_seedream_image_v1",
                     "profileVersion": 1,
                     "request": {
-                        "path": "/v1/images/generations",
+                        "path": image_path,
                         "encoding": "json",
                         "parameterContainer": "root"
                     },
@@ -1344,14 +1357,28 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                     );
                 }
             }
+            // 国内火山引擎原生 Seedance（doubao-seedance-*）走方舟官方
+            // `/contents/generations/tasks` 异步任务接口，参数平铺在顶层；
+            // 海外 Dreamina Seedance 保持魔芋聚合平台的 `/v1/video/generations`
+            // + metadata 容器协议。
+            let domestic_seedance = (seedance_20 || seedance_25) && !dreamina;
+            let (path, parameter_container, request_profile) = if domestic_seedance {
+                (
+                    "/contents/generations/tasks",
+                    "root",
+                    "volcengine_seedance_video_v1",
+                )
+            } else {
+                ("/v1/video/generations", "metadata", "moyu_video_metadata_v1")
+            };
             json!({
                 "resultType": "video",
-                "requestProfileId": "moyu_video_metadata_v1",
+                "requestProfileId": request_profile,
                 "profileVersion": 1,
                 "request": {
-                    "path": "/v1/video/generations",
+                    "path": path,
                     "encoding": "json",
-                    "parameterContainer": "metadata"
+                    "parameterContainer": parameter_container
                 },
                 "parameters": parameters
             })

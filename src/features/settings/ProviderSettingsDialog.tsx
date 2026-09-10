@@ -37,6 +37,7 @@ import {
 import { AssetLibraryTokenSettings } from "./AssetLibraryTokenSettings";
 import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
 import { TosStagingSettings } from "./TosStagingSettings";
+import { SearchableMultiSelect } from "../../components/SearchableMultiSelect";
 
 interface ProviderDraft {
   readonly id: string;
@@ -240,8 +241,8 @@ export function ProviderSettingsDialog({
   const [tokenGroups, setTokenGroups] = useState<ProviderTokenGroup[]>([]);
   /** 每个模型使用的令牌分组（null = 供应商默认令牌），供保存绑定与回显。 */
   const [modelTokenGroups, setModelTokenGroups] = useState<Record<string, string | null>>({});
-  /** 拉取模型时使用的令牌分组（null = 供应商默认令牌）。 */
-  const [pullTokenGroup, setPullTokenGroup] = useState<string | null>(null);
+  /** 拉取模型时使用的令牌分组列表（空字符串 "" 表示默认令牌）。 */
+  const [pullTokenGroups, setPullTokenGroups] = useState<string[]>([""]);
   const [busyAction, setBusyAction] = useState<BusyAction>("loading-connections");
   const [rawError, setRawError] = useState<string | null>(null);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -266,7 +267,7 @@ export function ProviderSettingsDialog({
         setModelTokenGroups(
           Object.fromEntries(models.map((model) => [model.id, model.tokenGroup ?? null])),
         );
-        setPullTokenGroup(null);
+        setPullTokenGroups([""]);
         setModelSearch("");
         setModelTypeFilter("all");
       } catch (error: unknown) {
@@ -379,7 +380,7 @@ export function ProviderSettingsDialog({
     setModelSearch("");
     setModelTypeFilter("all");
     setModelTokenGroups({});
-    setPullTokenGroup(null);
+    setPullTokenGroups([""]);
     setRawError(null);
     setSuccessMessage(null);
     setTestNotice(null);
@@ -469,7 +470,21 @@ export function ProviderSettingsDialog({
     setBusyAction("fetching-models");
     try {
       const provider = await persistConnection(connectionInput.apiKey);
-      const models = await client.fetchProviderModels(provider.id, pullTokenGroup);
+      // 多分组令牌并行拉取，按 model.id 合并去重
+      const results = await Promise.all(
+        pullTokenGroups.map((group) =>
+          client.fetchProviderModels(provider.id, group === "" ? null : group),
+        ),
+      );
+      const merged = new Map<string, RemoteModelOption>();
+      for (const models of results) {
+        for (const model of models) {
+          if (!merged.has(model.id)) {
+            merged.set(model.id, model);
+          }
+        }
+      }
+      const models = Array.from(merged.values());
       setRemoteModels(models);
       setModelUsage(
         Object.fromEntries(models.map((model) => [model.id, initialModelUsage(model)])),
@@ -479,10 +494,9 @@ export function ProviderSettingsDialog({
       );
       setModelSearch("");
       setModelTypeFilter("all");
+      const groupLabels = pullTokenGroups.map((g) => (g === "" ? "默认令牌" : g));
       setSuccessMessage(
-        `已保存连接，并从 ${provider.displayName}${
-          pullTokenGroup ? `（${pullTokenGroup} 令牌）` : ""
-        } 拉取 ${models.length} 个模型。`,
+        `已保存连接，并从 ${provider.displayName}（${groupLabels.join("、")}）拉取 ${models.length} 个模型。`,
       );
       window.requestAnimationFrame(() => modelSearchRef.current?.focus());
     } catch (error) {
@@ -736,27 +750,27 @@ export function ProviderSettingsDialog({
                 )}
                 {busyAction === "saving-connection" ? "正在保存…" : "保存连接"}
               </button>
-              <label className="provider-pull-token">
+              <div className="provider-pull-token">
                 <span>拉取令牌</span>
-                <select
-                  value={pullTokenGroup ?? ""}
+                <SearchableMultiSelect
+                  options={[
+                    { value: "", label: "默认令牌" },
+                    ...tokenGroups.map((group) => ({
+                      value: group.groupName,
+                      label: group.groupName,
+                    })),
+                  ]}
+                  value={pullTokenGroups}
+                  onChange={(next) => setPullTokenGroups(Array.from(next))}
+                  placeholder="选择拉取令牌分组"
+                  searchPlaceholder="搜索分组…"
                   disabled={busyAction !== null}
-                  onChange={(event) =>
-                    setPullTokenGroup(event.target.value ? event.target.value : null)
-                  }
-                  aria-describedby="provider-pull-token-hint"
-                >
-                  <option value="">默认令牌</option>
-                  {tokenGroups.map((group) => (
-                    <option key={group.id} value={group.groupName}>
-                      {group.groupName}
-                    </option>
-                  ))}
-                </select>
+                  ariaLabel="选择拉取模型的令牌分组"
+                />
                 <small id="provider-pull-token-hint">
-                  不同分组的令牌能拉到的模型目录可能不同；用对应分组拉取即可看到该分组可用的模型。
+                  可多选分组令牌并行拉取，合并去重后展示；已保存的模型绑定不会被重新拉取覆盖。
                 </small>
-              </label>
+              </div>
               <button
                 type="button"
                 className="provider-fetch-action"
