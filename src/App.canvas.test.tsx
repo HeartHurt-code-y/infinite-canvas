@@ -780,6 +780,21 @@ function appendPromptText(input: HTMLElement, text: string): void {
   fireEvent.input(input);
 }
 
+/** 提示词节点的输出框是 contenteditable div，通过 aria-labelledby 关联「输出提示词」label。 */
+function getPromptOutputEditor(container: HTMLElement): HTMLElement {
+  const label = within(container).getByText("输出提示词", { selector: "label" });
+  const htmlFor = label.getAttribute("for");
+  if (htmlFor) {
+    const editor = container.querySelector<HTMLElement>(`[aria-labelledby="${htmlFor}"]`);
+    if (editor) return editor;
+  }
+  return container.querySelector<HTMLElement>("[contenteditable='true']")!;
+}
+
+function setPromptOutputText(container: HTMLElement, text: string): void {
+  setPromptText(getPromptOutputEditor(container), text);
+}
+
 async function insertMention(generationNode: HTMLElement, name: string): Promise<void> {
   const input = within(generationNode).getByRole("textbox", {
     name: "提示词输入框，输入 @ 引用素材",
@@ -1479,9 +1494,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     render(<App />);
     const prompt = await addPromptNode(240, 180);
-    fireEvent.change(within(prompt).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "参考视频 https://example.com/one.mp4\n第二段 https://example.com/two.mp4" },
-    });
+    setPromptOutputText(
+      prompt,
+      "参考视频 https://example.com/one.mp4\n第二段 https://example.com/two.mp4",
+    );
     const downloader = await addVideoDownloaderNode(1050, 200);
     connectViaHandles(prompt, downloader);
     expect(within(downloader).getByRole("textbox", { name: "视频链接" })).toHaveValue("");
@@ -1821,16 +1837,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       userPrompt: "雨夜站台，女孩撑伞等候列车",
     });
     await waitFor(() =>
-      expect(within(promptNode).getByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
-        generatedPrompt,
-      ),
+      expect(getPromptOutputEditor(promptNode)).toHaveTextContent(generatedPrompt),
     );
 
-    const promptOutput = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
+    const promptOutput = getPromptOutputEditor(promptNode);
     expect(within(promptNode).queryByRole("button", { name: /审计/ })).not.toBeInTheDocument();
     const customPrompt = `${generatedPrompt} 自定义镜头节奏。`;
-    fireEvent.change(promptOutput, { target: { value: customPrompt } });
-    expect(promptOutput).toHaveValue(customPrompt);
+    setPromptText(promptOutput, customPrompt);
+    expect(promptOutput).toHaveTextContent(customPrompt);
 
     const imageNode = await addGenerationNode("图片", 920, 180);
     connectPromptToGeneration(promptNode, imageNode);
@@ -1902,16 +1916,18 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       resolvePrompt({ optimizedPrompt: generatedPrompt, rawModelOutput: generatedPrompt });
       await pendingPrompt;
     });
-    expect(screen.queryByRole("textbox", { name: "生成提示词输出" })).not.toBeInTheDocument();
+    expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(0);
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
     expect(screen.getByText("画布为空")).toBeInTheDocument();
 
     await waitFor(() => expect(originalTab).toBeEnabled());
     fireEvent.click(originalTab);
     await waitFor(() => expect(originalTab).toHaveAttribute("aria-selected", "true"));
-    expect(await screen.findByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
-      generatedPrompt,
-    );
+    await waitFor(() => {
+      const promptNode = document.querySelector(".canvas-gen-node--prompt") as HTMLElement;
+      expect(promptNode).not.toBeNull();
+      expect(getPromptOutputEditor(promptNode)).toHaveTextContent(generatedPrompt);
+    });
     expect(document.querySelectorAll(".canvas-gen-node--prompt")).toHaveLength(1);
     expect(invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node")).toHaveLength(
       1,
@@ -1964,8 +1980,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       resolvePrompt({ optimizedPrompt: generatedPrompt, rawModelOutput: generatedPrompt });
       await pendingPrompt;
     });
-    expect(await screen.findByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
-      generatedPrompt,
+    await waitFor(() =>
+      expect(getPromptOutputEditor(promptNode)).toHaveTextContent(generatedPrompt),
     );
     expect(within(promptNode).getByRole("button", { name: "生成提示词" })).toBeEnabled();
     expect(originalTab).toHaveAttribute("aria-selected", "true");
@@ -2049,9 +2065,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     const view = render(<App />);
     const promptNode = await addPromptNode(260, 180);
-    fireEvent.change(within(promptNode).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "@图片1 开场" },
-    });
+    setPromptOutputText(promptNode, "@图片1 开场");
     const videoNode = await addGenerationNode("视频", 920, 180);
     const firstAsset = await addAssetNode("图片", "站台参考图", 20, 500);
     const secondAsset = await addAssetNode("图片", "站台参考图", 20, 760);
@@ -2104,9 +2118,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(restoredInput).toHaveTextContent("开场");
     expect(restoredInput).toHaveTextContent("保留我的手改");
 
-    fireEvent.change(screen.getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "@图片1 上游新版本" },
-    });
+    const restoredPromptNode = document.querySelector(".canvas-gen-node--prompt") as HTMLElement;
+    setPromptOutputText(restoredPromptNode, "@图片1 上游新版本");
     await waitFor(() => {
       expect(restoredInput).toHaveTextContent("上游新版本");
       expect(restoredInput).not.toHaveTextContent("保留我的手改");
@@ -2120,9 +2133,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   it("新连接的提示词源即使输出相同，也会重新同步下游内容", async () => {
     render(<App />);
     const firstSource = await addPromptNode(260, 180);
-    fireEvent.change(within(firstSource).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "上游共同输出" },
-    });
+    setPromptOutputText(firstSource, "上游共同输出");
     const target = await addGenerationNode("视频", 920, 180);
     connectPromptToGeneration(firstSource, target);
     const input = within(target).getByRole("textbox", {
@@ -2131,9 +2142,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() => expect(input).toHaveTextContent("上游共同输出"));
     setPromptText(input, "下游临时修改");
     const secondSource = await addPromptNode(260, 720);
-    fireEvent.change(within(secondSource).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "上游共同输出" },
-    });
+    setPromptOutputText(secondSource, "上游共同输出");
     expect(input).toHaveTextContent("下游临时修改");
     connectPromptToGeneration(secondSource, target);
     await waitFor(() => expect(input).toHaveTextContent("上游共同输出"));
@@ -2181,8 +2190,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(promptNode).getByRole("textbox", { name: "创意或需求" })).toHaveValue("");
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
 
-    const output = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
-    await waitFor(() => expect(output).toHaveValue(firstPrompt));
+    const output = getPromptOutputEditor(promptNode);
+    await waitFor(() => expect(output).toHaveTextContent(firstPrompt));
     const firstCommand = invokeMock.mock.calls.find(
       ([command]) => command === "run_prompt_node",
     )?.[1] as { command: Record<string, unknown> };
@@ -2343,9 +2352,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
     await waitFor(() =>
-      expect(within(promptNode).getByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
-        generatedPrompt,
-      ),
+      expect(getPromptOutputEditor(promptNode)).toHaveTextContent(generatedPrompt),
     );
     expect(within(promptNode).queryByRole("alert")).not.toBeInTheDocument();
     const promptCommands = invokeMock.mock.calls.filter(
@@ -2412,8 +2419,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     connectAssetToGeneration(referenceImage, promptNode);
     expect(within(promptNode).getByRole("textbox", { name: "创意或需求" })).toHaveValue("");
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
-    const output = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
-    await waitFor(() => expect(output).toHaveValue(clarification));
+    const output = getPromptOutputEditor(promptNode);
+    await waitFor(() => expect(output).toHaveTextContent(clarification));
     expect(within(promptNode).getByRole("log", { name: "提示词多轮对话" })).toHaveTextContent(
       clarification,
     );
@@ -2536,12 +2543,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
     );
     const composer = within(promptNode).getByRole("textbox", { name: "创意或需求" });
-    const promptOutput = within(promptNode).getByRole("textbox", { name: "生成提示词输出" });
+    const promptOutput = getPromptOutputEditor(promptNode);
 
     // 第 1 轮：生成。首轮无历史，contextHistory 为空数组。
     fireEvent.change(composer, { target: { value: "雨夜站台，女孩撑伞等候列车" } });
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
-    await waitFor(() => expect(promptOutput).toHaveValue(firstPrompt));
+    await waitFor(() => expect(promptOutput).toHaveTextContent(firstPrompt));
     const firstCommand = invokeMock.mock.calls.find(
       ([command]) => command === "run_prompt_node",
     )?.[1] as { command: Record<string, unknown> };
@@ -2657,7 +2664,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(typeof visionTarget["canvasNodeKey"]).toBe("string");
     expect(visionImages[0]!["displayName"]).toBe("站台参考图");
     await waitFor(() =>
-      expect(within(promptNode).getByRole("textbox", { name: "生成提示词输出" })).toHaveValue(
+      expect(getPromptOutputEditor(promptNode)).toHaveTextContent(
         "依据参考图描述雨夜站台的提示词。",
       ),
     );
@@ -2944,9 +2951,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() =>
       expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
     );
-    fireEvent.change(within(promptNode).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "沿站台向前飞行，保持连续镜头。" },
-    });
+    setPromptOutputText(promptNode, "沿站台向前飞行，保持连续镜头。");
     const pathImage = await addAssetNode("图片", "站台参考图", 20, 700);
     connectAssetToGeneration(pathImage, promptNode);
     const videoNode = await addGenerationNode("视频", 920, 520);
@@ -4047,9 +4052,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     const view = render(<App />);
     const sourcePrompt = await addPromptNode(260, 180);
-    fireEvent.change(within(sourcePrompt).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "上游要求：保留列车进站镜头" },
-    });
+    setPromptOutputText(sourcePrompt, "上游要求：保留列车进站镜头");
     const node = await addGenerationNode("视频", 920, 180);
     const original = await addAssetNode("视频", "列车进站参考", 20, 500);
     connectAssetToGeneration(original, node);
