@@ -2215,11 +2215,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     expect(firstCommand.command["userPrompt"]).toMatch(/\S/);
 
-    fireEvent.change(output, { target: { value: editedPrompt } });
+    setPromptText(output, editedPrompt);
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
     expect(within(promptNode).getByRole("textbox", { name: "待优化提示词" })).toHaveValue("");
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
-    await waitFor(() => expect(output).toHaveValue(optimizedPrompt));
+    await waitFor(() => expect(output).toHaveTextContent(optimizedPrompt));
 
     const secondCommand = invokeMock.mock.calls.filter(
       ([command]) => command === "run_prompt_node",
@@ -2451,14 +2451,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       target: { value: parameters },
     });
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
-    await waitFor(() => expect(output).toHaveValue(generatedPrompts));
-    fireEvent.change(output, { target: { value: editedPrompt } });
+    await waitFor(() => expect(output).toHaveTextContent(generatedPrompts));
+    setPromptText(output, editedPrompt);
     fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
       target: { value: "" },
     });
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
-    await waitFor(() => expect(output).toHaveValue(optimizedPrompt));
+    await waitFor(() => expect(output).toHaveTextContent(optimizedPrompt));
     const thirdCommand = invokeMock.mock.calls.filter(
       ([command]) => command === "run_prompt_node",
     )[2]?.[1] as {
@@ -2567,7 +2567,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
     fireEvent.change(composer, { target: { value: "加入车灯在水面的暖色反射" } });
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
-    await waitFor(() => expect(promptOutput).toHaveValue(secondPrompt));
+    await waitFor(() => expect(promptOutput).toHaveTextContent(secondPrompt));
     const secondCommand = invokeMock.mock.calls.filter(
       ([command]) => command === "run_prompt_node",
     )[1]?.[1] as { command: Record<string, unknown> };
@@ -2585,7 +2585,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     // 第 3 轮：再次优化，上下文继续累计为 4 条历史。
     fireEvent.change(composer, { target: { value: "镜头缓慢推近" } });
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
-    await waitFor(() => expect(promptOutput).toHaveValue(thirdPrompt));
+    await waitFor(() => expect(promptOutput).toHaveTextContent(thirdPrompt));
     const thirdCommand = invokeMock.mock.calls.filter(
       ([command]) => command === "run_prompt_node",
     )[2]?.[1] as { command: Record<string, unknown> };
