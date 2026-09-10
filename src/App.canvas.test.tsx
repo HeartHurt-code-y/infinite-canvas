@@ -795,6 +795,11 @@ function setPromptOutputText(container: HTMLElement, text: string): void {
   setPromptText(getPromptOutputEditor(container), text);
 }
 
+/** tiptap 编辑器把换行渲染为块级标签，textContent 不保留 \n，断言前需去除。 */
+function noNewlines(text: string): string {
+  return text.replace(/\n/g, "");
+}
+
 async function insertMention(generationNode: HTMLElement, name: string): Promise<void> {
   const input = within(generationNode).getByRole("textbox", {
     name: "提示词输入框，输入 @ 引用素材",
@@ -2451,14 +2456,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       target: { value: parameters },
     });
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
-    await waitFor(() => expect(output).toHaveTextContent(generatedPrompts));
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(generatedPrompts)));
     setPromptText(output, editedPrompt);
     fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
       target: { value: "" },
     });
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
     fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
-    await waitFor(() => expect(output).toHaveTextContent(optimizedPrompt));
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(optimizedPrompt)));
     const thirdCommand = invokeMock.mock.calls.filter(
       ([command]) => command === "run_prompt_node",
     )[2]?.[1] as {
