@@ -37,10 +37,10 @@ use super::{
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand, SaveStatus,
+        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
         RefreshAssetMediaCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
-        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SetCredentialCommand,
-        StagingJobRecord, StartGenerationCommand, StartStagingCommand,
+        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
+        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
         TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
         UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
@@ -163,7 +163,10 @@ pub async fn resume_generation_result(
         ))
         .command();
     }
-    let result = match state.storage.get_result(&command.task_id, command.result_index) {
+    let result = match state
+        .storage
+        .get_result(&command.task_id, command.result_index)
+    {
         Ok(result) => result,
         Err(error) => return Err(error).command(),
     };
@@ -191,11 +194,7 @@ pub async fn resume_generation_result(
         result.media_type.as_str(),
         result.save_status.as_str()
     );
-    match state
-        .local_results
-        .resume_interrupted_result(result)
-        .await
-    {
+    match state.local_results.resume_interrupted_result(result).await {
         Ok(saved) => {
             let _ = app.emit(
                 "generation:result-saved",
