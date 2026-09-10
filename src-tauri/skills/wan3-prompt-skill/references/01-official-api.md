@@ -10,41 +10,42 @@
 
 ## 2. 两种模式
 
-| 模式 | 适用 | media 形态 |
-|---|---|---|
+| 模式                           | 适用                                     | media 形态                                                        |
+| ------------------------------ | ---------------------------------------- | ----------------------------------------------------------------- |
 | **全能参考模式**（All-in-One） | 自由参考生成与视频编辑，覆盖绝大多数任务 | reference_image / reference_video / reference_audio / file / link |
-| **首尾帧模式** | 严格遵循首帧/尾帧生成 | first_frame（≤1）+ last_frame（≤1） |
+| **首尾帧模式**                 | 严格遵循首帧/尾帧生成                    | first_frame（≤1）+ last_frame（≤1）                               |
 
 > 两模式**互斥**：进入首尾帧模式后不再支持参考输入。
 
 ## 3. 请求参数（parameters，整体可选，子字段亦可选）
 
-| 字段 | 类型 | 默认 | 可选值 / 范围 |
-|---|---|---|---|
-| `resolution` | string | `1080P` | `480P` / `720P` / `1080P` |
-| `ratio` | string | `adaptive` | `adaptive`（自适应）/ `16:9` / `9:16` / `4:3` / `3:4` / `1:1` |
-| `duration` | integer | `5` | 无视频输入：`[2,30]`；有视频输入：输入+输出 ≤30；`-1`=智能时长 |
-| `audio` | boolean | `true` | `true` 含音轨 / `false` 无音轨 |
-| `seed` | integer | 无 | `[0, 2147483647]` |
-| `prompt_extend` | boolean | `true` | `true` 智能改写 / `false` 关闭 |
-| `watermark` | boolean | `false` | `false` 无水印 / `true` 加水印 |
+| 字段            | 类型    | 默认       | 可选值 / 范围                                                  |
+| --------------- | ------- | ---------- | -------------------------------------------------------------- |
+| `resolution`    | string  | `1080P`    | `480P` / `720P` / `1080P`                                      |
+| `ratio`         | string  | `adaptive` | `adaptive`（自适应）/ `16:9` / `9:16` / `4:3` / `3:4` / `1:1`  |
+| `duration`      | integer | `5`        | 无视频输入：`[2,30]`；有视频输入：输入+输出 ≤30；`-1`=智能时长 |
+| `audio`         | boolean | `true`     | `true` 含音轨 / `false` 无音轨                                 |
+| `seed`          | integer | 无         | `[0, 2147483647]`                                              |
+| `prompt_extend` | boolean | `true`     | `true` 智能改写 / `false` 关闭                                 |
+| `watermark`     | boolean | `false`    | `false` 无水印 / `true` 加水印                                 |
 
 - 必选字段仅 `model` 与 `input`；`input.prompt` 与 `input.media` 二选一必填其一。
 - `prompt` ≤ 20000 字符（每汉字/字母占 1 字符，超出自动截断），支持中英文。
 
 ## 4. 媒体类型限制（input.media 数组元素）
 
-| type | 最大 | 限制 |
-|---|---|---|
-| `first_frame` | 1 张 | 严格作为第一帧；JPEG/JPG/PNG/BMP/WEBP，单边[240,8000]px，长宽比≤8:1，≤20MB |
-| `last_frame` | 1 张 | 严格作为最后一帧；同图片限制 |
-| `reference_image` | 10 张 | 同图片限制 |
-| `reference_video` | 5 段 | 单段[1,15]s，总时长≤15s；mp4/mov；单边[240,4096]px；≤100MB |
-| `reference_audio` | 5 段 | 单段[1,15]s，总时长≤15s；wav/mp3；≤15MB |
-| `file` | 1 个 | 与 `link` 二选一；docx/doc/xlsx/xls/pptx/ppt/pdf/txt/md（API 额外支持 key/pages/numbers），≤100MB，≤50 页 |
-| `link` | 1 个 | 公网 HTTP/HTTPS；与 `file` 二选一 |
+| type              | 最大  | 限制                                                                                                      |
+| ----------------- | ----- | --------------------------------------------------------------------------------------------------------- |
+| `first_frame`     | 1 张  | 严格作为第一帧；JPEG/JPG/PNG/BMP/WEBP，单边[240,8000]px，长宽比≤8:1，≤20MB                                |
+| `last_frame`      | 1 张  | 严格作为最后一帧；同图片限制                                                                              |
+| `reference_image` | 10 张 | 同图片限制                                                                                                |
+| `reference_video` | 5 段  | 单段[1,15]s，总时长≤15s；mp4/mov；单边[240,4096]px；≤100MB                                                |
+| `reference_audio` | 5 段  | 单段[1,15]s，总时长≤15s；wav/mp3；≤15MB                                                                   |
+| `file`            | 1 个  | 与 `link` 二选一；docx/doc/xlsx/xls/pptx/ppt/pdf/txt/md（API 额外支持 key/pages/numbers），≤100MB，≤50 页 |
+| `link`            | 1 个  | 公网 HTTP/HTTPS；与 `file` 二选一                                                                         |
 
 **互斥约束（官方硬规则）**：
+
 - `reference_image / reference_video / reference_audio / file / link` 与 `first_frame / last_frame` **不能同时出现**于同一 media 数组。错误码提示："The two modes are mutually exclusive. Do not pass reference_xx and first_frame/last_frame at the same time."
 - `file` 与 `link` 互斥。
 
@@ -70,9 +71,9 @@
 
 ## 8. 错误码速记
 
-| 现象 | 原因 |
-|---|---|
+| 现象                                                  | 原因                           |
+| ----------------------------------------------------- | ------------------------------ |
 | "current user api does not support synchronous calls" | 缺 `X-DashScope-Async: enable` |
-| "The two modes are mutually exclusive..." | 参考类与首尾帧混用 |
-| 跨地域调用失败 | 模型/URL/Key 地域不一致 |
-| 内容被截断 | prompt > 20000 字符 |
+| "The two modes are mutually exclusive..."             | 参考类与首尾帧混用             |
+| 跨地域调用失败                                        | 模型/URL/Key 地域不一致        |
+| 内容被截断                                            | prompt > 20000 字符            |
