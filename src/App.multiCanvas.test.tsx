@@ -104,6 +104,29 @@ function setPromptText(node: HTMLElement, text: string): void {
   fireEvent.input(input);
 }
 
+function getPromptOutputEditor(node: HTMLElement): HTMLElement {
+  const label = within(node).getByText("输出提示词", { selector: "label" });
+  const htmlFor = label.getAttribute("for");
+  if (htmlFor) {
+    const editor = node.querySelector<HTMLElement>(`[aria-labelledby="${htmlFor}"]`);
+    if (editor) return editor;
+  }
+  return node.querySelector<HTMLElement>("[contenteditable='true']")!;
+}
+
+function setPromptOutputText(node: HTMLElement, text: string): void {
+  const input = getPromptOutputEditor(node);
+  const target = input.querySelector<HTMLElement>(":scope > p") ?? input;
+  target.replaceChildren(document.createTextNode(text));
+  const range = document.createRange();
+  range.selectNodeContents(target);
+  range.collapse(false);
+  const selection = window.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+  fireEvent.input(input);
+}
+
 function nodePosition(node: HTMLElement): { x: number; y: number } {
   const transform = node.closest<HTMLElement>(".react-flow__node")!.style.transform;
   const match = transform.match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
@@ -356,9 +379,7 @@ describe("App independent canvases", () => {
     render(<App />);
     await waitForCanvasReady();
     const prompt = await addNode("prompt");
-    fireEvent.change(within(prompt).getByRole("textbox", { name: "生成提示词输出" }), {
-      target: { value: "第一场景的暖色商品摄影" },
-    });
+    setPromptOutputText(prompt, "第一场景的暖色商品摄影");
     const image = await addNode("image", 920, 180);
     connectNodes(prompt, image);
     await waitFor(() =>
