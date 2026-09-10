@@ -132,3 +132,25 @@ describe("画布连线交互", () => {
     );
   });
 });
+
+describe("画布视口控件", () => {
+  it("回到起始位置与前两组控件同一底边、依次左移且互不重叠", () => {
+    const zoom = cssRule(".zoom-control");
+    const history = cssRule(".canvas-history-control");
+    const home = cssRule(".canvas-home-control");
+    // 三组控件共用底边基准，右起依次为：缩放（9rem）→ 撤销/重做（4.5rem）→ 回到起始位置（2.25rem）。
+    expect(zoom).toMatch(/right:\s*var\(--space-md\)/);
+    expect(history).toMatch(
+      /right:\s*calc\(var\(--space-md\) \+ 9rem \+ 2 \* var\(--rule-thin\) \+ var\(--space-2xs\)\)/,
+    );
+    expect(home).toMatch(
+      /right:\s*calc\(var\(--space-md\) \+ 9rem \+ 4\.5rem \+ 4 \* var\(--rule-thin\) \+ 2 \* var\(--space-2xs\)\)/,
+    );
+    for (const rule of [zoom, history, home]) {
+      expect(rule).toMatch(/bottom:\s*var\(--size-zoom-collapsed-offset\)/);
+      expect(rule).toMatch(/min-height:\s*2\.25rem/);
+    }
+    expect(history).toMatch(/grid-template-columns:\s*2\.25rem 2\.25rem/);
+    expect(home).toMatch(/grid-template-columns:\s*2\.25rem/);
+  });
+});

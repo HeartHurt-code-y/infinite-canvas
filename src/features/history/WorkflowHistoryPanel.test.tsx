@@ -94,6 +94,39 @@ function createClient(detail = details()) {
 }
 
 describe("WorkflowHistoryPanel", () => {
+  it("跨画布范围不按画布过滤，并在行上标注归属画布", async () => {
+    const client = createClient();
+    render(
+      <WorkflowHistoryPanel
+        client={client}
+        canvasLabel={(id) => (id === "canvas-1" ? "画布甲" : null)}
+        onSelectGenerationTask={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("RAG 知识视频 workflow-history-1", {
+      selector: ".history-item__title",
+    });
+    // 不传 canvasId 即全部画布：查询里不带画布过滤，后端 (?1 IS NULL OR canvas_id=?1) 不过滤。
+    expect(client.list).toHaveBeenCalledWith({ limit: 30 });
+    const chip = screen.getByText("画布甲");
+    expect(chip).toHaveClass("history-item__canvas");
+    expect(chip).toHaveAttribute("title", "画布：画布甲");
+  });
+
+  it("没有归属标注回调时行上不渲染画布名", async () => {
+    const client = createClient();
+    render(
+      <WorkflowHistoryPanel client={client} canvasId="canvas-1" onSelectGenerationTask={vi.fn()} />,
+    );
+
+    await screen.findByText("RAG 知识视频 workflow-history-1", {
+      selector: ".history-item__title",
+    });
+    expect(client.list).toHaveBeenCalledWith({ canvasId: "canvas-1", limit: 30 });
+    expect(document.querySelector(".history-item__canvas")).toBeNull();
+  });
+
   it("combines creation-time bounds with canvas and status filters and keeps them on later pages", async () => {
     const client = createClient();
     render(
@@ -399,5 +432,34 @@ describe("WorkflowHistoryPanel", () => {
     expect(generation.get).toHaveBeenLastCalledWith("image-linked");
     fireEvent.click(screen.getByRole("tab", { name: "工作流" }));
     expect(screen.getByRole("heading", { name: record().title })).toBeInTheDocument();
+  });
+
+  it("切到「全部画布」后工作流历史不再按画布过滤", async () => {
+    const workflow = createClient();
+    const generation: GenerationTaskClient = {
+      start: vi.fn(),
+      list: vi.fn(() => Promise.resolve({ items: [], nextCursorCreatedBefore: null })),
+      get: vi.fn(),
+      queryVideoTaskNow: vi.fn(),
+    };
+    render(
+      <HistoryDialog
+        open
+        initialTab="workflow"
+        canvasId="canvas-1"
+        client={generation}
+        workflowClient={workflow}
+        onClose={vi.fn()}
+      />,
+    );
+
+    await screen.findByText("RAG 知识视频 workflow-history-1", {
+      selector: ".history-item__title",
+    });
+    expect(workflow.list).toHaveBeenLastCalledWith({ canvasId: "canvas-1", limit: 30 });
+
+    // 范围切换在弹窗头部，作用到工作流历史；查询里不再带画布过滤。
+    fireEvent.click(screen.getByRole("radio", { name: "全部画布" }));
+    await waitFor(() => expect(workflow.list).toHaveBeenLastCalledWith({ limit: 30 }));
   });
 });

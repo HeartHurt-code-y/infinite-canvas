@@ -67,6 +67,8 @@ const EMPTY_ACTIVE_IDS: readonly string[] = [];
 interface WorkflowHistoryPanelProps {
   readonly client?: WorkflowHistoryClient | undefined;
   readonly canvasId?: string | undefined;
+  /** 跨画布浏览时的归属标注（返回 null 表示不标注，即当前画布范围）。 */
+  readonly canvasLabel?: ((canvasId: string) => string | null) | undefined;
   readonly initialWorkflowId?: string | null | undefined;
   readonly activeWorkflowIds?: readonly string[] | undefined;
   readonly onResumeWorkflow?: (
@@ -164,7 +166,7 @@ function WorkflowDetail({
   onSelectGenerationTask,
 }: Omit<
   WorkflowHistoryPanelProps,
-  "client" | "canvasId" | "initialWorkflowId" | "activeWorkflowIds"
+  "client" | "canvasId" | "canvasLabel" | "initialWorkflowId" | "activeWorkflowIds"
 > & {
   readonly detail: WorkflowHistoryDetail;
   readonly active: boolean;
@@ -514,6 +516,7 @@ function WorkflowDetail({
 export function WorkflowHistoryPanel({
   client = workflowHistoryClient,
   canvasId,
+  canvasLabel,
   initialWorkflowId = null,
   activeWorkflowIds = EMPTY_ACTIVE_IDS,
   ...actions
@@ -687,32 +690,40 @@ export function WorkflowHistoryPanel({
             <p className="history-list__empty">没有符合条件的工作流。</p>
           ) : null}
           <ul className="history-items">
-            {items.map((item) => (
-              <li key={item.id}>
-                <button
-                  type="button"
-                  className={`history-item${item.id === selectedId ? " is-selected" : ""}`}
-                  aria-current={item.id === selectedId ? "true" : undefined}
-                  onClick={() => {
-                    setSelectedId(item.id);
-                    setDetailError(null);
-                  }}
-                >
-                  <span className="history-item__top">
-                    <span
-                      className={`history-item__status history-item__status--${item.status === "done" ? "succeeded" : item.status === "failed" ? "failed" : "running"}`}
-                    >
-                      {PHASE_LABELS[item.status]}
+            {items.map((item) => {
+              const canvasName = canvasLabel?.(item.canvasId) ?? null;
+              return (
+                <li key={item.id}>
+                  <button
+                    type="button"
+                    className={`history-item${item.id === selectedId ? " is-selected" : ""}`}
+                    aria-current={item.id === selectedId ? "true" : undefined}
+                    onClick={() => {
+                      setSelectedId(item.id);
+                      setDetailError(null);
+                    }}
+                  >
+                    <span className="history-item__top">
+                      <span
+                        className={`history-item__status history-item__status--${item.status === "done" ? "succeeded" : item.status === "failed" ? "failed" : "running"}`}
+                      >
+                        {PHASE_LABELS[item.status]}
+                      </span>
+                      <span className="history-item__tokens">{Math.round(item.progress)}%</span>
                     </span>
-                    <span className="history-item__tokens">{Math.round(item.progress)}%</span>
-                  </span>
-                  <span className="history-item__title">{item.title}</span>
-                  <span className="history-item__meta">
-                    {KIND_LABELS[item.workflowKind]} · {dateTime(item.updatedAt)}
-                  </span>
-                </button>
-              </li>
-            ))}
+                    <span className="history-item__title">{item.title}</span>
+                    <span className="history-item__meta">
+                      {canvasName != null ? (
+                        <span className="history-item__canvas" title={`画布：${canvasName}`}>
+                          {canvasName}
+                        </span>
+                      ) : null}
+                      {KIND_LABELS[item.workflowKind]} · {dateTime(item.updatedAt)}
+                    </span>
+                  </button>
+                </li>
+              );
+            })}
           </ul>
           {cursor ? (
             <button

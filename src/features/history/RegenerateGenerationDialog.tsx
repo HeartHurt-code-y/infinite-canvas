@@ -143,6 +143,14 @@ function materialsFromDetail(detail: GenerationTaskDetail): EditableMaterial[] {
   return materials;
 }
 
+/** 云端素材缩略图身份键：素材可能来自不同素材库连接，键里必须带连接。 */
+function cloudAssetKey(target: {
+  readonly providerConnectionId: string;
+  readonly assetId: string;
+}): string {
+  return `${target.providerConnectionId}:${target.assetId}`;
+}
+
 /** 素材行保持原始来源身份；编辑器相关视图（引用目标/连接）统一携带对话框合成实例键。 */
 function editorTargetForMaterial(material: EditableMaterial): ExplicitMediaTarget {
   return {
@@ -429,6 +437,11 @@ export function RegenerateGenerationDialog({
   const [localResultPreviews, setLocalResultPreviews] = useState<ReadonlyMap<string, string>>(
     new Map(),
   );
+  // 云端素材缩略图的按需签名地址：素材可能不在素材库列表首屏（或来自与模型不同的
+  // 素材库连接），列表查不到时按素材自身身份单独取一次地址。
+  const [fetchedAssetPreviews, setFetchedAssetPreviews] = useState<ReadonlyMap<string, string>>(
+    new Map(),
+  );
   const [urlName, setUrlName] = useState("");
   const [urlValue, setUrlValue] = useState("");
   const [urlKind, setUrlKind] = useState<MediaType>("image");
@@ -504,7 +517,11 @@ export function RegenerateGenerationDialog({
       switch (target.kind) {
         case "asset": {
           const asset = cloudById.get(target.assetId);
-          preview = asset?.previewUrl ?? asset?.coverUrl ?? null;
+          preview =
+            asset?.previewUrl ??
+            asset?.coverUrl ??
+            fetchedAssetPreviews.get(cloudAssetKey(target)) ??
+            null;
           break;
         }
         case "local_asset": {
@@ -528,7 +545,51 @@ export function RegenerateGenerationDialog({
       if (preview != null) next.set(material.id, preview);
     }
     return next;
-  }, [materials, cloudAssets, localAssets, localResultPreviews, runtime]);
+  }, [materials, cloudAssets, localAssets, localResultPreviews, fetchedAssetPreviews, runtime]);
+
+  // 云端素材缩略图兜底：素材库列表按单个连接、单页拉取，覆盖不到的长尾素材行
+  // 会没有缩略图；这里按素材自身身份（连接 + 素材 id）单独取一次签名地址。
+  // 列表尚未落定（成功或失败）时先不兜底：列表地址更省一次素材详情请求。
+  const cloudListSettled = cloudAssets != null || cloudError != null;
+  useEffect(() => {
+    if (!runtime || !cloudListSettled) return;
+    const missing = new Map<
+      string,
+      { providerConnectionId: string; id: string; mediaType: MediaType }
+    >();
+    for (const material of materials) {
+      const target = material.target;
+      if (target.kind !== "asset" || previewUrls.has(material.id)) continue;
+      const key = cloudAssetKey(target);
+      if (fetchedAssetPreviews.has(key) || missing.has(key)) continue;
+      missing.set(key, {
+        providerConnectionId: target.providerConnectionId,
+        id: target.assetId,
+        mediaType: target.mediaType,
+      });
+    }
+    if (missing.size === 0) return;
+    let cancelled = false;
+    void Promise.all(
+      Array.from(missing.entries()).map(async ([key, identity]) => {
+        try {
+          const url = await assetLibraryClient.refreshAssetMedia(identity);
+          return url != null && url !== "" ? ([key, url] as const) : null;
+        } catch {
+          // 素材已从云端删除、或该连接不支持读取：保持类型图标，不阻断其他素材。
+          return null;
+        }
+      }),
+    ).then((resolved) => {
+      if (cancelled) return;
+      const found = resolved.filter((entry) => entry != null);
+      if (found.length === 0) return;
+      setFetchedAssetPreviews((current) => new Map([...current, ...found]));
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [materials, previewUrls, fetchedAssetPreviews, runtime, cloudListSettled]);
 
   const candidates = useMemo<readonly PromptReferenceCandidate[]>(
     () =>
@@ -723,6 +784,14 @@ export function RegenerateGenerationDialog({
                     <MaterialThumb
                       previewUrl={previewUrls.get(material.id) ?? null}
                       mediaType={material.target.mediaType}
+                      {...(material.target.kind === "asset"
+                        ? {
+                            renewIdentity: {
+                              providerConnectionId: material.target.providerConnectionId,
+                              assetId: material.target.assetId,
+                            },
+                          }
+                        : {})}
                     />
                     <span className="regenerate-material__main">
                       <span className="regenerate-material__name" title={material.displayName}>

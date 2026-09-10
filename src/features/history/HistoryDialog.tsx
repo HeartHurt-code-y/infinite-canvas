@@ -18,6 +18,7 @@ import {
   type KeyboardEvent as ReactKeyboardEvent,
 } from "react";
 import {
+  canvasDocumentClient,
   formatBytes,
   formatRawBackendError,
   generationClient,
@@ -519,6 +520,26 @@ const HISTORY_TABS: readonly { readonly id: HistoryTab; readonly label: string }
   { id: "remoteVideo", label: "远程视频" },
 ];
 
+/** 历史记录范围：当前画布（默认）或全部画布。远程视频历史与画布无关，不参与切换。 */
+type HistoryScope = "canvas" | "all";
+
+const HISTORY_SCOPES: readonly { readonly id: HistoryScope; readonly label: string }[] = [
+  { id: "canvas", label: "当前画布" },
+  { id: "all", label: "全部画布" },
+];
+
+/**
+ * 生成任务列表的画布过滤：全部画布时显式传 null（后端 `(?1 IS NULL OR canvas_id = ?1)`
+ * 即不过滤），当前画布时沿用原有「有 canvasId 才带」的语义。
+ */
+function generationScopeQuery(
+  scope: HistoryScope,
+  canvasId: string | undefined,
+): { readonly canvasId: string | null } | { readonly canvasId?: string } {
+  if (scope === "all") return { canvasId: null };
+  return canvasId ? { canvasId } : {};
+}
+
 export function HistoryDialog({
   open,
   onClose,
@@ -556,6 +577,9 @@ export function HistoryDialog({
   const [remoteVideoVisited, setRemoteVideoVisited] = useState(initialTab === "remoteVideo");
   const linkedTaskIdRef = useRef<string | null>(null);
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
+  const [scope, setScope] = useState<HistoryScope>("canvas");
+  // 跨画布浏览时的归属标注：画布 id → 标题，切到「全部画布」时取一次本地画布清单。
+  const [canvasTitles, setCanvasTitles] = useState<ReadonlyMap<string, string>>(new Map());
   const [dateRange, setDateRange] = useState<HistoryDateRange>({});
   const [tasks, setTasks] = useState<readonly GenerationTaskSummary[]>([]);
   const [cursor, setCursor] = useState<number | null>(null);
@@ -587,7 +611,7 @@ export function HistoryDialog({
     void client
       .list({
         ...dateRange,
-        ...(canvasId ? { canvasId } : {}),
+        ...generationScopeQuery(scope, canvasId),
         statuses: statusFilterToStatuses(statusFilter),
         limit: HISTORY_PAGE_SIZE,
       })
@@ -614,7 +638,7 @@ export function HistoryDialog({
       // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 resetList 与下次请求递增，
       // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
-  }, [open, activeTab, statusFilter, dateRange, canvasId, client, listRevision]);
+  }, [open, activeTab, statusFilter, scope, dateRange, canvasId, client, listRevision]);
 
   const resetList = () => {
     ++listRequestRef.current;
@@ -629,6 +653,37 @@ export function HistoryDialog({
     setDetailError(null);
     setLightboxIndex(null);
   };
+
+  // 跨画布浏览需要画布名做归属标注：切到「全部画布」时取一次本地画布清单（不访问网络）。
+  useEffect(() => {
+    if (!open || scope !== "all") return;
+    let cancelled = false;
+    void canvasDocumentClient
+      .list()
+      .then((summaries) => {
+        if (cancelled) return;
+        setCanvasTitles(new Map(summaries.map((summary) => [summary.id, summary.title])));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [open, scope]);
+
+  /**
+   * 全部画布范围内的记录归属标注；当前画布范围返回 null（不显示）。
+   * 画布清单里没有的（已删除）退回短 id，避免多条记录都读作「未知画布」而无法区分。
+   */
+  const canvasLabel = useCallback(
+    (id: string): string | null => {
+      if (scope !== "all") return null;
+      const title = canvasTitles.get(id);
+      if (title != null && title !== "") return title;
+      if (canvasId != null && id === canvasId) return "当前画布";
+      return `画布 ${id.slice(0, 8)}`;
+    },
+    [scope, canvasTitles, canvasId],
+  );
 
   // 关闭时清空详情与浏览状态，避免下次打开闪现上一次的内容。
   // 清理放在关闭事件（而非 effect）中执行：setState 必须由事件驱动。
@@ -649,7 +704,7 @@ export function HistoryDialog({
     try {
       const page = await client.list({
         ...dateRange,
-        ...(canvasId ? { canvasId } : {}),
+        ...generationScopeQuery(scope, canvasId),
         statuses: statusFilterToStatuses(statusFilter),
         cursorCreatedBefore: cursor,
         limit: HISTORY_PAGE_SIZE,
@@ -663,7 +718,7 @@ export function HistoryDialog({
     } finally {
       if (requestId === listRequestRef.current) setListLoading(false);
     }
-  }, [client, cursor, listLoading, listLoaded, statusFilter, dateRange, canvasId]);
+  }, [client, cursor, listLoading, listLoaded, statusFilter, scope, dateRange, canvasId]);
 
   // 选中任务后加载完整详情（含尝试、供应商调用、结果与最终错误）。
   // 请求期间保留旧详情（标准主从布局），响应到达后整体替换。
@@ -836,6 +891,26 @@ export function HistoryDialog({
               </button>
             ))}
           </div>
+          {activeTab === "remoteVideo" ? null : (
+            <div className="history-scope" role="radiogroup" aria-label="历史记录范围">
+              {HISTORY_SCOPES.map((option) => (
+                <button
+                  key={option.id}
+                  type="button"
+                  role="radio"
+                  aria-checked={scope === option.id}
+                  className={`history-scope__option${scope === option.id ? " is-active" : ""}`}
+                  onClick={() => {
+                    if (scope === option.id) return;
+                    resetList();
+                    setScope(option.id);
+                  }}
+                >
+                  {option.label}
+                </button>
+              ))}
+            </div>
+          )}
           <button
             type="button"
             className="history-dialog__close"
@@ -851,7 +926,8 @@ export function HistoryDialog({
             <div id="workflow-history-panel" role="tabpanel" aria-labelledby="workflow-history-tab">
               <WorkflowHistoryPanel
                 client={workflowClient}
-                canvasId={canvasId}
+                canvasId={scope === "all" ? undefined : canvasId}
+                canvasLabel={canvasLabel}
                 initialWorkflowId={initialWorkflowId}
                 activeWorkflowIds={activeWorkflowIds}
                 {...(onResumeWorkflow ? { onResumeWorkflow } : {})}
@@ -920,6 +996,7 @@ export function HistoryDialog({
                   const operationTitle = OPERATION_LABELS[task.operation] ?? task.operation;
                   const modelTitle = task.remoteModelIdSnapshot ?? task.modelDefinitionId;
                   const listItemTitle = `${operationTitle} · ${modelTitle}（${TASK_STATUS_LABELS[task.status] ?? task.status}）`;
+                  const canvasName = canvasLabel(task.canvasId);
                   return (
                     <li key={task.id}>
                       <button
@@ -957,6 +1034,11 @@ export function HistoryDialog({
                           {operationTitle} · {modelTitle}
                         </span>
                         <span className="history-item__meta">
+                          {canvasName != null ? (
+                            <span className="history-item__canvas" title={`画布：${canvasName}`}>
+                              {canvasName}
+                            </span>
+                          ) : null}
                           {formatDateTime(task.createdAt)}
                           {task.completedAt != null && task.completedAt > task.createdAt
                             ? ` · 耗时 ${formatDuration(task.createdAt, task.completedAt) ?? "--"}`
@@ -1001,6 +1083,15 @@ export function HistoryDialog({
                       <dt>任务 ID</dt>
                       <dd className="history-mono">{summary.id}</dd>
                     </div>
+                    {scope === "all" ? (
+                      <div>
+                        <dt>画布</dt>
+                        <dd>
+                          {canvasLabel(summary.canvasId) ?? summary.canvasId}
+                          {summary.canvasId === canvasId ? null : "（重新生成会写回该画布）"}
+                        </dd>
+                      </div>
+                    ) : null}
                     <div>
                       <dt>状态</dt>
                       <dd>{TASK_STATUS_LABELS[summary.status] ?? summary.status}</dd>

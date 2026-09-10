@@ -80,6 +80,13 @@ function dragToCanvas(source: HTMLElement): void {
   });
 }
 
+/** 画布视口变换层当前的内联 transform（判断平移/缩放是否落到视口上）。 */
+function viewportTransform(): string {
+  const layer = document.querySelector<HTMLElement>(".react-flow__viewport");
+  expect(layer).not.toBeNull();
+  return layer!.style.transform.replace(/\s/g, "");
+}
+
 function deferred<T>(): {
   readonly promise: Promise<T>;
   readonly resolve: (value: T) => void;
@@ -314,7 +321,8 @@ describe("App workspace", () => {
     fireEvent.click(card);
 
     // 素材详情弹窗按需懒加载（deferredDialogs），首次打开需等待模块就绪。
-    const dialog = await screen.findByRole("dialog", { name: "林遥·角色正面" });
+    // 动态 import 在并行全量运行下可能超过默认 1s 轮询窗口，与既有懒加载弹窗用例一致放宽。
+    const dialog = await screen.findByRole("dialog", { name: "林遥·角色正面" }, { timeout: 5_000 });
     expect(dialog).toBeInTheDocument();
     expect(within(dialog).getByText("asset-image-01")).toBeInTheDocument();
     expect(within(dialog).getByText("云端素材库")).toBeInTheDocument();
@@ -521,6 +529,29 @@ describe("App workspace", () => {
     const viewportLayer = document.querySelector<HTMLElement>(".react-flow__viewport");
     expect(viewportLayer).not.toBeNull();
     expect(viewportLayer!.style.transform.replace(/\s/g, "")).toContain("translate(60px,40px)");
+  });
+
+  it("returns the canvas to its starting position from the viewport home control", async () => {
+    render(<App />);
+    await waitFor(() => expect(screen.queryByText("正在读取画布…")).not.toBeInTheDocument());
+
+    // 先平移离开起始位置：React Flow 的平移手势落在 pane 上（同「拖拽空白处平移」用例）。
+    const pane = document.querySelector<HTMLElement>(".react-flow__pane");
+    expect(pane).not.toBeNull();
+    fireCanvasMouse(pane!, "mousedown", { clientX: 300, clientY: 200 });
+    fireCanvasMouse(document, "mousemove", { clientX: 360, clientY: 240 });
+    fireCanvasMouse(document, "mouseup", { clientX: 360, clientY: 240 });
+    expect(viewportTransform()).toContain("translate(60px,40px)");
+    // 手势结束后 onMoveEnd 才把 RF 视口（默认 100%）回写 store：读数从 DEFAULT_ZOOM 变为
+    // 100% 即代表初始化/手势窗口已结束，此时再点按钮，命令式视口变化的动画才会真正落点。
+    await screen.findByText("100%");
+
+    fireEvent.click(screen.getByRole("button", { name: "回到画布起始位置" }));
+
+    // 起始视口 = 原点对齐视口左上角 + DEFAULT_ZOOM；落点同样由 onMoveEnd 同步回 store。
+    await waitFor(() => expect(viewportTransform()).toContain("scale(0.74)"));
+    expect(viewportTransform()).toContain("translate(0px,0px)");
+    expect(screen.getByText("74%")).toBeInTheDocument();
   });
 
   // 任务状态/原始返回展示已从画布下方状态栏（TaskDock）迁移到生成产物卡片：

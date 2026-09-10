@@ -8,6 +8,8 @@ import type {
 } from "../../lib/backend";
 import { HistoryDialog } from "./HistoryDialog";
 
+const DESKTOP_INTERNALS_KEY = "__TAURI_INTERNALS__";
+
 const SUMMARY: GenerationTaskSummary = {
   id: "task-failed-1",
   canvasId: "canvas-1",
@@ -126,6 +128,85 @@ describe("HistoryDialog diagnostics", () => {
     await screen.findByText("没有符合条件的任务。");
     expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-2", statuses: null, limit: 30 });
     expect(screen.queryByText("文生图 · image-model")).not.toBeInTheDocument();
+  });
+
+  it("切到「全部画布」后不再按画布过滤，并逐行标注归属画布", async () => {
+    const invoke = vi.fn((...call: readonly unknown[]) => {
+      if (call[0] === "list_canvas_documents") {
+        return Promise.resolve([
+          { id: "canvas-1", title: "画布甲", revision: 1, createdAt: 0, updatedAt: 0 },
+          { id: "canvas-2", title: "画布乙", revision: 1, createdAt: 0, updatedAt: 0 },
+        ]);
+      }
+      return Promise.resolve(null);
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    const client = createClient();
+    const list = vi.mocked(client.list);
+    vi.mocked(client.get).mockImplementation((id) =>
+      Promise.resolve(
+        id === "task-2"
+          ? { ...DETAIL, summary: { ...SUMMARY, id: "task-2", canvasId: "canvas-2" } }
+          : DETAIL,
+      ),
+    );
+    list.mockResolvedValueOnce({ items: [SUMMARY], nextCursorCreatedBefore: null });
+    try {
+      render(<HistoryDialog open onClose={vi.fn()} client={client} canvasId="canvas-1" />);
+
+      // 默认仍是当前画布：查询带 canvasId，行上不做归属标注。
+      await waitFor(() => expect(document.querySelector(".history-item")).not.toBeNull());
+      expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-1", statuses: null, limit: 30 });
+      expect(document.querySelector(".history-item__canvas")).toBeNull();
+      expect(screen.queryByText("画布", { selector: "dt" })).not.toBeInTheDocument();
+      expect(invoke.mock.calls.some(([command]) => command === "list_canvas_documents")).toBe(
+        false,
+      );
+
+      // 切到全部画布：canvasId 传 null（后端不过滤），并取一次画布清单做标注。
+      list.mockResolvedValue({
+        items: [SUMMARY, { ...SUMMARY, id: "task-2", canvasId: "canvas-2" }],
+        nextCursorCreatedBefore: null,
+      });
+      fireEvent.click(screen.getByRole("radio", { name: "全部画布" }));
+      await waitFor(() =>
+        expect(list).toHaveBeenLastCalledWith({ canvasId: null, statuses: null, limit: 30 }),
+      );
+      const taskList = screen.getByLabelText("任务列表");
+      await waitFor(() => expect(within(taskList).getByText("画布乙")).toBeInTheDocument());
+      expect(within(taskList).getByText("画布甲")).toBeInTheDocument();
+      expect(invoke.mock.calls.some(([command]) => command === "list_canvas_documents")).toBe(true);
+      // 详情页也补一行归属画布，避免跨画布打开记录时看不出它属于哪张画布。
+      await waitFor(() =>
+        expect(
+          within(screen.getByLabelText("任务详情")).getByText("画布", { selector: "dt" }),
+        ).toBeInTheDocument(),
+      );
+
+      // 选中属于另一张画布的记录：明确提示重新生成会写回该画布，而不是当前画布。
+      const items = within(taskList).getAllByRole("listitem");
+      fireEvent.click(within(items[1]!).getByRole("button"));
+      await waitFor(() =>
+        expect(
+          within(screen.getByLabelText("任务详情")).getByText(/重新生成会写回该画布/),
+        ).toBeInTheDocument(),
+      );
+
+      // 切回当前画布：过滤与标注同步收回。
+      fireEvent.click(screen.getByRole("radio", { name: "当前画布" }));
+      await waitFor(() =>
+        expect(list).toHaveBeenLastCalledWith({ canvasId: "canvas-1", statuses: null, limit: 30 }),
+      );
+      await waitFor(() => expect(document.querySelector(".history-item__canvas")).toBeNull());
+    } finally {
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
   });
 
   it("queries creation time in local time, carries the range into pagination, and resets it", async () => {
@@ -519,6 +600,112 @@ describe("HistoryDialog regeneration", () => {
       url: "https://example.com/reference",
       mediaType: "image",
     });
+  });
+
+  it("云端素材不在素材库列表里时按素材身份单独取预览地址", async () => {
+    const invoke = vi.fn((...call: readonly unknown[]) => {
+      switch (call[0]) {
+        case "list_assets":
+          // 素材库首屏不包含该任务引用的素材（长尾素材、或来自其他素材库连接）。
+          return Promise.resolve([]);
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 0,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
+        case "refresh_asset_media":
+          return Promise.resolve("https://cdn.example.com/recovered.jpg?sign=fresh");
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    try {
+      render(<HistoryDialog open onClose={vi.fn()} client={createClient(REGEN_DETAIL)} />);
+      await screen.findByText("任务概要");
+      fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+      const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+      await within(dialog).findByText("参考图A");
+
+      // 兜底按素材自身身份（连接 + 素材 id）取签名地址，而不是依赖列表分页覆盖。
+      await waitFor(() => {
+        expect(dialog.querySelector(".regenerate-material__thumb img")).toHaveAttribute(
+          "src",
+          expect.stringContaining(encodeURIComponent("https://cdn.example.com/recovered.jpg")),
+        );
+      });
+      const refresh = invoke.mock.calls.find(([command]) => command === "refresh_asset_media");
+      expect(refresh?.[1]).toEqual({
+        command: { providerConnectionId: "provider-1", id: "asset-1", mediaType: "image" },
+      });
+    } finally {
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
+  });
+
+  it("云端素材已在素材库列表里时直接用列表地址，不再单独请求", async () => {
+    const invoke = vi.fn((...call: readonly unknown[]) => {
+      switch (call[0]) {
+        case "list_assets":
+          return Promise.resolve([
+            {
+              providerConnectionId: "provider-1",
+              id: "asset-1",
+              name: "参考图A",
+              kind: "image",
+              status: "ready",
+              rawStatus: "Active",
+              previewUrl: "https://cdn.example.com/listed.jpg",
+              assetUrl: "https://cdn.example.com/listed.jpg",
+              coverUrl: null,
+              groupId: null,
+            },
+          ]);
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 0,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    try {
+      render(<HistoryDialog open onClose={vi.fn()} client={createClient(REGEN_DETAIL)} />);
+      await screen.findByText("任务概要");
+      fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+      const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+
+      await waitFor(() => {
+        expect(dialog.querySelector(".regenerate-material__thumb img")).toHaveAttribute(
+          "src",
+          expect.stringContaining(encodeURIComponent("https://cdn.example.com/listed.jpg")),
+        );
+      });
+      // 已有列表地址就不触发兜底请求，避免每次打开弹窗都打一轮素材详情接口。
+      expect(invoke.mock.calls.some(([command]) => command === "refresh_asset_media")).toBe(false);
+    } finally {
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
   });
 
   it("shows a snapshot warning for tasks without a usable frozen request", async () => {

@@ -2753,6 +2753,43 @@ svg[data-spin="true"] {
   bottom: calc(100% + var(--space-xs));
 }
 
+/* 回到起始位置控件：同样式 chrome，置于撤销/重做控件左侧
+   （偏移 = 边距 + 缩放 9rem + 撤销/重做 4.5rem + 4px 边框 + 两处组间距）。 */
+.canvas-home-control {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  right: calc(var(--space-md) + 9rem + 4.5rem + 4 * var(--rule-thin) + 2 * var(--space-2xs));
+  bottom: var(--size-zoom-collapsed-offset);
+  display: grid;
+  grid-template-columns: 2.25rem;
+  min-height: 2.25rem;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome);
+  border: var(--rule-thin) solid var(--color-chrome-field);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-whisper);
+}
+
+.canvas-home-control button {
+  display: grid;
+  padding: 0;
+  color: inherit;
+  background: var(--color-transparent);
+  border: 0;
+  place-items: center;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .canvas-home-control button:hover {
+    background: var(--color-chrome-3);
+  }
+}
+
+.canvas-home-control [data-tooltip]::after {
+  top: auto;
+  bottom: calc(100% + var(--space-xs));
+}
+
 .settings-layer {
   position: fixed;
   z-index: var(--z-toast);
@@ -9406,6 +9443,7 @@ svg[data-spin="true"] {
   .asset-origin select,
   .zoom-control button,
   .canvas-history-control button,
+  .canvas-home-control button,
   .primary-action,
   .asset-search,
   .settings-dialog__close,
@@ -9433,7 +9471,8 @@ svg[data-spin="true"] {
   .mobile-panel-close,
   .asset-search__clear,
   .zoom-control button,
-  .canvas-history-control button {
+  .canvas-history-control button,
+  .canvas-home-control button {
     min-width: var(--size-control-touch);
   }
 }
@@ -10485,6 +10524,49 @@ svg[data-spin="true"] {
 
 .history-tabs button.is-active::after {
   opacity: 1;
+}
+
+/* 历史记录范围：当前画布 / 全部画布（跨画布浏览时行内标注归属画布） */
+.history-scope {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: var(--space-sm);
+  padding: 2px;
+  background: var(--color-chrome-field);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+}
+
+.history-scope__option {
+  min-height: calc(var(--size-control) * 0.8);
+  padding-inline: var(--space-sm);
+  color: var(--color-chrome-subtle);
+  background: var(--color-transparent);
+  border: var(--rule-thin) solid var(--color-transparent);
+  border-radius: calc(var(--radius-control) * 0.8);
+  font-family: var(--font-display);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+}
+
+.history-scope__option.is-active {
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-3);
+  border-color: var(--color-accent);
+}
+
+.history-item__canvas {
+  display: inline-block;
+  max-width: 9rem;
+  margin-inline-end: var(--space-3xs);
+  padding-inline: 4px;
+  overflow: hidden;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-3);
+  border-radius: 4px;
+  text-overflow: ellipsis;
+  vertical-align: middle;
+  white-space: nowrap;
 }
 
 .history-dialog__body {

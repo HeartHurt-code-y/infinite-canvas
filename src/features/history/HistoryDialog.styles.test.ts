@@ -39,4 +39,19 @@ describe("HistoryDialog visual contracts", () => {
     expect(mediaRule).toMatch(/max-height:\s*calc\(100dvh\s*-\s*[^)]+\)/);
     expect(mediaRule).toMatch(/object-fit:\s*contain/);
   });
+
+  it("keeps the cross-canvas scope switch and canvas chip readable on dark chrome", () => {
+    expect(cssRule(appCss, ".history-scope__option")).toMatch(
+      /color:\s*var\(--color-chrome-subtle\)/,
+    );
+    expect(cssRule(appCss, ".history-scope__option.is-active")).toMatch(
+      /color:\s*var\(--color-chrome-ink\)/,
+    );
+
+    // 归属画布是行内小徽标：必须自带墨色与底色，否则落回继承色在深色列表里读不出来。
+    const canvasChip = cssRule(appCss, ".history-item__canvas");
+    expect(canvasChip).toMatch(/color:\s*var\(--color-chrome-ink\)/);
+    expect(canvasChip).toMatch(/background:\s*var\(--color-chrome-3\)/);
+    expect(canvasChip).toMatch(/text-overflow:\s*ellipsis/);
+  });
 });

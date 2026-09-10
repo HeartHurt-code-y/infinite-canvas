@@ -4,6 +4,7 @@ import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwi
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { Clock } from "@phosphor-icons/react/Clock";
 import { CornersOut } from "@phosphor-icons/react/CornersOut";
+import { CrosshairSimple } from "@phosphor-icons/react/CrosshairSimple";
 import { GearSix } from "@phosphor-icons/react/GearSix";
 import { Minus } from "@phosphor-icons/react/Minus";
 import { Plus } from "@phosphor-icons/react/Plus";
@@ -4276,6 +4277,20 @@ export function WorkspaceApp({
     [setView],
   );
 
+  /**
+   * 回到画布起始位置：平移回原点并恢复默认缩放，与新建画布的初始视口一致
+   * （原点在视口左上角、缩放为 DEFAULT_ZOOM）。落点同样由 onMoveEnd 同步回 store。
+   */
+  const resetCanvasViewport = useCallback(() => {
+    const instance = flowInstanceRef.current;
+    if (instance == null) {
+      // 实例尚未就绪（理论仅在挂载前）：先同步展示层，挂载后由 onInit 应用视图。
+      setView({ zoom: DEFAULT_ZOOM, pan: { x: 0, y: 0 } });
+      return;
+    }
+    void instance.setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 }, { duration: 200 });
+  }, [setView]);
+
   const queryClient = useQueryClient();
   // 对未到达终态的上传任务轮询 get_staging_job，驱动进度条实时刷新。
   // 查询 key 随活动任务集合变化：全部到达终态后集合为空，轮询自动停止；
@@ -8179,6 +8194,17 @@ export function WorkspaceApp({
                 <span>从左侧节点仓库拖入生成节点，或从素材库拖入素材开始创作。</span>
               </div>
             ) : null}
+          </div>
+
+          <div className="canvas-home-control" role="group" aria-label="画布视图归位">
+            <button
+              type="button"
+              aria-label="回到画布起始位置"
+              data-tooltip="回到起始位置"
+              onClick={resetCanvasViewport}
+            >
+              <CrosshairSimple size={16} weight="bold" aria-hidden="true" />
+            </button>
           </div>
 
           <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
