@@ -948,6 +948,8 @@ impl AssetLibrary {
                 .await;
         }
         // 魔芋方言：`POST /v1/assets/groups/delete`，请求体为 `{"id": <group id>}`。
+        // 上游 `DeleteAssetGroupRequest.id` 为 int 类型（`id > 0` 删除指定分组，
+        // `id = -2` 删除所有历史分组），必须传数字而非字符串。
         let id = command.id.trim();
         if id.is_empty() {
             return Err(BackendError::validation(
@@ -955,13 +957,19 @@ impl AssetLibrary {
                 json!({ "field": "id" }),
             ));
         }
+        let group_id: i64 = id.parse().map_err(|_| {
+            BackendError::validation(
+                "asset group id must be an integer",
+                json!({ "field": "id", "value": id }),
+            )
+        })?;
         let response = self
             .port
             .send(RemoteAssetRequest {
                 provider_connection_id: command.provider_connection_id,
                 method: Method::POST,
                 path: "/v1/assets/groups/delete",
-                body: Some(json!({ "id": id })),
+                body: Some(json!({ "id": group_id })),
             })
             .await?;
         // 删除为幂等操作：分组已不存在（HTTP 404）时按成功处理。
@@ -3634,7 +3642,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/v1/assets/groups/delete");
         assert_eq!(requests[0].method, Method::POST);
-        assert_eq!(requests[0].body, Some(json!({ "id": "8" })));
+        assert_eq!(requests[0].body, Some(json!({ "id": 8 })));
     }
 
     #[tokio::test]
@@ -3657,7 +3665,7 @@ mod tests {
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].path, "/v1/assets/groups/delete");
-        assert_eq!(requests[0].body, Some(json!({ "id": "99" })));
+        assert_eq!(requests[0].body, Some(json!({ "id": 99 })));
     }
 
     #[tokio::test]
@@ -3674,6 +3682,22 @@ mod tests {
             .expect_err("empty group id must be rejected before any request");
 
         assert!(error.to_string().contains("group id"));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_group_rejects_a_non_integer_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(adapter, immediate_poll());
+
+        let error = library
+            .delete_asset_group(DeleteAssetGroupCommand {
+                provider_connection_id: "provider-1".into(),
+                id: "asset-group-1".into(),
+            })
+            .await
+            .expect_err("non-integer group id must be rejected before any request");
+
+        assert!(error.to_string().contains("integer"));
     }
 
     #[tokio::test]
