@@ -61,16 +61,18 @@ use super::{
 
 mod reference_inputs;
 
-/// Seedance 2.0 提示词优化技能目录（byted-ark-seedance-pe）。
-pub const SEEDANCE_20_SKILL_DIR: &str =
-    r"C:\Users\bp180\Desktop\byted-ark-seedance-pe(4)\byted-ark-seedance-pe";
-/// Seedance 2.5 提示词生成与优化技能目录（seedance-2.5-prompt）。
-pub const SEEDANCE_25_SKILL_DIR: &str = r"C:\Users\bp180\Desktop\seedance-2.5-prompt";
-/// 万相 3.0 提示词生成与优化技能目录（wan3-prompt-skill，含嵌套技能根目录）。
-pub const WAN30_SKILL_DIR: &str = r"C:\Users\bp180\Desktop\wan3-prompt-skill\wan3-prompt-skill";
-/// 人物真实感图片提示词生成技能目录（realistic-character-prompt）。
-pub const REALISTIC_CHARACTER_SKILL_DIR: &str =
-    r"C:\Users\bp180\Desktop\realistic-character-prompt";
+/// Seedance 2.0 提示词优化技能（byted-ark-seedance-pe）随应用编译。
+///
+/// 历史值曾指向开发机桌面绝对路径，打包后在客户端必然 not_found。现统一改为
+/// `builtin://` 哨兵，由 `load_skill_system_prompt` 走 `include_str!` 内嵌路径。
+/// 常量保留为 ABI 兼容入口，外部代码仍可拿到稳定的技能标识。
+pub const SEEDANCE_20_SKILL_DIR: &str = "builtin://byted-ark-seedance-pe";
+/// Seedance 2.5 提示词生成与优化技能（seedance-2.5-prompt）随应用编译。
+pub const SEEDANCE_25_SKILL_DIR: &str = "builtin://seedance-2.5-prompt";
+/// 万相 3.0 提示词生成与优化技能（wan3-prompt-skill）随应用编译。
+pub const WAN30_SKILL_DIR: &str = "builtin://wan3-prompt-skill";
+/// 人物真实感图片提示词生成技能（realistic-character-prompt）随应用编译。
+pub const REALISTIC_CHARACTER_SKILL_DIR: &str = "builtin://realistic-character-prompt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -524,6 +526,21 @@ pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<S
     if mode == PromptOptimizationMode::ViralRemix {
         return Ok(load_builtin_viral_remix_system_prompt());
     }
+    if mode == PromptOptimizationMode::Seedance20 {
+        return Ok(load_builtin_seedance_20_system_prompt());
+    }
+    if mode == PromptOptimizationMode::Seedance25 {
+        return Ok(load_builtin_seedance_25_system_prompt());
+    }
+    if mode == PromptOptimizationMode::Wan30 {
+        return Ok(load_builtin_wan30_system_prompt());
+    }
+    if mode == PromptOptimizationMode::RealisticCharacter {
+        return Ok(load_builtin_realistic_character_system_prompt());
+    }
+    // 兜底：未来若新增未走内置分支的模式，会在这里被运行时捕获并以显式
+    // NotFound 错误终止；测试 `no_backend_source_hardcodes_developer_machine_paths`
+    // 与 `*_loads_builtin_skill_without_host_path` 共同锁死所有现有模式均不走到这里。
     let root = Path::new(mode.skill_dir());
     let files = collect_skill_markdown_files(root)?;
     let mut sections = Vec::with_capacity(files.len() + 1);
@@ -2796,9 +2813,471 @@ pub async fn optimize_video_prompt(
     Ok(result)
 }
 
+/// 把编译内置技能的多份文档拼装为系统提示词。
+///
+/// 与运行期 `collect_skill_markdown_files` + 末尾拼装逻辑保持完全一致：首行
+/// `以下是完整的提示词工程技能（目录 {root}）…`，随后每份文档以
+/// `---\n# 技能文档：{relative}\n\n{content}` 分隔，最后用 `\n\n` 连接，
+/// 并以 `info!` 上报「文件数 + 总字节数」。这样磁盘读取路径和编译内嵌路径
+/// 送入文本模型的系统提示词保持字节级一致，避免行为漂移。
+fn join_skill_sections(
+    mode: PromptOptimizationMode,
+    root: &str,
+    documents: &[(&str, &str)],
+) -> String {
+    let mut sections = Vec::with_capacity(documents.len() + 1);
+    sections.push(format!(
+        "以下是完整的提示词工程技能（目录 {root}），你必须严格按照技能中的规范执行任务。"
+    ));
+    let mut total_bytes = 0usize;
+    for (relative, content) in documents {
+        total_bytes += content.len();
+        sections.push(format!("---\n# 技能文档：{relative}\n\n{content}"));
+    }
+    info!(
+        "[generation] 提示词优化技能加载完成: mode={}, 文件数={}, 总字节数={}",
+        mode.as_str(),
+        documents.len(),
+        total_bytes
+    );
+    sections.join("\n\n")
+}
+
+/// Seedance 2.0 提示词优化技能（byted-ark-seedance-pe）整包随应用编译，
+/// 不再依赖开发机桌面目录；原桌面绝对路径已迁移到 `include_str!` 内嵌，
+/// 打包后客户端不再触发 `skill directory is missing SKILL.md`。
+fn load_builtin_seedance_20_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/byted-ark-seedance-pe/SKILL.md"),
+        ),
+        (
+            "references/api-doc-rules.md",
+            include_str!("../../skills/byted-ark-seedance-pe/references/api-doc-rules.md"),
+        ),
+        (
+            "references/business-guide-examples.md",
+            include_str!(
+                "../../skills/byted-ark-seedance-pe/references/business-guide-examples.md"
+            ),
+        ),
+        (
+            "references/engineering-prompt-methodology.md",
+            include_str!(
+                "../../skills/byted-ark-seedance-pe/references/engineering-prompt-methodology.md"
+            ),
+        ),
+        (
+            "references/prompt-guide.md",
+            include_str!("../../skills/byted-ark-seedance-pe/references/prompt-guide.md"),
+        ),
+        (
+            "references/seedance-2-troubleshooting-guide.md",
+            include_str!(
+                "../../skills/byted-ark-seedance-pe/references/seedance-2-troubleshooting-guide.md"
+            ),
+        ),
+        (
+            "references/typical-effect-cases.md",
+            include_str!("../../skills/byted-ark-seedance-pe/references/typical-effect-cases.md"),
+        ),
+    ];
+    join_skill_sections(
+        PromptOptimizationMode::Seedance20,
+        SEEDANCE_20_SKILL_DIR,
+        DOCUMENTS,
+    )
+}
+
+/// Seedance 2.5 提示词生成与优化技能（seedance-2.5-prompt）整包随应用编译。
+fn load_builtin_seedance_25_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/seedance-2.5-prompt/SKILL.md"),
+        ),
+        (
+            "assets/templates.md",
+            include_str!("../../skills/seedance-2.5-prompt/assets/templates.md"),
+        ),
+        (
+            "references/01-core-formula.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/01-core-formula.md"),
+        ),
+        (
+            "references/02-assets-routing.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/02-assets-routing.md"),
+        ),
+        (
+            "references/03-long-video-timing.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/03-long-video-timing.md"),
+        ),
+        (
+            "references/04-edit-extend-keyframe.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/04-edit-extend-keyframe.md"),
+        ),
+        (
+            "references/05-advanced-playbook.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/05-advanced-playbook.md"),
+        ),
+        (
+            "references/06-camera-and-emotion.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/06-camera-and-emotion.md"),
+        ),
+        (
+            "references/07-checklist-and-limits.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/07-checklist-and-limits.md"),
+        ),
+        (
+            "references/08-official-examples.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/08-official-examples.md"),
+        ),
+        (
+            "references/09-timed-script-prompter.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/09-timed-script-prompter.md"),
+        ),
+        (
+            "references/10-pe-discipline.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/10-pe-discipline.md"),
+        ),
+        (
+            "references/11-api-compat.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/11-api-compat.md"),
+        ),
+        (
+            "references/12-fight-combat.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/12-fight-combat.md"),
+        ),
+        (
+            "references/13-fight-clusters.md",
+            include_str!("../../skills/seedance-2.5-prompt/references/13-fight-clusters.md"),
+        ),
+    ];
+    join_skill_sections(
+        PromptOptimizationMode::Seedance25,
+        SEEDANCE_25_SKILL_DIR,
+        DOCUMENTS,
+    )
+}
+
+/// 万相 3.0 提示词生成与优化技能（wan3-prompt-skill）整包随应用编译。
+fn load_builtin_wan30_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/wan3-prompt-skill/SKILL.md"),
+        ),
+        (
+            "assets/dictionary.md",
+            include_str!("../../skills/wan3-prompt-skill/assets/dictionary.md"),
+        ),
+        (
+            "assets/templates.md",
+            include_str!("../../skills/wan3-prompt-skill/assets/templates.md"),
+        ),
+        (
+            "references/01-official-api.md",
+            include_str!("../../skills/wan3-prompt-skill/references/01-official-api.md"),
+        ),
+        (
+            "references/02-formula-families.md",
+            include_str!("../../skills/wan3-prompt-skill/references/02-formula-families.md"),
+        ),
+        (
+            "references/03-scene-templates.md",
+            include_str!("../../skills/wan3-prompt-skill/references/03-scene-templates.md"),
+        ),
+    ];
+    join_skill_sections(PromptOptimizationMode::Wan30, WAN30_SKILL_DIR, DOCUMENTS)
+}
+
+/// 人物真实感图片提示词生成技能（realistic-character-prompt）整包随应用编译。
+fn load_builtin_realistic_character_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/realistic-character-prompt/SKILL.md"),
+        ),
+        (
+            "references/skin-realism-guide.md",
+            include_str!(
+                "../../skills/realistic-character-prompt/references/skin-realism-guide.md"
+            ),
+        ),
+    ];
+    join_skill_sections(
+        PromptOptimizationMode::RealisticCharacter,
+        REALISTIC_CHARACTER_SKILL_DIR,
+        DOCUMENTS,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn seedance_20_loads_builtin_skill_without_host_path() {
+        let prompt = load_skill_system_prompt(PromptOptimizationMode::Seedance20).unwrap();
+        assert!(
+            prompt
+                .starts_with("以下是完整的提示词工程技能（目录 builtin://byted-ark-seedance-pe）")
+        );
+        assert!(prompt.contains("针对用户提供的原始视频提示词"));
+        for required in [
+            "SKILL.md",
+            "references/api-doc-rules.md",
+            "references/business-guide-examples.md",
+            "references/engineering-prompt-methodology.md",
+            "references/prompt-guide.md",
+            "references/seedance-2-troubleshooting-guide.md",
+            "references/typical-effect-cases.md",
+        ] {
+            assert!(
+                prompt.contains(&format!("技能文档：{required}")),
+                "missing embedded section: {required}"
+            );
+        }
+        let skill_idx = prompt.find("技能文档：SKILL.md");
+        let first_ref_idx = prompt.find("技能文档：references/api-doc-rules.md");
+        assert!(skill_idx.is_some() && first_ref_idx.is_some());
+        assert!(skill_idx.unwrap() < first_ref_idx.unwrap());
+        assert!(!prompt.contains(r"C:\Users"));
+        assert_eq!(
+            PromptOptimizationMode::Seedance20.skill_dir(),
+            "builtin://byted-ark-seedance-pe"
+        );
+    }
+
+    #[test]
+    fn seedance_25_loads_builtin_skill_without_host_path() {
+        let prompt = load_skill_system_prompt(PromptOptimizationMode::Seedance25).unwrap();
+        assert!(prompt.contains("builtin://seedance-2.5-prompt"));
+        assert!(prompt.contains("# Doubao-Seedance 2.5 提示词生成与优化 Skill"));
+        for required in [
+            "SKILL.md",
+            "assets/templates.md",
+            "references/01-core-formula.md",
+            "references/13-fight-clusters.md",
+        ] {
+            assert!(
+                prompt.contains(&format!("技能文档：{required}")),
+                "missing embedded section: {required}"
+            );
+        }
+        let skill_idx = prompt.find("技能文档：SKILL.md");
+        let first_ref_idx = prompt.find("技能文档：assets/templates.md");
+        assert!(skill_idx.is_some() && first_ref_idx.is_some());
+        assert!(skill_idx.unwrap() < first_ref_idx.unwrap());
+        assert!(!prompt.contains(r"C:\Users"));
+        assert_eq!(
+            PromptOptimizationMode::Seedance25.skill_dir(),
+            "builtin://seedance-2.5-prompt"
+        );
+    }
+
+    #[test]
+    fn wan30_loads_builtin_skill_without_host_path() {
+        let prompt = load_skill_system_prompt(PromptOptimizationMode::Wan30).unwrap();
+        assert!(prompt.contains("builtin://wan3-prompt-skill"));
+        assert!(prompt.contains("# 万相3.0 (Wan3.0 / wan3.0-video) 提示词生成与优化 Skill"));
+        for required in [
+            "SKILL.md",
+            "assets/dictionary.md",
+            "assets/templates.md",
+            "references/01-official-api.md",
+            "references/03-scene-templates.md",
+        ] {
+            assert!(
+                prompt.contains(&format!("技能文档：{required}")),
+                "missing embedded section: {required}"
+            );
+        }
+        assert!(!prompt.contains(r"C:\Users"));
+        assert_eq!(
+            PromptOptimizationMode::Wan30.skill_dir(),
+            "builtin://wan3-prompt-skill"
+        );
+    }
+
+    #[test]
+    fn realistic_character_loads_builtin_skill_without_host_path() {
+        let prompt = load_skill_system_prompt(PromptOptimizationMode::RealisticCharacter).unwrap();
+        assert!(prompt.contains("builtin://realistic-character-prompt"));
+        assert!(prompt.contains("# 真实感AI人物提示词生成技能"));
+        for required in ["SKILL.md", "references/skin-realism-guide.md"] {
+            assert!(
+                prompt.contains(&format!("技能文档：{required}")),
+                "missing embedded section: {required}"
+            );
+        }
+        assert!(!prompt.contains(r"C:\Users"));
+        assert_eq!(
+            PromptOptimizationMode::RealisticCharacter.skill_dir(),
+            "builtin://realistic-character-prompt"
+        );
+    }
+
+    /// 兜底：枚举全部 44 个模式，逐个断言 `skill_dir()` 走 `builtin://` 哨兵
+    /// 且 `load_skill_system_prompt()` 不触磁盘即可返回非空系统提示词。
+    /// 编译期强制穷尽：`assert_mode_skill_dir_in_sync` 收到新增变体会编译失败。
+    #[test]
+    fn every_prompt_mode_is_builtin_and_loads_without_filesystem() {
+        // 编译期强制穷尽：新增模式若未登记到本函数会编译失败，必须补 `builtin://` 哨兵。
+        fn assert_mode_skill_dir_in_sync(mode: PromptOptimizationMode) -> &'static str {
+            match mode {
+                PromptOptimizationMode::Seedance20
+                | PromptOptimizationMode::Seedance25
+                | PromptOptimizationMode::Wan30
+                | PromptOptimizationMode::MiniMaxH3
+                | PromptOptimizationMode::FpvPath
+                | PromptOptimizationMode::FightPromptMaster
+                | PromptOptimizationMode::MultiGridStoryboard
+                | PromptOptimizationMode::StoryboardPrompt
+                | PromptOptimizationMode::RealisticCharacter
+                | PromptOptimizationMode::Screenplay
+                | PromptOptimizationMode::Storyboard
+                | PromptOptimizationMode::KnowledgeVideoDirector
+                | PromptOptimizationMode::KnowledgeVideoQc
+                | PromptOptimizationMode::AiFilmRouter
+                | PromptOptimizationMode::AiFilmSynopsis
+                | PromptOptimizationMode::AiFilmCharacters
+                | PromptOptimizationMode::AiFilmWorldbuilding
+                | PromptOptimizationMode::AiFilmTreatment
+                | PromptOptimizationMode::AiFilmScreenplay
+                | PromptOptimizationMode::AiFilmAssets
+                | PromptOptimizationMode::AiFilmActing
+                | PromptOptimizationMode::AiFilmPrompts
+                | PromptOptimizationMode::AiFilmQc
+                | PromptOptimizationMode::ComicDramaDirector
+                | PromptOptimizationMode::ComicDramaArt
+                | PromptOptimizationMode::ComicDramaStoryboard
+                | PromptOptimizationMode::ComicDramaDirectorReview
+                | PromptOptimizationMode::ComicDramaArtReview
+                | PromptOptimizationMode::ComicDramaStoryboardReview
+                | PromptOptimizationMode::ComicDramaContentReview
+                | PromptOptimizationMode::CommerceResearch
+                | PromptOptimizationMode::CommerceCreative
+                | PromptOptimizationMode::CommerceScript
+                | PromptOptimizationMode::CommerceStoryboard
+                | PromptOptimizationMode::CommerceAssets
+                | PromptOptimizationMode::CommerceQuick
+                | PromptOptimizationMode::CommerceReview
+                | PromptOptimizationMode::RemotionPlanner
+                | PromptOptimizationMode::RemotionReview
+                | PromptOptimizationMode::XhsCoverPlan
+                | PromptOptimizationMode::XhsCoverQc
+                | PromptOptimizationMode::ReverseVideoAnalysis
+                | PromptOptimizationMode::ReverseVideoReview
+                | PromptOptimizationMode::ViralRemix => mode.skill_dir(),
+            }
+        }
+        const MODES: &[PromptOptimizationMode] = &[
+            PromptOptimizationMode::Seedance20,
+            PromptOptimizationMode::Seedance25,
+            PromptOptimizationMode::Wan30,
+            PromptOptimizationMode::MiniMaxH3,
+            PromptOptimizationMode::FpvPath,
+            PromptOptimizationMode::FightPromptMaster,
+            PromptOptimizationMode::MultiGridStoryboard,
+            PromptOptimizationMode::StoryboardPrompt,
+            PromptOptimizationMode::RealisticCharacter,
+            PromptOptimizationMode::Screenplay,
+            PromptOptimizationMode::Storyboard,
+            PromptOptimizationMode::KnowledgeVideoDirector,
+            PromptOptimizationMode::KnowledgeVideoQc,
+            PromptOptimizationMode::AiFilmRouter,
+            PromptOptimizationMode::AiFilmSynopsis,
+            PromptOptimizationMode::AiFilmCharacters,
+            PromptOptimizationMode::AiFilmWorldbuilding,
+            PromptOptimizationMode::AiFilmTreatment,
+            PromptOptimizationMode::AiFilmScreenplay,
+            PromptOptimizationMode::AiFilmAssets,
+            PromptOptimizationMode::AiFilmActing,
+            PromptOptimizationMode::AiFilmPrompts,
+            PromptOptimizationMode::AiFilmQc,
+            PromptOptimizationMode::ComicDramaDirector,
+            PromptOptimizationMode::ComicDramaArt,
+            PromptOptimizationMode::ComicDramaStoryboard,
+            PromptOptimizationMode::ComicDramaDirectorReview,
+            PromptOptimizationMode::ComicDramaArtReview,
+            PromptOptimizationMode::ComicDramaStoryboardReview,
+            PromptOptimizationMode::ComicDramaContentReview,
+            PromptOptimizationMode::CommerceResearch,
+            PromptOptimizationMode::CommerceCreative,
+            PromptOptimizationMode::CommerceScript,
+            PromptOptimizationMode::CommerceStoryboard,
+            PromptOptimizationMode::CommerceAssets,
+            PromptOptimizationMode::CommerceQuick,
+            PromptOptimizationMode::CommerceReview,
+            PromptOptimizationMode::RemotionPlanner,
+            PromptOptimizationMode::RemotionReview,
+            PromptOptimizationMode::XhsCoverPlan,
+            PromptOptimizationMode::XhsCoverQc,
+            PromptOptimizationMode::ReverseVideoAnalysis,
+            PromptOptimizationMode::ReverseVideoReview,
+            PromptOptimizationMode::ViralRemix,
+        ];
+        assert_eq!(MODES.len(), 44, "MODES 列表登记数量与 enum 变体数不一致");
+        for mode in MODES {
+            // 编译期 helper 已被引用，触发穷尽检查。
+            let _ = assert_mode_skill_dir_in_sync(*mode);
+            let dir = mode.skill_dir();
+            assert!(
+                dir.starts_with("builtin://"),
+                "{mode:?} skill_dir={dir:?} 不是 builtin:// 哨兵，疑似本机绝对路径泄漏"
+            );
+            // 不触磁盘：内置加载应直接返回非空字符串。
+            let prompt = load_skill_system_prompt(*mode)
+                .unwrap_or_else(|err| panic!("{mode:?} 加载失败：{err}"));
+            assert!(!prompt.trim().is_empty(), "{mode:?} 返回了空提示词");
+        }
+    }
+
+    /// 兜底：禁止任何后端源文件再出现本机桌面绝对路径片段（如 `C:\Users\…`）。
+    /// 历史教训：四个提示词技能曾以本机绝对路径解析，打包到客户端后必然 not_found。
+    #[test]
+    fn no_backend_source_hardcodes_developer_machine_paths() {
+        fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
+            let Ok(entries) = std::fs::read_dir(dir) else {
+                return;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().and_then(|value| value.to_str()) == Some("rs") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &mut files);
+        assert!(!files.is_empty(), "no .rs files under {}", root.display());
+        // 这两个文件因测试体/样例 fixture 合法包含本机绝对路径字面量，自身例外；
+        // 锁死的目标是其他所有后端源文件不得再出现本机绝对路径。
+        const SELF_EXCEPTIONS: &[&str] = &["prompt_optimize.rs", "commerce_sources.rs"];
+        for needle in [r"C:\Users", "C:/Users", "/Users/", r"\Users\"] {
+            for file in &files {
+                let fname = file
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or_default();
+                if SELF_EXCEPTIONS.contains(&fname) {
+                    continue;
+                }
+                let content = std::fs::read_to_string(file)
+                    .unwrap_or_else(|err| panic!("read {} failed: {err}", file.display()));
+                assert!(
+                    !content.contains(needle),
+                    "源文件 {} 含本机绝对路径片段 {needle}，请改用编译内嵌或配置驱动",
+                    file.display()
+                );
+            }
+        }
+    }
 
     #[test]
     fn extracts_text_from_all_supported_api_response_shapes() {
