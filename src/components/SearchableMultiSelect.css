@@ -17,7 +17,9 @@
   color: #1f2937;
   font-size: 13px;
   cursor: pointer;
-  transition: border-color 0.15s, box-shadow 0.15s;
+  transition:
+    border-color 0.15s,
+    box-shadow 0.15s;
 }
 
 .searchable-multi-select__trigger:hover:not(:disabled) {

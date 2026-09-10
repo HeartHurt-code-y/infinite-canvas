@@ -42,8 +42,7 @@ export function SearchableMultiSelect({
     const q = query.trim().toLowerCase();
     if (!q) return options;
     return options.filter(
-      (option) =>
-        option.label.toLowerCase().includes(q) || option.value.toLowerCase().includes(q),
+      (option) => option.label.toLowerCase().includes(q) || option.value.toLowerCase().includes(q),
     );
   }, [options, query]);
 
@@ -141,9 +140,7 @@ export function SearchableMultiSelect({
                     className={`searchable-multi-select__option${selected ? " is-selected" : ""}`}
                     onClick={() => toggleOption(option.value)}
                   >
-                    <span className="searchable-multi-select__checkbox">
-                      {selected ? "✓" : ""}
-                    </span>
+                    <span className="searchable-multi-select__checkbox">{selected ? "✓" : ""}</span>
                     <span>{option.label}</span>
                   </li>
                 );
