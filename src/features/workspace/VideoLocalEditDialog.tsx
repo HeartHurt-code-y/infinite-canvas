@@ -6,11 +6,26 @@ import { Play } from "@phosphor-icons/react/Play";
 import { Rectangle } from "@phosphor-icons/react/Rectangle";
 import { Trash } from "@phosphor-icons/react/Trash";
 import { X } from "@phosphor-icons/react/X";
-import { useEffect, useId, useRef, useState, type CSSProperties, type PointerEvent } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type CSSProperties,
+  type PointerEvent,
+} from "react";
 import { createPortal } from "react-dom";
 import { isDesktopRuntime, type ExplicitMediaTarget } from "../../lib/backend";
+import {
+  createPromptContentModule,
+  type PromptContentDocumentV1,
+  type PromptContentEditorSession,
+} from "../../lib/promptContent";
+import type { PromptReferenceCandidate } from "../../lib/promptReferences";
 import { prepareVideoEditSource, type PreparedVideoEditSource } from "../../lib/videoLocalEdit";
 
+import { PromptMentionInput } from "./PromptNodeViews";
 import {
   VIDEO_EDIT_COLORS,
   exportVideoLocalEditFrame,
@@ -32,7 +47,11 @@ export interface VideoLocalEditSource {
 export interface VideoLocalEditResult {
   readonly imageDataUrl: string;
   readonly timeSeconds: number;
-  readonly instruction: string;
+  /**
+   * 编辑要求沿用提示内容的引用文档：正文与 @ 素材引用同构，
+   * 由调用方并入生成节点提示词，保留引用身份而不是退化成素材名文本。
+   */
+  readonly instructionDocument: PromptContentDocumentV1;
   readonly operation: "remove" | "replace";
   readonly sourceKey: string;
   readonly timeRange: { readonly startSeconds: number; readonly endSeconds: number } | null;
@@ -40,9 +59,14 @@ export interface VideoLocalEditResult {
 
 export interface VideoLocalEditDialogProps {
   readonly source: VideoLocalEditSource;
+  /** 当前生成节点已连接的媒体素材，供编辑要求 @ 引用（替换素材即来自这里）。 */
+  readonly candidates: readonly PromptReferenceCandidate[];
   readonly onClose: () => void;
   readonly onApply: (result: VideoLocalEditResult) => Promise<void>;
 }
+
+/** 编辑要求编辑器在弹窗私有提示内容模块中的固定键；与画布节点提示词互不干扰。 */
+const INSTRUCTION_EDITOR_KEY = "video-local-edit-instruction";
 
 export function VideoLocalEditDialog(props: VideoLocalEditDialogProps) {
   // A changed source must never inherit another video's frame or marks.
@@ -54,7 +78,12 @@ export function VideoLocalEditDialog(props: VideoLocalEditDialogProps) {
   );
 }
 
-function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEditDialogProps) {
+function VideoLocalEditDialogContent({
+  source,
+  candidates,
+  onClose,
+  onApply,
+}: VideoLocalEditDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -63,7 +92,16 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
   const submittingRef = useRef(false);
   const titleId = useId();
   const hintId = useId();
-  const instructionId = useId();
+  const instructionLabelId = useId();
+  const instructionHintId = useId();
+  // 编辑要求与画布提示词共用引用规则，但使用弹窗私有的内容模块，不写入节点提示词。
+  const [instructionModule] = useState(() => createPromptContentModule());
+  const registerInstructionInput = useCallback(
+    (nodeKey: string, session: PromptContentEditorSession | null) => {
+      instructionModule.adoptEditor(nodeKey, session);
+    },
+    [instructionModule],
+  );
   const [dimensions, setDimensions] = useState({ width: 16, height: 9 });
   const [duration, setDuration] = useState(0);
   const [time, setTime] = useState(0);
@@ -78,7 +116,7 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
   const [rangeEnabled, setRangeEnabled] = useState(false);
   const [rangeStart, setRangeStart] = useState(0);
   const [rangeEnd, setRangeEnd] = useState(0);
-  const [instruction, setInstruction] = useState("");
+  const [instructionText, setInstructionText] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [sourceError, setSourceError] = useState(false);
@@ -94,10 +132,12 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
       rangeStart >= 0 &&
       rangeEnd > rangeStart &&
       rangeEnd <= duration);
+  // 编辑要求必须同时含正文：纯 @ 引用无法表达「改成什么、保持什么」，
+  // 与原先的纯文本输入框保持同一道门槛。
   const canApply =
     canDraw &&
     marks.some(isVisibleVideoEditMark) &&
-    instruction.trim().length > 0 &&
+    instructionText.trim().length > 0 &&
     !draft &&
     validRange;
 
@@ -273,10 +313,15 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
     dialogRef.current?.focus();
     try {
       const imageDataUrl = exportVideoLocalEditFrame(video, marks);
+      // 快照而非读取缓存视图：提交瞬间也要拿到编辑器里最新的引用文档。
+      const instructionDocument = instructionModule.snapshotAll(new Set([INSTRUCTION_EDITOR_KEY]))[
+        INSTRUCTION_EDITOR_KEY
+      ];
+      if (!instructionDocument) throw new Error("编辑要求无法读取，请重新填写。");
       await onApply({
         imageDataUrl,
         timeSeconds: video.currentTime,
-        instruction: instruction.trim(),
+        instructionDocument,
         operation,
         sourceKey: source.key,
         timeRange: rangeEnabled ? { startSeconds: rangeStart, endSeconds: rangeEnd } : null,
@@ -307,13 +352,15 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
       onKeyDown={(event) => {
         event.stopPropagation();
         if (event.key === "Escape") {
+          // 编辑要求编辑器已用 Escape 关闭自己的候选菜单或待确认项时，不连带关闭弹窗。
+          if (event.defaultPrevented) return;
           event.preventDefault();
           if (!submittingRef.current) onClose();
         }
         if (event.key === "Tab") {
           const controls = Array.from(
             event.currentTarget.querySelectorAll<HTMLElement>(
-              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [tabindex="0"]',
+              'button:not(:disabled), input:not(:disabled), textarea:not(:disabled), select:not(:disabled), summary, [contenteditable="true"], [tabindex="0"]',
             ),
           ).filter(
             (element) =>
@@ -610,22 +657,22 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
               替换与编辑
             </button>
           </div>
-          <label htmlFor={instructionId}>
+          <span id={instructionLabelId}>
             {operation === "remove"
               ? "要消除什么，哪些内容需要保持？"
               : "替换成什么，哪些内容需要保持？"}
-          </label>
-          <textarea
-            id={instructionId}
-            rows={3}
-            value={instruction}
-            onChange={(event) => setInstruction(event.target.value)}
-            placeholder={
-              operation === "remove"
-                ? "例如：消除圈出的路人，保留中间人物的动作，自然补全背景。"
-                : "例如：将圈出的水杯替换为一束红玫瑰，保持手部动作和原有光照。"
-            }
-          />
+          </span>
+          <div className="video-local-edit-dialog__reference-editor">
+            <PromptMentionInput
+              nodeKey={INSTRUCTION_EDITOR_KEY}
+              candidates={candidates}
+              registerInput={registerInstructionInput}
+              labelledBy={instructionLabelId}
+              describedBy={instructionHintId}
+              onTextChange={setInstructionText}
+              placeholder="例如：消除圈出的路人，或将水杯替换为红玫瑰，并说明哪些内容需要保持。"
+            />
+          </div>
           <div
             className="video-local-edit-dialog__operation"
             role="group"
@@ -676,10 +723,10 @@ function VideoLocalEditDialogContent({ source, onClose, onApply }: VideoLocalEdi
               {!validRange && <p role="alert">结束时间须晚于开始时间，且范围须在视频时长内。</p>}
             </div>
           )}
-          <p className="video-local-edit-dialog__hint">
+          <p id={instructionHintId} className="video-local-edit-dialog__hint">
             当前帧用于定位对象；
             {rangeEnabled ? "只在指定时段执行修改。" : "将在全片中跟随该对象保持修改一致。"}
-            替换素材可通过当前节点的参考素材连接提供。
+            输入 @ 可把当前节点已连接的素材引用为替换内容；未引用的连线素材仍会随请求传入。
           </p>
         </fieldset>
         {error && (

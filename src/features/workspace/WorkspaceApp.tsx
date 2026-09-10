@@ -4165,6 +4165,14 @@ export function WorkspaceApp({
       ) {
         throw new Error("源视频或生成节点已变化，标注图已保存，请重新打开视频编辑。");
       }
+      // 编辑要求里的 @ 引用按连线身份解析；连线被移除后再提交会得到无法定位的引用。
+      const connectedKeys = new Set(inputs.map((input) => input.key));
+      const staleReference = edit.instructionDocument.items.find(
+        (item) => item.kind === "media_reference" && !connectedKeys.has(item.canvasNodeKey),
+      );
+      if (staleReference) {
+        throw new Error("编辑要求引用的素材已断开连接，标注图已保存，请重新打开视频编辑。");
+      }
       const selection = resolveGenerationSelection(
         "video",
         target.config.modelSelection,
@@ -8381,6 +8389,7 @@ export function WorkspaceApp({
         >
           <VideoLocalEditDialog
             source={videoLocalEdit.source}
+            candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
             onClose={() => setVideoLocalEdit(null)}
             onApply={applyVideoLocalEdit}
           />

@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 import { appendVideoLocalEditPrompt } from "./videoLocalEdit";
-import { createPromptContentEditorSession, createPromptContentModule } from "./promptContent";
+import {
+  createPromptContentEditorSession,
+  createPromptContentModule,
+  type PromptContentDocumentV1,
+} from "./promptContent";
+import {
+  candidateTarget,
+  createPromptReference,
+  type PromptReferenceCandidate,
+} from "./promptReferences";
 import { createCanvasState } from "../features/canvas/canvasStore";
 import {
   createCanvasInputResolver,
@@ -29,6 +38,11 @@ const frame = {
   },
 };
 
+/** 编辑要求与画布提示词同构：正文 + @ 引用组成同一个文档。 */
+function instructionDocument(...items: PromptContentDocumentV1["items"]): PromptContentDocumentV1 {
+  return { schema: "prompt-content", version: 1, items };
+}
+
 describe("video local edit prompt and persistence", () => {
   it("preserves existing text and sends source video plus real frame with stable roles", () => {
     const module = createPromptContentModule();
@@ -39,7 +53,7 @@ describe("video local edit prompt and persistence", () => {
     const document = appendVideoLocalEditPrompt(module.snapshotAll()["target"], source, frame, {
       timeSeconds: 2,
       operation: "remove",
-      instruction: "消除右侧路人",
+      instructionDocument: instructionDocument({ kind: "text", text: "消除右侧路人" }),
       timeRange: { startSeconds: 5, endSeconds: 8 },
     });
     module.restoreDocument("target", document);
@@ -61,8 +75,87 @@ describe("video local edit prompt and persistence", () => {
     expect(module.read("target")?.plainText).toContain("保持原声。");
     expect(module.read("target")?.plainText).toContain("2.000 秒处");
     expect(module.read("target")?.plainText).toContain("5.000–8.000 秒");
+    expect(module.read("target")?.plainText).toContain("消除右侧路人");
     expect(module.read("other")?.plainText).toBe("另一节点不能被改写。");
     expect(JSON.stringify(document)).not.toContain("data:image");
+  });
+
+  it("keeps an @ referenced replacement material as a real input instead of plain text", () => {
+    const candidate: PromptReferenceCandidate = {
+      canvasNodeKey: "prop-image",
+      assetId: "asset-rose",
+      providerConnectionId: "project-provider",
+      name: "红玫瑰.png",
+      kind: "image",
+    };
+    const document = appendVideoLocalEditPrompt(undefined, source, frame, {
+      timeSeconds: 1.5,
+      operation: "replace",
+      instructionDocument: instructionDocument(
+        { kind: "text", text: "  去掉，改为" },
+        createPromptReference(candidate),
+        { kind: "text", text: "  " },
+      ),
+      timeRange: null,
+    });
+    const session = createPromptContentEditorSession([]);
+    session.restore(document);
+    expect(session.read().plainText).toContain("：去掉，改为@红玫瑰.png。保持区域外画面");
+    const prepared = session.prepareGeneration({
+      connections: [
+        { ...source, kind: "video", role: "reference_video" },
+        { ...frame, kind: "image", role: "reference_image" },
+        {
+          key: candidate.canvasNodeKey,
+          name: candidate.name,
+          kind: "image",
+          target: candidateTarget(candidate),
+        },
+      ],
+      allowMediaOnly: false,
+    });
+    expect(prepared?.ok).toBe(true);
+    if (!prepared?.ok) throw new Error("Expected the referenced instruction to be submittable");
+    expect(prepared.frozen.explicitMedia).toEqual([
+      expect.objectContaining({ target: source.target, role: "reference_video" }),
+      expect.objectContaining({ target: frame.target, role: "reference_image" }),
+      expect.objectContaining({ displayNameSnapshot: "红玫瑰.png" }),
+    ]);
+  });
+
+  it("reports a disconnected @ reference in the edit instruction instead of silently editing", () => {
+    const candidate: PromptReferenceCandidate = {
+      canvasNodeKey: "prop-image",
+      assetId: "asset-rose",
+      providerConnectionId: "project-provider",
+      name: "红玫瑰.png",
+      kind: "image",
+    };
+    const session = createPromptContentEditorSession([]);
+    session.restore(
+      appendVideoLocalEditPrompt(undefined, source, frame, {
+        timeSeconds: 0,
+        operation: "replace",
+        instructionDocument: instructionDocument(
+          { kind: "text", text: "改为" },
+          createPromptReference(candidate),
+        ),
+      }),
+    );
+    expect(
+      session.prepareGeneration({
+        connections: [
+          { ...source, kind: "video", role: "reference_video" },
+          { ...frame, kind: "image", role: "reference_image" },
+        ],
+        allowMediaOnly: false,
+      }),
+    ).toMatchObject({
+      ok: false,
+      issues: [
+        expect.objectContaining({ kind: "disconnected_reference", canvasNodeKey: "prop-image" }),
+      ],
+    });
   });
 
   it("blocks disconnected or replaced source identity instead of editing a same-name video", () => {
@@ -71,7 +164,7 @@ describe("video local edit prompt and persistence", () => {
       appendVideoLocalEditPrompt(undefined, source, frame, {
         timeSeconds: 0,
         operation: "replace",
-        instruction: "把水杯换成花束",
+        instructionDocument: instructionDocument({ kind: "text", text: "把水杯换成花束" }),
       }),
     );
     const connections = [{ ...frame, kind: "image" as const, role: "reference_image" }];

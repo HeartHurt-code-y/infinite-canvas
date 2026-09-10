@@ -75,7 +75,17 @@
   font-size: var(--text-base);
   pointer-events: none;
 }
-.video-local-edit-dialog button {
+/*
+ * 弹窗自身的按钮皮肤只作用于本弹窗的容器，不用 `.video-local-edit-dialog button` 广域选择器：
+ * 编辑要求嵌入了与画布共用的提示词引用编辑器，广域规则会覆盖它的 @ 触发按钮与候选行样式。
+ */
+.video-local-edit-dialog__header button,
+.video-local-edit-dialog__timeline button,
+.video-local-edit-dialog__toolbar button,
+.video-local-edit-dialog__operation button,
+.video-local-edit-dialog__keyboard-region button,
+.video-local-edit-dialog__body > button,
+.video-local-edit-dialog__footer button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -90,16 +100,28 @@
   font-size: var(--text-xs);
   cursor: pointer;
 }
-.video-local-edit-dialog button[aria-pressed="true"] {
+.video-local-edit-dialog__operation button[aria-pressed="true"] {
   border-color: var(--color-accent);
   background: color-mix(in oklch, var(--color-accent) 20%, var(--color-chrome-field));
 }
-.video-local-edit-dialog button:disabled,
+.video-local-edit-dialog__header button:disabled,
+.video-local-edit-dialog__timeline button:disabled,
+.video-local-edit-dialog__toolbar button:disabled,
+.video-local-edit-dialog__operation button:disabled,
+.video-local-edit-dialog__keyboard-region button:disabled,
+.video-local-edit-dialog__body > button:disabled,
+.video-local-edit-dialog__footer button:disabled,
 .video-local-edit-dialog fieldset:disabled button {
   opacity: 0.5;
   cursor: default;
 }
-.video-local-edit-dialog button:focus-visible,
+.video-local-edit-dialog__header button:focus-visible,
+.video-local-edit-dialog__timeline button:focus-visible,
+.video-local-edit-dialog__toolbar button:focus-visible,
+.video-local-edit-dialog__operation button:focus-visible,
+.video-local-edit-dialog__keyboard-region button:focus-visible,
+.video-local-edit-dialog__body > button:focus-visible,
+.video-local-edit-dialog__footer button:focus-visible,
 .video-local-edit-dialog input:focus-visible,
 .video-local-edit-dialog textarea:focus-visible,
 .video-local-edit-dialog summary:focus-visible {
@@ -234,6 +256,29 @@
   resize: vertical;
   line-height: 1.6;
 }
+/*
+ * 编辑要求 = 与画布共用的 @ 引用编辑器。其字段与状态条自带浅色底，直接作为一张
+ * 浅色卡片嵌在深色弹窗里，不需要再套一遍弹窗皮肤。
+ */
+.video-local-edit-dialog__reference-editor {
+  min-width: 0;
+  /*
+   * 编辑面与候选菜单自带浅色 paper 底，但 `.prompt-mention__input` /
+   * `.prompt-mention__option` 不自己声明 color，只继承祖先。画布节点给的是
+   * `--color-ink`，弹窗给的是 `--color-chrome-ink`（oklch 94% 近白）——
+   * 不显式改回 paper 墨色，正文与候选名就会变成浅色字落在浅色底上，完全看不见。
+   */
+  color: var(--color-ink);
+}
+.video-local-edit-dialog__reference-editor .prompt-mention__input {
+  min-height: 4.5rem;
+  max-height: 12rem;
+}
+/* fieldset[disabled] 不会禁用 contenteditable；提交期间显式冻结编辑要求。 */
+.video-local-edit-dialog fieldset:disabled .video-local-edit-dialog__reference-editor {
+  pointer-events: none;
+  opacity: 0.5;
+}
 .video-local-edit-dialog__error {
   margin: 0;
   padding: var(--space-sm);
@@ -267,7 +312,13 @@
   border-color: var(--color-accent);
 }
 @media (hover: hover) {
-  .video-local-edit-dialog button:hover:not(:disabled) {
+  .video-local-edit-dialog__header button:hover:not(:disabled),
+  .video-local-edit-dialog__timeline button:hover:not(:disabled),
+  .video-local-edit-dialog__toolbar button:hover:not(:disabled),
+  .video-local-edit-dialog__operation button:hover:not(:disabled),
+  .video-local-edit-dialog__keyboard-region button:hover:not(:disabled),
+  .video-local-edit-dialog__body > button:hover:not(:disabled),
+  .video-local-edit-dialog__footer button:hover:not(:disabled) {
     border-color: var(--color-focus);
   }
 }

@@ -213,6 +213,9 @@ const EMPTY_DOCUMENT: PromptContentDocumentV1 = {
   items: [],
 };
 
+/** 提示词输入框的默认占位文案；复用该编辑器的场景可传入更贴合自身的文案。 */
+const DEFAULT_PROMPT_PLACEHOLDER = "描述画面…输入 @ 选择已连接素材";
+
 const BLOCK_ELEMENTS = new Set(["DIV", "P", "LI"]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -527,6 +530,11 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private composing = false;
   private compositionEndTimer: number | null = null;
   private pendingConnections = false;
+  private readonly placeholder: string;
+
+  constructor(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER) {
+    this.placeholder = placeholder;
+  }
   private pendingRestore: PromptContentDocumentV1 | null = null;
   private readonly handleCompositionStart = () => {
     if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
@@ -584,7 +592,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     if (element == null) return;
     this.editor = new Editor({
       element,
-      extensions: createPromptTiptapExtensions("描述画面…输入 @ 选择已连接素材"),
+      extensions: createPromptTiptapExtensions(this.placeholder),
       content: promptDocumentToTiptapJson(this.document, this.presentation()),
       injectCSS: false,
       editorProps: {
@@ -1056,8 +1064,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
 /** 每个生成节点只创建一个 handle；挂载、放大重挂与调用方共享同一 canonical document。 */
 export function createPromptContentEditorSession(
   candidates: readonly PromptReferenceCandidate[] = [],
+  placeholder: string = DEFAULT_PROMPT_PLACEHOLDER,
 ): PromptContentEditorSession {
-  const session = new PromptContentEditorSessionImplementation();
+  const session = new PromptContentEditorSessionImplementation(placeholder);
   session.updateConnections(candidates);
   return session;
 }

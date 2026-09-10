@@ -1,4 +1,5 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import * as videoFrameSampler from "./lib/videoFrameSampler";
@@ -10,6 +11,7 @@ import type {
   SaveCanvasDocumentCommand,
 } from "./lib/backend";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
+import type { PromptContentDocumentV1 } from "./lib/promptContent";
 import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
 import type { VideoLocalEditDialogProps } from "./features/workspace/VideoLocalEditDialog";
 import { fireCanvasMouse } from "./test/canvasEvents";
@@ -20,13 +22,25 @@ const {
   fileStatMock,
   writeTextFileMock,
   videoLocalEditSourceMock,
-} = vi.hoisted(() => ({
-  dialogOpenMock: vi.fn(),
-  dialogSaveMock: vi.fn(),
-  fileStatMock: vi.fn(),
-  writeTextFileMock: vi.fn(),
-  videoLocalEditSourceMock: vi.fn(),
-}));
+  videoLocalEditInstructionMock,
+} = vi.hoisted(() => {
+  // 标注弹窗提交的编辑要求文档；用例可替换为含 @ 引用的版本来覆盖连线校验。
+  const videoLocalEditInstructionMock: { document: PromptContentDocumentV1 } = {
+    document: {
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "删除标记区域中的路人" }],
+    },
+  };
+  return {
+    dialogOpenMock: vi.fn(),
+    dialogSaveMock: vi.fn(),
+    fileStatMock: vi.fn(),
+    writeTextFileMock: vi.fn(),
+    videoLocalEditSourceMock: vi.fn(),
+    videoLocalEditInstructionMock,
+  };
+});
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({
   open: dialogOpenMock,
@@ -39,25 +53,32 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 }));
 
 // Drawing interactions are exercised by the dialog tests; this boundary checks canvas persistence and IPC.
+// 与真实弹窗一致：提交失败把错误显示出来，而不是把 rejection 丢成未处理错误。
 vi.mock("./features/workspace/VideoLocalEditDialog", () => ({
   VideoLocalEditDialog: ({ source, onApply }: VideoLocalEditDialogProps) => {
     videoLocalEditSourceMock(source);
+    const [error, setError] = useState<string | null>(null);
     return (
-      <button
-        type="button"
-        onClick={() =>
-          void onApply({
-            imageDataUrl: "data:image/png;base64,c2FtcGxl",
-            timeSeconds: 2.25,
-            instruction: "删除标记区域中的路人",
-            operation: "remove",
-            sourceKey: source.key,
-            timeRange: null,
-          })
-        }
-      >
-        应用测试局部标注 · {source.label}
-      </button>
+      <>
+        <button
+          type="button"
+          onClick={() =>
+            void onApply({
+              imageDataUrl: "data:image/png;base64,c2FtcGxl",
+              timeSeconds: 2.25,
+              instructionDocument: videoLocalEditInstructionMock.document,
+              operation: "remove",
+              sourceKey: source.key,
+              timeRange: null,
+            }).catch((cause: unknown) =>
+              setError(cause instanceof Error ? cause.message : String(cause)),
+            )
+          }
+        >
+          应用测试局部标注 · {source.label}
+        </button>
+        {error ? <p role="alert">{error}</p> : null}
+      </>
     );
   },
 }));
@@ -946,6 +967,11 @@ beforeEach(() => {
   dialogSaveMock.mockResolvedValue(null);
   fileStatMock.mockResolvedValue({ isFile: true, size: 1024 });
   writeTextFileMock.mockResolvedValue(undefined);
+  videoLocalEditInstructionMock.document = {
+    schema: "prompt-content",
+    version: 1,
+    items: [{ kind: "text", text: "删除标记区域中的路人" }],
+  };
   setupDesktopRuntime();
 });
 
@@ -4154,6 +4180,51 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).toEqual(originalMentions.map((mention) => mention.mentionId));
   });
 
+  it("编辑要求里的 @ 引用断开后拒绝提交，不把孤立引用写进节点提示词", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "save_video_edit_frame")
+        return Promise.resolve({
+          path: "C:\\generated\\orphan-annotation.png",
+          width: 1920,
+          height: 1080,
+        });
+      return baseInvokeImplementation(command, args);
+    });
+    videoLocalEditInstructionMock.document = {
+      schema: "prompt-content",
+      version: 1,
+      items: [
+        { kind: "text", text: "去掉，改为" },
+        {
+          kind: "media_reference",
+          mentionId: "mention-orphan",
+          canvasNodeKey: "missing-image",
+          target: {
+            kind: "asset",
+            providerConnectionId: "luma-production",
+            assetId: "asset-missing",
+            canvasNodeKey: "missing-image",
+            mediaType: "image",
+          },
+          displayNameSnapshot: "幽灵图.png",
+        },
+      ],
+    };
+    render(<App />);
+    const node = await addGenerationNode("视频", 920, 180);
+    const original = await addAssetNode("视频", "列车进站参考", 20, 500);
+    connectAssetToGeneration(original, node);
+    fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+    fireEvent.click(within(node).getByRole("button", { name: "局部消除与编辑 · 列车进站参考" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用测试局部标注 · 列车进站参考" }));
+
+    expect(await screen.findByText(/编辑要求引用的素材已断开连接/)).toBeInTheDocument();
+    expect(
+      within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+    ).not.toHaveTextContent("去掉，改为");
+    expect(submittedGenerationCommands()).toHaveLength(0);
+  });
+
   it("已有空能力快照的 Wan 3.0 模型仍在视频节点显示完整请求参数", async () => {
     invokeMock.mockImplementation(async (command) => {
       const value = await baseInvokeImplementation(command);
@@ -6536,9 +6607,7 @@ describe("素材库分组与云端素材改名（桌面运行时）", () => {
     // 第一次点击仅进入确认态（4 秒内二次点击才真正删除），不发起请求。
     fireEvent.click(deleteButton);
     screen.getByRole("button", { name: "确认删除分组：客户案例" });
-    expect(
-      invokeMock.mock.calls.some(([command]) => command === "delete_asset_group"),
-    ).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "delete_asset_group")).toBe(false);
 
     // 确认态下再次点击才调用删除接口。
     fireEvent.click(screen.getByRole("button", { name: "确认删除分组：客户案例" }));

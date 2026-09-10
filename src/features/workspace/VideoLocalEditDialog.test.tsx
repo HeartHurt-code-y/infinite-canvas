@@ -1,7 +1,12 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
-import { VideoLocalEditDialog } from "./VideoLocalEditDialog";
+import type { PromptReferenceCandidate } from "../../lib/promptReferences";
+import {
+  VideoLocalEditDialog,
+  type VideoLocalEditResult,
+  type VideoLocalEditSource,
+} from "./VideoLocalEditDialog";
 import { exportVideoLocalEditFrame } from "./videoLocalEditDrawing";
 import type * as VideoLocalEditDrawing from "./videoLocalEditDrawing";
 
@@ -17,6 +22,44 @@ vi.mock("./videoLocalEditDrawing", async (importOriginal) => {
 });
 
 const source = { key: "canvas-video-stable", label: "餐厅原视频", src: "blob:restaurant-source" };
+
+/** 当前生成节点已连接的替换素材；编辑要求可用 @ 引用。 */
+const roseCandidate: PromptReferenceCandidate = {
+  canvasNodeKey: "prop-image",
+  assetId: "asset-rose",
+  providerConnectionId: "project-provider",
+  name: "红玫瑰.png",
+  kind: "image",
+};
+
+function renderDialog(
+  options: {
+    readonly source?: VideoLocalEditSource;
+    readonly candidates?: readonly PromptReferenceCandidate[];
+    readonly onClose?: () => void;
+    /** 覆盖提交实现（默认立即成功），返回值仍是可直接断言的 mock。 */
+    readonly onApplyImpl?: () => Promise<void>;
+  } = {},
+) {
+  const onApply = vi.fn<(result: VideoLocalEditResult) => Promise<void>>(
+    options.onApplyImpl ?? (async () => {}),
+  );
+  const onClose = options.onClose ?? vi.fn();
+  const view = render(
+    <VideoLocalEditDialog
+      source={options.source ?? source}
+      candidates={options.candidates ?? []}
+      onClose={onClose}
+      onApply={onApply}
+    />,
+  );
+  return { ...view, onApply, onClose };
+}
+
+/** 编辑要求沿用与画布一致的引用编辑器：正文即编辑要求，@ 引用是原子 chip。 */
+function instruction(text: string) {
+  return { schema: "prompt-content", version: 1, items: [{ kind: "text", text }] };
+}
 
 function loadVideo() {
   const video = screen.getByLabelText<HTMLVideoElement>("待编辑视频：餐厅原视频");
@@ -77,9 +120,7 @@ describe("VideoLocalEditDialog", () => {
         mediaType: "video" as const,
       },
     };
-    const { unmount } = render(
-      <VideoLocalEditDialog source={cloud} onClose={vi.fn()} onApply={vi.fn()} />,
-    );
+    const { unmount } = renderDialog({ source: cloud });
     expect(screen.getByLabelText("待编辑视频：餐厅原视频")).not.toHaveAttribute("src", cloud.src);
     await waitFor(() => expect(prepareSource).toHaveBeenCalledWith(cloud.target, cloud.src));
     expect(screen.getByLabelText("待编辑视频：餐厅原视频")).toHaveAttribute(
@@ -95,8 +136,7 @@ describe("VideoLocalEditDialog", () => {
 
   it("requires both a visible region and instructions, preserving real source identity on apply", async () => {
     const user = userEvent.setup();
-    const onApply = vi.fn().mockResolvedValue(undefined);
-    render(<VideoLocalEditDialog source={source} onClose={vi.fn()} onApply={onApply} />);
+    const { onApply } = renderDialog();
     const submit = screen.getByRole("button", { name: "添加到生成节点" });
     expect(submit).toBeDisabled();
     const video = loadVideo();
@@ -117,7 +157,7 @@ describe("VideoLocalEditDialog", () => {
       imageDataUrl: "data:image/png;base64,annotated-frame",
       sourceKey: source.key,
       timeSeconds: 3.25,
-      instruction: "消除圈出的路人，保留桌子",
+      instructionDocument: instruction("消除圈出的路人，保留桌子"),
       operation: "remove",
       timeRange: null,
     });
@@ -152,9 +192,7 @@ describe("VideoLocalEditDialog", () => {
         mediaType: "video" as const,
       },
     };
-    const { unmount } = render(
-      <VideoLocalEditDialog source={pendingSource} onClose={vi.fn()} onApply={vi.fn()} />,
-    );
+    const { unmount } = renderDialog({ source: pendingSource });
     expect(screen.getByText("正在读取原视频…")).toBeInTheDocument();
     unmount();
     await act(async () => {
@@ -184,12 +222,11 @@ describe("VideoLocalEditDialog", () => {
       assetId: "old",
       mediaType: "video" as const,
     };
-    const { rerender, unmount } = render(
-      <VideoLocalEditDialog source={{ ...source, target }} onClose={vi.fn()} onApply={vi.fn()} />,
-    );
+    const { rerender, unmount } = renderDialog({ source: { ...source, target } });
     rerender(
       <VideoLocalEditDialog
         source={{ ...source, target: { ...target, assetId: "new" } }}
+        candidates={[]}
         onClose={vi.fn()}
         onApply={vi.fn()}
       />,
@@ -225,13 +262,7 @@ describe("VideoLocalEditDialog", () => {
       stagingJobId: "job",
       mediaType: "video" as const,
     };
-    render(
-      <VideoLocalEditDialog
-        source={{ ...source, src: "", target }}
-        onClose={vi.fn()}
-        onApply={vi.fn()}
-      />,
-    );
+    renderDialog({ source: { ...source, src: "", target } });
     expect(await screen.findByRole("alert")).toHaveTextContent("云素材暂时不可读取");
     await user.type(screen.getByRole("textbox"), "保留左边人物");
     await user.click(screen.getByRole("button", { name: "重新读取视频" }));
@@ -242,12 +273,12 @@ describe("VideoLocalEditDialog", () => {
       ),
     );
     expect(prepareSource).toHaveBeenCalledTimes(2);
-    expect(screen.getByRole("textbox")).toHaveValue("保留左边人物");
+    expect(screen.getByRole("textbox")).toHaveTextContent("保留左边人物");
   });
 
   it("supports colored freehand strokes, undo, and clearing without changing instructions", async () => {
     const user = userEvent.setup();
-    render(<VideoLocalEditDialog source={source} onClose={vi.fn()} onApply={vi.fn()} />);
+    renderDialog();
     loadVideo();
     drawRectangle();
     await user.click(screen.getByRole("button", { name: "画笔" }));
@@ -264,12 +295,12 @@ describe("VideoLocalEditDialog", () => {
     expect(remainingMarks.querySelector("polyline")).toBeNull();
     await user.click(screen.getByRole("button", { name: "清除" }));
     expect(screen.getByRole("img", { name: /已有 0 处标记/ })).toBeInTheDocument();
-    expect(screen.getByRole("textbox")).toHaveValue("替换圈出的杯子");
+    expect(screen.getByRole("textbox")).toHaveTextContent("替换圈出的杯子");
     expect(screen.getByRole("button", { name: "撤销" })).toBeDisabled();
   });
 
   it("clears marks on seeking and prevents annotation until the selected frame has decoded", () => {
-    render(<VideoLocalEditDialog source={source} onClose={vi.fn()} onApply={vi.fn()} />);
+    renderDialog();
     const video = loadVideo();
     drawRectangle();
     fireEvent.change(screen.getByRole("slider", { name: "视频时间" }), { target: { value: "5" } });
@@ -285,8 +316,7 @@ describe("VideoLocalEditDialog", () => {
 
   it("supports keyboard coordinate regions and a validated edit interval independent of the locator frame", async () => {
     const user = userEvent.setup();
-    const onApply = vi.fn().mockResolvedValue(undefined);
-    render(<VideoLocalEditDialog source={source} onClose={vi.fn()} onApply={onApply} />);
+    const { onApply } = renderDialog();
     const video = loadVideo();
     video.currentTime = 2;
     await user.click(screen.getByText("输入坐标框选"));
@@ -318,14 +348,14 @@ describe("VideoLocalEditDialog", () => {
   it("blocks duplicate submissions and dismissal while saving, then retains the draft on failure", async () => {
     const user = userEvent.setup();
     let fail: (error: Error) => void = () => {};
-    const onApply = vi.fn(
-      () =>
+    const onClose = vi.fn();
+    const { onApply } = renderDialog({
+      onClose,
+      onApplyImpl: () =>
         new Promise<void>((_, reject) => {
           fail = reject;
         }),
-    );
-    const onClose = vi.fn();
-    render(<VideoLocalEditDialog source={source} onClose={onClose} onApply={onApply} />);
+    });
     loadVideo();
     drawRectangle();
     await user.type(screen.getByRole("textbox"), "消除右侧路人");
@@ -340,15 +370,14 @@ describe("VideoLocalEditDialog", () => {
       await Promise.resolve();
     });
     expect(screen.getByRole("alert")).toHaveTextContent("磁盘写入失败");
-    expect(screen.getByRole("textbox")).toHaveValue("消除右侧路人");
+    expect(screen.getByRole("textbox")).toHaveTextContent("消除右侧路人");
     expect(screen.getByRole("img", { name: /已有 1 处标记/ })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "添加到生成节点" })).toBeEnabled();
   });
 
   it("shows load and capture failures and does not submit a blank frame", async () => {
     const user = userEvent.setup();
-    const onApply = vi.fn();
-    render(<VideoLocalEditDialog source={source} onClose={vi.fn()} onApply={onApply} />);
+    const { onApply } = renderDialog();
     const video = screen.getByLabelText("待编辑视频：餐厅原视频");
     fireEvent.error(video);
     expect(screen.getByRole("alert")).toHaveTextContent("无法加载此视频");
@@ -363,6 +392,37 @@ describe("VideoLocalEditDialog", () => {
     expect(onApply).not.toHaveBeenCalled();
   });
 
+  it("offers the connected materials as @ 引用 in the edit requirement and keeps the reference identity", async () => {
+    const user = userEvent.setup();
+    const { onApply } = renderDialog({ candidates: [roseCandidate] });
+    const video = loadVideo();
+    video.currentTime = 4;
+    drawRectangle();
+    await user.click(screen.getByRole("button", { name: "替换与编辑" }));
+    await waitFor(() =>
+      expect(screen.getByRole("textbox").querySelector("p")).toHaveAttribute(
+        "data-placeholder",
+        "例如：消除圈出的路人，或将水杯替换为红玫瑰，并说明哪些内容需要保持。",
+      ),
+    );
+    await user.type(screen.getByRole("textbox"), "去掉，改为");
+    await user.click(screen.getByRole("button", { name: "引用素材到提示词（候选 1 个）" }));
+    await user.click(await screen.findByRole("option"));
+    await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    const result = onApply.mock.calls[0]![0];
+    expect(result.operation).toBe("replace");
+    expect(result.timeSeconds).toBe(4);
+    expect(result.instructionDocument.items).toMatchObject([
+      { kind: "text", text: "去掉，改为" },
+      {
+        kind: "media_reference",
+        canvasNodeKey: "prop-image",
+        displayNameSnapshot: "红玫瑰.png",
+      },
+    ]);
+  });
+
   it("traps keyboard focus, isolates canvas shortcuts, and resets marks when the video identity changes", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -370,7 +430,7 @@ describe("VideoLocalEditDialog", () => {
     const onApply = vi.fn();
     const { rerender } = render(
       <div onKeyDown={shortcut}>
-        <VideoLocalEditDialog source={source} onClose={onClose} onApply={onApply} />
+        <VideoLocalEditDialog source={source} candidates={[]} onClose={onClose} onApply={onApply} />
       </div>,
     );
     expect(screen.getByRole("button", { name: "关闭局部编辑" })).toHaveFocus();
@@ -384,6 +444,7 @@ describe("VideoLocalEditDialog", () => {
       <div onKeyDown={shortcut}>
         <VideoLocalEditDialog
           source={{ ...source, key: "different-source" }}
+          candidates={[]}
           onClose={onClose}
           onApply={onApply}
         />

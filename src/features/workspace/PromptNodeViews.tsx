@@ -217,6 +217,7 @@ export function PromptMentionInput({
   describedBy,
   expandable = false,
   onTextChange,
+  placeholder,
 }: {
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
@@ -227,10 +228,12 @@ export function PromptMentionInput({
   readonly expandable?: boolean;
   /** 内容变化时的回调，传递纯文本（用于外部持久化，如提示词生成节点的 generatedPrompt）。 */
   readonly onTextChange?: (text: string) => void;
+  /** 空内容占位文案；缺省时使用提示词输入框的默认文案。仅在首次挂载时生效。 */
+  readonly placeholder?: string;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
   const sessionRef = useRef<PromptContentEditorSession | null>(null);
-  sessionRef.current ??= createPromptContentEditorSession(candidates);
+  sessionRef.current ??= createPromptContentEditorSession(candidates, placeholder);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreExpandFocusRef = useRef(false);
