@@ -1313,8 +1313,17 @@ export function mergeStagingJobsIntoUploads(
     const statusChanged = job.status !== entry.status;
     const lastAdvancedAt =
       bytesAdvanced || statusChanged || identityArrived ? now : entry.lastAdvancedAt;
-    // 后端记录本身到不了终态（执行它的进程已经不在了）：落地为已中断，
-    // 否则这一行会一直转圈，而且非终态行不给关闭按钮。
+    // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
+    // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
+    //
+    // 这道"无变化就跳过"必须排在僵尸判定**之后**：导入阶段（staged / importing /
+    // cleaning）本来就是"字节不再变、状态也不变"的阶段，若先跳过，僵尸判定永远轮不到
+    // 执行——真机上那行一直在转圈就是这么来的（staged 的 mp4 卡了两小时也不落地）。
+    const nothingChanged =
+      !bytesAdvanced && !statusChanged && !identityArrived && !isStallTrackedStatus(entry.status);
+
+    // 后端记录本身到不了终态、且长时间没有任何推进（执行它的进程已经不在了）：
+    // 落地为已中断，否则这一行会一直转圈，而且非终态行不给关闭按钮。
     // 已经拿到素材身份的记录不算在内：那是入库成功，只是随后的清理没走完。
     if (!isTerminalStagingJob(job) && now - lastAdvancedAt >= UPLOAD_ABANDONED_MS) {
       changed = true;
@@ -1328,14 +1337,7 @@ export function mergeStagingJobsIntoUploads(
         stalled: false,
       };
     }
-    // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
-    // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
-    if (
-      !bytesAdvanced &&
-      !statusChanged &&
-      !identityArrived &&
-      !isStallTrackedStatus(entry.status)
-    ) {
+    if (nothingChanged) {
       return entry;
     }
     changed = true;

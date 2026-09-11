@@ -77,6 +77,29 @@ describe("mergeStagingJobsIntoUploads", () => {
     expect(merged).toBeNull();
   });
 
+  it.each(["staged", "importing", "cleaning"] as const)(
+    "真机上卡住的 %s 行（字节与状态都不再变）也会被落地为已中断",
+    (status) => {
+      // 回归：导入阶段的特征就是「字节不再变、状态也不变」，此前"无变化就跳过"的
+      // 提前返回排在僵尸判定之前，判定永远执行不到——用户看到的行一直转圈。
+      const entry = uploadEntry({ status, lastAdvancedAt: 0 });
+      const merged = mergeStagingJobsIntoUploads([entry], [stagingJob({ status })], 600_000);
+      expect(merged).not.toBeNull();
+      expect(merged![0]!.status).toBe("interrupted");
+      expect(merged![0]!.error).toMatchObject({ kind: "abandoned", lastBackendStatus: status });
+    },
+  );
+
+  it("后端任务记录本身没有任何变化，也不影响僵尸判定", () => {
+    // 最严苛的形态：行与后端记录逐字段相同（bytesTotal/bytesUploaded 都一致），
+    // 唯一支撑判定的就是时间。
+    const entry = uploadEntry({ status: "staged", bytesUploaded: 38532482, lastAdvancedAt: 0 });
+    const job = stagingJob({ status: "staged", bytesUploaded: 38532482, bytesTotal: 38532482 });
+    expect(mergeStagingJobsIntoUploads([entry], [job], 60_000)).toBeNull();
+    const merged = mergeStagingJobsIntoUploads([entry], [job], 120_000);
+    expect(merged![0]!.status).toBe("interrupted");
+  });
+
   it("字节仍在推进时不吃僵尸判定，并按推进刷新 lastAdvancedAt", () => {
     const entry = uploadEntry({ status: "uploading", bytesUploaded: 1024, lastAdvancedAt: 0 });
     const merged = mergeStagingJobsIntoUploads(

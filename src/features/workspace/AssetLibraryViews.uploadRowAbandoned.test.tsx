@@ -78,4 +78,17 @@ describe("AssetUploadRow 僵尸在途行判定", () => {
       "preparing",
     );
   });
+
+  it.each(["staged", "importing", "cleaning"] as const)(
+    "真机上卡住的 %s 行同样自行落地为已中断",
+    (status) => {
+      // 真机上那行卡住的 mp4 正是 staged：对象已上传完、素材库导入再也没开始。
+      renderRowPastAbandonWindow({ status, bytesUploaded: 38532482, bytesTotal: 38532482 });
+
+      expect(screen.getByText("卡住的上传.png").closest(".asset-upload")).toHaveAttribute(
+        "data-state",
+        "interrupted",
+      );
+    },
+  );
 });

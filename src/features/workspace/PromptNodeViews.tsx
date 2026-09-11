@@ -207,20 +207,26 @@ const AUTO_MENTION_FEEDBACK_MS = 2400;
 /** 手动点击重扫时至少展示一次可感知的“扫描中”状态，避免同步结果被 React 合并掉。 */
 const MANUAL_AUTO_DETECT_DELAY_MS = 420;
 
-function readyAutoMentionFeedback(candidates: readonly MentionCandidate[]): AutoMentionFeedback {
+function readyAutoMentionFeedback(
+  candidates: readonly MentionCandidate[],
+  referenceCount = 0,
+): AutoMentionFeedback {
   if (candidates.length === 0) {
     return { kind: "empty", message: "连接素材后，输入 @ 选择引用" };
   }
+  // 已引用数是「识别到了」的常驻回执：提示内容被外部写入（弹窗「添加到生成节点」）
+  // 时不会有别的反馈，只写「普通文字保持原样」会让人以为一处都没认出来。
+  const bound = referenceCount > 0 ? `已引用 ${referenceCount} 处素材 · ` : "";
   const ambiguousCount = describePromptContentCandidates(candidates).ambiguousPatternCount;
   if (ambiguousCount > 0) {
     return {
       kind: "ready",
-      message: `输入 @ 引用素材 · ${candidates.length} 个素材 · 同名项需确认`,
+      message: `输入 @ 引用素材 · ${bound}${candidates.length} 个素材 · 同名项需确认`,
     };
   }
   return {
     kind: "ready",
-    message: `输入 @ 引用素材 · ${candidates.length} 个可引用素材 · 普通文字保持原样`,
+    message: `输入 @ 引用素材 · ${bound}${candidates.length} 个可引用素材 · 普通文字保持原样`,
   };
 }
 
@@ -282,9 +288,21 @@ export function PromptMentionInput({
     readonly pattern: string;
     readonly displayName: string;
   } | null>(null);
-  const [autoMentionFeedback, setAutoMentionFeedback] = useState<AutoMentionFeedback>(() =>
-    readyAutoMentionFeedback(candidates),
+  /** 一次性识别结果（正在识别 / 已识别 / 待确认 / 未匹配）；常驻提示见下方 autoMentionFeedback。 */
+  const [autoMentionFeedbackState, setAutoMentionFeedbackState] = useState<AutoMentionFeedback>(
+    () => readyAutoMentionFeedback(candidates),
   );
+  /** 提示内容里已绑定的引用数：它是「@ 有没有被识别到」的直接证据，写进常驻提示里。 */
+  const [referenceCount, setReferenceCount] = useState(0);
+  /**
+   * 回到常驻提示。文案不在这里定：常驻提示的数字必须跟着当前连线与内容走，
+   * 而防抖/复位计时器闭包住的是"调度那一刻"的候选（连线刚变化时还是旧的），
+   * 由它们写文案会让灰条长期停在过期的候选数上
+   * ——节点已接 2 个素材，却一直显示「1 个可引用素材」。
+   */
+  const showReadyFeedback = useCallback(() => {
+    setAutoMentionFeedbackState({ kind: "ready", message: "" });
+  }, []);
   const editorId = `prompt-editor-${nodeKey}`;
   const editorTitleId = `${editorId}-title`;
   const editorDescriptionId = `${editorId}-description`;
@@ -304,6 +322,8 @@ export function PromptMentionInput({
         ...(ariaDescribedBy ? { "aria-describedby": ariaDescribedBy } : {}),
       });
       inputRef.current = host?.querySelector<HTMLDivElement>("[contenteditable='true']") ?? null;
+      // 挂载/放大重挂时同步一次已引用数：存档恢复出来的内容不会产生 input 事件。
+      setReferenceCount(sessionRef.current?.read().referenceCount ?? 0);
       registerInput(nodeKey, host == null ? null : sessionRef.current);
     },
     [describedBy, editorDescriptionId, expanded, labelledBy, nodeKey, registerInput],
@@ -399,6 +419,9 @@ export function PromptMentionInput({
       const view = sessionRef.current?.acceptNativeInput();
       const plainText = view?.plainText ?? (input.textContent ?? "").replaceAll("\u200b", "");
       setCharacterCount(view?.characterCount ?? plainText.length);
+      // 外部写入（弹窗「添加到生成节点」、存档恢复、@ 菜单插入）都会派发 input 事件，
+      // 因此这里读到的引用数就是当前内容里的真实绑定数。
+      setReferenceCount(view?.referenceCount ?? 0);
       onTextChange?.(plainText);
     },
     [onTextChange],
@@ -506,7 +529,7 @@ export function PromptMentionInput({
         feedbackResetTimerRef.current = null;
       }
       const hasMorePending = openFirstPendingAmbiguity();
-      setAutoMentionFeedback(
+      setAutoMentionFeedbackState(
         hasMorePending
           ? {
               kind: "ambiguous",
@@ -520,7 +543,7 @@ export function PromptMentionInput({
       if (!hasMorePending) {
         feedbackResetTimerRef.current = window.setTimeout(() => {
           feedbackResetTimerRef.current = null;
-          setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
+          showReadyFeedback();
         }, AUTO_MENTION_FEEDBACK_MS);
       }
       input.focus();
@@ -529,7 +552,7 @@ export function PromptMentionInput({
         `[canvas] 同名引用已确认: node=${nodeKey}, pattern=${activeAmbiguity.pattern}, target=${candidate.canvasNodeKey}, count=${confirmed}`,
       );
     },
-    [activeAmbiguity, candidates, nodeKey, openFirstPendingAmbiguity],
+    [activeAmbiguity, nodeKey, openFirstPendingAmbiguity, showReadyFeedback],
   );
 
   /**
@@ -572,19 +595,20 @@ export function PromptMentionInput({
         setAutoMentionResolvedNames(resolvedNames);
         if (resolution.pending > 0) {
           openFirstPendingAmbiguity();
-          setAutoMentionFeedback({
+          setAutoMentionFeedbackState({
             kind: "ambiguous",
             message: `检测到 ${resolution.pending} 处同名引用 · 请选择具体对象`,
           });
         } else {
           setActiveAmbiguity(null);
-          setAutoMentionFeedback({
+          setAutoMentionFeedbackState({
             kind: "success",
             message: `已自动引用 ${resolution.converted} 处素材`,
           });
+          // 复位只是回到常驻提示：文案由渲染时按当前候选与已引用数重算。
           feedbackResetTimerRef.current = window.setTimeout(() => {
             feedbackResetTimerRef.current = null;
-            setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
+            showReadyFeedback();
           }, AUTO_MENTION_FEEDBACK_MS);
         }
         frontendLog(
@@ -597,21 +621,21 @@ export function PromptMentionInput({
       setAutoMentionResolvedNames([]);
       if (resolution.pending > 0) {
         openFirstPendingAmbiguity();
-        setAutoMentionFeedback({
+        setAutoMentionFeedbackState({
           kind: "ambiguous",
           message: `仍有 ${resolution.pending} 处同名引用待确认`,
         });
       } else if (!promptText) {
-        setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
+        showReadyFeedback();
       } else if (candidates.length === 0) {
-        setAutoMentionFeedback({ kind: "empty", message: "未连接素材，暂时无法引用" });
+        setAutoMentionFeedbackState({ kind: "empty", message: "未连接素材，暂时无法引用" });
       } else if (mode === "names") {
-        setAutoMentionFeedback({ kind: "no-match", message: "未匹配到已连接素材名" });
+        setAutoMentionFeedbackState({ kind: "no-match", message: "未匹配到已连接素材名" });
       } else {
-        setAutoMentionFeedback(readyAutoMentionFeedback(candidates));
+        showReadyFeedback();
       }
     },
-    [candidates, menuOpen, nodeKey, openFirstPendingAmbiguity],
+    [candidates, menuOpen, nodeKey, openFirstPendingAmbiguity, showReadyFeedback],
   );
 
   /** 手输防抖：停止键入一段时间后扫描一次。 */
@@ -624,7 +648,7 @@ export function PromptMentionInput({
     }
     if (!menuOpen && !composingRef.current) {
       setAutoMentionResolvedNames([]);
-      setAutoMentionFeedback({ kind: "scanning", message: "正在识别素材引用…" });
+      setAutoMentionFeedbackState({ kind: "scanning", message: "正在识别素材引用…" });
     }
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
@@ -706,7 +730,7 @@ export function PromptMentionInput({
       feedbackResetTimerRef.current = null;
     }
     setAutoMentionResolvedNames([]);
-    setAutoMentionFeedback({ kind: "scanning", message: "正在重新扫描已连接素材…" });
+    setAutoMentionFeedbackState({ kind: "scanning", message: "正在重新扫描已连接素材…" });
     autoDetectTimerRef.current = window.setTimeout(() => {
       autoDetectTimerRef.current = null;
       manualScanRequestedRef.current = false;
@@ -733,16 +757,25 @@ export function PromptMentionInput({
     const pendingCount = sessionRef.current?.read().pendingCount ?? 0;
     if (pendingCount > 0) {
       openFirstPendingAmbiguity();
-      setAutoMentionFeedback({
+      setAutoMentionFeedbackState({
         kind: "ambiguous",
         message: `仍有 ${pendingCount} 处同名引用待确认`,
       });
     } else {
       setActiveAmbiguity(null);
       setAutoMentionResolvedNames([]);
-      setAutoMentionFeedback(readyAutoMentionFeedback(currentCandidates));
+      showReadyFeedback();
     }
-  }, [candidateConnectionSignature, openFirstPendingAmbiguity]);
+  }, [candidateConnectionSignature, openFirstPendingAmbiguity, showReadyFeedback]);
+
+  /**
+   * 对外展示的识别状态：常驻提示（ready）在每次渲染时按当前候选与已引用数重算，
+   * 一次性结果（正在识别 / 已识别 / 待确认 / 未匹配 / 未连接素材）照原样展示。
+   */
+  const autoMentionFeedback =
+    autoMentionFeedbackState.kind === "ready"
+      ? readyAutoMentionFeedback(candidates, referenceCount)
+      : autoMentionFeedbackState;
 
   const autoMentionFeedbackIcon =
     autoMentionFeedback.kind === "scanning" ? (
