@@ -93,8 +93,8 @@ export interface UploadVideoEditFrameOptions {
   readonly path: string;
   readonly name: string;
   readonly providerConnectionId: string;
-  /** 真人平台分组 ID；普通素材传 null，由服务端发现/创建默认上传分组。 */
-  readonly groupId?: number | null | undefined;
+  /** 素材库分组 ID（字符串形态）；普通素材传 null，由服务端发现/创建默认上传分组。 */
+  readonly groupId?: string | null | undefined;
   readonly timeoutMs?: number | undefined;
   readonly pollIntervalMs?: number | undefined;
   readonly onProgress?: ((label: string) => void) | undefined;
@@ -203,7 +203,8 @@ export interface ResolveVideoEditFrameOptions {
   readonly canvasNodeKey: string;
   /** 素材库连接 ID；为 null（未配置供应商）时直接退化为本地文件。 */
   readonly providerConnectionId: string | null;
-  readonly groupId?: number | null | undefined;
+  /** 素材库分组 ID（字符串形态）；null 时由服务端决定默认上传分组。 */
+  readonly groupId?: string | null | undefined;
   readonly timeoutMs?: number | undefined;
   readonly pollIntervalMs?: number | undefined;
   readonly onProgress?: ((label: string) => void) | undefined;

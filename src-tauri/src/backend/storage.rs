@@ -225,7 +225,8 @@ CREATE TABLE IF NOT EXISTS staging_jobs (
   import_target_json TEXT,
   error_json TEXT,
   created_at INTEGER NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  adjustment TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
@@ -334,6 +335,7 @@ impl Storage {
         )?;
         migrate_generation_tasks_tokens(&connection)?;
         migrate_provider_token_groups(&connection)?;
+        migrate_staging_jobs_adjustment(&connection)?;
 
         let storage = Self {
             connection: Mutex::new(connection),
@@ -1374,8 +1376,9 @@ impl Storage {
         self.lock()?.execute(
             "INSERT INTO staging_jobs
              (id, local_path, purpose, media_type, object_key, status, bytes_total,
-              bytes_uploaded, asset_id, import_target_json, error_json, created_at, updated_at)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)",
+              bytes_uploaded, asset_id, import_target_json, error_json, created_at, updated_at,
+              adjustment)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
             params![
                 job.id,
                 job.local_path,
@@ -1392,7 +1395,8 @@ impl Storage {
                     .transpose()?,
                 job.error.as_ref().map(serde_json::to_string).transpose()?,
                 job.created_at,
-                job.updated_at
+                job.updated_at,
+                job.adjustment
             ],
         )?;
         Ok(())
@@ -1406,7 +1410,8 @@ impl Storage {
         let bytes_uploaded = checked_sql_integer(job.bytes_uploaded, "bytesUploaded")?;
         self.lock()?.execute(
             "UPDATE staging_jobs SET object_key = ?2, status = ?3, bytes_total = ?4,
-                    bytes_uploaded = ?5, asset_id = ?6, error_json = ?7, updated_at = ?8
+                    bytes_uploaded = ?5, asset_id = ?6, error_json = ?7, updated_at = ?8,
+                    adjustment = ?9
              WHERE id = ?1",
             params![
                 job.id,
@@ -1416,7 +1421,8 @@ impl Storage {
                 bytes_uploaded,
                 job.asset_id,
                 job.error.as_ref().map(serde_json::to_string).transpose()?,
-                job.updated_at
+                job.updated_at,
+                job.adjustment
             ],
         )?;
         Ok(())
@@ -1454,7 +1460,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at
+                        error_json, created_at, updated_at, adjustment
                  FROM staging_jobs WHERE id = ?1",
                 params![id],
                 staging_job_from_row,
@@ -1469,7 +1475,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at
+                    error_json, created_at, updated_at, adjustment
              FROM staging_jobs
              WHERE purpose = 'local_asset'
                AND import_target_json IS NULL
@@ -1490,7 +1496,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at
+                        error_json, created_at, updated_at, adjustment
                  FROM staging_jobs
                  WHERE purpose = 'local_asset'
                    AND import_target_json IS NULL
@@ -1509,7 +1515,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at
+                    error_json, created_at, updated_at, adjustment
              FROM staging_jobs
              WHERE status IN ('validating','authorizing','uploading','staged','importing','cleaning')
              ORDER BY created_at",
@@ -1554,6 +1560,20 @@ fn migrate_provider_token_groups(connection: &Connection) -> BackendResult<()> {
             "ALTER TABLE provider_model_bindings ADD COLUMN token_group TEXT",
             [],
         )?;
+    }
+    Ok(())
+}
+
+/// 为旧数据库补齐上传调整说明列：`adjustment` 记录上传前对素材做过的自动调整
+/// （目前只有「图片尺寸归一化」），旧库缺列时按 NULL（未做过调整）补齐。
+fn migrate_staging_jobs_adjustment(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(staging_jobs)")?;
+    let has_adjustment_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| result.map(|name| name == "adjustment").unwrap_or(false));
+    drop(statement);
+    if !has_adjustment_column {
+        connection.execute("ALTER TABLE staging_jobs ADD COLUMN adjustment TEXT", [])?;
     }
     Ok(())
 }
@@ -1747,6 +1767,7 @@ fn staging_job_from_row(row: &Row<'_>) -> rusqlite::Result<StagingJobRecord> {
         error: error.map(parse_json_column).transpose()?,
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
+        adjustment: row.get(13)?,
     })
 }
 
@@ -1975,6 +1996,7 @@ mod tests {
                 bytes_uploaded: 128,
                 asset_id: None,
                 import_target,
+                adjustment: None,
                 error: None,
                 created_at: 1,
                 updated_at: 1,
@@ -2011,6 +2033,75 @@ mod tests {
         let jobs = storage.list_local_asset_jobs().expect("list local assets");
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].id, "local-ready");
+
+        // 上传前的自动调整说明随任务记录往返读写；未调整的历史记录读回 NULL。
+        let mut cloud_job = storage
+            .get_staging_job("cloud-ready")
+            .expect("read cloud job");
+        assert_eq!(cloud_job.adjustment, None);
+        cloud_job.adjustment = Some("原图 8000×400 已自动等比缩放为 6000×300。".into());
+        storage
+            .update_staging_job(&cloud_job)
+            .expect("write adjustment");
+        assert_eq!(
+            storage
+                .get_staging_job("cloud-ready")
+                .expect("reload cloud job")
+                .adjustment
+                .as_deref(),
+            Some("原图 8000×400 已自动等比缩放为 6000×300。")
+        );
+    }
+
+    #[test]
+    fn migration_adds_staging_job_adjustment_column_to_existing_databases() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        // 模拟历史版本：staging_jobs 已有除 adjustment 外的全部列。
+        let connection = rusqlite::Connection::open(&path).expect("open raw db");
+        connection
+            .execute(
+                "CREATE TABLE staging_jobs (
+                   id TEXT PRIMARY KEY,
+                   local_path TEXT NOT NULL,
+                   purpose TEXT NOT NULL,
+                   media_type TEXT NOT NULL,
+                   object_key TEXT,
+                   status TEXT NOT NULL,
+                   bytes_total INTEGER,
+                   bytes_uploaded INTEGER NOT NULL DEFAULT 0,
+                   asset_id TEXT,
+                   import_target_json TEXT,
+                   error_json TEXT,
+                   created_at INTEGER NOT NULL,
+                   updated_at INTEGER NOT NULL
+                 )",
+                [],
+            )
+            .expect("create legacy table");
+
+        let columns = |connection: &rusqlite::Connection| {
+            let mut statement = connection
+                .prepare("PRAGMA table_info(staging_jobs)")
+                .expect("pragma");
+            statement
+                .query_map([], |row| row.get::<_, String>(1))
+                .expect("columns")
+                .collect::<Result<Vec<_>, _>>()
+                .expect("collect columns")
+        };
+        assert!(
+            !columns(&connection).contains(&"adjustment".to_string()),
+            "legacy table must not have adjustment yet"
+        );
+
+        migrate_staging_jobs_adjustment(&connection).expect("migration adds adjustment");
+        assert!(
+            columns(&connection).contains(&"adjustment".to_string()),
+            "adjustment column must be added by migration"
+        );
+        // 幂等：再次执行不报错。
+        migrate_staging_jobs_adjustment(&connection).expect("migration is idempotent");
     }
 
     #[test]

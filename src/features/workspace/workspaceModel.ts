@@ -107,6 +107,8 @@ export interface AssetUploadEntry {
   /** 上传中字节长时间未推进（疑似网络中断），由轮询在更新状态时计算。 */
   readonly stalled: boolean;
   readonly destination: AssetLibrarySource;
+  /** 后端在上传前对素材做过的自动调整说明（图片尺寸归一化），未调整时为 null。 */
+  readonly adjustment: string | null;
 }
 
 /** 从素材库拖到画布上生成的素材节点。旧文档未保存 source 时按 cloud 处理。 */

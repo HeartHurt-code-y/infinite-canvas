@@ -658,6 +658,11 @@ export function AssetUploadRow({
             上传长时间无进展，疑似网络中断或后端无响应，等待超时判定…
           </span>
         ) : null}
+        {entry.adjustment != null ? (
+          <span className="asset-upload__adjustment" role="status">
+            {entry.adjustment}
+          </span>
+        ) : null}
         {errorExpanded && errorDetail != null ? (
           <span className="asset-upload__error-detail-wrapper">
             <span className="asset-upload__error asset-upload__error-detail" role="alert">

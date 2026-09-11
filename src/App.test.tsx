@@ -1793,6 +1793,96 @@ describe("App workspace", () => {
     expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
   });
 
+  it("选中分组后上传的素材直接归入该分组，而不是落回默认上传分组", async () => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      void args;
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-prod",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_asset_groups":
+          return Promise.resolve([
+            { id: "0", name: "默认分组", groupName: "默认分组", isDefault: true, assetCount: 0 },
+            { id: "21", name: "客户案例", groupName: "客户案例", isDefault: false, assetCount: 3 },
+          ]);
+        case "list_assets": {
+          const groupId = (args as { command?: Record<string, unknown> })?.command?.["groupId"];
+          return Promise.resolve(
+            groupId === "21"
+              ? [cloudAsset("moyu-prod", { id: "cloud-in-group", kind: "image", name: "组内素材" })]
+              : [],
+          );
+        }
+        case "plugin:dialog|open":
+          return Promise.resolve(["C:\\media\\客户素材.png"]);
+        case "get_tos_staging_config":
+          return Promise.resolve({
+            region: "cn-beijing",
+            endpoint: "tos-cn-beijing.volces.com",
+            bucket: "test-staging-bucket",
+            credentialRef: "tos-ak-sk",
+            objectPrefix: "staging",
+            enabled: true,
+          });
+        case "start_staging_upload":
+          return Promise.resolve("cloud-upload-1");
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    // 选中「客户案例」后，上传必须带上该分组 ID，而不是只写进默认上传分组。
+    fireEvent.change(await screen.findByLabelText("素材库分组"), { target: { value: "21" } });
+    fireEvent.click(screen.getByRole("button", { name: "上传本地素材到云端素材库" }));
+
+    await waitFor(() => {
+      const uploadCall = invokeMock.mock.calls.find(
+        ([command]) => command === "start_staging_upload",
+      );
+      expect(uploadCall?.[1]).toEqual({
+        command: {
+          localPath: "C:\\media\\客户素材.png",
+          purpose: "asset_import",
+          mediaType: "image",
+          import: {
+            providerConnectionId: "moyu-prod",
+            name: "客户素材.png",
+            groupId: "21",
+          },
+        },
+      });
+    });
+  });
+
   it("浏览器预览模式下点击上传给出明确错误提示，而非无任何反应", async () => {
     const previousInternals = (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
     const previousEventInternals = (window as unknown as Record<string, unknown>)[

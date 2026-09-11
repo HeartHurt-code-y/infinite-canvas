@@ -201,7 +201,7 @@ describe("assetLibraryClient real-person H5 operations", () => {
 });
 
 describe("tosStagingClient.listLocalAssets", () => {
-  it("forwards a real-person platform group ID through the existing staging upload", async () => {
+  it("forwards a selected library group ID through the existing staging upload", async () => {
     let capturedCommand = "";
     let capturedArgs: Record<string, unknown> | undefined;
     mockDesktopInvoke((command, args) => {
@@ -218,7 +218,7 @@ describe("tosStagingClient.listLocalAssets", () => {
         import: {
           providerConnectionId: "provider-1",
           name: "张三-正脸",
-          groupId: 128,
+          groupId: "128",
         },
       }),
     ).resolves.toBe("job-real-1");
@@ -231,7 +231,7 @@ describe("tosStagingClient.listLocalAssets", () => {
         import: {
           providerConnectionId: "provider-1",
           name: "张三-正脸",
-          groupId: 128,
+          groupId: "128",
         },
       },
     });

@@ -151,7 +151,8 @@ const stagingStatusSchema = v.picklist([
 const stagingAssetImportTargetSchema = v.looseObject({
   providerConnectionId: v.string(),
   name: nullableStringSchema,
-  groupId: v.optional(nullableNumberSchema),
+  // 分组 ID 为字符串形态（魔芋数值 ID / 火山引擎 `asset-group-…`），缺省表示未指定分组。
+  groupId: v.optional(nullableStringSchema),
 });
 
 export const stagingJobRecordSchema = v.looseObject({
@@ -165,6 +166,8 @@ export const stagingJobRecordSchema = v.looseObject({
   bytesUploaded: v.number(),
   assetId: nullableStringSchema,
   importTarget: v.nullable(stagingAssetImportTargetSchema),
+  // 上传前的自动调整说明（旧后端没有该字段，缺省即「未调整」）。
+  adjustment: v.optional(nullableStringSchema),
   error: v.unknown(),
   createdAt: v.number(),
   updatedAt: v.number(),

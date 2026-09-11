@@ -7,6 +7,7 @@ pub mod credentials;
 pub mod downloader;
 pub mod error;
 pub mod frame_extractor;
+pub mod image_normalize;
 pub mod local_results;
 pub mod media;
 pub mod media_proxy;

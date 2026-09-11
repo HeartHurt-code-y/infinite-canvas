@@ -1801,6 +1801,8 @@ export function WorkspaceApp({
             lastAdvancedAt: Date.now(),
             stalled: false,
             destination,
+            // 尺寸归一化等自动调整由后端在真正上传时决定，这里先留空。
+            adjustment: null,
           })),
         ]);
       }
@@ -1817,7 +1819,12 @@ export function WorkspaceApp({
                 ? {
                     providerConnectionId: assetProvider.id,
                     name: candidate.name,
-                    groupId: realPersonGroup?.id ?? null,
+                    // 真人素材上传用平台数值分组 ID；普通上传沿用面板当前选中的分组，
+                    // 未选中任何分组时传 null，由后端发现/创建默认上传分组。
+                    groupId:
+                      realPersonGroup != null
+                        ? String(realPersonGroup.id)
+                        : selectedAssetGroupIdRef.current,
                   }
                 : null,
           });
@@ -1920,6 +1927,7 @@ export function WorkspaceApp({
           lastAdvancedAt: Date.now(),
           stalled: false,
           destination: "cloud",
+          adjustment: null,
         },
       ]);
       try {
@@ -1930,7 +1938,8 @@ export function WorkspaceApp({
           import: {
             providerConnectionId: assetProvider.id,
             name,
-            groupId: null,
+            // 产物上传同样归入面板当前选中的分组；未选中时由后端决定默认上传分组。
+            groupId: selectedAssetGroupIdRef.current,
           },
         });
         // pendingId 替换为真实 jobId，保持映射连续。
@@ -1973,6 +1982,8 @@ export function WorkspaceApp({
             bytesUploaded: job?.bytesUploaded ?? existing.bytesUploaded,
             bytesTotal: job?.bytesTotal ?? existing.bytesTotal,
             error: payload.error ?? existing.error,
+            // 后端的尺寸归一化说明在上传阶段就已写回任务记录，随事件一起送达。
+            adjustment: job?.adjustment ?? existing.adjustment,
           };
         }
         return next;
@@ -4306,6 +4317,8 @@ export function WorkspaceApp({
         name,
         canvasNodeKey: "",
         providerConnectionId: assetProvider.id,
+        // 标注帧入库沿用面板当前选中的分组；未选中时由后端决定默认上传分组。
+        groupId: selectedAssetGroupIdRef.current,
         onProgress,
       });
     },
@@ -7812,6 +7825,12 @@ export function WorkspaceApp({
   const selectedLibraryError = assetLibrarySource === "local" ? localLibraryError : libraryError;
   const uploadActionLabel =
     assetLibrarySource === "local" ? "上传到本地素材库（仅对象存储）" : "上传本地素材到云端素材库";
+  // 云端面板当前选中的分组即上传目标：选中分组后，上传必须直接归入该分组，
+  // 而不是始终落到默认上传分组、只在「全部素材」里可见。
+  const uploadGroupName =
+    assetLibrarySource === "cloud"
+      ? (assetGroups.find((group) => group.id === selectedAssetGroupId)?.name ?? null)
+      : null;
 
   if (!active) return null;
 
@@ -8141,6 +8160,7 @@ export function WorkspaceApp({
           search={assetSearch}
           onSearchChange={setAssetSearch}
           searchPending={assetSearchPending}
+          uploadGroupName={uploadGroupName}
           resultSummary={
             !isDesktopRuntime()
               ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`

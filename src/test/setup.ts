@@ -158,6 +158,25 @@ if (typeof document !== "undefined" && typeof document.elementFromPoint !== "fun
   });
 }
 
+/*
+ * jsdom 没有 canvas 实现（未安装 canvas 包），每次 getContext 都会打印
+ * 「Not implemented: HTMLCanvasElement's getContext()」并把调用栈当噪音淹没输出 ——
+ * 而标注缩略图、视频封面取帧这些路径在真实 WebView 里一定会调用它。
+ * 这里按「无 2D 上下文」的真实结果（null）静默掉，用例需要真实上下文时自行 spy 覆盖。
+ */
+if (typeof HTMLCanvasElement !== "undefined") {
+  Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
+    configurable: true,
+    writable: true,
+    value: () => null,
+  });
+  Object.defineProperty(HTMLCanvasElement.prototype, "toDataURL", {
+    configurable: true,
+    writable: true,
+    value: () => "data:image/png;base64,",
+  });
+}
+
 // ProseMirror 会在选区更新时读取 Range 几何；jsdom 没有这两个布局 API。
 // 返回零尺寸矩形即可覆盖编辑命令测试，真实布局由 WebView 提供。
 const EMPTY_CLIENT_RECT: DOMRect = {

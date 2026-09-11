@@ -959,9 +959,36 @@ pub struct StartStagingCommand {
 pub struct StagingAssetImportTarget {
     pub provider_connection_id: String,
     pub name: Option<String>,
-    /// A positive real-person platform group ID. `None` keeps the ordinary asset flow.
-    #[serde(default)]
-    pub group_id: Option<i64>,
+    /// 目标素材库分组 ID，字符串形态以兼容两种方言（魔芋数值 ID、火山引擎 `asset-group-…`）。
+    /// `None`/空串表示未指定分组，由方言自行发现/创建默认上传分组。
+    #[serde(default, deserialize_with = "deserialize_optional_group_id")]
+    pub group_id: Option<String>,
+}
+
+/// 分组 ID 兼容历史数据：早期版本只支持真人分组，把数值 ID 直接序列化成 JSON 数字，
+/// 旧的暂存任务记录里仍是 `"groupId": 128`；统一为字符串后必须仍能读回这些行。
+fn deserialize_optional_group_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(match value {
+        None | Some(Value::Null) => None,
+        Some(Value::String(group_id)) => {
+            let trimmed = group_id.trim();
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_string())
+            }
+        }
+        Some(Value::Number(number)) => Some(number.to_string()),
+        Some(other) => {
+            return Err(serde::de::Error::custom(format!(
+                "groupId must be a string or a number, got {other}"
+            )));
+        }
+    })
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -1011,6 +1038,9 @@ pub struct StagingJobRecord {
     pub bytes_uploaded: u64,
     pub asset_id: Option<String>,
     pub import_target: Option<StagingAssetImportTarget>,
+    /// 上传前的自动调整说明（目前只有「图片尺寸归一化」），面向用户展示。
+    #[serde(default)]
+    pub adjustment: Option<String>,
     pub error: Option<Value>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -1174,6 +1204,46 @@ mod tests {
                 ..
             } if url == "https://example.com/public-doc.pdf"
         ));
+    }
+
+    #[test]
+    fn staging_import_group_id_accepts_string_number_and_missing_values() {
+        // 新写入的记录：字符串分组 ID（魔芋数值 ID 与火山引擎 `asset-group-…` 共用）。
+        let target: StagingAssetImportTarget = serde_json::from_value(json!({
+            "providerConnectionId": "company",
+            "name": "素材",
+            "groupId": "asset-group-1"
+        }))
+        .expect("deserialize string group id");
+        assert_eq!(target.group_id.as_deref(), Some("asset-group-1"));
+
+        // 历史记录：旧版本把真人分组数值 ID 存成 JSON 数字。
+        let legacy: StagingAssetImportTarget = serde_json::from_value(json!({
+            "providerConnectionId": "company",
+            "name": null,
+            "groupId": 128
+        }))
+        .expect("deserialize legacy numeric group id");
+        assert_eq!(legacy.group_id.as_deref(), Some("128"));
+
+        // 未指定分组（字段缺失或空串）都归一为 None，交由方言发现/创建默认上传分组。
+        let missing: StagingAssetImportTarget =
+            serde_json::from_value(json!({ "providerConnectionId": "company", "name": null }))
+                .expect("deserialize missing group id");
+        assert_eq!(missing.group_id, None);
+        let blank: StagingAssetImportTarget = serde_json::from_value(json!({
+            "providerConnectionId": "company",
+            "name": null,
+            "groupId": "  "
+        }))
+        .expect("deserialize blank group id");
+        assert_eq!(blank.group_id, None);
+
+        // 序列化统一为字符串，落库后不回退成数字。
+        assert_eq!(
+            serde_json::to_value(&legacy).expect("serialize"),
+            json!({ "providerConnectionId": "company", "name": null, "groupId": "128" })
+        );
     }
 
     #[test]

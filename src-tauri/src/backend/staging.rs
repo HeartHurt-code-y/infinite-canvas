@@ -21,6 +21,7 @@ use super::{
     composer::VideoCompositionService,
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
+    image_normalize::normalize_image_for_asset_window,
     local_results::{format_bytes_per_sec, safe_file_stem},
     provider::{redact_request_value, redact_url_string, truncate_connectivity_detail},
     storage::{Storage, now_ms},
@@ -637,6 +638,7 @@ impl StagingService {
             bytes_uploaded: 0,
             asset_id: None,
             import_target: command.import,
+            adjustment: None,
             error: None,
             created_at: timestamp,
             updated_at: timestamp,
@@ -875,6 +877,7 @@ impl StagingService {
                 bytes_uploaded: object.size,
                 asset_id: None,
                 import_target: None,
+                adjustment: None,
                 error: None,
                 created_at: timestamp,
                 updated_at: timestamp,
@@ -1109,8 +1112,14 @@ impl StagingService {
                     public_url: lease.get_url.clone(),
                     media_type: job.media_type,
                     display_name: import_target.name.clone(),
-                    // 真人平台分组 ID（魔芋数值）转字符串形态，由方言各自解析/透传。
-                    group_id: import_target.group_id.map(|id| id.to_string()),
+                    // 分组 ID 已是字符串形态（前端选中的素材库分组 / 真人分组数值 ID），
+                    // 由方言各自解析/透传；None 表示未指定分组。
+                    group_id: import_target
+                        .group_id
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(str::to_string),
                 },
                 Some(Arc::new(import_progress)),
             )
@@ -1186,6 +1195,20 @@ impl StagingService {
             extension = transcode_ext;
             upload_path = temp_path;
             Some(TempFileGuard(Some(upload_path.clone())))
+        } else {
+            None
+        };
+        // 云端导入前把越界图片调整进平台边长窗口（本地素材只写对象存储、不经平台预处理，
+        // 保持原文件不动）。调整产物同样是临时文件，随本函数退出自动清理。
+        let _normalized_guard = if job.media_type == MediaType::Image && job.import_target.is_some()
+        {
+            normalize_image_for_asset_window(&upload_path, &extension, &job.id).map(|normalized| {
+                mime_type = normalized.mime;
+                extension = normalized.extension;
+                upload_path = normalized.path.clone();
+                job.adjustment = Some(normalized.note);
+                TempFileGuard(Some(upload_path.clone()))
+            })
         } else {
             None
         };

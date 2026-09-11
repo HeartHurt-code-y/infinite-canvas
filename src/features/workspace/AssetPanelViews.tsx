@@ -314,6 +314,11 @@ export function AssetGroupsPicker({
           ) : null}
         </div>
       </div>
+      {selectedGroup != null && !confirmingDelete ? (
+        <span className="asset-groups__upload-hint" role="status">
+          上传的素材会归入「{selectedGroup.name}」，不会落到其他分组。
+        </span>
+      ) : null}
       {confirmingDelete ? (
         <span className="asset-groups__delete-hint" role="status">
           <WarningCircle size={13} weight="fill" aria-hidden="true" />
@@ -456,6 +461,7 @@ export function AssetEmptyState({
   libraryError,
   hasProvider,
   search,
+  uploadGroupName,
   onClearSearch,
   onImport,
 }: {
@@ -464,6 +470,8 @@ export function AssetEmptyState({
   readonly libraryError: boolean;
   readonly hasProvider: boolean;
   readonly search: string;
+  /** 当前选中的云端分组名；非 null 时上传会直接归入该分组，空态里点明去向。 */
+  readonly uploadGroupName: string | null;
   readonly onClearSearch: () => void;
   readonly onImport: () => void;
 }) {
@@ -501,7 +509,9 @@ export function AssetEmptyState({
               : isDesktopRuntime()
                 ? source === "local"
                   ? "上传的素材只会写入对象存储，不会导入云端素材库。"
-                  : "试试上传本地素材，或切换素材类型。"
+                  : uploadGroupName != null
+                    ? `该分组还没有素材；从此处上传的素材会归入「${uploadGroupName}」。`
+                    : "试试上传本地素材，或切换素材类型。"
                 : "试试更短的名称，或切换素材类型。"}
       </span>
       {!loading && search ? (
@@ -657,6 +667,7 @@ export function AssetPanel({
   onSearchChange,
   searchPending,
   resultSummary,
+  uploadGroupName,
   visibleAssets,
   onPreviewAsset,
   onDropAssetToCanvas,
@@ -709,6 +720,8 @@ export function AssetPanel({
   readonly onSearchChange: (value: string) => void;
   readonly searchPending: boolean;
   readonly resultSummary: string;
+  /** 当前选中的云端分组名：空态里据此说明上传去向。 */
+  readonly uploadGroupName: string | null;
   readonly visibleAssets: readonly AssetItem[];
   readonly onPreviewAsset: (asset: AssetItem) => void;
   readonly onDropAssetToCanvas: (asset: AssetItem, clientX: number, clientY: number) => void;
@@ -828,6 +841,7 @@ export function AssetPanel({
             libraryError={libraryError}
             hasProvider={providerId != null}
             search={search}
+            uploadGroupName={uploadGroupName}
             onClearSearch={() => {
               onSearchChange("");
             }}

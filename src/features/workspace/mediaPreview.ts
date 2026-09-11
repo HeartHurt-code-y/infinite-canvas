@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
  * 视口懒挂载：节点滚出画布视口（含 512px 余量）时卸载 `<video>` 释放解码器，
@@ -9,14 +9,21 @@ import { useEffect, useRef, useState, type RefObject } from "react";
 const LAZY_MOUNT_ROOT_MARGIN_PX = 512;
 
 export function useNodeInView<T extends HTMLElement>(): {
-  readonly containerRef: RefObject<T | null>;
+  /**
+   * 回调 ref（不是 ref 对象）：被观察的元素可能晚于卡片首次挂载才出现 —— 生成产物卡片先以
+   * 无媒体的占位形态落卡（任务进行中），结果返回后才在原地渲染媒体区。用 ref 对象配合
+   * 空依赖 effect 时，effect 首轮读到的 `current` 是 null，observer 永远建不起来，
+   * `inView` 卡在初始 false，卡片就只剩灰底懒挂载占位、没有任何预览。
+   */
+  readonly containerRef: (element: T | null) => void;
   readonly inView: boolean;
 } {
-  const containerRef = useRef<T | null>(null);
   // IO 不可用（测试环境）时恒为可见，保持原行为；否则由 IO 按实际可见性驱动挂载。
   const [inView, setInView] = useState(() => typeof IntersectionObserver === "undefined");
-  useEffect(() => {
-    const element = containerRef.current;
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const containerRef = useCallback((element: T | null) => {
+    observerRef.current?.disconnect();
+    observerRef.current = null;
     if (element == null || typeof IntersectionObserver === "undefined") return;
     const observer = new IntersectionObserver(
       (entries) => {
@@ -25,8 +32,9 @@ export function useNodeInView<T extends HTMLElement>(): {
       { rootMargin: `${LAZY_MOUNT_ROOT_MARGIN_PX}px` },
     );
     observer.observe(element);
-    return () => observer.disconnect();
+    observerRef.current = observer;
   }, []);
+  useEffect(() => () => observerRef.current?.disconnect(), []);
   return { containerRef, inView };
 }
 

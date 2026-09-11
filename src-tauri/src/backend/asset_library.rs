@@ -1554,7 +1554,7 @@ impl AssetLibrary {
                 .filter(|value| *value > 0)
                 .ok_or_else(|| {
                     BackendError::validation(
-                        "real-person asset import requires a positive platform group id",
+                        "该供应商的素材分组 ID 必须是正整数，当前分组不受支持",
                         json!({ "groupId": group_id }),
                     )
                 })?,
@@ -1662,7 +1662,7 @@ impl AssetLibrary {
                 .filter(|value| *value > 0)
                 .ok_or_else(|| {
                     BackendError::validation(
-                        "real-person asset import requires a positive platform group id",
+                        "该供应商的素材分组 ID 必须是正整数，当前分组不受支持",
                         json!({ "groupId": group_id }),
                     )
                 })?,

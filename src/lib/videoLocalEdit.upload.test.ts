@@ -159,17 +159,17 @@ describe("video edit frame library upload", () => {
     expect(result.target.kind).toBe("local_file");
   });
 
-  it("forwards the real-person group id when one is supplied", async () => {
+  it("forwards the selected library group id when one is supplied", async () => {
     startUpload.mockResolvedValue("job-1");
     getJob.mockResolvedValue(job("active", "asset-42"));
     await uploadVideoEditFrameToLibrary({
       ...baseOptions,
       providerConnectionId: "provider-1",
-      groupId: 128,
+      groupId: "128",
     });
     expect(startUpload).toHaveBeenCalledWith(
       expect.objectContaining({
-        import: { providerConnectionId: "provider-1", name: baseOptions.name, groupId: 128 },
+        import: { providerConnectionId: "provider-1", name: baseOptions.name, groupId: "128" },
       }),
     );
   });

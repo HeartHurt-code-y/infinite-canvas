@@ -470,8 +470,13 @@ export type StagingStatus =
 export interface StagingAssetImportTarget {
   readonly providerConnectionId: string;
   readonly name: string | null;
-  /** Positive platform group ID returned by listRealPersonGroups. Omit for ordinary assets. */
-  readonly groupId?: number | null | undefined;
+  /**
+   * 素材库分组 ID（字符串形态，兼容魔芋数值 ID 与火山引擎 `asset-group-…`）。
+   *
+   * 传入时素材直接归入该分组；省略/null 时由后端发现/创建默认上传分组。
+   * 真人素材的数值分组 ID（listRealPersonGroups 返回）同样以字符串传入。
+   */
+  readonly groupId?: string | null | undefined;
 }
 
 export interface StartStagingCommand {
@@ -492,6 +497,8 @@ export interface StagingJobRecord {
   readonly bytesUploaded: number;
   readonly assetId: string | null;
   readonly importTarget: StagingAssetImportTarget | null;
+  /** 上传前的自动调整说明（目前只有「图片尺寸归一化」），未调整时为 null。 */
+  readonly adjustment?: string | null | undefined;
   readonly error: unknown;
   readonly createdAt: number;
   readonly updatedAt: number;
