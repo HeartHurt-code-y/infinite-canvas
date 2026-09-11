@@ -13,6 +13,10 @@ import type {
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import type { PromptContentDocumentV1 } from "./lib/promptContent";
 import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
+import {
+  UPLOAD_ABANDONED_MS,
+  UPLOAD_AUTO_DISMISS_DELAY_MS,
+} from "./features/workspace/workspaceModel";
 import type { VideoLocalEditDialogProps } from "./features/workspace/VideoLocalEditDialog";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
@@ -4504,6 +4508,25 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
   }
 
+  /**
+   * 取素材面板上传行里的文件名元素。
+   *
+   * 不能直接用 `screen.getByText(name)`：产物卡片的文件名文本也在文档里（同一个文件
+   * 既出现在画布产物卡片上，也出现在上传队列行里），会命中多个元素。
+   */
+  function uploadRowText(name: string): HTMLElement | null {
+    return (
+      Array.from(document.querySelectorAll<HTMLElement>(".asset-upload__name")).find(
+        (element) => element.textContent === name,
+      ) ?? null
+    );
+  }
+
+  /** 上传行元素本身（用于断言行状态与行内报错）。 */
+  function uploadRowFor(name: string): HTMLElement | null {
+    return uploadRowText(name)?.closest<HTMLElement>(".asset-upload") ?? null;
+  }
+
   it("已落卡的产物节点可通过拖拽把手自由移动，位移足够时不触发全屏预览", async () => {
     restoreCompletedImageOutputCard();
     render(<App />);
@@ -4642,6 +4665,102 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       },
       { timeout: 3000 },
     );
+
+    // 成功的上传行不需要用户再点一次 ×：留一小会儿让"已完成"被看见后自行收起。
+    expect(uploadRowText("night-train.png")).not.toBeNull();
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, UPLOAD_AUTO_DISMISS_DELAY_MS + 200),
+      );
+    });
+    expect(uploadRowText("night-train.png")).toBeNull();
+  });
+
+  it("上传失败的行保留在面板里，不自动收起（用户要看原因并重试）", async () => {
+    restoreCompletedImageOutputCard((command) => {
+      if (command === "get_tos_staging_config") {
+        return Promise.resolve({
+          region: "cn-beijing",
+          endpoint: "tos-cn-beijing.volces.com",
+          bucket: "canvas-test",
+          credentialRef: "tos:default",
+          objectPrefix: "staging",
+          enabled: true,
+        });
+      }
+      if (command === "start_staging_upload") return Promise.resolve("staging-job-failed");
+      return null;
+    });
+    render(<App />);
+
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    fireEvent.click(within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }));
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+        true,
+      );
+    });
+
+    const stagingListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "staging:state-changed",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const stagingHandler = tauriCallbacks.get(stagingListener[1]?.["handler"] as number);
+    act(() => {
+      stagingHandler!({
+        event: "staging:state-changed",
+        id: 1,
+        payload: {
+          jobId: "staging-job-failed",
+          job: {
+            id: "staging-job-failed",
+            localPath: "C:\\generated\\night-train.png",
+            purpose: "asset_import",
+            mediaType: "image",
+            objectKey: "staging/night-train.png",
+            status: "failed",
+            bytesTotal: 2048,
+            bytesUploaded: 2048,
+            assetId: null,
+            importTarget: {
+              providerConnectionId: PROVIDER.id,
+              name: "night-train.png",
+              groupId: null,
+            },
+            adjustment: null,
+            error: { kind: "transport", message: "连接中断" },
+            createdAt: 0,
+            updatedAt: 2,
+          },
+        },
+      });
+    });
+
+    // 失败行落地为终态并保留：既不会被自动收起，也不会一直转圈。
+    const failedRow = await waitFor(() => {
+      const failed = uploadRowFor("night-train.png");
+      expect(failed).toHaveAttribute("data-state", "failed");
+      return failed!;
+    });
+    await act(async () => {
+      await new Promise((resolve) =>
+        window.setTimeout(resolve, UPLOAD_AUTO_DISMISS_DELAY_MS + 200),
+      );
+    });
+    expect(uploadRowText("night-train.png")).not.toBeNull();
+    expect(within(failedRow).getByRole("alert")).toHaveTextContent("连接中断");
+    // 产物卡片不会被标记成已上传。
+    expect(
+      within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }),
+    ).toBeInTheDocument();
   });
 
   it("重启后按本地路径接回入库上传：已入库的点亮绿色小点，未完成的恢复为在途行", async () => {
@@ -4682,7 +4801,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
             status: "importing",
             updatedAt: restoredAt,
           }),
-          // 进程在上传途中被杀留下的僵死记录：超过停滞时限，不能显示成"还在传"。
+          // 进程在"清理暂存对象"途中被杀留下的僵死记录：这正是真机上卡住的三种状态
+          // （cleaning / staged / importing），必须落地为可关闭的已中断行。
+          importOutput({
+            jobId: "job-restored-cleaning",
+            localPath: "C:\\generated\\zombie-cleaning.png",
+            status: "cleaning",
+            updatedAt: restoredAt - 15 * 60 * 1000,
+          }),
           importOutput({
             jobId: "job-restored-stale",
             localPath: "C:\\generated\\stale-upload.png",
@@ -4716,16 +4842,111 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(restoredRow).getByText("still-importing.png")).toBeInTheDocument();
     expect(within(restoredRow).getByText("平台处理中…")).toBeInTheDocument();
 
-    // 僵死记录：显示为已中断的终态行，而不是一个永远转圈的在途上传。
-    const staleRow = await waitFor(() => {
-      const row = document.querySelector<HTMLElement>(".asset-upload[data-state='interrupted']");
-      expect(row).not.toBeNull();
-      return row!;
+    /** 按文件名取回该行（不依赖行顺序：同一批里可能有多条终态记录）。 */
+    const uploadRowNamed = async (name: string): Promise<HTMLElement> =>
+      waitFor(() => {
+        const row = screen.getByText(name).closest<HTMLElement>(".asset-upload");
+        expect(row).not.toBeNull();
+        return row!;
+      });
+
+    // 僵死记录：进程在"清理暂存对象"途中被杀留下的 cleaning 行，这正是真机上卡住的
+    // 状态。必须落地为已中断的终态行，而不是一个永远转圈、想关也关不掉的上传。
+    const zombieRow = await uploadRowNamed("zombie-cleaning.png");
+    expect(zombieRow).toHaveAttribute("data-state", "interrupted");
+    // 真机反馈「想关也关不掉」：终态行必须给出移除入口，点击后这一行真的消失。
+    fireEvent.click(
+      within(zombieRow).getByRole("button", { name: "移除上传记录：zombie-cleaning.png" }),
+    );
+    await waitFor(() => {
+      expect(screen.queryByText("zombie-cleaning.png")).not.toBeInTheDocument();
     });
-    expect(within(staleRow).getByText("stale-upload.png")).toBeInTheDocument();
+    // 同一批里的另一条已中断记录不受影响。
+    const staleRow = await uploadRowNamed("stale-upload.png");
+    expect(staleRow).toHaveAttribute("data-state", "interrupted");
+
     expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_import_outputs")).toBe(
       true,
     );
+  });
+
+  it("在途上传在后端卡住不再推进时，行自己落地为可移除的已中断行", async () => {
+    // 真机反馈的第二种形态：上传行本来在传，后端任务却再也没有下文。
+    // 此时 jobId 已在内存里，恢复路径完全不参与；关键在于即使没有任何后续数据更新
+    // （此处默认实现让 get_staging_job 返回 null，轮询拿不到新状态），
+    // 这一行也必须自己到点落地为已中断并给出移除入口——否则用户看到的就是
+    // 永远转圈、想关也关不掉。
+    const importOutput = (overrides: {
+      jobId: string;
+      localPath: string;
+      status: string;
+      updatedAt: number;
+    }) => ({
+      jobId: overrides.jobId,
+      localPath: overrides.localPath,
+      mediaType: "image",
+      status: overrides.status,
+      assetId: null,
+      groupId: null,
+      bytesUploaded: 2048,
+      bytesTotal: 2048,
+      error: null,
+      createdAt: 1,
+      updatedAt: overrides.updatedAt,
+    });
+    restoreCompletedImageOutputCard((command) => {
+      if (command === "list_asset_import_outputs") {
+        return Promise.resolve([
+          importOutput({
+            jobId: "job-alive-then-hung",
+            localPath: "C:\\generated\\hung-upload.png",
+            status: "importing",
+            // 恢复这一刻还很新：按在途行接管。
+            updatedAt: Date.now(),
+          }),
+        ]);
+      }
+      return null;
+    });
+    render(<App />);
+
+    const row = await waitFor(() => {
+      const candidate = screen.getByText("hung-upload.png").closest<HTMLElement>(".asset-upload");
+      expect(candidate).not.toBeNull();
+      return candidate!;
+    });
+    // 刚接管时是在途行：还没有移除入口。
+    expect(row).toHaveAttribute("data-state", "importing");
+    expect(
+      within(row).queryByRole("button", { name: "移除上传记录：hung-upload.png" }),
+    ).not.toBeInTheDocument();
+
+    // 推进系统时钟越过僵尸判定窗口：行内自检（真实计时器，5s 一跳）到点后自行落地为
+    // 可移除的已中断行，真机上就是等两分钟。判定边界的精确覆盖在
+    // AssetLibraryViews.uploadRowAbandoned.test.tsx（假计时器），这里只验证这条路接进
+    // app 之后真的通。
+    const advanced = vi
+      .spyOn(Date, "now")
+      .mockReturnValue(Date.now() + UPLOAD_ABANDONED_MS + 60_000);
+    try {
+      await waitFor(
+        () => {
+          expect(screen.getByText("hung-upload.png").closest(".asset-upload")).toHaveAttribute(
+            "data-state",
+            "interrupted",
+          );
+        },
+        { timeout: 15_000 },
+      );
+    } finally {
+      advanced.mockRestore();
+    }
+    // 现在这一行可以移除了——这正是真机上"想关也关不掉"的缺口。
+    const hungRow = screen.getByText("hung-upload.png").closest<HTMLElement>(".asset-upload")!;
+    fireEvent.click(within(hungRow).getByRole("button", { name: "移除上传记录：hung-upload.png" }));
+    await waitFor(() => {
+      expect(screen.queryByText("hung-upload.png")).not.toBeInTheDocument();
+    });
   });
 
   it.each(["queued", "running"] as const)(

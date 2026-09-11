@@ -252,8 +252,8 @@ import {
   SCREENPLAY_NODE_HEIGHT,
   SCREENPLAY_NODE_WIDTH,
   TERMINAL_UPLOAD_STATUSES,
+  UPLOAD_ABANDONED_MS,
   UPLOAD_POLL_INTERVAL_MS,
-  UPLOAD_STALL_HINT_MS,
   VIDEO_COMPOSER_NODE_HEIGHT,
   VIDEO_COMPOSER_NODE_WIDTH,
   VIDEO_DOWNLOADER_NODE_HEIGHT,
@@ -269,6 +269,7 @@ import {
   ZOOM_STEP,
   assetNodeDimensions,
   assetNodeKey,
+  abandonedUploadError,
   cloudAssetToItem,
   createImageNodeConfig,
   createPromptNodeConfig,
@@ -283,7 +284,6 @@ import {
   generationInputMentionCandidate,
   getNodeDescriptor,
   isRunningTaskStatus,
-  isStallTrackedStatus,
   textResultFromSource,
   isTerminalAssetUpload,
   isTerminalTaskStatus,
@@ -293,6 +293,9 @@ import {
   markdownDocumentExportName,
   materializeCompositionInputs,
   measuredFor,
+  mergeStagingJobsIntoUploads,
+  shouldAutoDismissUpload,
+  UPLOAD_AUTO_DISMISS_DELAY_MS,
   minimumCanvasZoom,
   modelDisplayNameForTask,
   nearestAvailableNodePosition,
@@ -747,6 +750,15 @@ export function WorkspaceApp({
   useEffect(() => {
     uploadEntriesRef.current = assetUploads;
   }, [assetUploads]);
+  /** 成功上传行的自动收起计时器（jobId → timer），卸载时一并清除。 */
+  const uploadAutoDismissTimersRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    const timers = uploadAutoDismissTimersRef.current;
+    return () => {
+      for (const timer of timers.values()) window.clearTimeout(timer);
+      timers.clear();
+    };
+  }, []);
   // startUpload 返回 jobId 前，占位行的临时自增 id（前缀避免与后端真实 id 冲突）。
   const pendingUploadSeqRef = useRef(0);
   const [videoComposerRuns, setVideoComposerRuns] = useState<
@@ -2133,7 +2145,11 @@ export function WorkspaceApp({
             status: job?.status ?? "failed",
             bytesUploaded: job?.bytesUploaded ?? existing.bytesUploaded,
             bytesTotal: job?.bytesTotal ?? existing.bytesTotal,
-            error: payload.error ?? existing.error,
+            // 失败原因有两个来源：事件顶层的 error（进程内失败时后端只发 error），
+            // 以及任务记录里的 job.error（跑完一轮后落库的完整记录，前端走 startUpload
+            // 的那条路径就吃这个）。只看顶层会把后者的失败原因丢掉，用户看到一行
+            // "失败"却没有任何原因。
+            error: payload.error ?? job?.error ?? existing.error,
             // 后端的尺寸归一化说明在上传阶段就已写回任务记录，随事件一起送达。
             adjustment: job?.adjustment ?? existing.adjustment,
           };
@@ -2177,6 +2193,19 @@ export function WorkspaceApp({
         // 上传失败：清理映射，不标记已上传。
         uploadJobToOutputKeyRef.current.delete(payload.jobId);
       }
+      // 成功的上传不用用户再点一次 ×：素材已经入库、绿色小点已经点亮，这一行
+      // 留一小会儿让"已完成"被看见，然后自行收起。失败/中断行永不自动收起
+      // （用户要看原因并重试），僵尸在途行也留着由行内判定落地为可移除的已中断行。
+      if (status != null && shouldAutoDismissUpload(status)) {
+        uploadAutoDismissTimersRef.current.set(
+          payload.jobId,
+          window.setTimeout(() => {
+            uploadAutoDismissTimersRef.current.delete(payload.jobId);
+            // 延迟期间这一行可能已经被手动移除：重复过滤是幂等的。
+            setAssetUploads((current) => current.filter((entry) => entry.jobId !== payload.jobId));
+          }, UPLOAD_AUTO_DISMISS_DELAY_MS),
+        );
+      }
     });
   }, [
     assetLibrarySource,
@@ -2215,21 +2244,21 @@ export function WorkspaceApp({
         recoveredAssetImportsRef.current = records;
         // 在途上传恢复成面板行：状态与字节进度都来自后端记录，之后由既有轮询继续推进。
         // 长时间没有推进的记录不再当作"还在传"：进程在上传途中被杀时后端会留下一个
-        // staged/importing 的僵死记录，显示成在途会让进度条永远转下去，用户既不知道
-        // 失败也无法重试；按停滞口径标记为已中断，给出明确的终态与原因。
+        // staged/importing/cleaning 的僵死记录，显示成在途会让进度条永远转下去，用户既
+        // 不知道失败也无法重试；按僵尸口径直接落地为已中断，给出明确的终态与原因。
         const restoredEntries: AssetUploadEntry[] = records
           .filter((record) => !ASSET_IMPORT_COMPLETED_STATUSES.has(record.status))
           .map((record) => {
             const lastAdvancedAt = record.updatedAt || restoredAt;
-            const stalled = restoredAt - lastAdvancedAt >= UPLOAD_STALL_HINT_MS;
+            const abandoned = restoredAt - lastAdvancedAt >= UPLOAD_ABANDONED_MS;
             return {
               jobId: record.jobId,
               name: localPathFileName(record.localPath),
               kind: record.mediaType,
-              status: stalled ? ("interrupted" as const) : record.status,
+              status: abandoned ? ("interrupted" as const) : record.status,
               bytesUploaded: record.bytesUploaded,
               bytesTotal: record.bytesTotal,
-              error: record.error,
+              error: abandoned ? abandonedUploadError(record.status) : record.error,
               lastAdvancedAt,
               stalled: false,
               destination: "cloud" as const,
@@ -4676,44 +4705,9 @@ export function WorkspaceApp({
         }
       }
       setAssetUploads((current) => {
-        let changed = false;
-        const next = current.map((entry) => {
-          const job = jobs.find(
-            (item): item is StagingJobRecord => item != null && item.id === entry.jobId,
-          );
-          if (job == null) {
-            // 占位行（preparing）在后端尚无任务记录：只推进停滞提示。
-            if (
-              isStallTrackedStatus(entry.status) &&
-              !entry.stalled &&
-              now - entry.lastAdvancedAt >= UPLOAD_STALL_HINT_MS
-            ) {
-              changed = true;
-              return { ...entry, stalled: true };
-            }
-            return entry;
-          }
-          const bytesAdvanced = job.bytesUploaded > entry.bytesUploaded;
-          const statusChanged = job.status !== entry.status;
-          // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
-          // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
-          if (!bytesAdvanced && !statusChanged && !isStallTrackedStatus(entry.status)) {
-            return entry;
-          }
-          changed = true;
-          const lastAdvancedAt = bytesAdvanced || statusChanged ? now : entry.lastAdvancedAt;
-          return {
-            ...entry,
-            status: job.status,
-            bytesUploaded: job.bytesUploaded,
-            bytesTotal: job.bytesTotal ?? entry.bytesTotal,
-            error: job.error ?? entry.error,
-            lastAdvancedAt,
-            stalled:
-              isStallTrackedStatus(job.status) && now - lastAdvancedAt >= UPLOAD_STALL_HINT_MS,
-          };
-        });
-        return changed ? next : current;
+        // 状态合并（终态写入、僵尸在途落地为已中断、停滞提示）在 workspaceModel 里：
+        // 僵尸判定要等两分钟，抽成纯函数后可以直接验证边界，不必在测试里真实等待。
+        return mergeStagingJobsIntoUploads(current, jobs, now) ?? current;
       });
     });
   }, [

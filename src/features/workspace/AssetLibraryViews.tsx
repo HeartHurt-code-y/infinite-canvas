@@ -15,8 +15,11 @@ import {
   ASSET_IMPORT_COMPLETED_STATUSES,
   ASSET_KIND_LABELS,
   STAGING_STATUS_LABELS,
+  UPLOAD_ABANDONED_TICK_MS,
   UPLOAD_PHASE_NAMES,
+  abandonedUploadError,
   assetErrorPresentation,
+  isAbandonedAssetUpload,
   isStallTrackedStatus,
   isTerminalAssetUpload,
   measuredAspectRatio,
@@ -561,7 +564,34 @@ export function AssetUploadRow({
   readonly entry: AssetUploadEntry;
   readonly onDismiss: () => void;
 }) {
-  const isTerminal = isTerminalAssetUpload(entry);
+  /**
+   * 僵尸判定：非终态但长时间完全没有推进的上传（执行它的后端进程已经不在了，
+   * 例如应用重启、导入途中退出）。真机反馈：这种行会一直转圈，而且非终态行不给
+   * 移除按钮，用户「想关也关不掉」。
+   *
+   * 判定放在行内部、用自己的计时器重算，而不是只依赖轮询把状态改成 interrupted：
+   * 轮询数据可能因为查询键/观察者变化停止更新，行内的时钟不会。判定窗口由
+   * `UPLOAD_ABANDONED_MS` 给出（默认两分钟），到点后这一行自动变成可移除的已中断行。
+   */
+  const [now, setNow] = useState(() => Date.now());
+  const abandoned = isAbandonedAssetUpload(entry, now);
+  // 依赖里只放"阶段"而不是整个 entry：轮询每秒都会产出新对象，
+  // 若按 entry 重注册计时器，等于每秒重启一次自检，永远等不到判定窗口。
+  const entryStatus = entry.status;
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      // 只在时间真的变了才 setState：避免同值更新触发无意义重渲染（也让测试里
+      // 同步触发的计时器不会陷入"更新→重渲染→再更新"的循环）。
+      setNow((previous) => {
+        const current = Date.now();
+        return current === previous ? previous : current;
+      });
+    }, UPLOAD_ABANDONED_TICK_MS);
+    return () => window.clearInterval(timer);
+  }, [entryStatus]);
+  // 僵尸行按「已中断」呈现并给出移除入口：不改后端事实，只把这一行落地为终态。
+  const status = abandoned ? ("interrupted" as const) : entry.status;
+  const isTerminal = isTerminalAssetUpload({ ...entry, status });
   const progressLabel =
     entry.bytesTotal != null
       ? `${formatBytes(entry.bytesUploaded) ?? "0 B"} / ${formatBytes(entry.bytesTotal) ?? "?"}`
@@ -570,30 +600,30 @@ export function AssetUploadRow({
     entry.bytesTotal != null && entry.bytesTotal > 0
       ? Math.min(100, Math.round((entry.bytesUploaded / entry.bytesTotal) * 100))
       : null;
-  const isStalled = entry.stalled && isStallTrackedStatus(entry.status);
+  const isStalled = !abandoned && entry.stalled && isStallTrackedStatus(status);
   // 两段进度：① 对象存储直传（preparing/validating/authorizing/uploading，有字节进度）；
   // ② 素材库导入（staged/importing → active/cleaned，仅云端素材）。
   const isObjectStoragePhase =
-    entry.status === "preparing" ||
-    entry.status === "validating" ||
-    entry.status === "authorizing" ||
-    entry.status === "uploading";
-  const hasFailed = entry.status === "failed" || entry.status === "interrupted";
+    status === "preparing" ||
+    status === "validating" ||
+    status === "authorizing" ||
+    status === "uploading";
+  const hasFailed = status === "failed" || status === "interrupted";
   const objectStorageValue = hasFailed
     ? "失败"
-    : entry.status === "preparing"
+    : status === "preparing"
       ? "准备中…"
       : isObjectStoragePhase
-        ? `${STAGING_STATUS_LABELS[entry.status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
+        ? `${STAGING_STATUS_LABELS[status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
         : "已完成";
   const showAssetImportPhase = entry.destination === "cloud";
-  const assetImportInProgress = entry.status === "staged" || entry.status === "importing";
-  const assetImportDone = ASSET_IMPORT_COMPLETED_STATUSES.has(entry.status);
+  const assetImportInProgress = status === "staged" || status === "importing";
+  const assetImportDone = ASSET_IMPORT_COMPLETED_STATUSES.has(status);
   // 素材库导入字节进度：海外路径在 importing 期间由后端推进（bytesTotal = 2×文件大小，
   // 下载 + 上传）；国内路径（/v1/assets/async 平台侧拉取）无字节进度，bytes 保持对象
   // 存储阶段的值（bytesUploaded ≥ bytesTotal），因此走"平台处理中"。
   const assetImportHasByteProgress =
-    entry.status === "importing" &&
+    status === "importing" &&
     entry.bytesTotal != null &&
     entry.bytesTotal > 0 &&
     entry.bytesUploaded < entry.bytesTotal;
@@ -606,7 +636,7 @@ export function AssetUploadRow({
     : assetImportInProgress
       ? assetImportHasByteProgress
         ? `上传中 ${assetImportPercent}%`
-        : entry.status === "importing"
+        : status === "importing"
           ? "平台处理中…"
           : "上传中…"
       : assetImportDone
@@ -614,24 +644,22 @@ export function AssetUploadRow({
         : "等待中";
   // 折叠态展示人类可读摘要；展开态展示后端返回的完整原始错误（JSON，含
   // message/kind/details/rawResponse/httpStatus 等全部诊断字段）。
-  const errorSummary =
-    entry.status === "failed" || entry.status === "interrupted"
-      ? stagingErrorSummary(entry.error)
-      : null;
-  const errorDetail =
-    entry.status === "failed" || entry.status === "interrupted"
-      ? stagingErrorFullText(entry.error)
-      : null;
+  const errorSummary = hasFailed
+    ? stagingErrorSummary(abandoned ? abandonedUploadError(entry.status) : entry.error)
+    : null;
+  const errorDetail = hasFailed
+    ? stagingErrorFullText(abandoned ? abandonedUploadError(entry.status) : entry.error)
+    : null;
   const [errorExpanded, setErrorExpanded] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
   // 完整原始错误过长才提供折叠/展开；摘要本身也可能被 -webkit-line-clamp 收成两行。
   const showErrorToggle = errorDetail != null && errorDetail.length > 80;
 
   return (
-    <li className="asset-upload" data-state={entry.status}>
+    <li className="asset-upload" data-state={status}>
       <span className="asset-upload__icon" aria-hidden="true">
         {isTerminal ? (
-          ASSET_IMPORT_COMPLETED_STATUSES.has(entry.status) || entry.status === "staged" ? (
+          ASSET_IMPORT_COMPLETED_STATUSES.has(status) || status === "staged" ? (
             <CheckCircle size={15} weight="fill" />
           ) : (
             <WarningCircle size={15} weight="fill" />

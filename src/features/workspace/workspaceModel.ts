@@ -22,6 +22,7 @@ import {
   type PromptReferenceInput,
   type ProviderCallRecord,
   type ProviderCatalogEntry,
+  type StagingJobRecord,
   type StagingStatus,
   toMediaSrc,
 } from "../../lib/backend";
@@ -1092,6 +1093,30 @@ export function localPathFileName(path: string): string {
   return name === "" ? normalized.trim() : name;
 }
 
+/**
+ * 上传成功后，这一行在面板里再停留多久再自动收起。
+ *
+ * 用户不需要为"成功"这个结局做任何操作：上传完成时素材已经出现在素材库里，
+ * 绿色小点也已经点亮，留着这一行只会让人再去点一次 ×。留一小段时间是为了
+ * 让"已完成"这个结论被看见（否则行会瞬间消失，用户没法确认刚才到底成没成）。
+ */
+export const UPLOAD_AUTO_DISMISS_DELAY_MS = 3_000;
+
+/**
+ * 这一次状态推送是否表示上传已经成功收尾（可以自动收起这一行）。
+ *
+ * 只认事件里的 `active` / `cleaned`——它们代表素材库已经给出素材身份：
+ * - `staged` 对云端素材只是"对象已上传，仍在导入"，不是成功；
+ * - `cleaned` 是随后清理暂存对象完成，同样算成功。
+ * 失败与中断（`failed` / `interrupted`）**永不**自动收起：用户需要看见原因并重试。
+ *
+ * 注意 `active` 只是运行中的瞬时状态，不会落库（已完成的记录都是 `cleaned`），
+ * 所以成功信号只能在事件里读到，不能靠轮询补。
+ */
+export function shouldAutoDismissUpload(status: StagingStatus): boolean {
+  return ASSET_IMPORT_COMPLETED_STATUSES.has(status);
+}
+
 // 到达这些状态后停止轮询，显示可移除的终态记录。
 export const TERMINAL_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
   "active",
@@ -1147,6 +1172,136 @@ export const EMPTY_GENERATION_TASKS: readonly GenerationTaskSummary[] = [];
 // 上传中超过该时长字节无推进时，提示疑似网络中断（后端 reqwest 总超时最长 300s，
 // 停滞期间进度条会一直停留在最后字节数，没有该提示用户无法区分“慢”和“断”）。
 export const UPLOAD_STALL_HINT_MS = 15_000;
+
+/**
+ * 上传行超过该时长完全无推进时，判定为「执行者已经没了」的僵尸任务，落地为已中断。
+ *
+ * 上传的执行者只存在于后端进程里，而进度是靠 `updated_at` 随字节推进刷新的：
+ * - 对象存储直传阶段每上传完一块就刷新一次，真实传输不会安静这么久；
+ * - 素材库导入阶段国内路径（方舟 /contents/generations/tasks 平台侧拉取）没有字节回调，
+ *   一旦进程在导入途中退出，记录就永远停在 importing / cleaning / staged，
+ *   既不会到达终态、也不会再有事件——前端只能一直转圈，而且非终态行不给关闭按钮。
+ *
+ * 阈值取得比停滞提示宽松得多：宁可多转两分钟，也不能把正在推进的上传误判成失败。
+ */
+export const UPLOAD_ABANDONED_MS = 120_000;
+
+/**
+ * 挂在面板行上的僵尸判定自检间隔。
+ *
+ * 行的僵尸判定要用当前时间，但行的重渲染完全由轮询/事件驱动：后端一旦不再推进，
+ * 这一行就再也没有机会重新计算，于是永远停在「上传中」。行自己按这个间隔重算一次，
+ * 到点后自动变成可移除的已中断行——不依赖任何后台路径是否还在更新。
+ */
+export const UPLOAD_ABANDONED_TICK_MS = 5_000;
+
+/**
+ * 僵尸判定的可信静默上限。
+ *
+ * 超过这个时长还没推进，说明这一行的 `lastAdvancedAt` 不是真实的上传时间
+ * （例如后端记录缺 `updated_at` 时回填的 0/1 这类哨兵值），不能据此把一条
+ * 正常的上传判成僵尸——否则刚提交的上传会立刻变成"已中断"。
+ */
+const UPLOAD_ABANDONED_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 这一行是否已经不可能再推进（僵尸在途）。
+ *
+ * 只看两个条件：既不是终态，又长时间没有任何字节/状态推进。`preparing` 与 `validating`
+ * 除外——它们还没有后端任务身份（jobId 生成前）或刚提交，超时口径与轮询路径不同，
+ * 由停滞提示负责呈现。静默时长还要落在可信区间内（见上），避免哨兵时间戳误伤新上传。
+ */
+export function isAbandonedAssetUpload(entry: AssetUploadEntry, now: number): boolean {
+  if (isTerminalAssetUpload(entry)) return false;
+  if (entry.status === "preparing" || entry.status === "validating") return false;
+  const idleMs = now - entry.lastAdvancedAt;
+  return idleMs >= UPLOAD_ABANDONED_MS && idleMs <= UPLOAD_ABANDONED_MAX_IDLE_MS;
+}
+
+/**
+ * 僵尸在途行落地为已中断时展示的原因（用户据此判断不需要重传还是必须重传）。
+ * `lastBackendStatus` 保留后端最后停留的阶段，便于对照日志排查。
+ */
+export function abandonedUploadError(lastBackendStatus: StagingStatus): {
+  readonly kind: "abandoned";
+  readonly message: string;
+  readonly lastBackendStatus: StagingStatus;
+} {
+  return {
+    kind: "abandoned",
+    message:
+      "上传长时间没有任何进展，执行它的进程已经不在（应用重启或后台任务中断）。这条记录不会再推进，可以直接移除后重新上传。",
+    lastBackendStatus,
+  };
+}
+
+/**
+ * 轮询结果合并：把后端任务状态写回上传行，并处理两种"看起来在传、其实不会再有下文"的行。
+ *
+ * 纯函数便于直接验证边界（僵尸判定要等两分钟，不该靠真实时间在测试里等）：
+ * - 到达终态：照实写入；
+ * - 后端记录长时间无任何推进（执行进程已经不在）：落地为已中断 + 原因，停止轮询并给出关闭入口；
+ * - 仍在推进：刷新字节与停滞提示，`lastAdvancedAt` 只在真有推进时前移。
+ *
+ * 返回 `null` 表示没有任何一行变化，调用方据此跳过重渲染。
+ */
+export function mergeStagingJobsIntoUploads(
+  current: readonly AssetUploadEntry[],
+  jobs: readonly (StagingJobRecord | null)[],
+  now: number,
+): readonly AssetUploadEntry[] | null {
+  let changed = false;
+  const next = current.map((entry) => {
+    const job = jobs.find(
+      (item): item is StagingJobRecord => item != null && item.id === entry.jobId,
+    );
+    if (job == null) {
+      // 占位行（preparing）在后端尚无任务记录：只推进停滞提示。
+      if (
+        isStallTrackedStatus(entry.status) &&
+        !entry.stalled &&
+        now - entry.lastAdvancedAt >= UPLOAD_STALL_HINT_MS
+      ) {
+        changed = true;
+        return { ...entry, stalled: true };
+      }
+      return entry;
+    }
+    const bytesAdvanced = job.bytesUploaded > entry.bytesUploaded;
+    const statusChanged = job.status !== entry.status;
+    const lastAdvancedAt = bytesAdvanced || statusChanged ? now : entry.lastAdvancedAt;
+    // 后端记录本身到不了终态（执行它的进程已经不在了）：落地为已中断，
+    // 否则这一行会一直转圈，而且非终态行不给关闭按钮。
+    if (!TERMINAL_UPLOAD_STATUSES.has(job.status) && now - lastAdvancedAt >= UPLOAD_ABANDONED_MS) {
+      changed = true;
+      return {
+        ...entry,
+        status: "interrupted" as const,
+        bytesUploaded: job.bytesUploaded,
+        bytesTotal: job.bytesTotal ?? entry.bytesTotal,
+        error: entry.error ?? abandonedUploadError(job.status),
+        lastAdvancedAt,
+        stalled: false,
+      };
+    }
+    // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
+    // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
+    if (!bytesAdvanced && !statusChanged && !isStallTrackedStatus(entry.status)) {
+      return entry;
+    }
+    changed = true;
+    return {
+      ...entry,
+      status: job.status,
+      bytesUploaded: job.bytesUploaded,
+      bytesTotal: job.bytesTotal ?? entry.bytesTotal,
+      error: job.error ?? entry.error,
+      lastAdvancedAt,
+      stalled: isStallTrackedStatus(job.status) && now - lastAdvancedAt >= UPLOAD_STALL_HINT_MS,
+    };
+  });
+  return changed ? next : null;
+}
 
 // 云端素材列表刷新的触发来源，写入 [assets] 日志便于区分刷新路径。
 export type AssetRefreshSource =
