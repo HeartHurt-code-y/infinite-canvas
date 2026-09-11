@@ -107,9 +107,34 @@ const UPLOAD_STAGE_LABELS: Partial<Record<StagingStatus, string>> = {
   staged: "对象存储上传完成，准备入库…",
   importing: "正在导入云端素材库…",
   active: "素材库导入完成",
+  cleaning: "素材库导入完成，正在清理暂存对象…",
+  cleaned: "素材库导入完成",
 };
 
 const FAILED_STAGES: readonly StagingStatus[] = ["failed", "interrupted"];
+
+/**
+ * 后端落库的状态多于这里登记的文案时的兜底：宁可用一句笼统的话配上仍在走的
+ * 已等待时长，也不能像原来那样静默不刷新，让界面停在一个秒数上看着像卡死。
+ */
+const UNKNOWN_UPLOAD_STAGE_LABEL = "正在等待素材库处理…";
+
+/**
+ * 已经取得云端素材身份的状态：入库成功后才可能继续往下走的状态。
+ *
+ * `active` 只是入库成功那一瞬间的落库状态——后端紧接着就清理暂存对象，把记录推到
+ * `cleaning` → `cleaned`，而这一步通常远快于 1 秒的轮询间隔。只认 `active` 的话，
+ * 轮询几乎必然错过它，界面会一直停在上一次的「正在导入云端素材库…（已等待 N 秒）」
+ * 上不再变化，直到 5 分钟超时才报错，用户看到的就是卡死。
+ *
+ * 权威信号是 `assetId`：它只在导入成功后写入，后续清理阶段不会丢，
+ * 因此这些状态只要带回素材 ID 就算入库成功。
+ */
+const IMPORT_COMPLETED_STATUSES: ReadonlySet<StagingStatus> = new Set([
+  "active",
+  "cleaning",
+  "cleaned",
+]);
 
 /**
  * 标注帧入库的等待上限。
@@ -166,18 +191,13 @@ export async function uploadVideoEditFrameToLibrary(
     import: { providerConnectionId, name, groupId },
   });
   const deadline = Date.now() + timeoutMs;
-  let lastStatus: StagingStatus | null = null;
   for (;;) {
     const job = await tosStagingClient.getJob(jobId);
-    const stageLabel = UPLOAD_STAGE_LABELS[job.status];
-    if (job.status !== lastStatus) {
-      lastStatus = job.status;
-      if (stageLabel) report(stageLabel);
-    } else if (stageLabel) {
-      // 同状态长时间停留（审核排队）：刷新已等待时长，让「还在等」看得见。
-      report(stageLabel);
-    }
-    if (job.status === "active") {
+    // 每轮都重报一次：同状态长时间停留（审核排队）时刷新已等待时长，让「还在等」看得见。
+    report(UPLOAD_STAGE_LABELS[job.status] ?? UNKNOWN_UPLOAD_STAGE_LABEL);
+    if (IMPORT_COMPLETED_STATUSES.has(job.status)) {
+      // 没有素材 ID 就没有可用的资产身份：清理阶段可能先于失败终态被读到，
+      // 但两种结局都是回退本地文件，这里直接说清楚，不必再空等。
       if (!job.assetId) {
         throw new Error("标注帧已进入素材库但未返回素材 ID，请稍后在素材面板确认后重试。");
       }

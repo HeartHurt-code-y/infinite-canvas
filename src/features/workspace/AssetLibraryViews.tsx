@@ -12,7 +12,6 @@ import { copyTextToDesktopClipboard } from "./desktopActions";
 import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
-  ASSET_IMPORT_COMPLETED_STATUSES,
   ASSET_KIND_LABELS,
   STAGING_STATUS_LABELS,
   UPLOAD_ABANDONED_TICK_MS,
@@ -25,6 +24,7 @@ import {
   measuredAspectRatio,
   stagingErrorFullText,
   stagingErrorSummary,
+  stagingImportReachedLibrary,
 } from "./workspaceModel";
 
 function startVideoPreview(video: HTMLVideoElement | null, fromStart = true) {
@@ -618,7 +618,9 @@ export function AssetUploadRow({
         : "已完成";
   const showAssetImportPhase = entry.destination === "cloud";
   const assetImportInProgress = status === "staged" || status === "importing";
-  const assetImportDone = ASSET_IMPORT_COMPLETED_STATUSES.has(status);
+  // 入库是否成功看素材身份而不是状态：后端给出素材身份后还会清理暂存对象
+  // （active → cleaning → cleaned），清理没走完的记录同样是成功。
+  const assetImportDone = stagingImportReachedLibrary(entry);
   // 素材库导入字节进度：海外路径在 importing 期间由后端推进（bytesTotal = 2×文件大小，
   // 下载 + 上传）；国内路径（/v1/assets/async 平台侧拉取）无字节进度，bytes 保持对象
   // 存储阶段的值（bytesUploaded ≥ bytesTotal），因此走"平台处理中"。
@@ -659,7 +661,7 @@ export function AssetUploadRow({
     <li className="asset-upload" data-state={status}>
       <span className="asset-upload__icon" aria-hidden="true">
         {isTerminal ? (
-          ASSET_IMPORT_COMPLETED_STATUSES.has(status) || status === "staged" ? (
+          assetImportDone || status === "staged" ? (
             <CheckCircle size={15} weight="fill" />
           ) : (
             <WarningCircle size={15} weight="fill" />

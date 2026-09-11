@@ -102,6 +102,58 @@ describe("video edit frame library upload", () => {
     });
   });
 
+  it("accepts the cleaned record when polling misses the transient active state", async () => {
+    startUpload.mockResolvedValue("job-1");
+    // 后端入库成功后会立刻清理暂存对象，把记录推到 cleaning → cleaned；
+    // 1 秒一轮的轮询很容易只读到 cleaned，只认 active 就会一直空等到超时。
+    getJob
+      .mockResolvedValueOnce(job("importing"))
+      .mockResolvedValueOnce(job("cleaning", "asset-42"))
+      .mockResolvedValue(job("cleaned", "asset-42"));
+    const labels: string[] = [];
+    const result = await resolveVideoEditFrameTarget({
+      ...baseOptions,
+      providerConnectionId: "provider-1",
+      // 缩小上限：真出现回归时这条用例只等 1 秒就失败，不会拖满 5 分钟。
+      timeoutMs: 1_000,
+      pollIntervalMs: 0,
+      onProgress: (label) => labels.push(label),
+    });
+    expect(result.uploadedToLibrary).toBe(true);
+    expect(result.target).toEqual({
+      kind: "asset",
+      providerConnectionId: "provider-1",
+      assetId: "asset-42",
+      canvasNodeKey: baseOptions.canvasNodeKey,
+      mediaType: "image",
+    });
+    expect(labels.at(-1)).toBe("素材库导入完成，正在清理暂存对象…");
+  });
+
+  it("keeps the wait counter moving for a status that has no progress label", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    startUpload.mockResolvedValue("job-1");
+    getJob.mockImplementation(() => {
+      now += 20_000;
+      // in_use 不在进度文案表里：旧实现会静默不刷新，界面停在上一个秒数上。
+      return Promise.resolve(now >= 60_000 ? job("active", "asset-42") : job("in_use"));
+    });
+    const labels: string[] = [];
+    await uploadVideoEditFrameToLibrary({
+      ...baseOptions,
+      providerConnectionId: "provider-1",
+      pollIntervalMs: 0,
+      onProgress: (label) => labels.push(label),
+    });
+    expect(labels).toEqual([
+      "正在提交标注帧上传…",
+      "正在等待素材库处理…（已等待 20 秒）",
+      "正在等待素材库处理…（已等待 40 秒）",
+      "素材库导入完成（已等待 1 分 00 秒）",
+    ]);
+  });
+
   it("reports progress stages while waiting for platform moderation", async () => {
     startUpload.mockResolvedValue("job-1");
     getJob

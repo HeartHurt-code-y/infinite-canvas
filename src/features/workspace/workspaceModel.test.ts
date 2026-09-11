@@ -2,8 +2,11 @@ import { describe, expect, it } from "vitest";
 import type { StagingJobRecord, StagingStatus } from "../../lib/backend";
 import {
   UPLOAD_ABANDONED_MS,
+  isTerminalAssetUpload,
+  isTerminalStagingJob,
   mergeStagingJobsIntoUploads,
   shouldAutoDismissUpload,
+  stagingImportReachedLibrary,
   type AssetUploadEntry,
   textResultFromSource,
 } from "./workspaceModel";
@@ -13,6 +16,7 @@ function uploadEntry(overrides: Partial<AssetUploadEntry> = {}): AssetUploadEntr
     jobId: "job-1",
     name: "素材.png",
     kind: "image",
+    assetId: null,
     status: "importing",
     bytesUploaded: 2048,
     bytesTotal: 2048,
@@ -96,6 +100,34 @@ describe("mergeStagingJobsIntoUploads", () => {
     expect(merged![0]!.error).toEqual({ kind: "transport", message: "连接中断" });
   });
 
+  it("已经拿到素材身份的 cleaning 记录不会被判成僵尸，并把素材身份写回行上", () => {
+    // 真实场景：素材已经入库，后端随后清理暂存对象时请求失败（或进程在清理途中退出），
+    // 记录永久停在 cleaning。它长时间不会有任何推进，但它是成功，不是「执行者已经没了」。
+    const entry = uploadEntry({ status: "importing", lastAdvancedAt: 0 });
+    const merged = mergeStagingJobsIntoUploads(
+      [entry],
+      [stagingJob({ status: "cleaning", assetId: "asset-42", updatedAt: 1 })],
+      600_000,
+    );
+    expect(merged).not.toBeNull();
+    const row = merged![0]!;
+    expect(row.status).toBe("cleaning");
+    expect(row.assetId).toBe("asset-42");
+    expect(row.error).toBeNull();
+    expect(isTerminalAssetUpload(row)).toBe(true);
+  });
+
+  it("没有素材身份的 cleaning 记录仍按僵尸口径落地为已中断", () => {
+    // 导入失败后清场停在同一状态：没有 assetId 就不是成功，不能给它亮绿点。
+    const entry = uploadEntry({ status: "cleaning", lastAdvancedAt: 0 });
+    const merged = mergeStagingJobsIntoUploads(
+      [entry],
+      [stagingJob({ status: "cleaning", assetId: null })],
+      120_000,
+    );
+    expect(merged![0]!.status).toBe("interrupted");
+  });
+
   it("占位行在后端还没有任务记录时只推进停滞提示", () => {
     const entry = uploadEntry({ status: "uploading", lastAdvancedAt: 0, stalled: false });
     const merged = mergeStagingJobsIntoUploads([entry], [null], 20_000);
@@ -140,13 +172,16 @@ describe("mergeStagingJobsIntoUploads", () => {
 describe("shouldAutoDismissUpload", () => {
   it("只有成功收尾的上传自动收起", () => {
     // 成功：素材库已给出素材身份。
-    expect(shouldAutoDismissUpload("active")).toBe(true);
-    expect(shouldAutoDismissUpload("cleaned")).toBe(true);
+    expect(shouldAutoDismissUpload({ status: "active", assetId: "asset-42" })).toBe(true);
+    expect(shouldAutoDismissUpload({ status: "cleaned", assetId: "asset-42" })).toBe(true);
+    // 清理暂存对象没走完（清理请求失败/进程退出）同样已经入库成功，记录会永久停在
+    // cleaning：按状态判定会把它当成没完成，按素材身份判定才对。
+    expect(shouldAutoDismissUpload({ status: "cleaning", assetId: "asset-42" })).toBe(true);
   });
 
   it("失败与中断永不自动收起：用户要看原因并重试", () => {
-    expect(shouldAutoDismissUpload("failed")).toBe(false);
-    expect(shouldAutoDismissUpload("interrupted")).toBe(false);
+    expect(shouldAutoDismissUpload({ status: "failed", assetId: null })).toBe(false);
+    expect(shouldAutoDismissUpload({ status: "interrupted", assetId: null })).toBe(false);
   });
 
   it("未完成的阶段都不算成功", () => {
@@ -158,8 +193,34 @@ describe("shouldAutoDismissUpload", () => {
       "importing",
       "cleaning",
     ] satisfies StagingStatus[]) {
-      expect(shouldAutoDismissUpload(status)).toBe(false);
+      expect(shouldAutoDismissUpload({ status, assetId: null })).toBe(false);
     }
+  });
+
+  it("没有素材身份时即使状态像成功也不算成功（导入失败后的清场记录）", () => {
+    // 后端报失败前会先尽力删掉暂存对象，那条记录同样经过 cleaning/cleaned，
+    // 但它没有 assetId：认定为成功会让失败的上传亮绿点、还停止轮询。
+    expect(shouldAutoDismissUpload({ status: "cleaning", assetId: null })).toBe(false);
+    expect(shouldAutoDismissUpload({ status: "cleaned", assetId: null })).toBe(false);
+    expect(shouldAutoDismissUpload({ status: "active", assetId: "" })).toBe(false);
+  });
+});
+
+describe("stagingImportReachedLibrary / isTerminalStagingJob", () => {
+  it("拿到素材身份就是成功，不管随后清理到哪一步", () => {
+    for (const status of ["active", "cleaning", "cleaned"] satisfies StagingStatus[]) {
+      expect(stagingImportReachedLibrary({ status, assetId: "asset-42" })).toBe(true);
+      expect(isTerminalStagingJob({ status, assetId: "asset-42" })).toBe(true);
+    }
+  });
+
+  it("还没拿到素材身份就不算成功，也不停止跟踪", () => {
+    for (const status of ["staged", "importing", "cleaning", "cleaned"] satisfies StagingStatus[]) {
+      expect(stagingImportReachedLibrary({ status, assetId: null })).toBe(false);
+      expect(isTerminalStagingJob({ status, assetId: null })).toBe(false);
+    }
+    expect(isTerminalStagingJob({ status: "failed", assetId: null })).toBe(true);
+    expect(isTerminalStagingJob({ status: "interrupted", assetId: null })).toBe(true);
   });
 });
 

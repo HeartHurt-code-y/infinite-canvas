@@ -99,6 +99,14 @@ export interface AssetUploadEntry {
   readonly jobId: string;
   readonly name: string;
   readonly kind: AssetKind;
+  /**
+   * 素材库给出的素材 ID（后端 `asset_id`）；只有入库成功后才会有值。
+   *
+   * 它是"这次入库到底成没成"的权威判据，见 [`stagingImportReachedLibrary`]：
+   * 状态会在入库成功后继续往前走（清理暂存对象），清理失败时甚至永久停在 `cleaning`，
+   * 只看状态既会漏认成功、又会把成功的一次判成失败。
+   */
+  readonly assetId: string | null;
   readonly status: StagingStatus;
   readonly bytesUploaded: number;
   readonly bytesTotal: number | null;
@@ -1103,37 +1111,54 @@ export function localPathFileName(path: string): string {
 export const UPLOAD_AUTO_DISMISS_DELAY_MS = 3_000;
 
 /**
- * 这一次状态推送是否表示上传已经成功收尾（可以自动收起这一行）。
- *
- * 只认事件里的 `active` / `cleaned`——它们代表素材库已经给出素材身份：
- * - `staged` 对云端素材只是"对象已上传，仍在导入"，不是成功；
- * - `cleaned` 是随后清理暂存对象完成，同样算成功。
- * 失败与中断（`failed` / `interrupted`）**永不**自动收起：用户需要看见原因并重试。
- *
- * 注意 `active` 只是运行中的瞬时状态，不会落库（已完成的记录都是 `cleaned`），
- * 所以成功信号只能在事件里读到，不能靠轮询补。
+ * 判定「素材库是否已经给出素材身份」所需的最小字段：后端任务记录与面板上传行都有这两个字段。
  */
-export function shouldAutoDismissUpload(status: StagingStatus): boolean {
-  return ASSET_IMPORT_COMPLETED_STATUSES.has(status);
+export interface StagingLibraryImportRecord {
+  readonly status: StagingStatus;
+  readonly assetId: string | null;
 }
 
-// 到达这些状态后停止轮询，显示可移除的终态记录。
-export const TERMINAL_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
+/**
+ * 入库取得素材身份之后可能停留的状态。
+ *
+ * `active` 是入库成功那一瞬的落库值，后端紧接着清理暂存对象，把记录推到
+ * `cleaning` → `cleaned`；清理请求失败、或进程在清理途中退出时，记录会**永久**
+ * 停在 `cleaning`，而素材其实已经在素材库里了。
+ */
+const IMPORT_SETTLED_STATUSES: ReadonlySet<StagingStatus> = new Set([
   "active",
+  "cleaning",
   "cleaned",
-  "failed",
-  "interrupted",
 ]);
 
+/** 不会再有任何新进展的上传状态：失败与中断。 */
+const FAILED_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set(["failed", "interrupted"]);
+
 /**
- * 素材库导入已取得云端素材身份的状态：产物上传成功（绿色小点）与角标增量都以它为准。
+ * 素材库是否已经给出素材身份（= 这次入库成功了）。
  *
- * `active` 是导入成功；`cleaned` 是随后清理暂存对象完成，同样是入库成功而不是失败。
+ * 判据是 `assetId` 而不是状态，只看状态两个方向都会错：
+ * - 只看 `active` 会漏认：它只是成功那一瞬的落库值，轮询与重启恢复多半只读到
+ *   `cleaning` / `cleaned`，于是成功的一次上传既不亮绿色小点、又会被僵尸判定判成
+ *   「已中断」，让用户重传一遍其实已经在库里的素材；
+ * - 只看 `cleaning` 会误认：导入**失败**后的清场同样要经过 `cleaning` / `cleaned`
+ *   （后端报失败前会先尽力删掉暂存对象），而那种记录没有 `assetId`。
  */
-export const ASSET_IMPORT_COMPLETED_STATUSES: ReadonlySet<StagingStatus> = new Set([
-  "active",
-  "cleaned",
-]);
+export function stagingImportReachedLibrary(record: StagingLibraryImportRecord): boolean {
+  if (record.assetId == null || record.assetId === "") return false;
+  return IMPORT_SETTLED_STATUSES.has(record.status);
+}
+
+/**
+ * 素材库导入已经成功收尾：可以自动收起这一行。
+ *
+ * `staged` 对云端素材只是"对象已上传，仍在导入"，不是成功；失败与中断
+ * （`failed` / `interrupted`）**永不**自动收起：用户需要看见原因并重试。
+ * 后端记录没有 `assetId` 时一律不认成功（例如导入失败后的清场记录）。
+ */
+export function shouldAutoDismissUpload(record: StagingLibraryImportRecord): boolean {
+  return stagingImportReachedLibrary(record);
+}
 
 /** 需要实时跟踪的对象存储阶段：每秒刷新并参与停滞检测（preparing 为提交前占位）。 */
 export const STALL_TRACKED_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
@@ -1149,9 +1174,20 @@ export function isStallTrackedStatus(status: StagingStatus): boolean {
 
 export function isTerminalAssetUpload(entry: AssetUploadEntry): boolean {
   return (
-    TERMINAL_UPLOAD_STATUSES.has(entry.status) ||
+    stagingImportReachedLibrary(entry) ||
+    FAILED_UPLOAD_STATUSES.has(entry.status) ||
     (entry.destination === "local" && entry.status === "staged")
   );
+}
+
+/**
+ * 后端上传任务是否已经不会再给出新信息：失败/中断，或者已经拿到素材身份。
+ *
+ * 轮询与僵尸判定都以它为准，别用只认状态的集合：一条停在 `cleaning` 但带回
+ * `assetId` 的记录是成功，不是僵尸。
+ */
+export function isTerminalStagingJob(job: StagingLibraryImportRecord): boolean {
+  return FAILED_UPLOAD_STATUSES.has(job.status) || stagingImportReachedLibrary(job);
 }
 
 // 上传进度只写入 SQLite，staging:state-changed 事件仅在任务结束时发射，
@@ -1179,8 +1215,11 @@ export const UPLOAD_STALL_HINT_MS = 15_000;
  * 上传的执行者只存在于后端进程里，而进度是靠 `updated_at` 随字节推进刷新的：
  * - 对象存储直传阶段每上传完一块就刷新一次，真实传输不会安静这么久；
  * - 素材库导入阶段国内路径（方舟 /contents/generations/tasks 平台侧拉取）没有字节回调，
- *   一旦进程在导入途中退出，记录就永远停在 importing / cleaning / staged，
+ *   一旦进程在导入途中退出，记录就永远停在 importing / staged，
  *   既不会到达终态、也不会再有事件——前端只能一直转圈，而且非终态行不给关闭按钮。
+ *
+ * 已经拿到 `assetId` 的记录不受这条规则约束：那种记录停在 cleaning 是「清理暂存对象
+ * 没走完」，与素材是否入库无关，判成僵尸会让用户重传一遍已在库里的素材。
  *
  * 阈值取得比停滞提示宽松得多：宁可多转两分钟，也不能把正在推进的上传误判成失败。
  */
@@ -1239,8 +1278,9 @@ export function abandonedUploadError(lastBackendStatus: StagingStatus): {
  * 轮询结果合并：把后端任务状态写回上传行，并处理两种"看起来在传、其实不会再有下文"的行。
  *
  * 纯函数便于直接验证边界（僵尸判定要等两分钟，不该靠真实时间在测试里等）：
- * - 到达终态：照实写入；
- * - 后端记录长时间无任何推进（执行进程已经不在）：落地为已中断 + 原因，停止轮询并给出关闭入口；
+ * - 到达终态：照实写入（含入库成功后拿到的 `assetId`，它决定这一行算不算成功）；
+ * - 后端记录长时间无任何推进、且还没拿到素材身份（执行进程已经不在）：落地为已中断 + 原因，
+ *   停止轮询并给出关闭入口；
  * - 仍在推进：刷新字节与停滞提示，`lastAdvancedAt` 只在真有推进时前移。
  *
  * 返回 `null` 表示没有任何一行变化，调用方据此跳过重渲染。
@@ -1267,12 +1307,16 @@ export function mergeStagingJobsIntoUploads(
       }
       return entry;
     }
+    const assetId = job.assetId ?? entry.assetId;
+    const identityArrived = assetId !== entry.assetId;
     const bytesAdvanced = job.bytesUploaded > entry.bytesUploaded;
     const statusChanged = job.status !== entry.status;
-    const lastAdvancedAt = bytesAdvanced || statusChanged ? now : entry.lastAdvancedAt;
+    const lastAdvancedAt =
+      bytesAdvanced || statusChanged || identityArrived ? now : entry.lastAdvancedAt;
     // 后端记录本身到不了终态（执行它的进程已经不在了）：落地为已中断，
     // 否则这一行会一直转圈，而且非终态行不给关闭按钮。
-    if (!TERMINAL_UPLOAD_STATUSES.has(job.status) && now - lastAdvancedAt >= UPLOAD_ABANDONED_MS) {
+    // 已经拿到素材身份的记录不算在内：那是入库成功，只是随后的清理没走完。
+    if (!isTerminalStagingJob(job) && now - lastAdvancedAt >= UPLOAD_ABANDONED_MS) {
       changed = true;
       return {
         ...entry,
@@ -1286,13 +1330,19 @@ export function mergeStagingJobsIntoUploads(
     }
     // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
     // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
-    if (!bytesAdvanced && !statusChanged && !isStallTrackedStatus(entry.status)) {
+    if (
+      !bytesAdvanced &&
+      !statusChanged &&
+      !identityArrived &&
+      !isStallTrackedStatus(entry.status)
+    ) {
       return entry;
     }
     changed = true;
     return {
       ...entry,
       status: job.status,
+      assetId,
       bytesUploaded: job.bytesUploaded,
       bytesTotal: job.bytesTotal ?? entry.bytesTotal,
       error: job.error ?? entry.error,

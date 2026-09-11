@@ -229,7 +229,6 @@ import type {
 } from "./workspaceModel";
 import {
   ASSETS,
-  ASSET_IMPORT_COMPLETED_STATUSES,
   ASSET_KIND_LABELS,
   ASSET_NODE_HEIGHT,
   ASSET_NODE_WIDTH,
@@ -251,7 +250,6 @@ import {
   SCREENPLAY_NODE_COARSE_HEIGHT,
   SCREENPLAY_NODE_HEIGHT,
   SCREENPLAY_NODE_WIDTH,
-  TERMINAL_UPLOAD_STATUSES,
   UPLOAD_ABANDONED_MS,
   UPLOAD_POLL_INTERVAL_MS,
   VIDEO_COMPOSER_NODE_HEIGHT,
@@ -286,6 +284,7 @@ import {
   isRunningTaskStatus,
   textResultFromSource,
   isTerminalAssetUpload,
+  isTerminalStagingJob,
   isTerminalTaskStatus,
   isTextGenerationModel,
   localAssetToItem,
@@ -295,6 +294,7 @@ import {
   measuredFor,
   mergeStagingJobsIntoUploads,
   shouldAutoDismissUpload,
+  stagingImportReachedLibrary,
   UPLOAD_AUTO_DISMISS_DELAY_MS,
   minimumCanvasZoom,
   modelDisplayNameForTask,
@@ -1958,6 +1958,8 @@ export function WorkspaceApp({
             jobId: candidate.pendingId,
             name: candidate.name,
             kind: candidate.kind,
+            // 素材身份由后端在入库成功后写回，提交这一刻还没有。
+            assetId: null,
             status: "preparing" as const,
             bytesUploaded: 0,
             bytesTotal: null,
@@ -2084,6 +2086,7 @@ export function WorkspaceApp({
           jobId: pendingId,
           name,
           kind: output.mediaType as "image" | "video",
+          assetId: null,
           status: "preparing",
           bytesUploaded: 0,
           bytesTotal: null,
@@ -2143,6 +2146,9 @@ export function WorkspaceApp({
           next[index] = {
             ...existing,
             status: job?.status ?? "failed",
+            // 素材身份只在入库成功后由后端写回；它是"这次上传成没成"的判据，
+            // 事件里带上就必须落到行上（见 stagingImportReachedLibrary）。
+            assetId: job?.assetId ?? existing.assetId,
             bytesUploaded: job?.bytesUploaded ?? existing.bytesUploaded,
             bytesTotal: job?.bytesTotal ?? existing.bytesTotal,
             // 失败原因有两个来源：事件顶层的 error（进程内失败时后端只发 error），
@@ -2157,13 +2163,12 @@ export function WorkspaceApp({
         return next;
       });
       const status = payload.job?.status;
+      // 入库是否成功看 `assetId` 而不是状态：后端给出素材身份后还会清理暂存对象
+      // （active → cleaning → cleaned），事件里读到的未必是 active。
+      const reachedLibrary = payload.job != null && stagingImportReachedLibrary(payload.job);
       if (payload.job?.purpose === "local_asset" && status === "staged") {
         refreshLocalAssets("upload-finished");
-      } else if (
-        assetLibrarySource === "cloud" &&
-        status != null &&
-        ASSET_IMPORT_COMPLETED_STATUSES.has(status)
-      ) {
+      } else if (assetLibrarySource === "cloud" && reachedLibrary) {
         if (assetProvider) {
           void refreshCloudAssets(assetProvider.id, "upload-finished");
           refreshAssetGroups(assetProvider.id);
@@ -2179,7 +2184,7 @@ export function WorkspaceApp({
         }
       }
       // 上传到云端素材库成功：标记对应产物节点已上传（写入节点数据，随画布文档持久化）。
-      if (status != null && ASSET_IMPORT_COMPLETED_STATUSES.has(status)) {
+      if (reachedLibrary) {
         const outputKey = uploadJobToOutputKeyRef.current.get(payload.jobId);
         if (outputKey) {
           patchNodes("output", (node) =>
@@ -2196,7 +2201,7 @@ export function WorkspaceApp({
       // 成功的上传不用用户再点一次 ×：素材已经入库、绿色小点已经点亮，这一行
       // 留一小会儿让"已完成"被看见，然后自行收起。失败/中断行永不自动收起
       // （用户要看原因并重试），僵尸在途行也留着由行内判定落地为可移除的已中断行。
-      if (status != null && shouldAutoDismissUpload(status)) {
+      if (payload.job != null && shouldAutoDismissUpload(payload.job)) {
         uploadAutoDismissTimersRef.current.set(
           payload.jobId,
           window.setTimeout(() => {
@@ -2244,10 +2249,12 @@ export function WorkspaceApp({
         recoveredAssetImportsRef.current = records;
         // 在途上传恢复成面板行：状态与字节进度都来自后端记录，之后由既有轮询继续推进。
         // 长时间没有推进的记录不再当作"还在传"：进程在上传途中被杀时后端会留下一个
-        // staged/importing/cleaning 的僵死记录，显示成在途会让进度条永远转下去，用户既
+        // staged/importing 的僵死记录，显示成在途会让进度条永远转下去，用户既
         // 不知道失败也无法重试；按僵尸口径直接落地为已中断，给出明确的终态与原因。
+        // 已经拿到素材身份的记录不算在内：那是入库成功（随后清理暂存对象没走完而已），
+        // 恢复成在途行会让它两分钟后被判成"已中断"，而素材其实已经在库里了。
         const restoredEntries: AssetUploadEntry[] = records
-          .filter((record) => !ASSET_IMPORT_COMPLETED_STATUSES.has(record.status))
+          .filter((record) => !stagingImportReachedLibrary(record))
           .map((record) => {
             const lastAdvancedAt = record.updatedAt || restoredAt;
             const abandoned = restoredAt - lastAdvancedAt >= UPLOAD_ABANDONED_MS;
@@ -2255,6 +2262,7 @@ export function WorkspaceApp({
               jobId: record.jobId,
               name: localPathFileName(record.localPath),
               kind: record.mediaType,
+              assetId: record.assetId,
               status: abandoned ? ("interrupted" as const) : record.status,
               bytesUploaded: record.bytesUploaded,
               bytesTotal: record.bytesTotal,
@@ -2294,7 +2302,7 @@ export function WorkspaceApp({
    */
   useEffect(() => {
     const completed = (recoveredAssetImportsRef.current ?? []).filter((record) =>
-      ASSET_IMPORT_COMPLETED_STATUSES.has(record.status),
+      stagingImportReachedLibrary(record),
     );
     if (completed.length === 0 || outputNodes.length === 0) return;
     const outputKeyByLocalPath = new Map<string, string>();
@@ -4694,8 +4702,7 @@ export function WorkspaceApp({
         const entry = uploadEntriesRef.current.find((item) => item.jobId === job.id);
         if (entry == null || isTerminalAssetUpload(entry)) continue;
         const reachedTerminal =
-          TERMINAL_UPLOAD_STATUSES.has(job.status) ||
-          (entry.destination === "local" && job.status === "staged");
+          isTerminalStagingJob(job) || (entry.destination === "local" && job.status === "staged");
         if (!reachedTerminal) continue;
         if (entry.destination === "local") {
           refreshLocalAssets("upload-finished");

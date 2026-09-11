@@ -12,6 +12,7 @@ function entry(overrides: Partial<AssetUploadEntry> = {}): AssetUploadEntry {
     jobId: "job-1",
     name: "卡住的上传.png",
     kind: "image",
+    assetId: null,
     status: "importing",
     bytesUploaded: 2048,
     bytesTotal: 2048,
