@@ -1887,29 +1887,58 @@ impl MultimodalPayload {
 }
 
 type StaticRequestHeader = (&'static str, &'static str);
-type TextModelRequest = (String, Vec<StaticRequestHeader>, Value);
 
-/// 请求发出后，上游拒绝了 `stream_options.include_usage` 时应改用的退避请求体。
-/// 只用于流式档案：去掉该可选字段后重发一次，保证用量统计的缺失不会让整轮调用失败。
+/// 流式协议方言：三类文本接口的 SSE 事件结构互不相同，按档案选择解析器。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TextModelStream {
+    /// OpenAI 兼容 `/v1/chat/completions`：`choices[].delta.content`。
+    OpenAiChat,
+    /// Anthropic Messages `/v1/messages`：`message_start` + `content_block_delta`
+    /// + `message_delta` 事件序列。
+    AnthropicMessages,
+    /// Gemini `:streamGenerateContent?alt=sse`：每个 `data:` 就是一份
+    /// `GenerateContentResponse` 分片。
+    GeminiContent,
+}
+
+/// 一次文本模型调用的完整请求计划。
+///
+/// `path` 与 `query` 分开：Gemini 的流式端点靠 `?alt=sse` 选择 SSE 返回，而
+/// `endpoint()` 会清空 base URL 上的 query，因此查询参数必须单独携带而不是拼进路径。
+#[derive(Debug)]
+pub struct TextRequestPlan {
+    pub path: String,
+    pub query: Vec<(&'static str, String)>,
+    pub headers: Vec<StaticRequestHeader>,
+    pub body: Value,
+    /// `None` 表示按非流式调用（当前三种档案都走流式，保留该分支给后续新增档案）。
+    pub stream: Option<TextModelStream>,
+    /// 上游不接受流式时应改走的非流式端点（不含查询参数）。Gemini 必须提供：
+    /// moyu 文档只公开 `:generateContent`，没有 `:streamGenerateContent` 与 `alt=sse`，
+    /// 被拒时只能退回非流式，否则那一档模型会完全不可用。
+    pub fallback_path: Option<String>,
+    /// 上游拒绝可选字段时应改用的退避请求体；没有可选字段时为 None。
+    pub fallback: Option<TextModelFallbackRequest>,
+}
+
+/// 请求发出后，上游拒绝了某个可选字段时应改用的退避请求体。
+/// 只用于带可选字段的档案：去掉它重发一次，保证附加能力缺失不会让整轮调用失败。
 #[derive(Debug, Clone)]
 pub struct TextModelFallbackRequest {
     pub body: Value,
     pub reason: &'static str,
 }
 
-/// OpenAI 兼容档案默认开启流式返回：非流式请求在生成完成前不回传任何字节，长上下文
-/// 下的首字节时间会撞上反向代理的零字节超时（Cloudflare 为 100 秒，超时即 524），
-/// 而流式返回持续回传增量，该判定条件不再成立。`stream_options.include_usage` 让
-/// 末尾分片继续携带 usage，用量统计与截断判定因此与非流式保持一致。
-const OPENAI_CHAT_STREAMING: bool = true;
-
-/// 按模型推断的请求档案构造对应的 HTTP 请求（路径、请求头、请求体），
-/// 并在需要时给出「上游拒绝流式用量选项」时的退避请求体。
-/// 三种档案对应 moyu 聚合平台代理的三类文本接口：
-/// - openai_chat_v1（OpenAI / 豆包 / DeepSeek / Qwen 等）：/v1/chat/completions，默认流式
+/// 按模型推断的请求档案构造对应的 HTTP 请求（路径、查询参数、请求头、请求体）。
+/// 三种档案对应 moyu 聚合平台代理的三类文本接口，**全部使用流式返回**：
+/// - openai_chat_v1（OpenAI / 豆包 / DeepSeek / Qwen 等）：/v1/chat/completions
 /// - anthropic_messages_v1：/v1/messages（必需 anthropic-version 头与 max_tokens）
-/// - gemini_generate_content_v1：/v1beta/models/{model}:generateContent
-///   （系统提示词走 systemInstruction，流式由 URL 决定而非 body 字段，这里无需流式）
+/// - gemini_generate_content_v1：/v1beta/models/{model}:streamGenerateContent?alt=sse
+///
+/// 非流式请求在模型生成完成前不回传任何字节，长上下文（工业级分镜技能全文约 175 KB）
+/// 加长输出的首字节时间会超过反向代理的零字节读取超时（Cloudflare 为 100 秒，超时即
+/// 524）。流式返回持续回传增量，该判定条件不再成立；增量由 provider 侧重新组装成与
+/// 非流式等价的响应对象，因此下游的用量统计、截断判定与文本提取逻辑完全不变。
 ///
 /// 携带素材时，素材内容块排在用户文本之前（先读取素材、再执行需求）；
 /// 无素材时保持原有纯文本请求体形状。各档案只构造其公开支持的内容块，不能
@@ -1923,7 +1952,7 @@ fn build_text_model_request(
     user_prompt: &str,
     vision_images: &[VisionImagePayload],
     multimodal_inputs: &[MultimodalPayload],
-) -> BackendResult<(TextModelRequest, Option<TextModelFallbackRequest>)> {
+) -> BackendResult<TextRequestPlan> {
     let has_materials = !vision_images.is_empty() || !multimodal_inputs.is_empty();
     match profile {
         "anthropic_messages_v1" => {
@@ -1993,20 +2022,32 @@ fn build_text_model_request(
             };
             let mut messages = history.to_vec();
             messages.push(json!({ "role": "user", "content": user_content }));
-            Ok((
-                (
-                    "/v1/messages".to_string(),
-                    vec![("anthropic-version", "2023-06-01")],
-                    json!({
-                        "model": remote_model_id,
-                        "system": system_prompt,
-                        "messages": messages,
-                        "max_tokens": 8192,
-                        "stream": false,
-                    }),
-                ),
-                None,
-            ))
+            let mut body = json!({
+                "model": remote_model_id,
+                "system": system_prompt,
+                "messages": messages,
+                "max_tokens": 8192,
+                "stream": true,
+            });
+            let mut non_streaming = body.clone();
+            if let Some(object) = non_streaming.as_object_mut() {
+                object.remove("stream");
+            }
+            body["stream"] = json!(true);
+            Ok(TextRequestPlan {
+                path: "/v1/messages".to_string(),
+                query: Vec::new(),
+                headers: vec![("anthropic-version", "2023-06-01")],
+                body,
+                stream: Some(TextModelStream::AnthropicMessages),
+                // Anthropic 的流式与非流式同路径，只靠 body 的 stream 开关区分；
+                // 退避时用不带 stream 的同一份消息体。
+                fallback_path: Some("/v1/messages".to_string()),
+                fallback: Some(TextModelFallbackRequest {
+                    body: non_streaming,
+                    reason: "provider does not stream the Anthropic Messages endpoint",
+                }),
+            })
         }
         "gemini_generate_content_v1" => {
             let parts = if !has_materials {
@@ -2057,17 +2098,26 @@ fn build_text_model_request(
                 })
                 .collect();
             contents.push(json!({ "role": "user", "parts": parts }));
-            Ok((
-                (
-                    format!("/v1beta/models/{remote_model_id}:generateContent"),
-                    Vec::new(),
-                    json!({
-                        "systemInstruction": { "parts": [{ "text": system_prompt }] },
-                        "contents": contents,
-                    }),
-                ),
-                None,
-            ))
+            let body = json!({
+                "systemInstruction": { "parts": [{ "text": system_prompt }] },
+                "contents": contents,
+            });
+            Ok(TextRequestPlan {
+                // 流式与非流式的路径不同：Gemini 用 :streamGenerateContent，并靠
+                // alt=sse 让网关回 SSE 而不是一个 JSON 数组。
+                path: format!("/v1beta/models/{remote_model_id}:streamGenerateContent"),
+                query: vec![("alt", "sse".to_string())],
+                headers: Vec::new(),
+                body: body.clone(),
+                stream: Some(TextModelStream::GeminiContent),
+                // moyu 文档只公开 :generateContent。上游一旦拒绝流式端点或忽略
+                // alt=sse，就退回这条非流式路径，请求体不需要任何改动。
+                fallback_path: Some(format!("/v1beta/models/{remote_model_id}:generateContent")),
+                fallback: Some(TextModelFallbackRequest {
+                    body,
+                    reason: "provider does not support the streaming endpoint",
+                }),
+            })
         }
         _ => {
             let user_content = if !has_materials {
@@ -2145,33 +2195,29 @@ fn build_text_model_request(
             messages.push(json!({ "role": "system", "content": system_prompt }));
             messages.extend(history.iter().cloned());
             messages.push(json!({ "role": "user", "content": user_content }));
-            let body = json!({
+            let mut body = json!({
                 "model": remote_model_id,
                 "messages": messages,
-                "stream": OPENAI_CHAT_STREAMING,
+                "stream": true,
             });
-            let fallback = OPENAI_CHAT_STREAMING.then(|| TextModelFallbackRequest {
-                // 只有用量选项是可选新增项；去掉它请求本身仍然成立。
-                body: {
-                    let mut body = body.clone();
-                    if let Some(object) = body.as_object_mut() {
-                        object.remove("stream_options");
-                    }
-                    body
-                },
-                reason: "provider rejected stream_options.include_usage",
-            });
-            let body = if OPENAI_CHAT_STREAMING {
-                let mut body = body;
-                body["stream_options"] = json!({ "include_usage": true });
-                body
-            } else {
-                body
-            };
-            Ok((
-                ("/v1/chat/completions".to_string(), Vec::new(), body),
-                fallback,
-            ))
+            let mut fallback_body = body.clone();
+            if let Some(object) = fallback_body.as_object_mut() {
+                object.remove("stream");
+            }
+            body["stream_options"] = json!({ "include_usage": true });
+            Ok(TextRequestPlan {
+                path: "/v1/chat/completions".to_string(),
+                query: Vec::new(),
+                headers: Vec::new(),
+                body,
+                stream: Some(TextModelStream::OpenAiChat),
+                // OpenAI 兼容的流式与非流式同路径，只靠 body 的 stream 开关区分。
+                fallback_path: Some("/v1/chat/completions".to_string()),
+                fallback: Some(TextModelFallbackRequest {
+                    body: fallback_body,
+                    reason: "provider does not stream the OpenAI-compatible endpoint",
+                }),
+            })
         }
     }
 }
@@ -2669,7 +2715,7 @@ async fn execute_recorded_text_call(
         )
     };
     let profile = text_request_profile(remote_model_id);
-    let ((path, headers, body), fallback) = build_text_model_request(
+    let plan = build_text_model_request(
         profile,
         remote_model_id,
         &system_prompt,
@@ -2678,6 +2724,15 @@ async fn execute_recorded_text_call(
         &vision_images,
         &multimodal_inputs,
     )?;
+    let TextRequestPlan {
+        path,
+        query,
+        headers,
+        body,
+        stream,
+        fallback_path,
+        fallback,
+    } = plan;
     let archived_body = redacted_request_value(&body);
     commit_generation_transition(
         deps,
@@ -2686,13 +2741,14 @@ async fn execute_recorded_text_call(
             resolved_request: json!({
                 "profile": profile,
                 "path": path,
+                "query": query.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
                 "headers": headers.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
                 "body": archived_body.clone(),
             }),
         },
     )?;
     info!(
-        "[generation] 提示词模型请求开始: taskId={}, task={:?}, mode={}, profile={}, providerConnectionId={}, model={}, 系统提示词 {} 字符, 历史 {} 轮, 流式 {}, 视觉素材 {} 张, 多模态素材 {} 项",
+        "[generation] 提示词模型请求开始: taskId={}, task={:?}, mode={}, profile={}, providerConnectionId={}, model={}, 系统提示词 {} 字符, 历史 {} 轮, 流式方言 {:?}, 视觉素材 {} 张, 多模态素材 {} 项",
         task_id,
         command.task,
         command.mode.as_str(),
@@ -2701,24 +2757,26 @@ async fn execute_recorded_text_call(
         remote_model_id,
         system_prompt.chars().count(),
         history.len(),
-        body.get("stream").and_then(Value::as_bool).unwrap_or(false),
+        stream,
         vision_images.len(),
         multimodal_inputs.len(),
     );
-    let streaming = body.get("stream").and_then(Value::as_bool).unwrap_or(false);
     // 流式调用：SSE 增量在传输过程中就回传，首个字节远早于生成完成，反向代理的
-    // 零字节读取超时不再触发。上游若拒绝可选用量字段，provider 会自动退避重发一次。
+    // 零字节读取超时不再触发。上游若不接受流式或拒绝可选字段，provider 会自动
+    // 按 plan 里的退避路径/请求体重发一次。
     let (response, payload) = deps
         .providers
         .captured_text_json(
             &deps.storage.get_task_execution(task_id)?,
             attempt_id,
             &path,
+            &query,
             &body,
             &archived_body,
             &headers,
-            streaming,
+            stream,
             fallback,
+            fallback_path.as_deref(),
         )
         .await?;
     if !(200..300).contains(&response.status) {
@@ -2742,8 +2800,11 @@ async fn execute_recorded_text_call(
             json!({
                 "profile": profile,
                 "path": path,
-                "stream": streaming,
-                "finishReason": payload.pointer("/choices/0/finish_reason"),
+                "streamDialect": stream.map(|dialect| format!("{dialect:?}")),
+                "termination": payload
+                    .pointer("/choices/0/finish_reason")
+                    .or_else(|| payload.get("stop_reason"))
+                    .or_else(|| payload.pointer("/candidates/0/finishReason")),
                 "upstreamError": payload.get("error"),
                 "streamFrames": payload.pointer("/x_stream/frames"),
                 "rawResponse": response.body.chars().take(2000).collect::<String>()
@@ -3470,7 +3531,8 @@ mod tests {
 
     #[test]
     fn builds_requests_matching_each_api_profile() {
-        let ((path, headers, body), fallback) = build_text_model_request(
+        // 三套档案共同点：全部走流式，且各自落到自己的流式端点/方言上。
+        let plan = build_text_model_request(
             "openai_chat_v1",
             "doubao-seed-1-8-251228",
             "SYS",
@@ -3480,21 +3542,25 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(path, "/v1/chat/completions");
-        assert!(headers.is_empty());
+        assert_eq!(plan.path, "/v1/chat/completions");
+        assert!(plan.query.is_empty());
+        assert!(plan.headers.is_empty());
+        assert_eq!(plan.stream, Some(TextModelStream::OpenAiChat));
+        let body = &plan.body;
         assert_eq!(body["messages"][0]["role"], "system");
         assert_eq!(body["messages"][0]["content"], "SYS");
         assert_eq!(body["messages"][1]["content"], "USER");
-        // OpenAI 兼容档案默认流式，并请求在末尾分片回传用量。
         assert_eq!(body["stream"], json!(true));
+        // 末尾分片回传用量，用量统计与非流式保持一致。
         assert_eq!(body["stream_options"]["include_usage"], json!(true));
-        // 退避请求体保留同一份消息，只去掉可选的用量字段。
-        let fallback = fallback.unwrap();
+        // 退避请求体保留同一份消息，去掉流式开关与用量选项，端点不变。
+        assert_eq!(plan.fallback_path.as_deref(), Some("/v1/chat/completions"));
+        let fallback = plan.fallback.unwrap();
+        assert!(fallback.body.get("stream").is_none());
         assert!(fallback.body.get("stream_options").is_none());
-        assert_eq!(fallback.body["stream"], json!(true));
         assert_eq!(fallback.body["messages"], body["messages"]);
 
-        let ((path, headers, body), fallback) = build_text_model_request(
+        let plan = build_text_model_request(
             "anthropic_messages_v1",
             "claude-sonnet-4-5-20250929",
             "SYS",
@@ -3504,17 +3570,23 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(path, "/v1/messages");
-        assert!(headers.contains(&("anthropic-version", "2023-06-01")));
-        // Anthropic：system 独立字段 + 必填 max_tokens
-        assert_eq!(body["system"], "SYS");
-        assert_eq!(body["messages"][0]["content"], "USER");
-        assert!(body["max_tokens"].as_u64().is_some());
-        // 非 OpenAI 档案不引入流式与退化请求体。
-        assert_eq!(body["stream"], json!(false));
-        assert!(fallback.is_none());
+        assert_eq!(plan.path, "/v1/messages");
+        assert!(plan.query.is_empty());
+        assert!(plan.headers.contains(&("anthropic-version", "2023-06-01")));
+        assert_eq!(plan.stream, Some(TextModelStream::AnthropicMessages));
+        // Anthropic：system 独立字段 + 必填 max_tokens + 流式开关在 body 里。
+        assert_eq!(plan.body["system"], "SYS");
+        assert_eq!(plan.body["messages"][0]["content"], "USER");
+        assert!(plan.body["max_tokens"].as_u64().is_some());
+        assert_eq!(plan.body["stream"], json!(true));
+        // 退避走同一路径，只把 stream 开关去掉；消息体逐字不变。
+        assert_eq!(plan.fallback_path.as_deref(), Some("/v1/messages"));
+        let fallback = plan.fallback.unwrap();
+        assert!(fallback.body.get("stream").is_none());
+        assert_eq!(fallback.body["messages"], plan.body["messages"]);
+        assert_eq!(fallback.body["system"], "SYS");
 
-        let ((path, headers, body), fallback) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini-2.5-flash",
             "SYS",
@@ -3524,18 +3596,30 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(path, "/v1beta/models/gemini-2.5-flash:generateContent");
-        assert!(headers.is_empty());
-        // Gemini：systemInstruction + contents/parts，且不允许 stream 字段
-        assert_eq!(body["systemInstruction"]["parts"][0]["text"], "SYS");
-        assert_eq!(body["contents"][0]["parts"][0]["text"], "USER");
-        assert!(body.get("stream").is_none());
-        assert!(fallback.is_none());
+        // Gemini 的流式与非流式路径不同，并靠查询参数选择 SSE 返回。
+        assert_eq!(
+            plan.path,
+            "/v1beta/models/gemini-2.5-flash:streamGenerateContent"
+        );
+        assert_eq!(plan.query, vec![("alt", "sse".to_string())]);
+        assert!(plan.headers.is_empty());
+        assert_eq!(plan.stream, Some(TextModelStream::GeminiContent));
+        assert_eq!(plan.body["systemInstruction"]["parts"][0]["text"], "SYS");
+        assert_eq!(plan.body["contents"][0]["parts"][0]["text"], "USER");
+        // Gemini 的流式由 URL 决定，body 里不能出现 stream（会被拒）。
+        assert!(plan.body.get("stream").is_none());
+        // moyu 文档只公开 :generateContent，因此必须给出无流式的退避端点；
+        // 退避走的是另一个路径，请求体不需要任何改动。
+        assert_eq!(
+            plan.fallback_path.as_deref(),
+            Some("/v1beta/models/gemini-2.5-flash:generateContent")
+        );
+        assert_eq!(plan.fallback.unwrap().body, plan.body);
     }
 
     #[test]
     fn gemini_endpoint_uses_the_documented_version_with_a_v1_provider_base() {
-        let ((path, _, _), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini-3.6-flash",
             "SYS",
@@ -3545,10 +3629,18 @@ mod tests {
             &[],
         )
         .unwrap();
-        let url = super::super::provider::endpoint("https://www.konjac.ai/v1", &path).unwrap();
+        // 查询参数不拼进路径：endpoint() 会清空 base URL 上的 query，因此由
+        // provider 侧单独附加。这里复现附加方式，验证完整 URL 与文档一致。
+        let mut url =
+            super::super::provider::endpoint("https://www.konjac.ai/v1", &plan.path).unwrap();
+        url.query_pairs_mut().extend_pairs(
+            plan.query
+                .iter()
+                .map(|(name, value)| (*name, value.as_str())),
+        );
         assert_eq!(
             url.as_str(),
-            "https://www.konjac.ai/v1beta/models/gemini-3.6-flash:generateContent"
+            "https://www.konjac.ai/v1beta/models/gemini-3.6-flash:streamGenerateContent?alt=sse"
         );
     }
 
@@ -3587,7 +3679,7 @@ mod tests {
         let prompts = build_system_and_user_prompts(&command, "V4.6 完整技能");
         // 技能全文单独构成系统提示词：历史不再撑大它，因此每轮前缀完全相同。
         assert_eq!(prompts.system, "V4.6 完整技能");
-        let ((_, _, first), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "openai_chat_v1",
             "deepseek-v4-flash",
             &prompts.system,
@@ -3597,8 +3689,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let messages = first["messages"].as_array().unwrap();
-        // system + user 轮次 + assistant 轮次 + 折叠后的业务标注 + 本轮用户消息。
+        let messages = plan.body["messages"].as_array().unwrap(); // system + user 轮次 + assistant 轮次 + 折叠后的业务标注 + 本轮用户消息。
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0]["role"], "system");
         assert_eq!(messages[0]["content"], "V4.6 完整技能");
@@ -3627,10 +3718,12 @@ mod tests {
 
         // 第二轮：历史变长，系统提示词与历史之后的位置都不影响前缀稳定性。
         let mut second_command = command.clone();
-        second_command.context_history.push(PromptOptimizationContextEntry {
-            role: "user".to_string(),
-            content: "第四镜补一个环境光说明。".to_string(),
-        });
+        second_command
+            .context_history
+            .push(PromptOptimizationContextEntry {
+                role: "user".to_string(),
+                content: "第四镜补一个环境光说明。".to_string(),
+            });
         let second_prompts = build_system_and_user_prompts(&second_command, "V4.6 完整技能");
         assert_eq!(second_prompts.system, prompts.system);
         // 新增的 user 轮次与上一条 user 历史合并，因此消息条数仍是 3。
@@ -3656,7 +3749,7 @@ mod tests {
             },
         ];
         // OpenAI 兼容：image_url 内容块携带 Data URL，文本块排在图片之后。
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "openai_chat_v1",
             "glm-5.3-flash",
             "SYS",
@@ -3666,7 +3759,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let content = body["messages"][1]["content"].as_array().unwrap();
+        let content = plan.body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content.len(), 3);
         assert_eq!(content[0]["type"], "image_url");
         assert_eq!(content[0]["image_url"]["url"], "data:image/png;base64,AAAA");
@@ -3676,10 +3769,10 @@ mod tests {
         );
         assert_eq!(content[2]["type"], "text");
         assert_eq!(content[2]["text"], "USER");
-        assert_eq!(body["messages"][0]["content"], "SYS");
+        assert_eq!(plan.body["messages"][0]["content"], "SYS");
 
         // Anthropic：base64 source 块。
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "anthropic_messages_v1",
             "claude-sonnet-4-5",
             "SYS",
@@ -3689,14 +3782,14 @@ mod tests {
             &[],
         )
         .unwrap();
-        let content = body["messages"][0]["content"].as_array().unwrap();
+        let content = plan.body["messages"][0]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "image");
         assert_eq!(content[0]["source"]["media_type"], "image/png");
         assert_eq!(content[0]["source"]["data"], "AAAA");
         assert_eq!(content[2]["text"], "USER");
 
         // Gemini：inline_data 块。
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini-2.5-flash",
             "SYS",
@@ -3706,7 +3799,7 @@ mod tests {
             &[],
         )
         .unwrap();
-        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        let parts = plan.body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["inline_data"]["mime_type"], "image/png");
         assert_eq!(parts[1]["inline_data"]["data"], "BBBB");
         assert_eq!(parts[2]["text"], "USER");
@@ -3728,7 +3821,7 @@ mod tests {
             base64: None,
             text: Some("主角害怕失去控制。".to_string()),
         };
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini-2.5-flash",
             "SYS",
@@ -3738,7 +3831,7 @@ mod tests {
             &[video.clone(), text_document.clone()],
         )
         .unwrap();
-        let parts = body["contents"][0]["parts"].as_array().unwrap();
+        let parts = plan.body["contents"][0]["parts"].as_array().unwrap();
         assert_eq!(parts[0]["inline_data"]["mime_type"], "video/mp4");
         assert!(parts[1]["text"].as_str().unwrap().contains("人物小传.md"));
         assert_eq!(parts[2]["text"], "USER");
@@ -3766,7 +3859,7 @@ mod tests {
             base64: Some("AUDIO".to_string()),
             text: None,
         };
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "openai_chat_v1",
             "gpt-4o-audio-preview",
             "SYS",
@@ -3776,7 +3869,7 @@ mod tests {
             &[audio, text_document],
         )
         .unwrap();
-        let content = body["messages"][1]["content"].as_array().unwrap();
+        let content = plan.body["messages"][1]["content"].as_array().unwrap();
         assert_eq!(content[0]["type"], "input_audio");
         assert_eq!(content[0]["input_audio"]["format"], "mp3");
         assert!(content[1]["text"].as_str().unwrap().contains("人物小传.md"));
@@ -3785,7 +3878,7 @@ mod tests {
 
     #[test]
     fn archive_body_omits_inline_media_and_large_document_content() {
-        let body = json!({
+        let source_body = json!({
             "contents": [{
                 "parts": [
                     { "inline_data": { "mime_type": "image/png", "data": "A".repeat(600) } },
@@ -3795,7 +3888,7 @@ mod tests {
             }],
         });
 
-        let archived = redacted_request_value(&body);
+        let archived = redacted_request_value(&source_body);
 
         assert_eq!(
             archived["contents"][0]["parts"][0]["inline_data"]["data"],
@@ -3810,7 +3903,7 @@ mod tests {
             .unwrap();
         assert!(archived_text.ends_with("<content omitted: 21000 characters>"));
         assert_eq!(
-            body["contents"][0]["parts"][0]["inline_data"]["data"]
+            source_body["contents"][0]["parts"][0]["inline_data"]["data"]
                 .as_str()
                 .unwrap()
                 .len(),
@@ -5190,7 +5283,7 @@ mod tests {
                     "/contents/3/parts/0/text",
                 ),
             ] {
-                let ((_, _, body), _) = build_text_model_request(
+                let plan = build_text_model_request(
                     profile,
                     "project-model",
                     &prompts.system,
@@ -5200,8 +5293,11 @@ mod tests {
                     &[],
                 )
                 .unwrap();
-                assert_eq!(body.pointer(system_path).unwrap(), &json!(prompts.system));
-                assert_eq!(body.pointer(user_path).unwrap(), &json!(prompts.user));
+                assert_eq!(
+                    plan.body.pointer(system_path).unwrap(),
+                    &json!(prompts.system)
+                );
+                assert_eq!(plan.body.pointer(user_path).unwrap(), &json!(prompts.user));
             }
             command.user_prompt.clear();
             command.vision_images.push(PromptVisionImage {
@@ -5674,11 +5770,7 @@ mod tests {
         let router_prompts = build_system_and_user_prompts(&command, "router");
         assert_eq!(router_prompts.system, "router");
         assert!(router_prompts.user.contains("ai-film-route.v1"));
-        assert!(
-            router_prompts
-                .user
-                .contains("把现有剧本接着做成完整镜头")
-        );
+        assert!(router_prompts.user.contains("把现有剧本接着做成完整镜头"));
 
         let stage_command = OptimizeVideoPromptCommand {
             mode: PromptOptimizationMode::AiFilmPrompts,

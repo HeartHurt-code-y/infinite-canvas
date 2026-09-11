@@ -16,7 +16,7 @@ use super::{
         infer_catalog_schema, is_seedance_25_video_model, operations_from_schema,
         provider_scoped_model_definition_id,
     },
-    prompt_optimize::TextModelFallbackRequest,
+    prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
     },
@@ -308,10 +308,10 @@ struct CapturedJsonRequest<'a> {
     body: &'a Value,
 }
 
-/// 单次文本模型调用的元数据：是否走 SSE 流式，以及本次是否为退避重试。
+/// 单次文本模型调用的元数据：流式方言，以及本次是否为退避重试。
 struct TextCallRequest<'a> {
     phase: &'a str,
-    stream: bool,
+    dialect: Option<TextModelStream>,
     fallback_reason: Option<&'a str>,
 }
 
@@ -325,33 +325,26 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// 按 SSE 分帧回传，继续缓存没有意义。
 const SSE_FRAME_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
 
-/// OpenAI 兼容的 SSE 增量累积器。
+/// 三类文本接口共用的 SSE 增量累积器。
 ///
-/// 逐块接收字节流，按空行切分事件帧，把 `choices[].delta` 的内容、终态原因与
-/// 末尾的 usage 重新组装成一份与非流式响应等价的完整响应对象。这样调用方的
-/// 用量统计、截断判定与文本提取逻辑都不需要区分流式与非流式。
+/// 逐块接收字节流，按空行切分事件帧，交给方言累积，最后重新组装成一份与该接口
+/// **非流式响应等价**的完整响应对象。这样调用方的用量统计、截断判定与文本提取逻辑
+/// 都不需要区分流式与非流式，也不需要区分接口方言。
 ///
 /// 缓冲原始字节而不是先转成字符串：网络块边界与 UTF-8 字符边界无关，中文内容
 /// 经常被拆在两个块里，只有在完整帧上解码才不会把字符撕成替换符（U+FFFD）。
 #[derive(Default)]
 struct SseFrameParser {
     buffer: Vec<u8>,
-    id: Option<String>,
-    model: Option<String>,
-    created: Option<i64>,
-    finish_reason: Option<String>,
-    content: String,
-    reasoning_content: String,
-    usage: Option<Value>,
     frames: usize,
-    provider_error: Option<Value>,
     parse_failures: usize,
     dropped_bytes: usize,
+    provider_error: Option<Value>,
 }
 
 impl SseFrameParser {
     /// 累积一个网络块并就地派发其中已完整的事件帧。
-    fn push(&mut self, chunk: &[u8]) {
+    fn push(&mut self, chunk: &[u8], dialect: &mut dyn DialectSink) {
         self.buffer.extend_from_slice(chunk);
         loop {
             // SSE 事件以空行结束，`\r\n\r\n` 与 `\n\n` 兼容。
@@ -370,12 +363,14 @@ impl SseFrameParser {
             // 因此这里不会产生替换符。
             let frame = String::from_utf8_lossy(&self.buffer[..boundary]).into_owned();
             self.buffer.drain(..boundary + width);
-            self.accept_frame(&frame);
+            self.accept_frame(&frame, dialect);
         }
     }
 
-    /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略。
-    fn accept_frame(&mut self, frame: &str) {
+    /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略：
+    /// 三类方言都把有效载荷放在 `data` 里，`event:` 只是事件种类的冗余标注，
+    /// 种类可从载荷的字段形状判断，因此不需要单独跟踪。
+    fn accept_frame(&mut self, frame: &str, dialect: &mut dyn DialectSink) {
         let mut data = String::new();
         for line in frame.lines() {
             let line = line.trim_end_matches('\r');
@@ -398,14 +393,61 @@ impl SseFrameParser {
             self.parse_failures += 1;
             return;
         };
-        self.accept_event(&value);
-    }
-
-    fn accept_event(&mut self, value: &Value) {
         self.frames += 1;
         if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
             self.provider_error.get_or_insert_with(|| error.clone());
         }
+        dialect.accept_event(&value);
+    }
+
+    /// 组装完整响应对象：方言负责正文、终态与用量，这里统一附加流式诊断字段与
+    /// 流内错误。顶层字段形状与非流式响应保持一致，`parse_token_usage` 因此无需改动。
+    fn assemble(self, dialect: &dyn SseDialect) -> Value {
+        let diagnostics = json!({
+            "frames": self.frames,
+            "parseFailures": self.parse_failures,
+            "droppedBytes": self.dropped_bytes,
+        });
+        let mut payload = dialect.finish();
+        if let Some(object) = payload.as_object_mut() {
+            if let Some(error) = self.provider_error {
+                object.insert("error".to_string(), error);
+            }
+            object.insert("x_stream".to_string(), diagnostics);
+        }
+        payload
+    }
+}
+
+/// 方言事件入口：由 `SseFrameParser` 逐帧调用。
+trait DialectSink {
+    fn accept_event(&mut self, event: &Value);
+}
+
+/// 方言出口：把累积到的增量还原成该接口的非流式响应形状。
+///
+/// 要求 `Send`：方言实例在文本调用的异步任务里创建并跨 await 持有，不满足时
+/// 整个 `run_prompt_node` future 会失去 `Send`，Tauri 命令将无法编译。
+trait SseDialect: DialectSink + Send {
+    fn finish(&self) -> Value;
+}
+
+/// OpenAI 兼容 `/v1/chat/completions`：`choices[].delta.content` 增量，
+/// `finish_reason` 在最后一个 choice 上，`usage` 在 `stream_options.include_usage`
+/// 打开的末尾分片里。
+#[derive(Default)]
+struct OpenAiChatDialect {
+    id: Option<String>,
+    model: Option<String>,
+    created: Option<i64>,
+    finish_reason: Option<String>,
+    content: String,
+    reasoning_content: String,
+    usage: Option<Value>,
+}
+
+impl DialectSink for OpenAiChatDialect {
+    fn accept_event(&mut self, value: &Value) {
         if let Some(id) = value.get("id").and_then(Value::as_str) {
             self.id.get_or_insert_with(|| id.to_string());
         }
@@ -438,10 +480,10 @@ impl SseFrameParser {
             }
         }
     }
+}
 
-    /// 组装完整响应对象。这里把流式与用量相关的调试信息放在 `x_stream` 下，
-    /// 顶层字段形状与非流式响应保持一致，`parse_token_usage` 因此无需改动。
-    fn into_reassembled(self) -> Value {
+impl SseDialect for OpenAiChatDialect {
+    fn finish(&self) -> Value {
         let mut choice = serde_json::Map::new();
         choice.insert("index".to_string(), json!(0));
         choice.insert(
@@ -454,15 +496,18 @@ impl SseFrameParser {
         );
         choice.insert(
             "finish_reason".to_string(),
-            self.finish_reason.map(Value::String).unwrap_or(Value::Null),
+            self.finish_reason
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
         );
         let mut payload = serde_json::Map::new();
         payload.insert("object".to_string(), json!("chat.completion"));
-        if let Some(id) = self.id {
-            payload.insert("id".to_string(), Value::String(id));
+        if let Some(id) = &self.id {
+            payload.insert("id".to_string(), Value::String(id.clone()));
         }
-        if let Some(model) = self.model {
-            payload.insert("model".to_string(), Value::String(model));
+        if let Some(model) = &self.model {
+            payload.insert("model".to_string(), Value::String(model.clone()));
         }
         if let Some(created) = self.created {
             payload.insert("created".to_string(), json!(created));
@@ -471,21 +516,353 @@ impl SseFrameParser {
             "choices".to_string(),
             Value::Array(vec![Value::Object(choice)]),
         );
-        if let Some(usage) = self.usage {
-            payload.insert("usage".to_string(), usage);
+        if let Some(usage) = &self.usage {
+            payload.insert("usage".to_string(), usage.clone());
         }
-        if let Some(error) = self.provider_error {
-            payload.insert("error".to_string(), error);
-        }
-        payload.insert(
-            "x_stream".to_string(),
-            json!({
-                "frames": self.frames,
-                "parseFailures": self.parse_failures,
-                "droppedBytes": self.dropped_bytes,
-            }),
-        );
         Value::Object(payload)
+    }
+}
+
+/// Anthropic Messages `/v1/messages`：`message_start` 给出 id / model / 输入用量，
+/// `content_block_delta` 的 `delta.text` 是正文增量，`message_delta` 给出
+/// `stop_reason` 与输出用量。终态还原为 `content[]` 文本块 + `stop_reason` + `usage`，
+/// 与非流式响应形状一致。
+#[derive(Default)]
+struct AnthropicMessagesDialect {
+    id: Option<String>,
+    model: Option<String>,
+    stop_reason: Option<String>,
+    text: String,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+}
+
+impl DialectSink for AnthropicMessagesDialect {
+    fn accept_event(&mut self, value: &Value) {
+        match value
+            .get("type")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+        {
+            "message_start" => {
+                if let Some(message) = value.get("message") {
+                    if let Some(id) = message.get("id").and_then(Value::as_str) {
+                        self.id.get_or_insert_with(|| id.to_string());
+                    }
+                    if let Some(model) = message.get("model").and_then(Value::as_str) {
+                        self.model.get_or_insert_with(|| model.to_string());
+                    }
+                    if let Some(tokens) = read_token(message, &["input_tokens"]) {
+                        self.input_tokens = Some(tokens);
+                    }
+                    if let Some(tokens) = read_token(message, &["output_tokens"]) {
+                        self.output_tokens = Some(tokens.max(self.output_tokens.unwrap_or(0)));
+                    }
+                }
+            }
+            "content_block_delta" => {
+                // 只累积文本块：thinking / signature 增量不属于交付正文。
+                if let Some(text) = value.pointer("/delta/text").and_then(Value::as_str) {
+                    self.text.push_str(text);
+                }
+            }
+            "message_delta" => {
+                if let Some(reason) = value
+                    .pointer("/delta/stop_reason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    self.stop_reason = Some(reason.to_string());
+                }
+                if let Some(tokens) = read_token(value, &["output_tokens"]) {
+                    self.output_tokens = Some(tokens.max(self.output_tokens.unwrap_or(0)));
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+impl SseDialect for AnthropicMessagesDialect {
+    fn finish(&self) -> Value {
+        let mut payload = serde_json::Map::new();
+        payload.insert("type".to_string(), json!("message"));
+        payload.insert("role".to_string(), json!("assistant"));
+        if let Some(id) = &self.id {
+            payload.insert("id".to_string(), Value::String(id.clone()));
+        }
+        if let Some(model) = &self.model {
+            payload.insert("model".to_string(), Value::String(model.clone()));
+        }
+        let mut blocks = Vec::new();
+        if !self.text.is_empty() {
+            blocks.push(json!({ "type": "text", "text": self.text }));
+        }
+        payload.insert("content".to_string(), Value::Array(blocks));
+        payload.insert(
+            "stop_reason".to_string(),
+            self.stop_reason
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        if self.input_tokens.is_some() || self.output_tokens.is_some() {
+            payload.insert(
+                "usage".to_string(),
+                json!({
+                    "input_tokens": self.input_tokens,
+                    "output_tokens": self.output_tokens,
+                }),
+            );
+        }
+        Value::Object(payload)
+    }
+}
+
+/// Gemini `:streamGenerateContent?alt=sse`：每个分片就是一份
+/// `GenerateContentResponse`，`candidates[0].content.parts[].text` 是正文增量，
+/// `usageMetadata` 随分片逐步补齐。终态还原为 `candidates[0]` + `usageMetadata`，
+/// 与非流式响应形状一致。
+#[derive(Default)]
+struct GeminiContentDialect {
+    model_version: Option<String>,
+    text: String,
+    finish_reason: Option<String>,
+    usage: Option<Value>,
+    prompt_feedback: Option<Value>,
+}
+
+impl DialectSink for GeminiContentDialect {
+    fn accept_event(&mut self, value: &Value) {
+        if let Some(version) = value.get("modelVersion").and_then(Value::as_str) {
+            self.model_version
+                .get_or_insert_with(|| version.to_string());
+        }
+        if self.prompt_feedback.is_none()
+            && let Some(feedback) = value.get("promptFeedback").filter(|item| !item.is_null())
+        {
+            self.prompt_feedback = Some(feedback.clone());
+        }
+        // 用量随分片单调递增，取最后一个分片即最终值。
+        if let Some(usage) = value.get("usageMetadata").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        let Some(candidates) = value.get("candidates").and_then(Value::as_array) else {
+            return;
+        };
+        for candidate in candidates {
+            if let Some(parts) = candidate
+                .pointer("/content/parts")
+                .and_then(Value::as_array)
+            {
+                for part in parts {
+                    // 带 thought=true 的分片是思维链，不算交付正文。
+                    if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                        continue;
+                    }
+                    if let Some(text) = part.get("text").and_then(Value::as_str) {
+                        self.text.push_str(text);
+                    }
+                }
+            }
+            if let Some(reason) = candidate
+                .get("finishReason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
+                self.finish_reason = Some(reason.to_string());
+            }
+        }
+    }
+}
+
+impl SseDialect for GeminiContentDialect {
+    fn finish(&self) -> Value {
+        let mut candidate = serde_json::Map::new();
+        candidate.insert(
+            "content".to_string(),
+            json!({ "role": "model", "parts": [{ "text": self.text }] }),
+        );
+        candidate.insert(
+            "finishReason".to_string(),
+            self.finish_reason
+                .clone()
+                .map(Value::String)
+                .unwrap_or(Value::Null),
+        );
+        let mut payload = serde_json::Map::new();
+        payload.insert(
+            "candidates".to_string(),
+            Value::Array(vec![Value::Object(candidate)]),
+        );
+        if let Some(usage) = &self.usage {
+            payload.insert("usageMetadata".to_string(), usage.clone());
+        }
+        if let Some(version) = &self.model_version {
+            payload.insert("modelVersion".to_string(), Value::String(version.clone()));
+        }
+        if let Some(feedback) = &self.prompt_feedback {
+            payload.insert("promptFeedback".to_string(), feedback.clone());
+        }
+        Value::Object(payload)
+    }
+}
+
+/// 按方言构造解析器。
+fn sse_dialect(dialect: TextModelStream) -> Box<dyn SseDialect> {
+    match dialect {
+        TextModelStream::OpenAiChat => Box::<OpenAiChatDialect>::default(),
+        TextModelStream::AnthropicMessages => Box::<AnthropicMessagesDialect>::default(),
+        TextModelStream::GeminiContent => Box::<GeminiContentDialect>::default(),
+    }
+}
+
+/// 从任意层级的 usage 对象里读一个 token 字段（Anthropic 与 Gemini 的字段名不同）。
+fn read_token(container: &Value, keys: &[&str]) -> Option<u64> {
+    let usage = container.get("usage").unwrap_or(container);
+    keys.iter().find_map(|key| {
+        usage.get(*key).and_then(|field| {
+            field
+                .as_u64()
+                .or_else(|| field.as_i64().map(|value| value.max(0) as u64))
+        })
+    })
+}
+
+/// 冻结一次出站请求的归档记录（provider_calls 的 `request` 字段）。
+///
+/// `url` 是已解析、已脱敏的完整地址；`body` 与 `archive_body` 分开：前者用于实际
+/// 请求，后者用于落盘，调用方可在其中移除大体积内联媒体或不应重复落盘的本地文档正文。
+fn build_archive(
+    context: &ResolvedProviderContext,
+    url: &str,
+    extra_headers: &[(&str, &str)],
+    body: &Value,
+    archive_body: Option<&Value>,
+) -> Value {
+    let mut headers = serde_json::Map::from_iter([
+        (
+            "authorization".to_string(),
+            Value::String("已排除敏感凭据".to_string()),
+        ),
+        (
+            "content-type".to_string(),
+            Value::String("application/json".to_string()),
+        ),
+    ]);
+    for (name, value) in extra_headers {
+        headers.insert((*name).to_string(), Value::String((*value).to_string()));
+    }
+    json!({
+        "providerConnectionId": context.provider_connection_id,
+        "adapterId": context.adapter_id,
+        "credentialReference": context.api_key_ref,
+        "method": "POST",
+        "url": url,
+        "headers": headers,
+        "bodyType": "json",
+        "body": redact_request_value(archive_body.unwrap_or(body)),
+    })
+}
+
+/// 文本调用在什么情况下应改走非流式端点重发一次。
+///
+/// 三种情况都表示「上游没有真正接受这个流式请求」：
+/// - 5xx：上游侧故障（含反向代理以 524 代答）。
+/// - 4xx：端点或参数不被接受。moyu 的 Gemini 文档只公开 `:generateContent`，
+///   完全没有 `:streamGenerateContent` 与 `alt=sse`，被拒时只能退回非流式。
+/// - 2xx 但一个 SSE 帧都没有：网关把整轮生成缓冲后一次性回完整 JSON。
+///
+/// 但只有退避确实会改变请求时才值得重发——否则就是原样重发一次。改变可能来自
+/// 端点不同（Gemini 换成 `:generateContent`），也可能来自请求体不同（去掉
+/// `stream` / `stream_options`）。
+///
+/// 判定用帧数而不是正文长度：上游确实流式回了一个空正文时不应被误判成退化响应。
+fn should_retry_without_streaming(
+    status: u16,
+    payload: &Value,
+    endpoint_changes: bool,
+    retry_body: &Value,
+    body: &Value,
+) -> bool {
+    let request_changes = endpoint_changes || retry_body != body;
+    if (500..600).contains(&status) {
+        return request_changes;
+    }
+    if (400..500).contains(&status) {
+        return request_changes;
+    }
+    // 2xx 但没有帧：网关忽略了流式，改走非流式重发一次就能拿到完整响应。
+    (200..300).contains(&status)
+        && payload.pointer("/x_stream/frames").and_then(Value::as_u64) == Some(0)
+}
+
+/// 把「上游没按 SSE 回传、直接给了完整 JSON」的响应体解析成响应对象。
+///
+/// 两种退化形状都要吃下：
+/// - 单对象：某个网关忽略 `stream` 直接回一份 `chat/completion` 或 `message`。
+/// - 数组：Gemini 在 `alt=sse` 缺失或未生效时返回 `[{...}, {...}]` 形式的
+///   `GenerateContentResponse` 列表，需要合并 `parts[].text` 与 `usageMetadata`。
+fn parse_complete_json_payload(transcript: &str) -> Option<Value> {
+    let trimmed = transcript.trim();
+    if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
+        return None;
+    }
+    let parsed = serde_json::from_str::<Value>(trimmed).ok()?;
+    match parsed {
+        Value::Object(_) => Some(parsed),
+        Value::Array(chunks) => {
+            // Gemini 分片列表：正文按顺序拼接，用量取最后一个非空 usageMetadata，
+            // 终态原因沿用最后一个非空 finishReason。
+            let mut text = String::new();
+            let mut usage = None;
+            let mut finish_reason = None;
+            let mut last: Option<Value> = None;
+            for chunk in &chunks {
+                if chunk
+                    .get("usageMetadata")
+                    .is_some_and(|value| !value.is_null())
+                {
+                    usage = chunk.get("usageMetadata").cloned();
+                }
+                if let Some(reason) = chunk
+                    .pointer("/candidates/0/finishReason")
+                    .and_then(Value::as_str)
+                    .filter(|reason| !reason.is_empty())
+                {
+                    finish_reason = Some(Value::String(reason.to_string()));
+                }
+                if let Some(parts) = chunk
+                    .pointer("/candidates/0/content/parts")
+                    .and_then(Value::as_array)
+                {
+                    for part in parts {
+                        if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                            continue;
+                        }
+                        if let Some(piece) = part.get("text").and_then(Value::as_str) {
+                            text.push_str(piece);
+                        }
+                    }
+                }
+                last = Some(chunk.clone());
+            }
+            let mut payload = last.unwrap_or_else(|| json!({}));
+            if let Some(object) = payload.as_object_mut() {
+                object.insert(
+                    "candidates".to_string(),
+                    json!([{
+                        "content": { "role": "model", "parts": [{ "text": text }] },
+                        "finishReason": finish_reason.unwrap_or(Value::Null),
+                    }]),
+                );
+                if let Some(usage) = usage {
+                    object.insert("usageMetadata".to_string(), usage);
+                }
+            }
+            Some(payload)
+        }
+        _ => None,
     }
 }
 
@@ -493,9 +870,7 @@ impl SseFrameParser {
 /// 在原始字节上查找，空行分隔符本身是 ASCII，不会出现在多字节字符内部。
 fn find_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
     let newline = buffer.windows(2).position(|pair| pair == b"\n\n");
-    let carriage = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n");
+    let carriage = buffer.windows(4).position(|window| window == b"\r\n\r\n");
     match (newline, carriage) {
         (Some(newline), Some(carriage)) if carriage < newline => Some((carriage, 4)),
         (Some(newline), _) => Some((newline, 2)),
@@ -990,58 +1365,62 @@ impl ProviderRuntime {
     /// `body` 仅用于实际 HTTP 请求；`archive_body` 用于持久化，调用方可在其中
     /// 移除大体积内联媒体或不应重复落盘的本地文档正文。
     ///
-    /// `stream` 为 true 时按 SSE 增量读取：非流式响应在生成完成前不回传任何字节，
-    /// 长上下文与长输出的首字节时间会撞上反向代理的零字节读取超时（例如
+    /// `stream` 为 `Some(方言)` 时按 SSE 增量读取：非流式响应在生成完成前不回传任何
+    /// 字节，长上下文与长输出的首字时长会撞上反向代理的零字节读取超时（例如
     /// Cloudflare 在 100 秒无数据时以 524 终止连接）；流式返回持续回传增量，
-    /// 该判定条件不再成立。增量会被重新组装成与非流式等价的完整响应对象返回。
+    /// 该判定条件不再成立。增量会按方言重新组装成与非流式等价的完整响应对象返回。
     ///
-    /// 上游拒绝可选的用量字段（`stream_options.include_usage`）时，用
-    /// `fallback` 退避重发一次，保证用量统计不成为整轮调用失败的原因。
+    /// 两条退避路径，各自只重发一次：
+    /// 1. `fallback`：上游拒绝某个可选字段（OpenAI 档案的用量选项）时去掉它重发。
+    /// 2. `fallback_path`：上游不真正支持流式（路径不存在、参数被拒、或把整轮生成
+    ///    缓冲后一次性回完整 JSON）时改走非流式端点重发。Gemini 尤其需要：moyu 文档
+    ///    只公开 `:generateContent`，没有 `:streamGenerateContent` 与 `alt=sse`。
     #[allow(clippy::too_many_arguments)]
     pub async fn captured_text_json(
         &self,
         task: &TaskExecutionRecord,
         attempt_id: &str,
         path: &str,
+        query: &[(&str, String)],
         body: &Value,
         archive_body: &Value,
         extra_headers: &[(&str, &str)],
-        stream: bool,
+        stream: Option<TextModelStream>,
         fallback: Option<TextModelFallbackRequest>,
+        fallback_path: Option<&str>,
     ) -> BackendResult<(CapturedHttpResponse, Value)> {
         let context = self.resolve_frozen(task)?;
-        let url = endpoint(&context.base_url, path)?;
-        let mut archived_headers = serde_json::Map::from_iter([
-            (
-                "authorization".to_string(),
-                Value::String("已排除敏感凭据".to_string()),
-            ),
-            (
-                "content-type".to_string(),
-                Value::String("application/json".to_string()),
-            ),
-        ]);
-        for (name, value) in extra_headers {
-            archived_headers.insert((*name).to_string(), Value::String((*value).to_string()));
+        let mut url = endpoint(&context.base_url, path)?;
+        // Gemini 的流式端点靠查询参数选择 SSE 返回；`endpoint()` 会清空 query，
+        // 因此查询参数由调用方单独给出，在这里统一附加。
+        if !query.is_empty() {
+            url.query_pairs_mut()
+                .extend_pairs(query.iter().map(|(name, value)| (*name, value.as_str())));
         }
+        // 非流式退避端点：不带任何查询参数（Gemini 的 alt=sse 只对流式端点有意义）。
         let sanitized_url = sanitize_url(&url);
-        let archive = json!({
-            "providerConnectionId": context.provider_connection_id,
-            "adapterId": context.adapter_id,
-            "credentialReference": context.api_key_ref,
-            "method": "POST",
-            "url": sanitized_url,
-            "headers": archived_headers,
-            "bodyType": "json",
-            "body": redact_request_value(archive_body),
-        });
+        let retry_plan = match (stream, fallback_path) {
+            (Some(_), Some(fallback_path)) => {
+                let retry_url = endpoint(&context.base_url, fallback_path)?;
+                let retry_archive = build_archive(
+                    &context,
+                    &sanitize_url(&retry_url),
+                    extra_headers,
+                    body,
+                    fallback.as_ref().map(|fallback| &fallback.body),
+                );
+                Some((retry_url, retry_archive))
+            }
+            _ => None,
+        };
+        let archive = build_archive(&context, &sanitized_url, extra_headers, archive_body, None);
         let request = TextCallRequest {
             phase: "text_generation",
-            stream,
+            dialect: stream,
             fallback_reason: None,
         };
 
-        let outcome = self
+        let (response, payload) = match self
             .send_text_call(
                 task,
                 attempt_id,
@@ -1052,34 +1431,32 @@ impl ProviderRuntime {
                 extra_headers,
                 &request,
             )
-            .await;
-        // 4xx 通常表示请求体不被接受；唯一的可选字段就是用量的 stream_options，
-        // 去掉它重发一次。可见的 4xx 大概率仍会失败，所以只重试一次并留 500ms 间隔。
-        if let (Some(fallback), Ok((response, _))) = (&fallback, &outcome)
+            .await
+        {
+            Ok(value) => value,
+            Err(error) => return Err(error),
+        };
+        // 退避 1：上游拒绝某个可选字段。4xx 通常表示请求体不被接受，而唯一的可选
+        // 字段就是 OpenAI 档案的用量选项；可见的 4xx 大概率仍会失败，故只重试一次。
+        if let Some(fallback) = &fallback
             && (400..500).contains(&response.status)
         {
-            // 退避原因来自请求构造方（TextModelFallbackRequest::reason），写进日志与
-            // provider_calls 记录，避免只留一个无从归因的 4xx。
             let fallback_reason = fallback.reason;
-            let fallback_body = &fallback.body;
             info!(
                 "[provider] 文本模型请求被拒，按退避请求体重试一次: taskId={}, HTTP {}, 原因={fallback_reason}",
                 task.id, response.status
             );
             tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            let retry_archive = json!({
-                "providerConnectionId": context.provider_connection_id,
-                "adapterId": context.adapter_id,
-                "credentialReference": context.api_key_ref,
-                "method": "POST",
-                "url": sanitized_url,
-                "headers": archive["headers"],
-                "bodyType": "json",
-                "body": redact_request_value(fallback_body),
-            });
+            let retry_archive = build_archive(
+                &context,
+                &sanitized_url,
+                extra_headers,
+                &fallback.body,
+                None,
+            );
             let retry_request = TextCallRequest {
                 phase: "text_generation",
-                stream,
+                dialect: stream,
                 fallback_reason: Some(fallback_reason),
             };
             return self
@@ -1095,7 +1472,48 @@ impl ProviderRuntime {
                 )
                 .await;
         }
-        outcome
+        // 退避 2：上游没有真正接受流式请求 → 改走非流式端点，并按非流式解析。
+        if let Some((retry_url, retry_archive)) = retry_plan {
+            let retry_body = fallback
+                .as_ref()
+                .map(|fallback| &fallback.body)
+                .unwrap_or(body);
+            let endpoint_changes = sanitize_url(&retry_url) != sanitized_url;
+            if !should_retry_without_streaming(
+                response.status,
+                &payload,
+                endpoint_changes,
+                retry_body,
+                body,
+            ) {
+                return Ok((response, payload));
+            }
+            info!(
+                "[provider] 上游未接受流式请求，改走非流式端点重试一次: taskId={}, HTTP {}, 目标={}",
+                task.id,
+                response.status,
+                sanitize_url(&retry_url)
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let retry_request = TextCallRequest {
+                phase: "text_generation",
+                dialect: None,
+                fallback_reason: Some("provider does not honour streaming for this endpoint"),
+            };
+            return self
+                .send_text_call(
+                    task,
+                    attempt_id,
+                    &context,
+                    &retry_url,
+                    &retry_archive,
+                    retry_body,
+                    extra_headers,
+                    &retry_request,
+                )
+                .await;
+        }
+        Ok((response, payload))
     }
 
     /// 单次文本模型调用：冻结 provider_calls 记录、发送请求、读取响应。
@@ -1135,8 +1553,8 @@ impl ProviderRuntime {
             request = request.header(*name, *value);
         }
         info!(
-            "[provider] 发起文本模型请求: taskId={}, callId={}, POST {}, 流式={}",
-            task.id, call_id, sanitized_url, call.stream
+            "[provider] 发起文本模型请求: taskId={}, callId={}, POST {}, 流式方言={:?}",
+            task.id, call_id, sanitized_url, call.dialect
         );
         let started_at = std::time::Instant::now();
         let sent_at = now_ms();
@@ -1149,32 +1567,37 @@ impl ProviderRuntime {
         )?;
 
         let label = format!("POST / phase=text_generation / taskId={}", task.id);
-        let (status, headers, body_text, payload) = if call.stream {
-            match self
-                .read_streamed_chat_completion(&task.id, &call_id, sent_at, &label, request)
-                .await
-            {
-                Ok(value) => value,
-                Err(error) => return Err(error),
+        let (status, headers, body_text, payload) = match call.dialect {
+            Some(dialect) => {
+                match self
+                    .read_streamed_text_response(
+                        &task.id, &call_id, sent_at, &label, request, dialect,
+                    )
+                    .await
+                {
+                    Ok(value) => value,
+                    Err(error) => return Err(error),
+                }
             }
-        } else {
-            let response = match self
-                .send_captured(&task.id, &call_id, &label, request)
-                .await
-            {
-                Ok(response) => response,
-                Err(error) => return Err(error),
-            };
-            let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
-            (response.status, response.headers, response.body, payload)
+            None => {
+                let response = match self
+                    .send_captured(&task.id, &call_id, &label, request)
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(error) => return Err(error),
+                };
+                let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
+                (response.status, response.headers, response.body, payload)
+            }
         };
         info!(
-            "[provider] 收到文本模型响应: taskId={}, callId={}, HTTP {}, 耗时 {}ms, 流式={}, 响应体 {} 字符{}",
+            "[provider] 收到文本模型响应: taskId={}, callId={}, HTTP {}, 耗时 {}ms, 流式方言={:?}, 响应体 {} 字符{}",
             task.id,
             call_id,
             status,
             started_at.elapsed().as_millis(),
-            call.stream,
+            call.dialect,
             body_text.len(),
             call.fallback_reason
                 .map(|reason| format!(", 退避原因: {reason}"))
@@ -1191,19 +1614,22 @@ impl ProviderRuntime {
         ))
     }
 
-    /// 读取 OpenAI 兼容的 SSE 流，把增量重新组装成与非流式等价的完整响应对象。
+    /// 读取文本接口的 SSE 流，按方言把增量重新组装成与非流式等价的完整响应对象。
     ///
     /// 返回（状态码、响应头、原始 SSE 文本、重组后的响应对象）。非 2xx 与上游在
     /// 流内返回的错误对象都保留原始文本，让调用方的错误诊断与非流式保持一致。
-    /// 重组对象同时保留 `reasoning_content`：非流式响应本就不回传思维链，这里只在
-    /// 确有增量时补充该字段，避免把思维链混进交付给用户的正文。
-    async fn read_streamed_chat_completion(
+    ///
+    /// 三个接口的流式协议不同（OpenAI 的 `delta.content`、Anthropic 的
+    /// `content_block_delta`、Gemini 的分数片 `candidates[].content.parts[]`），
+    /// 但共用同一套帧切分与空闲超时，差异全部收敛在方言实现里。
+    async fn read_streamed_text_response(
         &self,
         task_id: &str,
         call_id: &str,
         sent_at: i64,
         label: &str,
         request: reqwest::RequestBuilder,
+        dialect: TextModelStream,
     ) -> BackendResult<(u16, Value, String, Value)> {
         let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
             Ok(Ok(response)) => response,
@@ -1247,6 +1673,7 @@ impl ProviderRuntime {
         let headers = response_headers(response.headers());
         let mut stream = response.bytes_stream();
         let mut parser = SseFrameParser::default();
+        let mut dialect = sse_dialect(dialect);
         let mut transcript = String::new();
         let mut chunks = 0usize;
         let mut bytes = 0usize;
@@ -1304,17 +1731,16 @@ impl ProviderRuntime {
             bytes += chunk.len();
             transcript.push_str(&String::from_utf8_lossy(&chunk));
             // 解析器按原始字节累积，只在完整帧上解码，避免块边界撕裂多字节字符。
-            parser.push(&chunk);
+            parser.push(&chunk, dialect.as_mut());
         }
-        let mut payload = parser.into_reassembled();
-        // 网关可能忽略 stream 字段直接回一份完整 JSON（聚合平台的常见退化行为）。
-        // 这种情况下一个 SSE 帧都没有，但响应体本身就是完整响应，直接采用，
-        // 避免把一次成功的调用判成「空响应」。判定条件用帧数而不是正文长度：
-        // 上游确实流式回了一个空正文时不应被当成退化响应覆盖掉。
+        let mut payload = parser.assemble(dialect.as_ref());
+        // 网关可能忽略流式请求直接回一份完整 JSON（聚合平台的常见退化行为，Gemini 的
+        // 非 SSE 返回还会是一个 JSON 数组）。这种情况下一个 SSE 帧都没有，但响应体
+        // 本身就是完整响应，直接采用，避免把一次成功的调用判成「空响应」。
+        // 判定条件用帧数而不是正文长度：上游确实流式回了一个空正文时不应被覆盖。
         if (200..300).contains(&status)
             && payload.pointer("/x_stream/frames").and_then(Value::as_u64) == Some(0)
-            && transcript.trim_start().starts_with('{')
-            && let Ok(complete) = serde_json::from_str::<Value>(transcript.trim())
+            && let Some(complete) = parse_complete_json_payload(&transcript)
         {
             info!(
                 "[provider] 上游未按 SSE 回传，改用完整 JSON 响应: taskId={task_id}, callId={call_id}"
@@ -3979,25 +4405,34 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Value {
 mod tests {
     use super::*;
 
-    #[test]
-    fn sse_frames_assemble_into_a_complete_non_streaming_response() {
-        let sse = concat!(
-            "data: {\"id\":\"chat-1\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,",
-            "\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
-            "\"content\":\"\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"# 分镜\\n\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"【分镜3】\"},\"finish_reason\":null}]}\n\n",
-            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
-            "\"usage\":{\"prompt_tokens\":58000,\"completion_tokens\":1200,\"total_tokens\":59200}}\n\n",
-            "data: [DONE]\n\n",
-        );
-        // 按 7 字节切块投喂：块边界必然落在多字节中文字符内部，解码只能在
-        // 完整帧上进行，否则正文会被撕成替换符。
+    /// 按原始 SSE 文本投喂解析器，块边界由 `chunk_size` 决定（模拟真实网络分块）。
+    /// 泛型化为具体方言是为了拿到具体类型，从而不必为测试引入 `Box<dyn>`。
+    fn assemble_raw<D: SseDialect + Default>(sse: &str, chunk_size: usize) -> Value {
+        let mut dialect = D::default();
         let mut parser = SseFrameParser::default();
-        for chunk in sse.as_bytes().chunks(7) {
-            parser.push(chunk);
+        for chunk in sse.as_bytes().chunks(chunk_size) {
+            parser.push(chunk, &mut dialect);
         }
-        let payload = parser.into_reassembled();
+        parser.assemble(&dialect)
+    }
+
+    #[test]
+    fn openai_sse_frames_assemble_into_a_complete_non_streaming_response() {
+        let payload = assemble_raw::<OpenAiChatDialect>(
+            concat!(
+                "data: {\"id\":\"chat-1\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,",
+                "\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+                "\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"# 分镜\\n\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"【分镜3】\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+                "\"usage\":{\"prompt_tokens\":58000,\"completion_tokens\":1200,\"total_tokens\":59200}}\n\n",
+                "data: [DONE]\n\n",
+            ),
+            // 按 7 字节切块投喂：块边界必然落在多字节中文字符内部，解码只能在
+            // 完整帧上进行，否则正文会被撕成替换符。
+            7,
+        );
         assert_eq!(payload["id"], "chat-1");
         assert_eq!(payload["model"], "deepseek-v4-flash");
         assert_eq!(payload["created"], 1730000000);
@@ -4008,10 +4443,9 @@ mod tests {
             "# 分镜\n【分镜3】"
         );
         assert_eq!(payload["choices"][0]["finish_reason"], "stop");
-        // 5 条 JSON 事件各计一帧；`data: [DONE]` 是结束标记，不算帧。
+        // 4 条 JSON 事件各计一帧；`data: [DONE]` 是结束标记，不算帧。
         assert_eq!(payload["x_stream"]["frames"], 4);
         assert_eq!(payload["x_stream"]["parseFailures"], 0);
-        // 重组后的形状与非流式一致：既有提取逻辑与用量统计都无需区分。
         assert_eq!(
             super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
             Some("# 分镜\n【分镜3】")
@@ -4030,14 +4464,17 @@ mod tests {
 
     #[test]
     fn sse_parser_tolerates_crlf_unknown_fields_and_split_frames() {
-        // `\r\n\r\n` 分隔、`event:`/注释行与跨块的半帧。
-        let mut parser = SseFrameParser::default();
-        parser.push(b": keep-alive\r\n\r\nevent: message\r\ndata: {\"choices\":[{\"delta\":");
-        parser.push("{\"content\":\"前\"}}]}\r\n\r\n".as_bytes());
-        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"后\"}}]}\n\n".as_bytes());
-        // 最后一段没有空行结尾：只处理完整帧，残余部分不参与重组。
-        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"丢弃\"}}]}".as_bytes());
-        let payload = parser.into_reassembled();
+        // `\r\n\r\n` 分隔、`event:`/注释行与跨块的半帧；最后一段没有空行结尾，
+        // 只处理完整帧，残余部分不参与重组。
+        let payload = assemble_raw::<OpenAiChatDialect>(
+            concat!(
+                ": keep-alive\r\n\r\nevent: message\r\ndata: {\"choices\":[{\"delta\":",
+                "{\"content\":\"前\"}}]}\r\n\r\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"后\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"丢弃\"}}]}",
+            ),
+            3,
+        );
         assert_eq!(payload["choices"][0]["message"]["content"], "前后");
         assert_eq!(payload["choices"][0]["finish_reason"], Value::Null);
         assert_eq!(payload["x_stream"]["frames"], 2);
@@ -4047,16 +4484,26 @@ mod tests {
 
     #[test]
     fn sse_parser_surfaces_in_stream_errors_and_keeps_reasoning_out_of_the_deliverable() {
+        let mut dialect = OpenAiChatDialect::default();
         let mut parser = SseFrameParser::default();
         // 思维链增量单独累积，不混进交付正文。
-        parser.push("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先想\"}}]}\n\n".as_bytes());
-        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"正文\"}}]}\n\n".as_bytes());
+        parser.push(
+            b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\xe5\x85\x88\xe6\x83\xb3\"}}]}\n\n",
+            &mut dialect,
+        );
+        parser.push(
+            b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe6\xad\xa3\xe6\x96\x87\"}}]}\n\n",
+            &mut dialect,
+        );
         // 上游在流内返回错误对象时保留原始错误，便于诊断。
-        parser.push(b"data: {\"error\":{\"message\":\"upstream overloaded\"}}\n\n");
+        parser.push(
+            b"data: {\"error\":{\"message\":\"upstream overloaded\"}}\n\n",
+            &mut dialect,
+        );
         // 非 JSON 载荷计入解析失败，但不影响已累积的正文。
-        parser.push(b"data: not-json\n\n");
-        parser.push(b"data: [DONE]\n\n");
-        let payload = parser.into_reassembled();
+        parser.push(b"data: not-json\n\n", &mut dialect);
+        parser.push(b"data: [DONE]\n\n", &mut dialect);
+        let payload = parser.assemble(&dialect);
         assert_eq!(payload["choices"][0]["message"]["content"], "正文");
         assert_eq!(
             payload["choices"][0]["message"]["reasoning_content"],
@@ -4070,17 +4517,189 @@ mod tests {
         );
     }
 
+    /// Anthropic Messages：`message_start` / `content_block_delta` / `message_delta`
+    /// 三类事件必须还原成 `content[]` + `stop_reason` + `usage` 的非流式形状。
+    #[test]
+    fn anthropic_sse_events_reassemble_into_a_message_response() {
+        let payload = assemble_raw::<AnthropicMessagesDialect>(
+            concat!(
+                "event: message_start\n",
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"claude-sonnet-4-5\",",
+                "\"usage\":{\"input_tokens\":58000,\"output_tokens\":1}}}\n\n",
+                "event: content_block_start\n",
+                "data: {\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"# 分镜\"}}\n\n",
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"【分镜3】\"}}\n\n",
+                // 思维链增量不属于交付正文。
+                "event: content_block_delta\n",
+                "data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"先想\"}}\n\n",
+                "event: content_block_stop\n",
+                "data: {\"type\":\"content_block_stop\",\"index\":0}\n\n",
+                "event: message_delta\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":1200}}\n\n",
+                "event: message_stop\n",
+                "data: {\"type\":\"message_stop\"}\n\n",
+            ),
+            11,
+        );
+        assert_eq!(payload["type"], "message");
+        assert_eq!(payload["id"], "msg_1");
+        assert_eq!(payload["model"], "claude-sonnet-4-5");
+        assert_eq!(payload["content"][0]["type"], "text");
+        assert_eq!(payload["content"][0]["text"], "# 分镜【分镜3】");
+        assert_eq!(payload["stop_reason"], "end_turn");
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
+            Some("# 分镜【分镜3】")
+        );
+        // 截断判定依赖该路径的 stop_reason，这里的形状必须与截断检查的预期一致。
+        assert_eq!(
+            payload.pointer("/stop_reason").and_then(Value::as_str),
+            Some("end_turn")
+        );
+        let usage = parse_token_usage(&CapturedHttpResponse {
+            call_id: "call-2".into(),
+            status: 200,
+            headers: json!({}),
+            body: serde_json::to_string(&payload).unwrap(),
+        })
+        .expect("usage");
+        assert_eq!(usage.prompt_tokens, Some(58000));
+        assert_eq!(usage.completion_tokens, Some(1200));
+    }
+
+    /// Gemini 的 `alt=sse` 分片：正文逐步拼接，用量取最后一个分片，终态原因沿用
+    /// `finishReason`；带 `thought=true` 的分片是思维链，不进正文。
+    #[test]
+    fn gemini_sse_chunks_reassemble_into_a_generate_content_response() {
+        let payload = assemble_raw::<GeminiContentDialect>(
+            concat!(
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"# 分镜\"}]}}],",
+                "\"modelVersion\":\"gemini-2.5-flash\",\"usageMetadata\":{\"promptTokenCount\":58000,\"totalTokenCount\":58001}}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"先想\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"【分镜3】\"}]}}],",
+                "\"usageMetadata\":{\"promptTokenCount\":58000,\"candidatesTokenCount\":1200,\"totalTokenCount\":59200}}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"\"}]},\"finishReason\":\"STOP\"}],",
+                "\"usageMetadata\":{\"promptTokenCount\":58000,\"candidatesTokenCount\":1200,\"totalTokenCount\":59200}}\n\n",
+            ),
+            13,
+        );
+        assert_eq!(payload["modelVersion"], "gemini-2.5-flash");
+        assert_eq!(
+            payload["candidates"][0]["content"]["parts"][0]["text"],
+            "# 分镜【分镜3】"
+        );
+        assert_eq!(payload["candidates"][0]["finishReason"], "STOP");
+        assert_eq!(payload["x_stream"]["frames"], 4);
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
+            Some("# 分镜【分镜3】")
+        );
+        let usage = parse_token_usage(&CapturedHttpResponse {
+            call_id: "call-3".into(),
+            status: 200,
+            headers: json!({}),
+            body: serde_json::to_string(&payload).unwrap(),
+        })
+        .expect("usage");
+        assert_eq!(usage.prompt_tokens, Some(58000));
+        assert_eq!(usage.completion_tokens, Some(1200));
+        assert_eq!(usage.total_tokens, Some(59200));
+    }
+
+    /// Gemini 未生效 `alt=sse` 时返回的是分片数组而不是 SSE；没有帧就必须改用整份
+    /// 响应体，并把数组里的正文与用量合并成一份响应对象。
+    #[test]
+    fn json_array_payload_is_merged_when_the_gateway_ignores_streaming() {
+        let transcript = concat!(
+            "[{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"第一段\"}]}}]},",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"thought\":true,\"text\":\"先想\"}]}}]},",
+            "{\"candidates\":[{\"content\":{\"role\":\"model\",\"parts\":[{\"text\":\"第二段\"}]},",
+            "\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":10,\"candidatesTokenCount\":4}}]",
+        );
+        let mut parser = SseFrameParser::default();
+        let mut dialect = GeminiContentDialect::default();
+        parser.push(transcript.as_bytes(), &mut dialect);
+        let mut payload = parser.assemble(&dialect);
+        assert_eq!(payload.pointer("/x_stream/frames"), Some(&json!(0)));
+        payload = parse_complete_json_payload(transcript).expect("merged array payload");
+        assert_eq!(
+            payload["candidates"][0]["content"]["parts"][0]["text"],
+            "第一段第二段"
+        );
+        assert_eq!(payload["candidates"][0]["finishReason"], "STOP");
+        assert_eq!(payload["usageMetadata"]["candidatesTokenCount"], 4);
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
+            Some("第一段第二段")
+        );
+        // 单对象退化响应同样直接采用。
+        let single =
+            "{\"content\":[{\"type\":\"text\",\"text\":\"正文\"}],\"stop_reason\":\"end_turn\"}";
+        let merged = parse_complete_json_payload(single).expect("single object payload");
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&merged).as_deref(),
+            Some("正文")
+        );
+        // 非 JSON 响应体不参与合并，避免把 HTML 错误页当成结果。
+        assert!(parse_complete_json_payload("<html>524</html>").is_none());
+    }
+
     /// 上游忽略 stream 字段、直接回完整 JSON 时，解析器不产生任何 SSE 帧，
     /// 调用方据此改用整个响应体（判定条件是帧数为零）。
     #[test]
     fn sse_parser_reports_no_frames_for_a_plain_json_response() {
-        let mut parser = SseFrameParser::default();
-        parser.push(b"{\"id\":\"chat-2\",\"choices\":[{\"message\":{\"content\":\"body\"}}]}");
-        let payload = parser.into_reassembled();
+        let payload = assemble_raw::<OpenAiChatDialect>(
+            "{\"id\":\"chat-2\",\"choices\":[{\"message\":{\"content\":\"body\"}}]}",
+            64,
+        );
         assert_eq!(payload.pointer("/x_stream/frames"), Some(&json!(0)));
-        // 没有帧就没有增量：重组结果里只有空占位，正文必须为空。
+        // 没有帧就没有增量：重组结果里只有空占位，正文必须为空，才不会被误当结果。
         assert_eq!(payload["choices"][0]["message"]["content"], "");
         assert_eq!(payload["choices"][0]["finish_reason"], Value::Null);
+    }
+
+    /// 非流式退避的判定：端点差异或请求体差异，至少要有一个，否则重发没有意义。
+    #[test]
+    fn streaming_retry_requires_an_actually_different_request() {
+        let streamed = json!({ "model": "m", "messages": [], "stream": true });
+        let plain = json!({ "model": "m", "messages": [] });
+        let gemini_streamed = json!({ "contents": [] });
+        let ended = json!({ "x_stream": { "frames": 4 } });
+        let buffered = json!({ "x_stream": { "frames": 0 } });
+        // Gemini：请求体一致，但路径不同（:streamGenerateContent → :generateContent）。
+        assert!(should_retry_without_streaming(
+            404,
+            &json!({}),
+            true,
+            &gemini_streamed,
+            &gemini_streamed
+        ));
+        // OpenAI / Anthropic：路径相同时必须真的去掉了 stream 才算改变。
+        assert!(should_retry_without_streaming(
+            400,
+            &json!({}),
+            false,
+            &plain,
+            &streamed
+        ));
+        assert!(!should_retry_without_streaming(
+            400,
+            &json!({}),
+            false,
+            &streamed,
+            &streamed
+        ));
+        // 网关把整轮生成缓冲后一次性回完整 JSON：一个帧都没有，值得改走非流式。
+        assert!(should_retry_without_streaming(
+            200, &buffered, false, &plain, &streamed
+        ));
+        // 确实流过（有帧）就不该推翻已得到的结果。
+        assert!(!should_retry_without_streaming(
+            200, &ended, false, &plain, &streamed
+        ));
     }
 
     #[test]

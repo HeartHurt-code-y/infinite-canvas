@@ -323,7 +323,7 @@ mod tests {
             );
             payloads.push(payload);
         }
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini",
             "SYSTEM",
@@ -333,7 +333,8 @@ mod tests {
             &payloads,
         )
         .unwrap();
-        let archived = redacted_request_value(&body);
+        let body = &plan.body;
+        let archived = redacted_request_value(body);
         for (index, payload) in payloads.iter().enumerate() {
             assert_eq!(
                 body["contents"][0]["parts"][index]["inline_data"]["mime_type"],
@@ -466,7 +467,7 @@ mod tests {
             base64: None,
             text: Some("reference document".to_string()),
         };
-        let ((_, _, body), _) = build_text_model_request(
+        let plan = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini",
             "SYSTEM",
@@ -476,6 +477,7 @@ mod tests {
             &[payload.clone(), local_document],
         )
         .unwrap();
+        let body = &plan.body;
         assert_eq!(
             body["contents"][0]["parts"][0]["inline_data"]["data"],
             *payload.base64.as_ref().unwrap()
@@ -489,7 +491,7 @@ mod tests {
                     .as_str()
                     .is_some_and(|text| text.contains("reference document")))
         );
-        let archived = redacted_request_value(&body);
+        let archived = redacted_request_value(body);
         assert!(
             archived["contents"][0]["parts"][0]["inline_data"]["data"]
                 .as_str()
