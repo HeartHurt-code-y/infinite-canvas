@@ -244,7 +244,7 @@ CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 5] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 6] = [
     (
         "provider-sd20",
         "SD2.0",
@@ -274,6 +274,17 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 5] = [
         "火山引擎",
         "https://ark.cn-beijing.volces.com/api/v3",
         "volcengine_ark_v1",
+    ),
+    (
+        // 盘趣聚合网关（One API / new-api 内核）：视频生成走
+        // `POST /v1/video/generations`，请求体为顶层 `model`/`prompt`/
+        // `resolution`/`aspect_ratio`/`duration`，轮询 `GET /v1/video/generations/{task_id}`。
+        // 截至接入时该站点只开放 `pan-seedance-2.0`，且没有 `/v1/assets/*` 素材库接口，
+        // 因此这条连接只参与模型生成，素材库仍使用本地素材与本地生成结果。
+        "provider-panqu-api",
+        "盘趣API",
+        "https://115.191.2.88/",
+        "moyu_v1",
     ),
 ];
 

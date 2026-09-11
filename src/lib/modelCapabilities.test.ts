@@ -4,6 +4,7 @@ import {
   generationParameters,
   isGeminiImageModel,
   isMinimaxH3VideoModel,
+  isPanquVideoModel,
   isSeedreamImageModel,
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
@@ -11,6 +12,40 @@ import {
 } from "./modelCapabilities";
 
 describe("model capabilities", () => {
+  it("uses the panqu gateway top-level contract instead of the Seedance 2.0 moyu contract", () => {
+    // 盘趣网关的 pan-seedance-2.0 与魔芋 Seedance 2.0 名字相近但契约不同：
+    // 分辨率/画幅/时长都是顶层字段，且分辨率参与渠道匹配（该站只有 720p）。
+    expect(isPanquVideoModel("pan-seedance-2.0")).toBe(true);
+    const schema = defaultModelOperationSchema("pan-seedance-2.0", ["video_generation"]);
+    const capabilities = modelParameterCapabilities(schema, "video_generation", "pan-seedance-2.0");
+    expect(capabilities.map((capability) => capability.key)).toEqual([
+      "resolution",
+      "aspect_ratio",
+      "duration",
+      "seed",
+      "generate_audio",
+      "watermark",
+      "web_search",
+    ]);
+    // 只有实测可用的 720p；列出 480p/1080p 会让用户选到必然 503 的档位。
+    expect(capabilities.find((capability) => capability.key === "resolution")?.options).toEqual([
+      { value: "720p", label: "720p" },
+    ]);
+    expect(
+      capabilities.find((capability) => capability.key === "duration")?.options.map((o) => o.value),
+    ).toEqual([4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
+    expect(generationParameters(capabilities, { duration: 8 }, false)).toMatchObject({
+      duration: 8,
+      resolution: "720p",
+      aspect_ratio: "16:9",
+      generate_audio: true,
+    });
+    // 联网搜索只在纯文生视频时提交（顶层 tools）。
+    expect(generationParameters(capabilities, { web_search: true }, true)).not.toHaveProperty(
+      "web_search",
+    );
+  });
+
   it("renders provider-declared parameters without hardcoded field names", () => {
     const schema = {
       video_generation: {

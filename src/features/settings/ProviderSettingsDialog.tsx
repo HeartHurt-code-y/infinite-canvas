@@ -62,6 +62,12 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     adapterId: "volcengine_ark_v1",
   },
   {
+    id: "panqu-api",
+    displayName: "盘趣API",
+    baseUrl: "https://115.191.2.88/",
+    adapterId: "moyu_v1",
+  },
+  {
     id: "moyu-ai",
     displayName: "魔芋AI",
     baseUrl: "https://www.moyu.info/",

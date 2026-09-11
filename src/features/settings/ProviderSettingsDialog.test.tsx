@@ -255,6 +255,52 @@ describe("ProviderSettingsDialog", () => {
     expect(await screen.findByText(/已保存 火山引擎 的连接信息/)).toBeInTheDocument();
   });
 
+  it("新建连接选择盘趣API预置模板后沿用 moyu_v1 适配器与直连地址", async () => {
+    // 盘趣网关是 OpenAI 兼容的转发站，复用 moyu_v1 适配器；地址保留用户给定的直连 IP
+    // （证书不覆盖 IP，遇到 TLS 错误时改用 https://aiapis.panqu.com/）。
+    const panquProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-new-panqu",
+      displayName: "盘趣API",
+      adapterId: "moyu_v1",
+      baseUrl: "https://115.191.2.88/",
+    };
+    const client = createClient({
+      upsertProviderConnection: vi.fn(() => Promise.resolve(panquProvider)),
+    });
+    const onCatalogChanged = vi.fn(() => Promise.resolve());
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={onCatalogChanged}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    fireEvent.change(screen.getByLabelText("预置模板"), {
+      target: { value: "panqu-api" },
+    });
+    await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("盘趣API"));
+    expect(screen.getByLabelText(/^Base URL/)).toHaveValue("https://115.191.2.88/");
+
+    fireEvent.change(screen.getByLabelText(/^API Key/), { target: { value: "<REDACTED>" } });
+    const saveButton = screen.getByRole("button", { name: "保存连接" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.click(saveButton);
+
+    await waitFor(() =>
+      expect(client.upsertProviderConnection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          displayName: "盘趣API",
+          baseUrl: "https://115.191.2.88/",
+          adapterId: "moyu_v1",
+        }),
+      ),
+    );
+  });
+
   it("requires a key for a new connection and saves without pulling models", async () => {
     const client = createClient();
     const onCatalogChanged = vi.fn(() => Promise.resolve());

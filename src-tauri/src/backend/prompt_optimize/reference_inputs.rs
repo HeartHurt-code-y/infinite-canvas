@@ -306,7 +306,7 @@ mod tests {
                 b"\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42",
             ),
         ];
-        let mut payloads = Vec::new();
+        let mut payloads: Vec<MultimodalPayload> = Vec::new();
         for (filename, media_type, mime_type, signature) in cases {
             let path = directory.path().join(filename);
             let mut original_bytes = signature.to_vec();
@@ -323,10 +323,11 @@ mod tests {
             );
             payloads.push(payload);
         }
-        let (_, _, body) = build_text_model_request(
+        let ((_, _, body), _) = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini",
             "SYSTEM",
+            &[],
             "USER",
             &[],
             &payloads,
@@ -350,16 +351,24 @@ mod tests {
             );
         }
         assert!(
-            build_text_model_request("openai_chat_v1", "model", "S", "U", &[], &payloads)
+            build_text_model_request("openai_chat_v1", "model", "S", &[], "U", &[], &payloads)
                 .unwrap_err()
                 .to_string()
                 .contains("OpenAI-compatible")
         );
         assert!(
-            build_text_model_request("anthropic_messages_v1", "model", "S", "U", &[], &payloads)
-                .unwrap_err()
-                .to_string()
-                .contains("Claude")
+            build_text_model_request(
+                "anthropic_messages_v1",
+                "model",
+                "S",
+                &[],
+                "U",
+                &[],
+                &payloads
+            )
+            .unwrap_err()
+            .to_string()
+            .contains("Claude")
         );
     }
 
@@ -457,10 +466,11 @@ mod tests {
             base64: None,
             text: Some("reference document".to_string()),
         };
-        let (_, _, body) = build_text_model_request(
+        let ((_, _, body), _) = build_text_model_request(
             "gemini_generate_content_v1",
             "gemini",
             "SYSTEM",
+            &[],
             "USER",
             &[],
             &[payload.clone(), local_document],

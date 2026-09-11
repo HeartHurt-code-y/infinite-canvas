@@ -544,8 +544,80 @@ export function isMinimaxH3VideoModel(modelId: string): boolean {
   );
 }
 
+/**
+ * 盘趣聚合网关（One API / new-api 内核）的视频模型，当前为 `pan-seedance-2.0`。
+ *
+ * 该网关的 `resolution` / `aspect_ratio` / `duration` 是**顶层**字段：分辨率还参与
+ * 渠道匹配，顶层传渠道未覆盖的档位会被 `No available channel … matching resolution=…`
+ * 直接拒绝（实测该站仅 720p 可用）。媒体为顶层 `images` URL 数组。
+ * 与 Seedance 2.0 的魔芋契约（`metadata.content` + `metadata.*`）不是同一份契约，
+ * 因此这里必须排在 Seedance 2.0 之前判定。
+ */
+export function isPanquVideoModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return normalized.startsWith("pan-") && normalized.includes("seedance");
+}
+
+function panquVideoParameters(): Record<string, unknown> {
+  return {
+    resolution: {
+      type: "string",
+      label: "分辨率",
+      default: "720p",
+      enum: ["720p"],
+      order: 0,
+    },
+    aspect_ratio: {
+      type: "string",
+      label: "画幅",
+      default: "16:9",
+      enum: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      order: 1,
+    },
+    duration: {
+      type: "integer",
+      label: "时长",
+      default: 5,
+      enum: [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+      order: 2,
+    },
+    seed: {
+      type: "integer",
+      label: "随机种子",
+      optional: true,
+      minimum: -1,
+      maximum: 4_294_967_295,
+      order: 3,
+    },
+    generate_audio: {
+      type: "boolean",
+      label: "生成音频",
+      default: true,
+      order: 4,
+    },
+    watermark: {
+      type: "boolean",
+      label: "添加水印",
+      default: false,
+      order: 5,
+    },
+    // 该网关只接受顶层 `tools: [{"type":"web_search"}]`，且仅纯文生视频可用。
+    web_search: {
+      type: "boolean",
+      label: "联网搜索",
+      default: false,
+      requiresNoMedia: true,
+      order: 6,
+    },
+  };
+}
+
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  const panqu = isPanquVideoModel(normalized);
+  if (panqu) {
+    return panquVideoParameters();
+  }
   const minimaxH3 = isMinimaxH3VideoModel(normalized);
   if (minimaxH3) {
     // MiniMax-H3（魔芋平台新一代视频生成模型）：duration/resolution/ratio/

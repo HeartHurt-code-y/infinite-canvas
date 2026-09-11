@@ -2,9 +2,10 @@ use std::{collections::HashSet, sync::Arc};
 
 use base64::Engine as _;
 use chrono::Utc;
+use futures_util::StreamExt as _;
 use reqwest::{Method, multipart};
 use serde_json::{Map, Value, json};
-use tauri_plugin_log::log::{error, info};
+use tauri_plugin_log::log::{error, info, warn};
 use url::Url;
 use uuid::Uuid;
 
@@ -15,6 +16,7 @@ use super::{
         infer_catalog_schema, is_seedance_25_video_model, operations_from_schema,
         provider_scoped_model_definition_id,
     },
+    prompt_optimize::TextModelFallbackRequest,
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
     },
@@ -304,6 +306,202 @@ struct CapturedJsonRequest<'a> {
     method: Method,
     path: &'a str,
     body: &'a Value,
+}
+
+/// 单次文本模型调用的元数据：是否走 SSE 流式，以及本次是否为退避重试。
+struct TextCallRequest<'a> {
+    phase: &'a str,
+    stream: bool,
+    fallback_reason: Option<&'a str>,
+}
+
+/// 等待响应头的上限。超过它说明上游在生成完成前完全不回传数据，这正是非流式请求
+/// 触发反向代理零字节超时（如 Cloudflare 100 秒后的 524）的原因，因此提前给出
+/// 指向明确的本机错误，而不是让代理层返回一个无法归因的状态码。
+const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+/// 流式响应的块间空闲上限：正常增量通常毫秒级到达，停发这么久即视为上游中断。
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
+/// 单个 SSE 帧的缓冲上限。一帧承载一条增量，正常远小于此值；超过它说明上游没有
+/// 按 SSE 分帧回传，继续缓存没有意义。
+const SSE_FRAME_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
+
+/// OpenAI 兼容的 SSE 增量累积器。
+///
+/// 逐块接收字节流，按空行切分事件帧，把 `choices[].delta` 的内容、终态原因与
+/// 末尾的 usage 重新组装成一份与非流式响应等价的完整响应对象。这样调用方的
+/// 用量统计、截断判定与文本提取逻辑都不需要区分流式与非流式。
+///
+/// 缓冲原始字节而不是先转成字符串：网络块边界与 UTF-8 字符边界无关，中文内容
+/// 经常被拆在两个块里，只有在完整帧上解码才不会把字符撕成替换符（U+FFFD）。
+#[derive(Default)]
+struct SseFrameParser {
+    buffer: Vec<u8>,
+    id: Option<String>,
+    model: Option<String>,
+    created: Option<i64>,
+    finish_reason: Option<String>,
+    content: String,
+    reasoning_content: String,
+    usage: Option<Value>,
+    frames: usize,
+    provider_error: Option<Value>,
+    parse_failures: usize,
+    dropped_bytes: usize,
+}
+
+impl SseFrameParser {
+    /// 累积一个网络块并就地派发其中已完整的事件帧。
+    fn push(&mut self, chunk: &[u8]) {
+        self.buffer.extend_from_slice(chunk);
+        loop {
+            // SSE 事件以空行结束，`\r\n\r\n` 与 `\n\n` 兼容。
+            let Some((boundary, width)) = find_sse_boundary(&self.buffer) else {
+                if self.buffer.len() > SSE_FRAME_BUFFER_LIMIT {
+                    self.dropped_bytes += self.buffer.len();
+                    warn!(
+                        "[provider] SSE 帧超过缓冲上限，丢弃 {} 字节",
+                        self.buffer.len()
+                    );
+                    self.buffer.clear();
+                }
+                return;
+            };
+            // 只对完整帧解码：帧内字节必然构成合法 UTF-8（上游按字符切分 JSON），
+            // 因此这里不会产生替换符。
+            let frame = String::from_utf8_lossy(&self.buffer[..boundary]).into_owned();
+            self.buffer.drain(..boundary + width);
+            self.accept_frame(&frame);
+        }
+    }
+
+    /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略。
+    fn accept_frame(&mut self, frame: &str) {
+        let mut data = String::new();
+        for line in frame.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.starts_with(':') {
+                continue;
+            }
+            let Some(payload) = line.strip_prefix("data:") else {
+                continue;
+            };
+            if !data.is_empty() {
+                data.push('\n');
+            }
+            data.push_str(payload.trim_start());
+        }
+        let data = data.trim();
+        if data.is_empty() || data == "[DONE]" {
+            return;
+        }
+        let Ok(value) = serde_json::from_str::<Value>(data) else {
+            self.parse_failures += 1;
+            return;
+        };
+        self.accept_event(&value);
+    }
+
+    fn accept_event(&mut self, value: &Value) {
+        self.frames += 1;
+        if let Some(error) = value.get("error").filter(|error| !error.is_null()) {
+            self.provider_error.get_or_insert_with(|| error.clone());
+        }
+        if let Some(id) = value.get("id").and_then(Value::as_str) {
+            self.id.get_or_insert_with(|| id.to_string());
+        }
+        if let Some(model) = value.get("model").and_then(Value::as_str) {
+            self.model.get_or_insert_with(|| model.to_string());
+        }
+        if let Some(created) = value.get("created").and_then(Value::as_i64) {
+            self.created.get_or_insert(created);
+        }
+        if let Some(usage) = value.get("usage").filter(|usage| !usage.is_null()) {
+            self.usage = Some(usage.clone());
+        }
+        let Some(choices) = value.get("choices").and_then(Value::as_array) else {
+            return;
+        };
+        for choice in choices {
+            let delta = choice.get("delta").unwrap_or(choice);
+            if let Some(text) = delta.get("content").and_then(Value::as_str) {
+                self.content.push_str(text);
+            }
+            if let Some(reasoning) = delta.get("reasoning_content").and_then(Value::as_str) {
+                self.reasoning_content.push_str(reasoning);
+            }
+            if let Some(reason) = choice
+                .get("finish_reason")
+                .and_then(Value::as_str)
+                .filter(|reason| !reason.is_empty())
+            {
+                self.finish_reason = Some(reason.to_string());
+            }
+        }
+    }
+
+    /// 组装完整响应对象。这里把流式与用量相关的调试信息放在 `x_stream` 下，
+    /// 顶层字段形状与非流式响应保持一致，`parse_token_usage` 因此无需改动。
+    fn into_reassembled(self) -> Value {
+        let mut choice = serde_json::Map::new();
+        choice.insert("index".to_string(), json!(0));
+        choice.insert(
+            "message".to_string(),
+            json!({
+                "role": "assistant",
+                "content": self.content,
+                "reasoning_content": self.reasoning_content,
+            }),
+        );
+        choice.insert(
+            "finish_reason".to_string(),
+            self.finish_reason.map(Value::String).unwrap_or(Value::Null),
+        );
+        let mut payload = serde_json::Map::new();
+        payload.insert("object".to_string(), json!("chat.completion"));
+        if let Some(id) = self.id {
+            payload.insert("id".to_string(), Value::String(id));
+        }
+        if let Some(model) = self.model {
+            payload.insert("model".to_string(), Value::String(model));
+        }
+        if let Some(created) = self.created {
+            payload.insert("created".to_string(), json!(created));
+        }
+        payload.insert(
+            "choices".to_string(),
+            Value::Array(vec![Value::Object(choice)]),
+        );
+        if let Some(usage) = self.usage {
+            payload.insert("usage".to_string(), usage);
+        }
+        if let Some(error) = self.provider_error {
+            payload.insert("error".to_string(), error);
+        }
+        payload.insert(
+            "x_stream".to_string(),
+            json!({
+                "frames": self.frames,
+                "parseFailures": self.parse_failures,
+                "droppedBytes": self.dropped_bytes,
+            }),
+        );
+        Value::Object(payload)
+    }
+}
+
+/// 返回（帧结束位置, 分隔符宽度）；没有完整帧时返回 None。
+/// 在原始字节上查找，空行分隔符本身是 ASCII，不会出现在多字节字符内部。
+fn find_sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    let newline = buffer.windows(2).position(|pair| pair == b"\n\n");
+    let carriage = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n");
+    match (newline, carriage) {
+        (Some(newline), Some(carriage)) if carriage < newline => Some((carriage, 4)),
+        (Some(newline), _) => Some((newline, 2)),
+        (None, Some(carriage)) => Some((carriage, 4)),
+        (None, None) => None,
+    }
 }
 
 impl CapturedHttpResponse {
@@ -791,6 +989,15 @@ impl ProviderRuntime {
     /// 因而会冻结实际 URL、协议头、脱敏后的请求体、完整原始响应和网络层错误。
     /// `body` 仅用于实际 HTTP 请求；`archive_body` 用于持久化，调用方可在其中
     /// 移除大体积内联媒体或不应重复落盘的本地文档正文。
+    ///
+    /// `stream` 为 true 时按 SSE 增量读取：非流式响应在生成完成前不回传任何字节，
+    /// 长上下文与长输出的首字节时间会撞上反向代理的零字节读取超时（例如
+    /// Cloudflare 在 100 秒无数据时以 524 终止连接）；流式返回持续回传增量，
+    /// 该判定条件不再成立。增量会被重新组装成与非流式等价的完整响应对象返回。
+    ///
+    /// 上游拒绝可选的用量字段（`stream_options.include_usage`）时，用
+    /// `fallback` 退避重发一次，保证用量统计不成为整轮调用失败的原因。
+    #[allow(clippy::too_many_arguments)]
     pub async fn captured_text_json(
         &self,
         task: &TaskExecutionRecord,
@@ -799,7 +1006,9 @@ impl ProviderRuntime {
         body: &Value,
         archive_body: &Value,
         extra_headers: &[(&str, &str)],
-    ) -> BackendResult<CapturedHttpResponse> {
+        stream: bool,
+        fallback: Option<TextModelFallbackRequest>,
+    ) -> BackendResult<(CapturedHttpResponse, Value)> {
         let context = self.resolve_frozen(task)?;
         let url = endpoint(&context.base_url, path)?;
         let mut archived_headers = serde_json::Map::from_iter([
@@ -815,58 +1024,321 @@ impl ProviderRuntime {
         for (name, value) in extra_headers {
             archived_headers.insert((*name).to_string(), Value::String((*value).to_string()));
         }
+        let sanitized_url = sanitize_url(&url);
         let archive = json!({
             "providerConnectionId": context.provider_connection_id,
             "adapterId": context.adapter_id,
             "credentialReference": context.api_key_ref,
             "method": "POST",
-            "url": sanitize_url(&url),
+            "url": sanitized_url,
             "headers": archived_headers,
             "bodyType": "json",
             "body": redact_request_value(archive_body),
         });
+        let request = TextCallRequest {
+            phase: "text_generation",
+            stream,
+            fallback_reason: None,
+        };
+
+        let outcome = self
+            .send_text_call(
+                task,
+                attempt_id,
+                &context,
+                &url,
+                &archive,
+                body,
+                extra_headers,
+                &request,
+            )
+            .await;
+        // 4xx 通常表示请求体不被接受；唯一的可选字段就是用量的 stream_options，
+        // 去掉它重发一次。可见的 4xx 大概率仍会失败，所以只重试一次并留 500ms 间隔。
+        if let (Some(fallback), Ok((response, _))) = (&fallback, &outcome)
+            && (400..500).contains(&response.status)
+        {
+            // 退避原因来自请求构造方（TextModelFallbackRequest::reason），写进日志与
+            // provider_calls 记录，避免只留一个无从归因的 4xx。
+            let fallback_reason = fallback.reason;
+            let fallback_body = &fallback.body;
+            info!(
+                "[provider] 文本模型请求被拒，按退避请求体重试一次: taskId={}, HTTP {}, 原因={fallback_reason}",
+                task.id, response.status
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            let retry_archive = json!({
+                "providerConnectionId": context.provider_connection_id,
+                "adapterId": context.adapter_id,
+                "credentialReference": context.api_key_ref,
+                "method": "POST",
+                "url": sanitized_url,
+                "headers": archive["headers"],
+                "bodyType": "json",
+                "body": redact_request_value(fallback_body),
+            });
+            let retry_request = TextCallRequest {
+                phase: "text_generation",
+                stream,
+                fallback_reason: Some(fallback_reason),
+            };
+            return self
+                .send_text_call(
+                    task,
+                    attempt_id,
+                    &context,
+                    &url,
+                    &retry_archive,
+                    &fallback.body,
+                    extra_headers,
+                    &retry_request,
+                )
+                .await;
+        }
+        outcome
+    }
+
+    /// 单次文本模型调用：冻结 provider_calls 记录、发送请求、读取响应。
+    ///
+    /// 非流式响应用 `send_captured` 一次读完（保持原有调试字段与行为）；流式响应
+    /// 逐块读取 SSE 增量并重组为完整响应对象，返回的 `Value` 与非流式响应形状一致。
+    #[allow(clippy::too_many_arguments)]
+    async fn send_text_call(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        url: &Url,
+        archive: &Value,
+        body: &Value,
+        extra_headers: &[(&str, &str)],
+        call: &TextCallRequest<'_>,
+    ) -> BackendResult<(CapturedHttpResponse, Value)> {
         let call_id = Uuid::new_v4().to_string();
         self.lifecycle.commit(
             &task.id,
             GenerationLifecycleFact::ProviderCallPrepared {
                 call_id: call_id.clone(),
                 attempt_id: attempt_id.to_string(),
-                phase: "text_generation".to_string(),
-                request: archive,
+                phase: call.phase.to_string(),
+                request: archive.clone(),
             },
         )?;
 
-        let sanitized_url = sanitize_url(&url);
+        let sanitized_url = sanitize_url(url);
         let mut request = self
             .client
-            .post(url)
+            .post(url.clone())
             .bearer_auth(&context.api_key)
             .json(body);
         for (name, value) in extra_headers {
             request = request.header(*name, *value);
         }
         info!(
-            "[provider] 发起文本模型请求: taskId={}, callId={}, POST {}",
-            task.id, call_id, sanitized_url
+            "[provider] 发起文本模型请求: taskId={}, callId={}, POST {}, 流式={}",
+            task.id, call_id, sanitized_url, call.stream
         );
         let started_at = std::time::Instant::now();
-        let response = self
-            .send_captured(
-                &task.id,
-                &call_id,
-                &format!("POST / phase=text_generation / taskId={}", task.id),
-                request,
-            )
-            .await?;
+        let sent_at = now_ms();
+        self.lifecycle.commit(
+            &task.id,
+            GenerationLifecycleFact::ProviderCallSent {
+                call_id: call_id.clone(),
+                sent_at,
+            },
+        )?;
+
+        let label = format!("POST / phase=text_generation / taskId={}", task.id);
+        let (status, headers, body_text, payload) = if call.stream {
+            match self
+                .read_streamed_chat_completion(&task.id, &call_id, sent_at, &label, request)
+                .await
+            {
+                Ok(value) => value,
+                Err(error) => return Err(error),
+            }
+        } else {
+            let response = match self
+                .send_captured(&task.id, &call_id, &label, request)
+                .await
+            {
+                Ok(response) => response,
+                Err(error) => return Err(error),
+            };
+            let payload = serde_json::from_str::<Value>(&response.body).unwrap_or(Value::Null);
+            (response.status, response.headers, response.body, payload)
+        };
         info!(
-            "[provider] 收到文本模型响应: taskId={}, callId={}, HTTP {}, 耗时 {}ms, 响应体 {} 字符",
+            "[provider] 收到文本模型响应: taskId={}, callId={}, HTTP {}, 耗时 {}ms, 流式={}, 响应体 {} 字符{}",
             task.id,
             call_id,
-            response.status,
+            status,
             started_at.elapsed().as_millis(),
-            response.body.len()
+            call.stream,
+            body_text.len(),
+            call.fallback_reason
+                .map(|reason| format!(", 退避原因: {reason}"))
+                .unwrap_or_default()
         );
-        Ok(response)
+        Ok((
+            CapturedHttpResponse {
+                call_id,
+                status,
+                headers,
+                body: body_text,
+            },
+            payload,
+        ))
+    }
+
+    /// 读取 OpenAI 兼容的 SSE 流，把增量重新组装成与非流式等价的完整响应对象。
+    ///
+    /// 返回（状态码、响应头、原始 SSE 文本、重组后的响应对象）。非 2xx 与上游在
+    /// 流内返回的错误对象都保留原始文本，让调用方的错误诊断与非流式保持一致。
+    /// 重组对象同时保留 `reasoning_content`：非流式响应本就不回传思维链，这里只在
+    /// 确有增量时补充该字段，避免把思维链混进交付给用户的正文。
+    async fn read_streamed_chat_completion(
+        &self,
+        task_id: &str,
+        call_id: &str,
+        sent_at: i64,
+        label: &str,
+        request: reqwest::RequestBuilder,
+    ) -> BackendResult<(u16, Value, String, Value)> {
+        let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
+            Ok(Ok(response)) => response,
+            Ok(Err(error)) => {
+                let backend_error = BackendError::Transport(error);
+                error!(
+                    "[provider] 请求发送失败（网络层）: label={label}, 错误: {}",
+                    backend_error.payload().message
+                );
+                self.lifecycle.commit(
+                    task_id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.to_string(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                    },
+                )?;
+                return Err(backend_error);
+            }
+            Err(_) => {
+                let backend_error = BackendError::protocol(
+                    format!(
+                        "provider did not send response headers within {}s",
+                        FIRST_BYTE_TIMEOUT.as_secs()
+                    ),
+                    json!({ "callId": call_id, "timeoutSeconds": FIRST_BYTE_TIMEOUT.as_secs() }),
+                );
+                error!("[provider] 等待响应头超时: label={label}");
+                self.lifecycle.commit(
+                    task_id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.to_string(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                    },
+                )?;
+                return Err(backend_error);
+            }
+        };
+        let status = response.status().as_u16();
+        let headers = response_headers(response.headers());
+        let mut stream = response.bytes_stream();
+        let mut parser = SseFrameParser::default();
+        let mut transcript = String::new();
+        let mut chunks = 0usize;
+        let mut bytes = 0usize;
+        loop {
+            // 首块与块间用同一空闲超时：只要上游持续回传就不判定失败，停发即中止。
+            let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
+            let item = match next {
+                Ok(Some(item)) => item,
+                Ok(None) => break,
+                Err(_) => {
+                    let backend_error = BackendError::protocol(
+                        format!(
+                            "provider stream stalled for {}s",
+                            STREAM_IDLE_TIMEOUT.as_secs()
+                        ),
+                        json!({
+                            "callId": call_id,
+                            "timeoutSeconds": STREAM_IDLE_TIMEOUT.as_secs(),
+                            "receivedChunks": chunks,
+                            "receivedBytes": bytes,
+                        }),
+                    );
+                    error!("[provider] 流式响应中断: label={label}, 已接收 {chunks} 块");
+                    self.lifecycle.commit(
+                        task_id,
+                        GenerationLifecycleFact::ProviderCallFailed {
+                            call_id: call_id.to_string(),
+                            sent_at,
+                            error: backend_error.runtime_record(),
+                        },
+                    )?;
+                    return Err(backend_error);
+                }
+            };
+            let chunk = match item {
+                Ok(chunk) => chunk,
+                Err(error) => {
+                    let backend_error = BackendError::Transport(error);
+                    error!(
+                        "[provider] 读取流式响应失败（网络层）: label={label}, HTTP {status}, 错误: {}",
+                        backend_error.payload().message
+                    );
+                    self.lifecycle.commit(
+                        task_id,
+                        GenerationLifecycleFact::ProviderCallFailed {
+                            call_id: call_id.to_string(),
+                            sent_at,
+                            error: backend_error.runtime_record(),
+                        },
+                    )?;
+                    return Err(backend_error);
+                }
+            };
+            chunks += 1;
+            bytes += chunk.len();
+            transcript.push_str(&String::from_utf8_lossy(&chunk));
+            // 解析器按原始字节累积，只在完整帧上解码，避免块边界撕裂多字节字符。
+            parser.push(&chunk);
+        }
+        let mut payload = parser.into_reassembled();
+        // 网关可能忽略 stream 字段直接回一份完整 JSON（聚合平台的常见退化行为）。
+        // 这种情况下一个 SSE 帧都没有，但响应体本身就是完整响应，直接采用，
+        // 避免把一次成功的调用判成「空响应」。判定条件用帧数而不是正文长度：
+        // 上游确实流式回了一个空正文时不应被当成退化响应覆盖掉。
+        if (200..300).contains(&status)
+            && payload.pointer("/x_stream/frames").and_then(Value::as_u64) == Some(0)
+            && transcript.trim_start().starts_with('{')
+            && let Ok(complete) = serde_json::from_str::<Value>(transcript.trim())
+        {
+            info!(
+                "[provider] 上游未按 SSE 回传，改用完整 JSON 响应: taskId={task_id}, callId={call_id}"
+            );
+            payload = complete;
+        }
+        // 成功时存档重组后的完整响应（与非流式同形状、含 usage）；失败时存档原始
+        // SSE 文本，错误诊断因此不会丢失上游实际回传的内容。
+        let body_text = if (200..300).contains(&status) {
+            serde_json::to_string(&payload).unwrap_or_default()
+        } else {
+            transcript
+        };
+        self.lifecycle.commit(
+            task_id,
+            GenerationLifecycleFact::ProviderCallResponded {
+                call_id: call_id.to_string(),
+                sent_at,
+                status,
+                headers: headers.clone(),
+                raw_response: body_text.clone(),
+            },
+        )?;
+        Ok((status, headers, body_text, payload))
     }
 
     async fn captured_image_edit(
@@ -3506,6 +3978,120 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sse_frames_assemble_into_a_complete_non_streaming_response() {
+        let sse = concat!(
+            "data: {\"id\":\"chat-1\",\"object\":\"chat.completion.chunk\",\"created\":1730000000,",
+            "\"model\":\"deepseek-v4-flash\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",",
+            "\"content\":\"\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"# 分镜\\n\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{\"content\":\"【分镜3】\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}],",
+            "\"usage\":{\"prompt_tokens\":58000,\"completion_tokens\":1200,\"total_tokens\":59200}}\n\n",
+            "data: [DONE]\n\n",
+        );
+        // 按 7 字节切块投喂：块边界必然落在多字节中文字符内部，解码只能在
+        // 完整帧上进行，否则正文会被撕成替换符。
+        let mut parser = SseFrameParser::default();
+        for chunk in sse.as_bytes().chunks(7) {
+            parser.push(chunk);
+        }
+        let payload = parser.into_reassembled();
+        assert_eq!(payload["id"], "chat-1");
+        assert_eq!(payload["model"], "deepseek-v4-flash");
+        assert_eq!(payload["created"], 1730000000);
+        assert_eq!(payload["object"], "chat.completion");
+        assert_eq!(payload["choices"][0]["message"]["role"], "assistant");
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "# 分镜\n【分镜3】"
+        );
+        assert_eq!(payload["choices"][0]["finish_reason"], "stop");
+        // 5 条 JSON 事件各计一帧；`data: [DONE]` 是结束标记，不算帧。
+        assert_eq!(payload["x_stream"]["frames"], 4);
+        assert_eq!(payload["x_stream"]["parseFailures"], 0);
+        // 重组后的形状与非流式一致：既有提取逻辑与用量统计都无需区分。
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
+            Some("# 分镜\n【分镜3】")
+        );
+        let usage = parse_token_usage(&CapturedHttpResponse {
+            call_id: "call-1".into(),
+            status: 200,
+            headers: json!({}),
+            body: serde_json::to_string(&payload).unwrap(),
+        })
+        .expect("usage");
+        assert_eq!(usage.prompt_tokens, Some(58000));
+        assert_eq!(usage.completion_tokens, Some(1200));
+        assert_eq!(usage.total_tokens, Some(59200));
+    }
+
+    #[test]
+    fn sse_parser_tolerates_crlf_unknown_fields_and_split_frames() {
+        // `\r\n\r\n` 分隔、`event:`/注释行与跨块的半帧。
+        let mut parser = SseFrameParser::default();
+        parser.push(b": keep-alive\r\n\r\nevent: message\r\ndata: {\"choices\":[{\"delta\":");
+        parser.push("{\"content\":\"前\"}}]}\r\n\r\n".as_bytes());
+        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"后\"}}]}\n\n".as_bytes());
+        // 最后一段没有空行结尾：只处理完整帧，残余部分不参与重组。
+        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"丢弃\"}}]}".as_bytes());
+        let payload = parser.into_reassembled();
+        assert_eq!(payload["choices"][0]["message"]["content"], "前后");
+        assert_eq!(payload["choices"][0]["finish_reason"], Value::Null);
+        assert_eq!(payload["x_stream"]["frames"], 2);
+        assert_eq!(payload["x_stream"]["parseFailures"], 0);
+        assert!(payload.get("usage").is_none());
+    }
+
+    #[test]
+    fn sse_parser_surfaces_in_stream_errors_and_keeps_reasoning_out_of_the_deliverable() {
+        let mut parser = SseFrameParser::default();
+        // 思维链增量单独累积，不混进交付正文。
+        parser.push("data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先想\"}}]}\n\n".as_bytes());
+        parser.push("data: {\"choices\":[{\"delta\":{\"content\":\"正文\"}}]}\n\n".as_bytes());
+        // 上游在流内返回错误对象时保留原始错误，便于诊断。
+        parser.push(b"data: {\"error\":{\"message\":\"upstream overloaded\"}}\n\n");
+        // 非 JSON 载荷计入解析失败，但不影响已累积的正文。
+        parser.push(b"data: not-json\n\n");
+        parser.push(b"data: [DONE]\n\n");
+        let payload = parser.into_reassembled();
+        assert_eq!(payload["choices"][0]["message"]["content"], "正文");
+        assert_eq!(
+            payload["choices"][0]["message"]["reasoning_content"],
+            "先想"
+        );
+        assert_eq!(payload["error"]["message"], "upstream overloaded");
+        assert_eq!(payload["x_stream"]["parseFailures"], 1);
+        assert_eq!(
+            super::super::prompt_optimize::extract_text_model_output(&payload).as_deref(),
+            Some("正文")
+        );
+    }
+
+    /// 上游忽略 stream 字段、直接回完整 JSON 时，解析器不产生任何 SSE 帧，
+    /// 调用方据此改用整个响应体（判定条件是帧数为零）。
+    #[test]
+    fn sse_parser_reports_no_frames_for_a_plain_json_response() {
+        let mut parser = SseFrameParser::default();
+        parser.push(b"{\"id\":\"chat-2\",\"choices\":[{\"message\":{\"content\":\"body\"}}]}");
+        let payload = parser.into_reassembled();
+        assert_eq!(payload.pointer("/x_stream/frames"), Some(&json!(0)));
+        // 没有帧就没有增量：重组结果里只有空占位，正文必须为空。
+        assert_eq!(payload["choices"][0]["message"]["content"], "");
+        assert_eq!(payload["choices"][0]["finish_reason"], Value::Null);
+    }
+
+    #[test]
+    fn sse_boundary_detection_prefers_the_earliest_separator() {
+        assert_eq!(find_sse_boundary(b"data: a\n\nrest"), Some((7, 2)));
+        assert_eq!(find_sse_boundary(b"data: a\r\n\r\nrest"), Some((7, 4)));
+        assert_eq!(find_sse_boundary(b"data: a\r\nrest"), None);
+        assert_eq!(find_sse_boundary(b""), None);
+        // 分隔符查找在字节上进行：不会误命中文多字节字符内部。
+        assert_eq!(find_sse_boundary("data: 中文内容".as_bytes()), None);
+    }
 
     fn download_auth(base_url: &str, api_key: &str) -> ResultDownloadAuth {
         ResultDownloadAuth::from_parts(base_url, api_key)
