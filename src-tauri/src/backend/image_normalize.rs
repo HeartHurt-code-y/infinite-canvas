@@ -320,8 +320,6 @@ fn describe_fit(fit: ImageFit, source: (u32, u32), target: (u32, u32)) -> String
 
 #[cfg(test)]
 mod tests {
-    use std::io::Write as _;
-
     use image::{Rgb, RgbImage, Rgba, RgbaImage};
 
     use super::*;
