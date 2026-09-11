@@ -4547,6 +4547,10 @@ export function WorkspaceApp({
               finalPath: edit.frame.path,
               name,
               aspectRatio: edit.frame.aspectRatio,
+              // 标注帧的入库发生在弹窗里，不走产物卡片的上传按钮，因此 jobId → 产物节点
+              // 映射在这一刻并不存在；不在这里补上已上传状态，绿色小点就永远不会亮，
+              // 用户还会再点一次上传、把同一张帧重复上传成第二个素材。
+              ...(edit.frame.uploadedToLibrary ? { uploadedToCloud: true } : {}),
               x: target.x - 360,
               y: target.y + inputs.length * 24,
             },

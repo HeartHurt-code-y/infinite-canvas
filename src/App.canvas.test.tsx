@@ -27,6 +27,7 @@ const {
   writeTextFileMock,
   videoLocalEditSourceMock,
   videoLocalEditInstructionMock,
+  videoLocalEditUploadMock,
 } = vi.hoisted(() => {
   // 标注弹窗提交的编辑要求文档；用例可替换为含 @ 引用的版本来覆盖连线校验。
   const videoLocalEditInstructionMock: { document: PromptContentDocumentV1 } = {
@@ -36,6 +37,8 @@ const {
       items: [{ kind: "text", text: "删除标记区域中的路人" }],
     },
   };
+  // 弹窗里「上传标注帧到云端素材库」的勾选状态；默认未勾选，用例按需打开。
+  const videoLocalEditUploadMock: { uploadToLibrary: boolean } = { uploadToLibrary: false };
   return {
     dialogOpenMock: vi.fn(),
     dialogSaveMock: vi.fn(),
@@ -43,6 +46,7 @@ const {
     writeTextFileMock: vi.fn(),
     videoLocalEditSourceMock: vi.fn(),
     videoLocalEditInstructionMock,
+    videoLocalEditUploadMock,
   };
 });
 
@@ -80,7 +84,7 @@ vi.mock("./features/workspace/VideoLocalEditDialog", () => ({
                 name,
                 dataUrl: "data:image/png;base64,c2FtcGxl",
                 // 与默认状态一致：测试里的素材库未配置连接，解析结果会退回本地文件。
-                uploadToLibrary: false,
+                uploadToLibrary: videoLocalEditUploadMock.uploadToLibrary,
                 onProgress: () => {},
               });
               await onApply({
@@ -1003,6 +1007,7 @@ beforeEach(() => {
     version: 1,
     items: [{ kind: "text", text: "删除标记区域中的路人" }],
   };
+  videoLocalEditUploadMock.uploadToLibrary = false;
   setupDesktopRuntime();
 });
 
@@ -4091,6 +4096,104 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
       ],
     });
+  });
+
+  it("弹窗里已入库的标注帧落到画布就是已上传状态，名称旁的小绿点亮起来", async () => {
+    let savedDocument: CanvasDocumentV2 | null = null;
+    videoLocalEditUploadMock.uploadToLibrary = true;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            outputNodes: [
+              {
+                key: "restored-video",
+                resultKey: "restored-task#0",
+                sourceNodeId: "old-node",
+                taskId: "restored-task",
+                mediaType: "video",
+                finalPath: "C:\\generated\\original.mp4",
+                name: "原视频.mp4",
+                aspectRatio: 16 / 9,
+                x: 40,
+                y: 180,
+              },
+            ],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "save_video_edit_frame")
+        return Promise.resolve({
+          path: "C:\\generated\\annotation.png",
+          width: 1920,
+          height: 1080,
+        });
+      // 入库链路：上传任务拿到素材身份即视为成功（与真实后端一致，成功看 assetId）。
+      if (command === "start_staging_upload") return Promise.resolve("staging-job-annotation");
+      if (command === "get_staging_job")
+        return Promise.resolve({
+          id: "staging-job-annotation",
+          localPath: "C:\\generated\\annotation.png",
+          purpose: "asset_import",
+          mediaType: "image",
+          objectKey: "staging/annotation.png",
+          status: "active",
+          bytesTotal: 2048,
+          bytesUploaded: 2048,
+          assetId: "asset-annotation-1",
+          importTarget: {
+            providerConnectionId: PROVIDER.id,
+            name: "原视频.mp4 · 2.250s 标注",
+            groupId: null,
+          },
+          adjustment: null,
+          error: null,
+          createdAt: 0,
+          updatedAt: 2,
+        });
+      if (command === "save_canvas_document")
+        savedDocument = (args?.["command"] as SaveCanvasDocumentCommand)
+          .document as CanvasDocumentV2;
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const restored = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(".canvas-asset-node--output--video");
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const node = await addGenerationNode("视频", 555, 222);
+    connectAssetToGeneration(restored, node);
+    fireEvent.change(within(node).getByLabelText("任务类型"), { target: { value: "edit" } });
+    fireEvent.click(within(node).getByRole("button", { name: "局部消除与编辑 · 原视频.mp4" }));
+    fireEvent.click(await screen.findByRole("button", { name: "应用测试局部标注 · 原视频.mp4" }));
+
+    // 帧在弹窗里就已经入库：产物节点落地时就要带上已上传状态并随文档持久化，
+    // 否则绿色小点永远不亮，用户还会再点一次上传、把同一张帧重复传成第二个素材。
+    await waitFor(
+      () => {
+        const frame = savedDocument?.outputNodes?.find((output) => output.origin === "video_edit");
+        expect(frame?.uploadedToCloud).toBe(true);
+      },
+      { timeout: 4000 },
+    );
+    const frameCard = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+    expect(frameCard).not.toBeNull();
+    expect(frameCard!.querySelector(".canvas-asset-node__cloud-badge")).not.toBeNull();
+    expect(
+      within(frameCard!).getByRole("button", { name: /^已上传到云端素材库/ }),
+    ).toBeInTheDocument();
   });
 
   it("恢复含上游提示词的局部编辑画布时保留编辑指令与原视频标注图稳定引用", async () => {

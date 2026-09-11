@@ -54,6 +54,7 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点（持久化到�
     const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
     expect(button).not.toHaveClass("is-uploaded");
     expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
+    expect(document.querySelector(".canvas-asset-node__cloud-badge")).toBeNull();
   });
 
   it("未设置 uploadedToCloud 时视为未上传（旧文档兼容）", () => {
@@ -61,6 +62,7 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点（持久化到�
     const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
     expect(button).not.toHaveClass("is-uploaded");
     expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
+    expect(document.querySelector(".canvas-asset-node__cloud-badge")).toBeNull();
   });
 
   it("已上传时上传按钮显示绿色小点和已上传样式", () => {
@@ -69,6 +71,16 @@ describe("CanvasOutputNode 上传到云端素材库绿色小点（持久化到�
     expect(button).toHaveClass("is-uploaded");
     expect(button.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
     expect(button).toHaveAttribute("title", "已上传到云端素材库");
+  });
+
+  it("已上传时名称旁常显绿色小点：上传按钮只在悬停时出现，状态不能只跟着按钮走", () => {
+    renderHarness(makeOutputNode({ uploadedToCloud: true, name: "annotation.png" }));
+    const badge = document.querySelector(".canvas-asset-node__cloud-badge");
+    expect(badge).not.toBeNull();
+    expect(badge).toHaveAttribute("title", "已在云端素材库");
+    // 小绿点挂在名称行里、紧跟在名称之后，而不是卡片角落。
+    expect(badge?.previousElementSibling).toHaveClass("canvas-asset-node__name");
+    expect(badge?.previousElementSibling).toHaveTextContent("annotation.png");
   });
 
   it("视频产物已上传时也显示绿色小点", () => {

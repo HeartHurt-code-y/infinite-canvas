@@ -2106,6 +2106,15 @@ export function CanvasOutputNode({
                   : `图层 ${node.layer.zIndex}${node.layer.name ? ` · ${node.layer.name}` : ""}`
                 : (node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : ""))}
             </span>
+            {/* 已入库的产物在名称旁常显绿色小点：上传按钮只在悬停时出现，
+                状态若只跟着按钮走，用户扫一眼卡片根本看不出这张产物已经在素材库里。 */}
+            {node.uploadedToCloud ? (
+              <span
+                className="canvas-asset-node__cloud-badge"
+                title="已在云端素材库"
+                aria-label="已在云端素材库"
+              />
+            ) : null}
           </span>
           <span className="canvas-asset-node__meta">
             {node.origin === "composition"
