@@ -21,12 +21,13 @@ use super::{
     provider::{ARK_ADAPTER_ID, ProviderRuntime},
     storage::TaskExecutionRecord,
     types::{
-        AssetGroupRecord, AssetListCommand, CloudAssetIdentity, CloudAssetRecord, CloudAssetStatus,
-        CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
-        DeleteAssetGroupCommand, DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand,
-        ListAssetGroupsCommand, MediaType, RawProviderResponse, RealPersonAuthLink,
-        RealPersonGroup, RealPersonProviderCommand, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RenameAssetCommand, UpdateAssetGroupCommand,
+        AssetGroupRecord, AssetKindCountCommand, AssetListCommand, CloudAssetIdentity,
+        CloudAssetKindTotals, CloudAssetRecord, CloudAssetStatus, CreateAssetGroupCommand,
+        CreateRealPersonAuthLinkCommand, DeleteAssetCommand, DeleteAssetGroupCommand,
+        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
+        MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
+        RealPersonProviderCommand, RefreshAssetCoverCommand, RefreshAssetMediaCommand,
+        RenameAssetCommand, UpdateAssetGroupCommand,
     },
 };
 
@@ -38,7 +39,7 @@ const IMPORT_POLL_FAILURE_LIMIT: u32 = 5;
 const IMPORT_POLL_INTERVAL: Duration = Duration::from_secs(5);
 const IMPORT_POLL_TIMEOUT: Duration = Duration::from_secs(300);
 /// 类型过滤扫描的上游页数上限（每页 100 条）。到达上限仍未集齐目标页时按已有结果返回，
-/// 避免类型分布极端或翻深页时无界地请求上游。
+/// 避免类型分布极端或翻深页时无界地请求上游；类型计数扫描复用同一上限。
 const KIND_SCAN_PAGE_CAP: u64 = 50;
 
 /// 素材提交类请求（`/v1/assets/async`、`/v1/assets/upload`）对上游瞬时网关故障
@@ -433,6 +434,56 @@ impl AssetLibrary {
             .skip(usize::try_from(skip).unwrap_or(usize::MAX))
             .take(usize::try_from(want).unwrap_or(usize::MAX))
             .collect())
+    }
+
+    /// 按类型统计云端素材数量（图片/视频/音频），驱动素材面板类型 Tab 角标。
+    ///
+    /// 上游 `/v1/assets/list` 与火山引擎 `ListAssets` 都不返回类型计数，唯一口径是
+    /// 翻完扫描范围内的全部页后本地累加；调用方只在素材面板打开时调用一次，
+    /// 之后按上传/删除增量维护，不随每次翻页或切换类型重复扫描。
+    ///
+    /// 扫描范围只由连接与分组决定（不叠加类型/名称过滤），否则角标会随当前 Tab 变化。
+    /// 同名/重复记录按素材 ID 去重；到达 [`KIND_SCAN_PAGE_CAP`] 页上限时返回已累计结果。
+    pub async fn count_assets_by_kind(
+        &self,
+        command: AssetKindCountCommand,
+    ) -> BackendResult<CloudAssetKindTotals> {
+        let query = AssetListCommand {
+            provider_connection_id: command.provider_connection_id,
+            page_number: None,
+            page_size: None,
+            name: None,
+            group_id: command.group_id,
+            kind: None,
+        };
+        let ark = self.dialect(&query.provider_connection_id)? == AssetDialect::VolcengineArk;
+        let mut totals = CloudAssetKindTotals::default();
+        let mut seen: HashSet<String> = HashSet::new();
+        for upstream_page in 1..=KIND_SCAN_PAGE_CAP {
+            let records = if ark {
+                self.ark_browse_page(&query, upstream_page, 100).await?
+            } else {
+                self.browse_upstream_page(&query, upstream_page, 100)
+                    .await?
+            };
+            let exhausted = records.len() < 100;
+            for record in records {
+                if !seen.insert(record.id.clone()) {
+                    continue;
+                }
+                match record.kind {
+                    MediaType::Image => totals.image += 1,
+                    MediaType::Video => totals.video += 1,
+                    MediaType::Audio => totals.audio += 1,
+                    // 文本等非媒体素材不占类型 Tab 的角标。
+                    MediaType::Text => {}
+                }
+            }
+            if exhausted {
+                break;
+            }
+        }
+        Ok(totals)
     }
 
     /// 解析素材库连接的接口方言。
@@ -3405,6 +3456,117 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body.as_ref().unwrap()["page_number"], 1);
         assert_eq!(requests[1].body.as_ref().unwrap()["page_number"], 2);
+    }
+
+    #[tokio::test]
+    async fn count_assets_by_kind_scans_every_page_and_ignores_duplicate_records() {
+        // 第 1 页满 100 条：1 图片 + 1 视频 + 1 音频 + 97 图片噪声；
+        // 第 2 页与第 1 页重叠 1 个素材 ID（上游漂移），其余 3 条为新素材；
+        // 第 3 页不足 100 条，说明扫描结束。
+        let mut first_page = vec![
+            json!({ "id": "img-0", "name": "cover.png", "asset_type": "Image", "status": "Active" }),
+            json!({ "id": "vid-0", "name": "clip.mp4", "asset_type": "Video", "status": "Active" }),
+            json!({ "id": "aud-0", "name": "voice.mp3", "asset_type": "Audio", "status": "Active" }),
+        ];
+        first_page.extend(image_filler_entries(0..97));
+        assert_eq!(first_page.len(), 100);
+        let second_page = vec![
+            json!({ "id": "img-0", "name": "cover.png", "asset_type": "Image", "status": "Active" }),
+            json!({ "id": "img-97", "name": "img-new.png", "asset_type": "Image", "status": "Active" }),
+            json!({ "id": "vid-1", "name": "clip-2.mp4", "asset_type": "Video", "status": "Active" }),
+            json!({ "id": "aud-1", "name": "voice-2.mp3", "asset_type": "Audio", "status": "Active" }),
+        ];
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(200, json!({ "data": { "items": first_page } })),
+            response(200, json!({ "data": { "items": second_page } })),
+            response(200, json!({ "data": { "items": [] } })),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let totals = library
+            .count_assets_by_kind(AssetKindCountCommand {
+                provider_connection_id: "provider-1".into(),
+                group_id: None,
+            })
+            .await
+            .expect("kind totals");
+
+        assert_eq!(
+            totals,
+            CloudAssetKindTotals {
+                image: 99,
+                video: 2,
+                audio: 2,
+            }
+        );
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests.len(), 2);
+        for (index, request) in requests.iter().enumerate() {
+            assert_eq!(request.path, "/v1/assets/list");
+            let body = request.body.as_ref().unwrap();
+            assert_eq!(body["page_number"], index as u64 + 1);
+            assert_eq!(body["page_size"], 100);
+            // 计数按全库口径扫描：不叠加类型过滤。
+            assert!(body.get("asset_type").is_none());
+        }
+    }
+
+    #[tokio::test]
+    async fn count_assets_by_kind_forwards_the_selected_group() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({ "data": { "items": [] } }),
+        )]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let totals = library
+            .count_assets_by_kind(AssetKindCountCommand {
+                provider_connection_id: "provider-1".into(),
+                group_id: Some("21".into()),
+            })
+            .await
+            .expect("kind totals");
+
+        assert_eq!(totals, CloudAssetKindTotals::default());
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[0].body.as_ref().unwrap()["group_id"], 21);
+    }
+
+    #[tokio::test]
+    async fn count_assets_by_kind_uses_ark_dialect_actions_when_connected_that_way() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([response(
+                200,
+                json!({
+                    "Items": [
+                        { "Id": "asset-ark-1", "Name": "封面.png", "AssetType": "Image", "Status": "Active" },
+                        { "Id": "asset-ark-2", "Name": "clip.mp4", "AssetType": "Video", "Status": "Processing" },
+                        { "Id": "asset-ark-3", "Name": "voice.mp3", "AssetType": "Audio", "Status": "Active" }
+                    ]
+                }),
+            )])
+            .with_ark(true),
+        );
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let totals = library
+            .count_assets_by_kind(AssetKindCountCommand {
+                provider_connection_id: "provider-ark".into(),
+                group_id: None,
+            })
+            .await
+            .expect("ark kind totals");
+
+        assert_eq!(
+            totals,
+            CloudAssetKindTotals {
+                image: 1,
+                video: 1,
+                audio: 1,
+            }
+        );
+        assert_eq!(adapter.ark_request_actions(), ["ListAssets"]);
+        assert!(adapter.requests.lock().expect("request lock").is_empty());
     }
 
     /// 与 [`video_entries`] 同形但 `asset_type` 为 Image 的干扰条目。

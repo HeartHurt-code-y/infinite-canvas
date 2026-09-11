@@ -27,9 +27,9 @@ use super::{
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
-        ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery, LocalAssetPage,
-        LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus, StartStagingCommand,
-        TosBucketPullSummary, TosStagingConfig,
+        AssetImportOutputRecord, ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery,
+        LocalAssetPage, LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus,
+        StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -645,6 +645,37 @@ impl StagingService {
         };
         self.storage.insert_staging_job(&job)?;
         Ok(job)
+    }
+
+    /// 列出产物上传到云端素材库的入库记录，供应用重启后恢复绿色小点与在途上传行。
+    ///
+    /// 应用重启会丢掉前端的 `jobId → 产物节点` 映射：上传本身在后端继续推进，但成功事件
+    /// 到达时前端已无法回查对应的产物卡片，绿色小点会永远不亮；在途上传也从面板消失。
+    /// 这里把仍在推进或刚完成的上传交回前端，由前端按本地路径匹配产物节点后继续接管。
+    pub fn list_asset_import_outputs(&self) -> BackendResult<Vec<AssetImportOutputRecord>> {
+        let jobs = self.storage.list_asset_import_outputs()?;
+        Ok(jobs
+            .into_iter()
+            .map(|job| {
+                let group_id = job
+                    .import_target
+                    .as_ref()
+                    .and_then(|target| target.group_id.clone());
+                AssetImportOutputRecord {
+                    job_id: job.id,
+                    local_path: job.local_path,
+                    media_type: job.media_type,
+                    status: job.status,
+                    asset_id: job.asset_id,
+                    group_id,
+                    bytes_uploaded: job.bytes_uploaded,
+                    bytes_total: job.bytes_total,
+                    error: job.error,
+                    created_at: job.created_at,
+                    updated_at: job.updated_at,
+                }
+            })
+            .collect())
     }
 
     /// 列出本机索引中的素材，并为每个对象生成新的只读预签名 URL。

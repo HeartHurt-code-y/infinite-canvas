@@ -63,6 +63,8 @@ import {
   videoFrameExtractionClient,
   type CloudAsset,
   type AssetGroupRecord,
+  type AssetImportOutputRecord,
+  type CloudAssetKindTotals,
   type GenerationOperation,
   type GenerationResultRecord,
   type GenerationTaskSummary,
@@ -227,6 +229,7 @@ import type {
 } from "./workspaceModel";
 import {
   ASSETS,
+  ASSET_IMPORT_COMPLETED_STATUSES,
   ASSET_KIND_LABELS,
   ASSET_NODE_HEIGHT,
   ASSET_NODE_WIDTH,
@@ -286,6 +289,7 @@ import {
   isTerminalTaskStatus,
   isTextGenerationModel,
   localAssetToItem,
+  localPathFileName,
   markdownDocumentExportName,
   materializeCompositionInputs,
   measuredFor,
@@ -295,6 +299,7 @@ import {
   nextOutputSlot,
   nextVideoComposerOutputSlot,
   nextVideoDownloaderOutputSlot,
+  normalizeLocalPathKey,
   outputNodeDimensions,
   outputNodeKey,
   persistActiveAssetProviderId,
@@ -485,6 +490,17 @@ function screenplayConversationUserMessage(
   return `${userPrompt}\n\n> 参考素材：${materials.map((material) => material.displayName).join("、")}`;
 }
 
+/**
+ * 云端素材类型计数的作用域键（供应商连接 + 分组）。
+ * 切换任一维度都要重新扫描并重新累计增量；增量集合按该键隔离，滚动换连接/分组互不串味。
+ */
+function cloudAssetKindTotalsScopeKey(
+  providerConnectionId: string,
+  groupId: string | null,
+): string {
+  return `${providerConnectionId}|${groupId ?? ""}`;
+}
+
 export function WorkspaceApp({
   canvasId,
   active,
@@ -510,6 +526,22 @@ export function WorkspaceApp({
     video: 0,
     audio: 0,
   });
+  // 云端素材类型计数（驱动类型 Tab 角标）。上游不返回任何类型总数，唯一的精确口径是
+  // 翻完扫描范围内全部页；因此只在素材面板打开时扫一次，之后按上传/删除结果增量维护，
+  // 翻页与切换类型都不重新扫描。null 表示当前连接/分组还没有可用计数（不显示角标）。
+  const [cloudAssetKindTotals, setCloudAssetKindTotals] = useState<CloudAssetKindTotals | null>(
+    null,
+  );
+  // 云端类型计数的增量变更与在途扫描（只维护 ref，避免每次上传/删除触发额外渲染）。
+  // 扫描返回后先合并扫描期间累计的增量：扫描读到的是上游快照，晚到的结果不能吞掉
+  // 上传/删除已经产生的变化。键为 `providerConnectionId|groupId`，滚动换连接/分组天然隔离。
+  const cloudAssetKindTotalsRef = useRef<CloudAssetKindTotals | null>(null);
+  const cloudAssetKindDeltaRef = useRef<Map<string, CloudAssetKindTotals>>(new Map());
+  const countAssetsInFlightRef = useRef<Set<string>>(new Set());
+  /** 当前角标计数所属的供应商连接；换连接时旧计数立即作废。 */
+  const countedAssetProviderRef = useRef<string | null>(null);
+  /** 最近一次请求的计数作用域；晚到的扫描结果只合并增量，不覆盖当前作用域的计数。 */
+  const countedAssetScopeKeyRef = useRef<string | null>(null);
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [workflowRepositoryExpanded, setWorkflowRepositoryExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
@@ -1311,6 +1343,99 @@ export function WorkspaceApp({
     [],
   );
 
+  /**
+   * 按上传/删除结果把一次增减记进类型计数。扫描在途时先记入增量集合，扫描返回后统一合并，
+   * 避免上游快照覆盖已经发生的变更。
+   */
+  const applyCloudAssetKindDelta = useCallback(
+    (
+      providerConnectionId: string,
+      groupId: string | null,
+      kind: AssetKind,
+      delta: 1 | -1,
+    ): void => {
+      const key = cloudAssetKindTotalsScopeKey(providerConnectionId, groupId);
+      const pending = cloudAssetKindDeltaRef.current.get(key) ?? { image: 0, video: 0, audio: 0 };
+      cloudAssetKindDeltaRef.current.set(key, {
+        ...pending,
+        [kind]: Math.max(0, pending[kind] + delta),
+      });
+      const current = cloudAssetKindTotalsRef.current;
+      if (current == null) return;
+      const next = { ...current, [kind]: Math.max(0, current[kind] + delta) };
+      cloudAssetKindTotalsRef.current = next;
+      setCloudAssetKindTotals(next);
+    },
+    [],
+  );
+
+  /**
+   * 扫描云端素材库并按类型计数（驱动类型 Tab 角标）。
+   *
+   * 上游不返回任何类型总数，精确计数只能翻完扫描范围内的全部页，因此只在素材面板打开、
+   * 连接或分组变化时调用一次；翻页、切换类型、搜索都不重新扫描，上传/删除用增量维护。
+   * 扫描失败时保留已有计数并记录日志，不阻塞素材浏览。
+   */
+  const refreshCloudAssetKindTotals = useCallback(
+    (providerConnectionId: string, groupId: string | null, source: AssetRefreshSource): void => {
+      if (!isDesktopRuntime()) return;
+      const countAssetsByKind = assetLibraryClient.countAssetsByKind;
+      if (countAssetsByKind == null) return;
+      const key = cloudAssetKindTotalsScopeKey(providerConnectionId, groupId);
+      if (countAssetsInFlightRef.current.has(key)) return;
+      // 换供应商时旧连接的计数没有意义：先清空角标，扫完再显示新连接的计数。
+      if (
+        cloudAssetKindTotalsRef.current != null &&
+        countedAssetProviderRef.current !== providerConnectionId
+      ) {
+        cloudAssetKindTotalsRef.current = null;
+        setCloudAssetKindTotals(null);
+      }
+      countedAssetProviderRef.current = providerConnectionId;
+      countedAssetScopeKeyRef.current = key;
+      countAssetsInFlightRef.current.add(key);
+      const startedAt = Date.now();
+      frontendLog(
+        "info",
+        `[assets] 云端素材类型计数开始扫描: providerConnectionId=${providerConnectionId}, groupId=${groupId ?? "全部"}, 触发来源=${source}`,
+      );
+      void countAssetsByKind({ providerConnectionId, groupId })
+        .then(
+          (totals) => {
+            const pending = cloudAssetKindDeltaRef.current.get(key) ?? {
+              image: 0,
+              video: 0,
+              audio: 0,
+            };
+            cloudAssetKindDeltaRef.current.delete(key);
+            // 期间已切到别的连接/分组：本次结果只清掉自己的增量，不覆盖当前作用域的计数。
+            if (countedAssetScopeKeyRef.current !== key) return;
+            const merged: CloudAssetKindTotals = {
+              image: Math.max(0, totals.image + pending.image),
+              video: Math.max(0, totals.video + pending.video),
+              audio: Math.max(0, totals.audio + pending.audio),
+            };
+            cloudAssetKindTotalsRef.current = merged;
+            setCloudAssetKindTotals(merged);
+            frontendLog(
+              "info",
+              `[assets] 云端素材类型计数扫描完成: providerConnectionId=${providerConnectionId}, groupId=${groupId ?? "全部"}, 图片=${merged.image}, 视频=${merged.video}, 音频=${merged.audio}, 耗时 ${Date.now() - startedAt}ms`,
+            );
+          },
+          (error: unknown) => {
+            frontendLog(
+              "error",
+              `[assets] 云端素材类型计数扫描失败: providerConnectionId=${providerConnectionId}, groupId=${groupId ?? "全部"}, 耗时 ${Date.now() - startedAt}ms, 错误: ${formatRawBackendError(error)}`,
+            );
+          },
+        )
+        .finally(() => {
+          countAssetsInFlightRef.current.delete(key);
+        });
+    },
+    [],
+  );
+
   const refreshLocalAssets = useCallback((source: AssetRefreshSource): void => {
     const pageNumber = localAssetPageRef.current;
     const mediaType = assetKindRef.current;
@@ -1438,8 +1563,10 @@ export function WorkspaceApp({
       selectedAssetGroupIdRef.current = groupId;
       setSelectedAssetGroupId(groupId);
       refreshCloudAssets(providerConnectionId, "group-changed");
+      // 计数口径跟随分组：切换分组后重新扫描该范围内的类型计数。
+      refreshCloudAssetKindTotals(providerConnectionId, groupId, "group-changed");
     },
-    [refreshCloudAssets],
+    [refreshCloudAssetKindTotals, refreshCloudAssets],
   );
 
   const handleCreateAssetGroup = useCallback(
@@ -1497,6 +1624,10 @@ export function WorkspaceApp({
             }
             setAssetGroups((current) => current.filter((group) => group.id !== groupId));
             refreshAssetGroups(providerConnectionId);
+            // 组内素材已连同分组删除；若删除的是当前计数范围，整库计数同样需要重扫。
+            if (selectedAssetGroupIdRef.current == null) {
+              refreshCloudAssetKindTotals(providerConnectionId, null, "group-deleted");
+            }
           },
           (error: unknown) => {
             const formatted = formatRawBackendError(error);
@@ -1509,7 +1640,7 @@ export function WorkspaceApp({
         )
         .finally(() => setDeletingAssetGroupId(null));
     },
-    [deletingAssetGroupId, refreshAssetGroups],
+    [deletingAssetGroupId, refreshAssetGroups, refreshCloudAssetKindTotals],
   );
 
   const handleRenameAsset = useCallback(
@@ -1529,7 +1660,15 @@ export function WorkspaceApp({
               `[assets] 云端素材已改名: assetId=${asset.id}, renamedId=${renamedId}, name=${name}`,
             );
             setPreviewAsset(null);
-            if (assetProvider) refreshCloudAssets(assetProvider.id, "rename");
+            if (assetProvider) {
+              refreshCloudAssets(assetProvider.id, "rename");
+              // 改名不改类型；但上游记录被重写后类型字段可能随之变化，重扫一次保持计数准确。
+              refreshCloudAssetKindTotals(
+                assetProvider.id,
+                selectedAssetGroupIdRef.current,
+                "rename",
+              );
+            }
           },
           (error: unknown) => {
             const formatted = formatRawBackendError(error);
@@ -1542,7 +1681,7 @@ export function WorkspaceApp({
         )
         .finally(() => setRenamingAssetId(null));
     },
-    [assetProvider, refreshCloudAssets],
+    [assetProvider, refreshCloudAssetKindTotals, refreshCloudAssets],
   );
 
   const handleAssetLibraryLoaded = useCallback(
@@ -1617,6 +1756,19 @@ export function WorkspaceApp({
   useEffect(() => {
     committedAssetSearchRef.current = committedAssetSearch;
   }, [committedAssetSearch]);
+
+  // 素材面板打开时扫描一次云端类型计数（供应商切换、分组切换各再扫一次）。
+  // 面板关闭时不再扫描，但已拿到的计数保留：再次打开同一作用域不会重复扫全库。
+  const assetPanelOpen = isDesktopRuntime() && !settingsOpen;
+  const cloudKindTotalsScanKey = assetPanelOpen ? (assetProvider?.id ?? null) : null;
+  useEffect(() => {
+    if (cloudKindTotalsScanKey == null) return;
+    refreshCloudAssetKindTotals(
+      cloudKindTotalsScanKey,
+      selectedAssetGroupIdRef.current,
+      "panel-opened",
+    );
+  }, [cloudKindTotalsScanKey, refreshCloudAssetKindTotals]);
 
   // 素材库分页查询统一入口：来源 / 供应商 / 设置面板开关变化时回到第 1 页重查。
   // 查询键去重避免同一状态组合重复请求；分组列表仍在云端来源下单独刷新。
@@ -1991,14 +2143,27 @@ export function WorkspaceApp({
       const status = payload.job?.status;
       if (payload.job?.purpose === "local_asset" && status === "staged") {
         refreshLocalAssets("upload-finished");
-      } else if (assetLibrarySource === "cloud" && (status === "active" || status === "cleaned")) {
+      } else if (
+        assetLibrarySource === "cloud" &&
+        status != null &&
+        ASSET_IMPORT_COMPLETED_STATUSES.has(status)
+      ) {
         if (assetProvider) {
           void refreshCloudAssets(assetProvider.id, "upload-finished");
           refreshAssetGroups(assetProvider.id);
+          // 云端上传完成后按素材类型增量更新角标：不做全库重扫（那是「面板打开时扫一次」的成本）。
+          // 只看整库口径（选中具体分组时上传去向由后端决定，无法归因到当前分组范围）。
+          const uploadedKind = payload.job?.mediaType;
+          if (
+            selectedAssetGroupIdRef.current == null &&
+            (uploadedKind === "image" || uploadedKind === "video" || uploadedKind === "audio")
+          ) {
+            applyCloudAssetKindDelta(assetProvider.id, null, uploadedKind, 1);
+          }
         }
       }
       // 上传到云端素材库成功：标记对应产物节点已上传（写入节点数据，随画布文档持久化）。
-      if (status === "active" || status === "cleaned") {
+      if (status != null && ASSET_IMPORT_COMPLETED_STATUSES.has(status)) {
         const outputKey = uploadJobToOutputKeyRef.current.get(payload.jobId);
         if (outputKey) {
           patchNodes("output", (node) =>
@@ -2016,6 +2181,7 @@ export function WorkspaceApp({
   }, [
     assetLibrarySource,
     assetProvider,
+    applyCloudAssetKindDelta,
     patchNodes,
     refreshAssetGroups,
     refreshCloudAssets,
@@ -2025,6 +2191,105 @@ export function WorkspaceApp({
   const dismissAssetUpload = useCallback((jobId: string) => {
     setAssetUploads((current) => current.filter((entry) => entry.jobId !== jobId));
   }, []);
+
+  /** 重启恢复只尝试一次：后台任务本身不会因为本命令失败而消失，重试交给下一次启动。 */
+  const restoredAssetImportsRef = useRef(false);
+  /** 后端交回的上传记录；画布文档可能比它晚读回来，节点匹配因此要能重复尝试。 */
+  const recoveredAssetImportsRef = useRef<readonly AssetImportOutputRecord[] | null>(null);
+  /**
+   * 应用重启后接回未完成/刚完成的产物入库上传。
+   *
+   * 上传在后端进程里推进，但 `jobId → 产物节点` 映射只活在前端内存：重启后成功事件到达时
+   * 回查不到产物卡片，绿色小点永远不亮，在途上传也从素材面板消失，用户只能重传一次。
+   * 这里取回后端仍在推进或刚完成的上传记录，交给下面的节点匹配点亮绿色小点，
+   * 并把在途上传恢复成面板行继续跟踪。
+   *
+   * 只对产物节点生效：本机文件路径是产物节点与暂存任务唯一共有的稳定身份。
+   */
+  useEffect(() => {
+    if (!isDesktopRuntime() || restoredAssetImportsRef.current) return;
+    restoredAssetImportsRef.current = true;
+    const restoredAt = Date.now();
+    void tosStagingClient.listAssetImportOutputs().then(
+      (records) => {
+        recoveredAssetImportsRef.current = records;
+        // 在途上传恢复成面板行：状态与字节进度都来自后端记录，之后由既有轮询继续推进。
+        // 长时间没有推进的记录不再当作"还在传"：进程在上传途中被杀时后端会留下一个
+        // staged/importing 的僵死记录，显示成在途会让进度条永远转下去，用户既不知道
+        // 失败也无法重试；按停滞口径标记为已中断，给出明确的终态与原因。
+        const restoredEntries: AssetUploadEntry[] = records
+          .filter((record) => !ASSET_IMPORT_COMPLETED_STATUSES.has(record.status))
+          .map((record) => {
+            const lastAdvancedAt = record.updatedAt || restoredAt;
+            const stalled = restoredAt - lastAdvancedAt >= UPLOAD_STALL_HINT_MS;
+            return {
+              jobId: record.jobId,
+              name: localPathFileName(record.localPath),
+              kind: record.mediaType,
+              status: stalled ? ("interrupted" as const) : record.status,
+              bytesUploaded: record.bytesUploaded,
+              bytesTotal: record.bytesTotal,
+              error: record.error,
+              lastAdvancedAt,
+              stalled: false,
+              destination: "cloud" as const,
+              adjustment: null,
+            };
+          });
+        if (restoredEntries.length > 0) {
+          setAssetUploads((current) => {
+            const known = new Set(current.map((entry) => entry.jobId));
+            const merged = [...current, ...restoredEntries.filter((it) => !known.has(it.jobId))];
+            return merged.sort((first, second) => first.lastAdvancedAt - second.lastAdvancedAt);
+          });
+          toast.info(`已接管 ${restoredEntries.length} 个重启前未完成的上传`, {
+            description: "后台仍在继续，可在素材面板查看进度。",
+          });
+        }
+        frontendLog(
+          "info",
+          `[assets] 重启恢复产物入库上传: 记录=${records.length}, 在途=${restoredEntries.length}`,
+        );
+      },
+      (error: unknown) => {
+        frontendLog("error", `[assets] 重启恢复产物入库上传失败: ${formatRawBackendError(error)}`);
+      },
+    );
+  }, []);
+
+  /**
+   * 把已入库的上传记录配回产物节点并点亮绿色小点。
+   *
+   * 独立于取回动作重复执行：画布文档读取通常晚于本命令返回，节点列表在挂载后才出现；
+   * 切换画布标签后节点集合也会整体替换。`uploadedToCloud` 的写入是幂等的，重复匹配无副作用。
+   */
+  useEffect(() => {
+    const completed = (recoveredAssetImportsRef.current ?? []).filter((record) =>
+      ASSET_IMPORT_COMPLETED_STATUSES.has(record.status),
+    );
+    if (completed.length === 0 || outputNodes.length === 0) return;
+    const outputKeyByLocalPath = new Map<string, string>();
+    for (const node of outputNodes) {
+      if (node.finalPath == null || node.finalPath === "") continue;
+      outputKeyByLocalPath.set(normalizeLocalPathKey(node.finalPath), node.key);
+    }
+    const matchedKeys: string[] = [];
+    for (const record of completed) {
+      const outputKey = outputKeyByLocalPath.get(normalizeLocalPathKey(record.localPath));
+      if (outputKey == null) continue;
+      // 先重建映射再点亮：即使产物节点这一刻还没补齐 uploadedToCloud，事件路径也能命中。
+      uploadJobToOutputKeyRef.current.set(record.jobId, outputKey);
+      if (outputNodes.some((node) => node.key === outputKey && node.uploadedToCloud !== true)) {
+        matchedKeys.push(outputKey);
+      }
+    }
+    if (matchedKeys.length === 0) return;
+    const keys = new Set(matchedKeys);
+    patchNodes("output", (node) =>
+      keys.has(node.key) && !node.uploadedToCloud ? { ...node, uploadedToCloud: true } : node,
+    );
+    frontendLog("info", `[assets] 重启恢复绿色小点: 命中产物节点 ${matchedKeys.length} 个`);
+  }, [outputNodes, patchNodes]);
 
   /**
    * RF 实例就绪前的坐标兜底换算（store 中的 pan/zoom 与视口几何一致）。
@@ -6398,6 +6663,13 @@ export function WorkspaceApp({
             if (assetProvider) {
               refreshCloudAssets(assetProvider.id, "delete");
               refreshAssetGroups(assetProvider.id);
+              // 删除按素材类型减一，不做全库重扫；只看整库口径（选中分组时无法确认素材归属范围）。
+              if (
+                selectedAssetGroupIdRef.current == null &&
+                asset.providerConnectionId === assetProvider.id
+              ) {
+                applyCloudAssetKindDelta(assetProvider.id, null, asset.kind, -1);
+              }
             }
           },
           (error: unknown) => {
@@ -6410,7 +6682,7 @@ export function WorkspaceApp({
           },
         );
     },
-    [assetProvider, refreshAssetGroups, refreshCloudAssets],
+    [applyCloudAssetKindDelta, assetProvider, refreshAssetGroups, refreshCloudAssets],
   );
 
   const previewOutputNode =
@@ -8146,12 +8418,12 @@ export function WorkspaceApp({
           kind={assetKind}
           getKindCount={(tabKind) =>
             // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
-            // 云端上游不支持类型计数，不显示角标。
+            // 云端：面板打开时扫一次全库得到的类型计数（上传/删除按增量维护）。
             !isDesktopRuntime()
               ? libraryAssets.filter((asset) => asset.kind === tabKind).length
               : assetLibrarySource === "local"
                 ? localAssetKindTotals[tabKind]
-                : null
+                : (cloudAssetKindTotals?.[tabKind] ?? null)
           }
           onKindChange={(tabKind) => {
             setAssetKind(tabKind);

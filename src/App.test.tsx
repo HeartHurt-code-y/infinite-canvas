@@ -1674,6 +1674,89 @@ describe("App workspace", () => {
     expect(listAssetCalls[1]).toMatchObject({ pageNumber: 2, pageSize: 40, kind: "image" });
   });
 
+  it("素材库类型角标：面板打开时按类型扫一次全库，翻页与切类型都不重复扫描", async () => {
+    const buildItems = (from: number, to: number) =>
+      Array.from({ length: to - from }, (_, index) =>
+        cloudAsset("count-provider", {
+          id: `count-${from + index + 1}`,
+          kind: "image",
+          name: `计数素材 ${from + index + 1}`,
+          previewUrl: `https://assets.example/count-${from + index + 1}.png`,
+        }),
+      );
+    const listAssetCalls: Array<Record<string, unknown>> = [];
+    const countCalls: Array<Record<string, unknown>> = [];
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "count-provider",
+              displayName: "计数供应商",
+              adapterId: "moyu_v1",
+              baseUrl: "https://count.example/v1",
+              apiKeyRef: "provider:count-provider:api-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 1,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets": {
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          listAssetCalls.push(commandPayload);
+          const pageNumber = Number(commandPayload["pageNumber"] ?? 1);
+          // 共 45 条图片：第 1 页满 40 条，第 2 页 5 条。
+          return Promise.resolve(
+            pageNumber === 1 ? buildItems(0, 40) : pageNumber === 2 ? buildItems(40, 45) : [],
+          );
+        }
+        case "count_assets_by_kind": {
+          const commandPayload = (args as { command?: Record<string, unknown> })?.command ?? {};
+          countCalls.push(commandPayload);
+          // 全库精确计数：图片 45（含未加载的第 2 页）、视频 2、音频 0。
+          return Promise.resolve({ image: 45, video: 2, audio: 0 });
+        }
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+
+    // 角标显示扫描到的全库计数，而不是当前页（本页 40）或当前素材数。
+    expect(await screen.findByRole("tab", { name: "图片 45" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "视频 2" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "音频 0" })).toBeInTheDocument();
+    expect(countCalls).toHaveLength(1);
+    expect(countCalls[0]).toMatchObject({ providerConnectionId: "count-provider", groupId: null });
+
+    // 翻页只重拉列表，不重新扫全库。
+    fireEvent.click(await screen.findByRole("button", { name: "下一页素材" }));
+    expect(await screen.findByText("本页 5 个图片素材")).toBeInTheDocument();
+    expect(listAssetCalls).toHaveLength(2);
+    expect(countCalls).toHaveLength(1);
+    // 角标保持全库口径，不随翻页变化。
+    expect(screen.getByRole("tab", { name: "图片 45" })).toBeInTheDocument();
+  });
+
   it("切换到本地素材后只读本地索引，上传任务只写对象存储", async () => {
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       void args;
@@ -1828,6 +1911,13 @@ describe("App workspace", () => {
               : [],
           );
         }
+        case "count_assets_by_kind": {
+          // 计数口径跟随分组：整库与「客户案例」分组返回不同的类型计数。
+          const groupId = (args as { command?: Record<string, unknown> })?.command?.["groupId"];
+          return Promise.resolve(
+            groupId === "21" ? { image: 3, video: 1, audio: 0 } : { image: 12, video: 5, audio: 2 },
+          );
+        }
         case "plugin:dialog|open":
           return Promise.resolve(["C:\\media\\客户素材.png"]);
         case "get_tos_staging_config":
@@ -1860,9 +1950,27 @@ describe("App workspace", () => {
     };
 
     render(<App />);
+    // 素材库类型角标按当前分组范围统计：整库口径先给出 12/5/2。
+    expect(await screen.findByRole("tab", { name: "图片 12" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "视频 5" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "音频 2" })).toBeInTheDocument();
+
     // 选中「客户案例」后，上传必须带上该分组 ID，而不是只写进默认上传分组。
     fireEvent.change(await screen.findByLabelText("素材库分组"), { target: { value: "21" } });
     fireEvent.click(screen.getByRole("button", { name: "上传本地素材到云端素材库" }));
+
+    // 分组变化后按新范围重新扫描一次计数（12/5/2 → 3/1/0）。
+    expect(await screen.findByRole("tab", { name: "图片 3" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "视频 1" })).toBeInTheDocument();
+    expect(screen.getByRole("tab", { name: "音频 0" })).toBeInTheDocument();
+    expect(
+      invokeMock.mock.calls
+        .filter(([command]) => command === "count_assets_by_kind")
+        .map(([, invokeArgs]) => (invokeArgs as { command?: Record<string, unknown> })?.command),
+    ).toEqual([
+      { providerConnectionId: "moyu-prod", groupId: null },
+      { providerConnectionId: "moyu-prod", groupId: "21" },
+    ]);
 
     await waitFor(() => {
       const uploadCall = invokeMock.mock.calls.find(

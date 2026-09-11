@@ -8,6 +8,7 @@ import {
   assetGroupsSchema,
   canvasDocumentRecordSchema,
   canvasDocumentSummariesSchema,
+  cloudAssetKindTotalsSchema,
   cloudAssetsSchema,
   connectivityTestResultSchema,
   generationCreatedEventSchema,
@@ -34,6 +35,7 @@ import {
   realPersonAuthLinkSchema,
   realPersonGroupsSchema,
   remoteVideoTaskPageSchema,
+  assetImportOutputRecordsSchema,
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
@@ -504,8 +506,29 @@ export interface StagingJobRecord {
   readonly updatedAt: number;
 }
 
-/** 本机 SQLite 索引中的素材；媒体正文只保存在对象存储。 */
-export interface LocalAssetRecord {
+/**
+ * 产物上传到云端素材库的入库记录（应用重启恢复用）。
+ *
+ * 上传任务不会回到前端内存：前端既拿不到 jobId → 产物节点的映射，也不知道后台是否还在推进。
+ * 启动时按本记录重建映射与在途上传行，用户不必重传一次。
+ */
+export interface AssetImportOutputRecord {
+  readonly jobId: string;
+  readonly localPath: string;
+  readonly mediaType: MediaType;
+  readonly status: StagingStatus;
+  /** 入库成功后拿到的素材 ID；尚未入库完成时为 null。 */
+  readonly assetId: string | null;
+  /** 上传时选中的素材库分组；未选中时为 null（由服务端决定默认上传分组）。 */
+  readonly groupId: string | null;
+  readonly bytesUploaded: number;
+  readonly bytesTotal: number | null;
+  readonly error: unknown;
+  readonly createdAt: number;
+  readonly updatedAt: number;
+}
+
+/** 本机 SQLite 索引中的素材；媒体正文只保存在对象存储。 */ export interface LocalAssetRecord {
   readonly id: string;
   readonly name: string;
   readonly mediaType: MediaType;
@@ -565,6 +588,11 @@ export interface TosStagingClient {
   startUpload(this: void, command: StartStagingCommand): Promise<string>;
   getJob(this: void, jobId: string): Promise<StagingJobRecord>;
   /**
+   * 列出仍在推进或刚完成的产物入库上传，供应用重启后重建
+   * `jobId → 产物节点` 映射并恢复在途上传行。
+   */
+  listAssetImportOutputs(this: void): Promise<readonly AssetImportOutputRecord[]>;
+  /**
    * 分页查询本地素材索引：按类型与文件名子串过滤后返回单页（仅页内条目签发预签名 URL）。
    * 不传查询时返回全量。
    */
@@ -585,6 +613,8 @@ export const tosStagingClient: TosStagingClient = {
     invokeDesktop("get_credential", stringSchema, { credentialRef }),
   startUpload: (command) => invokeDesktop("start_staging_upload", stringSchema, { command }),
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
+  listAssetImportOutputs: () =>
+    invokeDesktop("list_asset_import_outputs", assetImportOutputRecordsSchema),
   listLocalAssets: (query) =>
     invokeDesktop("list_local_assets", localAssetPageSchema, { query: query ?? null }),
   pullBucketAssets: (prefix) =>
@@ -779,6 +809,33 @@ export interface DeleteAssetGroupCommand {
   readonly id: string;
 }
 
+/** 云端素材类型计数扫描参数：只按连接与分组限定范围，不叠加类型或名称过滤。 */
+export interface AssetKindCountQuery {
+  readonly providerConnectionId: string;
+  /** 云端素材库分组 ID；缺省/null 表示整个连接（全部素材）。 */
+  readonly groupId?: string | null;
+}
+
+/**
+ * 云端素材库按类型计数（扫描范围内全量，不受分页与当前类型 Tab 影响），
+ * 驱动素材面板类型 Tab 角标；与本地素材的 `LocalAssetKindTotals` 同形。
+ */
+export interface CloudAssetKindTotals {
+  readonly image: number;
+  readonly video: number;
+  readonly audio: number;
+}
+
+/** 云端素材类型计数只部署在桌面端；浏览器预览与测试注入的客户端可以没有该方法。 */
+export interface AssetKindCountClient {
+  /**
+   * 按类型统计云端素材数量。上游不返回任何类型总数，后端为此翻完扫描范围内的
+   * 全部页（每页 100 条，最多 50 页）；调用方应只在素材面板打开时调用一次，
+   * 之后按上传/删除结果增量维护，避免每次翻页或切换类型都扫全库。
+   */
+  countAssetsByKind?(this: void, query: AssetKindCountQuery): Promise<CloudAssetKindTotals>;
+}
+
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
   /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
@@ -812,7 +869,9 @@ export interface RealPersonAssetLibraryClient {
   deleteRealPersonGroup(this: void, command: DeleteRealPersonGroupCommand): Promise<void>;
 }
 
-export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClient = {
+export const assetLibraryClient: AssetLibraryClient &
+  RealPersonAssetLibraryClient &
+  AssetKindCountClient = {
   list: (query) =>
     invokeDesktop("list_assets", cloudAssetsSchema, {
       command: {
@@ -823,6 +882,13 @@ export const assetLibraryClient: AssetLibraryClient & RealPersonAssetLibraryClie
         name: query.name ?? null,
         groupId: query.groupId ?? null,
         kind: query.kind ?? null,
+      },
+    }),
+  countAssetsByKind: (query) =>
+    invokeDesktop("count_assets_by_kind", cloudAssetKindTotalsSchema, {
+      command: {
+        providerConnectionId: query.providerConnectionId,
+        groupId: query.groupId ?? null,
       },
     }),
   deleteAsset: (command) =>

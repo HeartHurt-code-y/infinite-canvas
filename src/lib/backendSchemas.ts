@@ -2,6 +2,7 @@ import * as v from "valibot";
 
 import type {
   AssetGroupRecord,
+  AssetImportOutputRecord,
   CanvasDocumentRecord,
   CanvasDocumentSummary,
   CloudAsset,
@@ -179,6 +180,23 @@ export const stagingStateChangedEventSchema = v.looseObject({
   error: v.optional(v.unknown()),
 }) satisfies v.GenericSchema<StagingStateChangedEvent>;
 
+const assetImportOutputRecordSchema = v.looseObject({
+  jobId: v.string(),
+  localPath: v.string(),
+  mediaType: mediaTypeSchema,
+  status: stagingStatusSchema,
+  assetId: nullableStringSchema,
+  // 后端总是显式给出该字段（未指定分组时为 null）。
+  groupId: nullableStringSchema,
+  bytesUploaded: v.number(),
+  bytesTotal: nullableNumberSchema,
+  error: v.unknown(),
+  createdAt: v.number(),
+  updatedAt: v.number(),
+}) satisfies v.GenericSchema<AssetImportOutputRecord>;
+
+export const assetImportOutputRecordsSchema = v.array(assetImportOutputRecordSchema);
+
 export const localAssetRecordSchema = v.looseObject({
   id: v.string(),
   name: v.string(),
@@ -227,6 +245,13 @@ export const cloudAssetSchema = v.looseObject({
 }) satisfies v.GenericSchema<CloudAsset>;
 
 export const cloudAssetsSchema = v.array(cloudAssetSchema);
+
+/** 云端素材按类型计数（后端扫描全部页后得到，与本地素材计数同形）。 */
+export const cloudAssetKindTotalsSchema = v.looseObject({
+  image: v.number(),
+  video: v.number(),
+  audio: v.number(),
+});
 
 export const assetGroupSchema = v.looseObject({
   id: v.string(),

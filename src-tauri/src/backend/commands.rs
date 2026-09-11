@@ -29,10 +29,11 @@ use super::{
         WorkflowHistoryQuery, WorkflowHistoryRecord,
     },
     types::{
-        AssetGroupRecord, AssetListCommand, CanvasDocumentRecord, CanvasDocumentSummary,
-        CloudAssetRecord, ConnectivityTestResult, CreateAssetGroupCommand,
-        CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
-        DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        AssetGroupRecord, AssetImportOutputRecord, AssetKindCountCommand, AssetListCommand,
+        CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetKindTotals, CloudAssetRecord,
+        ConnectivityTestResult, CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand,
+        CredentialStatus, DeleteAssetCommand, DeleteAssetGroupCommand,
+        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
@@ -507,6 +508,15 @@ pub async fn list_assets(
     state.assets.browse(command).await.command()
 }
 
+/// 按类型统计云端素材数量（扫描当前连接/分组范围内的全部页），驱动素材面板类型 Tab 角标。
+#[tauri::command]
+pub async fn count_assets_by_kind(
+    state: State<'_, BackendState>,
+    command: AssetKindCountCommand,
+) -> CommandResult<CloudAssetKindTotals> {
+    state.assets.count_assets_by_kind(command).await.command()
+}
+
 #[tauri::command]
 pub async fn refresh_asset_cover(
     state: State<'_, BackendState>,
@@ -768,6 +778,33 @@ pub fn list_local_assets(
     query: Option<LocalAssetListQuery>,
 ) -> CommandResult<LocalAssetPage> {
     state.staging.list_local_assets(query).command()
+}
+
+/// 列出产物上传到云端素材库的入库记录：应用重启后前端据此重建
+/// `jobId → 产物节点` 映射并恢复在途上传行，不必让用户重传一次。
+#[tauri::command]
+pub fn list_asset_import_outputs(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<AssetImportOutputRecord>> {
+    let started_at = std::time::Instant::now();
+    match state.staging.list_asset_import_outputs() {
+        Ok(records) => {
+            info!(
+                "[staging] list_asset_import_outputs 命令成功: 恢复候选 {} 条, 耗时 {}ms",
+                records.len(),
+                started_at.elapsed().as_millis()
+            );
+            Ok(records)
+        }
+        Err(error) => {
+            let record = error.runtime_record();
+            error!(
+                "[staging] list_asset_import_outputs 命令失败: 耗时 {}ms, 错误: {record}",
+                started_at.elapsed().as_millis()
+            );
+            Err(error.payload())
+        }
+    }
 }
 
 #[tauri::command]

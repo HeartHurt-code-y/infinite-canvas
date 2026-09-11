@@ -4328,14 +4328,25 @@ mod tests {
             for duration in [4.0, 16.5, 30.0] {
                 generation.videos[0].duration_seconds = Some(duration);
                 let body = build_video_body(&task, &generation).expect("valid edit");
+                // 本地任务类型只参与校验，不写进请求体：远端字段由冻结 schema 决定
+                // （国内 Seedance 2.5 的任务类型是根级 `omni_reference_task_type` 字符串）。
                 assert!(body.get("videoTaskType").is_none());
                 assert!(body["metadata"].get("videoTaskType").is_none());
-                assert_eq!(body["metadata"]["ratio"], "adaptive");
-                assert_eq!(body["metadata"]["duration"], -1);
+                // 参数容器按方言分流：国内 doubao-seedance-* 走方舟
+                // `/contents/generations/tasks`，参数平铺在根级；海外 Dreamina 走魔芋
+                // `/v1/video/generations`，参数归入 metadata。
                 if model.starts_with("dreamina") {
+                    assert_eq!(body["metadata"]["ratio"], "adaptive");
+                    assert_eq!(body["metadata"]["duration"], -1);
+                    // 海外模型没有任务类型参数，任何容器里都不该出现。
+                    assert!(body.get("omni_reference_task_type").is_none());
                     assert!(body["metadata"].get("omni_reference_task_type").is_none());
                 } else {
-                    assert_eq!(body["metadata"]["omni_reference_task_type"], "edit");
+                    assert_eq!(body["ratio"], "adaptive");
+                    assert_eq!(body["duration"], -1);
+                    assert_eq!(body["omni_reference_task_type"], "edit");
+                    assert!(body["metadata"].get("ratio").is_none());
+                    assert!(body["metadata"].get("omni_reference_task_type").is_none());
                 }
             }
             generation.parameters["duration"] = json!(10);
@@ -4606,7 +4617,10 @@ mod tests {
 
         let body = build_video_body(&video_task, &generation).expect("Seedance extend body");
         assert_eq!(body["model"], "doubao-seedance-2.5");
-        assert_eq!(body["metadata"]["omni_reference_task_type"], "extend");
+        // 国内 Seedance 2.5 的参数平铺在根级：任务类型是根级 `omni_reference_task_type` 字符串，
+        // 不在 metadata 里（metadata 只承载 content 与媒体项）。
+        assert_eq!(body["omni_reference_task_type"], "extend");
+        assert!(body["metadata"].get("omni_reference_task_type").is_none());
         assert_eq!(
             body["metadata"]["content"][0],
             json!({ "type": "text", "text": "【生成目标】\n向后延长视频1，生成一段对峙戏" })
@@ -4622,6 +4636,77 @@ mod tests {
                 .as_str()
                 .is_some_and(|prompt| !prompt.trim().is_empty())
         );
+    }
+
+    #[test]
+    fn domestic_seedance_25_flattens_parameters_at_root_and_keeps_metadata_for_content() {
+        // 契约：国内火山引擎原生 Seedance（doubao-seedance-*）走方舟
+        // `/contents/generations/tasks`，画幅/时长/分辨率/任务类型等参数平铺在请求体根级；
+        // metadata 只承载 content 与媒体项。海外 Dreamina 才把参数归入 metadata。
+        // 这条用例把根级形状单独钉住：此前它只被"参数应在 metadata"的错误预期覆盖，
+        // 结果两个用例长期失败而真实请求体其实是对的。
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedance-2-5-260628",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "ratio": "adaptive",
+                "resolution": "1080p",
+                "duration": -1,
+                "generate_audio": true,
+                "output_format": "mp4",
+                "omni_reference_task_type": "edit"
+            }),
+        );
+        generation.rendered_prompt = "把天空换成黄昏".into();
+        generation.content = vec![
+            CompiledContentItem::Text("把天空换成黄昏".into()),
+            CompiledContentItem::Media {
+                media_type: MediaType::Video,
+                type_position: 1,
+            },
+        ];
+        generation.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://cdn.example.com/source.mp4",
+            Some(1),
+        ));
+        generation.videos[0].duration_seconds = Some(8.0);
+        generation.video_task_type = Some(VideoTaskType::Edit);
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("doubao-seedance-2-5-260628".into());
+
+        let body = build_video_body(&video_task, &generation).expect("domestic Seedance edit body");
+        assert_eq!(body["model"], "doubao-seedance-2-5-260628");
+        // 解码类参数平铺在根级。
+        assert_eq!(body["ratio"], "adaptive");
+        assert_eq!(body["resolution"], "1080p");
+        assert_eq!(body["duration"], -1);
+        assert_eq!(body["generate_audio"], true);
+        assert_eq!(body["output_format"], "mp4");
+        assert_eq!(body["omni_reference_task_type"], "edit");
+        // metadata 只放 content：参数不能同时泄进 metadata，否则平台会读到两份口径。
+        let metadata = body["metadata"].as_object().expect("metadata object");
+        assert_eq!(
+            metadata.keys().collect::<Vec<_>>(),
+            vec!["content"],
+            "metadata 只承载 content，参数必须留在根级"
+        );
+        assert_eq!(metadata["content"][0]["type"], "text");
+        // content 首个 text 条目是渲染后的完整提示词：媒体引用渲染为「视频N」短标签，
+        // 编辑任务再补「编辑视频：」前缀；与根级 prompt 保持一致。
+        assert_eq!(metadata["content"][0]["text"], body["prompt"]);
+        assert_eq!(
+            metadata["content"][0]["text"],
+            "编辑视频：\n把天空换成黄昏视频1"
+        );
+        assert_eq!(metadata["content"][1]["role"], "reference_video");
+        // 请求体里没有本地 videoTaskType 字段：远端任务类型用 omni_reference_task_type 表达。
+        assert!(body.get("videoTaskType").is_none());
     }
 
     #[test]

@@ -939,6 +939,9 @@ function baseInvokeImplementation(
       return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
     case "list_assets":
       return Promise.resolve(CLOUD_ASSETS);
+    case "count_assets_by_kind":
+      // 类型角标的全库计数在这里与列表解耦：只关心面板打开时扫一次的行为。
+      return Promise.resolve({ image: 3, video: 2, audio: 1 });
     case "list_asset_groups":
       return Promise.resolve(mockAssetGroups);
     case "create_asset_group": {
@@ -4457,9 +4460,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(videoLightbox).getByLabelText("night-train.mp4")).toHaveAttribute("controls");
   });
 
-  /** 恢复一张已落卡（含产物文件）的图片产物卡片。 */
-  function restoreCompletedImageOutputCard(): void {
-    invokeMock.mockImplementation((command) => {
+  /** 恢复一张已落卡（含产物文件）的图片产物卡片；可追加覆盖命令（覆盖优先）。 */
+  function restoreCompletedImageOutputCard(
+    handleCommand?: (command: string, args?: Record<string, unknown>) => Promise<unknown> | null,
+  ): void {
+    invokeMock.mockImplementation((command, args) => {
+      const overridden = handleCommand?.(command, args);
+      if (overridden != null) return overridden;
       if (command === "get_canvas_document") {
         return Promise.resolve({
           id: "canvas-scene-03",
@@ -4534,6 +4541,191 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     // 键盘 Enter 路径保留：聚焦按钮直接激活。
     fireEvent.click(mediaButton);
     expect(screen.getByRole("dialog", { name: "媒体预览" })).toBeInTheDocument();
+  });
+
+  it("产物上传到云端素材库成功后显示绿色小点，并把已上传状态写进画布文档", async () => {
+    let savedDocument: { outputNodes?: Array<Record<string, unknown>> } | null = null;
+    restoreCompletedImageOutputCard((command, args) => {
+      if (command === "get_tos_staging_config") {
+        return Promise.resolve({
+          region: "cn-beijing",
+          endpoint: "tos-cn-beijing.volces.com",
+          bucket: "canvas-test",
+          credentialRef: "tos:default",
+          objectPrefix: "staging",
+          enabled: true,
+        });
+      }
+      if (command === "start_staging_upload") return Promise.resolve("staging-job-1");
+      if (command === "save_canvas_document") {
+        const saveCommand = args?.["command"] as { document: typeof savedDocument };
+        savedDocument = saveCommand.document;
+        return Promise.resolve({ ...saveCommand, revision: 1, createdAt: 1, updatedAt: 1 });
+      }
+      return null;
+    });
+    render(<App />);
+
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    // 产物卡片右上角的上传按钮：点击即用本地 finalPath 直接入库，不再走文件选择器。
+    fireEvent.click(within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }));
+
+    await waitFor(() => {
+      const uploadCall = invokeMock.mock.calls.find(
+        ([command]) => command === "start_staging_upload",
+      );
+      expect(uploadCall).toBeDefined();
+      expect((uploadCall![1] as { command: Record<string, unknown> }).command).toMatchObject({
+        localPath: "C:\\generated\\night-train.png",
+        purpose: "asset_import",
+        mediaType: "image",
+      });
+    });
+
+    // 后端上传完成事件（素材库导入成功）是绿色小点的唯一触发源。
+    const stagingListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "staging:state-changed",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const stagingHandler = tauriCallbacks.get(stagingListener[1]?.["handler"] as number);
+    expect(stagingHandler).toBeDefined();
+    act(() => {
+      stagingHandler!({
+        event: "staging:state-changed",
+        id: 1,
+        payload: {
+          jobId: "staging-job-1",
+          job: {
+            id: "staging-job-1",
+            localPath: "C:\\generated\\night-train.png",
+            purpose: "asset_import",
+            mediaType: "image",
+            objectKey: "staging/night-train.png",
+            status: "active",
+            bytesTotal: 2048,
+            bytesUploaded: 2048,
+            assetId: "asset-uploaded-1",
+            importTarget: {
+              providerConnectionId: PROVIDER.id,
+              name: "night-train.png",
+              groupId: null,
+            },
+            adjustment: null,
+            error: null,
+            createdAt: 0,
+            updatedAt: 2,
+          },
+        },
+      });
+    });
+
+    const uploadedButton = await within(card).findByRole("button", {
+      name: /^已上传到云端素材库/,
+    });
+    expect(uploadedButton).toHaveClass("is-uploaded");
+    expect(uploadedButton.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
+
+    // 已上传状态随画布文档落盘：重启后绿色小点仍在，而不是只活在本进程内存里。
+    await waitFor(
+      () => {
+        const outputs = savedDocument?.outputNodes ?? [];
+        const uploaded = outputs.find((node) => node["key"] === "output-task-1");
+        expect(uploaded?.["uploadedToCloud"]).toBe(true);
+      },
+      { timeout: 3000 },
+    );
+  });
+
+  it("重启后按本地路径接回入库上传：已入库的点亮绿色小点，未完成的恢复为在途行", async () => {
+    const importOutput = (overrides: {
+      jobId: string;
+      localPath: string;
+      status: string;
+      updatedAt: number;
+    }) => ({
+      jobId: overrides.jobId,
+      localPath: overrides.localPath,
+      mediaType: "image",
+      status: overrides.status,
+      assetId: overrides.status === "active" ? "asset-restored-1" : null,
+      groupId: null,
+      bytesUploaded: 2048,
+      bytesTotal: 2048,
+      error: null,
+      createdAt: 1,
+      updatedAt: overrides.updatedAt,
+    });
+    const restoredAt = Date.now();
+    restoreCompletedImageOutputCard((command) => {
+      if (command === "list_asset_import_outputs") {
+        return Promise.resolve([
+          // 上一个进程里的上传已经入库：只差把绿色小点接回产物卡片。
+          importOutput({
+            jobId: "job-restored-active",
+            // 同一文件在暂存任务里是正斜杠路径，产物节点保存的是 Windows 反斜杠路径。
+            localPath: "C:/generated/night-train.png",
+            status: "active",
+            updatedAt: restoredAt,
+          }),
+          // 尚未完成的上传：对象已到对象存储，素材库导入仍在推进。
+          importOutput({
+            jobId: "job-restored-importing",
+            localPath: "C:\\generated\\still-importing.png",
+            status: "importing",
+            updatedAt: restoredAt,
+          }),
+          // 进程在上传途中被杀留下的僵死记录：超过停滞时限，不能显示成"还在传"。
+          importOutput({
+            jobId: "job-restored-stale",
+            localPath: "C:\\generated\\stale-upload.png",
+            status: "staged",
+            updatedAt: restoredAt - 10 * 60 * 1000,
+          }),
+        ]);
+      }
+      return null;
+    });
+    render(<App />);
+
+    // 没有任何上传完成事件：绿色小点只可能来自重启恢复。
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    const uploadedButton = await within(card).findByRole("button", {
+      name: /^已上传到云端素材库/,
+    });
+    expect(uploadedButton).toHaveClass("is-uploaded");
+    expect(uploadedButton.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
+
+    // 未完成的上传恢复成面板在途行，并说明已被接管（后台仍在推进，用户不必重传）。
+    const restoredRow = await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(".asset-upload[data-state='importing']");
+      expect(row).not.toBeNull();
+      return row!;
+    });
+    expect(within(restoredRow).getByText("still-importing.png")).toBeInTheDocument();
+    expect(within(restoredRow).getByText("平台处理中…")).toBeInTheDocument();
+
+    // 僵死记录：显示为已中断的终态行，而不是一个永远转圈的在途上传。
+    const staleRow = await waitFor(() => {
+      const row = document.querySelector<HTMLElement>(".asset-upload[data-state='interrupted']");
+      expect(row).not.toBeNull();
+      return row!;
+    });
+    expect(within(staleRow).getByText("stale-upload.png")).toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_import_outputs")).toBe(
+      true,
+    );
   });
 
   it.each(["queued", "running"] as const)(

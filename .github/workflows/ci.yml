@@ -52,5 +52,12 @@ jobs:
       - name: Run project checks
         run: pnpm check
 
+      # 前端测试由 check:frontend 覆盖，Rust 用例此前没有任何 CI 入口，
+      # 导致 provider 的请求体用例长期失败而无人发现；单独一步让它在 CI 里必须通过。
+      # 需要打包引擎的用例都带 #[ignore]（见 remotion_renderer / cover_images），
+      # 因此 --lib 在无需预置资源的情况下即可稳定运行。
+      - name: Run Rust unit tests
+        run: pnpm rust:test
+
       - name: Build frontend
         run: pnpm build

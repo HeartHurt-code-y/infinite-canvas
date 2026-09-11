@@ -1074,12 +1074,40 @@ export const UPLOAD_PHASE_NAMES = {
   assetImport: "上传素材库",
 } as const;
 
+/**
+ * 把本机路径归一化成可比较的键。
+ *
+ * 重启恢复要把后端的上传记录配回产物节点：两边都是同一个文件的绝对路径，但来源不同
+ * （产物节点来自保存结果时的路径，暂存任务来自提交上传时的路径），分隔符与大小写都可能不同。
+ * Windows 盘符不区分大小写，统一小写后比较；分隔符统一成 `/`。
+ */
+export function normalizeLocalPathKey(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").trim().toLowerCase();
+}
+
+/** 本机路径的文件名（`C:\a\b.png` 与 `/a/b.png` 都取 `b.png`）；无文件名时回退整条路径。 */
+export function localPathFileName(path: string): string {
+  const normalized = path.replace(/\\/g, "/");
+  const name = normalized.slice(normalized.lastIndexOf("/") + 1).trim();
+  return name === "" ? normalized.trim() : name;
+}
+
 // 到达这些状态后停止轮询，显示可移除的终态记录。
 export const TERMINAL_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set([
   "active",
   "cleaned",
   "failed",
   "interrupted",
+]);
+
+/**
+ * 素材库导入已取得云端素材身份的状态：产物上传成功（绿色小点）与角标增量都以它为准。
+ *
+ * `active` 是导入成功；`cleaned` 是随后清理暂存对象完成，同样是入库成功而不是失败。
+ */
+export const ASSET_IMPORT_COMPLETED_STATUSES: ReadonlySet<StagingStatus> = new Set([
+  "active",
+  "cleaned",
 ]);
 
 /** 需要实时跟踪的对象存储阶段：每秒刷新并参与停滞检测（preparing 为提交前占位）。 */
@@ -1133,7 +1161,11 @@ export type AssetRefreshSource =
   /** 类型 Tab / 搜索 / 分组变化触发的第 1 页重查。 */
   | "filter"
   /** 分页控件翻页。 */
-  | "page";
+  | "page"
+  /** 素材面板打开（或供应商变化）触发的云端类型计数扫描。 */
+  | "panel-opened"
+  /** 删除云端分组后（组内素材连同消失）重扫整库类型计数。 */
+  | "group-deleted";
 
 // 素材库分页查询的页大小：云端与本地统一。上游单页上限 100 条，类型过滤由后端扫描；
 // 本地索引在 SQLite 中分页。UI 用「上一页/下一页」翻页，不再一次性挂载全部卡片。

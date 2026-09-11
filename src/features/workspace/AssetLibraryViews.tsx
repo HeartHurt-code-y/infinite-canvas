@@ -12,6 +12,7 @@ import { copyTextToDesktopClipboard } from "./desktopActions";
 import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
+  ASSET_IMPORT_COMPLETED_STATUSES,
   ASSET_KIND_LABELS,
   STAGING_STATUS_LABELS,
   UPLOAD_PHASE_NAMES,
@@ -587,7 +588,7 @@ export function AssetUploadRow({
         : "已完成";
   const showAssetImportPhase = entry.destination === "cloud";
   const assetImportInProgress = entry.status === "staged" || entry.status === "importing";
-  const assetImportDone = entry.status === "active" || entry.status === "cleaned";
+  const assetImportDone = ASSET_IMPORT_COMPLETED_STATUSES.has(entry.status);
   // 素材库导入字节进度：海外路径在 importing 期间由后端推进（bytesTotal = 2×文件大小，
   // 下载 + 上传）；国内路径（/v1/assets/async 平台侧拉取）无字节进度，bytes 保持对象
   // 存储阶段的值（bytesUploaded ≥ bytesTotal），因此走"平台处理中"。
@@ -630,7 +631,7 @@ export function AssetUploadRow({
     <li className="asset-upload" data-state={entry.status}>
       <span className="asset-upload__icon" aria-hidden="true">
         {isTerminal ? (
-          entry.status === "active" || entry.status === "cleaned" || entry.status === "staged" ? (
+          ASSET_IMPORT_COMPLETED_STATUSES.has(entry.status) || entry.status === "staged" ? (
             <CheckCircle size={15} weight="fill" />
           ) : (
             <WarningCircle size={15} weight="fill" />

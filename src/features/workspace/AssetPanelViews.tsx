@@ -338,7 +338,7 @@ export function AssetGroupsPicker({
   );
 }
 
-/** 素材类型 Tab：图片/视频/音频，角标计数由调用方按来源解析（null = 不显示）。 */
+/** 素材类型 Tab：图片/视频/音频，角标计数由调用方按来源解析（null = 尚无计数，不显示）。 */
 export function AssetKindTabs({
   kind,
   getKindCount,
@@ -713,7 +713,10 @@ export function AssetPanel({
   /** 删除云端素材库分组（连带组内全部素材，不可逆）。 */
   readonly onDeleteGroup: (groupId: string) => void;
   readonly kind: AssetKind;
-  /** Tab 角标计数：浏览器=演示数据计数，本地=分页响应全库计数，云端=null。 */
+  /**
+   * Tab 角标计数：浏览器=演示数据计数，本地=分页响应全库计数，
+   * 云端=面板打开时扫一次全库的类型计数（null = 尚无计数，不显示角标）。
+   */
   readonly getKindCount: (kind: AssetKind) => number | null;
   readonly onKindChange: (kind: AssetKind) => void;
   readonly search: string;

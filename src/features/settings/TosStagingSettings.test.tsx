@@ -34,6 +34,7 @@ function createClient(
     getJob: vi.fn(() => {
       throw new Error("not used in these tests");
     }),
+    listAssetImportOutputs: vi.fn(() => Promise.resolve([])),
     listLocalAssets: vi.fn(() =>
       Promise.resolve({
         items: [],

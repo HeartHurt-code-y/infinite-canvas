@@ -790,6 +790,25 @@ pub struct AssetListCommand {
     pub kind: Option<MediaType>,
 }
 
+/// 云端素材类型计数扫描参数：只按连接与分组限定范围，不叠加类型或名称过滤。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetKindCountCommand {
+    pub provider_connection_id: String,
+    /// 所属云端素材库分组 ID；为空表示整个连接（全部素材）。
+    pub group_id: Option<String>,
+}
+
+/// 云端素材库按类型计数（扫描范围内全量，不受分页与类型 Tab 影响），
+/// 驱动素材面板类型 Tab 角标；与 [`LocalAssetKindTotals`] 同形。
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CloudAssetKindTotals {
+    pub image: u64,
+    pub video: u64,
+    pub audio: u64,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CreateRealPersonAuthLinkCommand {
@@ -963,6 +982,31 @@ pub struct StagingAssetImportTarget {
     /// `None`/空串表示未指定分组，由方言自行发现/创建默认上传分组。
     #[serde(default, deserialize_with = "deserialize_optional_group_id")]
     pub group_id: Option<String>,
+}
+
+/// 产物上传到云端素材库的入库记录（重启恢复用）。
+///
+/// 上传任务在应用重启后不会回到前端内存：前端既拿不到 jobId → 产物节点的映射，
+/// 也不知道后台是否还在推进。启动时按本记录重建映射与在途行，用户不必重传一次。
+///
+/// 只暴露恢复所需的最小字段：完整 `StagingJobRecord` 里的 object_key / error 等
+/// 属于上传内部实现，前端不依赖，也就不随命令一起越过边界。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetImportOutputRecord {
+    pub job_id: String,
+    pub local_path: String,
+    pub media_type: MediaType,
+    pub status: StagingStatus,
+    /// 入库成功后拿到的素材 ID；未入库完成时为 None。
+    pub asset_id: Option<String>,
+    /// 分组 ID：上传时选中的素材库分组，未选中时为 None（由服务端决定默认上传分组）。
+    pub group_id: Option<String>,
+    pub bytes_uploaded: u64,
+    pub bytes_total: Option<u64>,
+    pub error: Option<Value>,
+    pub created_at: i64,
+    pub updated_at: i64,
 }
 
 /// 分组 ID 兼容历史数据：早期版本只支持真人分组，把数值 ID 直接序列化成 JSON 数字，

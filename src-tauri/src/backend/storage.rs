@@ -31,6 +31,12 @@ use super::{
 #[path = "storage/generation_lifecycle.rs"]
 mod generation_lifecycle;
 
+/// 已完成（`active` / `cleaned`）的产物入库上传参与重启恢复的时间窗口。
+///
+/// 绿色小点是要点亮「刚刚上传成功」的产物卡片，重启时重新翻出很久以前的成功上传没有意义；
+/// 未到终态的上传不受该窗口限制（见 [`Storage::list_asset_import_outputs`]）。
+const ASSET_IMPORT_OUTPUT_RECOVERY_WINDOW_MS: i64 = 24 * 60 * 60 * 1000;
+
 #[path = "storage/workflow_history.rs"]
 pub mod workflow_history;
 
@@ -1523,6 +1529,35 @@ impl Storage {
         let rows = statement.query_map([], staging_job_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
     }
+
+    /// 产物上传到云端素材库的入库记录，供应用重启后重建「jobId → 产物节点」映射与在途上传行。
+    ///
+    /// 只返回仍需要前端处置的行，按 `created_at` 升序（同一产物的多次上传由前端取最后一次）：
+    /// - 未到终态：后台可能仍在推进（例如进程重启后对象已落到对象存储、只差素材库导入），
+    ///   前端要继续轮询；这些行不设时间窗口，否则长时间停在 `staged` 的任务会被漏掉；
+    /// - `active` / `cleaned`：入库已完成，用于点亮产物卡片的绿色小点；已完成的上传只认
+    ///   最近 [`ASSET_IMPORT_OUTPUT_RECOVERY_WINDOW_MS`]，避免把很久以前的成功上传重新刷出来。
+    ///
+    /// `failed` / `interrupted` 与更早完成的记录不再返回：没有绿色小点要点亮，用户也已见过结果。
+    pub fn list_asset_import_outputs(&self) -> BackendResult<Vec<StagingJobRecord>> {
+        let completed_since = now_ms() - ASSET_IMPORT_OUTPUT_RECOVERY_WINDOW_MS;
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, local_path, purpose, media_type, object_key, status,
+                    bytes_total, bytes_uploaded, asset_id, import_target_json,
+                    error_json, created_at, updated_at, adjustment
+             FROM staging_jobs
+             WHERE purpose = 'asset_import'
+               AND import_target_json IS NOT NULL
+               AND (
+                 status IN ('validating','authorizing','uploading','staged','importing','cleaning')
+                 OR (status IN ('active','cleaned') AND created_at >= ?1)
+               )
+             ORDER BY created_at",
+        )?;
+        let rows = statement.query_map(params![completed_since], staging_job_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
 }
 
 pub fn now_ms() -> i64 {
@@ -2050,6 +2085,119 @@ mod tests {
                 .adjustment
                 .as_deref(),
             Some("原图 8000×400 已自动等比缩放为 6000×300。")
+        );
+    }
+
+    #[test]
+    fn asset_import_output_recovery_window_keeps_in_flight_and_recent_successes() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        let now = now_ms();
+        let import_target = Some(StagingAssetImportTarget {
+            provider_connection_id: "company".into(),
+            name: Some("night-train.png".into()),
+            group_id: Some("21".into()),
+        });
+        let make_job =
+            |id: &str,
+             purpose: &str,
+             status: StagingStatus,
+             created_at: i64,
+             import_target: Option<StagingAssetImportTarget>| StagingJobRecord {
+                id: id.into(),
+                local_path: format!("C:/generated/{id}.png"),
+                purpose: purpose.into(),
+                media_type: MediaType::Image,
+                object_key: Some(format!("staging/{id}.png")),
+                status,
+                bytes_total: Some(128),
+                bytes_uploaded: 128,
+                asset_id: None,
+                import_target,
+                adjustment: None,
+                error: None,
+                created_at,
+                updated_at: created_at,
+            };
+
+        // 恢复候选：重启时对象已到对象存储、只差素材库导入（status=staged，无时间窗口限制）。
+        storage
+            .insert_staging_job(&make_job(
+                "in-flight-staged",
+                "asset_import",
+                StagingStatus::Staged,
+                now - 3 * 24 * 60 * 60 * 1000,
+                import_target.clone(),
+            ))
+            .expect("insert staged import");
+        // 恢复候选：刚上传成功，用于点亮绿色小点。
+        storage
+            .insert_staging_job(&make_job(
+                "recent-active",
+                "asset_import",
+                StagingStatus::Active,
+                now - 60_000,
+                import_target.clone(),
+            ))
+            .expect("insert recent active import");
+        // 超出时间窗口的成功上传：不再翻出来。
+        storage
+            .insert_staging_job(&make_job(
+                "stale-active",
+                "asset_import",
+                StagingStatus::Active,
+                now - 3 * 24 * 60 * 60 * 1000,
+                import_target.clone(),
+            ))
+            .expect("insert stale active import");
+        // 已失败/已中断：没有绿色小点要点亮，也不该恢复成在途行。
+        storage
+            .insert_staging_job(&make_job(
+                "failed-import",
+                "asset_import",
+                StagingStatus::Failed,
+                now - 60_000,
+                import_target.clone(),
+            ))
+            .expect("insert failed import");
+        storage
+            .insert_staging_job(&make_job(
+                "interrupted-import",
+                "asset_import",
+                StagingStatus::Interrupted,
+                now - 60_000,
+                import_target.clone(),
+            ))
+            .expect("insert interrupted import");
+        // 其他用途的暂存任务与本命令无关：生成输入中转、本地素材（无素材库导入目标）。
+        storage
+            .insert_staging_job(&make_job(
+                "generation-input",
+                "generation_input",
+                StagingStatus::Uploading,
+                now,
+                None,
+            ))
+            .expect("insert generation input");
+        storage
+            .insert_staging_job(&make_job(
+                "local-asset",
+                "local_asset",
+                StagingStatus::Staged,
+                now,
+                None,
+            ))
+            .expect("insert local asset");
+
+        let recovered = storage
+            .list_asset_import_outputs()
+            .expect("list asset import outputs");
+        assert_eq!(
+            recovered
+                .iter()
+                .map(|job| job.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["in-flight-staged", "recent-active"]
         );
     }
 

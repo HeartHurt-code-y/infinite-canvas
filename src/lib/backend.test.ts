@@ -68,6 +68,42 @@ describe("assetLibraryClient.list", () => {
   });
 });
 
+describe("assetLibraryClient.countAssetsByKind", () => {
+  it("请求后端按类型统计并解析三个计数", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve({ image: 12, video: 3, audio: 1 });
+    });
+
+    await expect(
+      assetLibraryClient.countAssetsByKind?.({
+        providerConnectionId: "provider-1",
+        groupId: "21",
+      }),
+    ).resolves.toEqual({ image: 12, video: 3, audio: 1 });
+    expect(capturedCommand).toBe("count_assets_by_kind");
+    expect(capturedArgs).toEqual({
+      command: { providerConnectionId: "provider-1", groupId: "21" },
+    });
+  });
+
+  it("整库口径把分组归一为 null 而不是省略字段", async () => {
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((_command, args) => {
+      capturedArgs = args;
+      return Promise.resolve({ image: 0, video: 0, audio: 0 });
+    });
+
+    await assetLibraryClient.countAssetsByKind?.({ providerConnectionId: "provider-1" });
+    expect(capturedArgs).toEqual({
+      command: { providerConnectionId: "provider-1", groupId: null },
+    });
+  });
+});
+
 describe("assetLibraryClient group management", () => {
   it("forwards an asset group update with name and description", async () => {
     let capturedCommand = "";
