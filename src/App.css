@@ -8472,9 +8472,10 @@ svg[data-spin="true"] {
 }
 
 /*
- * 画面标注候选：来源是当前视频的框选/画笔标记，没有素材缩略图，
- * 用标记色画一个虚线框代替缩略图，并让描述独立一行——菜单只有 280px 宽，
- * 挤在同一行会把「标注1」压没。
+ * 画面标注候选：来源是当前视频的框选/画笔标记。
+ * 有缩略图时按标记区域的宽高比自适应（高度固定、宽度按比例算，完整显示不裁剪），
+ * 还没取到帧时退回标记色虚线框——菜单只有 280px 宽，挤在同一行会把「标注1」压没，
+ * 因此描述独立一行。
  */
 .prompt-mention__option-copy {
   display: grid;
@@ -8504,6 +8505,22 @@ svg[data-spin="true"] {
   border: 2px dashed var(--annotation-color);
   border-radius: calc(var(--radius-panel) * 0.4);
   background: color-mix(in oklch, var(--annotation-color) 14%, var(--color-paper));
+}
+
+/* 缩略图就位后，虚线框变成标记色实线描边：它是画面里的那一处标记，不是空占位。 */
+.prompt-mention__thumb--annotation:has(img) {
+  border-style: solid;
+  background: var(--color-paper-3);
+}
+
+/*
+ * 自适应尺寸的标注缩略图：宽度先按图片自身比例算，再夹在上限内，
+ * 因此竖构图的长条不会被压成方块，也不会把候选行撑出菜单。
+ */
+.prompt-mention__thumb--annotation.prompt-mention__thumb--auto-size {
+  height: 2.75rem;
+  width: auto;
+  max-width: 7rem;
 }
 
 .prompt-mention__empty {

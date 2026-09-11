@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   VIDEO_EDIT_THUMBNAIL_RESOLUTION,
+  capturePreviewSeekFrame,
   captureVideoEditFrameThumbnail,
   describeVideoEditMark,
   sameVideoEditFrame,
@@ -353,6 +354,74 @@ describe("video local edit drawing", () => {
       width: 1,
       height: 1,
     });
+  });
+
+  it("uses the main preview as a last resort and puts the user's frame back", async () => {
+    const context = drawingContext();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/png;base64,from-preview",
+    );
+    const mark: VideoEditMark = { ...rectangle, timeSeconds: 7.5 };
+    const preview = document.createElement("video");
+    let currentTime = 2;
+    let paused = true;
+    Object.defineProperties(preview, {
+      videoWidth: { value: 1920 },
+      videoHeight: { value: 1080 },
+      readyState: { value: 2 },
+      paused: { configurable: true, get: () => paused },
+      duration: { value: 30 },
+      currentTime: {
+        configurable: true,
+        get: () => currentTime,
+        set: (value: number) => {
+          currentTime = value;
+          // 浏览器语义：seek 落下后派发 seeked。
+          queueMicrotask(() => preview.dispatchEvent(new Event("seeked")));
+        },
+      },
+    });
+    const crop = { x: 100, y: 100, width: 800, height: 600 };
+    const first = await capturePreviewSeekFrame(preview, mark, crop, 200, 150, {
+      alreadyAtTargetFrame: false,
+    });
+    expect(first).toBe("data:image/png;base64,from-preview");
+    // 跳到了标记自己那一帧，并且跳回了用户原来停留的位置。
+    expect(context.drawImage).toHaveBeenCalled();
+    expect(currentTime).toBe(2);
+
+    // 已经停在目标帧时不该白跳一次：直接裁剪。
+    currentTime = 7.5;
+    const second = await capturePreviewSeekFrame(preview, mark, crop, 200, 150, {
+      alreadyAtTargetFrame: true,
+    });
+    expect(second).toBe("data:image/png;base64,from-preview");
+    expect(currentTime).toBe(7.5);
+
+    /*
+     * 画面正在播时，内部取帧必须先把播放停下来，取完再恢复播放、并把播放头放回原位。
+     * jsdom 不会真的改变播放状态，因此这里用 spy 模拟 pause/play 对 paused 的影响。
+     */
+    const play = vi.spyOn(HTMLMediaElement.prototype, "play").mockImplementation(() => {
+      paused = false;
+      return Promise.resolve();
+    });
+    const pause = vi.spyOn(HTMLMediaElement.prototype, "pause").mockImplementation(() => {
+      paused = true;
+    });
+    paused = false;
+    currentTime = 2;
+    const third = await capturePreviewSeekFrame(preview, mark, crop, 200, 150, {
+      alreadyAtTargetFrame: false,
+    });
+    expect(third).toBe("data:image/png;base64,from-preview");
+    expect(pause).toHaveBeenCalled();
+    expect(play).toHaveBeenCalled();
+    expect(currentTime).toBe(2);
+    expect(paused).toBe(false);
   });
 
   it("captures a thumbnail from the mark's own frame and draws the mark without an ordinal", async () => {

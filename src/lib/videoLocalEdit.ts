@@ -71,6 +71,16 @@ export async function saveVideoEditFrame(imageDataUrl: string) {
 }
 
 /**
+ * 标注帧在本地文件与云端素材库里的统一命名。
+ *
+ * 本地文件与入库素材同名，是为了让用户在素材面板里认得出「这张图是哪一帧」；
+ * 落盘与入库都由弹窗发起，因此命名也必须只有一处定义。
+ */
+export function videoLocalEditFrameName(sourceLabel: string, timeSeconds: number): string {
+  return `${sourceLabel} · ${timeSeconds.toFixed(3)}s 标注`;
+}
+
+/**
  * 标注帧入库后拿到的云端素材身份。它必须与画布里从素材库拖入的素材同构，
  * 否则提交时只会拿到对象存储的匿名 URL，真人隐私预检会直接拒绝。
  */
@@ -102,6 +112,30 @@ const UPLOAD_STAGE_LABELS: Partial<Record<StagingStatus, string>> = {
 const FAILED_STAGES: readonly StagingStatus[] = ["failed", "interrupted"];
 
 /**
+ * 标注帧入库的等待上限。
+ *
+ * 标注帧几乎总是含真人的视频关键帧，必须等平台审核放行（Pending → Ready）才能以资产身份提交；
+ * 审核排队时间不受本地控制，因此这里给足 5 分钟，避免用户在「已勾选入库」的情况下
+ * 因为审核慢而被动拿到一个本地文件身份。
+ */
+export const VIDEO_EDIT_FRAME_UPLOAD_TIMEOUT_MS = 300_000;
+
+/**
+ * 入库进度文案：等待超过几秒后补上已等待时长。
+ *
+ * 审核阶段可能安静地停在同一状态上一两分钟，只显示「正在导入云端素材库…」会让人以为卡死；
+ * 带上秒数至少能看出它还在等，而不是没反应。
+ */
+export function describeVideoEditFrameUploadProgress(label: string, elapsedMs: number): string {
+  const seconds = Math.floor(elapsedMs / 1_000);
+  if (seconds < 5) return label;
+  const minutes = Math.floor(seconds / 60);
+  const rest = seconds % 60;
+  const elapsed = minutes > 0 ? `${minutes} 分 ${String(rest).padStart(2, "0")} 秒` : `${rest} 秒`;
+  return `${label}（已等待 ${elapsed}）`;
+}
+
+/**
  * 把标注帧上传到云端素材库并阻塞等待平台审核通过（Pending → Ready）。
  *
  * 只有素材进入素材库、以 `asset://` 资产身份提交，真人素材才具备可用来源；
@@ -116,12 +150,15 @@ export async function uploadVideoEditFrameToLibrary(
     name,
     providerConnectionId,
     groupId = null,
-    timeoutMs = 120_000,
+    timeoutMs = VIDEO_EDIT_FRAME_UPLOAD_TIMEOUT_MS,
     pollIntervalMs = 1_000,
     onProgress,
   } = options;
   if (!isDesktopRuntime()) throw new Error("上传标注帧到素材库需要在桌面应用中运行。");
-  onProgress?.("正在提交标注帧上传…");
+  const startedAt = Date.now();
+  const report = (label: string) =>
+    onProgress?.(describeVideoEditFrameUploadProgress(label, Date.now() - startedAt));
+  report("正在提交标注帧上传…");
   const jobId = await tosStagingClient.startUpload({
     localPath: path,
     purpose: "asset_import",
@@ -132,10 +169,13 @@ export async function uploadVideoEditFrameToLibrary(
   let lastStatus: StagingStatus | null = null;
   for (;;) {
     const job = await tosStagingClient.getJob(jobId);
+    const stageLabel = UPLOAD_STAGE_LABELS[job.status];
     if (job.status !== lastStatus) {
       lastStatus = job.status;
-      const label = UPLOAD_STAGE_LABELS[job.status];
-      if (label) onProgress?.(label);
+      if (stageLabel) report(stageLabel);
+    } else if (stageLabel) {
+      // 同状态长时间停留（审核排队）：刷新已等待时长，让「还在等」看得见。
+      report(stageLabel);
     }
     if (job.status === "active") {
       if (!job.assetId) {
@@ -147,7 +187,9 @@ export async function uploadVideoEditFrameToLibrary(
       throw new Error(`标注帧上传素材库失败：${describeStagingError(job.error, job.status)}`);
     }
     if (Date.now() >= deadline) {
-      throw new Error("标注帧上传素材库超时，请稍后在素材面板确认后重试。");
+      throw new Error(
+        `标注帧上传素材库超时（已等待 ${Math.round(timeoutMs / 1_000)} 秒）；平台审核未在时限内通过，请稍后重试。`,
+      );
     }
     await new Promise((resolve) => {
       setTimeout(resolve, pollIntervalMs);

@@ -53,28 +53,51 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
 }));
 
 // Drawing interactions are exercised by the dialog tests; this boundary checks canvas persistence and IPC.
-// 与真实弹窗一致：提交失败把错误显示出来，而不是把 rejection 丢成未处理错误。
+// 与真实弹窗一致：先让调用方解析标注帧身份，再把解析结果交给 onApply；
+// 提交失败把错误显示出来，而不是把 rejection 丢成未处理错误。
 vi.mock("./features/workspace/VideoLocalEditDialog", () => ({
-  VideoLocalEditDialog: ({ source, onApply }: VideoLocalEditDialogProps) => {
+  VideoLocalEditDialog: ({ source, onApply, resolveFrame }: VideoLocalEditDialogProps) => {
     videoLocalEditSourceMock(source);
     const [error, setError] = useState<string | null>(null);
     return (
       <>
         <button
           type="button"
-          onClick={() =>
-            void onApply({
-              imageDataUrl: "data:image/png;base64,c2FtcGxl",
-              timeSeconds: 2.25,
-              instructionDocument: videoLocalEditInstructionMock.document,
-              operation: "remove",
-              sourceKey: source.key,
-              uploadFrameToLibrary: false,
-              timeRange: null,
-            }).catch((cause: unknown) =>
-              setError(cause instanceof Error ? cause.message : String(cause)),
-            )
-          }
+          onClick={() => {
+            const name = `${source.label} · 2.250s 标注`;
+            void (async () => {
+              // 真实弹窗先落盘标注帧，再让调用方把已落盘的文件解析成提交身份；
+              // 这里沿用同一条 IPC，保证画布测试仍然覆盖帧保存这条链路。
+              const saved = (await invokeMock("save_video_edit_frame", {
+                imageDataUrl: "data:image/png;base64,c2FtcGxl",
+              })) as { path: string };
+              const resolution = await resolveFrame({
+                path: saved.path,
+                name,
+                dataUrl: "data:image/png;base64,c2FtcGxl",
+                // 与默认状态一致：测试里的素材库未配置连接，解析结果会退回本地文件。
+                uploadToLibrary: false,
+                onProgress: () => {},
+              });
+              await onApply({
+                imageDataUrl: "data:image/png;base64,c2FtcGxl",
+                timeSeconds: 2.25,
+                instructionDocument: videoLocalEditInstructionMock.document,
+                operation: "remove",
+                sourceKey: source.key,
+                timeRange: null,
+                frame: {
+                  path: saved.path,
+                  name,
+                  target: resolution.target,
+                  uploadedToLibrary: resolution.uploadedToLibrary,
+                  aspectRatio: 16 / 9,
+                },
+              });
+            })().catch((cause: unknown) => {
+              setError(cause instanceof Error ? cause.message : String(cause));
+            });
+          }}
         >
           应用测试局部标注 · {source.label}
         </button>
@@ -4019,8 +4042,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       await within(node).findByRole("button", { name: "解除连线：原视频.mp4 · 2.250s 标注" }),
     ).toBeInTheDocument();
     const prompt = within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" });
-    expect(prompt).toHaveTextContent("删除标记区域中的路人");
-    expect(prompt.querySelectorAll(".mention-chip")).toHaveLength(2);
+    // 帧身份解析与接入是异步的，提示词在完成后才写入。
+    await waitFor(() => expect(prompt).toHaveTextContent("删除标记区域中的路人"));
+    await waitFor(() => expect(prompt.querySelectorAll(".mention-chip")).toHaveLength(2));
     await waitFor(
       () => {
         expect(

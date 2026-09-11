@@ -1,7 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type * as BackendModule from "./backend";
 import type { StagingJobRecord } from "./backend";
-import { resolveVideoEditFrameTarget, uploadVideoEditFrameToLibrary } from "./videoLocalEdit";
+import {
+  describeVideoEditFrameUploadProgress,
+  resolveVideoEditFrameTarget,
+  uploadVideoEditFrameToLibrary,
+} from "./videoLocalEdit";
 
 const startUpload = vi.fn<(_command: unknown) => Promise<string>>();
 const getJob = vi.fn<(_jobId: string) => Promise<StagingJobRecord>>();
@@ -168,5 +172,52 @@ describe("video edit frame library upload", () => {
         import: { providerConnectionId: "provider-1", name: baseOptions.name, groupId: 128 },
       }),
     );
+  });
+
+  it("keeps waiting long enough for platform moderation instead of falling back at two minutes", async () => {
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    startUpload.mockResolvedValue("job-1");
+    getJob.mockImplementation(() => {
+      // 每轮推进 10 秒：审核排队 150 秒后才放行（旧的两分钟上限会在这里放弃）。
+      now += 10_000;
+      return Promise.resolve(now >= 150_000 ? job("active", "asset-42") : job("importing"));
+    });
+    const asset = await uploadVideoEditFrameToLibrary({
+      ...baseOptions,
+      providerConnectionId: "provider-1",
+      pollIntervalMs: 0,
+    });
+    expect(asset.assetId).toBe("asset-42");
+    expect(now).toBeGreaterThan(120_000);
+  });
+
+  it("appends the elapsed wait to the progress label so a long moderation queue looks alive", async () => {
+    expect(describeVideoEditFrameUploadProgress("正在导入云端素材库…", 1_200)).toBe(
+      "正在导入云端素材库…",
+    );
+    expect(describeVideoEditFrameUploadProgress("正在导入云端素材库…", 42_000)).toBe(
+      "正在导入云端素材库…（已等待 42 秒）",
+    );
+    expect(describeVideoEditFrameUploadProgress("正在导入云端素材库…", 125_000)).toBe(
+      "正在导入云端素材库…（已等待 2 分 05 秒）",
+    );
+    // 停在同一状态时按间隔刷新已等待时长，用户能看出它还在等而不是卡死。
+    let now = 0;
+    vi.spyOn(Date, "now").mockImplementation(() => now);
+    startUpload.mockResolvedValue("job-1");
+    getJob.mockImplementation(() => {
+      now += 20_000;
+      return Promise.resolve(job("importing"));
+    });
+    const labels: string[] = [];
+    await uploadVideoEditFrameToLibrary({
+      ...baseOptions,
+      providerConnectionId: "provider-1",
+      timeoutMs: 80_000,
+      pollIntervalMs: 0,
+      onProgress: (label) => labels.push(label),
+    }).catch(() => undefined);
+    expect(labels.at(-1)).toBe("正在导入云端素材库…（已等待 1 分 20 秒）");
   });
 });

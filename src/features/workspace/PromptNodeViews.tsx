@@ -1067,10 +1067,16 @@ export function PromptMentionInput({
                       onClick={() => chooseMenuEntry(entry)}
                     >
                       <span
-                        className="prompt-mention__thumb prompt-mention__thumb--annotation"
+                        className={`prompt-mention__thumb prompt-mention__thumb--annotation${
+                          entry.annotation.thumbnail ? " prompt-mention__thumb--auto-size" : ""
+                        }`}
                         style={{ "--annotation-color": entry.annotation.color } as CSSProperties}
                         aria-hidden="true"
-                      />
+                      >
+                        {entry.annotation.thumbnail ? (
+                          <img src={entry.annotation.thumbnail} alt="" />
+                        ) : null}
+                      </span>
                       <span className="prompt-mention__option-copy">
                         <strong>{entry.annotation.label}</strong>
                         <small title={entry.annotation.description}>

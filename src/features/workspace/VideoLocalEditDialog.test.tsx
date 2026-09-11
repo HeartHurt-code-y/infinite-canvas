@@ -4,6 +4,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { PromptReferenceCandidate } from "../../lib/promptReferences";
 import {
   VideoLocalEditDialog,
+  type VideoLocalEditFrameResolution,
   type VideoLocalEditResult,
   type VideoLocalEditSource,
 } from "./VideoLocalEditDialog";
@@ -16,11 +17,17 @@ import type * as VideoLocalEditDrawing from "./videoLocalEditDrawing";
 import type * as VideoLocalEditModule from "../../lib/videoLocalEdit";
 
 const prepareSource = vi.hoisted(() => vi.fn());
+const saveFrame = vi.hoisted(() => vi.fn());
 // 只替换需要拦截的导出：整模块替身会让弹窗新增的引用展开函数变成 undefined，
 // 报错会伪装成「提交按钮没反应」。
 vi.mock("../../lib/videoLocalEdit", async (importOriginal) => {
   const original = await importOriginal<typeof VideoLocalEditModule>();
-  return { ...original, prepareVideoEditSource: prepareSource };
+  return {
+    ...original,
+    prepareVideoEditSource: prepareSource,
+    // 落盘是桌面能力：测试替换为固定路径，避免真的调用 Tauri invoke。
+    saveVideoEditFrame: saveFrame,
+  };
 });
 
 vi.mock("./videoLocalEditDrawing", async (importOriginal) => {
@@ -53,22 +60,43 @@ function renderDialog(
     readonly onApplyImpl?: () => Promise<void>;
     /** 云端素材库连接是否可用；不可用时弹窗不渲染上传选项。 */
     readonly canUploadToLibrary?: boolean;
+    /** 覆盖标注帧身份解析；默认入库成功，返回 asset:// 资产身份。 */
+    readonly resolveFrameImpl?: (request: {
+      readonly path: string;
+      readonly name: string;
+      readonly onProgress: (label: string) => void;
+    }) => Promise<VideoLocalEditFrameResolution>;
   } = {},
 ) {
   const onApply = vi.fn<(result: VideoLocalEditResult) => Promise<void>>(
     options.onApplyImpl ?? (async () => {}),
   );
   const onClose = options.onClose ?? vi.fn();
+  const resolveFrame = vi.fn(
+    options.resolveFrameImpl ??
+      ((): Promise<VideoLocalEditFrameResolution> =>
+        Promise.resolve({
+          uploadedToLibrary: true,
+          target: {
+            kind: "asset",
+            providerConnectionId: "project-provider",
+            assetId: "asset-frame",
+            canvasNodeKey: "annotation-node",
+            mediaType: "image",
+          },
+        })),
+  );
   const view = render(
     <VideoLocalEditDialog
       source={options.source ?? source}
       candidates={options.candidates ?? []}
       canUploadToLibrary={options.canUploadToLibrary ?? false}
+      resolveFrame={resolveFrame}
       onClose={onClose}
       onApply={onApply}
     />,
   );
-  return { ...view, onApply, onClose };
+  return { ...view, onApply, onClose, resolveFrame };
 }
 
 /** 编辑要求沿用与画布一致的引用编辑器：正文即编辑要求，@ 引用是原子 chip。 */
@@ -183,6 +211,11 @@ function drawRegion(left: number, top: number, right: number, bottom: number) {
 
 beforeEach(() => {
   prepareSource.mockReset();
+  saveFrame.mockReset().mockResolvedValue({
+    path: "C:\\generated\\annotation.png",
+    width: 1920,
+    height: 1080,
+  });
   vi.mocked(exportVideoLocalEditFrame)
     .mockReset()
     .mockReturnValue("data:image/png;base64,annotated-frame");
@@ -249,7 +282,20 @@ describe("VideoLocalEditDialog", () => {
       instructionDocument: instruction("消除圈出的路人，保留桌子"),
       operation: "remove",
       timeRange: null,
-      uploadFrameToLibrary: false,
+      // 弹窗先落盘再解析身份：提交给调用方的是可直接接入节点的帧信息。
+      frame: {
+        path: "C:\\generated\\annotation.png",
+        name: "餐厅原视频 · 3.250s 标注",
+        target: {
+          kind: "asset",
+          providerConnectionId: "project-provider",
+          assetId: "asset-frame",
+          canvasNodeKey: "annotation-node",
+          mediaType: "image",
+        },
+        uploadedToLibrary: true,
+        aspectRatio: 1920 / 1080,
+      },
       // 本次提交只画当前画面，编辑要求也没有引用别的时间点的标注。
       offFrameReferenceTimes: [],
     });
@@ -321,6 +367,7 @@ describe("VideoLocalEditDialog", () => {
         source={{ ...source, target: { ...target, assetId: "new" } }}
         candidates={[]}
         canUploadToLibrary={false}
+        resolveFrame={vi.fn()}
         onClose={vi.fn()}
         onApply={vi.fn()}
       />,
@@ -543,26 +590,160 @@ describe("VideoLocalEditDialog", () => {
 
   it("requests the library upload by default so real-person frames keep a verifiable origin", async () => {
     const user = userEvent.setup();
-    const { onApply } = renderDialog({ canUploadToLibrary: true });
+    const { onApply, resolveFrame } = renderDialog({ canUploadToLibrary: true });
     loadVideo();
     drawRectangle();
     await user.type(screen.getByRole("textbox"), "消除路人");
     expect(screen.getByRole("checkbox", { name: /上传标注帧到云端素材库/ })).toBeChecked();
     await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
     await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
-    expect(onApply.mock.calls[0]![0].uploadFrameToLibrary).toBe(true);
+    // 弹窗自己发起入库：调用方拿到的已经是解析好的资产身份。
+    expect(resolveFrame).toHaveBeenCalledWith(
+      expect.objectContaining({ path: "C:\\generated\\annotation.png" }),
+    );
+    expect(onApply.mock.calls[0]![0].frame).toEqual({
+      path: "C:\\generated\\annotation.png",
+      name: "餐厅原视频 · 0.000s 标注",
+      target: {
+        kind: "asset",
+        providerConnectionId: "project-provider",
+        assetId: "asset-frame",
+        canvasNodeKey: "annotation-node",
+        mediaType: "image",
+      },
+      uploadedToLibrary: true,
+      aspectRatio: 1920 / 1080,
+    });
   });
 
   it("skips the library upload when the option is unchecked", async () => {
     const user = userEvent.setup();
-    const { onApply } = renderDialog({ canUploadToLibrary: true });
+    // 没有连接可用时弹窗不渲染选项，因此这里直接按未勾选路径断言本地文件身份。
+    const { onApply, resolveFrame } = renderDialog({
+      canUploadToLibrary: true,
+      resolveFrameImpl: () =>
+        Promise.resolve({
+          uploadedToLibrary: false,
+          target: {
+            kind: "local_file",
+            path: "C:\\generated\\annotation.png",
+            canvasNodeKey: "annotation-node",
+            mediaType: "image",
+          },
+        }),
+    });
     loadVideo();
     drawRectangle();
     await user.type(screen.getByRole("textbox"), "消除路人");
     await user.click(screen.getByRole("checkbox", { name: /上传标注帧到云端素材库/ }));
     await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
     await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
-    expect(onApply.mock.calls[0]![0].uploadFrameToLibrary).toBe(false);
+    expect(onApply.mock.calls[0]![0].frame.uploadedToLibrary).toBe(false);
+    expect(onApply.mock.calls[0]![0].frame.target.kind).toBe("local_file");
+    expect(resolveFrame).toHaveBeenCalledOnce();
+  });
+
+  it("keeps the dialog and the marks when the frame import fails, then retries the import only", async () => {
+    const user = userEvent.setup();
+    const resolveFrame = vi
+      .fn<
+        (request: {
+          readonly path: string;
+          readonly name: string;
+          readonly uploadToLibrary: boolean;
+        }) => Promise<VideoLocalEditFrameResolution>
+      >()
+      .mockRejectedValueOnce(new Error("标注帧上传素材库失败：对象存储未配置"))
+      .mockResolvedValue({
+        uploadedToLibrary: true,
+        target: {
+          kind: "asset",
+          providerConnectionId: "project-provider",
+          assetId: "asset-frame",
+          canvasNodeKey: "annotation-node",
+          mediaType: "image",
+        },
+      });
+    const onApply = vi.fn<(result: VideoLocalEditResult) => Promise<void>>(async () => {});
+    render(
+      <VideoLocalEditDialog
+        source={source}
+        candidates={[]}
+        canUploadToLibrary
+        resolveFrame={resolveFrame}
+        onClose={vi.fn()}
+        onApply={onApply}
+      />,
+    );
+    loadVideo();
+    drawRectangle();
+    await user.type(screen.getByRole("textbox"), "消除路人");
+    await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
+
+    // 入库失败：弹窗不关、标注不丢，错误留在原地并给出重试入口。
+    expect(await screen.findByRole("alert")).toHaveTextContent("对象存储未配置");
+    expect(onApply).not.toHaveBeenCalled();
+    expect(screen.getByRole("list", { name: "已标注区域" })).toHaveTextContent("标注1");
+    expect(screen.getByRole("textbox")).toHaveTextContent("消除路人");
+    expect(saveFrame).toHaveBeenCalledOnce();
+
+    await user.click(screen.getByRole("button", { name: "重试入库并添加" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    // 重试只重跑入库：本地标注帧不重复导出、也不重复落盘。
+    expect(saveFrame).toHaveBeenCalledOnce();
+    expect(resolveFrame).toHaveBeenCalledTimes(2);
+    expect(resolveFrame.mock.calls[0]![0].path).toBe(resolveFrame.mock.calls[1]![0].path);
+    expect(resolveFrame.mock.calls[1]![0].uploadToLibrary).toBe(true);
+
+    expect(onApply.mock.calls[0]![0].frame.uploadedToLibrary).toBe(true);
+  });
+
+  it("lets the user drop the library requirement after a failed import and submit the saved frame locally", async () => {
+    const user = userEvent.setup();
+    const resolveFrame = vi.fn(
+      (request: {
+        readonly path: string;
+        readonly uploadToLibrary: boolean;
+      }): Promise<VideoLocalEditFrameResolution> =>
+        request.uploadToLibrary
+          ? Promise.reject(new Error("标注帧上传素材库失败：平台审核未通过"))
+          : Promise.resolve({
+              uploadedToLibrary: false,
+              target: {
+                kind: "local_file",
+                path: request.path,
+                canvasNodeKey: "",
+                mediaType: "image",
+              },
+            }),
+    );
+    const onApply = vi.fn<(result: VideoLocalEditResult) => Promise<void>>(async () => {});
+    render(
+      <VideoLocalEditDialog
+        source={source}
+        candidates={[]}
+        canUploadToLibrary
+        resolveFrame={resolveFrame}
+        onClose={vi.fn()}
+        onApply={onApply}
+      />,
+    );
+    loadVideo();
+    drawRectangle();
+    await user.type(screen.getByRole("textbox"), "消除路人");
+    await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("平台审核未通过");
+
+    // 放弃入库不等于放弃这次编辑：取消勾选后仍然用同一张已落盘的标注帧提交。
+    await user.click(screen.getByRole("checkbox", { name: /上传标注帧到云端素材库/ }));
+    await user.click(screen.getByRole("button", { name: "重试入库并添加" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    expect(saveFrame).toHaveBeenCalledOnce();
+    expect(onApply.mock.calls[0]![0].frame).toMatchObject({
+      path: "C:\\generated\\annotation.png",
+      uploadedToLibrary: false,
+      target: { kind: "local_file", path: "C:\\generated\\annotation.png" },
+    });
   });
 
   it("keeps several regions at once and lists every one of them for review", async () => {
@@ -750,6 +931,52 @@ describe("VideoLocalEditDialog", () => {
     expect(figure.querySelector("img")).toHaveAttribute("src", "data:image/png;base64,mark-frame");
   });
 
+  it("leaves the user's frame untouched while thumbnails are being captured", async () => {
+    // 后台元素取不到帧时，取帧兜底会去动主预览；但它必须把用户停留的位置还原回去，
+    // 也不能把内部跳帧显示成「正在定位画面…」。取帧本身的行为在 drawing 单测里覆盖。
+    vi.mocked(captureVideoEditFrameThumbnail).mockResolvedValue(null);
+    renderDialog();
+    const video = loadVideo();
+    layoutThumbnailLayer();
+    readyCaptureVideo();
+    seekToFrame(2);
+    drawRegion(0.25, 0.25, 0.75, 0.75);
+    // 让取帧循环跑几轮（后台元素始终取不到帧）。
+    await act(async () => {
+      await Promise.resolve();
+      await Promise.resolve();
+    });
+    expect(video.currentTime).toBe(2);
+    expect(screen.queryByText("正在定位画面…")).not.toBeInTheDocument();
+  });
+
+  it("offers the frame thumbnail in the @ menu so a mark is recognizable by sight", async () => {
+    const user = userEvent.setup();
+    const context = drawingContext();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+      context as unknown as CanvasRenderingContext2D,
+    );
+    vi.spyOn(HTMLCanvasElement.prototype, "toDataURL").mockReturnValue(
+      "data:image/png;base64,menu-thumb",
+    );
+    renderDialog();
+    loadVideo();
+    layoutThumbnailLayer();
+    readyCaptureVideo();
+    // 标记落在播放头的 0 秒上：直接由主预览裁剪，缩略图随标记立即可用。
+    drawRegion(0.25, 0.25, 0.75, 0.75);
+    await screen.findByRole("figure", { hidden: true });
+
+    await user.click(screen.getByRole("button", { name: "引用素材到提示词（候选 0 个）" }));
+    const option = await screen.findByRole("option", { name: /标注1，画面标注/ });
+    const thumb = option.querySelector<HTMLImageElement>(".prompt-mention__thumb--annotation img")!;
+    expect(thumb).toHaveAttribute("src", "data:image/png;base64,menu-thumb");
+    // 有缩略图时按标记区域比例自适应：高度固定、宽度自动，不再压成方块。
+    expect(thumb.closest(".prompt-mention__thumb--annotation")).toHaveClass(
+      "prompt-mention__thumb--auto-size",
+    );
+  });
+
   it("replaces the ordinal circle only once the frame thumbnail is available", async () => {
     vi.mocked(captureVideoEditFrameThumbnail).mockResolvedValue("data:image/png;base64,mark-frame");
     renderDialog();
@@ -867,6 +1094,7 @@ describe("VideoLocalEditDialog", () => {
           source={source}
           candidates={[]}
           canUploadToLibrary={false}
+          resolveFrame={vi.fn()}
           onClose={onClose}
           onApply={onApply}
         />
@@ -885,6 +1113,7 @@ describe("VideoLocalEditDialog", () => {
           source={{ ...source, key: "different-source" }}
           candidates={[]}
           canUploadToLibrary={false}
+          resolveFrame={vi.fn()}
           onClose={onClose}
           onApply={onApply}
         />

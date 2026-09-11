@@ -19,7 +19,11 @@ import {
   type PointerEvent as ReactPointerEvent,
 } from "react";
 import { createPortal } from "react-dom";
-import { isDesktopRuntime, type ExplicitMediaTarget } from "../../lib/backend";
+import {
+  isDesktopRuntime,
+  type ExplicitMediaTarget,
+  type MediaReferenceTarget,
+} from "../../lib/backend";
 import {
   createPromptContentModule,
   type PromptContentDocumentV1,
@@ -31,12 +35,15 @@ import type { PromptReferenceCandidate } from "../../lib/promptReferences";
 import {
   inlineVideoEditMarkReferences,
   prepareVideoEditSource,
+  saveVideoEditFrame,
+  videoLocalEditFrameName,
   type PreparedVideoEditSource,
 } from "../../lib/videoLocalEdit";
 
 import { PromptMentionInput } from "./PromptNodeViews";
 import {
   VIDEO_EDIT_COLORS,
+  capturePreviewSeekFrame,
   captureVideoEditFrameThumbnail,
   describeVideoEditMark,
   exportVideoLocalEditFrame,
@@ -52,6 +59,7 @@ import {
   videoEditPointFromClient,
   videoEditStrokeWidth,
   type VideoEditMark,
+  type VideoEditMarkThumbnailArea,
 } from "./videoLocalEditDrawing";
 import "./VideoLocalEditDialog.css";
 
@@ -62,12 +70,17 @@ import "./VideoLocalEditDialog.css";
  * 因此无论引用的是本帧还是别的帧，提示词都说清了「哪一帧的哪一处」——
  * 导出帧只含当前画面，时间读数是那条描述唯一的落点。
  */
-function markReferenceInput(mark: VideoEditMark, index: number): PromptMarkReferenceInput {
+function markReferenceInput(
+  mark: VideoEditMark,
+  index: number,
+  thumbnail: string | undefined,
+): PromptMarkReferenceInput {
   return {
     markId: mark.id,
     label: videoEditMarkLabel(index),
     description: describeVideoEditMark(mark, mark.timeSeconds),
     color: mark.color,
+    ...(thumbnail ? { thumbnail } : {}),
   };
 }
 
@@ -89,10 +102,34 @@ function markThumbnailCapture(mark: VideoEditMark, videoWidth: number, videoHeig
 }
 
 /**
+ * 用主预览取一处标记的缩略图，并处理「这次跳帧是内部的」这个标记位。
+ *
+ * 具体取帧逻辑在 videoLocalEditDrawing 里（与导出标注帧共用同一条画布路径）；
+ * 这里只负责让弹窗的事件回调知道：接下来这段 pause/seeked 不是用户操作。
+ */
+async function capturePreviewSeekThumbnail(
+  preview: HTMLVideoElement,
+  mark: VideoEditMark,
+  crop: VideoEditMarkThumbnailArea,
+  width: number,
+  height: number,
+  seekingRef: { current: boolean },
+): Promise<string | null> {
+  seekingRef.current = true;
+  try {
+    return await capturePreviewSeekFrame(preview, mark, crop, width, height, {
+      alreadyAtTargetFrame: false,
+    });
+  } finally {
+    seekingRef.current = false;
+  }
+}
+
+/**
  * 后台取帧：为清单里的每一处标记生成「它那一帧」的自适应缩略图。
  *
  * 取帧是异步且可失败的展示增强，因此只往缓存里写成功的结果；失败就退回原来的
- * 序号标记，标注本身的提交资格不受影响。取帧元素由弹窗提供，绝不扰动主预览。
+ * 序号标记，标注本身的提交资格不受影响。
  *
  * 取帧循环是「只有一个」的长驻任务，参数一律从 ref 读最新值：每加一处标记都会让
  * 依赖变化并重跑 effect，如果循环跟着每次重跑一起重启，正在等待 seek 的那一轮就会被
@@ -104,12 +141,19 @@ function useVideoEditFrameThumbnails(
   sourceKey: string,
   items: readonly { readonly key: string; readonly mark: VideoEditMark }[],
   previewVideoRef: { readonly current: HTMLVideoElement | null },
-): ReadonlyMap<string, string> {
+  previewSeekingRef: { current: boolean },
+): {
+  readonly thumbnails: ReadonlyMap<string, string>;
+  readonly capturingKeys: ReadonlySet<string>;
+} {
   const [thumbnails, setThumbnails] = useState<ReadonlyMap<string, string>>(() => new Map());
+  const [capturingKeys, setCapturingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const cacheRef = useRef(new Map<string, string>());
   // 取帧失败过的标记：允许有限次重试，避免一次偶发失败（源还没缓冲好）就永久没有缩略图，
   // 同时也不会让同一处标记把取帧循环卡死。
   const failedRef = useRef(new Map<string, number>());
+  /** 后台元素真正尝试过取帧的次数：用它决定要不要动用「跳主预览」这条有代价的兜底。 */
+  const backgroundAttemptsRef = useRef(0);
   // 取帧循环长驻，因此参数走 ref：在 effect 里同步最新值，渲染期间不写 ref。
   const latestRef = useRef({ captureVideo, captureSourceReady, items });
   const mountedRef = useRef(true);
@@ -140,7 +184,7 @@ function useVideoEditFrameThumbnails(
           if (!mountedRef.current) break;
           const current = latestRef.current;
           const preview = previewVideoRef.current;
-          const video =
+          const background =
             current.captureSourceReady && (current.captureVideo?.videoWidth ?? 0) > 0
               ? current.captureVideo
               : null;
@@ -149,53 +193,85 @@ function useVideoEditFrameThumbnails(
           );
           if (next == null) break;
           // 画面尺寸是裁剪的前提：优先用后台元素的，它没就绪时用主预览的。
-          const width = video?.videoWidth ?? preview?.videoWidth ?? 0;
-          const height = video?.videoHeight ?? preview?.videoHeight ?? 0;
+          const width = background?.videoWidth ?? preview?.videoWidth ?? 0;
+          const height = background?.videoHeight ?? preview?.videoHeight ?? 0;
           const capture = markThumbnailCapture(next.mark, width, height);
           if (capture == null) {
             // 尺寸都还没就绪：不记失败，等尺寸到位后这个 effect 会再跑一次。
             break;
           }
+          const job = {
+            crop: capture.crop,
+            width: capture.size.width,
+            height: capture.size.height,
+          };
+          setCapturingKeys((previous) =>
+            previous.has(next.key) ? previous : new Set(previous).add(next.key),
+          );
           /*
-           * 先试主预览：标记就属于当前画面、且预览已暂停时，这是最可靠的一路
-           * （用户此刻看到的正是这一帧，导出标注帧早已证明它可读）。
-           * 不成立时再让后台元素 seek 到标记自己那一帧。
+           * 三条路，从最可靠到最兜底：
+           * 1) 主预览：标记就属于当前画面且预览已暂停时直接裁剪，最可靠；
+           * 2) 后台元素：seek 到标记那一帧，完全不扰动用户画面（等待上限调短，
+           *    不可用就尽快交给下一条）；
+           * 3) 主预览 seek：与「导出标注帧」完全同一条画布路径，只要导出能用就一定能出图，
+           *    代价是画面会短暂跳到那一帧再跳回来。
            */
-          const previewThumbnail =
+          let dataUrl =
             preview == null
               ? null
-              : previewVideoEditMarkThumbnail(
-                  preview,
-                  next.mark,
-                  capture.crop,
-                  capture.size.width,
-                  capture.size.height,
-                );
-          const dataUrl =
-            previewThumbnail ??
-            (video == null
-              ? null
-              : await captureVideoEditFrameThumbnail(video, next.mark, {
-                  timeSeconds: next.mark.timeSeconds,
-                  crop: capture.crop,
-                  width: capture.size.width,
-                  height: capture.size.height,
-                }));
-          if (!mountedRef.current) break;
+              : previewVideoEditMarkThumbnail(preview, next.mark, job.crop, job.width, job.height);
+          if (dataUrl == null && background != null && backgroundAttemptsRef.current < 2) {
+            backgroundAttemptsRef.current += 1;
+            dataUrl = await captureVideoEditFrameThumbnail(background, next.mark, {
+              timeSeconds: next.mark.timeSeconds,
+              crop: job.crop,
+              width: job.width,
+              height: job.height,
+              waitMs: 1_500,
+            });
+            if (!mountedRef.current) break;
+          }
+          /*
+           * 第三条路（跳主预览）代价最大：画面会短暂跳到那一帧。因此只有在后台元素
+           * 真的试过并失败之后才动用它；后台元素都还没就绪时先等它 —— 那条路不打扰用户。
+           * 但它不能永久缺席：连续两次都不出图（WebView 不给不可见元素解码帧），
+           * 就接管过来，保证缩略图最终一定出得来。这一条只在后台元素真的存在时才可能触发，
+           * 因此元素尚未挂载/尚未就绪的阶段绝不会去动用户的画面。
+           */
+          const usePreviewSeek =
+            dataUrl == null && preview != null && backgroundAttemptsRef.current >= 2;
+          if (usePreviewSeek) {
+            dataUrl = await capturePreviewSeekThumbnail(
+              preview,
+              next.mark,
+              job.crop,
+              job.width,
+              job.height,
+              previewSeekingRef,
+            );
+            if (!mountedRef.current) break;
+          }
+          setCapturingKeys((previous) => {
+            if (!previous.has(next.key)) return previous;
+            const remaining = new Set(previous);
+            remaining.delete(next.key);
+            return remaining;
+          });
           if (dataUrl == null) {
-            // 取不到帧（源还没缓冲好、设备不支持）：记一次失败，本轮先跳过它，
+            // 三条路都取不到帧（源还没缓冲好、设备不支持）：记一次失败，本轮先跳过它，
             // 别让同一处标记卡住后面的标记，也不再永久放弃（换帧、加新标记都会重试）。
             failedRef.current.set(next.key, (failedRef.current.get(next.key) ?? 0) + 1);
             continue;
           }
           cacheRef.current.set(next.key, dataUrl);
+          failedRef.current.delete(next.key);
           setThumbnails(new Map(cacheRef.current));
         }
       } finally {
         pumpingRef.current = false;
       }
     })();
-  }, [captureSourceReady, captureVideo, items, previewVideoRef, sourceKey]);
+  }, [captureSourceReady, captureVideo, items, previewSeekingRef, previewVideoRef, sourceKey]);
 
   useEffect(() => {
     return () => {
@@ -212,7 +288,7 @@ function useVideoEditFrameThumbnails(
     setThumbnails(new Map());
   }, [sourceKey]);
 
-  return thumbnails;
+  return { thumbnails, capturingKeys };
 }
 
 export interface VideoLocalEditSource {
@@ -234,11 +310,20 @@ export interface VideoLocalEditResult {
   readonly sourceKey: string;
   readonly timeRange: { readonly startSeconds: number; readonly endSeconds: number } | null;
   /**
-   * 是否把标注帧上传到云端素材库，使其以 `asset://` 资产身份提交。
-   * 含真人的素材必须入库才可能通过平台隐私预检；不含真人时无必要，
-   * 因此默认关闭以免持续产生云端素材。
+   * 标注帧落盘后的身份：`path` 是本地文件，`target` 是它进入请求的方式。
+   * 入库成功时 `target` 是 `asset://` 资产身份（含真人的素材只有这样才能过平台隐私预检）；
+   * 未勾选入库或入库失败时是本地文件身份。
+   *
+   * 帧的保存与入库都由弹窗完成，因此调用方只需按这个身份接入节点，不必再走一次 I/O。
    */
-  readonly uploadFrameToLibrary: boolean;
+  readonly frame: {
+    readonly path: string;
+    readonly name: string;
+    readonly target: MediaReferenceTarget;
+    readonly uploadedToLibrary: boolean;
+    /** 标注帧（即原视频画面）的宽高比；调用方据此给产物卡片定尺寸，不必再读一次文件。 */
+    readonly aspectRatio: number;
+  };
   /**
    * 编辑要求里引用到的、不属于当前画面的标注时间读数（已格式化）。
    * 这些引用在提示词里带了时间读数、依然成立，但导出帧只画当前画面，
@@ -247,16 +332,41 @@ export interface VideoLocalEditResult {
   readonly offFrameReferenceTimes?: readonly string[] | undefined;
 }
 
+export interface VideoLocalEditFrameResolution {
+  /**
+   * 帧的提交身份。`canvasNodeKey` 在解析阶段只能是占位值 —— 真正的产物节点 key
+   * 由调用方在接入节点时才知道，必须由它覆写后再写入提示内容。
+   */
+  readonly target: MediaReferenceTarget;
+  readonly uploadedToLibrary: boolean;
+}
+
 export interface VideoLocalEditDialogProps {
   readonly source: VideoLocalEditSource;
   /** 当前生成节点已连接的媒体素材，供编辑要求 @ 引用（替换素材即来自这里）。 */
   readonly candidates: readonly PromptReferenceCandidate[];
   /** 是否已配置可用的云端素材库连接；不可用时隐藏上传选项。 */
   readonly canUploadToLibrary: boolean;
-  /** 标注帧入库与平台审核的实时进度文案；由调用方在提交期间驱动。 */
-  readonly progress?: string | null;
+  /**
+   * 把已落盘的标注帧解析成提交身份（入库为 `asset://` 资产，或退回本地文件）。
+   *
+   * 实现放在调用方（需要素材库连接等画布级信息），但**改由弹窗发起**：
+   * 入库失败时弹窗留在原地，让用户只重试入库这一步，而不是重新标注。
+   */
+  readonly resolveFrame: (request: {
+    readonly path: string;
+    readonly name: string;
+    readonly dataUrl: string;
+    /** 用户在弹窗里是否选择了入库；false 时只落本地文件，不产生云端素材。 */
+    readonly uploadToLibrary: boolean;
+    readonly onProgress: (label: string) => void;
+  }) => Promise<VideoLocalEditFrameResolution>;
   readonly onClose: () => void;
-  readonly onApply: (result: VideoLocalEditResult) => Promise<void>;
+  /**
+   * 接入生成节点。可以是同步实现：弹窗统一用 `await` 承接，失败（包括同步抛出）
+   * 一律表现为「弹窗留在原地 + 错误可见」，而不是把异常丢成未处理错误。
+   */
+  readonly onApply: (result: VideoLocalEditResult) => void | Promise<void>;
 }
 
 /** 编辑要求编辑器在弹窗私有提示内容模块中的固定键；与画布节点提示词互不干扰。 */
@@ -276,7 +386,7 @@ function VideoLocalEditDialogContent({
   source,
   candidates,
   canUploadToLibrary,
-  progress = null,
+  resolveFrame,
   onClose,
   onApply,
 }: VideoLocalEditDialogProps) {
@@ -287,7 +397,12 @@ function VideoLocalEditDialogContent({
   const draftRef = useRef<VideoEditMark | null>(null);
   const pointerRef = useRef<number | null>(null);
   const dragListenersRef = useRef<(() => void) | null>(null);
-  const submittingRef = useRef(false);
+  /*
+   * 提交中标记用 state 而不是 ref：Esc/取消的处理函数里要读它来决定是否允许关闭，
+   * 而渲染期间读 ref 会让「是否可关闭」这一步依赖不到最新的提交状态。
+   * 重入守卫另用一个同步局部标记（见 apply），避免同一次调用内读到自己刚写、还没生效的 state。
+   */
+  const [submitting, setSubmitting] = useState(false);
   // 编辑要求会话：标注引用的插入与失效清理都必须走它，才能与文档保持一致。
   const instructionSessionRef = useRef<PromptContentEditorSession | null>(null);
   const titleId = useId();
@@ -323,6 +438,20 @@ function VideoLocalEditDialogContent({
   // 漏勾会以匿名 URL 提交并直接被拒；确认片中没有真人时可手动关闭。
   const [uploadToLibrary, setUploadToLibrary] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  /*
+   * 标注帧的落盘与入库状态：
+   * - framePathRef：已经存过的本地文件。入库失败后重试只重跑入库，不重复导出/落盘；
+   * - frameImportFailed：入库失败。此时**不消耗**这次提交，弹窗留在原地等重试，
+   *   否则用户辛苦标的几处标注会随弹窗关闭一起丢掉。
+   */
+  const framePathRef = useRef<string | null>(null);
+  const [frameImportFailed, setFrameImportFailed] = useState(false);
+  const [frameProgress, setFrameProgress] = useState<string | null>(null);
+  const frameProgressRef = useRef<string | null>(null);
+  const setFrameProgressLabel = useCallback((label: string | null) => {
+    frameProgressRef.current = label;
+    setFrameProgress(label);
+  }, []);
   const [sourceError, setSourceError] = useState(false);
   const needsPreparation = source.target != null || isDesktopRuntime();
   const [previewSrc, setPreviewSrc] = useState<string | null>(needsPreparation ? null : source.src);
@@ -333,6 +462,11 @@ function VideoLocalEditDialogContent({
   const thumbnailLayerRef = useRef<HTMLDivElement | null>(null);
   const thumbnailLayerObserverRef = useRef<ResizeObserver | null>(null);
   const [viewportSize, setViewportSize] = useState({ width: 0, height: 0 });
+  /*
+   * 主预览正在被「取缩略图」内部跳动：这段时间里的 pause/seeked 不是用户操作，
+   * 不能拿来更新播放头、也不该闪加载遮罩。
+   */
+  const previewSeekingRef = useRef(false);
   // 取帧用的后台 video：只读源视频，不参与预览播放，因此不会打断用户的画面。
   // 元素放在 state 里（ref 回调只在引用变化时写入）：取帧循环需要等它挂载后才启动。
   const [captureVideo, setCaptureVideo] = useState<HTMLVideoElement | null>(null);
@@ -440,15 +574,6 @@ function VideoLocalEditDialogContent({
     () => currentFrame?.marks ?? [],
     [currentFrame],
   );
-  /**
-   * @ 候选与清单按钮共用的引用输入：全片所有标注都可引用，编号与画面上的序号一致。
-   * 描述里一律带帧时间，因此提示词不会把任何一处落到错误的画面上。
-   */
-  const markReferences = useMemo<readonly PromptMarkReferenceInput[]>(
-    () => marks.map((mark, index) => markReferenceInput(mark, index)),
-    [marks],
-  );
-  const markMentions = markReferences;
   const markReferencePresentation = useMemo(() => {
     const presentation = new Map<string, PromptMarkReferencePresentation>();
     const indexByMarkId = new Map(marks.map((mark, index) => [mark.id, index] as const));
@@ -480,7 +605,8 @@ function VideoLocalEditDialogContent({
       ? `标注只对它所标记的那一帧生效：请先回到 ${formatVideoEditTime(nearestMarkFrame.timeSeconds)} 再提交。`
       : null;
   // 编辑要求必须同时含正文：纯 @ 引用无法表达「改成什么、保持什么」，
-  // 与原先的纯文本输入框保持同一道门槛。
+  // 与原先的纯文本输入框保持同一道门槛。重复提交由 apply() 内部的重入守卫兜住，
+  // 这里不读 ref（渲染期间不得访问 ref）。
   const canApply =
     canDraw &&
     currentMarks.some(isVisibleVideoEditMark) &&
@@ -754,13 +880,47 @@ function VideoLocalEditDialogContent({
 
   async function apply() {
     const video = videoRef.current;
-    if (!video || !canApply || submittingRef.current) return;
-    submittingRef.current = true;
+    if (!video || !canApply || submitting) return;
+    const wantsLibrary = canUploadToLibrary && uploadToLibrary;
+    setSubmitting(true);
     setBusy(true);
     setError(null);
     dialogRef.current?.focus();
     try {
-      const imageDataUrl = exportVideoLocalEditFrame(video, currentMarks);
+      /*
+       * 落盘只在第一次做：入库失败后重试走的是同一个本地文件（画面逐像素一致），
+       * 既不用重新导出，也不会在磁盘上堆一串同内容的标注帧。
+       */
+      let path = framePathRef.current;
+      let imageDataUrl: string | null = null;
+      if (path == null) {
+        imageDataUrl = exportVideoLocalEditFrame(video, currentMarks);
+        path = (await saveVideoEditFrame(imageDataUrl)).path;
+        framePathRef.current = path;
+      }
+      const name = videoLocalEditFrameName(source.label, video.currentTime);
+      /*
+       * 入库失败时绝不当成提交成功：弹窗留在原地，让用户只重试入库这一步。
+       * 重试会命中已经校验过的本地文件，因此不用重新标注。
+       *
+       * 只有这一段失败才标记「已落盘、入库未完成」；后续接入节点的失败（素材断线、
+       * 模型未选等）是另一类问题，不该给出「重试入库」的按钮。
+       */
+      setFrameImportFailed(false);
+      if (wantsLibrary) setFrameProgressLabel("正在准备标注帧…");
+      let resolution: VideoLocalEditFrameResolution;
+      try {
+        resolution = await resolveFrame({
+          path,
+          name,
+          dataUrl: imageDataUrl ?? "",
+          uploadToLibrary: wantsLibrary,
+          onProgress: setFrameProgressLabel,
+        });
+      } catch (cause) {
+        setFrameImportFailed(true);
+        throw cause;
+      }
       // 快照而非读取缓存视图：提交瞬间也要拿到编辑器里最新的引用文档。
       const snapshot = instructionModule.snapshotAll(new Set([INSTRUCTION_EDITOR_KEY]))[
         INSTRUCTION_EDITOR_KEY
@@ -792,19 +952,28 @@ function VideoLocalEditDialogContent({
         )
         .map((mark) => formatVideoEditTime(mark.timeSeconds));
       await onApply({
-        imageDataUrl,
+        // 重试时不再重新导出：返回同一张已落盘标注帧的引用即可。
+        imageDataUrl: imageDataUrl ?? "",
         timeSeconds: video.currentTime,
         instructionDocument,
         operation,
         sourceKey: source.key,
         timeRange: rangeEnabled ? { startSeconds: rangeStart, endSeconds: rangeEnd } : null,
-        uploadFrameToLibrary: canUploadToLibrary && uploadToLibrary,
+        frame: {
+          path,
+          name,
+          target: resolution.target,
+          uploadedToLibrary: resolution.uploadedToLibrary,
+          aspectRatio: video.videoWidth / video.videoHeight,
+        },
         offFrameReferenceTimes,
       });
     } catch (cause) {
+      // 失败一律保留弹窗与全部标注；「已落盘但入库未完成」在入库那一步单独标记。
       setError(cause instanceof Error ? cause.message : "添加标注帧失败，请重试。");
     } finally {
-      submittingRef.current = false;
+      setFrameProgressLabel(null);
+      setSubmitting(false);
       setBusy(false);
     }
   }
@@ -817,12 +986,21 @@ function VideoLocalEditDialogContent({
   // 缩略图按整份清单生成：清单外的标记（正在拖拽的草稿）没有缩略图也没有编号。
   // 缓存键用标记 id（稳定身份）：删掉前面一处不会让后面所有缩略图重取。
   const markThumbnailItems = useMemo(() => marks.map((mark) => ({ key: mark.id, mark })), [marks]);
-  const frameThumbnails = useVideoEditFrameThumbnails(
+  const { thumbnails: frameThumbnails, capturingKeys } = useVideoEditFrameThumbnails(
     captureVideo,
     thumbnailSourceReady,
     sourceKeyForThumbnails,
     markThumbnailItems,
     videoRef,
+    previewSeekingRef,
+  );
+  /**
+   * @ 候选与清单按钮共用的引用输入：全片所有标注都可引用，编号与画面上的序号一致。
+   * 描述里一律带帧时间，因此提示词不会把任何一处落到错误的画面上；
+   * 已经取到帧的候选还会带上缩略图，让 @ 菜单里能直接看出「这一处标的是什么」。
+   */
+  const markReferences: readonly PromptMarkReferenceInput[] = marks.map((mark, index) =>
+    markReferenceInput(mark, index, frameThumbnails.get(mark.id)),
   );
   const markOrdinalByMarkId = useMemo(
     () => new Map(marks.map((mark, index) => [mark.id, index + 1] as const)),
@@ -863,7 +1041,7 @@ function VideoLocalEditDialogContent({
       aria-busy={busy}
       onCancel={(event) => {
         event.preventDefault();
-        if (!submittingRef.current) onClose();
+        if (!submitting) onClose();
       }}
       onKeyDown={(event) => {
         event.stopPropagation();
@@ -871,7 +1049,7 @@ function VideoLocalEditDialogContent({
           // 编辑要求编辑器已用 Escape 关闭自己的候选菜单或待确认项时，不连带关闭弹窗。
           if (event.defaultPrevented) return;
           event.preventDefault();
-          if (!submittingRef.current) onClose();
+          if (!submitting) onClose();
         }
         if (event.key === "Tab") {
           const controls = Array.from(
@@ -942,15 +1120,23 @@ function VideoLocalEditDialogContent({
               setSourceError(false);
             }}
             onDurationChange={(event) => updateMetadata(event.currentTarget)}
-            onSeeking={() => setSeeking(true)}
+            onSeeking={() => {
+              // 内部取缩略图引发的跳帧不该闪「正在定位画面…」。
+              if (!previewSeekingRef.current) setSeeking(true);
+            }}
             onSeeked={(event) => {
+              if (previewSeekingRef.current) return;
               setTime(event.currentTarget.currentTime);
               setSeeking(false);
               setReady(event.currentTarget.readyState >= 2);
             }}
-            onTimeUpdate={(event) => setTime(event.currentTarget.currentTime)}
+            onTimeUpdate={(event) => {
+              if (previewSeekingRef.current) return;
+              setTime(event.currentTarget.currentTime);
+            }}
             onPlay={() => setPlaying(true)}
             onPause={(event) => {
+              if (previewSeekingRef.current) return;
               setPlaying(false);
               // 暂停时按元素真实时间校正：timeupdate 的读数可能落后一帧。
               setTime(event.currentTarget.currentTime);
@@ -1023,7 +1209,12 @@ function VideoLocalEditDialogContent({
                   const badge = videoEditMarkBadge(mark, dimensions.width, dimensions.height);
                   if (badge == null) return null;
                   return (
-                    <g key={`ordinal-${mark.id}`} aria-hidden="true">
+                    <g
+                      key={`ordinal-${mark.id}`}
+                      aria-hidden="true"
+                      /* 正在取这一帧的缩略图：圆圈先淡出，取到后整体让位给缩略图。 */
+                      opacity={capturingKeys.has(mark.id) ? 0.45 : 1}
+                    >
                       <circle
                         cx={badge.x}
                         cy={badge.y}
@@ -1340,7 +1531,7 @@ function VideoLocalEditDialogContent({
             <PromptMentionInput
               nodeKey={INSTRUCTION_EDITOR_KEY}
               candidates={candidates}
-              annotationMentions={markMentions}
+              annotationMentions={markReferences}
               registerInput={registerInstructionInput}
               labelledBy={instructionLabelId}
               describedBy={instructionHintId}
@@ -1455,9 +1646,11 @@ function VideoLocalEditDialogContent({
       />
       <footer className="video-local-edit-dialog__footer">
         <p>
-          {busy && progress
-            ? progress
-            : (applyDisabledReason ?? "标注帧与编辑要求将添加到当前视频生成节点。")}
+          {busy
+            ? (frameProgress ?? "正在添加标注帧…")
+            : frameImportFailed
+              ? "标注帧已存到本地，但没有完成入库。修正后可直接重试；若只是想让任务先跑起来，也可以取消勾选上面的入库选项。"
+              : (applyDisabledReason ?? "标注帧与编辑要求将添加到当前视频生成节点。")}
         </p>
         <button type="button" onClick={onClose} disabled={busy}>
           取消
@@ -1468,7 +1661,7 @@ function VideoLocalEditDialogContent({
           disabled={!canApply}
           onClick={() => void apply()}
         >
-          {busy ? "正在添加标注帧…" : "添加到生成节点"}
+          {busy ? "正在添加标注帧…" : frameImportFailed ? "重试入库并添加" : "添加到生成节点"}
         </button>
       </footer>
     </dialog>,

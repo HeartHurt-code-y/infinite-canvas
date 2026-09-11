@@ -129,15 +129,18 @@
 }
 /*
  * 取帧用的后台 video：不显示，只为标注缩略图读取「那一帧」。
- * 故意保留一个正常的渲染盒（16rem×9rem）再移出可视区：WebKit 会为不可见或
- * 尺寸退化（1×1）的元素跳过视频解码，那样 drawImage 永远抓不到画面。
+ *
+ * 关键是让它和主预览**占同一个渲染盒**：WebKit 会为完全移出可视区、或尺寸退化
+ * （1×1、display:none）的元素跳过视频解码，那样 seek 永远等不到、drawImage 也抓不到
+ * 画面。铺在主预览同一位置 + opacity:0 是「不可见但仍在渲染」的可靠写法。
  */
 .video-local-edit-dialog__capture-source {
   position: absolute;
-  left: -10000px;
-  top: 0;
-  width: 16rem;
-  height: 9rem;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  opacity: 0;
   pointer-events: none;
 }
 .video-local-edit-dialog__loading {

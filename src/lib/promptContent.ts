@@ -116,6 +116,11 @@ export interface PromptMarkReferenceInput {
   readonly label: string;
   readonly description: string;
   readonly color: string;
+  /**
+   * 该标记所在画面的缩略图（data URL），仅用于让 @ 候选看得见「这一处标的是什么」。
+   * 取帧是异步的，因此可能缺省；缺省时候选退回标记色占位框。
+   */
+  readonly thumbnail?: string | undefined;
 }
 
 /** 标注引用展开为提示词正文的统一写法。 */

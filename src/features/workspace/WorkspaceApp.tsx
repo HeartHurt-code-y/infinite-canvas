@@ -151,13 +151,13 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
-import {
-  appendVideoLocalEditPrompt,
-  resolveVideoEditFrameTarget,
-  saveVideoEditFrame,
-} from "../../lib/videoLocalEdit";
+import { appendVideoLocalEditPrompt, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
-import type { VideoLocalEditResult, VideoLocalEditSource } from "./VideoLocalEditDialog";
+import type {
+  VideoLocalEditFrameResolution,
+  VideoLocalEditResult,
+  VideoLocalEditSource,
+} from "./VideoLocalEditDialog";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import {
   workflowCanvasInputsFromResolved,
@@ -524,8 +524,6 @@ export function WorkspaceApp({
     readonly source: VideoLocalEditSource;
     readonly input: GenerationMediaInput;
   } | null>(null);
-  /** 标注帧入库与平台审核的实时进度文案；仅弹窗存活期间有意义。 */
-  const [videoEditProgress, setVideoEditProgress] = useState<string | null>(null);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -4153,10 +4151,9 @@ export function WorkspaceApp({
   );
 
   const applyVideoLocalEdit = useCallback(
-    async (edit: VideoLocalEditResult) => {
+    (edit: VideoLocalEditResult) => {
       if (!videoLocalEdit || edit.sourceKey !== videoLocalEdit.input.key)
         throw new Error("待编辑视频已变化，请重新打开标注。");
-      const saved = await saveVideoEditFrame(edit.imageDataUrl);
       // Read the live graph after disk I/O: never bind a late annotation to a removed/replaced source.
       const current = snapshotV2({});
       const target = current.genNodes.find((node) => node.key === videoLocalEdit.nodeKey);
@@ -4192,31 +4189,15 @@ export function WorkspaceApp({
         selection.model.remoteModelId,
       );
       const key = outputNodeKey();
-      const name = `${source.name} · ${edit.timeSeconds.toFixed(3)}s 标注`;
-      // 标注帧默认只落本地文件；勾选后才入库，使其以平台可校验的资产身份提交。
-      // 直接提交对象存储匿名 URL 的真人素材会被输入素材隐私预检拒绝。
-      const frameTarget = edit.uploadFrameToLibrary
-        ? await resolveVideoEditFrameTarget({
-            path: saved.path,
-            name,
-            canvasNodeKey: key,
-            providerConnectionId: assetProvider?.id ?? null,
-            onProgress: setVideoEditProgress,
-          })
-        : {
-            uploadedToLibrary: false,
-            target: {
-              kind: "local_file" as const,
-              path: saved.path,
-              canvasNodeKey: key,
-              mediaType: "image" as const,
-            },
-          };
+      const name = edit.frame.name;
+      // 帧的保存与入库都在弹窗里完成：这里只按它给的身份接入节点，不再做磁盘 I/O。
+      // canvasNodeKey 必须改成这个产物节点自己的 key：解析阶段还不知道最终 key，
+      // 提示内容里的引用身份必须与节点身份一致，否则存档会因为目标身份不匹配被拒。
       const frame = {
         key,
         name,
         kind: "image" as const,
-        target: frameTarget.target,
+        target: { ...edit.frame.target, canvasNodeKey: key },
       };
       const nextConfig = selectSeedanceTask(
         selection.model.remoteModelId,
@@ -4250,9 +4231,9 @@ export function WorkspaceApp({
               taskId: `video-edit-${key}`,
               mediaType: "image",
               origin: "video_edit",
-              finalPath: saved.path,
+              finalPath: edit.frame.path,
               name,
-              aspectRatio: saved.width / saved.height,
+              aspectRatio: edit.frame.aspectRatio,
               x: target.x - 360,
               y: target.y + inputs.length * 24,
             },
@@ -4264,24 +4245,16 @@ export function WorkspaceApp({
       updateVideoNodeConfig(target.key, nextConfig);
       promptContents.restoreDocument(target.key, document);
       setNodeStartError(target.key, null);
-      setVideoEditProgress(null);
       setVideoLocalEdit(null);
       if (edit.offFrameReferenceTimes != null && edit.offFrameReferenceTimes.length > 0) {
         toast.info("编辑要求引用了其它画面的标注", {
           description: `提示词已写明它是视频 ${edit.offFrameReferenceTimes.join("、")} 处的区域，但标注帧只画出了当前画面。如需画面里的定位线，请回到该时间点再添加一次标注帧。`,
         });
       }
-      if (edit.uploadFrameToLibrary && !frameTarget.uploadedToLibrary) {
-        toast.info("局部编辑已添加，但标注帧未入库", {
-          description:
-            "标注帧仍以本地文件提交。含真人的素材可能被平台拒绝，请检查对象存储配置与素材审核状态后重试。",
-        });
-        return;
-      }
       toast.success("局部编辑已添加到输入框", {
-        description: frameTarget.uploadedToLibrary
+        description: edit.frame.uploadedToLibrary
           ? "标注帧已上传云端素材库，将以资产身份提交，可检查提示词后开始生成。"
-          : "已连接标注帧并锁定编辑参数，可检查提示词后开始生成。",
+          : "标注帧以本地文件身份提交（未入库）。含真人的素材可能被平台拒绝，可在弹窗里勾选入库后重试。",
       });
     },
     [
@@ -4292,8 +4265,51 @@ export function WorkspaceApp({
       insertSubgraph,
       updateVideoNodeConfig,
       setNodeStartError,
-      assetProvider,
     ],
+  );
+
+  /**
+   * 把弹窗落盘的标注帧解析成提交身份：勾选入库时优先走云端素材库。
+   *
+   * 它是弹窗的回调而不是弹窗的前置步骤：入库失败时要让弹窗留在原地重试，
+   * 用户不必重新标注一遍。未勾选入库时只落本地文件，不产生云端素材。
+   */
+  const resolveVideoLocalEditFrame = useCallback(
+    async ({
+      path,
+      name,
+      uploadToLibrary,
+      onProgress,
+    }: {
+      readonly path: string;
+      readonly name: string;
+      readonly dataUrl: string;
+      readonly uploadToLibrary: boolean;
+      readonly onProgress: (label: string) => void;
+    }): Promise<VideoLocalEditFrameResolution> => {
+      // 未配置素材库连接或用户取消勾选：直接以本地文件身份提交。
+      // 这里的 canvasNodeKey 只是占位：真正的产物节点 key 在接入时才知道，
+      // 提交前会由 applyVideoLocalEdit 覆写为节点自己的 key。
+      if (!uploadToLibrary || assetProvider == null) {
+        return {
+          uploadedToLibrary: false,
+          target: {
+            kind: "local_file",
+            path,
+            canvasNodeKey: "",
+            mediaType: "image",
+          },
+        };
+      }
+      return resolveVideoEditFrameTarget({
+        path,
+        name,
+        canvasNodeKey: "",
+        providerConnectionId: assetProvider.id,
+        onProgress,
+      });
+    },
+    [assetProvider],
   );
 
   /** 以视口中心为锚点缩放到目标百分比（键盘与缩放按钮共用），落点由 onMoveEnd 同步回 store。 */
@@ -8453,7 +8469,7 @@ export function WorkspaceApp({
             source={videoLocalEdit.source}
             candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
             canUploadToLibrary={assetProvider != null}
-            progress={videoEditProgress}
+            resolveFrame={resolveVideoLocalEditFrame}
             onClose={() => setVideoLocalEdit(null)}
             onApply={applyVideoLocalEdit}
           />

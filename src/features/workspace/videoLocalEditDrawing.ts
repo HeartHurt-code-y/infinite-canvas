@@ -498,6 +498,48 @@ function seekVideoElementToFrame(
   });
 }
 
+/**
+ * 用主预览取一处标记的缩略图：先 seek 到它所属的那一帧，裁完立刻跳回原位。
+ *
+ * 这是后台取帧元素的最后兜底。主预览就是用户此刻正在看的画面，导出标注帧早已证明它
+ * 可读可画；后台元素在部分 WebView 里会因为不可见而拿不到解码帧（seek 超时或画不出内容）。
+ *
+ * 代价是画面会短暂跳到被取帧的那一屏，所以：
+ * - 取完立刻 seek 回原位（不经过 React 状态，标注与播放头都不动）；
+ * - 调用方先用 isInternalSeek 置位，让暂停/seeked 回调不要把这次内部跳转当成用户换帧；
+ * - 只有 alreadyAtTargetFrame 会把「当前就停在这一帧」也算作可用，避免白跳一次。
+ */
+export async function capturePreviewSeekFrame(
+  preview: HTMLVideoElement,
+  mark: VideoEditMark,
+  crop: VideoEditMarkThumbnailArea,
+  width: number,
+  height: number,
+  options: {
+    readonly alreadyAtTargetFrame: boolean;
+    readonly waitMs?: number;
+  },
+): Promise<string | null> {
+  const waitMs = options.waitMs ?? 3_000;
+  const restoreTime = preview.currentTime;
+  const wasPlaying = !preview.paused;
+  if (wasPlaying) preview.pause();
+  try {
+    if (!options.alreadyAtTargetFrame) {
+      if (!(await seekVideoElementToFrame(preview, mark.timeSeconds, waitMs))) return null;
+    }
+    return previewVideoEditMarkThumbnail(preview, mark, crop, width, height);
+  } finally {
+    if (options.alreadyAtTargetFrame) {
+      if (wasPlaying) void preview.play().catch(() => undefined);
+    } else {
+      // 恢复用户原来停留的那一帧；不恢复播放状态会让「取缩略图」变成一次意外暂停。
+      await seekVideoElementToFrame(preview, restoreTime, waitMs);
+      if (wasPlaying) void preview.play().catch(() => undefined);
+    }
+  }
+}
+
 /** 把一帧画面按标记区域裁成缩略图；标记本身会被重画一遍（不含序号）。 */
 function encodeVideoEditMarkThumbnail(
   video: HTMLVideoElement,
