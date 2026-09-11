@@ -666,8 +666,10 @@ mod tests {
 
     #[test]
     fn extracts_stem_without_extension() {
+        // 用 `/` 分隔的相对路径：Windows 与 Unix 都把它当分隔符，
+        // 避免 Windows 反斜杠字面量在 Linux CI 上被当成普通字符、导致断言拿到整条路径。
         assert_eq!(
-            video_stem(Path::new("C:\\视频\\标题 [BV123].mp4")),
+            video_stem(Path::new("视频/标题 [BV123].mp4")),
             "标题 [BV123]"
         );
         assert_eq!(video_stem(Path::new("clip.mp4")), "clip");

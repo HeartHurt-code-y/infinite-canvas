@@ -1,0 +1,496 @@
+
+
+===== PAGE 1 =====
+API接⼊
+视频⽣成接⼝
+鉴权
+所有视频接⼝都需要APIKey，通过Header传递：
+代码块
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+APIKey在⾯板「令牌」⻚⾯创建，受⽤⼾额度、分组、模型限制约束。此外：
+•
+/v1/videos/{task_id}/content 同时接受⾯板会话（Cookie）与APIKey，便于浏览器
+直接播放；其余接⼝只接受APIKey。
+•
+请求会经过分组路由与渠道分发，报「⽆可⽤渠道」时请检查令牌分组与渠道配置。
+端点⼀览
+⽅法 路径 说明
+POST /v1/video/generations  提交视频⽣成任务（new-api通⽤
+⼊⼝）
+GET /v1/video/generations/{tas
+k_id} 
+查询任务状态与结果（通⽤
+TaskDto 格式）
+POST /v1/videos  提交视频⽣成任务（OpenAI
+VideosAPI兼容⼊⼝）
+GET /v1/videos/{task_id}  查询任务（ OpenAIVideo 格式）
+GET /v1/videos/{task_id}/conte
+nt 
+下载任务产出的视频内容（流式返
+回）
+POST /v1/videos/{video_id}/remi
+x 
+基于已有视频再⽣成新视频
+1
+
+===== PAGE 2 =====
+POST /v1/video/generations 与 POST /v1/videos ⾛的是同⼀条任务提交链路，请求体
+字段⼀致，区别只在提交响应的组织⽅式（⻅下⽂）。
+提交任务
+代码块
+POST /v1/video/generations 
+POST /v1/videos 
+Content-Type: application/json 
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+请求体字段：
+字段 类型 必填 说明
+model  string 是 模型名，决定渠道路由与
+计费
+prompt  string 是 视频内容描述；图⽣视频
+场景下描述期望的动作/
+变化
+mode  string 否 ⽣成模式，如
+text2video 、
+image2video ，由渠道
+适配器识别
+image  string|string[] 否 参考图：URL、base64
+dataURI，或图⽚数组
+（⾸尾帧、多图参考场
+景）
+images  string[] 否 参考图数组，与 image 
+等价的多图写法
+size  string 否 输出尺⼨，如
+1280x720 
+resolution  string 否 分辨率档位，如
+480p 、 720p 、
+1080p 、 4k ；参与计
+费⽐率
+1
+2
+3
+4
+
+===== PAGE 3 =====
+aspect_ratio  string 否 画⾯⽐例，如 16:9 、
+9:16 、 1:1 
+duration  integer 否 时⻓（秒），上限
+3600 ，参与计费⽐率
+seconds  string 否 OpenAI⻛格的时⻓字符
+串（如
+"4" 、 "8" ），与
+duration ⼆选⼀
+input_reference  string 否 OpenAI兼容的参考输⼊
+metadata  object 否 渠道附加参数（如
+seed 、 watermark 、
+镜头控制等），透传给渠
+道适配器
+字段解析规则：
+•
+image 同时兼容字符串与数组。传数组时，⾸个元素作为主参考图，同时保留全部图⽚，保证只
+读单图的适配器不丢图。
+•
+duration 与 seconds 表达同⼀维度；同时传⼊时以渠道适配器的取值为准。
+•
+校验失败⼀律返回400，例如时⻓超限会返回 invalid_seconds （ seconds must be 
+between 1 and 3600 ）。
+•
+部分渠道（如阿⾥云wan系列）额外⽀持 multipart/form-data 表单提交，字段名与
+JSON⼀致；常规调⽤使⽤JSON即可。
+⽰例：⽂⽣视频
+代码块
+curl -X POST "https://aiapis.panqu.com/v1/video/generations" \ 
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxx" \ 
+  -H "Content-Type: application/json" \ 
+  -d '{ 
+    "model": "doubao-seedance-1-0-pro", 
+    "prompt": " ⼀只柯基⽝在沙滩上奔跑，⼣阳，镜头跟随 ", 
+    "resolution": "1080p", 
+    "aspect_ratio": "16:9", 
+    "duration": 5 
+  }' 
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+
+===== PAGE 4 =====
+⽰例：图⽣视频（⾸帧驱动）
+代码块
+curl -X POST "https://aiapis.panqu.com/v1/video/generations" \ 
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxx" \ 
+  -H "Content-Type: application/json" \ 
+  -d '{ 
+    "model": "doubao-seedance-1-0-pro", 
+    "prompt": " 镜头缓慢推近，⼈物微笑 ", 
+    "images": ["https://example.com/first-frame.png"], 
+    "resolution": "720p", 
+    "duration": 5 
+  }' 
+⽰例：OpenAIVideosAPI兼容写法
+代码块
+curl -X POST "https://aiapis.panqu.com/v1/videos" \ 
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxx" \ 
+  -H "Content-Type: application/json" \ 
+  -d '{ 
+    "model": "sora-2", 
+    "prompt": "A paper airplane gliding over a city at dusk", 
+    "seconds": "4", 
+    "size": "1280x720" 
+  }' 
+提交响应
+提交链路会先做渠道限流检查、素材加⽩、模型映射与预扣费，全部通过后才向上游发起请求。
+•
+成功：HTTP 2xx 。响应体由具体渠道适配器⽣成；绝⼤多数渠道返回OpenAI⻛格的视频对象，
+其中 id 就是⽤于后续轮询的任务ID（new-api公开任务ID），上游真实任务ID放在
+metadata.upstream_task_id 。少部分渠道透传上游原始响应体，此时请以响应中的任务
+ID字段为准。
+•
+响应头： X-New-Api-Other-Ratios 返回本次任务⽣效的计费⽐率JSON，例如
+{"duration":2,"resolution":1.5} ，便于对账。
+•
+失败：返回统⼀任务错误结构（⻅「错误响应」），并⾃动退还预扣费⽤。
+OpenAI兼容格式的提交响应⽰例：
+代码块
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+1
+2
+3
+4
+5
+6
+7
+8
+9
+
+===== PAGE 5 =====
+{ 
+  "id": "task_20260101_abcdef", 
+  "task_id": "task_20260101_abcdef", 
+  "object": "video", 
+  "model": "sora-2", 
+  "status": "queued", 
+  "progress": 0, 
+  "created_at": 1767225600, 
+  "seconds": "4", 
+  "size": "1280x720", 
+  "metadata": { 
+    "upstream_task_id": "cgt-2026xxxx-xxxx" 
+  } 
+} 
+查询任务（通⽤格式）
+代码块
+GET /v1/video/generations/{task_id} 
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+{task_id} 使⽤提交响应返回的公开任务ID。响应为统⼀包装：
+代码块
+{ 
+  "code": "success", 
+  "message": "", 
+  "data": { 
+    "id": 1234, 
+    "task_id": "task_20260101_abcdef", 
+    "upstream_task_id": "cgt-2026xxxx-xxxx", 
+    "platform": "< 渠道平台标识 >", 
+    "model_name": "doubao-seedance-1-0-pro", 
+    "status": "IN_PROGRESS", 
+    "progress": "45%", 
+    "quota": 120000, 
+    "action": "", 
+    "fail_reason": "", 
+    "result_url": "", 
+    "submit_time": 1767225600, 
+    "start_time": 1767225602, 
+    "finish_time": 0, 
+    "created_at": 1767225600, 
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+1
+2
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+18
+19
+
+===== PAGE 6 =====
+    "updated_at": 1767225610, 
+    "data": {} 
+  } 
+} 
+data 字段说明：
+字段 类型 说明
+id  integer 任务记录主键
+task_id  string new-api公开任务ID，⽤于轮询与
+内容下载
+upstream_task_id  string 上游真实任务ID（如⽕⼭ cgt-
+xxxx ），便于与上游对账
+platform  string 任务所属渠道平台标识（渠道类型
+编码或平台名，如 suno ）
+model_name  string 实际调⽤的模型名
+status  string 任务状态，⻅下表
+progress  string 进度，如 "45%" ，部分渠道为空
+quota  integer 该任务消耗的额度
+action  string 任务动作，如remix场景下的动作
+标识
+fail_reason  string 失败原因，成功时为空
+result_url  string 结果地址（视频/图⽚URL），任
+务成功且渠道直接给出地址时填充
+submit_time / start_time /
+finish_time 
+integer 提交、开始、完成时间（Unix
+秒），未发⽣为0
+created_at / updated_at  integer 记录创建与更新时间（Unix秒）
+data  object 渠道原始响应数据，随渠道⽽异
+任务状态取⾃服务端任务表，部分渠道会在返回前做⼀次状态映射：
+状态 含义 客⼾端动作
+20
+21
+22
+23
+
+===== PAGE 7 =====
+NOT_START  尚未开始 继续轮询
+SUBMITTED  已提交上游 继续轮询
+QUEUED  上游排队中 继续轮询
+IN_PROGRESS  ⽣成中 继续轮询
+SUCCESS  ⽣成成功 取结果
+FAILURE  ⽣成失败 停⽌轮询，读 fail_reason 
+UNKNOWN  状态未知 继续轮询，注意超时上限
+Gemini/Vertex等渠道在查询时会向上游实时拉取最新状态并回写任务记录，因此同⼀任务多次查询
+的 status 与 progress 会随之推进。
+查询任务（OpenAI兼容格式）
+代码块
+GET /v1/videos/{task_id} 
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+响应对⻬OpenAIVideosAPI：
+代码块
+{ 
+  "id": "task_20260101_abcdef", 
+  "task_id": "task_20260101_abcdef", 
+  "object": "video", 
+  "model": "sora-2", 
+  "status": "completed", 
+  "progress": 100, 
+  "created_at": 1767225600, 
+  "completed_at": 1767225740, 
+  "expires_at": 1767312000, 
+  "seconds": "4", 
+  "size": "1280x720", 
+  "remixed_from_video_id": "", 
+  "error": null, 
+  "metadata": { 
+    "upstream_task_id": "cgt-2026xxxx-xxxx" 
+  } 
+1
+2
+1
+2
+3
+4
+5
+6
+7
+8
+9
+10
+11
+12
+13
+14
+15
+16
+17
+
+===== PAGE 8 =====
+} 
+字段 类型 说明
+id  string 任务ID
+task_id  string 与 id 相同，兼容旧接⼝保留，后
+续可能废弃
+object  string 固定为 video 
+model  string 模型名
+status  string queued 、 in_progress 、
+completed 、 failed 
+progress  integer 进度百分⽐， 0 ‒ 100 
+created_at  integer 创建时间（Unix秒）
+completed_at  integer 完成时间（Unix秒），未完成为0
+expires_at  integer 结果过期时间（Unix秒），未设置
+时不返回
+seconds  string 时⻓
+size  string 尺⼨
+remixed_from_video_id  string remix来源视频ID，⾮remix任务
+不返回
+error  object 失败信息 { "message": 
+"...", "code": "..." } ，成
+功时为 null 
+metadata  object 附加信息，包含
+upstream_task_id 
+状态取值： queued （排队）→ in_progress （⽣成中）→ completed （成功）/ failed
+（失败）。
+下载视频内容
+代码块
+18
+
+===== PAGE 9 =====
+GET /v1/videos/{task_id}/content 
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+任务成功时，服务端会代取上游视频并以流式⽅式返回（不缓存到本地磁盘），适合直接嵌⼊播放
+器。视频地址本⾝通常有有效期（例如24⼩时），建议⽣成后及时转存。
+错误响应使⽤OpenAI⻛格：
+代码块
+{ 
+  "error": { 
+    "message": "Task is not completed yet, current status: IN_PROGRESS", 
+    "type": "invalid_request_error" 
+  } 
+} 
+状态码 type  场景
+400 invalid_request_error  task_id 缺失，或任务尚未成功
+403 server_error  上游地址被SSRF/域名⽩名单策略
+拦截
+404 invalid_request_error  任务不存在或不属于当前⽤⼾
+500 server_error  查询任务或渠道信息失败
+502 server_error  ⽆法从上游取回视频内容
+视频再⽣成（remix）
+代码块
+POST /v1/videos/{video_id}/remix 
+Authorization: Bearer sk-xxxxxxxxxxxxxxxx 
+Content-Type: application/json 
+{video_id} 为已有视频的任务ID；请求体字段与提交任务相同（通常只需要 prompt ）。服务
+端会找到原任务、继承其模型与计费维度（时⻓、分辨率），并把渠道锁定到原任务使⽤的渠道，避
+免跨渠道⻛格漂移。
+代码块
+1
+2
+1
+2
+3
+4
+5
+6
+1
+2
+3
+
+===== PAGE 10 =====
+curl -X POST "https://aiapis.panqu.com/v1/videos/task_20260101_abcdef/remix" \ 
+  -H "Authorization: Bearer sk-xxxxxxxxxxxxxxxx" \ 
+  -H "Content-Type: application/json" \ 
+  -d '{"prompt": " 把场景切换到夜晚，霓虹灯 "}'  
+返回结构与提交任务⼀致，新任务的 remixed_from_video_id 会指向 {video_id} 。
+错误响应
+任务接⼝失败时返回统⼀结构：
+代码块
+{ 
+  "code": "invalid_seconds", 
+  "message": "seconds must be between 1 and 3600", 
+  "data": null 
+} 
+状态码 典型 code  场景
+400 invalid_request /
+invalid_seconds /
+task_not_exist /
+invalid_api_platform /
+model_mapping_failed /
+model_price_error 
+参数⾮法、任务不存在、模型⽆对
+应渠道平台或未配置价格
+401 — APIKey⽆效或未携带
+404 — 路径不存在（ Invalid URL 
+(POST /v1/...) ）
+429 channel_task_limit  渠道速率/并发超限；重试候选耗尽
+后返回该错误， message 会改写
+为「当前分组上游负载已饱和，请
+稍后再试」
+500 build_request_failed /
+do_request_failed /
+read_response_body_failed 
+/ asset_whitelist_failed 
+请求构造、上游请求发送、响应解
+析或素材加⽩失败
+上游返回码 fail_to_fetch_task  上游返回⾮2xx；HTTP状态码沿
+⽤上游返回码， message 为上游
+1
+2
+3
+4
+1
+2
+3
+4
+5
+
+===== PAGE 11 =====
+原始响应体
+提交失败（含⾮2xx上游响应）不会产⽣扣费，预扣额度会⾃动退回。
+计费与限额
+•
+视频任务按「模型单价×计费⽐率」预扣费⽤，结算后差额⾃动多退少补。
+•
+参与⽐率的维度包括时⻓（ duration / seconds ）、分辨率（ resolution / size ）、
+画⾯⽐例等，各渠道适配器按⾃⾝语义估算；提交与查询响应中的 quota 为最终消耗。
+•
+时⻓上限3600秒，超限请求在提交前即被拒绝，避免出现异常计费。
+•
+提交响应头 X-New-Api-Other-Ratios 给出本次任务实际⽣效的⽐率，可⽤于对账。
+•
+不同渠道的计费单位不同，实际价格由⾯板「模型价格」与⽤⼾分组倍率决定。
+轮询建议
+1. 提交任务后，以 GET /v1/video/generations/{task_id} （或 GET 
+/v1/videos/{task_id} ）轮询。
+2. ⾸次轮询建议间隔2‒5秒，之后逐步退避；视频⽣成通常需要数⼗秒到数分钟。
+3. 状态为 QUEUED / SUBMITTED / IN_PROGRESS （或OpenAI格式的 queued /
+in_progress ）时继续轮询。
+4. 状态为 SUCCESS / completed 时，从 result_url 取地址，或直接请求
+/v1/videos/{task_id}/content 。
+5. 状态为 FAILURE / failed 时停⽌轮询并读取 fail_reason / error.message 。
+6. 建议设置总轮询上限（例如10分钟），超时后停⽌并记录任务ID以便⼈⼯排查。
+⽀持的渠道平台
+服务端已实现以下视频/任务平台适配（以实际启⽤的渠道为准），下列名称为适配器标识（对应
+relay/channel/task/ 下的适配器⽬录）：
+ali （阿⾥云百炼wan系列）、 doubao （⽕⼭⽅⾈，渠道名 doubao-video ）、 gemini 、
+vertex 、 sora 、 kling 、 jimeng 、 hailuo （MiniMax）、 vidu 、 runninghub 、
+yike 、 xyq 、 pangemini 、 talkingdata 、 suno （⾳乐）。
+各渠道在请求字段⽀持度、返回体结构、结果地址有效期上存在差异；同⼀渠道的返回体结构保持稳
+定，跨渠道迁移时请以本⽂档描述的通⽤字段为准。
