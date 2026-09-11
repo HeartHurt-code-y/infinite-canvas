@@ -39,6 +39,8 @@ function renderDialog(
     readonly onClose?: () => void;
     /** 覆盖提交实现（默认立即成功），返回值仍是可直接断言的 mock。 */
     readonly onApplyImpl?: () => Promise<void>;
+    /** 云端素材库连接是否可用；不可用时弹窗不渲染上传选项。 */
+    readonly canUploadToLibrary?: boolean;
   } = {},
 ) {
   const onApply = vi.fn<(result: VideoLocalEditResult) => Promise<void>>(
@@ -49,6 +51,7 @@ function renderDialog(
     <VideoLocalEditDialog
       source={options.source ?? source}
       candidates={options.candidates ?? []}
+      canUploadToLibrary={options.canUploadToLibrary ?? false}
       onClose={onClose}
       onApply={onApply}
     />,
@@ -160,6 +163,7 @@ describe("VideoLocalEditDialog", () => {
       instructionDocument: instruction("消除圈出的路人，保留桌子"),
       operation: "remove",
       timeRange: null,
+      uploadFrameToLibrary: false,
     });
     expect(exportVideoLocalEditFrame).toHaveBeenCalledWith(video, [
       {
@@ -227,6 +231,7 @@ describe("VideoLocalEditDialog", () => {
       <VideoLocalEditDialog
         source={{ ...source, target: { ...target, assetId: "new" } }}
         candidates={[]}
+        canUploadToLibrary={false}
         onClose={vi.fn()}
         onApply={vi.fn()}
       />,
@@ -423,6 +428,38 @@ describe("VideoLocalEditDialog", () => {
     ]);
   });
 
+  it("hides the library upload option when no asset library connection is configured", () => {
+    renderDialog({ canUploadToLibrary: false });
+    loadVideo();
+    expect(
+      screen.queryByRole("checkbox", { name: /上传标注帧到云端素材库/ }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("requests the library upload by default so real-person frames keep a verifiable origin", async () => {
+    const user = userEvent.setup();
+    const { onApply } = renderDialog({ canUploadToLibrary: true });
+    loadVideo();
+    drawRectangle();
+    await user.type(screen.getByRole("textbox"), "消除路人");
+    expect(screen.getByRole("checkbox", { name: /上传标注帧到云端素材库/ })).toBeChecked();
+    await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    expect(onApply.mock.calls[0]![0].uploadFrameToLibrary).toBe(true);
+  });
+
+  it("skips the library upload when the option is unchecked", async () => {
+    const user = userEvent.setup();
+    const { onApply } = renderDialog({ canUploadToLibrary: true });
+    loadVideo();
+    drawRectangle();
+    await user.type(screen.getByRole("textbox"), "消除路人");
+    await user.click(screen.getByRole("checkbox", { name: /上传标注帧到云端素材库/ }));
+    await user.click(screen.getByRole("button", { name: "添加到生成节点" }));
+    await waitFor(() => expect(onApply).toHaveBeenCalledOnce());
+    expect(onApply.mock.calls[0]![0].uploadFrameToLibrary).toBe(false);
+  });
+
   it("traps keyboard focus, isolates canvas shortcuts, and resets marks when the video identity changes", async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -430,7 +467,13 @@ describe("VideoLocalEditDialog", () => {
     const onApply = vi.fn();
     const { rerender } = render(
       <div onKeyDown={shortcut}>
-        <VideoLocalEditDialog source={source} candidates={[]} onClose={onClose} onApply={onApply} />
+        <VideoLocalEditDialog
+          source={source}
+          candidates={[]}
+          canUploadToLibrary={false}
+          onClose={onClose}
+          onApply={onApply}
+        />
       </div>,
     );
     expect(screen.getByRole("button", { name: "关闭局部编辑" })).toHaveFocus();
@@ -445,6 +488,7 @@ describe("VideoLocalEditDialog", () => {
         <VideoLocalEditDialog
           source={{ ...source, key: "different-source" }}
           candidates={[]}
+          canUploadToLibrary={false}
           onClose={onClose}
           onApply={onApply}
         />

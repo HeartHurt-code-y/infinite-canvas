@@ -151,7 +151,11 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
-import { appendVideoLocalEditPrompt, saveVideoEditFrame } from "../../lib/videoLocalEdit";
+import {
+  appendVideoLocalEditPrompt,
+  resolveVideoEditFrameTarget,
+  saveVideoEditFrame,
+} from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type { VideoLocalEditResult, VideoLocalEditSource } from "./VideoLocalEditDialog";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
@@ -520,6 +524,8 @@ export function WorkspaceApp({
     readonly source: VideoLocalEditSource;
     readonly input: GenerationMediaInput;
   } | null>(null);
+  /** 标注帧入库与平台审核的实时进度文案；仅弹窗存活期间有意义。 */
+  const [videoEditProgress, setVideoEditProgress] = useState<string | null>(null);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -4187,16 +4193,30 @@ export function WorkspaceApp({
       );
       const key = outputNodeKey();
       const name = `${source.name} · ${edit.timeSeconds.toFixed(3)}s 标注`;
+      // 标注帧默认只落本地文件；勾选后才入库，使其以平台可校验的资产身份提交。
+      // 直接提交对象存储匿名 URL 的真人素材会被输入素材隐私预检拒绝。
+      const frameTarget = edit.uploadFrameToLibrary
+        ? await resolveVideoEditFrameTarget({
+            path: saved.path,
+            name,
+            canvasNodeKey: key,
+            providerConnectionId: assetProvider?.id ?? null,
+            onProgress: setVideoEditProgress,
+          })
+        : {
+            uploadedToLibrary: false,
+            target: {
+              kind: "local_file" as const,
+              path: saved.path,
+              canvasNodeKey: key,
+              mediaType: "image" as const,
+            },
+          };
       const frame = {
         key,
         name,
         kind: "image" as const,
-        target: {
-          kind: "local_file" as const,
-          path: saved.path,
-          canvasNodeKey: key,
-          mediaType: "image" as const,
-        },
+        target: frameTarget.target,
       };
       const nextConfig = selectSeedanceTask(
         selection.model.remoteModelId,
@@ -4244,9 +4264,19 @@ export function WorkspaceApp({
       updateVideoNodeConfig(target.key, nextConfig);
       promptContents.restoreDocument(target.key, document);
       setNodeStartError(target.key, null);
+      setVideoEditProgress(null);
       setVideoLocalEdit(null);
+      if (edit.uploadFrameToLibrary && !frameTarget.uploadedToLibrary) {
+        toast.info("局部编辑已添加，但标注帧未入库", {
+          description:
+            "标注帧仍以本地文件提交。含真人的素材可能被平台拒绝，请检查对象存储配置与素材审核状态后重试。",
+        });
+        return;
+      }
       toast.success("局部编辑已添加到输入框", {
-        description: "已连接标注帧并锁定编辑参数，可检查提示词后开始生成。",
+        description: frameTarget.uploadedToLibrary
+          ? "标注帧已上传云端素材库，将以资产身份提交，可检查提示词后开始生成。"
+          : "已连接标注帧并锁定编辑参数，可检查提示词后开始生成。",
       });
     },
     [
@@ -4257,6 +4287,7 @@ export function WorkspaceApp({
       insertSubgraph,
       updateVideoNodeConfig,
       setNodeStartError,
+      assetProvider,
     ],
   );
 
@@ -8416,6 +8447,8 @@ export function WorkspaceApp({
           <VideoLocalEditDialog
             source={videoLocalEdit.source}
             candidates={mentionCandidatesFor(videoLocalEdit.nodeKey)}
+            canUploadToLibrary={assetProvider != null}
+            progress={videoEditProgress}
             onClose={() => setVideoLocalEdit(null)}
             onApply={applyVideoLocalEdit}
           />

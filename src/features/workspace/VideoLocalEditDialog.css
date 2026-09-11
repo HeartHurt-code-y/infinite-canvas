@@ -42,6 +42,25 @@
   color: var(--color-chrome-muted);
   line-height: 1.6;
 }
+.video-local-edit-dialog__upload-option {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2xs);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-chrome-field);
+}
+.video-local-edit-dialog__upload-option label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-xs);
+  color: var(--color-ink);
+  font-size: var(--text-xs);
+}
+.video-local-edit-dialog__upload-option .video-local-edit-dialog__hint {
+  margin: 0;
+}
 .video-local-edit-dialog__viewport {
   position: relative;
   height: min(44dvh, 30rem);

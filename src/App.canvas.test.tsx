@@ -69,6 +69,7 @@ vi.mock("./features/workspace/VideoLocalEditDialog", () => ({
               instructionDocument: videoLocalEditInstructionMock.document,
               operation: "remove",
               sourceKey: source.key,
+              uploadFrameToLibrary: false,
               timeRange: null,
             }).catch((cause: unknown) =>
               setError(cause instanceof Error ? cause.message : String(cause)),

@@ -55,12 +55,22 @@ export interface VideoLocalEditResult {
   readonly operation: "remove" | "replace";
   readonly sourceKey: string;
   readonly timeRange: { readonly startSeconds: number; readonly endSeconds: number } | null;
+  /**
+   * 是否把标注帧上传到云端素材库，使其以 `asset://` 资产身份提交。
+   * 含真人的素材必须入库才可能通过平台隐私预检；不含真人时无必要，
+   * 因此默认关闭以免持续产生云端素材。
+   */
+  readonly uploadFrameToLibrary: boolean;
 }
 
 export interface VideoLocalEditDialogProps {
   readonly source: VideoLocalEditSource;
   /** 当前生成节点已连接的媒体素材，供编辑要求 @ 引用（替换素材即来自这里）。 */
   readonly candidates: readonly PromptReferenceCandidate[];
+  /** 是否已配置可用的云端素材库连接；不可用时隐藏上传选项。 */
+  readonly canUploadToLibrary: boolean;
+  /** 标注帧入库与平台审核的实时进度文案；由调用方在提交期间驱动。 */
+  readonly progress?: string | null;
   readonly onClose: () => void;
   readonly onApply: (result: VideoLocalEditResult) => Promise<void>;
 }
@@ -81,6 +91,8 @@ export function VideoLocalEditDialog(props: VideoLocalEditDialogProps) {
 function VideoLocalEditDialogContent({
   source,
   candidates,
+  canUploadToLibrary,
+  progress = null,
   onClose,
   onApply,
 }: VideoLocalEditDialogProps) {
@@ -118,6 +130,9 @@ function VideoLocalEditDialogContent({
   const [rangeEnd, setRangeEnd] = useState(0);
   const [instructionText, setInstructionText] = useState("");
   const [busy, setBusy] = useState(false);
+  // 默认开启：真人素材只有以入库资产身份提交才可能通过平台隐私预检，
+  // 漏勾会以匿名 URL 提交并直接被拒；确认片中没有真人时可手动关闭。
+  const [uploadToLibrary, setUploadToLibrary] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [sourceError, setSourceError] = useState(false);
   const needsPreparation = source.target != null || isDesktopRuntime();
@@ -325,6 +340,7 @@ function VideoLocalEditDialogContent({
         operation,
         sourceKey: source.key,
         timeRange: rangeEnabled ? { startSeconds: rangeStart, endSeconds: rangeEnd } : null,
+        uploadFrameToLibrary: canUploadToLibrary && uploadToLibrary,
       });
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : "添加标注帧失败，请重试。");
@@ -739,9 +755,26 @@ function VideoLocalEditDialogContent({
             重新读取视频
           </button>
         )}
+        {canUploadToLibrary && (
+          <div className="video-local-edit-dialog__upload-option">
+            <label>
+              <input
+                type="checkbox"
+                checked={uploadToLibrary}
+                disabled={busy}
+                onChange={(event) => setUploadToLibrary(event.target.checked)}
+              />
+              上传标注帧到云端素材库
+            </label>
+            <p className="video-local-edit-dialog__hint">
+              默认开启：只有入库的素材才会以平台可校验的资产身份提交，否则会被判定为来源不明的真人素材而拒绝。
+              确认片中没有真人时可取消勾选，避免产生冗余的云端素材。
+            </p>
+          </div>
+        )}
       </div>
       <footer className="video-local-edit-dialog__footer">
-        <p>标注帧与编辑要求将添加到当前视频生成节点。</p>
+        <p>{busy && progress ? progress : "标注帧与编辑要求将添加到当前视频生成节点。"}</p>
         <button type="button" onClick={onClose} disabled={busy}>
           取消
         </button>
