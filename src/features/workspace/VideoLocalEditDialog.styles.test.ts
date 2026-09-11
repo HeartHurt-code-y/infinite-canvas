@@ -23,6 +23,21 @@ describe("视频局部编辑弹窗的样式作用域", () => {
     expect(cssRule(".video-local-edit-dialog")).toMatch(/color:\s*var\(--color-chrome-ink\)/);
   });
 
+  it("上传标注帧选项直接放在 chrome 面上，必须用 chrome 墨色而不是 paper 墨色", () => {
+    // 该选项没有浅色 paper 底：误用 paper 墨色（--color-ink，近黑）会让
+    // 「上传标注帧到云端素材库」在深色弹窗里完全看不见。
+    const rule = cssRule(".video-local-edit-dialog__upload-option label");
+    expect(rule).toMatch(/color:\s*var\(--color-chrome-ink\)/);
+    expect(rule).not.toMatch(/color:\s*var\(--color-ink\)/);
+  });
+
+  it("标注清单同样贴在 chrome 面上，必须用 chrome 墨色", () => {
+    // 清单行直接排在深色弹窗背景上，没有浅色 paper 容器。
+    const rule = cssRule(".video-local-edit-dialog__mark-list li");
+    expect(rule).toMatch(/color:\s*var\(--color-chrome-ink\)/);
+    expect(rule).not.toMatch(/color:\s*var\(--color-ink\)/);
+  });
+
   it("弹窗按钮皮肤按容器限定，不覆盖共享编辑器的 @ 触发按钮与候选行", () => {
     // 广域 `.video-local-edit-dialog button` 的 specificity 会压过 `.prompt-mention__*`，
     // 把 @ 触发按钮和候选行改成弹窗的深色胶囊。
@@ -31,6 +46,7 @@ describe("视频局部编辑弹窗的样式作用域", () => {
       "header",
       "timeline",
       "toolbar",
+      "mark-list",
       "operation",
       "keyboard-region",
       "footer",

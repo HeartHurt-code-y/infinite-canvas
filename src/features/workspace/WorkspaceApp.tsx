@@ -4266,6 +4266,11 @@ export function WorkspaceApp({
       setNodeStartError(target.key, null);
       setVideoEditProgress(null);
       setVideoLocalEdit(null);
+      if (edit.offFrameReferenceTimes != null && edit.offFrameReferenceTimes.length > 0) {
+        toast.info("编辑要求引用了其它画面的标注", {
+          description: `提示词已写明它是视频 ${edit.offFrameReferenceTimes.join("、")} 处的区域，但标注帧只画出了当前画面。如需画面里的定位线，请回到该时间点再添加一次标注帧。`,
+        });
+      }
       if (edit.uploadFrameToLibrary && !frameTarget.uploadedToLibrary) {
         toast.info("局部编辑已添加，但标注帧未入库", {
           description:

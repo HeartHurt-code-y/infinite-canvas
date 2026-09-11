@@ -765,3 +765,60 @@ describe("cleanGeneratedPrompt", () => {
     expect(cleanGeneratedPrompt("")).toBe("");
   });
 });
+
+describe("prompt content annotation references", () => {
+  const markedRegion = (markId: string, label: string, description: string) => ({
+    markId,
+    label,
+    description,
+    color: "#ff4865",
+  });
+
+  it("counts a region reference as text, not as a media reference that needs a connection", () => {
+    const session = createPromptContentEditorSession();
+    session.insertMarkReference(markedRegion("mark-a", "标注1", "红色框选，画面左侧 25%"));
+    const view = session.read();
+    expect(view.referenceCount).toBe(0);
+    expect(view.issues).toEqual([]);
+    expect(view.plainText).toBe("标注1（红色框选，画面左侧 25%）");
+    expect(view.segments).toEqual([{ kind: "text", text: "标注1（红色框选，画面左侧 25%）" }]);
+  });
+
+  it("removes the references of a deleted region and keeps numbering out of the document", () => {
+    const session = createPromptContentEditorSession();
+    session.replaceText("把 ");
+    session.insertMarkReference(markedRegion("mark-a", "标注1", "红色框选 A"));
+    session.insertMarkReference(markedRegion("mark-b", "标注2", "蓝色框选 B"));
+    expect(session.removeMarkReferences(["mark-a"])).toBe(1);
+    expect(session.removeMarkReferences(["mark-a"])).toBe(0);
+    expect(session.read().plainText).toBe("把 标注2（蓝色框选 B）");
+    // 展示编号由渲染层提供：文档里保留插入时的快照，导出时才换成最新编号。
+    session.updateMarkReferencePresentation(
+      new Map([["mark-b", { label: "标注1", frameLabel: "0:02.00" }]]),
+    );
+    expect(session.snapshot().items).toMatchObject([
+      { kind: "text", text: "把 " },
+      { kind: "mark_reference", markId: "mark-b", labelSnapshot: "标注2" },
+    ]);
+  });
+
+  it("rejects a document whose reference identities stopped being addressable", () => {
+    const reference = {
+      kind: "mark_reference" as const,
+      mentionId: "mention-1",
+      markId: "mark-a",
+      labelSnapshot: "标注1",
+      descriptionSnapshot: "红色框选",
+      color: "#ff4865",
+    };
+    const document: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "把 " }, reference],
+    };
+    expect(decodePromptContentDocument(document)).toEqual(document);
+    expect(
+      decodePromptContentDocument({ ...document, items: [reference, { ...reference }] }),
+    ).toBeNull();
+  });
+});

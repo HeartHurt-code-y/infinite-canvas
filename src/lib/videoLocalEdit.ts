@@ -10,6 +10,7 @@ import {
   type StagingStatus,
 } from "./backend";
 import type { PromptContentDocumentV1, PromptContentItem } from "./promptContent";
+import { formatMarkReferenceText } from "./promptContent";
 
 const savedFrameSchema = v.object({
   path: v.pipe(v.string(), v.nonEmpty()),
@@ -271,8 +272,42 @@ function appendInstruction(items: PromptContentItem[], instruction: PromptConten
   }
   for (const item of incoming) {
     if (item.kind === "text") appendText(items, item.text);
+    else if (item.kind === "mark_reference")
+      // 兜底：调用方应已用 inlineVideoEditMarkReferences 展开；这里再展开一次，
+      // 保证画布提示内容永远不会写入标注引用条目。
+      appendText(items, formatMarkReferenceText(item.labelSnapshot, item.descriptionSnapshot));
     else items.push(item);
   }
+}
+
+/**
+ * 把编辑要求里的标注引用展开为正文。
+ *
+ * 标注引用是弹窗内部的编辑构造：引用身份只用于「整块删除」和「跟随标记列表重新编号」，
+ * 而区域本身已经用文字自述，因此导出时按当前编号展开成正文即可。这样画布提示内容依旧
+ * 只有正文与素材引用两种条目，生成请求、持久化与恢复链路都不需要知道视频标注的存在。
+ *
+ * 传入的编号表缺项表示标记已被删除：这种引用一律丢弃，绝不留下指向不存在区域的描述。
+ */
+export function inlineVideoEditMarkReferences(
+  document: PromptContentDocumentV1,
+  labelsByMarkId: ReadonlyMap<string, string>,
+): PromptContentDocumentV1 {
+  const items: PromptContentItem[] = [];
+  for (const item of document.items) {
+    if (item.kind === "text") {
+      appendText(items, item.text);
+      continue;
+    }
+    if (item.kind !== "mark_reference") {
+      items.push(item);
+      continue;
+    }
+    const label = labelsByMarkId.get(item.markId);
+    if (label == null) continue;
+    appendText(items, formatMarkReferenceText(label, item.descriptionSnapshot));
+  }
+  return { schema: "prompt-content", version: 1, items };
 }
 
 /** Stable references keep the selected video unambiguous even when other inputs are reordered. */

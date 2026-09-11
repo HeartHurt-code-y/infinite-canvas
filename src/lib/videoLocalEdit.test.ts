@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { appendVideoLocalEditPrompt } from "./videoLocalEdit";
+import { appendVideoLocalEditPrompt, inlineVideoEditMarkReferences } from "./videoLocalEdit";
 import {
   createPromptContentEditorSession,
   createPromptContentModule,
@@ -258,5 +258,67 @@ describe("video local edit prompt and persistence", () => {
       next.assetEdges,
     )("downstream");
     expect(downstreamInputs.media.map((input) => input.kind)).toEqual(["video"]);
+  });
+});
+
+describe("video local edit annotation references", () => {
+  const markedRegion = (markId: string, label: string, description: string) => ({
+    kind: "mark_reference" as const,
+    mentionId: `mention-${markId}`,
+    markId,
+    labelSnapshot: label,
+    descriptionSnapshot: description,
+    color: "#5caeff",
+  });
+
+  it("expands a referenced region with the current numbering, not the number it was inserted with", () => {
+    const document = instructionDocument(
+      { kind: "text", text: "把 " },
+      markedRegion("mark-b", "标注2", "蓝色框选，画面左侧 10%、顶部 10% 至右侧 40%、底部 40%"),
+      { kind: "text", text: " 替换为红玫瑰" },
+    );
+    expect(inlineVideoEditMarkReferences(document, new Map([["mark-b", "标注1"]])).items).toEqual([
+      {
+        kind: "text",
+        text: "把 标注1（蓝色框选，画面左侧 10%、顶部 10% 至右侧 40%、底部 40%） 替换为红玫瑰",
+      },
+    ]);
+  });
+
+  it("drops references of a removed region and keeps media references intact", () => {
+    const candidate: PromptReferenceCandidate = {
+      canvasNodeKey: "prop-image",
+      assetId: "asset-rose",
+      providerConnectionId: "provider-1",
+      referenceKind: "asset",
+      kind: "image",
+      name: "红玫瑰.png",
+    };
+    const media = createPromptReference(candidate);
+    const document = instructionDocument(
+      markedRegion("mark-gone", "标注1", "红色框选，画面左侧 25%"),
+      media,
+    );
+    expect(inlineVideoEditMarkReferences(document, new Map())).toEqual({
+      schema: "prompt-content",
+      version: 1,
+      items: [media],
+    });
+  });
+
+  it("never persists an annotation reference into the canvas prompt", () => {
+    // 兜底路径：调用方若忘记展开，合并提示词时必须自己展开，画布文档里不能出现标注引用。
+    const document = appendVideoLocalEditPrompt(undefined, source, frame, {
+      timeSeconds: 2,
+      operation: "replace",
+      instructionDocument: instructionDocument(
+        markedRegion("mark-a", "标注1", "蓝色框选，画面左侧 20%"),
+      ),
+    });
+    expect(document.items.some((item) => item.kind === "mark_reference")).toBe(false);
+    expect(
+      document.items.flatMap((item) => (item.kind === "text" ? [item.text] : [])).join(""),
+    ).toContain("标注1（蓝色框选，画面左侧 20%）");
+    expect(document.items.some((item) => item.kind === "media_reference")).toBe(true);
   });
 });

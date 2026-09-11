@@ -8197,6 +8197,33 @@ svg[data-spin="true"] {
   text-decoration: line-through;
 }
 
+/*
+ * 画面标注引用：引用的是当前视频上的区域标记，不是素材。
+ * 色点跟随标记颜色，文字保持 paper 墨色（chip 只出现在提示词编辑面这类浅色底上）。
+ */
+.mention-chip--mark {
+  color: var(--color-ink);
+  background: color-mix(in oklch, var(--annotation-color) 14%, var(--color-paper));
+  border: var(--rule-thin) dashed color-mix(in oklch, var(--annotation-color) 60%, transparent);
+}
+
+/* 属于其它时间点的标注引用：引用有效但本次提交不包含它，用点线降级提示。 */
+.mention-chip--mark.is-off-frame {
+  color: var(--color-muted);
+  border-style: dotted;
+}
+
+.mention-chip--mark::before {
+  content: "";
+  display: inline-block;
+  width: 0.5em;
+  height: 0.5em;
+  margin-inline-end: 0.28em;
+  vertical-align: baseline;
+  border-radius: var(--radius-round);
+  background: var(--annotation-color);
+}
+
 /* 同名引用不猜测：保留为可聚焦、不可提交的待确认 chip。文字 + 图标语义不依赖颜色。 */
 .mention-chip--ambiguous {
   color: var(--color-neutral);
@@ -8442,6 +8469,41 @@ svg[data-spin="true"] {
   flex-shrink: 0;
   color: var(--color-muted);
   font-size: var(--text-2xs);
+}
+
+/*
+ * 画面标注候选：来源是当前视频的框选/画笔标记，没有素材缩略图，
+ * 用标记色画一个虚线框代替缩略图，并让描述独立一行——菜单只有 280px 宽，
+ * 挤在同一行会把「标注1」压没。
+ */
+.prompt-mention__option-copy {
+  display: grid;
+  flex: 1;
+  min-width: 0;
+  gap: 1px;
+}
+
+.prompt-mention__option-copy strong {
+  overflow: hidden;
+  font-size: var(--text-2xs);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-mention__option-copy small {
+  overflow: hidden;
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+  line-height: 1.35;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.prompt-mention__thumb--annotation {
+  border: 2px dashed var(--annotation-color);
+  border-radius: calc(var(--radius-panel) * 0.4);
+  background: color-mix(in oklch, var(--annotation-color) 14%, var(--color-paper));
 }
 
 .prompt-mention__empty {

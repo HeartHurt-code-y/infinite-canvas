@@ -10,17 +10,29 @@ import { decodeMediaReferenceTarget } from "./promptReferenceTarget";
 import type {
   PromptContentDocumentV1,
   PromptContentItem,
+  PromptContentMarkReferenceItem,
   PromptContentMediaReferenceItem,
 } from "./promptContent";
 
 export const PROMPT_TIPTAP_MEDIA_REFERENCE_NODE = "mediaReference";
 export const PROMPT_TIPTAP_PENDING_REFERENCE_NODE = "pendingReference";
+export const PROMPT_TIPTAP_MARK_REFERENCE_NODE = "markReference";
+
+/** 标注引用的展示信息：编号与所属帧只影响渲染，文档里保存的是插入时的快照。 */
+export interface PromptMarkReferencePresentation {
+  readonly label: string;
+  /** 所属画面的时间读数，让 chip 能自己说明属于哪一帧。 */
+  readonly frameLabel?: string;
+  /** 属于其它时间点：本次提交不包含它，chip 用降级样式提示。 */
+  readonly offFrame?: boolean;
+}
 
 export interface PromptTiptapPresentation {
   readonly connectedCanvasNodeKeys?: ReadonlySet<string>;
   readonly freshMentionIds?: ReadonlySet<string>;
   readonly invalidMentionIds?: ReadonlySet<string>;
   readonly referenceLabelsByKey?: ReadonlyMap<string, string>;
+  readonly markReferencesByMarkId?: ReadonlyMap<string, PromptMarkReferencePresentation>;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -251,6 +263,92 @@ const PendingReference = Node.create({
   },
 });
 
+/**
+ * 标注引用 chip：引用的是画面上的区域标记，而不是可下载的素材。
+ *
+ * 它没有后端可解析的来源身份，导出提示词时按「编号（颜色工具，画面范围）」展开为正文，
+ * 因此不需要后端 PromptSegment 支持新类型；`labelSnapshot` 只是插入当时的编号快照，
+ * 展示用的编号与所属帧由 presentation 提供，保证与标记清单、画面上的序号一致。
+ */
+const MarkReference = Node.create({
+  name: PROMPT_TIPTAP_MARK_REFERENCE_NODE,
+  group: "inline",
+  inline: true,
+  atom: true,
+  selectable: true,
+  draggable: false,
+
+  addAttributes() {
+    return {
+      mentionId: { default: "" },
+      markId: { default: "" },
+      labelSnapshot: { default: "" },
+      descriptionSnapshot: { default: "" },
+      color: { default: "" },
+      label: { default: null, rendered: false },
+      frameLabel: { default: null, rendered: false },
+      offFrame: { default: false, rendered: false },
+    };
+  },
+
+  parseHTML() {
+    return [
+      {
+        tag: "span[data-mark-id]",
+        getAttrs: (node) => {
+          if (!(node instanceof HTMLElement)) return false;
+          const markId = node.dataset["markId"] ?? "";
+          const labelSnapshot = node.dataset["displayName"] ?? "";
+          const descriptionSnapshot = node.dataset["markDescription"] ?? "";
+          if (!markId || !labelSnapshot) return false;
+          return {
+            mentionId: node.dataset["markMentionId"] ?? "",
+            markId,
+            labelSnapshot,
+            descriptionSnapshot,
+            color: node.dataset["markColor"] ?? "",
+            label: null,
+            frameLabel: null,
+            offFrame: false,
+          };
+        },
+      },
+    ];
+  },
+
+  renderHTML({ node }) {
+    const markId = String(node.attrs["markId"] ?? "");
+    const description = String(node.attrs["descriptionSnapshot"] ?? "");
+    const color = String(node.attrs["color"] ?? "");
+    const label = String(node.attrs["label"] ?? node.attrs["labelSnapshot"] ?? "");
+    const frameLabel = String(node.attrs["frameLabel"] ?? "");
+    const offFrame = node.attrs["offFrame"] === true;
+    const title = [label, frameLabel, description, offFrame ? "属于其它时间点，本次不提交" : ""]
+      .filter(Boolean)
+      .join(" · ");
+    return [
+      "span",
+      {
+        class: `mention-chip mention-chip--mark${offFrame ? " is-off-frame" : ""}`,
+        contenteditable: "false",
+        "data-mark-id": markId,
+        "data-mark-mention-id": String(node.attrs["mentionId"] ?? ""),
+        "data-mark-color": color,
+        "data-mark-description": description,
+        "data-display-name": label,
+        title,
+        style: `--annotation-color: ${color}`,
+      },
+      `@${label}`,
+    ];
+  },
+
+  renderText({ node }) {
+    const label = String(node.attrs["label"] ?? node.attrs["labelSnapshot"] ?? "");
+    return `${label}（${String(node.attrs["descriptionSnapshot"] ?? "")}）`;
+  },
+});
+
 export function createPromptTiptapExtensions(placeholder: string): Extensions {
   return [
     Document,
@@ -259,6 +357,7 @@ export function createPromptTiptapExtensions(placeholder: string): Extensions {
     HardBreak,
     MediaReference,
     PendingReference,
+    MarkReference,
     Placeholder.configure({ placeholder }),
     UndoRedo,
   ];
@@ -309,6 +408,26 @@ export function promptReferenceToTiptapNode(
   };
 }
 
+export function promptMarkReferenceToTiptapNode(
+  item: PromptContentMarkReferenceItem,
+  presentation: PromptTiptapPresentation = {},
+): JSONContent {
+  const shown = presentation.markReferencesByMarkId?.get(item.markId);
+  return {
+    type: PROMPT_TIPTAP_MARK_REFERENCE_NODE,
+    attrs: {
+      mentionId: item.mentionId,
+      markId: item.markId,
+      labelSnapshot: item.labelSnapshot,
+      descriptionSnapshot: item.descriptionSnapshot,
+      color: item.color,
+      label: shown?.label ?? null,
+      frameLabel: shown?.frameLabel ?? null,
+      offFrame: shown?.offFrame ?? false,
+    },
+  };
+}
+
 export function promptDocumentToTiptapJson(
   document: PromptContentDocumentV1,
   presentation: PromptTiptapPresentation = {},
@@ -319,6 +438,8 @@ export function promptDocumentToTiptapJson(
       content.push(...plainTextToTiptapContent(item.text));
     } else if (item.kind === "media_reference") {
       content.push(promptReferenceToTiptapNode(item, presentation));
+    } else if (item.kind === "mark_reference") {
+      content.push(promptMarkReferenceToTiptapNode(item, presentation));
     } else {
       content.push({
         type: PROMPT_TIPTAP_PENDING_REFERENCE_NODE,
@@ -381,6 +502,32 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
           ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
           : {}),
         ...(typeof aliasSnapshot === "string" && aliasSnapshot ? { aliasSnapshot } : {}),
+      });
+      return;
+    }
+    if (node.type === PROMPT_TIPTAP_MARK_REFERENCE_NODE) {
+      const attrs = jsonContentAttributes(node);
+      const markId = attrs["markId"];
+      const labelSnapshot = attrs["labelSnapshot"];
+      const descriptionSnapshot = attrs["descriptionSnapshot"];
+      const color = attrs["color"];
+      if (typeof markId !== "string" || !markId || typeof labelSnapshot !== "string") {
+        appendText(items, typeof labelSnapshot === "string" ? labelSnapshot : "");
+        return;
+      }
+      const rawMentionId = attrs["mentionId"];
+      const mentionId =
+        typeof rawMentionId === "string" && rawMentionId && !mentionIds.has(rawMentionId)
+          ? rawMentionId
+          : `mark-${globalThis.crypto.randomUUID()}`;
+      mentionIds.add(mentionId);
+      items.push({
+        kind: "mark_reference",
+        mentionId,
+        markId,
+        labelSnapshot,
+        descriptionSnapshot: typeof descriptionSnapshot === "string" ? descriptionSnapshot : "",
+        color: typeof color === "string" ? color : "",
       });
       return;
     }

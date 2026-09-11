@@ -17,7 +17,7 @@ import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
 import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
 import { Waveform as WaveformIcon } from "@phosphor-icons/react/Waveform";
 import { X } from "@phosphor-icons/react/X";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
   assetLibraryClient,
@@ -46,7 +46,9 @@ import {
   describePromptContentCandidates,
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
   type PromptContentEditorSession,
+  type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
+import { normalizePromptReferenceText } from "../../lib/promptReferences";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
 
@@ -228,9 +230,18 @@ function readyAutoMentionFeedback(candidates: readonly MentionCandidate[]): Auto
  * - 选中后由提示内容 adapter 插入 Tiptap 原子引用节点；
  * - canonical document、结构化持久化与冻结提交均由提示内容 module 负责。
  */
+/**
+ * @ 下拉的统一候选：连线素材，或画面上的区域标注。
+ * 两者共用同一个下拉与同一套键盘导航，避免为了非素材引用再造一个菜单。
+ */
+type MentionMenuEntry =
+  | { readonly type: "media"; readonly candidate: MentionCandidate }
+  | { readonly type: "annotation"; readonly annotation: PromptMarkReferenceInput };
+
 export function PromptMentionInput({
   nodeKey,
   candidates,
+  annotationMentions,
   registerInput,
   labelledBy,
   describedBy,
@@ -241,6 +252,8 @@ export function PromptMentionInput({
   readonly nodeKey: string;
   /** 仅包含已连接到当前生成节点的素材实例。 */
   readonly candidates: readonly MentionCandidate[];
+  /** 额外的非素材引用候选（如视频局部编辑的区域标注）；缺省时菜单与今天完全一致。 */
+  readonly annotationMentions?: readonly PromptMarkReferenceInput[];
   readonly registerInput: (nodeKey: string, session: PromptContentEditorSession | null) => void;
   readonly labelledBy?: string;
   readonly describedBy?: string;
@@ -302,6 +315,19 @@ export function PromptMentionInput({
   );
   const candidateAliases = candidateDescription.aliases;
   const filtered = useMemo(() => candidateDescription.search(query), [candidateDescription, query]);
+  const menuEntries = useMemo<readonly MentionMenuEntry[]>(() => {
+    const media = filtered.map((candidate): MentionMenuEntry => ({ type: "media", candidate }));
+    if (annotationMentions == null || annotationMentions.length === 0) return media;
+    const normalized = normalizePromptReferenceText(query).replace(/^@/u, "");
+    const annotations = annotationMentions
+      .filter(
+        (entry) =>
+          !normalized ||
+          normalizePromptReferenceText(`${entry.label} ${entry.description}`).includes(normalized),
+      )
+      .map((annotation): MentionMenuEntry => ({ type: "annotation", annotation }));
+    return [...annotations, ...media];
+  }, [annotationMentions, filtered, query]);
   const candidateConnectionSignature = JSON.stringify(
     candidates.map((candidate) => [
       candidate.canvasNodeKey,
@@ -615,6 +641,29 @@ export function PromptMentionInput({
     [insertMention, removeActiveMentionQuery, scheduleAutoDetect],
   );
 
+  /** 标注引用插入的是区域标记，不是素材，因此不走素材自动识别。 */
+  const insertAnnotationMention = useCallback(
+    (annotation: PromptMarkReferenceInput) => {
+      if (inputRef.current == null) return;
+      if (replaceTypedQueryOnSelectRef.current) removeActiveMentionQuery();
+      sessionRef.current?.insertMarkReference(annotation);
+      closeMenu();
+      frontendLog(
+        "info",
+        `[canvas] @标注引用插入: node=${nodeKey}, mark=${annotation.markId}（${annotation.label}）`,
+      );
+    },
+    [closeMenu, nodeKey, removeActiveMentionQuery],
+  );
+
+  const chooseMenuEntry = useCallback(
+    (entry: MentionMenuEntry) => {
+      if (entry.type === "annotation") insertAnnotationMention(entry.annotation);
+      else chooseMention(entry.candidate);
+    },
+    [chooseMention, insertAnnotationMention],
+  );
+
   /**
    * 候选菜单关闭后补一次重扫。手打 @ 会打开菜单，期间自动识别被跳过
    * （避免干扰菜单查询）；若用户未从菜单选择而是直接关掉菜单，输入框里
@@ -879,25 +928,27 @@ export function PromptMentionInput({
                 closeMenu();
                 return;
               }
-              if (menuOpen && filtered.length > 0) {
+              if (menuOpen && menuEntries.length > 0) {
                 if (event.key === "ArrowDown") {
                   event.preventDefault();
                   event.stopPropagation();
-                  setActiveIndex((current) => (current + 1) % filtered.length);
+                  setActiveIndex((current) => (current + 1) % menuEntries.length);
                   return;
                 }
                 if (event.key === "ArrowUp") {
                   event.preventDefault();
                   event.stopPropagation();
-                  setActiveIndex((current) => (current - 1 + filtered.length) % filtered.length);
+                  setActiveIndex(
+                    (current) => (current - 1 + menuEntries.length) % menuEntries.length,
+                  );
                   return;
                 }
                 if (event.key === "Enter" || event.key === "Tab") {
                   event.preventDefault();
                   event.stopPropagation();
-                  const candidate = filtered[activeIndex] ?? filtered[0];
-                  if (candidate) {
-                    chooseMention(candidate);
+                  const entry = menuEntries[activeIndex] ?? menuEntries[0];
+                  if (entry) {
+                    chooseMenuEntry(entry);
                   }
                   return;
                 }
@@ -986,36 +1037,73 @@ export function PromptMentionInput({
             </button>
           </div>
           {menuOpen ? (
-            <div className="prompt-mention__menu" role="listbox" aria-label="素材引用候选">
-              {filtered.length === 0 ? (
+            <div
+              className="prompt-mention__menu"
+              role="listbox"
+              aria-label={
+                annotationMentions != null && annotationMentions.length > 0
+                  ? "引用候选"
+                  : "素材引用候选"
+              }
+            >
+              {menuEntries.length === 0 ? (
                 <span className="prompt-mention__empty">
-                  没有匹配素材。先从素材库拖素材到画布并连线，或在素材库中确认名称。
+                  {annotationMentions != null && annotationMentions.length > 0
+                    ? "没有匹配的素材或画面标注。先在画面上框选或圈出要修改的区域，或改成其它关键字。"
+                    : "没有匹配素材。先从素材库拖素材到画布并连线，或在素材库中确认名称。"}
                 </span>
               ) : (
-                filtered.map((candidate, index) => (
-                  <button
-                    key={`${candidate.assetId}-${candidate.canvasNodeKey}`}
-                    type="button"
-                    className={`prompt-mention__option${index === activeIndex ? " is-active" : ""}`}
-                    role="option"
-                    aria-label={`${candidate.name}，已连线，素材 ID ${candidate.assetId}，实例 ID ${candidate.canvasNodeKey}`}
-                    aria-selected={index === activeIndex}
-                    onMouseDown={(event) => event.preventDefault()}
-                    onMouseEnter={() => setActiveIndex(index)}
-                    onClick={() => chooseMention(candidate)}
-                  >
-                    <MentionOptionThumb candidate={candidate} />
-                    <span className="prompt-mention__option-name">{candidate.name}</span>
-                    <span className="prompt-mention__option-tag">
-                      {candidateAliases[
-                        candidates.findIndex(
-                          (entry) => entry.canvasNodeKey === candidate.canvasNodeKey,
-                        )
-                      ]?.label ?? "已连线"}
-                      {` · ${candidate.canvasNodeKey.slice(-6)}`}
-                    </span>
-                  </button>
-                ))
+                menuEntries.map((entry, index) =>
+                  entry.type === "annotation" ? (
+                    <button
+                      key={`annotation-${entry.annotation.markId}`}
+                      type="button"
+                      className={`prompt-mention__option prompt-mention__option--annotation${index === activeIndex ? " is-active" : ""}`}
+                      role="option"
+                      aria-label={`${entry.annotation.label}，画面标注，${entry.annotation.description}`}
+                      aria-selected={index === activeIndex}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onMouseEnter={() => setActiveIndex(index)}
+                      onClick={() => chooseMenuEntry(entry)}
+                    >
+                      <span
+                        className="prompt-mention__thumb prompt-mention__thumb--annotation"
+                        style={{ "--annotation-color": entry.annotation.color } as CSSProperties}
+                        aria-hidden="true"
+                      />
+                      <span className="prompt-mention__option-copy">
+                        <strong>{entry.annotation.label}</strong>
+                        <small title={entry.annotation.description}>
+                          {entry.annotation.description}
+                        </small>
+                      </span>
+                    </button>
+                  ) : (
+                    <button
+                      key={`${entry.candidate.assetId}-${entry.candidate.canvasNodeKey}`}
+                      type="button"
+                      className={`prompt-mention__option${index === activeIndex ? " is-active" : ""}`}
+                      role="option"
+                      aria-label={`${entry.candidate.name}，已连线，素材 ID ${entry.candidate.assetId}，实例 ID ${entry.candidate.canvasNodeKey}`}
+                      aria-selected={index === activeIndex}
+                      onMouseDown={(event) => event.preventDefault()}
+                      onMouseEnter={() => setActiveIndex(index)}
+                      onClick={() => chooseMenuEntry(entry)}
+                    >
+                      <MentionOptionThumb candidate={entry.candidate} />
+                      <span className="prompt-mention__option-name">{entry.candidate.name}</span>
+                      <span className="prompt-mention__option-tag">
+                        {candidateAliases[
+                          candidates.findIndex(
+                            (candidate) =>
+                              candidate.canvasNodeKey === entry.candidate.canvasNodeKey,
+                          )
+                        ]?.label ?? "已连线"}
+                        {` · ${entry.candidate.canvasNodeKey.slice(-6)}`}
+                      </span>
+                    </button>
+                  ),
+                )
               )}
             </div>
           ) : null}

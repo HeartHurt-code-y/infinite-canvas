@@ -23,11 +23,16 @@ import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptRe
 import {
   createPromptTiptapExtensions,
   plainTextToTiptapContent,
+  PROMPT_TIPTAP_MARK_REFERENCE_NODE,
   promptDocumentFromTiptapJson,
   promptDocumentToTiptapJson,
+  promptMarkReferenceToTiptapNode,
   promptReferenceToTiptapNode,
   promptReferenceTargetFromElement,
+  type PromptMarkReferencePresentation,
 } from "./promptTiptap";
+
+export type { PromptMarkReferencePresentation } from "./promptTiptap";
 
 export const PROMPT_AUTO_DETECT_DEBOUNCE_MS = 420;
 const PROMPT_REFERENCE_FRESH_MS = 2200;
@@ -60,7 +65,10 @@ export interface PromptContentDocumentV1 {
 }
 
 export type PromptContentItem =
-  PromptContentTextItem | PromptContentMediaReferenceItem | PromptContentPendingReferenceItem;
+  | PromptContentTextItem
+  | PromptContentMediaReferenceItem
+  | PromptContentMarkReferenceItem
+  | PromptContentPendingReferenceItem;
 
 export interface PromptContentTextItem {
   readonly kind: "text";
@@ -83,6 +91,36 @@ export interface PromptContentPendingReferenceItem {
   readonly normalizedPattern: string;
   readonly displayText: string;
   readonly candidateCount: number;
+}
+
+/**
+ * 标注引用：引用的是画面上的区域标记（视频局部编辑），没有可下载的来源身份。
+ * 它在编辑态里保留「可整块删除、不会从中间被切开」的引用身份；导出提示词时展开为
+ * 自述正文，因此冻结段与持久化文档里只会出现 text / media_reference 两种条目。
+ */
+export interface PromptContentMarkReferenceItem {
+  readonly kind: "mark_reference";
+  readonly mentionId: string;
+  /** 标记的稳定身份；编号会随删除变化，引用必须按它对齐区域。 */
+  readonly markId: string;
+  /** 插入当时的编号快照；展示编号由 presentation 提供，导出使用最新编号。 */
+  readonly labelSnapshot: string;
+  /** 不含编号的区域描述（颜色、工具、画面范围）。 */
+  readonly descriptionSnapshot: string;
+  readonly color: string;
+}
+
+/** 插入标注引用时的输入；mentionId 由会话生成，同一个标记可以被引用多次。 */
+export interface PromptMarkReferenceInput {
+  readonly markId: string;
+  readonly label: string;
+  readonly description: string;
+  readonly color: string;
+}
+
+/** 标注引用展开为提示词正文的统一写法。 */
+export function formatMarkReferenceText(label: string, description: string): string {
+  return `${label}（${description}）`;
 }
 
 export interface PromptContentConnection {
@@ -147,6 +185,14 @@ export interface PromptContentEditorSession {
   updateConnections(candidates: readonly PromptReferenceCandidate[]): void;
   acceptNativeInput(): PromptContentView;
   insertReference(candidate: PromptReferenceCandidate): PromptContentView;
+  /** 在光标处插入标注引用；同一标记可以插入多次，每次都是独立的引用身份。 */
+  insertMarkReference(input: PromptMarkReferenceInput): PromptContentView;
+  /** 标记被删除后同步删除它的引用，避免提示词里留下指向不存在区域的描述。 */
+  removeMarkReferences(markIds: readonly string[]): number;
+  /** 更新标注引用的展示编号与所属帧；只影响渲染，不改写文档里的快照。 */
+  updateMarkReferencePresentation(
+    presentation: ReadonlyMap<string, PromptMarkReferencePresentation>,
+  ): void;
   pastePlainText(text: string): AutoMentionResolutionResult;
   autoResolve(options?: {
     readonly fresh?: boolean;
@@ -340,6 +386,28 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
       continue;
     }
     if (
+      raw["kind"] === "mark_reference" &&
+      typeof raw["mentionId"] === "string" &&
+      raw["mentionId"] &&
+      typeof raw["markId"] === "string" &&
+      raw["markId"] &&
+      typeof raw["labelSnapshot"] === "string" &&
+      typeof raw["descriptionSnapshot"] === "string" &&
+      typeof raw["color"] === "string"
+    ) {
+      if (mentionIds.has(raw["mentionId"])) return null;
+      mentionIds.add(raw["mentionId"]);
+      items.push({
+        kind: "mark_reference",
+        mentionId: raw["mentionId"],
+        markId: raw["markId"],
+        labelSnapshot: raw["labelSnapshot"],
+        descriptionSnapshot: raw["descriptionSnapshot"],
+        color: raw["color"],
+      });
+      continue;
+    }
+    if (
       raw["kind"] === "media_reference" &&
       typeof raw["mentionId"] === "string" &&
       raw["mentionId"] &&
@@ -388,6 +456,16 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
       first.candidateCount === second.candidateCount
     );
   }
+  if (first.kind === "mark_reference") {
+    return (
+      second.kind === "mark_reference" &&
+      first.mentionId === second.mentionId &&
+      first.markId === second.markId &&
+      first.labelSnapshot === second.labelSnapshot &&
+      first.descriptionSnapshot === second.descriptionSnapshot &&
+      first.color === second.color
+    );
+  }
   if (second.kind !== "media_reference") return false;
   return (
     first.mentionId === second.mentionId &&
@@ -433,6 +511,13 @@ function viewFromDocument(
         displayText: item.displayText,
         candidateCount: item.candidateCount,
       });
+      continue;
+    }
+    // 标注引用没有可断言的来源身份（不依赖连线，也不会失效），按正文计入即可。
+    if (item.kind === "mark_reference") {
+      const text = formatMarkReferenceText(item.labelSnapshot, item.descriptionSnapshot);
+      segments.push({ kind: "text", text });
+      plain.push(text);
       continue;
     }
     referenceCount += 1;
@@ -530,6 +615,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private composing = false;
   private compositionEndTimer: number | null = null;
   private pendingConnections = false;
+  private markReferencePresentation: ReadonlyMap<string, PromptMarkReferencePresentation> =
+    new Map();
   private readonly placeholder: string;
 
   constructor(placeholder: string = DEFAULT_PROMPT_PLACEHOLDER) {
@@ -642,6 +729,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       referenceLabelsByKey: new Map(
         this.candidates.map((candidate, index) => [candidate.canvasNodeKey, aliases[index]!.label]),
       ),
+      markReferencesByMarkId: this.markReferencePresentation,
       freshMentionIds: this.freshMentionIds,
     };
   }
@@ -746,6 +834,83 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     this.notify();
     this.editor?.commands.focus();
     return this.read();
+  }
+
+  insertMarkReference(input: PromptMarkReferenceInput): PromptContentView {
+    if (this.isComposing()) return this.read();
+    const item: PromptContentMarkReferenceItem = {
+      kind: "mark_reference",
+      mentionId: `mark-${globalThis.crypto.randomUUID()}`,
+      markId: input.markId,
+      labelSnapshot: input.label,
+      descriptionSnapshot: input.description,
+      color: input.color,
+    };
+    if (this.editor != null) {
+      this.editor
+        .chain()
+        .focus()
+        .insertContent(promptMarkReferenceToTiptapNode(item, this.presentation()))
+        .run();
+      this.syncFromEditor();
+    } else {
+      this.document = {
+        schema: "prompt-content",
+        version: 1,
+        items: [...this.document.items, item],
+      };
+    }
+    this.notify();
+    this.editor?.commands.focus();
+    return this.read();
+  }
+
+  removeMarkReferences(markIds: readonly string[]): number {
+    if (this.isComposing() || markIds.length === 0) return 0;
+    this.syncFromEditor();
+    const removed = new Set(markIds);
+    const items = this.document.items.filter(
+      (item) => item.kind !== "mark_reference" || !removed.has(item.markId),
+    );
+    const count = this.document.items.length - items.length;
+    if (count === 0) return 0;
+    this.document = { schema: "prompt-content", version: 1, items };
+    // 保留选区：删除的是 chip 而不是正文，光标不该跳到文档末尾。
+    this.applyDocument();
+    this.notify();
+    return count;
+  }
+
+  updateMarkReferencePresentation(
+    presentation: ReadonlyMap<string, PromptMarkReferencePresentation>,
+  ): void {
+    this.markReferencePresentation = presentation;
+    if (this.editor == null || this.isComposing()) return;
+    const transaction = this.editor.state.tr;
+    this.editor.state.doc.descendants((node, position) => {
+      if (node.type.name !== PROMPT_TIPTAP_MARK_REFERENCE_NODE) return;
+      const shown = this.markReferencePresentation.get(String(node.attrs["markId"] ?? ""));
+      const label = shown?.label ?? null;
+      const frameLabel = shown?.frameLabel ?? null;
+      const offFrame = shown?.offFrame ?? false;
+      if (
+        label === node.attrs["label"] &&
+        frameLabel === node.attrs["frameLabel"] &&
+        offFrame === node.attrs["offFrame"]
+      )
+        return;
+      transaction.setNodeMarkup(
+        position,
+        undefined,
+        { ...node.attrs, label, frameLabel, offFrame },
+        node.marks,
+      );
+    });
+    // 展示信息只影响渲染，和连线协调一样不进撤销历史。
+    if (transaction.docChanged)
+      this.editor.view.dispatch(
+        transaction.setMeta("preventUpdate", true).setMeta("addToHistory", false),
+      );
   }
 
   pastePlainText(text: string): AutoMentionResolutionResult {

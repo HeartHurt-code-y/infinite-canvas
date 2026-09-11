@@ -55,7 +55,7 @@
   display: inline-flex;
   align-items: center;
   gap: var(--space-xs);
-  color: var(--color-ink);
+  color: var(--color-chrome-ink);
   font-size: var(--text-xs);
 }
 .video-local-edit-dialog__upload-option .video-local-edit-dialog__hint {
@@ -85,6 +85,61 @@
 .video-local-edit-dialog__marks[aria-disabled="true"] {
   cursor: default;
 }
+/*
+ * 标注缩略图层：与视频同盒，缩略图按标记区域的位置与宽高比定位。
+ * 它只负责显示，指针事件一律穿透，画面上的框选/圈选照旧落在下面的 <svg> 上。
+ */
+.video-local-edit-dialog__thumbnails {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+}
+.video-local-edit-dialog__thumbnail {
+  position: absolute;
+  display: block;
+  margin: 0;
+  overflow: hidden;
+  border: var(--rule-active) solid var(--annotation-color);
+  border-radius: var(--radius-xs);
+  background: var(--color-chrome);
+  box-shadow: var(--shadow-whisper);
+}
+.video-local-edit-dialog__thumbnail img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  /* 缩略图按标记区域裁剪，比例与容器一致；cover 只兜住取整带来的亚像素误差。 */
+  object-fit: cover;
+}
+.video-local-edit-dialog__thumbnail-index {
+  position: absolute;
+  top: 0;
+  left: 0;
+  min-width: 1rem;
+  padding: 0 var(--space-3xs);
+  color: var(--color-paper);
+  background: var(--annotation-color);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 1rem;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+/*
+ * 取帧用的后台 video：不显示，只为标注缩略图读取「那一帧」。
+ * 故意保留一个正常的渲染盒（16rem×9rem）再移出可视区：WebKit 会为不可见或
+ * 尺寸退化（1×1）的元素跳过视频解码，那样 drawImage 永远抓不到画面。
+ */
+.video-local-edit-dialog__capture-source {
+  position: absolute;
+  left: -10000px;
+  top: 0;
+  width: 16rem;
+  height: 9rem;
+  pointer-events: none;
+}
 .video-local-edit-dialog__loading {
   position: absolute;
   inset: 0;
@@ -101,6 +156,7 @@
 .video-local-edit-dialog__header button,
 .video-local-edit-dialog__timeline button,
 .video-local-edit-dialog__toolbar button,
+.video-local-edit-dialog__mark-list button,
 .video-local-edit-dialog__operation button,
 .video-local-edit-dialog__keyboard-region button,
 .video-local-edit-dialog__body > button,
@@ -126,6 +182,7 @@
 .video-local-edit-dialog__header button:disabled,
 .video-local-edit-dialog__timeline button:disabled,
 .video-local-edit-dialog__toolbar button:disabled,
+.video-local-edit-dialog__mark-list button:disabled,
 .video-local-edit-dialog__operation button:disabled,
 .video-local-edit-dialog__keyboard-region button:disabled,
 .video-local-edit-dialog__body > button:disabled,
@@ -137,6 +194,7 @@
 .video-local-edit-dialog__header button:focus-visible,
 .video-local-edit-dialog__timeline button:focus-visible,
 .video-local-edit-dialog__toolbar button:focus-visible,
+.video-local-edit-dialog__mark-list button:focus-visible,
 .video-local-edit-dialog__operation button:focus-visible,
 .video-local-edit-dialog__keyboard-region button:focus-visible,
 .video-local-edit-dialog__body > button:focus-visible,
@@ -196,6 +254,80 @@
   padding: 0 var(--space-xs);
   color: var(--color-chrome-muted);
   font-size: var(--text-xs);
+}
+
+/*
+ * 已标注区域清单：直接放在 chrome 面上，因此用 chrome 墨色而不是 paper 墨色。
+ * 它是「自己标了哪些」的唯一可见答案，所以默认展开，不折进 details。
+ */
+.video-local-edit-dialog__mark-list {
+  display: grid;
+  gap: var(--space-3xs);
+  margin: 0;
+  padding: var(--space-2xs);
+  list-style: none;
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+  background: var(--color-chrome-field);
+}
+.video-local-edit-dialog__mark-list li {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: 2.25rem;
+  color: var(--color-chrome-ink);
+  font-size: var(--text-xs);
+}
+.video-local-edit-dialog__mark-swatch {
+  flex-shrink: 0;
+  width: 0.85rem;
+  height: 0.85rem;
+  border: 2px solid var(--annotation-color);
+  border-radius: var(--radius-round);
+  background: color-mix(in oklch, var(--annotation-color) 28%, transparent);
+}
+.video-local-edit-dialog__mark-label {
+  flex-shrink: 0;
+  font-weight: 600;
+}
+.video-local-edit-dialog__mark-detail {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--color-chrome-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* 标注所属画面的时间读数：非当前画面时是「回到该画面」按钮，当前画面时只是标记。 */
+.video-local-edit-dialog__mark-frame {
+  flex-shrink: 0;
+  color: var(--color-chrome-muted);
+  font-family: var(--font-mono);
+  font-size: var(--text-2xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.video-local-edit-dialog .video-local-edit-dialog__mark-list .video-local-edit-dialog__mark-frame {
+  min-height: 1.5rem;
+  padding: 0 var(--space-2xs);
+}
+/*
+ * 属于其它画面的标注：降级但始终可见可删 —— 这正是「切换时间不会丢标注」的可见依据。
+ * 不能隐藏，否则用户又会以为标注没了。
+ */
+.video-local-edit-dialog__mark-list li.is-off-frame .video-local-edit-dialog__mark-label {
+  color: var(--color-chrome-muted);
+  font-weight: 400;
+}
+.video-local-edit-dialog__notice {
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-field);
+  font-size: var(--text-xs);
+  line-height: 1.6;
 }
 .video-local-edit-dialog fieldset {
   margin: 0;
@@ -334,6 +466,7 @@
   .video-local-edit-dialog__header button:hover:not(:disabled),
   .video-local-edit-dialog__timeline button:hover:not(:disabled),
   .video-local-edit-dialog__toolbar button:hover:not(:disabled),
+  .video-local-edit-dialog__mark-list button:hover:not(:disabled),
   .video-local-edit-dialog__operation button:hover:not(:disabled),
   .video-local-edit-dialog__keyboard-region button:hover:not(:disabled),
   .video-local-edit-dialog__body > button:hover:not(:disabled),
