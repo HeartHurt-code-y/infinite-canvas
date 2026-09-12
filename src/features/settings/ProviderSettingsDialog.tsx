@@ -37,6 +37,7 @@ import {
 import { AssetLibraryTokenSettings } from "./AssetLibraryTokenSettings";
 import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
 import { TosStagingSettings } from "./TosStagingSettings";
+import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
 import { SearchableMultiSelect } from "../../components/SearchableMultiSelect";
 
 interface ProviderDraft {
@@ -349,6 +350,15 @@ export function ProviderSettingsDialog({
       window.cancelAnimationFrame(animationFrame);
     };
   }, [activeAssetProviderId, client, open, restoreSavedModels, loadApiKey]);
+
+  // 素材库令牌只对实现了云端素材库的连接有意义：盘趣API 这类网关没有 `/v1/assets/*`，
+  // 令牌与素材请求都无从落地，因此不出现在这里（该连接仍可正常用于模型生成）。
+  const assetTokenProviders = useMemo(() => assetLibraryProviders(providers), [providers]);
+  // 当前选中的连接没有素材库时，退到第一条可用连接，而不是让整段配置变成空状态。
+  const assetTokenProvider =
+    assetTokenProviders.find((provider) => provider.id === assetTokenProviderId) ??
+    assetTokenProviders[0] ??
+    null;
 
   const visibleModels = useMemo(() => {
     const query = modelSearch.trim().toLocaleLowerCase();
@@ -810,8 +820,8 @@ export function ProviderSettingsDialog({
           ) : null}
 
           <AssetLibraryTokenSettings
-            provider={providers.find((provider) => provider.id === assetTokenProviderId) ?? null}
-            providers={providers}
+            provider={assetTokenProvider}
+            providers={assetTokenProviders}
             onProviderChanged={handleAssetProviderChanged}
             credentialClient={client}
             libraryClient={assetClient}

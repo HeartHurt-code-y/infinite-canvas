@@ -1413,6 +1413,84 @@ describe("App workspace", () => {
     ).toBeInTheDocument();
   });
 
+  it("盘趣API 没有云端素材库，不作为素材库来源，也不为它拉取素材", async () => {
+    const assetListCalls: string[] = [];
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              // 盘趣网关是最新编辑的连接，但只有模型生成接口（`/v1/assets/*` 全 404）：
+              // 素材库来源不能落到它头上，否则面板只会显示上游 404。
+              id: "provider-panqu-api",
+              displayName: "盘趣API",
+              adapterId: "moyu_v1",
+              baseUrl: "https://115.191.2.88/",
+              apiKeyRef: "provider:provider-panqu-api:api-key",
+              enabled: true,
+              createdAt: 2,
+              updatedAt: 3,
+            },
+            {
+              id: "moyu-prod",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com/v1",
+              apiKeyRef: "provider:moyu-prod:api-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 1,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets": {
+          const providerId = (
+            (args?.["command"] as { providerConnectionId?: string } | undefined) ?? {}
+          ).providerConnectionId;
+          if (providerId) assetListCalls.push(providerId);
+          return Promise.resolve([
+            cloudAsset(providerId ?? "moyu-prod", {
+              id: "moyu-asset",
+              kind: "image",
+              name: "生产素材",
+              previewUrl: "https://api.example.com/asset.png",
+            }),
+          ]);
+        }
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+
+    const providerSelect = await screen.findByRole("combobox", { name: "素材库供应商" });
+    await waitFor(() => expect(assetListCalls).toContain("moyu-prod"));
+    // 最新编辑的盘趣连接被跳过，素材库回落到唯一可用的素材库来源。
+    expect(providerSelect).toHaveValue("moyu-prod");
+    expect(
+      within(providerSelect).queryByRole("option", { name: "盘趣API" }),
+    ).not.toBeInTheDocument();
+    expect(assetListCalls).not.toContain("provider-panqu-api");
+  });
+
   it("可以在素材库中切换全局配置的供应商 key", async () => {
     const assetListCalls: string[] = [];
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {

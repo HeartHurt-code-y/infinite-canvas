@@ -219,7 +219,7 @@ export function AssetLibraryTokenSettings({
             ))}
           </select>
           <small id={`${providerSelectId}-hint`}>
-            为不同供应商分别保存素材库令牌；令牌不会在供应商之间复用。
+            只列出提供云端素材库的连接；令牌按连接隔离，不会在供应商之间复用。
           </small>
         </div>
       ) : null}

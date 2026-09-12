@@ -2285,7 +2285,14 @@ mod tests {
                 .iter()
                 .map(|provider| provider.display_name.as_str())
                 .collect::<Vec<_>>(),
-            vec!["MAIGateway", "SD2.0", "海外平台", "火山引擎", "魔芋AI"]
+            vec![
+                "MAIGateway",
+                "SD2.0",
+                "海外平台",
+                "火山引擎",
+                "盘趣API",
+                "魔芋AI"
+            ]
         );
         assert!(providers.iter().all(|provider| !provider.enabled));
         let encoding: String = storage

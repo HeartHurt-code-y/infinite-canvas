@@ -37,6 +37,26 @@ pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
 /// Base URL 共用凭据。未配置供应商专用令牌时才回退到本引用。
 pub const ASSET_LIBRARY_CREDENTIAL_REF: &str = "asset-library-token";
 
+/// 没有云端素材库的上游主机（小写、不含端口）。
+///
+/// 盘趣聚合网关（One API / new-api 内核）只开放 `/v1/models` 与
+/// `/v1/video/generations*`，`/v1/assets/*` 全部 404：该连接只参与模型生成。
+/// 素材库请求在解析阶段就按主机挡掉，避免把上游 404 原样当成「素材库故障」展示；
+/// 判定口径与前端 `src/lib/assetLibrarySupport.ts` 保持一致。
+/// 实测记录见 `docs/integrations/panqu-video-api.md`。
+const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 2] = ["115.191.2.88", "panqu.com"];
+
+/// 返回命中的「没有素材库」主机；地址无法解析时退回原始字符串比对（用户可能只填主机）。
+fn host_without_asset_library(base_url: &str) -> Option<&'static str> {
+    let host = Url::parse(base_url)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+        .unwrap_or_else(|| base_url.trim().to_ascii_lowercase());
+    HOSTS_WITHOUT_ASSET_LIBRARY
+        .into_iter()
+        .find(|unsupported| host == *unsupported || host.ends_with(&format!(".{unsupported}")))
+}
+
 pub fn asset_library_credential_ref(provider_connection_id: &str) -> String {
     format!("{ASSET_LIBRARY_CREDENTIAL_REF}:{provider_connection_id}")
 }
@@ -374,7 +394,12 @@ impl SseFrameParser {
     /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略：
     /// 三类方言都把有效载荷放在 `data` 里，`event:` 只是事件种类的冗余标注，
     /// 种类可从载荷的字段形状判断，因此不需要单独跟踪。
-    fn accept_frame(&mut self, frame: &str, dialect: &mut dyn DialectSink, sink: &mut StreamSink<'_>) {
+    fn accept_frame(
+        &mut self,
+        frame: &str,
+        dialect: &mut dyn DialectSink,
+        sink: &mut StreamSink<'_>,
+    ) {
         let mut data = String::new();
         for line in frame.lines() {
             let line = line.trim_end_matches('\r');
@@ -1135,6 +1160,13 @@ impl ProviderRuntime {
         provider_connection_id: &str,
     ) -> BackendResult<ResolvedProviderContext> {
         let mut context = self.resolve_current(provider_connection_id)?;
+        if let Some(host) = host_without_asset_library(&context.base_url) {
+            return Err(BackendError::Conflict(format!(
+                "供应商连接 {}（{host}）没有云端素材库：该网关只有模型生成接口，\
+                 /v1/assets/* 全部 404；素材请使用本地素材库或本地生成结果。",
+                context.provider_connection_id
+            )));
+        }
         let scoped_credential_ref = asset_library_credential_ref(provider_connection_id);
         for credential_ref in [scoped_credential_ref.as_str(), ASSET_LIBRARY_CREDENTIAL_REF] {
             if self.credentials.status(credential_ref)?.configured {
@@ -1680,13 +1712,7 @@ impl ProviderRuntime {
             Some(dialect) => {
                 match self
                     .read_streamed_text_response(
-                        &task.id,
-                        &call_id,
-                        sent_at,
-                        &label,
-                        request,
-                        dialect,
-                        delta_sink,
+                        &task.id, &call_id, sent_at, &label, request, dialect, delta_sink,
                     )
                     .await
                 {
@@ -1749,7 +1775,8 @@ impl ProviderRuntime {
         request: reqwest::RequestBuilder,
         dialect: TextModelStream,
         mut delta_sink: Option<&mut TextDeltaSink<'_>>,
-    ) -> BackendResult<(u16, Value, String, Value)> {        let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
+    ) -> BackendResult<(u16, Value, String, Value)> {
+        let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 let backend_error = BackendError::Transport(error);
@@ -5173,6 +5200,30 @@ mod tests {
             asset_library_credential_ref("provider-overseas"),
             "asset-library-token:provider-overseas"
         );
+    }
+
+    #[test]
+    fn gateways_without_asset_endpoints_are_kept_out_of_the_asset_library() {
+        // 盘趣网关没有 `/v1/assets/*`：直连 IP、带端口的地址与文档域名同样要挡住。
+        assert_eq!(
+            host_without_asset_library("https://115.191.2.88/"),
+            Some("115.191.2.88")
+        );
+        assert_eq!(
+            host_without_asset_library("http://115.191.2.88:3000/v1"),
+            Some("115.191.2.88")
+        );
+        assert_eq!(
+            host_without_asset_library("https://aiapis.panqu.com/"),
+            Some("panqu.com")
+        );
+        // 其他上游继续使用既有素材库链路（魔芋聚合与火山引擎方舟）。
+        assert_eq!(host_without_asset_library("https://www.moyu.info/"), None);
+        assert_eq!(
+            host_without_asset_library("https://ark.cn-beijing.volces.com/api/v3"),
+            None
+        );
+        assert_eq!(host_without_asset_library(""), None);
     }
 
     #[test]

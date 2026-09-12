@@ -301,6 +301,41 @@ describe("ProviderSettingsDialog", () => {
     );
   });
 
+  it("盘趣API 没有云端素材库，不出现在素材库令牌的供应商列表里", async () => {
+    const panquProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-panqu-api",
+      displayName: "盘趣API",
+      baseUrl: "https://115.191.2.88/",
+      apiKeyRef: "provider:provider-panqu-api:api-key",
+      updatedAt: 2,
+    };
+    const client = createClient({
+      listProviderConnections: vi.fn(() => Promise.resolve([panquProvider, SAVED_PROVIDER])),
+    });
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={vi.fn()}
+        activeAssetProviderId={panquProvider.id}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    const assetProviderSelect = await screen.findByLabelText("素材库供应商连接");
+    // 素材库令牌只对实现了云端素材库的连接开放；当前选中的盘趣连接整体不参与素材库，
+    // 因此这段配置退到第一条可用连接，而不是留在没有素材库的连接上。
+    await waitFor(() => expect(assetProviderSelect).toHaveValue(SAVED_PROVIDER.id));
+    expect(
+      within(assetProviderSelect).queryByRole("option", { name: "盘趣API" }),
+    ).not.toBeInTheDocument();
+    expect(
+      within(assetProviderSelect).getByRole("option", { name: "公司接口" }),
+    ).toBeInTheDocument();
+  });
+
   it("requires a key for a new connection and saves without pulling models", async () => {
     const client = createClient();
     const onCatalogChanged = vi.fn(() => Promise.resolve());

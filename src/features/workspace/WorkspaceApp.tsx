@@ -84,6 +84,7 @@ import {
   type VideoDownloaderEngineStatus,
   type VideoFrameExtractionJobRecord,
 } from "../../lib/backend";
+import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
 import {
   generationParameters,
   modelAllowsMediaOnlyPrompt,
@@ -1229,8 +1230,13 @@ export function WorkspaceApp({
     );
   }, [canvasInputsFor, genNodes]);
 
+  // 只有实现了云端素材库的连接才会出现在素材库来源里：盘趣API 这类只有生成接口的
+  // 网关没有 `/v1/assets/*`，列出来只会让面板把上游 404 当成素材库故障展示。
   const availableAssetProviders = useMemo(
-    () => providerCatalog.map((entry) => entry.provider).filter((provider) => provider.enabled),
+    () =>
+      assetLibraryProviders(
+        providerCatalog.map((entry) => entry.provider).filter((provider) => provider.enabled),
+      ),
     [providerCatalog],
   );
 
@@ -1239,8 +1245,8 @@ export function WorkspaceApp({
       (provider) => provider.id === activeAssetProviderId,
     );
     if (persisted) return persisted;
-    // 旧版本没有保存素材库当前供应商：用最近修改的连接作为迁移默认，
-    // 避免回退到按名称排序的旧 SD2.0 连接。
+    // 旧版本没有保存素材库当前供应商，或保存的连接已不再提供素材库（如盘趣API）：
+    // 用最近修改的可用连接作为迁移默认，避免回退到按名称排序的旧 SD2.0 连接。
     return (
       availableAssetProviders.reduce<ProviderConnection | null>(
         (latest, provider) =>
