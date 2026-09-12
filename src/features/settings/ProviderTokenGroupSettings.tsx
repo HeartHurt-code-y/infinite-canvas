@@ -1,9 +1,4 @@
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { Key } from "@phosphor-icons/react/Key";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { Trash } from "@phosphor-icons/react/Trash";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
+import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   formatRawBackendError,
@@ -228,7 +223,7 @@ export function ProviderTokenGroupSettings({
     <section className="token-group-settings" aria-labelledby="token-group-settings-title">
       <div className="provider-form__heading">
         <span className="settings-step" aria-hidden="true">
-          <Key size={15} weight="bold" />
+          <Icon name="key" size="md" />
         </span>
         <div>
           <strong id="token-group-settings-title">令牌分组</strong>
@@ -242,11 +237,11 @@ export function ProviderTokenGroupSettings({
           data-state={loading ? "loading" : groups.length > 0 ? "configured" : "empty"}
         >
           {loading ? (
-            <CircleNotch size={13} weight="bold" aria-hidden="true" />
+            <Icon name="circle-notch" aria-hidden="true" size="sm" />
           ) : groups.length > 0 ? (
-            <CheckCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : (
-            <WarningCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
           )}
           {loading ? "读取中" : groups.length > 0 ? `${groups.length} 个分组` : "未配置"}
         </span>
@@ -316,9 +311,9 @@ export function ProviderTokenGroupSettings({
               }}
             >
               {busyId === group.id ? (
-                <CircleNotch size={14} weight="bold" aria-hidden="true" />
+                <Icon name="circle-notch" aria-hidden="true" size="sm" />
               ) : (
-                <CheckCircle size={14} weight="bold" aria-hidden="true" />
+                <Icon name="check-circle" aria-hidden="true" size="sm" />
               )}
               保存
             </button>
@@ -339,7 +334,7 @@ export function ProviderTokenGroupSettings({
                 void handleDeleteGroup(group);
               }}
             >
-              <Trash size={14} weight="bold" aria-hidden="true" />
+              <Icon name="trash" aria-hidden="true" size="sm" />
               删除
             </button>
           </div>
@@ -390,9 +385,9 @@ export function ProviderTokenGroupSettings({
             }}
           >
             {busyId === "new" ? (
-              <CircleNotch size={14} weight="bold" aria-hidden="true" />
+              <Icon name="circle-notch" aria-hidden="true" size="sm" />
             ) : (
-              <Plus size={14} weight="bold" aria-hidden="true" />
+              <Icon name="plus" aria-hidden="true" size="sm" />
             )}
             添加分组
           </button>
@@ -407,7 +402,7 @@ export function ProviderTokenGroupSettings({
       ) : null}
       {successMessage ? (
         <p className="settings-success token-group-settings__notice" role="status">
-          <CheckCircle size={15} weight="fill" aria-hidden="true" />
+          <Icon name="check-circle" aria-hidden="true" size="md" />
           {successMessage}
         </p>
       ) : null}

@@ -1,4 +1,4 @@
-import { CaretDown } from "@phosphor-icons/react/CaretDown";
+import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -74,7 +74,7 @@ export function ComicDramaConfiguration({
       <summary>
         <span className="canvas-knowledge-workflow__models-title">分集剧本与制作设置</span>
         <span>{populatedCount ? `${populatedCount} 集剧本已就绪` : "添加或导入剧本"}</span>
-        <CaretDown size={15} aria-hidden="true" />
+        <Icon name="caret-down" aria-hidden="true" size="md" />
       </summary>
       <fieldset disabled={disabled || importing} className="canvas-comic-drama-workflow__settings">
         <label className="canvas-comic-drama-workflow__import">

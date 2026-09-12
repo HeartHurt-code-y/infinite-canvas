@@ -1,13 +1,4 @@
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
-import { CaretLeft } from "@phosphor-icons/react/CaretLeft";
-import { CaretRight } from "@phosphor-icons/react/CaretRight";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { Clock } from "@phosphor-icons/react/Clock";
-import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
-import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import {
   useCallback,
   useEffect,
@@ -241,7 +232,7 @@ function HistoryDiagnostic({ label, value }: { readonly label: string; readonly 
   return (
     <div className="history-diagnostic" role="group" aria-label={label}>
       <div className="history-diagnostic__summary">
-        <WarningCircle size={18} weight="fill" aria-hidden="true" />
+        <Icon name="warning-circle" aria-hidden="true" size="lg" />
         <div>
           <span className="history-diagnostic__label">
             {label}
@@ -252,11 +243,11 @@ function HistoryDiagnostic({ label, value }: { readonly label: string; readonly 
       </div>
       <details className="history-diagnostic__details">
         <summary>
-          <CaretRight
-            size={14}
-            weight="bold"
+          <Icon
+            name="caret-right"
             className="history-disclosure__caret"
             aria-hidden="true"
+            size="sm"
           />
           完整技术详情
         </summary>
@@ -282,11 +273,11 @@ function HistoryPayload({
   return (
     <details className="history-payload" open={open}>
       <summary>
-        <CaretRight
-          size={14}
-          weight="bold"
+        <Icon
+          name="caret-right"
           className="history-disclosure__caret"
           aria-hidden="true"
+          size="sm"
         />
         <span>{label}</span>
         <span className="history-payload__format">{payloadFormat(value)}</span>
@@ -406,7 +397,7 @@ function HistoryLightbox({
         aria-label="关闭媒体预览"
         onClick={onClose}
       >
-        <X size={22} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="xl" />
       </button>
       <div
         className="history-lightbox__stage"
@@ -421,7 +412,7 @@ function HistoryLightbox({
             aria-label="上一个结果"
             onClick={() => onIndexChange(index - 1)}
           >
-            <CaretLeft size={22} weight="bold" aria-hidden="true" />
+            <Icon name="caret-left" aria-hidden="true" size="xl" />
           </button>
         ) : null}
         {result.mediaType === "text" ? (
@@ -467,7 +458,7 @@ function HistoryLightbox({
             aria-label="下一个结果"
             onClick={() => onIndexChange(index + 1)}
           >
-            <CaretRight size={22} weight="bold" aria-hidden="true" />
+            <Icon name="caret-right" aria-hidden="true" size="xl" />
           </button>
         ) : null}
       </div>
@@ -841,7 +832,7 @@ export function HistoryDialog({
       >
         <header className="history-dialog__header">
           <span className="history-dialog__eyebrow">
-            <Clock size={14} weight="bold" aria-hidden="true" />
+            <Icon name="clock" aria-hidden="true" size="sm" />
             历史记录
           </span>
           <h2 id="generation-history-title">
@@ -917,7 +908,7 @@ export function HistoryDialog({
             aria-label="关闭历史记录"
             onClick={handleClose}
           >
-            <X size={18} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="lg" />
           </button>
         </header>
 
@@ -1014,13 +1005,13 @@ export function HistoryDialog({
                             className={`history-item__status history-item__status--${task.status}`}
                           >
                             {task.status === "succeeded" ? (
-                              <CheckCircle size={14} weight="fill" aria-hidden="true" />
+                              <Icon name="check-circle" aria-hidden="true" size="sm" />
                             ) : task.status === "failed" ||
                               task.status === "unknown" ||
                               task.status === "interrupted" ? (
-                              <WarningCircle size={14} weight="fill" aria-hidden="true" />
+                              <Icon name="warning-circle" aria-hidden="true" size="sm" />
                             ) : (
-                              <CircleNotch size={14} weight="bold" aria-hidden="true" />
+                              <Icon name="circle-notch" aria-hidden="true" size="sm" />
                             )}
                             {TASK_STATUS_LABELS[task.status] ?? task.status}
                           </span>
@@ -1067,7 +1058,7 @@ export function HistoryDialog({
           <div className="history-detail" aria-label="任务详情">
             {selectedTaskId == null ? (
               <p className="history-detail__placeholder">
-                <MagnifyingGlass size={20} weight="bold" aria-hidden="true" />
+                <Icon name="magnifying-glass" aria-hidden="true" size="xl" />
                 在左侧选择一个任务查看详情。
               </p>
             ) : detailError != null && detail == null ? (
@@ -1142,7 +1133,7 @@ export function HistoryDialog({
                             title="按原任务冻结的提示词与素材创建一次全新生成"
                             onClick={() => void submitRegenerate(frozenCommand)}
                           >
-                            <ArrowClockwise size={15} weight="bold" aria-hidden="true" />
+                            <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
                             直接重新生成
                           </button>
                           <button
@@ -1297,7 +1288,7 @@ export function HistoryDialog({
                                     );
                                   }}
                                 >
-                                  <FolderOpen size={13} weight="bold" aria-hidden="true" />
+                                  <Icon name="folder-open" aria-hidden="true" size="sm" />
                                 </button>
                               ) : null}
                             </article>
@@ -1389,11 +1380,11 @@ export function HistoryDialog({
                           >
                             <details open={failed}>
                               <summary>
-                                <CaretRight
-                                  size={15}
-                                  weight="bold"
+                                <Icon
+                                  name="caret-right"
                                   className="history-disclosure__caret"
                                   aria-hidden="true"
+                                  size="md"
                                 />
                                 <span className="history-call__index">调用 {index + 1}</span>
                                 <span className="history-call__phase">

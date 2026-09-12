@@ -1,13 +1,4 @@
-import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
-import { At } from "@phosphor-icons/react/At";
-import { Check } from "@phosphor-icons/react/Check";
-import { Pause } from "@phosphor-icons/react/Pause";
-import { PencilSimple } from "@phosphor-icons/react/PencilSimple";
-import { Play } from "@phosphor-icons/react/Play";
-import { Rectangle } from "@phosphor-icons/react/Rectangle";
-import { Trash } from "@phosphor-icons/react/Trash";
-import { TrashSimple } from "@phosphor-icons/react/TrashSimple";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import {
   useCallback,
   useEffect,
@@ -1095,7 +1086,7 @@ function VideoLocalEditDialogContent({
           onClick={onClose}
           disabled={busy}
         >
-          <X size={20} aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="xl" />
         </button>
       </header>
       <div className="video-local-edit-dialog__body">
@@ -1291,9 +1282,9 @@ function VideoLocalEditDialogContent({
             disabled={!ready || busy || seeking || !!draft}
           >
             {playing ? (
-              <Pause size={18} aria-hidden="true" />
+              <Icon name="pause" aria-hidden="true" size="lg" />
             ) : (
-              <Play size={18} aria-hidden="true" />
+              <Icon name="play" aria-hidden="true" size="lg" />
             )}
           </button>
           <input
@@ -1318,7 +1309,7 @@ function VideoLocalEditDialogContent({
             disabled={!canDraw || !!draft}
             onClick={() => setTool("rectangle")}
           >
-            <Rectangle size={18} aria-hidden="true" />
+            <Icon name="rectangle" aria-hidden="true" size="lg" />
             框选
           </button>
           <button
@@ -1327,7 +1318,7 @@ function VideoLocalEditDialogContent({
             disabled={!canDraw || !!draft}
             onClick={() => setTool("freehand")}
           >
-            <PencilSimple size={18} aria-hidden="true" />
+            <Icon name="pencil-simple" aria-hidden="true" size="lg" />
             画笔
           </button>
           <span className="video-local-edit-dialog__separator" />
@@ -1342,7 +1333,7 @@ function VideoLocalEditDialogContent({
               disabled={!canDraw || !!draft}
               onClick={() => setColor(entry.value)}
             >
-              {color === entry.value && <Check size={16} weight="bold" aria-hidden="true" />}
+              {color === entry.value && <Icon name="check" aria-hidden="true" size="md" />}
             </button>
           ))}
           <span className="video-local-edit-dialog__separator" />
@@ -1352,7 +1343,7 @@ function VideoLocalEditDialogContent({
             disabled={!canDraw || currentMarks.length === 0 || !!draft}
             onClick={undoMark}
           >
-            <ArrowCounterClockwise size={18} aria-hidden="true" />
+            <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
             撤销
           </button>
           <button
@@ -1361,7 +1352,7 @@ function VideoLocalEditDialogContent({
             disabled={!canDraw || currentMarks.length === 0 || !!draft}
             onClick={clearFrameMarks}
           >
-            <Trash size={18} aria-hidden="true" />
+            <Icon name="trash" aria-hidden="true" size="lg" />
             清除
           </button>
           <span className="video-local-edit-dialog__count" role="status">
@@ -1425,7 +1416,7 @@ function VideoLocalEditDialogContent({
                       disabled={!canDraw || busy}
                       onClick={() => quoteMark(index)}
                     >
-                      <At size={16} aria-hidden="true" />
+                      <Icon name="at" aria-hidden="true" size="md" />
                       引用
                     </button>
                     <button
@@ -1435,7 +1426,7 @@ function VideoLocalEditDialogContent({
                       disabled={busy}
                       onClick={() => deleteMark(mark.id)}
                     >
-                      <TrashSimple size={16} aria-hidden="true" />
+                      <Icon name="trash-simple" aria-hidden="true" size="md" />
                     </button>
                   </li>
                 );

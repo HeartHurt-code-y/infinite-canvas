@@ -1,16 +1,4 @@
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
-import { ArrowSquareOut } from "@phosphor-icons/react/ArrowSquareOut";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { Copy } from "@phosphor-icons/react/Copy";
-import { FolderSimplePlus } from "@phosphor-icons/react/FolderSimplePlus";
-import { IdentificationBadge } from "@phosphor-icons/react/IdentificationBadge";
-import { PencilSimple } from "@phosphor-icons/react/PencilSimple";
-import { Trash } from "@phosphor-icons/react/Trash";
-import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { Waveform as WaveformIcon } from "@phosphor-icons/react/Waveform";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
@@ -196,7 +184,7 @@ export function RealPersonAssetDialog({
       <header className="real-person-dialog__header">
         <div className="real-person-dialog__title-row">
           <span className="real-person-dialog__mark" aria-hidden="true">
-            <IdentificationBadge size={24} weight="duotone" />
+            <Icon name="identification-badge" size="2xl" />
           </span>
           <div>
             <p className="real-person-dialog__eyebrow">REAL PERSON · H5 AUTH</p>
@@ -212,7 +200,7 @@ export function RealPersonAssetDialog({
           aria-label="关闭明星素材"
           onClick={onClose}
         >
-          <X size={20} weight="bold" aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="xl" />
         </button>
       </header>
 
@@ -265,9 +253,9 @@ export function RealPersonAssetDialog({
               disabled={linkBusy || !artistName.trim()}
             >
               {linkBusy ? (
-                <CircleNotch size={16} weight="bold" data-spin="true" aria-hidden="true" />
+                <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="md" />
               ) : (
-                <IdentificationBadge size={17} weight="bold" aria-hidden="true" />
+                <Icon name="identification-badge" aria-hidden="true" size="lg" />
               )}
               {linkBusy ? "正在生成…" : authLink ? "重新生成认证链接" : "生成认证链接"}
             </button>
@@ -295,7 +283,7 @@ export function RealPersonAssetDialog({
                     );
                   }}
                 >
-                  <Copy size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="copy" aria-hidden="true" size="md" />
                   复制链接
                 </button>
                 <button
@@ -307,7 +295,7 @@ export function RealPersonAssetDialog({
                     );
                   }}
                 >
-                  <ArrowSquareOut size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="arrow-square-out" aria-hidden="true" size="md" />
                   浏览器打开
                 </button>
               </div>
@@ -317,13 +305,13 @@ export function RealPersonAssetDialog({
 
           {error ? (
             <p className="real-person-dialog__message" data-state="error" role="alert">
-              <WarningCircle size={16} weight="fill" aria-hidden="true" />
+              <Icon name="warning-circle" aria-hidden="true" size="md" />
               {error}
             </p>
           ) : null}
           {notice ? (
             <p className="real-person-dialog__message" data-state="success" role="status">
-              <CheckCircle size={16} weight="fill" aria-hidden="true" />
+              <Icon name="check-circle" aria-hidden="true" size="md" />
               {notice}
             </p>
           ) : null}
@@ -342,11 +330,11 @@ export function RealPersonAssetDialog({
               aria-label="刷新已授权明星组"
               onClick={() => void refreshGroups(true)}
             >
-              <ArrowClockwise
-                size={16}
-                weight="bold"
+              <Icon
+                name="arrow-clockwise"
                 data-spin={groupsLoading ? "true" : undefined}
                 aria-hidden="true"
+                size="md"
               />
               刷新
             </button>
@@ -358,12 +346,12 @@ export function RealPersonAssetDialog({
 
           {groupsLoading && groups.length === 0 ? (
             <div className="real-person-groups__empty" role="status">
-              <CircleNotch size={22} weight="bold" data-spin="true" aria-hidden="true" />
+              <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="xl" />
               <span>正在读取已授权明星组…</span>
             </div>
           ) : groups.length === 0 ? (
             <div className="real-person-groups__empty">
-              <IdentificationBadge size={28} weight="duotone" aria-hidden="true" />
+              <Icon name="identification-badge" aria-hidden="true" size="2xl" />
               <strong>还没有完成认证的明星组</strong>
               <span>生成链接并由本人刷脸后，这里会自动出现授权组。</span>
             </div>
@@ -416,9 +404,9 @@ export function RealPersonAssetDialog({
                     }}
                   >
                     {uploadingGroupId === group.id ? (
-                      <CircleNotch size={16} weight="bold" data-spin="true" aria-hidden="true" />
+                      <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="md" />
                     ) : (
-                      <UploadSimple size={16} weight="bold" aria-hidden="true" />
+                      <Icon name="upload-simple" aria-hidden="true" size="md" />
                     )}
                     {uploadingGroupId === group.id ? "正在选择…" : "上传同一人的素材"}
                   </button>
@@ -488,7 +476,7 @@ export function AssetGroupCreateDialog({
       <header className="asset-group-dialog__header">
         <div className="asset-group-dialog__title-row">
           <span className="asset-group-dialog__mark" aria-hidden="true">
-            <FolderSimplePlus size={22} weight="duotone" />
+            <Icon name="folder-simple-plus" size="xl" />
           </span>
           <div>
             <p className="asset-group-dialog__eyebrow">ASSET LIBRARY · GROUP</p>
@@ -503,7 +491,7 @@ export function AssetGroupCreateDialog({
           onClick={onClose}
           disabled={busy}
         >
-          <X size={20} weight="bold" aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="xl" />
         </button>
       </header>
 
@@ -536,9 +524,9 @@ export function AssetGroupCreateDialog({
             </button>
             <button type="submit" className="real-person-primary-action" disabled={!canCreate}>
               {busy ? (
-                <CircleNotch size={16} weight="bold" data-spin="true" aria-hidden="true" />
+                <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="md" />
               ) : (
-                <FolderSimplePlus size={17} weight="bold" aria-hidden="true" />
+                <Icon name="folder-simple-plus" aria-hidden="true" size="lg" />
               )}
               {busy ? "正在创建…" : "创建分组"}
             </button>
@@ -701,7 +689,7 @@ export function AssetSourceDialog({
             aria-label="关闭素材详情"
             onClick={onClose}
           >
-            <X size={22} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xl" />
           </button>
           {asset.kind === "image" && mediaSrc && !mediaFailed ? (
             <img
@@ -723,7 +711,7 @@ export function AssetSourceDialog({
             />
           ) : asset.kind === "audio" && mediaSrc && !mediaFailed ? (
             <div className="asset-source-dialog__audio">
-              <WaveformIcon size={48} weight="regular" aria-hidden="true" />
+              <Icon name="waveform" size="3xl" />
               <audio
                 src={mediaSrc}
                 aria-label={asset.name}
@@ -734,7 +722,7 @@ export function AssetSourceDialog({
             </div>
           ) : asset.kind === "audio" ? (
             <div className="asset-source-dialog__audio" role="img" aria-label={asset.name}>
-              <WaveformIcon size={56} weight="regular" aria-hidden="true" />
+              <Icon name="waveform" size="3xl" />
               <span>预览不可用</span>
             </div>
           ) : asset.source != null ? (
@@ -783,7 +771,7 @@ export function AssetSourceDialog({
                         aria-label={`重命名素材：${asset.name}`}
                         onClick={startRenaming}
                       >
-                        <PencilSimple size={14} weight="bold" aria-hidden="true" />
+                        <Icon name="pencil-simple" aria-hidden="true" size="sm" />
                         重命名
                       </button>
                     ) : null}
@@ -828,12 +816,12 @@ export function AssetSourceDialog({
               >
                 {confirmingDelete ? (
                   <>
-                    <WarningCircle size={16} weight="bold" aria-hidden="true" />
+                    <Icon name="warning-circle" aria-hidden="true" size="md" />
                     确认删除？
                   </>
                 ) : (
                   <>
-                    <Trash size={16} weight="regular" aria-hidden="true" />
+                    <Icon name="trash" aria-hidden="true" size="md" />
                     删除素材
                   </>
                 )}

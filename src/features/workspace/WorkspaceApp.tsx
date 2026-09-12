@@ -1,19 +1,5 @@
+import { Icon } from "../../components/Icon";
 import { videoDownloadInputs } from "./videoDownloadInputs";
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
-import { ArrowCounterClockwise } from "@phosphor-icons/react/ArrowCounterClockwise";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { Clock } from "@phosphor-icons/react/Clock";
-import { CornersOut } from "@phosphor-icons/react/CornersOut";
-import { CrosshairSimple } from "@phosphor-icons/react/CrosshairSimple";
-import { GearSix } from "@phosphor-icons/react/GearSix";
-import { Minus } from "@phosphor-icons/react/Minus";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { Sparkle } from "@phosphor-icons/react/Sparkle";
-import { StackSimple } from "@phosphor-icons/react/StackSimple";
-import { TrashSimple } from "@phosphor-icons/react/TrashSimple";
-import { Warning } from "@phosphor-icons/react/Warning";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   Background,
@@ -8221,9 +8207,9 @@ export function WorkspaceApp({
             role="status"
           >
             {canvasPersistence.error ? (
-              <WarningCircle size={14} aria-hidden="true" />
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
             ) : (
-              <CheckCircle size={14} weight="fill" aria-hidden="true" />
+              <Icon name="check-circle" aria-hidden="true" size="sm" />
             )}
             {canvasPersistence.status === "saved"
               ? "已保存"
@@ -8249,7 +8235,7 @@ export function WorkspaceApp({
               aria-expanded={mobilePanel === "nodes"}
               onClick={(event) => toggleMobilePanel("nodes", event.currentTarget)}
             >
-              <Sparkle size={18} weight="bold" aria-hidden="true" />
+              <Icon name="sparkle" aria-hidden="true" size="lg" />
               <span>节点</span>
             </button>
             <button
@@ -8260,7 +8246,7 @@ export function WorkspaceApp({
               aria-expanded={mobilePanel === "assets"}
               onClick={(event) => toggleMobilePanel("assets", event.currentTarget)}
             >
-              <StackSimple size={18} weight="bold" aria-hidden="true" />
+              <Icon name="stack-simple" aria-hidden="true" size="lg" />
               <span>素材</span>
             </button>
             <button
@@ -8278,7 +8264,7 @@ export function WorkspaceApp({
                 setHistoryOpen(true);
               }}
             >
-              <Clock size={18} weight="bold" aria-hidden="true" />
+              <Icon name="clock" aria-hidden="true" size="lg" />
             </button>
             <button
               type="button"
@@ -8287,7 +8273,7 @@ export function WorkspaceApp({
               data-tooltip="清空画布上的节点与连线"
               onClick={openClearCanvasDialog}
             >
-              <ArrowCounterClockwise size={18} weight="bold" aria-hidden="true" />
+              <Icon name="arrow-counter-clockwise" aria-hidden="true" size="lg" />
             </button>
             <button
               ref={settingsTriggerRef}
@@ -8304,7 +8290,7 @@ export function WorkspaceApp({
                 setSettingsOpen(true);
               }}
             >
-              <GearSix size={18} weight="bold" aria-hidden="true" />
+              <Icon name="gear-six" aria-hidden="true" size="lg" />
             </button>
           </div>
         </header>
@@ -8320,11 +8306,11 @@ export function WorkspaceApp({
             aria-label="关闭节点仓库"
             onClick={closeMobilePanel}
           >
-            <X size={18} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="lg" />
           </button>
           <div className="panel-title-row">
             <div className="panel-title-row__identity">
-              <Sparkle size={18} weight="bold" aria-hidden="true" />
+              <Icon name="sparkle" aria-hidden="true" size="lg" />
               <h2>节点仓库</h2>
             </div>
           </div>
@@ -8628,7 +8614,7 @@ export function WorkspaceApp({
               data-tooltip="回到起始位置"
               onClick={resetCanvasViewport}
             >
-              <CrosshairSimple size={16} weight="bold" aria-hidden="true" />
+              <Icon name="crosshair-simple" aria-hidden="true" size="md" />
             </button>
           </div>
 
@@ -8641,7 +8627,7 @@ export function WorkspaceApp({
               disabled={pastCount === 0}
               onClick={undo}
             >
-              <ArrowCounterClockwise size={16} weight="bold" aria-hidden="true" />
+              <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
             </button>
             <button
               type="button"
@@ -8651,7 +8637,7 @@ export function WorkspaceApp({
               disabled={futureCount === 0}
               onClick={redo}
             >
-              <ArrowClockwise size={16} weight="bold" aria-hidden="true" />
+              <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
             </button>
           </div>
 
@@ -8663,7 +8649,7 @@ export function WorkspaceApp({
               data-tooltip="缩小画布 · -"
               onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
             >
-              <Minus size={16} weight="bold" aria-hidden="true" />
+              <Icon name="minus" aria-hidden="true" size="md" />
             </button>
             <button
               type="button"
@@ -8673,7 +8659,7 @@ export function WorkspaceApp({
               data-tooltip="重置缩放 · 0"
               onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
             >
-              <CornersOut size={14} weight="bold" aria-hidden="true" />
+              <Icon name="corners-out" aria-hidden="true" size="sm" />
               <output aria-live="polite">{zoom}%</output>
             </button>
             <button
@@ -8683,7 +8669,7 @@ export function WorkspaceApp({
               data-tooltip="放大画布 · +"
               onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
             >
-              <Plus size={16} weight="bold" aria-hidden="true" />
+              <Icon name="plus" aria-hidden="true" size="md" />
             </button>
           </div>
         </section>
@@ -8865,7 +8851,7 @@ export function WorkspaceApp({
         >
           <header className="confirm-dialog__header">
             <span className="confirm-dialog__badge" aria-hidden="true">
-              <Warning size={20} weight="bold" />
+              <Icon name="warning" size="xl" />
             </span>
             <div>
               <p className="confirm-dialog__eyebrow">危险操作 · 不可撤销</p>
@@ -8881,14 +8867,14 @@ export function WorkspaceApp({
             <ul className="confirm-dialog__facts">
               <li className="confirm-dialog__fact confirm-dialog__fact--removed">
                 <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                  <TrashSimple size={14} weight="bold" />
+                  <Icon name="trash-simple" size="sm" />
                 </span>
                 <span className="confirm-dialog__fact-label">画布节点与连线</span>
                 <span className="confirm-dialog__fact-state">将被移除</span>
               </li>
               <li className="confirm-dialog__fact confirm-dialog__fact--kept">
                 <span className="confirm-dialog__fact-icon" aria-hidden="true">
-                  <CheckCircle size={14} weight="bold" />
+                  <Icon name="check-circle" size="sm" />
                 </span>
                 <span className="confirm-dialog__fact-label">任务历史</span>
                 <span className="confirm-dialog__fact-state">保留 · 可复现审计</span>
@@ -8904,7 +8890,7 @@ export function WorkspaceApp({
               className="confirm-dialog__btn confirm-dialog__btn--danger"
               onClick={confirmClearCanvas}
             >
-              <TrashSimple size={14} weight="bold" aria-hidden="true" />
+              <Icon name="trash-simple" aria-hidden="true" size="sm" />
               确认清空
             </button>
           </div>

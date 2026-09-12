@@ -1,16 +1,4 @@
-import { BookOpenText } from "@phosphor-icons/react/BookOpenText";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
-import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
-import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
-import { FileText } from "@phosphor-icons/react/FileText";
-import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
-import { MusicNotes } from "@phosphor-icons/react/MusicNotes";
-import { Paperclip } from "@phosphor-icons/react/Paperclip";
-import { PaperPlaneRight } from "@phosphor-icons/react/PaperPlaneRight";
-import { Sparkle } from "@phosphor-icons/react/Sparkle";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   formatBytes,
@@ -48,10 +36,10 @@ import {
 
 function ScreenplayMaterialIcon({ kind }: { readonly kind: PromptMaterialKind }) {
   const props = { size: 15, weight: "bold" as const, "aria-hidden": true as const };
-  if (kind === "image") return <ImageSquare {...props} />;
-  if (kind === "audio") return <MusicNotes {...props} />;
-  if (kind === "video") return <VideoCamera {...props} />;
-  return <FileText {...props} />;
+  if (kind === "image") return <Icon name="image-square" {...props} size="md" />;
+  if (kind === "audio") return <Icon name="music-notes" {...props} size="md" />;
+  if (kind === "video") return <Icon name="video-camera" {...props} size="md" />;
+  return <Icon name="file-text" {...props} size="md" />;
 }
 
 function screenplayMaterialKindLabel(kind: PromptMaterialKind): string {
@@ -246,9 +234,9 @@ export function CanvasDocumentSkillNode({
             }}
           >
             {exporting ? (
-              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
             ) : (
-              <DownloadSimple size={14} weight="bold" aria-hidden="true" />
+              <Icon name="download-simple" aria-hidden="true" size="sm" />
             )}
             <span>{exporting ? "导出中" : "导出 MD"}</span>
           </button>
@@ -262,7 +250,7 @@ export function CanvasDocumentSkillNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -271,7 +259,7 @@ export function CanvasDocumentSkillNode({
         {textInputs.map((input) => (
           <div key={input.key} className="canvas-screenplay-node__source is-connected">
             <span className="canvas-screenplay-node__source-copy">
-              <BookOpenText size={16} weight="bold" aria-hidden="true" />
+              <Icon name="book-open-text" aria-hidden="true" size="md" />
               <span>
                 <small>输入文本</small>
                 <strong>{input.name}</strong>
@@ -286,7 +274,7 @@ export function CanvasDocumentSkillNode({
                 onUnlink(input.edgeId);
               }}
             >
-              <X size={14} weight="bold" aria-hidden="true" />
+              <Icon name="x" aria-hidden="true" size="sm" />
             </button>
           </div>
         ))}
@@ -301,15 +289,15 @@ export function CanvasDocumentSkillNode({
               aria-label={`解除素材连线：${input.name}`}
               onClick={() => onUnlink(input.edgeId)}
             >
-              <X size={14} aria-hidden="true" />
+              <Icon name="x" aria-hidden="true" size="sm" />
             </button>
           </div>
         ))}
         <div className="canvas-screenplay-node__skill-badge">
           {node.kind === "storyboard" ? (
-            <FilmSlate size={16} weight="bold" aria-hidden="true" />
+            <Icon name="film-slate" aria-hidden="true" size="md" />
           ) : (
-            <BookOpenText size={16} weight="bold" aria-hidden="true" />
+            <Icon name="book-open-text" aria-hidden="true" size="md" />
           )}
           <span>
             <strong>{copy.skillTitle}</strong>
@@ -405,7 +393,7 @@ export function CanvasDocumentSkillNode({
           )}
           {running ? (
             <div className="canvas-screenplay-node__thinking" role="status">
-              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
               {copy.loadingLabel}
             </div>
           ) : null}
@@ -467,9 +455,9 @@ export function CanvasDocumentSkillNode({
                 }}
               >
                 {pickingMaterials ? (
-                  <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
+                  <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
                 ) : (
-                  <Paperclip size={15} weight="bold" aria-hidden="true" />
+                  <Icon name="paperclip" aria-hidden="true" size="md" />
                 )}
                 {pickingMaterials ? "读取中" : "添加素材"}
               </button>
@@ -501,7 +489,7 @@ export function CanvasDocumentSkillNode({
                         onRemoveMaterial?.(node.key, material.id);
                       }}
                     >
-                      <X size={13} weight="bold" aria-hidden="true" />
+                      <Icon name="x" aria-hidden="true" size="sm" />
                     </button>
                   </li>
                 ))}
@@ -530,9 +518,9 @@ export function CanvasDocumentSkillNode({
             }}
           >
             {running ? (
-              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
             ) : (
-              <PaperPlaneRight size={14} weight="fill" aria-hidden="true" />
+              <Icon name="paper-plane-right" aria-hidden="true" size="sm" />
             )}
             {running ? "生成中" : "发送"}
           </button>
@@ -745,9 +733,9 @@ export function CanvasViralRemixNode({
             }}
           >
             {exporting ? (
-              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
             ) : (
-              <DownloadSimple size={14} weight="bold" aria-hidden="true" />
+              <Icon name="download-simple" aria-hidden="true" size="sm" />
             )}
             <span>{exporting ? "导出中" : "导出 MD"}</span>
           </button>
@@ -761,14 +749,14 @@ export function CanvasViralRemixNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
 
       <div className="canvas-viral-remix-node__body">
         <div className="canvas-screenplay-node__skill-badge">
-          <FilmStrip size={16} weight="bold" aria-hidden="true" />
+          <Icon name="film-strip" aria-hidden="true" size="md" />
           <span>
             <strong>V1.1 复刻技能已内置</strong>
             <small>只分析与二创 · 不包含下载能力</small>
@@ -803,7 +791,7 @@ export function CanvasViralRemixNode({
                   onUnlink(input.edgeId);
                 }}
               >
-                <X size={12} weight="bold" aria-hidden="true" />
+                <Icon name="x" aria-hidden="true" size="xs" />
               </button>
             </div>
           ))
@@ -896,9 +884,9 @@ export function CanvasViralRemixNode({
           }}
         >
           {running ? (
-            <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
+            <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
           ) : (
-            <Sparkle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="sparkle" aria-hidden="true" size="md" />
           )}
           {running ? "正在密集抽帧与复刻…" : "开始复刻"}
         </button>
@@ -1165,9 +1153,9 @@ export function CanvasPromptNode({
             }}
           >
             {running ? (
-              <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
             ) : (
-              <Sparkle size={15} weight="fill" aria-hidden="true" />
+              <Icon name="sparkle" aria-hidden="true" size="md" />
             )}
             <span>{running ? "调用中" : taskLabel}</span>
           </button>
@@ -1181,7 +1169,7 @@ export function CanvasPromptNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -1216,7 +1204,7 @@ export function CanvasPromptNode({
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={() => onUnlink(connection.edgeId)}
                   >
-                    <X size={12} weight="bold" aria-hidden="true" />
+                    <Icon name="x" aria-hidden="true" size="xs" />
                   </button>
                 </li>
               ))}
@@ -1289,7 +1277,7 @@ export function CanvasPromptNode({
           ) : null}
           {running ? (
             <div className="canvas-screenplay-node__thinking" role="status">
-              <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
               正在调用文本模型…
             </div>
           ) : null}
@@ -1497,7 +1485,7 @@ export function CanvasPromptNode({
                     onMouseDown={(event) => event.stopPropagation()}
                     onClick={() => onUnlink(connection.edgeId)}
                   >
-                    <X size={12} weight="bold" aria-hidden="true" />
+                    <Icon name="x" aria-hidden="true" size="xs" />
                   </button>
                 </li>
               ))}

@@ -1,20 +1,4 @@
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
-import { ArrowDown } from "@phosphor-icons/react/ArrowDown";
-import { ArrowUp } from "@phosphor-icons/react/ArrowUp";
-import { Check } from "@phosphor-icons/react/Check";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { CopySimple } from "@phosphor-icons/react/CopySimple";
-import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
-import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
-import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
-import { Images } from "@phosphor-icons/react/Images";
-import { Play } from "@phosphor-icons/react/Play";
-import { Sparkle } from "@phosphor-icons/react/Sparkle";
-import { TextT } from "@phosphor-icons/react/TextT";
-import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+﻿import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -239,11 +223,11 @@ export function CanvasGenNode({
             }}
           >
             {starting ? (
-              <CircleNotch size={15} weight="bold" aria-hidden="true" className="spin-icon" />
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
             ) : isVideo ? (
-              <Play size={15} weight="fill" aria-hidden="true" />
+              <Icon name="play" aria-hidden="true" size="md" />
             ) : (
-              <Sparkle size={15} weight="fill" aria-hidden="true" />
+              <Icon name="sparkle" aria-hidden="true" size="md" />
             )}
             <span>{starting ? "提交中" : "生成"}</span>
           </button>
@@ -257,7 +241,7 @@ export function CanvasGenNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -318,7 +302,7 @@ export function CanvasGenNode({
         <div className="canvas-gen-node__error" role="alert">
           {!isVideo ? (
             <strong>
-              <WarningCircle size={14} weight="fill" aria-hidden="true" />
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
               未能开始生成 · 检查配置后重试
             </strong>
           ) : null}
@@ -340,9 +324,9 @@ export function CanvasGenNode({
               aria-hidden="true"
             >
               {activeTask || starting ? (
-                <CircleNotch size={15} weight="bold" className="spin-icon" />
+                <Icon name="circle-notch" className="spin-icon" size="md" />
               ) : (
-                <CheckCircle size={15} weight="fill" />
+                <Icon name="check-circle" size="md" />
               )}
             </span>
             <span>
@@ -384,9 +368,9 @@ export function CanvasGenNode({
               aria-hidden="true"
             >
               {activeTask || starting ? (
-                <CircleNotch size={15} weight="bold" className="spin-icon" />
+                <Icon name="circle-notch" className="spin-icon" size="md" />
               ) : (
-                <CheckCircle size={15} weight="fill" />
+                <Icon name="check-circle" size="md" />
               )}
             </span>
             <span>
@@ -500,7 +484,7 @@ export function CanvasVideoComposerNode({
       <div className="canvas-video-composer__header">
         <span className="canvas-video-composer__type">
           <span className="canvas-video-composer__type-icon" aria-hidden="true">
-            <FilmStrip size={16} weight="bold" />
+            <Icon name="film-strip" size="md" />
           </span>
           <span>
             <strong>视频拼接与合成</strong>
@@ -527,9 +511,9 @@ export function CanvasVideoComposerNode({
             }}
           >
             {running ? (
-              <CircleNotch size={15} weight="bold" className="spin-icon" aria-hidden="true" />
+              <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
             ) : (
-              <Play size={15} weight="fill" aria-hidden="true" />
+              <Icon name="play" aria-hidden="true" size="md" />
             )}
             <span>{running ? "合成中" : "合成"}</span>
           </button>
@@ -543,7 +527,7 @@ export function CanvasVideoComposerNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -570,7 +554,7 @@ export function CanvasVideoComposerNode({
                   aria-label={`上移第 ${index + 1} 段：${input.name}`}
                   onClick={() => onMoveInput(node.key, input.key, -1)}
                 >
-                  <ArrowUp size={14} weight="bold" aria-hidden="true" />
+                  <Icon name="arrow-up" aria-hidden="true" size="sm" />
                 </button>
                 <button
                   type="button"
@@ -578,7 +562,7 @@ export function CanvasVideoComposerNode({
                   aria-label={`下移第 ${index + 1} 段：${input.name}`}
                   onClick={() => onMoveInput(node.key, input.key, 1)}
                 >
-                  <ArrowDown size={14} weight="bold" aria-hidden="true" />
+                  <Icon name="arrow-down" aria-hidden="true" size="sm" />
                 </button>
                 <button
                   type="button"
@@ -586,7 +570,7 @@ export function CanvasVideoComposerNode({
                   aria-label={`移除第 ${index + 1} 段：${input.name}`}
                   onClick={() => onUnlink(input.edgeId)}
                 >
-                  <X size={13} weight="bold" aria-hidden="true" />
+                  <Icon name="x" aria-hidden="true" size="sm" />
                 </button>
               </span>
             </li>
@@ -594,7 +578,7 @@ export function CanvasVideoComposerNode({
         </ol>
       ) : (
         <div className="canvas-video-composer__empty">
-          <FilmStrip size={20} weight="bold" aria-hidden="true" />
+          <Icon name="film-strip" aria-hidden="true" size="xl" />
           <span>从视频素材或视频产物的右侧端口拖入连线</span>
         </div>
       )}
@@ -632,11 +616,11 @@ export function CanvasVideoComposerNode({
       >
         <span>
           {running ? (
-            <CircleNotch size={15} weight="bold" className="spin-icon" aria-hidden="true" />
+            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
           ) : runState?.status === "error" ? (
-            <WarningCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="md" />
           ) : (
-            <CheckCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="md" />
           )}
           <strong>{statusText}</strong>
         </span>
@@ -767,7 +751,7 @@ export function CanvasVideoDownloaderNode({
       <div className="canvas-video-downloader__header">
         <span className="canvas-video-downloader__type">
           <span className="canvas-video-downloader__type-icon" aria-hidden="true">
-            <DownloadSimple size={16} weight="bold" />
+            <Icon name="download-simple" size="md" />
           </span>
           <span>
             <strong>网络爆款视频下载</strong>
@@ -787,7 +771,7 @@ export function CanvasVideoDownloaderNode({
                 onRevealResult(node.key);
               }}
             >
-              <FolderOpen size={15} weight="bold" aria-hidden="true" />
+              <Icon name="folder-open" aria-hidden="true" size="md" />
             </button>
           ) : null}
           {running ? (
@@ -802,7 +786,7 @@ export function CanvasVideoDownloaderNode({
                 onCancelDownload(node.key);
               }}
             >
-              <X size={15} weight="bold" aria-hidden="true" />
+              <Icon name="x" aria-hidden="true" size="md" />
               <span>取消</span>
             </button>
           ) : (
@@ -818,7 +802,7 @@ export function CanvasVideoDownloaderNode({
                 onStartDownload(node.key);
               }}
             >
-              <DownloadSimple size={15} weight="bold" aria-hidden="true" />
+              <Icon name="download-simple" aria-hidden="true" size="md" />
               <span>下载</span>
             </button>
           )}
@@ -832,7 +816,7 @@ export function CanvasVideoDownloaderNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -863,9 +847,9 @@ export function CanvasVideoDownloaderNode({
           className="canvas-video-downloader__engine-chip"
           data-state={engineStatus?.state ?? "unknown"}
         >
-          {engineReady ? <CheckCircle size={12} weight="fill" aria-hidden="true" /> : null}
+          {engineReady ? <Icon name="check-circle" aria-hidden="true" size="xs" /> : null}
           {engineStatus?.state === "failed" ? (
-            <WarningCircle size={12} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="xs" />
           ) : null}
           <span>{engineStateLabel}</span>
         </span>
@@ -941,9 +925,9 @@ export function CanvasVideoDownloaderNode({
           role="status"
         >
           {bilibiliLoggedIn ? (
-            <CheckCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : (
-            <WarningCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
           )}
           <span>
             {bilibiliLoggedIn
@@ -960,11 +944,11 @@ export function CanvasVideoDownloaderNode({
       >
         <span>
           {running ? (
-            <CircleNotch size={15} weight="bold" className="spin-icon" aria-hidden="true" />
+            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
           ) : runState?.status === "error" ? (
-            <WarningCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="md" />
           ) : runState?.status === "done" ? (
-            <CheckCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="md" />
           ) : null}
           <strong>{statusText}</strong>
         </span>
@@ -1124,7 +1108,7 @@ export function CanvasVideoFrameExtractorNode({
       <div className="canvas-video-frame-extractor__header">
         <span className="canvas-video-frame-extractor__type">
           <span className="canvas-video-frame-extractor__type-icon" aria-hidden="true">
-            <Images size={16} weight="bold" />
+            <Icon name="images" size="md" />
           </span>
           <span>
             <strong>视频抽帧</strong>
@@ -1144,7 +1128,7 @@ export function CanvasVideoFrameExtractorNode({
                 onCancelExtraction(node.key);
               }}
             >
-              <X size={15} weight="bold" aria-hidden="true" />
+              <Icon name="x" aria-hidden="true" size="md" />
               <span>取消</span>
             </button>
           ) : (
@@ -1167,9 +1151,9 @@ export function CanvasVideoFrameExtractorNode({
               }}
             >
               {running ? (
-                <CircleNotch size={15} weight="bold" className="spin-icon" aria-hidden="true" />
+                <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
               ) : (
-                <Play size={15} weight="fill" aria-hidden="true" />
+                <Icon name="play" aria-hidden="true" size="md" />
               )}
               <span>{running ? "抽帧中" : "开始抽帧"}</span>
             </button>
@@ -1184,7 +1168,7 @@ export function CanvasVideoFrameExtractorNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -1257,10 +1241,10 @@ export function CanvasVideoFrameExtractorNode({
       >
         <span>
           {runState?.status === "done" ? (
-            <CheckCircle size={14} weight="bold" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : null}
           {runState?.status === "error" || runState?.status === "cancelled" ? (
-            <WarningCircle size={14} weight="bold" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
           ) : null}
           {statusText}
         </span>
@@ -1620,7 +1604,7 @@ export function CanvasAssetNode({
           onRemove(node.key);
         }}
       >
-        <X size={11} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="xs" />
       </button>
       <button
         type="button"
@@ -1682,7 +1666,7 @@ export function CanvasOutputLightbox({
         aria-label="关闭媒体预览"
         onClick={onClose}
       >
-        <X size={22} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="xl" />
       </button>
       <div
         className="history-lightbox__stage"
@@ -1756,7 +1740,7 @@ export function CanvasAssetLightbox({
         aria-label="关闭素材预览"
         onClick={onClose}
       >
-        <X size={22} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="xl" />
       </button>
       <div
         className="history-lightbox__stage"
@@ -2017,7 +2001,7 @@ export function CanvasOutputNode({
       {isTextResult && node.textContent != null ? (
         <>
           <span className="canvas-output-node__state canvas-output-node__state--saved">
-            <TextT size={14} weight="fill" aria-hidden="true" />
+            <Icon name="text-t" aria-hidden="true" size="sm" />
             <span className="canvas-output-node__status">
               {isSaving ? "智能扩写完成 · 等待文本保存" : "智能扩写完成"}
             </span>
@@ -2033,9 +2017,9 @@ export function CanvasOutputNode({
               }}
             >
               {copied ? (
-                <Check size={13} weight="bold" aria-hidden="true" />
+                <Icon name="check" aria-hidden="true" size="sm" />
               ) : (
-                <CopySimple size={13} weight="bold" aria-hidden="true" />
+                <Icon name="copy-simple" aria-hidden="true" size="sm" />
               )}
               {copied ? "已复制" : "复制"}
             </button>
@@ -2044,7 +2028,7 @@ export function CanvasOutputNode({
             {node.textContent}
           </pre>
           <span className="canvas-asset-node__identity">
-            <TextT size={15} weight="bold" aria-hidden="true" />
+            <Icon name="text-t" aria-hidden="true" size="md" />
             <span className="canvas-asset-node__name" title={node.name ?? undefined}>
               {node.name ?? "智能扩写结果"}
             </span>
@@ -2138,12 +2122,12 @@ export function CanvasOutputNode({
               >
                 {resuming ? (
                   <>
-                    <CircleNotch size={12} weight="bold" className="spin-icon" aria-hidden="true" />
+                    <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="xs" />
                     正在保存…
                   </>
                 ) : (
                   <>
-                    <ArrowClockwise size={12} weight="bold" aria-hidden="true" />
+                    <Icon name="arrow-clockwise" aria-hidden="true" size="xs" />
                     重试保存
                   </>
                 )}
@@ -2154,7 +2138,7 @@ export function CanvasOutputNode({
       ) : isFailed ? (
         <>
           <span className="canvas-output-node__state canvas-output-node__state--failed">
-            <WarningCircle size={14} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
             <span className="canvas-output-node__state-title">{failedTitle}</span>
             <button
               type="button"
@@ -2168,9 +2152,9 @@ export function CanvasOutputNode({
               }}
             >
               {copied ? (
-                <Check size={13} weight="bold" aria-hidden="true" />
+                <Icon name="check" aria-hidden="true" size="sm" />
               ) : (
-                <CopySimple size={13} weight="bold" aria-hidden="true" />
+                <Icon name="copy-simple" aria-hidden="true" size="sm" />
               )}
               {copied ? "已复制" : "复制错误"}
             </button>
@@ -2185,9 +2169,9 @@ export function CanvasOutputNode({
           <span className="canvas-output-node__state">
             <span className={isRunning ? "spin-icon" : undefined}>
               {phase === "saving" ? (
-                <CheckCircle size={16} weight="fill" aria-hidden="true" />
+                <Icon name="check-circle" aria-hidden="true" size="md" />
               ) : (
-                <CircleNotch size={16} weight="bold" aria-hidden="true" />
+                <Icon name="circle-notch" aria-hidden="true" size="md" />
               )}
             </span>
             <span className="canvas-output-node__status">
@@ -2233,7 +2217,7 @@ export function CanvasOutputNode({
             onUploadToCloud(node.key);
           }}
         >
-          <UploadSimple size={12} weight="bold" aria-hidden="true" />
+          <Icon name="upload-simple" aria-hidden="true" size="xs" />
           {node.uploadedToCloud ? (
             <span className="canvas-asset-node__upload-dot" aria-hidden="true" />
           ) : null}
@@ -2249,7 +2233,7 @@ export function CanvasOutputNode({
           onRemove(node.key);
         }}
       >
-        <X size={11} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="xs" />
       </button>
       {canUseAsGenerationReference || canConnectToComposer ? (
         <button
@@ -2332,7 +2316,7 @@ export function CanvasResultNode({
                 }
               }}
             >
-              <FolderOpen size={13} weight="bold" aria-hidden="true" />
+              <Icon name="folder-open" aria-hidden="true" size="sm" />
             </button>
           ) : null}
           <button
@@ -2345,7 +2329,7 @@ export function CanvasResultNode({
               onRemove(node.key);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </span>
       </div>
@@ -2428,7 +2412,7 @@ export function AutoSizeThumb({
       {showVideo ? (
         <VideoMiddleFrame
           src={videoSource}
-          placeholder={<AssetKindIcon kind="video" size={16} />}
+          placeholder={<AssetKindIcon kind="video" size="md" />}
           onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
           onLoadError={() => setFailedUrl(videoSource)}
         />
@@ -2448,7 +2432,7 @@ export function AutoSizeThumb({
       ) : (
         <AssetKindIcon
           kind={kind === "document" ? "text" : (kind as "image" | "video" | "audio" | "text")}
-          size={16}
+          size="md"
         />
       )}
     </span>
@@ -2517,7 +2501,7 @@ export function GenerationInputChips({
                     onUnlink(input.edgeId);
                   }}
                 >
-                  <X size={10} weight="bold" aria-hidden="true" />
+                  <Icon name="x" aria-hidden="true" size="2xs" />
                 </button>
               </>
             )}

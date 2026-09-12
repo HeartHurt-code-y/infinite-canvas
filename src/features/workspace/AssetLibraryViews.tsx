@@ -1,9 +1,4 @@
-import { Check } from "@phosphor-icons/react/Check";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { CopySimple } from "@phosphor-icons/react/CopySimple";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+﻿import { Icon } from "../../components/Icon";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import { formatBytes, assetLibraryClient } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
@@ -49,7 +44,7 @@ export function AssetMediaState({
   const label = state === "loading" ? "正在加载预览" : "预览不可用";
   return (
     <span className="asset-card__media-state" data-state={state}>
-      <AssetKindIcon kind={kind} size={22} />
+      <AssetKindIcon kind={kind} size="xl" />
       <span>{label}</span>
     </span>
   );
@@ -662,12 +657,12 @@ export function AssetUploadRow({
       <span className="asset-upload__icon" aria-hidden="true">
         {isTerminal ? (
           assetImportDone || status === "staged" ? (
-            <CheckCircle size={15} weight="fill" />
+            <Icon name="check-circle" size="md" />
           ) : (
-            <WarningCircle size={15} weight="fill" />
+            <Icon name="warning-circle" size="md" />
           )
         ) : (
-          <CircleNotch size={15} weight="bold" />
+          <Icon name="circle-notch" size="md" />
         )}
       </span>
       <span className="asset-upload__body">
@@ -719,9 +714,9 @@ export function AssetUploadRow({
               }}
             >
               {errorCopied ? (
-                <Check size={12} weight="bold" aria-hidden="true" />
+                <Icon name="check" aria-hidden="true" size="xs" />
               ) : (
-                <CopySimple size={12} weight="bold" aria-hidden="true" />
+                <Icon name="copy-simple" aria-hidden="true" size="xs" />
               )}
               {errorCopied ? "已复制" : "复制"}
             </button>
@@ -765,7 +760,7 @@ export function AssetUploadRow({
           aria-label={`移除上传记录：${entry.name}`}
           onClick={onDismiss}
         >
-          <X size={13} weight="bold" aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="sm" />
         </button>
       ) : null}
     </li>
@@ -787,7 +782,7 @@ export function AssetPanelError({
   return (
     <div className="asset-panel__error" role="alert">
       <div className="asset-panel__error-heading">
-        <WarningCircle size={18} weight="fill" aria-hidden="true" />
+        <Icon name="warning-circle" aria-hidden="true" size="lg" />
         <strong>{title}</strong>
       </div>
       <p className="asset-panel__error-summary">{presentation.summary}</p>

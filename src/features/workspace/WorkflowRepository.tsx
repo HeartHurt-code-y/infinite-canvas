@@ -1,7 +1,4 @@
-import { CaretRight } from "@phosphor-icons/react/CaretRight";
-import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { StackSimple } from "@phosphor-icons/react/StackSimple";
+import { Icon } from "../../components/Icon";
 import { memo, useId } from "react";
 
 const KNOWLEDGE_VIDEO_WORKFLOW_STAGES = ["智能策划", "自动生成", "质量检查", "成片交付"] as const;
@@ -45,7 +42,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
         onClick={onToggle}
       >
         <span className="workflow-repository__toggle-mark" aria-hidden="true">
-          <StackSimple size={20} weight="duotone" />
+          <Icon name="stack-simple" size="xl" />
         </span>
         <span className="workflow-repository__toggle-copy">
           <span id={toggleLabelId} className="workflow-repository__title">
@@ -56,11 +53,11 @@ export const WorkflowRepository = memo(function WorkflowRepository({
           </span>
         </span>
         <span className="workflow-repository__count">7 个自动工作流</span>
-        <CaretRight
+        <Icon
+          name="caret-right"
           className="workflow-repository__toggle-icon"
-          size={18}
-          weight="bold"
           aria-hidden="true"
+          size="lg"
         />
       </button>
 
@@ -73,7 +70,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
       >
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -98,13 +95,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertReverseVideoWorkflow}
             aria-label="添加短视频反推工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加反推工作流
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <StackSimple size={26} weight="duotone" />
+            <Icon name="stack-simple" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -130,13 +127,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertXhsCoverWorkflow}
             aria-label="添加小红书封面工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加封面工作流
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
 
           <div className="workflow-repository__card-body">
@@ -164,13 +161,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             className="workflow-repository__insert"
             onClick={onInsertKnowledgeVideoWorkflow}
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加工作流节点
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -195,13 +192,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertAiFilmWorkflow}
             aria-label="添加AI影视工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加影视工作流
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -226,13 +223,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertComicDramaWorkflow}
             aria-label="添加漫剧自动工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加漫剧工作流
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -258,13 +255,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertCommerceWorkflow}
             aria-label="添加剧情带货工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加带货工作流
           </button>
         </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
-            <FilmSlate size={26} weight="duotone" />
+            <Icon name="film-slate" size="2xl" />
           </div>
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
@@ -290,7 +287,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             disabled={!onInsertRemotionWorkflow}
             aria-label="添加动画逻辑图工作流节点"
           >
-            <Plus size={17} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="lg" />
             添加动画工作流
           </button>
         </article>

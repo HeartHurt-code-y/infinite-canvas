@@ -1,4 +1,4 @@
-import { Trash } from "@phosphor-icons/react/Trash";
+import { Icon } from "../../components/Icon";
 import { useEffect, useId, useRef } from "react";
 import { createPortal } from "react-dom";
 
@@ -90,7 +90,7 @@ export function CanvasDeleteDialog({
     >
       <header className="canvas-delete-dialog__header">
         <span className="canvas-delete-dialog__icon" aria-hidden="true">
-          <Trash size={22} weight="duotone" />
+          <Icon name="trash" size="xl" />
         </span>
         <h2 id={titleId}>删除画布？</h2>
       </header>

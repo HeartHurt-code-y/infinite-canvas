@@ -1,8 +1,4 @@
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { CloudArrowDown } from "@phosphor-icons/react/CloudArrowDown";
-import { Key } from "@phosphor-icons/react/Key";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
+import { Icon } from "../../components/Icon";
 import { useEffect, useId, useState } from "react";
 import {
   ASSET_LIBRARY_CREDENTIAL_REF,
@@ -179,7 +175,7 @@ export function AssetLibraryTokenSettings({
     <section className="asset-token-settings" aria-labelledby="asset-token-settings-title">
       <div className="provider-form__heading">
         <span className="settings-step" aria-hidden="true">
-          <Key size={15} weight="bold" />
+          <Icon name="key" size="md" />
         </span>
         <div>
           <strong id="asset-token-settings-title">素材库令牌</strong>
@@ -190,11 +186,11 @@ export function AssetLibraryTokenSettings({
           data-state={loading ? "loading" : hasToken ? "configured" : "empty"}
         >
           {loading ? (
-            <CircleNotch size={13} weight="bold" aria-hidden="true" />
+            <Icon name="circle-notch" aria-hidden="true" size="sm" />
           ) : hasToken ? (
-            <CheckCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : (
-            <WarningCircle size={13} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
           )}
           {loading ? "读取中" : hasToken ? "已配置" : "未配置"}
         </span>
@@ -293,9 +289,9 @@ export function AssetLibraryTokenSettings({
             }}
           >
             {saving ? (
-              <CircleNotch size={16} weight="bold" aria-hidden="true" />
+              <Icon name="circle-notch" aria-hidden="true" size="md" />
             ) : (
-              <CloudArrowDown size={16} weight="bold" aria-hidden="true" />
+              <Icon name="cloud-arrow-down" aria-hidden="true" size="md" />
             )}
             {saving ? "正在拉取…" : "保存并拉取素材"}
           </button>
@@ -324,7 +320,7 @@ export function AssetLibraryTokenSettings({
       ) : null}
       {successMessage ? (
         <p className="settings-success asset-token-settings__notice" role="status">
-          <CheckCircle size={15} weight="fill" aria-hidden="true" />
+          <Icon name="check-circle" aria-hidden="true" size="md" />
           {successMessage}
         </p>
       ) : null}

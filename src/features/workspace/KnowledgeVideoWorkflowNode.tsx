@@ -1,14 +1,4 @@
-import { CaretDown } from "@phosphor-icons/react/CaretDown";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { Clock } from "@phosphor-icons/react/Clock";
-import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
-import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
-import { GearSix } from "@phosphor-icons/react/GearSix";
-import { Pause } from "@phosphor-icons/react/Pause";
-import { Play } from "@phosphor-icons/react/Play";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -498,7 +488,7 @@ export function KnowledgeVideoWorkflowNode({
       <header className="canvas-knowledge-workflow__header">
         <span className="canvas-knowledge-workflow__identity">
           <span className="canvas-knowledge-workflow__mark" aria-hidden="true">
-            <FilmSlate size={20} weight="duotone" />
+            <Icon name="film-slate" size="xl" />
           </span>
           <span>
             <strong>{workflowTitle}</strong>
@@ -521,11 +511,11 @@ export function KnowledgeVideoWorkflowNode({
         </span>
         <span className={`canvas-knowledge-workflow__status is-${phase}`} role="status">
           {isActivePhase(phase) ? (
-            <CircleNotch size={13} weight="bold" className="spin-icon" aria-hidden="true" />
+            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="sm" />
           ) : phase === "done" ? (
-            <CheckCircle size={13} weight="bold" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : phase === "failed" || phase === "awaiting_approval" ? (
-            <WarningCircle size={13} weight="bold" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
           ) : null}
           {phaseLabel}
         </span>
@@ -540,7 +530,7 @@ export function KnowledgeVideoWorkflowNode({
               onOpenHistory(node.key);
             }}
           >
-            <Clock size={15} aria-hidden="true" />
+            <Icon name="clock" aria-hidden="true" size="md" />
           </button>
         ) : null}
         <button
@@ -552,7 +542,7 @@ export function KnowledgeVideoWorkflowNode({
             onRemove(node.key);
           }}
         >
-          <X size={13} weight="bold" aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="sm" />
         </button>
       </header>
 
@@ -692,7 +682,7 @@ export function KnowledgeVideoWorkflowNode({
             <summary>
               <span className="canvas-knowledge-workflow__models-title">已有资料与制作范围</span>
               <span />
-              <CaretDown size={15} aria-hidden="true" />
+              <Icon name="caret-down" aria-hidden="true" size="md" />
             </summary>
             <div className="canvas-knowledge-workflow__body">
               <label className="canvas-knowledge-workflow__brief">
@@ -763,7 +753,7 @@ export function KnowledgeVideoWorkflowNode({
         <details className="canvas-knowledge-workflow__models">
           <summary>
             <span className="canvas-knowledge-workflow__models-title">
-              <GearSix size={16} weight="bold" aria-hidden="true" />
+              <Icon name="gear-six" aria-hidden="true" size="md" />
               模型配置
             </span>
             <span className="canvas-knowledge-workflow__model-summary" aria-label="已选模型">
@@ -777,7 +767,7 @@ export function KnowledgeVideoWorkflowNode({
                 </>
               ) : null}
             </span>
-            <CaretDown size={15} weight="bold" aria-hidden="true" />
+            <Icon name="caret-down" aria-hidden="true" size="md" />
           </summary>
           <div className="canvas-knowledge-workflow__model-grid">
             <ModelSlot
@@ -859,7 +849,7 @@ export function KnowledgeVideoWorkflowNode({
                     aria-current={current ? "step" : undefined}
                   >
                     <span aria-hidden="true">
-                      {complete ? <CheckCircle size={14} weight="fill" /> : index + 1}
+                      {complete ? <Icon name="check-circle" size="sm" /> : index + 1}
                     </span>
                     {stage.label}
                   </li>
@@ -876,7 +866,7 @@ export function KnowledgeVideoWorkflowNode({
             tabIndex={-1}
           >
             <span className="canvas-knowledge-workflow__decision-icon" aria-hidden="true">
-              <WarningCircle size={20} weight="duotone" />
+              <Icon name="warning-circle" size="xl" />
             </span>
             <div>
               <small>继续前需要你决定</small>
@@ -935,7 +925,7 @@ export function KnowledgeVideoWorkflowNode({
 
         {error ? (
           <div className="canvas-knowledge-workflow__error" role="alert">
-            <WarningCircle size={17} weight="bold" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="lg" />
             <span>{error}</span>
           </div>
         ) : null}
@@ -1071,14 +1061,14 @@ export function KnowledgeVideoWorkflowNode({
             <video controls preload="metadata" src={toMediaSrc(finalPath)} />
             <div>
               <span>
-                <CheckCircle size={17} weight="fill" aria-hidden="true" />
+                <Icon name="check-circle" aria-hidden="true" size="lg" />
                 <span>
                   <strong>完整成片已就绪</strong>
                   <small>脚本、分镜和质检记录已保存在工作流中</small>
                 </span>
               </span>
               <button type="button" onClick={() => onRevealResult(node.key)}>
-                <FolderOpen size={16} weight="bold" aria-hidden="true" />
+                <Icon name="folder-open" aria-hidden="true" size="md" />
                 查看成片
               </button>
             </div>
@@ -1353,7 +1343,7 @@ export function KnowledgeVideoWorkflowNode({
                 disabled={!readyToExecute}
                 onClick={() => onExecute(node.key)}
               >
-                <Play size={16} weight="fill" aria-hidden="true" />
+                <Icon name="play" aria-hidden="true" size="md" />
                 {isReverse ? "开始反推" : "开始制作"}
               </button>
             </>
@@ -1369,7 +1359,7 @@ export function KnowledgeVideoWorkflowNode({
                 className="canvas-knowledge-workflow__secondary"
                 onClick={() => onCancel(node.key)}
               >
-                <Pause size={16} weight="fill" aria-hidden="true" />
+                <Icon name="pause" aria-hidden="true" size="md" />
                 暂停后续步骤
               </button>
             </>
@@ -1382,7 +1372,7 @@ export function KnowledgeVideoWorkflowNode({
                 disabled={pickingMaterials || !materialsValid}
                 onClick={() => onContinue(node.key)}
               >
-                <Play size={16} weight="fill" aria-hidden="true" />
+                <Icon name="play" aria-hidden="true" size="md" />
                 继续制作
               </button>
             </>
@@ -1409,7 +1399,7 @@ export function KnowledgeVideoWorkflowNode({
                 disabled={!readyToExecute}
                 onClick={() => onExecute(node.key)}
               >
-                <Play size={16} weight="fill" aria-hidden="true" />
+                <Icon name="play" aria-hidden="true" size="md" />
                 重新制作
               </button>
             </>

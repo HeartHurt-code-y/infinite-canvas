@@ -1,14 +1,4 @@
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { FloppyDisk } from "@phosphor-icons/react/FloppyDisk";
-import { GearSix } from "@phosphor-icons/react/GearSix";
-import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
-import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { TextAa } from "@phosphor-icons/react/TextAa";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import {
   useCallback,
   useEffect,
@@ -65,7 +55,8 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
     id: "panqu-api",
     displayName: "盘趣API",
-    baseUrl: "https://115.191.2.88/",
+    // 必须用域名：直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会直接拒绝。
+    baseUrl: "https://aiapis.panqu.com/",
     adapterId: "moyu_v1",
   },
   {
@@ -623,7 +614,7 @@ export function ProviderSettingsDialog({
       >
         <header className="settings-dialog__header">
           <span className="settings-dialog__eyebrow">
-            <GearSix size={14} weight="bold" aria-hidden="true" />
+            <Icon name="gear-six" aria-hidden="true" size="sm" />
             全局设置
           </span>
           <h2 id="provider-settings-title">供应商连接与模型</h2>
@@ -634,7 +625,7 @@ export function ProviderSettingsDialog({
             aria-label="关闭设置"
             onClick={onClose}
           >
-            <X size={18} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="lg" />
           </button>
         </header>
 
@@ -672,7 +663,7 @@ export function ProviderSettingsDialog({
                   <option value={NEW_PROVIDER_ID}>新建连接</option>
                 </select>
                 <button type="button" onClick={() => selectProvider(NEW_PROVIDER_ID)}>
-                  <Plus size={15} weight="bold" aria-hidden="true" />
+                  <Icon name="plus" aria-hidden="true" size="md" />
                   新建
                 </button>
               </div>
@@ -760,9 +751,9 @@ export function ProviderSettingsDialog({
                 disabled={busyAction !== null}
               >
                 {busyAction === "saving-connection" ? (
-                  <CircleNotch size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="circle-notch" aria-hidden="true" size="md" />
                 ) : (
-                  <FloppyDisk size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="floppy-disk" aria-hidden="true" size="md" />
                 )}
                 {busyAction === "saving-connection" ? "正在保存…" : "保存连接"}
               </button>
@@ -797,9 +788,9 @@ export function ProviderSettingsDialog({
                 }}
               >
                 {busyAction === "fetching-models" ? (
-                  <CircleNotch size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="circle-notch" aria-hidden="true" size="md" />
                 ) : (
-                  <MagnifyingGlass size={16} weight="bold" aria-hidden="true" />
+                  <Icon name="magnifying-glass" aria-hidden="true" size="md" />
                 )}
                 {busyAction === "fetching-models" ? "正在拉取…" : "拉取模型"}
               </button>
@@ -814,7 +805,7 @@ export function ProviderSettingsDialog({
           ) : null}
           {successMessage ? (
             <p className="settings-success" role="status">
-              <CheckCircle size={15} weight="fill" aria-hidden="true" />
+              <Icon name="check-circle" aria-hidden="true" size="md" />
               {successMessage}
             </p>
           ) : null}
@@ -868,7 +859,7 @@ export function ProviderSettingsDialog({
                     aria-pressed={modelTypeFilter === "text"}
                     onClick={() => setModelTypeFilter("text")}
                   >
-                    <TextAa size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="text-aa" aria-hidden="true" size="sm" />
                     文本
                     <span aria-hidden="true">{modelTypeCounts.text}</span>
                   </button>
@@ -878,7 +869,7 @@ export function ProviderSettingsDialog({
                     aria-pressed={modelTypeFilter === "image"}
                     onClick={() => setModelTypeFilter("image")}
                   >
-                    <ImageSquare size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="image-square" aria-hidden="true" size="sm" />
                     图片
                     <span aria-hidden="true">{modelTypeCounts.image}</span>
                   </button>
@@ -888,13 +879,13 @@ export function ProviderSettingsDialog({
                     aria-pressed={modelTypeFilter === "video"}
                     onClick={() => setModelTypeFilter("video")}
                   >
-                    <VideoCamera size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="video-camera" aria-hidden="true" size="sm" />
                     视频
                     <span aria-hidden="true">{modelTypeCounts.video}</span>
                   </button>
                 </div>
                 <label className="model-search">
-                  <MagnifyingGlass size={15} weight="bold" aria-hidden="true" />
+                  <Icon name="magnifying-glass" aria-hidden="true" size="md" />
                   <span className="sr-only">搜索已拉取模型</span>
                   <input
                     ref={modelSearchRef}
@@ -940,17 +931,17 @@ export function ProviderSettingsDialog({
                                   "不启用"
                                 ) : kind === "image" ? (
                                   <>
-                                    <ImageSquare size={14} weight="bold" aria-hidden="true" />
+                                    <Icon name="image-square" aria-hidden="true" size="sm" />
                                     图片模型
                                   </>
                                 ) : kind === "video" ? (
                                   <>
-                                    <VideoCamera size={14} weight="bold" aria-hidden="true" />
+                                    <Icon name="video-camera" aria-hidden="true" size="sm" />
                                     视频模型
                                   </>
                                 ) : (
                                   <>
-                                    <TextAa size={14} weight="bold" aria-hidden="true" />
+                                    <Icon name="text-aa" aria-hidden="true" size="sm" />
                                     文本模型
                                   </>
                                 )}
@@ -992,12 +983,12 @@ export function ProviderSettingsDialog({
                             </div>
                           ) : usage.kind === "video" ? (
                             <span className="model-option__type-note">
-                              <VideoCamera size={14} weight="bold" aria-hidden="true" />
+                              <Icon name="video-camera" aria-hidden="true" size="sm" />
                               视频生成
                             </span>
                           ) : usage.kind === "text" ? (
                             <span className="model-option__type-note">
-                              <TextAa size={14} weight="bold" aria-hidden="true" />
+                              <Icon name="text-aa" aria-hidden="true" size="sm" />
                               对话补全 · 自动适配 OpenAI / Anthropic / Gemini 接口格式
                             </span>
                           ) : null}
@@ -1031,7 +1022,7 @@ export function ProviderSettingsDialog({
                   })
                 ) : (
                   <div className="model-list__empty">
-                    <MagnifyingGlass size={20} weight="regular" aria-hidden="true" />
+                    <Icon name="magnifying-glass" aria-hidden="true" size="xl" />
                     <strong>没有匹配的模型</strong>
                     <span>
                       {modelSearch.trim()
@@ -1045,15 +1036,15 @@ export function ProviderSettingsDialog({
               <footer className="model-picker__footer">
                 <div className="model-picker__summary" aria-live="polite">
                   <span>
-                    <ImageSquare size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="image-square" aria-hidden="true" size="sm" />
                     图片模型 {modelTypeCounts.image}
                   </span>
                   <span>
-                    <VideoCamera size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="video-camera" aria-hidden="true" size="sm" />
                     视频模型 {modelTypeCounts.video}
                   </span>
                   <span>
-                    <TextAa size={14} weight="bold" aria-hidden="true" />
+                    <Icon name="text-aa" aria-hidden="true" size="sm" />
                     文本模型 {modelTypeCounts.text}
                   </span>
                 </div>
@@ -1071,9 +1062,9 @@ export function ProviderSettingsDialog({
                   }}
                 >
                   {busyAction === "saving-models" || busyAction === "testing-connection" ? (
-                    <CircleNotch size={16} weight="bold" aria-hidden="true" />
+                    <Icon name="circle-notch" aria-hidden="true" size="md" />
                   ) : (
-                    <CheckCircle size={16} weight="bold" aria-hidden="true" />
+                    <Icon name="check-circle" aria-hidden="true" size="md" />
                   )}
                   {busyAction === "saving-models"
                     ? "正在保存…"
@@ -1086,9 +1077,9 @@ export function ProviderSettingsDialog({
               {testNotice ? (
                 <p className={testNotice.ok ? "settings-success" : "settings-error"} role="status">
                   {testNotice.ok ? (
-                    <CheckCircle size={15} weight="fill" aria-hidden="true" />
+                    <Icon name="check-circle" aria-hidden="true" size="md" />
                   ) : (
-                    <WarningCircle size={15} weight="fill" aria-hidden="true" />
+                    <Icon name="warning-circle" aria-hidden="true" size="md" />
                   )}
                   {testNotice.message}
                 </p>

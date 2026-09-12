@@ -1,6 +1,4 @@
-import { PencilSimple } from "@phosphor-icons/react/PencilSimple";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { Trash } from "@phosphor-icons/react/Trash";
+import { Icon } from "../../components/Icon";
 import { memo, useEffect, useRef, useState, type KeyboardEvent } from "react";
 
 import "./CanvasTabs.css";
@@ -143,7 +141,7 @@ export const CanvasTabs = memo(function CanvasTabs({
                   onClick={() => beginRename(canvas)}
                   disabled={busy}
                 >
-                  <PencilSimple size={14} aria-hidden="true" />
+                  <Icon name="pencil-simple" aria-hidden="true" size="sm" />
                 </button>
               )}
               {selected && (
@@ -155,7 +153,7 @@ export const CanvasTabs = memo(function CanvasTabs({
                   onClick={() => onDelete(canvas.id)}
                   disabled={busy || editing !== null}
                 >
-                  <Trash size={14} aria-hidden="true" />
+                  <Icon name="trash" aria-hidden="true" size="sm" />
                 </button>
               )}
               {isEditing && (
@@ -198,7 +196,7 @@ export const CanvasTabs = memo(function CanvasTabs({
         })}
       </div>
       <button type="button" className="canvas-tabs__create" disabled={busy} onClick={onCreate}>
-        <Plus size={16} weight="bold" aria-hidden="true" />
+        <Icon name="plus" aria-hidden="true" size="md" />
         <span>新建画布</span>
       </button>
     </nav>

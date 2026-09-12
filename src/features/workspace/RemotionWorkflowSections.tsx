@@ -1,5 +1,4 @@
-import { CaretDown } from "@phosphor-icons/react/CaretDown";
-
+import { Icon } from "../../components/Icon";
 import { toMediaSrc } from "../../lib/backend";
 import { ANIMATION_TEMPLATES, type RemotionWorkflowOptions } from "./remotionWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
@@ -19,7 +18,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
           {options.width} × {options.height} ·{" "}
           {options.format === "both" ? "GIF + MP4" : options.format.toUpperCase()}
         </span>
-        <CaretDown size={15} aria-hidden="true" />
+        <Icon name="caret-down" aria-hidden="true" size="md" />
       </summary>
       <fieldset disabled={disabled} className="canvas-remotion-workflow__settings">
         <label>

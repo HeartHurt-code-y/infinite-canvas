@@ -1,4 +1,4 @@
-import { CaretDown } from "@phosphor-icons/react/CaretDown";
+import { Icon } from "../../components/Icon";
 import { useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -54,7 +54,7 @@ export function CommerceConfiguration({
       <summary>
         <span className="canvas-knowledge-workflow__models-title">商品资料与制作设置</span>
         <span>{options.productName.trim() || "添加商品资料"}</span>
-        <CaretDown size={15} aria-hidden="true" />
+        <Icon name="caret-down" aria-hidden="true" size="md" />
       </summary>
       <fieldset disabled={disabled || picking} className="canvas-commerce-workflow__settings">
         <div className="canvas-commerce-workflow__format">

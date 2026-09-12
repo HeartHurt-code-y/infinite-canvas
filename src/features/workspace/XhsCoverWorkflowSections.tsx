@@ -1,4 +1,4 @@
-import { CaretDown } from "@phosphor-icons/react/CaretDown";
+import { Icon } from "../../components/Icon";
 import { useState } from "react";
 
 import { ImeInput } from "../../components/ImeTextField";
@@ -146,7 +146,7 @@ export function XhsCoverConfiguration({
           <span>
             {options.style === "auto" ? "自动匹配风格" : XHS_COVER_STYLES[options.style]} · 3:4 竖版
           </span>
-          <CaretDown size={15} aria-hidden="true" />
+          <Icon name="caret-down" aria-hidden="true" size="md" />
         </summary>
         <div className="canvas-xhs-cover__settings">
           <label className="canvas-xhs-cover__title">

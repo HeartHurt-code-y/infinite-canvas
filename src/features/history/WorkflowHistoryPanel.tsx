@@ -1,4 +1,4 @@
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
+import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { ImeTextarea } from "../../components/ImeTextField";
@@ -668,7 +668,7 @@ export function WorkflowHistoryPanel({
               disabled={!loaded}
               onClick={refresh}
             >
-              <ArrowClockwise size={16} aria-hidden="true" />
+              <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
             </button>
           </div>
           <HistoryDateRangeFilter

@@ -1,6 +1,4 @@
-import { Image } from "@phosphor-icons/react/Image";
-import { MagicWand } from "@phosphor-icons/react/MagicWand";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
+import { Icon, type IconName } from "../../components/Icon";
 import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
@@ -13,11 +11,16 @@ export interface ConnectionQuickAddMenuProps {
   readonly onClose: () => void;
 }
 
-const choices = [
-  { kind: "image", label: "图片生成", icon: Image },
-  { kind: "video", label: "视频生成", icon: VideoCamera },
-  { kind: "prompt", label: "提示词生成与优化", icon: MagicWand },
-] as const;
+/* 数据里存图标名而不是组件，让这三个入口也走图标层的尺寸与字重规则。 */
+const choices: readonly {
+  readonly kind: CanvasGenNodeKind;
+  readonly label: string;
+  readonly icon: IconName;
+}[] = [
+  { kind: "image", label: "图片生成", icon: "image" },
+  { kind: "video", label: "视频生成", icon: "video-camera" },
+  { kind: "prompt", label: "提示词生成与优化", icon: "magic-wand" },
+];
 
 const VIEWPORT_MARGIN = 8;
 
@@ -132,7 +135,7 @@ export function ConnectionQuickAddMenu({
         <strong>常用生成节点</strong>
         <span>选择后创建并自动连线</span>
       </div>
-      {choices.map(({ kind, label, icon: Icon }, index) => (
+      {choices.map(({ kind, label, icon }, index) => (
         <button
           key={kind}
           ref={(button) => {
@@ -145,7 +148,7 @@ export function ConnectionQuickAddMenu({
           onFocus={() => setFocusedIndex(index)}
           onClick={() => onSelect(kind)}
         >
-          <Icon size={20} aria-hidden="true" />
+          <Icon name={icon} size="xl" />
           <span>{label}</span>
         </button>
       ))}

@@ -1,4 +1,4 @@
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import {
   BaseEdge,
   EdgeLabelRenderer,
@@ -156,7 +156,7 @@ export function CanvasFlowEdgeView({
               data.onRemove();
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         ) : null}
       </EdgeLabelRenderer>

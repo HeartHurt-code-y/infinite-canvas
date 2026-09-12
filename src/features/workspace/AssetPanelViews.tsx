@@ -3,19 +3,7 @@
 //! 状态与请求逻辑仍全部留在 WorkspaceApp，这里只做展示与事件转发；
 //! DOM 结构与 aria 属性保持与拆分前一致（App.test.tsx 依赖这些语义）。
 
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
-import { ArrowsClockwise } from "@phosphor-icons/react/ArrowsClockwise";
-import { CaretRight } from "@phosphor-icons/react/CaretRight";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { MagnifyingGlass } from "@phosphor-icons/react/MagnifyingGlass";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { StackSimple } from "@phosphor-icons/react/StackSimple";
-import { Trash } from "@phosphor-icons/react/Trash";
-import { UploadSimple } from "@phosphor-icons/react/UploadSimple";
-import { UserFocus } from "@phosphor-icons/react/UserFocus";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState } from "react";
 import {
   isDesktopRuntime,
@@ -38,7 +26,7 @@ export function AssetPanelHeader({
   return (
     <div className="panel-title-row">
       <div className="panel-title-row__identity">
-        <StackSimple size={18} weight="bold" aria-hidden="true" />
+        <Icon name="stack-simple" aria-hidden="true" size="lg" />
         <h2>素材库</h2>
       </div>
       <button
@@ -48,7 +36,7 @@ export function AssetPanelHeader({
         data-tooltip={uploadActionLabel}
         onClick={onImport}
       >
-        <UploadSimple size={18} weight="bold" aria-hidden="true" />
+        <Icon name="upload-simple" aria-hidden="true" size="lg" />
       </button>
     </div>
   );
@@ -58,7 +46,7 @@ export function AssetPanelHeader({
 export function AssetOfflineBanner({ source }: { readonly source: AssetLibrarySource }) {
   return (
     <div className="asset-panel__offline" role="status">
-      <WarningCircle size={14} weight="fill" aria-hidden="true" />
+      <Icon name="warning-circle" aria-hidden="true" size="sm" />
       <span>
         {source === "local"
           ? "网络连接已断开，对象存储预览与上传暂时不可用。"
@@ -112,9 +100,9 @@ export function AssetOriginSwitcher({
           onClick={onPullBucket}
         >
           {pullingBucket ? (
-            <CircleNotch size={12} weight="bold" aria-hidden="true" data-spin="true" />
+            <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="xs" />
           ) : (
-            <ArrowsClockwise size={12} weight="bold" aria-hidden="true" />
+            <Icon name="arrows-clockwise" aria-hidden="true" size="xs" />
           )}
           拉取整桶
         </button>
@@ -129,13 +117,13 @@ export function AssetOriginSwitcher({
             : "Moyu · 制作库"}
       </span>
       {assetsLoading ? (
-        <CircleNotch size={14} weight="bold" aria-hidden="true" data-spin="true" />
+        <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="sm" />
       ) : libraryError ? (
-        <WarningCircle size={14} weight="fill" aria-hidden="true" />
+        <Icon name="warning-circle" aria-hidden="true" size="sm" />
       ) : source === "local" || providerId != null || !isDesktopRuntime() ? (
-        <CheckCircle size={14} weight="fill" aria-hidden="true" />
+        <Icon name="check-circle" aria-hidden="true" size="sm" />
       ) : (
-        <WarningCircle size={14} weight="fill" aria-hidden="true" />
+        <Icon name="warning-circle" aria-hidden="true" size="sm" />
       )}
     </div>
   );
@@ -187,7 +175,7 @@ export function AssetCloudControls({
         onClick={onOpenRealPersonDialog}
       >
         <span className="real-person-entry__icon" aria-hidden="true">
-          <UserFocus size={20} weight="duotone" />
+          <Icon name="user-focus" size="xl" />
         </span>
         <span className="real-person-entry__copy">
           <strong>明星真人素材</strong>
@@ -199,7 +187,7 @@ export function AssetCloudControls({
                 : "H5 人脸认证 · 同人素材上传"}
           </small>
         </span>
-        <CaretRight size={16} weight="bold" aria-hidden="true" />
+        <Icon name="caret-right" aria-hidden="true" size="md" />
       </button>
     </>
   );
@@ -285,7 +273,7 @@ export function AssetGroupsPicker({
           ))}
         </select>
         {loading ? (
-          <CircleNotch size={14} weight="bold" data-spin="true" aria-hidden="true" />
+          <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="sm" />
         ) : null}
         <div className="asset-groups__actions">
           <button
@@ -294,7 +282,7 @@ export function AssetGroupsPicker({
             aria-label="新建素材分组"
             onClick={onCreateGroup}
           >
-            <Plus size={12} weight="bold" aria-hidden="true" />
+            <Icon name="plus" aria-hidden="true" size="xs" />
             新建分组
           </button>
           {selectedGroupId != null ? (
@@ -308,7 +296,7 @@ export function AssetGroupsPicker({
               }
               onClick={confirmingDelete ? confirmDelete : armDelete}
             >
-              <Trash size={12} weight="bold" aria-hidden="true" />
+              <Icon name="trash" aria-hidden="true" size="xs" />
               {confirmingDelete ? "确认删除？" : "删除分组"}
             </button>
           ) : null}
@@ -321,13 +309,13 @@ export function AssetGroupsPicker({
       ) : null}
       {confirmingDelete ? (
         <span className="asset-groups__delete-hint" role="status">
-          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
           分组及组内全部素材将从云端永久删除，此操作不可撤销。
         </span>
       ) : null}
       {error ? (
         <span className="asset-groups__error" role="status">
-          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
           分组加载失败，仍显示全部素材
           <button type="button" onClick={() => onRetry(providerConnectionId)}>
             重试
@@ -404,7 +392,7 @@ export function AssetSearchBar({
         筛选当前素材
       </label>
       <div className="asset-search">
-        <MagnifyingGlass size={16} weight="bold" aria-hidden="true" />
+        <Icon name="magnifying-glass" aria-hidden="true" size="md" />
         <input
           id="asset-search-input"
           type="search"
@@ -425,7 +413,7 @@ export function AssetSearchBar({
             data-tooltip="刷新素材列表"
             onClick={onRefreshCloud}
           >
-            <ArrowClockwise size={15} weight="bold" aria-hidden="true" />
+            <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
           </button>
         ) : null}
         {search ? (
@@ -437,7 +425,7 @@ export function AssetSearchBar({
               onSearchChange("");
             }}
           >
-            <X size={14} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="sm" />
           </button>
         ) : null}
       </div>
@@ -478,11 +466,11 @@ export function AssetEmptyState({
   return (
     <div className="asset-empty">
       {loading ? (
-        <CircleNotch size={24} weight="bold" aria-hidden="true" data-spin="true" />
+        <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="2xl" />
       ) : libraryError ? (
-        <WarningCircle size={24} weight="fill" aria-hidden="true" />
+        <Icon name="warning-circle" aria-hidden="true" size="2xl" />
       ) : (
-        <MagnifyingGlass size={24} weight="regular" aria-hidden="true" />
+        <Icon name="magnifying-glass" aria-hidden="true" size="2xl" />
       )}
       <strong>
         {loading
@@ -516,13 +504,13 @@ export function AssetEmptyState({
       </span>
       {!loading && search ? (
         <button type="button" onClick={onClearSearch}>
-          <X size={14} weight="bold" aria-hidden="true" />
+          <Icon name="x" aria-hidden="true" size="sm" />
           清除搜索
         </button>
       ) : null}
       {!loading && isDesktopRuntime() && (source === "local" || hasProvider) ? (
         <button type="button" onClick={onImport}>
-          <UploadSimple size={14} weight="bold" aria-hidden="true" />
+          <Icon name="upload-simple" aria-hidden="true" size="sm" />
           {source === "local" ? "上传到本地素材库" : "上传本地素材"}
         </button>
       ) : null}
@@ -748,7 +736,7 @@ export function AssetPanel({
         aria-label="关闭素材库"
         onClick={onCloseMobilePanel}
       >
-        <X size={18} weight="bold" aria-hidden="true" />
+        <Icon name="x" aria-hidden="true" size="lg" />
       </button>
       <AssetPanelHeader
         uploadActionLabel={uploadActionLabel}

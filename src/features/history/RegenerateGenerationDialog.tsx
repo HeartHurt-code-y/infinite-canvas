@@ -1,10 +1,5 @@
-import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
+import { Icon } from "../../components/Icon";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
-import { Play } from "@phosphor-icons/react/Play";
-import { Plus } from "@phosphor-icons/react/Plus";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
-import { Waveform } from "@phosphor-icons/react/Waveform";
-import { X } from "@phosphor-icons/react/X";
 import {
   useEffect,
   useMemo,
@@ -273,11 +268,11 @@ function MaterialThumb({
     return (
       <span className="regenerate-material__thumb" aria-hidden="true">
         {mediaType === "video" ? (
-          <VideoCamera size={16} weight="bold" />
+          <Icon name="video-camera" size="md" />
         ) : mediaType === "audio" ? (
-          <Waveform size={16} weight="bold" />
+          <Icon name="waveform" size="md" />
         ) : (
-          <ImageSquare size={16} weight="bold" />
+          <Icon name="image-square" size="md" />
         )}
       </span>
     );
@@ -296,7 +291,7 @@ function MaterialThumb({
       )}
       {mediaType === "video" ? (
         <span className="regenerate-material__thumb-badge" aria-hidden="true">
-          <Play size={10} weight="fill" />
+          <Icon name="play" size="2xs" />
         </span>
       ) : null}
     </span>
@@ -349,9 +344,9 @@ function AddListThumb({
     return (
       <span className="regenerate-add__thumb" aria-hidden="true">
         {kind === "video" ? (
-          <VideoCamera size={14} weight="bold" />
+          <Icon name="video-camera" size="sm" />
         ) : (
-          <ImageSquare size={14} weight="bold" />
+          <Icon name="image-square" size="sm" />
         )}
       </span>
     );
@@ -750,7 +745,7 @@ export function RegenerateGenerationDialog({
             aria-label="关闭重新生成设置"
             onClick={onCancel}
           >
-            <X size={18} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="lg" />
           </button>
         </header>
         <div className="regenerate-dialog__body">
@@ -818,7 +813,7 @@ export function RegenerateGenerationDialog({
                       disabled={busy}
                       onClick={() => removeMaterial(material)}
                     >
-                      <X size={13} weight="bold" aria-hidden="true" />
+                      <Icon name="x" aria-hidden="true" size="sm" />
                     </button>
                   </li>
                 ))}
@@ -826,7 +821,7 @@ export function RegenerateGenerationDialog({
             )}
             <details className="regenerate-add">
               <summary>
-                <Plus size={14} weight="bold" aria-hidden="true" />
+                <Icon name="plus" aria-hidden="true" size="sm" />
                 添加素材
               </summary>
               <div className="regenerate-add__tabs" role="tablist" aria-label="素材来源">

@@ -1,4 +1,4 @@
-import { ArrowClockwise } from "@phosphor-icons/react/ArrowClockwise";
+import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   formatRawBackendError,
@@ -388,7 +388,7 @@ export function RemoteVideoHistoryPanel({
                   disabled={loading || !appliedQuery}
                   onClick={() => appliedQuery && void loadPage(appliedQuery)}
                 >
-                  <ArrowClockwise size={14} aria-hidden="true" /> 刷新
+                  <Icon name="arrow-clockwise" aria-hidden="true" size="sm" /> 刷新
                 </button>
                 <button
                   type="button"

@@ -1,6 +1,4 @@
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { Paperclip } from "@phosphor-icons/react/Paperclip";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { useState } from "react";
 
 import { AutoSizeThumb } from "./MediaNodeViews";
@@ -84,9 +82,9 @@ export function WorkflowReferenceMaterials({
           onClick={() => void pickMaterials()}
         >
           {picking ? (
-            <CircleNotch size={15} className="spin-icon" aria-hidden="true" />
+            <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="md" />
           ) : (
-            <Paperclip size={15} aria-hidden="true" />
+            <Icon name="paperclip" aria-hidden="true" size="md" />
           )}
           {picking ? "正在选择素材…" : "添加素材"}
         </button>
@@ -128,7 +126,7 @@ export function WorkflowReferenceMaterials({
                 disabled={disabled || picking || !onRemove}
                 onClick={() => onRemove?.(material.localPath)}
               >
-                <X size={15} aria-hidden="true" />
+                <Icon name="x" aria-hidden="true" size="md" />
               </button>
             </li>
           ))}
@@ -189,7 +187,7 @@ export function WorkflowReferenceMaterials({
                   disabled={disabled || picking || !remove}
                   onClick={remove}
                 >
-                  <X size={15} aria-hidden="true" />
+                  <Icon name="x" aria-hidden="true" size="md" />
                 </button>
               </li>
             ))}
@@ -210,7 +208,7 @@ export function WorkflowReferenceMaterials({
                 disabled={disabled || !onUnlink}
                 onClick={() => onUnlink?.(input.edgeId)}
               >
-                <X size={15} aria-hidden="true" />
+                <Icon name="x" aria-hidden="true" size="md" />
               </button>
             </li>
           ))}
@@ -226,7 +224,7 @@ export function WorkflowReferenceMaterials({
                 disabled={disabled || picking || !onRemoveHistoricalText}
                 onClick={() => onRemoveHistoricalText?.(input.key)}
               >
-                <X size={15} aria-hidden="true" />
+                <Icon name="x" aria-hidden="true" size="md" />
               </button>
             </li>
           ))}

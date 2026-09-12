@@ -1,5 +1,4 @@
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { X } from "@phosphor-icons/react/X";
+import { Icon } from "../../components/Icon";
 import { lazy } from "react";
 import {
   loadAssetGroupCreateDialog,
@@ -56,7 +55,7 @@ export function DeferredDialogFallback({
       >
         <header className="settings-dialog__header">
           <span className="settings-dialog__eyebrow">
-            <CircleNotch size={14} weight="bold" aria-hidden="true" data-spin="true" />
+            <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="sm" />
             按需加载
           </span>
           <h2 id={titleId}>正在加载{label}…</h2>
@@ -67,7 +66,7 @@ export function DeferredDialogFallback({
             aria-label={`关闭${label}`}
             onClick={onClose}
           >
-            <X size={18} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="lg" />
           </button>
         </header>
       </section>

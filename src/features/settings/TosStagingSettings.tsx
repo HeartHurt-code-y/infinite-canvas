@@ -1,7 +1,4 @@
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { CloudArrowUp } from "@phosphor-icons/react/CloudArrowUp";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
+import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import * as v from "valibot";
 import {
@@ -211,9 +208,9 @@ export function TosStagingSettings({
         </div>
         <span className="tos-status-badge" data-state={badge.state}>
           {badge.state === "loading" ? (
-            <CircleNotch size={13} weight="bold" aria-hidden="true" />
+            <Icon name="circle-notch" aria-hidden="true" size="sm" />
           ) : (
-            <CloudArrowUp size={13} weight="fill" aria-hidden="true" />
+            <Icon name="cloud-arrow-up" aria-hidden="true" size="sm" />
           )}
           {badge.text}
         </span>
@@ -276,9 +273,9 @@ export function TosStagingSettings({
           disabled={loadingConfig || saving || testing}
         >
           {saving || testing ? (
-            <CircleNotch size={16} weight="bold" aria-hidden="true" />
+            <Icon name="circle-notch" aria-hidden="true" size="md" />
           ) : (
-            <CheckCircle size={16} weight="bold" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="md" />
           )}
           {saving ? "正在保存…" : testing ? "正在测试连通性…" : "保存直连配置"}
         </button>
@@ -292,16 +289,16 @@ export function TosStagingSettings({
       ) : null}
       {successMessage ? (
         <p className="settings-success" role="status">
-          <CheckCircle size={15} weight="fill" aria-hidden="true" />
+          <Icon name="check-circle" aria-hidden="true" size="md" />
           {successMessage}
         </p>
       ) : null}
       {testNotice ? (
         <p className={testNotice.ok ? "settings-success" : "settings-error"} role="status">
           {testNotice.ok ? (
-            <CheckCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="check-circle" aria-hidden="true" size="md" />
           ) : (
-            <WarningCircle size={15} weight="fill" aria-hidden="true" />
+            <Icon name="warning-circle" aria-hidden="true" size="md" />
           )}
           {testNotice.message}
         </p>

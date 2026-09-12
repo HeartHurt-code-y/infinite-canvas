@@ -1,22 +1,5 @@
-import { BookOpenText } from "@phosphor-icons/react/BookOpenText";
+import { Icon, type IconSize } from "../../components/Icon";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
-import { Check } from "@phosphor-icons/react/Check";
-import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
-import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
-import { CornersOut } from "@phosphor-icons/react/CornersOut";
-import { DownloadSimple } from "@phosphor-icons/react/DownloadSimple";
-import { FileText } from "@phosphor-icons/react/FileText";
-import { FilmSlate } from "@phosphor-icons/react/FilmSlate";
-import { FilmStrip } from "@phosphor-icons/react/FilmStrip";
-import { FolderOpen } from "@phosphor-icons/react/FolderOpen";
-import { Globe } from "@phosphor-icons/react/Globe";
-import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
-import { LinkSimple } from "@phosphor-icons/react/LinkSimple";
-import { Sparkle } from "@phosphor-icons/react/Sparkle";
-import { VideoCamera } from "@phosphor-icons/react/VideoCamera";
-import { WarningCircle } from "@phosphor-icons/react/WarningCircle";
-import { Waveform as WaveformIcon } from "@phosphor-icons/react/Waveform";
-import { X } from "@phosphor-icons/react/X";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -71,17 +54,15 @@ import {
 
 export function AssetKindIcon({
   kind,
-  size = 15,
+  size = "md",
 }: {
   readonly kind: AssetKind | "text";
-  readonly size?: number;
+  readonly size?: IconSize;
 }) {
-  const iconProps = { size, weight: "bold" as const, "aria-hidden": true };
-
-  if (kind === "text") return <FileText {...iconProps} />;
-  if (kind === "image") return <ImageSquare {...iconProps} />;
-  if (kind === "video") return <VideoCamera {...iconProps} />;
-  return <WaveformIcon {...iconProps} />;
+  if (kind === "text") return <Icon name="file-text" size={size} />;
+  if (kind === "image") return <Icon name="image-square" size={size} />;
+  if (kind === "video") return <Icon name="video-camera" size={size} />;
+  return <Icon name="waveform" size={size} />;
 }
 
 /** @ 候选缩略图：自动适应原始媒体宽高比，完整显示不裁剪；视频取中间帧作封面。 */
@@ -151,7 +132,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
       {showVideo ? (
         <VideoMiddleFrame
           src={videoSource}
-          placeholder={<AssetKindIcon kind="video" size={20} />}
+          placeholder={<AssetKindIcon kind="video" size="xl" />}
           onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
           onLoadError={() => setFailedUrl(videoSource)}
         />
@@ -169,7 +150,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
           }}
         />
       ) : (
-        <AssetKindIcon kind={candidate.kind} size={20} />
+        <AssetKindIcon kind={candidate.kind} size="xl" />
       )}
     </span>
   );
@@ -184,15 +165,15 @@ export function NodeTypeIcon({
 }) {
   const iconProps = { size, weight: "bold" as const, "aria-hidden": true };
 
-  if (kind === "image") return <ImageSquare {...iconProps} />;
-  if (kind === "video") return <VideoCamera {...iconProps} />;
-  if (kind === "prompt") return <Sparkle {...iconProps} />;
-  if (kind === "screenplay") return <BookOpenText {...iconProps} />;
-  if (kind === "storyboard") return <FilmSlate {...iconProps} />;
-  if (kind === "viral_remix") return <FilmStrip {...iconProps} />;
-  if (kind === "video_composer") return <FilmStrip {...iconProps} />;
-  if (kind === "video_downloader") return <DownloadSimple {...iconProps} />;
-  return <FolderOpen {...iconProps} />;
+  if (kind === "image") return <Icon name="image-square" {...iconProps} size="md" />;
+  if (kind === "video") return <Icon name="video-camera" {...iconProps} size="md" />;
+  if (kind === "prompt") return <Icon name="sparkle" {...iconProps} size="md" />;
+  if (kind === "screenplay") return <Icon name="book-open-text" {...iconProps} size="md" />;
+  if (kind === "storyboard") return <Icon name="film-slate" {...iconProps} size="md" />;
+  if (kind === "viral_remix") return <Icon name="film-strip" {...iconProps} size="md" />;
+  if (kind === "video_composer") return <Icon name="film-strip" {...iconProps} size="md" />;
+  if (kind === "video_downloader") return <Icon name="download-simple" {...iconProps} size="md" />;
+  return <Icon name="folder-open" {...iconProps} size="md" />;
 }
 
 type AutoMentionFeedbackKind =
@@ -779,13 +760,13 @@ export function PromptMentionInput({
 
   const autoMentionFeedbackIcon =
     autoMentionFeedback.kind === "scanning" ? (
-      <CircleNotch size={12} weight="bold" className="spin-icon" aria-hidden="true" />
+      <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="xs" />
     ) : autoMentionFeedback.kind === "success" ? (
-      <CheckCircle size={12} weight="fill" aria-hidden="true" />
+      <Icon name="check-circle" aria-hidden="true" size="xs" />
     ) : autoMentionFeedback.kind === "ambiguous" || autoMentionFeedback.kind === "no-match" ? (
-      <WarningCircle size={12} weight="bold" aria-hidden="true" />
+      <Icon name="warning-circle" aria-hidden="true" size="xs" />
     ) : (
-      <Sparkle size={12} weight="fill" aria-hidden="true" />
+      <Icon name="sparkle" aria-hidden="true" size="xs" />
     );
 
   const isProminentAutoMentionFeedback =
@@ -864,7 +845,7 @@ export function PromptMentionInput({
           <div className="prompt-mention__expanded-header">
             <span className="prompt-mention__expanded-identity">
               <span className="prompt-mention__expanded-icon" aria-hidden="true">
-                <CornersOut size={18} weight="bold" />
+                <Icon name="corners-out" size="lg" />
               </span>
               <span>
                 <strong id={editorTitleId}>放大编辑提示词</strong>
@@ -877,7 +858,7 @@ export function PromptMentionInput({
               aria-label="关闭放大提示词编辑器"
               onClick={closeExpandedEditor}
             >
-              <X size={16} weight="bold" aria-hidden="true" />
+              <Icon name="x" aria-hidden="true" size="md" />
             </button>
           </div>
         ) : null}
@@ -1018,7 +999,7 @@ export function PromptMentionInput({
                   setExpanded(true);
                 }}
               >
-                <CornersOut size={14} weight="bold" aria-hidden="true" />
+                <Icon name="corners-out" aria-hidden="true" size="sm" />
                 <span>放大</span>
               </button>
             ) : null}
@@ -1037,14 +1018,14 @@ export function PromptMentionInput({
               }}
             >
               {autoMentionFeedback.kind === "scanning" ? (
-                <CircleNotch size={12} weight="bold" className="spin-icon" aria-hidden="true" />
+                <Icon name="circle-notch" className="spin-icon" aria-hidden="true" size="xs" />
               ) : autoMentionFeedback.kind === "success" ? (
-                <CheckCircle size={12} weight="fill" aria-hidden="true" />
+                <Icon name="check-circle" aria-hidden="true" size="xs" />
               ) : autoMentionFeedback.kind === "no-match" ||
                 autoMentionFeedback.kind === "ambiguous" ? (
-                <WarningCircle size={12} weight="bold" aria-hidden="true" />
+                <Icon name="warning-circle" aria-hidden="true" size="xs" />
               ) : (
-                <Sparkle size={12} weight="bold" aria-hidden="true" />
+                <Icon name="sparkle" aria-hidden="true" size="xs" />
               )}
               <span>识别素材名</span>
             </button>
@@ -1154,7 +1135,7 @@ export function PromptMentionInput({
             >
               <div className="prompt-ambiguity__header">
                 <span className="prompt-ambiguity__heading">
-                  <WarningCircle size={14} weight="fill" aria-hidden="true" />
+                  <Icon name="warning-circle" aria-hidden="true" size="sm" />
                   <span>
                     <strong>“{activeAmbiguity.displayName}”有同名对象</strong>
                     <small>此次选择应用于当前全部同名待确认项；新输入仍需确认</small>
@@ -1166,7 +1147,7 @@ export function PromptMentionInput({
                   aria-label="暂时关闭同名素材选择器"
                   onClick={() => setActiveAmbiguity(null)}
                 >
-                  <X size={13} weight="bold" aria-hidden="true" />
+                  <Icon name="x" aria-hidden="true" size="sm" />
                 </button>
               </div>
               <div className="prompt-ambiguity__options" role="listbox">
@@ -1191,7 +1172,7 @@ export function PromptMentionInput({
                         <small>实例 {candidate.canvasNodeKey.slice(-6)}</small>
                       </span>
                       <span className="prompt-ambiguity__alias">{alias}</span>
-                      <Check size={14} weight="bold" aria-hidden="true" />
+                      <Icon name="check" aria-hidden="true" size="sm" />
                     </button>
                   ))
                 )}
@@ -1317,7 +1298,7 @@ export function ImageNodeSettings({
     <div className="canvas-gen-node__settings" aria-label="图片生成参数">
       <div className="canvas-gen-node__operation" role="status" aria-live="polite">
         <span className="canvas-gen-node__operation-icon" aria-hidden="true">
-          <ImageSquare size={16} weight="bold" />
+          <Icon name="image-square" size="md" />
         </span>
         <span className="canvas-gen-node__operation-copy">
           <strong>{operation === "image_to_image" ? "图片参考生成" : "文生图"}</strong>
@@ -1574,7 +1555,7 @@ export function VideoNodeSettings({
     <div className="canvas-gen-node__settings" aria-label="视频生成参数">
       <div className="canvas-gen-node__operation" role="status" aria-live="polite">
         <span className="canvas-gen-node__operation-icon" aria-hidden="true">
-          <VideoCamera size={16} weight="bold" />
+          <Icon name="video-camera" size="md" />
         </span>
         <span className="canvas-gen-node__operation-copy">
           <strong>
@@ -1710,7 +1691,7 @@ export function VideoNodeSettings({
           </div>
           {taskState.issue ? (
             <div className="canvas-gen-node__media-role-warning" role="alert">
-              <WarningCircle size={14} weight="fill" aria-hidden="true" />
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
               <span>{taskState.issue}</span>
             </div>
           ) : null}
@@ -1720,7 +1701,7 @@ export function VideoNodeSettings({
               <ol className="canvas-gen-node__media-role-list">
                 {mediaInputs?.map((input) => (
                   <li key={input.key} className="canvas-gen-node__media-role">
-                    <AssetKindIcon kind={input.kind} size={15} />
+                    <AssetKindIcon kind={input.kind} size="md" />
                     <span className="canvas-gen-node__media-role-name">{input.name}</span>
                     <span>
                       {taskState.mediaRoles[input.key] === "first_frame"
@@ -1853,7 +1834,7 @@ function VideoMediaRoleSection({
           const current = roles[input.key] ?? defaultWanMediaRole(input.kind);
           return (
             <li key={`${input.key}:${index}`} className="canvas-gen-node__media-role">
-              <AssetKindIcon kind={input.kind} size={15} />
+              <AssetKindIcon kind={input.kind} size="md" />
               <span className="canvas-gen-node__media-role-name" title={input.name}>
                 {input.name}
               </span>
@@ -1878,7 +1859,7 @@ function VideoMediaRoleSection({
       </ol>
       {conflict ? (
         <div className="canvas-gen-node__media-role-warning" role="alert">
-          <WarningCircle size={14} weight="fill" aria-hidden="true" />
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
           <span>
             首帧/首尾帧与参考素材（参考图/参考视频/参考音频）不可在同一请求混用，请二选一。
           </span>
@@ -1946,9 +1927,9 @@ function VideoUrlMediaSection({
           {urlMedia.map((input) => (
             <li key={input.id} className="canvas-gen-node__url-item">
               {input.role === "file" ? (
-                <FileText size={15} weight="bold" aria-hidden="true" />
+                <Icon name="file-text" aria-hidden="true" size="md" />
               ) : (
-                <Globe size={15} weight="bold" aria-hidden="true" />
+                <Icon name="globe" aria-hidden="true" size="md" />
               )}
               <span className="canvas-gen-node__url-copy">
                 <strong>{input.role === "file" ? "文档" : "网页"}</strong>
@@ -1960,7 +1941,7 @@ function VideoUrlMediaSection({
                 aria-label="移除 URL 素材"
                 onClick={() => onChange(urlMedia.filter((item) => item.id !== input.id))}
               >
-                <X size={11} weight="bold" aria-hidden="true" />
+                <Icon name="x" aria-hidden="true" size="xs" />
               </button>
             </li>
           ))}
@@ -2006,7 +1987,7 @@ function VideoUrlMediaSection({
               setDraftError(null);
             }}
           >
-            <X size={12} weight="bold" aria-hidden="true" />
+            <Icon name="x" aria-hidden="true" size="xs" />
           </button>
         </div>
       ) : (
@@ -2020,7 +2001,7 @@ function VideoUrlMediaSection({
               setDraftError(null);
             }}
           >
-            <FileText size={13} weight="bold" aria-hidden="true" />
+            <Icon name="file-text" aria-hidden="true" size="sm" />
             粘贴文档 URL
           </button>
           <button
@@ -2032,20 +2013,20 @@ function VideoUrlMediaSection({
               setDraftError(null);
             }}
           >
-            <LinkSimple size={13} weight="bold" aria-hidden="true" />
+            <Icon name="link-simple" aria-hidden="true" size="sm" />
             粘贴网页链接
           </button>
         </div>
       )}
       {draftError ? (
         <div className="canvas-gen-node__url-error" role="alert">
-          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
           {draftError}
         </div>
       ) : null}
       {conflictCount || mixedWithMedia ? (
         <div className="canvas-gen-node__url-warning" role="alert">
-          <WarningCircle size={13} weight="fill" aria-hidden="true" />
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
           <span>
             {conflictCount
               ? "文档（file）与网页（link）二选一，各限 1 个。"

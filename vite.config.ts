@@ -95,7 +95,10 @@ export default defineConfig(() => ({
       : undefined,
     watch: {
       // 3. tell Vite to ignore watching `src-tauri`
-      ignored: ["**/src-tauri/**"],
+      //    同时忽略「原子写」临时产物：不少编辑器与工具保存文件时先写
+      //    `.<名称>.<pid>.<uuid>.tmpdir/<名称>.tmp` 再改名。Vite 会在这些临时
+      //    文件被改名或删除的瞬间拿到 EBUSY，并让整个 dev server 退出。
+      ignored: ["**/src-tauri/**", "**/*.tmpdir/**", "**/*.tmp", "**/.*.tmp*"],
     },
   },
 }));
