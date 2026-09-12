@@ -12,6 +12,7 @@ import type {
   GenerationResultSavedEvent,
   GenerationRetryEvent,
   GenerationStateChangedEvent,
+  GenerationTextDeltaEvent,
   GenerationTaskDetail,
   GenerationTaskPage,
   LocalAssetPage,
@@ -439,6 +440,13 @@ export const generationStateChangedEventSchema = v.looseObject({
   progress: nullableNumberSchema,
   error: v.unknown(),
 }) satisfies v.GenericSchema<GenerationStateChangedEvent>;
+
+export const generationTextDeltaEventSchema = v.looseObject({
+  taskId: v.string(),
+  sourceNodeId: v.string(),
+  canvasId: v.string(),
+  delta: v.string(),
+}) satisfies v.GenericSchema<GenerationTextDeltaEvent>;
 
 export const generationResultSavedEventSchema = v.looseObject({
   taskId: v.string(),

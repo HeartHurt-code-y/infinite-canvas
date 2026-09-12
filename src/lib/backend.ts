@@ -18,6 +18,7 @@ import {
   generationRetryEventSchema,
   generationRetryExhaustedEventSchema,
   generationStateChangedEventSchema,
+  generationTextDeltaEventSchema,
   generationTaskDetailSchema,
   generationTaskPageSchema,
   localAssetPageSchema,
@@ -1564,10 +1565,25 @@ export const promptNodeClient: PromptNodeClient = {
 export type GenerationEventName =
   | "generation:created"
   | "generation:state-changed"
+  | "generation:text-delta"
   | "generation:result-ready"
   | "generation:result-saved"
   | "generation:retry"
   | "generation:retry-exhausted";
+
+/**
+ * 文本模型正在生成的正文增量。
+ *
+ * `delta` 是**本次新增**的片段，前端按节点累加即可；后端已按时间节流（约 120ms），
+ * 因此事件频率有上限，不会把画布重渲染打满。任务结束时会再补发一次尾部增量。
+ */
+export interface GenerationTextDeltaEvent {
+  readonly taskId: string;
+  /** 发起本轮文本调用的画布节点 key；前端按它路由到对应节点。 */
+  readonly sourceNodeId: string;
+  readonly canvasId: string;
+  readonly delta: string;
+}
 
 export interface GenerationStateChangedEvent {
   readonly taskId: string;
@@ -1601,6 +1617,7 @@ export interface GenerationRetryEvent {
 const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
   "generation:created",
   "generation:state-changed",
+  "generation:text-delta",
   "generation:result-ready",
   "generation:result-saved",
   "generation:retry",
@@ -1610,6 +1627,7 @@ const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
 const GENERATION_EVENT_SCHEMAS = {
   "generation:created": generationCreatedEventSchema,
   "generation:state-changed": generationStateChangedEventSchema,
+  "generation:text-delta": generationTextDeltaEventSchema,
   "generation:result-ready": generationResultReadyEventSchema,
   "generation:result-saved": generationResultSavedEventSchema,
   "generation:retry": generationRetryEventSchema,

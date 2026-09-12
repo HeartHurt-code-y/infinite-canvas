@@ -324,6 +324,9 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// 单个 SSE 帧的缓冲上限。一帧承载一条增量，正常远小于此值；超过它说明上游没有
 /// 按 SSE 分帧回传，继续缓存没有意义。
 const SSE_FRAME_BUFFER_LIMIT: usize = 8 * 1024 * 1024;
+/// 正文增量的转发间隔。模型每秒可能产出几十条增量，逐条转发会把 Tauri 事件通道和
+/// 前端重渲染都打满；按时间合批后视觉上仍然是逐字推进。
+const STREAM_DELTA_INTERVAL: std::time::Duration = std::time::Duration::from_millis(120);
 
 /// 三类文本接口共用的 SSE 增量累积器。
 ///
@@ -343,8 +346,9 @@ struct SseFrameParser {
 }
 
 impl SseFrameParser {
-    /// 累积一个网络块并就地派发其中已完整的事件帧。
-    fn push(&mut self, chunk: &[u8], dialect: &mut dyn DialectSink) {
+    /// 累积一个网络块并就地派发其中已完整的事件帧；每个帧处理完都把新增正文推给
+    /// `sink`，由它按时间节流后交给上层。
+    fn push(&mut self, chunk: &[u8], dialect: &mut dyn DialectSink, sink: &mut StreamSink<'_>) {
         self.buffer.extend_from_slice(chunk);
         loop {
             // SSE 事件以空行结束，`\r\n\r\n` 与 `\n\n` 兼容。
@@ -363,14 +367,14 @@ impl SseFrameParser {
             // 因此这里不会产生替换符。
             let frame = String::from_utf8_lossy(&self.buffer[..boundary]).into_owned();
             self.buffer.drain(..boundary + width);
-            self.accept_frame(&frame, dialect);
+            self.accept_frame(&frame, dialect, sink);
         }
     }
 
     /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略：
     /// 三类方言都把有效载荷放在 `data` 里，`event:` 只是事件种类的冗余标注，
     /// 种类可从载荷的字段形状判断，因此不需要单独跟踪。
-    fn accept_frame(&mut self, frame: &str, dialect: &mut dyn DialectSink) {
+    fn accept_frame(&mut self, frame: &str, dialect: &mut dyn DialectSink, sink: &mut StreamSink<'_>) {
         let mut data = String::new();
         for line in frame.lines() {
             let line = line.trim_end_matches('\r');
@@ -398,6 +402,9 @@ impl SseFrameParser {
             self.provider_error.get_or_insert_with(|| error.clone());
         }
         dialect.accept_event(&value);
+        // 一帧处理完就把新增正文推出去：正文在方言里是纯追加的，按「已发出长度」
+        // 切片即可拿到增量，对三种方言都成立。
+        sink.emit(dialect.text());
     }
 
     /// 组装完整响应对象：方言负责正文、终态与用量，这里统一附加流式诊断字段与
@@ -420,8 +427,12 @@ impl SseFrameParser {
 }
 
 /// 方言事件入口：由 `SseFrameParser` 逐帧调用。
+///
+/// `text` 返回已累积的交付正文。正文在三种方言里都是纯追加的，因此「已发出长度 →
+/// 当前长度」就是新增部分，流式转发不需要每种方言各写一套增量逻辑。
 trait DialectSink {
     fn accept_event(&mut self, event: &Value);
+    fn text(&self) -> &str;
 }
 
 /// 方言出口：把累积到的增量还原成该接口的非流式响应形状。
@@ -430,6 +441,81 @@ trait DialectSink {
 /// 整个 `run_prompt_node` future 会失去 `Send`，Tauri 命令将无法编译。
 trait SseDialect: DialectSink + Send {
     fn finish(&self) -> Value;
+}
+
+/// 流式正文的下游出口。上层用它把增量推给前端（Tauri 事件），测试里可以直接收进
+/// `String` 做断言。
+pub type TextDeltaSink<'a> = dyn FnMut(&str) + Send + 'a;
+
+/// 增量节流器：模型可能每秒产出几十条增量，逐条转发会把事件通道打满。
+/// 按时间合批（默认 120ms），并保证流结束时把剩余部分补发一次。
+struct StreamSink<'a> {
+    sink: Option<&'a mut TextDeltaSink<'a>>,
+    emitted_chars: usize,
+    last_emit: Option<std::time::Instant>,
+}
+
+impl<'a> StreamSink<'a> {
+    fn new(sink: Option<&'a mut TextDeltaSink<'a>>) -> Self {
+        Self {
+            sink,
+            emitted_chars: 0,
+            last_emit: None,
+        }
+    }
+
+    /// 转发截至 `text` 的新增部分。切点会把「已发出长度」回退到最近的字符边界，
+    /// 避免在多字节字符中间切片而 panic。
+    fn emit(&mut self, text: &str) {
+        if self.sink.is_none() {
+            return;
+        }
+        if text.len() <= self.emitted_chars {
+            return;
+        }
+        if let Some(last) = self.last_emit
+            && last.elapsed() < STREAM_DELTA_INTERVAL
+        {
+            return;
+        }
+        let start = floor_char_boundary(text, self.emitted_chars);
+        if start >= text.len() {
+            return;
+        }
+        let delta = &text[start..];
+        if let Some(sink) = self.sink.as_deref_mut() {
+            sink(delta);
+        }
+        self.emitted_chars = text.len();
+        self.last_emit = Some(std::time::Instant::now());
+    }
+
+    /// 补发剩余增量：流结束时调用，保证最后一段不会因为节流窗口而丢失。
+    fn finish(&mut self, text: &str) {
+        if self.sink.is_none() || text.len() <= self.emitted_chars {
+            return;
+        }
+        let start = floor_char_boundary(text, self.emitted_chars);
+        if start < text.len() {
+            let delta = &text[start..];
+            if let Some(sink) = self.sink.as_deref_mut() {
+                sink(delta);
+            }
+        }
+        self.emitted_chars = text.len();
+    }
+}
+
+/// 返回不大于 `index` 的最大字符边界，`index` 越界时返回 `text.len()`。
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    if index >= text.len() {
+        return text.len();
+    }
+    let mut boundary = index;
+    while boundary > 0 && !text.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+    boundary
 }
 
 /// OpenAI 兼容 `/v1/chat/completions`：`choices[].delta.content` 增量，
@@ -479,6 +565,10 @@ impl DialectSink for OpenAiChatDialect {
                 self.finish_reason = Some(reason.to_string());
             }
         }
+    }
+
+    fn text(&self) -> &str {
+        &self.content
     }
 }
 
@@ -581,6 +671,10 @@ impl DialectSink for AnthropicMessagesDialect {
             _ => {}
         }
     }
+
+    fn text(&self) -> &str {
+        &self.text
+    }
 }
 
 impl SseDialect for AnthropicMessagesDialect {
@@ -673,6 +767,10 @@ impl DialectSink for GeminiContentDialect {
                 self.finish_reason = Some(reason.to_string());
             }
         }
+    }
+
+    fn text(&self) -> &str {
+        &self.text
     }
 }
 
@@ -1370,6 +1468,10 @@ impl ProviderRuntime {
     /// Cloudflare 在 100 秒无数据时以 524 终止连接）；流式返回持续回传增量，
     /// 该判定条件不再成立。增量会按方言重新组装成与非流式等价的完整响应对象返回。
     ///
+    /// `delta_sink` 非空时，正文增量边收边按时间节流转发出去，供上层实时展示。
+    /// 两条退避路径都不转发增量：重试会让正文从头再来一遍，转发出去只会覆盖或
+    /// 重复已展示的内容。
+    ///
     /// 两条退避路径，各自只重发一次：
     /// 1. `fallback`：上游拒绝某个可选字段（OpenAI 档案的用量选项）时去掉它重发。
     /// 2. `fallback_path`：上游不真正支持流式（路径不存在、参数被拒、或把整轮生成
@@ -1388,6 +1490,7 @@ impl ProviderRuntime {
         stream: Option<TextModelStream>,
         fallback: Option<TextModelFallbackRequest>,
         fallback_path: Option<&str>,
+        delta_sink: Option<&mut TextDeltaSink<'_>>,
     ) -> BackendResult<(CapturedHttpResponse, Value)> {
         let context = self.resolve_frozen(task)?;
         let mut url = endpoint(&context.base_url, path)?;
@@ -1430,6 +1533,7 @@ impl ProviderRuntime {
                 body,
                 extra_headers,
                 &request,
+                delta_sink,
             )
             .await
         {
@@ -1469,6 +1573,8 @@ impl ProviderRuntime {
                     &fallback.body,
                     extra_headers,
                     &retry_request,
+                    // 重试不转发增量：正文会从头再来一遍，转发只会重复已展示的内容。
+                    None,
                 )
                 .await;
         }
@@ -1510,6 +1616,8 @@ impl ProviderRuntime {
                     retry_body,
                     extra_headers,
                     &retry_request,
+                    // 非流式退避没有增量可转发。
+                    None,
                 )
                 .await;
         }
@@ -1531,6 +1639,7 @@ impl ProviderRuntime {
         body: &Value,
         extra_headers: &[(&str, &str)],
         call: &TextCallRequest<'_>,
+        delta_sink: Option<&mut TextDeltaSink<'_>>,
     ) -> BackendResult<(CapturedHttpResponse, Value)> {
         let call_id = Uuid::new_v4().to_string();
         self.lifecycle.commit(
@@ -1571,7 +1680,13 @@ impl ProviderRuntime {
             Some(dialect) => {
                 match self
                     .read_streamed_text_response(
-                        &task.id, &call_id, sent_at, &label, request, dialect,
+                        &task.id,
+                        &call_id,
+                        sent_at,
+                        &label,
+                        request,
+                        dialect,
+                        delta_sink,
                     )
                     .await
                 {
@@ -1622,6 +1737,9 @@ impl ProviderRuntime {
     /// 三个接口的流式协议不同（OpenAI 的 `delta.content`、Anthropic 的
     /// `content_block_delta`、Gemini 的分数片 `candidates[].content.parts[]`），
     /// 但共用同一套帧切分与空闲超时，差异全部收敛在方言实现里。
+    ///
+    /// `delta_sink` 非空时，正文增量边收边转出去（按时间节流），供上层实时展示。
+    #[allow(clippy::too_many_arguments)]
     async fn read_streamed_text_response(
         &self,
         task_id: &str,
@@ -1630,8 +1748,8 @@ impl ProviderRuntime {
         label: &str,
         request: reqwest::RequestBuilder,
         dialect: TextModelStream,
-    ) -> BackendResult<(u16, Value, String, Value)> {
-        let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
+        mut delta_sink: Option<&mut TextDeltaSink<'_>>,
+    ) -> BackendResult<(u16, Value, String, Value)> {        let response = match tokio::time::timeout(FIRST_BYTE_TIMEOUT, request.send()).await {
             Ok(Ok(response)) => response,
             Ok(Err(error)) => {
                 let backend_error = BackendError::Transport(error);
@@ -1674,6 +1792,10 @@ impl ProviderRuntime {
         let mut stream = response.bytes_stream();
         let mut parser = SseFrameParser::default();
         let mut dialect = sse_dialect(dialect);
+        let mut delta_sink = match delta_sink.take() {
+            Some(sink) => StreamSink::new(Some(sink)),
+            None => StreamSink::new(None),
+        };
         let mut transcript = String::new();
         let mut chunks = 0usize;
         let mut bytes = 0usize;
@@ -1731,7 +1853,7 @@ impl ProviderRuntime {
             bytes += chunk.len();
             transcript.push_str(&String::from_utf8_lossy(&chunk));
             // 解析器按原始字节累积，只在完整帧上解码，避免块边界撕裂多字节字符。
-            parser.push(&chunk, dialect.as_mut());
+            parser.push(&chunk, dialect.as_mut(), &mut delta_sink);
         }
         let mut payload = parser.assemble(dialect.as_ref());
         // 网关可能忽略流式请求直接回一份完整 JSON（聚合平台的常见退化行为，Gemini 的
@@ -1746,6 +1868,10 @@ impl ProviderRuntime {
                 "[provider] 上游未按 SSE 回传，改用完整 JSON 响应: taskId={task_id}, callId={call_id}"
             );
             payload = complete;
+        }
+        // 补发被节流窗口挡住的最后一段：上游可能正好在窗口内结束。
+        if (200..300).contains(&status) {
+            delta_sink.finish(dialect.text());
         }
         // 成功时存档重组后的完整响应（与非流式同形状、含 usage）；失败时存档原始
         // SSE 文本，错误诊断因此不会丢失上游实际回传的内容。
@@ -4410,10 +4536,39 @@ mod tests {
     fn assemble_raw<D: SseDialect + Default>(sse: &str, chunk_size: usize) -> Value {
         let mut dialect = D::default();
         let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
         for chunk in sse.as_bytes().chunks(chunk_size) {
-            parser.push(chunk, &mut dialect);
+            parser.push(chunk, &mut dialect, &mut sink);
         }
         parser.assemble(&dialect)
+    }
+
+    /// 投喂并收集转发出去的正文增量，返回（整段原文, 逐次转发的内容）。
+    fn collect_deltas<D: SseDialect + Default>(
+        sse: &str,
+        chunk_size: usize,
+    ) -> (String, Vec<String>) {
+        let mut dialect = D::default();
+        let mut parser = SseFrameParser::default();
+        let emitted: Vec<String> = Vec::new();
+        // 用 Mutex 让收集闭包在 `&mut` 借用下也能写入（`TextDeltaSink` 要求 Send）。
+        let collected = std::sync::Mutex::new(emitted);
+        {
+            let mut collector = |delta: &str| {
+                if let Ok(mut guard) = collected.lock() {
+                    guard.push(delta.to_string());
+                }
+            };
+            let mut sink = StreamSink::new(Some(&mut collector));
+            for chunk in sse.as_bytes().chunks(chunk_size) {
+                parser.push(chunk, &mut dialect, &mut sink);
+            }
+            // 与真实读取路径一致：流结束时补发被节流窗口挡住的最后一段。
+            sink.finish(dialect.text());
+        }
+        let full = dialect.text().to_string();
+        let deltas = collected.into_inner().unwrap_or_default();
+        (full, deltas)
     }
 
     #[test]
@@ -4486,23 +4641,27 @@ mod tests {
     fn sse_parser_surfaces_in_stream_errors_and_keeps_reasoning_out_of_the_deliverable() {
         let mut dialect = OpenAiChatDialect::default();
         let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
         // 思维链增量单独累积，不混进交付正文。
         parser.push(
             b"data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"\xe5\x85\x88\xe6\x83\xb3\"}}]}\n\n",
             &mut dialect,
+            &mut sink,
         );
         parser.push(
             b"data: {\"choices\":[{\"delta\":{\"content\":\"\xe6\xad\xa3\xe6\x96\x87\"}}]}\n\n",
             &mut dialect,
+            &mut sink,
         );
         // 上游在流内返回错误对象时保留原始错误，便于诊断。
         parser.push(
             b"data: {\"error\":{\"message\":\"upstream overloaded\"}}\n\n",
             &mut dialect,
+            &mut sink,
         );
         // 非 JSON 载荷计入解析失败，但不影响已累积的正文。
-        parser.push(b"data: not-json\n\n", &mut dialect);
-        parser.push(b"data: [DONE]\n\n", &mut dialect);
+        parser.push(b"data: not-json\n\n", &mut dialect, &mut sink);
+        parser.push(b"data: [DONE]\n\n", &mut dialect, &mut sink);
         let payload = parser.assemble(&dialect);
         assert_eq!(payload["choices"][0]["message"]["content"], "正文");
         assert_eq!(
@@ -4621,7 +4780,8 @@ mod tests {
         );
         let mut parser = SseFrameParser::default();
         let mut dialect = GeminiContentDialect::default();
-        parser.push(transcript.as_bytes(), &mut dialect);
+        let mut sink = StreamSink::new(None);
+        parser.push(transcript.as_bytes(), &mut dialect, &mut sink);
         let mut payload = parser.assemble(&dialect);
         assert_eq!(payload.pointer("/x_stream/frames"), Some(&json!(0)));
         payload = parse_complete_json_payload(transcript).expect("merged array payload");
@@ -4700,6 +4860,98 @@ mod tests {
         assert!(!should_retry_without_streaming(
             200, &ended, false, &plain, &streamed
         ));
+    }
+
+    /// 增量转发必须做到「逐次转发拼接后正好等于最终正文」，否则前端会看到重复或缺失。
+    /// 三种方言都要满足，因为转发逻辑是共用的、只有累积来源不同。
+    #[test]
+    fn streamed_text_deltas_concatenate_to_the_final_text() {
+        // OpenAI：分片增量。
+        let (full, deltas) = collect_deltas::<OpenAiChatDialect>(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"# 分镜\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"\\n【分镜3】\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: [DONE]\n\n",
+            ),
+            5,
+        );
+        assert_eq!(full, "# 分镜\n【分镜3】");
+        assert_eq!(deltas.concat(), full);
+        // 思维链不计入正文，也不应被转发出去。
+        let (reasoning_full, reasoning_deltas) = collect_deltas::<OpenAiChatDialect>(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"reasoning_content\":\"先想很久\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"答案\"}}]}\n\n",
+            ),
+            7,
+        );
+        assert_eq!(reasoning_full, "答案");
+        assert_eq!(reasoning_deltas.concat(), "答案");
+
+        // Anthropic：只有 content_block_delta 进正文。
+        let (claude_full, claude_deltas) = collect_deltas::<AnthropicMessagesDialect>(
+            concat!(
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"第一段\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"略\"}}\n\n",
+                "data: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"第二段\"}}\n\n",
+                "data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"}}\n\n",
+            ),
+            9,
+        );
+        assert_eq!(claude_full, "第一段第二段");
+        assert_eq!(claude_deltas.concat(), claude_full);
+
+        // Gemini：分片 parts[].text；thought 分片不进正文。
+        let (gemini_full, gemini_deltas) = collect_deltas::<GeminiContentDialect>(
+            concat!(
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"甲\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"thought\":true,\"text\":\"略\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"乙\"}]}}]}\n\n",
+                "data: {\"candidates\":[{\"content\":{\"parts\":[{\"text\":\"\"}]},\"finishReason\":\"STOP\"}]}\n\n",
+            ),
+            6,
+        );
+        assert_eq!(gemini_full, "甲乙");
+        assert_eq!(gemini_deltas.concat(), gemini_full);
+    }
+
+    /// 节流：同一时间窗口内的多条增量会被合并，最终补发保证不丢内容。
+    #[test]
+    fn stream_sink_throttles_and_then_flushes_the_tail() {
+        let collected = std::sync::Mutex::new(Vec::<String>::new());
+        {
+            let mut collector = |delta: &str| {
+                if let Ok(mut guard) = collected.lock() {
+                    guard.push(delta.to_string());
+                }
+            };
+            let mut sink = StreamSink::new(Some(&mut collector));
+            // 三次调用落在同一窗口内：只有第一次真正转发。
+            sink.emit("一");
+            sink.emit("一二");
+            sink.emit("一二三");
+            // 结束时补发剩余部分。
+            sink.finish("一二三");
+            // 已全部发出后再调用什么都不发。
+            sink.finish("一二三");
+        }
+        let deltas = collected.into_inner().unwrap_or_default();
+        assert_eq!(deltas.len(), 2);
+        assert_eq!(deltas.concat(), "一二三");
+    }
+
+    #[test]
+    fn floor_char_boundary_never_splits_a_multibyte_char() {
+        let text = "中文abc";
+        // 「中」占 3 字节：切在 1/2 上都要回退到 0。
+        assert_eq!(floor_char_boundary(text, 1), 0);
+        assert_eq!(floor_char_boundary(text, 2), 0);
+        assert_eq!(floor_char_boundary(text, 3), 3);
+        assert_eq!(floor_char_boundary(text, 4), 3);
+        assert_eq!(floor_char_boundary(text, text.len()), text.len());
+        assert_eq!(floor_char_boundary(text, text.len() + 9), text.len());
     }
 
     #[test]

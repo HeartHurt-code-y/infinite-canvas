@@ -2764,6 +2764,27 @@ async fn execute_recorded_text_call(
     // 流式调用：SSE 增量在传输过程中就回传，首个字节远早于生成完成，反向代理的
     // 零字节读取超时不再触发。上游若不接受流式或拒绝可选字段，provider 会自动
     // 按 plan 里的退避路径/请求体重发一次。
+    //
+    // 正文增量再转发给前端做实时展示：provider 侧已按时间节流，这里只负责组装事件
+    // 载荷。事件带 nodeId 让前端按节点路由，带 text 的是**累计**正文（不是增量），
+    // 前端可以直接覆盖渲染，不需要自己拼接。
+    let source_node_id_for_delta = command
+        .source_node_id
+        .clone()
+        .unwrap_or_else(|| "legacy-prompt-optimizer".to_string());
+    let canvas_id_for_delta = command.canvas_id.clone().unwrap_or_default();
+    let mut emit_delta = |delta: &str| {
+        emit_generation_event(
+            deps,
+            "generation:text-delta",
+            &json!({
+                "taskId": task_id,
+                "sourceNodeId": source_node_id_for_delta,
+                "canvasId": canvas_id_for_delta,
+                "delta": delta,
+            }),
+        );
+    };
     let (response, payload) = deps
         .providers
         .captured_text_json(
@@ -2777,6 +2798,7 @@ async fn execute_recorded_text_call(
             stream,
             fallback,
             fallback_path.as_deref(),
+            Some(&mut emit_delta),
         )
         .await?;
     if !(200..300).contains(&response.status) {

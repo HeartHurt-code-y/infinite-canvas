@@ -77,6 +77,7 @@ export function CanvasDocumentSkillNode({
   selected,
   dragging,
   running,
+  streamingText,
   error,
   providerCatalog,
   sourceInput = null,
@@ -97,6 +98,7 @@ export function CanvasDocumentSkillNode({
   readonly selected: boolean;
   readonly dragging: boolean;
   readonly running: boolean;
+  readonly streamingText: string | null;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly sourceInput?: ConnectedScreenplayInput | null;
@@ -591,6 +593,22 @@ export function CanvasDocumentSkillNode({
           )}
         </div>
 
+        {running && streamingText ? (
+          // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
+          // 配置里的完整结果取代（父组件在 finally 里清空本字段）。
+          <div
+            className="canvas-screenplay-node__document-preview nodrag is-streaming"
+            role="region"
+            aria-label={`${copy.currentDocumentLabel}流式草稿`}
+            data-testid="streaming-text"
+          >
+            <p className="canvas-screenplay-node__streaming-note">
+              正在生成（已接收 {streamingText.length} 字符）
+            </p>
+            <MarkdownView content={streamingText} />
+          </div>
+        ) : null}
+
         {error ? (
           <pre className="raw-error canvas-prompt-node__error" role="alert" tabIndex={0}>
             {error}
@@ -608,6 +626,7 @@ export function CanvasViralRemixNode({
   selected,
   dragging,
   running,
+  streamingText,
   error,
   providerCatalog,
   onSelect,
@@ -624,6 +643,7 @@ export function CanvasViralRemixNode({
   readonly selected: boolean;
   readonly dragging: boolean;
   readonly running: boolean;
+  readonly streamingText: string | null;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly onSelect: (key: string) => void;
@@ -914,6 +934,20 @@ export function CanvasViralRemixNode({
               <span className="canvas-screenplay-node__document-hint">可编辑 · 可导出</span>
             </span>
           </div>
+          {running && streamingText ? (
+            // 流式草稿：模型还在生成时就把已收到的正文展示出来。
+            <div
+              className="canvas-screenplay-node__document-preview nodrag is-streaming"
+              role="region"
+              aria-label="当前复刻方案流式草稿"
+              data-testid="streaming-text"
+            >
+              <p className="canvas-screenplay-node__streaming-note">
+                正在生成（已接收 {streamingText.length} 字符）
+              </p>
+              <MarkdownView content={streamingText} />
+            </div>
+          ) : null}
           {effectiveDocumentMode === "preview" ? (
             <div
               className="canvas-screenplay-node__document-preview nodrag"
@@ -954,6 +988,7 @@ export function CanvasPromptNode({
   selected,
   dragging,
   running,
+  streamingText,
   error,
   providerCatalog,
   sourceConnections,
@@ -975,6 +1010,7 @@ export function CanvasPromptNode({
   readonly selected: boolean;
   readonly dragging: boolean;
   readonly running: boolean;
+  readonly streamingText: string | null;
   readonly error: string | null;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   /** 连入本节点的图片素材与图片/视频产物（多模态理解参考，按连线建立顺序）。 */
@@ -1214,7 +1250,7 @@ export function CanvasPromptNode({
           aria-label="提示词多轮对话"
           aria-live="polite"
         >
-          {conversation.length === 0 ? (
+          {conversation.length === 0 && !(running && streamingText) ? (
             <div className="canvas-screenplay-node__empty">
               <strong>
                 {isFpvPath
@@ -1240,11 +1276,33 @@ export function CanvasPromptNode({
               </article>
             ))
           )}
+          {running && streamingText ? (
+            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
+            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
+            <article
+              className="canvas-screenplay-node__message is-assistant is-streaming"
+              data-testid="streaming-text"
+            >
+              <span>正在生成（已接收 {streamingText.length} 字符）</span>
+              <MarkdownView content={streamingText} />
+            </article>
+          ) : null}
           {running ? (
             <div className="canvas-screenplay-node__thinking" role="status">
               <CircleNotch size={14} weight="bold" aria-hidden="true" className="spin-icon" />
               正在调用文本模型…
             </div>
+          ) : null}
+          {running && streamingText ? (
+            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
+            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
+            <article
+              className="canvas-screenplay-node__message is-assistant is-streaming"
+              data-testid="streaming-text"
+            >
+              <span>正在生成（已接收 {streamingText.length} 字符）</span>
+              <MarkdownView content={streamingText} />
+            </article>
           ) : null}
         </div>
         <label className="canvas-prompt-node__field">

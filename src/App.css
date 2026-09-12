@@ -7198,6 +7198,21 @@ svg[data-spin="true"] {
   margin-bottom: 0;
 }
 
+/* 流式草稿：模型生成期间先展示已接收正文，任务完成后由正式文档取代。
+   独立成块并限制高度，避免高频追加把节点撑到不可用。 */
+.canvas-screenplay-node__document-preview.is-streaming {
+  max-height: 18rem;
+  margin-top: var(--space-sm);
+  border-style: dashed;
+  border-color: var(--color-rule-2);
+}
+
+.canvas-screenplay-node__streaming-note {
+  margin: 0 0 var(--space-xs);
+  color: var(--color-muted);
+  font-size: var(--text-2xs);
+}
+
 /* 工业级分镜沿用同一套文档节点交互，以视频紫建立独立的节点身份。 */
 .canvas-screenplay-node--storyboard {
   border-top-color: var(--color-video-strong);

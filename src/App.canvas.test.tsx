@@ -7040,6 +7040,104 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     );
   });
 
+  it("运行期间把文本模型的流式正文实时显示在节点上", async () => {
+    // 手动控制的 Promise：让 run_prompt_node 保持挂起，才能在「生成中」断言流式草稿。
+    let resolveRun: ((value: { optimizedPrompt: string; rawModelOutput: string }) => void) | null =
+      null;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        return new Promise((resolve) => {
+          resolveRun = resolve;
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    await screen.findByText("画布为空");
+    const node = await addStoryboardNode(640, 400);
+
+    // 找到后端注册的 generation:text-delta 监听器。
+    const deltaListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "generation:text-delta",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const deltaHandler = tauriCallbacks.get(deltaListener[1]?.["handler"] as number);
+    expect(deltaHandler).toBeDefined();
+
+    const composer = within(node).getByRole("textbox", { name: "分镜对话消息" });
+    fireEvent.change(composer, { target: { value: "把这份剧本拆成分镜" } });
+    fireEvent.click(within(node).getByRole("button", { name: "发送" }));
+
+    // 节点 key 是随机生成的，从实际发起的命令里取，保证事件路由到同一个节点。
+    const sourceNodeId = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(([command]) => command === "run_prompt_node");
+      expect(call).toBeDefined();
+      return (call![1] as { command: { sourceNodeId: string } }).command.sourceNodeId;
+    });
+
+    // 第一段增量：草稿出现，且还没有写入文档区。
+    await waitFor(() => expect(within(node).getByText("生成中")).toBeInTheDocument());
+    act(() => {
+      deltaHandler!({
+        event: "generation:text-delta",
+        id: 1,
+        payload: {
+          taskId: "text-task-1",
+          sourceNodeId,
+          canvasId: "canvas-1",
+          delta: "# 雨夜归人 · 工业级分镜\n",
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(within(node).getByText(/正在生成（已接收 \d+ 字符）/)).toBeInTheDocument(),
+    );
+    // Markdown 渲染后标题进 h1，本轮增量本身还没有正文段落。
+    expect(
+      within(node).getByRole("heading", { name: "雨夜归人 · 工业级分镜" }),
+    ).toBeInTheDocument();
+
+    // 同一任务的第二段增量累加在同一份草稿上。
+    act(() => {
+      deltaHandler!({
+        event: "generation:text-delta",
+        id: 2,
+        payload: {
+          taskId: "text-task-1",
+          sourceNodeId,
+          canvasId: "canvas-1",
+          delta: "0-5s：24mm 建场镜头",
+        },
+      });
+    });
+    // 累加后的字符数等于两段增量拼接后的长度。
+    const expectedLength = "# 雨夜归人 · 工业级分镜\n0-5s：24mm 建场镜头".length;
+    await waitFor(() =>
+      expect(within(node).getByText(/已接收 \d+ 字符/)).toHaveTextContent(
+        `正在生成（已接收 ${expectedLength} 字符）`,
+      ),
+    );
+
+    // 任务完成：完整结果写入文档区，流式草稿移除，不会残留两份内容。
+    act(() => {
+      resolveRun?.({
+        optimizedPrompt: "# 雨夜归人 · 工业级分镜\n\n0-5s：24mm 建场镜头",
+        rawModelOutput: "ok",
+      });
+    });
+    await waitFor(() => {
+      expect(getDocumentEditor(node, "当前工业级分镜脚本").value).toContain("24mm 建场镜头");
+    });
+    await waitFor(() => {
+      expect(within(node).queryByText(/正在生成（已接收/)).not.toBeInTheDocument();
+    });
+  });
+
   it("每轮注入完整上下文并支持 Markdown 导出", async () => {
     let storyboardCall = 0;
     dialogSaveMock.mockResolvedValue("C:\\Exports\\工业级分镜脚本.md");

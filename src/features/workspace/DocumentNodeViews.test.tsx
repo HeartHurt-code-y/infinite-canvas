@@ -31,6 +31,7 @@ describe("CanvasDocumentSkillNode composer", () => {
           selected
           dragging={false}
           running={false}
+          streamingText={null}
           error={null}
           providerCatalog={[]}
           sourceInput={null}

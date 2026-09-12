@@ -694,6 +694,25 @@ export function WorkspaceApp({
   );
   // 正在提交生成任务的节点 key；不同节点可以同时提交。
   const [startingNodeKeys, setStartingNodeKeys] = useState<ReadonlySet<string>>(() => new Set());
+  /**
+   * 文本模型正在生成的正文（按节点 key 累加）。
+   *
+   * 只用于「运行中」的实时展示：任务完成后由 run 的回调写入完整结果并清空这里，
+   * 因此它不是画布文档的一部分，不参与持久化。
+   */
+  const [streamingTextByNode, setStreamingTextByNode] = useState<Record<string, string>>({});
+  /** 记录每个节点当前流式任务 ID：任务换了说明是新一轮，需要从空重新累积。 */
+  const streamingTextTaskByNodeRef = useRef<Map<string, string>>(new Map());
+  /** 本轮结束（成功或失败）后清掉流式草稿：完整结果由调用方写入节点。 */
+  const clearStreamingText = useCallback((nodeKey: string) => {
+    streamingTextTaskByNodeRef.current.delete(nodeKey);
+    setStreamingTextByNode((current) => {
+      if (!(nodeKey in current)) return current;
+      const next = { ...current };
+      delete next[nodeKey];
+      return next;
+    });
+  }, []);
   const [startErrorsByNode, setStartErrorsByNode] = useState<Record<string, string>>({});
   const setNodeStartError = useCallback((nodeKey: string, error: string | null) => {
     setStartErrorsByNode((current) => {
@@ -3667,6 +3686,8 @@ export function WorkspaceApp({
           frontendLog("error", `[generation] 提示词节点请求失败: node=${nodeKey}, ${message}`);
         })
         .finally(() => {
+          // 完整结果已写入节点（或已失败），流式草稿不再需要。
+          clearStreamingText(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -3684,6 +3705,7 @@ export function WorkspaceApp({
       setNodeStartError,
       startingNodeKeys,
       patchNode,
+      clearStreamingText,
     ],
   );
 
@@ -3798,6 +3820,8 @@ export function WorkspaceApp({
           frontendLog("error", `[generation] 剧本多轮对话失败: node=${nodeKey}, ${message}`);
         })
         .finally(() => {
+          // 完整结果已写入节点（或已失败），流式草稿不再需要。
+          clearStreamingText(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -3813,6 +3837,7 @@ export function WorkspaceApp({
       setNodeStartError,
       startingNodeKeys,
       canvasInputsFor,
+      clearStreamingText,
     ],
   );
 
@@ -3950,6 +3975,8 @@ export function WorkspaceApp({
           frontendLog("error", `[generation] 工业级分镜多轮对话失败: node=${nodeKey}, ${message}`);
         })
         .finally(() => {
+          // 完整结果已写入节点（或已失败），流式草稿不再需要。
+          clearStreamingText(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -3965,6 +3992,7 @@ export function WorkspaceApp({
       setNodeStartError,
       startingNodeKeys,
       storyboardNodes,
+      clearStreamingText,
     ],
   );
 
@@ -4091,6 +4119,8 @@ export function WorkspaceApp({
           frontendLog("error", `[viral-remix] 复刻失败: node=${nodeKey}, ${message}`);
         })
         .finally(() => {
+          // 完整结果已写入节点（或已失败），流式草稿不再需要。
+          clearStreamingText(nodeKey);
           setStartingNodeKeys((current) => {
             const next = new Set(current);
             next.delete(nodeKey);
@@ -4106,6 +4136,7 @@ export function WorkspaceApp({
       startingNodeKeys,
       viralRemixNodes,
       patchNode,
+      clearStreamingText,
     ],
   );
 
@@ -4981,6 +5012,29 @@ export function WorkspaceApp({
 
   const handleGenerationEvent = useCallback(
     (eventName: string, payload: unknown) => {
+      if (eventName === "generation:text-delta") {
+        // 文本模型正在生成的正文：按节点暂存，节点卡片实时展示。
+        // 任务结束后由 run 的 then 用完整结果覆盖，这里不需要清理。
+        const info = payload as {
+          sourceNodeId?: string;
+          taskId?: string;
+          delta?: string;
+        } | null;
+        const nodeKey = info?.sourceNodeId;
+        const chunk = info?.delta;
+        if (!nodeKey || !chunk) return;
+        if (info?.taskId && info.taskId !== streamingTextTaskByNodeRef.current.get(nodeKey)) {
+          // 同一节点可能被连续发起多轮；任务 ID 变了说明是新一轮，从空开始累积。
+          streamingTextTaskByNodeRef.current.set(nodeKey, info.taskId);
+          setStreamingTextByNode((current) => ({ ...current, [nodeKey]: chunk }));
+          return;
+        }
+        setStreamingTextByNode((current) => ({
+          ...current,
+          [nodeKey]: `${current[nodeKey] ?? ""}${chunk}`,
+        }));
+        return;
+      }
       if (eventName === "generation:result-ready" || eventName === "generation:result-saved") {
         const record = (payload as { result?: GenerationResultRecord } | null)?.result;
         if (record) {
@@ -6921,6 +6975,8 @@ export function WorkspaceApp({
             selectedNodeKey === node.key,
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
+            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
+            streamingTextByNode[node.key] ?? null,
             providerCatalog,
             documentInputsByNode.get(node.key),
             canvasInputsFor,
@@ -6951,6 +7007,7 @@ export function WorkspaceApp({
                   selected={selectedNodeKey === node.key}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
+                  streamingText={streamingTextByNode[node.key] ?? null}
                   error={startErrorsByNode[node.key] ?? null}
                   providerCatalog={providerCatalog}
                   sourceInputs={documentInputsByNode.get(node.key) ?? []}
@@ -6989,6 +7046,7 @@ export function WorkspaceApp({
       handleExportScreenplay,
       documentInputsByNode,
       canvasInputsFor,
+      streamingTextByNode,
     ],
   );
 
@@ -7004,6 +7062,8 @@ export function WorkspaceApp({
             selectedNodeKey === node.key,
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
+            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
+            streamingTextByNode[node.key] ?? null,
             providerCatalog,
             documentInputsByNode.get(node.key),
             canvasInputsFor,
@@ -7032,6 +7092,7 @@ export function WorkspaceApp({
                   selected={selectedNodeKey === node.key}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
+                  streamingText={streamingTextByNode[node.key] ?? null}
                   error={startErrorsByNode[node.key] ?? null}
                   providerCatalog={providerCatalog}
                   sourceInputs={documentInputsByNode.get(node.key) ?? []}
@@ -7066,6 +7127,7 @@ export function WorkspaceApp({
       updateStoryboardNodeConfig,
       handleRunStoryboardNode,
       handleExportStoryboard,
+      streamingTextByNode,
     ],
   );
 
@@ -7216,6 +7278,8 @@ export function WorkspaceApp({
             selectedNodeKey === node.key,
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
+            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
+            streamingTextByNode[node.key] ?? null,
             providerCatalog,
             selectNode,
             ignoreLegacyNodeDrag,
@@ -7243,6 +7307,7 @@ export function WorkspaceApp({
                   selected={selectedNodeKey === node.key}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
+                  streamingText={streamingTextByNode[node.key] ?? null}
                   error={startErrorsByNode[node.key] ?? null}
                   providerCatalog={providerCatalog}
                   onSelect={selectNode}
@@ -7274,6 +7339,7 @@ export function WorkspaceApp({
       updateViralRemixNodeConfig,
       handleRunViralRemixNode,
       handleExportViralRemix,
+      streamingTextByNode,
     ],
   );
 
@@ -7302,6 +7368,8 @@ export function WorkspaceApp({
             selectedNodeKey === node.key,
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
+            // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
+            streamingTextByNode[node.key] ?? null,
             connectedInputs,
             promptTargetsBySource.get(node.key),
             promptSourceByTarget.has(node.key),
@@ -7347,6 +7415,7 @@ export function WorkspaceApp({
                   selected={selectedNodeKey === node.key}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
+                  streamingText={streamingTextByNode[node.key] ?? null}
                   error={startErrorsByNode[node.key] ?? null}
                   providerCatalog={providerCatalog}
                   sourceConnections={connectedInputs ?? []}
@@ -7435,6 +7504,7 @@ export function WorkspaceApp({
       updateVideoNodeConfig,
       openVideoLocalEdit,
       handleStartGeneration,
+      streamingTextByNode,
     ],
   );
 
