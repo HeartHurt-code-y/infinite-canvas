@@ -281,9 +281,12 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 6] = [
         // `resolution`/`aspect_ratio`/`duration`，轮询 `GET /v1/video/generations/{task_id}`。
         // 截至接入时该站点只开放 `pan-seedance-2.0`，且没有 `/v1/assets/*` 素材库接口，
         // 因此这条连接只参与模型生成，素材库仍使用本地素材与本地生成结果。
+        //
+        // 必须使用域名而不是直连 IP `115.191.2.88`：服务器证书是 `*.panqu.com`，
+        // 不覆盖 IP，rustls 会在握手阶段直接拒绝该地址（TCP 端口 3000 则完全不通）。
         "provider-panqu-api",
         "盘趣API",
-        "https://115.191.2.88/",
+        "https://aiapis.panqu.com/",
         "moyu_v1",
     ),
 ];
@@ -353,6 +356,7 @@ impl Storage {
         migrate_generation_tasks_tokens(&connection)?;
         migrate_provider_token_groups(&connection)?;
         migrate_staging_jobs_adjustment(&connection)?;
+        migrate_panqu_provider_base_url(&connection)?;
 
         let storage = Self {
             connection: Mutex::new(connection),
@@ -1624,6 +1628,26 @@ fn migrate_staging_jobs_adjustment(connection: &Connection) -> BackendResult<()>
     Ok(())
 }
 
+/// 修正盘趣连接的直连 IP 地址：`https://115.191.2.88/` 的服务器证书只覆盖
+/// `*.panqu.com`，严格校验的 TLS 客户端（应用的 rustls）会在握手阶段以
+/// `invalid peer certificate: certificate not valid for name "115.191.2.88"` 失败，
+/// 表现为「连通但拉不到模型」的 transport 错误。同一服务的域名地址证书有效。
+///
+/// 只改 `base_url`，且只在它仍然是那个不可用地址时生效，因此不会覆盖用户在
+/// 连接上做过的任何其他编辑；API Key、启用状态与模型绑定都保持不变。
+fn migrate_panqu_provider_base_url(connection: &Connection) -> BackendResult<()> {
+    connection.execute(
+        "UPDATE provider_connections SET base_url = ?1, updated_at = ?2
+         WHERE id = 'provider-panqu-api' AND base_url = ?3",
+        params![
+            "https://aiapis.panqu.com/",
+            now_ms(),
+            "https://115.191.2.88/"
+        ],
+    )?;
+    Ok(())
+}
+
 fn provider_from_row(row: &Row<'_>) -> rusqlite::Result<ProviderConnection> {
     Ok(ProviderConnection {
         id: row.get(0)?,
@@ -2301,6 +2325,74 @@ mod tests {
             .query_row("PRAGMA encoding", [], |row| row.get(0))
             .expect("read encoding");
         assert_eq!(encoding, "UTF-8");
+    }
+
+    #[test]
+    fn panqu_connection_migrates_off_the_tls_invalid_ip_address() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        // 预置本身已经是域名地址。
+        assert_eq!(
+            storage
+                .get_provider_connection("provider-panqu-api")
+                .expect("panqu connection")
+                .base_url,
+            "https://aiapis.panqu.com/"
+        );
+
+        // 模拟旧库：地址仍是证书不覆盖的直连 IP，且用户改过显示名与模型绑定。
+        {
+            let connection = storage.lock().expect("database lock");
+            connection
+                .execute(
+                    "UPDATE provider_connections
+                        SET base_url = 'https://115.191.2.88/', display_name = '我改过的名字', enabled = 1
+                      WHERE id = 'provider-panqu-api'",
+                    [],
+                )
+                .expect("seed legacy address");
+            migrate_panqu_provider_base_url(&connection).expect("migrate base url");
+            // 幂等：再跑一次不会改变结果。
+            migrate_panqu_provider_base_url(&connection).expect("migrate base url twice");
+            // 其他连接不受影响（SD2.0 的历史地址保持不变）。
+            let sd20: String = connection
+                .query_row(
+                    "SELECT base_url FROM provider_connections WHERE id = 'provider-sd20'",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("sd20 address");
+            assert_eq!(sd20, "https://47.94.250.161/");
+        }
+
+        let migrated = storage
+            .get_provider_connection("provider-panqu-api")
+            .expect("panqu connection");
+        assert_eq!(migrated.base_url, "https://aiapis.panqu.com/");
+        // 只改地址：显示名与启用状态保留用户自己的编辑。
+        assert_eq!(migrated.display_name, "我改过的名字");
+        assert!(migrated.enabled);
+
+        // 用户自己填过的其他地址不会被这条迁移覆盖。
+        {
+            let connection = storage.lock().expect("database lock");
+            connection
+                .execute(
+                    "UPDATE provider_connections
+                        SET base_url = 'https://my-proxy.example.com/'
+                      WHERE id = 'provider-panqu-api'",
+                    [],
+                )
+                .expect("set custom address");
+            migrate_panqu_provider_base_url(&connection).expect("migrate base url");
+        }
+        assert_eq!(
+            storage
+                .get_provider_connection("provider-panqu-api")
+                .expect("panqu connection")
+                .base_url,
+            "https://my-proxy.example.com/"
+        );
     }
 
     #[test]

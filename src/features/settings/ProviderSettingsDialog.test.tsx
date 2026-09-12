@@ -255,15 +255,16 @@ describe("ProviderSettingsDialog", () => {
     expect(await screen.findByText(/已保存 火山引擎 的连接信息/)).toBeInTheDocument();
   });
 
-  it("新建连接选择盘趣API预置模板后沿用 moyu_v1 适配器与直连地址", async () => {
-    // 盘趣网关是 OpenAI 兼容的转发站，复用 moyu_v1 适配器；地址保留用户给定的直连 IP
-    // （证书不覆盖 IP，遇到 TLS 错误时改用 https://aiapis.panqu.com/）。
+  it("新建连接选择盘趣API预置模板后沿用 moyu_v1 适配器与域名地址", async () => {
+    // 盘趣网关是 OpenAI 兼容的转发站，复用 moyu_v1 适配器。地址必须是域名：
+    // 直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会在握手阶段拒绝，
+    // 表现为「连接正常但拉不到模型」；3000 端口则完全不可达。
     const panquProvider: ProviderConnection = {
       ...SAVED_PROVIDER,
       id: "provider-new-panqu",
       displayName: "盘趣API",
       adapterId: "moyu_v1",
-      baseUrl: "https://115.191.2.88/",
+      baseUrl: "https://aiapis.panqu.com/",
     };
     const client = createClient({
       upsertProviderConnection: vi.fn(() => Promise.resolve(panquProvider)),
@@ -283,7 +284,7 @@ describe("ProviderSettingsDialog", () => {
       target: { value: "panqu-api" },
     });
     await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("盘趣API"));
-    expect(screen.getByLabelText(/^Base URL/)).toHaveValue("https://115.191.2.88/");
+    expect(screen.getByLabelText(/^Base URL/)).toHaveValue("https://aiapis.panqu.com/");
 
     fireEvent.change(screen.getByLabelText(/^API Key/), { target: { value: "<REDACTED>" } });
     const saveButton = screen.getByRole("button", { name: "保存连接" });
@@ -294,7 +295,7 @@ describe("ProviderSettingsDialog", () => {
       expect(client.upsertProviderConnection).toHaveBeenCalledWith(
         expect.objectContaining({
           displayName: "盘趣API",
-          baseUrl: "https://115.191.2.88/",
+          baseUrl: "https://aiapis.panqu.com/",
           adapterId: "moyu_v1",
         }),
       ),
