@@ -371,18 +371,22 @@ export function createCanvasInputResolver(
     // 生成节点（图片/视频）若配置了 inputSlots，则对直连素材按槽位顺序排序；
     // 只重排有槽位的素材之间的相对顺序，保持它们在原数组中的位置区间，
     // 不影响继承素材（来自提示词节点）与直连素材之间的先后关系。
+    // 槽位表可能残留指向已删除节点/已解绑素材的 key：它们不出现在本次素材里，
+    // 若继续按槽位下标排序会占用排序位置、把真实素材挤到后面，因此按现有素材压缩序号。
     const targetEntry = nodes.get(targetKey);
-    if (
-      targetEntry &&
-      targetEntry.type === "gen" &&
-      (targetEntry.data.kind === "image" || targetEntry.data.kind === "video") &&
-      targetEntry.data.config.inputSlots &&
-      targetEntry.data.config.inputSlots.length > 0
-    ) {
+    const targetSlots =
+      targetEntry?.type === "gen" &&
+      (targetEntry.data.kind === "image" || targetEntry.data.kind === "video")
+        ? targetEntry.data.config.inputSlots
+        : undefined;
+    if (targetSlots && targetSlots.length > 0) {
+      const present = new Set(media.map((item) => item.sourceKey));
       const slotOrder = new Map<string, number>();
-      targetEntry.data.config.inputSlots.forEach((slot, index) => {
-        if (slot !== null) slotOrder.set(slot, index);
-      });
+      // 同一素材 key 重复占位时以第一个槽位为准，避免后一个槽位覆盖真实顺序。
+      for (const slot of targetSlots) {
+        if (slot === null || !present.has(slot) || slotOrder.has(slot)) continue;
+        slotOrder.set(slot, slotOrder.size);
+      }
       const slottedIndices: number[] = [];
       const slottedItems: ConnectedCanvasMediaInput[] = [];
       media.forEach((item, index) => {

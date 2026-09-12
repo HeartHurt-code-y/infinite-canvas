@@ -286,11 +286,7 @@ export function CanvasGenNode({
           describedBy={promptHintId}
           expandable
         />
-        <GenerationInputChips
-          inputs={effectiveInputs}
-          onUnlink={onUnlink}
-          {...(node.config.inputSlots ? { inputSlots: node.config.inputSlots } : {})}
-        />
+        <GenerationInputChips inputs={effectiveInputs} onUnlink={onUnlink} />
       </div>
 
       {node.kind === "video" ? (
@@ -2460,32 +2456,23 @@ export function AutoSizeThumb({
 }
 
 /** 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。 */
-function GenerationInputChips({
+export function GenerationInputChips({
   inputs,
-  inputSlots,
   onUnlink,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
-  readonly inputSlots?: readonly (string | null)[];
   readonly onUnlink: (edgeId: string) => void;
 }) {
   if (inputs.length === 0) return null;
-  // 槽位号映射：素材 key → 槽位 index（从 0 开始）。直连素材按槽位编号，
-  // 继承素材不在槽位表中，编号接续在最大槽位之后。
-  const slotByKey = new Map<string, number>();
-  inputSlots?.forEach((slot, index) => {
-    if (slot !== null) slotByKey.set(slot, index);
-  });
-  const maxSlotIndex = inputSlots ? inputSlots.length - 1 : -1;
-  let inheritedCounter = 0;
+  // 编号即渲染顺序：inputs 已由 canvasInputs 按槽位排好序，就是实际提交给生成请求的顺序。
+  // 槽位号只负责排序，不再参与编号——槽位表按素材 key 记账，节点被删除或素材解绑后
+  // 槽位可能残留空位（或残留已被替换的 key），直接拿槽位下标当编号会出现跳号、重号。
   return (
     <ol className="node-media-inputs" aria-label="生成参考素材，按传入顺序排列">
-      {inputs.map((input) => {
+      {inputs.map((input, index) => {
         const inherited = "promptNodeKey" in input;
         const isOutput = !inherited && input.sourceLabel === "产物";
-        const orderNumber = inherited
-          ? maxSlotIndex + 1 + ++inheritedCounter
-          : (slotByKey.get(input.key) ?? inputs.indexOf(input)) + 1;
+        const orderNumber = index + 1;
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}

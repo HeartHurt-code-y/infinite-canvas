@@ -1093,8 +1093,32 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
                   .filter((edge) => edge.fromKey === key || edge.toKey === key)
                   .map((edge) => edge.id),
               );
+              // 删除的边会从 assetEdges 移除，但它占用的 inputSlots 槽位若继续留着，
+              // 就会变成一个指向已不存在节点的悬挂 key：既占住槽位表位置（导致跳号），
+              // 又可能被后续素材按"最小空槽"复用时对不上真实连线。
+              // 这里把它清成 null 空槽，与 disconnect 的语义一致：保留位置、不压缩顺序。
+              let slotsPruned = false;
+              for (const candidate of Object.values(nodesById)) {
+                if (candidate.type !== "gen") continue;
+                const candidateData = candidate.data;
+                if (candidateData.kind !== "image" && candidateData.kind !== "video") continue;
+                const slots = candidateData.config.inputSlots;
+                if (slots == null || !slots.includes(key)) continue;
+                slotsPruned = true;
+                const prunedData = {
+                  ...candidateData,
+                  config: {
+                    ...candidateData.config,
+                    inputSlots: slots.map((slot) => (slot === key ? null : slot)),
+                  },
+                };
+                Object.assign(nodesById, {
+                  [candidateData.key]: { type: "gen", data: prunedData },
+                });
+              }
               return {
-                nodesById,
+                // 删节点时不必整体替换 nodesById；只有槽位被清理过才复制一层。
+                ...(slotsPruned ? { nodesById: { ...nodesById } } : {}),
                 assetEdges:
                   removedEdgeIds.size === 0
                     ? state.assetEdges
