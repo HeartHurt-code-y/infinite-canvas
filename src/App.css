@@ -2268,7 +2268,9 @@ svg[data-spin="true"] {
   height: 18px;
   padding: 0;
   color: var(--color-text);
-  background: var(--color-ink);
+  /* 深色圆底：图标本身用 --color-text，底色必须取深色控件面。
+     用 --color-ink 会和文字色同值（近白），叉号在浅色图上完全看不见。 */
+  background: var(--color-chrome-2);
   border: none;
   border-radius: var(--radius-round);
   opacity: 0;

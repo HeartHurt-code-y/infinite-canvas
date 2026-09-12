@@ -1117,8 +1117,15 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
                 });
               }
               return {
-                // 删节点时不必整体替换 nodesById；只有槽位被清理过才复制一层。
-                ...(slotsPruned ? { nodesById: { ...nodesById } } : {}),
+                /*
+                 * nodesById 必须无条件回写：replaceTypeNodes 每次都返回删掉该节点的
+                 * 新对象，漏掉这一步等于把节点留在图里——表现为「点叉号没反应」，
+                 * 只有恰好清到槽位（删的素材被生成节点的 inputSlots 引用）才会生效。
+                 *
+                 * 槽位是就地清在新对象上的，那份投影缓存已不代表它的内容，
+                 * 因此清理过时再复制一层，让下游按新对象重算。
+                 */
+                nodesById: slotsPruned ? { ...nodesById } : nodesById,
                 assetEdges:
                   removedEdgeIds.size === 0
                     ? state.assetEdges

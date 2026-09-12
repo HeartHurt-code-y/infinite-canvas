@@ -478,6 +478,24 @@ describe("canvas state interface", () => {
     expect(canvas.getSnapshot().selection).toEqual({ nodeKey: null, edgeId: null });
   });
 
+  it("removes a node that no generation slot references", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("asset", assetNode);
+    canvas.commands.addNode("gen", genNode);
+
+    /*
+     * 未连线的素材不会被任何生成节点的 inputSlots 引用，槽位清理这一支不会发生。
+     * 删除仍然必须把新的 nodesById 写回：漏写时节点留在图里，画布上表现为
+     * 「点素材卡片的叉号没有反应」（只有恰好清到槽位时才生效）。
+     */
+    const removed = canvas.commands.removeNode("asset-1");
+
+    expect(removed).toMatchObject({ type: "asset", data: { key: "asset-1" } });
+    expect(canvas.getSnapshot().nodes.asset).toEqual([]);
+    expect(canvas.getSnapshot().nodeByKey.asset.has("asset-1")).toBe(false);
+    expect(canvas.getSnapshot().nodes.gen).toHaveLength(1);
+  });
+
   it("keeps connection projections stable across layout-only changes", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", assetNode);
