@@ -6137,6 +6137,68 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
   });
 
+  it("删除连线再重连同一素材后，画布连线序号仍与节点清单编号一一对应", async () => {
+    const cleanImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-clean",
+      name: "站台干净底图",
+      previewUrl: "https://cdn.example.com/station-clean.jpg",
+      assetUrl: "https://cdn.example.com/station-clean.jpg",
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, cleanImage])
+        : baseInvokeImplementation(command),
+    );
+
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const referenceImage = await addAssetNode("图片", "站台参考图", 148, 148);
+    const cleanImageNode = await addAssetNode("图片", "站台干净底图", 148, 333);
+    const targetKey = videoGeneration.dataset["connectionTarget"]!;
+    const referenceKey = referenceImage.dataset["connectionTarget"]!;
+    const cleanKey = cleanImageNode.dataset["connectionTarget"]!;
+    connectAssetToGeneration(referenceImage, videoGeneration);
+    connectAssetToGeneration(cleanImageNode, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台干净底图" });
+
+    // 解除第 1 条连线，再把同一素材连回来：槽位账本把它放回原位（仍是第 1 个输入），
+    // 但连线数组只能把这条新连线追加到末尾——两处顺序从此各说各话。
+    fireEvent.click(within(videoGeneration).getByRole("button", { name: "解除连线：站台参考图" }));
+    await waitFor(() =>
+      expect(
+        within(videoGeneration).queryByRole("button", { name: "解除连线：站台参考图" }),
+      ).not.toBeInTheDocument(),
+    );
+    connectAssetToGeneration(referenceImage, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台参考图" });
+
+    // 节点清单即实际提交顺序：站台参考图第 1、站台干净底图第 2。
+    expect(
+      within(videoGeneration)
+        .getAllByRole("listitem")
+        .map((item) => ({
+          order: item.querySelector(".node-media-chip__order")?.textContent,
+          name: item.querySelector(".node-media-chip__name")?.textContent,
+        })),
+    ).toEqual([
+      { order: "1", name: "站台参考图" },
+      { order: "2", name: "站台干净底图" },
+    ]);
+
+    // 连线徽标与徽标节点由同一份 flowEdges 渲染，按下标即可把徽标对回具体连线。
+    const edgeIds = Array.from(document.querySelectorAll(".react-flow__edge")).map((edge) =>
+      edge.getAttribute("data-id"),
+    );
+    const badges = Array.from(document.querySelectorAll(".canvas-flow-edge__order")).map(
+      (marker) => marker.textContent,
+    );
+    expect(edgeIds).toHaveLength(badges.length);
+    const orderByEdgeId = new Map(edgeIds.map((edgeId, index) => [edgeId, badges[index]]));
+    expect(orderByEdgeId.get(`${referenceKey}->${targetKey}`)).toBe("1");
+    expect(orderByEdgeId.get(`${cleanKey}->${targetKey}`)).toBe("2");
+  });
+
   it("多素材连到视频节点后统一冻结连线编号，@ 引用与媒体清单一一对应", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);

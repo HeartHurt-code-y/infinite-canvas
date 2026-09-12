@@ -410,3 +410,28 @@ export function createCanvasInputResolver(
     return result;
   };
 }
+
+/**
+ * 目标节点输入清单里每条输入的归属连线，按清单顺序去重。
+ *
+ * 同一连线可以承载多条输入：中转素材与随提示词继承的素材都记在进入目标的这条连线上，
+ * 这里取它首次出现的位置。解析结果里没有出现的连线（例如上游还没有可用结果）按调用方
+ * 给出的原始连线顺序接在末尾，保证每条进入目标的连线都拿到唯一且连续的序号。
+ */
+export function canvasInputEdgeOrder(
+  resolved: ResolvedCanvasInputs,
+  fallbackEdgeIds: readonly string[],
+): readonly string[] {
+  const ordered: string[] = [];
+  const seen = new Set<string>();
+  const collect = (edgeId: string) => {
+    if (seen.has(edgeId)) return;
+    seen.add(edgeId);
+    ordered.push(edgeId);
+  };
+  for (const input of resolved.media) collect(input.edgeId);
+  for (const input of resolved.texts) collect(input.edgeId);
+  for (const input of resolved.pending) collect(input.edgeId);
+  for (const edgeId of fallbackEdgeIds) collect(edgeId);
+  return ordered;
+}

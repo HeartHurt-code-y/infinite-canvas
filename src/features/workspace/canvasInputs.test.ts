@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createCanvasState, type CanvasNodeEntry } from "../canvas/canvasStore";
 import {
+  canvasInputEdgeOrder,
   canvasNodeIndex,
   canvasNodesByKeyFromDocument,
   createCanvasInputResolver,
@@ -428,5 +429,98 @@ describe("unrestricted canvas payload graph", () => {
       ["C:/animation.gif", "image"],
       ["C:/animation.mp4", "video"],
     ]);
+  });
+});
+
+describe("画布连线序号", () => {
+  const imageGenerator = (key: string): GenNodeData => ({
+    key,
+    kind: "image",
+    x: 0,
+    y: 0,
+    config: {
+      modelSelection: model,
+      generationCount: 1,
+      parameterValues: {},
+      catalogResolved: true,
+    },
+  });
+
+  it("删除后再重连的素材仍按清单顺序编号，不被追加到连线数组末尾", () => {
+    const canvas = createCanvasState();
+    canvas.commands.insertSubgraph(
+      [
+        { type: "gen", data: imageGenerator("gen") },
+        { type: "asset", data: material("asset-a") },
+        { type: "asset", data: material("asset-b") },
+      ],
+      [],
+    );
+    canvas.commands.connect("asset-a", "gen");
+    canvas.commands.connect("asset-b", "gen");
+    canvas.commands.disconnect("asset-a->gen");
+    canvas.commands.connect("asset-a", "gen");
+
+    const snapshot = canvas.getSnapshot();
+    // 槽位账本把 asset-a 放回原位（第 1 个输入），连线数组却只能把新连线追加到末尾。
+    expect(snapshot.nodeByKey.gen.get("gen")).toMatchObject({
+      config: { inputSlots: ["asset-a", "asset-b"] },
+    });
+    expect(snapshot.graph.edges.map((item) => item.id)).toEqual(["asset-b->gen", "asset-a->gen"]);
+
+    const resolved = createCanvasInputResolver(snapshot.nodeByKey, snapshot.graph.edges)("gen");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-a", "asset-b"]);
+    // 序号按清单顺序读连线：asset-a 是第 1 个输入，asset-b 是第 2 个。
+    // 旧实现直接取连线数组下标，徽标会与节点清单互相矛盾（asset-b=1、asset-a=2）。
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        snapshot.graph.edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-a->gen", "asset-b->gen"]);
+  });
+
+  it("尚未产出结果的上游连线排在清单之后，解析不到的连线也不会漏号", () => {
+    const entries: CanvasNodeEntry[] = [
+      { type: "gen", data: imageGenerator("gen") },
+      { type: "asset", data: material("asset-a") },
+      // 尚未产出结果的节点：它不贡献媒体，只贡献一条等待中的输入和它自己的连线。
+      { type: "result", data: { key: "empty-result", x: 0, y: 0 } },
+    ];
+    const edges: AssetEdgeData[] = [edge("empty-result", "gen"), edge("asset-a", "gen")];
+    const resolved = createCanvasInputResolver(canvasNodeIndex(entries), edges)("gen");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-a"]);
+    expect(resolved.pending.map((input) => input.sourceKey)).toEqual(["empty-result"]);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-a->gen", "empty-result->gen"]);
+    // 旧文档里解析不到任何输入的残留连线也按原始顺序接在末尾，不会与已有序号重号。
+    expect(
+      canvasInputEdgeOrder(resolved, ["asset-a->gen", "empty-result->gen", "stale->gen"]),
+    ).toEqual(["asset-a->gen", "empty-result->gen", "stale->gen"]);
+  });
+
+  it("同一条连线承载多条输入（中转素材）时取首次出现的位置", () => {
+    const entries: CanvasNodeEntry[] = [
+      { type: "gen", data: imageGenerator("gen") },
+      { type: "asset", data: material("source") },
+      { type: "asset", data: material("relay") },
+      { type: "asset", data: material("asset-c") },
+    ];
+    const incoming = [edge("relay", "gen"), edge("asset-c", "gen")];
+    const resolved = createCanvasInputResolver(canvasNodeIndex(entries), [
+      edge("source", "relay"),
+      ...incoming,
+    ])("gen");
+    expect(resolved.media.map((input) => input.key)).toEqual(["relay", "source", "asset-c"]);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        incoming.map((item) => item.id),
+      ),
+    ).toEqual(["relay->gen", "asset-c->gen"]);
   });
 });

@@ -107,7 +107,11 @@ import {
   type CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
-import { createCanvasInputResolver, canvasNodesByKeyFromDocument } from "./canvasInputs";
+import {
+  createCanvasInputResolver,
+  canvasInputEdgeOrder,
+  canvasNodesByKeyFromDocument,
+} from "./canvasInputs";
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
@@ -5512,14 +5516,25 @@ export function WorkspaceApp({
   }, [canvasInputsFor, videoComposerNodeByKey]);
 
   const inputOrderByEdge = useMemo(() => {
-    const direct = new Map(
-      [...canvasEdgeIndex.byTarget].map(([key, edges]) => [
+    // 连线序号回答的是「这条连线给目标节点送去了第几个输入」，因此必须与节点内的清单同源。
+    // 清单由 canvasInputs 归一化：直连素材按槽位账本排序，中转与随提示词继承的素材按解析
+    // 顺序展开。若改用 assetEdges 的写入顺序（旧实现），删除后再重连这类只回填空槽、不动
+    // 其余素材位置的操作会让两处错位：徽标显示 2，节点清单却把同一素材排在第 1 位。
+    const groups = new Map<string, { edgeId: string }[]>();
+    for (const [key, edges] of canvasEdgeIndex.byTarget) {
+      // 视频合成节点的片段顺序可由用户在节点内调整，画布序号跟随它实际展示的顺序。
+      const preferred = videoComposerInputsByNode.get(key)?.map((input) => input.edgeId) ?? [];
+      const ordered = canvasInputEdgeOrder(
+        canvasInputsFor(key),
+        edges.map((edge) => edge.id),
+      );
+      groups.set(
         key,
-        edges.map((edge) => ({ edgeId: edge.id })),
-      ]),
-    );
-    return buildInputOrderByEdge(direct);
-  }, [canvasEdgeIndex]);
+        [...new Set([...preferred, ...ordered])].map((edgeId) => ({ edgeId })),
+      );
+    }
+    return buildInputOrderByEdge(groups);
+  }, [canvasEdgeIndex, canvasInputsFor, videoComposerInputsByNode]);
 
   const viralRemixInputsByNode = useMemo(() => {
     const map = new Map<string, ViralRemixVideoInput[]>();
