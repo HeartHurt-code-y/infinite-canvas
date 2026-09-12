@@ -30,11 +30,15 @@ coverage
 .editorconfig
 
 # Agent / tool runtime state (logs, sessions, caches — not project source)
+.extract-design-system/
 .playwright-mcp/
 .hallmark/
 .zcode/
 .video_agent/
 .workbuddy/
+
+# Local visual-audit screenshots (produced by scripts/audit-visuals.mjs)
+.screenshots/
 
 # Local-only project docs (kept on this machine, not pushed to remote)
 docs/

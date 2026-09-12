@@ -1,5 +1,16 @@
-/* Hallmark · macrostructure: Workbench · tone: technical · anchor hue: warm copper · genre: atmospheric · theme: Bloom · nav: N9 · footer: Ft2 · enrichment: existing Tier C still · slop: pass (1–58) · contrast: pass (40–41) · honest: pass (46) · chrome: pass (47) · tokens: pass (48) · responsive: pass (49) · icons: pass (30) · mobile: pass (34, 49, 50–57) */
-/* Hallmark · pre-emit critique: P5 H5 E4 S5 R5 V5 */
+/*
+ * Hallmark · macrostructure: Workbench · tone: technical · anchor hue: warm copper
+ * genre: atmospheric · theme: Machine Room · 基调: 影视暗调专业机
+ * nav: N9 · footer: Ft2 · enrichment: existing Tier C still
+ *
+ * 视觉命题：画布是工作台中最深的一层，面板与节点靠明度递进浮起，
+ * 媒体内容（生成的图与视频）是全画面唯一的饱和色来源。
+ * 全站只有一个交互色（暖铜），图片/视频/音频三色只表达媒体类型。
+ *
+ * tokens: 全部视觉值来自 ../tokens.css（单一来源，无孤立声明）
+ * contrast: WCAG AA —— 正文 ≥ 4.5:1，大字与图形 ≥ 3:1
+ * motion: 仅表达状态变化；减少动态效果时收敛到 ≤150ms
+ */
 @import "../tokens.css";
 
 * {
@@ -22,17 +33,18 @@ body {
 
 body {
   color: var(--color-chrome-ink);
-  background: var(--color-chrome);
+  background: var(--color-bg-base);
   font-family: var(--font-body);
   font-synthesis: none;
   font-variant-numeric: tabular-nums;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 [data-sonner-toaster].app-toaster {
   --border-radius: var(--radius-control);
-  --normal-bg: var(--color-paper);
+  --normal-bg: var(--color-surface-2);
   --normal-border: var(--color-rule);
   --normal-text: var(--color-ink);
   z-index: var(--z-toast);
@@ -97,6 +109,8 @@ input:focus-visible,
 select:focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--rule-active);
+  /* 深色面上单圈细描边容易被底噪吃掉；补一圈与环境同色的接触光晕把控件顶出来。 */
+  box-shadow: 0 0 0 var(--focus-halo-width) var(--color-bg-base);
 }
 
 .mono {
@@ -130,7 +144,7 @@ select:focus-visible {
   padding-inline: var(--space-sm);
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
-  border-bottom: var(--rule-thin) solid var(--color-chrome-field);
+  border-bottom: var(--rule-thin) solid var(--color-rule);
 }
 
 .brand-lockup,
@@ -395,7 +409,7 @@ h3 {
   overflow: hidden;
   color: var(--color-chrome-ink);
   background: var(--color-chrome-2);
-  border-inline-end: var(--rule-thin) solid var(--color-chrome-field);
+  border-inline-end: var(--rule-thin) solid var(--color-rule);
   transform: translateX(-102%);
 }
 
@@ -915,38 +929,52 @@ h3 {
   opacity: 0.82;
 }
 
+/*
+ * 面板空态：图标、标题、说明三层。
+ * 原来三层同名同色、间距只有 12px，读起来像一段报错而不是一个起点。
+ * 现在拉开层级与间距：图标最轻、标题最重，让空面板看起来是「等你开始」。
+ */
 .asset-empty {
   display: grid;
   justify-items: start;
-  gap: var(--space-xs);
+  gap: var(--space-sm);
   padding: var(--space-lg);
-  color: var(--color-chrome-subtle);
+  color: var(--color-text-3);
   text-align: start;
-  border: var(--rule-thin) dashed var(--color-chrome-rule-2);
+  border: var(--rule-thin) dashed var(--color-rule);
   border-radius: var(--radius-panel);
 }
 
+.asset-empty > svg {
+  color: var(--color-text-4);
+}
+
 .asset-empty strong {
-  color: var(--color-chrome-ink);
-  font-size: var(--text-sm);
+  color: var(--color-text);
+  font-family: var(--font-display);
+  font-size: var(--text-lg);
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: var(--leading-heading);
 }
 
 .asset-empty > span {
-  max-width: 18rem;
-  font-size: var(--text-xs);
-  line-height: 1.55;
+  max-width: 20rem;
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  text-wrap: pretty;
 }
 
 .asset-empty button {
   gap: var(--space-2xs);
-  min-height: 2rem;
+  min-height: var(--size-control);
   margin-block-start: var(--space-2xs);
-  padding-inline: var(--space-xs);
-  color: var(--color-chrome-ink);
-  background: var(--color-chrome-3);
-  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  padding-inline: var(--space-sm);
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border: var(--rule-thin) solid var(--color-rule-strong);
   border-radius: var(--radius-control);
-  font-size: var(--text-2xs);
+  font-size: var(--text-xs);
 }
 
 svg[data-spin="true"] {
@@ -968,6 +996,15 @@ svg[data-spin="true"] {
   user-select: none;
 }
 
+/*
+ * 素材卡片的加载 / 不可用遮罩。
+ *
+ * 素材列表在缩略图就绪前会先铺满这个覆盖层。原来它是一块纯色实心（与卡片底同值），
+ * 整个素材库在加载期间呈现为一排「空方块」，看起来像坏掉而不是在读取。
+ * 这里把加载态做成明确的骨架：略亮于卡片底 + 一次缓慢的横向扫光，
+ * 让人一眼知道是「正在读取」，而不是「没有内容」。
+ * 减少动态效果时，全局规则会把动画压到 150ms 一次，静止为一层静态骨架底。
+ */
 .asset-card__media-state {
   position: absolute;
   inset: 0;
@@ -976,13 +1013,39 @@ svg[data-spin="true"] {
   justify-items: center;
   gap: var(--space-2xs);
   padding: var(--space-sm);
-  color: var(--color-chrome-subtle);
+  color: var(--color-text-3);
   text-align: center;
-  background: var(--color-chrome-3);
+  background: var(--color-surface-2);
   font-size: var(--text-2xs);
   line-height: 1.35;
   pointer-events: none;
   user-select: none;
+}
+
+.asset-card__media-state[data-state="loading"] {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in oklch, var(--color-text) 7%, transparent) 50%,
+    transparent 80%
+  );
+  background-size: 220% 100%;
+  animation: asset-card-skeleton 1.6s var(--ease-in-out) infinite;
+}
+
+@keyframes asset-card-skeleton {
+  from {
+    background-position: 180% 0;
+  }
+
+  to {
+    background-position: -80% 0;
+  }
+}
+
+.asset-card__media-state[data-state="unavailable"] {
+  color: var(--color-text-3);
+  background: var(--color-surface-1);
 }
 
 .asset-card__media-state[data-state="unavailable"] svg {
@@ -995,8 +1058,8 @@ svg[data-spin="true"] {
   left: var(--space-3xs);
   z-index: 1;
   padding: var(--space-3xs) var(--space-2xs);
-  color: var(--color-paper, white);
-  background: color-mix(in oklch, var(--color-chrome-ink) 78%, transparent);
+  color: var(--color-text);
+  background: color-mix(in oklch, var(--color-bg-sunk) 78%, transparent);
   border-radius: var(--radius-control);
   font-size: var(--text-2xs);
   font-weight: 700;
@@ -1588,7 +1651,7 @@ svg[data-spin="true"] {
 }
 
 .edge-order-marker circle {
-  fill: var(--color-paper);
+  fill: var(--color-text);
   stroke: var(--color-accent);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
@@ -1618,7 +1681,7 @@ svg[data-spin="true"] {
 }
 
 .edge-delete-control circle {
-  fill: var(--color-paper);
+  fill: var(--color-text);
   stroke: var(--color-error);
   stroke-width: 2;
   vector-effect: non-scaling-stroke;
@@ -2149,7 +2212,7 @@ svg[data-spin="true"] {
   z-index: 2;
   right: var(--space-xs);
   left: var(--space-xs);
-  color: var(--color-paper);
+  color: var(--color-text);
   text-shadow: 0 1px 2px rgba(0 0 0 / 72%);
 }
 
@@ -2183,11 +2246,11 @@ svg[data-spin="true"] {
 
 .canvas-asset-node__cloud-badge {
   flex-shrink: 0;
-  width: 8px;
-  height: 8px;
-  background: #22c55e;
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--color-success);
   border-radius: var(--radius-round);
-  box-shadow: 0 0 0 2px rgba(34 197 94 / 18%);
+  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-success) 22%, transparent);
 }
 
 .canvas-asset-node__meta {
@@ -2204,7 +2267,7 @@ svg[data-spin="true"] {
   width: 18px;
   height: 18px;
   padding: 0;
-  color: var(--color-paper);
+  color: var(--color-text);
   background: var(--color-ink);
   border: none;
   border-radius: var(--radius-round);
@@ -2230,7 +2293,7 @@ svg[data-spin="true"] {
   width: 18px;
   height: 18px;
   padding: 0;
-  color: var(--color-paper);
+  color: var(--color-text);
   background: var(--color-ink);
   border: none;
   border-radius: var(--radius-round);
@@ -2253,14 +2316,14 @@ svg[data-spin="true"] {
 
 .canvas-asset-node__upload-dot {
   position: absolute;
-  top: -2px;
-  right: -2px;
-  width: 8px;
-  height: 8px;
-  background: #22c55e;
-  border: 2px solid var(--color-ink);
+  top: calc(var(--space-3xs) * -1);
+  right: calc(var(--space-3xs) * -1);
+  width: 0.5rem;
+  height: 0.5rem;
+  background: var(--color-success);
+  border: var(--rule-active) solid var(--color-surface-1);
   border-radius: var(--radius-round);
-  box-shadow: 0 0 0 2px rgba(34 197 94 / 18%);
+  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-success) 22%, transparent);
 }
 
 .canvas-asset-node__port {
@@ -2283,10 +2346,10 @@ svg[data-spin="true"] {
   width: var(--space-md);
   height: var(--space-md);
   box-sizing: border-box;
-  background: var(--color-paper);
+  background: var(--color-text);
   border: var(--rule-active) solid var(--color-accent);
   border-radius: var(--radius-round);
-  box-shadow: 0 0 0 var(--rule-active) var(--color-paper);
+  box-shadow: 0 0 0 var(--rule-active) var(--color-text);
   content: "";
 }
 
@@ -2328,7 +2391,7 @@ svg[data-spin="true"] {
   width: 20px;
   height: 20px;
   flex: 0 0 auto;
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   font-weight: 800;
@@ -2682,7 +2745,7 @@ svg[data-spin="true"] {
   min-height: 2.25rem;
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
-  border: var(--rule-thin) solid var(--color-chrome-field);
+  border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-control);
   box-shadow: var(--shadow-whisper);
 }
@@ -2731,7 +2794,7 @@ svg[data-spin="true"] {
   min-height: 2.25rem;
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
-  border: var(--rule-thin) solid var(--color-chrome-field);
+  border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-control);
   box-shadow: var(--shadow-whisper);
 }
@@ -2773,7 +2836,7 @@ svg[data-spin="true"] {
   min-height: 2.25rem;
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
-  border: var(--rule-thin) solid var(--color-chrome-field);
+  border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-control);
   box-shadow: var(--shadow-whisper);
 }
@@ -3072,7 +3135,7 @@ svg[data-spin="true"] {
   .provider-save-action:hover {
     color: var(--color-ink);
     background: var(--color-paper-2);
-    border-color: var(--color-rule-3);
+    border-color: var(--color-rule-strong);
   }
 
   .provider-fetch-action:hover,
@@ -3377,10 +3440,15 @@ svg[data-spin="true"] {
   user-select: none;
 }
 
-.repository-card:hover,
+.repository-card:hover {
+  border-color: var(--color-rule-strong);
+  background: var(--color-surface-2);
+}
+
 .repository-card:focus-visible {
   border-color: var(--color-accent);
-  outline: none;
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
 }
 
 .repository-card:active {
@@ -3394,53 +3462,80 @@ svg[data-spin="true"] {
   opacity: 0.72;
 }
 
+/* ================= 排版基线 ================= */
+
+/*
+ * 展示级标题的字距与行高。
+ *
+ * 产品界面以中文为主，此前所有标题一律沿用为拉丁字母优化的负字距（最大 -0.04em）。
+ * 负字距收紧拉丁小写观感良好，但汉字是满字身、笔画密，收紧后相邻笔画相互挤压，
+ * 中文标题会显得又挤又小。这里只把展示级标题（≥20px）的字距退回 0 并统一行高。
+ *
+ * 小字号的拉丁标签、编号与参数（10–12px，多为等宽字体）不受影响，
+ * 它们原有的负/正字距是合适的。
+ * 这些选择器与原始声明同为一类选择器 + 元素，靠书写顺序生效，无需 !important。
+ */
+.settings-dialog__header h2,
+.real-person-dialog__header h2,
+.history-dialog__header h2,
+.asset-group-dialog__header h2,
+.confirm-dialog__title,
+.panel-title-row h2 {
+  letter-spacing: normal;
+  line-height: var(--leading-heading);
+}
+
+/* ================= 节点仓库 ================= */
+
+/*
+ * 节点仓库图标：九个模板原来各用一个饱和实心色块，在 272px 侧板里堆成一条
+ * 彩虹，比画布本身更抢眼。这里统一收敛为「深色底 + 语义色前景」的同一套做法：
+ * 色相仍然表达节点类型，但明度压低，让侧板退回导航层级，画布内容成为主角。
+ */
 .repository-card__icon {
   display: grid;
   place-items: center;
   flex: 0 0 auto;
   width: 2rem;
   height: 2rem;
-  color: var(--color-paper);
-  background: var(--color-neutral);
-  border-radius: var(--radius-panel);
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule-faint);
+  border-radius: var(--radius-sm);
 }
 
+/* 媒体类型：保留类型识别色，改用 soft 底 + strong 前景 */
 .repository-card--image .repository-card__icon {
-  background: var(--color-image);
+  color: var(--color-image-strong);
+  background: var(--color-image-soft);
+  border-color: color-mix(in oklch, var(--color-image) 42%, transparent);
 }
 
-.repository-card--video .repository-card__icon {
-  background: var(--color-video);
-}
-
-.repository-card--video_composer .repository-card__icon {
+.repository-card--video .repository-card__icon,
+.repository-card--video_composer .repository-card__icon,
+.repository-card--storyboard .repository-card__icon {
   color: var(--color-video-strong);
   background: var(--color-video-soft);
-  border: var(--rule-thin) solid var(--color-video);
+  border-color: color-mix(in oklch, var(--color-video) 42%, transparent);
 }
 
-.repository-card--video_downloader .repository-card__icon {
-  color: var(--color-paper);
-  background: var(--color-accent);
-}
-
+.repository-card--video_downloader .repository-card__icon,
 .repository-card--viral_remix .repository-card__icon {
-  color: var(--color-paper);
-  background: linear-gradient(135deg, var(--color-accent), var(--color-video-strong));
-}
-
-.repository-card--prompt .repository-card__icon {
-  background: var(--color-accent);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: color-mix(in oklch, var(--color-accent) 42%, transparent);
 }
 
 .repository-card--screenplay .repository-card__icon {
-  color: var(--color-chrome-field);
-  background: var(--color-audio);
+  color: var(--color-audio-strong);
+  background: var(--color-audio-soft);
+  border-color: color-mix(in oklch, var(--color-audio) 42%, transparent);
 }
 
-.repository-card--storyboard .repository-card__icon {
-  color: var(--color-paper);
-  background: var(--color-video-strong);
+.repository-card--prompt .repository-card__icon {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule);
 }
 
 .repository-card__body {
@@ -3468,7 +3563,7 @@ svg[data-spin="true"] {
   overflow: hidden;
   color: var(--color-chrome-ink);
   background: var(--color-chrome-2);
-  border-top: var(--rule-thin) solid var(--color-chrome-field);
+  border-top: var(--rule-thin) solid var(--color-rule);
   transition: height var(--dur-short) var(--ease-out);
 }
 
@@ -3643,7 +3738,7 @@ svg[data-spin="true"] {
 }
 
 .canvas-comic-drama-workflow__settings small {
-  color: var(--color-ink-3);
+  color: var(--color-text-3);
   font-size: var(--text-xs);
   line-height: 1.5;
 }
@@ -4848,33 +4943,37 @@ svg[data-spin="true"] {
   border-radius: var(--radius-control);
 }
 
+/*
+ * 合成 / 导出等主操作按钮同样统一用全站交互色，理由见上方生成节点主操作按钮。
+ * 「视频节点」这个身份由节点顶边与头部图标表达，不需要按钮再重复一次紫色。
+ */
 .canvas-video-composer__compose {
   min-width: 5.5rem;
   gap: var(--space-2xs);
   padding-inline: var(--space-sm);
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-size: var(--text-xs);
   font-weight: 700;
-  background: var(--color-video-strong);
+  background: var(--color-accent);
   border: none;
 }
 
 .canvas-video-composer__compose:hover:not(:disabled),
 .canvas-video-composer__compose:focus-visible {
-  background: var(--color-video);
+  background: var(--color-accent-hover);
 }
 
 .canvas-video-composer__compose:disabled {
-  color: var(--color-muted);
+  color: var(--color-text-3);
   cursor: not-allowed;
-  background: var(--color-paper-3);
+  background: var(--color-surface-3);
   border: var(--rule-thin) solid var(--color-rule);
 }
 
 .canvas-video-composer__compose[data-state="loading"]:disabled {
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   cursor: progress;
-  background: var(--color-video-strong);
+  background: var(--color-accent);
 }
 
 .canvas-video-composer__remove {
@@ -4931,7 +5030,7 @@ svg[data-spin="true"] {
   width: 24px;
   height: 24px;
   flex: 0 0 auto;
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-family: var(--font-mono);
   font-size: var(--text-2xs);
   font-weight: 800;
@@ -5206,7 +5305,7 @@ svg[data-spin="true"] {
   min-width: 5.5rem;
   gap: var(--space-2xs);
   padding-inline: var(--space-sm);
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-size: var(--text-xs);
   font-weight: 700;
   background: var(--color-accent);
@@ -5229,7 +5328,7 @@ svg[data-spin="true"] {
   min-width: 5rem;
   gap: var(--space-2xs);
   padding-inline: var(--space-sm);
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-size: var(--text-xs);
   font-weight: 700;
   background: var(--color-error);
@@ -5264,7 +5363,7 @@ svg[data-spin="true"] {
 .canvas-video-downloader__reveal:focus-visible,
 .canvas-video-downloader__engine-action:hover:not(:disabled),
 .canvas-video-downloader__engine-action:focus-visible {
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: var(--color-accent);
 }
 
@@ -5664,7 +5763,7 @@ svg[data-spin="true"] {
   width: 26px;
   height: 26px;
   padding: 0;
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: var(--color-accent);
   border: none;
   border-radius: var(--radius-round);
@@ -5677,20 +5776,26 @@ svg[data-spin="true"] {
   height: 2rem;
   gap: var(--space-2xs);
   padding-inline: var(--space-sm);
-  color: var(--color-paper);
-  background: var(--color-image-strong);
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
   border-radius: var(--radius-control);
   font-size: var(--text-xs);
   font-weight: 700;
 }
 
-.canvas-gen-node--video .canvas-gen-node__start {
-  height: 2.25rem;
-  background: var(--color-video-strong);
-}
-
+/*
+ * 主操作按钮一律使用全站交互色。
+ *
+ * 基础规则本来就是 --color-accent，但这里按节点类型把它覆盖成了
+ * 「图片蓝 / 视频紫 / 铜色」三种。类型色回答的是「这是什么节点」，
+ * 按钮回答的是「这里可以执行」——全站可执行动作应当是同一个颜色。
+ *
+ * 媒体类型色只保留在三处：节点顶边的身份条、头部类型图标、媒体 chip。
+ * 按钮高度也统一为 2rem：同一个「生成」动作在不同节点里不该有两种身材。
+ */
+.canvas-gen-node--video .canvas-gen-node__start,
 .canvas-gen-node--prompt .canvas-gen-node__start {
-  height: 2.25rem;
+  height: 2rem;
   background: var(--color-accent);
 }
 
@@ -5700,20 +5805,11 @@ svg[data-spin="true"] {
 }
 
 .canvas-gen-node__start:hover:not(:disabled),
-.canvas-gen-node__start:focus-visible {
-  background: var(--color-accent-hover);
-}
-
+.canvas-gen-node__start:focus-visible,
 .canvas-gen-node__start--labeled:hover:not(:disabled),
-.canvas-gen-node__start--labeled:focus-visible {
-  background: var(--color-image);
-}
-
+.canvas-gen-node__start--labeled:focus-visible,
 .canvas-gen-node--video .canvas-gen-node__start:hover:not(:disabled),
-.canvas-gen-node--video .canvas-gen-node__start:focus-visible {
-  background: var(--color-video);
-}
-
+.canvas-gen-node--video .canvas-gen-node__start:focus-visible,
 .canvas-gen-node--prompt .canvas-gen-node__start:hover:not(:disabled),
 .canvas-gen-node--prompt .canvas-gen-node__start:focus-visible {
   background: var(--color-accent-hover);
@@ -6172,7 +6268,7 @@ svg[data-spin="true"] {
 
 .canvas-gen-node__url-draft-input:focus-visible {
   outline-color: var(--color-focus);
-  border-color: var(--color-video-strong);
+  border-color: var(--color-accent);
 }
 
 .canvas-gen-node__url-draft-add {
@@ -6180,15 +6276,15 @@ svg[data-spin="true"] {
   height: 2rem;
   padding-inline: var(--space-sm);
   color: var(--color-accent-ink);
-  background: var(--color-video);
-  border: var(--rule-thin) solid var(--color-video);
+  background: var(--color-accent);
+  border: var(--rule-thin) solid var(--color-accent);
   border-radius: var(--radius-control);
   font-size: var(--text-2xs);
   cursor: pointer;
 }
 
 .canvas-gen-node__url-draft-add:hover {
-  background: var(--color-video-strong);
+  background: var(--color-accent-hover);
 }
 
 .canvas-gen-node__url-draft-cancel {
@@ -6581,7 +6677,7 @@ svg[data-spin="true"] {
   justify-content: center;
   gap: var(--space-2xs);
   padding-inline: var(--space-sm);
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: var(--color-audio-strong);
   border: var(--rule-thin) solid var(--color-audio-strong);
   border-radius: var(--radius-control);
@@ -7237,8 +7333,8 @@ svg[data-spin="true"] {
 
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__export,
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__composer-actions button {
-  background: var(--color-video-strong);
-  border-color: var(--color-video-strong);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__export:hover:not(:disabled),
@@ -7247,8 +7343,8 @@ svg[data-spin="true"] {
   .canvas-screenplay-node__composer-actions
   button:hover:not(:disabled),
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__composer-actions button:focus-visible {
-  background: color-mix(in oklch, var(--color-video-strong) 84%, var(--color-chrome));
-  border-color: color-mix(in oklch, var(--color-video-strong) 84%, var(--color-chrome));
+  background: var(--color-accent-hover);
+  border-color: var(--color-accent-hover);
 }
 
 .canvas-screenplay-node--storyboard .canvas-screenplay-node__skill-badge {
@@ -7289,14 +7385,14 @@ svg[data-spin="true"] {
 }
 
 .canvas-screenplay-node--viral_remix .canvas-gen-node__type-icon {
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: linear-gradient(135deg, var(--color-accent), var(--color-video-strong));
   border-color: var(--color-accent);
 }
 
 .canvas-screenplay-node--viral_remix .canvas-screenplay-node__export,
 .canvas-viral-remix-node__run {
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: var(--color-accent);
   border-color: var(--color-accent);
 }
@@ -7518,7 +7614,7 @@ svg[data-spin="true"] {
   justify-content: center;
   gap: var(--space-3xs);
   padding: 0 var(--space-xs);
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   font-weight: 700;
   background: var(--color-accent);
   border: var(--rule-thin) solid var(--color-accent);
@@ -8191,7 +8287,7 @@ svg[data-spin="true"] {
 /* 自动识别刚转换的引用：一次性呼吸高亮，标记新产物。 */
 @keyframes mention-chip-fresh {
   0% {
-    color: var(--color-paper);
+    color: var(--color-text);
     background: var(--color-accent);
     box-shadow: 0 0 0 0 var(--color-accent);
     outline: 2px solid var(--color-accent);
@@ -8262,7 +8358,7 @@ svg[data-spin="true"] {
   height: 1em;
   place-items: center;
   margin-inline-end: 0.2em;
-  color: var(--color-paper);
+  color: var(--color-text);
   background: var(--color-warning);
   border-radius: var(--radius-round);
   font-size: 0.82em;
@@ -8351,9 +8447,9 @@ svg[data-spin="true"] {
 
 .prompt-mention__expand:hover,
 .prompt-mention__expand:focus-visible {
-  color: var(--color-paper);
-  background: var(--color-image-strong);
-  border-color: var(--color-image-strong);
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .canvas-gen-node--image .prompt-mention__expand,
@@ -8374,7 +8470,7 @@ svg[data-spin="true"] {
 .canvas-gen-node--video .prompt-mention__expand:focus-visible,
 .canvas-gen-node--video .prompt-mention__trigger:hover,
 .canvas-gen-node--video .prompt-mention__trigger:focus-visible {
-  color: var(--color-paper);
+  color: var(--color-accent-ink);
   background: var(--color-video-strong);
   border-color: var(--color-video-strong);
 }
@@ -8921,8 +9017,8 @@ svg[data-spin="true"] {
   min-width: 5rem;
   height: 2.25rem;
   padding-inline: var(--space-md);
-  color: var(--color-paper);
-  background: var(--color-image-strong);
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
   border: none;
   border-radius: var(--radius-control);
   font-weight: 700;
@@ -8930,7 +9026,7 @@ svg[data-spin="true"] {
 
 .prompt-mention__expanded-footer button:hover,
 .prompt-mention__expanded-footer button:focus-visible {
-  background: var(--color-image);
+  background: var(--color-accent-hover);
 }
 
 @media (max-width: 40rem) {
@@ -9048,28 +9144,42 @@ svg[data-spin="true"] {
 
 /* ============ 空画布引导 ============ */
 
+/*
+ * 空画布状态：这是用户第一次打开产品看到的唯一画面，原来只有 12px 粗体，
+ * 与「新建画布」的空白感叠加后整个首屏没有落点。改用展示级窄体 + 一句引导，
+ * 让首屏有一个明确的视觉重心，同时保持画布可用区域不被遮挡（pointer-events: none）。
+ */
 .canvas-empty-hint {
   position: absolute;
   top: 50%;
   left: 50%;
   display: grid;
-  gap: var(--space-2xs);
+  gap: var(--space-sm);
   justify-items: center;
-  padding: var(--space-xs);
-  color: var(--color-muted);
+  max-width: 30rem;
+  padding: var(--space-lg);
+  color: var(--color-text-3);
   text-align: center;
   transform: translate(-50%, -50%);
   pointer-events: none;
 }
 
 .canvas-empty-hint strong {
-  font-family: var(--font-body);
-  font-size: var(--text-sm);
-  color: var(--color-neutral);
+  font-family: var(--font-display);
+  font-size: var(--text-3xl);
+  font-weight: 600;
+  /* 中文标题不加紧字距：负字距会让汉字笔画相撞；轻微放开反而更稳。 */
+  letter-spacing: 0.01em;
+  line-height: var(--leading-display);
+  color: var(--color-text);
 }
 
 .canvas-empty-hint span {
-  font-size: var(--text-xs);
+  max-width: 26rem;
+  font-size: var(--text-md);
+  line-height: var(--leading-body);
+  color: var(--color-text-3);
+  text-wrap: pretty;
 }
 
 /* ============ 视频素材卡片：关键帧截图 + 悬浮播放 ============ */
@@ -10477,7 +10587,7 @@ svg[data-spin="true"] {
 }
 
 .confirm-dialog__btn--danger {
-  color: var(--color-paper);
+  color: var(--color-text);
   background: var(--color-error);
   border-color: var(--color-error);
 }
@@ -10922,19 +11032,36 @@ svg[data-spin="true"] {
   scrollbar-width: thin;
 }
 
+/*
+ * 历史详情空位：这块区域占了对话框大半宽度，原来是 14px 灰字居中，
+ * 在空态下读起来像页面没加载完。把图标与文案收成一组、加大行距并提高对比，
+ * 让它是一个明确的「等待选择」提示。
+ */
 .history-detail__placeholder,
 .history-detail__error {
   display: grid;
   min-height: 100%;
+  gap: var(--space-sm);
+  justify-items: center;
+  align-content: center;
   padding: var(--space-xl);
-  color: var(--color-muted);
-  font-size: var(--text-sm);
+  color: var(--color-text-3);
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
   place-items: center;
   text-align: center;
 }
 
+.history-detail__placeholder > svg {
+  color: var(--color-text-4);
+}
+
 .history-detail__error {
+  align-content: start;
+  justify-items: start;
   color: var(--color-error);
+  font-size: var(--text-sm);
+  text-align: start;
   white-space: pre-wrap;
 }
 
@@ -11725,7 +11852,7 @@ details[open] > summary .history-disclosure__caret {
 }
 
 .asset-source-dialog__delete-button.is-armed {
-  color: var(--color-paper, white);
+  color: var(--color-text);
   background: var(--color-error);
   border-color: var(--color-error);
 }
@@ -11945,7 +12072,7 @@ details[open] > summary .history-disclosure__caret {
 }
 
 .asset-groups__delete.is-armed {
-  color: var(--color-paper, white);
+  color: var(--color-text);
   background: var(--color-error);
   border-color: var(--color-error);
 }
@@ -12442,7 +12569,7 @@ details[open] > summary .history-disclosure__caret {
 @media (hover: hover) and (pointer: fine) {
   .token-group-settings__actions button:hover:not(:disabled) {
     background: var(--color-paper-2);
-    border-color: var(--color-rule-3);
+    border-color: var(--color-rule-strong);
   }
 
   .token-group-settings__actions .token-group-settings__add:hover:not(:disabled) {

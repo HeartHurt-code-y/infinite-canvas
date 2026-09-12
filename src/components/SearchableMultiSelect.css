@@ -1,3 +1,14 @@
+/*
+ * 可搜索多选控件。
+ *
+ * 该组件直接渲染在深色面板与设置对话框内，此前整套样式是浅色主题的硬编码值
+ * （#ffffff 底、#d1d5db 描边、#6366f1 靛蓝强调），与产品其余部分完全脱节：
+ * 在深色面上会出现刺眼的白块，并且引入了一个产品里不存在的强调色。
+ *
+ * 现全部改用 tokens.css 的语义令牌与 4pt 间距节奏，与其它表单控件保持一致。
+ * 状态覆盖：默认 / hover / focus-visible / disabled / 选中 / 空列表。
+ */
+
 .searchable-multi-select {
   position: relative;
   width: 100%;
@@ -7,168 +18,176 @@
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
+  gap: var(--space-xs);
   width: 100%;
-  min-height: 38px;
-  padding: 4px 10px;
-  background: #ffffff;
-  border: 1px solid #d1d5db;
-  border-radius: 6px;
-  color: #1f2937;
-  font-size: 13px;
+  min-height: var(--size-control);
+  padding: var(--space-3xs) var(--space-xs);
+  color: var(--color-text);
+  background: var(--color-field);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
   cursor: pointer;
   transition:
-    border-color 0.15s,
-    box-shadow 0.15s;
+    border-color var(--dur-micro) var(--ease-out),
+    background-color var(--dur-micro) var(--ease-out),
+    box-shadow var(--dur-micro) var(--ease-out);
 }
 
 .searchable-multi-select__trigger:hover:not(:disabled) {
-  border-color: #9ca3af;
+  border-color: var(--color-rule-strong);
+  background: var(--color-surface-2);
 }
 
 .searchable-multi-select__trigger:focus-visible {
-  outline: none;
-  border-color: #6366f1;
-  box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.2);
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
+  border-color: var(--color-accent);
 }
 
 .searchable-multi-select__trigger:disabled {
-  opacity: 0.5;
   cursor: not-allowed;
-  background: #f3f4f6;
+  opacity: 0.55;
+  background: var(--color-surface-2);
 }
 
 .searchable-multi-select__chips {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px;
   flex: 1;
+  gap: var(--space-3xs);
   min-width: 0;
 }
 
 .searchable-multi-select__chip {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  padding: 2px 6px;
-  background: #eef2ff;
-  border: 1px solid #c7d2fe;
-  border-radius: 4px;
-  font-size: 12px;
-  color: #4338ca;
+  gap: var(--space-3xs);
+  padding: var(--space-3xs) var(--space-2xs);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border: var(--rule-thin) solid color-mix(in oklch, var(--color-accent) 42%, transparent);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
 }
 
 .searchable-multi-select__chip-remove {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
+  width: 1rem;
+  height: 1rem;
   padding: 0;
+  color: inherit;
   background: transparent;
   border: none;
-  border-radius: 2px;
-  color: inherit;
-  font-size: 14px;
+  border-radius: var(--radius-xs);
+  font-size: var(--text-base);
   line-height: 1;
   cursor: pointer;
-  transition: background 0.15s;
+  transition: background-color var(--dur-micro) var(--ease-out);
 }
 
 .searchable-multi-select__chip-remove:hover {
-  background: rgba(67, 56, 202, 0.1);
+  background: color-mix(in oklch, var(--color-accent) 28%, transparent);
 }
 
 .searchable-multi-select__placeholder {
-  color: #9ca3af;
   flex: 1;
-  text-align: left;
+  color: var(--color-text-4);
+  text-align: start;
 }
 
 .searchable-multi-select__arrow {
-  color: #6b7280;
-  font-size: 10px;
   flex-shrink: 0;
+  color: var(--color-text-3);
+  font-size: var(--text-2xs);
 }
 
 .searchable-multi-select__dropdown {
   position: absolute;
-  top: calc(100% + 4px);
-  left: 0;
+  z-index: var(--z-dropdown);
+  top: calc(100% + var(--space-2xs));
   right: 0;
-  z-index: 100;
-  background: #ffffff;
-  border: 1px solid #e5e7eb;
-  border-radius: 6px;
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+  left: 0;
   overflow: hidden;
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-floating);
 }
 
 .searchable-multi-select__search {
   width: 100%;
-  padding: 8px 10px;
-  background: #f9fafb;
+  padding: var(--space-xs);
+  color: var(--color-text);
+  background: var(--color-field);
   border: none;
-  border-bottom: 1px solid #e5e7eb;
-  color: #1f2937;
-  font-size: 13px;
+  border-bottom: var(--rule-thin) solid var(--color-rule);
+  font-size: var(--text-sm);
   outline: none;
 }
 
 .searchable-multi-select__search::placeholder {
-  color: #9ca3af;
+  color: var(--color-text-4);
+}
+
+.searchable-multi-select__search:focus-visible {
+  outline: none;
+  border-bottom-color: var(--color-accent);
 }
 
 .searchable-multi-select__options {
-  list-style: none;
+  max-height: 12.5rem;
   margin: 0;
-  padding: 4px 0;
-  max-height: 200px;
+  padding: var(--space-3xs) 0;
   overflow-y: auto;
+  list-style: none;
 }
 
 .searchable-multi-select__option {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 10px;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
   cursor: pointer;
-  font-size: 13px;
-  color: #1f2937;
-  transition: background 0.1s;
+  transition: background-color var(--dur-micro) var(--ease-out);
 }
 
 .searchable-multi-select__option:hover {
-  background: #f3f4f6;
+  color: var(--color-text);
+  background: var(--color-surface-3);
 }
 
 .searchable-multi-select__option.is-selected {
-  background: #eef2ff;
-  color: #4338ca;
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
 }
 
 .searchable-multi-select__checkbox {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 16px;
-  height: 16px;
-  border: 1px solid #d1d5db;
-  border-radius: 3px;
-  font-size: 11px;
   flex-shrink: 0;
+  width: 1rem;
+  height: 1rem;
   color: transparent;
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-2xs);
 }
 
 .searchable-multi-select__option.is-selected .searchable-multi-select__checkbox {
-  background: #6366f1;
-  border-color: #6366f1;
-  color: #ffffff;
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
 }
 
 .searchable-multi-select__empty {
-  padding: 12px 10px;
+  padding: var(--space-sm) var(--space-xs);
+  color: var(--color-text-4);
+  font-size: var(--text-sm);
   text-align: center;
-  color: #9ca3af;
-  font-size: 13px;
 }

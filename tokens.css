@@ -1,61 +1,142 @@
+/*
+ * 无限画布 · 设计令牌
+ * Hallmark · 主题: Machine Room · 基调: 影视暗调专业机 · genre: atmospheric
+ * 结构: 暖石墨单一中性族（hue 70）+ 单一铜色强调（hue 48）+ 三类媒体语义色
+ *
+ * 该文件是全部视觉值的唯一来源。组件样式不得重新声明孤立的颜色、字体、
+ * 间距、圆角、层级或动效值；需要新值时先在此处登记为具名令牌。
+ *
+ * 数值同时给出 hex 参考值，便于在设计评审中核对；实现以 OKLCH 为准。
+ */
+
 :root {
-  /* Bloom · light paper · warm copper · technical workbench */
-  --color-paper: oklch(97% 0.008 78);
-  --color-paper-2: oklch(94% 0.01 78);
-  --color-paper-3: oklch(90% 0.012 78);
-  --color-canvas: oklch(91% 0.009 78);
-  --color-canvas-raised: oklch(95% 0.009 78);
-  --color-ink: oklch(22% 0.012 62);
-  --color-ink-2: oklch(34% 0.012 62);
-  --color-neutral: oklch(43% 0.01 62);
-  --color-muted: oklch(49% 0.009 62);
-  --color-rule: oklch(81% 0.01 72);
-  --color-rule-2: oklch(71% 0.011 72);
+  color-scheme: dark;
 
-  --color-chrome: oklch(18% 0.012 62);
-  --color-chrome-2: oklch(21% 0.013 62);
-  --color-chrome-3: oklch(25% 0.014 62);
-  --color-chrome-field: oklch(15% 0.012 62);
-  --color-chrome-rule: oklch(31% 0.012 62);
-  --color-chrome-rule-2: oklch(38% 0.011 62);
-  --color-chrome-ink: oklch(94% 0.007 78);
-  --color-chrome-muted: oklch(72% 0.008 70);
-  --color-chrome-subtle: oklch(66% 0.008 70);
+  /* ── 画布工作台：层级中最深的一层，媒体与节点浮在其上 ───────────────── */
+  --color-bg-base: oklch(0.16 0.008 70); /* #100D0A */
+  --color-bg-sunk: oklch(0.125 0.008 70); /* #080604 */
 
-  --color-accent: oklch(52% 0.17 45);
-  --color-accent-hover: oklch(46% 0.16 45);
-  --color-accent-soft: oklch(91% 0.035 60);
-  --color-accent-ink: oklch(98% 0.006 78);
-  --color-focus: oklch(53% 0.18 45);
-  --color-image: oklch(59% 0.18 258);
-  --color-image-strong: oklch(45% 0.16 258);
-  --color-image-soft: oklch(92% 0.035 258);
-  --color-video: oklch(61% 0.16 301);
-  --color-video-strong: oklch(46% 0.14 301);
-  --color-video-soft: oklch(92% 0.032 301);
-  --color-audio: oklch(68% 0.15 70);
-  --color-audio-strong: oklch(48% 0.12 70);
-  --color-audio-soft: oklch(93% 0.036 70);
-  --color-success: oklch(52% 0.12 150);
-  --color-success-soft: oklch(92% 0.025 150);
-  --color-error: oklch(53% 0.18 25);
-  --color-error-soft: oklch(92% 0.035 25);
-  --color-warning: oklch(66% 0.14 70);
+  /* ── 抬升表面：面板、节点、弹窗，靠明度递进而非色相区分 ─────────────── */
+  --color-surface-1: oklch(0.205 0.009 70); /* #1A1713 */
+  --color-surface-2: oklch(0.245 0.01 70); /* #24201B */
+  --color-surface-3: oklch(0.29 0.011 70); /* #2F2A26 */
+  --color-field: oklch(0.175 0.008 70); /* #13100D */
+  --color-overlay: oklch(0.335 0.012 70); /* #3B3630 */
 
-  --color-grid-major: oklch(38% 0.012 62 / 0.09);
-  --color-grid-minor: oklch(38% 0.012 62 / 0.035);
-  --color-scrim: oklch(10% 0.012 62 / 0.58);
-  --color-panel-wash: oklch(97% 0.008 78 / 0.97);
-  --color-dock-wash: oklch(18% 0.012 62 / 0.97);
-  --color-shadow: oklch(16% 0.012 62 / 0.16);
-  --color-shadow-strong: oklch(16% 0.012 62 / 0.26);
-  --color-selection-wash: oklch(52% 0.17 45 / 0.12);
+  /* ── 描边：三档，仅在需要表达分组层级时出现 ───────────────────────── */
+  --color-rule-faint: oklch(0.245 0.008 70); /* #23201C */
+  --color-rule: oklch(0.3 0.009 70); /* #312D29 */
+  --color-rule-strong: oklch(0.375 0.01 70); /* #45403B */
+
+  /* ── 文字四级：主文案 / 次要 / 辅助 / 占位与提示 ──────────────────── */
+  /* 各级在 --color-surface-1 上的对比依次为 15.7 / 9.5 / 5.6 / 4.5，均达 WCAG AA。 */
+  --color-text: oklch(0.955 0.004 85); /* #F1F0ED  15.67:1 */
+  --color-text-2: oklch(0.8 0.006 80); /* #C0BDB9   9.54:1 */
+  --color-text-3: oklch(0.655 0.007 75); /* #93908C   5.62:1 */
+  --color-text-4: oklch(0.6 0.007 75); /* #83807C   4.54:1 */
+
+  /* ── 强调：全站唯一交互色。焦点、主按钮、选中登记共用同一铜色 ───────── */
+  --color-accent: oklch(0.7 0.148 48); /* #E77E44 */
+  --color-accent-hover: oklch(0.765 0.152 52); /* #FD944E */
+  --color-accent-press: oklch(0.635 0.142 45); /* #CF6B39 */
+  --color-accent-soft: oklch(0.27 0.045 48); /* #381F12 */
+  --color-accent-ink: oklch(0.17 0.02 48); /* #170D08 */
+  --color-focus: oklch(0.755 0.15 52); /* #F9914D */
+  /* 焦点光晕：深色面上为焦点环补一圈与背景同色的接触环，避免环被底噪吃掉 */
+  --focus-halo-width: 4px;
+
+  /* ── 媒体语义：仅用于表达素材与端口的类型，不用于通用控件 ───────────── */
+  --color-image: oklch(0.705 0.115 235); /* #4DABDD */
+  --color-image-strong: oklch(0.775 0.105 235); /* #6EC1EF */
+  --color-image-soft: oklch(0.28 0.04 235); /* #132C3A */
+  --color-image-ink: oklch(0.17 0.02 235); /* #071117 */
+
+  --color-video: oklch(0.705 0.12 305); /* #B18CDC */
+  --color-video-strong: oklch(0.775 0.11 305); /* #C6A4EE */
+  --color-video-soft: oklch(0.28 0.042 305); /* #2E233A */
+  --color-video-ink: oklch(0.17 0.02 305); /* #110D16 */
+
+  --color-audio: oklch(0.775 0.115 82); /* #DAAE5A */
+  --color-audio-strong: oklch(0.835 0.105 82); /* #EBC277 */
+  --color-audio-soft: oklch(0.3 0.045 82); /* #392B11 */
+  --color-audio-ink: oklch(0.19 0.025 82); /* #191307 */
+
+  /* ── 状态：成功 / 警告 / 失败，均配深色底与反相墨色 ────────────────── */
+  --color-success: oklch(0.72 0.13 158); /* #51BD85 */
+  --color-success-soft: oklch(0.27 0.04 158); /* #142C1F */
+  --color-success-ink: oklch(0.17 0.02 158); /* #08120C */
+  --color-warning: oklch(0.795 0.135 78); /* #EBB04B */
+  --color-warning-soft: oklch(0.3 0.05 78); /* #3C2A0D */
+  --color-warning-ink: oklch(0.19 0.03 78); /* #1B1204 */
+  --color-error: oklch(0.665 0.175 25); /* #EC5F5A */
+  --color-danger: oklch(0.665 0.175 25); /* #EC5F5A */
+  --color-danger-soft: oklch(0.28 0.055 25); /* #401D1B */
+  --color-error-soft: oklch(0.28 0.055 25); /* #401D1B */
+  --color-danger-ink: oklch(0.16 0.02 25); /* #150A09 */
+  --color-ok: oklch(0.72 0.13 158); /* #51BD85 */
+
+  /*
+   * 兼容层：旧令牌名保留为语义别名，避免任何调用点失效。
+   * 新代码请使用上面的语义名。
+   */
+  --color-canvas: var(--color-bg-base);
+  --color-canvas-raised: var(--color-surface-1);
+  --color-paper: var(--color-surface-1);
+  --color-paper-2: var(--color-surface-2);
+  --color-paper-3: var(--color-surface-3);
+  --color-ink: var(--color-text);
+  --color-ink-2: var(--color-text-2);
+  --color-ink-3: var(--color-text-3);
+  --color-muted: var(--color-text-3);
+  --color-neutral: var(--color-text-2);
+  --color-line: var(--color-rule-strong);
+  --color-rule-2: var(--color-rule-strong);
+  --color-rule-3: var(--color-rule-strong);
+  --color-accent-strong: var(--color-accent-hover);
+
+  /* 深色框架：面板、顶栏、任务栏与深色控件 */
+  --color-chrome: var(--color-surface-1);
+  --color-chrome-2: var(--color-surface-2);
+  --color-chrome-3: var(--color-surface-3);
+  --color-chrome-field: var(--color-field);
+  --color-chrome-rule: var(--color-rule);
+  --color-chrome-rule-2: var(--color-rule-strong);
+  --color-chrome-ink: var(--color-text);
+  --color-chrome-muted: var(--color-text-3);
+  --color-chrome-subtle: var(--color-text-4);
+
+  /* ── 工作台网格：退到内容之下，只提供空间参照 ─────────────────────── */
+  --color-grid-major: oklch(0.72 0.004 80 / 0.062);
+  --color-grid-minor: oklch(0.72 0.004 80 / 0.026);
+  --color-scrim: oklch(0.08 0.008 70 / 0.72);
+  --color-panel-wash: oklch(0.205 0.009 70 / 0.97);
+  --color-dock-wash: oklch(0.205 0.009 70 / 0.97);
+  --color-selection-wash: oklch(0.7 0.148 48 / 0.14);
   --color-transparent: transparent;
 
-  --font-display: "JetBrains Mono Variable", ui-monospace, monospace;
+  /* ── 阴影：深色表面靠「顶缘内高光 + 接触阴影 + 扩散阴影」三层建立抬升 ── */
+  --color-shadow: oklch(0.06 0.01 70 / 0.5);
+  --color-shadow-strong: oklch(0.06 0.01 70 / 0.66);
+  --color-highlight-inset: oklch(1 0 0 / 0.07);
+  --shadow-inset: inset 0 1px 0 var(--color-highlight-inset);
+  --shadow-whisper: inset 0 1px 0 var(--color-highlight-inset), 0 1px 2px var(--color-shadow);
+  --shadow-small: inset 0 1px 0 var(--color-highlight-inset), 0 2px 6px var(--color-shadow);
+  --shadow-raised:
+    inset 0 1px 0 var(--color-highlight-inset), 0 8px 20px oklch(0.06 0.01 70 / 0.55),
+    0 2px 6px oklch(0.06 0.01 70 / 0.4);
+  --shadow-floating:
+    inset 0 1px 0 var(--color-highlight-inset), 0 28px 64px oklch(0.05 0.01 70 / 0.72),
+    0 8px 20px oklch(0.05 0.01 70 / 0.5);
+  /* 框架边缘：让面板与画布之间成为一条有意为之的界线，而不是硬接缝 */
+  --shadow-frame-edge: inset 1px 0 0 var(--color-rule-faint), 4px 0 18px oklch(0.06 0.01 70 / 0.4);
+
+  /* ── 字体：同一字体族的三个角色，字面宽度承担层级对比 ─────────────── */
+  --font-display:
+    "IBM Plex Sans Condensed", "IBM Plex Sans Variable", "Microsoft YaHei UI", sans-serif;
   --font-body: "IBM Plex Sans Variable", "Microsoft YaHei UI", sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
+  /* ── 间距：4pt 主节奏 ────────────────────────────────────────────── */
   --space-3xs: 0.125rem;
   --space-2xs: 0.25rem;
   --space-xs: 0.5rem;
@@ -67,14 +148,27 @@
   --space-3xl: 6rem;
   --space-4xl: 9rem;
 
-  --text-2xs: 0.625rem;
-  --text-xs: 0.6875rem;
-  --text-sm: 0.75rem;
-  --text-base: 0.875rem;
-  --text-md: 1rem;
-  --text-lg: 1.25rem;
-  --text-xl: 1.5rem;
+  /*
+   * ── 字号：密度工具为主体，同时补齐产品一直缺失的展示级 ──────────────
+   * 小字号承担高密度信息，展示级只用于空状态、对话框标题与首启时刻。
+   */
+  --text-2xs: 0.625rem; /* 10px */
+  --text-xs: 0.6875rem; /* 11px */
+  --text-sm: 0.75rem; /* 12px */
+  --text-base: 0.875rem; /* 14px */
+  --text-md: 1rem; /* 16px */
+  --text-lg: 1.25rem; /* 20px */
+  --text-xl: 1.5rem; /* 24px */
+  --text-2xl: 2rem; /* 32px */
+  --text-3xl: 2.75rem; /* 44px */
+  --text-display: 3.5rem; /* 56px */
 
+  /* 行高：标题紧、正文松，一律无单位随字号缩放 */
+  --leading-display: 1.04;
+  --leading-heading: 1.2;
+  --leading-body: 1.55;
+
+  /* ── 动效：三个命名缓动，深浅方向明确 ───────────────────────────── */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
@@ -83,16 +177,17 @@
   --dur-long: 420ms;
   --dur-progress: 900ms;
 
+  /* ── 形状：三档圆角，用途固定 ───────────────────────────────────── */
   --rule-thin: 1px;
   --rule-active: 2px;
-  --radius-xs: 0.1875rem;
-  --radius-control: 0.375rem;
-  --radius-panel: 0.5rem;
+  --radius-xs: 0.25rem; /* 4px 内嵌单元 */
+  --radius-sm: 0.375rem; /* 6px 输入框、缩略图 */
+  --radius-control: 0.5rem; /* 8px 按钮与控件 */
+  --radius-panel: 0.75rem; /* 12px 卡片与面板 */
+  --radius-pill: 999px;
   --radius-round: 999px;
 
-  --shadow-whisper: 0 1px 2px var(--color-shadow);
-  --shadow-raised: 0 12px 30px var(--color-shadow-strong);
-
+  /* ── 层级 ───────────────────────────────────────────────────────── */
   --z-base: 1;
   --z-raised: 10;
   --z-dropdown: 100;
@@ -101,6 +196,7 @@
   --z-toast: 500;
   --z-tooltip: 600;
 
+  /* ── 尺寸 ───────────────────────────────────────────────────────── */
   --size-header: 3.75rem;
   --size-nodes: 13rem;
   --size-assets: 17rem;

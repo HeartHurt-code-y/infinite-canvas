@@ -25,7 +25,9 @@
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib",
-    "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test:coverage",
+    "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:tokens && pnpm test:coverage",
+    "check:tokens": "node scripts/check-design-tokens.mjs",
+    "audit:visuals": "node scripts/audit-visuals.mjs",
     "check": "pnpm check:frontend && pnpm rust:fmt && pnpm rust:clippy && pnpm rust:test",
     "tauri": "tauri",
     "remotion:prepare": "node scripts/prepare-remotion-runtime.mjs",
@@ -37,6 +39,7 @@
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "5.3.0",
     "@fontsource-variable/jetbrains-mono": "5.3.0",
+    "@fontsource/ibm-plex-sans-condensed": "5.3.0",
     "@phosphor-icons/react": "^2.1.10",
     "@tanstack/react-query": "^5.102.8",
     "@tauri-apps/api": "^2",
