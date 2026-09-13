@@ -1,5 +1,6 @@
 import type { CanvasDocument, CanvasNodeEntry, CanvasNodesByKey } from "../canvas/canvasStore";
 import { toMediaSrc } from "../../lib/backend";
+import { stripMarkdown } from "../../lib/promptContent";
 import {
   assetGenerationInput,
   outputGenerationInput,
@@ -25,6 +26,20 @@ export interface ConnectedCanvasTextInput {
   readonly name: string;
   readonly text: string;
   readonly edgeId: string;
+  /** 完整技能文档的代码块、模板说明与约束都属于输出，不能只抽取首个代码块。 */
+  readonly preserveFullText?: boolean;
+}
+
+export function connectedCanvasPromptText(sources: readonly ConnectedCanvasTextInput[]): string {
+  const combined = sources.map((source) => source.text).join("\n\n");
+  if (!sources.some((source) => source.preserveFullText)) {
+    return stripMarkdown(combined) || combined.trim();
+  }
+  return sources
+    .map((source) =>
+      source.preserveFullText ? source.text : stripMarkdown(source.text) || source.text.trim(),
+    )
+    .join("\n\n");
 }
 
 export interface ResolvedCanvasInputs {
@@ -266,7 +281,19 @@ export function createCanvasInputResolver(
       const text = entry.data.config.generatedPrompt.trim();
       payload = {
         media: [],
-        texts: text ? [{ key, sourceKey: key, name: "提示词节点", text }] : [],
+        texts: text
+          ? [
+              {
+                key,
+                sourceKey: key,
+                name: "提示词节点",
+                text,
+                ...(entry.data.config.mode === "gpt_image_2_style"
+                  ? { preserveFullText: true }
+                  : {}),
+              },
+            ]
+          : [],
       };
     } else if (
       entry.type === "screenplay" ||

@@ -4,6 +4,7 @@ import {
   canvasInputEdgeOrder,
   canvasNodeIndex,
   canvasNodesByKeyFromDocument,
+  connectedCanvasPromptText,
   createCanvasInputResolver,
 } from "./canvasInputs";
 import {
@@ -68,6 +69,47 @@ const edge = (fromKey: string, toKey: string): AssetEdgeData => ({
 });
 
 describe("unrestricted canvas payload graph", () => {
+  it("preserves the GPT Image 2 full document through relays and mixed legacy text sources", () => {
+    const fullDocument =
+      "```text\n第一套完整图片提示词\n```\n\n说明：产品电商模板；保留包装。\n\n```text\n第二套完整图片提示词\n```\n\n注：不得新增产品功效。\n\n如果需要更换标题，请提供确认文案。";
+    const entries: CanvasNodeEntry[] = [
+      {
+        type: "gen",
+        data: {
+          key: "style",
+          kind: "prompt",
+          x: 0,
+          y: 0,
+          config: {
+            ...createPromptNodeConfig(model, true),
+            mode: "gpt_image_2_style",
+            generatedPrompt: fullDocument,
+          },
+        },
+      },
+      { type: "gen", data: prompt("legacy", "```\n传统模式正文\n```\n\n旧模式说明") },
+      { type: "result", data: { key: "relay", x: 0, y: 0 } },
+      { type: "gen", data: prompt("target") },
+    ];
+    const sources = createCanvasInputResolver(canvasNodeIndex(entries), [
+      edge("legacy", "target"),
+      edge("style", "relay"),
+      edge("relay", "target"),
+    ])("target").texts;
+    expect(sources.find((source) => source.sourceKey === "style")).toMatchObject({
+      edgeId: "relay->target",
+      preserveFullText: true,
+      text: fullDocument,
+    });
+    expect(connectedCanvasPromptText(sources)).toBe(`传统模式正文\n\n${fullDocument}`);
+    expect(connectedCanvasPromptText([...sources].reverse())).toBe(
+      `${fullDocument}\n\n传统模式正文`,
+    );
+    expect(
+      connectedCanvasPromptText(sources.filter((source) => source.sourceKey === "legacy")),
+    ).toBe("传统模式正文");
+  });
+
   it("connects every pair of node families in both directions and preserves all edges after restore", () => {
     const entries: CanvasNodeEntry[] = [
       { type: "asset", data: material("asset") },

@@ -2076,6 +2076,7 @@ export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, str
   fight_prompt_master: "打斗导演",
   multi_grid_storyboard: "多宫格分镜",
   storyboard_prompt: "故事板",
+  gpt_image_2_style: "GPT Image 2 风格库",
 };
 
 /** 把提示词段序列（文本 + @引用）压成纯文本：引用内联为「@显示名」。 */

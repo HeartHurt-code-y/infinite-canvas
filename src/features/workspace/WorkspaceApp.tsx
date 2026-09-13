@@ -82,11 +82,7 @@ import type {
   PromptContentEditorSession,
   PromptContentIssue,
 } from "../../lib/promptContent";
-import {
-  cleanGeneratedPrompt,
-  createPromptContentModule,
-  stripMarkdown,
-} from "../../lib/promptContent";
+import { cleanGeneratedPrompt, createPromptContentModule } from "../../lib/promptContent";
 import {
   composeVideosInOrder,
   composedVideoFileName,
@@ -111,6 +107,7 @@ import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import {
   createCanvasInputResolver,
   canvasInputEdgeOrder,
+  connectedCanvasPromptText,
   canvasNodesByKeyFromDocument,
 } from "./canvasInputs";
 
@@ -1004,7 +1001,7 @@ export function WorkspaceApp({
   const [promptContents] = useState(createPromptContentModule);
   // 追踪上游原始输出版本；结构化引用的显示文字和用户手改内容都不用于判定重新导入。
   const importedPromptSourcesRef = useRef(
-    new Map<string, { edgeId: string; sourceKey: string; text: string }>(),
+    new Map<string, { edgeId: string; sourceKey: string; text: string; importedText: string }>(),
   );
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
   // React Flow 实例引用：命令式视口操作（恢复视图/锚点缩放/坐标换算）的唯一入口。
@@ -1109,6 +1106,7 @@ export function WorkspaceApp({
             edgeId: sources.map((source) => source.edgeId).join("\n"),
             sourceKey: sources.map((source) => source.sourceKey).join("\n"),
             text: sources.map((source) => source.text).join("\n\n"),
+            importedText: connectedCanvasPromptText(sources),
           });
         }
       }
@@ -3537,6 +3535,7 @@ export function WorkspaceApp({
       const isFightPromptMaster = node.config.mode === "fight_prompt_master";
       const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
       const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
+      const isGptImage2Style = node.config.mode === "gpt_image_2_style";
       const defaultFpvPrompt =
         isFpvPath && node.config.task === "generate" && visionImages.length > 0
           ? "请根据已连接参考图中的路径标记，生成完整的 FPV 飞行提示词方案。"
@@ -3573,12 +3572,23 @@ export function WorkspaceApp({
               node.config.generatedPrompt.trim()
             ? "请继续优化当前输出中的故事板提示词，保留已确认的用途、角色、剧情、格数、画幅和风格，返回可直接交给图片节点的完整整张故事板提示词。"
             : "";
+      const defaultGptImage2StylePrompt =
+        isGptImage2Style &&
+        node.config.task === "generate" &&
+        (visionImages.length > 0 || videoMaterials.length > 0)
+          ? "请根据已连接参考素材中实际可见的主体、构图与视觉风格，结合对话中已确认的图片用途，匹配风格库模板并生成可直接交给图片节点的完整图片提示词。保留已确认的主体、文字与画幅要求；不编造未提供的品牌、产品事实或读图结果。"
+          : isGptImage2Style &&
+              node.config.task === "optimize" &&
+              node.config.generatedPrompt.trim()
+            ? "请继续优化当前输出中的图片提示词，沿用已确认的图片用途、主体、文字、画幅与风格要求，结合风格库模板完善构图、材质和细节，返回可直接交给图片节点的完整提示词。"
+            : "";
       const sourcePrompt =
         node.config.sourcePrompt.trim() ||
         defaultFpvPrompt ||
         defaultFightPrompt ||
         defaultMultiGridPrompt ||
         defaultStoryboardPrompt ||
+        defaultGptImage2StylePrompt ||
         (canvasInputsFor(nodeKey).texts.length || canvasInputsFor(nodeKey).media.length
           ? "请依据已连接的文本和参考素材生成或优化提示词。"
           : "");
@@ -3593,7 +3603,9 @@ export function WorkspaceApp({
                   ? "请填写剧情或分镜需求，或连接参考图片、已保存的视频产物。"
                   : isStoryboardPrompt
                     ? "请填写故事板用途与创意，或连接参考图片、已保存的视频产物。"
-                    : "请输入创意或需求，再生成提示词。"
+                    : isGptImage2Style
+                      ? "请填写图片用途、主体或风格要求，或连接参考图片、已保存的视频产物。"
+                      : "请输入创意或需求，再生成提示词。"
             : "请输入需要优化的提示词。",
         );
         return;
@@ -3624,7 +3636,11 @@ export function WorkspaceApp({
         })),
       );
       if (
-        (isFpvPath || isFightPromptMaster || isMultiGridStoryboard || isStoryboardPrompt) &&
+        (isFpvPath ||
+          isFightPromptMaster ||
+          isMultiGridStoryboard ||
+          isStoryboardPrompt ||
+          isGptImage2Style) &&
         node.config.generatedPrompt.trim()
       ) {
         contextHistory.push({ role: "当前输出提示词", content: node.config.generatedPrompt });
@@ -3649,18 +3665,21 @@ export function WorkspaceApp({
           referenceInputs: videoMaterials,
         })
         .then((result) => {
-          const cleanedPrompt = cleanGeneratedPrompt(result.optimizedPrompt);
+          // 风格库交付的模板选择、假设与补问同样属于完整输出。
+          const outputPrompt = isGptImage2Style
+            ? result.optimizedPrompt
+            : cleanGeneratedPrompt(result.optimizedPrompt);
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
               ? {
                   ...item,
                   config: {
                     ...item.config,
-                    generatedPrompt: cleanedPrompt,
+                    generatedPrompt: outputPrompt,
                     conversation: [
                       ...(item.config.conversation ?? []),
                       { id: promptMessageId(), role: "user", content: sourcePrompt },
-                      { id: promptMessageId(), role: "assistant", content: cleanedPrompt },
+                      { id: promptMessageId(), role: "assistant", content: outputPrompt },
                     ],
                   },
                 }
@@ -3668,7 +3687,7 @@ export function WorkspaceApp({
           );
           frontendLog(
             "info",
-            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符，清洗后 ${cleanedPrompt.length} 字符`,
+            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符，写入 ${outputPrompt.length} 字符`,
           );
           toast.success("提示词已生成");
         })
@@ -6803,8 +6822,7 @@ export function WorkspaceApp({
     for (const [targetKey, previous] of imported) {
       if (promptSourceByTarget.has(targetKey)) continue;
       // 断开最后一条来源时清除自动导入内容，保留用户另行修改的内容。
-      const generated = stripMarkdown(previous.text) || previous.text.trim();
-      if (promptContents.read(targetKey)?.plainText === generated) {
+      if (promptContents.read(targetKey)?.plainText === previous.importedText) {
         promptContents.replaceText(targetKey, "", mentionCandidatesFor(targetKey));
       }
       imported.delete(targetKey);
@@ -6814,16 +6832,23 @@ export function WorkspaceApp({
         edgeId: sources.map((source) => source.edgeId).join("\n"),
         sourceKey: sources.map((source) => source.sourceKey).join("\n"),
         text: sources.map((source) => source.text).join("\n\n"),
+        importedText: connectedCanvasPromptText(sources),
       };
       const previous = imported.get(targetKey);
       if (
         previous?.edgeId === version.edgeId &&
         previous.sourceKey === version.sourceKey &&
-        previous.text === version.text
+        previous.text === version.text &&
+        previous.importedText === version.importedText
       )
         continue;
-      const text = stripMarkdown(version.text) || version.text.trim();
-      if (promptContents.replaceText(targetKey, text, mentionCandidatesFor(targetKey)) != null) {
+      if (
+        promptContents.replaceText(
+          targetKey,
+          version.importedText,
+          mentionCandidatesFor(targetKey),
+        ) != null
+      ) {
         imported.set(targetKey, version);
       }
     }

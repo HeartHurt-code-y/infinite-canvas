@@ -102,6 +102,8 @@ pub enum PromptOptimizationMode {
     MultiGridStoryboard,
     #[serde(rename = "storyboard_prompt")]
     StoryboardPrompt,
+    #[serde(rename = "gpt_image_2_style")]
+    GptImage2Style,
     #[serde(rename = "realistic_character", alias = "realisticcharacter")]
     RealisticCharacter,
     #[serde(rename = "screenplay", alias = "screenwriter")]
@@ -197,6 +199,7 @@ impl PromptOptimizationMode {
             Self::FightPromptMaster => "fight_prompt_master",
             Self::MultiGridStoryboard => "multi_grid_storyboard",
             Self::StoryboardPrompt => "storyboard_prompt",
+            Self::GptImage2Style => "gpt_image_2_style",
             Self::RealisticCharacter => "realistic_character",
             Self::Screenplay => "screenplay",
             Self::Storyboard => "storyboard",
@@ -246,6 +249,7 @@ impl PromptOptimizationMode {
             Self::FightPromptMaster => "builtin://fight-prompt-master-v0.2",
             Self::MultiGridStoryboard => "builtin://multi-grid-storyboard-prompter",
             Self::StoryboardPrompt => "builtin://storyboard-prompt",
+            Self::GptImage2Style => "builtin://gpt-image-2-style-library",
             Self::RealisticCharacter => REALISTIC_CHARACTER_SKILL_DIR,
             // 剧本双技能使用 include_str! 编译进应用，不依赖用户电脑上的外部路径。
             Self::Screenplay => "builtin://screenplay-dual-skill",
@@ -495,6 +499,9 @@ pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<S
     if mode == PromptOptimizationMode::StoryboardPrompt {
         return Ok(load_builtin_storyboard_prompt_system_prompt());
     }
+    if mode == PromptOptimizationMode::GptImage2Style {
+        return Ok(load_builtin_gpt_image_2_style_system_prompt());
+    }
     if mode == PromptOptimizationMode::XhsCoverPlan {
         return Ok(include_str!("../../skills/xhs-cover-workflow/plan.md").to_string());
     }
@@ -736,6 +743,26 @@ fn load_builtin_multi_grid_storyboard_system_prompt() -> String {
         sections.push(format!("---\n# 技能文档：{path}\n\n{content}"));
     }
     sections.push("---\n# 交付提醒\n\n继续遵守开头的多宫格提示词节点运行合同：用户本轮或历史已确认交付范围优先；未指定范围时，SKILL.md Step 6 的位置锁定双输出优先于参考文件旧格式。时长预算按公式向下取整，按真实台词字数核算；当前交付为完整文本，不执行外部工具或媒体生成。".to_string());
+    sections.join("\n\n")
+}
+
+/// 风格库适配合同和完整索引编译内置；索引中的外部模板链接不视为已读取全文。
+fn load_builtin_gpt_image_2_style_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/gpt-image-2-style-library/SKILL.md"),
+        ),
+        (
+            "references/style-library.md",
+            include_str!("../../skills/gpt-image-2-style-library/references/style-library.md"),
+        ),
+    ];
+    let mut sections = vec!["# GPT Image 2 风格库提示词节点运行合同\n\n当前调用只交付图片提示词文本。下面的应用 SKILL.md 优先于来源索引中的选择建议；用户当前明确要求与已确认事实优先。技能名称不绑定供应商或实际图片模型。".to_string()];
+    for (path, content) in DOCUMENTS {
+        sections.push(format!("---\n# 技能文档：{path}\n\n{content}"));
+    }
+    sections.push("---\n继续遵守应用 SKILL.md：先给完整可复制的图片提示词，再简述所选模板方向。仅以本轮实际素材为视觉证据；来源案例 ID、链接和封面路径都是索引元数据，不代表已读取对应案例或图片。普通细节合理选择；只合并补问无法可靠推断的必要事实，不执行外部工具或生成媒体。".to_string());
     sections.join("\n\n")
 }
 
@@ -1464,7 +1491,7 @@ fn strip_thinking_blocks(text: &str) -> String {
     result
 }
 
-/// 按模式提取交付内容；H3、FPV、打斗、多宫格与故事板保留完整文档，其余按各自正文合同清洗。
+/// 按模式提取交付内容；H3、FPV、打斗、多宫格、故事板与图片风格库保留完整文档。
 pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) -> String {
     // 推理模型常在正文前内嵌思维链：先剥离 think/思考块，避免思考内容进入对话、稿件或下游提示词。
     let content = strip_thinking_blocks(raw_output.trim());
@@ -1489,7 +1516,8 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::FpvPath
         | PromptOptimizationMode::FightPromptMaster
         | PromptOptimizationMode::MultiGridStoryboard
-        | PromptOptimizationMode::StoryboardPrompt => {
+        | PromptOptimizationMode::StoryboardPrompt
+        | PromptOptimizationMode::GptImage2Style => {
             extract_complete_prompt_document(&content).to_string()
         }
         PromptOptimizationMode::RealisticCharacter => {
@@ -1830,6 +1858,43 @@ fn build_system_and_user_prompts(
         };
         format!(
             "请按故事板技能处理本轮{action}请求，从已提供的 14 份资料中选择符合用途的主模板。生成时将创意、剧本或真实参考素材整理为整张故事板图片提示词；优化时以当前可编辑输出为基础，保留历史已确认的角色、产品事实、剧情、风格、画幅、镜头数和交付范围，落实本轮修改。用户明确要求优先，普通细节合理推断，只有无法推断的必要事实才用自然语言合并补问，已提供信息不重复询问。默认中文输出完整可复制的故事板图片提示词，保留主模板的全部分区、连续编号与必要约束；不自动套用其他模板的镜头数、比例、负面词或示例品牌，不附带视频生成提示词。\n\n{evidence}\n\n用户本轮请求：\n{}",
+            command.user_prompt
+        )
+    } else if command.mode == PromptOptimizationMode::GptImage2Style {
+        let action = match command.task {
+            PromptTask::Generate => "生成",
+            PromptTask::Optimize => "优化",
+        };
+        let image_count = command.vision_images.len()
+            + command
+                .multimodal_inputs
+                .iter()
+                .filter(|input| input.kind == PromptMultimodalKind::Image)
+                .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
+                .count();
+        let video_count = command
+            .multimodal_inputs
+            .iter()
+            .filter(|input| input.kind == PromptMultimodalKind::Video)
+            .count()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Video)
+                .count();
+        let evidence = if image_count == 0 && video_count == 0 {
+            "本轮未附带图片或视频视觉证据：仅依据用户文字与历史已确认内容，不得声称看过参考图、案例封面或视频。".to_string()
+        } else {
+            format!(
+                "本轮实际附带 {image_count} 张图片（可能包含视频联系表）及 {video_count} 份视频素材：只以可见内容为依据保留主体、产品外观和空间关系；联系表的格数、边框和时间码不代表目标图片版式，静态帧不构成听觉证据。不根据图片编造产品功效或未见细节。"
+            )
+        };
+        format!(
+            "请按 GPT Image 2 风格库处理本轮{action}请求：依次按产物用途、模板类别、视觉风格、场景和相关案例索引选择方向，应用索引中的用途、构图建议和常见问题。优化以当前可编辑输出为基础，保留完整历史中已确认的主体、画面文字、品牌事实、风格、画幅和交付范围，落实本轮修改。首先交付完整可复制图片提示词，覆盖主体与任务、构图与布局、视觉风格与材质、画面文字与标签、画幅与输出形式、约束与排除细节；然后简述所选模板名称及有用案例 ID，不声称复现未读取的案例全文。跟随用户语言。多个方案复用同一模板，变化主体、构图、配色或场景；普通细节合理选择，仅对无法推断的必要事实合并补问。此轮只交付文字，图片由下游图片节点执行生成。\n\n{evidence}\n\n用户本轮请求：\n{}",
             command.user_prompt
         )
     } else if command.task == PromptTask::Generate {
@@ -2333,6 +2398,9 @@ fn validate_prompt_response_completeness(
         }
         PromptOptimizationMode::StoryboardPrompt => {
             "输出达到长度上限，故事板提示词不完整，请精简分区或逐镜描述后重试"
+        }
+        PromptOptimizationMode::GptImage2Style => {
+            "输出达到长度上限，风格库图片提示词不完整，请减少方案数量或精简描述后重试"
         }
         _ => return Ok(()),
     };
@@ -3340,7 +3408,7 @@ mod tests {
         );
     }
 
-    /// 兜底：枚举全部 44 个模式，逐个断言 `skill_dir()` 走 `builtin://` 哨兵
+    /// 兜底：枚举全部模式，逐个断言 `skill_dir()` 走 `builtin://` 哨兵
     /// 且 `load_skill_system_prompt()` 不触磁盘即可返回非空系统提示词。
     /// 编译期强制穷尽：`assert_mode_skill_dir_in_sync` 收到新增变体会编译失败。
     #[test]
@@ -3356,6 +3424,7 @@ mod tests {
                 | PromptOptimizationMode::FightPromptMaster
                 | PromptOptimizationMode::MultiGridStoryboard
                 | PromptOptimizationMode::StoryboardPrompt
+                | PromptOptimizationMode::GptImage2Style
                 | PromptOptimizationMode::RealisticCharacter
                 | PromptOptimizationMode::Screenplay
                 | PromptOptimizationMode::Storyboard
@@ -3403,6 +3472,7 @@ mod tests {
             PromptOptimizationMode::FightPromptMaster,
             PromptOptimizationMode::MultiGridStoryboard,
             PromptOptimizationMode::StoryboardPrompt,
+            PromptOptimizationMode::GptImage2Style,
             PromptOptimizationMode::RealisticCharacter,
             PromptOptimizationMode::Screenplay,
             PromptOptimizationMode::Storyboard,
@@ -3440,7 +3510,7 @@ mod tests {
             PromptOptimizationMode::ReverseVideoReview,
             PromptOptimizationMode::ViralRemix,
         ];
-        assert_eq!(MODES.len(), 44, "MODES 列表登记数量与 enum 变体数不一致");
+        assert_eq!(MODES.len(), 45, "MODES 列表登记数量与 enum 变体数不一致");
         for mode in MODES {
             // 编译期 helper 已被引用，触发穷尽检查。
             let _ = assert_mode_skill_dir_in_sync(*mode);
@@ -5206,6 +5276,193 @@ mod tests {
             assert!(
                 validate_prompt_response_completeness(
                     PromptOptimizationMode::MultiGridStoryboard,
+                    &payload
+                )
+                .is_ok()
+            );
+        }
+    }
+
+    #[test]
+    fn gpt_image_2_style_embeds_complete_index_and_round_trips_mode() {
+        let mode = PromptOptimizationMode::GptImage2Style;
+        assert_eq!(
+            serde_json::to_value(mode).unwrap(),
+            json!("gpt_image_2_style")
+        );
+        assert_eq!(
+            serde_json::from_value::<PromptOptimizationMode>(json!(mode.as_str())).unwrap(),
+            mode
+        );
+        assert_eq!(mode.skill_dir(), "builtin://gpt-image-2-style-library");
+        let prompt = load_skill_system_prompt(mode).unwrap();
+        let index =
+            include_str!("../../skills/gpt-image-2-style-library/references/style-library.md");
+        assert!(prompt.contains(index));
+        assert!(prompt.contains(include_str!(
+            "../../skills/gpt-image-2-style-library/SKILL.md"
+        )));
+        assert_eq!(prompt.matches("# 技能文档：").count(), 2);
+        assert_eq!(index.matches("- ID: ").count(), 22);
+        assert!(prompt.contains("不代表已读取对应案例或图片"));
+        assert!(!prompt.contains("npm run"));
+        assert!(!prompt.contains("npx skills"));
+        assert!(!prompt.contains(r"C:\Users"));
+    }
+
+    #[test]
+    fn gpt_image_2_style_preserves_edits_history_and_actual_evidence_in_provider_requests() {
+        for task in [PromptTask::Generate, PromptTask::Optimize] {
+            let mut command = OptimizeVideoPromptCommand {
+                workflow_run_id: None,
+                canvas_id: Some("canvas-style".into()),
+                source_node_id: Some("prompt-style".into()),
+                provider_connection_id: "project-provider".into(),
+                model_definition_id: "project-text-model".into(),
+                mode: PromptOptimizationMode::GptImage2Style,
+                task,
+                user_prompt: "改成极简电商海报，标题保留“夏日补给”。".into(),
+                context_history: vec![
+                    PromptOptimizationContextEntry {
+                        role: "user".into(),
+                        content: "白色保温杯，3:4，无品牌文字。".into(),
+                    },
+                    PromptOptimizationContextEntry {
+                        role: "assistant".into(),
+                        content: "商品海报：杯盖为白色。".into(),
+                    },
+                    PromptOptimizationContextEntry {
+                        role: "user".into(),
+                        content: "当前可编辑输出：杯盖已手改为黑色，继续保留。".into(),
+                    },
+                ],
+                vision_images: Vec::new(),
+                multimodal_inputs: Vec::new(),
+                reference_inputs: Vec::new(),
+            };
+            let method = load_skill_system_prompt(command.mode).unwrap();
+            let prompts = build_system_and_user_prompts(&command, &method);
+            assert_eq!(prompts.system, method);
+            assert_eq!(prompts.history.len(), 3);
+            for (message, original) in prompts.history.iter().zip(&command.context_history) {
+                assert!(
+                    message["content"]
+                        .as_str()
+                        .unwrap()
+                        .contains(&original.content)
+                );
+            }
+            assert!(prompts.user.contains(&command.user_prompt));
+            assert!(prompts.user.contains(match task {
+                PromptTask::Generate => "本轮生成请求",
+                PromptTask::Optimize => "本轮优化请求",
+            }));
+            assert!(prompts.user.contains("本轮未附带图片或视频视觉证据"));
+            for (profile, system_path, user_path) in [
+                (
+                    "openai_chat_v1",
+                    "/messages/0/content",
+                    "/messages/4/content",
+                ),
+                ("anthropic_messages_v1", "/system", "/messages/3/content"),
+                (
+                    "gemini_generate_content_v1",
+                    "/systemInstruction/parts/0/text",
+                    "/contents/3/parts/0/text",
+                ),
+            ] {
+                let plan = build_text_model_request(
+                    profile,
+                    "project-model",
+                    &prompts.system,
+                    &prompts.history,
+                    &prompts.user,
+                    &[],
+                    &[],
+                )
+                .unwrap();
+                assert_eq!(plan.body.pointer(system_path).unwrap(), &json!(method));
+                assert_eq!(plan.body.pointer(user_path).unwrap(), &json!(prompts.user));
+                let body = plan.body.to_string();
+                assert!(body.contains("杯盖已手改为黑色"));
+                assert!(!body.contains("npm run"));
+            }
+            command.user_prompt.clear();
+            command.vision_images.push(PromptVisionImage {
+                target: None,
+                data_url: Some("data:image/png;base64,AAAA".into()),
+                display_name: "商品参考图".into(),
+            });
+            let with_image = build_system_and_user_prompts(&command, &method);
+            assert!(with_image.user.contains("本轮实际附带 1 张图片"));
+            assert!(!with_image.user.contains("本轮未附带"));
+            command.vision_images.clear();
+            command.multimodal_inputs.push(PromptMultimodalInput {
+                local_path: r"C:\reference\product.mp4".into(),
+                display_name: "产品视频".into(),
+                kind: PromptMultimodalKind::Video,
+                mime_type: "video/mp4".into(),
+            });
+            let with_video = build_system_and_user_prompts(&command, &method);
+            assert!(with_video.user.contains("0 张图片"));
+            assert!(with_video.user.contains("1 份视频素材"));
+            assert!(with_video.user.contains("静态帧不构成听觉证据"));
+            assert!(!with_video.user.contains("本轮未附带"));
+        }
+    }
+
+    #[test]
+    fn gpt_image_2_style_keeps_all_concepts_template_notes_and_questions() {
+        for output in [
+            "```text\n主体：白色保温杯。构图：3:4，主体居中。\n文字：夏日补给。约束：无品牌水印。\n```\n模板：产品电商；案例 ID 仅供索引。",
+            "方案一：极简摄影。\n```text\n保留真实杯盖。\n```\n方案二：几何插画。\n```text\n大色块和留白。\n```\n约束：两版标题相同。",
+            "请补充必须印在海报上的真实售价；未提供前不编造。",
+        ] {
+            assert_eq!(
+                extract_optimized_prompt(PromptOptimizationMode::GptImage2Style, output),
+                output
+            );
+        }
+        let body = "主体与任务\n构图与布局\n视觉风格与材质\n文字与标签\n画幅与格式\n约束与排除细节";
+        assert_eq!(
+            extract_optimized_prompt(
+                PromptOptimizationMode::GptImage2Style,
+                &format!("```text\n{body}\n```")
+            ),
+            body
+        );
+    }
+
+    #[test]
+    fn gpt_image_2_style_rejects_explicit_provider_truncation() {
+        for payload in [
+            json!({"choices": [{"finish_reason": "length"}]}),
+            json!({"stop_reason": "max_tokens"}),
+            json!({"candidates": [{"finishReason": "MAX_TOKENS"}]}),
+            json!({"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}),
+        ] {
+            let BackendError::Protocol { message, details } =
+                validate_prompt_response_completeness(
+                    PromptOptimizationMode::GptImage2Style,
+                    &payload,
+                )
+                .unwrap_err()
+            else {
+                panic!("truncation must fail");
+            };
+            assert!(message.contains("风格库图片提示词不完整"));
+            assert_eq!(details["mode"], json!("gpt_image_2_style"));
+        }
+        for payload in [
+            json!({"choices": [{"finish_reason": "stop"}]}),
+            json!({"stop_reason": "end_turn"}),
+            json!({"candidates": [{"finishReason": "STOP"}]}),
+            json!({"status": "completed"}),
+            json!({}),
+        ] {
+            assert!(
+                validate_prompt_response_completeness(
+                    PromptOptimizationMode::GptImage2Style,
                     &payload
                 )
                 .is_ok()

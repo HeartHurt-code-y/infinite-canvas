@@ -1449,7 +1449,8 @@ export type PromptOptimizationMode =
   | "fpv_path"
   | "fight_prompt_master"
   | "multi_grid_storyboard"
-  | "storyboard_prompt";
+  | "storyboard_prompt"
+  | "gpt_image_2_style";
 
 /** 文本技能模式；文档与视频复刻模式均使用随应用编译的完整技能上下文。 */
 export type TextSkillMode =

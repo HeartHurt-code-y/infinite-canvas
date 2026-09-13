@@ -1056,8 +1056,13 @@ export function CanvasPromptNode({
   const isFightPromptMaster = node.config.mode === "fight_prompt_master";
   const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
   const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
+  const isGptImage2Style = node.config.mode === "gpt_image_2_style";
   const hasModeHint =
-    isFpvPath || isFightPromptMaster || isMultiGridStoryboard || isStoryboardPrompt;
+    isFpvPath ||
+    isFightPromptMaster ||
+    isMultiGridStoryboard ||
+    isStoryboardPrompt ||
+    isGptImage2Style;
   const modeHintId = `prompt-mode-hint-${node.key}`;
   const conversation = node.config.conversation ?? [];
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -1249,7 +1254,9 @@ export function CanvasPromptNode({
                       ? "提供剧情，或连接角色、场景与视频参考素材"
                       : isStoryboardPrompt
                         ? "描述故事与用途，或连接角色、场景与风格参考素材"
-                        : "从一句创意或待优化提示词开始"}
+                        : isGptImage2Style
+                          ? "描述图片用途与主体，或连接图片和风格参考素材"
+                          : "从一句创意或待优化提示词开始"}
               </strong>
               <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
             </div>
@@ -1315,9 +1322,13 @@ export function CanvasPromptNode({
                       ? node.config.task === "generate"
                         ? "例如：咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格；已连接参考素材时可直接生成"
                         : "粘贴故事板提示词或填写修改要求，例如：保留角色与版式，加强最后一格的情绪；留空可优化当前输出"
-                      : node.config.task === "generate"
-                        ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
-                        : "粘贴一段已有提示词，补充镜头、主体和风格细节"
+                      : isGptImage2Style
+                        ? node.config.task === "generate"
+                          ? "例如：咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」；也可指定风格名称或连接参考素材"
+                          : "粘贴图片提示词或填写修改要求，例如：保留主体和标题，改成杂志封面风格；留空可优化当前输出"
+                        : node.config.task === "generate"
+                          ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
+                          : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
             disabled={running}
@@ -1445,6 +1456,12 @@ export function CanvasPromptNode({
           <div id={modeHintId} className="canvas-prompt-node__intro">
             <span>
               按电影、广告、短剧、动画、漫画、品牌、MV、游戏、社交、教程、体育或国漫视觉开发场景组织画面，输出可直接交给图片节点的整张故事板提示词。可指定格数、画幅与风格；参考图片与视频画面需使用支持图片理解的文本模型。
+            </span>
+          </div>
+        ) : isGptImage2Style ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              按图片用途匹配风格，也可指定风格名称；结合主体、构图、画幅与文字要求，输出可直接交给图片节点的完整提示词。沿用所选项目文本模型，参考图片与视频画面需使用支持图片理解的文本模型；生成图片请连接图片节点。
             </span>
           </div>
         ) : null}

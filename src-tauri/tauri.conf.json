@@ -41,7 +41,8 @@
     "copyright": "Copyright © 2026 infinitecanvas",
     "resources": {
       "resources/remotion-runtime/": "remotion-runtime/",
-      "resources/ffmpeg/": "ffmpeg/"
+      "resources/ffmpeg/": "ffmpeg/",
+      "skills/gpt-image-2-style-library/LICENSE": "licenses/gpt-image-2-style-library-LICENSE"
     },
     "windows": {
       "wix": {

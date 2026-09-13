@@ -2354,97 +2354,113 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: "取消" }));
   });
 
-  it("上游输出未变时保留手改和断线引用，保存恢复不按新编号重绑", async () => {
-    let storedDocument: unknown = null;
-    invokeMock.mockImplementation((command, args) => {
-      if (command === "get_canvas_document") {
-        if (storedDocument == null) {
-          return Promise.reject(
-            Object.assign(new Error("canvas not found"), { kind: "not_found" }),
-          );
+  it.each(["seedance_2_5", "gpt_image_2_style"])(
+    "%s 上游输出未变时保留手改和断线引用，保存恢复不按新编号重绑",
+    async (mode) => {
+      let storedDocument: unknown = null;
+      invokeMock.mockImplementation((command, args) => {
+        if (command === "get_canvas_document") {
+          if (storedDocument == null) {
+            return Promise.reject(
+              Object.assign(new Error("canvas not found"), { kind: "not_found" }),
+            );
+          }
+          return Promise.resolve({
+            id: "canvas-scene-03",
+            title: "未命名画布",
+            document: storedDocument,
+            revision: 1,
+            createdAt: 0,
+            updatedAt: 0,
+          });
         }
-        return Promise.resolve({
-          id: "canvas-scene-03",
-          title: "未命名画布",
-          document: storedDocument,
-          revision: 1,
-          createdAt: 0,
-          updatedAt: 0,
-        });
-      }
-      if (command === "save_canvas_document") {
-        const save = args?.["command"] as { id: string; title: string; document: unknown };
-        storedDocument = structuredClone(save.document);
-        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
-      }
-      return baseInvokeImplementation(command);
-    });
-    const view = render(<App />);
-    const promptNode = await addPromptNode(260, 180);
-    setPromptOutputText(promptNode, "@图片1 开场");
-    const videoNode = await addGenerationNode("视频", 920, 180);
-    const firstAsset = await addAssetNode("图片", "站台参考图", 20, 500);
-    const secondAsset = await addAssetNode("图片", "站台参考图", 20, 760);
-    connectAssetToGeneration(firstAsset, videoNode);
-    connectAssetToGeneration(secondAsset, videoNode);
-    connectPromptToGeneration(promptNode, videoNode);
-    const videoKey = videoNode.dataset["connectionTarget"]!;
-    const firstKey = firstAsset.dataset["connectionTarget"]!;
-    const secondKey = secondAsset.dataset["connectionTarget"]!;
-    const input = within(videoNode).getByRole("textbox", {
-      name: "提示词输入框，输入 @ 引用素材",
-    });
-    const originalChip = await waitFor(() => {
-      const chip = input.querySelector<HTMLElement>("[data-mention-id]")!;
-      expect(chip).toHaveAttribute("data-canvas-node-key", firstKey);
-      return chip;
-    });
-    const mentionId = originalChip.dataset["mentionId"]!;
-    appendPromptText(input, "，保留我的手改");
-    fireEvent.click(within(videoNode).getAllByRole("button", { name: "解除连线：站台参考图" })[0]!);
-    await waitFor(() => {
-      expect(input.querySelector(`[data-mention-id="${mentionId}"]`)).toHaveClass("is-stale");
-      expect(input).toHaveTextContent("保留我的手改");
-    });
-    expect(input.querySelector("[data-mention-id]")).toHaveAttribute(
-      "data-canvas-node-key",
-      firstKey,
-    );
-
-    view.unmount();
-    await waitFor(() => expect(storedDocument).not.toBeNull());
-    render(<App />);
-    const restoredVideo = await waitFor(() => {
-      const node = document.querySelector<HTMLElement>(`[data-connection-target="${videoKey}"]`);
-      expect(node).not.toBeNull();
-      return node!;
-    });
-    await waitForNodeAccessible(restoredVideo);
-    const restoredInput = within(restoredVideo).getByRole("textbox", {
-      name: "提示词输入框，输入 @ 引用素材",
-    });
-    const restoredChip = await waitFor(() => {
-      const chip = restoredInput.querySelector<HTMLElement>("[data-mention-id]");
-      expect(chip).not.toBeNull();
-      expect(chip).toHaveClass("is-stale");
-      return chip!;
-    });
-    expect(restoredChip).toHaveAttribute("data-canvas-node-key", firstKey);
-    expect(restoredChip).toHaveAttribute("data-mention-id", mentionId);
-    expect(restoredInput).toHaveTextContent("开场");
-    expect(restoredInput).toHaveTextContent("保留我的手改");
-
-    const restoredPromptNode = document.querySelector(".canvas-gen-node--prompt") as HTMLElement;
-    setPromptOutputText(restoredPromptNode, "@图片1 上游新版本");
-    await waitFor(() => {
-      expect(restoredInput).toHaveTextContent("上游新版本");
-      expect(restoredInput).not.toHaveTextContent("保留我的手改");
-      expect(restoredInput.querySelector("[data-mention-id]")).toHaveAttribute(
-        "data-canvas-node-key",
-        secondKey,
+        if (command === "save_canvas_document") {
+          const save = args?.["command"] as { id: string; title: string; document: unknown };
+          storedDocument = structuredClone(save.document);
+          return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+        }
+        return baseInvokeImplementation(command);
+      });
+      const view = render(<App />);
+      const promptNode = await addPromptNode(260, 180);
+      fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+        target: { value: mode },
+      });
+      setPromptOutputText(
+        promptNode,
+        mode === "gpt_image_2_style"
+          ? "```\n@图片1 开场\n```\n\n说明：保留站台素材与红色招牌。"
+          : "@图片1 开场",
       );
-    });
-  });
+      const videoNode = await addGenerationNode("视频", 920, 180);
+      const firstAsset = await addAssetNode("图片", "站台参考图", 20, 500);
+      const secondAsset = await addAssetNode("图片", "站台参考图", 20, 760);
+      connectAssetToGeneration(firstAsset, videoNode);
+      connectAssetToGeneration(secondAsset, videoNode);
+      connectPromptToGeneration(promptNode, videoNode);
+      const videoKey = videoNode.dataset["connectionTarget"]!;
+      const firstKey = firstAsset.dataset["connectionTarget"]!;
+      const secondKey = secondAsset.dataset["connectionTarget"]!;
+      const input = within(videoNode).getByRole("textbox", {
+        name: "提示词输入框，输入 @ 引用素材",
+      });
+      const originalChip = await waitFor(() => {
+        const chip = input.querySelector<HTMLElement>("[data-mention-id]")!;
+        expect(chip).toHaveAttribute("data-canvas-node-key", firstKey);
+        return chip;
+      });
+      const mentionId = originalChip.dataset["mentionId"]!;
+      appendPromptText(input, "，保留我的手改");
+      fireEvent.click(
+        within(videoNode).getAllByRole("button", { name: "解除连线：站台参考图" })[0]!,
+      );
+      await waitFor(() => {
+        expect(input.querySelector(`[data-mention-id="${mentionId}"]`)).toHaveClass("is-stale");
+        expect(input).toHaveTextContent("保留我的手改");
+      });
+      expect(input.querySelector("[data-mention-id]")).toHaveAttribute(
+        "data-canvas-node-key",
+        firstKey,
+      );
+
+      view.unmount();
+      await waitFor(() => expect(storedDocument).not.toBeNull());
+      render(<App />);
+      const restoredVideo = await waitFor(() => {
+        const node = document.querySelector<HTMLElement>(`[data-connection-target="${videoKey}"]`);
+        expect(node).not.toBeNull();
+        return node!;
+      });
+      await waitForNodeAccessible(restoredVideo);
+      const restoredInput = within(restoredVideo).getByRole("textbox", {
+        name: "提示词输入框，输入 @ 引用素材",
+      });
+      const restoredChip = await waitFor(() => {
+        const chip = restoredInput.querySelector<HTMLElement>("[data-mention-id]");
+        expect(chip).not.toBeNull();
+        expect(chip).toHaveClass("is-stale");
+        return chip!;
+      });
+      expect(restoredChip).toHaveAttribute("data-canvas-node-key", firstKey);
+      expect(restoredChip).toHaveAttribute("data-mention-id", mentionId);
+      expect(restoredInput).toHaveTextContent("开场");
+      expect(restoredInput).toHaveTextContent("保留我的手改");
+      if (mode === "gpt_image_2_style") {
+        expect(restoredInput).toHaveTextContent("说明：保留站台素材与红色招牌。");
+      }
+
+      const restoredPromptNode = document.querySelector(".canvas-gen-node--prompt") as HTMLElement;
+      setPromptOutputText(restoredPromptNode, "@图片1 上游新版本");
+      await waitFor(() => {
+        expect(restoredInput).toHaveTextContent("上游新版本");
+        expect(restoredInput).not.toHaveTextContent("保留我的手改");
+        expect(restoredInput.querySelector("[data-mention-id]")).toHaveAttribute(
+          "data-canvas-node-key",
+          secondKey,
+        );
+      });
+    },
+  );
 
   it("新连接的提示词源即使输出相同，也会重新同步下游内容", async () => {
     render(<App />);
@@ -2631,6 +2647,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ["打斗导演", "fight_prompt_master", "SD2.5，15 秒，超高速，雨夜站台两人徒手近战"],
     ["多宫格分镜", "multi_grid_storyboard", "6 宫格，12 秒，电影写实，女孩在站台发现一封信"],
     ["故事板", "storyboard_prompt", "咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格"],
+    [
+      "GPT Image 2 风格库",
+      "gpt_image_2_style",
+      "咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」",
+    ],
   ])("%s 无图时拦截空请求，并允许仅文字描述生成", async (_label, mode, userPrompt) => {
     const generatedPrompt = `根据要求完成的提示词方案：${userPrompt}`;
     invokeMock.mockImplementation((command) => {
@@ -2836,6 +2857,138 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(submittedGenerationCommands().at(-1)?.["prompt"]).toEqual([
       { kind: "text", text: optimizedPrompt },
     ]);
+  });
+
+  it("GPT Image 2 风格库使用真实参考与手改上下文，将完整图片提示词传入图片节点", async () => {
+    const templateNote = "说明：所选模板为产品电商；假设画幅 3:4。";
+    const constraintsNote = "注：保留杯身已有标签，不添加未确认的产品功效。";
+    const clarification = "如果需要更换包装文字，请提供确认后的完整文案。";
+    const generatedPrompt = `\`\`\`text\n主体与任务：以参考图中的站台为背景制作咖啡海报。\n构图：主体居中，顶部留标题空间。\n风格与材质：温暖复古纸张质感。\n文字：标题严格为「醒来一杯好心情」。\n画幅：3:4。\n约束：保留真实产品外观，不增加品牌标识。\n\`\`\`\n\n${templateNote}\n\n${constraintsNote}\n\n${clarification}`;
+    const editedPrompt = `${generatedPrompt}\n手动修改：杯子移到画面右侧，保留左侧留白。`;
+    const optimizedPrompt = `${editedPrompt}\n调整光线：暖色侧光，杯身标签完整可见。\n\n${constraintsNote}\n\n${clarification}`;
+    const replies = [generatedPrompt, optimizedPrompt, optimizedPrompt];
+    let runCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        const reply = replies[runCount++]!;
+        return Promise.resolve({ optimizedPrompt: reply, rawModelOutput: reply });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: "gpt_image_2_style" },
+    });
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveDisplayValue(
+      "GPT Image 2 风格库",
+    );
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveAccessibleDescription(
+      /按图片用途匹配风格.*输出可直接交给图片节点的完整提示词/,
+    );
+    const referenceImage = await addAssetNode("图片", "站台参考图", 20, 700);
+    connectAssetToGeneration(referenceImage, promptNode);
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    const output = getPromptOutputEditor(promptNode);
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(generatedPrompt)));
+    const conversationLog = within(promptNode).getByRole("log", { name: "提示词多轮对话" });
+    expect(conversationLog).toHaveTextContent(templateNote);
+    expect(conversationLog).toHaveTextContent(constraintsNote);
+    expect(conversationLog).toHaveTextContent(clarification);
+    const promptCommands = () =>
+      invokeMock.mock.calls
+        .filter(([command]) => command === "run_prompt_node")
+        .map(([, args]) => (args as { command: Record<string, unknown> }).command);
+    const firstCommand = promptCommands()[0]!;
+    expect(firstCommand).toMatchObject({
+      providerConnectionId: PROVIDER.id,
+      modelDefinitionId: TEXT_MODEL.id,
+      mode: "gpt_image_2_style",
+      task: "generate",
+      contextHistory: [],
+      visionImages: [
+        { displayName: "站台参考图", target: { kind: "asset", assetId: "asset-image-1" } },
+      ],
+    });
+    expect(firstCommand["userPrompt"]).toContain("实际可见的主体、构图与视觉风格");
+    expect(firstCommand["userPrompt"]).toContain("不编造未提供的品牌、产品事实或读图结果");
+    setPromptText(output, editedPrompt);
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化" }));
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(optimizedPrompt)));
+    expect(promptCommands()[1]).toMatchObject({
+      mode: "gpt_image_2_style",
+      task: "optimize",
+      visionImages: firstCommand["visionImages"],
+      contextHistory: [
+        { role: "第 1 条 · 你", content: firstCommand["userPrompt"] },
+        { role: "第 2 条 · 提示词助手", content: generatedPrompt },
+        { role: "当前输出提示词", content: editedPrompt },
+      ],
+    });
+    expect(promptCommands()[1]?.["userPrompt"]).toContain("继续优化当前输出中的图片提示词");
+    expect(submittedGenerationCommands()).toHaveLength(0);
+
+    const imageNode = await addGenerationNode("图片", 920, 180);
+    connectPromptToGeneration(promptNode, imageNode);
+    await waitFor(() =>
+      expect(
+        within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      ).toHaveTextContent(noNewlines(optimizedPrompt)),
+    );
+    fireEvent.click(within(imageNode).getByRole("button", { name: "开始图片生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommand()["prompt"]).toEqual([
+      { kind: "text", text: optimizedPrompt },
+    ]);
+    expect(submittedGenerationCommand()["explicitMedia"]).toEqual([
+      expect.objectContaining({
+        target: {
+          kind: "asset",
+          providerConnectionId: PROVIDER.id,
+          assetId: "asset-image-1",
+          canvasNodeKey: referenceImage.dataset["connectionTarget"],
+          mediaType: "image",
+        },
+        displayNameSnapshot: "站台参考图",
+        typePosition: 1,
+      }),
+    ]);
+
+    fireEvent.click(within(promptNode).getByRole("button", { name: "解除连线：站台参考图" }));
+    fireEvent.click(within(promptNode).getByRole("button", { name: "优化提示词" }));
+    await waitFor(() => expect(promptCommands()).toHaveLength(3));
+    expect(promptCommands()[2]).toMatchObject({ visionImages: [], referenceInputs: [] });
+    expect(promptCommands()[2]?.["contextHistory"]).toEqual(
+      expect.arrayContaining([{ role: "当前输出提示词", content: optimizedPrompt }]),
+    );
+  });
+
+  it.each([false, true])("GPT Image 2 风格库断开输出连线时保留手改=%s", async (edited) => {
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: "gpt_image_2_style" },
+    });
+    const fullDocument = "```\n复古咖啡海报\n```\n\n说明：产品电商模板。\n\n注：保留原包装。";
+    setPromptOutputText(promptNode, fullDocument);
+    const imageNode = await addGenerationNode("图片", 920, 180);
+    connectPromptToGeneration(promptNode, imageNode);
+    const input = within(imageNode).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    await waitFor(() => expect(input).toHaveTextContent(noNewlines(fullDocument)));
+    if (edited) setPromptText(input, `${fullDocument}\n用户添加标题留白。`);
+    fireEvent.click(within(promptNode).getByRole("button", { name: /^解除连线：图片生成 / }));
+    await waitFor(() =>
+      edited
+        ? expect(input).toHaveTextContent(noNewlines(`${fullDocument}\n用户添加标题留白。`))
+        : expect(input).not.toHaveTextContent(/\S/),
+    );
   });
 
   it("多轮生成与优化会携带之前的完整对话上下文", async () => {
@@ -3087,6 +3240,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ["打斗导演仅视频", "fight_prompt_master", ""],
     ["多宫格分镜仅视频", "multi_grid_storyboard", ""],
     ["故事板仅视频", "storyboard_prompt", ""],
+    ["GPT Image 2 风格库仅视频", "gpt_image_2_style", ""],
   ])(
     "%s：已保存的视频产物可连入提示词节点并作为多模态视频素材传出",
     async (_label, mode, userPrompt) => {

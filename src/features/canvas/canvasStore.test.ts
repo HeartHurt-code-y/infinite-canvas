@@ -647,6 +647,7 @@ describe("canvas document interface", () => {
     "fight_prompt_master",
     "multi_grid_storyboard",
     "storyboard_prompt",
+    "gpt_image_2_style",
   ] as const)(
     "retains %s mode, edited output, conversation and reference connections after JSON restore",
     (mode) => {
