@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { StagingJobRecord, StagingStatus } from "../../lib/backend";
 import {
+  DEFAULT_ZOOM,
+  MAX_ZOOM,
+  MIN_ZOOM,
   UPLOAD_ABANDONED_MS,
+  clampCanvasZoom,
   isTerminalAssetUpload,
   isTerminalStagingJob,
   mergeStagingJobsIntoUploads,
@@ -260,5 +264,25 @@ describe("textResultFromSource", () => {
     expect(textResultFromSource(null)).toBeNull();
     expect(textResultFromSource(undefined)).toBeNull();
     expect(textResultFromSource("plain string")).toBeNull();
+  });
+});
+
+describe("canvas zoom bounds", () => {
+  it("新画布起始缩放为 50%，仍在缩放下限之上", () => {
+    expect(DEFAULT_ZOOM).toBe(50);
+    expect(DEFAULT_ZOOM).toBeGreaterThan(MIN_ZOOM);
+  });
+
+  it("缩小按钮与快捷键的落点不会低于最小值，也不会超过放大上限", () => {
+    expect(clampCanvasZoom(MIN_ZOOM - 26)).toBe(MIN_ZOOM);
+    expect(clampCanvasZoom(0)).toBe(MIN_ZOOM);
+    expect(clampCanvasZoom(-40)).toBe(MIN_ZOOM);
+    expect(clampCanvasZoom(MAX_ZOOM + 8)).toBe(MAX_ZOOM);
+  });
+
+  it("范围内的目标缩放按整数读数原样保留", () => {
+    expect(clampCanvasZoom(DEFAULT_ZOOM)).toBe(50);
+    expect(clampCanvasZoom(DEFAULT_ZOOM - 8)).toBe(42);
+    expect(clampCanvasZoom(99.6)).toBe(100);
   });
 });

@@ -476,9 +476,9 @@ describe("App workspace", () => {
     expect(screen.queryByRole("button", { name: "平移工具" })).not.toBeInTheDocument();
 
     fireEvent.keyDown(document, { key: "+" });
-    expect(await screen.findByText("82%")).toBeInTheDocument();
+    expect(await screen.findByText("58%")).toBeInTheDocument();
     fireEvent.keyDown(document, { key: "0" });
-    expect(await screen.findByText("74%")).toBeInTheDocument();
+    expect(await screen.findByText("50%")).toBeInTheDocument();
   });
 
   it("pans the infinite canvas by dragging empty space with the mouse", () => {
@@ -516,9 +516,9 @@ describe("App workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "回到画布起始位置" }));
 
     // 起始视口 = 原点对齐视口左上角 + DEFAULT_ZOOM；落点同样由 onMoveEnd 同步回 store。
-    await waitFor(() => expect(viewportTransform()).toContain("scale(0.74)"));
+    await waitFor(() => expect(viewportTransform()).toContain("scale(0.5)"));
     expect(viewportTransform()).toContain("translate(0px,0px)");
-    expect(screen.getByText("74%")).toBeInTheDocument();
+    expect(screen.getByText("50%")).toBeInTheDocument();
   });
 
   // 任务状态/原始返回展示已从画布下方状态栏（TaskDock）迁移到生成产物卡片：

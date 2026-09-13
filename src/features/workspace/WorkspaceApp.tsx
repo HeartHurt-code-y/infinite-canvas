@@ -249,6 +249,7 @@ import {
   GPT_IMAGE_MAX_GENERATION_COUNT,
   MAX_GENERATION_COUNT,
   MAX_ZOOM,
+  MIN_ZOOM,
   RESULT_NODE_HEIGHT,
   RESULT_NODE_WIDTH,
   SCREENPLAY_NODE_COARSE_HEIGHT,
@@ -300,7 +301,7 @@ import {
   shouldAutoDismissUpload,
   stagingImportReachedLibrary,
   UPLOAD_AUTO_DISMISS_DELAY_MS,
-  minimumCanvasZoom,
+  clampCanvasZoom,
   modelDisplayNameForTask,
   nearestAvailableNodePosition,
   nextOutputSlot,
@@ -5000,7 +5001,7 @@ export function WorkspaceApp({
   const zoomAroundViewportCenter = useCallback(
     (targetZoom: number) => {
       const instance = flowInstanceRef.current;
-      const nextZoom = Math.round(Math.min(MAX_ZOOM, Math.max(minimumCanvasZoom(), targetZoom)));
+      const nextZoom = clampCanvasZoom(targetZoom);
       if (instance == null) {
         // 实例尚未就绪（理论仅在挂载前）：先同步展示层，挂载后由 onInit 应用视图。
         setView({ zoom: nextZoom });
@@ -8906,7 +8907,7 @@ export function WorkspaceApp({
               edges={flowEdges}
               nodeTypes={CANVAS_FLOW_NODE_TYPES}
               edgeTypes={CANVAS_FLOW_EDGE_TYPES}
-              minZoom={minimumCanvasZoom() / 100}
+              minZoom={MIN_ZOOM / 100}
               maxZoom={MAX_ZOOM / 100}
               panOnDrag={[0, 1]}
               zoomOnScroll

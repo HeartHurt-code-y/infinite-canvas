@@ -68,9 +68,13 @@ export interface NodeModelSelection {
 
 export type NodeModelSelections = Record<CanvasGenNodeKind, NodeModelSelection>;
 
-export const DEFAULT_ZOOM = 74;
-export const MIN_ZOOM = 54;
-export const COARSE_POINTER_MIN_ZOOM = 74;
+// 新建画布与「重置缩放/回到起始位置」共用的起始缩放：一半比例，
+// 便于一次看到比旧 74% 更大的画布范围。
+export const DEFAULT_ZOOM = 50;
+// 缩放下限放宽到 10%（桌面与触屏同一读数）：缩小按钮、快捷键、滚轮缩放（RF minZoom）
+// 与视图恢复共用一份边界，长工作流可以在同一屏内看清整体结构。不设真正的"无限"：
+// 0% 附近平移/坐标换算会退化，且低于 10% 的节点已经失去可读性，保留硬底更稳妥。
+export const MIN_ZOOM = 10;
 // 放大上限提升至 10 倍。不设真正的"无限"：极端缩放下平移/坐标计算会因
 // 浮点精度出现抖动，栅格图也会放大到失去意义，保留硬顶更稳妥。
 export const MAX_ZOOM = 1000;
@@ -773,8 +777,12 @@ export function usesCoarsePointer(): boolean {
     : false;
 }
 
-export function minimumCanvasZoom(): number {
-  return usesCoarsePointer() ? COARSE_POINTER_MIN_ZOOM : MIN_ZOOM;
+/**
+ * 把百分比缩放读数收进画布允许范围（[`MIN_ZOOM`]，[`MAX_ZOOM`]）。
+ * 缩小按钮、`+`/`-` 快捷键与视图重置共用，保证与交给 React Flow 的 `minZoom`/`maxZoom` 一致。
+ */
+export function clampCanvasZoom(zoom: number): number {
+  return Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)));
 }
 
 export function genNodeDimensions(kind: CanvasGenNodeKind): { width: number; height: number } {
