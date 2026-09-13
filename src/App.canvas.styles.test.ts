@@ -80,22 +80,6 @@ describe("视频拼接与合成节点", () => {
   });
 });
 
-describe("底部工作流仓库", () => {
-  it("占用独立底部网格行并在折叠时保持紧凑", () => {
-    expect(cssRule(".workspace-shell")).toMatch(/"workflows"\s+auto/);
-    expect(cssRule(".workflow-repository")).toMatch(/grid-area:\s*workflows/);
-    expect(cssRule(".workflow-repository")).toMatch(/height:\s*3\.25rem/);
-    expect(cssRule(".workflow-repository--expanded")).toMatch(
-      /height:\s*clamp\(12rem,\s*25vh,\s*15rem\)/,
-    );
-  });
-
-  it("隐藏折叠内容并保留可触达的主要操作", () => {
-    expect(cssRule(".workflow-repository__content[hidden]")).toMatch(/display:\s*none/);
-    expect(cssRule(".workflow-repository__insert")).toMatch(/min-height:\s*var\(--size-control\)/);
-  });
-});
-
 describe("剧本节点文本选中复制", () => {
   it("编剧助手对话区与剧本预览框允许选中文字，而不是继承节点卡片的禁止选中", () => {
     expect(cssRule(".canvas-screenplay-node__conversation")).toMatch(

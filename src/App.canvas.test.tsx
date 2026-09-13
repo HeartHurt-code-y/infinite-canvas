@@ -468,6 +468,18 @@ function setupDesktopRuntime(): void {
 const ASSET_NODE_WIDTH = 500;
 const ASSET_NODE_HEIGHT = 437.5;
 
+const NODE_MENU_CASES = [
+  ["图片生成", ".canvas-gen-node--image"],
+  ["视频生成", ".canvas-gen-node--video"],
+  ["视频拼接与合成", ".canvas-video-composer"],
+  ["网络爆款视频下载", ".canvas-video-downloader"],
+  ["视频抽帧", ".canvas-video-frame-extractor"],
+  ["爆款视频复刻", ".canvas-screenplay-node--viral_remix"],
+  ["提示词生成与优化", ".canvas-gen-node--prompt"],
+  ["剧本创作与优化", ".canvas-screenplay-node"],
+  ["剧本转工业级分镜脚本", ".canvas-screenplay-node--storyboard"],
+] as const;
+
 function getCanvasViewport(): HTMLElement {
   const viewport = document.querySelector<HTMLElement>(".canvas-viewport");
   expect(viewport).not.toBeNull();
@@ -509,6 +521,29 @@ function dragToCanvas(source: HTMLElement, clientX: number, clientY: number): vo
     clientX,
     clientY,
   });
+}
+
+/** 通过画布空白处的实际菜单添加节点，保留传入的投放坐标。 */
+function createNodeAt(name: string, clientX: number, clientY: number): void {
+  vi.spyOn(getCanvasViewport(), "getBoundingClientRect").mockReturnValue({
+    x: 0,
+    y: 0,
+    top: 0,
+    left: 0,
+    right: 1280,
+    bottom: 800,
+    width: 1280,
+    height: 800,
+    toJSON: () => ({}),
+  });
+  fireEvent.contextMenu(document.querySelector<HTMLElement>(".react-flow__pane")!, {
+    button: 2,
+    clientX,
+    clientY,
+  });
+  fireEvent.click(
+    within(screen.getByRole("menu", { name: "添加节点" })).getByRole("menuitem", { name }),
+  );
 }
 
 /** 节点内容的 React Flow 包装层（节点位置由包装层 transform 表达）。 */
@@ -619,10 +654,10 @@ async function addGenerationNode(
   clientX: number,
   clientY: number,
 ): Promise<HTMLElement> {
+  await waitFor(() => expect(screen.getByRole("button", { name: "新建画布" })).toBeEnabled());
   const selector = `.canvas-gen-node--${kind === "图片" ? "image" : "video"}`;
   const countBefore = document.querySelectorAll(selector).length;
-  const template = screen.getByRole("button", { name: `拖拽创建${kind}生成节点` });
-  dragToCanvas(template, clientX, clientY);
+  createNodeAt(`${kind}生成`, clientX, clientY);
 
   await waitFor(() => {
     expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1);
@@ -635,11 +670,7 @@ async function addGenerationNode(
 async function addPromptNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-gen-node--prompt";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建提示词生成与优化节点" }),
-    clientX,
-    clientY,
-  );
+  createNodeAt("提示词生成与优化", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -649,11 +680,7 @@ async function addPromptNode(clientX: number, clientY: number): Promise<HTMLElem
 async function addScreenplayNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-screenplay-node";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建剧本创作与优化节点" }),
-    clientX,
-    clientY,
-  );
+  createNodeAt("剧本创作与优化", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -663,11 +690,7 @@ async function addScreenplayNode(clientX: number, clientY: number): Promise<HTML
 async function addStoryboardNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-screenplay-node--storyboard";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建剧本转工业级分镜脚本节点" }),
-    clientX,
-    clientY,
-  );
+  createNodeAt("剧本转工业级分镜脚本", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -689,7 +712,7 @@ function getDocumentEditor(node: HTMLElement, name: string): HTMLTextAreaElement
 async function addViralRemixNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-screenplay-node--viral_remix";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(screen.getByRole("button", { name: "拖拽创建爆款视频复刻节点" }), clientX, clientY);
+  createNodeAt("爆款视频复刻", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -699,11 +722,7 @@ async function addViralRemixNode(clientX: number, clientY: number): Promise<HTML
 async function addVideoComposerNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-video-composer";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建视频拼接与合成节点" }),
-    clientX,
-    clientY,
-  );
+  createNodeAt("视频拼接与合成", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -713,11 +732,7 @@ async function addVideoComposerNode(clientX: number, clientY: number): Promise<H
 async function addVideoDownloaderNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-video-downloader";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(
-    screen.getByRole("button", { name: "拖拽创建网络爆款视频下载节点" }),
-    clientX,
-    clientY,
-  );
+  createNodeAt("网络爆款视频下载", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -727,7 +742,7 @@ async function addVideoDownloaderNode(clientX: number, clientY: number): Promise
 async function addFrameExtractorNode(clientX: number, clientY: number): Promise<HTMLElement> {
   const selector = ".canvas-video-frame-extractor";
   const countBefore = document.querySelectorAll(selector).length;
-  dragToCanvas(screen.getByRole("button", { name: "拖拽创建视频抽帧节点" }), clientX, clientY);
+  createNodeAt("视频抽帧", clientX, clientY);
   await waitFor(() => expect(document.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   return waitForNodeAccessible(
     Array.from(document.querySelectorAll<HTMLElement>(selector)).at(-1)!,
@@ -766,7 +781,7 @@ async function addAssetNode(
 }
 
 async function addWorkflowNode(buttonName = "添加工作流节点"): Promise<HTMLElement> {
-  const repositoryToggle = screen.getByRole("button", { name: /工作流仓库/ });
+  const repositoryToggle = screen.getByRole("button", { name: "工作流仓库" });
   if (repositoryToggle.getAttribute("aria-expanded") !== "true") {
     fireEvent.click(repositoryToggle);
   }
@@ -1022,16 +1037,73 @@ afterEach(async () => {
 });
 
 describe("画布素材拖拽与连线（桌面运行时）", () => {
-  it("初始画布为空，展示生成与视频合成模板", async () => {
+  it("初始画布为空，通过添加节点菜单展示全部九种节点", async () => {
     render(<App />);
 
     expect(await screen.findByText("画布为空")).toBeInTheDocument();
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
     expect(document.querySelectorAll(".canvas-asset-node")).toHaveLength(0);
     expect(document.querySelectorAll(".edge--asset")).toHaveLength(0);
-    expect(screen.getByRole("button", { name: "拖拽创建图片生成节点" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "拖拽创建视频生成节点" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "拖拽创建视频拼接与合成节点" })).toBeInTheDocument();
+    expect(screen.queryByRole("complementary", { name: "节点仓库" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+    const menu = screen.getByRole("menu", { name: "添加节点" });
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+    expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
+    expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
+  });
+
+  it.each(NODE_MENU_CASES)("空白画布菜单可以创建%s并单次撤销", async (name, selector) => {
+    render(<App />);
+    await screen.findByText("画布为空");
+    createNodeAt(name, 680, 400);
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(selector)).toHaveLength(1);
+      expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+    });
+    expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
+    await waitFor(() => expect(document.querySelectorAll(".react-flow__node")).toHaveLength(0));
+    expect(screen.getByText("画布为空")).toBeInTheDocument();
+  });
+
+  describe.each(["source", "target"] as const)("从%s端口添加所有节点", (handleType) => {
+    it.each(NODE_MENU_CASES)(
+      "选择%s创建节点并按方向连线，撤销重做保持原子性",
+      async (name, selector) => {
+        render(<App />);
+        const asset = await addAssetNode("图片", "站台参考图", 180, 180);
+        const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
+        dropConnectionFromHandle(asset, handleType, pane, { x: 980, y: 600 });
+        const menu = await screen.findByRole("menu", { name: "添加节点" });
+        fireEvent.click(within(menu).getByRole("menuitem", { name }));
+
+        const edgeName =
+          handleType === "source"
+            ? /^选择连线：站台参考图 → .+；按 Delete 删除$/
+            : /^选择连线：.+ → 站台参考图；按 Delete 删除$/;
+        expect(await screen.findByRole("button", { name: edgeName })).toBeInTheDocument();
+        expect(document.querySelectorAll(selector)).toHaveLength(1);
+        expect(document.querySelectorAll(".react-flow__node")).toHaveLength(2);
+        expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(1);
+
+        fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
+        await waitFor(() => {
+          expect(document.querySelectorAll(selector)).toHaveLength(0);
+          expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+        });
+        expect(document.querySelectorAll(".react-flow__node")).toHaveLength(1);
+        expect(document.body).toContainElement(asset);
+
+        fireEvent.click(screen.getByRole("button", { name: "重做画布操作" }));
+        expect(await screen.findByRole("button", { name: edgeName })).toBeInTheDocument();
+        expect(document.querySelectorAll(selector)).toHaveLength(1);
+        expect(document.querySelectorAll(".react-flow__node")).toHaveLength(2);
+        expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(1);
+      },
+    );
   });
 
   it("拖线落点偏离目标端口时仍会自动吸附并完成连接", async () => {
@@ -1045,7 +1117,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() =>
       expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
     );
-    expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
   });
 
   it.each([
@@ -1062,8 +1134,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
       dropConnectionFromHandle(asset, "source", pane, dropPoint);
 
-      const menu = await screen.findByRole("menu", { name: "常用生成节点" });
-      expect(within(menu).getAllByRole("menuitem")).toHaveLength(3);
+      const menu = await screen.findByRole("menu", { name: "添加节点" });
+      expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
       for (const name of ["图片生成", "视频生成", "提示词生成与优化"]) {
         expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
       }
@@ -1078,7 +1150,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         return node!;
       });
       await waitForNodeAccessible(created);
-      // 与节点仓库拖入一致：无碰撞时，新节点中心对齐画布落点。
+      // 无碰撞时，新节点中心对齐画布落点。
       expect(rfNodeFlowPosition(created)).toEqual({
         x: dropPoint.x - width / 2,
         y: dropPoint.y - height / 2,
@@ -1092,7 +1164,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         within(created).getAllByRole("button", { name: "解除连线：站台参考图" }).length,
       ).toBeGreaterThan(0);
       expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
-      expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
     },
   );
 
@@ -1102,7 +1174,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
 
     dropConnectionFromHandle(generation, "target", pane, { x: 180, y: 600 });
-    const menu = await screen.findByRole("menu", { name: "常用生成节点" });
+    const menu = await screen.findByRole("menu", { name: "添加节点" });
     fireEvent.click(within(menu).getByRole("menuitem", { name: "提示词生成与优化" }));
 
     const edgeName = "选择连线：提示词节点 → 图片生成节点；按 Delete 删除";
@@ -1128,7 +1200,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const asset = await addAssetNode("图片", "站台参考图", 180, 180);
     const pane = document.querySelector<HTMLElement>(".react-flow__pane")!;
     dropConnectionFromHandle(asset, "source", pane, { x: 980, y: 600 });
-    const menu = await screen.findByRole("menu", { name: "常用生成节点" });
+    const menu = await screen.findByRole("menu", { name: "添加节点" });
 
     if (cancelBy === "Escape") {
       fireEvent.keyDown(menu, { key: "Escape" });
@@ -1138,14 +1210,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     }
 
     await waitFor(() =>
-      expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument(),
+      expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument(),
     );
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
     expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     expect(document.body).toContainElement(asset);
   });
 
-  it("拖线落在已有节点本体时不弹出常用生成节点菜单", async () => {
+  it("拖线落在已有节点本体时不弹出添加节点菜单", async () => {
     render(<App />);
     const asset = await addAssetNode("图片", "站台参考图", 180, 180);
     const generation = await addGenerationNode("图片", 980, 180);
@@ -1156,7 +1228,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       y: targetPosition.y + 140,
     });
 
-    expect(screen.queryByRole("menu", { name: "常用生成节点" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
     expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
   });
@@ -1992,9 +2064,16 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
     expect(screen.getByText("画布为空")).toBeInTheDocument();
 
-    await waitFor(() => expect(originalTab).toBeEnabled());
-    fireEvent.click(originalTab);
-    await waitFor(() => expect(originalTab).toHaveAttribute("aria-selected", "true"));
+    // 顶栏跟随当前工作区重新挂载；切回时查询当前顶栏中的标签。
+    const returnTab = screen.getByRole("tab", { name: originalTab.textContent! });
+    await waitFor(() => expect(returnTab).not.toHaveAttribute("aria-disabled", "true"));
+    fireEvent.click(returnTab);
+    await waitFor(() =>
+      expect(screen.getByRole("tab", { name: originalTab.textContent! })).toHaveAttribute(
+        "aria-selected",
+        "true",
+      ),
+    );
     await waitFor(() => {
       const promptNode = document.querySelector(".canvas-gen-node--prompt") as HTMLElement;
       expect(promptNode).not.toBeNull();
@@ -3153,8 +3232,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     vi.useFakeTimers();
     try {
-      const template = screen.getByRole("button", { name: "拖拽创建图片生成节点" });
-      dragToCanvas(template, 370, 120);
+      createNodeAt("图片生成", 370, 120);
       expect(document.querySelectorAll(".canvas-gen-node--image")).toHaveLength(1);
 
       // 模拟用户在 1 秒自动保存防抖到期前直接退出桌面应用。
@@ -3186,7 +3264,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     }
   });
 
-  it("同一个生成模板可重复拖入画布", async () => {
+  it("同一个节点类型可从菜单重复添加到画布", async () => {
     render(<App />);
 
     const first = await addGenerationNode("图片", 370, 120);

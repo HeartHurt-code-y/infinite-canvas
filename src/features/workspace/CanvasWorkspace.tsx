@@ -47,12 +47,34 @@ export function CanvasWorkspace() {
   const [deleteTarget, setDeleteTarget] = useState<CanvasTab | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const recovery = useRef<Promise<number> | null>(null);
+  const focusActivatedTab = useRef(false);
+
+  useEffect(() => {
+    if (
+      !focusActivatedTab.current ||
+      !readyIds.has(activeCanvasId) ||
+      loading ||
+      busy ||
+      deleteTarget !== null
+    ) {
+      return;
+    }
+    focusActivatedTab.current = false;
+    document.getElementById(`canvas-tab-${activeCanvasId}`)?.focus();
+  }, [activeCanvasId, readyIds, loading, busy, deleteTarget]);
 
   const services = useMemo<CanvasSessionServices>(
     () => ({
       register: (id, handle) => {
         sessions.current.set(id, handle);
-        setReadyIds((current) => new Set([...current, id]));
+        setReadyIds((current) => {
+          const ready = handle.isReady();
+          if (current.has(id) === ready) return current;
+          const next = new Set(current);
+          if (ready) next.add(id);
+          else next.delete(id);
+          return next;
+        });
         return () => {
           sessions.current.delete(id);
         };
@@ -159,6 +181,7 @@ export function CanvasWorkspace() {
   }, [flushAll]);
 
   const activate = (id: string) => {
+    focusActivatedTab.current = true;
     activeId.current = id;
     setVisited((current) => (current.includes(id) ? current : [...current, id]));
     setActiveCanvasId(id);
@@ -270,9 +293,6 @@ export function CanvasWorkspace() {
         setVisited((current) => current.filter((id) => id !== target.id));
         activate(next.id);
         setDeleteTarget(null);
-        requestAnimationFrame(() => {
-          document.getElementById(`canvas-tab-${next.id}`)?.focus();
-        });
       } catch (failure) {
         const messages = [`删除失败：${formatRawBackendError(failure)}`];
         let retainReplacement = false;
@@ -316,7 +336,29 @@ export function CanvasWorkspace() {
       >
         {visited.map((id) => (
           <CanvasStoreProvider key={id} initialZoom={DEFAULT_ZOOM}>
-            <WorkspaceApp canvasId={id} active={id === activeCanvasId} services={services} />
+            <WorkspaceApp
+              canvasId={id}
+              active={id === activeCanvasId}
+              services={services}
+              canvasNavigation={
+                id === activeCanvasId ? (
+                  <CanvasTabs
+                    canvases={canvases}
+                    activeCanvasId={activeCanvasId}
+                    busy={loading || busy || deleteTarget !== null || !readyIds.has(activeCanvasId)}
+                    onSelect={selectCanvas}
+                    onCreate={createCanvas}
+                    onRename={renameCanvas}
+                    onDelete={(canvasId) => {
+                      const target = canvases.find((canvas) => canvas.id === canvasId);
+                      if (!target || mutation.current) return;
+                      setDeleteError(null);
+                      setDeleteTarget(target);
+                    }}
+                  />
+                ) : null
+              }
+            />
           </CanvasStoreProvider>
         ))}
       </div>
@@ -340,20 +382,6 @@ export function CanvasWorkspace() {
           </button>
         </div>
       ) : null}
-      <CanvasTabs
-        canvases={canvases}
-        activeCanvasId={activeCanvasId}
-        busy={loading || busy || deleteTarget !== null || !readyIds.has(activeCanvasId)}
-        onSelect={selectCanvas}
-        onCreate={createCanvas}
-        onRename={renameCanvas}
-        onDelete={(id) => {
-          const target = canvases.find((canvas) => canvas.id === id);
-          if (!target || mutation.current) return;
-          setDeleteError(null);
-          setDeleteTarget(target);
-        }}
-      />
       {deleteTarget ? (
         <CanvasDeleteDialog
           canvasName={deleteTarget.name}

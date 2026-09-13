@@ -14,10 +14,6 @@
 .canvas-session-panel > .workspace-shell {
   height: 100%;
 }
-.multi-canvas-workspace > .canvas-tabs {
-  flex-shrink: 0;
-}
-
 .canvas-session-error {
   flex-shrink: 0;
   display: flex;

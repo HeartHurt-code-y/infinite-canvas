@@ -122,8 +122,7 @@ select:focus-visible {
   display: grid;
   grid-template:
     "header" var(--size-header)
-    "canvas" minmax(0, 1fr)
-    "workflows" auto /
+    "canvas" minmax(0, 1fr) /
     minmax(0, 1fr);
   width: 100%;
   height: 100dvh;
@@ -145,6 +144,30 @@ select:focus-visible {
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
   border-bottom: var(--rule-thin) solid var(--color-rule);
+}
+
+.workspace-header__navigation {
+  display: flex;
+  align-items: center;
+  flex: 1 1 auto;
+  gap: var(--space-xs);
+  min-width: 0;
+  margin-inline: var(--space-lg) var(--space-sm);
+}
+
+.canvas-add-node-trigger {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2xs);
+  min-height: var(--size-control);
+  padding-inline: var(--space-xs);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-2);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-sm);
 }
 
 .brand-lockup,
@@ -223,6 +246,7 @@ select:focus-visible {
 }
 
 .header-actions {
+  flex: 0 0 auto;
   gap: var(--space-2xs);
   min-width: 0;
   margin-inline-start: auto;
@@ -386,8 +410,7 @@ h3 {
   transform: none;
 }
 
-.asset-panel,
-.node-panel {
+.asset-panel {
   position: fixed;
   z-index: var(--z-modal);
   top: var(--size-header);
@@ -402,8 +425,7 @@ h3 {
     transform var(--dur-micro) var(--ease-in);
 }
 
-.asset-panel,
-.node-panel {
+.asset-panel {
   left: 0;
   padding: var(--space-lg) var(--space-sm) var(--space-sm);
   overflow: hidden;
@@ -418,8 +440,7 @@ h3 {
   flex-direction: column;
 }
 
-.asset-panel.is-mobile-open,
-.node-panel.is-mobile-open {
+.asset-panel.is-mobile-open {
   visibility: visible;
   opacity: 1;
   pointer-events: auto;
@@ -435,10 +456,6 @@ h3 {
 
 .mobile-panel-close--assets {
   right: calc(var(--space-sm) + var(--size-control) + var(--space-2xs));
-}
-
-.mobile-panel-close--nodes {
-  right: var(--space-sm);
 }
 
 .mobile-panel-backdrop {
@@ -3417,53 +3434,6 @@ svg[data-spin="true"] {
   font-weight: 600;
 }
 
-/* ============ 节点仓库（独立侧板，生成节点模板拖到画布创建实例） ============ */
-
-.node-panel__hint {
-  margin: 0 0 var(--space-sm);
-  color: var(--color-chrome-muted);
-  font-size: var(--text-2xs);
-}
-
-.node-panel__grid {
-  display: grid;
-  gap: var(--space-2xs);
-}
-
-.repository-card {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2xs);
-  padding: var(--space-2xs);
-  background: var(--color-chrome-field);
-  border: var(--rule-thin) solid var(--color-chrome-rule);
-  border-radius: var(--radius-panel);
-  cursor: grab;
-  user-select: none;
-}
-
-.repository-card:hover {
-  border-color: var(--color-rule-strong);
-  background: var(--color-surface-2);
-}
-
-.repository-card:focus-visible {
-  border-color: var(--color-accent);
-  outline: var(--rule-active) solid var(--color-focus);
-  outline-offset: var(--rule-thin);
-}
-
-.repository-card:active {
-  cursor: grabbing;
-}
-
-.repository-card.is-dragging {
-  cursor: grabbing;
-  outline: var(--rule-active) solid var(--color-accent);
-  outline-offset: var(--space-3xs);
-  opacity: 0.72;
-}
-
 /* ================= 排版基线 ================= */
 
 /*
@@ -3487,112 +3457,33 @@ svg[data-spin="true"] {
   line-height: var(--leading-heading);
 }
 
-/* ================= 节点仓库 ================= */
-
-/*
- * 节点仓库图标：九个模板原来各用一个饱和实心色块，在 272px 侧板里堆成一条
- * 彩虹，比画布本身更抢眼。这里统一收敛为「深色底 + 语义色前景」的同一套做法：
- * 色相仍然表达节点类型，但明度压低，让侧板退回导航层级，画布内容成为主角。
- */
-.repository-card__icon {
-  display: grid;
-  place-items: center;
-  flex: 0 0 auto;
-  width: 2rem;
-  height: 2rem;
-  color: var(--color-text-2);
-  background: var(--color-surface-2);
-  border: var(--rule-thin) solid var(--color-rule-faint);
-  border-radius: var(--radius-sm);
-}
-
-/* 媒体类型：保留类型识别色，改用 soft 底 + strong 前景 */
-.repository-card--image .repository-card__icon {
-  color: var(--color-image-strong);
-  background: var(--color-image-soft);
-  border-color: color-mix(in oklch, var(--color-image) 42%, transparent);
-}
-
-.repository-card--video .repository-card__icon,
-.repository-card--video_composer .repository-card__icon,
-.repository-card--storyboard .repository-card__icon {
-  color: var(--color-video-strong);
-  background: var(--color-video-soft);
-  border-color: color-mix(in oklch, var(--color-video) 42%, transparent);
-}
-
-.repository-card--video_downloader .repository-card__icon,
-.repository-card--viral_remix .repository-card__icon {
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border-color: color-mix(in oklch, var(--color-accent) 42%, transparent);
-}
-
-.repository-card--screenplay .repository-card__icon {
-  color: var(--color-audio-strong);
-  background: var(--color-audio-soft);
-  border-color: color-mix(in oklch, var(--color-audio) 42%, transparent);
-}
-
-.repository-card--prompt .repository-card__icon {
-  color: var(--color-text);
-  background: var(--color-surface-3);
-  border-color: var(--color-rule);
-}
-
-.repository-card__body {
-  display: grid;
-  min-width: 0;
-}
-
-.repository-card__label {
-  color: var(--color-chrome-ink);
-  font-family: var(--font-body);
-  font-size: var(--text-xs);
-  font-weight: 600;
-}
-
-/* ============ 工作流仓库（底部整组模板，一次放入画布） ============ */
+/* ============ 工作流仓库（顶栏弹出模板，一次放入画布） ============ */
 
 .workflow-repository {
-  z-index: var(--z-raised);
-  grid-area: workflows;
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
+  position: relative;
+  flex: 0 0 auto;
   min-width: 0;
-  min-height: 0;
-  height: 3.25rem;
-  overflow: hidden;
   color: var(--color-chrome-ink);
-  background: var(--color-chrome-2);
-  border-top: var(--rule-thin) solid var(--color-rule);
-  transition: height var(--dur-short) var(--ease-out);
-}
-
-.workflow-repository--expanded {
-  height: clamp(12rem, 25vh, 15rem);
 }
 
 .workflow-repository__toggle {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: var(--space-xs);
+  display: flex;
+  gap: var(--space-2xs);
   align-items: center;
-  width: 100%;
-  min-height: 3.25rem;
-  padding: var(--space-xs) var(--space-md);
+  min-height: var(--size-control);
+  padding: var(--space-2xs) var(--space-xs);
   color: inherit;
   text-align: start;
   background: var(--color-chrome-2);
-  border: 0;
-  border-bottom: var(--rule-thin) solid transparent;
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
 }
 
 .workflow-repository--expanded .workflow-repository__toggle {
-  border-bottom-color: var(--color-chrome-rule);
+  border-color: var(--color-accent);
+  background: var(--color-chrome-3);
 }
 
-.workflow-repository__toggle-mark,
 .workflow-repository__card-mark {
   display: grid;
   place-items: center;
@@ -3603,8 +3494,9 @@ svg[data-spin="true"] {
 }
 
 .workflow-repository__toggle-mark {
-  width: 2rem;
-  height: 2rem;
+  display: grid;
+  place-items: center;
+  color: var(--color-accent);
 }
 
 .workflow-repository__toggle-copy {
@@ -3619,7 +3511,6 @@ svg[data-spin="true"] {
   font-weight: 700;
 }
 
-.workflow-repository__summary,
 .workflow-repository__count {
   color: var(--color-chrome-subtle);
   font-size: var(--text-2xs);
@@ -3635,6 +3526,7 @@ svg[data-spin="true"] {
 
 .workflow-repository__toggle-icon {
   color: var(--color-chrome-muted);
+  transform: rotate(90deg);
   transition: transform var(--dur-short) var(--ease-out);
 }
 
@@ -3643,15 +3535,49 @@ svg[data-spin="true"] {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .workflow-repository__toggle:hover {
+  .workflow-repository__toggle:hover,
+  .workflow-repository__close:hover,
+  .canvas-add-node-trigger:hover {
     background: var(--color-chrome-3);
   }
 }
 
 .workflow-repository__content {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  top: calc(100% + var(--space-xs));
+  left: 0;
+  width: min(42rem, calc(100vw - 2 * var(--space-md)));
   min-height: 0;
-  padding: var(--space-sm) var(--space-md);
+  max-height: min(44rem, calc(100dvh - var(--size-header) - var(--space-lg)));
+  padding: var(--space-sm);
   overflow: auto;
+  overscroll-behavior: contain;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-2);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-raised);
+}
+
+.workflow-repository__content-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-sm);
+  margin-bottom: var(--space-sm);
+}
+
+.workflow-repository__close {
+  display: grid;
+  place-items: center;
+  width: var(--size-control);
+  height: var(--size-control);
+  padding: 0;
+  color: var(--color-chrome-muted);
+  background: var(--color-transparent);
+  border: var(--rule-thin) solid var(--color-chrome-rule);
+  border-radius: var(--radius-control);
 }
 
 .workflow-repository__content[hidden] {
@@ -3660,7 +3586,7 @@ svg[data-spin="true"] {
 
 .workflow-repository__card {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: var(--space-sm);
   align-items: center;
   min-height: 7.5rem;
@@ -3892,6 +3818,8 @@ svg[data-spin="true"] {
   gap: var(--space-2xs);
   align-items: center;
   justify-content: center;
+  grid-column: 2;
+  justify-self: start;
   min-width: 7.5rem;
   min-height: var(--size-control);
   padding-inline: var(--space-sm);
@@ -9692,12 +9620,12 @@ svg[data-spin="true"] {
 }
 
 @media (max-width: 40rem) {
-  .workflow-repository--expanded {
-    height: min(22rem, 42vh);
-  }
-
-  .workflow-repository__toggle {
-    padding-inline: var(--space-sm);
+  .workflow-repository__toggle-copy {
+    position: absolute;
+    width: var(--rule-thin);
+    height: var(--rule-thin);
+    overflow: hidden;
+    clip-path: inset(50%);
   }
 
   .workflow-repository__content {
@@ -9839,13 +9767,40 @@ svg[data-spin="true"] {
   }
 }
 
+@media (max-width: 59.999rem) {
+  .workspace-shell {
+    --size-header: 7rem;
+  }
+
+  .workspace-header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    grid-template-rows: repeat(2, minmax(0, 1fr));
+  }
+
+  .workspace-header > .brand-lockup {
+    grid-column: 1;
+    grid-row: 1;
+  }
+
+  .workspace-header > .header-actions {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .workspace-header__navigation {
+    grid-column: 1 / -1;
+    grid-row: 2;
+    margin-inline: 0;
+  }
+}
+
 @media (min-width: 60rem) {
   .workspace-shell {
     grid-template:
-      "header header header" var(--size-header)
-      "nodes assets canvas" minmax(0, 1fr)
-      "workflows workflows workflows" auto /
-      var(--size-nodes) var(--size-assets) minmax(0, 1fr);
+      "header header" var(--size-header)
+      "assets canvas" minmax(0, 1fr) /
+      var(--size-assets) minmax(0, 1fr);
   }
 
   .save-state {
@@ -9858,8 +9813,7 @@ svg[data-spin="true"] {
     display: none;
   }
 
-  .asset-panel,
-  .node-panel {
+  .asset-panel {
     position: relative;
     z-index: var(--z-raised);
     top: auto;
@@ -9878,10 +9832,6 @@ svg[data-spin="true"] {
     display: flex;
     flex-direction: column;
     grid-area: assets;
-  }
-
-  .node-panel {
-    grid-area: nodes;
   }
 }
 

@@ -1,11 +1,12 @@
 .connection-quick-add-menu {
   position: fixed;
   z-index: var(--z-modal);
-  width: 14rem;
+  width: 16rem;
   max-width: calc(100vw - var(--space-md));
-  max-height: calc(100dvh - var(--space-md));
+  max-height: min(36rem, calc(100dvh - var(--space-md)));
   overflow-y: auto;
   overscroll-behavior: contain;
+  scroll-padding-block: var(--space-xs);
   padding: var(--space-xs);
   border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-panel);
@@ -31,6 +32,7 @@
 .connection-quick-add-menu__heading span {
   color: var(--color-muted);
   font-size: var(--text-sm);
+  line-height: var(--leading-body);
 }
 
 .connection-quick-add-menu__item {
@@ -56,12 +58,24 @@
   color: var(--color-image-strong);
 }
 
-.connection-quick-add-menu__item--video svg {
+.connection-quick-add-menu__item--video svg,
+.connection-quick-add-menu__item--video_composer svg,
+.connection-quick-add-menu__item--storyboard svg {
   color: var(--color-video-strong);
 }
 
-.connection-quick-add-menu__item--prompt svg {
+.connection-quick-add-menu__item--prompt svg,
+.connection-quick-add-menu__item--video_downloader svg,
+.connection-quick-add-menu__item--viral_remix svg {
   color: var(--color-accent);
+}
+
+.connection-quick-add-menu__item--screenplay svg {
+  color: var(--color-warning);
+}
+
+.connection-quick-add-menu__item--frame_extractor svg {
+  color: var(--color-muted);
 }
 
 .connection-quick-add-menu__item:focus-visible {

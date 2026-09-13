@@ -1,19 +1,19 @@
 .canvas-tabs {
-  grid-area: canvases;
   display: flex;
+  flex: 1 1 auto;
   align-items: center;
   gap: var(--space-xs);
   min-width: 0;
-  padding: var(--space-2xs) var(--space-sm);
-  border-top: var(--rule-thin) solid var(--color-chrome-rule);
+  padding: 0;
   background: var(--color-chrome);
   color: var(--color-chrome-ink);
 }
 
 .canvas-tabs__list {
   display: flex;
+  flex: 0 1 auto;
   align-items: center;
-  gap: var(--space-xs);
+  gap: var(--space-2xs);
   min-width: 0;
   overflow-x: auto;
   overscroll-behavior-x: contain;
@@ -27,7 +27,7 @@
   display: flex;
   flex: 0 0 auto;
   min-width: 7rem;
-  max-width: 16rem;
+  max-width: 14rem;
   border: var(--rule-thin) solid var(--color-transparent);
   border-radius: var(--radius-control);
   background: var(--color-chrome-2);
@@ -120,5 +120,16 @@
 @media (prefers-reduced-motion: reduce) {
   .canvas-tabs button {
     transition: none;
+  }
+}
+
+@media (max-width: 40rem) {
+  .canvas-tabs__create {
+    width: var(--size-control);
+    padding: 0;
+  }
+
+  .canvas-tabs__create > span {
+    display: none;
   }
 }

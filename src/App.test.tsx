@@ -41,43 +41,11 @@ function cloudAsset(
   };
 }
 
-// 节点仓库卡片与素材卡片统一走指针拖拽（Tauri WebView 会拦截 HTML5 dataTransfer 拖拽），
-// 测试必须模拟真实交互路径：pointerdown → pointermove(超过阈值) → pointerup。
-function dragToCanvas(source: HTMLElement): void {
-  const viewport = document.querySelector<HTMLElement>(".canvas-viewport");
-  expect(viewport).not.toBeNull();
-  vi.spyOn(viewport!, "getBoundingClientRect").mockReturnValue({
-    x: 0,
-    y: 0,
-    top: 0,
-    left: 0,
-    right: 1280,
-    bottom: 800,
-    width: 1280,
-    height: 800,
-    toJSON: () => ({}),
-  });
-
-  fireEvent.pointerDown(source, {
-    pointerId: 1,
-    isPrimary: true,
-    button: 0,
-    clientX: 20,
-    clientY: 20,
-  });
-  fireEvent.pointerMove(window, {
-    pointerId: 1,
-    isPrimary: true,
-    clientX: 40,
-    clientY: 40,
-  });
-  fireEvent.pointerUp(window, {
-    pointerId: 1,
-    isPrimary: true,
-    button: 0,
-    clientX: 370,
-    clientY: 222,
-  });
+function createNode(name: string): void {
+  fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+  fireEvent.click(
+    within(screen.getByRole("menu", { name: "添加节点" })).getByRole("menuitem", { name }),
+  );
 }
 
 /** 画布视口变换层当前的内联 transform（判断平移/缩放是否落到视口上）。 */
@@ -133,40 +101,48 @@ describe("App workspace", () => {
     expect(canvas.querySelector(".canvas-asset-node")).toBeNull();
     expect(canvas.querySelector(".canvas-result-node")).toBeNull();
 
-    // 节点仓库是独立侧板（不再嵌在素材库内）。
-    const repository = screen.getByRole("complementary", { name: "节点仓库" });
+    // 节点入口收进画布菜单，侧边仅保留素材库。
+    expect(screen.queryByRole("complementary", { name: "节点仓库" })).not.toBeInTheDocument();
     const assetPanel = screen.getByRole("complementary", { name: "素材库" });
     expect(assetPanel.querySelector(".repository-card")).toBeNull();
-    expect(repository.querySelectorAll(".repository-card")).toHaveLength(9);
-    const templates = within(repository).getAllByRole("button", { name: /拖拽创建/ });
-    expect(templates).toHaveLength(9);
-    expect(templates[0]).toHaveAccessibleName("拖拽创建图片生成节点");
-    expect(templates[1]).toHaveAccessibleName("拖拽创建视频生成节点");
-    expect(templates[2]).toHaveAccessibleName("拖拽创建视频拼接与合成节点");
-    expect(templates[3]).toHaveAccessibleName("拖拽创建网络爆款视频下载节点");
-    expect(templates[4]).toHaveAccessibleName("拖拽创建视频抽帧节点");
-    expect(templates[5]).toHaveAccessibleName("拖拽创建爆款视频复刻节点");
-    expect(templates[6]).toHaveAccessibleName("拖拽创建提示词生成与优化节点");
-    expect(templates[7]).toHaveAccessibleName("拖拽创建剧本创作与优化节点");
-    expect(templates[8]).toHaveAccessibleName("拖拽创建剧本转工业级分镜脚本节点");
-    expect(within(repository).queryByRole("button", { name: /结果/ })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
+    const menu = screen.getByRole("menu", { name: "添加节点" });
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+    for (const name of [
+      "图片生成",
+      "视频生成",
+      "视频拼接与合成",
+      "网络爆款视频下载",
+      "视频抽帧",
+      "爆款视频复刻",
+      "提示词生成与优化",
+      "剧本创作与优化",
+      "剧本转工业级分镜脚本",
+    ]) {
+      expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
+    }
+    fireEvent.keyDown(menu, { key: "Escape" });
     expect(screen.queryByRole("button", { name: /取消/ })).not.toBeInTheDocument();
 
     const workflowRepository = screen.getByRole("complementary", { name: "工作流仓库" });
     const workflowToggle = within(workflowRepository).getByRole("button", {
-      name: /工作流仓库/,
+      name: "工作流仓库",
     });
     expect(workflowToggle).toHaveAttribute("aria-expanded", "false");
     expect(workflowRepository.querySelector(".workflow-repository__content")).toHaveAttribute(
       "hidden",
     );
+    const header = screen.getByRole("banner");
+    expect(header).toContainElement(workflowToggle);
+    expect(header).toContainElement(screen.getByRole("button", { name: "新建画布" }));
+    expect(header).toContainElement(screen.getByRole("tab", { name: "未命名画布" }));
   });
 
-  it("expands the bottom workflow repository and inserts one automated workflow node", async () => {
+  it("expands the header workflow repository and inserts one automated workflow node", async () => {
     render(<App />);
 
     const workflowRepository = screen.getByRole("complementary", { name: "工作流仓库" });
-    fireEvent.click(within(workflowRepository).getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(within(workflowRepository).getByRole("button", { name: "工作流仓库" }));
 
     expect(workflowRepository).toHaveClass("workflow-repository--expanded");
     expect(
@@ -194,9 +170,9 @@ describe("App workspace", () => {
     });
   });
 
-  it("adds a single film node from the bottom workflow repository", async () => {
+  it("adds a single film node from the header workflow repository", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "工作流仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "添加AI影视工作流节点" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".canvas-ai-film-workflow")).toHaveLength(1);
@@ -204,15 +180,15 @@ describe("App workspace", () => {
       expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     });
     expect(screen.getByLabelText("影视制作要求")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "工作流仓库" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
   });
 
-  it("adds a single comic drama node and collapses the bottom repository", async () => {
+  it("adds a single comic drama node and collapses the header repository", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "工作流仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "添加漫剧自动工作流节点" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".canvas-comic-drama-workflow")).toHaveLength(1);
@@ -220,7 +196,7 @@ describe("App workspace", () => {
       expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     });
     expect(screen.getByLabelText("漫剧制作要求")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "工作流仓库" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -228,7 +204,7 @@ describe("App workspace", () => {
 
   it("adds one commerce workflow node with product settings and collapses the repository", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "工作流仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "添加剧情带货工作流节点" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".canvas-commerce-workflow")).toHaveLength(1);
@@ -236,7 +212,7 @@ describe("App workspace", () => {
       expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     });
     expect(screen.getByLabelText("带货商品名称")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "工作流仓库" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -244,7 +220,7 @@ describe("App workspace", () => {
 
   it("adds one animation workflow node with only a text model and collapses the repository", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "工作流仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "添加动画逻辑图工作流节点" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".canvas-remotion-workflow")).toHaveLength(1);
@@ -252,7 +228,7 @@ describe("App workspace", () => {
       expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     });
     expect(screen.getByLabelText("动画制作要求")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "工作流仓库" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -264,7 +240,7 @@ describe("App workspace", () => {
 
   it("adds one cover workflow with portrait inputs and only text and image models", async () => {
     render(<App />);
-    fireEvent.click(screen.getByRole("button", { name: /工作流仓库/ }));
+    fireEvent.click(screen.getByRole("button", { name: "工作流仓库" }));
     fireEvent.click(screen.getByRole("button", { name: "添加小红书封面工作流节点" }));
     await waitFor(() => {
       expect(document.querySelectorAll(".canvas-xhs-cover-workflow")).toHaveLength(1);
@@ -272,7 +248,7 @@ describe("App workspace", () => {
       expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
     });
     expect(screen.getByLabelText("封面内容")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: /工作流仓库/ })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "工作流仓库" })).toHaveAttribute(
       "aria-expanded",
       "false",
     );
@@ -362,22 +338,13 @@ describe("App workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "关闭素材库" }));
     expect(assetPanel).not.toHaveClass("is-mobile-open");
 
-    // 节点仓库是独立侧板，有自己的触发按钮与关闭按钮。
-    const nodePanel = screen.getByRole("complementary", { name: "节点仓库" });
-    const nodeTrigger = screen.getByRole("button", { name: "打开节点仓库侧板" });
-    expect(nodeTrigger).toHaveAttribute("aria-controls", "node-panel");
-    fireEvent.click(nodeTrigger);
-    expect(nodePanel).toHaveClass("is-mobile-open");
-    expect(nodeTrigger).toHaveAttribute("aria-expanded", "true");
-
-    fireEvent.click(screen.getByRole("button", { name: "关闭节点仓库" }));
-    expect(nodePanel).not.toHaveClass("is-mobile-open");
+    expect(screen.queryByRole("button", { name: "打开节点仓库侧板" })).not.toBeInTheDocument();
   });
 
   it("keeps every video generation setting on the video node card", async () => {
     render(<App />);
 
-    dragToCanvas(screen.getByRole("button", { name: "拖拽创建视频生成节点" }));
+    createNode("视频生成");
 
     const videoNode = document.querySelector<HTMLElement>(".canvas-gen-node--video");
     expect(videoNode).not.toBeNull();
@@ -417,7 +384,7 @@ describe("App workspace", () => {
   it("keeps every image generation setting on the image node card", async () => {
     render(<App />);
 
-    dragToCanvas(screen.getByRole("button", { name: "拖拽创建图片生成节点" }));
+    createNode("图片生成");
 
     const imageNode = document.querySelector<HTMLElement>(".canvas-gen-node--image");
     expect(imageNode).not.toBeNull();
@@ -449,7 +416,7 @@ describe("App workspace", () => {
   it("expands long image prompts and keeps edits synchronized with the node", async () => {
     render(<App />);
 
-    dragToCanvas(screen.getByRole("button", { name: "拖拽创建图片生成节点" }));
+    createNode("图片生成");
     const imageNode = document.querySelector<HTMLElement>(".canvas-gen-node--image");
     expect(imageNode).not.toBeNull();
     await waitForNodeVisible(imageNode!);
@@ -2232,8 +2199,8 @@ describe("App workspace", () => {
     // 遮罩），无需自建 dialog 框架。
     render(<App />);
 
-    // 拖入一个视频生成节点到画布，作为「画布非空」的初始证据。
-    dragToCanvas(screen.getByRole("button", { name: "拖拽创建视频生成节点" }));
+    // 添加一个视频生成节点到画布，作为「画布非空」的初始证据。
+    createNode("视频生成");
     expect(document.querySelector(".canvas-gen-node--video")).not.toBeNull();
 
     // 找到 header 上的清空按钮。
@@ -2260,7 +2227,7 @@ describe("App workspace", () => {
     // 验证取消路径同样安全：用户从弹窗取消时画布节点必须保留。
     render(<App />);
 
-    dragToCanvas(screen.getByRole("button", { name: "拖拽创建视频生成节点" }));
+    createNode("视频生成");
     expect(document.querySelector(".canvas-gen-node--video")).not.toBeNull();
 
     fireEvent.click(screen.getByRole("button", { name: "清空画布" }));

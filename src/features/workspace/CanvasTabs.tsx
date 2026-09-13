@@ -195,7 +195,14 @@ export const CanvasTabs = memo(function CanvasTabs({
           );
         })}
       </div>
-      <button type="button" className="canvas-tabs__create" disabled={busy} onClick={onCreate}>
+      <button
+        type="button"
+        className="canvas-tabs__create"
+        aria-label="新建画布"
+        title="新建画布"
+        disabled={busy}
+        onClick={onCreate}
+      >
         <Icon name="plus" aria-hidden="true" size="md" />
         <span>新建画布</span>
       </button>

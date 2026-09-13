@@ -56,7 +56,7 @@ export type RepositoryNodeKind =
   | "video_composer"
   | "video_downloader"
   | "frame_extractor";
-export type MobilePanel = "assets" | "nodes" | null;
+export type MobilePanel = "assets" | null;
 
 export interface NodeModelSelection {
   readonly providerId: string;
@@ -393,7 +393,7 @@ export function nearestAvailableNodePosition(
 export const OUTPUT_NODE_GAP_X = 96;
 export const OUTPUT_NODE_GAP_Y = 32;
 
-// 素材卡片与节点仓库卡片统一使用指针拖拽（见 RepositoryCard / AssetCard）：
+// 素材卡片使用指针拖拽（见 AssetCard）：
 // Tauri WebView 的系统拖放处理器会拦截 HTML5 dataTransfer 拖拽，不能依赖 draggable。
 
 export interface BaseGenNodeData {
@@ -404,7 +404,7 @@ export interface BaseGenNodeData {
   readonly measured?: { readonly width: number; readonly height: number };
 }
 
-/** 画布上的生成节点实例（从节点仓库拖入，可无限重复）。 */
+/** 画布上的生成节点实例（从节点列表创建，可无限重复）。 */
 export type GenNodeData =
   | (BaseGenNodeData & {
       readonly kind: "image";

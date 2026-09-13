@@ -1,34 +1,28 @@
-import { Icon, type IconName } from "../../components/Icon";
-import { useEffect, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Icon } from "../../components/Icon";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
 
-import { type CanvasGenNodeKind } from "./workspaceModel";
+import { CANVAS_QUICK_ADD_CHOICES, type CanvasQuickAddKind } from "./canvasQuickAddCatalog";
 import "./ConnectionQuickAddMenu.css";
 
 export interface ConnectionQuickAddMenuProps {
   readonly position: { readonly x: number; readonly y: number };
-  readonly onSelect: (kind: CanvasGenNodeKind) => void;
+  readonly connectionMode?: boolean;
+  readonly triggerElement?: HTMLElement | null;
+  readonly onSelect: (kind: CanvasQuickAddKind) => void;
   readonly onClose: () => void;
 }
-
-/* 数据里存图标名而不是组件，让这三个入口也走图标层的尺寸与字重规则。 */
-const choices: readonly {
-  readonly kind: CanvasGenNodeKind;
-  readonly label: string;
-  readonly icon: IconName;
-}[] = [
-  { kind: "image", label: "图片生成", icon: "image" },
-  { kind: "video", label: "视频生成", icon: "video-camera" },
-  { kind: "prompt", label: "提示词生成与优化", icon: "magic-wand" },
-];
 
 const VIEWPORT_MARGIN = 8;
 
 export function ConnectionQuickAddMenu({
   position,
+  connectionMode = false,
+  triggerElement,
   onSelect,
   onClose,
 }: ConnectionQuickAddMenuProps) {
+  const descriptionId = useId();
   const menuRef = useRef<HTMLDivElement>(null);
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
   const previousFocusRef = useRef<HTMLElement | null>(null);
@@ -59,7 +53,13 @@ export function ConnectionQuickAddMenu({
 
   useEffect(() => {
     function handleOutsidePointerDown(event: PointerEvent) {
-      if (event.target instanceof Node && !menuRef.current?.contains(event.target)) onClose();
+      if (
+        event.target instanceof Node &&
+        !menuRef.current?.contains(event.target) &&
+        !triggerElement?.contains(event.target)
+      ) {
+        onClose();
+      }
     }
     document.addEventListener("pointerdown", handleOutsidePointerDown, true);
     window.addEventListener("resize", onClose);
@@ -67,7 +67,7 @@ export function ConnectionQuickAddMenu({
       document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
       window.removeEventListener("resize", onClose);
     };
-  }, [onClose]);
+  }, [onClose, triggerElement]);
 
   useEffect(() => () => window.clearTimeout(tabCloseTimerRef.current), []);
 
@@ -92,16 +92,17 @@ export function ConnectionQuickAddMenu({
     let nextIndex: number;
     switch (event.key) {
       case "ArrowDown":
-        nextIndex = (currentIndex + 1) % choices.length;
+        nextIndex = (currentIndex + 1) % CANVAS_QUICK_ADD_CHOICES.length;
         break;
       case "ArrowUp":
-        nextIndex = (currentIndex + choices.length - 1) % choices.length;
+        nextIndex =
+          (currentIndex + CANVAS_QUICK_ADD_CHOICES.length - 1) % CANVAS_QUICK_ADD_CHOICES.length;
         break;
       case "Home":
         nextIndex = 0;
         break;
       case "End":
-        nextIndex = choices.length - 1;
+        nextIndex = CANVAS_QUICK_ADD_CHOICES.length - 1;
         break;
       default:
         return;
@@ -114,7 +115,8 @@ export function ConnectionQuickAddMenu({
     <div
       ref={menuRef}
       role="menu"
-      aria-label="常用生成节点"
+      aria-label="添加节点"
+      aria-describedby={descriptionId}
       className="connection-quick-add-menu nodrag nopan nowheel"
       style={{ left: position.x, top: position.y }}
       onKeyDown={handleKeyDown}
@@ -132,10 +134,12 @@ export function ConnectionQuickAddMenu({
       }}
     >
       <div className="connection-quick-add-menu__heading" role="presentation">
-        <strong>常用生成节点</strong>
-        <span>选择后创建并自动连线</span>
+        <strong>添加节点</strong>
+        <span id={descriptionId}>
+          {connectionMode ? "选择后创建并自动连线" : "选择后在画布创建节点"}
+        </span>
       </div>
-      {choices.map(({ kind, label, icon }, index) => (
+      {CANVAS_QUICK_ADD_CHOICES.map(({ kind, label, icon }, index) => (
         <button
           key={kind}
           ref={(button) => {

@@ -2,9 +2,9 @@
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
 import { formatBytes, assetLibraryClient } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
-import { AssetKindIcon, NodeTypeIcon } from "./PromptNodeViews";
+import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
-import type { AssetItem, AssetKind, AssetUploadEntry, RepositoryNodeKind } from "./workspaceModel";
+import type { AssetItem, AssetKind, AssetUploadEntry } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
   ASSET_KIND_LABELS,
@@ -448,109 +448,6 @@ export const AssetFlow = memo(function AssetFlow({
     </div>
   );
 });
-
-/**
- * 节点仓库卡片：按指针事件实现拖拽（与素材卡片一致）。
- * Tauri WebView 下 HTML5 原生拖拽会被系统拖放处理器拦截，因此不能依赖
- * draggable + dataTransfer；指针拖拽在桌面与浏览器环境都可靠。
- * 单击（未发生拖动）等价于在画布中心创建节点。
- */
-export function RepositoryCard({
-  nodeType,
-  label,
-  onAddToCanvas,
-  onDropToCanvas,
-}: {
-  readonly nodeType: RepositoryNodeKind;
-  readonly label: string;
-  readonly onAddToCanvas: () => void;
-  readonly onDropToCanvas: (clientX: number, clientY: number) => void;
-}) {
-  const dragged = useRef(false);
-  const pointerDragRef = useRef<{
-    pointerId: number;
-    startX: number;
-    startY: number;
-    active: boolean;
-  } | null>(null);
-  const [pointerDragging, setPointerDragging] = useState(false);
-
-  useEffect(() => {
-    const finishPointerDrag = (event: PointerEvent, cancelled: boolean) => {
-      const drag = pointerDragRef.current;
-      if (drag == null || event.pointerId !== drag.pointerId) return;
-      pointerDragRef.current = null;
-      setPointerDragging(false);
-      if (!drag.active) return;
-      event.preventDefault();
-      if (!cancelled) onDropToCanvas(event.clientX, event.clientY);
-      window.requestAnimationFrame(() => {
-        dragged.current = false;
-      });
-    };
-    const handlePointerMove = (event: PointerEvent) => {
-      const drag = pointerDragRef.current;
-      if (drag == null || event.pointerId !== drag.pointerId) return;
-      if (
-        !drag.active &&
-        Math.hypot(event.clientX - drag.startX, event.clientY - drag.startY) >= 6
-      ) {
-        drag.active = true;
-        dragged.current = true;
-        setPointerDragging(true);
-      }
-      if (drag.active) event.preventDefault();
-    };
-    const handlePointerUp = (event: PointerEvent) => finishPointerDrag(event, false);
-    const handlePointerCancel = (event: PointerEvent) => finishPointerDrag(event, true);
-
-    window.addEventListener("pointermove", handlePointerMove);
-    window.addEventListener("pointerup", handlePointerUp);
-    window.addEventListener("pointercancel", handlePointerCancel);
-    return () => {
-      window.removeEventListener("pointermove", handlePointerMove);
-      window.removeEventListener("pointerup", handlePointerUp);
-      window.removeEventListener("pointercancel", handlePointerCancel);
-    };
-  }, [onDropToCanvas]);
-
-  return (
-    <div
-      className={`repository-card repository-card--${nodeType}${pointerDragging ? " is-dragging" : ""}`}
-      role="button"
-      tabIndex={0}
-      aria-label={`拖拽创建${label}节点`}
-      onPointerDown={(event) => {
-        if (!event.isPrimary || event.button !== 0) return;
-        pointerDragRef.current = {
-          pointerId: event.pointerId,
-          startX: event.clientX,
-          startY: event.clientY,
-          active: false,
-        };
-      }}
-      onClick={() => {
-        if (dragged.current) {
-          dragged.current = false;
-          return;
-        }
-        onAddToCanvas();
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onAddToCanvas();
-      }}
-    >
-      <span className="repository-card__icon">
-        <NodeTypeIcon kind={nodeType} size={18} />
-      </span>
-      <span className="repository-card__body">
-        <span className="repository-card__label">{label}</span>
-      </span>
-    </div>
-  );
-}
 
 export function AssetUploadRow({
   entry,

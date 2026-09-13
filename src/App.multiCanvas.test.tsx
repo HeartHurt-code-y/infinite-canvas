@@ -54,9 +54,9 @@ async function addNode(
   clientY = 180,
 ): Promise<HTMLElement> {
   const labels = {
-    image: "拖拽创建图片生成节点",
-    video: "拖拽创建视频生成节点",
-    prompt: "拖拽创建提示词生成与优化节点",
+    image: "图片生成",
+    video: "视频生成",
+    prompt: "提示词生成与优化",
   };
   const canvas = activeCanvas();
   const selector = `.canvas-gen-node--${kind}`;
@@ -73,16 +73,16 @@ async function addNode(
     height: 800,
     toJSON: () => ({}),
   });
-  const source = screen.getByRole("button", { name: labels[kind] });
-  fireEvent.pointerDown(source, {
-    pointerId: 1,
-    isPrimary: true,
-    button: 0,
-    clientX: 20,
-    clientY: 20,
+  fireEvent.contextMenu(canvas.querySelector<HTMLElement>(".react-flow__pane")!, {
+    button: 2,
+    clientX,
+    clientY,
   });
-  fireEvent.pointerMove(window, { pointerId: 1, isPrimary: true, clientX: 40, clientY: 40 });
-  fireEvent.pointerUp(window, { pointerId: 1, isPrimary: true, button: 0, clientX, clientY });
+  fireEvent.click(
+    within(screen.getByRole("menu", { name: "添加节点" })).getByRole("menuitem", {
+      name: labels[kind],
+    }),
+  );
   await waitFor(() => expect(canvas.querySelectorAll(selector)).toHaveLength(countBefore + 1));
   const node = Array.from(canvas.querySelectorAll<HTMLElement>(selector)).at(-1)!;
   await waitFor(() =>
@@ -186,6 +186,45 @@ afterEach(() => {
 });
 
 describe("App independent canvases", () => {
+  it("waits for a new canvas to load before enabling its header navigation and restoring keyboard focus", async () => {
+    render(<App />);
+    await waitForCanvasReady();
+    const originalId = window.localStorage.getItem(ACTIVE_CANVAS_STORAGE_KEY)!;
+    const originalGet = canvasDocumentRepository.get;
+    let releaseRead!: () => void;
+    const pendingRead = new Promise<void>((resolve) => {
+      releaseRead = resolve;
+    });
+    const get = vi.spyOn(canvasDocumentRepository, "get").mockImplementation(async (canvasId) => {
+      if (canvasId !== originalId) await pendingRead;
+      return originalGet(canvasId);
+    });
+
+    fireEvent.click(screen.getByRole("button", { name: "新建画布" }));
+    const newTab = await screen.findByRole("tab", { name: "画布 2" });
+    await waitFor(() => expect(get).toHaveBeenCalled());
+    expect(newTab).toHaveAttribute("aria-selected", "true");
+    expect(newTab).toHaveAttribute("aria-disabled", "true");
+    expect(newTab).not.toHaveFocus();
+    expect(screen.getByRole("button", { name: "新建画布" })).toBeDisabled();
+    expect(screen.getByText("正在读取画布…")).toBeInTheDocument();
+
+    await act(async () => {
+      releaseRead();
+      await pendingRead;
+    });
+    await waitForCanvasReady();
+    await waitFor(() => expect(screen.getByRole("tab", { name: "画布 2" })).toHaveFocus());
+
+    fireEvent.keyDown(screen.getByRole("tab", { name: "画布 2" }), { key: "ArrowRight" });
+    await waitFor(() => expect(screen.getByRole("tab", { name: "未命名画布" })).toHaveFocus());
+    expect(screen.getByRole("tab", { name: "未命名画布" })).toHaveAttribute(
+      "aria-selected",
+      "true",
+    );
+    await waitForCanvasReady();
+  });
+
   it("confirms deletion, selects the next or previous canvas, and retains the other scenes after reload", async () => {
     const originalId = `canvas-${crypto.randomUUID()}`;
     window.localStorage.setItem(ACTIVE_CANVAS_STORAGE_KEY, originalId);

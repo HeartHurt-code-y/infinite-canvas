@@ -1,4 +1,5 @@
 import { fireEvent, render, screen, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
@@ -122,7 +123,7 @@ describe("WorkflowRepository", () => {
     expect(onToggle).toHaveBeenCalledTimes(1);
     expect(toggle).toHaveAttribute("aria-expanded", "true");
     expect(content).not.toHaveAttribute("hidden");
-    expect(content).toHaveAttribute("role", "region");
+    expect(content).toHaveAttribute("role", "dialog");
     expect(content).toHaveAccessibleName("工作流仓库");
 
     fireEvent.click(toggle);
@@ -130,6 +131,71 @@ describe("WorkflowRepository", () => {
     expect(onToggle).toHaveBeenCalledTimes(2);
     expect(toggle).toHaveAttribute("aria-expanded", "false");
     expect(content).toHaveAttribute("hidden");
+  });
+
+  it("opens all seven templates and restores focus when dismissed with Escape or close", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [expanded, setExpanded] = useState(false);
+      return (
+        <WorkflowRepository
+          expanded={expanded}
+          onToggle={() => setExpanded((current) => !current)}
+          onInsertKnowledgeVideoWorkflow={vi.fn()}
+          onInsertAiFilmWorkflow={vi.fn()}
+          onInsertComicDramaWorkflow={vi.fn()}
+          onInsertCommerceWorkflow={vi.fn()}
+          onInsertRemotionWorkflow={vi.fn()}
+          onInsertXhsCoverWorkflow={vi.fn()}
+          onInsertReverseVideoWorkflow={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: "工作流仓库" });
+    await user.click(toggle);
+    const dialog = screen.getByRole("dialog", { name: "工作流仓库" });
+    expect(within(dialog).getAllByRole("heading")).toHaveLength(7);
+    expect(within(dialog).getByRole("button", { name: "添加短视频反推工作流节点" })).toHaveFocus();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(toggle).toHaveFocus();
+
+    await user.click(toggle);
+    await user.click(screen.getByRole("button", { name: "关闭工作流仓库" }));
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(toggle).toHaveFocus();
+  });
+
+  it("dismisses on outside pointer or focus without swallowing the outside action", async () => {
+    const user = userEvent.setup();
+    const outsideAction = vi.fn();
+    function Harness() {
+      const [expanded, setExpanded] = useState(false);
+      return (
+        <>
+          <WorkflowRepository
+            expanded={expanded}
+            onToggle={() => setExpanded((current) => !current)}
+            onInsertKnowledgeVideoWorkflow={vi.fn()}
+          />
+          <button onClick={outsideAction}>画布外部操作</button>
+        </>
+      );
+    }
+    render(<Harness />);
+    const toggle = screen.getByRole("button", { name: "工作流仓库" });
+    const outside = screen.getByRole("button", { name: "画布外部操作" });
+    await user.click(toggle);
+    await user.click(outside);
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(outsideAction).toHaveBeenCalledOnce();
+    expect(outside).toHaveFocus();
+
+    await user.click(toggle);
+    await user.tab();
+    expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+    expect(outside).toHaveFocus();
   });
 
   it("presents the compact automatic stages and inserts one workflow node", () => {

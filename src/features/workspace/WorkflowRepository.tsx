@@ -1,5 +1,5 @@
 import { Icon } from "../../components/Icon";
-import { memo, useId } from "react";
+import { memo, useEffect, useId, useRef } from "react";
 
 const KNOWLEDGE_VIDEO_WORKFLOW_STAGES = ["智能策划", "自动生成", "质量检查", "成片交付"] as const;
 
@@ -28,17 +28,65 @@ export const WorkflowRepository = memo(function WorkflowRepository({
 }: WorkflowRepositoryProps) {
   const contentId = useId();
   const toggleLabelId = useId();
+  const repositoryRef = useRef<HTMLElement>(null);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const contentRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!expanded) return;
+    const content = contentRef.current;
+    const toggle = toggleRef.current;
+    content
+      ?.querySelector<HTMLButtonElement>(".workflow-repository__insert:not(:disabled)")
+      ?.focus();
+    return () => {
+      if (content?.contains(document.activeElement)) toggle?.focus();
+    };
+  }, [expanded]);
+
+  useEffect(() => {
+    if (!expanded) return;
+    let dismissed = false;
+    const dismiss = () => {
+      if (dismissed) return;
+      dismissed = true;
+      onToggle();
+    };
+    const dismissOutside = (event: PointerEvent | FocusEvent) => {
+      if (event.target instanceof Node && !repositoryRef.current?.contains(event.target)) {
+        dismiss();
+      }
+    };
+    const dismissOnEscape = (event: globalThis.KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      dismiss();
+      toggleRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", dismissOutside);
+    document.addEventListener("focusin", dismissOutside);
+    document.addEventListener("keydown", dismissOnEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", dismissOutside);
+      document.removeEventListener("focusin", dismissOutside);
+      document.removeEventListener("keydown", dismissOnEscape, true);
+    };
+  }, [expanded, onToggle]);
 
   return (
     <aside
+      ref={repositoryRef}
       className={`workflow-repository${expanded ? " workflow-repository--expanded" : ""}`}
       aria-label="工作流仓库"
     >
       <button
+        ref={toggleRef}
         type="button"
         className="workflow-repository__toggle"
         aria-expanded={expanded}
         aria-controls={contentId}
+        aria-haspopup="dialog"
         onClick={onToggle}
       >
         <span className="workflow-repository__toggle-mark" aria-hidden="true">
@@ -48,11 +96,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
           <span id={toggleLabelId} className="workflow-repository__title">
             工作流仓库
           </span>
-          <span className="workflow-repository__summary">
-            {expanded ? "收起模板" : "展开可复用模板"}
-          </span>
         </span>
-        <span className="workflow-repository__count">7 个自动工作流</span>
         <Icon
           name="caret-right"
           className="workflow-repository__toggle-icon"
@@ -62,12 +106,24 @@ export const WorkflowRepository = memo(function WorkflowRepository({
       </button>
 
       <div
+        ref={contentRef}
         id={contentId}
         className="workflow-repository__content"
-        role="region"
+        role="dialog"
         aria-labelledby={toggleLabelId}
         hidden={!expanded}
       >
+        <div className="workflow-repository__content-heading">
+          <span className="workflow-repository__count">7 个自动工作流</span>
+          <button
+            type="button"
+            className="workflow-repository__close"
+            aria-label="关闭工作流仓库"
+            onClick={onToggle}
+          >
+            <Icon name="x" size="lg" aria-hidden="true" />
+          </button>
+        </div>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
             <Icon name="film-slate" size="2xl" />

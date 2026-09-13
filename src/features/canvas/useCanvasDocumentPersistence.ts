@@ -168,13 +168,14 @@ export function useCanvasDocumentPersistence({
   }, [schedule]);
 
   useEffect(() => {
+    // Notify the workspace after the hydrated UI commits, when its controls can receive focus.
     return services.register(canvasId, {
       flush,
-      isReady: () => ready.current && !suspended.current,
+      isReady: () => hydrated && ready.current && !suspended.current,
       prepareDelete,
       resumeAfterDeleteFailure,
     });
-  }, [canvasId, flush, prepareDelete, resumeAfterDeleteFailure, services]);
+  }, [canvasId, flush, hydrated, prepareDelete, resumeAfterDeleteFailure, services]);
 
   useEffect(
     () => () => {

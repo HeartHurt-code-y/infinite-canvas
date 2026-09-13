@@ -25,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
 import { toast } from "sonner";
@@ -115,7 +116,7 @@ import {
 
 import { CanvasFlowEdgeView, CanvasFlowNodeView } from "./CanvasFlowViews";
 import { ConnectionQuickAddMenu } from "./ConnectionQuickAddMenu";
-import { RepositoryCard } from "./AssetLibraryViews";
+import { type CanvasQuickAddKind } from "./canvasQuickAddCatalog";
 import { AssetPanel } from "./AssetPanelViews";
 import {
   AssetGroupCreateDialog,
@@ -170,6 +171,7 @@ import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
 import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
 import type {
+  AssetEdgeData,
   AssetItem,
   AssetKind,
   AssetLibrarySource,
@@ -499,10 +501,12 @@ export function WorkspaceApp({
   canvasId,
   active,
   services,
+  canvasNavigation,
 }: {
   readonly canvasId: string;
   readonly active: boolean;
   readonly services: CanvasSessionServices;
+  readonly canvasNavigation?: ReactNode;
 }) {
   const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>("cloud");
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
@@ -2449,22 +2453,8 @@ export function WorkspaceApp({
     ],
   );
 
-  /** 在画布上创建一个生成节点（来自节点仓库拖拽或键盘新增）。 */
-  const addGenNode = useCallback(
-    (kind: CanvasGenNodeKind, x: number, y: number) => {
-      const node = createGenNode(kind, x, y);
-      addNode("gen", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 生成节点已创建: key=${node.key}, kind=${kind}, 位置=(${Math.round(node.x)}, ${Math.round(node.y)})`,
-      );
-      return node;
-    },
-    [addNode, createGenNode],
-  );
-
-  /** 创建独立剧本节点；它不接媒体连线，只复用全局文本模型连接。 */
-  const addScreenplayNode = useCallback(
+  /** 创建独立剧本节点；复用全局文本模型连接。 */
+  const createScreenplayNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(x, y, SCREENPLAY_NODE_WIDTH, SCREENPLAY_NODE_HEIGHT);
       const node: ScreenplayNodeData = {
@@ -2473,18 +2463,13 @@ export function WorkspaceApp({
         ...position,
         config: createScreenplayNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
       };
-      addNode("screenplay", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 剧本节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded, addNode],
+    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
   );
 
   /** 创建剧本转工业级分镜脚本节点；V4.6 技能与历史均由文本模型通道注入。 */
-  const addStoryboardNode = useCallback(
+  const createStoryboardNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(x, y, SCREENPLAY_NODE_WIDTH, SCREENPLAY_NODE_HEIGHT);
       const node: StoryboardNodeData = {
@@ -2493,18 +2478,13 @@ export function WorkspaceApp({
         ...position,
         config: createScreenplayNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
       };
-      addNode("storyboard", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 工业级分镜节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded, addNode],
+    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
   );
 
   /** 创建爆款视频复刻节点；视频输入由连线提供，技能本身不执行下载。 */
-  const addViralRemixNode = useCallback(
+  const createViralRemixNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(x, y, VIRAL_REMIX_NODE_WIDTH, VIRAL_REMIX_NODE_HEIGHT);
       const node: ViralRemixNodeData = {
@@ -2513,18 +2493,13 @@ export function WorkspaceApp({
         ...position,
         config: createViralRemixNodeConfig(nodeModelSelections.prompt, providerCatalogLoaded),
       };
-      addNode("viralRemix", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 爆款视频复刻节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded, addNode],
+    [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
   );
 
   /** 在画布上创建本地视频拼接与合成节点。 */
-  const addVideoComposerNode = useCallback(
+  const createVideoComposerNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(x, y, VIDEO_COMPOSER_NODE_WIDTH, VIDEO_COMPOSER_NODE_HEIGHT);
       const node: VideoComposerNodeData = {
@@ -2533,18 +2508,13 @@ export function WorkspaceApp({
         ...position,
         config: { outputName: "合成视频", inputOrder: [] },
       };
-      addNode("videoComposer", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 视频合成节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [addNode, dropPosition],
+    [dropPosition],
   );
 
   /** 在画布上创建网络爆款视频下载节点（内置 yt-dlp 引擎的本地工具）。 */
-  const addVideoDownloaderNode = useCallback(
+  const createVideoDownloaderNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(
         x,
@@ -2558,18 +2528,13 @@ export function WorkspaceApp({
         ...position,
         config: { url: "" },
       };
-      addNode("videoDownloader", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 视频下载节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [addNode, dropPosition],
+    [dropPosition],
   );
 
   /** 在画布上创建视频抽帧节点（复用内置 FFmpeg 引擎的本地工具）。 */
-  const addFrameExtractorNode = useCallback(
+  const createFrameExtractorNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(
         x,
@@ -2583,18 +2548,35 @@ export function WorkspaceApp({
         ...position,
         config: { timestamps: [], videoPath: "" },
       };
-      addNode("frameExtractor", node, { select: true });
-      frontendLog(
-        "info",
-        `[canvas] 视频抽帧节点已创建: key=${node.key}, 位置=(${Math.round(position.x)}, ${Math.round(position.y)})`,
-      );
       return node;
     },
-    [addNode, dropPosition],
+    [dropPosition],
   );
 
+  /** 先准备完整节点，再由菜单将节点和可选连线一次写入。 */
+  const createQuickAddEntry = (kind: CanvasQuickAddKind, x: number, y: number): CanvasNodeEntry => {
+    switch (kind) {
+      case "image":
+      case "video":
+      case "prompt":
+        return { type: "gen", data: createGenNode(kind, x, y) };
+      case "screenplay":
+        return { type: "screenplay", data: createScreenplayNode(x, y) };
+      case "storyboard":
+        return { type: "storyboard", data: createStoryboardNode(x, y) };
+      case "viral_remix":
+        return { type: "viralRemix", data: createViralRemixNode(x, y) };
+      case "video_composer":
+        return { type: "videoComposer", data: createVideoComposerNode(x, y) };
+      case "video_downloader":
+        return { type: "videoDownloader", data: createVideoDownloaderNode(x, y) };
+      case "frame_extractor":
+        return { type: "frameExtractor", data: createFrameExtractorNode(x, y) };
+    }
+  };
+
   /**
-   * 从底部工作流仓库一次性放入知识教学视频导演流程。
+   * 从顶部工作流仓库一次性放入知识教学视频导演流程。
    * 模板只保存当前项目供应商目录校准后的模型绑定；插入本身不会发起任何模型任务。
    */
   const insertWorkflow = useCallback(
@@ -6788,9 +6770,7 @@ export function WorkspaceApp({
   useEffect(() => {
     if (!active || !mobilePanel || !window.matchMedia?.("(max-width: 59.999rem)").matches) return;
 
-    const closeButton = document.querySelector<HTMLButtonElement>(
-      mobilePanel === "nodes" ? ".mobile-panel-close--nodes" : ".mobile-panel-close--assets",
-    );
+    const closeButton = document.querySelector<HTMLButtonElement>(".mobile-panel-close--assets");
     const animationFrame = window.requestAnimationFrame(() => closeButton?.focus());
 
     return () => window.cancelAnimationFrame(animationFrame);
@@ -7789,6 +7769,9 @@ export function WorkspaceApp({
 
   // 拖线过程中记录源节点 key，用于高亮所有可连接目标的输入端口。
   const [connectionSourceKey, setConnectionSourceKey] = useState<string | null>(null);
+  const [nodeMenuTriggerElement, setNodeMenuTriggerElement] = useState<HTMLButtonElement | null>(
+    null,
+  );
   const connectionStartRef = useRef<{
     nodeKey: string;
     handleType: "source" | "target";
@@ -7796,8 +7779,7 @@ export function WorkspaceApp({
     y: number;
   } | null>(null);
   const [connectionQuickAdd, setConnectionQuickAdd] = useState<{
-    nodeKey: string;
-    handleType: "source" | "target";
+    connection: { nodeKey: string; handleType: "source" | "target" } | null;
     position: { x: number; y: number };
     boardPosition: { x: number; y: number };
   } | null>(null);
@@ -7867,7 +7849,9 @@ export function WorkspaceApp({
   );
 
   const quickAddEndpointExists =
-    connectionQuickAdd != null && canvasEntryByKey(connectionQuickAdd.nodeKey) != null;
+    connectionQuickAdd != null &&
+    (connectionQuickAdd.connection == null ||
+      canvasEntryByKey(connectionQuickAdd.connection.nodeKey) != null);
   useEffect(() => {
     if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
   }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
@@ -8123,34 +8107,36 @@ export function WorkspaceApp({
     const boardPosition = dropClientPointToBoard(point.clientX, point.clientY);
     if (!boardPosition || !canvasEntryByKey(start.nodeKey)) return;
     setConnectionQuickAdd({
-      nodeKey: start.nodeKey,
-      handleType: start.handleType,
+      connection: { nodeKey: start.nodeKey, handleType: start.handleType },
       position: { x: point.clientX, y: point.clientY },
       boardPosition,
     });
   };
 
-  const handleConnectionQuickAdd = (kind: CanvasGenNodeKind) => {
+  const handleConnectionQuickAdd = (kind: CanvasQuickAddKind) => {
     if (!connectionQuickAdd) return;
-    const endpoint = canvasEntryByKey(connectionQuickAdd.nodeKey);
+    const { connection, boardPosition } = connectionQuickAdd;
+    const endpoint = connection ? canvasEntryByKey(connection.nodeKey) : null;
     closeConnectionQuickAdd();
-    if (!endpoint) return;
-    const node = createGenNode(
-      kind,
-      connectionQuickAdd.boardPosition.x,
-      connectionQuickAdd.boardPosition.y,
-    );
-    const entry: CanvasNodeEntry = { type: "gen", data: node };
-    const [source, target] =
-      connectionQuickAdd.handleType === "source" ? [endpoint, entry] : [entry, endpoint];
-    if (!isSupportedConnection(source, target)) return;
-    const fromKey = source.data.key;
-    const toKey = target.data.key;
-    insertSubgraph([entry], [{ id: `${fromKey}->${toKey}`, fromKey, toKey }], {
-      selectNodeKey: node.key,
+    if (connection && !endpoint) return;
+    const entry = createQuickAddEntry(kind, boardPosition.x, boardPosition.y);
+    const edges: AssetEdgeData[] = [];
+    if (connection && endpoint) {
+      const [source, target] =
+        connection.handleType === "source" ? [endpoint, entry] : [entry, endpoint];
+      if (!isSupportedConnection(source, target)) return;
+      const fromKey = source.data.key;
+      const toKey = target.data.key;
+      edges.push({ id: `${fromKey}->${toKey}`, fromKey, toKey });
+    }
+    insertSubgraph([entry], edges, {
+      selectNodeKey: entry.data.key,
     });
     selectEdge(null);
-    frontendLog("info", `[canvas] 拖线创建生成节点并连接: ${fromKey} → ${toKey}, kind=${kind}`);
+    frontendLog(
+      "info",
+      `[canvas] 菜单创建节点: key=${entry.data.key}, kind=${kind}, edges=${edges.length}`,
+    );
   };
 
   const handleFlowConnect = (connection: Connection) => {
@@ -8241,18 +8227,45 @@ export function WorkspaceApp({
               </button>
             ) : null}
           </div>
-          <div className="header-actions">
+          <div className="workspace-header__navigation">
+            <WorkflowRepository
+              expanded={workflowRepositoryExpanded}
+              onToggle={toggleWorkflowRepository}
+              onInsertKnowledgeVideoWorkflow={insertKnowledgeVideoDirectorWorkflow}
+              onInsertAiFilmWorkflow={insertAiFilmWorkflow}
+              onInsertComicDramaWorkflow={insertComicDramaWorkflow}
+              onInsertCommerceWorkflow={insertCommerceWorkflow}
+              onInsertRemotionWorkflow={insertRemotionWorkflow}
+              onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
+              onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
+            />
             <button
+              ref={setNodeMenuTriggerElement}
               type="button"
-              className="mobile-panel-trigger"
-              aria-label="打开节点仓库侧板"
-              aria-controls="node-panel"
-              aria-expanded={mobilePanel === "nodes"}
-              onClick={(event) => toggleMobilePanel("nodes", event.currentTarget)}
+              className="canvas-add-node-trigger"
+              aria-label="添加节点"
+              aria-haspopup="menu"
+              aria-expanded={connectionQuickAdd !== null}
+              title="添加节点（也可右键画布空白处）"
+              onClick={(event) => {
+                if (connectionQuickAdd) {
+                  closeConnectionQuickAdd();
+                  return;
+                }
+                const bounds = event.currentTarget.getBoundingClientRect();
+                setConnectionQuickAdd({
+                  connection: null,
+                  position: { x: bounds.left, y: bounds.bottom + 8 },
+                  boardPosition: viewportCenterBoardCoordinates(),
+                });
+              }}
             >
-              <Icon name="sparkle" aria-hidden="true" size="lg" />
+              <Icon name="plus" aria-hidden="true" size="lg" />
               <span>节点</span>
             </button>
+            {canvasNavigation}
+          </div>
+          <div className="header-actions">
             <button
               type="button"
               className="mobile-panel-trigger"
@@ -8309,147 +8322,6 @@ export function WorkspaceApp({
             </button>
           </div>
         </header>
-
-        <aside
-          id="node-panel"
-          className={`node-panel${mobilePanel === "nodes" ? " is-mobile-open" : ""}`}
-          aria-label="节点仓库"
-        >
-          <button
-            type="button"
-            className="mobile-panel-close mobile-panel-close--nodes"
-            aria-label="关闭节点仓库"
-            onClick={closeMobilePanel}
-          >
-            <Icon name="x" aria-hidden="true" size="lg" />
-          </button>
-          <div className="panel-title-row">
-            <div className="panel-title-row__identity">
-              <Icon name="sparkle" aria-hidden="true" size="lg" />
-              <h2>节点仓库</h2>
-            </div>
-          </div>
-          <p className="node-panel__hint">拖到画布创建节点，可重复放置；单击在画布中心创建。</p>
-          <div className="node-panel__grid">
-            <RepositoryCard
-              nodeType="image"
-              label="图片生成"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addGenNode("image", center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addGenNode("image", point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="video"
-              label="视频生成"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addGenNode("video", center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addGenNode("video", point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="video_composer"
-              label="视频拼接与合成"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addVideoComposerNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addVideoComposerNode(point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="video_downloader"
-              label="网络爆款视频下载"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addVideoDownloaderNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addVideoDownloaderNode(point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="frame_extractor"
-              label="视频抽帧"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addFrameExtractorNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addFrameExtractorNode(point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="viral_remix"
-              label="爆款视频复刻"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addViralRemixNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addViralRemixNode(point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="prompt"
-              label="提示词生成与优化"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addGenNode("prompt", center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addGenNode("prompt", point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="screenplay"
-              label="剧本创作与优化"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addScreenplayNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addScreenplayNode(point.x, point.y);
-              }}
-            />
-            <RepositoryCard
-              nodeType="storyboard"
-              label="剧本转工业级分镜脚本"
-              onAddToCanvas={() => {
-                const center = viewportCenterBoardCoordinates();
-                addStoryboardNode(center.x, center.y);
-              }}
-              onDropToCanvas={(clientX, clientY) => {
-                const point = dropClientPointToBoard(clientX, clientY);
-                if (point == null) return;
-                addStoryboardNode(point.x, point.y);
-              }}
-            />
-          </div>
-        </aside>
 
         <AssetPanel
           mobileOpen={mobilePanel === "assets"}
@@ -8575,6 +8447,16 @@ export function WorkspaceApp({
                 selectNode(null);
                 selectEdge(null);
               }}
+              onPaneContextMenu={(event) => {
+                event.preventDefault();
+                const boardPosition = dropClientPointToBoard(event.clientX, event.clientY);
+                if (!boardPosition) return;
+                setConnectionQuickAdd({
+                  connection: null,
+                  position: { x: event.clientX, y: event.clientY },
+                  boardPosition,
+                });
+              }}
               onNodeClick={(_, node) => {
                 selectNode(node.id);
                 selectEdge(null);
@@ -8608,6 +8490,8 @@ export function WorkspaceApp({
             {connectionQuickAdd && quickAddEndpointExists ? (
               <ConnectionQuickAddMenu
                 position={connectionQuickAdd.position}
+                connectionMode={connectionQuickAdd.connection !== null}
+                triggerElement={nodeMenuTriggerElement}
                 onSelect={handleConnectionQuickAdd}
                 onClose={closeConnectionQuickAdd}
               />
@@ -8617,7 +8501,7 @@ export function WorkspaceApp({
             {!hasCanvasNodes ? (
               <div className="canvas-empty-hint">
                 <strong>画布为空</strong>
-                <span>从左侧节点仓库拖入生成节点，或从素材库拖入素材开始创作。</span>
+                <span>右键画布空白处或点击顶部「节点」添加节点，也可从素材库拖入素材。</span>
               </div>
             ) : null}
           </div>
@@ -8688,18 +8572,6 @@ export function WorkspaceApp({
             </button>
           </div>
         </section>
-
-        <WorkflowRepository
-          expanded={workflowRepositoryExpanded}
-          onToggle={toggleWorkflowRepository}
-          onInsertKnowledgeVideoWorkflow={insertKnowledgeVideoDirectorWorkflow}
-          onInsertAiFilmWorkflow={insertAiFilmWorkflow}
-          onInsertComicDramaWorkflow={insertComicDramaWorkflow}
-          onInsertCommerceWorkflow={insertCommerceWorkflow}
-          onInsertRemotionWorkflow={insertRemotionWorkflow}
-          onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
-          onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
-        />
 
         {mobilePanel ? (
           <button
