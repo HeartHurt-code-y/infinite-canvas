@@ -8190,15 +8190,16 @@ svg[data-spin="true"] {
   font-weight: 700;
 }
 
+/* 提示词里的 @ 引用：统一走专属绿色，让引用从正文里跳出来（见 tokens.css）。 */
 .mention-chip {
   display: inline-block;
   margin: 0 1px;
   padding: 0 var(--space-3xs);
   font-size: var(--text-2xs);
   font-weight: 600;
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border: var(--rule-thin) solid color-mix(in oklch, var(--color-accent) 45%, transparent);
+  color: var(--color-mention);
+  background: var(--color-mention-soft);
+  border: var(--rule-thin) solid color-mix(in oklch, var(--color-mention) 45%, transparent);
   border-radius: var(--radius-round);
   white-space: nowrap;
 }
@@ -8206,10 +8207,10 @@ svg[data-spin="true"] {
 /* 自动识别刚转换的引用：一次性呼吸高亮，标记新产物。 */
 @keyframes mention-chip-fresh {
   0% {
-    color: var(--color-text);
-    background: var(--color-accent);
-    box-shadow: 0 0 0 0 var(--color-accent);
-    outline: 2px solid var(--color-accent);
+    color: var(--color-mention-ink);
+    background: var(--color-mention);
+    box-shadow: 0 0 0 0 var(--color-mention);
+    outline: 2px solid var(--color-mention);
     outline-offset: 1px;
   }
 
@@ -8237,12 +8238,12 @@ svg[data-spin="true"] {
 
 /*
  * 画面标注引用：引用的是当前视频上的区域标记，不是素材。
- * 色点跟随标记颜色，文字保持 paper 墨色（chip 只出现在提示词编辑面这类浅色底上）。
+ * 文字与底一样走引用绿；保留跟随标记颜色的色点，标注颜色的语义仍由色点承担。
  */
 .mention-chip--mark {
-  color: var(--color-ink);
-  background: color-mix(in oklch, var(--annotation-color) 14%, var(--color-paper));
-  border: var(--rule-thin) dashed color-mix(in oklch, var(--annotation-color) 60%, transparent);
+  color: var(--color-mention);
+  background: color-mix(in oklch, var(--annotation-color) 14%, var(--color-mention-soft));
+  border: var(--rule-thin) solid color-mix(in oklch, var(--color-mention) 45%, transparent);
 }
 
 /* 属于其它时间点的标注引用：引用有效但本次提交不包含它，用点线降级提示。 */

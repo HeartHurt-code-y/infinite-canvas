@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
 
 function cssRule(selector: string): string {
   const escapedSelector = selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -88,6 +89,21 @@ describe("剧本节点文本选中复制", () => {
     expect(cssRule(".canvas-screenplay-node__document-preview")).toMatch(
       /-webkit-user-select:\s*text;\s*user-select:\s*text/,
     );
+  });
+});
+
+describe("提示词 @ 引用配色", () => {
+  it("引用配色取自 tokens.css 的专属绿色，而不是中性交互色", () => {
+    // `.mention-chip` 同时是状态变体与选中态的前缀，这里只取基础规则本身。
+    const chip = appCss.match(/(?:^|\n)\.mention-chip\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(chip).not.toBe("");
+    expect(chip).toMatch(/color:\s*var\(--color-mention\)/);
+    expect(chip).toMatch(/background:\s*var\(--color-mention-soft\)/);
+    expect(chip).not.toMatch(/var\(--color-accent\)/);
+    // 深色面与浅色工具区各自声明一支绿，缺失任一都会静默回退成继承色。
+    for (const token of ["--color-mention:", "--color-mention-soft:", "--color-mention-ink:"]) {
+      expect(tokensCss.split(token).length - 1).toBe(2);
+    }
   });
 });
 

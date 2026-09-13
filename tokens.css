@@ -42,6 +42,17 @@
   --color-accent-soft: #303030;
   --color-accent-ink: #171717;
   --color-focus: #eeeeee;
+  /*
+   * ── 提示词 @ 引用：绿色，与「成功」状态无关 ─────────────────────────
+   * 引用是提示词里唯一需要从正文中跳出来的一类行内对象。工具区整体是中性灰，
+   * 引用沿用中性色就会和正文糊在一起，看不出哪一段是引用。这里给引用单独一支
+   * 绿色：`--color-mention` 是色点与文字色，`--color-mention-soft` 是 chip 底，
+   * `--color-mention-ink` 是绿底上的墨色（实心状态与刚识别的呼吸高亮用）。
+   * 深色面上 文字/底色对比 7.6:1，高于旧的中性灰 chip。
+   */
+  --color-mention: oklch(0.802 0.127 158.2); /* #6FD79F */
+  --color-mention-soft: oklch(0.298 0.049 162.7); /* #123526 */
+  --color-mention-ink: oklch(0.219 0.039 162.6); /* #062015 */
   --color-brand: #ededed;
   --color-brand-hover: #ffffff;
   --color-brand-ink: #171717;
@@ -273,6 +284,13 @@
   --color-accent-soft: var(--color-brand-wash);
   --color-accent-ink: var(--color-brand-ink);
   --color-focus: var(--color-brand);
+  /*
+   * 浅色工具区上的 @ 引用：绿底保持浅淡，文字换成深绿压住对比
+   * （文字/chip 底 6.8:1）。深色弹窗不走这段别名，仍用深色面的那支绿。
+   */
+  --color-mention: oklch(0.421 0.093 157); /* #0F5C38 */
+  --color-mention-soft: oklch(0.937 0.026 159.6); /* #DCF0E4 */
+  --color-mention-ink: oklch(0.17 0.02 158); /* #08120C */
   --color-success: #23764e;
   --color-success-soft: #e0f3e8;
   --color-success-ink: #16432b;
