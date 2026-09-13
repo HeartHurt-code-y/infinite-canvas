@@ -1,0 +1,7 @@
+/* Studio presentation layer. Imported after the existing component styles.
+ * Each file owns one surface; layout, state and media contracts stay in place.
+ * tokens.css is the shared palette, type, spacing and motion source.
+ */
+@import "./studio-shell.css";
+@import "./studio-nodes.css";
+@import "./studio-surfaces.css";

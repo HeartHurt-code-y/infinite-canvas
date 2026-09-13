@@ -1,47 +1,51 @@
 /*
  * 无限画布 · 设计令牌
- * Hallmark · 主题: Machine Room · 基调: 影视暗调专业机 · genre: atmospheric
- * 结构: 暖石墨单一中性族（hue 70）+ 单一铜色强调（hue 48）+ 三类媒体语义色
+ * Studio · 钴蓝创作空间
+ * 雾白工具区与深墨色画布形成明暗分区，钴蓝用于品牌和主操作。
  *
  * 该文件是全部视觉值的唯一来源。组件样式不得重新声明孤立的颜色、字体、
  * 间距、圆角、层级或动效值；需要新值时先在此处登记为具名令牌。
  *
- * 数值同时给出 hex 参考值，便于在设计评审中核对；实现以 OKLCH 为准。
+ * 中性表面使用 sRGB，保证桌面 WebView 与浏览器预览一致。
  */
 
 :root {
   color-scheme: dark;
 
   /* ── 画布工作台：层级中最深的一层，媒体与节点浮在其上 ───────────────── */
-  --color-bg-base: oklch(0.16 0.008 70); /* #100D0A */
-  --color-bg-sunk: oklch(0.125 0.008 70); /* #080604 */
+  --color-bg-base: #191b24;
+  --color-bg-sunk: #11131b;
 
   /* ── 抬升表面：面板、节点、弹窗，靠明度递进而非色相区分 ─────────────── */
-  --color-surface-1: oklch(0.205 0.009 70); /* #1A1713 */
-  --color-surface-2: oklch(0.245 0.01 70); /* #24201B */
-  --color-surface-3: oklch(0.29 0.011 70); /* #2F2A26 */
-  --color-field: oklch(0.175 0.008 70); /* #13100D */
-  --color-overlay: oklch(0.335 0.012 70); /* #3B3630 */
+  --color-surface-1: #232632;
+  --color-surface-2: #2b2f3e;
+  --color-surface-3: #383e50;
+  --color-field: #1b1e29;
+  --color-overlay: #434b60;
 
   /* ── 描边：三档，仅在需要表达分组层级时出现 ───────────────────────── */
-  --color-rule-faint: oklch(0.245 0.008 70); /* #23201C */
-  --color-rule: oklch(0.3 0.009 70); /* #312D29 */
-  --color-rule-strong: oklch(0.375 0.01 70); /* #45403B */
+  --color-rule-faint: #282c33;
+  --color-rule: #363c46;
+  --color-rule-strong: #505968;
 
   /* ── 文字四级：主文案 / 次要 / 辅助 / 占位与提示 ──────────────────── */
-  /* 各级在 --color-surface-1 上的对比依次为 15.7 / 9.5 / 5.6 / 4.5，均达 WCAG AA。 */
-  --color-text: oklch(0.955 0.004 85); /* #F1F0ED  15.67:1 */
-  --color-text-2: oklch(0.8 0.006 80); /* #C0BDB9   9.54:1 */
-  --color-text-3: oklch(0.655 0.007 75); /* #93908C   5.62:1 */
-  --color-text-4: oklch(0.6 0.007 75); /* #83807C   4.54:1 */
+  /* 辅助文字也保持实色，避免整组 opacity 叠加损失对比。 */
+  --color-text: #eceef2;
+  --color-text-2: #bfc5ce;
+  --color-text-3: #a1aab8;
+  --color-text-4: #a1aab8;
 
-  /* ── 强调：全站唯一交互色。焦点、主按钮、选中登记共用同一铜色 ───────── */
-  --color-accent: oklch(0.7 0.148 48); /* #E77E44 */
-  --color-accent-hover: oklch(0.765 0.152 52); /* #FD944E */
-  --color-accent-press: oklch(0.635 0.142 45); /* #CF6B39 */
-  --color-accent-soft: oklch(0.27 0.045 48); /* #381F12 */
-  --color-accent-ink: oklch(0.17 0.02 48); /* #170D08 */
-  --color-focus: oklch(0.755 0.15 52); /* #F9914D */
+  /* ── 交互色：主操作、焦点和选中；不铺满所有工具 ─────────────────── */
+  --color-accent: #9aafff;
+  --color-accent-hover: #bdcbff;
+  --color-accent-press: #879bea;
+  --color-accent-soft: #29365b;
+  --color-accent-ink: #18213a;
+  --color-focus: #b4c4ff;
+  --color-brand: #4555ed;
+  --color-brand-hover: #3948d7;
+  --color-brand-ink: #ffffff;
+  --color-brand-wash: #e8ebff;
   /* 焦点光晕：深色面上为焦点环补一圈与背景同色的接触环，避免环被底噪吃掉 */
   --focus-halo-width: 4px;
 
@@ -106,34 +110,35 @@
   --color-chrome-subtle: var(--color-text-4);
 
   /* ── 工作台网格：退到内容之下，只提供空间参照 ─────────────────────── */
-  --color-grid-major: oklch(0.72 0.004 80 / 0.062);
-  --color-grid-minor: oklch(0.72 0.004 80 / 0.026);
-  --color-scrim: oklch(0.08 0.008 70 / 0.72);
-  --color-panel-wash: oklch(0.205 0.009 70 / 0.97);
-  --color-dock-wash: oklch(0.205 0.009 70 / 0.97);
-  --color-selection-wash: oklch(0.7 0.148 48 / 0.14);
+  --color-grid-major: rgb(172 187 209 / 0.17);
+  --color-grid-minor: rgb(172 187 209 / 0.045);
+  --color-scrim: rgb(6 8 12 / 0.72);
+  --color-panel-wash: rgb(35 38 50 / 0.98);
+  --color-dock-wash: rgb(43 47 62 / 0.98);
+  --color-selection-wash: rgb(154 175 255 / 0.14);
   --color-transparent: transparent;
 
   /* ── 阴影：深色表面靠「顶缘内高光 + 接触阴影 + 扩散阴影」三层建立抬升 ── */
-  --color-shadow: oklch(0.06 0.01 70 / 0.5);
-  --color-shadow-strong: oklch(0.06 0.01 70 / 0.66);
-  --color-highlight-inset: oklch(1 0 0 / 0.07);
+  --color-shadow: rgb(0 0 0 / 0.2);
+  --color-shadow-strong: rgb(0 0 0 / 0.4);
+  --color-highlight-inset: rgb(255 255 255 / 0.045);
   --shadow-inset: inset 0 1px 0 var(--color-highlight-inset);
   --shadow-whisper: inset 0 1px 0 var(--color-highlight-inset), 0 1px 2px var(--color-shadow);
   --shadow-small: inset 0 1px 0 var(--color-highlight-inset), 0 2px 6px var(--color-shadow);
   --shadow-raised:
-    inset 0 1px 0 var(--color-highlight-inset), 0 8px 20px oklch(0.06 0.01 70 / 0.55),
-    0 2px 6px oklch(0.06 0.01 70 / 0.4);
+    inset 0 1px 0 var(--color-highlight-inset), 0 8px 24px var(--color-shadow),
+    0 2px 6px var(--color-shadow);
   --shadow-floating:
-    inset 0 1px 0 var(--color-highlight-inset), 0 28px 64px oklch(0.05 0.01 70 / 0.72),
-    0 8px 20px oklch(0.05 0.01 70 / 0.5);
+    inset 0 1px 0 var(--color-highlight-inset), 0 24px 72px var(--color-shadow-strong),
+    0 8px 24px var(--color-shadow);
   /* 框架边缘：让面板与画布之间成为一条有意为之的界线，而不是硬接缝 */
-  --shadow-frame-edge: inset 1px 0 0 var(--color-rule-faint), 4px 0 18px oklch(0.06 0.01 70 / 0.4);
+  --shadow-frame-edge: inset -1px 0 0 var(--color-rule-faint);
 
   /* ── 字体：同一字体族的三个角色，字面宽度承担层级对比 ─────────────── */
-  --font-display:
-    "IBM Plex Sans Condensed", "IBM Plex Sans Variable", "Microsoft YaHei UI", sans-serif;
-  --font-body: "IBM Plex Sans Variable", "Microsoft YaHei UI", sans-serif;
+  --font-display: var(--font-body);
+  --font-body:
+    "IBM Plex Sans Variable", "Noto Sans SC Variable", "PingFang SC", "Microsoft YaHei UI",
+    sans-serif;
   --font-mono: "JetBrains Mono Variable", ui-monospace, monospace;
 
   /* ── 间距：4pt 主节奏 ────────────────────────────────────────────── */
@@ -152,9 +157,9 @@
    * ── 字号：密度工具为主体，同时补齐产品一直缺失的展示级 ──────────────
    * 小字号承担高密度信息，展示级只用于空状态、对话框标题与首启时刻。
    */
-  --text-2xs: 0.625rem; /* 10px */
-  --text-xs: 0.6875rem; /* 11px */
-  --text-sm: 0.75rem; /* 12px */
+  --text-2xs: 0.6875rem; /* 11px 仅用于紧凑计数与时间码 */
+  --text-xs: 0.75rem; /* 12px 辅助文案 */
+  --text-sm: 0.8125rem; /* 13px 工具控件 */
   --text-base: 0.875rem; /* 14px */
   --text-md: 1rem; /* 16px */
   --text-lg: 1.25rem; /* 20px */
@@ -164,17 +169,17 @@
   --text-display: 3.5rem; /* 56px */
 
   /* 行高：标题紧、正文松，一律无单位随字号缩放 */
-  --leading-display: 1.04;
-  --leading-heading: 1.2;
-  --leading-body: 1.55;
+  --leading-display: 1.2;
+  --leading-heading: 1.35;
+  --leading-body: 1.6;
 
   /* ── 动效：三个命名缓动，深浅方向明确 ───────────────────────────── */
   --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
   --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
   --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
   --dur-micro: 120ms;
-  --dur-short: 220ms;
-  --dur-long: 420ms;
+  --dur-short: 180ms;
+  --dur-long: 280ms;
   --dur-progress: 900ms;
 
   /* ── 形状：三档圆角，用途固定 ───────────────────────────────────── */
@@ -183,7 +188,8 @@
   --radius-xs: 0.25rem; /* 4px 内嵌单元 */
   --radius-sm: 0.375rem; /* 6px 输入框、缩略图 */
   --radius-control: 0.5rem; /* 8px 按钮与控件 */
-  --radius-panel: 0.75rem; /* 12px 卡片与面板 */
+  --radius-card: 0.75rem; /* 12px 节点与内容卡片 */
+  --radius-panel: 1rem; /* 16px 浮层与弹窗 */
   --radius-pill: 999px;
   --radius-round: 999px;
 
@@ -197,9 +203,18 @@
   --z-tooltip: 600;
 
   /* ── 尺寸 ───────────────────────────────────────────────────────── */
-  --size-header: 3.75rem;
+  --size-header: 4.25rem;
   --size-nodes: 13rem;
-  --size-assets: 17rem;
+  --size-assets: 18.5rem;
+  --size-control-small: 2rem;
+  --size-brand: 2rem;
+  --size-menu: 18.5rem;
+  --size-workflow-menu: 40rem;
+  --size-empty-art: 6rem;
+  --size-empty-composition: 8rem;
+  --size-empty-layout: 32rem;
+  --angle-brand-card: -12deg;
+  --angle-brand-counter: 8deg;
   --size-control-compact: 1.5rem;
   --size-control: 2.5rem;
   --size-control-touch: 3rem;
@@ -227,4 +242,80 @@
   --icon-xl: 1.25rem; /* 20px 面板标题、空态 */
   --icon-2xl: 1.5rem; /* 24px 对话框标题、大空态 */
   --icon-3xl: 3rem; /* 48px 整页空态 */
+}
+
+/* Light tools / dark canvas: aliases are repeated here so every legacy component
+ * resolves its surface locally. Floating workspace dialogs retain the dark set.
+ */
+.workspace-header,
+.asset-panel,
+.connection-quick-add-menu {
+  color-scheme: light;
+  --color-bg-base: #f6f7fb;
+  --color-bg-sunk: #e7eaf3;
+  --color-surface-1: #f6f7fb;
+  --color-surface-2: #eceef6;
+  --color-surface-3: #dfe4f1;
+  --color-field: #ffffff;
+  --color-overlay: #d8deed;
+  --color-rule-faint: #e6e9f1;
+  --color-rule: #d3d9e6;
+  --color-rule-strong: #a0abc0;
+  --color-text: #20253b;
+  --color-text-2: #454e66;
+  --color-text-3: #58637a;
+  --color-text-4: #58637a;
+  --color-accent: var(--color-brand);
+  --color-accent-hover: var(--color-brand-hover);
+  --color-accent-press: #303fca;
+  --color-accent-soft: var(--color-brand-wash);
+  --color-accent-ink: var(--color-brand-ink);
+  --color-focus: var(--color-brand);
+  --color-success: #23764e;
+  --color-success-soft: #e0f3e8;
+  --color-success-ink: #16432b;
+  --color-error: #b93040;
+  --color-error-soft: #fbecef;
+  --color-danger: var(--color-error);
+  --color-danger-soft: var(--color-error-soft);
+  --color-warning: #876315;
+  --color-warning-soft: #f7edce;
+  --color-warning-ink: #503805;
+  --color-image: #246d9d;
+  --color-image-strong: #1d5982;
+  --color-image-soft: #e3f2fa;
+  --color-video: #7950b6;
+  --color-video-strong: #624093;
+  --color-video-soft: #efe9fb;
+  --color-audio: #927027;
+  --color-audio-strong: #785619;
+  --color-audio-soft: #f8efd7;
+  --color-highlight-inset: rgb(255 255 255 / 0.6);
+  --color-shadow: rgb(31 44 80 / 0.08);
+  --color-shadow-strong: rgb(31 44 80 / 0.16);
+  --color-paper: var(--color-surface-1);
+  --color-paper-2: var(--color-surface-2);
+  --color-paper-3: var(--color-surface-3);
+  --color-ink: var(--color-text);
+  --color-ink-2: var(--color-text-2);
+  --color-ink-3: var(--color-text-3);
+  --color-muted: var(--color-text-3);
+  --color-neutral: var(--color-text-2);
+  --color-rule-2: var(--color-rule-strong);
+  --color-rule-3: var(--color-rule-strong);
+  --color-accent-strong: var(--color-accent-hover);
+  --color-chrome: var(--color-surface-1);
+  --color-chrome-2: var(--color-surface-2);
+  --color-chrome-3: var(--color-surface-3);
+  --color-chrome-field: var(--color-field);
+  --color-chrome-rule: var(--color-rule);
+  --color-chrome-rule-2: var(--color-rule-strong);
+  --color-chrome-ink: var(--color-text);
+  --color-chrome-muted: var(--color-text-3);
+  --color-chrome-subtle: var(--color-text-4);
+  --shadow-inset: inset 0 1px 0 var(--color-highlight-inset);
+  --shadow-whisper: 0 1px 2px var(--color-shadow);
+  --shadow-small: 0 2px 6px var(--color-shadow);
+  --shadow-raised: 0 8px 24px var(--color-shadow), 0 2px 6px var(--color-shadow);
+  --shadow-floating: 0 24px 72px var(--color-shadow-strong), 0 8px 24px var(--color-shadow);
 }

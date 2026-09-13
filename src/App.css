@@ -1,11 +1,6 @@
 /*
- * Hallmark · macrostructure: Workbench · tone: technical · anchor hue: warm copper
- * genre: atmospheric · theme: Machine Room · 基调: 影视暗调专业机
- * nav: N9 · footer: Ft2 · enrichment: existing Tier C still
- *
- * 视觉命题：画布是工作台中最深的一层，面板与节点靠明度递进浮起，
- * 媒体内容（生成的图与视频）是全画面唯一的饱和色来源。
- * 全站只有一个交互色（暖铜），图片/视频/音频三色只表达媒体类型。
+ * 组件基础布局与交互状态。当前 Studio 主题的表面和排版按区域定义于
+ * styles/studio-{shell,nodes,surfaces}.css，统一使用 tokens.css。
  *
  * tokens: 全部视觉值来自 ../tokens.css（单一来源，无孤立声明）
  * contrast: WCAG AA —— 正文 ≥ 4.5:1，大字与图形 ≥ 3:1
@@ -423,9 +418,6 @@ h3 {
   transition:
     opacity var(--dur-micro) var(--ease-in),
     transform var(--dur-micro) var(--ease-in);
-}
-
-.asset-panel {
   left: 0;
   padding: var(--space-lg) var(--space-sm) var(--space-sm);
   overflow: hidden;
@@ -433,9 +425,6 @@ h3 {
   background: var(--color-chrome-2);
   border-inline-end: var(--rule-thin) solid var(--color-rule);
   transform: translateX(-102%);
-}
-
-.asset-panel {
   display: flex;
   flex-direction: column;
 }

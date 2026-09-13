@@ -1,0 +1,761 @@
+/* Cobalt Studio: light tools surround an ink canvas. The brand mark and
+ * primary actions carry the color; viewport motion remains instantaneous.
+ */
+body {
+  font-optical-sizing: auto;
+  line-height: var(--leading-body);
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: var(--font-body);
+  letter-spacing: normal;
+}
+
+::selection {
+  color: var(--color-text);
+  background: var(--color-accent-soft);
+}
+
+textarea:focus-visible,
+[contenteditable="true"]:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+button:focus-visible {
+  transition: none;
+}
+
+/* Keyboard activation and drag surfaces must not move under the pointer. */
+button:active:focus-visible,
+.workspace-shell .asset-card:active,
+.workspace-shell .canvas-node:active {
+  transform: none;
+}
+
+.workspace-shell .workspace-header {
+  gap: var(--space-sm);
+  padding-inline: var(--space-md);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule-faint);
+}
+
+.workspace-header .brand-lockup {
+  gap: var(--space-xs);
+}
+
+.workspace-header .brand-mark {
+  align-items: center;
+  justify-content: center;
+  width: var(--size-brand);
+  height: var(--size-brand);
+  padding: 0;
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border: var(--rule-thin) solid var(--color-brand);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-inset);
+}
+
+.workspace-header .brand-name {
+  font-size: var(--text-md);
+  font-weight: 700;
+  letter-spacing: normal;
+}
+
+.workspace-header .save-state {
+  gap: var(--space-2xs);
+  margin-inline-start: 0;
+  white-space: nowrap;
+  font-size: var(--text-xs);
+}
+
+.workspace-header .save-state svg {
+  color: var(--color-text-3);
+}
+
+.workspace-header .save-state--error,
+.workspace-header .save-state--error svg {
+  color: var(--color-error);
+}
+
+.workspace-header__navigation {
+  gap: var(--space-xs);
+  margin-inline: var(--space-xs) 0;
+}
+
+.workspace-header__navigation .canvas-tabs {
+  gap: var(--space-2xs);
+  background: none;
+}
+
+.canvas-tabs .canvas-tabs__list {
+  gap: var(--space-2xs);
+}
+
+.canvas-tabs .canvas-tabs__item {
+  min-width: 6rem;
+  background: none;
+  border-color: var(--color-transparent);
+  border-radius: var(--radius-control);
+}
+
+.canvas-tabs .canvas-tabs__item--active {
+  background: var(--color-brand-wash);
+  border-color: var(--color-transparent);
+  box-shadow: none;
+}
+
+.canvas-tabs .canvas-tabs__tab {
+  min-height: var(--size-control-small);
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+}
+
+.canvas-tabs .canvas-tabs__tab[aria-selected="true"] {
+  color: var(--color-brand);
+  font-weight: 650;
+}
+
+.canvas-tabs .canvas-tabs__rename,
+.canvas-tabs .canvas-tabs__delete {
+  min-height: var(--size-control-small);
+  padding-inline: var(--space-2xs);
+  flex-basis: var(--icon-2xl);
+  color: var(--color-text-3);
+}
+
+.canvas-tabs .canvas-tabs__create {
+  min-height: var(--size-control-small);
+  padding-inline: var(--space-xs);
+  border-color: var(--color-transparent);
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  font-weight: 400;
+}
+
+.workspace-header .header-actions {
+  gap: var(--space-2xs);
+  margin-inline-start: 0;
+  padding-inline-start: var(--space-xs);
+  border-inline-start: var(--rule-thin) solid var(--color-rule-faint);
+}
+
+.workspace-header .header-icon {
+  min-width: var(--size-control-small);
+  height: var(--size-control-small);
+  border-color: var(--color-transparent);
+  color: var(--color-text-2);
+}
+
+.workspace-header .canvas-add-node-trigger {
+  gap: var(--space-2xs);
+  min-height: var(--size-control-small);
+  padding-inline: var(--space-sm);
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  box-shadow: var(--shadow-whisper);
+}
+
+.workspace-header .workflow-repository__toggle {
+  gap: var(--space-xs);
+  min-height: var(--size-control-small);
+  padding: var(--space-2xs) var(--space-xs);
+  background: none;
+  border-color: var(--color-transparent);
+}
+
+.workspace-header .workflow-repository__title {
+  font-weight: 500;
+}
+
+.workspace-header .workflow-repository__toggle-mark {
+  color: var(--color-text-2);
+}
+
+.workspace-header .workflow-repository--expanded .workflow-repository__toggle {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule);
+}
+
+/* Material shelf: remove boxes around boxes; selection is a segmented surface. */
+.workspace-shell .asset-panel {
+  padding: var(--space-md);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule-faint);
+}
+
+.asset-panel .panel-title-row {
+  min-height: var(--size-control);
+  margin-bottom: var(--space-md);
+}
+
+.asset-panel .panel-title-row h2 {
+  font-size: var(--text-md);
+  font-weight: 650;
+  letter-spacing: normal;
+}
+
+.asset-panel .panel-title-row__identity {
+  color: var(--color-brand);
+}
+
+.asset-panel .square-action {
+  width: var(--size-control-small);
+  min-width: var(--size-control-small);
+  height: var(--size-control-small);
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+}
+
+.asset-panel .asset-origin {
+  padding-inline: 0;
+  gap: var(--space-xs);
+  background: none;
+  border: 0;
+  font-size: var(--text-xs);
+}
+
+.asset-panel .asset-origin select {
+  padding-inline: var(--space-xs);
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.asset-panel .asset-provider-switcher {
+  gap: var(--space-sm);
+  margin-top: var(--space-xs);
+  font-size: var(--text-xs);
+}
+
+.asset-panel .asset-provider-switcher select {
+  min-height: var(--size-control-small);
+  padding-inline: var(--space-xs);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.asset-panel .real-person-entry {
+  margin-top: var(--space-sm);
+  padding: var(--space-xs);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-card);
+}
+
+.asset-panel .real-person-entry__icon {
+  width: var(--size-control-small);
+  height: var(--size-control-small);
+  color: var(--color-text-2);
+  background: var(--color-surface-3);
+}
+
+.asset-panel .real-person-entry__copy strong {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.asset-panel .real-person-entry__copy small {
+  font-size: var(--text-xs);
+}
+
+.asset-panel .real-person-entry:disabled {
+  opacity: 0.65;
+}
+
+.asset-panel .asset-tabs {
+  gap: var(--space-2xs);
+  margin-block: var(--space-md);
+  padding: var(--space-2xs);
+  border: var(--rule-thin) solid var(--color-rule-faint);
+  border-radius: var(--radius-control);
+  background: var(--color-field);
+}
+
+.asset-panel .asset-tabs button {
+  height: var(--size-control-small);
+  border-radius: var(--radius-sm);
+  font-size: var(--text-sm);
+}
+
+.asset-panel .asset-tabs button[aria-selected="true"] {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  box-shadow: var(--shadow-whisper);
+}
+
+.asset-panel .asset-tabs button[aria-selected="true"]::after {
+  content: none;
+}
+
+.asset-panel .asset-search-label,
+.asset-panel .asset-search-status,
+.asset-panel .asset-pagination,
+.asset-panel .asset-pagination button {
+  font-size: var(--text-xs);
+}
+
+.asset-panel .asset-search-label {
+  margin-bottom: var(--space-2xs);
+}
+
+.asset-panel .asset-search {
+  border-color: var(--color-rule);
+  background: var(--color-field);
+}
+
+.asset-panel .asset-search input {
+  font-size: var(--text-sm);
+}
+
+.asset-panel .asset-card {
+  border-radius: var(--radius-card);
+  box-shadow: none;
+  outline: var(--rule-thin) solid var(--color-rule-faint);
+  outline-offset: calc(-1 * var(--rule-thin));
+  transition: none;
+}
+
+.asset-panel .asset-card:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--space-3xs);
+}
+
+.asset-panel .asset-card__visual {
+  background: var(--color-surface-2);
+  transition: none;
+}
+
+.asset-panel .asset-card__media-state {
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.asset-panel .asset-card__media-state[data-state="loading"] {
+  background-image: none;
+  animation: none;
+}
+
+.asset-panel .asset-panel__hint {
+  right: var(--space-md);
+  left: var(--space-md);
+  padding-top: var(--space-sm);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule-faint);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.asset-panel .asset-empty {
+  gap: var(--space-sm);
+  padding: var(--space-lg) var(--space-sm);
+  background: none;
+  border-color: var(--color-rule-faint);
+}
+
+/* Browsing templates is a list of tools, with one calm insertion action per row. */
+.workflow-repository .workflow-repository__content {
+  left: auto;
+  right: 0;
+  width: min(var(--size-workflow-menu), calc(100vw - 2 * var(--space-md)));
+  padding: var(--space-md);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-floating);
+  transform-origin: top right;
+}
+
+.workflow-repository__content .workflow-repository__content-heading {
+  margin-bottom: var(--space-sm);
+  font-size: var(--text-base);
+}
+
+.workflow-repository__content .workflow-repository__card {
+  gap: var(--space-xs) var(--space-sm);
+  align-items: start;
+  padding: var(--space-md);
+  background: var(--color-surface-2);
+  border: var(--rule-thin) solid var(--color-rule-faint);
+  border-radius: var(--radius-card);
+  box-shadow: none;
+}
+
+.workflow-repository__content .workflow-repository__card-mark {
+  width: var(--size-control);
+  height: var(--size-control);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: var(--color-transparent);
+}
+
+.workflow-repository__content .workflow-repository__card-title {
+  font-size: var(--text-base);
+  font-weight: 600;
+}
+
+.workflow-repository__content .workflow-repository__badge {
+  color: var(--color-text-2);
+  background: var(--color-surface-3);
+  border-radius: var(--radius-xs);
+  font-size: var(--text-xs);
+  font-weight: 400;
+}
+
+.workflow-repository__content .workflow-repository__description {
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  text-wrap: pretty;
+}
+
+.workflow-repository__content .workflow-repository__stages {
+  flex-wrap: wrap;
+  overflow: visible;
+}
+
+.workflow-repository__content .workflow-repository__stage {
+  font-size: var(--text-xs);
+}
+
+.workflow-repository__content .workflow-repository__stage-number {
+  color: var(--color-text-3);
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+
+.workflow-repository__content .workflow-repository__insert {
+  min-height: var(--size-control-small);
+  margin-top: var(--space-xs);
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: var(--color-transparent);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.connection-quick-add-menu {
+  width: var(--size-menu);
+  padding: var(--space-xs);
+  border-color: var(--color-rule);
+  box-shadow: var(--shadow-floating);
+}
+
+.connection-quick-add-menu .connection-quick-add-menu__heading {
+  padding: var(--space-sm);
+  border-color: var(--color-rule-faint);
+}
+
+.connection-quick-add-menu .connection-quick-add-menu__item {
+  gap: var(--space-sm);
+  min-height: var(--size-control-touch);
+  padding-inline: var(--space-sm);
+  font-size: var(--text-sm);
+}
+
+.connection-quick-add-menu .connection-quick-add-menu__item svg {
+  width: var(--icon-lg);
+  height: var(--icon-lg);
+}
+
+/* Dot fill is separate from the old line-pattern stroke. */
+.canvas-react-flow .canvas-flow-bg--minor circle {
+  fill: var(--color-grid-minor);
+}
+
+.canvas-react-flow .canvas-flow-bg--major circle {
+  fill: var(--color-grid-major);
+}
+
+.canvas-viewport .canvas-empty-hint {
+  top: 46%;
+  width: calc(100% - var(--space-xl));
+  max-width: var(--size-empty-layout);
+  gap: var(--space-sm);
+}
+
+.canvas-empty-hint .canvas-empty-hint__art {
+  position: relative;
+  display: grid;
+  width: var(--size-empty-composition);
+  height: var(--size-empty-art);
+  place-items: center;
+  margin-bottom: var(--space-lg);
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border: var(--rule-thin) solid var(--color-brand);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-raised);
+  isolation: isolate;
+}
+
+.canvas-empty-hint__art::before,
+.canvas-empty-hint__art::after {
+  position: absolute;
+  z-index: -1;
+  inset: 0;
+  border: var(--rule-thin) solid var(--color-accent);
+  border-radius: var(--radius-panel);
+  background: var(--color-accent-soft);
+  content: "";
+}
+
+.canvas-empty-hint__art::before {
+  transform: translateX(calc(-1 * var(--space-md))) rotate(var(--angle-brand-card));
+}
+
+.canvas-empty-hint__art::after {
+  background: var(--color-brand);
+  transform: translateX(var(--space-sm)) rotate(var(--angle-brand-counter));
+}
+
+.canvas-viewport .canvas-empty-hint strong {
+  color: var(--color-text);
+  font-size: var(--text-2xl);
+  font-weight: 650;
+  letter-spacing: normal;
+  line-height: var(--leading-heading);
+}
+
+.canvas-viewport .canvas-empty-hint > span {
+  font-size: var(--text-base);
+  line-height: var(--leading-body);
+}
+
+.canvas-stage .zoom-control,
+.canvas-stage .canvas-history-control,
+.canvas-stage .canvas-home-control {
+  bottom: var(--space-lg);
+  min-height: var(--size-control);
+  padding: var(--space-3xs);
+  background: var(--color-dock-wash);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-raised);
+}
+
+.canvas-stage .canvas-history-control {
+  right: calc(var(--space-md) + 9rem + 2 * var(--rule-thin) + 2 * var(--space-2xs));
+}
+
+.canvas-stage .canvas-home-control {
+  right: calc(var(--space-md) + 13.5rem + 4 * var(--rule-thin) + 4 * var(--space-2xs));
+}
+
+.canvas-stage .zoom-control button,
+.canvas-stage .canvas-history-control button,
+.canvas-stage .canvas-home-control button {
+  color: var(--color-text-2);
+  border-radius: var(--radius-control);
+  transition: none;
+}
+
+.workspace-shell [data-tooltip]::after {
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+  box-shadow: var(--shadow-raised);
+}
+
+.workspace-header .header-actions [data-tooltip]::after {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+[data-sonner-toaster].app-toaster {
+  --border-radius: var(--radius-card);
+  --normal-bg: var(--color-surface-2);
+  --normal-border: var(--color-rule);
+  --normal-text: var(--color-text);
+  --success-bg: var(--color-success-soft);
+  --success-border: var(--color-success);
+  --success-text: var(--color-text);
+  --error-bg: var(--color-error-soft);
+  --error-border: var(--color-error);
+  --error-text: var(--color-text);
+  --warning-bg: var(--color-warning-soft);
+  --warning-border: var(--color-warning);
+  --warning-text: var(--color-text);
+}
+
+[data-sonner-toaster].app-toaster [data-sonner-toast] {
+  padding: var(--space-md);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .workspace-header .canvas-add-node-trigger:hover {
+    background: var(--color-accent-hover);
+    border-color: var(--color-accent-hover);
+  }
+
+  .workspace-header .header-icon:hover,
+  .workspace-header .workflow-repository__toggle:hover {
+    background: var(--color-surface-3);
+  }
+
+  .asset-panel .asset-card:hover {
+    outline-color: var(--color-rule-strong);
+    box-shadow: none;
+    transform: none;
+  }
+
+  .asset-panel .asset-card:hover .asset-card__visual {
+    filter: none;
+    transform: none;
+  }
+
+  .asset-panel .real-person-entry:hover:not(:disabled) {
+    border-color: var(--color-rule-strong);
+    background: var(--color-surface-3);
+    transform: none;
+  }
+
+  .workflow-repository__content .workflow-repository__insert:hover {
+    color: var(--color-accent-ink);
+    background: var(--color-accent);
+  }
+}
+
+@media (min-width: 60rem) {
+  .workspace-shell {
+    --size-assets: 18.5rem;
+  }
+}
+
+@media (min-width: 60rem) and (max-width: 74.999rem) {
+  .workspace-header .brand-name {
+    display: none;
+  }
+}
+
+@media (max-width: 59.999rem) {
+  .workspace-shell {
+    --size-header: 7.5rem;
+  }
+
+  .workspace-shell .workspace-header {
+    gap: 0 var(--space-xs);
+    padding-block: var(--space-xs);
+  }
+
+  .workspace-header__navigation {
+    margin-inline: 0;
+  }
+
+  .workflow-repository .workflow-repository__content {
+    position: fixed;
+    top: var(--size-header);
+    left: var(--space-md);
+    right: var(--space-md);
+    width: auto;
+  }
+}
+
+@media (max-width: 40rem) {
+  .workspace-shell .workspace-header {
+    padding-inline: var(--space-xs);
+  }
+
+  .workspace-header .brand-name {
+    display: inline;
+  }
+
+  .workspace-header .header-actions {
+    gap: var(--space-2xs);
+  }
+
+  .workspace-header__navigation {
+    gap: var(--space-2xs);
+  }
+
+  .canvas-tabs .canvas-tabs__create {
+    width: var(--size-control-small);
+    min-width: var(--size-control-small);
+    padding: 0;
+  }
+
+  .workspace-shell .asset-panel {
+    width: min(22rem, calc(100% - var(--space-xl)));
+  }
+
+  .asset-panel .asset-search input,
+  .asset-panel .asset-origin select,
+  .asset-panel .asset-provider-switcher select {
+    font-size: var(--text-md);
+  }
+
+  .canvas-viewport .canvas-empty-hint {
+    padding-inline: var(--space-xs);
+  }
+
+  .workflow-repository__content .workflow-repository__card {
+    padding: var(--space-sm);
+  }
+
+  .workflow-repository__content .workflow-repository__insert {
+    min-height: var(--size-control-touch);
+  }
+}
+
+@media (pointer: coarse) {
+  .workspace-header .header-icon,
+  .workspace-header .canvas-add-node-trigger,
+  .workspace-header .workflow-repository__toggle,
+  .canvas-tabs .canvas-tabs__create,
+  .canvas-tabs .canvas-tabs__tab,
+  .canvas-tabs .canvas-tabs__rename,
+  .canvas-tabs .canvas-tabs__delete,
+  .asset-panel .square-action {
+    min-width: var(--size-control-touch);
+    min-height: var(--size-control-touch);
+  }
+
+  .asset-panel .asset-provider-switcher select,
+  .asset-panel .asset-tabs button {
+    min-height: var(--size-control-touch);
+  }
+}
+
+/* Opacity-only panel response; no animation is introduced on node movement. */
+@media (prefers-reduced-motion: no-preference) {
+  .workflow-repository .workflow-repository__content {
+    transition: opacity var(--dur-short) var(--ease-out);
+  }
+
+  @starting-style {
+    .workflow-repository .workflow-repository__content:not([hidden]) {
+      opacity: 0;
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

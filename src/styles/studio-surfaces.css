@@ -1,0 +1,808 @@
+/* Studio surfaces: presentation only. Keep dialog ownership, media sizing and scroll regions. */
+
+.settings-layer .settings-dialog,
+.history-layer .history-dialog,
+.regenerate-layer .regenerate-dialog,
+.real-person-dialog[open],
+.asset-group-dialog[open],
+.confirm-dialog[open],
+.canvas-delete-dialog[open],
+.video-local-edit-dialog[open] {
+  color: var(--color-text);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule-strong);
+  box-shadow: var(--shadow-floating);
+}
+
+.settings-layer .settings-dialog,
+.history-layer .history-dialog,
+.regenerate-layer .regenerate-dialog {
+  animation: studio-surface-enter var(--dur-short) var(--ease-out);
+}
+
+.real-person-dialog[open],
+.asset-group-dialog[open],
+.confirm-dialog[open],
+.canvas-delete-dialog[open],
+.video-local-edit-dialog[open] {
+  animation: studio-surface-enter var(--dur-short) var(--ease-out);
+}
+
+@keyframes studio-surface-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.settings-dialog .settings-dialog__header,
+.history-dialog .history-dialog__header,
+.regenerate-dialog .regenerate-dialog__header,
+.real-person-dialog .real-person-dialog__header,
+.asset-group-dialog .asset-group-dialog__header,
+.confirm-dialog .confirm-dialog__header,
+.canvas-delete-dialog .canvas-delete-dialog__header,
+.video-local-edit-dialog .video-local-edit-dialog__header {
+  background: var(--color-surface-1);
+  border-bottom-color: var(--color-rule);
+}
+
+.settings-dialog .settings-dialog__header h2,
+.history-dialog .history-dialog__header h2,
+.regenerate-dialog .regenerate-dialog__header h2,
+.real-person-dialog .real-person-dialog__header h2,
+.asset-group-dialog .asset-group-dialog__header h2,
+.confirm-dialog .confirm-dialog__title,
+.canvas-delete-dialog .canvas-delete-dialog__header h2,
+.video-local-edit-dialog .video-local-edit-dialog__header h2 {
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-weight: 650;
+  letter-spacing: normal;
+  line-height: var(--leading-heading);
+  text-wrap: balance;
+}
+
+:is(
+    .settings-dialog,
+    .history-dialog,
+    .regenerate-dialog,
+    .real-person-dialog,
+    .asset-group-dialog,
+    .confirm-dialog
+  )
+  :is([class$="__eyebrow"], .regenerate-field__label, .regenerate-materials__head) {
+  color: var(--color-text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+:is(.settings-dialog, .history-dialog, .regenerate-dialog, .real-person-dialog, .asset-group-dialog)
+  :is([class$="__header"] > p) {
+  max-width: 65ch;
+  color: var(--color-text-3);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+  text-wrap: pretty;
+}
+
+:is(.settings-dialog, .history-dialog, .regenerate-dialog, .real-person-dialog, .asset-group-dialog)
+  :is(
+    .settings-dialog__close,
+    .history-dialog__close,
+    .real-person-dialog__close,
+    .asset-group-dialog__close
+  ) {
+  color: var(--color-text-3);
+  background: var(--color-transparent);
+  border-color: var(--color-transparent);
+}
+
+:is(
+    .settings-dialog,
+    .history-dialog,
+    .regenerate-dialog,
+    .real-person-dialog,
+    .asset-group-dialog,
+    .canvas-delete-dialog,
+    .video-local-edit-dialog
+  )
+  :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea) {
+  color: var(--color-text);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+:is(
+    .settings-dialog,
+    .regenerate-dialog,
+    .real-person-dialog,
+    .asset-group-dialog,
+    .video-local-edit-dialog
+  )
+  :is(input, select, textarea):focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+/* Settings: sections have space to breathe; fields stay visually recessed. */
+.settings-dialog .settings-dialog__body {
+  background: var(--color-surface-1);
+}
+
+.settings-dialog .provider-form {
+  gap: var(--space-lg);
+}
+
+.settings-dialog .provider-field--preset > select {
+  width: 100%;
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+}
+
+.settings-dialog :is(input, textarea)::placeholder {
+  color: var(--color-text-4);
+  opacity: 1;
+}
+
+.settings-dialog
+  :is(.provider-form__heading strong, .model-picker__header h3, .real-person-section-heading h3) {
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 600;
+  letter-spacing: normal;
+}
+
+.settings-dialog
+  :is(
+    .provider-form__heading p,
+    .model-picker__header p,
+    .provider-field-grid small,
+    .provider-switcher > label,
+    .provider-field-grid label > span,
+    .asset-token-settings__provider > label,
+    .asset-token-settings__provider small,
+    .asset-token-settings__control > label,
+    .asset-token-settings__control small,
+    .token-group-settings__name label,
+    .token-group-settings__secret label,
+    .token-group-settings__secret small,
+    .provider-pull-token > span,
+    .provider-pull-token small
+  ) {
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.settings-dialog .settings-step {
+  color: var(--color-text-2);
+  background: var(--color-surface-3);
+  border-color: var(--color-transparent);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.settings-dialog
+  :is(
+    .model-picker,
+    .model-picker-placeholder,
+    .asset-token-settings,
+    .tos-settings,
+    .token-group-settings
+  ) {
+  margin-block-start: var(--space-xl);
+  padding-block-start: var(--space-lg);
+  border-top-color: var(--color-rule);
+}
+
+.settings-dialog .model-list {
+  gap: var(--space-xs);
+  padding: var(--space-2xs);
+}
+
+.settings-dialog :is(.model-option, .token-group-settings__row) {
+  background: var(--color-surface-2);
+  border-color: var(--color-transparent);
+  border-radius: var(--radius-control);
+}
+
+.settings-dialog .token-group-settings__row--new {
+  background: var(--color-transparent);
+  border-color: var(--color-rule);
+}
+
+.settings-dialog
+  :is(
+    .model-option__identity strong,
+    .model-option__kind label,
+    .model-option__uses label,
+    .model-type-filter button,
+    .model-picker__summary
+  ) {
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.settings-dialog
+  :is(
+    .model-option__identity code,
+    .model-option__identity span,
+    .model-picker__summary span,
+    .asset-token-status,
+    .tos-status-badge,
+    .model-type-filter button > span
+  ) {
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.settings-dialog .model-type-filter {
+  background: var(--color-field);
+  border-color: var(--color-transparent);
+}
+
+.settings-dialog .model-type-filter button[aria-pressed="true"] {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-transparent);
+  box-shadow: var(--shadow-small);
+}
+
+.settings-dialog :is(.model-option__kind label, .model-option__uses label) {
+  background: var(--color-field);
+  border-color: var(--color-rule);
+}
+
+.settings-dialog :is(.model-option__kind label, .model-option__uses label):has(input:checked) {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: color-mix(in oklch, var(--color-accent) 35%, var(--color-rule));
+}
+
+.settings-dialog
+  :is(.provider-switcher button, .provider-save-action, .token-group-settings__actions button) {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.settings-dialog :is(.provider-fetch-action, .model-save-action, .asset-token-save-action),
+.settings-dialog .token-group-settings__actions .token-group-settings__add {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.settings-dialog .token-group-settings__actions .token-group-settings__delete {
+  color: var(--color-error);
+}
+
+/* History: a quiet list rail with reading space for the selected task. */
+.history-dialog .history-tabs {
+  gap: var(--space-2xs);
+  padding: var(--space-2xs);
+  background: var(--color-field);
+  border-radius: var(--radius-control);
+}
+
+.history-dialog .history-tabs button {
+  color: var(--color-text-3);
+  border-color: var(--color-transparent);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.history-dialog .history-tabs button.is-active {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-transparent);
+  box-shadow: var(--shadow-small);
+}
+
+.history-dialog .history-tabs button::after {
+  background: var(--color-transparent);
+}
+
+.history-dialog .history-scope {
+  background: var(--color-transparent);
+  border-color: var(--color-transparent);
+}
+
+.history-dialog .history-scope__option {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.history-dialog .history-scope__option.is-active {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: var(--color-transparent);
+}
+
+.history-dialog .history-list {
+  background: var(--color-surface-1);
+  border-color: var(--color-rule);
+}
+
+.history-dialog
+  :is(
+    .history-list__error,
+    .history-detail__error,
+    .history-regenerate__error,
+    .workflow-history__error
+  ) {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.history-dialog :is(.history-list__toolbar, .history-date-filter) {
+  background: var(--color-transparent);
+  border-color: var(--color-rule);
+}
+
+.history-dialog .history-filters {
+  flex-wrap: wrap;
+  gap: var(--space-2xs);
+}
+
+.history-dialog .history-filter {
+  min-height: calc(var(--size-control) - var(--space-xs));
+  padding-inline: var(--space-xs);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  border-color: var(--color-transparent);
+}
+
+.history-dialog .history-filter.is-active {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+.history-dialog .history-date-filter {
+  font-size: var(--text-xs);
+}
+
+.history-dialog .history-date-filter__actions button {
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.history-dialog .history-item {
+  gap: var(--space-xs);
+  padding-block: var(--space-sm);
+}
+
+.history-dialog .history-item.is-selected {
+  background: var(--color-surface-3);
+  border-color: var(--color-transparent);
+}
+
+.history-dialog .history-item::before {
+  inset-block: var(--space-sm);
+  border-radius: var(--radius-round);
+}
+
+.history-dialog .history-item__title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+
+.history-dialog
+  :is(.history-item__meta, .history-item__tokens, .history-item__status, .history-list__more) {
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.history-dialog .history-detail {
+  background: var(--color-bg-base);
+}
+
+.history-dialog .history-section {
+  margin-block-end: var(--space-lg);
+  padding: var(--space-md);
+  background: var(--color-surface-1);
+  border-color: var(--color-transparent);
+  border-radius: var(--radius-control);
+}
+
+.history-dialog .history-section > h3 {
+  color: var(--color-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+
+.history-dialog .history-section--error > h3 {
+  color: var(--color-error);
+}
+
+.history-dialog
+  :is(
+    .history-facts dt,
+    .history-mono,
+    .history-regenerate button,
+    .history-regenerate__note,
+    .history-disclosure__caret,
+    .history-call__meta,
+    .history-attempt__meta,
+    .history-attempt__number,
+    .history-call__index,
+    .history-payload__format,
+    .workflow-history__tasks span
+  ) {
+  font-size: var(--text-xs);
+}
+
+.history-dialog
+  :is(
+    .history-facts dd,
+    .history-prompt-text,
+    .workflow-history__timeline p,
+    .workflow-history__message
+  ) {
+  font-size: var(--text-sm);
+  line-height: 1.65;
+}
+
+.history-dialog .history-raw {
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  font-size: var(--text-xs);
+  line-height: 1.65;
+}
+
+.history-dialog
+  :is(.history-diagnostic, .history-call > details, .history-payload, .history-attempt) {
+  border-color: var(--color-rule);
+  box-shadow: none;
+}
+
+.history-dialog .remote-video-history {
+  background: var(--color-bg-base);
+}
+
+.history-dialog .remote-video-history__item {
+  padding: var(--space-lg);
+  background: var(--color-surface-1);
+  border-color: var(--color-transparent);
+}
+
+.history-dialog .remote-video-history .remote-video-history__primary {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+.history-dialog .workflow-history__detail .workflow-history__primary {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+}
+
+/* Media utilities inherit the same chrome without changing preview geometry. */
+.asset-source-dialog .asset-source-dialog__details {
+  padding-top: calc(var(--size-control-touch) + var(--space-lg));
+  background: var(--color-surface-1);
+  border-color: var(--color-rule);
+}
+
+.asset-source-dialog .asset-source-dialog__details dl > div {
+  padding-block: var(--space-lg);
+  border-color: var(--color-rule);
+}
+
+.asset-source-dialog .asset-source-dialog__details dt {
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.asset-source-dialog .asset-source-dialog__close {
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-small);
+}
+
+:is(
+    .regenerate-dialog,
+    .real-person-dialog,
+    .asset-group-dialog,
+    .confirm-dialog,
+    .video-local-edit-dialog
+  )
+  :is(
+    small,
+    [class$="__hint"],
+    [class$="__counter"],
+    .regenerate-field__hint,
+    .regenerate-material__meta,
+    .regenerate-add__tab,
+    .regenerate-add__url label,
+    .regenerate-add__submit,
+    .regenerate-dialog__actions button,
+    .confirm-dialog__fact-label,
+    .confirm-dialog__fact-state,
+    .real-person-auth__form label,
+    .real-person-link__status,
+    .real-person-group-card__header span,
+    .real-person-group-card dt,
+    .real-person-group-card dd
+  ) {
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.regenerate-dialog :is(.regenerate-material, .regenerate-add),
+.real-person-dialog :is(.real-person-link, .real-person-group-card) {
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+}
+
+.regenerate-dialog .regenerate-dialog__actions {
+  background: var(--color-surface-1);
+  border-top-color: var(--color-rule);
+}
+
+.regenerate-dialog .regenerate-add__tab {
+  color: var(--color-text-3);
+  border-color: var(--color-transparent);
+  font-family: var(--font-body);
+  font-weight: 500;
+}
+
+.regenerate-dialog .regenerate-add__tab.is-active {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+:is(.asset-group-dialog, .real-person-dialog)
+  :is(.asset-group-dialog__mark, .real-person-dialog__mark) {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: var(--color-transparent);
+}
+
+.confirm-dialog .confirm-dialog__desc {
+  font-size: var(--text-base);
+  line-height: 1.65;
+}
+
+.video-local-edit-dialog .video-local-edit-dialog__viewport {
+  box-shadow: var(--shadow-small);
+}
+
+.video-local-edit-dialog .video-local-edit-dialog__upload-option {
+  background: var(--color-field);
+  border-color: var(--color-rule);
+}
+
+/* Cobalt denotes the committing action; selection and focus retain light blue. */
+.history-dialog .history-date-filter__actions button[type="submit"],
+.history-dialog .history-regenerate .history-regenerate__primary,
+.regenerate-dialog .regenerate-dialog__actions .regenerate-dialog__submit,
+.regenerate-dialog .regenerate-add .regenerate-add__submit,
+.real-person-dialog :is(.real-person-primary-action, .real-person-upload-action),
+.asset-group-dialog .asset-group-dialog__actions button[type="submit"],
+.asset-source-dialog .asset-source-dialog__rename-form button:first-of-type,
+.video-local-edit-dialog .video-local-edit-dialog__footer .video-local-edit-dialog__apply {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  font-weight: 600;
+}
+
+/* Searchable multi-select remains the same control, with a calmer choice surface. */
+.searchable-multi-select .searchable-multi-select__trigger {
+  padding: var(--space-xs) var(--space-sm);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.searchable-multi-select .searchable-multi-select__trigger[tabindex="-1"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.searchable-multi-select .searchable-multi-select__trigger[aria-expanded="true"] {
+  border-color: var(--color-accent);
+}
+
+.searchable-multi-select .searchable-multi-select__chip {
+  max-width: 100%;
+  color: var(--color-text-2);
+  background: var(--color-surface-3);
+  border-color: var(--color-transparent);
+  overflow-wrap: anywhere;
+}
+
+.searchable-multi-select .searchable-multi-select__chip-remove {
+  flex-shrink: 0;
+}
+
+.searchable-multi-select .searchable-multi-select__dropdown {
+  padding: var(--space-2xs);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-strong);
+  box-shadow: var(--shadow-raised);
+}
+
+.searchable-multi-select .searchable-multi-select__search {
+  min-height: var(--size-control);
+  padding-inline: var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.searchable-multi-select .searchable-multi-select__search:focus-visible {
+  border-color: var(--color-accent);
+}
+
+.searchable-multi-select .searchable-multi-select__options {
+  padding-top: var(--space-2xs);
+}
+
+.searchable-multi-select .searchable-multi-select__option {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border-radius: var(--radius-xs);
+  line-height: var(--leading-body);
+}
+
+.searchable-multi-select .searchable-multi-select__option > span:last-child {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  :is(
+      .settings-dialog,
+      .history-dialog,
+      .regenerate-dialog,
+      .real-person-dialog,
+      .asset-group-dialog
+    )
+    :is(
+      .settings-dialog__close,
+      .history-dialog__close,
+      .real-person-dialog__close,
+      .asset-group-dialog__close
+    ):hover {
+    color: var(--color-text);
+    background: var(--color-surface-3);
+  }
+
+  .settings-dialog
+    :is(.provider-fetch-action, .model-save-action, .asset-token-save-action):hover:not(:disabled),
+  .settings-dialog .token-group-settings__actions .token-group-settings__add:hover:not(:disabled),
+  .history-dialog .remote-video-history .remote-video-history__primary:hover:not(:disabled),
+  .history-dialog .workflow-history__detail .workflow-history__primary:hover:not(:disabled),
+  .history-dialog .history-date-filter__actions button[type="submit"]:hover:not(:disabled),
+  .history-dialog .history-regenerate .history-regenerate__primary:hover:not(:disabled),
+  .regenerate-dialog .regenerate-dialog__actions .regenerate-dialog__submit:hover:not(:disabled),
+  .regenerate-dialog .regenerate-add .regenerate-add__submit:hover:not(:disabled),
+  .real-person-dialog
+    :is(.real-person-primary-action, .real-person-upload-action):hover:not(:disabled),
+  .asset-group-dialog .asset-group-dialog__actions button[type="submit"]:hover:not(:disabled),
+  .asset-source-dialog .asset-source-dialog__rename-form button:first-of-type:hover:not(:disabled),
+  .video-local-edit-dialog
+    .video-local-edit-dialog__footer
+    .video-local-edit-dialog__apply:hover:not(:disabled) {
+    color: var(--color-brand-ink);
+    background: var(--color-brand-hover);
+    border-color: var(--color-brand-hover);
+    filter: none;
+  }
+
+  .history-dialog .history-item:hover {
+    background: var(--color-surface-2);
+    border-color: var(--color-transparent);
+  }
+
+  .history-dialog .history-item.is-selected:hover {
+    background: var(--color-surface-3);
+  }
+}
+
+/* Fixed minimum columns used to overrun the settings dialog between breakpoints. */
+@media (max-width: 52rem) {
+  .settings-dialog :is(.model-option, .token-group-settings__row) {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-dialog .model-picker__toolbar {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-dialog .model-picker__header {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .settings-dialog .token-group-settings__actions {
+    flex-wrap: wrap;
+  }
+}
+
+@media (max-width: 48rem) {
+  .history-dialog .history-dialog__body:not(.history-dialog__body--single) {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(12rem, 42%) minmax(0, 1fr);
+  }
+
+  /* Scrolling the complete rail keeps results reachable below the date controls. */
+  .history-dialog .history-list {
+    display: block;
+    overflow: auto;
+    scrollbar-width: thin;
+  }
+
+  .history-dialog .history-list__scroll {
+    overflow: visible;
+  }
+
+  .asset-source-dialog .asset-source-dialog__details {
+    padding-top: var(--space-lg);
+  }
+}
+
+@media (max-width: 40rem) {
+  :is(
+      .settings-dialog,
+      .history-dialog,
+      .regenerate-dialog,
+      .real-person-dialog,
+      .asset-group-dialog,
+      .video-local-edit-dialog
+    )
+    :is(input:not([type="checkbox"]):not([type="radio"]):not([type="range"]), select, textarea),
+  .searchable-multi-select .searchable-multi-select__search {
+    font-size: var(--text-md);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-layer .settings-dialog,
+  .history-layer .history-dialog,
+  .regenerate-layer .regenerate-dialog,
+  .real-person-dialog[open],
+  .asset-group-dialog[open],
+  .confirm-dialog[open],
+  .canvas-delete-dialog[open],
+  .video-local-edit-dialog[open] {
+    animation-name: none;
+  }
+
+  .searchable-multi-select
+    :is(
+      .searchable-multi-select__trigger,
+      .searchable-multi-select__option,
+      .searchable-multi-select__chip-remove
+    ) {
+    transition-property: none;
+  }
+}

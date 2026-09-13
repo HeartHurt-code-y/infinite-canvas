@@ -1,0 +1,841 @@
+/*
+ * Studio canvas: cobalt execution controls anchor an ink-dark media workspace.
+ * This layer intentionally preserves node dimensions, port geometry, grids,
+ * editor sizing and scroll containers owned by the canvas components.
+ */
+
+.react-flow__node
+  :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow,
+    .canvas-asset-node,
+    .canvas-result-node
+  ) {
+  --studio-node-tint: var(--color-accent);
+  color: var(--color-text);
+  background: var(--color-surface-1);
+  border-color: var(--color-rule);
+  border-top-color: color-mix(in srgb, var(--studio-node-tint) 22%, var(--color-rule));
+  border-radius: var(--radius-card);
+  box-shadow: var(--shadow-raised);
+  transition: none;
+}
+
+.react-flow__node .canvas-gen-node--image,
+.react-flow__node .canvas-asset-node--output--image {
+  --studio-node-tint: var(--color-image);
+}
+
+.react-flow__node
+  :is(
+    .canvas-gen-node--video,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-screenplay-node--storyboard,
+    .canvas-screenplay-node--viral_remix,
+    .canvas-asset-node--output--video
+  ) {
+  --studio-node-tint: var(--color-video);
+}
+
+.react-flow__node
+  .canvas-screenplay-node:not(.canvas-screenplay-node--storyboard):not(
+    .canvas-screenplay-node--viral_remix
+  ) {
+  --studio-node-tint: var(--color-audio);
+}
+
+.react-flow__node .canvas-asset-node--output--failed {
+  border-top-color: var(--color-error);
+}
+
+.react-flow__node
+  :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow,
+    .canvas-asset-node,
+    .canvas-result-node
+  ).is-selected,
+.react-flow__node.selected
+  > .canvas-flow-node
+  > :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow,
+    .canvas-asset-node,
+    .canvas-result-node
+  ) {
+  border-color: color-mix(in srgb, var(--color-accent) 58%, var(--color-rule));
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+  box-shadow: var(--shadow-raised);
+}
+
+/* Titles have one hierarchy across generation, writing and local tools. */
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__type,
+    .canvas-video-composer__type,
+    .canvas-video-downloader__type,
+    .canvas-video-frame-extractor__type
+  ) {
+  gap: var(--space-xs);
+  color: var(--color-text);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__type-copy,
+    .canvas-video-composer__type > span:last-child,
+    .canvas-video-downloader__type > span:last-child,
+    .canvas-video-frame-extractor__type > span:last-child
+  ) {
+  line-height: var(--leading-heading);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__type-copy,
+    .canvas-video-composer__type,
+    .canvas-video-downloader__type,
+    .canvas-video-frame-extractor__type,
+    .canvas-knowledge-workflow__identity
+  )
+  strong {
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-size: var(--text-base);
+  font-weight: 650;
+  letter-spacing: normal;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__type-copy,
+    .canvas-video-composer__type,
+    .canvas-video-downloader__type,
+    .canvas-video-frame-extractor__type,
+    .canvas-knowledge-workflow__identity
+  )
+  small {
+  color: var(--color-text-3);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 400;
+  letter-spacing: normal;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__type-icon,
+    .canvas-video-composer__type-icon,
+    .canvas-video-downloader__type-icon,
+    .canvas-video-frame-extractor__type-icon,
+    .canvas-knowledge-workflow__mark
+  ) {
+  color: var(--studio-node-tint);
+  background: color-mix(in srgb, var(--studio-node-tint) 9%, var(--color-surface-2));
+  border-color: color-mix(in srgb, var(--studio-node-tint) 16%, var(--color-rule));
+  border-radius: var(--radius-control);
+  box-shadow: none;
+}
+
+/* A single recessed field treatment, including the seven workflow variants. */
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow
+  )
+  :is(
+    input:where(:not([type="checkbox"]):not([type="range"]):not([type="color"])),
+    select,
+    textarea,
+    .prompt-mention__input
+  ) {
+  color: var(--color-text);
+  background-color: var(--color-field);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-control);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  font-weight: 400;
+  box-shadow: none;
+}
+
+.react-flow__node .canvas-flow-node :is(textarea, .prompt-mention__input) {
+  line-height: var(--leading-body);
+}
+
+.react-flow__node .canvas-flow-node :is(input, textarea)::placeholder,
+.react-flow__node .canvas-flow-node .prompt-mention__input p.is-editor-empty:first-child::before,
+.react-flow__node .canvas-flow-node .prompt-mention__input:empty::before {
+  color: var(--color-text-4);
+  opacity: 1;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    input:where(:not([type="checkbox"]):not([type="range"]):not([type="color"])),
+    select,
+    textarea,
+    .prompt-mention__input
+  ):focus-visible {
+  border-color: var(--color-accent);
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-thin);
+}
+
+.react-flow__node .canvas-flow-node input[type="checkbox"] {
+  accent-color: var(--color-accent);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow
+  )
+  [aria-invalid="true"] {
+  border-color: var(--color-error);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__field > span,
+    .canvas-prompt-node__field > span,
+    .canvas-prompt-node__field > label,
+    .canvas-gen-node__section-heading,
+    .canvas-gen-node__section-title,
+    .canvas-video-composer__section-heading,
+    .canvas-video-downloader__section-heading,
+    .canvas-video-frame-extractor__field-label,
+    .canvas-knowledge-workflow__brief > span,
+    .canvas-knowledge-workflow__model-slot label > span
+  ) {
+  color: var(--color-text-2);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__section-heading,
+    .canvas-gen-node__section-title,
+    .canvas-video-composer__section-heading,
+    .canvas-video-downloader__section-heading
+  )
+  small {
+  color: var(--color-text-3);
+  font-family: var(--font-body);
+  font-weight: 400;
+}
+
+/* The operating mode is supporting information, not a second colored header. */
+.react-flow__node .canvas-gen-node .canvas-gen-node__operation {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node .canvas-gen-node .canvas-gen-node__operation strong {
+  color: var(--color-text-2);
+  font-weight: 500;
+}
+
+.react-flow__node .canvas-gen-node .canvas-gen-node__operation small {
+  color: var(--color-text-3);
+  line-height: 1.4;
+}
+
+.react-flow__node .canvas-gen-node .canvas-gen-node__operation-icon {
+  color: var(--studio-node-tint);
+}
+
+.react-flow__node
+  .canvas-gen-node
+  :is(
+    .canvas-gen-node__media-roles,
+    .canvas-gen-node__url-media,
+    .canvas-gen-node__toggle-control
+  ) {
+  color: var(--color-text-2);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__url-item,
+    .canvas-gen-node__image-status,
+    .canvas-gen-node__video-status,
+    .canvas-video-composer__inputs li,
+    .canvas-video-composer__summary,
+    .canvas-video-composer__status:not(.is-error),
+    .canvas-video-downloader__status:not(.is-error):not(.is-cancelled):not(.is-done),
+    .canvas-prompt-node__connections li
+  ) {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(.canvas-gen-node__image-status-icon, .canvas-gen-node__video-status-icon):not(.is-active) {
+  color: var(--color-text-3);
+  background: var(--color-surface-3);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__image-progress-value,
+    .canvas-gen-node__video-progress-value,
+    .canvas-video-composer__index,
+    .canvas-knowledge-workflow__progress-head span,
+    .canvas-knowledge-workflow__shot-meta,
+    .prompt-mention__character-count
+  ) {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Cobalt is reserved for execution; export, attach and revise are secondary. */
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__start,
+    .canvas-video-composer__compose,
+    .canvas-video-downloader__start,
+    .canvas-video-frame-extractor__start,
+    .canvas-viral-remix-node__run,
+    .canvas-screenplay-node__composer-actions button,
+    .canvas-knowledge-workflow__primary,
+    .canvas-knowledge-workflow__decision button,
+    .canvas-gen-node__url-draft-add,
+    .prompt-mention__expanded-footer button
+  ):is(:not(:disabled), [data-state="loading"], .is-busy) {
+  color: var(--color-brand-ink);
+  background: var(--color-brand);
+  border-color: var(--color-brand);
+  border-radius: var(--radius-control);
+  font-weight: 600;
+  box-shadow: var(--shadow-inset);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__start,
+    .canvas-video-composer__compose,
+    .canvas-video-downloader__start,
+    .canvas-video-frame-extractor__start,
+    .canvas-viral-remix-node__run,
+    .canvas-screenplay-node__composer-actions button,
+    .canvas-knowledge-workflow__primary,
+    .canvas-knowledge-workflow__decision button,
+    .canvas-gen-node__url-draft-add,
+    .prompt-mention__expanded-footer button
+  ):hover:not(:disabled) {
+  color: var(--color-brand-ink);
+  background: var(--color-brand-hover);
+  border-color: var(--color-brand-hover);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-gen-node__start,
+    .canvas-video-composer__compose,
+    .canvas-video-downloader__start,
+    .canvas-video-frame-extractor__start,
+    .canvas-viral-remix-node__run,
+    .canvas-screenplay-node__composer-actions button,
+    .canvas-knowledge-workflow__primary,
+    .canvas-knowledge-workflow__decision button,
+    .canvas-gen-node__url-draft-add,
+    .prompt-mention__expanded-footer button
+  ):disabled:not([data-state="loading"]):not(.is-busy) {
+  color: var(--color-text-3);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule);
+  box-shadow: none;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-screenplay-node__export,
+    .canvas-screenplay-node__materials-add,
+    .canvas-knowledge-workflow__secondary,
+    .canvas-knowledge-workflow__result button,
+    .canvas-workflow-references button,
+    .canvas-reverse-video__configuration button,
+    .canvas-reverse-video__deliverables button,
+    .canvas-xhs-cover__configuration button,
+    .canvas-xhs-cover__deliverables button,
+    .canvas-ai-film-workflow__artifacts > button,
+    .canvas-comic-drama-workflow__settings button,
+    .canvas-commerce-workflow__settings button,
+    .canvas-remotion-workflow__delivery-actions button,
+    .canvas-video-downloader__engine-action,
+    .canvas-video-downloader__reveal,
+    .canvas-video-composer__input-actions button,
+    .canvas-gen-node__url-add,
+    .canvas-gen-node__url-draft-cancel,
+    .canvas-prompt-node__connections button,
+    .prompt-mention__trigger,
+    .prompt-mention__expand
+  ) {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-control);
+  font-family: var(--font-body);
+  font-weight: 500;
+  box-shadow: none;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-screenplay-node__export,
+    .canvas-screenplay-node__materials-add,
+    .canvas-knowledge-workflow__secondary,
+    .canvas-knowledge-workflow__result button,
+    .canvas-workflow-references button,
+    .canvas-reverse-video__configuration button,
+    .canvas-reverse-video__deliverables button,
+    .canvas-xhs-cover__configuration button,
+    .canvas-xhs-cover__deliverables button,
+    .canvas-ai-film-workflow__artifacts > button,
+    .canvas-comic-drama-workflow__settings button,
+    .canvas-commerce-workflow__settings button,
+    .canvas-remotion-workflow__delivery-actions button,
+    .canvas-video-downloader__engine-action,
+    .canvas-video-downloader__reveal,
+    .canvas-video-composer__input-actions button,
+    .canvas-gen-node__url-add,
+    .canvas-gen-node__url-draft-cancel,
+    .canvas-prompt-node__connections button,
+    .prompt-mention__trigger,
+    .prompt-mention__expand
+  ):hover:not(:disabled) {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  border-color: var(--color-rule-strong);
+}
+
+.react-flow__node .canvas-flow-node :is(button, summary):focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+/* Prompt writing and documents share a calm reading surface. */
+.react-flow__node .canvas-gen-node--prompt .canvas-prompt-node__task {
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node .canvas-gen-node--prompt .canvas-prompt-node__task button {
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.react-flow__node .canvas-gen-node--prompt .canvas-prompt-node__task button.is-active {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+  box-shadow: var(--shadow-whisper);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-prompt-node__intro,
+    .canvas-screenplay-node__skill-badge,
+    .canvas-screenplay-node__materials,
+    .canvas-screenplay-node__source,
+    .canvas-screenplay-node__source.is-connected,
+    .canvas-viral-remix-node__input,
+    .canvas-viral-remix-node__input.is-connected
+  ) {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+}
+
+.react-flow__node .canvas-screenplay-node .canvas-screenplay-node__skill-badge > svg {
+  color: var(--studio-node-tint);
+}
+
+/* The original intro used inverse ink on a bright accent panel. Its child
+ * copy needs an explicit foreground when the panel becomes a dark surface. */
+.react-flow__node .canvas-flow-node .canvas-prompt-node__intro > strong {
+  color: var(--color-text);
+}
+
+.react-flow__node .canvas-flow-node .canvas-prompt-node__intro > span {
+  color: var(--color-text-2);
+  font-size: var(--text-xs);
+  line-height: var(--leading-body);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-screenplay-node__skill-badge small,
+    .canvas-screenplay-node__source-copy small,
+    .canvas-screenplay-node__message > span,
+    .canvas-screenplay-node__material-copy small,
+    .canvas-prompt-node__status
+  ) {
+  color: var(--color-text-3);
+  font-family: var(--font-body);
+  font-weight: 400;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(.canvas-screenplay-node__conversation, .canvas-screenplay-node__document-preview) {
+  color: var(--color-text);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node .canvas-flow-node .canvas-screenplay-node__message {
+  background: var(--color-surface-1);
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node .canvas-flow-node .canvas-screenplay-node__message.is-user {
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-2));
+  border-color: color-mix(in srgb, var(--color-accent) 15%, var(--color-rule));
+}
+
+.react-flow__node .canvas-flow-node .canvas-screenplay-node__message.is-decision {
+  background: transparent;
+  border-color: var(--color-rule);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  :is(
+    .canvas-screenplay-node__message .markdown-view,
+    .canvas-screenplay-node__document-preview .markdown-view
+  ) {
+  color: var(--color-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.react-flow__node
+  .canvas-flow-node
+  .canvas-screenplay-node__message
+  .markdown-view
+  :is(h1, h2, h3, h4, h5, h6) {
+  color: var(--color-text);
+  font-family: var(--font-body);
+  font-weight: 600;
+  text-transform: none;
+  line-height: 1.4;
+}
+
+.react-flow__node .canvas-flow-node .canvas-screenplay-node__message .markdown-view :is(h1, h2) {
+  font-size: var(--text-base);
+}
+
+.react-flow__node
+  .canvas-flow-node
+  .canvas-screenplay-node__message
+  .markdown-view
+  :is(h3, h4, h5, h6) {
+  font-size: var(--text-sm);
+}
+
+.react-flow__node .canvas-flow-node :is(.prompt-mention__menu, .prompt-ambiguity__menu) {
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-strong);
+  border-radius: var(--radius-panel);
+  box-shadow: var(--shadow-floating);
+}
+
+.react-flow__node .canvas-flow-node .prompt-mention__option {
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node .canvas-flow-node .prompt-mention__option:is(.is-active, :hover) {
+  color: var(--color-text);
+  background: var(--color-surface-3);
+}
+
+.react-flow__node .canvas-flow-node .mention-chip {
+  font-size: var(--text-xs);
+  border-radius: var(--radius-xs);
+}
+
+.react-flow__node .canvas-flow-node .node-media-chip {
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node .canvas-flow-node .prompt-mention__trigger--detect[data-result="scanning"] {
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  border-color: color-mix(in srgb, var(--color-accent) 32%, var(--color-rule));
+}
+
+.react-flow__node .canvas-flow-node .prompt-mention__trigger--detect[data-result="success"] {
+  color: var(--color-success);
+  background: var(--color-success-soft);
+  border-color: color-mix(in srgb, var(--color-success) 32%, var(--color-rule));
+}
+
+.react-flow__node
+  .canvas-flow-node
+  .prompt-mention__trigger--detect:is([data-result="ambiguous"], [data-result="no-match"]) {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border-color: color-mix(in srgb, var(--color-warning) 32%, var(--color-rule));
+}
+
+/* All seven workflows retain their own content and step layout. */
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__header {
+  background: var(--color-surface-1);
+  border-bottom-color: var(--color-rule);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  :is(
+    .canvas-knowledge-workflow__models,
+    .canvas-knowledge-workflow__progress,
+    .canvas-knowledge-workflow__deliverables
+  ) {
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__model-slot {
+  background: transparent;
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  :is(
+    .canvas-knowledge-workflow__models-title,
+    .canvas-knowledge-workflow__model-slot legend,
+    .canvas-knowledge-workflow__deliverables > summary
+  ) {
+  color: var(--color-text-2);
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__model-summary span {
+  color: var(--color-text-3);
+  background: var(--color-field);
+  border-radius: var(--radius-xs);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__status {
+  font-size: var(--text-xs);
+  font-weight: 500;
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  .canvas-knowledge-workflow__status.is-awaiting_approval {
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  border-color: color-mix(in srgb, var(--color-warning) 25%, var(--color-rule));
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__progress-head span {
+  font-family: var(--font-body);
+  font-weight: 600;
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__stages li {
+  font-size: var(--text-xs);
+  line-height: 1.4;
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__decision {
+  background: color-mix(in srgb, var(--color-accent) 6%, var(--color-surface-2));
+  border-color: color-mix(in srgb, var(--color-accent) 28%, var(--color-rule));
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__shots li {
+  background: var(--color-surface-2);
+  border-color: var(--color-rule);
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  .canvas-knowledge-workflow__shots
+  li.canvas-knowledge-workflow__shot--redo {
+  border-color: var(--color-warning);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  .canvas-knowledge-workflow__shots
+  li.canvas-knowledge-workflow__shot--edited {
+  border-color: color-mix(in srgb, var(--color-accent) 42%, var(--color-rule));
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__shot-editor {
+  background: var(--color-surface-1);
+  border-color: var(--color-rule);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  :is(
+    .canvas-knowledge-workflow__result video,
+    .canvas-knowledge-workflow__shots video,
+    .canvas-reverse-video__deliverables video,
+    .canvas-reverse-video__sheets img
+  ) {
+  background: var(--color-bg-sunk);
+  border-radius: var(--radius-control);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__actions {
+  border-top-color: var(--color-rule);
+}
+
+.react-flow__node
+  .canvas-knowledge-workflow
+  :is(.canvas-commerce-workflow__materials, .canvas-comic-drama-workflow__episode) {
+  color: var(--color-text-2);
+  background: var(--color-surface-2);
+  border-color: var(--color-rule-faint);
+  border-radius: var(--radius-card);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-commerce-workflow__materials p {
+  color: var(--color-text-3);
+  line-height: var(--leading-body);
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-commerce-workflow__materials p[role="alert"] {
+  color: var(--color-error);
+}
+
+.react-flow__node .canvas-knowledge-workflow .markdown-view {
+  color: var(--color-text-2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.react-flow__node .canvas-knowledge-workflow .canvas-workflow-references__icon {
+  color: var(--color-text-3);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+}
+
+/* Media remains edge-to-edge; the caption scrim follows the graphite palette. */
+.react-flow__node .canvas-asset-node--media::after {
+  background: linear-gradient(
+    to bottom,
+    transparent,
+    color-mix(in srgb, var(--color-bg-sunk) 88%, transparent)
+  );
+  border-radius: 0 0 calc(var(--radius-card) - var(--rule-thin))
+    calc(var(--radius-card) - var(--rule-thin));
+}
+
+.react-flow__node .canvas-asset-node--media > .canvas-asset-node__visual {
+  border-radius: calc(var(--radius-card) - var(--rule-thin));
+}
+
+.react-flow__node .canvas-asset-node .canvas-asset-node__name,
+.react-flow__node .canvas-result-node .canvas-result-node__title {
+  font-family: var(--font-body);
+  font-size: var(--text-xs);
+  font-weight: 650;
+}
+
+.react-flow__node .canvas-asset-node .canvas-output-node__text {
+  color: var(--color-text-2);
+  background: var(--color-field);
+  border-color: var(--color-rule);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.react-flow__node .canvas-video-composer .canvas-video-composer__index {
+  color: var(--color-text-2);
+  background: var(--color-surface-3);
+  font-family: var(--font-body);
+  font-weight: 600;
+}
+
+/* Keep the real handles visible; their position and hit targets stay untouched. */
+.react-flow__node .canvas-flow-handle {
+  background: var(--color-surface-2);
+  border-color: color-mix(in srgb, var(--color-accent) 65%, var(--color-rule-strong));
+  box-shadow: 0 0 0 var(--rule-active) var(--color-bg-base);
+}
+
+.react-flow__node .canvas-flow-handle:is(:hover, :focus-visible, .canvas-flow-handle--highlight) {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 var(--focus-halo-width) var(--color-accent-soft);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .react-flow__node .canvas-flow-node *,
+  .react-flow__node .canvas-flow-node *::before,
+  .react-flow__node .canvas-flow-node *::after,
+  .react-flow__node .canvas-flow-handle {
+    animation: none !important;
+    transition: none !important;
+  }
+}

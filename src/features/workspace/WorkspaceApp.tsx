@@ -8196,9 +8196,7 @@ export function WorkspaceApp({
         <header className="workspace-header">
           <div className="brand-lockup" aria-label="无限画布">
             <span className="brand-mark" aria-hidden="true">
-              <i />
-              <i />
-              <i />
+              <Icon name="infinity" size="2xl" />
             </span>
             <span className="brand-name">无限画布</span>
           </div>
@@ -8228,6 +8226,7 @@ export function WorkspaceApp({
             ) : null}
           </div>
           <div className="workspace-header__navigation">
+            {canvasNavigation}
             <WorkflowRepository
               expanded={workflowRepositoryExpanded}
               onToggle={toggleWorkflowRepository}
@@ -8263,7 +8262,6 @@ export function WorkspaceApp({
               <Icon name="plus" aria-hidden="true" size="lg" />
               <span>节点</span>
             </button>
-            {canvasNavigation}
           </div>
           <div className="header-actions">
             <button
@@ -8470,18 +8468,20 @@ export function WorkspaceApp({
               aria-label="无限画布节点编辑器"
               attributionPosition="bottom-left"
             >
-              {/* 网格由 React Flow Background 渲染，随视口原生平移缩放（主网格 5rem、次网格 1rem）。 */}
+              {/* 点阵随原生视口平移缩放，为创作区域提供轻量的空间参照。 */}
               <Background
                 id="canvas-grid-minor"
-                variant={BackgroundVariant.Lines}
-                gap={16}
+                variant={BackgroundVariant.Dots}
+                gap={24}
+                size={1}
                 lineWidth={1}
                 className="canvas-flow-bg canvas-flow-bg--minor"
               />
               <Background
                 id="canvas-grid-major"
-                variant={BackgroundVariant.Lines}
-                gap={80}
+                variant={BackgroundVariant.Dots}
+                gap={120}
+                size={1.5}
                 lineWidth={1}
                 className="canvas-flow-bg canvas-flow-bg--major"
               />
@@ -8500,6 +8500,9 @@ export function WorkspaceApp({
             {/* 空态提示与连线/拖动捕获层挂在视口上，不随画布平移缩放。 */}
             {!hasCanvasNodes ? (
               <div className="canvas-empty-hint">
+                <div className="canvas-empty-hint__art" aria-hidden="true">
+                  <Icon name="infinity" size="3xl" />
+                </div>
                 <strong>画布为空</strong>
                 <span>右键画布空白处或点击顶部「节点」添加节点，也可从素材库拖入素材。</span>
               </div>

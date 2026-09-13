@@ -5,6 +5,7 @@ import { Toaster } from "sonner";
 import "./App.css";
 import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { createQueryClient } from "./lib/queryClient";
+import "./styles/studio.css";
 
 export { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./features/workspace/workspaceModel";
 export type {
@@ -30,7 +31,7 @@ function App() {
         closeButton
         position="bottom-right"
         richColors
-        theme="light"
+        theme="dark"
         visibleToasts={4}
         toastOptions={{ closeButtonAriaLabel: "关闭通知", duration: 4000 }}
       />
