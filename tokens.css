@@ -1,7 +1,7 @@
 /*
  * 无限画布 · 设计令牌
- * Studio · 钴蓝创作空间
- * 雾白工具区与深墨色画布形成明暗分区，钴蓝用于品牌和主操作。
+ * Studio · 黑白创作空间
+ * 中性工具区、纯黑虚线画布与石墨节点，以明度和排版建立层级。
  *
  * 该文件是全部视觉值的唯一来源。组件样式不得重新声明孤立的颜色、字体、
  * 间距、圆角、层级或动效值；需要新值时先在此处登记为具名令牌。
@@ -13,57 +13,55 @@
   color-scheme: dark;
 
   /* ── 画布工作台：层级中最深的一层，媒体与节点浮在其上 ───────────────── */
-  --color-bg-base: #191b24;
-  --color-bg-sunk: #11131b;
+  --color-bg-base: #000000;
+  --color-bg-sunk: #000000;
 
   /* ── 抬升表面：面板、节点、弹窗，靠明度递进而非色相区分 ─────────────── */
-  --color-surface-1: #232632;
-  --color-surface-2: #2b2f3e;
-  --color-surface-3: #383e50;
-  --color-field: #1b1e29;
-  --color-overlay: #434b60;
+  --color-surface-1: #1c1c1c;
+  --color-surface-2: #242424;
+  --color-surface-3: #303030;
+  --color-field: #111111;
+  --color-overlay: #414141;
 
   /* ── 描边：三档，仅在需要表达分组层级时出现 ───────────────────────── */
-  --color-rule-faint: #282c33;
-  --color-rule: #363c46;
-  --color-rule-strong: #505968;
+  --color-rule-faint: #292929;
+  --color-rule: #3b3b3b;
+  --color-rule-strong: #626262;
 
   /* ── 文字四级：主文案 / 次要 / 辅助 / 占位与提示 ──────────────────── */
   /* 辅助文字也保持实色，避免整组 opacity 叠加损失对比。 */
-  --color-text: #eceef2;
-  --color-text-2: #bfc5ce;
-  --color-text-3: #a1aab8;
-  --color-text-4: #a1aab8;
+  --color-text: #f4f4f4;
+  --color-text-2: #cccccc;
+  --color-text-3: #aaaaaa;
+  --color-text-4: #aaaaaa;
 
   /* ── 交互色：主操作、焦点和选中；不铺满所有工具 ─────────────────── */
-  --color-accent: #9aafff;
-  --color-accent-hover: #bdcbff;
-  --color-accent-press: #879bea;
-  --color-accent-soft: #29365b;
-  --color-accent-ink: #18213a;
-  --color-focus: #b4c4ff;
-  --color-brand: #4555ed;
-  --color-brand-hover: #3948d7;
-  --color-brand-ink: #ffffff;
-  --color-brand-wash: #e8ebff;
+  --color-accent: #dadada;
+  --color-accent-hover: #ffffff;
+  --color-accent-press: #bcbcbc;
+  --color-accent-soft: #303030;
+  --color-accent-ink: #171717;
+  --color-focus: #eeeeee;
+  --color-brand: #ededed;
+  --color-brand-hover: #ffffff;
+  --color-brand-ink: #171717;
+  --color-brand-wash: #303030;
   /* 焦点光晕：深色面上为焦点环补一圈与背景同色的接触环，避免环被底噪吃掉 */
   --focus-halo-width: 4px;
 
-  /* ── 媒体语义：仅用于表达素材与端口的类型，不用于通用控件 ───────────── */
-  --color-image: oklch(0.705 0.115 235); /* #4DABDD */
-  --color-image-strong: oklch(0.775 0.105 235); /* #6EC1EF */
-  --color-image-soft: oklch(0.28 0.04 235); /* #132C3A */
-  --color-image-ink: oklch(0.17 0.02 235); /* #071117 */
-
-  --color-video: oklch(0.705 0.12 305); /* #B18CDC */
-  --color-video-strong: oklch(0.775 0.11 305); /* #C6A4EE */
-  --color-video-soft: oklch(0.28 0.042 305); /* #2E233A */
-  --color-video-ink: oklch(0.17 0.02 305); /* #110D16 */
-
-  --color-audio: oklch(0.775 0.115 82); /* #DAAE5A */
-  --color-audio-strong: oklch(0.835 0.105 82); /* #EBC277 */
-  --color-audio-soft: oklch(0.3 0.045 82); /* #392B11 */
-  --color-audio-ink: oklch(0.19 0.025 82); /* #191307 */
+  /* 媒体类型由图标与文字区分，避免为不同节点铺设竞争的色相。 */
+  --color-image: var(--color-text-2);
+  --color-image-strong: var(--color-text);
+  --color-image-soft: var(--color-surface-3);
+  --color-image-ink: var(--color-accent-ink);
+  --color-video: var(--color-text-2);
+  --color-video-strong: var(--color-text);
+  --color-video-soft: var(--color-surface-3);
+  --color-video-ink: var(--color-accent-ink);
+  --color-audio: var(--color-text-2);
+  --color-audio-strong: var(--color-text);
+  --color-audio-soft: var(--color-surface-3);
+  --color-audio-ink: var(--color-accent-ink);
 
   /* ── 状态：成功 / 警告 / 失败，均配深色底与反相墨色 ────────────────── */
   --color-success: oklch(0.72 0.13 158); /* #51BD85 */
@@ -110,12 +108,14 @@
   --color-chrome-subtle: var(--color-text-4);
 
   /* ── 工作台网格：退到内容之下，只提供空间参照 ─────────────────────── */
-  --color-grid-major: rgb(172 187 209 / 0.17);
-  --color-grid-minor: rgb(172 187 209 / 0.045);
-  --color-scrim: rgb(6 8 12 / 0.72);
-  --color-panel-wash: rgb(35 38 50 / 0.98);
-  --color-dock-wash: rgb(43 47 62 / 0.98);
-  --color-selection-wash: rgb(154 175 255 / 0.14);
+  --color-grid-major: rgb(255 255 255 / 0.16);
+  --color-grid-minor: rgb(255 255 255 / 0.075);
+  --grid-dash-minor: 3 7;
+  --grid-dash-major: 4 8;
+  --color-scrim: rgb(0 0 0 / 0.72);
+  --color-panel-wash: rgb(28 28 28 / 0.98);
+  --color-dock-wash: rgb(36 36 36 / 0.98);
+  --color-selection-wash: rgb(255 255 255 / 0.12);
   --color-transparent: transparent;
 
   /* ── 阴影：深色表面靠「顶缘内高光 + 接触阴影 + 扩散阴影」三层建立抬升 ── */
@@ -213,8 +213,6 @@
   --size-empty-art: 6rem;
   --size-empty-composition: 8rem;
   --size-empty-layout: 32rem;
-  --angle-brand-card: -12deg;
-  --angle-brand-counter: 8deg;
   --size-control-compact: 1.5rem;
   --size-control: 2.5rem;
   --size-control-touch: 3rem;
@@ -251,23 +249,27 @@
 .asset-panel,
 .connection-quick-add-menu {
   color-scheme: light;
-  --color-bg-base: #f6f7fb;
-  --color-bg-sunk: #e7eaf3;
-  --color-surface-1: #f6f7fb;
-  --color-surface-2: #eceef6;
-  --color-surface-3: #dfe4f1;
+  --color-bg-base: #f5f5f5;
+  --color-bg-sunk: #e7e7e7;
+  --color-surface-1: #f5f5f5;
+  --color-surface-2: #ebebeb;
+  --color-surface-3: #dfdfdf;
   --color-field: #ffffff;
-  --color-overlay: #d8deed;
-  --color-rule-faint: #e6e9f1;
-  --color-rule: #d3d9e6;
-  --color-rule-strong: #a0abc0;
-  --color-text: #20253b;
-  --color-text-2: #454e66;
-  --color-text-3: #58637a;
-  --color-text-4: #58637a;
+  --color-overlay: #d8d8d8;
+  --color-rule-faint: #e3e3e3;
+  --color-rule: #d0d0d0;
+  --color-rule-strong: #a0a0a0;
+  --color-text: #222222;
+  --color-text-2: #4b4b4b;
+  --color-text-3: #606060;
+  --color-text-4: #606060;
+  --color-brand: #202020;
+  --color-brand-hover: #393939;
+  --color-brand-ink: #ffffff;
+  --color-brand-wash: #e6e6e6;
   --color-accent: var(--color-brand);
   --color-accent-hover: var(--color-brand-hover);
-  --color-accent-press: #303fca;
+  --color-accent-press: #111111;
   --color-accent-soft: var(--color-brand-wash);
   --color-accent-ink: var(--color-brand-ink);
   --color-focus: var(--color-brand);
@@ -281,18 +283,21 @@
   --color-warning: #876315;
   --color-warning-soft: #f7edce;
   --color-warning-ink: #503805;
-  --color-image: #246d9d;
-  --color-image-strong: #1d5982;
-  --color-image-soft: #e3f2fa;
-  --color-video: #7950b6;
-  --color-video-strong: #624093;
-  --color-video-soft: #efe9fb;
-  --color-audio: #927027;
-  --color-audio-strong: #785619;
-  --color-audio-soft: #f8efd7;
+  --color-image: var(--color-text-2);
+  --color-image-strong: var(--color-text);
+  --color-image-soft: var(--color-surface-3);
+  --color-image-ink: var(--color-brand-ink);
+  --color-video: var(--color-text-2);
+  --color-video-strong: var(--color-text);
+  --color-video-soft: var(--color-surface-3);
+  --color-video-ink: var(--color-brand-ink);
+  --color-audio: var(--color-text-2);
+  --color-audio-strong: var(--color-text);
+  --color-audio-soft: var(--color-surface-3);
+  --color-audio-ink: var(--color-brand-ink);
   --color-highlight-inset: rgb(255 255 255 / 0.6);
-  --color-shadow: rgb(31 44 80 / 0.08);
-  --color-shadow-strong: rgb(31 44 80 / 0.16);
+  --color-shadow: rgb(0 0 0 / 0.08);
+  --color-shadow-strong: rgb(0 0 0 / 0.16);
   --color-paper: var(--color-surface-1);
   --color-paper-2: var(--color-surface-2);
   --color-paper-3: var(--color-surface-3);

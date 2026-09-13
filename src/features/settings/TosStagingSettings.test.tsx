@@ -53,6 +53,7 @@ function createClient(
         prefix: "",
       }),
     ),
+    refreshLocalAssetMedia: vi.fn(() => Promise.resolve("https://tos.example.com/resigned.png")),
     ...overrides,
   };
 }

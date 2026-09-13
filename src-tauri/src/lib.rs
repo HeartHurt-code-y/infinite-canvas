@@ -126,6 +126,7 @@ pub fn run() {
             commands::get_staging_job,
             commands::list_asset_import_outputs,
             commands::list_local_assets,
+            commands::refresh_local_asset_media,
             commands::pull_tos_bucket_assets,
             commands::verify_local_result,
             commands::get_video_downloader_engine,

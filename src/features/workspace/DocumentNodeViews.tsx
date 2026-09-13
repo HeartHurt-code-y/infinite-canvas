@@ -1145,27 +1145,6 @@ export function CanvasPromptNode({
         <span className="canvas-gen-node__actions">
           <button
             type="button"
-            className="canvas-gen-node__start canvas-gen-node__start--labeled canvas-prompt-node__run"
-            aria-label={taskLabel}
-            data-state={running ? "loading" : undefined}
-            disabled={running || !selectionReady}
-            title={!selectionReady ? "请先选择可用的文本模型" : `调用文本模型${taskLabel}`}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelect(node.key);
-              onRun(node.key);
-            }}
-          >
-            {running ? (
-              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
-            ) : (
-              <Icon name="sparkle" aria-hidden="true" size="md" />
-            )}
-            <span>{running ? "调用中" : taskLabel}</span>
-          </button>
-          <button
-            type="button"
             className="canvas-gen-node__remove"
             aria-label="移除提示词生成与优化节点"
             onMouseDown={(event) => event.stopPropagation()}
@@ -1180,7 +1159,8 @@ export function CanvasPromptNode({
       </div>
 
       <div className="canvas-prompt-node__body">
-        <div className="canvas-prompt-node__intro">
+        <details className="canvas-prompt-node__guide nodrag">
+          <summary>使用说明</summary>
           <strong>
             {isFpvPath ? "沿参考路径规划第一人称飞行镜头" : "把创意变成可执行的提示词"}
           </strong>
@@ -1189,7 +1169,7 @@ export function CanvasPromptNode({
               ? "连接带红线或箭头的场景图，保留路径标记用于分析；也可直接描述路线。生成参考图版、纯文字版提示词，以及时长建议、运镜时间线和速度节奏。"
               : "支持多轮对话：每次生成或优化都会携带之前的全部对话；连入图片素材或已生成的图片/视频产物辅助多模态理解，最新输出自动下发到连接的图片或视频节点。"}
           </span>
-        </div>
+        </details>
         {sourceConnections.length > 0 ? (
           <div className="canvas-prompt-node__connections">
             <span>参考素材（多模态理解）</span>
@@ -1235,114 +1215,6 @@ export function CanvasPromptNode({
           >
             优化
           </button>
-        </div>
-        <div
-          ref={conversationRef}
-          className="canvas-screenplay-node__conversation canvas-prompt-node__conversation nodrag"
-          role="log"
-          aria-label="提示词多轮对话"
-          aria-live="polite"
-        >
-          {conversation.length === 0 && !(running && streamingText) ? (
-            <div className="canvas-screenplay-node__empty">
-              <strong>
-                {isFpvPath
-                  ? "连接路径图，或写下起点、途经点和终点"
-                  : isFightPromptMaster
-                    ? "描述一场打斗，或连接角色、场景与动作参考素材"
-                    : isMultiGridStoryboard
-                      ? "提供剧情，或连接角色、场景与视频参考素材"
-                      : isStoryboardPrompt
-                        ? "描述故事与用途，或连接角色、场景与风格参考素材"
-                        : isGptImage2Style
-                          ? "描述图片用途与主体，或连接图片和风格参考素材"
-                          : "从一句创意或待优化提示词开始"}
-              </strong>
-              <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
-            </div>
-          ) : (
-            conversation.map((entry) => (
-              <article
-                key={entry.id}
-                className={`canvas-screenplay-node__message is-${entry.role}`}
-              >
-                <span>{promptConversationRoleLabel(entry.role)}</span>
-                <MarkdownView content={entry.content} />
-              </article>
-            ))
-          )}
-          {running && streamingText ? (
-            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
-            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
-            <article
-              className="canvas-screenplay-node__message is-assistant is-streaming"
-              data-testid="streaming-text"
-            >
-              <span>正在生成（已接收 {streamingText.length} 字符）</span>
-              <MarkdownView content={streamingText} />
-            </article>
-          ) : null}
-          {running ? (
-            <div className="canvas-screenplay-node__thinking" role="status">
-              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
-              正在调用文本模型…
-            </div>
-          ) : null}
-          {running && streamingText ? (
-            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
-            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
-            <article
-              className="canvas-screenplay-node__message is-assistant is-streaming"
-              data-testid="streaming-text"
-            >
-              <span>正在生成（已接收 {streamingText.length} 字符）</span>
-              <MarkdownView content={streamingText} />
-            </article>
-          ) : null}
-        </div>
-        <label className="canvas-prompt-node__field">
-          <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
-          <textarea
-            aria-label={node.config.task === "generate" ? "创意或需求" : "待优化提示词"}
-            aria-describedby={hasModeHint ? modeHintId : undefined}
-            placeholder={
-              isFpvPath
-                ? node.config.task === "generate"
-                  ? "例如：沿红线贴地切入，绕过塔楼后拉升到屋顶，15 秒一镜到底；已连接路径图时可直接生成"
-                  : "粘贴飞行提示词或填写修改要求，例如：保留路线，放慢环绕；留空可优化当前输出"
-                : isFightPromptMaster
-                  ? node.config.task === "generate"
-                    ? "例如：SD2.5，15 秒，超高速；雨夜站台双人近战。已连接参考素材时可直接生成"
-                    : "粘贴打斗提示词或填写修改要求，例如：加强攻防因果，减少镜头切换；留空可优化当前输出"
-                  : isMultiGridStoryboard
-                    ? node.config.task === "generate"
-                      ? "例如：6 宫格，12 秒，电影写实；女孩走进雨夜站台，发现遗落的信封。已连接参考素材时可直接生成"
-                      : "粘贴分镜方案或填写修改要求，例如：保留角色与总时长，强化最后一格；留空可优化当前输出"
-                    : isStoryboardPrompt
-                      ? node.config.task === "generate"
-                        ? "例如：咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格；已连接参考素材时可直接生成"
-                        : "粘贴故事板提示词或填写修改要求，例如：保留角色与版式，加强最后一格的情绪；留空可优化当前输出"
-                      : isGptImage2Style
-                        ? node.config.task === "generate"
-                          ? "例如：咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」；也可指定风格名称或连接参考素材"
-                          : "粘贴图片提示词或填写修改要求，例如：保留主体和标题，改成杂志封面风格；留空可优化当前输出"
-                        : node.config.task === "generate"
-                          ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
-                          : "粘贴一段已有提示词，补充镜头、主体和风格细节"
-            }
-            value={node.config.sourcePrompt}
-            disabled={running}
-            onChange={(event) => onChange({ ...node.config, sourcePrompt: event.target.value })}
-            onKeyDown={(event) => {
-              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
-                event.preventDefault();
-                onRun(node.key);
-              }
-            }}
-          />
-        </label>
-        <div className="canvas-screenplay-node__composer-actions canvas-prompt-node__composer-actions">
-          <span>Ctrl / ⌘ + Enter 发送 · 每轮自动携带全部对话上下文</span>
         </div>
         <div className="canvas-prompt-node__fields">
           <label className="canvas-prompt-node__field">
@@ -1465,6 +1337,135 @@ export function CanvasPromptNode({
             </span>
           </div>
         ) : null}
+        <div
+          ref={conversationRef}
+          className="canvas-screenplay-node__conversation canvas-prompt-node__conversation nodrag"
+          role="log"
+          aria-label="提示词多轮对话"
+          aria-live="polite"
+        >
+          {conversation.length === 0 && !(running && streamingText) ? (
+            <div className="canvas-screenplay-node__empty">
+              <strong>
+                {isFpvPath
+                  ? "连接路径图，或写下起点、途经点和终点"
+                  : isFightPromptMaster
+                    ? "描述一场打斗，或连接角色、场景与动作参考素材"
+                    : isMultiGridStoryboard
+                      ? "提供剧情，或连接角色、场景与视频参考素材"
+                      : isStoryboardPrompt
+                        ? "描述故事与用途，或连接角色、场景与风格参考素材"
+                        : isGptImage2Style
+                          ? "描述图片用途与主体，或连接图片和风格参考素材"
+                          : "从一句创意或待优化提示词开始"}
+              </strong>
+              <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
+            </div>
+          ) : (
+            conversation.map((entry) => (
+              <article
+                key={entry.id}
+                className={`canvas-screenplay-node__message is-${entry.role}`}
+              >
+                <span>{promptConversationRoleLabel(entry.role)}</span>
+                <MarkdownView content={entry.content} />
+              </article>
+            ))
+          )}
+          {running && streamingText ? (
+            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
+            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
+            <article
+              className="canvas-screenplay-node__message is-assistant is-streaming"
+              data-testid="streaming-text"
+            >
+              <span>正在生成（已接收 {streamingText.length} 字符）</span>
+              <MarkdownView content={streamingText} />
+            </article>
+          ) : null}
+          {running ? (
+            <div className="canvas-screenplay-node__thinking" role="status">
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="sm" />
+              正在调用文本模型…
+            </div>
+          ) : null}
+          {running && streamingText ? (
+            // 流式草稿：模型还在生成时就把已收到的正文展示出来，任务完成后由
+            // 节点配置里的完整结果取代（父组件在 finally 里清空本字段）。
+            <article
+              className="canvas-screenplay-node__message is-assistant is-streaming"
+              data-testid="streaming-text"
+            >
+              <span>正在生成（已接收 {streamingText.length} 字符）</span>
+              <MarkdownView content={streamingText} />
+            </article>
+          ) : null}
+        </div>
+        <label className="canvas-prompt-node__field">
+          <span>{node.config.task === "generate" ? "创意 / 需求" : "待优化提示词"}</span>
+          <textarea
+            aria-label={node.config.task === "generate" ? "创意或需求" : "待优化提示词"}
+            aria-describedby={hasModeHint ? modeHintId : undefined}
+            placeholder={
+              isFpvPath
+                ? node.config.task === "generate"
+                  ? "例如：沿红线贴地切入，绕过塔楼后拉升到屋顶，15 秒一镜到底；已连接路径图时可直接生成"
+                  : "粘贴飞行提示词或填写修改要求，例如：保留路线，放慢环绕；留空可优化当前输出"
+                : isFightPromptMaster
+                  ? node.config.task === "generate"
+                    ? "例如：SD2.5，15 秒，超高速；雨夜站台双人近战。已连接参考素材时可直接生成"
+                    : "粘贴打斗提示词或填写修改要求，例如：加强攻防因果，减少镜头切换；留空可优化当前输出"
+                  : isMultiGridStoryboard
+                    ? node.config.task === "generate"
+                      ? "例如：6 宫格，12 秒，电影写实；女孩走进雨夜站台，发现遗落的信封。已连接参考素材时可直接生成"
+                      : "粘贴分镜方案或填写修改要求，例如：保留角色与总时长，强化最后一格；留空可优化当前输出"
+                    : isStoryboardPrompt
+                      ? node.config.task === "generate"
+                        ? "例如：咖啡品牌广告，6 格故事板，清晨出发到温暖重逢，16:9，手绘风格；已连接参考素材时可直接生成"
+                        : "粘贴故事板提示词或填写修改要求，例如：保留角色与版式，加强最后一格的情绪；留空可优化当前输出"
+                      : isGptImage2Style
+                        ? node.config.task === "generate"
+                          ? "例如：咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」；也可指定风格名称或连接参考素材"
+                          : "粘贴图片提示词或填写修改要求，例如：保留主体和标题，改成杂志封面风格；留空可优化当前输出"
+                        : node.config.task === "generate"
+                          ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
+                          : "粘贴一段已有提示词，补充镜头、主体和风格细节"
+            }
+            value={node.config.sourcePrompt}
+            disabled={running}
+            onChange={(event) => onChange({ ...node.config, sourcePrompt: event.target.value })}
+            onKeyDown={(event) => {
+              if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+                event.preventDefault();
+                onRun(node.key);
+              }
+            }}
+          />
+        </label>
+        <div className="canvas-screenplay-node__composer-actions canvas-prompt-node__composer-actions">
+          <span>Ctrl / ⌘ + Enter 发送</span>
+          <button
+            type="button"
+            className="canvas-gen-node__start canvas-gen-node__start--labeled canvas-prompt-node__run"
+            aria-label={taskLabel}
+            data-state={running ? "loading" : undefined}
+            disabled={running || !selectionReady}
+            title={!selectionReady ? "请先选择可用的文本模型" : `调用文本模型${taskLabel}`}
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(node.key);
+              onRun(node.key);
+            }}
+          >
+            {running ? (
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
+            ) : (
+              <Icon name="sparkle" aria-hidden="true" size="md" />
+            )}
+            <span>{running ? "调用中" : taskLabel}</span>
+          </button>
+        </div>
         <div className="canvas-prompt-node__field">
           <label htmlFor={promptOutputId}>输出提示词</label>
           <div className="canvas-prompt-node__output-editor">

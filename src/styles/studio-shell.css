@@ -1,5 +1,5 @@
-/* Cobalt Studio: light tools surround an ink canvas. The brand mark and
- * primary actions carry the color; viewport motion remains instantaneous.
+/* Monochrome Studio: neutral tools surround a black drafting canvas.
+ * Hierarchy comes from type and luminance; viewport motion stays instantaneous.
  */
 body {
   font-optical-sizing: auto;
@@ -472,13 +472,15 @@ button:active:focus-visible,
   height: var(--icon-lg);
 }
 
-/* Dot fill is separate from the old line-pattern stroke. */
-.canvas-react-flow .canvas-flow-bg--minor circle {
-  fill: var(--color-grid-minor);
+/* Native line patterns follow viewport pan and zoom; dashes stay understated. */
+.canvas-react-flow .canvas-flow-bg--minor path {
+  stroke: var(--color-grid-minor);
+  stroke-dasharray: var(--grid-dash-minor);
 }
 
-.canvas-react-flow .canvas-flow-bg--major circle {
-  fill: var(--color-grid-major);
+.canvas-react-flow .canvas-flow-bg--major path {
+  stroke: var(--color-grid-major);
+  stroke-dasharray: var(--grid-dash-major);
 }
 
 .canvas-viewport .canvas-empty-hint {
@@ -491,36 +493,20 @@ button:active:focus-visible,
 .canvas-empty-hint .canvas-empty-hint__art {
   position: relative;
   display: grid;
-  width: var(--size-empty-composition);
+  width: var(--size-empty-art);
   height: var(--size-empty-art);
   place-items: center;
-  margin-bottom: var(--space-lg);
-  color: var(--color-brand-ink);
-  background: var(--color-brand);
-  border: var(--rule-thin) solid var(--color-brand);
-  border-radius: var(--radius-panel);
-  box-shadow: var(--shadow-raised);
-  isolation: isolate;
+  margin-bottom: var(--space-sm);
+  color: var(--color-text-2);
+  background: var(--color-bg-base);
+  border: var(--rule-thin) dashed var(--color-rule-strong);
+  border-radius: var(--radius-control);
+  box-shadow: none;
 }
 
 .canvas-empty-hint__art::before,
 .canvas-empty-hint__art::after {
-  position: absolute;
-  z-index: -1;
-  inset: 0;
-  border: var(--rule-thin) solid var(--color-accent);
-  border-radius: var(--radius-panel);
-  background: var(--color-accent-soft);
-  content: "";
-}
-
-.canvas-empty-hint__art::before {
-  transform: translateX(calc(-1 * var(--space-md))) rotate(var(--angle-brand-card));
-}
-
-.canvas-empty-hint__art::after {
-  background: var(--color-brand);
-  transform: translateX(var(--space-sm)) rotate(var(--angle-brand-counter));
+  content: none;
 }
 
 .canvas-viewport .canvas-empty-hint strong {

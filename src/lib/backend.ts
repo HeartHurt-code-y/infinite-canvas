@@ -539,6 +539,19 @@ export interface AssetImportOutputRecord {
   readonly createdAt: number;
 }
 
+/**
+ * 本地素材预览续签参数：按素材身份重新签发对象存储只读地址。
+ *
+ * 本地素材的 `previewUrl` 是短期预签名地址（后端 `LEASE_URL_EXPIRY_SECS`，1 小时）；
+ * 画布文档把它持久化后必然过期，续签只能按 staging job id 重新签发。
+ */
+export interface RefreshLocalAssetMediaCommand {
+  /** 本地素材身份：完成上传的 staging job id（即 `LocalAssetRecord.id`）。 */
+  readonly stagingJobId: string;
+  /** 期望的素材类型；后端索引记录类型不符时报错。 */
+  readonly mediaType: MediaType;
+}
+
 /** 本地素材库按类型计数（全库范围，不受查询过滤影响）。 */
 export interface LocalAssetKindTotals {
   readonly image: number;
@@ -599,6 +612,11 @@ export interface TosStagingClient {
    */
   listLocalAssets(this: void, query?: LocalAssetListQuery): Promise<LocalAssetPage>;
   /**
+   * 本地素材预览续签（画布素材节点用）：按素材身份重新签发对象存储只读地址。
+   * 与云端素材的 `assetLibraryClient.refreshAssetMedia` 对称，取代已过期的持久化签名地址。
+   */
+  refreshLocalAssetMedia(this: void, command: RefreshLocalAssetMediaCommand): Promise<string>;
+  /**
    * 拉取整个对象存储桶（可选指定前缀）下的素材文件到本地素材索引。
    * 后端走火山引擎 TOS ListObjectsV2 分页列举，按对象键去重。
    */
@@ -618,11 +636,84 @@ export const tosStagingClient: TosStagingClient = {
     invokeDesktop("list_asset_import_outputs", assetImportOutputRecordsSchema),
   listLocalAssets: (query) =>
     invokeDesktop("list_local_assets", localAssetPageSchema, { query: query ?? null }),
+  refreshLocalAssetMedia: (command) =>
+    invokeDesktop("refresh_local_asset_media", stringSchema, {
+      command: {
+        stagingJobId: command.stagingJobId,
+        mediaType: command.mediaType,
+      },
+    }),
   pullBucketAssets: (prefix) =>
     invokeDesktop("pull_tos_bucket_assets", tosBucketPullSummarySchema, {
       prefix: prefix ?? null,
     }),
 };
+
+/**
+ * 素材签名地址续签（云端与本地共用入口）：按素材身份重新取一份可读取地址。
+ *
+ * 云端素材回读供应商记录（`refreshAssetMedia`），本地素材按 staging job id 重签
+ * 对象存储地址（`refreshLocalAssetMedia`）；本地素材没有 `providerConnectionId`，
+ * 只判断云端分支会让本地素材的过期签名无法恢复。续签失败返回 null，调用方保持置灰。
+ * 源类型按 `string` 放宽，避免 `exactOptionalPropertyTypes` 下调用方为可选字段
+ * （`source?: AssetLibrarySource`）额外补 undefined。
+ */
+export async function refreshAssetItemMediaUrl(
+  asset: {
+    readonly id: string;
+    readonly source?: string | null | undefined;
+    readonly providerConnectionId?: string | null | undefined;
+  },
+  mediaType: MediaType,
+): Promise<string | null> {
+  const providerConnectionId = asset.providerConnectionId ?? "";
+  try {
+    if ((asset.source ?? "cloud") === "cloud") {
+      if (providerConnectionId === "" || asset.id === "") return null;
+      return await assetLibraryClient.refreshAssetMedia({
+        providerConnectionId,
+        id: asset.id,
+        mediaType,
+      });
+    }
+    if (asset.id === "") return null;
+    return await tosStagingClient.refreshLocalAssetMedia({
+      stagingJobId: asset.id,
+      mediaType,
+    });
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 关键帧封面地址续签（素材库视频卡片用）：云端素材回读供应商封面
+ * （`refreshAssetCover`）；本地素材没有独立封面，退回重签对象存储正文地址
+ * （视频中间帧封面直接由正文抽取）。续签失败返回 null，调用方保持置灰。
+ */
+export async function refreshAssetItemCoverUrl(asset: {
+  readonly id: string;
+  readonly source?: string | null | undefined;
+  readonly providerConnectionId?: string | null | undefined;
+}): Promise<string | null> {
+  const providerConnectionId = asset.providerConnectionId ?? "";
+  try {
+    if ((asset.source ?? "cloud") === "cloud") {
+      if (providerConnectionId === "" || asset.id === "") return null;
+      return await assetLibraryClient.refreshAssetCover({
+        providerConnectionId,
+        id: asset.id,
+      });
+    }
+    if (asset.id === "") return null;
+    return await tosStagingClient.refreshLocalAssetMedia({
+      stagingJobId: asset.id,
+      mediaType: "video",
+    });
+  } catch {
+    return null;
+  }
+}
 
 export interface StagingStateChangedEvent {
   readonly jobId: string;

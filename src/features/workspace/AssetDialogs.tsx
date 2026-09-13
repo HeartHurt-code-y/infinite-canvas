@@ -5,6 +5,7 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   assetLibraryClient,
   formatRawBackendError,
+  refreshAssetItemMediaUrl,
   type RealPersonAssetLibraryClient,
   type RealPersonAuthLink,
   type RealPersonGroup,
@@ -566,29 +567,16 @@ export function AssetSourceDialog({
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
   const handleMediaError = () => {
     if (mediaSrc != null) setFailedMediaSrc(mediaSrc);
-    if (
-      mediaRefreshAttemptedRef.current ||
-      rawMediaUrl == null ||
-      asset.source !== "cloud" ||
-      asset.providerConnectionId == null ||
-      asset.providerConnectionId === ""
-    ) {
-      return;
-    }
+    if (mediaRefreshAttemptedRef.current || rawMediaUrl == null) return;
     mediaRefreshAttemptedRef.current = true;
-    void assetLibraryClient
-      .refreshAssetMedia({
-        providerConnectionId: asset.providerConnectionId,
-        id: asset.id,
-        mediaType: asset.kind,
-      })
-      .then((freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== rawMediaUrl) {
-          setRefreshedMediaUrl(freshUrl);
-          setFailedMediaSrc(null);
-        }
-      })
-      .catch(() => undefined);
+    // 云端素材回读供应商记录、本地素材重签对象存储地址（本地素材没有
+    // providerConnectionId），续签后图片预览与视频播放共用新地址。
+    void refreshAssetItemMediaUrl(asset, asset.kind).then((freshUrl) => {
+      if (freshUrl != null && freshUrl !== "" && freshUrl !== rawMediaUrl) {
+        setRefreshedMediaUrl(freshUrl);
+        setFailedMediaSrc(null);
+      }
+    });
   };
   // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，
   // 避免误触；弹窗关闭时取消计时，不会在下次打开时残留。

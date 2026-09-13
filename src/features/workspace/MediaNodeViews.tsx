@@ -1,4 +1,4 @@
-﻿import { Icon } from "../../components/Icon";
+import { Icon } from "../../components/Icon";
 import { useCallback, useEffect, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
@@ -9,8 +9,8 @@ import {
   formatRawBackendError,
   frontendLog,
   isDesktopRuntime,
-  assetLibraryClient,
   mediaClient,
+  refreshAssetItemMediaUrl,
   resumeGenerationResult,
   toMediaSrc,
   type GenerationResultRecord,
@@ -22,6 +22,7 @@ import type { PromptContentEditorSession } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
 import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
+import { localAssetNodeMediaUrl, useLocalAssetMediaRefreshState } from "./localAssetMedia";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
@@ -72,6 +73,8 @@ import {
   textResultFromSource,
 } from "./workspaceModel";
 
+import type { GreenScreenResult } from "./GreenScreenSection";
+
 export function CanvasGenNode({
   node,
   descriptor,
@@ -94,6 +97,9 @@ export function CanvasGenNode({
   onVideoConfigChange,
   onAnnotateVideo,
   onOpenWhiteModelStudio,
+  greenScreenResults,
+  onGreenScreenUseResult,
+  onImportGreenScreenVideo,
   onStartGeneration,
   startError,
 }: {
@@ -127,6 +133,9 @@ export function CanvasGenNode({
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
   readonly onOpenWhiteModelStudio?: ((nodeKey: string) => void) | undefined;
+  readonly greenScreenResults?: readonly GreenScreenResult[] | undefined;
+  readonly onGreenScreenUseResult?: ((nodeKey: string, key: string) => void) | undefined;
+  readonly onImportGreenScreenVideo?: ((nodeKey: string) => void) | undefined;
   readonly onAnnotateVideo?: (
     nodeKey: string,
     input: ConnectedAssetInput | InheritedAssetInput,
@@ -206,35 +215,6 @@ export function CanvasGenNode({
         <span className="canvas-gen-node__actions">
           <button
             type="button"
-            className={`canvas-gen-node__start canvas-gen-node__start--labeled${starting ? " is-busy" : ""}`}
-            aria-label={isVideo ? "开始视频生成" : "开始图片生成"}
-            data-state={starting ? "loading" : undefined}
-            title={
-              !selectionReady
-                ? `请先选择可用的供应商和${isVideo ? "视频" : "图片"}模型`
-                : isVideo
-                  ? "点击开始视频生成"
-                  : "点击开始图片生成"
-            }
-            disabled={starting || !selectionReady}
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onSelect(node.key);
-              onStartGeneration(node.key);
-            }}
-          >
-            {starting ? (
-              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
-            ) : isVideo ? (
-              <Icon name="play" aria-hidden="true" size="md" />
-            ) : (
-              <Icon name="sparkle" aria-hidden="true" size="md" />
-            )}
-            <span>{starting ? "提交中" : "生成"}</span>
-          </button>
-          <button
-            type="button"
             className="canvas-gen-node__remove"
             aria-label={`移除${descriptor.kindLabel}节点`}
             onMouseDown={(event) => event.stopPropagation()}
@@ -277,6 +257,15 @@ export function CanvasGenNode({
 
       {node.kind === "video" ? (
         <VideoNodeSettings
+          greenScreenResults={greenScreenResults}
+          greenScreenBusy={starting || activeTask != null}
+          onGreenScreenGenerate={() => onStartGeneration(node.key)}
+          onGreenScreenUseResult={
+            onGreenScreenUseResult ? (key) => onGreenScreenUseResult(node.key, key) : undefined
+          }
+          onImportGreenScreenVideo={
+            onImportGreenScreenVideo ? () => onImportGreenScreenVideo(node.key) : undefined
+          }
           onOpenWhiteModelStudio={
             onOpenWhiteModelStudio ? () => onOpenWhiteModelStudio(node.key) : undefined
           }
@@ -321,95 +310,132 @@ export function CanvasGenNode({
         </div>
       ) : null}
 
-      {isVideo ? (
-        <div className="canvas-gen-node__video-status" role="status" aria-live="polite">
-          <span className="canvas-gen-node__video-status-copy">
-            <span
-              className={`canvas-gen-node__video-status-icon${activeTask || starting ? " is-active" : ""}`}
-              aria-hidden="true"
-            >
-              {activeTask || starting ? (
-                <Icon name="circle-notch" className="spin-icon" size="md" />
-              ) : (
-                <Icon name="check-circle" size="md" />
-              )}
+      <div className="canvas-gen-node__footer">
+        {isVideo ? (
+          <div className="canvas-gen-node__video-status" role="status" aria-live="polite">
+            <span className="canvas-gen-node__video-status-copy">
+              <span
+                className={`canvas-gen-node__video-status-icon${activeTask || starting ? " is-active" : ""}`}
+                aria-hidden="true"
+              >
+                {activeTask || starting ? (
+                  <Icon name="circle-notch" className="spin-icon" size="md" />
+                ) : (
+                  <Icon name="check-circle" size="md" />
+                )}
+              </span>
+              <span>
+                <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
+                <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
+              </span>
             </span>
-            <span>
-              <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
-              <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
+            {activeTask?.progress != null ? (
+              <strong className="canvas-gen-node__video-progress-value">
+                {Math.round(activeTask.progress)}%
+              </strong>
+            ) : null}
+            {activeTask ? (
+              <span
+                className="canvas-gen-node__video-progress"
+                role="progressbar"
+                aria-label="视频节点生成进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={
+                  activeTask.progress != null
+                    ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
+                    : undefined
+                }
+              >
+                <i
+                  style={{
+                    width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
+                  }}
+                />
+              </span>
+            ) : null}
+          </div>
+        ) : (
+          <div className="canvas-gen-node__image-status" role="status" aria-live="polite">
+            <span className="canvas-gen-node__image-status-copy">
+              <span
+                className={`canvas-gen-node__image-status-icon${activeTask || starting ? " is-active" : ""}`}
+                aria-hidden="true"
+              >
+                {activeTask || starting ? (
+                  <Icon name="circle-notch" className="spin-icon" size="md" />
+                ) : (
+                  <Icon name="check-circle" size="md" />
+                )}
+              </span>
+              <span>
+                <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
+                <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
+              </span>
             </span>
-          </span>
-          {activeTask?.progress != null ? (
-            <strong className="canvas-gen-node__video-progress-value">
-              {Math.round(activeTask.progress)}%
-            </strong>
-          ) : null}
-          {activeTask ? (
-            <span
-              className="canvas-gen-node__video-progress"
-              role="progressbar"
-              aria-label="视频节点生成进度"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={
-                activeTask.progress != null
-                  ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
-                  : undefined
-              }
-            >
-              <i
-                style={{
-                  width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
-                }}
-              />
-            </span>
-          ) : null}
+            {activeTask?.progress != null ? (
+              <strong className="canvas-gen-node__image-progress-value">
+                {Math.round(activeTask.progress)}%
+              </strong>
+            ) : null}
+            {activeTask ? (
+              <span
+                className="canvas-gen-node__image-progress"
+                role="progressbar"
+                aria-label="图片生成进度"
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={
+                  activeTask.progress != null
+                    ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
+                    : undefined
+                }
+              >
+                <i
+                  style={{
+                    width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
+                  }}
+                />
+              </span>
+            ) : null}
+          </div>
+        )}
+        <div className="canvas-gen-node__footer-actions">
+          <button
+            type="button"
+            className={`canvas-gen-node__start canvas-gen-node__start--labeled${starting ? " is-busy" : ""}`}
+            aria-label={isVideo ? "开始视频生成" : "开始图片生成"}
+            data-state={starting ? "loading" : undefined}
+            title={
+              !selectionReady
+                ? `请先选择可用的供应商和${isVideo ? "视频" : "图片"}模型`
+                : isVideo
+                  ? "点击开始视频生成"
+                  : "点击开始图片生成"
+            }
+            disabled={
+              starting ||
+              !selectionReady ||
+              (node.kind === "video" && node.config.greenScreen?.enabled && activeTask != null)
+            }
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              onSelect(node.key);
+              onStartGeneration(node.key);
+            }}
+          >
+            {starting ? (
+              <Icon name="circle-notch" aria-hidden="true" className="spin-icon" size="md" />
+            ) : isVideo ? (
+              <Icon name="play" aria-hidden="true" size="md" />
+            ) : (
+              <Icon name="sparkle" aria-hidden="true" size="md" />
+            )}
+            <span>{starting ? "提交中" : "生成"}</span>
+          </button>
         </div>
-      ) : (
-        <div className="canvas-gen-node__image-status" role="status" aria-live="polite">
-          <span className="canvas-gen-node__image-status-copy">
-            <span
-              className={`canvas-gen-node__image-status-icon${activeTask || starting ? " is-active" : ""}`}
-              aria-hidden="true"
-            >
-              {activeTask || starting ? (
-                <Icon name="circle-notch" className="spin-icon" size="md" />
-              ) : (
-                <Icon name="check-circle" size="md" />
-              )}
-            </span>
-            <span>
-              <strong>{activeTask || starting ? statusLabel : "就绪"}</strong>
-              <small>{activeTask ? "结果将作为新节点落在右侧" : "配置完成后点击生成"}</small>
-            </span>
-          </span>
-          {activeTask?.progress != null ? (
-            <strong className="canvas-gen-node__image-progress-value">
-              {Math.round(activeTask.progress)}%
-            </strong>
-          ) : null}
-          {activeTask ? (
-            <span
-              className="canvas-gen-node__image-progress"
-              role="progressbar"
-              aria-label="图片生成进度"
-              aria-valuemin={0}
-              aria-valuemax={100}
-              aria-valuenow={
-                activeTask.progress != null
-                  ? Math.min(100, Math.max(0, Math.round(activeTask.progress)))
-                  : undefined
-              }
-            >
-              <i
-                style={{
-                  width: `${activeTask.progress != null ? Math.min(100, Math.max(0, Math.round(activeTask.progress))) : 18}%`,
-                }}
-              />
-            </span>
-          ) : null}
-        </div>
-      )}
+      </div>
       <span
         className={`node-port node-port--left node-port--${isVideo ? "video" : "image"}`}
         aria-hidden="true"
@@ -1477,37 +1503,43 @@ export function CanvasAssetNode({
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
   const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>();
-  const imageReady = node.previewUrl != null && loadedImageUrl === node.previewUrl;
-  const imageFailed = node.previewUrl == null || failedImageUrl === node.previewUrl;
+  // 画布水合后会批量重签本地素材签名，新地址优先于节点里持久化的那一份（可能已过期）。
+  const localRefreshPending = useLocalAssetMediaRefreshState(node.assetId, node.kind);
+  const effectivePreviewUrl = localAssetNodeMediaUrl(node);
+  const imageReady = effectivePreviewUrl != null && loadedImageUrl === effectivePreviewUrl;
+  const imageFailed = effectivePreviewUrl == null || failedImageUrl === effectivePreviewUrl;
   const isRealAsset = node.source != null || isDesktopRuntime();
   const dimensions = assetNodeDimensions(node);
-  // 云端素材签名地址（约 2 小时）过期后预览失败：每个节点实例只向后端续签一次，
-  // 新地址回写节点数据持久化；续签失败保持置灰，不反复请求（与素材库卡片一致）。
-  const mediaRefreshAttemptedRef = useRef(false);
+  // 素材签名地址过期后预览失败：同一地址只向后端续签一次，新地址回写节点数据持久化；
+  // 续签失败保持置灰，不反复请求（与素材库卡片一致）。
+  // 云端素材按素材身份回读供应商记录；本地素材按 staging job id 重签对象存储地址——
+  // 本地素材没有 providerConnectionId，缺了这条分支画布节点会永久停在「预览不可用」。
+  // 记录「已为哪个地址续签过」而不是布尔标记：画布水合批量重签、其他实例续签或后端重读
+  // 都可能换成新地址，新地址失败时理应还能自愈一次。实例内最多两次，杜绝地址反复变化时的循环请求。
+  const mediaRefreshAttemptedRef = useRef<{ urls: string[]; count: number }>({
+    urls: [],
+    count: 0,
+  });
   const attemptMediaRefresh = useCallback(
     (failedUrl: string | null) => {
-      if (mediaRefreshAttemptedRef.current) return;
-      if (
-        failedUrl == null ||
-        node.source !== "cloud" ||
-        node.providerConnectionId === "" ||
-        node.assetId === ""
-      ) {
-        return;
-      }
-      mediaRefreshAttemptedRef.current = true;
-      assetLibraryClient
-        .refreshAssetMedia({
-          providerConnectionId: node.providerConnectionId,
+      if (failedUrl == null || node.assetId === "") return;
+      const attempted = mediaRefreshAttemptedRef.current;
+      if (attempted.count >= 2 || attempted.urls.includes(failedUrl)) return;
+      if (node.source === "cloud" && node.providerConnectionId === "") return;
+      attempted.urls.push(failedUrl);
+      attempted.count += 1;
+      void refreshAssetItemMediaUrl(
+        {
           id: node.assetId,
-          mediaType: node.kind,
-        })
-        .then((freshUrl) => {
-          if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
-            onRefreshMediaUrls(node.key, freshUrl);
-          }
-        })
-        .catch(() => undefined);
+          source: node.source,
+          providerConnectionId: node.providerConnectionId,
+        },
+        node.kind,
+      ).then((freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+          onRefreshMediaUrls(node.key, freshUrl);
+        }
+      });
     },
     [node.assetId, node.key, node.kind, node.providerConnectionId, node.source, onRefreshMediaUrls],
   );
@@ -1552,11 +1584,14 @@ export function CanvasAssetNode({
         ) : node.kind === "image" ? (
           <>
             {isRealAsset && !imageReady ? (
-              <AssetMediaState kind="image" state={imageFailed ? "unavailable" : "loading"} />
+              <AssetMediaState
+                kind="image"
+                state={imageFailed && !localRefreshPending ? "unavailable" : "loading"}
+              />
             ) : null}
-            {node.previewUrl && !imageFailed ? (
+            {effectivePreviewUrl != null && !imageFailed ? (
               <img
-                src={toMediaProxyUrl(node.previewUrl) ?? node.previewUrl}
+                src={toMediaProxyUrl(effectivePreviewUrl) ?? effectivePreviewUrl}
                 alt=""
                 draggable={false}
                 decoding="async"
@@ -1564,13 +1599,13 @@ export function CanvasAssetNode({
                   const image = event.currentTarget;
                   const aspectRatio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
                   if (aspectRatio != null) onAspectRatioChange(node.key, aspectRatio);
-                  setLoadedImageUrl(node.previewUrl);
+                  setLoadedImageUrl(effectivePreviewUrl);
                   setFailedImageUrl(null);
                 }}
                 onError={() => {
                   setLoadedImageUrl(null);
-                  setFailedImageUrl(node.previewUrl);
-                  attemptMediaRefresh(node.previewUrl);
+                  setFailedImageUrl(effectivePreviewUrl);
+                  attemptMediaRefresh(effectivePreviewUrl);
                 }}
               />
             ) : null}
@@ -1972,15 +2007,17 @@ export function CanvasOutputNode({
         ? "网络爆款视频下载 · 本地结果"
         : node.origin === "white_model"
           ? "Blender 白模动画 · 本地结果"
-          : node.origin === "video_edit"
-            ? "视频局部编辑 · 标注参考帧"
-            : task
-              ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
-                  isFailed
-                    ? formatTaskClock(task.completedAt ?? task.updatedAt)
-                    : formatTaskClock(task.createdAt)
-                }`
-              : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
+          : node.origin === "green_screen"
+            ? "绿幕流程 · 本地视频"
+            : node.origin === "video_edit"
+              ? "视频局部编辑 · 标注参考帧"
+              : task
+                ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
+                    isFailed
+                      ? formatTaskClock(task.completedAt ?? task.updatedAt)
+                      : formatTaskClock(task.createdAt)
+                  }`
+                : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   return (
     <div

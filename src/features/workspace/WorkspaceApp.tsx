@@ -142,6 +142,9 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
+import { prepareGreenScreenGeneration } from "../../lib/greenScreen";
+import { greenScreenPreparationOutputs, greenScreenWorkflowSignature } from "./greenScreenWorkflow";
+import { prefetchLocalAssetMedia, resetLocalAssetMediaRegistry } from "./localAssetMedia";
 import {
   createWhiteModelControlConfig,
   prepareWhiteModelGeneration,
@@ -306,6 +309,7 @@ import {
   normalizeLocalPathKey,
   outputNodeDimensions,
   outputNodeKey,
+  outputNodeReferenceTarget,
   persistActiveAssetProviderId,
   promptConversationRoleLabel,
   promptMessageId,
@@ -4284,7 +4288,8 @@ export function WorkspaceApp({
     [patchNode],
   );
 
-  // 云端素材节点预览续签成功：把新签名地址回写节点数据并随画布文档持久化。
+  // 素材节点预览续签成功（云端素材回读供应商记录 / 本地素材重签对象存储地址）：
+  // 把新签名地址回写节点数据并随画布文档持久化。
   const handleAssetMediaRefresh = useCallback(
     (key: string, freshPreviewUrl: string) => {
       patchNode("asset", key, (node) => {
@@ -4299,6 +4304,39 @@ export function WorkspaceApp({
     },
     [patchNode],
   );
+
+  // 画布文档水合后批量重签本地素材的预览地址：本地素材的签名只活 1 小时，而节点数据
+  // 会被整体持久化，所以「重启后打开画布」拿到的必然是一批过期签名。这里在首次渲染
+  // 前把节点数据换成新签名，用户不会再看到一屏「预览不可用」。
+  // 依赖只看本轮画布里的素材身份集合：续签写回节点后签名变化不会重新触发本效果。
+  const localAssetNodeSignature = useMemo(
+    () =>
+      assetNodes
+        .filter((node) => node.source === "local" && node.assetId !== "")
+        .map((node) => `${node.assetId}:${node.kind}`)
+        .sort()
+        .join("|"),
+    [assetNodes],
+  );
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    const localAssetNodes = assetNodes.filter(
+      (node) => node.source === "local" && node.assetId !== "",
+    );
+    if (localAssetNodes.length === 0) return;
+    return prefetchLocalAssetMedia(localAssetNodes, (fresh) => {
+      for (const node of localAssetNodes) {
+        const freshUrl = fresh.get(`${node.assetId}:${node.kind}`);
+        if (freshUrl != null) handleAssetMediaRefresh(node.key, freshUrl);
+      }
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- 按素材身份集合触发，避免签名回写引发重复续签
+  }, [canvasHydrated, handleAssetMediaRefresh, localAssetNodeSignature]);
+
+  // 切换画布时丢弃上一条画布的重签登记表，避免把上一份素材的新地址用到当前画布。
+  useEffect(() => {
+    return () => resetLocalAssetMediaRegistry();
+  }, [canvasId]);
 
   const handleOutputAspectRatioChange = useCallback(
     (key: string, aspectRatio: number) => {
@@ -4504,6 +4542,135 @@ export function WorkspaceApp({
       });
     },
     [canvasInputsFor, setNodeStartError],
+  );
+
+  const importGreenScreenVideo = useCallback(
+    async (nodeKey: string) => {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const path = await open({
+          multiple: false,
+          directory: false,
+          title: "导入绿幕或原视频",
+          filters: [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv", "avi", "m4v"] }],
+        });
+        if (typeof path !== "string" || !path) return;
+        const current = snapshotV2({});
+        const target = current.genNodes.find((node) => node.key === nodeKey);
+        if (target?.kind !== "video") return;
+        const key = outputNodeKey();
+        insertSubgraph(
+          [
+            {
+              type: "output",
+              data: {
+                key,
+                resultKey: null,
+                sourceNodeId: `green-screen-import-${key}`,
+                taskId: `green-screen-import-${key}`,
+                mediaType: "video",
+                origin: "green_screen",
+                finalPath: path,
+                name: fileNameFromPath(path),
+                x: target.x - 360,
+                y: target.y,
+              },
+            },
+          ],
+          [{ id: `green-screen-${key}-${nodeKey}`, fromKey: key, toKey: nodeKey }],
+          { selectNodeKey: nodeKey },
+        );
+        toast.success("视频已连接", {
+          description: "请在绿幕流程中将它明确选为原视频或绿幕前景。",
+        });
+      } catch (error) {
+        toast.error("导入视频失败", { description: formatRawBackendError(error) });
+      }
+    },
+    [snapshotV2, insertSubgraph],
+  );
+
+  const handleUseGreenScreenResult = useCallback(
+    async (nodeKey: string, outputKey: string) => {
+      try {
+        const requested = snapshotV2({}).outputNodes?.find((output) => output.key === outputKey);
+        if (!requested?.finalPath) throw new Error("绿幕视频尚未保存，请等待保存完成后再选用。");
+        const detail = await generationClient.get(requested.taskId);
+        const current = snapshotV2({});
+        const node = current.genNodes.find((entry) => entry.key === nodeKey);
+        const output = current.outputNodes?.find((entry) => entry.key === outputKey);
+        if (node?.kind !== "video" || !output?.finalPath || !node.config.greenScreen)
+          throw new Error("节点或绿幕结果已变化，请重新选择。");
+        const greenScreen = node.config.greenScreen;
+        const task = greenScreen.preparationTasks.find((entry) => entry.taskId === output.taskId);
+        const prompt = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
+        if (!task || task.signature !== greenScreenWorkflowSignature(node.config, prompt))
+          throw new Error(
+            "绿幕制作设置或提示词已变化，请重新制作；旧视频仍保留在画布中，也可作为已有绿幕手动选用。",
+          );
+        const selection = resolveGenerationSelection(
+          "video",
+          node.config.modelSelection,
+          providerCatalog,
+        );
+        const inputs = createCanvasInputResolver(
+          canvasNodesByKeyFromDocument(current),
+          current.assetEdges,
+        )(nodeKey).media;
+        const preparation = prepareGreenScreenGeneration(
+          { ...greenScreen, phase: "prepare" },
+          inputs,
+          selection?.model.remoteModelId ?? "",
+          prompt,
+        );
+        if (preparation.issue) throw new Error(preparation.issue);
+        if (!preparation.preparation?.ok)
+          throw new Error("制作阶段的提示词引用已失效，请检查来源后重新制作。");
+        const result = detail.results.find(
+          (entry) =>
+            `${entry.taskId}#${entry.resultIndex}` === output.resultKey &&
+            entry.saveStatus === "succeeded" &&
+            entry.finalPath === output.finalPath,
+        );
+        if (detail.summary.id !== output.taskId || detail.summary.status !== "succeeded" || !result)
+          throw new Error("这版绿幕结果尚未成功保存，或来源已变化，请在任务历史中检查后重试。");
+        const mediaTarget = outputNodeReferenceTarget(output);
+        if (!mediaTarget) throw new Error("绿幕结果的素材身份无效。");
+        if (
+          !current.assetEdges.some((edge) => edge.fromKey === outputKey && edge.toKey === nodeKey)
+        ) {
+          insertSubgraph(
+            [],
+            [{ id: `green-screen-${outputKey}-${nodeKey}`, fromKey: outputKey, toKey: nodeKey }],
+          );
+        }
+        updateVideoNodeConfig(nodeKey, {
+          ...node.config,
+          greenScreen: {
+            ...greenScreen,
+            enabled: true,
+            phase: "composite",
+            foregrounds: [
+              { key: output.key, name: output.name ?? "绿幕视频", target: mediaTarget },
+            ],
+          },
+        });
+        setNodeStartError(nodeKey, null);
+        toast.success("绿幕已选用", {
+          description: "设置新场景并点击生成融合成片；制作阶段的原视频会保留在画布中。",
+        });
+      } catch (error) {
+        setNodeStartError(nodeKey, formatRawBackendError(error));
+      }
+    },
+    [
+      snapshotV2,
+      promptContents,
+      providerCatalog,
+      insertSubgraph,
+      updateVideoNodeConfig,
+      setNodeStartError,
+    ],
   );
 
   const openWhiteModelStudio = useCallback(
@@ -5325,10 +5492,24 @@ export function WorkspaceApp({
   const handleStartGeneration = useCallback(
     (nodeKey: string) => {
       if (startingNodeKeys.has(nodeKey)) return;
-      const genNode = genNodes.find((node) => node.key === nodeKey);
+      const liveCanvas = snapshotV2({});
+      const genNode = liveCanvas.genNodes.find((node) => node.key === nodeKey);
       if (!genNode) return;
       // 提示词节点通过自身的文本模型按钮执行，不创建媒体生成任务。
       if (genNode.kind === "prompt") return;
+      if (
+        genNode.kind === "video" &&
+        genNode.config.greenScreen?.enabled &&
+        generationTasks.some(
+          (task) => task.sourceNodeId === nodeKey && !isTerminalTaskStatus(task.status),
+        )
+      ) {
+        setNodeStartError(
+          nodeKey,
+          "绿幕流程已有任务正在生成，请完成后检查选用，或在任务历史中取消后重做。",
+        );
+        return;
+      }
       if (!isDesktopRuntime()) {
         setNodeStartError(nodeKey, "生成任务只能在桌面应用中发起。请通过 Tauri 桌面端运行。");
         return;
@@ -5344,7 +5525,10 @@ export function WorkspaceApp({
         return;
       }
 
-      const connectedAssets = generationInputs(nodeKey);
+      const connectedAssets = createCanvasInputResolver(
+        canvasNodesByKeyFromDocument(liveCanvas),
+        liveCanvas.assetEdges,
+      )(nodeKey).media;
       // 万相 3.0 URL 素材（文档 file / 网页 link）：随节点配置保存，不在画布连线上。
       const urlMedia: readonly VideoUrlMediaInput[] =
         genNode.kind === "video" ? (genNode.config.urlMedia ?? []) : [];
@@ -5392,13 +5576,41 @@ export function WorkspaceApp({
         operation,
         resolvedSelection.model.remoteModelId,
       );
+      const greenScreen =
+        genNode.kind === "video" && genNode.config.greenScreen?.enabled
+          ? genNode.config.greenScreen
+          : null;
+      if (greenScreen && genNode.kind === "video" && genNode.config.whiteModelControl?.enabled) {
+        setNodeStartError(nodeKey, "绿幕流程与白模控制不能同时启用，请关闭其中一项后生成。");
+        return;
+      }
+      const promptDocument = promptContents.snapshotAll(new Set([nodeKey]))[nodeKey];
+      const greenScreenPreparation = greenScreen
+        ? prepareGreenScreenGeneration(
+            greenScreen,
+            connections,
+            resolvedSelection.model.remoteModelId,
+            promptDocument,
+          )
+        : null;
+      if (greenScreenPreparation?.issue) {
+        setNodeStartError(nodeKey, greenScreenPreparation.issue);
+        return;
+      }
+      if (greenScreenPreparation) connections = [...greenScreenPreparation.connections];
+      const greenScreenSignature =
+        greenScreen && genNode.kind === "video" && greenScreen.phase === "prepare"
+          ? greenScreenWorkflowSignature(genNode.config, promptDocument)
+          : null;
       const seedanceTask =
         genNode.kind === "video"
           ? resolveSeedanceTask(
               resolvedSelection.model.remoteModelId,
               parameterCapabilities,
-              genNode.config,
-              connectedAssets,
+              greenScreenPreparation
+                ? { ...genNode.config, seedanceTaskMode: greenScreenPreparation.taskMode }
+                : genNode.config,
+              connections,
             )
           : null;
       if (seedanceTask?.issue) {
@@ -5425,15 +5637,17 @@ export function WorkspaceApp({
         setNodeStartError(nodeKey, whiteModel.issue);
         return;
       }
-      const preparedPrompt = whiteModel
-        ? whiteModel.preparation
-        : promptContents.prepareGeneration(nodeKey, {
-            connections,
-            allowMediaOnly: modelAllowsMediaOnlyPrompt(
-              resolvedSelection.model.operationSchema,
-              operation,
-            ),
-          });
+      const preparedPrompt = greenScreenPreparation
+        ? greenScreenPreparation.preparation
+        : whiteModel
+          ? whiteModel.preparation
+          : promptContents.prepareGeneration(nodeKey, {
+              connections,
+              allowMediaOnly: modelAllowsMediaOnlyPrompt(
+                resolvedSelection.model.operationSchema,
+                operation,
+              ),
+            });
       if (preparedPrompt == null || !preparedPrompt.ok) {
         const issue = preparedPrompt?.issues[0] ?? ({ kind: "empty_prompt" } as const);
         setNodeStartError(nodeKey, promptContentIssueMessage(issue));
@@ -5508,6 +5722,25 @@ export function WorkspaceApp({
             generationCount: 1,
           })
           .then((taskId) => {
+            if (greenScreenSignature) {
+              patchNode("gen", nodeKey, (node) =>
+                node.kind === "video" && node.config.greenScreen
+                  ? {
+                      ...node,
+                      config: {
+                        ...node.config,
+                        greenScreen: {
+                          ...node.config.greenScreen,
+                          preparationTasks: [
+                            ...node.config.greenScreen.preparationTasks,
+                            { taskId, signature: greenScreenSignature },
+                          ],
+                        },
+                      },
+                    }
+                  : node,
+              );
+            }
             // 任务创建成功 → 立即在来源生成节点右侧落下占位产物卡片并连虚线，
             // 卡片承担任务状态栏职责：进行中展示进度，成功填充产物，失败展示完整错误。
             // 支持 n 参数的模型一次请求返回多张图：生成开始时就落下与数量相等的占位卡片，
@@ -5541,8 +5774,9 @@ export function WorkspaceApp({
     },
     [
       canvasId,
-      generationInputs,
-      genNodes,
+      snapshotV2,
+      patchNode,
+      generationTasks,
       providerCatalog,
       promptContents,
       refreshTasks,
@@ -7549,6 +7783,31 @@ export function WorkspaceApp({
     return map;
   }, [genNodes, mentionCandidatesFor]);
 
+  const greenScreenResultsByNode = useMemo(
+    () =>
+      new Map(
+        genNodes.flatMap((node) =>
+          node.kind === "video" && node.config.greenScreen
+            ? [
+                [
+                  node.key,
+                  greenScreenPreparationOutputs(node.key, node.config, outputNodes).map(
+                    (output) => ({
+                      key: output.key,
+                      taskId: output.taskId,
+                      finalPath: output.finalPath!,
+                      name: output.name ?? "绿幕视频",
+                      src: toMediaSrc(output.finalPath!),
+                    }),
+                  ),
+                ] as const,
+              ]
+            : [],
+        ),
+      ),
+    [genNodes, outputNodes],
+  );
+
   const genFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
       genNodes.map((node) => {
@@ -7588,6 +7847,9 @@ export function WorkspaceApp({
             updateVideoNodeConfig,
             openVideoLocalEdit,
             openWhiteModelStudio,
+            greenScreenResultsByNode.get(node.key),
+            handleUseGreenScreenResult,
+            importGreenScreenVideo,
             handleStartGeneration,
           ],
           () => {
@@ -7660,6 +7922,13 @@ export function WorkspaceApp({
                   onVideoConfigChange={updateVideoNodeConfig}
                   onAnnotateVideo={openVideoLocalEdit}
                   onOpenWhiteModelStudio={openWhiteModelStudio}
+                  greenScreenResults={greenScreenResultsByNode.get(node.key)}
+                  onGreenScreenUseResult={(nodeKey, key) => {
+                    void handleUseGreenScreenResult(nodeKey, key);
+                  }}
+                  onImportGreenScreenVideo={(nodeKey) => {
+                    void importGreenScreenVideo(nodeKey);
+                  }}
                   onStartGeneration={handleStartGeneration}
                 />
               );
@@ -7704,6 +7973,9 @@ export function WorkspaceApp({
       updateVideoNodeConfig,
       openVideoLocalEdit,
       openWhiteModelStudio,
+      greenScreenResultsByNode,
+      handleUseGreenScreenResult,
+      importGreenScreenVideo,
       handleStartGeneration,
       streamingTextByNode,
     ],
@@ -8410,7 +8682,7 @@ export function WorkspaceApp({
         <header className="workspace-header">
           <div className="brand-lockup" aria-label="无限画布">
             <span className="brand-mark" aria-hidden="true">
-              <Icon name="infinity" size="2xl" />
+              <Icon name="bounding-box" size="2xl" />
             </span>
             <span className="brand-name">无限画布</span>
           </div>
@@ -8682,20 +8954,18 @@ export function WorkspaceApp({
               aria-label="无限画布节点编辑器"
               attributionPosition="bottom-left"
             >
-              {/* 点阵随原生视口平移缩放，为创作区域提供轻量的空间参照。 */}
+              {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
               <Background
                 id="canvas-grid-minor"
-                variant={BackgroundVariant.Dots}
-                gap={24}
-                size={1}
+                variant={BackgroundVariant.Lines}
+                gap={40}
                 lineWidth={1}
                 className="canvas-flow-bg canvas-flow-bg--minor"
               />
               <Background
                 id="canvas-grid-major"
-                variant={BackgroundVariant.Dots}
-                gap={120}
-                size={1.5}
+                variant={BackgroundVariant.Lines}
+                gap={200}
                 lineWidth={1}
                 className="canvas-flow-bg canvas-flow-bg--major"
               />
@@ -8715,7 +8985,7 @@ export function WorkspaceApp({
             {!hasCanvasNodes ? (
               <div className="canvas-empty-hint">
                 <div className="canvas-empty-hint__art" aria-hidden="true">
-                  <Icon name="infinity" size="3xl" />
+                  <Icon name="bounding-box" size="3xl" />
                 </div>
                 <strong>画布为空</strong>
                 <span>右键画布空白处或点击顶部「节点」添加节点，也可从素材库拖入素材。</span>

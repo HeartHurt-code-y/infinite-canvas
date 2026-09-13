@@ -40,12 +40,13 @@ use super::{
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
         RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
-        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
-        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
-        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
-        TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
-        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
+        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RemoteModelOption,
+        RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
+        SaveCanvasDocumentCommand, SaveStatus, SetCredentialCommand, StagingJobRecord,
+        StartGenerationCommand, StartStagingCommand, StartVideoCompositionCommand,
+        StartVideoDownloadCommand, StartVideoFrameExtractionCommand, TosBucketPullSummary,
+        TosStagingConfig, UpdateAssetGroupCommand, UpsertProviderConnectionCommand,
+        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
 
@@ -818,6 +819,33 @@ pub fn list_local_assets(
     query: Option<LocalAssetListQuery>,
 ) -> CommandResult<LocalAssetPage> {
     state.staging.list_local_assets(query).command()
+}
+
+/// 本地素材预览续签：按素材身份重新签发对象存储只读地址，供画布节点恢复过期签名。
+#[tauri::command]
+pub fn refresh_local_asset_media(
+    state: State<'_, BackendState>,
+    command: RefreshLocalAssetMediaCommand,
+) -> CommandResult<String> {
+    let started_at = std::time::Instant::now();
+    let staging_job_id = command.staging_job_id.clone();
+    match state.staging.refresh_local_asset_media(command) {
+        Ok(url) => {
+            info!(
+                "[staging] refresh_local_asset_media 命令成功: stagingJobId={staging_job_id}, 耗时 {}ms",
+                started_at.elapsed().as_millis()
+            );
+            Ok(url)
+        }
+        Err(error) => {
+            let record = error.runtime_record();
+            error!(
+                "[staging] refresh_local_asset_media 命令失败: stagingJobId={staging_job_id}, 耗时 {}ms, 错误: {record}",
+                started_at.elapsed().as_millis()
+            );
+            Err(error.payload())
+        }
+    }
 }
 
 /// 列出产物上传到云端素材库的入库记录：应用重启后前端据此重建

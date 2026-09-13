@@ -5,6 +5,7 @@ import App from "./App";
 import * as videoFrameSampler from "./lib/videoFrameSampler";
 import type {
   CloudAsset,
+  ExplicitMediaInput,
   GenerationTaskDetail,
   GenerationTaskSummary,
   MediaReferenceTarget,
@@ -20,6 +21,7 @@ import {
 } from "./features/workspace/workspaceModel";
 import type { VideoLocalEditDialogProps } from "./features/workspace/VideoLocalEditDialog";
 import { createWhiteModelControlConfig } from "./lib/whiteModelControl";
+import { createGreenScreenConfig } from "./lib/greenScreen";
 import {
   createWhiteModelStudioDraft,
   whiteModelRenderSignature,
@@ -4108,6 +4110,235 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).toContain("保留我的角色对白和叙事要求。");
   }, 30000);
 
+  it("绿幕完整流程：转绿任务保存恢复、明确选用后连线并用新场景合成，隔离各步输入", async () => {
+    const base = whiteModelCanvasFixture();
+    const initial = base.genNodes[0]!;
+    if (initial.kind !== "video") throw new Error("需要视频节点");
+    let storedDocument: CanvasDocumentV2 = {
+      ...base,
+      genNodes: [
+        {
+          ...initial,
+          config: {
+            ...initial.config,
+            whiteModelControl: { ...initial.config.whiteModelControl!, enabled: false },
+            seedanceTaskMode: "first_frame",
+            mediaRoles: { "white-model-video": "first_frame" },
+            greenScreen: {
+              ...createGreenScreenConfig(),
+              enabled: true,
+              preparationMode: "convert",
+              source: initial.config.whiteModelControl!.source,
+              subject: "保留表演者",
+              background: initial.config.whiteModelControl!.mappings[0]!.reference,
+              scene: "夜间教室",
+            },
+          },
+        },
+      ],
+    };
+    let starts = 0;
+    const result = {
+      taskId: "green-task",
+      resultIndex: 0,
+      mediaType: "video" as const,
+      remoteTaskId: "remote-green",
+      source: {},
+      saveStatus: "succeeded" as const,
+      finalPath: "C:/generated/green.mp4",
+      relativePath: "green.mp4",
+      byteSize: 1024,
+      mimeType: "video/mp4",
+      sha256: "test",
+      savedAt: 1,
+      error: null,
+    };
+    const detail: GenerationTaskDetail = {
+      summary: makeTaskSummary({
+        id: "green-task",
+        sourceNodeId: initial.key,
+        status: "succeeded",
+      }),
+      logicalRequest: {},
+      resolvedRequest: {},
+      attempts: [],
+      calls: [],
+      events: [],
+      results: [result],
+      textOutput: null,
+      finalError: null,
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "绿幕流程",
+          document: structuredClone(storedDocument),
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      if (command === "save_canvas_document") {
+        const save = args?.["command"] as SaveCanvasDocumentCommand;
+        storedDocument = structuredClone(save.document) as CanvasDocumentV2;
+        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+      }
+      if (command === "start_generation")
+        return Promise.resolve(++starts === 1 ? "green-task" : "final-task");
+      if (command === "list_generation_tasks")
+        return Promise.resolve({
+          items: starts ? [detail.summary] : [],
+          nextCursorCreatedBefore: null,
+        });
+      if (command === "get_generation_task") return Promise.resolve(detail);
+      return baseInvokeImplementation(command, args);
+    });
+    const view = render(<App />);
+    const findNode = async () => {
+      const node = await waitFor(() => {
+        const found = document.querySelector<HTMLElement>(
+          '[data-connection-target="white-model-generation"]',
+        );
+        expect(found).not.toBeNull();
+        return found!;
+      });
+      await waitForNodeAccessible(node);
+      return node;
+    };
+    const node = await findNode();
+    fireEvent.click(within(node).getByRole("button", { name: "将原视频转为绿幕" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommands()[0]).toMatchObject({
+      videoTaskType: "edit",
+      parameters: { ratio: "adaptive", duration: -1 },
+      explicitMedia: [{ role: "reference_video", target: { assetId: "white-model-video-asset" } }],
+    });
+    await waitFor(() =>
+      expect(within(node).getByRole("button", { name: "使用这版绿幕进入合成" })).toBeEnabled(),
+    );
+    await waitFor(
+      () => {
+        const saved = storedDocument.genNodes[0]!;
+        expect(saved.kind === "video" && saved.config.greenScreen?.preparationTasks).toHaveLength(
+          1,
+        );
+        expect(
+          storedDocument.outputNodes?.some((output) => output.finalPath === result.finalPath),
+        ).toBe(true);
+      },
+      { timeout: 4000 },
+    );
+    expect(starts).toBe(1);
+    view.unmount();
+    render(<App />);
+    const restored = await findNode();
+    fireEvent.change(within(restored).getByLabelText("主体与动作描述"), {
+      target: { value: "修改了主体" },
+    });
+    fireEvent.click(await within(restored).findByRole("button", { name: "使用这版绿幕进入合成" }));
+    await waitFor(() =>
+      expect(within(restored).getByLabelText("发起任务失败")).toHaveTextContent(
+        "制作设置或提示词已变化",
+      ),
+    );
+    expect(starts).toBe(1);
+    fireEvent.change(within(restored).getByLabelText("主体与动作描述"), {
+      target: { value: "保留表演者" },
+    });
+    fireEvent.click(await within(restored).findByRole("button", { name: "使用这版绿幕进入合成" }));
+    const composite = await within(restored).findByRole("button", { name: "生成融合成片" });
+    expect(starts).toBe(1);
+    fireEvent.click(composite);
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+    const final = submittedGenerationCommands()[1]!;
+    expect(final).toMatchObject({
+      videoTaskType: "edit",
+      parameters: { ratio: "adaptive", duration: -1 },
+    });
+    const media = final["explicitMedia"] as readonly ExplicitMediaInput[];
+    expect(media.find((entry) => entry.role === "reference_video")).toMatchObject({
+      target: { kind: "local_result", generationTaskId: "green-task", resultIndex: 0 },
+    });
+    expect(media.find((entry) => entry.role === "reference_image")).toMatchObject({
+      target: { assetId: "white-model-character-asset" },
+    });
+    expect(final["explicitMedia"]).toHaveLength(2);
+    const text = (final["prompt"] as PromptSegment[])
+      .filter((part) => part.kind === "text")
+      .map((part) => part.text)
+      .join("");
+    expect(text).toContain("夜间教室");
+    expect(text).toContain("保留我的角色对白和叙事要求。");
+    expect(text).not.toContain("【制作绿幕视频】");
+    expect(
+      within(restored).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+    ).not.toHaveTextContent("【无缝绿幕编辑】");
+  }, 30000);
+
+  it("绿幕流程导入本地视频后明确选择，作为已有绿幕直接发起融合请求", async () => {
+    const base = whiteModelCanvasFixture();
+    const initial = base.genNodes[0]!;
+    if (initial.kind !== "video") throw new Error("需要视频节点");
+    const fixture: CanvasDocumentV2 = {
+      ...base,
+      genNodes: [
+        {
+          ...initial,
+          config: {
+            ...initial.config,
+            whiteModelControl: { ...initial.config.whiteModelControl!, enabled: false },
+            greenScreen: {
+              ...createGreenScreenConfig(),
+              enabled: true,
+              preparationMode: "existing",
+              scene: "虚拟演播室",
+            },
+          },
+        },
+      ],
+    };
+    dialogOpenMock.mockResolvedValue("C:/footage/actor-green.mp4");
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "绿幕导入",
+          document: fixture,
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(node);
+    fireEvent.click(within(node).getByRole("button", { name: "导入绿幕或原视频" }));
+    const option = await within(node).findByRole("option", { name: "视频 · actor-green.mp4" });
+    fireEvent.change(within(node).getByLabelText("添加已连接的绿幕视频"), {
+      target: { value: (option as HTMLOptionElement).value },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "添加为绿幕前景" }));
+    fireEvent.click(within(node).getByRole("button", { name: "确认绿幕并进入合成" }));
+    fireEvent.click(within(node).getByRole("button", { name: "生成融合成片" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommands()[0]).toMatchObject({
+      videoTaskType: "edit",
+      explicitMedia: [
+        {
+          role: "reference_video",
+          target: { kind: "local_file", path: "C:/footage/actor-green.mp4", mediaType: "video" },
+        },
+      ],
+    });
+  }, 15000);
+
   it("专业级白模控制保存恢复后以稳定素材引用生成，控制指令不改写或重复累积到用户提示词", async () => {
     let storedDocument = whiteModelCanvasFixture();
     const initialNode = storedDocument.genNodes[0]!;
@@ -4605,7 +4836,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     },
   );
 
-  it("云端图片素材节点预览签名过期时向后端续签一次，用新地址重新加载", async () => {
+  it("云端图片素材节点预览签名过期时续签一次，新地址失败则收口置灰", async () => {
     const staleUrl = "https://tos-cn.example.com/stale.jpg?X-Tos-Signature=expired";
     const freshUrl = "https://tos-cn.example.com/fresh.jpg?X-Tos-Signature=fresh";
     invokeMock.mockImplementation((command, args) => {
@@ -4674,13 +4905,27 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       mediaType: "image",
     });
 
-    // 新地址仍失败时不再续签（每节点实例一次），避免循环请求。
+    // 新地址仍失败时按「每个地址只续签一次、实例内最多两次」收口：
+    // 这一次为刚换成的新地址再续签一次（首次失败已用过 stale 地址的额度）；
+    // 之后额度用尽，图片元素从 DOM 移除并置灰，同一个新地址不再重复请求。
+    await waitFor(() => {
+      expect(node.querySelector("img")).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+      );
+    });
     fireEvent.error(node.querySelector("img")!);
     await waitFor(() => {
       expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
-        1,
+        2,
       );
+      expect(node.querySelector("img")).toBeNull();
     });
+    const leftover = node.querySelector("img");
+    if (leftover != null) fireEvent.error(leftover);
+    expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
+      2,
+    );
   });
 
   it("云端视频素材节点播放签名过期时同样触发续签并回写播放地址", async () => {
@@ -4750,6 +4995,154 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       id: "video-asset-1",
       mediaType: "video",
     });
+  });
+
+  it("本地素材节点预览签名过期时按 staging job id 重签对象存储地址", async () => {
+    // 水合期批量续签失败（离线/对象不存在）时节点仍保留过期签名，加载失败后由 onError 自愈一次。
+    const staleUrl =
+      "https://sd20-zq.tos-cn-beijing.volces.com/stale.png?X-Tos-Date=20260912T100000Z&X-Tos-Expires=3600&X-Tos-Signature=expired";
+    const freshUrl = "https://sd20-zq.tos-cn-beijing.volces.com/fresh.png?X-Tos-Signature=fresh";
+    let refreshLocalCalls = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-06",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [
+              {
+                key: "stale-local-image-node",
+                assetId: "5744d2ad-19ee-4d07-a4a7-ada09152027c",
+                // 本地素材没有供应商连接：续签必须走 staging job id 重签分支。
+                providerConnectionId: "",
+                source: "local",
+                kind: "image",
+                name: "本地素材图片",
+                previewUrl: staleUrl,
+                videoUrl: null,
+                x: 40,
+                y: 180,
+              },
+            ],
+            outputNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "refresh_local_asset_media") {
+        refreshLocalCalls += 1;
+        return refreshLocalCalls === 1
+          ? Promise.reject(new Error("对象存储暂不可用"))
+          : Promise.resolve(freshUrl);
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="stale-local-image-node"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    // 水合续签失败：保留节点自带签名，图片按旧地址发起加载。
+    await waitFor(() => expect(refreshLocalCalls).toBe(1));
+    expect(node.querySelector("img")).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleUrl)}`,
+    );
+
+    fireEvent.error(node.querySelector("img")!);
+    await waitFor(() => {
+      expect(node.querySelector("img")).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+      );
+    });
+    expect(refreshLocalCalls).toBe(2);
+    const refreshCalls = invokeMock.mock.calls.filter(
+      ([name]) => name === "refresh_local_asset_media",
+    );
+    expect((refreshCalls.at(-1)![1] as { command: unknown }).command).toEqual({
+      stagingJobId: "5744d2ad-19ee-4d07-a4a7-ada09152027c",
+      mediaType: "image",
+    });
+    // 本地素材不得误走云端素材续签接口（它没有 providerConnectionId）。
+    expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
+      0,
+    );
+  });
+
+  it("画布水合后批量重签本地素材预览地址：过期签名在首次渲染前就被换掉", async () => {
+    // 本地素材签名只活 1 小时，而节点数据随画布文档持久化：重启后打开画布必然拿到过期签名，
+    // 这里验证不会再看到一屏「预览不可用」，而是水合后直接换上新签名。
+    const expiredUrl =
+      "https://sd20-zq.tos-cn-beijing.volces.com/old.png?X-Tos-Date=20260912T100000Z&X-Tos-Expires=3600&X-Tos-Signature=stale";
+    const freshUrl = "https://sd20-zq.tos-cn-beijing.volces.com/new.png?X-Tos-Signature=fresh";
+    let refreshLocalCalls = 0;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-07",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [
+              {
+                key: "restored-local-node",
+                assetId: "5744d2ad-19ee-4d07-a4a7-ada09152027c",
+                providerConnectionId: "",
+                source: "local",
+                kind: "image",
+                name: "过期本地图.png",
+                previewUrl: expiredUrl,
+                videoUrl: null,
+                x: 40,
+                y: 180,
+              },
+            ],
+            outputNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "refresh_local_asset_media") {
+        refreshLocalCalls += 1;
+        return Promise.resolve(freshUrl);
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="restored-local-node"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+
+    await waitFor(() => {
+      expect(node.querySelector("img")).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+      );
+    });
+    // 续签在水合后主动发生，且每个素材身份只请求一次；节点里那份过期地址没有触发 onError 自愈。
+    expect(refreshLocalCalls).toBe(1);
+    expect(node).not.toHaveTextContent("预览不可用");
   });
 
   it("视频局部标注保存为独立素材，并将原视频与标注图稳定引用提交到编辑任务", async () => {

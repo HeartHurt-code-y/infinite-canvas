@@ -816,6 +816,105 @@ describe("App workspace", () => {
     });
   });
 
+  it("本地素材卡预览签名过期时按 staging job id 重签对象存储地址", async () => {
+    // 本地素材没有 providerConnectionId；过去只判断云端分支，卡片与画布节点都会永久置灰。
+    const staleLocalUrl = "https://tos.example.com/local/stale.png?X-Tos-Signature=expired";
+    const freshLocalUrl = "https://tos.example.com/local/fresh.png?X-Tos-Signature=fresh";
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-production",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 2,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([]);
+        case "list_asset_groups":
+          return Promise.resolve([]);
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [
+              {
+                id: "local-asset-9",
+                name: "过期本地图.png",
+                mediaType: "image",
+                objectKey: "staging/expired.png",
+                previewUrl: staleLocalUrl,
+                byteSize: 2048,
+                createdAt: 1,
+              },
+            ],
+            total: 1,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 1, video: 0, audio: 0 },
+          });
+        case "refresh_local_asset_media":
+          return Promise.resolve(freshLocalUrl);
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "素材库来源" }), {
+      target: { value: "local" },
+    });
+    const card = await screen.findByRole("button", { name: "预览图片素材详情：过期本地图.png" });
+    const image = card.querySelector<HTMLImageElement>(".asset-card__preview");
+    expect(image).toHaveAttribute(
+      "src",
+      `asset://localhost/video?src=${encodeURIComponent(staleLocalUrl)}`,
+    );
+
+    fireEvent.error(image!);
+    await waitFor(() => {
+      const refreshCall = invokeMock.mock.calls.find(
+        ([name]) => name === "refresh_local_asset_media",
+      ) as [string, { command: { stagingJobId: string; mediaType: string } }] | undefined;
+      expect(refreshCall?.[1]?.command).toEqual({
+        stagingJobId: "local-asset-9",
+        mediaType: "image",
+      });
+    });
+    await waitFor(() => {
+      expect(card.querySelector<HTMLImageElement>(".asset-card__preview")).toHaveAttribute(
+        "src",
+        `asset://localhost/video?src=${encodeURIComponent(freshLocalUrl)}`,
+      );
+    });
+    // 本地素材不得误走云端素材续签接口。
+    expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
+      0,
+    );
+  });
+
   it("视频卡播放地址签名过期时向后端续签一次，用新地址重新加载", async () => {
     const staleVideoUrl = "https://cdn.example.com/stale-play.mp4?signature=expired";
     const freshVideoUrl = "https://cdn.example.com/fresh-play.mp4?signature=fresh";

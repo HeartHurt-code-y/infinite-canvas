@@ -1,6 +1,6 @@
-﻿import { Icon } from "../../components/Icon";
+import { Icon } from "../../components/Icon";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
-import { formatBytes, assetLibraryClient } from "../../lib/backend";
+import { formatBytes, refreshAssetItemCoverUrl, refreshAssetItemMediaUrl } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
@@ -131,27 +131,17 @@ function AssetCardVideoVisual({
             const failedUrl = effectiveCoverUrl;
             setLoadedCoverUrl(null);
             setFailedCoverUrl(failedUrl);
-            // 供应商封面签名过期：云端素材首次失败时向后端续签一次新封面；
-            // 续签失败或新封面仍无法加载时回退视频中间帧（与画布素材节点一致）。
-            if (
-              failedUrl != null &&
-              !coverRefreshAttemptedRef.current &&
-              asset.source === "cloud" &&
-              asset.providerConnectionId != null
-            ) {
+            // 封面签名过期：首次失败时向后端续签一次新封面（云端回读供应商记录、
+            // 本地重签对象存储地址）；续签失败或新封面仍无法加载时回退视频中间帧
+            // （与画布素材节点一致）。
+            if (failedUrl != null && !coverRefreshAttemptedRef.current) {
               coverRefreshAttemptedRef.current = true;
-              void assetLibraryClient
-                .refreshAssetCover({
-                  providerConnectionId: asset.providerConnectionId,
-                  id: asset.id,
-                })
-                .then((freshUrl) => {
-                  if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
-                    setRefreshedCoverUrl(freshUrl);
-                    setFailedCoverUrl(null);
-                  }
-                })
-                .catch(() => undefined);
+              void refreshAssetItemCoverUrl(asset).then((freshUrl) => {
+                if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+                  setRefreshedCoverUrl(freshUrl);
+                  setFailedCoverUrl(null);
+                }
+              });
             }
             const video = videoRef.current;
             if (video != null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
@@ -181,28 +171,17 @@ function AssetCardVideoVisual({
             setLoadedVideoSrc(null);
             setFailedVideoSrc(videoSrc);
             setVideoCoverReady(false);
-            // 播放地址签名过期：每个卡片实例续签一次（与封面续签相互独立），
-            // 拿到新地址后重新加载；续签失败保持置灰，不反复请求。
-            if (
-              candidateVideoUrl != null &&
-              !playbackRefreshAttemptedRef.current &&
-              asset.source === "cloud" &&
-              asset.providerConnectionId != null
-            ) {
+            // 播放地址签名过期：每个卡片实例续签一次（云端回读供应商记录、本地重签
+            // 对象存储地址，与封面续签相互独立），拿到新地址后重新加载；
+            // 续签失败保持置灰，不反复请求。
+            if (candidateVideoUrl != null && !playbackRefreshAttemptedRef.current) {
               playbackRefreshAttemptedRef.current = true;
-              void assetLibraryClient
-                .refreshAssetMedia({
-                  providerConnectionId: asset.providerConnectionId,
-                  id: asset.id,
-                  mediaType: "video",
-                })
-                .then((freshUrl) => {
-                  if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
-                    setRefreshedVideoUrl(freshUrl);
-                    setFailedVideoSrc(null);
-                  }
-                })
-                .catch(() => undefined);
+              void refreshAssetItemMediaUrl(asset, "video").then((freshUrl) => {
+                if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
+                  setRefreshedVideoUrl(freshUrl);
+                  setFailedVideoSrc(null);
+                }
+              });
             }
           }}
           onLoadedMetadata={(event) => {
@@ -378,31 +357,20 @@ function AssetCard({
                   onError={() => {
                     setLoadedImagePreviewUrl(null);
                     setFailedImagePreviewUrl(candidateImagePreviewUrl ?? null);
-                    // 预览签名过期：云端素材每个卡片实例续签一次，新地址重新加载。
-                    if (
-                      candidateImagePreviewUrl != null &&
-                      !imageRefreshAttemptedRef.current &&
-                      asset.source === "cloud" &&
-                      asset.providerConnectionId != null
-                    ) {
+                    // 预览签名过期：每个卡片实例续签一次（云端回读供应商记录、
+                    // 本地重签对象存储地址），新地址重新加载。
+                    if (candidateImagePreviewUrl != null && !imageRefreshAttemptedRef.current) {
                       imageRefreshAttemptedRef.current = true;
-                      void assetLibraryClient
-                        .refreshAssetMedia({
-                          providerConnectionId: asset.providerConnectionId,
-                          id: asset.id,
-                          mediaType: "image",
-                        })
-                        .then((freshUrl) => {
-                          if (
-                            freshUrl != null &&
-                            freshUrl !== "" &&
-                            freshUrl !== candidateImagePreviewUrl
-                          ) {
-                            setRefreshedImagePreviewUrl(freshUrl);
-                            setFailedImagePreviewUrl(null);
-                          }
-                        })
-                        .catch(() => undefined);
+                      void refreshAssetItemMediaUrl(asset, "image").then((freshUrl) => {
+                        if (
+                          freshUrl != null &&
+                          freshUrl !== "" &&
+                          freshUrl !== candidateImagePreviewUrl
+                        ) {
+                          setRefreshedImagePreviewUrl(freshUrl);
+                          setFailedImagePreviewUrl(null);
+                        }
+                      });
                     }
                   }}
                 />

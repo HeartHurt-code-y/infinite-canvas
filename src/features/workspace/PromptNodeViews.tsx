@@ -3,8 +3,8 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
-  assetLibraryClient,
   frontendLog,
+  refreshAssetItemMediaUrl,
   type GenerationOperation,
   type ProviderCatalogEntry,
 } from "../../lib/backend";
@@ -35,6 +35,8 @@ import { normalizePromptReferenceText } from "../../lib/promptReferences";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
 import { WhiteModelControlSection } from "./WhiteModelControlSection";
+import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
+import { resolveGreenScreen } from "../../lib/greenScreen";
 
 import type {
   AssetKind,
@@ -86,28 +88,24 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
 
   const handleImageError = () => {
     setFailedUrl(preview);
-    if (
-      preview == null ||
-      refreshAttemptedRef.current ||
-      candidate.source !== "cloud" ||
-      candidate.providerConnectionId === ""
-    ) {
-      return;
-    }
+    if (preview == null || refreshAttemptedRef.current) return;
+    if (candidate.source === "cloud" && candidate.providerConnectionId === "") return;
     refreshAttemptedRef.current = true;
-    void assetLibraryClient
-      .refreshAssetMedia({
-        providerConnectionId: candidate.providerConnectionId,
+    // 云端素材回读供应商记录、本地素材重签对象存储地址，本地素材没有
+    // providerConnectionId，只判断云端分支会让缩略图永久停在失败态。
+    void refreshAssetItemMediaUrl(
+      {
         id: candidate.assetId,
-        mediaType: candidate.kind,
-      })
-      .then((freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== preview) {
-          setRefreshedUrl(freshUrl);
-          setFailedUrl(null);
-        }
-      })
-      .catch(() => undefined);
+        source: candidate.source,
+        providerConnectionId: candidate.providerConnectionId,
+      },
+      candidate.kind,
+    ).then((freshUrl) => {
+      if (freshUrl != null && freshUrl !== "" && freshUrl !== preview) {
+        setRefreshedUrl(freshUrl);
+        setFailedUrl(null);
+      }
+    });
   };
 
   const measure = (url: string, ratio: number) => {
@@ -1514,6 +1512,11 @@ export function VideoNodeSettings({
   onChange,
   onAnnotateVideo,
   onOpenWhiteModelStudio,
+  onGreenScreenGenerate,
+  onGreenScreenUseResult,
+  onImportGreenScreenVideo,
+  greenScreenResults,
+  greenScreenBusy,
 }: {
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
@@ -1522,6 +1525,11 @@ export function VideoNodeSettings({
   readonly onChange: (config: VideoNodeConfig) => void;
   readonly onAnnotateVideo?: (input: ConnectedAssetInput | InheritedAssetInput) => void;
   readonly onOpenWhiteModelStudio?: (() => void) | undefined;
+  readonly onGreenScreenGenerate?: (() => void) | undefined;
+  readonly onGreenScreenUseResult?: ((key: string) => void) | undefined;
+  readonly onImportGreenScreenVideo?: (() => void) | undefined;
+  readonly greenScreenResults?: readonly GreenScreenResult[] | undefined;
+  readonly greenScreenBusy?: boolean | undefined;
 }) {
   const availableProviders = providerCatalog.filter(
     (entry) =>
@@ -1544,11 +1552,19 @@ export function VideoNodeSettings({
       )
     : [];
 
+  const greenScreenInputs = (mediaInputs ?? []).flatMap((input) =>
+    input.target
+      ? [{ key: input.key, name: input.name, kind: input.kind, target: input.target }]
+      : [],
+  );
+  const greenScreen = config.greenScreen?.enabled
+    ? resolveGreenScreen(config.greenScreen, greenScreenInputs, selectedModel?.remoteModelId ?? "")
+    : null;
   const taskState = resolveSeedanceTask(
     selectedModel?.remoteModelId ?? "",
     parameterCapabilities,
-    config,
-    mediaInputs ?? [],
+    greenScreen ? { ...config, seedanceTaskMode: greenScreen.taskMode } : config,
+    greenScreen ? greenScreen.connections : (mediaInputs ?? []),
   );
   const currentTaskLabel = SEEDANCE_TASK_OPTIONS.find(
     (option) => option.value === taskState.mode,
@@ -1662,6 +1678,7 @@ export function VideoNodeSettings({
             <span>任务类型</span>
             <select
               value={taskState.mode}
+              disabled={config.greenScreen?.enabled}
               onChange={(event) =>
                 onChange(
                   selectSeedanceTask(
@@ -1762,6 +1779,28 @@ export function VideoNodeSettings({
         </>
       ) : null}
 
+      {taskState.enabled || config.greenScreen ? (
+        <GreenScreenSection
+          config={config.greenScreen}
+          inputs={greenScreenInputs}
+          modelId={selectedModel?.remoteModelId ?? ""}
+          results={greenScreenResults}
+          busy={greenScreenBusy}
+          onGenerate={onGreenScreenGenerate}
+          onUseResult={onGreenScreenUseResult}
+          onImportVideo={onImportGreenScreenVideo}
+          onChange={(next) =>
+            onChange({
+              ...config,
+              greenScreen: next,
+              ...(next.enabled && config.whiteModelControl?.enabled
+                ? { whiteModelControl: { ...config.whiteModelControl, enabled: false } }
+                : {}),
+            })
+          }
+        />
+      ) : null}
+
       {taskState.enabled || config.whiteModelControl ? (
         <WhiteModelControlSection
           onOpenStudio={onOpenWhiteModelStudio}
@@ -1773,7 +1812,15 @@ export function VideoNodeSettings({
           )}
           modelId={selectedModel?.remoteModelId ?? ""}
           taskMode={taskState.mode}
-          onChange={(whiteModelControl) => onChange({ ...config, whiteModelControl })}
+          onChange={(whiteModelControl) =>
+            onChange({
+              ...config,
+              whiteModelControl,
+              ...(whiteModelControl.enabled && config.greenScreen?.enabled
+                ? { greenScreen: { ...config.greenScreen, enabled: false } }
+                : {}),
+            })
+          }
         />
       ) : null}
 

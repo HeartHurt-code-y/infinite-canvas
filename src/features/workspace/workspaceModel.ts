@@ -30,6 +30,7 @@ import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
 import type { WhiteModelControlConfig } from "../../lib/whiteModelControl";
 import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
+import type { GreenScreenConfig } from "../../lib/greenScreen";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./commerceWorkflowModel";
@@ -839,7 +840,13 @@ export interface OutputNodeData {
   readonly mediaType: "image" | "video" | "text";
   /** 旧文档未保存时默认为 generation。 */
   readonly origin?:
-    "generation" | "composition" | "download" | "frame_extract" | "video_edit" | "white_model";
+    | "generation"
+    | "composition"
+    | "download"
+    | "frame_extract"
+    | "video_edit"
+    | "white_model"
+    | "green_screen";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
   readonly finalPath: string | null;
   /** 供应商返回后、保存完成前的会话内预览地址；不写入画布文档。 */
@@ -1884,6 +1891,8 @@ export interface VideoNodeConfig {
   readonly whiteModelControl?: WhiteModelControlConfig;
   /** Blender 制作参数与持久渲染任务，关闭工作台后仍可恢复。 */
   readonly whiteModelStudio?: WhiteModelStudioDraft;
+  /** 绿幕制作、明确选用与无缝融合的分阶段配置，任务复用生成历史。 */
+  readonly greenScreen?: GreenScreenConfig;
   /** 连接素材的显式角色：素材 key → first_frame/last_frame/reference_*。 */
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
@@ -2251,7 +2260,8 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   if (
     node.origin === "composition" ||
     node.origin === "download" ||
-    node.origin === "white_model"
+    node.origin === "white_model" ||
+    node.origin === "green_screen"
   ) {
     if (node.finalPath == null) return null;
     return {

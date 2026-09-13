@@ -84,6 +84,7 @@ import { Image } from "@phosphor-icons/react/Image";
 import { ImageSquare } from "@phosphor-icons/react/ImageSquare";
 import { Images } from "@phosphor-icons/react/Images";
 import { InfinityIcon } from "@phosphor-icons/react/Infinity";
+import { BoundingBox } from "@phosphor-icons/react/BoundingBox";
 import { Key } from "@phosphor-icons/react/Key";
 import { LinkSimple } from "@phosphor-icons/react/LinkSimple";
 import { MagicWand } from "@phosphor-icons/react/MagicWand";
@@ -167,6 +168,7 @@ const GLYPHS = {
   "image-square": ImageSquare,
   images: Images,
   infinity: InfinityIcon,
+  "bounding-box": BoundingBox,
   key: Key,
   "link-simple": LinkSimple,
   "magic-wand": MagicWand,

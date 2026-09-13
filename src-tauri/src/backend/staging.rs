@@ -28,8 +28,9 @@ use super::{
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
         AssetImportOutputRecord, ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery,
-        LocalAssetPage, LocalAssetRecord, MediaType, StagingJobRecord, StagingStatus,
-        StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
+        LocalAssetPage, LocalAssetRecord, MediaType, RefreshLocalAssetMediaCommand,
+        StagingJobRecord, StagingStatus, StartStagingCommand, TosBucketPullSummary,
+        TosStagingConfig,
     },
 };
 
@@ -823,6 +824,26 @@ impl StagingService {
             )
         })?;
         self.presign_existing_object(staging_job_id, object_key)
+    }
+
+    /// 为一幅已入库的本地素材重新签发读取地址（画布节点预览续签）。
+    ///
+    /// 本地素材的预览地址是短期预签名 URL，画布文档把它持久化后必然过期；
+    /// 生成链路由 `local_asset_lease` 每次重签，前端预览过去没有对应入口，
+    /// 因此这里按素材身份返回同一份租约里的只读地址。
+    pub fn refresh_local_asset_media(
+        &self,
+        command: RefreshLocalAssetMediaCommand,
+    ) -> BackendResult<String> {
+        let staging_job_id = command.staging_job_id.trim();
+        if staging_job_id.is_empty() {
+            return Err(BackendError::validation(
+                "local asset refresh requires a staging job id",
+                json!({ "stagingJobId": command.staging_job_id }),
+            ));
+        }
+        let lease = self.local_asset_lease(staging_job_id, command.media_type)?;
+        Ok(lease.get_url)
     }
 
     /// 拉取整个存储桶（或指定前缀）下的对象文件到本地素材索引。

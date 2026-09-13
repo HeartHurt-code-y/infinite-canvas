@@ -949,6 +949,19 @@ pub struct RefreshAssetMediaCommand {
     pub media_type: MediaType,
 }
 
+/// 本地素材（对象存储）读取地址续签：按 staging job id 重新签发预签名只读地址。
+///
+/// 本地素材的 `previewUrl` 是短期签名地址（`LEASE_URL_EXPIRY_SECS`），
+/// 画布节点把地址持久化进画布文档后会随签名过期而失效，必须能按身份重新签发。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshLocalAssetMediaCommand {
+    /// 本地素材身份：完成上传的 staging job id。
+    pub staging_job_id: String,
+    /// 期望的素材类型；索引记录类型不符时报错，避免把错误素材的地址喂给节点。
+    pub media_type: MediaType,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {
