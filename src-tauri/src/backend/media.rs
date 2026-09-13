@@ -16,7 +16,7 @@ use super::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
         redact_request_value, redact_url_string, seedance_video_task_type,
     },
-    staging::{StagingLease, StagingService},
+    staging::{StagingLease, StagingService, fake_ip_aware_client},
     storage::TaskExecutionRecord,
     types::{
         ExplicitMediaInput, GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment,
@@ -28,6 +28,11 @@ use super::{
 /// `/v1/assets/get` 失败）时的自动指数退避重试次数。`3` 表示除首次尝试外再自动
 /// 重试 3 次（共尝试 4 次），退避节奏为约 2s / 4s / 8s。
 const ASSET_RESOLVE_RETRIES: u32 = 3;
+
+/// 本地素材库对象字节下载遇传输层故障（连接失败/超时等瞬时网络错误，例如代理
+/// fake-ip 抖动导致对象存储连接被拒）时的自动指数退避重试次数。`3` 表示除首次
+/// 尝试外再自动重试 3 次（共尝试 4 次），退避节奏为约 2s / 4s / 8s。
+const LOCAL_ASSET_DOWNLOAD_RETRIES: u32 = 3;
 
 #[derive(Clone)]
 pub struct MediaResolver {
@@ -570,10 +575,18 @@ impl MediaResolver {
             } => {
                 // 本地素材目录只保存稳定 job id；每次生成都重新签发对象存储读取地址，
                 // 不读取供应商素材库，也不会把永久素材对象加入任务结束后的清理列表。
-                let lease = self
-                    .staging
-                    .local_asset_lease(staging_job_id, *media_type)?;
-                let bytes = self.download_asset_bytes(&lease.get_url).await?;
+                // 每次尝试都重新签发一次地址：预签名地址是短期凭据，瞬时网络故障重试
+                // 时必须换新签名，不能复用已经失败过的地址。
+                let (bytes, get_url) = download_with_fresh_lease(
+                    LOCAL_ASSET_DOWNLOAD_RETRIES,
+                    || {
+                        self.staging
+                            .local_asset_lease(staging_job_id, *media_type)
+                            .map(|lease| lease.get_url)
+                    },
+                    |url: String| async move { self.download_asset_bytes(&url).await },
+                )
+                .await?;
                 let detected = infer::get(&bytes).ok_or_else(|| {
                     BackendError::protocol(
                         "local library asset media type could not be identified from file signature",
@@ -602,7 +615,7 @@ impl MediaResolver {
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
                         bytes: needs_bytes.then_some(bytes),
-                        remote_reference: (!needs_bytes).then_some(lease.get_url),
+                        remote_reference: (!needs_bytes).then_some(get_url),
                         prompt_segment_index,
                         content_index,
                     },
@@ -778,11 +791,16 @@ impl MediaResolver {
         }
     }
 
+    /// 读取一个对象存储预签名地址的字节。
+    ///
+    /// 代理 fake-ip 环境下用备用 DNS 拿真实 IP 直连，避免下载暂存对象时连接失败
+    /// （与素材库下载路径一致）；单次尝试的失败由调用方的重试策略处理。
     async fn download_asset_bytes(&self, url: &str) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         info!("[resolve] 开始下载引用素材字节: url={redacted_url}");
         let started_at = std::time::Instant::now();
-        let response = self.providers.client().get(url).send().await?;
+        let client = fake_ip_aware_client(url, self.providers.client().clone()).await;
+        let response = client.get(url).send().await?;
         let status = response.status().as_u16();
         if !(200..300).contains(&status) {
             let raw = String::from_utf8_lossy(&response.bytes().await?).into_owned();
@@ -807,6 +825,48 @@ impl MediaResolver {
         );
         Ok(bytes)
     }
+}
+
+/// 下载一份本地素材库对象：每次尝试都重新签发一次读取地址再下载。
+///
+/// 预签名地址是短期凭据：重试必须换新签名，复用上一次失败请求的地址没有意义。
+/// 仅传输层瞬时失败（连接失败、超时等）按 `retries` 指数退避重试；HTTP 非 2xx、
+/// 校验等确定性错误直接返回。返回字节与最后一次成功尝试实际使用的读取地址。
+async fn download_with_fresh_lease<L, D, Fut>(
+    retries: u32,
+    fresh_url: L,
+    download: D,
+) -> BackendResult<(Vec<u8>, String)>
+where
+    L: Fn() -> BackendResult<String>,
+    D: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = BackendResult<Vec<u8>>>,
+{
+    download_with_fresh_lease_inner(retries, media_retry_delay_ms, fresh_url, download).await
+}
+
+/// `download_with_fresh_lease` 的实现体，退避延迟由 `delay_ms`（接收 1 起的重试序号）
+/// 注入，便于测试用 0 延迟验证「每次尝试重新签发」的控制流而无需真实等待。
+async fn download_with_fresh_lease_inner<L, D, Fut, Delay>(
+    retries: u32,
+    delay_ms: Delay,
+    fresh_url: L,
+    download: D,
+) -> BackendResult<(Vec<u8>, String)>
+where
+    L: Fn() -> BackendResult<String>,
+    D: Fn(String) -> Fut,
+    Fut: std::future::Future<Output = BackendResult<Vec<u8>>>,
+    Delay: Fn(u32) -> u64,
+{
+    let fresh_url = &fresh_url;
+    let download = &download;
+    with_transport_retry_inner("引用素材字节下载", retries, delay_ms, || async move {
+        let url = fresh_url()?;
+        let bytes = download(url.clone()).await?;
+        Ok((bytes, url))
+    })
+    .await
 }
 
 /// 对可能因瞬时网络故障失败的解析操作执行指数退避自动重试。
@@ -1408,5 +1468,69 @@ mod tests {
             assert!(delay >= nominal);
             assert!(delay <= nominal + nominal / 5);
         }
+    }
+
+    /// 回归：本地素材库对象下载曾因单次连接失败（代理 fake-ip 抖动）直接判定
+    /// 任务失败。现在每次尝试都重新签发读取地址，并只对传输层失败重试。
+    #[tokio::test]
+    async fn local_asset_download_reissues_a_lease_for_every_retry() {
+        let issued = std::sync::Mutex::new(0_u32);
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let (bytes, url) = download_with_fresh_lease_inner(
+            3,
+            |_| 0,
+            || {
+                let mut issued = issued.lock().unwrap();
+                *issued += 1;
+                Ok(format!(
+                    "https://staging.example/object?signature={}",
+                    *issued
+                ))
+            },
+            |url: String| {
+                let attempt = attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async move {
+                    if attempt < 2 {
+                        Err(transport_error().await)
+                    } else {
+                        Ok(url.into_bytes())
+                    }
+                }
+            },
+        )
+        .await
+        .expect("transient connect failures must be retried");
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 3);
+        assert_eq!(
+            *issued.lock().unwrap(),
+            3,
+            "every attempt must reissue its own presigned url"
+        );
+        // 返回值里的地址是第 3 次成功尝试用的那份签名，不是首次失败的地址。
+        assert_eq!(String::from_utf8(bytes).unwrap(), url);
+        assert!(url.ends_with("signature=3"));
+    }
+
+    #[tokio::test]
+    async fn local_asset_download_does_not_retry_deterministic_failures() {
+        let attempts = std::sync::atomic::AtomicU32::new(0);
+        let result: BackendResult<(Vec<u8>, String)> = download_with_fresh_lease_inner(
+            3,
+            |_| 0,
+            || Ok("https://staging.example/object?signature=1".to_string()),
+            |_url: String| {
+                attempts.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                async {
+                    Err::<Vec<u8>, _>(BackendError::protocol(
+                        "asset download returned HTTP 403",
+                        json!({ "httpStatus": 403 }),
+                    ))
+                }
+            },
+        )
+        .await;
+        assert!(matches!(result, Err(BackendError::Protocol { .. })));
+        // 确定性错误只尝试一次，不重新签发地址也不退避等待。
+        assert_eq!(attempts.load(std::sync::atomic::Ordering::SeqCst), 1);
     }
 }
