@@ -1,4 +1,3 @@
-import { useCallback, useSyncExternalStore } from "react";
 import { refreshAssetItemMediaUrl } from "../../lib/backend";
 import type { AssetKind, AssetNodeData } from "./workspaceModel";
 
@@ -12,27 +11,18 @@ import type { AssetKind, AssetNodeData } from "./workspaceModel";
  * 这里在画布文档水合后按素材身份批量续签，把新地址回写节点数据。因此画布文档不再
  * 依赖其中一份签名的存活期：过期地址在被使用前就被替换，续签失败时仍回落到
  * `CanvasAssetNode` 的 onError 自愈路径。云端素材（供应商签名地址）不由本模块接管。
+ *
+ * 已经下载过的素材由 `mediaByteCache` 直接命中本地字节，续签只负责让画布文档里的
+ * 签名保持新鲜；两者互相独立，任一路径可用预览就不会失败。
  */
 
 /** 同一素材的并发续签只发一次请求：同一次水合里多个节点常常引用同一素材。 */
 const inFlight = new Map<string, Promise<string | null>>();
 /** 已续签但尚未回写节点的地址，供渲染期先取用，避免回写前的空窗。 */
 const resolved = new Map<string, string>();
-const listeners = new Set<() => void>();
 
 function keyOf(assetId: string, kind: AssetKind): string {
   return `${assetId}:${kind}`;
-}
-
-function emit(): void {
-  for (const listener of [...listeners]) listener();
-}
-
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
 }
 
 /**
@@ -86,7 +76,6 @@ export function refreshLocalAssetPreviewUrl(
       inFlight.delete(key);
       if (freshUrl != null && freshUrl !== "") {
         resolved.set(key, freshUrl);
-        emit();
       }
       return freshUrl;
     })
@@ -95,14 +84,7 @@ export function refreshLocalAssetPreviewUrl(
       return null;
     });
   inFlight.set(key, request);
-  // 发起时也要通知：订阅者据此把「预览不可用」推迟到续签有结果之后。
-  emit();
   return request;
-}
-
-/** 该素材当前是否正在续签：渲染期据此把「预览不可用」推迟到续签有结果之后。 */
-export function localAssetMediaRefreshing(assetId: string, kind: AssetKind): boolean {
-  return inFlight.has(keyOf(assetId, kind));
 }
 
 /**
@@ -140,19 +122,8 @@ export function prefetchLocalAssetMedia(
   };
 }
 
-/** 订阅某素材的续签状态：续签状态变化时重渲染，让「预览不可用」推迟到续签有结果之后。 */
-export function useLocalAssetMediaRefreshState(assetId: string, kind: AssetKind): boolean {
-  const subscribeAsset = useCallback((listener: () => void) => subscribe(listener), []);
-  return useSyncExternalStore(
-    subscribeAsset,
-    () => localAssetMediaRefreshing(assetId, kind),
-    () => false,
-  );
-}
-
 /** 测试与文档切换时清空运行时登记表，避免上一条画布的新地址泄漏到下一条。 */
 export function resetLocalAssetMediaRegistry(): void {
   inFlight.clear();
   resolved.clear();
-  emit();
 }

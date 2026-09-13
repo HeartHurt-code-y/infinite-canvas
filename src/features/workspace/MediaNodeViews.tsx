@@ -22,7 +22,8 @@ import type { PromptContentEditorSession } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
 import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
-import { localAssetNodeMediaUrl, useLocalAssetMediaRefreshState } from "./localAssetMedia";
+import { localAssetNodeMediaUrl } from "./localAssetMedia";
+import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
@@ -1503,9 +1504,11 @@ export function CanvasAssetNode({
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
   const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>();
-  // 画布水合后会批量重签本地素材签名，新地址优先于节点里持久化的那一份（可能已过期）。
-  const localRefreshPending = useLocalAssetMediaRefreshState(node.assetId, node.kind);
-  const effectivePreviewUrl = localAssetNodeMediaUrl(node);
+  // 画布水合后会批量重签本地素材签名；已下载过的素材则直接复用会话内字节，
+  // 既不必再等一次续签往返，也不受签名是否过期影响。
+  const localMediaUrl = localAssetNodeMediaUrl(node);
+  const imageBytes = useMediaByteSource(node.assetId, node.kind, localMediaUrl);
+  const effectivePreviewUrl = imageBytes.url ?? localMediaUrl;
   const imageReady = effectivePreviewUrl != null && loadedImageUrl === effectivePreviewUrl;
   const imageFailed = effectivePreviewUrl == null || failedImageUrl === effectivePreviewUrl;
   const isRealAsset = node.source != null || isDesktopRuntime();
@@ -1584,14 +1587,11 @@ export function CanvasAssetNode({
         ) : node.kind === "image" ? (
           <>
             {isRealAsset && !imageReady ? (
-              <AssetMediaState
-                kind="image"
-                state={imageFailed && !localRefreshPending ? "unavailable" : "loading"}
-              />
+              <AssetMediaState kind="image" state={imageFailed ? "unavailable" : "loading"} />
             ) : null}
             {effectivePreviewUrl != null && !imageFailed ? (
               <img
-                src={toMediaProxyUrl(effectivePreviewUrl) ?? effectivePreviewUrl}
+                src={effectivePreviewUrl}
                 alt=""
                 draggable={false}
                 decoding="async"
@@ -1605,6 +1605,10 @@ export function CanvasAssetNode({
                 onError={() => {
                   setLoadedImageUrl(null);
                   setFailedImageUrl(effectivePreviewUrl);
+                  // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里
+                  // 找一次（重启后本地通常已有副本），都没命中才回到续签自愈路径。
+                  imageBytes.retry();
+                  if (imageBytes.fromCache) return;
                   attemptMediaRefresh(effectivePreviewUrl);
                 }}
               />
@@ -1765,10 +1769,16 @@ export function CanvasAssetLightbox({
     };
   }, [onClose]);
 
+  // 大图同样优先用会话内已下载的字节：放大查看不必等一次远端往返，签名过期也照常显示。
+  const lightboxBytes = useMediaByteSource(
+    node.assetId,
+    node.kind === "video" ? "video" : "image",
+    node.kind === "video" ? node.videoUrl : node.previewUrl,
+  );
   const mediaSrc =
     node.kind === "video"
-      ? (toMediaProxyUrl(node.videoUrl ?? node.previewUrl) ?? node.videoUrl ?? node.previewUrl)
-      : (toMediaProxyUrl(node.previewUrl) ?? node.previewUrl);
+      ? (lightboxBytes.url ?? node.videoUrl ?? node.previewUrl)
+      : lightboxBytes.url;
   if (mediaSrc == null) return null;
 
   return createPortal(

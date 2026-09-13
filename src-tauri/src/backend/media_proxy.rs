@@ -1,13 +1,21 @@
 //! Native media protocol for HTTP(S) videos whose origins do not allow WebView CORS.
 //! This transports bytes; refreshing expiring provider URLs belongs to the asset library.
+//!
+//! 图片预览在这里落盘复用（见 `media_cache`）：自定义协议的响应 WebView 不会缓存，
+//! 素材库卡片与画布节点每次重挂载都会重新下载同一张图；同一份素材下载一次之后，
+//! 后续请求（含重启后、签名过期后、远端暂时不可达时）直接由本地副本应答。
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tauri::{
-    UriSchemeContext, UriSchemeResponder,
+    Manager as _, UriSchemeContext, UriSchemeResponder,
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri},
 };
 use url::Url;
+
+use super::media_cache::{
+    MediaCache, is_cacheable_content_type, permits_storage, within_entry_limit,
+};
 
 pub const MEDIA_PROXY_SCHEME: &str = "assetproxy";
 
@@ -32,16 +40,31 @@ fn clamp_open_ended_range(header: &HeaderValue) -> Option<HeaderValue> {
 /// Use Tauri's persistent async runtime; never block a WebView callback or create a
 /// short-lived runtime whose I/O drivers have already been dropped.
 pub fn handle_media_proxy_request<R: tauri::Runtime>(
-    _context: UriSchemeContext<'_, R>,
+    context: UriSchemeContext<'_, R>,
     request: Request<Vec<u8>>,
     responder: UriSchemeResponder,
 ) {
+    // 缓存目录按应用数据目录解析；解析失败（路径不可用）时退化为直连穿透。
+    let cache = context
+        .app_handle()
+        .path()
+        .app_local_data_dir()
+        .ok()
+        .map(|directory| MediaCache::new(preview_cache_directory(&directory)));
     tauri::async_runtime::spawn(async move {
-        responder.respond(proxy_response(request).await);
+        responder.respond(proxy_response(request, cache.as_ref()).await);
     });
 }
 
-async fn proxy_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+/// 预览媒体缓存目录：与缩略图缓存同级，便于用户按需整体清理。
+fn preview_cache_directory(local_data: &std::path::Path) -> PathBuf {
+    local_data.join("media-preview-cache")
+}
+
+async fn proxy_response(
+    request: Request<Vec<u8>>,
+    cache: Option<&MediaCache>,
+) -> Response<Vec<u8>> {
     if request.method() == Method::OPTIONS {
         return build_response(StatusCode::NO_CONTENT, HeaderMap::new(), Vec::new());
     }
@@ -52,14 +75,43 @@ async fn proxy_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
     let Some(upstream_url) = extract_upstream_url(request.uri()) else {
         return error_response(StatusCode::BAD_REQUEST, "invalid_media_source", is_head);
     };
+    // Range 请求（视频探测/续播）不参与缓存：分块响应不是完整内容。
+    let range_requested = request.headers().contains_key("range");
+    if let Some(cache) = cache {
+        if !range_requested {
+            if let Some(cached) = cache.read(&upstream_url) {
+                return cached_response(cached.content_type, cached.body, is_head);
+            }
+        }
+    }
     match fetch_upstream(&upstream_url, request.method().clone(), request.headers()).await {
         Ok((status, mut headers, body)) => {
             if status == StatusCode::RANGE_NOT_SATISFIABLE {
                 headers.insert("content-length", HeaderValue::from_static("0"));
                 build_response(status, headers, Vec::new())
             } else if status.is_success() {
+                store_cacheable(
+                    cache,
+                    &upstream_url,
+                    &status,
+                    &headers,
+                    &body,
+                    range_requested,
+                );
+                let cached_control =
+                    response_cache_header(&status, &headers, &body, range_requested);
+                if let Some(value) = cached_control {
+                    headers.insert("cache-control", value);
+                }
                 build_response(status, headers, body)
             } else {
+                // 远端明确报错（常见于签名过期）：本地有副本时继续用副本，
+                // 不必把一屏已经下载过的预览打成「预览不可用」。
+                if let Some(cache) = cache {
+                    if let Some(cached) = cache.read(&upstream_url) {
+                        return cached_response(cached.content_type, cached.body, is_head);
+                    }
+                }
                 // Upstream error pages can echo signed URLs or authentication details.
                 let status = if status.is_redirection() {
                     StatusCode::BAD_GATEWAY
@@ -79,9 +131,92 @@ async fn proxy_response(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
             };
             // Reqwest's Display may include a signed URL; record only a fixed category.
             tauri_plugin_log::log::warn!("media proxy failed: {kind}");
+            if let Some(cache) = cache {
+                if let Some(cached) = cache.read(&upstream_url) {
+                    return cached_response(cached.content_type, cached.body, is_head);
+                }
+            }
             error_response(StatusCode::BAD_GATEWAY, kind, is_head)
         }
     }
+}
+
+/// 命中本地副本时的响应：长度按缓存文件重算，不再回放上游那一次的元数据。
+fn cached_response(
+    content_type: Option<String>,
+    body: Vec<u8>,
+    is_head: bool,
+) -> Response<Vec<u8>> {
+    let mut headers = HeaderMap::new();
+    if let Some(content_type) = content_type.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        headers.insert("content-type", content_type);
+    }
+    headers.insert("accept-ranges", HeaderValue::from_static("none"));
+    headers.insert(
+        "cache-control",
+        HeaderValue::from_static("private, max-age=86400"),
+    );
+    let length = body.len();
+    let body = if is_head { Vec::new() } else { body };
+    if let Ok(value) = HeaderValue::from_str(&length.to_string()) {
+        headers.insert("content-length", value);
+    }
+    build_response(StatusCode::OK, headers, body)
+}
+
+/// 判断这份响应是否值得落盘；只有完整、图片、未被上游禁止的响应才写入。
+fn store_cacheable(
+    cache: Option<&MediaCache>,
+    upstream_url: &Url,
+    status: &StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+    range_requested: bool,
+) {
+    let Some(cache) = cache else {
+        return;
+    };
+    if range_requested || *status != StatusCode::OK {
+        return;
+    }
+    let content_type = header_str(headers, "content-type");
+    if !is_cacheable_content_type(content_type)
+        || !permits_storage(header_str(headers, "cache-control"))
+    {
+        return;
+    }
+    if !within_entry_limit(header_u64(headers, "content-length").or(Some(body.len() as u64))) {
+        return;
+    }
+    cache.store(upstream_url, content_type, body);
+}
+
+/// 落盘成功的响应附上缓存指令，让 WebView 在内存里也复用同一份内容。
+fn response_cache_header(
+    status: &StatusCode,
+    headers: &HeaderMap,
+    body: &[u8],
+    range_requested: bool,
+) -> Option<HeaderValue> {
+    if range_requested || *status != StatusCode::OK {
+        return None;
+    }
+    let content_type = header_str(headers, "content-type");
+    if !is_cacheable_content_type(content_type) {
+        return None;
+    }
+    if !within_entry_limit(Some(body.len() as u64)) {
+        return None;
+    }
+    Some(HeaderValue::from_static("private, max-age=86400"))
+}
+
+fn header_str<'a>(headers: &'a HeaderMap, name: &str) -> Option<&'a str> {
+    headers.get(name).and_then(|value| value.to_str().ok())
+}
+
+fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
+    header_str(headers, name)?.trim().parse().ok()
 }
 
 fn extract_upstream_url(uri: &Uri) -> Option<Url> {
@@ -260,10 +395,10 @@ mod tests {
                     }
                     let request = String::from_utf8_lossy(&buffer).into_owned();
                     let first = request.lines().next().unwrap_or_default();
-                    let path = first.split_whitespace().nth(1).unwrap_or("/");
+                    let path = first.split_whitespace().nth(1).unwrap_or("/").to_owned();
                     let is_head = first.starts_with("HEAD ");
                     let lower = request.to_ascii_lowercase();
-                    let (status, mut headers, body) = match path {
+                    let (status, mut headers, body) = match path.as_str() {
                         "/redirect" => (
                             "302 Found",
                             format!("Location: http://localhost:{port}/media\r\n"),
@@ -293,13 +428,38 @@ mod tests {
                             "Access-Control-Allow-Origin: https://upstream.example\r\nSet-Cookie: secret=1\r\n".into(),
                             "video",
                         ),
+                        // 图片预览：缓存测试用的可缓存响应。更具体的路径必须先匹配，
+                        // 否则会被下面的 `/image` 兜底吃掉。
+                        "/image-no-store" => (
+                            "200 OK",
+                            "Content-Type: image/png\r\nCache-Control: no-store\r\n".into(),
+                            "PNGBYTES",
+                        ),
+                        // 同一路径先成功、后失败：用于验证「远端报错时本地副本接管」。
+                        "/image-flaky" if lower.contains("x-fail") => (
+                            "503 Service Unavailable",
+                            "Content-Type: text/plain\r\n".into(),
+                            "secret-signed-url",
+                        ),
+                        path if path.starts_with("/image") => (
+                            "200 OK",
+                            "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n".into(),
+                            if path == "/image-deny" { "" } else { "PNGBYTES" },
+                        ),
                         _ => ("200 OK", String::new(), "video"),
                     };
+                    // 图片路径自带 Content-Type，不再追加视频头。路径要在 `request` 被 move
+                    // 进夹具记录之前转成自有字符串（它借用自 `request`）。
+                    let is_image_response = path.starts_with("/image");
                     captured.lock().unwrap().push(request);
-                    headers.push_str(&format!(
-                        "Content-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"media-v1\"\r\nConnection: close\r\n",
-                        body.len(),
-                    ));
+                    if !is_image_response {
+                        headers.push_str(&format!(
+                            "Content-Type: video/mp4\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nETag: \"media-v1\"\r\nConnection: close\r\n",
+                            body.len(),
+                        ));
+                    } else if !headers.contains("Content-Length:") {
+                        headers.push_str(&format!("Content-Length: {}\r\n", body.len()));
+                    }
                     let response = format!(
                         "HTTP/1.1 {status}\r\n{headers}\r\n{}",
                         if is_head { "" } else { body },
@@ -330,10 +490,21 @@ mod tests {
         }
     }
 
+    /// 无缓存穿透语义：既有的传输层用例只关心代理转发，不关心缓存。
+    async fn proxy_response_uncached(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
+        proxy_response(request, None).await
+    }
+
+    fn test_cache() -> (tempfile::TempDir, MediaCache) {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MediaCache::new(directory.path().join("media-preview-cache"));
+        (directory, cache)
+    }
+
     #[tokio::test]
     async fn follows_a_no_cors_http_redirect_and_preserves_the_media_body() {
         let server = HttpFixture::new();
-        let response = proxy_response(
+        let response = proxy_response_uncached(
             server
                 .request(Method::GET, "/redirect")
                 .body(Vec::new())
@@ -350,7 +521,7 @@ mod tests {
     #[tokio::test]
     async fn forwards_range_and_if_range_but_not_webview_credentials_across_hosts() {
         let server = HttpFixture::new();
-        let response = proxy_response(
+        let response = proxy_response_uncached(
             server
                 .request(Method::GET, "/redirect")
                 .header("range", "bytes=1-3")
@@ -377,7 +548,7 @@ mod tests {
     #[tokio::test]
     async fn clamps_open_ended_ranges_to_a_bounded_chunk_and_passes_the_partial_response() {
         let server = HttpFixture::new();
-        let response = proxy_response(
+        let response = proxy_response_uncached(
             server
                 .request(Method::GET, "/media")
                 .header("range", "bytes=0-")
@@ -418,7 +589,7 @@ mod tests {
     #[tokio::test]
     async fn preserves_head_and_unsatisfiable_ranges() {
         let server = HttpFixture::new();
-        let head = proxy_response(
+        let head = proxy_response_uncached(
             server
                 .request(Method::HEAD, "/media")
                 .body(Vec::new())
@@ -428,7 +599,7 @@ mod tests {
         assert_eq!(head.status(), StatusCode::OK);
         assert!(head.body().is_empty());
         assert_eq!(head.headers()["content-length"], "5");
-        let range = proxy_response(
+        let range = proxy_response_uncached(
             server
                 .request(Method::GET, "/media")
                 .header("range", "bytes=99-")
@@ -444,7 +615,7 @@ mod tests {
     #[tokio::test]
     async fn replaces_upstream_cors_and_omits_cookies() {
         let server = HttpFixture::new();
-        let response = proxy_response(
+        let response = proxy_response_uncached(
             server
                 .request(Method::GET, "/cors")
                 .body(Vec::new())
@@ -467,8 +638,10 @@ mod tests {
     async fn bounds_redirects_and_redacts_upstream_failures() {
         let server = HttpFixture::new();
         for path in ["/loop", "/unsupported", "/fail"] {
-            let response =
-                proxy_response(server.request(Method::GET, path).body(Vec::new()).unwrap()).await;
+            let response = proxy_response_uncached(
+                server.request(Method::GET, path).body(Vec::new()).unwrap(),
+            )
+            .await;
             assert!(response.status().is_server_error());
             assert_eq!(response.headers()["access-control-allow-origin"], "*");
             let body = String::from_utf8_lossy(response.body());
@@ -485,7 +658,7 @@ mod tests {
             (Method::POST, StatusCode::METHOD_NOT_ALLOWED),
             (Method::GET, StatusCode::BAD_REQUEST),
         ] {
-            let response = proxy_response(
+            let response = proxy_response_uncached(
                 Request::builder()
                     .method(method)
                     .uri("http://assetproxy.localhost/video")
@@ -500,6 +673,157 @@ mod tests {
                 "Range, If-Range, Content-Type"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn serves_a_repeated_image_preview_from_the_local_copy_without_asking_upstream_again() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let source = Url::parse(&format!("{}/image.png?sig=first", server.url)).unwrap();
+        let request = || {
+            let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+            url.query_pairs_mut().append_pair("src", source.as_str());
+            Request::builder()
+                .method(Method::GET)
+                .uri(url.as_str())
+                .body(Vec::new())
+                .unwrap()
+        };
+
+        let first = proxy_response(request(), Some(&cache)).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert_eq!(first.body(), b"PNGBYTES");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
+
+        // 第二次（重开面板 / 重挂载卡片 / 重启后同一素材）：不再打扰上游，直接回本地副本。
+        let second = proxy_response(request(), Some(&cache)).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(second.body(), b"PNGBYTES");
+        assert_eq!(second.headers()["content-length"], "8");
+        assert_eq!(second.headers()["content-type"], "image/png");
+        assert_eq!(second.headers()["cache-control"], "private, max-age=86400");
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "命中缓存后不得再请求上游"
+        );
+
+        // 续签换了签名参数：仍是同一对象，继续命中同一份副本。
+        let resigned = Url::parse(&format!("{}/image.png?sig=second", server.url)).unwrap();
+        assert!(cache.read(&resigned).is_some());
+    }
+
+    #[tokio::test]
+    async fn falls_back_to_the_local_copy_when_upstream_fails() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let source = format!("{}/image-flaky", server.url);
+        let signed = Url::parse(&format!("{source}?sig=1")).unwrap();
+        let request = |fail: bool| {
+            let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+            url.query_pairs_mut()
+                .append_pair("src", &format!("{source}?sig={}", if fail { 2 } else { 1 }));
+            let builder = Request::builder().method(Method::GET).uri(url.as_str());
+            let builder = if fail {
+                builder.header("x-fail", "1")
+            } else {
+                builder
+            };
+            builder.body(Vec::new()).unwrap()
+        };
+
+        // 先成功取一次：字节落盘。
+        let first = proxy_response(request(false), Some(&cache)).await;
+        assert_eq!(first.status(), StatusCode::OK);
+        assert!(cache.read(&signed).is_some());
+
+        // 远端随后报错（典型是签名过期 / 网络不可达）：本地副本接管，预览不再变成「不可用」。
+        let second = proxy_response(request(true), Some(&cache)).await;
+        assert_eq!(second.status(), StatusCode::OK);
+        assert_eq!(second.body(), b"PNGBYTES");
+        assert_eq!(second.headers()["content-type"], "image/png");
+        // 上游错误正文可能带签名或认证细节，不能被透传出去。
+        assert!(!String::from_utf8_lossy(second.body()).contains("secret"));
+    }
+
+    #[tokio::test]
+    async fn does_not_cache_video_bodies_ranges_or_no_store_images() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+
+        // 视频正文：不落盘（按 Range 播放）。
+        let video = proxy_response(
+            server
+                .request(Method::GET, "/media")
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+        )
+        .await;
+        assert_eq!(video.status(), StatusCode::OK);
+        assert!(
+            cache
+                .read(&Url::parse(&format!("{}/media", server.url)).unwrap())
+                .is_none()
+        );
+
+        // 上游声明 no-store：尊重其意图，不落盘。
+        let no_store = proxy_response(
+            server
+                .request(Method::GET, "/image-no-store")
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+        )
+        .await;
+        assert_eq!(no_store.status(), StatusCode::OK);
+        assert!(
+            cache
+                .read(&Url::parse(&format!("{}/image-no-store", server.url)).unwrap())
+                .is_none()
+        );
+
+        // Range 请求（视频续播）即使是图片也不写缓存：分块响应不是完整内容。
+        let ranged = proxy_response(
+            server
+                .request(Method::GET, "/image.png")
+                .header("range", "bytes=0-3")
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+        )
+        .await;
+        assert!(ranged.status().is_success());
+        assert!(
+            cache
+                .read(&Url::parse(&format!("{}/image.png", server.url)).unwrap())
+                .is_none()
+        );
+    }
+
+    #[tokio::test]
+    async fn answers_head_from_the_local_copy_without_a_body() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let source = Url::parse(&format!("{}/image.png", server.url)).unwrap();
+        cache.store(&source, Some("image/png"), b"PNGBYTES");
+
+        let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+        url.query_pairs_mut().append_pair("src", source.as_str());
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::HEAD)
+                .uri(url.as_str())
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(response.body().is_empty());
+        assert_eq!(response.headers()["content-length"], "8");
+        assert_eq!(server.requests.lock().unwrap().len(), 0);
     }
 
     #[test]

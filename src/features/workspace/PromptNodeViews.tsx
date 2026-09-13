@@ -1,5 +1,4 @@
 import { Icon, type IconSize } from "../../components/Icon";
-import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import {
@@ -32,6 +31,7 @@ import {
   type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
 import { normalizePromptReferenceText } from "../../lib/promptReferences";
+import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
 import { WhiteModelControlSection } from "./WhiteModelControlSection";
@@ -75,19 +75,26 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
   const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
   const refreshAttemptedRef = useRef(false);
   const preview = refreshedUrl ?? candidate.previewUrl ?? null;
-  const failed = preview != null && failedUrl === preview;
-  const videoSource = candidate.kind === "video" && isVideoSourceUrl(preview) ? preview : null;
+  // 已下载过的素材直接复用会话内字节：候选面板反复开关、同一素材被多个节点引用时都不再重复下载。
+  const previewBytes = useMediaByteSource(candidate.assetId, candidate.kind, preview);
+  const resolvedPreview = previewBytes.url ?? preview;
+  const failed = resolvedPreview != null && failedUrl === resolvedPreview;
+  const videoSource =
+    candidate.kind === "video" && isVideoSourceUrl(resolvedPreview) ? resolvedPreview : null;
   const showVideo = videoSource != null && !failed;
   const imageSource =
-    videoSource == null && preview != null && !failed && candidate.kind !== "audio"
-      ? preview
+    videoSource == null && resolvedPreview != null && !failed && candidate.kind !== "audio"
+      ? resolvedPreview
       : null;
   // 宽高比与来源地址一起记忆：封面续签换地址后旧比例立即失效。
   const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
-  const aspectRatio = measured != null && measured.url === preview ? measured.ratio : null;
+  const aspectRatio = measured != null && measured.url === resolvedPreview ? measured.ratio : null;
 
   const handleImageError = () => {
-    setFailedUrl(preview);
+    setFailedUrl(resolvedPreview);
+    // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
+    previewBytes.retry();
+    if (previewBytes.fromCache) return;
     if (preview == null || refreshAttemptedRef.current) return;
     if (candidate.source === "cloud" && candidate.providerConnectionId === "") return;
     refreshAttemptedRef.current = true;
@@ -137,7 +144,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
         />
       ) : imageSource != null ? (
         <img
-          src={toMediaProxyUrl(imageSource) ?? imageSource}
+          src={imageSource}
           alt=""
           draggable={false}
           decoding="async"

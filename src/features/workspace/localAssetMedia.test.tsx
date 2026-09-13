@@ -1,4 +1,4 @@
-import { renderHook, waitFor } from "@testing-library/react";
+import { waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AssetNodeData } from "./workspaceModel";
 
@@ -136,7 +136,8 @@ describe("本地素材预览续签登记表", () => {
     const { media } = await loadModules(() => Promise.reject(new Error("offline")));
     const resolved = vi.fn();
     media.prefetchLocalAssetMedia([{ assetId: "local-3", kind: "image" }], resolved);
-    await waitFor(() => expect(media.localAssetMediaRefreshing("local-3", "image")).toBe(false));
+    await Promise.resolve();
+    await Promise.resolve();
     expect(resolved).not.toHaveBeenCalled();
     expect(
       media.localAssetNodeMediaUrl(
@@ -145,7 +146,7 @@ describe("本地素材预览续签登记表", () => {
     ).toBe("https://x/stale");
   });
 
-  it("续签在途时报告 pending，完成后回落为 false", async () => {
+  it("续签在途时复用同一个请求，落定后渲染期即可取到新地址", async () => {
     const releasers: Array<(url: string) => void> = [];
     const { media } = await loadModules(
       () =>
@@ -153,15 +154,14 @@ describe("本地素材预览续签登记表", () => {
           releasers.push(resolve);
         }),
     );
-    const { result } = renderHook(() => media.useLocalAssetMediaRefreshState("local-4", "image"));
-    expect(result.current).toBe(false);
-
-    const pending = media.refreshLocalAssetPreviewUrl("local-4", "image");
-    await waitFor(() => expect(result.current).toBe(true));
+    const first = media.refreshLocalAssetPreviewUrl("local-4", "image");
+    const second = media.refreshLocalAssetPreviewUrl("local-4", "image");
+    // 同一素材在途时不再发第二次请求。
+    expect(releasers).toHaveLength(1);
+    expect(second).toBe(first);
 
     releasers[0]?.("https://tos.example.com/local-4.png?X-Tos-Date=fresh");
-    await pending;
-    await waitFor(() => expect(result.current).toBe(false));
+    await first;
     expect(media.localAssetNodeMediaUrl(assetNode({ assetId: "local-4" }))).toBe(
       "https://tos.example.com/local-4.png?X-Tos-Date=fresh",
     );

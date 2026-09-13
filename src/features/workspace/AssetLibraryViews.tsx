@@ -4,6 +4,7 @@ import { formatBytes, refreshAssetItemCoverUrl, refreshAssetItemMediaUrl } from 
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
+import { assetMediaByteIdentity, useMediaByteSource, type MediaByteSource } from "./mediaByteCache";
 import type { AssetItem, AssetKind, AssetUploadEntry } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
@@ -50,6 +51,21 @@ export function AssetMediaState({
   );
 }
 
+/**
+ * 按素材身份取用会话内已下载的预览字节。
+ *
+ * 两份用途独立缓存：图片正文与视频封面是两份不同内容（同一素材 ID、不同 `kind`）。
+ * 没有素材身份（占位条目）时直接沿用远端地址，不进入缓存。
+ */
+function useAssetMediaBytes(
+  asset: AssetItem,
+  kind: AssetKind,
+  mediaUrl: string | null,
+): MediaByteSource {
+  const identity = assetMediaByteIdentity(asset);
+  return useMediaByteSource(identity?.assetId ?? "", kind, mediaUrl);
+}
+
 function AssetCardVideoVisual({
   asset,
   previewing,
@@ -78,9 +94,10 @@ function AssetCardVideoVisual({
   const effectiveCoverUrl =
     candidateCoverUrl != null && failedCoverUrl !== candidateCoverUrl ? candidateCoverUrl : null;
   // 封面与海报帧同样走媒体代理，避免 WebView 对跨域签名地址的 CORS/混合内容限制；
-  // 代理只传输字节，签名过期仍由 onError 触发的续签解决。
-  const coverProxySrc = effectiveCoverUrl ? toMediaProxyUrl(effectiveCoverUrl) : null;
-  const coverReady = effectiveCoverUrl != null && loadedCoverUrl === effectiveCoverUrl;
+  // 封面字节按素材身份缓存在本地，重开面板不再重复下载（签名过期也不影响已经下载过的封面）。
+  const coverBytes = useAssetMediaBytes(asset, "video", effectiveCoverUrl);
+  const coverSrc = coverBytes.url;
+  const coverLoaded = effectiveCoverUrl != null && loadedCoverUrl === effectiveCoverUrl;
   // 供应商封面缺失或加载失败时，抽取视频中间帧作静止封面（与画布素材节点一致）。
   const useVideoCover = effectiveCoverUrl == null && videoSrc != null;
   const coverTimeRef = useRef(0);
@@ -91,7 +108,7 @@ function AssetCardVideoVisual({
     useVideoCover && videoCoverReady ? " is-cover" : ""
   }`;
   const isRealAsset = asset.source != null;
-  const mediaReady = coverReady || videoCoverReady;
+  const mediaReady = coverLoaded || videoCoverReady;
 
   useEffect(() => {
     if (previewing) {
@@ -115,10 +132,10 @@ function AssetCardVideoVisual({
           state={effectiveCoverUrl == null && videoFailed ? "unavailable" : "loading"}
         />
       ) : null}
-      {effectiveCoverUrl ? (
+      {coverSrc != null ? (
         <img
           className="asset-card__preview"
-          src={coverProxySrc ?? undefined}
+          src={coverSrc}
           alt=""
           loading="lazy"
           onLoad={(event) => {
@@ -131,6 +148,9 @@ function AssetCardVideoVisual({
             const failedUrl = effectiveCoverUrl;
             setLoadedCoverUrl(null);
             setFailedCoverUrl(failedUrl);
+            // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
+            coverBytes.retry();
+            if (coverBytes.fromCache) return;
             // 封面签名过期：首次失败时向后端续签一次新封面（云端回读供应商记录、
             // 本地重签对象存储地址）；续签失败或新封面仍无法加载时回退视频中间帧
             // （与画布素材节点一致）。
@@ -155,7 +175,7 @@ function AssetCardVideoVisual({
           ref={videoRef}
           className={videoClassName}
           src={videoSrc}
-          poster={coverProxySrc ?? undefined}
+          poster={coverSrc ?? undefined}
           muted
           loop
           playsInline
@@ -173,7 +193,7 @@ function AssetCardVideoVisual({
             setVideoCoverReady(false);
             // 播放地址签名过期：每个卡片实例续签一次（云端回读供应商记录、本地重签
             // 对象存储地址，与封面续签相互独立），拿到新地址后重新加载；
-            // 续签失败保持置灰，不反复请求。
+            // 续签失败保持置灰，不反复请求。视频正文不落字节缓存，按需播放。
             if (candidateVideoUrl != null && !playbackRefreshAttemptedRef.current) {
               playbackRefreshAttemptedRef.current = true;
               void refreshAssetItemMediaUrl(asset, "video").then((freshUrl) => {
@@ -233,6 +253,10 @@ function AssetCard({
   const [refreshedImagePreviewUrl, setRefreshedImagePreviewUrl] = useState<string | null>(null);
   const imageRefreshAttemptedRef = useRef(false);
   const candidateImagePreviewUrl = refreshedImagePreviewUrl ?? asset.previewUrl;
+  // 已下载过的预览字节直接复用：重开面板、切换类型/翻页回来后不再重复下载，
+  // 签名过期也不影响已经下载过的那份内容。
+  const imageBytes = useAssetMediaBytes(asset, "image", candidateImagePreviewUrl ?? null);
+  const imagePreviewSrc = imageBytes.url;
   const imagePreviewReady =
     candidateImagePreviewUrl != null && loadedImagePreviewUrl === candidateImagePreviewUrl;
   const imagePreviewFailed =
@@ -341,10 +365,10 @@ function AssetCard({
                   state={imagePreviewFailed ? "unavailable" : "loading"}
                 />
               ) : null}
-              {candidateImagePreviewUrl && !imagePreviewFailed ? (
+              {imagePreviewSrc != null && !imagePreviewFailed ? (
                 <img
                   className="asset-card__preview"
-                  src={toMediaProxyUrl(candidateImagePreviewUrl) ?? candidateImagePreviewUrl}
+                  src={imagePreviewSrc}
                   alt=""
                   loading="lazy"
                   onLoad={(event) => {
@@ -357,6 +381,9 @@ function AssetCard({
                   onError={() => {
                     setLoadedImagePreviewUrl(null);
                     setFailedImagePreviewUrl(candidateImagePreviewUrl ?? null);
+                    // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
+                    imageBytes.retry();
+                    if (imageBytes.fromCache) return;
                     // 预览签名过期：每个卡片实例续签一次（云端回读供应商记录、
                     // 本地重签对象存储地址），新地址重新加载。
                     if (candidateImagePreviewUrl != null && !imageRefreshAttemptedRef.current) {
