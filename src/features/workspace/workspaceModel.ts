@@ -1751,7 +1751,7 @@ export const SCREENPLAY_NODE_DESCRIPTOR: StaticNodeDescriptor = {
 
 export const STORYBOARD_NODE_DESCRIPTOR: StaticNodeDescriptor = {
   kindLabel: "剧本转工业级分镜脚本",
-  description: "内置 V4.6 技能 · 多轮分镜与 Markdown 导出",
+  description: "内置 V5.0 技能 · 多轮分镜与 Markdown 导出",
 };
 
 export interface DocumentSkillNodeCopy {
@@ -1803,8 +1803,8 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     assistantRole: "分镜导演",
     documentName: "分镜脚本",
     currentDocumentLabel: "当前工业级分镜脚本",
-    skillTitle: "V4.6 分镜技能已内置",
-    skillDetail: "SKILL.md + 16 references · 每轮完整注入",
+    skillTitle: "V5.0 分镜技能已内置",
+    skillDetail: "SKILL.md + 17 references · 每轮完整注入",
     providerAriaLabel: "分镜文本模型供应商",
     modelAriaLabel: "分镜文本模型",
     conversationAriaLabel: "工业级分镜多轮对话",
@@ -1814,7 +1814,7 @@ export const DOCUMENT_SKILL_NODE_COPY: Record<DocumentSkillNodeKind, DocumentSki
     composerPlaceholder:
       "粘贴剧本，或输入：将上面的剧本转成 9:16、每段 15 秒的 Seedance 2.5 分镜脚本",
     documentPlaceholder: "最新工业级分镜稿会同步到这里；可直接编辑、继续对话并导出 Markdown。",
-    loadingLabel: "正在载入 V4.6 技能与全部上下文…",
+    loadingLabel: "正在载入 V5.0 技能与全部上下文…",
     removeAriaLabel: "移除剧本转工业级分镜脚本节点",
     exportAriaLabel: "导出 Markdown 分镜脚本文档",
     exportReadyTitle: "导出当前工业级分镜脚本",

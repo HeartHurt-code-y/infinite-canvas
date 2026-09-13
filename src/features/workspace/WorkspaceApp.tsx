@@ -2486,7 +2486,7 @@ export function WorkspaceApp({
     [dropPosition, nodeModelSelections.prompt, providerCatalogLoaded],
   );
 
-  /** 创建剧本转工业级分镜脚本节点；V4.6 技能与历史均由文本模型通道注入。 */
+  /** 创建剧本转工业级分镜脚本节点；V5.0 技能与历史均由文本模型通道注入。 */
   const createStoryboardNode = useCallback(
     (x: number, y: number) => {
       const position = dropPosition(x, y, SCREENPLAY_NODE_WIDTH, SCREENPLAY_NODE_HEIGHT);
@@ -3892,7 +3892,7 @@ export function WorkspaceApp({
     [screenplayNodes, setNodeStartError],
   );
 
-  /** 工业级分镜对话：V4.6 完整技能由后端每轮重新载入，节点全部历史逐条注入。 */
+  /** 工业级分镜对话：V5.0 完整技能由后端每轮重新载入，节点全部历史逐条注入。 */
   const handleRunStoryboardNode = useCallback(
     (nodeKey: string) => {
       if (startingNodeKeys.has(nodeKey)) return;

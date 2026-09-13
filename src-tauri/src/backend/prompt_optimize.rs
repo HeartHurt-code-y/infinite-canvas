@@ -15,8 +15,8 @@
 //! - 人物真实感图片：注入 `realistic-character-prompt` 技能（输出真实感人物图片提示词，可能附设计逻辑说明）。
 //! - 剧本创作：注入随应用编译的 `screenplay-master` + `screenwriter-zh` 双技能全文，
 //!   支持完整多轮上下文与 Markdown 正文输出。
-//! - 工业级分镜：注入随应用编译的 `viral-video-prompt-engine` V4.6 独立完整版，
-//!   支持剧本转分镜、多轮上下文与 Markdown 正文输出。
+//! - 工业级分镜：注入随应用编译的 `viral-video-prompt-engine` V5.0 独立完整版
+//!   （已去除原作者水印与第三方引流物），支持剧本转分镜、多轮上下文与 Markdown 正文输出。
 //! - 爆款视频复刻：注入 `douyin-reverse-prompt` V1.1 的纯复刻适配版；视频由前端
 //!   密集抽帧并合成带时间码联系表，后端只负责视觉分析，不包含任何下载能力。
 //!
@@ -253,8 +253,9 @@ impl PromptOptimizationMode {
             Self::RealisticCharacter => REALISTIC_CHARACTER_SKILL_DIR,
             // 剧本双技能使用 include_str! 编译进应用，不依赖用户电脑上的外部路径。
             Self::Screenplay => "builtin://screenplay-dual-skill",
-            // 工业级分镜技能同样随应用编译，原始分享包无需留在桌面。
-            Self::Storyboard => "builtin://viral-video-prompt-engine-v4.6",
+            // 工业级分镜技能同样随应用编译，原始分享包无需留在桌面；
+            // 内置副本已做去水印与去第三方引流清洗。
+            Self::Storyboard => "builtin://viral-video-prompt-engine-v5.0",
             // 知识视频导演只使用编译进应用的供应商无关编排合同。
             Self::KnowledgeVideoDirector => "builtin://knowledge-video-director-v2.4",
             Self::KnowledgeVideoQc => "builtin://knowledge-video-qc-v1",
@@ -1006,16 +1007,27 @@ fn load_builtin_screenplay_system_prompt() -> String {
     sections.join("\n\n")
 }
 
-/// V4.6 分享包提供的 standalone 文档已经把 SKILL.md 与全部 16 份 references 合并为
+/// V5.0 分享包提供的 standalone 文档已经把 SKILL.md 与全部 17 份 references 合并为
 /// 单一真相源。直接在编译期嵌入该文件，既避免运行时依赖桌面 zip，也避免重复注入
 /// standalone 与拆分文档造成上下文翻倍。
+///
+/// 内置副本在入库前已完成一次「去原作者水印 + 去第三方引流」清洗：删除原作者署名串、
+/// 公众号介绍页 / 安装引导 / 分发 ZIP 等分发物描述、cases 历史档案目录，并把依赖
+/// 技能包自身目录与外部 skill 的指令改写到本节点的单份 Markdown 交付合同上。
+/// 清洗只做减法，不改写任何方法论、工艺词库与 Seedance 2.5 规格。
+///
+/// 随后又裁掉「V4.1→V5.0 逐版变更史」「与原版本的区别」等纯元数据章节（约 19 KB）：
+/// 这些章节只服务于技能作者，对模型行为零贡献，却与规则正文争同一份上下文预算。
+/// 裁剪前已逐条核验——审核档位三档、48 项审核清单、Q15/Q16、宪法要点行、
+/// 【表演指导】活人感栏位、不加署名等现行规则在正文操作章节或 references 中均有落点，
+/// 不存在只存在于变更史里的规则。
 fn load_builtin_storyboard_system_prompt() -> String {
     const SKILL: &str = include_str!(
         "../../skills/storyboard/viral-video-prompt-engine/viral-video-prompt-engine-standalone.md"
     );
-    let header = "你是画布中的「剧本转工业级分镜脚本」节点。以下是内置的 viral-video-prompt-engine V4.6 完整独立版（SKILL.md + 全部 16 份 references）。每一轮都必须重新依据完整技能、随后提供的全部对话历史，以及当前 Markdown 分镜脚本工作。\n\n本节点运行合同高于技能包中依赖外部 Agent、文件夹或 TXT 文件的操作说明：用户提供的是待转化或待迭代的剧本，应直接聚焦阶段03工业级视频分镜；需要补充资产、画幅、平台或时长时，可以在对话中明确询问，但不得声称已经创建子 Agent、文件夹或本地 TXT 文件。所有可交付内容必须是一份结构完整、可直接导出的 Markdown 分镜脚本文档；保留技能要求的场景调度宪法、逐镜时间码、焦段/景别、运镜构图、表演调度、环境光与声音、Seedance 2.5 双版提示词和质量门禁。";
+    let header = "你是画布中的「剧本转工业级分镜脚本」节点。以下是内置的 viral-video-prompt-engine V5.0 完整独立版（SKILL.md + 全部 17 份 references）。每一轮都必须重新依据完整技能、随后提供的全部对话历史，以及当前 Markdown 分镜脚本工作。\n\n本节点运行合同高于技能包中依赖外部 Agent、文件夹、子进程或 TXT 文件的操作说明：用户提供的是待转化或待迭代的剧本，应直接聚焦阶段03工业级视频分镜；需要补充资产、画幅、平台或时长时，可以在对话中明确询问，但不得声称已经创建子 Agent、文件夹或本地 TXT 文件，也不得声称已写入技能包内的归档目录或经验库文件。所有可交付内容必须是一份结构完整、可直接导出的 Markdown 分镜脚本文档；保留技能要求的场景调度宪法（整场一次完整版 + 每段【宪法要点】/【本段微调】）、逐镜时间码、焦段/景别、运镜构图、表演调度与默认生效的【表演指导】活人感栏位、环境光与声音、Seedance 2.5 双版提示词、按档位分配的独立审核，以及质量门禁。";
     info!(
-        "[generation] 内置工业级分镜技能加载完成: 版本=V4.6, 文档=standalone, 总字节数={}",
+        "[generation] 内置工业级分镜技能加载完成: 版本=V5.0, 文档=standalone, 总字节数={}",
         SKILL.len()
     );
     format!("{header}\n\n---\n# 技能文档：viral-video-prompt-engine-standalone.md\n\n{SKILL}")
@@ -1564,8 +1576,9 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
 /// 一轮文本模型调用的完整提示词组合。
 ///
 /// 拆成三段而不是把历史拼进系统提示词，是为了让系统提示词成为稳定前缀：
-/// 技能全文（工业级分镜的 V4.6 独立版约 175 KB）在每一轮请求里都占据完全相同的
+/// 技能全文（工业级分镜的 V5.0 独立版约 194 KB）在每一轮请求里都占据完全相同的
 /// 前缀位置，供应商侧的前缀缓存才能命中，否则每轮都要重新预填充整份技能。
+/// 已在入库前裁掉该文档内「逐版变更史」等纯元数据，把同一份字节预算全部留给规则正文。
 #[derive(Debug, Clone)]
 struct PromptConversation {
     system: String,
@@ -2000,7 +2013,7 @@ pub struct TextModelFallbackRequest {
 /// - anthropic_messages_v1：/v1/messages（必需 anthropic-version 头与 max_tokens）
 /// - gemini_generate_content_v1：/v1beta/models/{model}:streamGenerateContent?alt=sse
 ///
-/// 非流式请求在模型生成完成前不回传任何字节，长上下文（工业级分镜技能全文约 175 KB）
+/// 非流式请求在模型生成完成前不回传任何字节，长上下文（工业级分镜技能全文约 194 KB）
 /// 加长输出的首字节时间会超过反向代理的零字节读取超时（Cloudflare 为 100 秒，超时即
 /// 524）。流式返回持续回传增量，该判定条件不再成立；增量由 provider 侧重新组装成与
 /// 非流式等价的响应对象，因此下游的用量统计、截断判定与文本提取逻辑完全不变。
@@ -3768,9 +3781,9 @@ mod tests {
             multimodal_inputs: Vec::new(),
             reference_inputs: Vec::new(),
         };
-        let prompts = build_system_and_user_prompts(&command, "V4.6 完整技能");
+        let prompts = build_system_and_user_prompts(&command, "V5.0 完整技能");
         // 技能全文单独构成系统提示词：历史不再撑大它，因此每轮前缀完全相同。
-        assert_eq!(prompts.system, "V4.6 完整技能");
+        assert_eq!(prompts.system, "V5.0 完整技能");
         let plan = build_text_model_request(
             "openai_chat_v1",
             "deepseek-v4-flash",
@@ -3784,7 +3797,7 @@ mod tests {
         let messages = plan.body["messages"].as_array().unwrap(); // system + user 轮次 + assistant 轮次 + 折叠后的业务标注 + 本轮用户消息。
         assert_eq!(messages.len(), 5);
         assert_eq!(messages[0]["role"], "system");
-        assert_eq!(messages[0]["content"], "V4.6 完整技能");
+        assert_eq!(messages[0]["content"], "V5.0 完整技能");
         // 连续 user 轮次合并为一条，assistant 保留原角色，业务标注折叠为 user。
         assert_eq!(messages[1]["role"], "user");
         assert!(
@@ -3816,7 +3829,7 @@ mod tests {
                 role: "user".to_string(),
                 content: "第四镜补一个环境光说明。".to_string(),
             });
-        let second_prompts = build_system_and_user_prompts(&second_command, "V4.6 完整技能");
+        let second_prompts = build_system_and_user_prompts(&second_command, "V5.0 完整技能");
         assert_eq!(second_prompts.system, prompts.system);
         // 新增的 user 轮次与上一条 user 历史合并，因此消息条数仍是 3。
         assert_eq!(second_prompts.history.len(), 3);
@@ -6616,14 +6629,52 @@ mod tests {
     }
 
     #[test]
-    fn storyboard_loads_bundled_v46_standalone_skill() {
+    fn storyboard_loads_bundled_v50_standalone_skill() {
         let prompt = load_skill_system_prompt(PromptOptimizationMode::Storyboard).unwrap();
-        assert!(prompt.contains("viral-video-prompt-engine V4.6 完整独立版"));
-        assert!(prompt.contains("viral-video-prompt-engine Standalone (V4.6)"));
+        assert!(prompt.contains("viral-video-prompt-engine V5.0 完整独立版"));
+        assert!(prompt.contains("# 爆款视频全流程提示词引擎 · 5.0（三阶段审核制"));
         assert!(prompt.contains("=== REFERENCE: references/01-input-routing.md ==="));
         assert!(prompt.contains("=== REFERENCE: references/12-film-review.md ==="));
         assert!(prompt.contains("=== REFERENCE: references/16-craft-blocking.md ==="));
         assert!(prompt.contains("Seedance 2.5"));
+    }
+
+    /// 内置工业级分镜技能必须是「无原作者水印、无第三方引流」的清洗版。
+    /// 这条断言直接守住入库清洗结果，防止后续换包时把水印或引流物带回来。
+    #[test]
+    fn bundled_storyboard_skill_has_no_watermark_or_promo() {
+        let prompt = load_skill_system_prompt(PromptOptimizationMode::Storyboard).unwrap();
+        for forbidden in [
+            "AI随风",
+            "公众号",
+            "介绍页",
+            "WorkBuddy",
+            "禁止商业售卖",
+            "cases/",
+            "experience/",
+            "signals.jsonl",
+            "minimax-h3-liveness",
+        ] {
+            assert!(
+                !prompt.contains(forbidden),
+                "内置工业级分镜技能仍残留「{forbidden}」，入库清洗不完整"
+            );
+        }
+        // 清洗不能把交付合同一起削掉：关键工艺栏目仍须在正文里。
+        for required in [
+            "场景调度宪法",
+            "【宪法要点】",
+            "【本段微调】",
+            "【表演指导】",
+            "多模态版",
+            "纯文字版",
+            "48 项",
+        ] {
+            assert!(
+                prompt.contains(required),
+                "内置工业级分镜技能丢失关键栏目「{required}」"
+            );
+        }
     }
 
     #[test]
@@ -6645,9 +6696,9 @@ mod tests {
             multimodal_inputs: Vec::new(),
             reference_inputs: Vec::new(),
         };
-        let prompts = build_system_and_user_prompts(&command, "V4.6 完整技能");
+        let prompts = build_system_and_user_prompts(&command, "V5.0 完整技能");
         // 系统提示词保持为技能全文本身：历史不再拼进系统提示词，前缀缓存因此可命中。
-        assert_eq!(prompts.system, "V4.6 完整技能");
+        assert_eq!(prompts.system, "V5.0 完整技能");
         assert_eq!(prompts.history.len(), 1);
         assert_eq!(prompts.history[0]["role"], "user");
         let history_content = prompts.history[0]["content"].as_str().unwrap();

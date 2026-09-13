@@ -8377,8 +8377,8 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     await screen.findByText("画布为空");
     const node = await addStoryboardNode(640, 400);
 
-    expect(within(node).getByText("V4.6 分镜技能已内置")).toBeInTheDocument();
-    expect(within(node).getByText(/16 references · 每轮完整注入/)).toBeInTheDocument();
+    expect(within(node).getByText("V5.0 分镜技能已内置")).toBeInTheDocument();
+    expect(within(node).getByText(/17 references · 每轮完整注入/)).toBeInTheDocument();
     const composer = within(node).getByRole("textbox", { name: "分镜对话消息" });
     fireEvent.change(composer, {
       target: { value: "把这份雨夜重逢剧本转成 9:16 的 Seedance 2.5 工业级分镜" },
