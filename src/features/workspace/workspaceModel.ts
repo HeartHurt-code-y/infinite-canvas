@@ -28,6 +28,8 @@ import {
 } from "../../lib/backend";
 import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib/modelCapabilities";
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
+import type { WhiteModelControlConfig } from "../../lib/whiteModelControl";
+import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./commerceWorkflowModel";
@@ -187,6 +189,8 @@ export interface ConnectedAssetInput {
   readonly edgeId: string;
   readonly sourceLabel: "素材" | "产物";
   readonly previewUrl: string | null;
+  /** 可执行素材的稳定来源，白模控制按此身份绑定，不能按显示名推断。 */
+  readonly target?: MediaReferenceTarget;
 }
 
 /** 分镜节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
@@ -203,6 +207,7 @@ export interface InheritedAssetInput {
   readonly kind: AssetKind;
   readonly promptNodeKey: string;
   readonly previewUrl: string | null;
+  readonly target?: MediaReferenceTarget;
 }
 
 /** 图片/视频生成节点统一消费的媒体输入；可来自素材节点或已保存的生成产物。 */
@@ -833,7 +838,8 @@ export interface OutputNodeData {
   /** 文本产物（Context-IR 等）为 "text"，无法作为媒体参考输入。 */
   readonly mediaType: "image" | "video" | "text";
   /** 旧文档未保存时默认为 generation。 */
-  readonly origin?: "generation" | "composition" | "download" | "frame_extract" | "video_edit";
+  readonly origin?:
+    "generation" | "composition" | "download" | "frame_extract" | "video_edit" | "white_model";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
   readonly finalPath: string | null;
   /** 供应商返回后、保存完成前的会话内预览地址；不写入画布文档。 */
@@ -1874,6 +1880,10 @@ export interface VideoNodeConfig {
   readonly catalogResolved: boolean;
   /** Seedance 2.5 本地任务选择；独立于各供应商开放的请求字段。 */
   readonly seedanceTaskMode?: SeedanceTaskMode;
+  /** 白模参考视频与渲染要求；生成时合入冻结提示词，原输入框正文保持可编辑。 */
+  readonly whiteModelControl?: WhiteModelControlConfig;
+  /** Blender 制作参数与持久渲染任务，关闭工作台后仍可恢复。 */
+  readonly whiteModelStudio?: WhiteModelStudioDraft;
   /** 连接素材的显式角色：素材 key → first_frame/last_frame/reference_*。 */
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
@@ -2237,7 +2247,11 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   }
   // 合成与下载产物不是 generation task 的结果，无法通过 local_result 校验，
   // 但只要已落盘（finalPath 存在），即可作为 local_file 普通媒体文件连入生成节点。
-  if (node.origin === "composition" || node.origin === "download") {
+  if (
+    node.origin === "composition" ||
+    node.origin === "download" ||
+    node.origin === "white_model"
+  ) {
     if (node.finalPath == null) return null;
     return {
       kind: "local_file",

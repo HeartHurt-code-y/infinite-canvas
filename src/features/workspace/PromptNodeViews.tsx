@@ -34,6 +34,7 @@ import {
 import { normalizePromptReferenceText } from "../../lib/promptReferences";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
+import { WhiteModelControlSection } from "./WhiteModelControlSection";
 
 import type {
   AssetKind,
@@ -1512,6 +1513,7 @@ export function VideoNodeSettings({
   mediaInputs,
   onChange,
   onAnnotateVideo,
+  onOpenWhiteModelStudio,
 }: {
   readonly config: VideoNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
@@ -1519,6 +1521,7 @@ export function VideoNodeSettings({
   readonly mediaInputs?: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly onChange: (config: VideoNodeConfig) => void;
   readonly onAnnotateVideo?: (input: ConnectedAssetInput | InheritedAssetInput) => void;
+  readonly onOpenWhiteModelStudio?: (() => void) | undefined;
 }) {
   const availableProviders = providerCatalog.filter(
     (entry) =>
@@ -1757,6 +1760,21 @@ export function VideoNodeSettings({
             </div>
           ) : null}
         </>
+      ) : null}
+
+      {taskState.enabled || config.whiteModelControl ? (
+        <WhiteModelControlSection
+          onOpenStudio={onOpenWhiteModelStudio}
+          {...(config.whiteModelControl ? { config: config.whiteModelControl } : {})}
+          inputs={(mediaInputs ?? []).flatMap((input) =>
+            input.target
+              ? [{ key: input.key, name: input.name, kind: input.kind, target: input.target }]
+              : [],
+          )}
+          modelId={selectedModel?.remoteModelId ?? ""}
+          taskMode={taskState.mode}
+          onChange={(whiteModelControl) => onChange({ ...config, whiteModelControl })}
+        />
       ) : null}
 
       {taskState.parameterCapabilities.map((capability) => {

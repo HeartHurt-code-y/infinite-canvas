@@ -1,0 +1,167 @@
+.white-model-control {
+  grid-column: 1 / -1;
+  width: 100%;
+  min-width: 0;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  background: var(--color-surface-1);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+
+.white-model-control__summary,
+.white-model-control__preview > summary {
+  min-height: var(--size-control-touch);
+  align-content: center;
+  padding: var(--space-xs) var(--space-sm);
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+
+.white-model-control__state {
+  margin-inline-start: var(--space-xs);
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+}
+
+.white-model-control__body {
+  display: grid;
+  gap: var(--space-sm);
+  max-height: 32rem;
+  min-width: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 0 var(--space-sm) var(--space-sm);
+  border-top: var(--rule-thin) solid var(--color-rule-faint);
+}
+
+.white-model-control__hint {
+  margin: 0;
+  color: var(--color-text-3);
+  font-size: var(--text-xs);
+  overflow-wrap: anywhere;
+}
+
+.white-model-control__field {
+  display: grid;
+  min-width: 0;
+  gap: var(--space-2xs);
+  color: var(--color-text-2);
+}
+
+.white-model-control .white-model-control__field :is(input, select, textarea),
+.white-model-control .white-model-control__preview-text {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  min-height: var(--size-control-touch);
+  margin: 0;
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-sm);
+  background: var(--color-field);
+  color: var(--color-text);
+  font: inherit;
+  line-height: var(--leading-body);
+}
+
+.white-model-control textarea {
+  resize: vertical;
+}
+
+.white-model-control textarea::placeholder,
+.white-model-control input::placeholder {
+  color: var(--color-text-4);
+}
+
+.white-model-control__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-xs);
+  min-height: var(--size-control-touch);
+  cursor: pointer;
+}
+
+.white-model-control .white-model-control__check input {
+  width: var(--space-md);
+  height: var(--space-md);
+  min-height: 0;
+  margin: 0;
+  flex-shrink: 0;
+  accent-color: var(--color-accent);
+}
+
+.white-model-control__dimensions,
+.white-model-control__mapping {
+  display: grid;
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-sm);
+}
+
+.white-model-control__dimensions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  column-gap: var(--space-xs);
+}
+
+.white-model-control__mapping,
+.white-model-control__mappings {
+  display: grid;
+  gap: var(--space-sm);
+}
+
+.white-model-control__section-heading,
+.white-model-control legend {
+  color: var(--color-text-2);
+  font-weight: 600;
+}
+
+.white-model-control .white-model-control__button {
+  min-height: var(--size-control-touch);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-control);
+  color: var(--color-text);
+  background: var(--color-surface-2);
+  font: inherit;
+  cursor: pointer;
+}
+
+.white-model-control .white-model-control__button:hover {
+  background: var(--color-surface-3);
+}
+
+.white-model-control :is(input, select, textarea, button, summary):focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--space-3xs);
+}
+
+.white-model-control__issue {
+  margin: 0;
+  padding: var(--space-xs);
+  border-inline-start: var(--rule-active) solid var(--color-warning);
+  color: var(--color-warning);
+  background: var(--color-warning-soft);
+  overflow-wrap: anywhere;
+}
+
+.white-model-control .white-model-control__field select[aria-invalid="true"] {
+  border-color: var(--color-warning);
+}
+
+.white-model-control__preview {
+  min-width: 0;
+  border-top: var(--rule-thin) solid var(--color-rule);
+}
+
+.white-model-control__preview > summary {
+  padding-inline: 0;
+}
+
+.white-model-control .white-model-control__preview-text {
+  margin-top: var(--space-xs);
+  color: var(--color-text-2);
+}

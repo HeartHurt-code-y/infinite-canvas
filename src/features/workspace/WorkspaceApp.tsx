@@ -145,6 +145,17 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
+import {
+  createWhiteModelControlConfig,
+  prepareWhiteModelGeneration,
+} from "../../lib/whiteModelControl";
+import {
+  createWhiteModelStudioDraft,
+  getBlenderRender,
+  whiteModelRenderSignature,
+  type BlenderRenderJob,
+  type WhiteModelStudioDraft,
+} from "../../lib/whiteModelStudio";
 import { appendVideoLocalEditPrompt, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type {
@@ -324,6 +335,9 @@ import {
 const CANVAS_FLOW_NODE_TYPES = { canvas: CanvasFlowNodeView };
 const VideoLocalEditDialog = lazy(() =>
   import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
+);
+const WhiteModelStudioDialog = lazy(() =>
+  import("./WhiteModelStudioDialog").then((module) => ({ default: module.WhiteModelStudioDialog })),
 );
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
@@ -554,6 +568,7 @@ export function WorkspaceApp({
     readonly source: VideoLocalEditSource;
     readonly input: GenerationMediaInput;
   } | null>(null);
+  const [whiteModelStudioNodeKey, setWhiteModelStudioNodeKey] = useState<string | null>(null);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -4472,6 +4487,161 @@ export function WorkspaceApp({
     [canvasInputsFor, setNodeStartError],
   );
 
+  const openWhiteModelStudio = useCallback(
+    (nodeKey: string) => {
+      const node = snapshotV2({}).genNodes.find((candidate) => candidate.key === nodeKey);
+      if (node?.kind !== "video") return;
+      if (!node.config.whiteModelStudio) {
+        updateVideoNodeConfig(nodeKey, {
+          ...node.config,
+          whiteModelStudio: createWhiteModelStudioDraft(),
+        });
+      }
+      setWhiteModelStudioNodeKey(nodeKey);
+    },
+    [snapshotV2, updateVideoNodeConfig],
+  );
+
+  const updateWhiteModelStudioDraft = useCallback(
+    (draft: WhiteModelStudioDraft) => {
+      if (!whiteModelStudioNodeKey) return;
+      patchNode("gen", whiteModelStudioNodeKey, (node) =>
+        node.kind === "video"
+          ? { ...node, config: { ...node.config, whiteModelStudio: draft } }
+          : node,
+      );
+    },
+    [patchNode, whiteModelStudioNodeKey],
+  );
+
+  const useWhiteModelVideo = useCallback(
+    async (requestedJob: BlenderRenderJob) => {
+      const nodeKey = whiteModelStudioNodeKey;
+      if (!nodeKey) throw new Error("请重新打开白模工作台。");
+      const job = await getBlenderRender(requestedJob.jobId);
+      if (job.status !== "succeeded" || !job.videoPath)
+        throw new Error("白模动画尚未成功导出，请重新渲染。");
+      const current = snapshotV2({});
+      const target = current.genNodes.find((node) => node.key === nodeKey);
+      if (target?.kind !== "video") throw new Error("视频节点已移除；已导出文件仍保留在本地。");
+      const draft = target.config.whiteModelStudio;
+      if (
+        draft?.jobId !== job.jobId ||
+        draft.jobInputSignature !== whiteModelRenderSignature(draft)
+      ) {
+        throw new Error("制作设置已改变，请先重新渲染，再使用新的白模视频。");
+      }
+      const selection = resolveGenerationSelection(
+        "video",
+        target.config.modelSelection,
+        providerCatalog,
+      );
+      if (!selection) throw new Error("请先选择可用的 Seedance 2.5 模型；已导出文件保留在本地。");
+      const capabilities = modelParameterCapabilities(
+        selection.model.operationSchema,
+        "video_generation",
+        selection.model.remoteModelId,
+      );
+      const control = target.config.whiteModelControl ?? createWhiteModelControlConfig();
+      const previousSource = current.outputNodes?.find(
+        (output) => output.key === control.source?.key && output.origin === "white_model",
+      );
+      const existingOutput = current.outputNodes?.find(
+        (output) =>
+          output.origin === "white_model" &&
+          output.taskId === job.jobId &&
+          output.finalPath === job.videoPath,
+      );
+      const key = existingOutput?.key ?? outputNodeKey();
+      const name = existingOutput?.name ?? `白模动画 · ${job.jobId.slice(0, 8)}.mp4`;
+      const media = {
+        key,
+        name,
+        kind: "video" as const,
+        target: {
+          kind: "local_file" as const,
+          path: job.videoPath,
+          canvasNodeKey: key,
+          mediaType: "video" as const,
+        },
+      };
+      const oldEdges = current.assetEdges.filter(
+        (edge) =>
+          edge.toKey === nodeKey && edge.fromKey === previousSource?.key && edge.fromKey !== key,
+      );
+      const remainingEdges = current.assetEdges.filter(
+        (edge) => !oldEdges.some((old) => old.id === edge.id),
+      );
+      const inputs = createCanvasInputResolver(
+        canvasNodesByKeyFromDocument(current),
+        remainingEdges,
+      )(nodeKey).media.filter((input) => input.key !== key);
+      const nextConfig = selectSeedanceTask(
+        selection.model.remoteModelId,
+        capabilities,
+        target.config,
+        [...inputs, media],
+        "reference",
+      );
+      const task = resolveSeedanceTask(selection.model.remoteModelId, capabilities, nextConfig, [
+        ...inputs,
+        media,
+      ]);
+      if (!task.enabled || task.issue)
+        throw new Error(task.issue ?? "当前模型不支持 Seedance 2.5 白模参考视频。");
+      const edges = remainingEdges.some((edge) => edge.fromKey === key && edge.toKey === nodeKey)
+        ? []
+        : [{ id: `white-model-${key}-${nodeKey}`, fromKey: key, toKey: nodeKey }];
+      insertSubgraph(
+        existingOutput
+          ? []
+          : [
+              {
+                type: "output",
+                data: {
+                  key,
+                  resultKey: null,
+                  sourceNodeId: `blender-${job.jobId}`,
+                  taskId: job.jobId,
+                  mediaType: "video",
+                  origin: "white_model",
+                  finalPath: job.videoPath,
+                  name,
+                  aspectRatio: job.width / job.height,
+                  x: target.x - 360,
+                  y: target.y + inputs.length * 24,
+                },
+              },
+            ],
+        edges,
+        { selectNodeKey: nodeKey },
+      );
+      oldEdges.forEach((edge) => removeAssetEdge(edge.id));
+      updateVideoNodeConfig(nodeKey, {
+        ...nextConfig,
+        whiteModelControl: {
+          ...control,
+          enabled: true,
+          source: { key, name, target: media.target },
+        },
+      });
+      setNodeStartError(nodeKey, null);
+      setWhiteModelStudioNodeKey(null);
+      toast.success("白模动画已连接", {
+        description: "检查角色映射与画面要求后，点击开始生成即可渲染成片。",
+      });
+    },
+    [
+      whiteModelStudioNodeKey,
+      snapshotV2,
+      providerCatalog,
+      insertSubgraph,
+      removeAssetEdge,
+      updateVideoNodeConfig,
+      setNodeStartError,
+    ],
+  );
+
   const applyVideoLocalEdit = useCallback(
     (edit: VideoLocalEditResult) => {
       if (!videoLocalEdit || edit.sourceKey !== videoLocalEdit.input.key)
@@ -5222,13 +5392,29 @@ export function WorkspaceApp({
           role: seedanceTask.mediaRoles[connection.key] ?? connection.role ?? "",
         }));
       }
-      const preparedPrompt = promptContents.prepareGeneration(nodeKey, {
-        connections,
-        allowMediaOnly: modelAllowsMediaOnlyPrompt(
-          resolvedSelection.model.operationSchema,
-          operation,
-        ),
-      });
+      const whiteModel =
+        genNode.kind === "video" && genNode.config.whiteModelControl?.enabled
+          ? prepareWhiteModelGeneration(
+              genNode.config.whiteModelControl,
+              connections,
+              resolvedSelection.model.remoteModelId,
+              seedanceTask?.mode ?? "auto",
+              promptContents.snapshotAll(new Set([nodeKey]))[nodeKey],
+            )
+          : null;
+      if (whiteModel?.issue) {
+        setNodeStartError(nodeKey, whiteModel.issue);
+        return;
+      }
+      const preparedPrompt = whiteModel
+        ? whiteModel.preparation
+        : promptContents.prepareGeneration(nodeKey, {
+            connections,
+            allowMediaOnly: modelAllowsMediaOnlyPrompt(
+              resolvedSelection.model.operationSchema,
+              operation,
+            ),
+          });
       if (preparedPrompt == null || !preparedPrompt.ok) {
         const issue = preparedPrompt?.issues[0] ?? ({ kind: "empty_prompt" } as const);
         setNodeStartError(nodeKey, promptContentIssueMessage(issue));
@@ -7376,6 +7562,7 @@ export function WorkspaceApp({
             updateImageNodeConfig,
             updateVideoNodeConfig,
             openVideoLocalEdit,
+            openWhiteModelStudio,
             handleStartGeneration,
           ],
           () => {
@@ -7447,6 +7634,7 @@ export function WorkspaceApp({
                   onImageConfigChange={updateImageNodeConfig}
                   onVideoConfigChange={updateVideoNodeConfig}
                   onAnnotateVideo={openVideoLocalEdit}
+                  onOpenWhiteModelStudio={openWhiteModelStudio}
                   onStartGeneration={handleStartGeneration}
                 />
               );
@@ -7490,6 +7678,7 @@ export function WorkspaceApp({
       updateImageNodeConfig,
       updateVideoNodeConfig,
       openVideoLocalEdit,
+      openWhiteModelStudio,
       handleStartGeneration,
       streamingTextByNode,
     ],
@@ -8704,6 +8893,32 @@ export function WorkspaceApp({
       {previewAssetNode ? (
         <CanvasAssetLightbox node={previewAssetNode} onClose={() => setPreviewAssetNodeKey(null)} />
       ) : null}
+      {active &&
+      whiteModelStudioNodeKey &&
+      genNodeByKey.get(whiteModelStudioNodeKey)?.kind === "video"
+        ? (() => {
+            const studioNode = genNodeByKey.get(whiteModelStudioNodeKey);
+            if (studioNode?.kind !== "video" || !studioNode.config.whiteModelStudio) return null;
+            return (
+              <Suspense
+                fallback={
+                  <DeferredDialogFallback
+                    id="white-model-studio"
+                    label="Blender 白模工作台"
+                    onClose={() => setWhiteModelStudioNodeKey(null)}
+                  />
+                }
+              >
+                <WhiteModelStudioDialog
+                  draft={studioNode.config.whiteModelStudio}
+                  onDraftChange={updateWhiteModelStudioDraft}
+                  onClose={() => setWhiteModelStudioNodeKey(null)}
+                  onUse={useWhiteModelVideo}
+                />
+              </Suspense>
+            );
+          })()
+        : null}
       {active && videoLocalEdit ? (
         <Suspense
           fallback={

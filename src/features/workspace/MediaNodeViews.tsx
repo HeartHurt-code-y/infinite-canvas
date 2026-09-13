@@ -93,6 +93,7 @@ export function CanvasGenNode({
   onImageConfigChange,
   onVideoConfigChange,
   onAnnotateVideo,
+  onOpenWhiteModelStudio,
   onStartGeneration,
   startError,
 }: {
@@ -125,6 +126,7 @@ export function CanvasGenNode({
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
+  readonly onOpenWhiteModelStudio?: ((nodeKey: string) => void) | undefined;
   readonly onAnnotateVideo?: (
     nodeKey: string,
     input: ConnectedAssetInput | InheritedAssetInput,
@@ -275,6 +277,9 @@ export function CanvasGenNode({
 
       {node.kind === "video" ? (
         <VideoNodeSettings
+          onOpenWhiteModelStudio={
+            onOpenWhiteModelStudio ? () => onOpenWhiteModelStudio(node.key) : undefined
+          }
           config={node.config}
           providerCatalog={providerCatalog}
           hasMediaInputs={effectiveInputs.length > 0}
@@ -1965,15 +1970,17 @@ export function CanvasOutputNode({
       ? "视频拼接与合成 · 本地结果"
       : node.origin === "download"
         ? "网络爆款视频下载 · 本地结果"
-        : node.origin === "video_edit"
-          ? "视频局部编辑 · 标注参考帧"
-          : task
-            ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
-                isFailed
-                  ? formatTaskClock(task.completedAt ?? task.updatedAt)
-                  : formatTaskClock(task.createdAt)
-              }`
-            : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
+        : node.origin === "white_model"
+          ? "Blender 白模动画 · 本地结果"
+          : node.origin === "video_edit"
+            ? "视频局部编辑 · 标注参考帧"
+            : task
+              ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
+                  isFailed
+                    ? formatTaskClock(task.completedAt ?? task.updatedAt)
+                    : formatTaskClock(task.createdAt)
+                }`
+              : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   return (
     <div

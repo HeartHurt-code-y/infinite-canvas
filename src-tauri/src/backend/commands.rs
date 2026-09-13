@@ -5,6 +5,7 @@ use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
     BackendState,
+    blender::{self, BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
     commerce_sources::{self, CommerceSource},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
     cover_images::{
@@ -209,6 +210,45 @@ pub async fn resume_generation_result(
         }
         Err(error) => Err(error).command(),
     }
+}
+
+#[tauri::command]
+pub async fn get_blender_engine(executable_path: Option<String>) -> BlenderEngineStatus {
+    blender::detect_engine(executable_path.as_deref()).await
+}
+
+#[tauri::command]
+pub async fn start_blender_render(
+    state: State<'_, BackendState>,
+    request: StartBlenderRenderRequest,
+) -> CommandResult<BlenderRenderJob> {
+    state.blender.start(request).await.command()
+}
+
+#[tauri::command]
+pub fn get_blender_render(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<BlenderRenderJob> {
+    state.blender.get(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_blender_render(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<BlenderRenderJob> {
+    state.blender.cancel(&job_id).command()
+}
+
+#[tauri::command]
+pub async fn open_blender_project(
+    executable_path: Option<String>,
+    project_path: String,
+) -> CommandResult<()> {
+    blender::open_project(executable_path.as_deref(), Path::new(&project_path))
+        .await
+        .command()
 }
 
 #[tauri::command]

@@ -1,4 +1,5 @@
 pub mod asset_library;
+pub mod blender;
 pub mod commands;
 pub mod commerce_sources;
 pub mod composer;
@@ -12,6 +13,7 @@ pub mod local_results;
 pub mod media;
 pub mod media_proxy;
 pub mod model_schema;
+pub(crate) mod process_tree;
 pub mod prompt_optimize;
 pub mod provider;
 pub mod remote_video_tasks;
@@ -30,6 +32,7 @@ pub mod volcengine_ark;
 use std::sync::Arc;
 
 use asset_library::AssetLibrary;
+use blender::BlenderRenderService;
 use composer::VideoCompositionService;
 use cover_images::CoverImageService;
 use credentials::CredentialStore;
@@ -61,6 +64,7 @@ pub struct BackendState {
     pub cover_images: CoverImageService,
     pub frame_extractor: VideoFrameExtractionService,
     pub remotion_renderer: RemotionRenderService,
+    pub blender: BlenderRenderService,
     pub reverse_video: ReverseVideoService,
     pub video_edit_sources: VideoEditSourceService,
 }
@@ -135,6 +139,7 @@ impl BackendState {
         let cover_images = CoverImageService::new(downloads_directory.clone(), composer.clone());
         let reverse_video =
             ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
+        let blender = BlenderRenderService::new(downloads_directory.clone(), composer.clone());
         let remotion_renderer =
             RemotionRenderService::new(downloads_directory, app.path().resource_dir()?);
 
@@ -152,6 +157,7 @@ impl BackendState {
             cover_images,
             frame_extractor,
             remotion_renderer,
+            blender,
             reverse_video,
             video_edit_sources,
         })

@@ -8,6 +8,7 @@ import type {
   GenerationTaskDetail,
   GenerationTaskSummary,
   MediaReferenceTarget,
+  PromptSegment,
   SaveCanvasDocumentCommand,
 } from "./lib/backend";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
@@ -18,6 +19,13 @@ import {
   UPLOAD_AUTO_DISMISS_DELAY_MS,
 } from "./features/workspace/workspaceModel";
 import type { VideoLocalEditDialogProps } from "./features/workspace/VideoLocalEditDialog";
+import { createWhiteModelControlConfig } from "./lib/whiteModelControl";
+import {
+  createWhiteModelStudioDraft,
+  whiteModelRenderSignature,
+  type BlenderRenderJob,
+  type WhiteModelStudioDraft,
+} from "./lib/whiteModelStudio";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
 const {
@@ -59,6 +67,60 @@ vi.mock("@tauri-apps/plugin-fs", () => ({
   stat: fileStatMock,
   writeTextFile: writeTextFileMock,
 }));
+
+// 工作台自身的进度/编辑交互由独立测试覆盖；这里验证落盘视频接入真实画布和生成 IPC。
+vi.mock("./features/workspace/WhiteModelStudioDialog", () => ({
+  WhiteModelStudioDialog: ({
+    draft,
+    onDraftChange,
+    onUse,
+  }: {
+    draft: WhiteModelStudioDraft;
+    onDraftChange: (draft: WhiteModelStudioDraft) => void;
+    onUse: (job: BlenderRenderJob) => Promise<void>;
+  }) => {
+    const [error, setError] = useState<string | null>(null);
+    return (
+      <>
+        <button
+          onClick={() =>
+            onDraftChange({
+              ...draft,
+              jobId: studioJob.jobId,
+              jobInputSignature: whiteModelRenderSignature(draft),
+            })
+          }
+        >
+          模拟完成白模渲染
+        </button>
+        <button
+          onClick={() => {
+            void onUse(studioJob).catch((cause: unknown) => setError(String(cause)));
+          }}
+        >
+          使用测试白模视频
+        </button>
+        {error ? <p role="alert">{error}</p> : null}
+      </>
+    );
+  },
+}));
+
+const studioJob: BlenderRenderJob = {
+  jobId: "08c93a77-fc4c-4b24-a7eb-d90e89924196",
+  status: "succeeded",
+  progress: 100,
+  message: "白模动画已导出",
+  error: null,
+  videoPath: "C:/rendered/white-model/output.mp4",
+  previewPath: "C:/rendered/white-model/preview.png",
+  projectPath: "C:/rendered/white-model/scene.blend",
+  width: 960,
+  height: 540,
+  durationSeconds: 8,
+  createdAt: 0,
+  updatedAt: 1,
+};
 
 // Drawing interactions are exercised by the dialog tests; this boundary checks canvas persistence and IPC.
 // 与真实弹窗一致：先让调用方解析标注帧身份，再把解析结果交给 onApply；
@@ -891,6 +953,109 @@ function submittedGenerationCommands(): Record<string, unknown>[] {
   return invokeMock.mock.calls
     .filter(([command]) => command === "start_generation")
     .map(([, args]) => (args as { command: Record<string, unknown> }).command);
+}
+
+function whiteModelCanvasFixture(): CanvasDocumentV2 {
+  return {
+    version: 2,
+    assetNodes: [
+      {
+        key: "white-model-video",
+        assetId: "white-model-video-asset",
+        providerConnectionId: PROVIDER.id,
+        kind: "video",
+        name: "动态白模.mp4",
+        previewUrl: null,
+        videoUrl: "https://cdn.example.com/white-model.mp4",
+        x: 20,
+        y: 100,
+      },
+      {
+        key: "white-model-character",
+        assetId: "white-model-character-asset",
+        providerConnectionId: PROVIDER.id,
+        kind: "image",
+        name: "主角设计图",
+        previewUrl: "https://cdn.example.com/character.png",
+        videoUrl: null,
+        x: 20,
+        y: 580,
+      },
+    ],
+    genNodes: [
+      {
+        key: "white-model-generation",
+        kind: "video",
+        x: 620,
+        y: 100,
+        config: {
+          modelSelection: { providerId: PROVIDER.id, modelDefinitionId: VIDEO_MODEL.id },
+          generationCount: 1,
+          catalogResolved: true,
+          seedanceTaskMode: "reference",
+          parameterValues: { ratio: "16:9", resolution: "720p", duration: 8 },
+          whiteModelControl: {
+            ...createWhiteModelControlConfig(),
+            enabled: true,
+            granularity: "fine",
+            source: {
+              key: "white-model-video",
+              name: "动态白模.mp4",
+              target: {
+                kind: "asset",
+                providerConnectionId: PROVIDER.id,
+                assetId: "white-model-video-asset",
+                canvasNodeKey: "white-model-video",
+                mediaType: "video",
+              },
+            },
+            mappings: [
+              {
+                id: "blue-capsule",
+                modelPart: "蓝色胶囊体",
+                description: "穿黄色外套的主角",
+                reference: {
+                  key: "white-model-character",
+                  name: "主角设计图",
+                  target: {
+                    kind: "asset",
+                    providerConnectionId: PROVIDER.id,
+                    assetId: "white-model-character-asset",
+                    canvasNodeKey: "white-model-character",
+                    mediaType: "image",
+                  },
+                },
+              },
+            ],
+            timeline: "0–4 秒主角走近镜头，4–8 秒绕过石柱。",
+            scene: "暮色中的石砌长廊，保留柱子的前后遮挡。",
+            finish: "真实电影质感，保留原白模运动节奏。",
+          },
+        },
+      },
+    ],
+    resultNodes: [],
+    assetEdges: [
+      {
+        id: "white-model-source-edge",
+        fromKey: "white-model-video",
+        toKey: "white-model-generation",
+      },
+      {
+        id: "white-model-image-edge",
+        fromKey: "white-model-character",
+        toKey: "white-model-generation",
+      },
+    ],
+    view: { zoom: 74, pan: { x: 0, y: 0 } },
+    promptContents: {
+      "white-model-generation": {
+        schema: "prompt-content",
+        version: 1,
+        items: [{ kind: "text", text: "保留我的角色对白和叙事要求。" }],
+      },
+    },
+  };
 }
 
 /** 默认 invoke mock：单测可用 mockImplementation 包装并按需覆盖个别命令。 */
@@ -3649,6 +3814,372 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     });
     expect(secondCommand["parameters"]).not.toHaveProperty("output_format");
     expect(secondCommand["parameters"]).not.toHaveProperty("omni_reference_task_type");
+  });
+
+  it("Blender 白模工作台导出回填、替换旧白模并持久化，以本地文件引用生成且保留原提示词", async () => {
+    const base = whiteModelCanvasFixture();
+    const initial = base.genNodes[0]!;
+    if (initial.kind !== "video") throw new Error("需要视频节点");
+    let storedDocument: CanvasDocumentV2 = {
+      ...base,
+      assetNodes: base.assetNodes.filter((node) => node.key !== "white-model-video"),
+      outputNodes: [
+        {
+          key: "white-model-video",
+          sourceNodeId: "blender-old",
+          taskId: "old-job",
+          resultKey: null,
+          origin: "white_model",
+          mediaType: "video",
+          finalPath: "C:/old.mp4",
+          name: "旧白模.mp4",
+          x: 20,
+          y: 100,
+        },
+      ],
+      genNodes: [
+        {
+          ...initial,
+          config: {
+            ...initial.config,
+            whiteModelStudio: createWhiteModelStudioDraft(),
+            whiteModelControl: {
+              ...initial.config.whiteModelControl!,
+              source: {
+                key: "white-model-video",
+                name: "旧白模.mp4",
+                target: {
+                  kind: "local_file",
+                  path: "C:/old.mp4",
+                  mediaType: "video",
+                  canvasNodeKey: "white-model-video",
+                },
+              },
+            },
+          },
+        },
+      ],
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_blender_render") return Promise.resolve(studioJob);
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "白模工作台测试",
+          document: structuredClone(storedDocument),
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      if (command === "save_canvas_document") {
+        const save = args?.["command"] as SaveCanvasDocumentCommand;
+        storedDocument = structuredClone(save.document) as CanvasDocumentV2;
+        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    const view = render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(node);
+    fireEvent.click(within(node).getByRole("button", { name: "制作白模动画 · Blender" }));
+    fireEvent.click(await screen.findByRole("button", { name: "模拟完成白模渲染" }));
+    fireEvent.click(screen.getByRole("button", { name: "使用测试白模视频" }));
+    await waitFor(() =>
+      expect(screen.queryByRole("button", { name: "使用测试白模视频" })).not.toBeInTheDocument(),
+    );
+    await waitFor(
+      () =>
+        expect(
+          storedDocument.outputNodes?.some((output) => output.taskId === studioJob.jobId),
+        ).toBe(true),
+      { timeout: 4000 },
+    );
+    const output = storedDocument.outputNodes!.find((item) => item.taskId === studioJob.jobId)!;
+    expect(output).toMatchObject({
+      origin: "white_model",
+      finalPath: studioJob.videoPath,
+      aspectRatio: 16 / 9,
+    });
+    expect(storedDocument.outputNodes).toHaveLength(2);
+    expect(storedDocument.assetEdges.some((edge) => edge.fromKey === "white-model-video")).toBe(
+      false,
+    );
+    expect(
+      storedDocument.assetEdges.some(
+        (edge) => edge.fromKey === output.key && edge.toKey === initial.key,
+      ),
+    ).toBe(true);
+    expect(storedDocument.promptContents[initial.key]).toEqual(base.promptContents[initial.key]);
+    const savedNode = storedDocument.genNodes[0]!;
+    expect(savedNode.kind === "video" && savedNode.config.whiteModelStudio?.jobId).toBe(
+      studioJob.jobId,
+    );
+    view.unmount();
+    render(<App />);
+    const restored = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(restored);
+    fireEvent.click(within(restored).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    const command = submittedGenerationCommands()[0]!;
+    expect(command["explicitMedia"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          role: "reference_video",
+          target: {
+            kind: "local_file",
+            path: studioJob.videoPath,
+            canvasNodeKey: output.key,
+            mediaType: "video",
+          },
+        }),
+      ]),
+    );
+    expect(
+      (command["prompt"] as PromptSegment[])
+        .filter((segment) => segment.kind === "text")
+        .map((segment) => segment.text)
+        .join(""),
+    ).toContain("保留我的角色对白和叙事要求。");
+  }, 30000);
+
+  it("专业级白模控制保存恢复后以稳定素材引用生成，控制指令不改写或重复累积到用户提示词", async () => {
+    let storedDocument = whiteModelCanvasFixture();
+    const initialNode = storedDocument.genNodes[0]!;
+    if (initialNode.kind !== "video") throw new Error("白模测试需要视频节点");
+    const updatedScene = "雨后的石砌长廊，保留柱子的前后遮挡与地面积水反光。";
+    const expectedControl = {
+      ...structuredClone(initialNode.config.whiteModelControl),
+      scene: updatedScene,
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "白模镜头测试",
+          document: structuredClone(storedDocument),
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      if (command === "save_canvas_document") {
+        const save = args?.["command"] as SaveCanvasDocumentCommand;
+        storedDocument = structuredClone(save.document) as CanvasDocumentV2;
+        return Promise.resolve({ ...save, revision: 1, createdAt: 0, updatedAt: 0 });
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    const view = render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(node);
+    expect(within(node).getByText("专业级白模控制", { exact: true })).toBeInTheDocument();
+    fireEvent.change(within(node).getByRole("textbox", { name: "场景处理" }), {
+      target: { value: updatedScene },
+    });
+    const prompt = within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" });
+    await waitFor(() => expect(prompt).toHaveTextContent("保留我的角色对白和叙事要求。"));
+    setPromptText(prompt, "保留我的角色对白和叙事要求。重启前手动修订对白。");
+    const expectedPrompt: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "保留我的角色对白和叙事要求。重启前手动修订对白。" }],
+    };
+    await waitFor(
+      () => {
+        expect(storedDocument.promptContents["white-model-generation"]).toEqual(expectedPrompt);
+      },
+      { timeout: 4000 },
+    );
+    const savedNode = storedDocument.genNodes.find((item) => item.key === "white-model-generation");
+    expect(savedNode?.kind === "video" && savedNode.config.whiteModelControl).toEqual(
+      expectedControl,
+    );
+
+    view.unmount();
+    render(<App />);
+    const restored = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(restored);
+    const restoredPrompt = within(restored).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    await waitFor(() => expect(restoredPrompt).toHaveTextContent("重启前手动修订对白。"));
+    expect(within(restored).getByLabelText("任务类型")).toHaveValue("reference");
+    expect(within(restored).getByLabelText("白模颗粒度")).toHaveValue("fine");
+    expect(
+      within(within(restored).getByLabelText("白模参考视频")).getByRole("option", {
+        name: "视频 1 · 动态白模.mp4",
+        selected: true,
+      }),
+    ).toBeInTheDocument();
+    expect(within(restored).getByRole("textbox", { name: "场景处理" })).toHaveValue(updatedScene);
+    const generate = within(restored).getByRole("button", { name: "开始视频生成" });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await waitFor(() => expect(generate).toBeEnabled());
+      fireEvent.click(generate);
+      await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(attempt));
+      const command = submittedGenerationCommands()[attempt - 1]!;
+      expect(command).toMatchObject({
+        sourceNodeId: "white-model-generation",
+        modelDefinitionId: VIDEO_MODEL.id,
+        providerConnectionId: PROVIDER.id,
+        operation: "video_generation",
+        videoTaskType: "reference",
+        parameters: {
+          ratio: "16:9",
+          resolution: "720p",
+          duration: 8,
+          omni_reference_task_type: "reference",
+        },
+        explicitMedia: [
+          {
+            role: "reference_video",
+            target: {
+              kind: "asset",
+              assetId: "white-model-video-asset",
+              canvasNodeKey: "white-model-video",
+              mediaType: "video",
+            },
+          },
+          {
+            role: "reference_image",
+            target: {
+              kind: "asset",
+              assetId: "white-model-character-asset",
+              canvasNodeKey: "white-model-character",
+              mediaType: "image",
+            },
+          },
+        ],
+      });
+      // 白模要求通过普通参考媒体和 canonical 提示词传递，不创造后端未开放的控制字段。
+      expect(Object.keys(command).sort()).toEqual([
+        "canvasId",
+        "explicitMedia",
+        "generationCount",
+        "modelDefinitionId",
+        "operation",
+        "parameters",
+        "prompt",
+        "providerConnectionId",
+        "sourceNodeId",
+        "videoTaskType",
+      ]);
+      expect(
+        Object.keys(command["parameters"] as Record<string, unknown>).every((key) =>
+          [
+            "ratio",
+            "resolution",
+            "duration",
+            "generate_audio",
+            "output_format",
+            "omni_reference_task_type",
+          ].includes(key),
+        ),
+      ).toBe(true);
+      const segments = command["prompt"] as readonly PromptSegment[];
+      expect(segments.filter((segment) => segment.kind === "media_reference")).toMatchObject([
+        { target: { canvasNodeKey: "white-model-video", assetId: "white-model-video-asset" } },
+        {
+          target: {
+            canvasNodeKey: "white-model-character",
+            assetId: "white-model-character-asset",
+          },
+        },
+      ]);
+      const text = segments
+        .filter((segment) => segment.kind === "text")
+        .map((segment) => segment.text)
+        .join("");
+      expect(text).toContain("保留我的角色对白和叙事要求。重启前手动修订对白。");
+      expect(text).toContain("蓝色胶囊体");
+      expect(text).toContain("穿黄色外套的主角");
+      expect(text).toContain("0–4 秒主角走近镜头，4–8 秒绕过石柱。");
+      expect(text).toContain(updatedScene);
+      expect(text).toContain("真实电影质感，保留原白模运动节奏。");
+      expect(text.match(/【渲染指令】/g)).toHaveLength(1);
+      expect(restoredPrompt).not.toHaveTextContent("【渲染指令】");
+      expect(restoredPrompt.querySelectorAll(".mention-chip")).toHaveLength(0);
+    }
+    expect(storedDocument.promptContents["white-model-generation"]).toEqual(expectedPrompt);
+  });
+
+  it("专业级白模控制断开指定实例后阻止生成，不按同名同素材的另一个实例重绑", async () => {
+    const fixture = whiteModelCanvasFixture();
+    const storedDocument: CanvasDocumentV2 = {
+      ...fixture,
+      assetNodes: [
+        ...fixture.assetNodes,
+        { ...fixture.assetNodes[0]!, key: "white-model-duplicate", y: 1100 },
+      ],
+      assetEdges: [
+        ...fixture.assetEdges,
+        {
+          id: "duplicate-white-model-edge",
+          fromKey: "white-model-duplicate",
+          toKey: "white-model-generation",
+        },
+      ],
+    };
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-03",
+          title: "白模镜头测试",
+          document: storedDocument,
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+        });
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="white-model-generation"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    await waitForNodeAccessible(node);
+    const disconnect = within(node).getAllByRole("button", { name: "解除连线：动态白模.mp4" });
+    expect(disconnect).toHaveLength(2);
+    fireEvent.click(disconnect[0]!);
+    await waitFor(() =>
+      expect(within(node).getAllByRole("button", { name: "解除连线：动态白模.mp4" })).toHaveLength(
+        1,
+      ),
+    );
+    fireEvent.click(within(node).getByRole("button", { name: "开始视频生成" }));
+    expect(await screen.findByLabelText("发起任务失败")).toHaveTextContent(
+      "白模参考视频「动态白模.mp4」已断开连接",
+    );
+    expect(submittedGenerationCommands()).toHaveLength(0);
+    expect(
+      within(node).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+    ).toHaveTextContent("保留我的角色对白和叙事要求。");
   });
 
   it.each([VIDEO_MODEL.id, "dreamina-seedance-2.5"])(
