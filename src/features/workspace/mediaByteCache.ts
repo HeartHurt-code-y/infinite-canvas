@@ -16,6 +16,9 @@ import type { AssetKind } from "./workspaceModel";
  *
  * 视频正文不进本缓存：视频按 Range 分块播放，把整段视频读进内存换不来秒开，
  * 只会让内存随时长线性增长。视频的封面/关键帧是图片，照常走这里。
+ *
+ * 大图（声明长度超过 `MAX_BLOB_BYTES`）同样不进本缓存：几十 MB 的原图整包读进内存
+ * 只会与 `<img>` 抢带宽、多占一份内存，直连渲染反而更快。
  */
 
 /** 一份素材预览内容的稳定身份：素材身份 + 用途（图片正文 / 视频封面）。 */
@@ -23,6 +26,20 @@ export interface AssetMediaIdentity {
   readonly assetId: string;
   readonly kind: AssetKind;
 }
+
+/**
+ * 整包读进内存的体积上限：超过它的响应不再读成 Blob。
+ *
+ * 手机原图可以到几十 MB（例如 5464×7285 的 36 MB JPEG）。这类图读成 Blob 要再占一份
+ * 内存、再多搬一次，而 `<img>` 直接指向代理地址时本来就是边下边解码；更要紧的是
+ * 字节缓存与 `<img>` 会同时各下一份，几十 MB 互相抢带宽，两边都更容易失败。
+ * 超限的素材因此只走「直连渲染」：一条 `<img>` 请求，正文不进本缓存（跨次复用交给
+ * 后端媒体代理的磁盘缓存）。
+ */
+const MAX_BLOB_BYTES = 8 * 1024 * 1024;
+
+/** 已判定「太大，只直连渲染」的素材身份：同一会话内不再重复探测体积。 */
+const directOnlyIdentities = new Set<string>();
 
 interface CachedMediaBytes {
   readonly objectUrl: string;
@@ -78,15 +95,26 @@ export async function loadMediaBytes(
 
   const pending = inFlight.get(key);
   if (pending != null) return pending;
+  // 已知太大：保持直连渲染，不必再探一次体积。
+  if (directOnlyIdentities.has(key)) return null;
 
   const request = (async (): Promise<string | null> => {
+    // 响应头一到就能判定体积：超限时立刻取消，正文一个字节都不读。
+    const controller = new AbortController();
     try {
       const response = await fetch(toMediaProxyUrl(mediaUrl) ?? mediaUrl, {
         // 素材身份已经决定复用，这里不再让 WebView 做二次校验；凭据绝不外发给对象存储。
         cache: "force-cache",
         credentials: "omit",
+        signal: controller.signal,
       });
       if (!response.ok) return null;
+      const declaredBytes = Number(response.headers.get("content-length"));
+      if (Number.isFinite(declaredBytes) && declaredBytes > MAX_BLOB_BYTES) {
+        directOnlyIdentities.add(key);
+        controller.abort();
+        return null;
+      }
       const blob = await response.blob();
       if (blob.size === 0) return null;
       const objectUrl = URL.createObjectURL(blob);
@@ -119,6 +147,8 @@ export function clearMediaByteCache(): void {
   objectUrls.clear();
   cachedBytes.clear();
   inFlight.clear();
+  // 体积判定同样清空：清缓存后重新探测一次，避免「曾经太大」的判断跨场景沿用。
+  directOnlyIdentities.clear();
 }
 
 let unloadListenerBound = false;

@@ -12,6 +12,8 @@
 //!
 //! 只缓存图片：视频按 Range 分块播放，落盘整段视频既占磁盘又不解决秒开，还容易在
 //! 分块/续播语义上产生错误命中。`no-store` 响应同样不缓存，尊重上游的隐私意图。
+//!
+//! 容量上限由 [`CacheLimits`] 给出：生产用默认值，测试用小值以便在毫秒级观察淘汰行为。
 
 use std::{
     fs,
@@ -24,10 +26,29 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use url::Url;
 
-/// 单个条目的大小上限：异常巨大的「图片」不做缓存，前端仍按原路径加载。
-const MAX_ENTRY_BYTES: u64 = 32 * 1024 * 1024;
-/// 缓存目录总大小上限；超出后按最近写入时间淘汰最旧的条目。
-const MAX_CACHE_BYTES: u64 = 256 * 1024 * 1024;
+/// 缓存容量上限。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CacheLimits {
+    /// 单个条目的字节上限；超过这条线的响应不落盘。
+    pub max_entry_bytes: u64,
+    /// 缓存目录总字节上限；超出后按最近写入时间淘汰最旧的条目。
+    pub max_cache_bytes: u64,
+}
+
+impl Default for CacheLimits {
+    fn default() -> Self {
+        Self {
+            // 单条上限放到 128 MiB：手机原图动辄几十 MB（例如 5464×7285 的 36 MB JPEG），
+            // 卡在 32 MiB 时这类素材永远落不了盘 —— 每次预览、每次重挂载都要重新整包
+            // 下载几十 MB，弱网或并发下必然被打成「预览不可用」。
+            max_entry_bytes: 128 * 1024 * 1024,
+            // 总量随之放到 1 GiB：否则几张几十 MB 的大图就会把目录填满并互相淘汰，
+            // 形成「缓存永远命中不了」的抖动。
+            max_cache_bytes: 1024 * 1024 * 1024,
+        }
+    }
+}
+
 /// 条目最长保留时间：超过后按未命中处理并重新下载，避免签名中蕴含的内容变化长期不生效。
 const MAX_ENTRY_AGE: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 /// 两次容量巡检的最小间隔：目录填满后不再每次落盘都全量扫描（那会在浏览时周期性卡顿）。
@@ -50,16 +71,36 @@ struct CacheMetadata {
 /// 缓存目录句柄。缺失目录不报错：缓存不可用时退化为直连穿透，不影响预览可用性。
 pub struct MediaCache {
     directory: PathBuf,
+    limits: CacheLimits,
     /// 上次容量巡检的时刻（Unix 毫秒），0 表示从未巡检。
     pruned_at_ms: AtomicU64,
 }
 
 impl MediaCache {
     pub fn new(directory: PathBuf) -> Self {
+        Self::with_limits(directory, CacheLimits::default())
+    }
+
+    /// 显式指定容量上限：测试用小上限，避免为了观察淘汰行为写入几百 MB。
+    pub fn with_limits(directory: PathBuf, limits: CacheLimits) -> Self {
         Self {
             directory,
+            limits,
             pruned_at_ms: AtomicU64::new(0),
         }
+    }
+
+    /// 读回当前上限：只有测试需要断言默认值（生产代码不消费它）。
+    #[cfg(test)]
+    pub fn limits(&self) -> CacheLimits {
+        self.limits
+    }
+
+    /// 内容长度是否在单条上限之内。未知长度时允许尝试，落盘那一刻再按实际大小判定。
+    pub fn accepts_length(&self, content_length: Option<u64>) -> bool {
+        content_length
+            .map(|value| value <= self.limits.max_entry_bytes)
+            .unwrap_or(true)
     }
 
     /// 命中（且未过期）时返回字节；未命中、已过期或缓存文件损坏时返回 `None`。
@@ -70,7 +111,7 @@ impl MediaCache {
 
     /// 落盘一份可缓存的响应。只有 200 与完整内容会被调用方传进来。
     pub fn store(&self, url: &Url, content_type: Option<&str>, body: &[u8]) {
-        if body.is_empty() || body.len() as u64 > MAX_ENTRY_BYTES {
+        if body.is_empty() || body.len() as u64 > self.limits.max_entry_bytes {
             return;
         }
         let Some(digest) = cache_digest(url) else {
@@ -164,12 +205,12 @@ impl MediaCache {
             let modified = metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             bodies.push((path, metadata.len(), modified));
         }
-        if total <= MAX_CACHE_BYTES {
+        if total <= self.limits.max_cache_bytes {
             return;
         }
         bodies.sort_by_key(|(_, _, modified)| *modified);
         for (path, size, _) in bodies {
-            if total <= MAX_CACHE_BYTES {
+            if total <= self.limits.max_cache_bytes {
                 break;
             }
             let digest = path
@@ -223,13 +264,6 @@ fn cache_digest(url: &Url) -> Option<String> {
     Some(hex::encode(hasher.finalize()))
 }
 
-/// 内容长度超过条目上限时无需下载即可判定不缓存。
-pub fn within_entry_limit(content_length: Option<u64>) -> bool {
-    content_length
-        .map(|value| value <= MAX_ENTRY_BYTES)
-        .unwrap_or(true)
-}
-
 fn now_ms() -> u128 {
     SystemTime::now()
         .duration_since(SystemTime::UNIX_EPOCH)
@@ -248,6 +282,13 @@ mod tests {
     fn cache() -> (tempfile::TempDir, MediaCache) {
         let directory = tempfile::tempdir().unwrap();
         let cache = MediaCache::new(directory.path().join("media-preview-cache"));
+        (directory, cache)
+    }
+
+    /// 小上限缓存：容量类行为用小值观察，避免测试写入几百 MB。
+    fn small_cache(limits: CacheLimits) -> (tempfile::TempDir, MediaCache) {
+        let directory = tempfile::tempdir().unwrap();
+        let cache = MediaCache::with_limits(directory.path().join("media-preview-cache"), limits);
         (directory, cache)
     }
 
@@ -327,21 +368,36 @@ mod tests {
 
     #[test]
     fn 超出单条上限的字节不落盘() {
-        let (_guard, cache) = cache();
+        let (_guard, cache) = small_cache(CacheLimits {
+            max_entry_bytes: 8,
+            max_cache_bytes: 1024,
+        });
         let source = url("https://cdn.example.com/huge.png");
-        cache.store(
-            &source,
-            Some("image/png"),
-            &vec![0u8; (MAX_ENTRY_BYTES + 1) as usize],
-        );
+        cache.store(&source, Some("image/png"), &[0u8; 9]);
         assert!(cache.read(&source).is_none());
-        assert!(!within_entry_limit(Some(MAX_ENTRY_BYTES + 1)));
-        assert!(within_entry_limit(Some(MAX_ENTRY_BYTES)));
+        assert!(!cache.accepts_length(Some(9)));
+        assert!(cache.accepts_length(Some(8)));
         // 上游没给长度时允许尝试，落盘那一刻再按实际大小判定。
-        assert!(within_entry_limit(None));
+        assert!(cache.accepts_length(None));
         // 空响应不写缓存。
         cache.store(&source, Some("image/png"), b"");
         assert!(cache.read(&source).is_none());
+        // 刚好等于上限的响应正常落盘。
+        cache.store(&source, Some("image/png"), &[7u8; 8]);
+        assert_eq!(cache.read(&source).unwrap().body, vec![7u8; 8]);
+    }
+
+    #[test]
+    fn 默认上限必须容得下几十兆的手机原图() {
+        // 真实回归：一张 5464×7285 的本地素材是 36,852,238 字节。旧上限 32 MiB 让它
+        // 永远落不了盘，于是每次预览、每次重挂载都要重新整包下载，弱网/并发下被打成
+        // 「预览不可用」。
+        let (_guard, cache) = cache();
+        let limits = cache.limits();
+        assert!(cache.accepts_length(Some(36_852_238)));
+        assert!(limits.max_entry_bytes >= 64 * 1024 * 1024);
+        // 总量必须容得下若干张大图，否则缓存会在几张图之间反复互相淘汰。
+        assert!(limits.max_cache_bytes >= limits.max_entry_bytes * 4);
     }
 
     #[test]
@@ -361,12 +417,14 @@ mod tests {
 
     #[test]
     fn 超出总容量时淘汰最旧的条目() {
-        let (_guard, cache) = cache();
-        // 按「单条上限」的量级堆到超过总上限会太慢，这里用 1 MiB 小块堆过上限。
+        // 按「单条上限」的量级堆到超过总上限会太慢，这里用小上限 + 1 MiB 小块观察淘汰。
         let chunk = vec![0u8; 1024 * 1024];
-        let entries = MAX_CACHE_BYTES / (1024 * 1024) + 2;
+        let (_guard, cache) = small_cache(CacheLimits {
+            max_entry_bytes: 2 * 1024 * 1024,
+            max_cache_bytes: 4 * 1024 * 1024,
+        });
         let mut sources = Vec::new();
-        for index in 0..entries {
+        for index in 0..7 {
             let source = url(&format!("https://cdn.example.com/frame-{index}.png"));
             // 生产里巡检是节流的（避免每次落盘都全量扫描目录）；这里把上次巡检时间
             // 推回过去，让每一步落盘都能立刻观察淘汰结果。

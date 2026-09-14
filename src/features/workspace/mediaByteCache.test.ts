@@ -190,4 +190,54 @@ describe("素材预览字节缓存", () => {
     expect(await cache.loadMediaBytes("", "image", "https://cdn/x.jpg")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it("几十 MB 的大图只走直连渲染：不读进内存，也不再重复探测", async () => {
+    const cache = await loadCacheModule();
+    const bigImage = () =>
+      new Response("bytes", {
+        status: 200,
+        headers: { "content-length": String(36_852_238) },
+      });
+    const fetchMock = vi.fn(() => Promise.resolve(bigImage()));
+    vi.stubGlobal("fetch", fetchMock);
+
+    // 手机原图级别的素材：响应头一到就判定体积，正文一个字节都不读。
+    expect(
+      await cache.loadMediaBytes("big-1", "image", "https://cdn.example.com/big.jpg?sig=1"),
+    ).toBeNull();
+    expect(cache.getMediaByteUrl("big-1", "image")).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    // 已判定太大：同素材不再探第二次，`<img>` 自己直接取这个地址。
+    expect(
+      await cache.loadMediaBytes("big-1", "image", "https://cdn.example.com/big.jpg?sig=2"),
+    ).toBeNull();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    const { result } = renderHook(() =>
+      cache.useMediaByteSource("big-1", "image", "https://cdn.example.com/big.jpg?sig=2"),
+    );
+    await waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(result.current.fromCache).toBe(false);
+    expect(result.current.url).toBe("https://cdn.example.com/big.jpg?sig=2");
+  });
+
+  it("恰好在上限内的图片照常进缓存（阈值不能误伤正常素材）", async () => {
+    const cache = await loadCacheModule();
+    const fetchMock = vi.fn(() =>
+      Promise.resolve(
+        new Response("bytes", { status: 200, headers: { "content-length": "8388608" } }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const objectUrl = await cache.loadMediaBytes(
+      "edge-1",
+      "image",
+      "https://cdn.example.com/edge.jpg",
+    );
+
+    expect(objectUrl).not.toBeNull();
+    expect(cache.getMediaByteUrl("edge-1", "image")).toBe(objectUrl);
+  });
 });
