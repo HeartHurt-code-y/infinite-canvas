@@ -14,6 +14,7 @@ import {
   assetLibraryClient,
   formatRawBackendError,
   isDesktopRuntime,
+  refreshMediaUrlWithStagingFallback,
   toMediaSrc,
   tosStagingClient,
   type CloudAsset,
@@ -239,28 +240,22 @@ function MaterialThumb({
   const failed = effectiveUrl != null && failedUrl === effectiveUrl;
   const handleImageError = () => {
     setFailedUrl(effectiveUrl);
-    if (
-      effectiveUrl == null ||
-      refreshAttemptedRef.current ||
-      renewIdentity == null ||
-      renewIdentity.providerConnectionId === ""
-    ) {
-      return;
-    }
+    if (effectiveUrl == null || refreshAttemptedRef.current || renewIdentity == null) return;
     refreshAttemptedRef.current = true;
-    void assetLibraryClient
-      .refreshAssetMedia({
-        providerConnectionId: renewIdentity.providerConnectionId,
+    void refreshMediaUrlWithStagingFallback(
+      {
         id: renewIdentity.assetId,
-        mediaType,
-      })
-      .then((freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
-          setRefreshedUrl(freshUrl);
-          setFailedUrl(null);
-        }
-      })
-      .catch(() => undefined);
+        source: "cloud",
+        providerConnectionId: renewIdentity.providerConnectionId,
+      },
+      mediaType,
+      effectiveUrl,
+    ).then((freshUrl) => {
+      if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
+        setRefreshedUrl(freshUrl);
+        setFailedUrl(null);
+      }
+    });
   };
   // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
   const videoSource = mediaType === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;
@@ -315,28 +310,22 @@ function AddListThumb({
   const failed = effectiveUrl != null && failedUrl === effectiveUrl;
   const handleImageError = () => {
     setFailedUrl(effectiveUrl);
-    if (
-      effectiveUrl == null ||
-      refreshAttemptedRef.current ||
-      renewIdentity == null ||
-      renewIdentity.providerConnectionId === ""
-    ) {
-      return;
-    }
+    if (effectiveUrl == null || refreshAttemptedRef.current || renewIdentity == null) return;
     refreshAttemptedRef.current = true;
-    void assetLibraryClient
-      .refreshAssetMedia({
-        providerConnectionId: renewIdentity.providerConnectionId,
+    void refreshMediaUrlWithStagingFallback(
+      {
         id: renewIdentity.assetId,
-        mediaType: kind,
-      })
-      .then((freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
-          setRefreshedUrl(freshUrl);
-          setFailedUrl(null);
-        }
-      })
-      .catch(() => undefined);
+        source: "cloud",
+        providerConnectionId: renewIdentity.providerConnectionId,
+      },
+      kind,
+      effectiveUrl,
+    ).then((freshUrl) => {
+      if (freshUrl != null && freshUrl !== "" && freshUrl !== effectiveUrl) {
+        setRefreshedUrl(freshUrl);
+        setFailedUrl(null);
+      }
+    });
   };
   // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
   const videoSource = kind === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;

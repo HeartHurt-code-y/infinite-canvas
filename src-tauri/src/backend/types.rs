@@ -962,6 +962,19 @@ pub struct RefreshLocalAssetMediaCommand {
     pub media_type: MediaType,
 }
 
+/// 过期暂存对象地址的续签：把一个已经过期的预签名读取地址换成新签名地址。
+///
+/// 素材入库会把暂存租约地址（`LEASE_URL_EXPIRY_SECS`，1 小时）当成素材预览地址交给上游
+/// 素材库，上游记录里的这个地址随后必然失效，且重新读取素材记录仍然只会拿回同一个死地址
+/// （实测魔芋 `/v1/assets/get` 原样回放导入时的租约）。对象本身就在用户自己的暂存桶里，
+/// 因此这里按同一对象键重新签发，让预览可以随用随续，而不是导入一小时后永久置灰。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RefreshStagingObjectCommand {
+    /// 已失效的预签名读取地址；只有指向当前配置的暂存桶时才续签。
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {

@@ -325,6 +325,35 @@ describe("HistoryDialog diagnostics", () => {
     expect(screen.getByText("供应商响应")).toBeInTheDocument();
   });
 
+  it("renders prompt @ references with the shared green mention chip", async () => {
+    // 任务历史的引用与画布编辑器共用 `.mention-chip`，配色只在 `.mention-chip` 一处定义。
+    const mentionDetail: GenerationTaskDetail = {
+      ...DETAIL,
+      logicalRequest: {
+        prompt: [
+          { kind: "text", text: "参考" },
+          {
+            kind: "media_reference",
+            mentionId: "mention-1",
+            target: {
+              kind: "asset",
+              providerConnectionId: "provider-1",
+              assetId: "asset-1",
+              mediaType: "image",
+            },
+            displayNameSnapshot: "雨夜站台.png",
+          },
+        ],
+      },
+    };
+
+    render(<HistoryDialog open onClose={vi.fn()} client={createClient(mentionDetail)} />);
+
+    const chip = await screen.findByText("@雨夜站台.png");
+    expect(chip).toHaveClass("mention-chip");
+    expect(chip).toHaveAttribute("title", "雨夜站台.png");
+  });
+
   it("surfaces readable error summaries and expands failed provider calls", async () => {
     render(<HistoryDialog open onClose={vi.fn()} client={createClient()} />);
 
@@ -703,6 +732,86 @@ describe("HistoryDialog regeneration", () => {
       });
       // 已有列表地址就不触发兜底请求，避免每次打开弹窗都打一轮素材详情接口。
       expect(invoke.mock.calls.some(([command]) => command === "refresh_asset_media")).toBe(false);
+    } finally {
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
+  });
+
+  it("上游素材记录回放同一个过期暂存地址时按对象键重签，恢复素材缩略图", async () => {
+    // 复现用户报告的真实现场：素材入库把导入时的暂存租约地址当成素材预览地址写进上游，
+    // 一小时后租约过期，而 /v1/assets/get 只会原样回放这个死地址。此时续签「成功但没换地址」，
+    // 缩略图必须继续按对象键重签自己的暂存副本，而不是停在类型图标。
+    const expiredStagingUrl =
+      "https://my-staging-bucket.tos-cn-beijing.volces.com/staging/e90484f4b8801be7/2026/09/14/55be7f2f.png?X-Tos-Expires=3600&X-Tos-Signature=stale";
+    const invoke = vi.fn((...call: readonly unknown[]) => {
+      switch (call[0]) {
+        case "list_assets":
+          return Promise.resolve([
+            {
+              providerConnectionId: "provider-1",
+              id: "asset-1",
+              name: "参考图A",
+              kind: "image",
+              status: "ready",
+              rawStatus: "Active",
+              previewUrl: expiredStagingUrl,
+              assetUrl: `asset://asset-1`,
+              coverUrl: null,
+              groupId: null,
+            },
+          ]);
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 0,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
+        case "refresh_asset_media":
+          // 上游只回放导入时的那份死地址。
+          return Promise.resolve(expiredStagingUrl);
+        case "refresh_staging_object_url":
+          return Promise.resolve("https://tos.example.com/resigned-reference.png");
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    try {
+      render(<HistoryDialog open onClose={vi.fn()} client={createClient(REGEN_DETAIL)} />);
+      await screen.findByText("任务概要");
+      fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+      const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+      const thumb = await waitFor(() => {
+        const image = dialog.querySelector(".regenerate-material__thumb img");
+        expect(image).not.toBeNull();
+        return image!;
+      });
+      expect(thumb).toHaveAttribute(
+        "src",
+        expect.stringContaining(encodeURIComponent(expiredStagingUrl)),
+      );
+
+      // 图片按过期地址加载失败 → 先按素材身份续签（拿到同一个死地址）→ 再按对象键重签暂存对象。
+      fireEvent.error(thumb);
+      await waitFor(() => {
+        expect(dialog.querySelector(".regenerate-material__thumb img")).toHaveAttribute(
+          "src",
+          expect.stringContaining(
+            encodeURIComponent("https://tos.example.com/resigned-reference.png"),
+          ),
+        );
+      });
+      expect(invoke.mock.calls.some(([c]) => c === "refresh_asset_media")).toBe(true);
+      const resign = invoke.mock.calls.find(([c]) => c === "refresh_staging_object_url");
+      expect(resign?.[1]).toEqual({ command: { url: expiredStagingUrl } });
     } finally {
       delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
     }

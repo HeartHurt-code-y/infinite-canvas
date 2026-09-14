@@ -11144,17 +11144,8 @@ svg[data-spin="true"] {
   overflow-wrap: anywhere;
 }
 
-.history-prompt-chip {
-  display: inline-block;
-  margin: 0 1px;
-  padding: 0 var(--space-3xs);
-  font-size: var(--text-2xs);
-  font-weight: 600;
-  color: var(--color-accent);
-  background: var(--color-accent-soft);
-  border-radius: var(--radius-round);
-  white-space: nowrap;
-}
+/* 提示词里的 @ 引用不在这里另立一套配色：任务历史与画布编辑器共用 `.mention-chip`，
+ * 否则同一份提示词在两个界面会出现两种引用色（见上方 `.mention-chip` 规则）。 */
 
 /* 结果网格 */
 

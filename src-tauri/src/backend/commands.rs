@@ -40,13 +40,13 @@ use super::{
         LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
         RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RemoteModelOption,
-        RemoteVideoTaskPage, RenameAssetCommand, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SaveStatus, SetCredentialCommand, StagingJobRecord,
-        StartGenerationCommand, StartStagingCommand, StartVideoCompositionCommand,
-        StartVideoDownloadCommand, StartVideoFrameExtractionCommand, TosBucketPullSummary,
-        TosStagingConfig, UpdateAssetGroupCommand, UpsertProviderConnectionCommand,
-        UpsertProviderTokenGroupCommand, VideoTaskListCommand,
+        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
+        RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
+        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
+        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
+        TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
     },
 };
 
@@ -846,6 +846,16 @@ pub fn refresh_local_asset_media(
             Err(error.payload())
         }
     }
+}
+
+/// 过期暂存对象地址续签：素材库把导入时的租约地址当预览地址回放，租约一小时后必失效，
+/// 这里按同一对象键重新签发，供画布节点与素材清单恢复预览。
+#[tauri::command]
+pub fn refresh_staging_object_url(
+    state: State<'_, BackendState>,
+    command: RefreshStagingObjectCommand,
+) -> CommandResult<String> {
+    state.staging.refresh_staging_object_url(command).command()
 }
 
 /// 列出产物上传到云端素材库的入库记录：应用重启后前端据此重建

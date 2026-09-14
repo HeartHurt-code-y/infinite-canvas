@@ -54,6 +54,7 @@ function createClient(
       }),
     ),
     refreshLocalAssetMedia: vi.fn(() => Promise.resolve("https://tos.example.com/resigned.png")),
+    refreshStagingObjectUrl: vi.fn(() => Promise.resolve("https://tos.example.com/resigned.png")),
     ...overrides,
   };
 }

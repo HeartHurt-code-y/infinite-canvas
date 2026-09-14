@@ -29,8 +29,8 @@ use super::{
     types::{
         AssetImportOutputRecord, ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery,
         LocalAssetPage, LocalAssetRecord, MediaType, RefreshLocalAssetMediaCommand,
-        StagingJobRecord, StagingStatus, StartStagingCommand, TosBucketPullSummary,
-        TosStagingConfig,
+        RefreshStagingObjectCommand, StagingJobRecord, StagingStatus, StartStagingCommand,
+        TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -846,6 +846,52 @@ impl StagingService {
         Ok(lease.get_url)
     }
 
+    /// 为一个已过期的暂存对象读取地址重新签名（素材预览续签的最终兜底）。
+    ///
+    /// 只接受指向已配置暂存桶、且对象键落在配置前缀内的地址：签名等于授予读取权限，
+    /// 凭一个 URL 就能重签任意桶内对象会把续签接口变成越权读取入口。
+    pub fn refresh_staging_object_url(
+        &self,
+        command: RefreshStagingObjectCommand,
+    ) -> BackendResult<String> {
+        let config = self.storage.get_tos_config()?.ok_or_else(|| {
+            BackendError::validation(
+                "TOS staging is not configured",
+                json!({ "required": ["bucket", "region", "endpoint", "objectPrefix"] }),
+            )
+        })?;
+        if !config.enabled {
+            return Err(BackendError::validation(
+                "TOS staging is disabled",
+                json!({}),
+            ));
+        }
+        let object_key = staging_object_key(&command.url, &config).ok_or_else(|| {
+            // 不回显地址本身：带签名的 URL 等同凭据。
+            BackendError::validation(
+                "只支持续签当前暂存桶内的对象地址。",
+                json!({ "bucket": config.bucket, "endpoint": config.endpoint }),
+            )
+        })?;
+        let credential_ref = config.credential_ref.as_deref().ok_or_else(|| {
+            BackendError::validation(
+                "TOS staging credentials are not configured",
+                json!({ "required": ["accessKey", "secretKey"] }),
+            )
+        })?;
+        let credentials = TosCredentials::parse(&self.credentials.get(credential_ref)?)?;
+        let host = format!("{}.{}", config.bucket, config.endpoint);
+        presign_url(&PresignParams {
+            method: "GET",
+            host: &host,
+            object_key: &object_key,
+            region: &config.region,
+            credentials: &credentials,
+            expires_secs: LEASE_URL_EXPIRY_SECS,
+            now: Utc::now(),
+        })
+    }
+
     /// 拉取整个存储桶（或指定前缀）下的对象文件到本地素材索引。
     ///
     /// 依据火山引擎官方文档《ListObjectsV2》：
@@ -1512,6 +1558,30 @@ impl StagingService {
     }
 }
 
+/// 从暂存对象的预签名读取地址解出对象键；地址不指向当前配置的暂存桶时返回 `None`。
+///
+/// 预签名地址的 host 形如 `{bucket}.{endpoint}`（见 `presign_url` 的调用方），
+/// path 即对象键；`?X-Tos-…` 查询串是签名本身，不参与解析。地址里的对象键不按百分号
+/// 解码：签名按原样字节参与计算，解码后重签会得到指向另一个对象的地址。
+fn staging_object_key(url: &str, config: &TosStagingConfig) -> Option<String> {
+    let parsed = reqwest::Url::parse(url).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") {
+        return None;
+    }
+    if parsed.host_str()? != format!("{}.{}", config.bucket, config.endpoint) {
+        return None;
+    }
+    let object_key = parsed.path().trim_start_matches('/');
+    if object_key.is_empty() || object_key.contains('%') {
+        return None;
+    }
+    let prefix = config.object_prefix.trim_matches('/');
+    if !prefix.is_empty() && !object_key.starts_with(&format!("{prefix}/")) {
+        return None;
+    }
+    Some(object_key.to_string())
+}
+
 /// 桶内对象摘要（ListObjectsV2 `Contents` 元素的字段子集）。
 #[derive(Debug, Clone)]
 pub struct TosObjectSummary {
@@ -1881,6 +1951,54 @@ mod tests {
         assert_eq!(detect_media_type_by_extension("doc.pdf"), None);
         // 文件夹占位对象（键以 / 结尾）不做扩展名判断，调用方先行跳过。
         assert_eq!(detect_media_type_by_extension("staging/folder/"), None);
+    }
+
+    #[test]
+    fn staging_object_key_accepts_only_the_configured_staging_bucket_and_prefix() {
+        let config = sample_config();
+        // 线上形态：导入时签发的租约地址（host = {bucket}.{endpoint}，path = 对象键）。
+        let signed = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/e90484f4b8801be7/2026/09/14/55be7f2f.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Date=20260914T023421Z&X-Tos-Expires=3600&X-Tos-Signature=deadbeef";
+        assert_eq!(
+            staging_object_key(signed, &config).as_deref(),
+            Some("staging/e90484f4b8801be7/2026/09/14/55be7f2f.png")
+        );
+        // 同一地址在签名过期后仍是同一个对象键：续签不依赖旧签名是否还有效。
+        let expired = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/a/b.png";
+        assert_eq!(
+            staging_object_key(expired, &config).as_deref(),
+            Some("staging/a/b.png")
+        );
+
+        // 别的桶一律不签：续签接口不能变成任意对象的读取授权。
+        let other_bucket = signed.replace("example-staging-bucket.", "other-bucket.");
+        assert_eq!(staging_object_key(&other_bucket, &config), None);
+        // 别的 endpoint（同桶名不同地域）同样拒绝。
+        let other_region = signed.replace("cn-beijing", "cn-shanghai");
+        assert_eq!(staging_object_key(&other_region, &config), None);
+        // 桶内但不在暂存前缀下的对象不签。
+        let outside_prefix = "https://example-staging-bucket.tos-cn-beijing.volces.com/other/a.png";
+        assert_eq!(staging_object_key(outside_prefix, &config), None);
+        // 前缀本身（无对象名）不是可读取的对象。
+        let prefix_only = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging";
+        assert_eq!(staging_object_key(prefix_only, &config), None);
+        // 百分号编码的对象键不重签：签名按原样字节计算，解码后重签会指向另一个对象。
+        let encoded = "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/a%2Fb.png";
+        assert_eq!(staging_object_key(encoded, &config), None);
+        // 非 http(s) 与不可解析地址直接拒绝。
+        assert_eq!(
+            staging_object_key("asset://localhost/staging/a.png", &config),
+            None
+        );
+        assert_eq!(staging_object_key("not a url", &config), None);
+    }
+
+    #[test]
+    fn staging_object_key_keeps_objects_when_no_prefix_configured() {
+        // 未配置前缀时整桶都是暂存范围，续签仍按桶边界收口。
+        let mut config = sample_config();
+        config.object_prefix = String::new();
+        let url = "https://example-staging-bucket.tos-cn-beijing.volces.com/a/b.png";
+        assert_eq!(staging_object_key(url, &config).as_deref(), Some("a/b.png"));
     }
 
     #[test]

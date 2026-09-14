@@ -3,7 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties }
 import { createPortal } from "react-dom";
 import {
   frontendLog,
-  refreshAssetItemMediaUrl,
+  refreshMediaUrlWithStagingFallback,
   type GenerationOperation,
   type ProviderCatalogEntry,
 } from "../../lib/backend";
@@ -98,15 +98,16 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
     if (preview == null || refreshAttemptedRef.current) return;
     if (candidate.source === "cloud" && candidate.providerConnectionId === "") return;
     refreshAttemptedRef.current = true;
-    // 云端素材回读供应商记录、本地素材重签对象存储地址，本地素材没有
-    // providerConnectionId，只判断云端分支会让缩略图永久停在失败态。
-    void refreshAssetItemMediaUrl(
+    // 云端素材回读供应商记录、本地素材重签对象存储地址；上游把导入时的暂存租约地址当
+    // 预览地址回放时续签不会换地址，共享入口会继续按对象键重签暂存副本。
+    void refreshMediaUrlWithStagingFallback(
       {
         id: candidate.assetId,
         source: candidate.source,
         providerConnectionId: candidate.providerConnectionId,
       },
       candidate.kind,
+      preview,
     ).then((freshUrl) => {
       if (freshUrl != null && freshUrl !== "" && freshUrl !== preview) {
         setRefreshedUrl(freshUrl);

@@ -10,7 +10,7 @@ import {
   frontendLog,
   isDesktopRuntime,
   mediaClient,
-  refreshAssetItemMediaUrl,
+  refreshMediaUrlWithStagingFallback,
   resumeGenerationResult,
   toMediaSrc,
   type GenerationResultRecord,
@@ -1533,13 +1533,16 @@ export function CanvasAssetNode({
       if (node.source === "cloud" && node.providerConnectionId === "") return;
       attempted.urls.push(failedUrl);
       attempted.count += 1;
-      void refreshAssetItemMediaUrl(
+      // 云端素材按身份回读供应商记录、本地素材按 staging job id 重签；素材入库会把导入时的
+      // 暂存租约地址写进上游素材库，上游读取只会回放这个死地址，共享入口会继续按对象键重签。
+      void refreshMediaUrlWithStagingFallback(
         {
           id: node.assetId,
           source: node.source,
           providerConnectionId: node.providerConnectionId,
         },
         node.kind,
+        failedUrl,
       ).then((freshUrl) => {
         if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
           onRefreshMediaUrls(node.key, freshUrl);

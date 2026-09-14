@@ -621,6 +621,15 @@ export interface TosStagingClient {
    * 后端走火山引擎 TOS ListObjectsV2 分页列举，按对象键去重。
    */
   pullBucketAssets(this: void, prefix?: string): Promise<TosBucketPullSummary>;
+  /**
+   * 过期暂存对象地址续签：把一个失效的暂存租约地址换成新签名地址。
+   *
+   * 素材入库会把导入时的租约地址（1 小时有效）当预览地址写进上游素材库，上游记录随后
+   * 原样回放这个死地址；对象本身仍在用户自己的暂存桶里，因此按同一对象键重签即可恢复预览。
+   * 只接受当前配置暂存桶（且落在配置前缀内）的地址，其余地址后端直接拒绝。
+   * 只部署在桌面端：浏览器预览与测试注入的客户端可以没有该方法。
+   */
+  refreshStagingObjectUrl?(this: void, url: string): Promise<string>;
 }
 
 export const tosStagingClient: TosStagingClient = {
@@ -647,6 +656,8 @@ export const tosStagingClient: TosStagingClient = {
     invokeDesktop("pull_tos_bucket_assets", tosBucketPullSummarySchema, {
       prefix: prefix ?? null,
     }),
+  refreshStagingObjectUrl: (url) =>
+    invokeDesktop("refresh_staging_object_url", stringSchema, { command: { url } }),
 };
 
 /**
@@ -683,6 +694,37 @@ export async function refreshAssetItemMediaUrl(
     });
   } catch {
     return null;
+  }
+}
+
+/**
+ * 素材预览地址续签（含「上游记录里就是死地址」的兜底）。
+ *
+ * 先按素材身份走 `refreshAssetItemMediaUrl`；素材入库会把导入时的暂存租约地址当预览地址
+ * 写进上游素材库，上游读取只会原样回放这个死地址（实测魔芋 `/v1/assets/get`），
+ * 于是续签「成功」但地址没变、预览依旧只剩类型图标。此时按失败地址重签自己的暂存对象：
+ * 对象没被删就能恢复真实预览，地址不属于当前暂存桶则后端拒绝，调用方照旧回退图标。
+ * 续签失败一律返回 null，不阻断其他素材行。
+ */
+export async function refreshMediaUrlWithStagingFallback(
+  asset: {
+    readonly id: string;
+    readonly source?: string | null | undefined;
+    readonly providerConnectionId?: string | null | undefined;
+  },
+  mediaType: MediaType,
+  failedUrl: string | null,
+): Promise<string | null> {
+  const renewed = await refreshAssetItemMediaUrl(asset, mediaType);
+  // 地址变了就是有效续签；上游回放同一个死地址（或没有素材身份可续签）才走暂存重签。
+  if (renewed != null && renewed !== "" && renewed !== failedUrl) return renewed;
+  if (failedUrl == null || failedUrl === "") return renewed;
+  const resign = tosStagingClient.refreshStagingObjectUrl;
+  if (resign == null) return renewed ?? null;
+  try {
+    return await resign(failedUrl);
+  } catch {
+    return renewed ?? null;
   }
 }
 

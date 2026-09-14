@@ -332,7 +332,10 @@ function promptSegmentsFromDetail(detail: GenerationTaskDetail): PromptSegment[]
   return request.prompt as PromptSegment[];
 }
 
-/** 渲染提示词段：文本原样，@引用显示为只读 chip。 */
+/**
+ * 渲染提示词段：文本原样，@引用显示为只读 chip。
+ * chip 复用画布提示词的 `.mention-chip`，让全站 @ 引用共用同一支绿色（见 tokens.css）。
+ */
 function HistoryPromptSegments({ segments }: { readonly segments: readonly PromptSegment[] }) {
   if (segments.length === 0) {
     return <p className="history-empty-note">该任务没有记录提示词。</p>;
@@ -343,7 +346,7 @@ function HistoryPromptSegments({ segments }: { readonly segments: readonly Promp
         segment.kind === "text" ? (
           <span key={index}>{segment.text}</span>
         ) : (
-          <span key={index} className="history-prompt-chip" title={segment.displayNameSnapshot}>
+          <span key={index} className="mention-chip" title={segment.displayNameSnapshot}>
             @{segment.displayNameSnapshot}
           </span>
         ),

@@ -49,6 +49,7 @@ const TOS_STUB: TosStagingClient = {
     }),
   ),
   refreshLocalAssetMedia: vi.fn(() => Promise.resolve("https://tos.example.com/resigned.png")),
+  refreshStagingObjectUrl: vi.fn(() => Promise.resolve("https://tos.example.com/resigned.png")),
 };
 
 const CONNECTIVITY_OK = {
