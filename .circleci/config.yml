@@ -69,7 +69,8 @@ commands:
 jobs:
   quality:
     docker:
-      - image: cimg/node:24
+      # cimg/node 的 tag 是 24.x（major.minor），不存在裸 24；24.21 跟随最新 24 补丁
+      - image: cimg/node:24.21
     steps:
       - checkout
       - run:
