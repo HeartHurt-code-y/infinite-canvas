@@ -10,7 +10,7 @@
     "pnpm": ">=11.0.0"
   },
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev-server.mjs",
     "dev:daemon": "node scripts/devserver-daemon.mjs start",
     "dev:daemon:status": "node scripts/devserver-daemon.mjs status",
     "dev:daemon:stop": "node scripts/devserver-daemon.mjs stop",
