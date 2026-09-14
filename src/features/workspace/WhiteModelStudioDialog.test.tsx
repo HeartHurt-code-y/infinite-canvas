@@ -71,9 +71,9 @@ beforeEach(() => {
   vi.clearAllMocks();
   mocks.engine.mockResolvedValue({
     available: true,
-    executablePath: "C:/Blender/blender.exe",
+    executablePath: "C:/InfiniteCanvas/resources/blender/blender.exe",
     version: "Blender 4.5",
-    message: "Blender 已就绪",
+    message: "内置 Blender 已就绪",
   });
   mocks.start.mockResolvedValue(job("queued"));
   mocks.get.mockResolvedValue(job("running"));
@@ -83,10 +83,15 @@ beforeEach(() => {
 });
 
 describe("白模工作室", () => {
-  it("保存真实角色与相机设置，关闭继续渲染，恢复使用成片并将精修工程作为下次渲染源", async () => {
+  it("默认内置引擎无需选择路径，保存角色相机设置并恢复成片与精修工程渲染", async () => {
     const view = harness(createWhiteModelStudioDraft());
     const renderButton = screen.getByRole("button", { name: "渲染白模视频" });
     await waitFor(() => expect(renderButton).toBeEnabled());
+    expect(mocks.engine).toHaveBeenCalledWith("");
+    expect(screen.getByText(/应用已内置 Blender，无需另行安装或下载/)).toBeInTheDocument();
+    expect(screen.queryByRole("textbox", { name: "外部 Blender 路径" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "选择外部 Blender" })).not.toBeInTheDocument();
+    expect(mocks.chooseFile).not.toHaveBeenCalled();
     fireEvent.change(screen.getByLabelText("几何体 1"), { target: { value: "box" } });
     fireEvent.change(screen.getByLabelText("角色 1 终点 X"), { target: { value: "4" } });
     fireEvent.change(screen.getByLabelText("角色 1 终点朝向（度）"), { target: { value: "90" } });
@@ -99,6 +104,7 @@ describe("白模工作室", () => {
     fireEvent.click(renderButton);
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
     expect(mocks.start.mock.calls[0]![0]).toMatchObject({
+      executablePath: null,
       sourceBlendPath: null,
       plan: {
         durationSeconds: 12,
@@ -167,6 +173,7 @@ describe("白模工作室", () => {
 
   it("恢复中可取消，迟到的运行状态不覆盖取消结果，保留草稿可重试", async () => {
     const draft = createWhiteModelStudioDraft();
+    draft.executablePath = "D:/Tools/Blender/blender.exe";
     draft.jobId = "render-1";
     draft.jobInputSignature = whiteModelRenderSignature(draft);
     let resolvePoll: (value: BlenderRenderJob) => void = () => {};
@@ -176,6 +183,9 @@ describe("白模工作室", () => {
       }),
     );
     const view = harness(draft);
+    expect(screen.getByRole("textbox", { name: "外部 Blender 路径" })).toHaveValue(
+      "D:/Tools/Blender/blender.exe",
+    );
     expect(screen.getByLabelText("角色名称 1")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "取消渲染" }));
     await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("render-1"));
@@ -191,18 +201,21 @@ describe("白模工作室", () => {
     expect(screen.getByRole("button", { name: "使用白模视频" })).toBeDisabled();
   });
 
-  it("选择 Blender 与导入工程使用文件路径，不可用引擎明确阻止渲染", async () => {
+  it("内置引擎异常引导修复应用，高级设置可选外部程序并保留工程导入与重试", async () => {
     mocks.engine.mockResolvedValueOnce({
       available: false,
       executablePath: null,
       version: null,
-      message: "未检测到 Blender，请选择已安装的程序。",
+      message: "安装包内置 Blender 不完整，请修复安装包或重新安装应用。",
     });
     const view = harness(createWhiteModelStudioDraft());
-    expect(await screen.findByText("未检测到 Blender，请选择已安装的程序。")).toBeInTheDocument();
+    expect(
+      await screen.findByText("安装包内置 Blender 不完整，请修复安装包或重新安装应用。"),
+    ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "渲染白模视频" })).toBeDisabled();
+    fireEvent.click(screen.getByText("高级设置：使用外部 Blender（可选）"));
     mocks.chooseFile.mockResolvedValueOnce("D:/Tools/Blender/blender.exe");
-    fireEvent.click(screen.getByRole("button", { name: "选择 Blender" }));
+    fireEvent.click(await screen.findByRole("button", { name: "选择外部 Blender" }));
     await waitFor(() => expect(mocks.engine).toHaveBeenCalledWith("D:/Tools/Blender/blender.exe"));
     mocks.chooseFile.mockResolvedValueOnce("D:/Projects/精修镜头.blend");
     fireEvent.click(screen.getByRole("button", { name: "导入已有 .blend 工程" }));

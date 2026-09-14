@@ -122,6 +122,7 @@ struct Inner {
     jobs: std::sync::Mutex<HashMap<String, JobEntry>>,
     jobs_dir: PathBuf,
     composer: VideoCompositionService,
+    bundled_roots: Vec<PathBuf>,
 }
 
 #[derive(Clone)]
@@ -227,66 +228,100 @@ fn validate_blend_path(path: &Path) -> BackendResult<()> {
     Ok(())
 }
 
-fn engine_candidates(explicit: Option<&str>) -> Vec<PathBuf> {
-    if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
-        return vec![PathBuf::from(path.trim())];
-    }
-    let mut paths = Vec::new();
-    if let Some(path) = std::env::var_os("INFINITE_CANVAS_BLENDER") {
-        paths.push(path.into());
-    }
-    let binary = if cfg!(windows) {
-        "blender.exe"
-    } else {
-        "blender"
-    };
-    if let Some(path) = std::env::var_os("PATH") {
-        paths.extend(std::env::split_paths(&path).map(|directory| directory.join(binary)));
-    }
-    if cfg!(windows) {
-        for key in ["ProgramFiles", "ProgramFiles(x86)"] {
-            if let Some(root) = std::env::var_os(key) {
-                let root = PathBuf::from(root).join("Blender Foundation");
-                if let Ok(entries) = std::fs::read_dir(root) {
-                    let mut installed: Vec<_> = entries
-                        .filter_map(Result::ok)
-                        .map(|entry| entry.path().join(binary))
-                        .collect();
-                    installed.sort();
-                    installed.reverse();
-                    paths.extend(installed);
-                }
-            }
-        }
-        if let Some(root) = std::env::var_os("LOCALAPPDATA") {
-            paths.push(PathBuf::from(root).join(
-                "InfiniteCanvas/tools/blender-4.5.13/blender-4.5.13-windows-x64/blender.exe",
-            ));
-        }
-    } else {
-        paths.extend(
-            [
-                "/Applications/Blender.app/Contents/MacOS/Blender",
-                "/usr/bin/blender",
-                "/usr/local/bin/blender",
-                "/opt/blender/blender",
-            ]
-            .map(PathBuf::from),
-        );
-    }
-    let mut seen = HashSet::new();
-    paths.retain(|path| path.is_file() && seen.insert(path.clone()));
-    paths
+#[derive(Deserialize)]
+struct BundledBlenderManifest {
+    version: String,
+    platform: String,
+    arch: String,
+    executable: String,
 }
 
-pub async fn detect_engine(explicit: Option<&str>) -> BlenderEngineStatus {
+fn supported_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    parts
+        .next()
+        .and_then(|part| part.parse::<u32>().ok())
+        .zip(parts.next().and_then(|part| part.parse::<u32>().ok()))
+        .is_some_and(|(major, minor)| major > 4 || major == 4 && minor >= 5)
+}
+
+fn bundle_platform() -> &'static str {
+    if cfg!(windows) {
+        "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
+    } else {
+        "linux"
+    }
+}
+
+fn bundle_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        "x86_64" => "x64",
+        "aarch64" => "arm64",
+        other => other,
+    }
+}
+
+fn bundled_executable(root: &Path) -> BackendResult<PathBuf> {
+    let manifest: BundledBlenderManifest =
+        serde_json::from_slice(&read_limited(&root.join("manifest.json"), 64 * 1024)?)?;
+    if !supported_version(&manifest.version)
+        || ![bundle_platform(), std::env::consts::OS].contains(&manifest.platform.as_str())
+        || ![bundle_arch(), std::env::consts::ARCH].contains(&manifest.arch.as_str())
+    {
+        return Err(invalid("内置 Blender 清单与当前系统、架构或支持版本不匹配"));
+    }
+    let executable = Path::new(&manifest.executable);
+    if executable.is_absolute()
+        || !executable
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
+        || !executable.starts_with("runtime")
+    {
+        return Err(invalid("内置 Blender 清单的可执行路径无效"));
+    }
+    let executable = root.join(executable);
+    if !executable.is_file() || !executable.canonicalize()?.starts_with(root.canonicalize()?) {
+        return Err(invalid("内置 Blender 可执行文件缺失或超出资源目录"));
+    }
+    Ok(executable)
+}
+
+fn engine_candidates(explicit: Option<&str>, bundled_roots: &[PathBuf]) -> Vec<PathBuf> {
+    if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
+        // An external executable is an explicit advanced override, never an automatic dependency.
+        return vec![PathBuf::from(path.trim())];
+    }
+    let mut seen = HashSet::new();
+    bundled_roots
+        .iter()
+        .filter_map(|root| bundled_executable(root).ok())
+        .filter(|path| seen.insert(path.clone()))
+        .collect()
+}
+
+fn bundled_engine_repair_message() -> &'static str {
+    if cfg!(debug_assertions) {
+        "内置 Blender 资源缺失或不完整，请先运行 pnpm blender:prepare 准备完整应用资源，再重新检查"
+    } else {
+        "内置 Blender 资源缺失或不完整，请修复安装或重新安装包含白模引擎的完整应用"
+    }
+}
+
+async fn detect_engine(explicit: Option<&str>, bundled_roots: &[PathBuf]) -> BlenderEngineStatus {
+    let external = explicit.is_some_and(|value| !value.trim().is_empty());
     let mut unavailable = BlenderEngineStatus {
         available: false,
         executable_path: None,
         version: None,
-        message: "未找到 Blender 4.5 或更新版本，请选择已安装的 Blender 可执行文件".into(),
+        message: if external {
+            "无法运行指定的 Blender，请检查高级设置中的可执行文件路径".into()
+        } else {
+            bundled_engine_repair_message().into()
+        },
     };
-    for path in engine_candidates(explicit) {
+    for path in engine_candidates(explicit, bundled_roots) {
         unavailable.executable_path = Some(path.to_string_lossy().into_owned());
         let mut command = tokio::process::Command::new(&path);
         command
@@ -303,16 +338,17 @@ pub async fn detect_engine(explicit: Option<&str>) -> BlenderEngineStatus {
                     .find_map(|line| line.strip_prefix("Blender "))
                     .and_then(|value| value.split_whitespace().next())
                     .unwrap_or("");
-                let mut parts = version
-                    .split('.')
-                    .filter_map(|part| part.parse::<u32>().ok());
-                let supported = parts
-                    .next()
-                    .zip(parts.next())
-                    .is_some_and(|(major, minor)| major > 4 || major == 4 && minor >= 5);
-                if !supported {
-                    unavailable.message =
-                        format!("当前引擎版本不兼容（{version}），请选择 Blender 4.5 或更新版本");
+                if !supported_version(version) {
+                    unavailable.message = if external {
+                        format!(
+                            "高级设置指定的 Blender 版本不兼容（{version}），需要 4.5 或更新版本"
+                        )
+                    } else {
+                        format!(
+                            "内置 Blender 版本不兼容（{version}）。{}",
+                            bundled_engine_repair_message()
+                        )
+                    };
                     unavailable.version = (!version.is_empty()).then(|| version.to_string());
                     continue;
                 }
@@ -320,28 +356,59 @@ pub async fn detect_engine(explicit: Option<&str>) -> BlenderEngineStatus {
                     available: true,
                     executable_path: Some(path.to_string_lossy().into_owned()),
                     version: Some(version.into()),
-                    message: format!("Blender {version} 已就绪，可生成白模动画并导出工程"),
+                    message: if external {
+                        format!("Blender {version} 已就绪，正在使用高级设置指定的引擎")
+                    } else {
+                        format!("内置 Blender {version} 已就绪，无需额外安装")
+                    },
                 };
             }
             Ok(Ok(_)) | Ok(Err(_)) => {
-                unavailable.message =
-                    "无法运行选定的 Blender，请检查可执行文件路径或安装完整性".into()
+                unavailable.message = if external {
+                    "无法运行高级设置指定的 Blender，请检查可执行文件路径或安装完整性".into()
+                } else {
+                    format!("内置 Blender 无法启动。{}", bundled_engine_repair_message())
+                };
             }
-            Err(_) => unavailable.message = "Blender 版本检查超时，请检查本机安装后重试".into(),
+            Err(_) => {
+                unavailable.message = if external {
+                    "Blender 版本检查超时，请检查高级设置中的引擎后重试".into()
+                } else {
+                    format!(
+                        "内置 Blender 启动检查超时。{}",
+                        bundled_engine_repair_message()
+                    )
+                }
+            }
         }
     }
     unavailable
 }
-
 impl BlenderRenderService {
-    pub fn new(downloads_dir: PathBuf, composer: VideoCompositionService) -> Self {
+    pub fn new(
+        downloads_dir: PathBuf,
+        composer: VideoCompositionService,
+        bundled_root: Option<PathBuf>,
+    ) -> Self {
+        let mut bundled_roots: Vec<_> = bundled_root.into_iter().collect();
+        if cfg!(debug_assertions) {
+            let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/blender");
+            if !bundled_roots.contains(&development) {
+                bundled_roots.push(development);
+            }
+        }
         Self {
             inner: Arc::new(Inner {
                 jobs: std::sync::Mutex::new(HashMap::new()),
                 jobs_dir: downloads_dir.join("无限画布").join("白模"),
                 composer,
+                bundled_roots,
             }),
         }
+    }
+
+    pub async fn detect_engine(&self, explicit: Option<&str>) -> BlenderEngineStatus {
+        detect_engine(explicit, &self.inner.bundled_roots).await
     }
 
     pub async fn start(
@@ -349,7 +416,7 @@ impl BlenderRenderService {
         mut request: StartBlenderRenderRequest,
     ) -> BackendResult<BlenderRenderJob> {
         validate_request(&request)?;
-        let engine = detect_engine(request.executable_path.as_deref()).await;
+        let engine = self.detect_engine(request.executable_path.as_deref()).await;
         if !engine.available {
             return Err(invalid(engine.message));
         }
@@ -713,31 +780,37 @@ struct PythonResult {
     preview_path: String,
 }
 
-pub async fn open_project(executable_path: Option<&str>, project_path: &Path) -> BackendResult<()> {
-    validate_blend_path(project_path)?;
-    let engine = detect_engine(executable_path).await;
-    if !engine.available {
-        return Err(invalid(engine.message));
+impl BlenderRenderService {
+    pub async fn open_project(
+        &self,
+        executable_path: Option<&str>,
+        project_path: &Path,
+    ) -> BackendResult<()> {
+        validate_blend_path(project_path)?;
+        let engine = self.detect_engine(executable_path).await;
+        if !engine.available {
+            return Err(invalid(engine.message));
+        }
+        let mut command = tokio::process::Command::new(
+            engine
+                .executable_path
+                .ok_or_else(|| invalid("Blender 路径缺失"))?,
+        );
+        command
+            .arg("--disable-autoexec")
+            .arg(project_path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        #[cfg(windows)]
+        command.creation_flags(0x0800_0000);
+        let mut child = command.spawn()?;
+        // The user explicitly opened a professional GUI; it lives independently of render cancellation.
+        tauri::async_runtime::spawn(async move {
+            let _ = child.wait().await;
+        });
+        Ok(())
     }
-    let mut command = tokio::process::Command::new(
-        engine
-            .executable_path
-            .ok_or_else(|| invalid("Blender 路径缺失"))?,
-    );
-    command
-        .arg("--disable-autoexec")
-        .arg(project_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(0x0800_0000);
-    let mut child = command.spawn()?;
-    // The user explicitly opened a professional GUI; it lives independently of render cancellation.
-    tauri::async_runtime::spawn(async move {
-        let _ = child.wait().await;
-    });
-    Ok(())
 }
 
 async fn wait_for_cancel(cancelled: &AtomicBool) {
@@ -847,6 +920,13 @@ mod tests {
     }
 
     fn service(directory: &Path) -> BlenderRenderService {
+        service_with_bundle(
+            directory,
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/blender"),
+        )
+    }
+
+    fn service_with_bundle(directory: &Path, bundled_root: PathBuf) -> BlenderRenderService {
         BlenderRenderService::new(
             directory.into(),
             VideoCompositionService::new(
@@ -855,6 +935,7 @@ mod tests {
                 Path::new(env!("CARGO_MANIFEST_DIR")).join("resources"),
             )
             .unwrap(),
+            Some(bundled_root),
         )
     }
 
@@ -874,6 +955,67 @@ mod tests {
             created_at: now_ms(),
             updated_at: now_ms(),
         }
+    }
+
+    #[test]
+    fn blender_bundled_locator_prioritizes_resources_and_preserves_explicit_override() {
+        let temporary = tempfile::tempdir().unwrap();
+        let packaged = temporary.path().join("packaged/blender");
+        let development = temporary.path().join("development/blender");
+        let binary_name = if cfg!(windows) {
+            "runtime/blender.exe"
+        } else if cfg!(target_os = "macos") {
+            "runtime/Blender.app/Contents/MacOS/Blender"
+        } else {
+            "runtime/blender"
+        };
+        for root in [&packaged, &development] {
+            let executable = root.join(binary_name);
+            std::fs::create_dir_all(executable.parent().unwrap()).unwrap();
+            std::fs::write(executable, b"fixture").unwrap();
+            write_json(
+                &root.join("manifest.json"),
+                &json!({
+                    "version": "4.5.13", "platform": bundle_platform(), "arch": bundle_arch(),
+                    "executable": binary_name,
+                }),
+            )
+            .unwrap();
+        }
+        let roots = [packaged.clone(), development.clone()];
+        assert_eq!(
+            engine_candidates(None, &roots),
+            vec![packaged.join(binary_name), development.join(binary_name)]
+        );
+        let external = temporary.path().join(if cfg!(windows) {
+            "external.exe"
+        } else {
+            "external"
+        });
+        assert_eq!(engine_candidates(external.to_str(), &roots), vec![external]);
+        // No implicit fallback to PATH, AppData, or a separately installed Blender.
+        assert!(engine_candidates(None, &[]).is_empty());
+        write_json(
+            &packaged.join("manifest.json"),
+            &json!({
+                "version": "4.5.13", "platform": bundle_platform(), "arch": bundle_arch(),
+                "executable": "../external.exe",
+            }),
+        )
+        .unwrap();
+        assert_eq!(
+            engine_candidates(None, &roots),
+            vec![development.join(binary_name)]
+        );
+        write_json(
+            &development.join("manifest.json"),
+            &json!({
+                "version": "4.5.13", "platform": "another-platform", "arch": bundle_arch(),
+                "executable": binary_name,
+            }),
+        )
+        .unwrap();
+        assert!(engine_candidates(None, &roots).is_empty());
     }
 
     #[test]
@@ -998,10 +1140,21 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore = "requires Blender 4.5+; set INFINITE_CANVAS_BLENDER or use installed portable engine"]
+    #[ignore = "requires packaged Blender runtime; optional INFINITE_CANVAS_BLENDER_BUNDLE selects an extracted bundle root"]
     async fn blender_real_engine_renders_mp4_and_reimports_editable_project() {
         let temporary = tempfile::tempdir().unwrap();
-        let renderer = service(temporary.path());
+        let bundled_root = std::env::var_os("INFINITE_CANVAS_BLENDER_BUNDLE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/blender"));
+        let renderer = service_with_bundle(temporary.path(), bundled_root.clone());
+        let engine = renderer.detect_engine(None).await;
+        assert!(engine.available, "{}", engine.message);
+        assert!(
+            Path::new(engine.executable_path.as_ref().unwrap())
+                .canonicalize()
+                .unwrap()
+                .starts_with(bundled_root.canonicalize().unwrap())
+        );
         let started = renderer.start(request()).await.unwrap();
         let first = completed(&renderer, &started.job_id).await;
         assert_eq!(
@@ -1027,11 +1180,15 @@ mod tests {
         assert_ne!(first.project_path, second.project_path);
         assert_eq!(std::fs::read(first_project).unwrap(), original_bytes);
         assert_eq!(
-            service(temporary.path()).get(&first.job_id).unwrap().status,
+            service_with_bundle(temporary.path(), bundled_root.clone())
+                .get(&first.job_id)
+                .unwrap()
+                .status,
             BlenderRenderStatus::Succeeded
         );
         eprintln!(
-            "Blender service smoke complete: create and reimport MP4 + editable project, 320x180 / 8fps / 1s"
+            "Blender bundled service smoke complete: create and reimport MP4 + editable project, 320x180 / 8fps / 1s, bundle={}",
+            bundled_root.display()
         );
     }
 }

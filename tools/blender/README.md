@@ -8,19 +8,56 @@
 
 ## 引擎
 
-需要 Blender **4.5 或更新版本**，实际验证版本为 **4.5.13 LTS**。应用支持自动检测或选择已有 Blender 可执行文件。Windows 便携版检测位置为：
+正式安装包内置完整 **Blender 4.5.13 LTS**，用户无需下载或安装 Blender。构建过程预先准备引擎、Python、动态库、资源与许可证；应用运行时使用包内引擎。显式选择其他本地 Blender 是可选的专业配置，桥接支持 4.5 或更新版本，实际验证基线为 4.5.13。
+
+构建资源布局如下，缓存和解包暂存目录不进入安装包：
 
 ```text
-%LOCALAPPDATA%\InfiniteCanvas\tools\blender-4.5.13\blender-4.5.13-windows-x64\blender.exe
+src-tauri/resources/blender/
+  manifest.json
+  files-manifest.json
+  SOURCE.txt
+  runtime/                 # 完整官方发行内容
+  sources/
+    blender-4.5.13.tar.xz
+    white_model.py
+    white_model.LICENSE.txt
 ```
 
-[官方 4.5 LTS 下载页](https://www.blender.org/download/lts/4-5/)提供 Windows ZIP；[4.5.13 官方校验文件](https://download.blender.org/release/Blender4.5/blender-4.5.13.sha256)中，Windows x64 ZIP 的 SHA-256 为：
+Windows 可执行文件为 `runtime/blender.exe`，macOS 为 `runtime/Blender.app/Contents/MacOS/Blender`，Linux 为 `runtime/blender`。
+
+## 构建时准备
+
+`scripts/prepare-blender-runtime.mjs` 使用 [官方 4.5.13 发行目录](https://download.blender.org/release/Blender4.5/)和固定 SHA-256。它完整解包官方发行内容，实际执行 `--version`，再发布资源目录。Windows 使用原生 `tar.exe`，macOS 使用 `hdiutil` 和 `ditto` 保留完整 `.app` 及其链接，Linux 使用 `tar`。不读取用户 AppData 中的已安装 Blender。
+
+```powershell
+pnpm blender:prepare
+# 可选：使用已有官方归档，仍必须通过相同大小与 SHA-256 校验。
+$env:BLENDER_ARCHIVE_PATH = 'C:\build-cache\blender-4.5.13-windows-x64.zip'
+pnpm blender:prepare
+```
+
+源码包默认也从官方地址下载；离线构建可用 `BLENDER_SOURCE_ARCHIVE_PATH` 指定对应源码包。缓存位于 `node_modules/.cache/infinite-canvas/blender/4.5.13`，每次复用都重新校验归档或完整资源库存；同名文件被替换、Python/DLL 缺失、清单损坏会触发重新准备。无法取得或验证资源会中断构建，不产生缺引擎的安装包。`--force` 可明确重新准备。
+
+支持官方提供的 Windows x64 / arm64、macOS x64 / arm64、Linux x64。4.5.13 没有官方 Linux arm64 便携发行包，该目标会明确报错。目标平台或架构与构建机不符时也会报错，避免混入宿主平台引擎；macOS arm64 CI 在原生 runner 准备对应 DMG。
+
+[官方校验文件](https://download.blender.org/release/Blender4.5/blender-4.5.13.sha256)中的 Windows x64 ZIP SHA-256 为：
 
 ```text
 b5fdf800ce65fa2f209e8f68d02667e4d720fa1c42f247c72d1882ab04decba6
 ```
 
+Windows x64 归档约 **380.2 MiB**，完整资源包实测约 **963.0 MiB**，其中已包含约 **81.2 MiB** 的对应 Blender 源码归档；最终安装包大小由平台压缩与其他应用资源共同决定。全文件库存存放在独立 `files-manifest.json`，主 `manifest.json` 只保存平台、版本、路径、来源和库存摘要，启动时无需读取大型库存。
+
 Workbench 适合白模预演，保留物体颜色、空间遮挡和相机动画，输出不透明画面。它仍需可用的显卡驱动，后台运行不等于只使用 CPU。所选引擎的实际启动和渲染错误会返回任务状态。
+
+## 许可证与源码
+
+保留原始发行包的 `copyright.txt` 和整个 `license/`；macOS 对应内容位于 `.app/Contents/Resources/text/`。[Blender 官方许可说明](https://www.blender.org/about/license/)说明二进制发行整体采用 GPLv3 或更新版本，包中各第三方组件继续保留各自许可。
+
+包内附带[对应 Blender 4.5.13 源码归档](https://download.blender.org/source/blender-4.5.13.tar.xz)。官方为源码发布 MD5，本脚本核对官方 MD5 后记录本地计算的 SHA-256，不将它冒称为官方 SHA-256。`SOURCE.txt` 记录原发行与源码地址、校验信息和依赖源码获取位置；源码归档内保留官方构建文件、依赖下载地址与校验值。发布时应一起保留这些源码和许可文件。
+
+本目录的 `white_model.py` 桥接脚本采用 **GPL-3.0-or-later**，文本见本目录 `LICENSE`，脚本源文件及许可同时复制到安装包的 `sources/`。该声明仅适用于该 Blender 桥接脚本，不改变其他主程序文件的许可。
 
 ## 固定脚本协议
 
@@ -55,9 +92,15 @@ blender --background --factory-startup --disable-autoexec --python-exit-code 1
 Rust 中保留一项需要本地引擎的手动 smoke，覆盖渲染、视频编码和工程再导入：
 
 ```powershell
+# 可选：指定从安装包提取出的 blender 目录；不设置时使用构建资源。
+$env:INFINITE_CANVAS_BLENDER_BUNDLE = 'C:\package-check\blender'
 cargo test --manifest-path src-tauri/Cargo.toml --locked blender_real_engine_renders_mp4_and_reimports_editable_project -- --ignored --nocapture
 ```
 
-可先单独执行 `blender.exe --version` 检查原生进程是否能读取安装目录。本次工具环境中，PowerShell 曾能读取 AppData 内解压的文件，而原生进程看不到对应运行库，导致 SideBySide 错误；使用原生 Python 从已校验 ZIP 解压到同一便携目录后恢复。该问题通过文件落盘方式解决，未修改系统注册表或系统运行库。
+构建准备测试使用 `node --test scripts/prepare-blender-runtime.test.mjs`，覆盖平台映射、归档校验、缓存缺少/篡改依赖及路径边界。
+
+2026-09-14 完成 Windows x64 NSIS 正式构建，安装包为 753,312,356 字节（约 718.4 MiB）。从该安装包提取并逐项验证全部 5,529 个 Blender 文件／链接，内容与构建资源完全一致，FFmpeg 摘要也一致。以提取根运行上述单项 Rust smoke（6.12 秒通过），创建与工程回导均使用 `executablePath: null`，路径断言确认选择包内引擎；MP4、预览、可编辑工程、原工程保护和持久任务恢复均通过。本次未运行安装后的 GUI 点选验收，macOS/Linux 仍需在对应平台实际验证。
+
+本次工具环境曾出现 PowerShell 能读取 AppData 内的文件、原生进程却看不到对应运行库的 SideBySide 错误。构建准备改用原生解包与原生执行验证，避免依赖该工具环境的路径映射；未修改系统注册表或系统运行库。
 
 接口依据为 [Blender 4.5 命令行文档](https://docs.blender.org/manual/en/4.5/advanced/command_line/arguments.html)、[Python API](https://docs.blender.org/api/4.5/)及 [Workbench 说明](https://docs.blender.org/manual/en/4.5/render/workbench/introduction.html)。

@@ -1,3 +1,5 @@
+# SPDX-License-Identifier: GPL-3.0-or-later
+# This Blender bridge script is distributed under tools/blender/LICENSE.
 """Render an app-authored white-model plan using Blender's bundled Python.
 
 Only JSON data is accepted from the job. This fixed script creates an editable

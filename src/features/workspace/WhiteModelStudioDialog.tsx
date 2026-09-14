@@ -146,6 +146,9 @@ export function WhiteModelStudioDialog({
   const [cancelling, setCancelling] = useState(false);
   const [using, setUsing] = useState(false);
   const [opening, setOpening] = useState(false);
+  const [advancedEngineOpen, setAdvancedEngineOpen] = useState(
+    Boolean(draft.executablePath.trim()),
+  );
   const engineRequestId = useRef(0);
   const initialPath = useRef(draft.executablePath);
   const loadedJob = job?.jobId === draft.jobId ? job : null;
@@ -187,7 +190,12 @@ export function WhiteModelStudioDialog({
         }
       })
       .catch((cause: unknown) => {
-        if (alive) setError(errorMessage(cause));
+        if (alive)
+          setError(
+            initialPath.current.trim()
+              ? errorMessage(cause)
+              : `内置 Blender 检查失败：${errorMessage(cause)} 请修复安装包或重新安装应用。`,
+          );
       });
     return () => {
       alive = false;
@@ -250,7 +258,11 @@ export function WhiteModelStudioDialog({
     } catch (cause) {
       if (requestId === engineRequestId.current) {
         setEngine(null);
-        setError(errorMessage(cause));
+        setError(
+          path.trim()
+            ? errorMessage(cause)
+            : `内置 Blender 检查失败：${errorMessage(cause)} 请修复安装包或重新安装应用。`,
+        );
       }
     } finally {
       if (requestId === engineRequestId.current) setDetecting(false);
@@ -356,11 +368,16 @@ export function WhiteModelStudioDialog({
         if (event.key === "Tab") {
           const controls = Array.from(
             dialogRef.current?.querySelectorAll<HTMLElement>(
-              'button, input, select, textarea, video[controls], [tabindex="0"]',
+              'button, input, select, textarea, summary, video[controls], [tabindex="0"]',
             ) ?? [],
-          ).filter(
-            (element) => !element.matches(":disabled") && !element.closest("details:not([open])"),
-          );
+          ).filter((element) => {
+            const closedDetails = element.closest("details:not([open])");
+            return (
+              !element.matches(":disabled") &&
+              (!closedDetails ||
+                (element.tagName === "SUMMARY" && element.parentElement === closedDetails))
+            );
+          });
           const first = controls[0];
           const last = controls.at(-1);
           if (event.shiftKey && document.activeElement === first) {
@@ -393,40 +410,79 @@ export function WhiteModelStudioDialog({
         >
           <fieldset disabled={locked} className="white-model-studio__section">
             <legend>渲染引擎</legend>
-            <label className="white-model-studio__field">
-              <span>Blender 路径</span>
-              <input
-                value={draft.executablePath}
-                placeholder="留空自动检测已安装的 Blender"
-                onChange={(event) => updateDraft({ executablePath: event.target.value })}
-              />
-            </label>
-            <div className="white-model-studio__actions">
-              <button
-                type="button"
-                onClick={() => {
-                  void chooseFile("engine");
-                }}
-              >
-                选择 Blender
-              </button>
-              <button
-                type="button"
-                disabled={detecting}
-                onClick={() => {
-                  void detectEngine();
-                }}
-              >
-                {detecting ? "正在检测…" : "检测引擎"}
-              </button>
-            </div>
+            <p className="white-model-studio__hint">
+              应用已内置 Blender，无需另行安装或下载。渲染与工程精修均可直接使用内置引擎。
+            </p>
             <p className="white-model-studio__hint" role="status">
               {enginePath !== draft.executablePath.trim() && engine
-                ? "路径已修改，请重新检测引擎。"
+                ? "外部程序路径已修改，请重新检查引擎。"
                 : engine
                   ? `${engine.message}${engine.version ? ` · ${engine.version}` : ""}`
-                  : "正在检测 Blender…"}
+                  : draft.executablePath.trim()
+                    ? "正在检查指定的外部 Blender…"
+                    : "正在检查内置 Blender…"}
             </p>
+            {!draft.executablePath.trim() && engine && !engine.available ? (
+              <p className="white-model-studio__hint">
+                内置引擎无法启动，请修复安装包或重新安装应用。
+              </p>
+            ) : null}
+            <button
+              type="button"
+              disabled={detecting}
+              onClick={() => {
+                void detectEngine();
+              }}
+            >
+              {detecting
+                ? "正在检查…"
+                : draft.executablePath.trim()
+                  ? "重新检查外部引擎"
+                  : "重新检查内置引擎"}
+            </button>
+            <details
+              className="white-model-studio__advanced"
+              open={advancedEngineOpen}
+              onToggle={(event) => setAdvancedEngineOpen(event.currentTarget.open)}
+            >
+              <summary>高级设置：使用外部 Blender（可选）</summary>
+              {advancedEngineOpen ? (
+                <div className="white-model-studio__advanced-body">
+                  <p className="white-model-studio__hint">
+                    仅在需要指定其他版本时使用。留空即使用应用内置版本。
+                  </p>
+                  <label className="white-model-studio__field">
+                    <span>外部 Blender 路径</span>
+                    <input
+                      value={draft.executablePath}
+                      placeholder="留空使用内置 Blender"
+                      onChange={(event) => updateDraft({ executablePath: event.target.value })}
+                    />
+                  </label>
+                  <div className="white-model-studio__actions">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void chooseFile("engine");
+                      }}
+                    >
+                      选择外部 Blender
+                    </button>
+                    {draft.executablePath.trim() ? (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          updateDraft({ executablePath: "" });
+                          void detectEngine("");
+                        }}
+                      >
+                        恢复使用内置引擎
+                      </button>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+            </details>
           </fieldset>
           <fieldset disabled={locked} className="white-model-studio__section">
             <legend>场景来源与输出</legend>

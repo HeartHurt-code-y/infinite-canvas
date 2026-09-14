@@ -141,7 +141,11 @@ impl BackendState {
         let cover_images = CoverImageService::new(downloads_directory.clone(), composer.clone());
         let reverse_video =
             ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
-        let blender = BlenderRenderService::new(downloads_directory.clone(), composer.clone());
+        let blender = BlenderRenderService::new(
+            downloads_directory.clone(),
+            composer.clone(),
+            Some(app.path().resource_dir()?.join("blender")),
+        );
         let remotion_renderer =
             RemotionRenderService::new(downloads_directory, app.path().resource_dir()?);
 

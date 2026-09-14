@@ -109,7 +109,7 @@
   opacity: 0.55;
   cursor: default;
 }
-.white-model-studio :is(input, select, button, video):focus-visible {
+.white-model-studio :is(input, select, button, video, summary):focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--space-3xs);
 }
@@ -124,6 +124,16 @@
   color: var(--color-chrome-muted);
   font-size: var(--text-xs);
   overflow-wrap: anywhere;
+}
+.white-model-studio__advanced > summary {
+  min-height: var(--size-control-touch);
+  align-content: center;
+  cursor: pointer;
+}
+.white-model-studio__advanced-body {
+  display: grid;
+  gap: var(--space-sm);
+  padding-top: var(--space-xs);
 }
 .white-model-studio__keyframe {
   display: grid;

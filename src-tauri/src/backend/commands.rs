@@ -5,7 +5,7 @@ use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
     BackendState,
-    blender::{self, BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
+    blender::{BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
     commerce_sources::{self, CommerceSource},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
     cover_images::{
@@ -214,8 +214,14 @@ pub async fn resume_generation_result(
 }
 
 #[tauri::command]
-pub async fn get_blender_engine(executable_path: Option<String>) -> BlenderEngineStatus {
-    blender::detect_engine(executable_path.as_deref()).await
+pub async fn get_blender_engine(
+    state: State<'_, BackendState>,
+    executable_path: Option<String>,
+) -> CommandResult<BlenderEngineStatus> {
+    Ok(state
+        .blender
+        .detect_engine(executable_path.as_deref())
+        .await)
 }
 
 #[tauri::command]
@@ -244,10 +250,13 @@ pub fn cancel_blender_render(
 
 #[tauri::command]
 pub async fn open_blender_project(
+    state: State<'_, BackendState>,
     executable_path: Option<String>,
     project_path: String,
 ) -> CommandResult<()> {
-    blender::open_project(executable_path.as_deref(), Path::new(&project_path))
+    state
+        .blender
+        .open_project(executable_path.as_deref(), Path::new(&project_path))
         .await
         .command()
 }
