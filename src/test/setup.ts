@@ -1,6 +1,11 @@
 import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
+import { cleanup, configure } from "@testing-library/react";
 import { afterEach } from "vitest";
+
+// 慢速 CI（如 CircleCI 的 2 vCPU Docker executor）上整包 App 渲染与 React 更新
+// 可能超过 findBy*/waitFor 默认的 1000ms，造成与真实用户无关的边缘超时。
+// 全局放宽到 5s：成功路径立即返回，仅在慢环境上消除偶发竞态。
+configure({ asyncUtilTimeout: 5000 });
 
 // Node 26 的实验性 global localStorage 在未指定文件时为 undefined，会覆盖
 // jsdom 实现。测试环境用内存 Storage 复原 WebView 中的持久化 API。

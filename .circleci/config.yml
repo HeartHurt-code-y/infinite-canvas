@@ -71,6 +71,9 @@ jobs:
     docker:
       # cimg/node 的 tag 是 24.x（major.minor），不存在裸 24；24.21 跟随最新 24 补丁
       - image: cimg/node:24.21
+    # 与 GitHub Actions ubuntu-24.04 的 4 vCPU 对齐：默认 medium(2 vCPU) 下整包
+    # 测试与渲染明显变慢，容易踩 findBy*/waitFor 的边缘超时
+    resource_class: large
     steps:
       - checkout
       - run:
