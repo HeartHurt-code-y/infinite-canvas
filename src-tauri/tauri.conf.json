@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.infinitecanvas.desktop",
   "build": {
-    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm dev",
+    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm build",
+    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {
@@ -42,6 +42,7 @@
     "resources": {
       "resources/remotion-runtime/": "remotion-runtime/",
       "resources/ffmpeg/": "ffmpeg/",
+      "resources/blender/": "blender/",
       "skills/gpt-image-2-style-library/LICENSE": "licenses/gpt-image-2-style-library-LICENSE",
       "skills/gpt-image-2-style-library/": "skills/gpt-image-2-style-library/"
     },
