@@ -4,13 +4,13 @@ version: 2.1
 #   - .github/workflows/ci.yml           → quality job（Linux 质量检查）
 #   - .github/workflows/macos-package.yml → macos-package job（macOS 安装包）
 #
-# 触发方式：push 时只跑 quality（默认参数）；需要打 macOS 包时，在 CircleCI
-# 「Run Pipeline」弹窗中勾选 run-macos-package 再触发，避免每次 push 消耗
-# 免费的 macOS 构建分钟（免费层约 150 分钟/月，冷编译一次约 25-40 分钟）。
+# 触发方式：push 不自动跑任何 workflow，全部在 CircleCI「Run Pipeline」弹窗中
+# 按需勾选（或通过 API 带参数触发），避免 push 消耗免费的构建分钟
+# （免费层 Linux 有额度限制，macOS 约 150 分钟/月，冷编译一次约 25-40 分钟）。
 parameters:
   run-quality:
     type: boolean
-    default: true
+    default: false
   run-macos-package:
     type: boolean
     default: false
