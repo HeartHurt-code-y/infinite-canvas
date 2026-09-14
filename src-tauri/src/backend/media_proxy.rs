@@ -1095,7 +1095,7 @@ mod tests {
         assert_eq!(open_ended.body(), b"0123456789ab");
         assert_eq!(
             open_ended.headers()["content-range"],
-            format!("bytes 0-11/12")
+            "bytes 0-11/12".to_string()
         );
 
         // 越界区间按标准语义回 416，不静默返回整包。
