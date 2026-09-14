@@ -8150,7 +8150,7 @@ describe("剧本创作与优化节点（桌面运行时）", () => {
     const node = await addScreenplayNode(640, 400);
 
     expect(within(node).getByText("双技能已内置")).toBeInTheDocument();
-    expect(within(node).getByText(/每轮完整注入/)).toBeInTheDocument();
+    expect(within(node).getByText(/智能按需加载/)).toBeInTheDocument();
     const composer = within(node).getByRole("textbox", { name: "剧本对话消息" });
     fireEvent.change(composer, { target: { value: "写一个雨夜重逢短剧" } });
     fireEvent.click(within(node).getByRole("button", { name: "发送" }));
@@ -8384,7 +8384,7 @@ describe("剧本转工业级分镜脚本节点（桌面运行时）", () => {
     const node = await addStoryboardNode(640, 400);
 
     expect(within(node).getByText("V5.0 分镜技能已内置")).toBeInTheDocument();
-    expect(within(node).getByText(/17 references · 每轮完整注入/)).toBeInTheDocument();
+    expect(within(node).getByText(/V5.0 完整技能库 · 智能按需加载/)).toBeInTheDocument();
     const composer = within(node).getByRole("textbox", { name: "分镜对话消息" });
     fireEvent.change(composer, {
       target: { value: "把这份雨夜重逢剧本转成 9:16 的 Seedance 2.5 工业级分镜" },

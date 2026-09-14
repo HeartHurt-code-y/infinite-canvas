@@ -1585,7 +1585,7 @@ export type PromptOptimizationMode =
   | "storyboard_prompt"
   | "gpt_image_2_style";
 
-/** 文本技能模式；文档与视频复刻模式均使用随应用编译的完整技能上下文。 */
+/** 文本技能模式；完整技能库随应用编译，运行时保留核心合同并按需选择参考资料。 */
 export type TextSkillMode =
   | PromptOptimizationMode
   | "screenplay"
