@@ -1,0 +1,157 @@
+version: 2.1
+
+# 对齐仓库现有 GitHub Actions 流水线：
+#   - .github/workflows/ci.yml           → quality job（Linux 质量检查）
+#   - .github/workflows/macos-package.yml → macos-package job（macOS 安装包）
+#
+# 触发方式：push 时只跑 quality（默认参数）；需要打 macOS 包时，在 CircleCI
+# 「Run Pipeline」弹窗中勾选 run-macos-package 再触发，避免每次 push 消耗
+# 免费的 macOS 构建分钟（免费层约 150 分钟/月，冷编译一次约 25-40 分钟）。
+parameters:
+  run-quality:
+    type: boolean
+    default: true
+  run-macos-package:
+    type: boolean
+    default: false
+
+commands:
+  install-rust:
+    description: 安装 Rust stable + clippy + rustfmt（与现有流水线一致）
+    steps:
+      - run:
+          name: Set up Rust
+          command: |
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal --component clippy --component rustfmt
+            echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$BASH_ENV"
+
+  install-pnpm:
+    description: 固定 pnpm 11.21.0，并把 store 固定到可缓存目录
+    steps:
+      - run:
+          name: Set up pnpm
+          command: |
+            if command -v corepack >/dev/null 2>&1; then
+              corepack enable
+              corepack prepare pnpm@11.21.0 --activate
+            else
+              npm install -g pnpm@11.21.0
+            fi
+            pnpm config set store-dir "$HOME/.pnpm-store"
+
+  restore-caches:
+    steps:
+      - restore_cache:
+          name: Restore pnpm store
+          keys:
+            - pnpm-store-{{ checksum "pnpm-lock.yaml" }}
+      - restore_cache:
+          name: Restore Rust cache
+          keys:
+            - cargo-{{ checksum "src-tauri/Cargo.lock" }}-{{ .Branch }}
+            - cargo-{{ checksum "src-tauri/Cargo.lock" }}
+
+  save-caches:
+    steps:
+      - save_cache:
+          name: Save pnpm store
+          key: pnpm-store-{{ checksum "pnpm-lock.yaml" }}
+          paths:
+            - ~/.pnpm-store
+      - save_cache:
+          name: Save Rust cache
+          key: cargo-{{ checksum "src-tauri/Cargo.lock" }}-{{ .Branch }}-{{ .Revision }}
+          paths:
+            - ~/.cargo/registry
+            - ~/.cargo/git
+            - src-tauri/target
+
+jobs:
+  quality:
+    docker:
+      - image: cimg/node:24
+    steps:
+      - checkout
+      - run:
+          name: Install Linux dependencies
+          command: |
+            sudo apt-get update
+            sudo apt-get install --no-install-recommends -y \
+              libayatana-appindicator3-dev \
+              librsvg2-dev \
+              libwebkit2gtk-4.1-dev
+      - install-rust
+      - install-pnpm
+      - restore-caches
+      - run:
+          name: Install dependencies
+          command: pnpm install --frozen-lockfile
+      # bundle.resources 指向的两个引擎目录由 prepare 脚本生成且被 gitignore，
+      # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
+      # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
+      - run:
+          name: Prepare bundled engines
+          command: pnpm ffmpeg:prepare && pnpm remotion:prepare
+      - run:
+          name: Run project checks
+          command: pnpm check
+      - run:
+          name: Run Rust unit tests
+          command: pnpm rust:test
+      - run:
+          name: Build frontend
+          command: pnpm build
+      - save-caches
+
+  macos-package:
+    # 对应 GitHub Actions 的 macos-14；CircleCI 免费层 macOS 默认机型即可完成打包
+    macos:
+      xcode: "15.4.0"
+    environment:
+      CI: "true"
+    steps:
+      - checkout
+      - run:
+          name: Set up Node.js 24
+          command: |
+            ARCH="$(uname -m)"
+            case "$ARCH" in
+              arm64) NODE_TGZ="node-v24.0.0-darwin-arm64.tar.gz" ;;
+              x86_64) NODE_TGZ="node-v24.0.0-darwin-x64.tar.gz" ;;
+              *) echo "unsupported arch: $ARCH" >&2; exit 1 ;;
+            esac
+            curl -fsSL "https://nodejs.org/dist/v24.0.0/${NODE_TGZ}" -o /tmp/node.tgz
+            mkdir -p /tmp/nodejs
+            tar -xzf /tmp/node.tgz -C /tmp/nodejs --strip-components=1
+            echo 'export PATH="/tmp/nodejs/bin:$PATH"' >> "$BASH_ENV"
+      - install-rust
+      - install-pnpm
+      - restore-caches
+      - run:
+          name: Install dependencies
+          command: pnpm install --frozen-lockfile
+      - run:
+          name: Build macOS installer
+          command: pnpm tauri:build
+      - run:
+          name: List bundle outputs
+          command: |
+            ls -lh src-tauri/target/release/bundle/dmg || true
+            ls -lh src-tauri/target/release/bundle/macos || true
+      - store_artifacts:
+          path: src-tauri/target/release/bundle/dmg
+          destination: dmg
+      - store_artifacts:
+          path: src-tauri/target/release/bundle/macos
+          destination: macos
+      - save-caches
+
+workflows:
+  quality:
+    when: << pipeline.parameters.run-quality >>
+    jobs:
+      - quality
+  macos-package:
+    when: << pipeline.parameters.run-macos-package >>
+    jobs:
+      - macos-package
