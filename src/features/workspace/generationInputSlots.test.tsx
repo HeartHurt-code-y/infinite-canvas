@@ -1,9 +1,17 @@
-import { render, screen } from "@testing-library/react";
-import { describe, expect, it, vi } from "vitest";
+import { render, screen, waitFor } from "@testing-library/react";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasState, type CanvasNodeEntry } from "../canvas/canvasStore";
 import { createCanvasInputResolver } from "./canvasInputs";
+import { AssetFlow } from "./AssetLibraryViews";
 import { GenerationInputChips } from "./MediaNodeViews";
-import type { AssetEdgeData, AssetNodeData, GenNodeData, ImageNodeConfig } from "./workspaceModel";
+import { clearMediaByteCache } from "./mediaByteCache";
+import type {
+  AssetEdgeData,
+  AssetItem,
+  AssetNodeData,
+  GenNodeData,
+  ImageNodeConfig,
+} from "./workspaceModel";
 
 const model = { providerId: "provider", modelDefinitionId: "model" };
 const imageNode = (key: string): AssetNodeData => ({
@@ -134,6 +142,77 @@ describe("生成节点参考素材的传入顺序编号", () => {
       { order: "2", name: "继承图" },
       { order: "3", name: "C" },
     ]);
+  });
+});
+
+describe("参考素材清单的缩略图字节复用", () => {
+  afterEach(() => {
+    clearMediaByteCache();
+    vi.unstubAllGlobals();
+  });
+
+  it("同一份素材在素材库卡片里下载过一次后，参考清单直接复用本地字节", async () => {
+    // 用户真实形态：素材库缩略图能显示，参考清单上的同一份素材却只剩类型图标 ——
+    // 因为清单把供应商签名地址直接交给 `<img>`，既不复用已下载的字节，失败后也不再重试。
+    const fetched: string[] = [];
+    const objectUrl = "blob:shared-asset";
+    vi.stubGlobal("fetch", (input: string) => {
+      fetched.push(input);
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => null },
+        blob: () => Promise.resolve({ size: 8 }),
+      } as unknown as Response);
+    });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue(objectUrl);
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    const signedUrl = "https://cdn.example.com/shot.png?X-Tos-Signature=stale";
+    const asset: AssetItem = {
+      id: "asset-shot",
+      kind: "image",
+      name: "ScreenShot_2026-09-07_192951_026.png",
+      meta: "已就绪",
+      visual: "portrait",
+      previewUrl: signedUrl,
+      source: "cloud",
+      providerConnectionId: "moyu-prod",
+    };
+    render(
+      <>
+        <AssetFlow assets={[asset]} onPreview={() => undefined} onDropToCanvas={vi.fn()} />
+        <GenerationInputChips
+          inputs={[
+            {
+              key: "asset-node-1",
+              name: asset.name,
+              kind: "image",
+              edgeId: "asset-node-1->gen",
+              sourceLabel: "素材",
+              previewUrl: signedUrl,
+              target: {
+                kind: "asset",
+                providerConnectionId: "moyu-prod",
+                assetId: "asset-shot",
+                canvasNodeKey: "asset-node-1",
+                mediaType: "image",
+              },
+            },
+          ]}
+          onUnlink={vi.fn()}
+        />
+      </>,
+    );
+
+    // 素材库卡片按素材身份下载一次字节；参考清单复用同一笔账，不再重复请求。
+    await waitFor(() => expect(fetched).toHaveLength(1));
+    const chipThumb = await waitFor(() => {
+      const image = document.querySelector<HTMLImageElement>(".auto-size-thumb img");
+      expect(image).not.toBeNull();
+      return image!;
+    });
+    expect(chipThumb).toHaveAttribute("src", objectUrl);
+    expect(fetched).toHaveLength(1);
   });
 });
 

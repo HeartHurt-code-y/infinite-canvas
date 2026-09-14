@@ -15,6 +15,7 @@ import {
   toMediaSrc,
   type GenerationResultRecord,
   type GenerationTaskSummary,
+  type MediaReferenceTarget,
   type ProviderCatalogEntry,
   type VideoDownloaderEngineStatus,
 } from "../../lib/backend";
@@ -34,6 +35,7 @@ import {
   VideoNodeSettings,
 } from "./PromptNodeViews";
 import type {
+  AssetKind,
   AssetNodeData,
   CanvasNodeDimensions,
   ConnectedAssetInput,
@@ -2425,29 +2427,40 @@ export function CanvasResultNode({
  * 自动适应原始媒体宽高比的缩略图：高度固定，宽度按比例计算，完整显示不裁剪。
  * 参考视频素材取中间帧作静止封面（与素材卡片、画布素材节点一致），
  * 封面图/首帧尚未就绪时先显示类型图标。
+ *
+ * 传入素材身份（`assetId`/`assetKind`）时，图片同样取用会话内已下载的字节：参考素材
+ * 清单与素材库卡片、画布素材节点显示的是同一份素材，只在这里把供应商签名地址交给
+ * `<img>`，会让同一张图在卡片里可见、在参考清单里只留一个类型图标。
  */
 export function AutoSizeThumb({
   previewUrl,
   kind,
+  assetId,
+  assetKind,
   height = "2rem",
   maxWidth = "6rem",
 }: {
   readonly previewUrl: string | null;
   readonly kind: string;
+  /** 素材身份与 `previewUrl` 一起决定字节缓存的账目；缺省时只按地址直连渲染。 */
+  readonly assetId?: string | undefined;
+  readonly assetKind?: AssetKind | undefined;
   readonly height?: string;
   readonly maxWidth?: string;
 }) {
+  const bytes = useMediaByteSource(assetId ?? "", assetKind ?? "image", previewUrl);
+  const resolvedUrl = bytes.url ?? previewUrl;
   // 失败按 URL 记忆而非布尔值：来源节点续签出新地址后，新 URL 会自动重试加载。
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
-  const failed = previewUrl != null && failedUrl === previewUrl;
+  const failed = resolvedUrl != null && failedUrl === resolvedUrl;
   // 宽高比与来源地址一起记忆：来源换地址后旧比例立即失效，避免沿用上一份媒体的比例。
   const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
-  const measuredRatio = measured != null && measured.url === previewUrl ? measured.ratio : null;
-  const videoSource = kind === "video" && isVideoSourceUrl(previewUrl) ? previewUrl : null;
+  const measuredRatio = measured != null && measured.url === resolvedUrl ? measured.ratio : null;
+  const videoSource = kind === "video" && isVideoSourceUrl(resolvedUrl) ? resolvedUrl : null;
   const showVideo = videoSource != null && !failed;
   const imageSource =
-    videoSource == null && previewUrl != null && !failed && kind !== "audio" && kind !== "document"
-      ? previewUrl
+    videoSource == null && resolvedUrl != null && !failed && kind !== "audio" && kind !== "document"
+      ? resolvedUrl
       : null;
   const measure = (url: string, ratio: number) => {
     if (Number.isFinite(ratio) && ratio > 0) setMeasured({ url, ratio });
@@ -2493,6 +2506,28 @@ export function AutoSizeThumb({
   );
 }
 
+/**
+ * 参考素材的字节缓存身份：与 @ 引用候选（`referenceCandidateFromTarget`）同一套映射，
+ * 保证同一份素材在候选面板、参考清单、素材库与画布节点之间共用同一笔缓存账。
+ */
+function referenceAssetIdentity(
+  target: MediaReferenceTarget | undefined,
+): { readonly assetId: string; readonly kind: AssetKind } | null {
+  if (target == null) return null;
+  if (target.kind === "asset") return { assetId: target.assetId, kind: target.mediaType };
+  if (target.kind === "local_asset") {
+    return { assetId: target.stagingJobId, kind: target.mediaType };
+  }
+  if (target.kind === "local_result") {
+    // 产物节点没有素材 ID：按产物身份记账，同一份产物的缩略图只下载一次。
+    return {
+      assetId: `${target.generationTaskId}#${target.resultIndex}`,
+      kind: target.mediaType,
+    };
+  }
+  return null;
+}
+
 /** 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。 */
 export function GenerationInputChips({
   inputs,
@@ -2511,6 +2546,7 @@ export function GenerationInputChips({
         const inherited = "promptNodeKey" in input;
         const isOutput = !inherited && input.sourceLabel === "产物";
         const orderNumber = index + 1;
+        const identity = referenceAssetIdentity(input.target);
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
@@ -2526,6 +2562,8 @@ export function GenerationInputChips({
             <AutoSizeThumb
               previewUrl={input.previewUrl}
               kind={input.kind}
+              assetId={identity?.assetId}
+              assetKind={identity?.kind}
               height="2.5rem"
               maxWidth="7rem"
             />

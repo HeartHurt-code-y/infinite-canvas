@@ -12,6 +12,7 @@ import {
 } from "../../lib/backend";
 import { copyTextToDesktopClipboard, openExternalUrl } from "./desktopActions";
 import { AssetMediaState } from "./AssetLibraryViews";
+import { useMediaByteSource } from "./mediaByteCache";
 import type { AssetItem } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
@@ -562,11 +563,19 @@ export function AssetSourceDialog({
   const rawMediaUrl =
     refreshedMediaUrl ??
     (asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl);
-  const mediaSrc = asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl) : rawMediaUrl;
+  // 图片正文同样交给原生媒体代理取字节：供应商签名地址在 WebView 里直接请求会被跨域
+  // 限制/混合内容策略拦掉，而素材库卡片与画布素材节点一直是走代理的 —— 只给 `<img>`
+  // 裸地址会让同一份素材「缩略图可见、点进详情却是预览不可用」。已下载过的字节优先
+  // 复用（放大查看不必等一次远端往返，签名过期也不影响）。
+  const mediaBytes = useMediaByteSource(asset.id, asset.kind, rawMediaUrl);
+  const mediaSrc = asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl) : mediaBytes.url;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
   const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
   const handleMediaError = () => {
     if (mediaSrc != null) setFailedMediaSrc(mediaSrc);
+    // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
+    mediaBytes.retry();
+    if (mediaBytes.fromCache) return;
     if (mediaRefreshAttemptedRef.current || rawMediaUrl == null) return;
     mediaRefreshAttemptedRef.current = true;
     // 云端素材回读供应商记录、本地素材重签对象存储地址（本地素材没有

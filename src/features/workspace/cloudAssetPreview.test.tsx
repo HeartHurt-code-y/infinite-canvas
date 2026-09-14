@@ -1,0 +1,148 @@
+import { fireEvent, render, waitFor } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { AssetFlow } from "./AssetLibraryViews";
+import { AssetSourceDialog } from "./AssetDialogs";
+import { clearMediaByteCache } from "./mediaByteCache";
+import type { AssetItem } from "./workspaceModel";
+import * as backend from "../../lib/backend";
+
+/**
+ * 云端素材预览地址：素材库缩略图能显示、点进详情却「预览不可用」的成因。
+ *
+ * 同一个供应商签名地址在三条渲染路径上被要求做三件不同的事：
+ * - 素材库卡片与画布素材节点把地址交给 `assetproxy` 原生取字节（绕开 WebView 跨域限制），
+ *   并按素材身份复用会话内已下载的字节；
+ * - 素材详情弹窗却把原始地址直接交给 `<img>`，于是弹出时该地址可能已经取不到（供应商
+ *   失效签名、WebView 直接请求被拦），同一份素材在缩略图里可见、在弹窗里报「预览不可用」。
+ *
+ * 这里锁定统一语义：详情弹窗必须走与卡片完全相同的地址解析，且在会话内已下载过这份
+ * 素材时直接复用本地字节，不再因为签名失效而失败。
+ */
+
+const mocks = vi.hoisted(() => ({ convertFileSrc: vi.fn(), refreshMedia: vi.fn() }));
+vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: mocks.convertFileSrc }));
+// 只替换预览续签这一条命令；`isDesktopRuntime` 等运行时判定保持真实实现
+// （由下面注入的 Tauri 全局决定），避免测出一套与生产不同的地址解析。
+vi.mock("../../lib/backend", { spy: true });
+
+const SIGNED_URL = "https://cdn.example.com/a.png?X-Tos-Signature=expired";
+const PROXY_URL = `asset://localhost/video?src=${encodeURIComponent(SIGNED_URL)}`;
+const ASSET_ID = "asset-20260914103421-82xww";
+const ASSET_NAME = "ScreenShot_2026-09-07_192951_026.png";
+
+function cloudImageAsset(): AssetItem {
+  return {
+    id: ASSET_ID,
+    kind: "image",
+    name: ASSET_NAME,
+    meta: "已就绪",
+    visual: "portrait",
+    previewUrl: SIGNED_URL,
+    coverUrl: null,
+    videoUrl: null,
+    cloudStatus: "ready",
+    source: "cloud",
+    providerConnectionId: "moyu-prod",
+  };
+}
+
+/** 素材库卡片渲染的图片地址（图片预览 `src` 或视频封面 `poster`）。 */
+function cardMediaSrc(): string | null {
+  return (
+    document.querySelector<HTMLImageElement>(".asset-card__preview")?.getAttribute("src") ??
+    document.querySelector<HTMLVideoElement>(".asset-card video")?.getAttribute("poster") ??
+    null
+  );
+}
+
+function dialogPreview(): HTMLImageElement | null {
+  return document.querySelector<HTMLImageElement>(".asset-source-dialog__media");
+}
+
+beforeEach(() => {
+  clearMediaByteCache();
+  // 生产里预览地址只在桌面 WebView 中经 `assetproxy` 取字节，这里还原该运行时前提。
+  (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = {
+    convertFileSrc: mocks.convertFileSrc,
+  };
+  mocks.convertFileSrc
+    .mockReset()
+    .mockImplementation((path: string) => `asset://localhost/${path}`);
+  mocks.refreshMedia.mockReset().mockResolvedValue(null);
+  vi.spyOn(backend, "refreshAssetItemMediaUrl").mockImplementation(mocks.refreshMedia);
+});
+
+afterEach(() => {
+  delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];
+  vi.unstubAllGlobals();
+});
+
+describe("云端素材预览地址在缩略图与详情之间的解析一致性", () => {
+  it("卡片按素材身份取字节，详情弹窗不得退回裸供应商地址", async () => {
+    const fetched: string[] = [];
+    const objectUrl = "blob:asset-image-1";
+    vi.stubGlobal("fetch", (input: string) => {
+      fetched.push(input);
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => null },
+        blob: () => Promise.resolve({ size: 4 }),
+      } as unknown as Response);
+    });
+    // jsdom 没有 object URL 实现；只替掉这两个静态方法，不能用对象覆盖整个 URL
+    // 构造器（代理地址解析依赖 `new URL(...)`）。
+    vi.spyOn(URL, "createObjectURL").mockReturnValue(objectUrl);
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+
+    render(
+      <>
+        <AssetFlow
+          assets={[cloudImageAsset()]}
+          onPreview={() => undefined}
+          onDropToCanvas={vi.fn()}
+        />
+        <AssetSourceDialog
+          asset={cloudImageAsset()}
+          onClose={() => undefined}
+          onDelete={null}
+          onRename={null}
+        />
+      </>,
+    );
+
+    // 卡片把供应商签名地址交给原生代理取字节，拿到本地字节后换成稳定地址。
+    await waitFor(() => expect(fetched).toEqual([PROXY_URL]));
+    await waitFor(() => expect(cardMediaSrc()).toBe(objectUrl));
+
+    // 详情弹窗渲染的就是卡片那一份地址：不再是裸的供应商签名地址，也不再另发请求。
+    await waitFor(() => expect(dialogPreview()?.getAttribute("src")).toBe(objectUrl));
+    expect(fetched).toHaveLength(1);
+  });
+
+  it("详情弹窗的预览失败时仍会按素材身份续签一次", async () => {
+    const freshUrl = "https://cdn.example.com/a.png?X-Tos-Signature=fresh";
+    mocks.refreshMedia.mockResolvedValue(freshUrl);
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
+
+    render(
+      <AssetSourceDialog
+        asset={cloudImageAsset()}
+        onClose={() => undefined}
+        onDelete={null}
+        onRename={null}
+      />,
+    );
+    // 没有可用字节时回落到同一个原生代理地址，而不是裸的供应商地址。
+    expect(dialogPreview()?.getAttribute("src")).toBe(PROXY_URL);
+
+    fireEvent.error(dialogPreview()!);
+    await waitFor(() =>
+      expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image"),
+    );
+    await waitFor(() =>
+      expect(dialogPreview()?.getAttribute("src")).toBe(
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+      ),
+    );
+  });
+});
