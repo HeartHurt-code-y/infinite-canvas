@@ -185,6 +185,8 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+// 多画布集成用例渲染整个 App 并做多次持久化往返，在慢速 CI（如 CircleCI 的
+// Docker executor）上接近默认 10s 边界；给本块放宽默认超时消除边缘超时。
 describe("App independent canvases", () => {
   it("waits for a new canvas to load before enabling its header navigation and restoring keyboard focus", async () => {
     render(<App />);
@@ -602,4 +604,4 @@ describe("App independent canvases", () => {
       ).toHaveTextContent("删除和偏好回滚失败时仍需保留的提示词"),
     );
   });
-});
+}, 20_000);
