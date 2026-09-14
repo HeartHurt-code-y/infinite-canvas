@@ -32,15 +32,18 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 | ----------------------- | ----------------------------------------------------------------- |
 | `pnpm dev`              | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）     |
 | `pnpm dev:daemon`       | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀） |
-| `pnpm tauri:dev`        | 启动完整桌面应用（自动预置动画与 FFmpeg 引擎）                    |
+| `pnpm tauri:dev`        | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）          |
 | `pnpm build`            | 类型检查并构建前端                                                |
-| `pnpm tauri:build`      | 构建桌面安装包（内置 FFmpeg，离线可用）                           |
+| `pnpm tauri:build`      | 构建桌面安装包（内置 FFmpeg 与 Blender，离线可用）                |
 | `pnpm test`             | 运行前端测试                                                      |
 | `pnpm lint`             | 执行类型感知 ESLint 检查                                          |
 | `pnpm format`           | 使用 Prettier 格式化工程文件                                      |
 | `pnpm check`            | 执行前端、Rust 格式化及 Clippy 全量检查                           |
 | `pnpm ffmpeg:prepare`   | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`        |
 | `pnpm remotion:prepare` | 准备内置动画渲染运行时                                            |
+| `pnpm blender:prepare`  | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码         |
+
+白模工作室默认使用应用内置 Blender，用户无需另行安装或首次运行时下载引擎。构建准备在开发机器上完成，正式安装包包含完整运行库、Python 与工程精修所需资源。外部 Blender 仅作为高级可选设置；内置资源缺失时会报告安装包损坏。打包方式、支持平台与验证说明见 [Blender 桥接](tools/blender/README.md)。
 
 ## 系统访问能力
 
