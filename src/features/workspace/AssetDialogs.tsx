@@ -5,13 +5,14 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   assetLibraryClient,
   formatRawBackendError,
-  refreshAssetItemMediaUrl,
+  refreshMediaUrlWithStagingFallback,
   type RealPersonAssetLibraryClient,
   type RealPersonAuthLink,
   type RealPersonGroup,
 } from "../../lib/backend";
 import { copyTextToDesktopClipboard, openExternalUrl } from "./desktopActions";
 import { AssetMediaState } from "./AssetLibraryViews";
+import { useRecoveredPreviewUrl } from "./assetPreviewRecovery";
 import { useMediaByteSource } from "./mediaByteCache";
 import type { AssetItem } from "./workspaceModel";
 import {
@@ -560,9 +561,11 @@ export function AssetSourceDialog({
   // 云端素材签名地址过期时续签一次：图片预览与视频播放共用新预览地址。
   const [refreshedMediaUrl, setRefreshedMediaUrl] = useState<string | null>(null);
   const mediaRefreshAttemptedRef = useRef(false);
-  const rawMediaUrl =
-    refreshedMediaUrl ??
-    (asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl);
+  const listedMediaUrl =
+    asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
+  // 列表项没带地址时按素材身份补取一次：直接按「没有地址」渲染会让这类素材永远没有预览。
+  const recoveredMediaUrl = useRecoveredPreviewUrl(asset, asset.kind, listedMediaUrl);
+  const rawMediaUrl = refreshedMediaUrl ?? recoveredMediaUrl ?? listedMediaUrl;
   // 图片正文同样交给原生媒体代理取字节：供应商签名地址在 WebView 里直接请求会被跨域
   // 限制/混合内容策略拦掉，而素材库卡片与画布素材节点一直是走代理的 —— 只给 `<img>`
   // 裸地址会让同一份素材「缩略图可见、点进详情却是预览不可用」。已下载过的字节优先
@@ -579,8 +582,10 @@ export function AssetSourceDialog({
     if (mediaRefreshAttemptedRef.current || rawMediaUrl == null) return;
     mediaRefreshAttemptedRef.current = true;
     // 云端素材回读供应商记录、本地素材重签对象存储地址（本地素材没有
-    // providerConnectionId），续签后图片预览与视频播放共用新地址。
-    void refreshAssetItemMediaUrl(asset, asset.kind).then((freshUrl) => {
+    // providerConnectionId），续签后图片预览与视频播放共用新地址。上游把导入时的暂存
+    // 租约地址当预览地址回放时续签不会换地址，共享入口会继续按对象键重签暂存副本；
+    // 暂存对象已被清理时由媒体代理用导入时留存的原始文件接管，弹窗不再永久停在「预览不可用」。
+    void refreshMediaUrlWithStagingFallback(asset, asset.kind, rawMediaUrl).then((freshUrl) => {
       if (freshUrl != null && freshUrl !== "" && freshUrl !== rawMediaUrl) {
         setRefreshedMediaUrl(freshUrl);
         setFailedMediaSrc(null);

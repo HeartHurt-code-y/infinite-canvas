@@ -1,9 +1,14 @@
 import { Icon } from "../../components/Icon";
 import { memo, useEffect, useRef, useState, type CSSProperties } from "react";
-import { formatBytes, refreshAssetItemCoverUrl, refreshAssetItemMediaUrl } from "../../lib/backend";
+import {
+  formatBytes,
+  refreshAssetItemCoverUrl,
+  refreshMediaUrlWithStagingFallback,
+} from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
+import { useRecoveredPreviewUrl } from "./assetPreviewRecovery";
 import { assetMediaByteIdentity, useMediaByteSource, type MediaByteSource } from "./mediaByteCache";
 import type { AssetItem, AssetKind, AssetUploadEntry } from "./workspaceModel";
 import {
@@ -78,7 +83,14 @@ function AssetCardVideoVisual({
   // 播放地址签名过期时向后端续签一次得到的新地址；未刷新时用列表原始地址。
   const [refreshedVideoUrl, setRefreshedVideoUrl] = useState<string | null>(null);
   const playbackRefreshAttemptedRef = useRef(false);
-  const candidateVideoUrl = refreshedVideoUrl ?? asset.videoUrl ?? asset.previewUrl ?? null;
+  // 列表没给播放地址时按素材身份补取一次（同一素材整个会话只补一次）。
+  const recoveredVideoUrl = useRecoveredPreviewUrl(
+    asset,
+    "video",
+    asset.videoUrl ?? asset.previewUrl,
+  );
+  const candidateVideoUrl =
+    refreshedVideoUrl ?? recoveredVideoUrl ?? asset.videoUrl ?? asset.previewUrl ?? null;
   const videoSrc = toMediaProxyUrl(candidateVideoUrl);
   const [loadedVideoSrc, setLoadedVideoSrc] = useState<string | null>(null);
   const videoReady = loadedVideoSrc === videoSrc;
@@ -193,15 +205,19 @@ function AssetCardVideoVisual({
             setVideoCoverReady(false);
             // 播放地址签名过期：每个卡片实例续签一次（云端回读供应商记录、本地重签
             // 对象存储地址，与封面续签相互独立），拿到新地址后重新加载；
+            // 上游把导入时的暂存租约地址当预览地址回放时续签不会换地址，共享入口会继续
+            // 按对象键重签暂存副本（暂存对象已被清理时由媒体代理用导入的原始文件接管）。
             // 续签失败保持置灰，不反复请求。视频正文不落字节缓存，按需播放。
             if (candidateVideoUrl != null && !playbackRefreshAttemptedRef.current) {
               playbackRefreshAttemptedRef.current = true;
-              void refreshAssetItemMediaUrl(asset, "video").then((freshUrl) => {
-                if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
-                  setRefreshedVideoUrl(freshUrl);
-                  setFailedVideoSrc(null);
-                }
-              });
+              void refreshMediaUrlWithStagingFallback(asset, "video", candidateVideoUrl).then(
+                (freshUrl) => {
+                  if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
+                    setRefreshedVideoUrl(freshUrl);
+                    setFailedVideoSrc(null);
+                  }
+                },
+              );
             }
           }}
           onLoadedMetadata={(event) => {
@@ -252,7 +268,14 @@ function AssetCard({
   // 图片预览签名过期时向后端续签一次得到的新地址；每个卡片实例只尝试一次。
   const [refreshedImagePreviewUrl, setRefreshedImagePreviewUrl] = useState<string | null>(null);
   const imageRefreshAttemptedRef = useRef(false);
-  const candidateImagePreviewUrl = refreshedImagePreviewUrl ?? asset.previewUrl;
+  // 列表没给预览地址时按素材身份补取一次（同一素材整个会话只补一次）。
+  const recoveredImagePreviewUrl = useRecoveredPreviewUrl(
+    asset,
+    "image",
+    refreshedImagePreviewUrl ?? asset.previewUrl,
+  );
+  const candidateImagePreviewUrl =
+    refreshedImagePreviewUrl ?? recoveredImagePreviewUrl ?? asset.previewUrl;
   // 已下载过的预览字节直接复用：重开面板、切换类型/翻页回来后不再重复下载，
   // 签名过期也不影响已经下载过的那份内容。
   const imageBytes = useAssetMediaBytes(asset, "image", candidateImagePreviewUrl ?? null);
@@ -385,10 +408,16 @@ function AssetCard({
                     imageBytes.retry();
                     if (imageBytes.fromCache) return;
                     // 预览签名过期：每个卡片实例续签一次（云端回读供应商记录、
-                    // 本地重签对象存储地址），新地址重新加载。
+                    // 本地重签对象存储地址）。上游把导入时的暂存租约地址当预览地址回放时
+                    // 续签不会换地址，共享入口会继续按对象键重签暂存副本；暂存对象已被清理
+                    // 时由媒体代理用导入时留存的原始文件接管，预览不再永久停在「不可用」。
                     if (candidateImagePreviewUrl != null && !imageRefreshAttemptedRef.current) {
                       imageRefreshAttemptedRef.current = true;
-                      void refreshAssetItemMediaUrl(asset, "image").then((freshUrl) => {
+                      void refreshMediaUrlWithStagingFallback(
+                        asset,
+                        "image",
+                        candidateImagePreviewUrl,
+                      ).then((freshUrl) => {
                         if (
                           freshUrl != null &&
                           freshUrl !== "" &&

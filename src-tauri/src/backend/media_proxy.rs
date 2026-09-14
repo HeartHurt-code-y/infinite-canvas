@@ -11,7 +11,7 @@
 
 use std::{
     collections::HashMap,
-    path::PathBuf,
+    path::{Path as StdPath, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock},
     time::Duration,
 };
@@ -20,10 +20,16 @@ use tauri::{
     Manager as _, UriSchemeContext, UriSchemeResponder,
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri},
 };
-use tokio::sync::watch;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncSeekExt as _},
+    sync::watch,
+};
 use url::Url;
 
-use super::media_cache::{MediaCache, is_cacheable_content_type, permits_storage};
+use super::{
+    BackendState,
+    media_cache::{MediaCache, is_cacheable_content_type, permits_storage},
+};
 
 pub const MEDIA_PROXY_SCHEME: &str = "assetproxy";
 
@@ -45,6 +51,242 @@ const BASE_TRANSFER_BUDGET: Duration = Duration::from_secs(120);
 const MIN_TRANSFER_BYTES_PER_SECOND: u64 = 64 * 1024;
 /// 传输预算上限：再慢也不无限等待，避免坏链路长期占用连接与内存。
 const MAX_TRANSFER_BUDGET: Duration = Duration::from_secs(20 * 60);
+
+/// 本地兜底整包读取的体积上限。
+///
+/// 无 Range 的请求要一次读完整文件；上游代理路径本来就整包缓冲，这里沿用同一量级
+/// （与磁盘缓存的单条上限一致）即可覆盖图片素材，又不会为了一个异常大的本地文件
+/// 分配几百 MB 内存。视频由 WebView 以 Range 分块请求，不落在这条路径上。
+const MAX_LOCAL_FULL_BYTES: u64 = 128 * 1024 * 1024;
+
+/// 上游取不到字节时可用的本地副本。
+#[derive(Debug, Clone)]
+pub struct LocalMediaSource {
+    pub path: PathBuf,
+}
+
+/// 把「上游媒体地址」解析成本地副本的能力。
+///
+/// 生产实现是 [`super::staging::StagingService`]：只认当前暂存桶内的对象地址，并按对象键
+/// 回到素材导入任务取出原始文件；拿不到映射时返回 `None`，绝不按任意地址读本机文件。
+pub trait LocalMediaFallback: Send + Sync {
+    fn resolve(&self, url: &Url) -> Option<LocalMediaSource>;
+}
+
+/// 一次本地兜底读取要回答的内容：状态、响应体、以及附加头。
+struct LocalCopy {
+    status: StatusCode,
+    headers: HeaderMap,
+    body: Vec<u8>,
+}
+
+/// 请求里的字节区间。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RequestedRange {
+    /// `bytes=start-` 或 `bytes=start-end`（`end` 为闭区间端点）。
+    FromTo(u64, Option<u64>),
+    /// `bytes=-n`：末尾 n 个字节。
+    Suffix(u64),
+}
+
+/// 解析单区间字节请求；多区间、非 bytes 单位与非法写法一律返回 `None`（按整包处理）。
+fn parse_requested_range(raw: &str) -> Option<RequestedRange> {
+    let spec = raw.trim().strip_prefix("bytes=")?.trim();
+    if spec.contains(',') {
+        return None;
+    }
+    let (start, end) = spec.split_once('-')?;
+    let (start, end) = (start.trim(), end.trim());
+    if start.is_empty() {
+        let length = end.parse::<u64>().ok()?;
+        return (length > 0).then_some(RequestedRange::Suffix(length));
+    }
+    let start = start.parse::<u64>().ok()?;
+    if end.is_empty() {
+        return Some(RequestedRange::FromTo(start, None));
+    }
+    let end = end.parse::<u64>().ok()?;
+    (end >= start).then_some(RequestedRange::FromTo(start, Some(end)))
+}
+
+/// 按文件长度把请求区间换算成实际读取窗口 `[start, end]`（含端点）。
+///
+/// 开放区间与末尾区间都按 [`MAX_RANGE_CHUNK_BYTES`] 收口：WebView 的 `<video>` 从
+/// `bytes=0-` 开始探测，不钳制就会为一个请求把整段视频读进内存（与上游路径同样的理由）。
+/// 两者返回的都是「从请求位置到文件末尾」的子窗口，客户端按内容范围继续请求下一段。
+fn resolve_window(range: RequestedRange, length: u64) -> Option<(u64, u64)> {
+    if length == 0 {
+        return None;
+    }
+    match range {
+        RequestedRange::Suffix(tail) => {
+            let tail = tail.min(length).min(MAX_RANGE_CHUNK_BYTES);
+            Some((length - tail, length - 1))
+        }
+        RequestedRange::FromTo(start, end) => {
+            if start >= length {
+                return None;
+            }
+            let end = end.unwrap_or(u64::MAX).min(length - 1);
+            let end = end.min(start.saturating_add(MAX_RANGE_CHUNK_BYTES - 1));
+            Some((start, end))
+        }
+    }
+}
+
+/// 内容类型：优先按文件头嗅探，其次按扩展名兜底，都识别不出时交给 WebView 自行判断。
+fn local_content_type(path: &StdPath, head: &[u8]) -> Option<String> {
+    if let Some(detected) = infer::get(head) {
+        return Some(detected.mime_type().to_string());
+    }
+    let extension = path
+        .extension()
+        .and_then(|value| value.to_str())
+        .map(str::to_ascii_lowercase)?;
+    let mime = match extension.as_str() {
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "avif" => "image/avif",
+        "mp4" | "m4v" => "video/mp4",
+        "mov" => "video/quicktime",
+        "webm" => "video/webm",
+        "mkv" => "video/x-matroska",
+        "avi" => "video/x-msvideo",
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "m4a" => "audio/mp4",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        _ => return None,
+    };
+    Some(mime.to_string())
+}
+
+/// 读取本地副本：按请求区间（或整包）读窗口，并给出与一次性响应一致的头。
+///
+/// 文件读不出来、超出整包上限或区间不可满足时返回 `None`/416，由调用方回落到错误响应。
+async fn read_local_copy(
+    path: &StdPath,
+    content_type: Option<String>,
+    requested: Option<RequestedRange>,
+    is_head: bool,
+) -> Option<LocalCopy> {
+    let length = tokio::fs::metadata(path).await.ok()?.len();
+    let mut headers = HeaderMap::new();
+    if let Some(content_type) = content_type.and_then(|value| HeaderValue::from_str(&value).ok()) {
+        headers.insert("content-type", content_type);
+    }
+    if requested.is_none() && length > MAX_LOCAL_FULL_BYTES {
+        return None;
+    }
+    let window = match requested {
+        Some(range) => match resolve_window(range, length) {
+            Some(window) => Some(window),
+            None => {
+                headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
+                headers.insert(
+                    "content-range",
+                    HeaderValue::from_str(&format!("bytes */{length}")).ok()?,
+                );
+                return Some(LocalCopy {
+                    status: StatusCode::RANGE_NOT_SATISFIABLE,
+                    headers,
+                    body: Vec::new(),
+                });
+            }
+        },
+        None => None,
+    };
+    let (status, start, count) = match window {
+        Some((start, end)) => (
+            StatusCode::PARTIAL_CONTENT,
+            start,
+            end.saturating_sub(start) + 1,
+        ),
+        None => (StatusCode::OK, 0, length),
+    };
+    headers.insert("accept-ranges", HeaderValue::from_static("bytes"));
+    if let Some((start, end)) = window {
+        headers.insert(
+            "content-range",
+            HeaderValue::from_str(&format!("bytes {start}-{end}/{length}")).ok()?,
+        );
+    }
+    if let Ok(value) = HeaderValue::from_str(&count.to_string()) {
+        headers.insert("content-length", value);
+    }
+    if is_head {
+        return Some(LocalCopy {
+            status,
+            headers,
+            body: Vec::new(),
+        });
+    }
+    let mut file = tokio::fs::File::open(path).await.ok()?;
+    if start > 0 {
+        file.seek(std::io::SeekFrom::Start(start)).await.ok()?;
+    }
+    let mut body = Vec::new();
+    file.take(count).read_to_end(&mut body).await.ok()?;
+    (body.len() as u64 == count).then_some(LocalCopy {
+        status,
+        headers,
+        body,
+    })
+}
+
+/// 上游取不到字节时的最终兜底：按对象键回到导入任务，用本地原始文件应答。
+///
+/// 素材入库把导入时的暂存租约地址交给上游（`public_url`），导入成功后暂存对象立刻被清理；
+/// 而上游素材记录仍原样回放那个地址，于是上游必然报错、磁盘缓存里也没有这份字节 ——
+/// 预览就此永久停在「预览不可用」。导入时的原始文件与暂存对象是同一份内容，按对象键取回
+/// 即可恢复预览；图片顺带落盘，之后连源文件都不再需要。
+async fn serve_local_copy(
+    fallback: Option<&dyn LocalMediaFallback>,
+    upstream_url: &Url,
+    request_headers: &HeaderMap,
+    cache: Option<&MediaCache>,
+    is_head: bool,
+) -> Option<Response<Vec<u8>>> {
+    let source = fallback?.resolve(upstream_url)?;
+    let requested = request_headers
+        .get("range")
+        .and_then(|value| value.to_str().ok())
+        .and_then(parse_requested_range);
+    let mut head = [0_u8; 4 * 1024];
+    let sniffed = match tokio::fs::File::open(&source.path).await {
+        Ok(mut file) => {
+            let read = file.read(&mut head).await.unwrap_or(0);
+            local_content_type(&source.path, &head[..read])
+        }
+        Err(_) => return None,
+    };
+    let copy = read_local_copy(&source.path, sniffed.clone(), requested, is_head).await?;
+    // 完整、图片、上游未禁止存储的响应同样落盘：下一次（含签名过期后）直接命中本地字节。
+    if copy.status == StatusCode::OK && !is_head {
+        if let (Some(cache), Some(content_type)) = (cache, sniffed.as_deref()) {
+            if is_cacheable_content_type(Some(content_type))
+                && cache.accepts_length(Some(copy.body.len() as u64))
+            {
+                cache.store(upstream_url, Some(content_type), &copy.body);
+            }
+        }
+    }
+    let mut headers = copy.headers;
+    if copy.status == StatusCode::OK && cache.is_some() {
+        headers.insert(
+            "cache-control",
+            HeaderValue::from_static("private, max-age=86400"),
+        );
+    }
+    Some(build_response(copy.status, headers, copy.body))
+}
 
 /// 按内容长度算出的整包传输预算：小响应 120s，大响应按等效最低速率放大并封顶。
 ///
@@ -250,8 +492,21 @@ pub fn handle_media_proxy_request<R: tauri::Runtime>(
         .app_local_data_dir()
         .ok()
         .map(|directory| MediaCache::new(preview_cache_directory(&directory)));
+    // 本地兜底：暂存对象在导入成功后即被清理，上游素材记录却仍回放那个地址，
+    // 于是取字节必然失败。按对象键回到导入任务用原始文件应答（见 `serve_local_copy`）。
+    let fallback = context
+        .app_handle()
+        .try_state::<BackendState>()
+        .map(|state| state.staging.clone());
     tauri::async_runtime::spawn(async move {
-        responder.respond(proxy_response(request, cache.as_ref()).await);
+        responder.respond(
+            proxy_response(
+                request,
+                cache.as_ref(),
+                fallback.as_ref().map(|value| value as _),
+            )
+            .await,
+        );
     });
 }
 
@@ -263,6 +518,7 @@ fn preview_cache_directory(local_data: &std::path::Path) -> PathBuf {
 async fn proxy_response(
     request: Request<Vec<u8>>,
     cache: Option<&MediaCache>,
+    fallback: Option<&dyn LocalMediaFallback>,
 ) -> Response<Vec<u8>> {
     if request.method() == Method::OPTIONS {
         return build_response(StatusCode::NO_CONTENT, HeaderMap::new(), Vec::new());
@@ -330,6 +586,13 @@ async fn proxy_response(
                         return cached_response(cached.content_type, cached.body, is_head);
                     }
                 }
+                // 暂存对象已被清理（上游回放的是导入时的死地址）：用导入时的原始文件应答。
+                if let Some(response) =
+                    serve_local_copy(fallback, &upstream_url, request.headers(), cache, is_head)
+                        .await
+                {
+                    return response;
+                }
                 // Upstream error pages can echo signed URLs or authentication details.
                 let status = if status.is_redirection() {
                     StatusCode::BAD_GATEWAY
@@ -347,6 +610,11 @@ async fn proxy_response(
                 if let Some(cached) = cache.read(&upstream_url) {
                     return cached_response(cached.content_type, cached.body, is_head);
                 }
+            }
+            if let Some(response) =
+                serve_local_copy(fallback, &upstream_url, request.headers(), cache, is_head).await
+            {
+                return response;
             }
             error_response(StatusCode::BAD_GATEWAY, kind, is_head)
         }
@@ -715,9 +983,183 @@ mod tests {
         }
     }
 
-    /// 无缓存穿透语义：既有的传输层用例只关心代理转发，不关心缓存。
+    /// 无缓存穿透语义：既有的传输层用例只关心代理转发，不关心缓存与本地兜底。
     async fn proxy_response_uncached(request: Request<Vec<u8>>) -> Response<Vec<u8>> {
-        proxy_response(request, None).await
+        proxy_response(request, None, None).await
+    }
+
+    /// 固定映射的本地兜底替身：把指定上游地址映射到一份本地文件，其余地址不兜底。
+    #[derive(Default)]
+    struct StubLocalFallback {
+        mapped: std::sync::Mutex<HashMap<String, PathBuf>>,
+    }
+
+    impl StubLocalFallback {
+        fn with(self, url: &str, path: &StdPath) -> Self {
+            self.mapped
+                .lock()
+                .unwrap()
+                .insert(url.to_string(), path.to_path_buf());
+            self
+        }
+    }
+
+    impl LocalMediaFallback for StubLocalFallback {
+        fn resolve(&self, url: &Url) -> Option<LocalMediaSource> {
+            self.mapped
+                .lock()
+                .unwrap()
+                .get(url.as_str())
+                .map(|path| LocalMediaSource { path: path.clone() })
+        }
+    }
+
+    /// 代理请求构造：`src` 指向夹具服务器的路径。
+    fn fixture_request(method: Method, base: &str, path: &str) -> Request<Vec<u8>> {
+        let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+        url.query_pairs_mut()
+            .append_pair("src", &format!("{base}{path}"));
+        Request::builder()
+            .method(method)
+            .uri(url.as_str())
+            .body(Vec::new())
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn serves_the_imported_local_file_when_upstream_cannot_deliver() {
+        // 素材入库后暂存对象即被清理，上游记录仍回放那个地址：上游报错、缓存也没有字节，
+        // 预览会永久停在「预览不可用」。导入时的原始文件是同一份内容，必须用它接管。
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("imported.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nIMPORTED").unwrap();
+        // 夹具的 `/fail` 固定 503（签名过期或对象已被清理的上游都是这个形态）。
+        let source = format!("{}/fail", server.url);
+        let fallback = StubLocalFallback::default().with(&source, &image_path);
+
+        let response = proxy_response(
+            fixture_request(Method::GET, &server.url, "/fail"),
+            Some(&cache),
+            Some(&fallback),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"\x89PNG\r\n\x1a\nIMPORTED");
+        assert_eq!(response.headers()["content-type"], "image/png");
+        assert_eq!(response.headers()["accept-ranges"], "bytes");
+        assert_eq!(
+            response.headers()["content-length"],
+            response.body().len().to_string()
+        );
+        // 图片顺带落盘：之后连源文件都不再需要，续签出的任何签名都命中同一份字节。
+        assert!(
+            cache.read(&Url::parse(&source).unwrap()).is_some(),
+            "本地兜底应答的图片必须落盘复用"
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_local_video_ranges_so_playback_can_seek() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let directory = tempfile::tempdir().unwrap();
+        let video_path = directory.path().join("imported.mp4");
+        // 12 字节的可辨识载荷：只断言被请求的窗口。
+        std::fs::write(&video_path, b"0123456789ab").unwrap();
+        // 夹具服务器的 `/fail` 固定 503（上游取不到字节），本地兜底按同一地址接管。
+        let source = format!("{}/fail", server.url);
+        let fallback = StubLocalFallback::default().with(&source, &video_path);
+        let request = |range: &str| {
+            let mut builder = Request::builder()
+                .method(Method::GET)
+                .header("range", range);
+            let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+            url.query_pairs_mut()
+                .append_pair("src", &format!("{}/fail", server.url));
+            builder = builder.uri(url.as_str());
+            builder.body(Vec::new()).unwrap()
+        };
+
+        let ranged = proxy_response(request("bytes=2-5"), Some(&cache), Some(&fallback)).await;
+        assert_eq!(ranged.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(ranged.body(), b"2345");
+        assert_eq!(ranged.headers()["content-range"], "bytes 2-5/12");
+        assert_eq!(ranged.headers()["content-length"], "4");
+
+        // 开放区间按固定窗口收口：不能因为 `bytes=0-` 就把整段媒体读进内存。
+        let open_ended = proxy_response(request("bytes=0-"), Some(&cache), Some(&fallback)).await;
+        assert_eq!(open_ended.status(), StatusCode::PARTIAL_CONTENT);
+        assert_eq!(open_ended.body(), b"0123456789ab");
+        assert_eq!(
+            open_ended.headers()["content-range"],
+            format!("bytes 0-11/12")
+        );
+
+        // 越界区间按标准语义回 416，不静默返回整包。
+        let unsatisfiable =
+            proxy_response(request("bytes=99-"), Some(&cache), Some(&fallback)).await;
+        assert_eq!(unsatisfiable.status(), StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(unsatisfiable.headers()["content-range"], "bytes */12");
+    }
+
+    #[tokio::test]
+    async fn keeps_the_upstream_error_when_no_local_copy_maps_the_url() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let fallback = StubLocalFallback::default();
+        let response = proxy_response(
+            fixture_request(Method::GET, &server.url, "/fail"),
+            Some(&cache),
+            Some(&fallback),
+        )
+        .await;
+        assert!(response.status().is_server_error());
+        assert_eq!(response.headers()["content-type"], "application/json");
+    }
+
+    #[test]
+    fn parses_single_byte_ranges_and_rejects_the_rest() {
+        assert_eq!(
+            parse_requested_range("bytes=0-"),
+            Some(RequestedRange::FromTo(0, None))
+        );
+        assert_eq!(
+            parse_requested_range("bytes=10-20"),
+            Some(RequestedRange::FromTo(10, Some(20)))
+        );
+        assert_eq!(
+            parse_requested_range("bytes=-500"),
+            Some(RequestedRange::Suffix(500))
+        );
+        // 多区间、倒序区间、非 bytes 单位：按整包处理，不猜语义。
+        assert_eq!(parse_requested_range("bytes=0-1,5-6"), None);
+        assert_eq!(parse_requested_range("bytes=9-2"), None);
+        assert_eq!(parse_requested_range("chunks=0-"), None);
+    }
+
+    #[test]
+    fn bounds_local_windows_to_the_chunk_limit() {
+        assert_eq!(
+            resolve_window(RequestedRange::FromTo(0, None), 100),
+            Some((0, 99))
+        );
+        assert_eq!(
+            resolve_window(RequestedRange::FromTo(0, None), 10 * 1024 * 1024),
+            Some((0, MAX_RANGE_CHUNK_BYTES - 1))
+        );
+        assert_eq!(resolve_window(RequestedRange::Suffix(4), 10), Some((6, 9)));
+        // 末尾区间同样收口：一个 `bytes=-10G` 不能把整段媒体读进内存。
+        assert_eq!(
+            resolve_window(RequestedRange::Suffix(u64::MAX), 10 * 1024 * 1024),
+            Some((
+                10 * 1024 * 1024 - MAX_RANGE_CHUNK_BYTES,
+                10 * 1024 * 1024 - 1
+            ))
+        );
+        assert_eq!(resolve_window(RequestedRange::FromTo(10, None), 10), None);
     }
 
     fn test_cache() -> (tempfile::TempDir, MediaCache) {
@@ -915,13 +1357,13 @@ mod tests {
                 .unwrap()
         };
 
-        let first = proxy_response(request(), Some(&cache)).await;
+        let first = proxy_response(request(), Some(&cache), None).await;
         assert_eq!(first.status(), StatusCode::OK);
         assert_eq!(first.body(), b"PNGBYTES");
         assert_eq!(server.requests.lock().unwrap().len(), 1);
 
         // 第二次（重开面板 / 重挂载卡片 / 重启后同一素材）：不再打扰上游，直接回本地副本。
-        let second = proxy_response(request(), Some(&cache)).await;
+        let second = proxy_response(request(), Some(&cache), None).await;
         assert_eq!(second.status(), StatusCode::OK);
         assert_eq!(second.body(), b"PNGBYTES");
         assert_eq!(second.headers()["content-length"], "8");
@@ -958,12 +1400,12 @@ mod tests {
         };
 
         // 先成功取一次：字节落盘。
-        let first = proxy_response(request(false), Some(&cache)).await;
+        let first = proxy_response(request(false), Some(&cache), None).await;
         assert_eq!(first.status(), StatusCode::OK);
         assert!(cache.read(&signed).is_some());
 
         // 远端随后报错（典型是签名过期 / 网络不可达）：本地副本接管，预览不再变成「不可用」。
-        let second = proxy_response(request(true), Some(&cache)).await;
+        let second = proxy_response(request(true), Some(&cache), None).await;
         assert_eq!(second.status(), StatusCode::OK);
         assert_eq!(second.body(), b"PNGBYTES");
         assert_eq!(second.headers()["content-type"], "image/png");
@@ -1000,8 +1442,8 @@ mod tests {
 
         // 画布节点会同时发 `<img>` 与前端会话字节缓存两条请求：只允许打扰上游一次。
         let (first, second) = tokio::join!(
-            proxy_response(request(), Some(&cache)),
-            proxy_response(request(), Some(&cache)),
+            proxy_response(request(), Some(&cache), None),
+            proxy_response(request(), Some(&cache), None),
         );
 
         assert_eq!(first.status(), StatusCode::OK);
@@ -1035,8 +1477,8 @@ mod tests {
         // 续签前后的地址指向同一对象，但有效性不同：旧签名的失败不能拖累新签名，
         // 因此合并键是完整地址而不是「主机 + 路径」（不落盘的响应用于固定这一行为）。
         let (stale, fresh) = tokio::join!(
-            proxy_response(request(1), Some(&cache)),
-            proxy_response(request(2), Some(&cache)),
+            proxy_response(request(1), Some(&cache), None),
+            proxy_response(request(2), Some(&cache), None),
         );
 
         assert_eq!(stale.status(), StatusCode::OK);
@@ -1062,7 +1504,7 @@ mod tests {
         };
 
         // 推进一次即登记成领导请求并停在上游等待；随后直接丢弃它，模拟 WebView 侧取消。
-        let mut leader = Box::pin(proxy_response(request(), Some(&cache)));
+        let mut leader = Box::pin(proxy_response(request(), Some(&cache), None));
         futures_util::future::poll_fn(|context| {
             let _ = leader.as_mut().poll(context);
             Poll::Ready(())
@@ -1073,7 +1515,7 @@ mod tests {
         // 后来的请求必须自己接手：既不能挂在死槽位上，也不能空转重试。
         let response = tokio::time::timeout(
             Duration::from_secs(10),
-            proxy_response(request(), Some(&cache)),
+            proxy_response(request(), Some(&cache), None),
         )
         .await
         .expect("领导请求被取消后，后续请求必须自行接手");
@@ -1093,6 +1535,7 @@ mod tests {
                 .body(Vec::new())
                 .unwrap(),
             Some(&cache),
+            None,
         )
         .await;
         assert_eq!(video.status(), StatusCode::OK);
@@ -1109,6 +1552,7 @@ mod tests {
                 .body(Vec::new())
                 .unwrap(),
             Some(&cache),
+            None,
         )
         .await;
         assert_eq!(no_store.status(), StatusCode::OK);
@@ -1126,6 +1570,7 @@ mod tests {
                 .body(Vec::new())
                 .unwrap(),
             Some(&cache),
+            None,
         )
         .await;
         assert!(ranged.status().is_success());
@@ -1152,6 +1597,7 @@ mod tests {
                 .body(Vec::new())
                 .unwrap(),
             Some(&cache),
+            None,
         )
         .await;
 

@@ -1775,15 +1775,35 @@ export function CanvasAssetLightbox({
   }, [onClose]);
 
   // 大图同样优先用会话内已下载的字节：放大查看不必等一次远端往返，签名过期也照常显示。
+  // 地址取与节点视觉区同一份（本地素材续签登记表优先），避免「节点里已是新签名、放大后
+  // 反而拿旧签名」；视频不读整包字节（按 Range 播放），交给媒体代理直连。
+  const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
+  const refreshAttemptedRef = useRef(false);
+  const listedUrl = localAssetNodeMediaUrl(node);
+  const candidateUrl = refreshedUrl ?? listedUrl ?? null;
   const lightboxBytes = useMediaByteSource(
-    node.assetId,
-    node.kind === "video" ? "video" : "image",
-    node.kind === "video" ? node.videoUrl : node.previewUrl,
+    node.kind === "video" ? "" : node.assetId,
+    node.kind,
+    node.kind === "video" ? null : candidateUrl,
   );
-  const mediaSrc =
-    node.kind === "video"
-      ? (lightboxBytes.url ?? node.videoUrl ?? node.previewUrl)
-      : lightboxBytes.url;
+  const mediaSrc = node.kind === "video" ? toMediaProxyUrl(candidateUrl) : lightboxBytes.url;
+  // 放大后的地址同样能自愈一次：本地副本坏了就重下一次，远端地址失败则续签一次
+  // （上游回放导入时的死地址时按对象键重签暂存副本，暂存对象已清理则由媒体代理
+  // 用导入时留存的原始文件接管）。每个实例只尝试一次，不形成重试循环。
+  const handleMediaError = () => {
+    lightboxBytes.retry();
+    if (lightboxBytes.fromCache || refreshAttemptedRef.current) return;
+    refreshAttemptedRef.current = true;
+    void refreshMediaUrlWithStagingFallback(
+      { id: node.assetId, source: node.source, providerConnectionId: node.providerConnectionId },
+      node.kind,
+      candidateUrl,
+    ).then((freshUrl) => {
+      if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateUrl) {
+        setRefreshedUrl(freshUrl);
+      }
+    });
+  };
   if (mediaSrc == null) return null;
 
   return createPortal(
@@ -1811,6 +1831,7 @@ export function CanvasAssetLightbox({
             controls
             autoPlay
             playsInline
+            onError={handleMediaError}
           />
         ) : (
           <img
@@ -1818,6 +1839,7 @@ export function CanvasAssetLightbox({
             src={mediaSrc}
             alt={node.name}
             draggable={false}
+            onError={handleMediaError}
           />
         )}
       </div>
@@ -2440,6 +2462,7 @@ export function AutoSizeThumb({
   kind,
   assetId,
   assetKind,
+  renewAsset,
   height = "2rem",
   maxWidth = "6rem",
 }: {
@@ -2448,14 +2471,43 @@ export function AutoSizeThumb({
   /** 素材身份与 `previewUrl` 一起决定字节缓存的账目；缺省时只按地址直连渲染。 */
   readonly assetId?: string | undefined;
   readonly assetKind?: AssetKind | undefined;
+  /**
+   * 续签身份：地址失效时按它续签一次（云端回读供应商记录、本地重签对象存储地址）。
+   * 缺省时保持只渲染的原行为 —— 本地文件、产物路径这类不依赖签名的地址不需要续签。
+   */
+  readonly renewAsset?: {
+    readonly id: string;
+    readonly source: string | null | undefined;
+    readonly providerConnectionId: string | null | undefined;
+  } | null;
   readonly height?: string;
   readonly maxWidth?: string;
 }) {
-  const bytes = useMediaByteSource(assetId ?? "", assetKind ?? "image", previewUrl);
-  const resolvedUrl = bytes.url ?? previewUrl;
-  // 失败按 URL 记忆而非布尔值：来源节点续签出新地址后，新 URL 会自动重试加载。
   const [failedUrl, setFailedUrl] = useState<string | null>(null);
+  const [renewedUrl, setRenewedUrl] = useState<string | null>(null);
+  const renewAttemptedRef = useRef(false);
+  const effectiveUrl = renewedUrl ?? previewUrl;
+  const bytes = useMediaByteSource(assetId ?? "", assetKind ?? "image", effectiveUrl);
+  const resolvedUrl = bytes.url ?? effectiveUrl;
+  // 失败按 URL 记忆而非布尔值：来源节点续签出新地址后，新 URL 会自动重试加载。
   const failed = resolvedUrl != null && failedUrl === resolvedUrl;
+  // 缩略图同样要能自愈：同一份素材在卡片与画布节点上能恢复，在参考清单里却只剩类型
+  // 图标，是最容易被忽略的「预览不可用」。每个地址只续签一次，不形成重试循环。
+  const handleMediaError = (failedSource: string | null) => {
+    setFailedUrl(failedSource);
+    bytes.retry();
+    if (bytes.fromCache || renewAttemptedRef.current || renewAsset == null) return;
+    if (failedSource == null || failedSource === "") return;
+    renewAttemptedRef.current = true;
+    void refreshMediaUrlWithStagingFallback(renewAsset, assetKind ?? "image", failedSource).then(
+      (freshUrl) => {
+        if (freshUrl != null && freshUrl !== "" && freshUrl !== failedSource) {
+          setRenewedUrl(freshUrl);
+          setFailedUrl(null);
+        }
+      },
+    );
+  };
   // 宽高比与来源地址一起记忆：来源换地址后旧比例立即失效，避免沿用上一份媒体的比例。
   const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
   const measuredRatio = measured != null && measured.url === resolvedUrl ? measured.ratio : null;
@@ -2484,7 +2536,7 @@ export function AutoSizeThumb({
           src={videoSource}
           placeholder={<AssetKindIcon kind="video" size="md" />}
           onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
-          onLoadError={() => setFailedUrl(videoSource)}
+          onLoadError={() => handleMediaError(videoSource)}
         />
       ) : imageSource != null ? (
         <img
@@ -2493,7 +2545,7 @@ export function AutoSizeThumb({
           draggable={false}
           decoding="async"
           loading="lazy"
-          onError={() => setFailedUrl(imageSource)}
+          onError={() => handleMediaError(imageSource)}
           onLoad={(event) => {
             const image = event.currentTarget;
             measure(imageSource, image.naturalWidth / image.naturalHeight);
@@ -2550,6 +2602,18 @@ export function GenerationInputChips({
         const isOutput = !inherited && input.sourceLabel === "产物";
         const orderNumber = index + 1;
         const identity = referenceAssetIdentity(input.target);
+        // 云端素材回读供应商记录、本地素材按 staging job id 重签；产物与本地文件不依赖签名。
+        const target = input.target;
+        const renewAsset =
+          target?.kind === "asset"
+            ? {
+                id: target.assetId,
+                source: "cloud",
+                providerConnectionId: target.providerConnectionId,
+              }
+            : target?.kind === "local_asset"
+              ? { id: target.stagingJobId, source: "local", providerConnectionId: null }
+              : null;
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
@@ -2567,6 +2631,7 @@ export function GenerationInputChips({
               kind={input.kind}
               assetId={identity?.assetId}
               assetKind={identity?.kind}
+              renewAsset={identity != null ? renewAsset : null}
               height="2.5rem"
               maxWidth="7rem"
             />

@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   assetLibraryClient,
   BackendContractError,
   providerSettingsClient,
+  refreshMediaUrlWithStagingFallback,
   tosStagingClient,
   type CloudAsset,
 } from "./backend";
@@ -462,5 +463,86 @@ describe("providerSettingsClient token groups", () => {
 
     await providerSettingsClient.fetchProviderModels("provider-1");
     expect(capturedArgs).toEqual({ providerConnectionId: "provider-1", tokenGroup: null });
+  });
+});
+
+/**
+ * 素材预览地址的共享恢复入口：所有渲染预览图的地方都走它，缺一环就会留下
+ * 「某个入口能恢复、另一个入口永久停在预览不可用」的缝。
+ */
+describe("refreshMediaUrlWithStagingFallback", () => {
+  const deadUrl =
+    "https://tos.example.com/staging/e90484f4b8801be7/2026/09/14/55be7f2f.png?X-Tos-Date=20260914T023421Z&X-Tos-Expires=3600&X-Tos-Signature=dead";
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("prefers the freshly read provider address", async () => {
+    const fresh = "https://tos.example.com/staging/a/b.png?signature=fresh";
+    const read = vi.spyOn(assetLibraryClient, "refreshAssetMedia").mockResolvedValue(fresh);
+    const resign = vi.spyOn(tosStagingClient, "refreshStagingObjectUrl");
+
+    await expect(
+      refreshMediaUrlWithStagingFallback(
+        { id: "asset-1", source: "cloud", providerConnectionId: "provider-1" },
+        "image",
+        deadUrl,
+      ),
+    ).resolves.toBe(fresh);
+    expect(read).toHaveBeenCalledWith({
+      providerConnectionId: "provider-1",
+      id: "asset-1",
+      mediaType: "image",
+    });
+    // 续签已经换到新地址，不必再按对象键重签。
+    expect(resign).not.toHaveBeenCalled();
+  });
+
+  it("re-signs the staging object when the provider replays the same dead address", async () => {
+    // 实测魔芋 `/v1/assets/get` 会把导入时的暂存租约地址原样回放：续签「成功」但地址没变。
+    const resigned = "https://tos.example.com/staging/a/b.png?X-Tos-Date=20260914T050000Z";
+    vi.spyOn(assetLibraryClient, "refreshAssetMedia").mockResolvedValue(deadUrl);
+    const resign = vi
+      .spyOn(tosStagingClient, "refreshStagingObjectUrl")
+      .mockResolvedValue(resigned);
+
+    await expect(
+      refreshMediaUrlWithStagingFallback(
+        { id: "asset-1", source: "cloud", providerConnectionId: "provider-1" },
+        "image",
+        deadUrl,
+      ),
+    ).resolves.toBe(resigned);
+    expect(resign).toHaveBeenCalledWith(deadUrl);
+  });
+
+  it("falls back to the provider result when the staging object cannot be re-signed", async () => {
+    vi.spyOn(assetLibraryClient, "refreshAssetMedia").mockResolvedValue(deadUrl);
+    vi.spyOn(tosStagingClient, "refreshStagingObjectUrl").mockRejectedValue(
+      new Error("只支持续签当前暂存桶内的对象地址。"),
+    );
+
+    // 地址不属于当前暂存桶（例如上游自己的 CDN）：保持原续签结果，不阻断其他素材行。
+    await expect(
+      refreshMediaUrlWithStagingFallback(
+        { id: "asset-1", source: "cloud", providerConnectionId: "provider-1" },
+        "image",
+        "https://api.example.com/asset.png?sign=expired",
+      ),
+    ).resolves.toBe(deadUrl);
+  });
+
+  it("keeps local assets on their staging job identity without a provider read", async () => {
+    const fresh = "https://tos.example.com/staging/local.png?signature=fresh";
+    const local = vi.spyOn(tosStagingClient, "refreshLocalAssetMedia").mockResolvedValue(fresh);
+    const read = vi.spyOn(assetLibraryClient, "refreshAssetMedia");
+
+    await expect(
+      refreshMediaUrlWithStagingFallback({ id: "job-1", source: "local" }, "image", null),
+    ).resolves.toBe(fresh);
+    expect(local).toHaveBeenCalledWith({ stagingJobId: "job-1", mediaType: "image" });
+    // 本地素材没有 providerConnectionId，不该去问供应商记录。
+    expect(read).not.toHaveBeenCalled();
   });
 });

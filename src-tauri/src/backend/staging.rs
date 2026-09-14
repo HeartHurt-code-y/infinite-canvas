@@ -14,6 +14,7 @@ use sha2::{Digest, Sha256};
 use tauri_plugin_log::log::{error, info, warn};
 use tokio::io::AsyncReadExt as _;
 use tokio_util::io::ReaderStream;
+use url::Url;
 use uuid::Uuid;
 
 use super::{
@@ -23,6 +24,7 @@ use super::{
     error::{BackendError, BackendResult},
     image_normalize::normalize_image_for_asset_window,
     local_results::{format_bytes_per_sec, safe_file_stem},
+    media_proxy::{LocalMediaFallback, LocalMediaSource},
     provider::{redact_request_value, redact_url_string, truncate_connectivity_detail},
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
@@ -1558,6 +1560,42 @@ impl StagingService {
     }
 }
 
+/// 上游取字节失败时的本地副本来源：素材导入时上传的原始文件。
+///
+/// 素材入库把导入时的暂存租约地址交给上游，导入成功后暂存对象立刻被清理，而上游素材记录
+/// 仍原样回放那个地址 —— 上游必然取不到字节，预览于是永久停在「预览不可用」。原始文件与
+/// 当时的暂存对象是同一份内容，按对象键找回来即可恢复预览。
+///
+/// 只接受指向当前配置暂存桶（含配置前缀）的对象地址，并且必须有对应的 `asset_import`
+/// 导入记录：签名地址等同凭据，任何其他地址都不允许映射到本机文件。
+impl LocalMediaFallback for StagingService {
+    fn resolve(&self, url: &Url) -> Option<LocalMediaSource> {
+        let config = self.storage.get_tos_config().ok().flatten()?;
+        if !config.enabled {
+            return None;
+        }
+        resolve_staging_local_source(&self.storage, &config, url)
+    }
+}
+
+/// 本地兜底的解析实现（与 [`LocalMediaFallback`] 分离，便于不构造整套服务直接测试）。
+fn resolve_staging_local_source(
+    storage: &Storage,
+    config: &TosStagingConfig,
+    url: &Url,
+) -> Option<LocalMediaSource> {
+    let object_key = staging_object_key(url.as_str(), config)?;
+    let job = storage
+        .find_asset_import_job_by_object_key(&object_key)
+        .ok()
+        .flatten()?;
+    let path = PathBuf::from(job.local_path.trim());
+    if path.as_os_str().is_empty() || !std::fs::metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    Some(LocalMediaSource { path })
+}
+
 /// 从暂存对象的预签名读取地址解出对象键；地址不指向当前配置的暂存桶时返回 `None`。
 ///
 /// 预签名地址的 host 形如 `{bucket}.{endpoint}`（见 `presign_url` 的调用方），
@@ -1999,6 +2037,109 @@ mod tests {
         config.object_prefix = String::new();
         let url = "https://example-staging-bucket.tos-cn-beijing.volces.com/a/b.png";
         assert_eq!(staging_object_key(url, &config).as_deref(), Some("a/b.png"));
+    }
+
+    /// 本地兜底只认「暂存桶内 + 有导入记录 + 文件仍在」三件事同时成立的地址。
+    #[test]
+    fn local_fallback_maps_only_imported_staging_objects_to_existing_files() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
+        let config = sample_config();
+        let imported_path = directory.path().join("imported.png");
+        std::fs::write(&imported_path, b"PNGBYTES").unwrap();
+        let object_key = "staging/e90484f4b8801be7/2026/09/14/55be7f2f.png";
+        let lease = format!(
+            "https://example-staging-bucket.tos-cn-beijing.volces.com/{object_key}?X-Tos-Date=20260914T023421Z&X-Tos-Expires=3600&X-Tos-Signature=deadbeef"
+        );
+
+        // 尚未入库（没有导入记录）时没有可用的本地副本：不能凭一个对象键读本机文件。
+        assert!(
+            resolve_staging_local_source(&storage, &config, &Url::parse(&lease).unwrap()).is_none()
+        );
+
+        let timestamp = now_ms();
+        storage
+            .insert_staging_job(&StagingJobRecord {
+                id: "job-1".into(),
+                local_path: imported_path.to_string_lossy().into_owned(),
+                purpose: "asset_import".into(),
+                media_type: MediaType::Image,
+                object_key: Some(object_key.into()),
+                status: StagingStatus::Cleaned,
+                bytes_total: Some(8),
+                bytes_uploaded: 8,
+                asset_id: Some("asset-20260914103421-82xww".into()),
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })
+            .unwrap();
+
+        // 导入记录在、原始文件仍在：续签出的新签名（同一对象键）同样能映射到同一份文件。
+        let resigned = format!(
+            "https://example-staging-bucket.tos-cn-beijing.volces.com/{object_key}?X-Tos-Date=20260914T050000Z&X-Tos-Expires=3600&X-Tos-Signature=fresh"
+        );
+        assert_eq!(
+            resolve_staging_local_source(&storage, &config, &Url::parse(&resigned).unwrap())
+                .map(|source| source.path),
+            Some(imported_path.clone())
+        );
+
+        // 别的桶、别的对象键一律不映射（签名地址等同凭据，不能变成任意文件的读取入口）。
+        let other_bucket = resigned.replace("example-staging-bucket.", "other-bucket.");
+        assert!(
+            resolve_staging_local_source(&storage, &config, &Url::parse(&other_bucket).unwrap())
+                .is_none()
+        );
+        let other_object = resigned.replace("55be7f2f.png", "unknown.png");
+        assert!(
+            resolve_staging_local_source(&storage, &config, &Url::parse(&other_object).unwrap())
+                .is_none()
+        );
+
+        // 源文件被移走后不再兜底：不能凭一份丢失的文件凭空造出预览。
+        std::fs::remove_file(&imported_path).unwrap();
+        assert!(
+            resolve_staging_local_source(&storage, &config, &Url::parse(&resigned).unwrap())
+                .is_none()
+        );
+    }
+
+    /// 拉取存储桶建立的 `local_asset` 任务只存文件名，绝不能当成本地路径兜底。
+    #[test]
+    fn local_fallback_ignores_local_asset_index_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
+        let config = sample_config();
+        let file_name = "a.png";
+        std::fs::write(directory.path().join(file_name), b"PNGBYTES").unwrap();
+        let timestamp = now_ms();
+        storage
+            .insert_staging_job(&StagingJobRecord {
+                id: "job-pulled".into(),
+                local_path: file_name.into(),
+                purpose: "local_asset".into(),
+                media_type: MediaType::Image,
+                object_key: Some("staging/pulled.png".into()),
+                status: StagingStatus::Staged,
+                bytes_total: Some(8),
+                bytes_uploaded: 8,
+                asset_id: None,
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })
+            .unwrap();
+
+        let url = Url::parse(
+            "https://example-staging-bucket.tos-cn-beijing.volces.com/staging/pulled.png",
+        )
+        .unwrap();
+        assert!(resolve_staging_local_source(&storage, &config, &url).is_none());
     }
 
     #[test]

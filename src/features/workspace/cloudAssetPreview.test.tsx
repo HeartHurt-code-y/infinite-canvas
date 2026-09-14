@@ -1,6 +1,7 @@
 import { fireEvent, render, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssetFlow } from "./AssetLibraryViews";
+import { resetMissingPreviewUrlAttempts } from "./assetPreviewRecovery";
 import { AssetSourceDialog } from "./AssetDialogs";
 import { clearMediaByteCache } from "./mediaByteCache";
 import type { AssetItem } from "./workspaceModel";
@@ -21,7 +22,7 @@ import * as backend from "../../lib/backend";
 
 const mocks = vi.hoisted(() => ({ convertFileSrc: vi.fn(), refreshMedia: vi.fn() }));
 vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: mocks.convertFileSrc }));
-// 只替换预览续签这一条命令；`isDesktopRuntime` 等运行时判定保持真实实现
+// 只替换预览恢复入口这一条命令；`isDesktopRuntime` 等运行时判定保持真实实现
 // （由下面注入的 Tauri 全局决定），避免测出一套与生产不同的地址解析。
 vi.mock("../../lib/backend", { spy: true });
 
@@ -61,6 +62,7 @@ function dialogPreview(): HTMLImageElement | null {
 
 beforeEach(() => {
   clearMediaByteCache();
+  resetMissingPreviewUrlAttempts();
   // 生产里预览地址只在桌面 WebView 中经 `assetproxy` 取字节，这里还原该运行时前提。
   (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = {
     convertFileSrc: mocks.convertFileSrc,
@@ -69,7 +71,7 @@ beforeEach(() => {
     .mockReset()
     .mockImplementation((path: string) => `asset://localhost/${path}`);
   mocks.refreshMedia.mockReset().mockResolvedValue(null);
-  vi.spyOn(backend, "refreshAssetItemMediaUrl").mockImplementation(mocks.refreshMedia);
+  vi.spyOn(backend, "refreshMediaUrlWithStagingFallback").mockImplementation(mocks.refreshMedia);
 });
 
 afterEach(() => {
@@ -137,12 +139,60 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
 
     fireEvent.error(dialogPreview()!);
     await waitFor(() =>
-      expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image"),
+      expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
     );
     await waitFor(() =>
       expect(dialogPreview()?.getAttribute("src")).toBe(
         `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
       ),
+    );
+  });
+
+  it("素材库卡片的图片预览失败时走同一条恢复入口", async () => {
+    const freshUrl = "https://cdn.example.com/a.png?X-Tos-Signature=fresh";
+    mocks.refreshMedia.mockResolvedValue(freshUrl);
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
+
+    render(
+      <AssetFlow
+        assets={[cloudImageAsset()]}
+        onPreview={() => undefined}
+        onDropToCanvas={vi.fn()}
+      />,
+    );
+    // 供应商签名地址经原生代理取字节：取不到时回落到代理地址，由代理按对象键兜底。
+    await waitFor(() => expect(cardMediaSrc()).toBe(PROXY_URL));
+
+    fireEvent.error(document.querySelector<HTMLImageElement>(".asset-card__preview")!);
+    // 卡片与画布节点、详情弹窗共用同一个恢复入口：上游回放导入时的死地址时，
+    // 由它继续按对象键重签暂存副本，而不是停在「预览不可用」。
+    await waitFor(() =>
+      expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
+    );
+    await waitFor(() =>
+      expect(cardMediaSrc()).toBe(`asset://localhost/video?src=${encodeURIComponent(freshUrl)}`),
+    );
+  });
+
+  it("列表项没有预览地址时按素材身份补取一次", async () => {
+    const freshUrl = "https://cdn.example.com/a.png?X-Tos-Signature=fresh";
+    mocks.refreshMedia.mockResolvedValue(freshUrl);
+    vi.stubGlobal("fetch", () => Promise.reject(new Error("offline")));
+
+    render(
+      <AssetFlow
+        assets={[{ ...cloudImageAsset(), previewUrl: null }]}
+        onPreview={() => undefined}
+        onDropToCanvas={vi.fn()}
+      />,
+    );
+
+    // 直接按「没有地址」渲染会让这类素材永远没有预览：必须先补取一次。
+    await waitFor(() =>
+      expect(mocks.refreshMedia).toHaveBeenCalledWith(expect.anything(), "image", null),
+    );
+    await waitFor(() =>
+      expect(cardMediaSrc()).toBe(`asset://localhost/video?src=${encodeURIComponent(freshUrl)}`),
     );
   });
 });

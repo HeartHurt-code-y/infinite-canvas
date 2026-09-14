@@ -1531,6 +1531,38 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    /// 按对象键查找素材导入任务（预览兜底用）。
+    ///
+    /// 素材入库把导入时的暂存租约地址交给上游，上游把它当预览地址原样回放；租约过期、
+    /// 暂存对象清理之后这个地址就取不到字节了。此时按对象键回到导入任务，用其
+    /// `local_path`（导入的原始文件）重建预览，是同一份内容的唯一可靠副本。
+    ///
+    /// 只认 `purpose = 'asset_import'`：拉取存储桶建立的 `local_asset` 任务只存文件名，
+    /// 不是真实路径，拿它当本地文件会读到错误位置。
+    pub fn find_asset_import_job_by_object_key(
+        &self,
+        object_key: &str,
+    ) -> BackendResult<Option<StagingJobRecord>> {
+        if object_key.trim().is_empty() {
+            return Ok(None);
+        }
+        self.lock()?
+            .query_row(
+                "SELECT id, local_path, purpose, media_type, object_key, status,
+                        bytes_total, bytes_uploaded, asset_id, import_target_json,
+                        error_json, created_at, updated_at, adjustment
+                 FROM staging_jobs
+                 WHERE purpose = 'asset_import'
+                   AND object_key = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![object_key],
+                staging_job_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_recoverable_staging_jobs(&self) -> BackendResult<Vec<StagingJobRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
