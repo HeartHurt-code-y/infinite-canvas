@@ -2302,7 +2302,10 @@ svg[data-spin="true"] {
   height: 18px;
   padding: 0;
   color: var(--color-text);
-  background: var(--color-ink);
+  /* 与 __remove 同一条约定：图标用 --color-text，底色必须取深色控件面。
+     用 --color-ink 会和文字色同值（近白），上传图标被自己的底色盖住，
+     按钮退化成一颗纯白圆点，在深色卡片上只剩「看不清的白块」。 */
+  background: var(--color-chrome-2);
   border: none;
   border-radius: var(--radius-round);
   opacity: 0;
