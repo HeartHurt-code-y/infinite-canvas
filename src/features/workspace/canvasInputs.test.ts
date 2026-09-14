@@ -69,9 +69,11 @@ const edge = (fromKey: string, toKey: string): AssetEdgeData => ({
 });
 
 describe("unrestricted canvas payload graph", () => {
-  it("preserves the GPT Image 2 full document through relays and mixed legacy text sources", () => {
+  it("cleans restored GPT Image 2 metadata while preserving all prompts through relays", () => {
     const fullDocument =
       "```text\n第一套完整图片提示词\n```\n\n说明：产品电商模板；保留包装。\n\n```text\n第二套完整图片提示词\n```\n\n注：不得新增产品功效。\n\n如果需要更换标题，请提供确认文案。";
+    const cleanedDocument =
+      "```text\n第一套完整图片提示词\n```\n\n\n```text\n第二套完整图片提示词\n```\n\n注：不得新增产品功效。\n\n如果需要更换标题，请提供确认文案。";
     const entries: CanvasNodeEntry[] = [
       {
         type: "gen",
@@ -99,11 +101,11 @@ describe("unrestricted canvas payload graph", () => {
     expect(sources.find((source) => source.sourceKey === "style")).toMatchObject({
       edgeId: "relay->target",
       preserveFullText: true,
-      text: fullDocument,
+      text: cleanedDocument,
     });
-    expect(connectedCanvasPromptText(sources)).toBe(`传统模式正文\n\n${fullDocument}`);
+    expect(connectedCanvasPromptText(sources)).toBe(`传统模式正文\n\n${cleanedDocument}`);
     expect(connectedCanvasPromptText([...sources].reverse())).toBe(
-      `${fullDocument}\n\n传统模式正文`,
+      `${cleanedDocument}\n\n传统模式正文`,
     );
     expect(
       connectedCanvasPromptText(sources.filter((source) => source.sourceKey === "legacy")),

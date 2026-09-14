@@ -2861,12 +2861,13 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ]);
   });
 
-  it("GPT Image 2 风格库使用真实参考与手改上下文，将完整图片提示词传入图片节点", async () => {
+  it("GPT Image 2 风格库清洗模板元信息，保留真实参考与手改并传入图片节点", async () => {
     const templateNote = "说明：所选模板为产品电商；假设画幅 3:4。";
     const constraintsNote = "注：保留杯身已有标签，不添加未确认的产品功效。";
     const clarification = "如果需要更换包装文字，请提供确认后的完整文案。";
-    const generatedPrompt = `\`\`\`text\n主体与任务：以参考图中的站台为背景制作咖啡海报。\n构图：主体居中，顶部留标题空间。\n风格与材质：温暖复古纸张质感。\n文字：标题严格为「醒来一杯好心情」。\n画幅：3:4。\n约束：保留真实产品外观，不增加品牌标识。\n\`\`\`\n\n${templateNote}\n\n${constraintsNote}\n\n${clarification}`;
-    const editedPrompt = `${generatedPrompt}\n手动修改：杯子移到画面右侧，保留左侧留白。`;
+    const cleanedPrompt = `主体与任务：以参考图中的站台为背景制作咖啡海报。\n构图：主体居中，顶部留标题空间。\n风格与材质：温暖复古纸张质感。\n文字：标题严格为「醒来一杯好心情」。\n画幅：3:4。\n约束：保留真实产品外观，不增加品牌标识。\n\n${constraintsNote}\n\n${clarification}`;
+    const generatedPrompt = `\`\`\`text\n${cleanedPrompt}\n\`\`\`\n\n${templateNote}\n案例索引：case 347`;
+    const editedPrompt = `${cleanedPrompt}\n手动修改：杯子移到画面右侧，保留左侧留白。`;
     const optimizedPrompt = `${editedPrompt}\n调整光线：暖色侧光，杯身标签完整可见。\n\n${constraintsNote}\n\n${clarification}`;
     const replies = [generatedPrompt, optimizedPrompt, optimizedPrompt];
     let runCount = 0;
@@ -2890,15 +2891,18 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       "GPT Image 2 风格库",
     );
     expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveAccessibleDescription(
-      /按图片用途匹配风格.*输出可直接交给图片节点的完整提示词/,
+      /按图片用途匹配内置案例与风格.*输出可直接交给图片节点的提示词正文/,
     );
     const referenceImage = await addAssetNode("图片", "站台参考图", 20, 700);
     connectAssetToGeneration(referenceImage, promptNode);
     fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
     const output = getPromptOutputEditor(promptNode);
-    await waitFor(() => expect(output).toHaveTextContent(noNewlines(generatedPrompt)));
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(cleanedPrompt)));
+    expect(output).not.toHaveTextContent("case 347");
+    expect(output).not.toHaveTextContent("```");
     const conversationLog = within(promptNode).getByRole("log", { name: "提示词多轮对话" });
-    expect(conversationLog).toHaveTextContent(templateNote);
+    expect(conversationLog).not.toHaveTextContent(templateNote);
+    expect(conversationLog).not.toHaveTextContent("case 347");
     expect(conversationLog).toHaveTextContent(constraintsNote);
     expect(conversationLog).toHaveTextContent(clarification);
     const promptCommands = () =>
@@ -2928,7 +2932,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       visionImages: firstCommand["visionImages"],
       contextHistory: [
         { role: "第 1 条 · 你", content: firstCommand["userPrompt"] },
-        { role: "第 2 条 · 提示词助手", content: generatedPrompt },
+        { role: "第 2 条 · 提示词助手", content: cleanedPrompt },
         { role: "当前输出提示词", content: editedPrompt },
       ],
     });
@@ -2977,18 +2981,20 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       target: { value: "gpt_image_2_style" },
     });
     const fullDocument = "```\n复古咖啡海报\n```\n\n说明：产品电商模板。\n\n注：保留原包装。";
+    const cleanedDocument = "```\n复古咖啡海报\n```\n\n\n注：保留原包装。";
     setPromptOutputText(promptNode, fullDocument);
     const imageNode = await addGenerationNode("图片", 920, 180);
     connectPromptToGeneration(promptNode, imageNode);
     const input = within(imageNode).getByRole("textbox", {
       name: "提示词输入框，输入 @ 引用素材",
     });
-    await waitFor(() => expect(input).toHaveTextContent(noNewlines(fullDocument)));
-    if (edited) setPromptText(input, `${fullDocument}\n用户添加标题留白。`);
+    await waitFor(() => expect(input).toHaveTextContent(noNewlines(cleanedDocument)));
+    expect(input).not.toHaveTextContent("说明：产品电商模板");
+    if (edited) setPromptText(input, `${cleanedDocument}\n用户添加标题留白。`);
     fireEvent.click(within(promptNode).getByRole("button", { name: /^解除连线：图片生成 / }));
     await waitFor(() =>
       edited
-        ? expect(input).toHaveTextContent(noNewlines(`${fullDocument}\n用户添加标题留白。`))
+        ? expect(input).toHaveTextContent(noNewlines(`${cleanedDocument}\n用户添加标题留白。`))
         : expect(input).not.toHaveTextContent(/\S/),
     );
   });

@@ -7,8 +7,8 @@ Generated from `data/style-library.json`. Use this file as the detailed index fo
 - Match explicit product types to template categories first, such as product, poster, UI, infographic, brand, photography, character, or document.
 - Match visual words to style tags next, such as realistic, 3D, illustration, classical, brand, poster, or UI.
 - Match context words to scene tags next, such as commerce, education, social, food, travel, story, history, tech, or creative.
-- If a request is vague, offer 2-3 strong template directions and ask the user to choose before writing the final prompt.
-- Final output should include the selected template name, a copyable GPT-Image2 prompt, and concise constraints for text, aspect ratio, layout, and negative details.
+- If a request is vague, select a reasonable suitable direction and complete a concrete prompt using the current user request and supplied materials.
+- Final output must contain only the complete generation-ready prompt. Do not emit template names, selection rationale, case IDs, source links, or Markdown wrapper fences.
 
 ## Template Index
 
@@ -19,9 +19,6 @@ Generated from `data/style-library.json`. Use this file as the detailed index fo
 - Styles: UI
 - Scenes: Tech, Social
 - Tags: UI, Dashboard, Screenshot
-- Cover: `/images/case17.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-ui
-- Example cases: case 17, case 2, case 4
 
 Use when:
 - EN: Use for app screens, dashboards, social screenshots, and live interface mockups.
@@ -46,9 +43,6 @@ Pitfalls:
 - Styles: Infographic, Charts
 - Scenes: Education, Tech
 - Tags: Infographic, Chart, Education
-- Cover: `/images/case334.png`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-infographic
-- Example cases: case 334, case 1, case 8
 
 Use when:
 - EN: Use for explainer graphics, technical diagrams, timelines, and knowledge cards.
@@ -73,9 +67,6 @@ Pitfalls:
 - Styles: Infographic, Charts, Realistic
 - Scenes: Education, Tech
 - Tags: Infographic, Chart, Education
-- Cover: `/images/case341.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-infographic
-- Example cases: case 341
 
 Use when:
 - EN: Use when the topic needs micro-to-macro scale comparison and labeled detail windows.
@@ -100,9 +91,6 @@ Pitfalls:
 - Styles: Poster
 - Scenes: Commerce, Social
 - Tags: Poster, Typography, Campaign
-- Cover: `/images/case345.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-poster
-- Example cases: case 345, case 5, case 10
 
 Use when:
 - EN: Use for event posters, movie posters, covers, and social campaign visuals.
@@ -127,9 +115,6 @@ Pitfalls:
 - Styles: Poster, Realistic
 - Scenes: Commerce, Fashion
 - Tags: Poster, Campaign, Typography
-- Cover: `/images/case350.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-poster
-- Example cases: case 350, case 3
 
 Use when:
 - EN: Use for sports brand campaigns, athlete posters, and product-led sport visuals.
@@ -154,9 +139,6 @@ Pitfalls:
 - Styles: Poster
 - Scenes: Creative, Social
 - Tags: Typography, Poster, Style
-- Cover: `/images/case355.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-poster
-- Example cases: case 355
 
 Use when:
 - EN: Use when the exact title must become the main visual structure.
@@ -181,9 +163,6 @@ Pitfalls:
 - Styles: Poster, Illustration, Classical
 - Scenes: Story, History
 - Tags: Poster, Classical, Style
-- Cover: `/images/case359.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-poster
-- Example cases: case 359
 
 Use when:
 - EN: Use for poetic portrait posters, ink atmospheres, and layered cultural visuals.
@@ -208,9 +187,6 @@ Pitfalls:
 - Styles: Poster, Infographic
 - Scenes: Education
 - Tags: Poster, Education, Style
-- Cover: `/images/case339.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-poster
-- Example cases: case 339
 
 Use when:
 - EN: Use for natural subjects that need a premium, clean science poster feel.
@@ -235,9 +211,6 @@ Pitfalls:
 - Styles: Product, Realistic
 - Scenes: Commerce, Food
 - Tags: Product, Commerce, Packaging
-- Cover: `/images/case373.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-product
-- Example cases: case 373, case 358
 
 Use when:
 - EN: Use for product hero shots, packaging visuals, detail pages, and sales layouts.
@@ -262,9 +235,6 @@ Pitfalls:
 - Styles: Product, UI
 - Scenes: Commerce, Fashion
 - Tags: Product, Layout, Style
-- Cover: `/images/case353.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-product
-- Example cases: case 353
 
 Use when:
 - EN: Use for beauty recommendations, skin reports, shopping assistants, and lifestyle product cards.
@@ -289,9 +259,6 @@ Pitfalls:
 - Styles: Brand
 - Scenes: Commerce
 - Tags: Brand, Logo, Identity
-- Cover: `/images/case354.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-brand
-- Example cases: case 354
 
 Use when:
 - EN: Use for logo systems, brand boards, visual identity kits, and application mockups.
@@ -316,9 +283,6 @@ Pitfalls:
 - Styles: Brand, Product
 - Scenes: Commerce, Social
 - Tags: Brand, Identity, Campaign
-- Cover: `/images/case362.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-brand
-- Example cases: case 362
 
 Use when:
 - EN: Use for multi-touchpoint campaign boards and brand rollout previews.
@@ -343,9 +307,6 @@ Pitfalls:
 - Styles: Architecture
 - Scenes: Travel, Commerce
 - Tags: Architecture, Interior, Map
-- Cover: `/images/case331.png`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-architecture
-- Example cases: case 331, case 11
 
 Use when:
 - EN: Use for interiors, architecture renders, city maps, spatial plans, and environment concepts.
@@ -370,9 +331,6 @@ Pitfalls:
 - Styles: Photography, Realistic
 - Scenes: Fashion, Commerce
 - Tags: Photography, Realistic, Lens
-- Cover: `/images/case377.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-photo
-- Example cases: case 377
 
 Use when:
 - EN: Use for portraits, street photos, product photography, and cinematic realism.
@@ -397,9 +355,6 @@ Pitfalls:
 - Styles: Photography, Realistic
 - Scenes: Travel, Social
 - Tags: Photography, Realistic, Scene
-- Cover: `/images/case376.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-photo
-- Example cases: case 376
 
 Use when:
 - EN: Use for candid street moments, accidental spills, documentary phone shots, and fast action.
@@ -424,9 +379,6 @@ Pitfalls:
 - Styles: Illustration
 - Scenes: Story, Creative
 - Tags: Illustration, Art, Style
-- Cover: `/images/case346.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-illustration
-- Example cases: case 346, case 6
 
 Use when:
 - EN: Use for anime, watercolor, ink, decorative art, and style experiments.
@@ -451,9 +403,6 @@ Pitfalls:
 - Styles: Character, Illustration
 - Scenes: Story
 - Tags: Character, Pose, Style
-- Cover: `/images/case347.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-character
-- Example cases: case 347
 
 Use when:
 - EN: Use for character sheets, pose grids, action breakdowns, and identity references.
@@ -478,9 +427,6 @@ Pitfalls:
 - Styles: 3D, Character
 - Scenes: Commerce, Creative
 - Tags: Character, 3D, Style
-- Cover: `/images/case378.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-character
-- Example cases: case 378
 
 Use when:
 - EN: Use for premium collectible figures, avatar toys, blind-box characters, and 3D display renders.
@@ -505,9 +451,6 @@ Pitfalls:
 - Styles: Scenes, Illustration
 - Scenes: Story, Social
 - Tags: Scene, Story, Storyboard
-- Cover: `/images/case330.png`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-scene
-- Example cases: case 330
 
 Use when:
 - EN: Use for storyboards, worldbuilding, live scenes, and emotional narrative frames.
@@ -532,9 +475,6 @@ Pitfalls:
 - Styles: History, Classical, Illustration
 - Scenes: History, Story
 - Tags: History, Classical, Scroll
-- Cover: `/images/case375.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-history
-- Example cases: case 375, case 338
 
 Use when:
 - EN: Use for ancient Chinese themes, scrolls, dynasty clothing, poetry visuals, and historical scenes.
@@ -559,9 +499,6 @@ Pitfalls:
 - Styles: Documents, Infographic
 - Scenes: Education, Tech
 - Tags: Document, Publishing, Layout
-- Cover: `/images/case360.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-document
-- Example cases: case 360
 
 Use when:
 - EN: Use for white papers, manuals, encyclopedic plates, report pages, and publication systems.
@@ -586,9 +523,6 @@ Pitfalls:
 - Styles: Other Use Cases, Product
 - Scenes: Creative, Tech
 - Tags: Creative, R&D, Special
-- Cover: `/images/case370.jpg`
-- Template source: https://github.com/freestylefly/awesome-gpt-image-2/blob/main/docs/templates.md#tpl-other
-- Example cases: case 370, case 361
 
 Use when:
 - EN: Use for experimental prompt tasks, R&D boards, exploded diagrams, and unusual visual systems.

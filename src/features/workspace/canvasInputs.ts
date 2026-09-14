@@ -1,6 +1,7 @@
 import type { CanvasDocument, CanvasNodeEntry, CanvasNodesByKey } from "../canvas/canvasStore";
 import { toMediaSrc } from "../../lib/backend";
 import { stripMarkdown } from "../../lib/promptContent";
+import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
 import {
   assetGenerationInput,
   outputGenerationInput,
@@ -26,7 +27,7 @@ export interface ConnectedCanvasTextInput {
   readonly name: string;
   readonly text: string;
   readonly edgeId: string;
-  /** 完整技能文档的代码块、模板说明与约束都属于输出，不能只抽取首个代码块。 */
+  /** 已按模式清洗的完整提示词；多方案、正文代码和约束不能只抽取首个代码块。 */
   readonly preserveFullText?: boolean;
 }
 
@@ -278,7 +279,10 @@ export function createCanvasInputResolver(
     } else if (entry.type === "output") {
       payload = outputPayload(entry.data);
     } else if (entry.type === "gen" && entry.data.kind === "prompt") {
-      const text = entry.data.config.generatedPrompt.trim();
+      const text =
+        entry.data.config.mode === "gpt_image_2_style"
+          ? cleanGptImage2Prompt(entry.data.config.generatedPrompt)
+          : entry.data.config.generatedPrompt.trim();
       payload = {
         media: [],
         texts: text

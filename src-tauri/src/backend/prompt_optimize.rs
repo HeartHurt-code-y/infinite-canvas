@@ -43,7 +43,7 @@ use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use regex::Regex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use tauri::{AppHandle, Emitter as _};
+use tauri::{AppHandle, Emitter as _, Manager as _};
 use tauri_plugin_log::log::{info, warn};
 use uuid::Uuid;
 
@@ -53,6 +53,7 @@ use super::{
         AssetDelivery, AssetLibrary, AssetReadTrace, ResolveAsset, ResolvedAssetAccess,
     },
     error::{BackendError, BackendResult},
+    gpt_image_style_library,
     local_results::LocalResultService,
     model_schema::{provider_scoped_model_definition_id, text_request_profile},
     provider::{CapturedHttpResponse, parse_token_usage},
@@ -68,6 +69,8 @@ use super::{
 };
 
 mod reference_inputs;
+#[cfg(test)]
+mod style_reference_tests;
 
 /// Seedance 2.0 提示词优化技能（byted-ark-seedance-pe）随应用编译。
 ///
@@ -747,7 +750,7 @@ fn load_builtin_multi_grid_storyboard_system_prompt() -> String {
     sections.join("\n\n")
 }
 
-/// 风格库适配合同和完整索引编译内置；索引中的外部模板链接不视为已读取全文。
+/// 固定技能合同和索引保持缓存前缀；相关模板全文、案例正文和图片按本轮意图另行附带。
 fn load_builtin_gpt_image_2_style_system_prompt() -> String {
     const DOCUMENTS: &[(&str, &str)] = &[
         (
@@ -763,7 +766,7 @@ fn load_builtin_gpt_image_2_style_system_prompt() -> String {
     for (path, content) in DOCUMENTS {
         sections.push(format!("---\n# 技能文档：{path}\n\n{content}"));
     }
-    sections.push("---\n继续遵守应用 SKILL.md：先给完整可复制的图片提示词，再简述所选模板方向。仅以本轮实际素材为视觉证据；来源案例 ID、链接和封面路径都是索引元数据，不代表已读取对应案例或图片。普通细节合理选择；只合并补问无法可靠推断的必要事实，不执行外部工具或生成媒体。".to_string());
+    sections.push(format!("---\n继续遵守应用 SKILL.md：只输出可直接用于图片生成的完整提示词正文，去掉围栏、模板说明、案例编号和来源信息。完整案例库已离线内置，本轮只附带按当前请求与最新编辑稿选择的模板全文、案例正文及实际图片；索引链接本身不代表已读取对应案例或图片。普通细节合理选择，只合并补问无法可靠推断的必要事实，不执行外部工具或生成媒体。\n\n{}", gpt_image_style_library::REFERENCE_BOUNDARY));
     sections.join("\n\n")
 }
 
@@ -1452,6 +1455,155 @@ fn extract_complete_prompt_document(content: &str) -> &str {
     }
 }
 
+// Keep this mode-specific contract in sync with src/lib/gptImage2Prompt.ts. Shared
+// fixtures cover both the recorded backend result and legacy canvas propagation.
+fn gpt_image_prompt_plain_label(line: &str) -> String {
+    static PREFIX: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^(?:#{1,6}\s+|[-*+]\s+)").expect("valid label prefix regex"));
+    static BOLD: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\*\*([^*]+)\*\*").expect("valid bold label regex"));
+    BOLD.replace(&PREFIX.replace(line.trim(), ""), "$1")
+        .into_owned()
+}
+
+fn gpt_image_prompt_fence(line: &str) -> Option<(String, String)> {
+    static FENCE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\s*(`{3,}|~{3,})([^`~]*)$").expect("valid prompt fence regex")
+    });
+    FENCE.captures(line).map(|captures| {
+        (
+            captures[1].to_string(),
+            captures[2].trim().to_ascii_lowercase(),
+        )
+    })
+}
+
+fn unwrap_gpt_image_prompt_envelope(text: &str) -> String {
+    let mut current = text.trim().to_string();
+    loop {
+        let lines: Vec<&str> = current.split('\n').collect();
+        if let Some((marker, info)) = gpt_image_prompt_fence(lines.first().copied().unwrap_or(""))
+            && matches!(
+                info.as_str(),
+                "" | "text" | "plaintext" | "markdown" | "md" | "prompt"
+            )
+            && lines.len() >= 3
+            && lines.last().map(|line| line.trim()) == Some(marker.as_str())
+            && !lines[1..lines.len() - 1]
+                .iter()
+                .any(|line| line.trim() == marker)
+        {
+            current = lines[1..lines.len() - 1].join("\n").trim().to_string();
+        } else {
+            return current;
+        }
+    }
+}
+
+/// Strip only recognizable delivery metadata, keeping actual image copy, references,
+/// negative constraints, multiple requested prompts and internal code verbatim.
+fn extract_gpt_image_2_prompt(content: &str) -> String {
+    static METADATA: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r"(?i)^(?:所选模板方向|所选模板|模板选择|模板信息|模板名称|适用理由|选择理由|匹配理由|案例索引|案例编号|案例\s*ID|参考案例|案例来源|template name|selected template|selection rationale|case index|case id)(?:\s*[：:]|$)"
+    ).expect("valid style metadata regex")
+    });
+    static TEMPLATE_NOTE: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r"(?i)^(?:说明|模板)[：:]\s*(?:所选模板|选择了|选用|采用的模板|.*模板[。；;]|.*案例\s*ID)"
+    ).expect("valid template note regex")
+    });
+    static VISUAL_LABEL: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r"^(?:主体与任务|主体|构图与布局|构图|视觉风格与材质|风格与材质|视觉风格|文字与标签要求|文字与标签|画面文字与标签|画面文字|文字|画幅与输出格式|画幅与输出形式|画幅与格式|画幅|约束与负面细节|约束与排除细节|约束|负面提示词|负面提示)(?:\s*[：:]|$)"
+    ).expect("valid visual label regex")
+    });
+    static PROMPT_HEADING: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(
+        r"(?i)^(?:最终提示词|图片提示词|生成提示词|完整提示词|final prompt|image prompt)[：:]?$"
+    ).expect("valid prompt heading regex")
+    });
+    static INDENTED: LazyLock<Regex> =
+        LazyLock::new(|| Regex::new(r"^\s{2,}\S").expect("valid continuation regex"));
+    static FOOTER_GAP: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^(?:\s*|\s*(?:-{3,}|\*{3,}|_{3,})\s*)$").expect("valid footer separator regex")
+    });
+    let unwrapped = unwrap_gpt_image_prompt_envelope(&content.replace("\r\n", "\n"));
+    let mut result = Vec::new();
+    let mut fence: Option<String> = None;
+    let mut metadata_continuation = false;
+    let mut removed_metadata = false;
+    for line in unwrapped.split('\n') {
+        if let Some(marker) = &fence {
+            result.push(line);
+            if line.trim() == marker {
+                fence = None;
+            }
+            continue;
+        }
+        if let Some((marker, _)) = gpt_image_prompt_fence(line) {
+            fence = Some(marker);
+            metadata_continuation = false;
+            result.push(line);
+            continue;
+        }
+        let label = gpt_image_prompt_plain_label(line);
+        if METADATA.is_match(&label) || TEMPLATE_NOTE.is_match(&label) {
+            metadata_continuation = true;
+            removed_metadata = true;
+            continue;
+        }
+        if metadata_continuation && INDENTED.is_match(line) && !VISUAL_LABEL.is_match(&label) {
+            continue;
+        }
+        metadata_continuation = false;
+        if !PROMPT_HEADING.is_match(&label) {
+            result.push(line);
+        }
+    }
+    if removed_metadata && fence.is_none() {
+        while result.last().is_some_and(|line| FOOTER_GAP.is_match(line)) {
+            result.pop();
+        }
+    }
+    let unwrapped = unwrap_gpt_image_prompt_envelope(&result.join("\n"));
+    fence = None;
+    unwrapped
+        .split('\n')
+        .map(|line| {
+            if let Some(marker) = &fence {
+                if line.trim() == marker {
+                    fence = None;
+                }
+                return line.to_string();
+            }
+            if let Some((marker, _)) = gpt_image_prompt_fence(line) {
+                fence = Some(marker);
+                return line.to_string();
+            }
+            let label = gpt_image_prompt_plain_label(line);
+            if VISUAL_LABEL.is_match(&label) {
+                label
+            } else {
+                line.to_string()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+fn validate_cleaned_prompt_output(mode: PromptOptimizationMode, prompt: &str) -> BackendResult<()> {
+    if mode == PromptOptimizationMode::GptImage2Style && prompt.trim().is_empty() {
+        return Err(BackendError::protocol(
+            "模型只返回了模板或案例说明，没有可用图片提示词，请重试",
+            json!({ "mode": mode.as_str() }),
+        ));
+    }
+    Ok(())
+}
+
 /// 人物真实感图片技能允许在提示词正文后附一句设计逻辑说明；
 /// 这类说明与分隔线不属于提示词本体，交付前剥离（与 2.5 的尾注剥离同一策略）。
 fn strip_realistic_character_explanation(content: &str) -> String {
@@ -1503,7 +1655,7 @@ fn strip_thinking_blocks(text: &str) -> String {
     result
 }
 
-/// 按模式提取交付内容；H3、FPV、打斗、多宫格、故事板与图片风格库保留完整文档。
+/// 按模式提取交付内容；图片风格库单独剥离模板元信息，其余完整文档模式保持原合同。
 pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) -> String {
     // 推理模型常在正文前内嵌思维链：先剥离 think/思考块，避免思考内容进入对话、稿件或下游提示词。
     let content = strip_thinking_blocks(raw_output.trim());
@@ -1528,10 +1680,10 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::FpvPath
         | PromptOptimizationMode::FightPromptMaster
         | PromptOptimizationMode::MultiGridStoryboard
-        | PromptOptimizationMode::StoryboardPrompt
-        | PromptOptimizationMode::GptImage2Style => {
+        | PromptOptimizationMode::StoryboardPrompt => {
             extract_complete_prompt_document(&content).to_string()
         }
+        PromptOptimizationMode::GptImage2Style => extract_gpt_image_2_prompt(&content),
         PromptOptimizationMode::RealisticCharacter => {
             strip_realistic_character_explanation(strip_outer_code_fence(&content))
         }
@@ -1900,14 +2052,14 @@ fn build_system_and_user_prompts(
                 .filter(|input| input.target.media_type() == MediaType::Video)
                 .count();
         let evidence = if image_count == 0 && video_count == 0 {
-            "本轮未附带图片或视频视觉证据：仅依据用户文字与历史已确认内容，不得声称看过参考图、案例封面或视频。".to_string()
+            "用户本轮未附带图片或视频视觉证据：用户主体与事实仅依据用户文字和历史已确认内容，不得声称看过用户参考图或视频；另外提供的内置案例图片仅是风格资料，不能充当用户角色身份或产品事实。".to_string()
         } else {
             format!(
-                "本轮实际附带 {image_count} 张图片（可能包含视频联系表）及 {video_count} 份视频素材：只以可见内容为依据保留主体、产品外观和空间关系；联系表的格数、边框和时间码不代表目标图片版式，静态帧不构成听觉证据。不根据图片编造产品功效或未见细节。"
+                "用户本轮实际附带 {image_count} 张图片（可能包含视频联系表）及 {video_count} 份视频素材：只以可见内容为依据保留主体、产品外观和空间关系；联系表的格数、边框和时间码不代表目标图片版式，静态帧不构成听觉证据。不根据图片编造产品功效或未见细节。另外提供的内置案例图片仅是风格资料，不能覆盖用户角色身份或产品事实。"
             )
         };
         format!(
-            "请按 GPT Image 2 风格库处理本轮{action}请求：依次按产物用途、模板类别、视觉风格、场景和相关案例索引选择方向，应用索引中的用途、构图建议和常见问题。优化以当前可编辑输出为基础，保留完整历史中已确认的主体、画面文字、品牌事实、风格、画幅和交付范围，落实本轮修改。首先交付完整可复制图片提示词，覆盖主体与任务、构图与布局、视觉风格与材质、画面文字与标签、画幅与输出形式、约束与排除细节；然后简述所选模板名称及有用案例 ID，不声称复现未读取的案例全文。跟随用户语言。多个方案复用同一模板，变化主体、构图、配色或场景；普通细节合理选择，仅对无法推断的必要事实合并补问。此轮只交付文字，图片由下游图片节点执行生成。\n\n{evidence}\n\n用户本轮请求：\n{}",
+            "请按 GPT Image 2 风格库处理本轮{action}请求：按产物用途、模板类别、视觉风格和场景选择方向，使用本轮实际提供的内置案例正文与图片证据。优化以当前可编辑输出为基础，保留完整历史中已确认的主体、画面文字、品牌事实、风格、画幅和交付范围，落实本轮修改。只交付可直接交给图片生成模型的完整提示词正文，用自然段覆盖主体与任务、构图与布局、视觉风格与材质、画面文字、画幅与输出形式、约束与排除细节。不要输出 Markdown 围栏、分析过程、所选模板方向、模板名称、适用理由、案例索引、案例 ID、来源链接或来源说明；案例只用于内部参考，不能冒充用户的参考图。保留用户要求实际出现在画面中的文字、标点、网址和显式 @ 引用，不因为清洗元信息而删除这些内容。跟随用户语言。用户需要多个方案时完整交付每个方案，不只保留首个；普通细节合理选择，仅对无法推断的必要事实合并补问。此轮只交付文字，图片由下游图片节点执行生成。\n\n{evidence}\n\n用户本轮请求：\n{}",
             command.user_prompt
         )
     } else if command.task == PromptTask::Generate {
@@ -2746,6 +2898,43 @@ async fn resolve_multimodal_inputs(
     Ok(payloads)
 }
 
+/// Internal examples use the existing image adapters, but are appended only to
+/// this text request. The command, canvas references and user history are untouched.
+async fn append_gpt_image_style_references(
+    command: &OptimizeVideoPromptCommand,
+    root: &Path,
+    multimodal_inputs: &mut Vec<MultimodalPayload>,
+) -> BackendResult<Value> {
+    let references = gpt_image_style_library::select(command, root)?;
+    let image_count = references.images.len();
+    let mut internal_materials = vec![MultimodalPayload {
+        display_name: "内置模板和风格示例（不是用户身份素材）".to_string(),
+        kind: PromptMultimodalKind::Document,
+        mime_type: "text/plain".to_string(),
+        base64: None,
+        text: Some(references.document),
+    }];
+    for image in references.images {
+        let bytes = tokio::fs::read(&image.path).await?;
+        let payload = vision_image_payload(&image.display_name, bytes)?;
+        internal_materials.push(MultimodalPayload {
+            display_name: image.display_name,
+            kind: PromptMultimodalKind::Image,
+            mime_type: payload.mime_type,
+            base64: Some(payload.base64),
+            text: None,
+        });
+    }
+    // Commit only after every selected image has been read and validated.
+    multimodal_inputs.extend(internal_materials);
+    Ok(json!({
+        "templateId": references.template_id,
+        "caseIds": references.case_ids,
+        "imageCount": image_count,
+        "purpose": "internal_style_reference_only",
+    }))
+}
+
 async fn execute_recorded_text_call(
     deps: &PromptVisionDeps<'_>,
     task_id: &str,
@@ -2795,6 +2984,14 @@ async fn execute_recorded_text_call(
             "以下参考素材已随请求附带，请逐项读取并用于本轮任务：\n{inventory}\n\n{user_prompt}"
         )
     };
+    // Build the user's inventory first so internal examples are never described
+    // as user-supplied evidence or included in the visible reference count.
+    let style_reference_evidence = if command.mode == PromptOptimizationMode::GptImage2Style {
+        let root = gpt_image_style_library::bundle_root(&deps.app.path().resource_dir()?)?;
+        Some(append_gpt_image_style_references(command, &root, &mut multimodal_inputs).await?)
+    } else {
+        None
+    };
     let profile = text_request_profile(remote_model_id);
     let plan = build_text_model_request(
         profile,
@@ -2825,6 +3022,7 @@ async fn execute_recorded_text_call(
                 "query": query.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
                 "headers": headers.iter().map(|(name, value)| json!({ "name": name, "value": value })).collect::<Vec<_>>(),
                 "body": archived_body.clone(),
+                "internalStyleReferences": style_reference_evidence,
             }),
         },
     )?;
@@ -2915,6 +3113,7 @@ async fn execute_recorded_text_call(
         ));
     }
     let optimized_prompt = extract_optimized_prompt(command.mode, &raw_model_output);
+    validate_cleaned_prompt_output(command.mode, &optimized_prompt)?;
     Ok((
         OptimizedPromptResult {
             optimized_prompt,
@@ -5317,7 +5516,8 @@ mod tests {
         )));
         assert_eq!(prompt.matches("# 技能文档：").count(), 2);
         assert_eq!(index.matches("- ID: ").count(), 22);
-        assert!(prompt.contains("不代表已读取对应案例或图片"));
+        assert!(prompt.contains("完整案例库已离线内置"));
+        assert!(prompt.contains(gpt_image_style_library::REFERENCE_BOUNDARY));
         assert!(!prompt.contains("npm run"));
         assert!(!prompt.contains("npx skills"));
         assert!(!prompt.contains(r"C:\Users"));
@@ -5425,9 +5625,40 @@ mod tests {
     }
 
     #[test]
-    fn gpt_image_2_style_keeps_all_concepts_template_notes_and_questions() {
+    fn gpt_image_2_style_cleans_shared_generation_prompt_fixtures() {
+        let examples: Value = serde_json::from_str(include_str!(
+            "../../../src/lib/__fixtures__/gptImage2Prompt.json"
+        ))
+        .unwrap();
+        for example in examples.as_array().unwrap() {
+            let name = example["name"].as_str().unwrap();
+            let expected = example["expected"].as_str().unwrap();
+            for raw in [example["raw"].as_str().unwrap(), expected] {
+                assert_eq!(
+                    extract_optimized_prompt(PromptOptimizationMode::GptImage2Style, raw),
+                    expected,
+                    "{name}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gpt_image_2_style_rejects_metadata_only_output() {
+        let mode = PromptOptimizationMode::GptImage2Style;
+        let cleaned = extract_optimized_prompt(
+            mode,
+            "**所选模板方向**：\n模板名称：角色设定表\n案例索引：case 347",
+        );
+        assert!(cleaned.is_empty());
+        assert!(validate_cleaned_prompt_output(mode, &cleaned).is_err());
+        assert!(validate_cleaned_prompt_output(mode, "黄色恐龙，白底。").is_ok());
+        assert!(validate_cleaned_prompt_output(PromptOptimizationMode::Seedance25, "").is_ok());
+    }
+
+    #[test]
+    fn gpt_image_2_style_keeps_all_concepts_constraints_and_questions() {
         for output in [
-            "```text\n主体：白色保温杯。构图：3:4，主体居中。\n文字：夏日补给。约束：无品牌水印。\n```\n模板：产品电商；案例 ID 仅供索引。",
             "方案一：极简摄影。\n```text\n保留真实杯盖。\n```\n方案二：几何插画。\n```text\n大色块和留白。\n```\n约束：两版标题相同。",
             "请补充必须印在海报上的真实售价；未提供前不编造。",
         ] {

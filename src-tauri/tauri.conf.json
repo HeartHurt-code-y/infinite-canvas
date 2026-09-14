@@ -42,7 +42,8 @@
     "resources": {
       "resources/remotion-runtime/": "remotion-runtime/",
       "resources/ffmpeg/": "ffmpeg/",
-      "skills/gpt-image-2-style-library/LICENSE": "licenses/gpt-image-2-style-library-LICENSE"
+      "skills/gpt-image-2-style-library/LICENSE": "licenses/gpt-image-2-style-library-LICENSE",
+      "skills/gpt-image-2-style-library/": "skills/gpt-image-2-style-library/"
     },
     "windows": {
       "wix": {

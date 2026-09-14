@@ -83,6 +83,7 @@ import type {
   PromptContentIssue,
 } from "../../lib/promptContent";
 import { cleanGeneratedPrompt, createPromptContentModule } from "../../lib/promptContent";
+import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
 import {
   composeVideosInOrder,
   composedVideoFileName,
@@ -3670,9 +3671,8 @@ export function WorkspaceApp({
           referenceInputs: videoMaterials,
         })
         .then((result) => {
-          // 风格库交付的模板选择、假设与补问同样属于完整输出。
           const outputPrompt = isGptImage2Style
-            ? result.optimizedPrompt
+            ? cleanGptImage2Prompt(result.optimizedPrompt)
             : cleanGeneratedPrompt(result.optimizedPrompt);
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"

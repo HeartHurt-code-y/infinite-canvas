@@ -8,6 +8,7 @@ pub mod credentials;
 pub mod downloader;
 pub mod error;
 pub mod frame_extractor;
+mod gpt_image_style_library;
 pub mod image_normalize;
 pub mod local_results;
 pub mod media;
