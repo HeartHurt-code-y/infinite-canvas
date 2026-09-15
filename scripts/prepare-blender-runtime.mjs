@@ -22,14 +22,28 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const BLENDER_VERSION = "4.5.13";
 // 主源 download.blender.org 会对数据中心出口 IP（如 CircleCI）稳定返回 403；
-// 多镜像按序尝试，任一源拿到合法归档后统一走 sha256 校验，多源不降低可信度。
+// 多镜像按序尝试，任一源拿到合法归档后统一走 sha256/md5 校验，多源不降低可信度。
 const BASE_URL = "https://download.blender.org/release/Blender4.5/";
-const DOWNLOAD_MIRROR_BASE_URLS = [
+// 平台发行包位于 release/Blender4.5/。
+const RELEASE_MIRROR_BASE_URLS = [
   BASE_URL,
   "https://mirrors.aliyun.com/blender/release/Blender4.5/",
   "https://mirrors.tuna.tsinghua.edu.cn/blender/release/Blender4.5/",
   "https://mirror.clarkson.edu/blender/release/Blender4.5/",
   "https://ftp.halifax.rwth-aachen.de/blender/release/Blender4.5/",
+];
+// 对应源码归档位于 /source/，与发行包**不是**同一目录，必须各自成表。
+//
+// 历史故障：源码归档也曾用 RELEASE 镜像前缀拼接，于是请求
+// https://download.blender.org/release/Blender4.5/blender-4.5.13.tar.xz
+// ——5 个镜像全部 404，macOS 打包在 blender:prepare 这一步直接失败。
+// 这 5 个镜像的 /source/ 路径均已实测可用（HTTP 200，85,105,684 字节）。
+const SOURCE_MIRROR_BASE_URLS = [
+  "https://download.blender.org/source/",
+  "https://mirrors.tuna.tsinghua.edu.cn/blender/source/",
+  "https://mirrors.aliyun.com/blender/source/",
+  "https://mirror.clarkson.edu/blender/source/",
+  "https://ftp.halifax.rwth-aachen.de/blender/source/",
 ];
 const CHECKSUM_URL = `${BASE_URL}blender-${BLENDER_VERSION}.sha256`;
 // Official manifest checked on 2026-09-14; do not accept an unverified replacement archive.
@@ -63,6 +77,7 @@ const DISTRIBUTIONS = {
 const SOURCE = {
   filename: "blender-4.5.13.tar.xz",
   url: "https://download.blender.org/source/blender-4.5.13.tar.xz",
+  mirrorBases: SOURCE_MIRROR_BASE_URLS,
   checksumUrl: "https://download.blender.org/source/blender-4.5.13.tar.xz.md5sum",
   // The official source archive publishes MD5, not a SHA-256 manifest. Record both honestly.
   md5: "ff006e90a288fc82cee21578372bc034",
@@ -81,6 +96,7 @@ export function platformDistribution(platform, arch) {
     platform,
     arch,
     url: BASE_URL + distribution.filename,
+    mirrorBases: RELEASE_MIRROR_BASE_URLS,
     executable:
       platform === "win32"
         ? "runtime/blender.exe"
@@ -89,6 +105,20 @@ export function platformDistribution(platform, arch) {
           : "runtime/blender",
   };
 }
+
+/// 某个归档按镜像顺序展开出的全部下载地址。
+///
+/// 归档所在目录由 `metadata.mirrorBases` 显式给出（发行包在 release/，
+/// 源码在 /source/），缺失时直接报错，绝不退化成“按发行包目录猜路径”——
+/// 那正是源码归档在 5 个镜像上全部 404 的根因。
+export function downloadUrls(metadata) {
+  if (!Array.isArray(metadata.mirrorBases) || metadata.mirrorBases.length === 0)
+    throw new Error(`Blender 归档缺少镜像目录配置：${metadata.filename}`);
+  return metadata.mirrorBases.map((base) => base + metadata.filename);
+}
+
+/// 源码归档元数据（对外暴露以便单测钉住 /source/ 路径）。
+export const SOURCE_ARCHIVE = SOURCE;
 
 function contained(root, candidate) {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -279,8 +309,7 @@ async function cachedDownload(cache, metadata, override) {
   }
   const temporary = path.join(cache, `${metadata.filename}.${randomUUID()}.part`);
   let lastError;
-  for (const source of DOWNLOAD_MIRROR_BASE_URLS) {
-    const url = source + metadata.filename;
+  for (const url of downloadUrls(metadata)) {
     for (let attempt = 1; attempt <= 2; attempt += 1) {
       try {
         console.log(
