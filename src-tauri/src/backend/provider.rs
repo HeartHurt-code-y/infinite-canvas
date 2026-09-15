@@ -37,6 +37,25 @@ pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
 /// Base URL 共用凭据。未配置供应商专用令牌时才回退到本引用。
 pub const ASSET_LIBRARY_CREDENTIAL_REF: &str = "asset-library-token";
 
+/// 火山引擎方舟推理 API 的模型目录路径。
+///
+/// 该连接的 Base URL 已含 `/api/v3` 前缀（`https://ark.cn-beijing.volces.com/api/v3`），
+/// 端点因此是 `/models` 而不是 `/v1/models`。连通性测试与「拉取模型」必须用同一个
+/// 路径，否则测试结论无法代表实际拉取/生成能力。
+const ARK_MODELS_PATH: &str = "/models";
+
+/// 模型目录路径：方舟推理 API 不带 `/v1` 前缀，其余 OpenAI 兼容供应商沿用 `/v1/models`。
+///
+/// 模型列表与连通性测试共用本函数，避免两处各写一份路径判断后互相漂移
+/// （历史上连通性测试用的是 `/v1/models`，而拉取模型用的是 `/models`）。
+fn model_catalog_path(adapter_id: &str) -> &'static str {
+    if adapter_id == ARK_ADAPTER_ID {
+        ARK_MODELS_PATH
+    } else {
+        "/v1/models"
+    }
+}
+
 /// 没有云端素材库的上游主机（小写、不含端口）。
 ///
 /// 盘趣聚合网关（One API / new-api 内核）只开放 `/v1/models` 与
@@ -2291,6 +2310,18 @@ impl ProviderRuntime {
                 }),
             ));
         }
+        if context.api_key.trim().is_empty() {
+            // 未配置素材库凭据时，`resolve_asset_library` 会保留主 API Key（模型密钥），
+            // 空值继续往下走只会得到「凭据必须为 JSON 形态」这种指向错误的报错。
+            return Err(BackendError::validation(
+                "该火山引擎连接尚未配置素材库 AK/SK：请在「素材库令牌」处填写 Access Key 与 Secret Key；\
+                 只使用模型（拉取模型目录 / 生成）不需要素材库凭据。",
+                json!({
+                    "providerConnectionId": provider_connection_id,
+                    "credentialReference": context.api_key_ref,
+                }),
+            ));
+        }
         let credentials = ArkCredentials::parse(&context.api_key)?;
         // 火山引擎方舟有两套独立 API：
         // - 推理 API（模型拉取/生成）：供应商连接的 base_url，如 https://ark.cn-beijing.volces.com/api/v3
@@ -2366,7 +2397,12 @@ impl ProviderRuntime {
         })
     }
 
-    /// 连通性测试：向供应商 `/v1/models` 发起一次真实的鉴权请求。
+    /// 连通性测试：向供应商的模型目录端点发起一次真实的鉴权请求
+    /// （`GET {base_url}/v1/models`，火山引擎方舟推理 API 为 `GET {base_url}/models`）。
+    ///
+    /// 只做这一件事、只发这一个最小请求：它验证的正是「拉取模型」与「模型生成」要用的
+    /// 那条链路与那把密钥，不额外触发素材库 OpenAPI（那需要另一套 AK/SK，未配置是允许的
+    /// 组合，拿它做探测会把「没配素材库」误报成模型连接失败）。
     ///
     /// 失败（网络不可达、凭据错误、非 2xx）转换为 `ok=false` 的结果而不是错误，
     /// 保存动作本身已经成功，前端需要把两种结果分开提示。
@@ -2380,36 +2416,27 @@ impl ProviderRuntime {
     ) -> BackendResult<ConnectivityTestResult> {
         let started_at = std::time::Instant::now();
         let elapsed_ms = || started_at.elapsed().as_millis() as u64;
-        // 火山引擎 Ark 连接没有 `/v1/models` Bearer 语义，改用素材 OpenAPI 的
-        // ListAssetGroups（最小分页）做探测：能同时验证 AK/SK 签名与网关可达性。
-        let ark_connection = token_group.is_none()
-            && self
-                .storage
+        // 指定分组令牌时一律按该分组的 OpenAI 兼容语义探测（分组令牌只存在于聚合网关
+        // 连接上），只有默认令牌才需要区分方舟推理 API 的路径（少一个 `/v1` 前缀）。
+        let adapter_id = if token_group.is_none() {
+            self.storage
                 .get_provider_connection(provider_connection_id)
-                .map(|provider| provider.adapter_id == ARK_ADAPTER_ID)
-                .unwrap_or(false);
-        let probe = if ark_connection {
-            self.raw_ark_action_request(
-                provider_connection_id,
-                "ListAssetGroups",
-                &json!({
-                    "Filter": { "GroupType": "AIGC" },
-                    "PageNumber": 1,
-                    "PageSize": 1,
-                }),
-            )
-            .await
+                .map(|provider| provider.adapter_id)
+                .unwrap_or_default()
         } else {
-            self.raw_json_request_with_token_group(
+            String::new()
+        };
+        // 只做一次最小探测：GET 模型目录，不落任何生成请求。
+        let probe = self
+            .raw_json_request_with_token_group(
                 provider_connection_id,
                 token_group,
                 Method::GET,
-                "/v1/models",
+                model_catalog_path(&adapter_id),
                 &[],
                 None,
             )
-            .await
-        };
+            .await;
         match probe {
             Ok(response) => {
                 let ok = (200..300).contains(&response.status);
@@ -2436,25 +2463,17 @@ impl ProviderRuntime {
         provider_connection_id: &str,
         token_group: Option<&str>,
     ) -> BackendResult<Vec<RemoteModelOption>> {
-        // 火山引擎方舟推理 API 的 Base URL 已含 /api/v3 前缀，模型列表端点为 /models；
-        // 其他 OpenAI 兼容供应商沿用 /v1/models。
-        let models_path = self
+        let adapter_id = self
             .storage
             .get_provider_connection(provider_connection_id)
-            .map(|provider| {
-                if provider.adapter_id == ARK_ADAPTER_ID {
-                    "/models"
-                } else {
-                    "/v1/models"
-                }
-            })
-            .unwrap_or("/v1/models");
+            .map(|provider| provider.adapter_id)
+            .unwrap_or_default();
         let response = self
             .raw_json_request_with_token_group(
                 provider_connection_id,
                 token_group,
                 Method::GET,
-                models_path,
+                model_catalog_path(&adapter_id),
                 &[],
                 None,
             )
@@ -5224,6 +5243,17 @@ mod tests {
             None
         );
         assert_eq!(host_without_asset_library(""), None);
+    }
+
+    #[test]
+    fn model_catalog_path_matches_each_adapter_dialect() {
+        // 方舟推理 API 的 Base URL 自带 /api/v3，端点不能再加 /v1；聚合网关沿用 /v1/models。
+        // 连通性测试与「拉取模型」共用本函数：两处路径一旦分叉，测试结论就不再代表
+        // 实际拉取能力（历史缺陷：连通性测试打 /v1/models，拉取模型打 /models）。
+        assert_eq!(model_catalog_path(ARK_ADAPTER_ID), "/models");
+        assert_eq!(model_catalog_path(MOYU_ADAPTER_ID), "/v1/models");
+        // 连接查不到（adapter 为空）时退回 OpenAI 兼容默认路径。
+        assert_eq!(model_catalog_path(""), "/v1/models");
     }
 
     #[test]
