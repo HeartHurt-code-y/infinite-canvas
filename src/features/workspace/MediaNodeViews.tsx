@@ -1945,6 +1945,17 @@ export function CanvasOutputNode({
   const failedSaveResult = results.find((result) =>
     ["failed", "interrupted", "local_missing", "conflict"].includes(result.saveStatus),
   );
+  // 后端其实已经落盘、但卡片还没拿到本地路径的结果：事件漏投时卡片会短暂停在
+  // 「正在保存本地副本」，而后端的任务详情里 finalPath 已经写好。补发逻辑会自动补齐，
+  // 这里先把真实情况显示出来，避免让用户误以为保存卡死。
+  // 文件名在组件体里算好再进 JSX：把 fileNameFromPath 调用留在 JSX 里会让 React Compiler
+  // 放弃本组件的记忆化（preserve-manual-memoization 报错）。
+  const savedResultName = (() => {
+    const saved = results.find(
+      (result) => result.saveStatus === "succeeded" && result.finalPath != null,
+    );
+    return saved?.finalPath == null ? null : fileNameFromPath(saved.finalPath);
+  })();
   // 展示阶段：running = 任务进行中（含任务记录同步中）；failed = 任务失败/保存失败；saving = 任务成功但结果尚未落卡。
   const phase: "running" | "failed" | "saving" = (() => {
     if (task == null) return "running";
@@ -2169,7 +2180,7 @@ export function CanvasOutputNode({
                 ? node.layer.isBaseLayer
                   ? `底图${node.layer.name ? ` · ${node.layer.name}` : ""}`
                   : `图层 ${node.layer.zIndex}${node.layer.name ? ` · ${node.layer.name}` : ""}`
-                : (node.name ?? (isPreviewOnly ? "生成结果（正在保存）" : ""))}
+                : (node.name ?? savedResultName ?? (isPreviewOnly ? "生成结果（正在保存）" : ""))}
             </span>
             {/* 已入库的产物在名称旁常显绿色小点：上传按钮只在悬停时出现，
                 状态若只跟着按钮走，用户扫一眼卡片根本看不出这张产物已经在素材库里。 */}
@@ -2188,7 +2199,9 @@ export function CanvasOutputNode({
                   isPreviewOnly
                     ? failedSaveResult
                       ? "本地保存失败"
-                      : "正在保存本地副本"
+                      : savedResultName != null
+                        ? "已保存到本机 · 正在补齐卡片"
+                        : "正在保存本地副本"
                     : "已连线来源节点 · 可作为参考输入"
                 }`}
           </span>

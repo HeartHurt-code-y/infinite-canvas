@@ -1768,10 +1768,23 @@ const GENERATION_EVENT_SCHEMAS = {
   "generation:retry-exhausted": generationRetryExhaustedEventSchema,
 } as const satisfies Record<GenerationEventName, v.GenericSchema>;
 
+/** 生成事件订阅建立次数：>1 说明调用方处理器引用不稳定，事件存在丢失风险。 */
+let generationEventSubscriptionCount = 0;
+
 export function subscribeGenerationEvents(
   handler: (eventName: GenerationEventName, payload: unknown) => void,
 ): () => void {
   if (!isDesktopRuntime()) return () => undefined;
+  // 订阅期数只在挂载时增长一次；调用方必须保证不会反复重建订阅——`result-ready` 与
+  // `result-saved` 之间如果有一次退订/重订，图片结果的那次保存事件就会被静默丢弃，
+  // 卡片永久停在「正在保存本地副本」。这里把期数记进日志，便于日后回看是否又出现抖动。
+  generationEventSubscriptionCount += 1;
+  if (generationEventSubscriptionCount > 1) {
+    frontendLog(
+      "warn",
+      `[generation] 生成事件订阅被重复建立（第 ${generationEventSubscriptionCount} 次）：处理器引用不稳定会导致事件丢失`,
+    );
+  }
   const unlistenPromises = GENERATION_EVENT_NAMES.map((name) =>
     listen(name, (event) => {
       try {

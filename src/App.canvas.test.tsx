@@ -6415,6 +6415,150 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(card).getByText(/已连线来源节点/)).toBeInTheDocument();
   });
 
+  it("生成事件订阅对同一个处理器保持幂等：不退订重订，保存事件不会落在重建窗口里", async () => {
+    // 图片结果的 result-ready 与 result-saved 由后端几乎同一时刻连着发出：只要两者之间
+    // 发生一次退订/重订，那次保存事件就被静默丢弃，卡片永久停在「正在保存本地副本」。
+    // 因此订阅必须复用同一个处理器引用，而不是每次画布变化都重建监听。
+    render(<App />);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([command]) => command === "plugin:event|listen")).toBe(
+        true,
+      );
+    });
+    const handlerIdsByName = new Map<string, unknown>();
+    for (const [command, args] of invokeMock.mock.calls) {
+      if (command !== "plugin:event|listen") continue;
+      const name = (args as { event?: string } | undefined)?.event;
+      if (name == null || !name.startsWith("generation:")) continue;
+      const handlerId = (args as { handler?: unknown } | undefined)?.handler;
+      // 同一个事件名重复订阅即为重建，处理器引用必须完全一致。
+      if (handlerIdsByName.has(name)) {
+        expect(handlerId).toBe(handlerIdsByName.get(name));
+      } else {
+        handlerIdsByName.set(name, handlerId);
+      }
+    }
+    expect(handlerIdsByName.size).toBe(7);
+    // 画布交互（节点/边变化）会让事件处理器闭包重建，订阅本身不能跟着重建。
+    const listensBefore = invokeMock.mock.calls.filter(
+      ([command, args]) =>
+        command === "plugin:event|listen" &&
+        String((args as { event?: string } | undefined)?.event).startsWith("generation:"),
+    ).length;
+    createNodeAt("图片生成", 700, 380);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const listensAfter = invokeMock.mock.calls.filter(
+      ([command, args]) =>
+        command === "plugin:event|listen" &&
+        String((args as { event?: string } | undefined)?.event).startsWith("generation:"),
+    ).length;
+    expect(listensAfter).toBe(listensBefore);
+  });
+
+  it("漏掉保存事件后按后端事实补发：卡片从「正在保存」切到本地文件", async () => {
+    // 事件丢失（监听重建、应用切后台、页面重载）后，结果事实仍在后端任务详情里。
+    // 卡片不能就这么永远停在「生成结果（正在保存）」——必须按事实补上本地路径。
+    const succeededTask = makeTaskSummary({
+      operation: "text_to_image",
+      status: "succeeded",
+      progress: 100,
+      completedAt: 1,
+    });
+    const savedRecord = {
+      taskId: succeededTask.id,
+      resultIndex: 1,
+      mediaType: "image",
+      remoteTaskId: null,
+      source: { kind: "url", url: "https://cdn.example.com/recovered.png" },
+      saveStatus: "succeeded",
+      finalPath: "C:\\generated\\recovered.png",
+      relativePath: "无限画布/recovered.png",
+      byteSize: 4096,
+      mimeType: "image/png",
+      sha256: "def456",
+      savedAt: 2,
+      error: null,
+    };
+    invokeMock.mockImplementation((command) => {
+      if (command === "list_generation_tasks") {
+        return Promise.resolve({ items: [succeededTask], nextCursorCreatedBefore: null });
+      }
+      if (command === "get_generation_task") {
+        return Promise.resolve({
+          summary: succeededTask,
+          logicalRequest: null,
+          resolvedRequest: null,
+          attempts: [],
+          calls: [],
+          events: [],
+          results: [savedRecord],
+          textOutput: null,
+          finalError: null,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+
+    const imageNode = await addGenerationNode("图片", 370, 148);
+    await waitFor(() => {
+      expect(within(imageNode).getByLabelText("供应商")).toHaveValue(PROVIDER.id);
+    });
+    setPromptText(
+      within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      "城市排水系统剖面示意图",
+    );
+    fireEvent.click(within(imageNode).getByRole("button", { name: "开始图片生成" }));
+
+    // 只投递 result-ready：result-saved 假设已在事件通道里丢失。
+    const readyListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "generation:result-ready",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const readyHandler = tauriCallbacks.get(readyListener[1]?.["handler"] as number);
+    act(() => {
+      readyHandler!({
+        event: "generation:result-ready",
+        id: 1,
+        payload: {
+          taskId: succeededTask.id,
+          result: { ...savedRecord, saveStatus: "writing", finalPath: null },
+          previewSrc: "https://cdn.example.com/recovered.png",
+        },
+      });
+    });
+
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    // 补发确实发生了（拉取任务详情取回后端事实），且不依赖任何后续事件。
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(
+          ([command, args]) =>
+            command === "get_generation_task" &&
+            (args as { taskId?: string } | undefined)?.taskId === succeededTask.id,
+        ),
+      ).toBe(true);
+    });
+    // 卡片按事实切到本地文件：不再停在「正在保存本地副本」，名称直接用落盘文件名。
+    await waitFor(() => {
+      expect(card.querySelector("img")).toHaveAttribute(
+        "src",
+        expect.stringContaining("recovered.png"),
+      );
+    });
+    expect(within(card).queryByText(/正在保存本地副本/)).not.toBeInTheDocument();
+    expect(within(card).getByText("recovered.png")).toBeInTheDocument();
+    expect(within(card).getByText(/已连线来源节点/)).toBeInTheDocument();
+  });
+
   it("一张图只落一张产物卡片：占位卡片被结果原地填充，不再多出一张等待保存的卡片", async () => {
     // gpt-image 契约模型声明 n 参数：占位卡片预设 resultKey=taskId#index。
     // 后端结果索引是 1 起的业务索引，两侧必须落在同一套编号上——

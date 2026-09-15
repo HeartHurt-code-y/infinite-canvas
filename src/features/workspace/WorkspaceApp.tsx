@@ -345,6 +345,12 @@ const WhiteModelStudioDialog = lazy(() =>
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
 /**
+ * 生成结果补发的最多尝试次数（含首次立即补发）。超过后不再轮询：卡片会停留在
+ * 「正在保存本地副本」并保留结果记录里的错误，用户可用卡片上的按钮手动重试。
+ */
+const RESULT_RESCUE_MAX_ATTEMPTS = 8;
+
+/**
  * 画布节点的 per-node 引用稳定缓存：inputs 浅比较全部相等时复用上次的
  * CanvasFlowNode 对象（含 data.content 的 JSX 元素引用），让 memo 化的
  * CanvasFlowNodeView 跳过未变化节点的整棵子树渲染。
@@ -5243,25 +5249,36 @@ export function WorkspaceApp({
   // 生成结果落卡去重（taskId#resultIndex）：占位卡片在任务启动时即已创建。
   // result-ready 只写入会话内 previewSrc，result-saved 再写入稳定的 finalPath；
   // 用户手动删除的占位卡片也不会因结果事件被重新创建。
-  const seenOutputResultKeysRef = useRef<Set<string>>(new Set());
-  // 已尝试补齐结果的占位卡片任务（应用重启后回填用，避免重复拉取任务详情）。
-  const resolvedPendingTaskIdsRef = useRef<Set<string>>(new Set());
+  //
+  // 去重按「卡片自己的 resultKey」判定，不使用「已处理过的 resultKey」全局集合：
+  // 图片结果的 result-ready 与 result-saved 由后端几乎同一时刻连着发出，事件一旦在
+  // 监听重建窗口里丢失，事后补发就会被那个集合挡住，卡片永远停在「正在保存本地副本」。
+  // 幂等改由卡片自身状态保证——resultKey 已对上且 finalPath 已写好的卡片只补缺失字段。
+  //
+  // 补发重试台账：`inFlight` 记录已排定待执行的任务（同一任务只排一个计时器），
+  // `attempts` 记录已用掉的重试次数。两者分开是因为 effect 会随画布任何变化重跑：
+  // 已排定的退避不能被无关的节点变化取消，否则补发会退化成打满次数就放弃。
+  const resultRescueInFlightRef = useRef<Map<string, number>>(new Map());
+  const resultRescueAttemptsRef = useRef<Map<string, number>>(new Map());
 
   /**
    * 生成结果填充：供应商返回的结果先原地填充 previewSrc，保存完成后再替换成
    * finalPath。previewSrc 只存在于当前会话，不会写进画布文档。
    * Seedream 图层拆分场景下单任务返回多张图（底图+多个图层），占位卡片只有一个，
    * 后续结果会动态新建独立卡片，每个图层单独落为可编辑对象。
+   *
+   * 返回值表示「这次调用是否让某个卡片拿到了该结果」：
+   * - 事件路径不关心返回值（事件只发一次，重复投递由幂等吸收）；
+   * - 补发路径用它决定是否继续重试——没落卡就说明后端结果还没就绪或事件没到，需要再等。
    */
   const applyResultToOutputCard = useCallback(
-    (record: GenerationResultRecord, previewSrc: string | null = null) => {
-      if (!isDesktopRuntime()) return;
+    (record: GenerationResultRecord, previewSrc: string | null = null): boolean => {
+      if (!isDesktopRuntime()) return false;
       const mediaType = record.mediaType;
-      if (mediaType !== "image" && mediaType !== "video" && mediaType !== "text") return;
+      if (mediaType !== "image" && mediaType !== "video" && mediaType !== "text") return false;
       const resultKey = `${record.taskId}#${record.resultIndex}`;
       const saved = record.saveStatus === "succeeded" && record.finalPath != null;
-      if (!saved && previewSrc == null && mediaType !== "text") return;
-      if (saved && seenOutputResultKeysRef.current.has(resultKey)) return;
+      if (!saved && previewSrc == null && mediaType !== "text") return false;
       const finalPath = saved ? record.finalPath : null;
       const name = finalPath ? fileNameFromPath(finalPath) : null;
       // Context-IR 文本产物：扩写正文内联在 source.text，随事件写入卡片展示。
@@ -5291,52 +5308,59 @@ export function WorkspaceApp({
         };
         return info;
       })();
+      // 把结果写进指定卡片。幂等：以卡片自身 resultKey + finalPath 判定，绝不重复落卡，
+      // 因此可以在事件丢失后由补发路径反复调用。
+      const fillNode = (node: OutputNodeData): OutputNodeData => ({
+        ...node,
+        resultKey,
+        mediaType,
+        ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
+        ...(textContent != null ? { textContent } : {}),
+        ...(layer != null ? { layer } : {}),
+      });
+      const ownsResult = (node: OutputNodeData) =>
+        node.taskId === record.taskId && node.resultKey === resultKey;
       let matched = false;
       patchNodes("output", (node) => {
-        if (
-          matched ||
-          node.taskId !== record.taskId ||
-          (node.resultKey != null && node.resultKey !== resultKey)
-        ) {
-          return node;
+        if (matched || !ownsResult(node)) return node;
+        // 已经是这次结果且本地文件路径已写入：真正无事可做，直接出账。
+        if (!(saved && node.finalPath === finalPath)) {
+          matched = true;
+          return fillNode(node);
         }
         matched = true;
-        return {
-          ...node,
-          resultKey,
-          mediaType,
-          ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
-          ...(textContent != null ? { textContent } : {}),
-          ...(layer != null ? { layer } : {}),
-        };
+        return node;
       });
       // 兜底收编本次任务的空占位卡片：即使 resultKey 与本次结果对不上（历史文档里的
       // 旧编号、或结果索引与占位编号错位），也把结果填进已有卡片——否则占位卡片会永远
       // 停在「已成功 · 等待结果保存」，同一次生成还会多出一张重复卡片。
-      // 已有 resultKey 的卡片不参与收编，多结果场景仍由后续结果各自新建卡片展示。
+      // 已有内容（finalPath / previewSrc）的卡片不参与收编，多结果场景仍由后续结果各自新建卡片。
       if (!matched) {
         patchNodes("output", (node) => {
           if (
             matched ||
             node.taskId !== record.taskId ||
             node.finalPath != null ||
-            node.previewSrc != null ||
-            (node.resultKey != null && node.resultKey !== resultKey)
+            node.previewSrc != null
           ) {
             return node;
           }
           matched = true;
-          return {
-            ...node,
-            resultKey,
-            mediaType,
-            ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
-            ...(textContent != null ? { textContent } : {}),
-            ...(layer != null ? { layer } : {}),
-          };
+          return fillNode(node);
         });
       }
       // 单任务多结果（如图层拆分）：占位卡片只有一个，后续结果匹配不到时动态新建卡片。
+      // 先确认没有任何卡片代表这次结果——补发路径可能在上一次尝试里已经落过卡，
+      // 这时只补字段，不能再新建一张重复卡片。
+      if (!matched) {
+        const alreadyOwned = outputNodes.find(ownsResult);
+        if (alreadyOwned != null) {
+          matched = true;
+          if (saved && alreadyOwned.finalPath !== finalPath) {
+            patchNodes("output", (node) => (ownsResult(node) ? fillNode(node) : node));
+          }
+        }
+      }
       if (!matched) {
         const existing = outputNodes.find((node) => node.taskId === record.taskId);
         const sourceNodeId = existing?.sourceNodeId;
@@ -5361,12 +5385,14 @@ export function WorkspaceApp({
           }
         }
       }
-      if (saved) {
-        seenOutputResultKeysRef.current.add(resultKey);
-        frontendLog("info", `[canvas] 生成产物已落卡: ${name}`);
-      } else {
-        frontendLog("info", `[canvas] 生成结果已返回，先展示临时预览: task=${record.taskId}`);
+      if (matched) {
+        if (saved) {
+          frontendLog("info", `[canvas] 生成产物已落卡: ${name}`);
+        } else {
+          frontendLog("info", `[canvas] 生成结果已返回，先展示临时预览: task=${record.taskId}`);
+        }
       }
+      return matched;
     },
     [patchNodes, addOutput, genNodes, outputNodes],
   );
@@ -5440,9 +5466,19 @@ export function WorkspaceApp({
     [applyResultToOutputCard, refreshTasks],
   );
 
+  // 事件处理器每次渲染都会重建（依赖 applyResultToOutputCard → outputNodes），因此订阅
+  // 必须经过 ref 转发：早期实现把处理器直接作为 effect 依赖，于是每次画布节点变化都会
+  // 把 7 个事件监听全部退订再重新注册。而图片结果的 result-ready 与 result-saved 由后端
+  // 在下载完成后几乎同一时刻连着发出，恰好落在重建窗口里的那次 save 事件会被静默吞掉——
+  // 卡片就永远停在「正在保存本地副本」，后端其实早已把文件写进下载目录。
+  // 订阅只注册一次，处理器始终读取最新闭包。
+  const generationEventHandlerRef = useRef(handleGenerationEvent);
+  generationEventHandlerRef.current = handleGenerationEvent;
   useEffect(() => {
-    return subscribeGenerationEvents(handleGenerationEvent);
-  }, [handleGenerationEvent]);
+    return subscribeGenerationEvents((eventName, payload) => {
+      generationEventHandlerRef.current(eventName, payload);
+    });
+  }, []);
 
   // 拉取任务的完整原始返回（失败产物卡片展示完整原始错误）：
   // ref 去重避免重复请求；状态只在异步回调中更新。
@@ -5474,27 +5510,96 @@ export function WorkspaceApp({
     return map;
   }, [generationTasks]);
 
-  // 应用重启后回填：画布恢复出的占位产物卡片，若对应任务在应用关闭期间已成功
-  // 且结果已保存，则拉取任务详情把产物补进卡片（会话内落卡由事件驱动，不经过这里）。
+  // 生成结果补发（兜底）：任务已经成功，但卡片始终没拿到本地文件路径。成因只有两类——
+  // 事件通道漏掉了那一次 result-saved（监听重建窗口、应用切后台、页面重载都会造成），
+  // 或结果落卡时这张卡片还不存在（图片结果下载很快，result-ready/result-saved 可能早于
+  // 占位卡片落入画布）。两者都追不回事件，但事实还在后端：任务详情里的结果记录带着
+  // finalPath。所以这里按任务拉一次详情，把后端真实状态对账进卡片；没就绪就退避重试。
   useEffect(() => {
     if (!isDesktopRuntime()) return;
+    const inFlight = resultRescueInFlightRef.current;
+    const attempts = resultRescueAttemptsRef.current;
+    const waitingTaskIds = new Set<string>();
     for (const node of outputNodes) {
       if (node.finalPath != null) continue;
-      if (resolvedPendingTaskIdsRef.current.has(node.taskId)) continue;
+      // 组合/下载/白模等本地产物不是生成任务的结果投影，只对账生成产物卡片。
+      if (node.origin != null && node.origin !== "generation") continue;
       const task = taskById.get(node.taskId);
       if (task?.status !== "succeeded") continue;
-      resolvedPendingTaskIdsRef.current.add(node.taskId);
-      void generationClient
-        .get(node.taskId)
-        .then((detail) => {
-          const record = detail.results.find(
-            (result) => result.saveStatus === "succeeded" && result.finalPath != null,
-          );
-          if (record) applyResultToOutputCard(record);
-        })
-        .catch(() => undefined);
+      // 有失败结果记录的卡片走「重试保存」按钮，不在这里反复拉取。
+      if (
+        taskResults[node.taskId]?.some((result) =>
+          ["failed", "interrupted", "local_missing", "conflict"].includes(result.saveStatus),
+        )
+      ) {
+        continue;
+      }
+      waitingTaskIds.add(node.taskId);
     }
-  }, [outputNodes, taskById, applyResultToOutputCard]);
+    // 卡片已经补上 finalPath（或任务不再是成功态）：撤掉待执行的重试并出账。
+    for (const [taskId, timer] of [...inFlight]) {
+      if (waitingTaskIds.has(taskId)) continue;
+      window.clearTimeout(timer);
+      inFlight.delete(taskId);
+      attempts.delete(taskId);
+    }
+    for (const taskId of waitingTaskIds) {
+      // 已排定待执行的重试不重复排期：effect 会随画布任何变化重跑，
+      // 每次都重排就等于把退避取消掉。
+      if (inFlight.has(taskId)) continue;
+      const attempt = attempts.get(taskId) ?? 0;
+      if (attempt >= RESULT_RESCUE_MAX_ATTEMPTS) continue;
+      attempts.set(taskId, attempt + 1);
+      // 首次立即补发（重启回填要保持即时响应），之后按 2s/4s/8s… 退避，最长 128s。
+      const delay = attempt === 0 ? 0 : Math.min(2_000 * 2 ** (attempt - 1), 128_000);
+      const timer = window.setTimeout(() => {
+        inFlight.delete(taskId);
+        void generationClient
+          .get(taskId)
+          .then((detail) => {
+            const savedResults = detail.results.filter(
+              (result) => result.saveStatus === "succeeded" && result.finalPath != null,
+            );
+            // 已经落好的结果也算「对账完成」：applyResultToOutputCard 对同一结果重复调用
+            // 是空操作（幂等），这里必须把它算成成功，否则单任务多结果场景会被误判为
+            // 一直没补齐，白白重试到上限。
+            const landed = (record: GenerationResultRecord) => {
+              const key = `${record.taskId}#${record.resultIndex}`;
+              return outputNodes.some(
+                (node) => node.resultKey === key && node.finalPath === record.finalPath,
+              );
+            };
+            let applied = false;
+            for (const record of savedResults) {
+              applied = applyResultToOutputCard(record) || applied;
+            }
+            if (applied || savedResults.some(landed)) {
+              attempts.delete(taskId);
+              frontendLog(
+                "info",
+                `[canvas] 生成结果补发成功：任务已保存但卡片未收到事件，已按后端事实补齐本地路径: task=${taskId}`,
+              );
+            }
+          })
+          .catch((error: unknown) => {
+            frontendLog(
+              "warn",
+              `[canvas] 生成结果补发查询失败，将重试: task=${taskId}, ${formatRawBackendError(error)}`,
+            );
+          });
+      }, delay);
+      inFlight.set(taskId, timer);
+    }
+  }, [outputNodes, taskById, taskResults, applyResultToOutputCard]);
+
+  // 卸载时清理补发计时器。
+  useEffect(() => {
+    const inFlight = resultRescueInFlightRef.current;
+    return () => {
+      for (const timer of inFlight.values()) window.clearTimeout(timer);
+      inFlight.clear();
+    };
+  }, []);
 
   // 失败/中断的产物卡片自动加载完整原始返回（卡片内展示完整原始错误）。
   useEffect(() => {
