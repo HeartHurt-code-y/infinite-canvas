@@ -4416,6 +4416,34 @@ fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<Remo
     Ok(models)
 }
 
+/// 路径段是否是「版本根」：`v1`、`v2`、`v3beta` …
+///
+/// 形状是「`v` + 至少一位数字 + 可选别名后缀」，后缀只认 `beta` / `alpha`（Gemini
+/// 的 `v1beta`）。`chat`、`images`、`videos`、`v1draft` 这类业务段一律不认，避免把
+/// 业务路径误判成版本前缀。比较时用整段原文（而非规整成 `v1`）：`v1beta` 因此天然
+/// 与 `v1` 不同，「版本冲突」判定不会被 Gemini 的 `v1beta` 别名撞上。
+fn version_root(segment: &str) -> Option<&str> {
+    const ALIASES: [&str; 2] = ["beta", "alpha"];
+    let rest = segment
+        .strip_prefix('v')
+        .or_else(|| segment.strip_prefix('V'))?;
+    let version_len = rest.bytes().take_while(|byte| byte.is_ascii_digit()).count();
+    let (version, alias) = rest.split_at(version_len);
+    if version.is_empty() || (!alias.is_empty() && !ALIASES.contains(&alias)) {
+        return None;
+    }
+    Some(segment)
+}
+
+/// 路径里的版本根只在前几个段内查找：Base URL 的版本前缀（`/api/v3`）出现在
+/// 靠前位置，越深越可能是业务名（例如某个分组恰好叫 `v1`）。
+fn version_root_within<'a>(segments: &[&'a str], limit: usize) -> Option<&'a str> {
+    segments
+        .iter()
+        .take(limit)
+        .find_map(|segment| version_root(segment))
+}
+
 pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     let mut url = Url::parse(base_url)?;
     let mut base_segments = url
@@ -4438,6 +4466,24 @@ pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     ) {
         base_segments.pop();
     }
+    // 已带版本的 Base URL 是一种 drop-in 端点：用户填 `https://ark.cn-beijing.volces.com/api/v3`
+    // 时，`/api/v3` 本身就是接口版本，模型契约里的 `/v1/...` 是给 OpenAI 兼容网关写的
+    // 通用路径。两者拼起来会得到上游没有的 `/api/v3/v1/chat/completions`（火山方舟实测
+    // 404，两次退避重试同样 404）。判定刻意保守——只认「Base 版本根与请求版本根同时出现
+    // 且版本号不同」：`.../v1` + `/v1/chat/completions` 这种版本号相同的写法保持原样，
+    // 免得把网关自带的版本段吃掉；上面的 v1/v1beta 别名切换已经先处理过，这里读到的是
+    // 改写后的 Base 段，因此 `.../v1` + `/v1beta/...` 不会被二次削掉版本根。
+    let base_version = version_root_within(&base_segments, 3);
+    let request_version = requested_segments.first().and_then(|first| version_root(first));
+    let drop_request_version = matches!(
+        (base_version, request_version),
+        (Some(base), Some(requested)) if base != requested
+    );
+    let requested_segments = if drop_request_version {
+        &requested_segments[1..]
+    } else {
+        requested_segments.as_slice()
+    };
     let overlap = (1..=base_segments.len().min(requested_segments.len()))
         .rev()
         .find(|count| base_segments[base_segments.len() - count..] == requested_segments[..*count])
@@ -5270,6 +5316,54 @@ mod tests {
                 .as_str(),
             "https://example.com/company/v1/models"
         );
+    }
+
+    #[test]
+    fn endpoint_drops_a_generic_version_root_on_a_versioned_base_url() {
+        // 火山方舟推理 API 的 Base URL 自带接口版本 `/api/v3`，而模型契约里给
+        // OpenAI 兼容网关写的是通用路径 `/v1/chat/completions`。历史缺陷：两者直接
+        // 拼接得到上游不存在的 `/api/v3/v1/chat/completions`，提示词节点因此 404，
+        // 流式退避重试打的是同一个地址，同样 404。图片/视频契约的 `/v1/...` 路径
+        // 走同一个 `endpoint()`，一并修正。
+        for (base, path, expected) in [
+            (
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "/v1/chat/completions",
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+            ),
+            (
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "/v1/images/generations",
+                "https://ark.cn-beijing.volces.com/api/v3/images/generations",
+            ),
+            // 版本号相同的写法保持原样：网关自带的 `/v1` 不能被吃掉。
+            (
+                "https://gateway.example.com/openai/v1",
+                "/v1/chat/completions",
+                "https://gateway.example.com/openai/v1/chat/completions",
+            ),
+            // 契约已经写成方舟形状时本来就正确，修正后不得回退。
+            (
+                "https://ark.cn-beijing.volces.com/api/v3",
+                "/chat/completions",
+                "https://ark.cn-beijing.volces.com/api/v3/chat/completions",
+            ),
+        ] {
+            assert_eq!(endpoint(base, path).unwrap().as_str(), expected);
+        }
+    }
+
+    #[test]
+    fn version_root_only_matches_version_shaped_segments() {
+        assert_eq!(version_root("v1"), Some("v1"));
+        assert_eq!(version_root("V3"), Some("V3"));
+        // 别名本体按原文返回，因此天然与 `v1` 不同。
+        assert_eq!(version_root("v1beta"), Some("v1beta"));
+        assert_eq!(version_root("v"), None);
+        assert_eq!(version_root("chat"), None);
+        assert_eq!(version_root("api"), None);
+        assert_eq!(version_root("videos"), None);
+        assert_eq!(version_root("v1draft"), None);
     }
 
     #[test]
