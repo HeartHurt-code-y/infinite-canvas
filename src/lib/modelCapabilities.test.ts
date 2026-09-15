@@ -220,15 +220,9 @@ describe("model capabilities", () => {
     // GPT Image 契约：文生图声明生成数量 n（1~10，默认 1）。
     const count = gptImage.find((capability) => capability.key === "n");
     expect(count).toMatchObject({ type: "integer", defaultValue: 1, minimum: 1, maximum: 10 });
-    // 返回格式默认内联 Base64：结果保存不再依赖对供应商存储域名的第二次连接。
-    const gptImageResponseFormat = gptImage.find(
-      (capability) => capability.key === "response_format",
-    );
-    expect(gptImageResponseFormat?.defaultValue).toBe("b64_json");
-    expect(gptImageResponseFormat?.options.map((option) => option.value)).toEqual([
-      "url",
-      "b64_json",
-    ]);
+    // gpt-image 不接受返回格式：上游（moyu 网关对 gpt-image-2，真机实测）以
+    // HTTP 400 unknown_parameter 拒绝该键，结果恒为内联 Base64。
+    expect(gptImage.some((capability) => capability.key === "response_format")).toBe(false);
 
     // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
     const gptImageEdit = modelParameterCapabilities(

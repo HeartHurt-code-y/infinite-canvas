@@ -825,14 +825,17 @@ fn gpt_image_count_parameter() -> Value {
     })
 }
 
-/// OpenAI Images 契约（`/v1/images/generations`）的返回格式参数：`url` 返回可下载
-/// 的链接，`b64_json` 把图片内联在响应里。
+/// dall-e 系 OpenAI Images 契约（`/v1/images/generations`）的返回格式参数：`url` 返回
+/// 可下载的链接，`b64_json` 把图片内联在响应里。
 ///
 /// 默认 `b64_json`：`url` 需要客户端再对供应商返回的存储地址发第二次请求，而该地址
 /// 与生成接口的域名往往不同（上游自有存储/CDN）。当这台机器连得上生成接口却连不上
 /// 那个存储域名时，生成成功但结果永远保存不下来；内联 Base64 不引入第二次连接。
 /// 兼容性由「下载失败回退 Base64」与用户可改的「返回格式」参数共同兜底：供应商若
 /// 忽略该字段仍返回链接，保存阶段会照旧下载。
+///
+/// **只属于 dall-e 契约**：gpt-image 系列不接受该键（见文生图默认契约里的注释），
+/// Seedream 有自己从文档抄来的同名字段（`seedream_text_to_image_parameters`）。
 fn openai_image_response_format_parameter() -> Value {
     json!({
         "type": "string",
@@ -862,13 +865,19 @@ fn gpt_image_text_to_image_parameters_before_n() -> Value {
     })
 }
 
-/// 尚未声明「返回格式」的 GPT Image 文生图默认参数（加入 `response_format` 前的
-/// 形状），用于识别需要补上 `response_format` 键的已保存定义。
-fn gpt_image_text_to_image_parameters_before_response_format() -> Value {
+/// 曾把「返回格式」声明为默认 `b64_json` 的 GPT Image 文生图默认参数（本次修正前的
+/// 形状），用于识别需要剔除 `response_format` 键的已保存定义。
+///
+/// 2026-09-15 真机实测：moyu 网关对 `gpt-image-2` 回
+/// HTTP 400 `Unknown parameter: 'response_format'`（`code=unknown_parameter`）。
+/// `response_format` 只属于 dall-e 系列契约，gpt-image 系列不接受该键，且其结果恒为
+/// 内联 Base64，因此当前契约不再声明它。
+fn gpt_image_text_to_image_parameters_with_response_format() -> Value {
     json!({
         "size": gpt_image_size_parameter(),
         "quality": gpt_image_quality_parameter(),
-        "n": gpt_image_count_parameter()
+        "n": gpt_image_count_parameter(),
+        "response_format": openai_image_response_format_parameter()
     })
 }
 
@@ -995,12 +1004,15 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             // GPT Image 契约的图片生成接口还声明生成数量 `n`（1~10，默认 1）。
             if gpt_image {
                 parameters.insert("n".into(), gpt_image_count_parameter());
+            } else {
+                // 返回格式只属于 dall-e 系列：gpt-image 系列既不接受该键（供应商以
+                // HTTP 400 unknown_parameter 拒绝），结果也恒为内联 Base64，声明它
+                // 只会让整次生成失败，因此不给 gpt-image 声明。
+                parameters.insert(
+                    "response_format".into(),
+                    openai_image_response_format_parameter(),
+                );
             }
-            // 返回格式：默认内联 Base64，避免结果保存阶段再直连供应商的存储域名。
-            parameters.insert(
-                "response_format".into(),
-                openai_image_response_format_parameter(),
-            );
             json!({
                 "resultType": "image",
                 "requestProfileId": "openai_images_v1",
@@ -1923,7 +1935,8 @@ fn legacy_text_to_image_parameters() -> Value {
 /// 迁移的三类历史形状：
 /// - dall-e 旧契约（`1024x1024` + `standard`）——gpt-image 供应商会以 HTTP 400 拒绝；
 /// - 尚未加入 `n` 的早期 GPT Image 契约；
-/// - 尚未声明「返回格式」的 GPT Image 契约（补上默认 `b64_json`）。
+/// - 曾声明返回格式 `response_format` 的 GPT Image 契约（上游以 HTTP 400
+///   `unknown_parameter` 拒绝该键，因此当前契约剔除它）。
 ///
 /// Gemini 与 Seedream 各有自己的契约刷新（`refresh_gemini_image_parameter_defaults`、
 /// `refresh_seedream_image_parameter_defaults`），这里显式让出，避免互相覆盖。
@@ -1935,17 +1948,17 @@ pub fn refresh_legacy_image_parameter_defaults(schema: &mut Value, model_id: &st
     }
     let gpt_image = model_id.to_ascii_lowercase().contains("gpt-image");
     let mut changed = false;
-    // 文生图：dall-e 旧契约、早期 GPT Image 契约或尚未声明返回格式的契约 → 刷新为当前契约。
+    // 文生图：dall-e 旧契约、早期 GPT Image 契约或带返回格式的旧契约 → 刷新为当前契约。
     if let Some(definition) = schema
         .get_mut("text_to_image")
         .and_then(Value::as_object_mut)
     {
         let legacy = legacy_text_to_image_parameters();
         let before_n = gpt_image_text_to_image_parameters_before_n();
-        let before_response_format = gpt_image_text_to_image_parameters_before_response_format();
+        let with_response_format = gpt_image_text_to_image_parameters_with_response_format();
         if definition.get("parameters") == Some(&legacy)
             || definition.get("parameters") == Some(&before_n)
-            || definition.get("parameters") == Some(&before_response_format)
+            || definition.get("parameters") == Some(&with_response_format)
         {
             if let Some(parameters) =
                 default_operation_schema(model_id, GenerationOperation::TextToImage)
@@ -3137,12 +3150,9 @@ mod tests {
         assert_eq!(parameters["n"]["default"], 1);
         assert_eq!(parameters["n"]["minimum"], 1);
         assert_eq!(parameters["n"]["maximum"], 10);
-        // 返回格式默认内联 Base64：结果下载不再依赖供应商的第三方存储域名。
-        assert_eq!(parameters["response_format"]["default"], "b64_json");
-        assert_eq!(
-            parameters["response_format"]["enum"],
-            json!(["url", "b64_json"])
-        );
+        // gpt-image 系列不接受 `response_format`（moyu 真机实测 HTTP 400
+        // unknown_parameter），结果恒为内联 Base64，因此当前契约不声明该键。
+        assert!(parameters.get("response_format").is_none());
 
         // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
         let edit_parameters = &schema["image_to_image"]["parameters"];
@@ -3150,7 +3160,7 @@ mod tests {
         assert_eq!(edit_parameters["size"]["default"], "auto");
         assert_eq!(edit_parameters["quality"]["default"], "auto");
 
-        // 非 gpt-image 模型沿用通用文生图契约。
+        // 非 gpt-image 模型沿用通用文生图契约，并保留 dall-e 契约的返回格式参数。
         let generic = default_model_schema("photon-1", &[GenerationOperation::TextToImage]);
         let generic_parameters = &generic["text_to_image"]["parameters"];
         assert_eq!(generic_parameters["quality"]["default"], "standard");
@@ -3455,20 +3465,21 @@ mod tests {
         ));
         assert_eq!(before_n["text_to_image"]["parameters"]["n"]["default"], 1);
 
-        // 尚未声明返回格式的 GPT Image 契约也会被刷新（补上 response_format）。
-        let mut before_response_format = json!({
+        // 曾声明返回格式的 GPT Image 契约会被刷新为当前契约（剔除 response_format）。
+        let mut with_response_format = json!({
             "text_to_image": {
-                "parameters": gpt_image_text_to_image_parameters_before_response_format()
+                "parameters": gpt_image_text_to_image_parameters_with_response_format()
             }
         });
         assert!(refresh_legacy_image_parameter_defaults(
-            &mut before_response_format,
+            &mut with_response_format,
             "gpt-image-2"
         ));
-        assert_eq!(
-            before_response_format["text_to_image"]["parameters"]["response_format"]["default"],
-            "b64_json"
-        );
+        let refreshed_parameters = &with_response_format["text_to_image"]["parameters"];
+        assert!(refreshed_parameters.get("response_format").is_none());
+        assert_eq!(refreshed_parameters["n"]["default"], 1);
+        assert_eq!(refreshed_parameters["size"]["default"], "auto");
+        assert_eq!(refreshed_parameters["quality"]["default"], "auto");
 
         // 图生图的历史空参数会被刷新为当前契约（含 n/size/quality）。
         let mut edit = json!({

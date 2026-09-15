@@ -1,4 +1,7 @@
-use std::{collections::HashSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashSet},
+    sync::{Arc, Mutex},
+};
 
 use base64::Engine as _;
 use chrono::Utc;
@@ -86,6 +89,15 @@ pub struct ProviderRuntime {
     lifecycle: GenerationTaskLifecycle,
     credentials: CredentialStore,
     client: reqwest::Client,
+    /// 进程内记忆：上游以 4xx 明确点名「不认识这个字段」的请求字段，按
+    /// 「模型定义 + 操作」分桶。命中后请求体不再携带该字段，避免同一模型每次生成都
+    /// 先用一个注定失败的请求试一次。
+    ///
+    /// 持久层的对应修复是模型契约本身（例如 gpt-image 系列不再声明
+    /// `response_format`，见 `model_schema::refresh_legacy_image_parameter_defaults`）；
+    /// 这一层只兜住「供应商下发的自定义契约」与「以后新增字段」两类，因此不落库：
+    /// 契约改了才是权威，进程内记忆只负责当次运行不再重复踩同一个坑。
+    rejected_request_fields: Arc<Mutex<BTreeMap<String, BTreeSet<String>>>>,
 }
 
 #[derive(Clone)]
@@ -1047,6 +1059,7 @@ impl ProviderRuntime {
             lifecycle,
             credentials,
             client,
+            rejected_request_fields: Arc::new(Mutex::new(BTreeMap::new())),
         })
     }
 
@@ -1209,17 +1222,7 @@ impl ProviderRuntime {
                 let body = build_text_to_image_body(task, resolved)?;
                 let path = request_path(&resolved.operation_schema, "/v1/images/generations")?;
                 let response = self
-                    .captured_json(
-                        task,
-                        attempt_id,
-                        &context,
-                        CapturedJsonRequest {
-                            phase: "submit",
-                            method: Method::POST,
-                            path: &path,
-                            body: &body,
-                        },
-                    )
+                    .send_submission_json(task, attempt_id, &context, "submit", &path, body)
                     .await?;
                 let submission = parse_image_submission(&response, false)?;
                 Ok((submission, response))
@@ -1247,18 +1250,8 @@ impl ProviderRuntime {
                         }
                         _ => build_seedream_image_to_image_body(task, resolved)?,
                     };
-                    self.captured_json(
-                        task,
-                        attempt_id,
-                        &context,
-                        CapturedJsonRequest {
-                            phase: "submit",
-                            method: Method::POST,
-                            path: &path,
-                            body: &body,
-                        },
-                    )
-                    .await?
+                    self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
+                        .await?
                 } else {
                     self.captured_image_edit(task, attempt_id, &context, resolved, &path)
                         .await?
@@ -1274,17 +1267,7 @@ impl ProviderRuntime {
                 let body = build_video_body(task, resolved)?;
                 let path = request_path(&resolved.operation_schema, "/v1/video/generations")?;
                 let response = self
-                    .captured_json(
-                        task,
-                        attempt_id,
-                        &context,
-                        CapturedJsonRequest {
-                            phase: "submit",
-                            method: Method::POST,
-                            path: &path,
-                            body: &body,
-                        },
-                    )
+                    .send_submission_json(task, attempt_id, &context, "submit", &path, body)
                     .await?;
                 let task_id = parse_video_task_id(&response)?;
                 Ok((GenerationSubmission::RemoteVideoTask { task_id }, response))
@@ -1328,6 +1311,107 @@ impl ProviderRuntime {
             .await?;
         let observation = parse_video_observation(&response)?;
         Ok((observation, response))
+    }
+
+    /// 记忆读写共用的入口：锁中毒时沿用已有数据，不把一次上游退化升级成 panic。
+    fn with_rejected_fields<R>(
+        &self,
+        visit: impl FnOnce(&mut BTreeMap<String, BTreeSet<String>>) -> R,
+    ) -> R {
+        match self.rejected_request_fields.lock() {
+            Ok(mut fields) => visit(&mut fields),
+            Err(poisoned) => visit(&mut poisoned.into_inner()),
+        }
+    }
+
+    /// 发送前剔除本次运行已记忆的「上游拒绝过」字段。
+    fn drop_rejected_fields(&self, task: &TaskExecutionRecord, body: &mut Value) {
+        if body.as_object().is_none() {
+            return;
+        }
+        let key = rejected_field_key(task);
+        let removed = self.with_rejected_fields(|fields| {
+            fields
+                .get(&key)
+                .map(|known| {
+                    known
+                        .iter()
+                        .filter(|field| remove_request_field(body, field))
+                        .cloned()
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default()
+        });
+        if !removed.is_empty() {
+            info!(
+                "[provider] 请求体按上游拒绝记忆剔除字段: taskId={}, 模型={}, 字段={}",
+                task.id,
+                task.remote_model_id_snapshot.as_deref().unwrap_or(""),
+                removed.join("、")
+            );
+        }
+    }
+
+    /// 提交类 JSON 请求的发送：先剔除已记忆的字段；若上游以 4xx 点名拒绝请求体里的
+    /// 某个字段，剥离该字段后重发一次，并把该字段记进进程内记忆。
+    ///
+    /// 只有「供应商点名了它不认识的字段」这一种证据才会重发，每个请求最多一次；
+    /// 两次请求都完整落在 `provider_calls`（第一次带字段、第二次不带），日志给出
+    /// 字段名与模型，因此不是静默改写。字段值不合法、或错误没点名字段时，响应原样
+    /// 返回，由既有失败路径报错。
+    ///
+    /// 图片编辑的 multipart 契约不在此列：它的参数是表单字段、剥离方式不同，且
+    /// gpt-image 编辑接口声明的是 `n`/`size`/`quality` 这类受支持字段。
+    async fn send_submission_json(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        phase: &str,
+        path: &str,
+        body: Value,
+    ) -> BackendResult<CapturedHttpResponse> {
+        let mut body = body;
+        self.drop_rejected_fields(task, &mut body);
+        let request = CapturedJsonRequest {
+            phase,
+            method: Method::POST,
+            path,
+            body: &body,
+        };
+        let response = self
+            .captured_json(task, attempt_id, context, request)
+            .await?;
+        if response.is_success() {
+            return Ok(response);
+        }
+        let Some(field) = unsupported_request_field(&response) else {
+            return Ok(response);
+        };
+        let mut retry_body = body.clone();
+        if !remove_request_field(&mut retry_body, &field) {
+            return Ok(response);
+        }
+        warn!(
+            "[provider] 上游拒绝请求字段，剥离后重发一次: taskId={}, attemptId={}, phase={phase}, HTTP {}, 字段={field}, 模型={}, 该字段已记入本次运行的不支持清单",
+            task.id,
+            attempt_id,
+            response.status,
+            task.remote_model_id_snapshot.as_deref().unwrap_or("")
+        );
+        self.with_rejected_fields(|fields| {
+            fields
+                .entry(rejected_field_key(task))
+                .or_default()
+                .insert(field);
+        });
+        let retry = CapturedJsonRequest {
+            phase,
+            method: Method::POST,
+            path,
+            body: &retry_body,
+        };
+        self.captured_json(task, attempt_id, context, retry).await
     }
 
     /// 通过 `GET {base_url}/v1/videos/{remote_task_id}/content` 获取海外平台视频
@@ -4322,6 +4406,158 @@ fn require_success(response: &CapturedHttpResponse) -> BackendResult<()> {
     }
 }
 
+/// 上游 4xx 明确点名「它不认识这个字段」时，从错误正文里读出字段名。
+///
+/// 只认「供应商点名了参数」这一种证据：拿不到字段名、或错误其实是「字段值不合法」
+/// 时一律返回 `None`，交给既有的 4xx 失败路径处理——不做无依据的猜测与重发，
+/// 也不把用户填错的取值悄悄丢掉。
+///
+/// 覆盖的错误形状（多数网关只命中其中一条）：
+/// - OpenAI 兼容（new-api 等）：`error.param` / `error.parameter` / `error.field`；
+/// - 只在正文里点名的网关：`Unknown parameter: 'response_format'.`、
+///   `Unknown name "response_format": Cannot find field.` 这类被引号括起来的字段名。
+fn unsupported_request_field(response: &CapturedHttpResponse) -> Option<String> {
+    if !(400..500).contains(&response.status) {
+        return None;
+    }
+    let payload: Value = serde_json::from_str(&response.body).ok()?;
+    let error = payload.get("error").unwrap_or(&payload);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("message").and_then(Value::as_str))
+        .unwrap_or_default();
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .or_else(|| payload.get("code").and_then(Value::as_str));
+    if !reports_unknown_field(message, code) {
+        return None;
+    }
+    ["param", "parameter", "field", "name"]
+        .iter()
+        .find_map(|key| {
+            error
+                .get(*key)
+                .and_then(Value::as_str)
+                .or_else(|| payload.get(*key).and_then(Value::as_str))
+        })
+        .map(str::trim)
+        .filter(|field| valid_request_field_name(field))
+        .map(ToOwned::to_owned)
+        .or_else(|| quoted_field_after_keyword(message))
+}
+
+/// 错误正文是否表示「上游不认识这个字段」，而不是「字段值不合法」。
+///
+/// 值不合法（`invalid_value` / `invalid value` / 取值范围）必须原样抛给用户：
+/// 那是用户填错了取值，剥离字段重发只会把配置问题藏起来。
+fn reports_unknown_field(message: &str, code: Option<&str>) -> bool {
+    let code = code.unwrap_or_default().to_ascii_lowercase();
+    let normalized = message.to_ascii_lowercase();
+    if code.contains("invalid_value")
+        || normalized.contains("invalid value")
+        || normalized.contains("取值范围")
+        || normalized.contains("not in the list")
+    {
+        return false;
+    }
+    if code.contains("unknown") || code.contains("unsupported") {
+        return true;
+    }
+    const MARKERS: [&str; 12] = [
+        "unknown parameter",
+        "unsupported parameter",
+        "unknown field",
+        "unsupported field",
+        "unknown name",
+        "cannot find field",
+        "unrecognized",
+        "not supported",
+        "不支持的参数",
+        "不支持的字段",
+        "未知参数",
+        "未知字段",
+    ];
+    MARKERS.iter().any(|marker| normalized.contains(marker))
+}
+
+/// 从错误正文里取出被引号（`'x'` / `"x"` / `` `x` ``）括起来的字段名。
+///
+/// 字段名必须紧跟在 parameter / param / field / name（或中文「参数/字段/名称」）
+/// 之后、且间隔里只有分隔符，避免把正文里任意引号内容当成字段名。
+fn quoted_field_after_keyword(message: &str) -> Option<String> {
+    const KEYWORDS: [&str; 7] = [
+        "parameter",
+        "param",
+        "field",
+        "name",
+        "参数",
+        "字段",
+        "名称",
+    ];
+    // `to_ascii_lowercase` 不改动非 ASCII 字节，因此索引可以安全地用在原文上。
+    let normalized = message.to_ascii_lowercase();
+    let keyword_end = KEYWORDS
+        .iter()
+        .filter_map(|keyword| {
+            normalized
+                .find(keyword)
+                .map(|index| (index, index + keyword.len()))
+        })
+        // 同一位置会同时命中 `param` 与 `parameter`：取更长的那个，否则尾部从
+        // `eter…` 开始，分隔符检查必然不通过、字段名永远抓不到。
+        .min_by_key(|(start, end)| (*start, std::cmp::Reverse(*end)))
+        .map(|(_, end)| end)?;
+    let tail = &message[keyword_end..];
+    for (open, close) in [('\'', '\''), ('"', '"'), ('`', '`')] {
+        let Some(start) = tail.find(open) else {
+            continue;
+        };
+        let gap = &tail[..start];
+        // 关键词与字段名之间只允许分隔符，避免跨句抓到无关的引号内容。
+        if !gap.chars().all(|character| {
+            character.is_whitespace()
+                || matches!(
+                    character,
+                    ':' | '：' | '=' | '-' | '_' | ',' | '，' | '[' | '('
+                )
+        }) {
+            continue;
+        }
+        let rest = &tail[start + open.len_utf8()..];
+        let Some(end) = rest.find(close) else {
+            continue;
+        };
+        let field = rest[..end].trim();
+        if valid_request_field_name(field) {
+            return Some(field.to_string());
+        }
+    }
+    None
+}
+
+/// 从生成请求体里剔除一个字段：先看顶层（绝大多数参数的容器），再退到顶层对象内部
+/// （Vidu / Seedance 把高级参数放进 `metadata` 这一类容器）。返回是否真的删掉了。
+fn remove_request_field(body: &mut Value, field: &str) -> bool {
+    let Some(object) = body.as_object_mut() else {
+        return false;
+    };
+    if object.remove(field).is_some() {
+        return true;
+    }
+    object
+        .values_mut()
+        .filter_map(Value::as_object_mut)
+        .any(|nested| nested.remove(field).is_some())
+}
+
+/// 「模型定义 + 操作」维度的记忆键。同一模型定义换供应商连接会另建定义，
+/// 因此这一层不需要再带连接 ID。
+fn rejected_field_key(task: &TaskExecutionRecord) -> String {
+    format!("{}::{}", task.model_definition_id, task.operation.as_str())
+}
+
 fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<RemoteModelOption>> {
     if !(200..300).contains(&response.status) {
         return Err(BackendError::protocol(
@@ -5456,6 +5692,129 @@ mod tests {
         assert_eq!(payload.details["httpStatus"], 502);
         assert_eq!(payload.details["rawResponse"], response.body);
         assert_eq!(payload.details["headers"]["x-request-id"], "req-1");
+    }
+
+    /// 构造一条「上游拒绝请求」的响应，字段名与状态码由用例给出。
+    fn rejection(status: u16, body: &str) -> CapturedHttpResponse {
+        CapturedHttpResponse {
+            call_id: "call-1".into(),
+            status,
+            headers: json!({}),
+            body: body.into(),
+        }
+    }
+
+    #[test]
+    fn upstream_rejection_names_the_request_field_it_refuses() {
+        // 真机实测（moyu 网关 / gpt-image-2，2026-09-15）：请求带 `response_format`
+        // 时上游回 400，正文点名该字段。这里锁定这条证据的识别。
+        let refused = rejection(
+            400,
+            r#"{"error":{"message":"Unknown parameter: 'response_format'.","type":"invalid_request_error","param":"response_format","code":"unknown_parameter"}}"#,
+        );
+        assert_eq!(
+            unsupported_request_field(&refused).as_deref(),
+            Some("response_format")
+        );
+
+        // 只在正文里点名的网关：引号里的字段名跟在 parameter / name 之后。
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                400,
+                r#"{"error":{"message":"Unsupported parameter: `quality` for this model"}}"#,
+            ))
+            .as_deref(),
+            Some("quality")
+        );
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                400,
+                r#"{"error":{"message":"Unknown name \"response_format\": Cannot find field."}}"#,
+            ))
+            .as_deref(),
+            Some("response_format")
+        );
+        // 中文网关同样识别。
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                400,
+                r#"{"error":{"message":"不支持的参数：'watermark'"}}"#,
+            ))
+            .as_deref(),
+            Some("watermark")
+        );
+
+        // 取值不合法必须原样报错：那是用户填错了值，剥离字段重发只会把配置问题藏起来。
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                400,
+                r#"{"error":{"message":"Invalid value for 'size': expected one of auto","param":"size","code":"invalid_value"}}"#,
+            )),
+            None
+        );
+        // 没点名字段的 4xx（限流/鉴权/内容策略）不触发退化。
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                429,
+                r#"{"error":{"message":"rate limit exceeded"}}"#,
+            )),
+            None
+        );
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                400,
+                r#"{"error":{"message":"content policy violation"}}"#,
+            )),
+            None
+        );
+        // 5xx 不是「字段不被接受」，交给既有重试策略。
+        assert_eq!(
+            unsupported_request_field(&rejection(
+                502,
+                r#"{"error":{"message":"Unknown parameter: 'response_format'."}}"#,
+            )),
+            None
+        );
+        // 正文不是 JSON 时不做猜测。
+        assert_eq!(
+            unsupported_request_field(&rejection(400, "<html>Bad Request</html>")),
+            None
+        );
+    }
+
+    #[test]
+    fn refused_field_is_removed_from_root_or_nested_parameter_containers() {
+        // 顶层参数容器（images/videos 契约）。
+        let mut body = json!({ "model": "gpt-image-2", "response_format": "b64_json", "n": 1 });
+        assert!(remove_request_field(&mut body, "response_format"));
+        assert_eq!(body, json!({ "model": "gpt-image-2", "n": 1 }));
+        // 只删一次：再删同一个字段返回 false，避免退化重发变成循环。
+        assert!(!remove_request_field(&mut body, "response_format"));
+
+        // 顶层对象内部的参数容器（Vidu / Seedance 的 metadata）。
+        let mut nested = json!({
+            "model": "vidu2.0",
+            "metadata": { "movement_amplitude": "auto", "style": "general" }
+        });
+        assert!(remove_request_field(&mut nested, "movement_amplitude"));
+        assert_eq!(nested["metadata"], json!({ "style": "general" }));
+
+        // 请求体里没有该字段时不动它：上游点的名字不在我们发出去的请求里。
+        let mut untouched = json!({ "model": "vidu2.0" });
+        assert!(!remove_request_field(&mut untouched, "response_format"));
+        assert_eq!(untouched, json!({ "model": "vidu2.0" }));
+    }
+
+    #[test]
+    fn rejected_field_memory_is_scoped_to_model_definition_and_operation() {
+        assert_eq!(
+            rejected_field_key(&task(GenerationOperation::TextToImage)),
+            "company-model::text_to_image"
+        );
+        assert_ne!(
+            rejected_field_key(&task(GenerationOperation::TextToImage)),
+            rejected_field_key(&task(GenerationOperation::ImageToImage))
+        );
     }
 
     #[test]

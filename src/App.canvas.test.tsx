@@ -7215,7 +7215,6 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       size: "1536x1024",
       quality: "high",
       n: 1,
-      response_format: "b64_json",
     });
   });
 

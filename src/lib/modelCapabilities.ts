@@ -237,9 +237,10 @@ function seedreamTextToImageBaseParameters(): Record<string, unknown> {
   };
 }
 
-/** OpenAI Images 契约（`/v1/images/generations`）的返回格式参数。
+/** 通用 dall-e 契约（`/v1/images/generations`）的返回格式参数。
  *  默认内联 `b64_json`：`url` 需要客户端再对供应商返回的存储地址发第二次请求，
- *  而该地址与生成接口的域名往往不同；内联结果不引入第二次连接。 */
+ *  而该地址与生成接口的域名往往不同；内联结果不引入第二次连接。
+ *  gpt-image 系列不接受该键（上游以 HTTP 400 unknown_parameter 拒绝），不声明。 */
 function openaiImageResponseFormatParameter(): Record<string, unknown> {
   return {
     response_format: {
@@ -344,8 +345,10 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
   }
   // gpt-image 系列（gpt-image-1/1.5/2 …）遵循 GPT Image 契约：
   // 质量只接受 auto/high/medium/low，尺寸只接受 auto 与三种标准尺寸，并声明生成数量 n；
-  // 其余模型沿用通用文生图契约（standard/hd）。
-  // 两者都声明返回格式并默认内联 b64_json，避免结果保存阶段再直连供应商存储域名。
+  // 其余模型沿用通用文生图契约（standard/hd）。通用契约声明返回格式并默认内联 b64_json，
+  // 避免结果保存阶段再直连供应商存储域名；gpt-image 不声明它——上游（moyu 网关对
+  // gpt-image-2，2026-09-15 真机实测）以 HTTP 400 unknown_parameter 拒绝该键，
+  // 且其结果恒为内联 Base64。
   if (modelId.toLocaleLowerCase().includes("gpt-image")) {
     return {
       size: {
@@ -367,7 +370,6 @@ function textToImageParameters(modelId: string): Record<string, unknown> {
         minimum: 1,
         maximum: 10,
       },
-      ...openaiImageResponseFormatParameter(),
     };
   }
   return {

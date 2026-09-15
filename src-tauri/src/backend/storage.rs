@@ -2831,6 +2831,10 @@ mod tests {
         let timestamp = now_ms();
         // 历史版本持久化的 gpt-image 文生图参数：dall-e 契约（standard/hd）。
         let legacy_parameters = r#"{"size":{"type":"string","label":"尺寸","default":"1024x1024","enum":["256x256","512x512","1024x1024","1536x1024","1024x1536","1792x1024","1024x1792"]},"quality":{"type":"string","label":"质量","default":"standard","enum":["hd","standard"]}}"#;
+        // 上一版默认契约：显式声明 `response_format`。这份参数逐字节取自真实库里的
+        // gpt-image-2 定义，用于锁定「升级后该键被剔除」——上游（moyu 网关）对它回
+        // HTTP 400 unknown_parameter，见 docs/integrations/result-image-save-failure.md 第 7 节。
+        let with_response_format_parameters = r#"{"n":{"default":1,"label":"生成数量","maximum":10,"minimum":1,"type":"integer"},"quality":{"default":"auto","enum":["auto","high","medium","low"],"label":"质量","type":"string"},"response_format":{"default":"b64_json","enum":["url","b64_json"],"label":"返回格式","order":3,"type":"string"},"size":{"default":"auto","enum":["auto","1024x1024","1536x1024","1024x1536"],"label":"尺寸","type":"string"}}"#;
         {
             let connection = storage.lock().expect("database lock");
             connection
@@ -2845,6 +2849,18 @@ mod tests {
                     ],
                 )
                 .expect("insert legacy gpt-image definition");
+            connection
+                .execute(
+                    "INSERT INTO model_definitions
+                     (id, display_name, remote_model_id, operations_json, created_at, updated_at)
+                     VALUES ('remote::company-prod::gpt-image-2-with-format', 'GPT Image 2', 'gpt-image-2',
+                             ?2, ?1, ?1)",
+                    params![
+                        timestamp,
+                        format!(r#"{{"text_to_image":{{"resultType":"image","parameters":{with_response_format_parameters}}}}}"#)
+                    ],
+                )
+                .expect("insert previous-contract gpt-image definition");
         }
 
         drop(storage);
@@ -2866,6 +2882,21 @@ mod tests {
             parameters["size"]["enum"],
             json!(["auto", "1024x1024", "1536x1024", "1024x1536"])
         );
+
+        // 上一版默认契约（带 `response_format`）同样被刷新，且该键被剔除；
+        // 同批次的 n/size/quality 保持当前默认值。
+        let previous = definitions
+            .iter()
+            .find(|model| model.id == "remote::company-prod::gpt-image-2-with-format")
+            .expect("previous-contract gpt-image definition");
+        let previous_parameters = &previous.operations["text_to_image"]["parameters"];
+        assert!(
+            previous_parameters.get("response_format").is_none(),
+            "response_format must be dropped from persisted gpt-image defaults"
+        );
+        assert_eq!(previous_parameters["n"]["default"], 1);
+        assert_eq!(previous_parameters["size"]["default"], "auto");
+        assert_eq!(previous_parameters["quality"]["default"], "auto");
     }
 
     #[test]
