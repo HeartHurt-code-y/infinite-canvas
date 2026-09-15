@@ -6,7 +6,14 @@ export default defineConfig({
   test: {
     environment: "jsdom",
     setupFiles: ["./src/test/setup.ts"],
-    exclude: [...configDefaults.exclude, "tools/remotion-runtime/**", "src-tauri/resources/**"],
+    // scripts/ 与 tools/remotion-runtime/ 下的 .mjs 测试走 node --test（原生 runner），
+    // 不归 vitest；不加排除会被 test:coverage 扫到并报 No test suite found。
+    exclude: [
+      ...configDefaults.exclude,
+      "scripts/**",
+      "tools/remotion-runtime/**",
+      "src-tauri/resources/**",
+    ],
     // 画布集成用例会同时挂载大量媒体节点；并行全量运行时 5 秒默认值容易产生假超时。
     testTimeout: 10_000,
     // 隔离卫生兜底：现有用例已在 afterEach 手动 restore，这里保证未来新增用例

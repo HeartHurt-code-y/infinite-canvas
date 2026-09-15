@@ -38,6 +38,7 @@
     "ffmpeg:prepare": "node scripts/prepare-ffmpeg.mjs",
     "blender:prepare": "node scripts/prepare-blender-runtime.mjs",
     "remotion:test": "node --test tools/remotion-runtime/plan.test.mjs",
+    "blender:test": "node --test scripts/prepare-blender-runtime.test.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build"
   },
