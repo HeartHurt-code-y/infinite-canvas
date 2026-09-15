@@ -5310,6 +5310,32 @@ export function WorkspaceApp({
           ...(layer != null ? { layer } : {}),
         };
       });
+      // 兜底收编本次任务的空占位卡片：即使 resultKey 与本次结果对不上（历史文档里的
+      // 旧编号、或结果索引与占位编号错位），也把结果填进已有卡片——否则占位卡片会永远
+      // 停在「已成功 · 等待结果保存」，同一次生成还会多出一张重复卡片。
+      // 已有 resultKey 的卡片不参与收编，多结果场景仍由后续结果各自新建卡片展示。
+      if (!matched) {
+        patchNodes("output", (node) => {
+          if (
+            matched ||
+            node.taskId !== record.taskId ||
+            node.finalPath != null ||
+            node.previewSrc != null ||
+            (node.resultKey != null && node.resultKey !== resultKey)
+          ) {
+            return node;
+          }
+          matched = true;
+          return {
+            ...node,
+            resultKey,
+            mediaType,
+            ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
+            ...(textContent != null ? { textContent } : {}),
+            ...(layer != null ? { layer } : {}),
+          };
+        });
+      }
       // 单任务多结果（如图层拆分）：占位卡片只有一个，后续结果匹配不到时动态新建卡片。
       if (!matched) {
         const existing = outputNodes.find((node) => node.taskId === record.taskId);
@@ -5746,8 +5772,10 @@ export function WorkspaceApp({
             // 卡片承担任务状态栏职责：进行中展示进度，成功填充产物，失败展示完整错误。
             // 支持 n 参数的模型一次请求返回多张图：生成开始时就落下与数量相等的占位卡片，
             // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
+            // 编号必须与后端结果索引保持一致（1 起）：错位会让占位卡片永远匹配不到结果，
+            // 同一次生成既留下永远等待保存的卡片，又多出一张重复产物卡片。
             const placeholderCount = supportsBatchCount ? generationCount : 1;
-            for (let resultIndex = 0; resultIndex < placeholderCount; resultIndex += 1) {
+            for (let resultIndex = 1; resultIndex <= placeholderCount; resultIndex += 1) {
               const key = outputNodeKey();
               addOutput((current) => ({
                 key,
@@ -5807,12 +5835,13 @@ export function WorkspaceApp({
 
         if (genNode != null) {
           if (supportsBatchCount) {
-            // 单任务多结果：创建 n 个占位卡片，每个预设 resultKey=taskId#index
+            // 单任务多结果：创建 n 个占位卡片，每个预设 resultKey=taskId#index（索引 1 起，
+            // 与后端结果索引同一套编号）。
             const batchCount = Math.min(
               GPT_IMAGE_MAX_GENERATION_COUNT,
               Math.floor(command.parameters["n"] as number),
             );
-            for (let resultIndex = 0; resultIndex < batchCount; resultIndex += 1) {
+            for (let resultIndex = 1; resultIndex <= batchCount; resultIndex += 1) {
               const key = outputNodeKey();
               addOutput((current) => ({
                 key,

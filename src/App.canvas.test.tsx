@@ -6415,6 +6415,132 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(card).getByText(/已连线来源节点/)).toBeInTheDocument();
   });
 
+  it("一张图只落一张产物卡片：占位卡片被结果原地填充，不再多出一张等待保存的卡片", async () => {
+    // gpt-image 契约模型声明 n 参数：占位卡片预设 resultKey=taskId#index。
+    // 后端结果索引是 1 起的业务索引，两侧必须落在同一套编号上——
+    // 否则占位卡片永远匹配不到结果，卡片会停在「已成功 · 等待结果保存」，
+    // 同一次生成还会多出一张重复的产物卡片。
+    const taskId = "task-batch-1";
+    let taskStatus: "queued" | "succeeded" = "queued";
+    invokeMock.mockImplementation((command) => {
+      if (command === "list_generation_tasks") {
+        return Promise.resolve({
+          items: [
+            makeTaskSummary({
+              id: taskId,
+              operation: "text_to_image",
+              status: taskStatus,
+              progress: taskStatus === "succeeded" ? 100 : null,
+              completedAt: taskStatus === "succeeded" ? 1 : null,
+            }),
+          ],
+          nextCursorCreatedBefore: null,
+        });
+      }
+      if (command === "start_generation") return Promise.resolve(taskId);
+      return baseInvokeImplementation(command);
+    });
+    render(<App />);
+
+    const imageNode = await addGenerationNode("图片", 370, 148);
+    await waitFor(() => {
+      expect(within(imageNode).getByLabelText("供应商")).toHaveValue(PROVIDER.id);
+    });
+    setPromptText(
+      within(imageNode).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      "电商3D渲染风格，1:1 比例中心构图",
+    );
+    fireEvent.click(within(imageNode).getByRole("button", { name: "开始图片生成" }));
+
+    // 生成开始：只允许出现一张占位产物卡片。
+    const generationCards = () =>
+      Array.from(document.querySelectorAll<HTMLElement>(".canvas-asset-node--output--image"));
+    await waitFor(() => expect(generationCards()).toHaveLength(1));
+
+    const resultReadyListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "generation:result-ready",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const savedListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "generation:result-saved",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const readyHandler = tauriCallbacks.get(resultReadyListener[1]?.["handler"] as number)!;
+    const savedHandler = tauriCallbacks.get(savedListener[1]?.["handler"] as number)!;
+
+    // 任务成功（后端已把结果登记为 writing）→ 供应商结果返回，先展示临时预览。
+    taskStatus = "succeeded";
+    const previewSrc = "data:image/png;base64,iVBORw0KGgo=";
+    const readyRecord = {
+      taskId,
+      resultIndex: 1,
+      mediaType: "image",
+      remoteTaskId: null,
+      source: { kind: "base64", storedInRawProviderResponse: true },
+      saveStatus: "writing",
+      finalPath: null,
+      relativePath: null,
+      byteSize: null,
+      mimeType: null,
+      sha256: null,
+      savedAt: null,
+      error: null,
+    };
+    act(() => {
+      readyHandler({
+        event: "generation:result-ready",
+        id: 1,
+        payload: { taskId, result: readyRecord, previewSrc },
+      });
+    });
+
+    // 占位卡片原地变成媒体卡片，不再停留在「已成功 · 等待结果保存」。
+    await waitFor(() => {
+      const preview = document.querySelector<HTMLImageElement>(
+        ".canvas-asset-node--output--image img",
+      );
+      expect(preview?.getAttribute("src")).toBe(previewSrc);
+    });
+    expect(generationCards()).toHaveLength(1);
+    expect(screen.queryByText("已成功 · 等待结果保存")).not.toBeInTheDocument();
+
+    // 本地保存完成 → 同一张卡片切换到本地文件，不会再新建卡片。
+    const savedRecord = {
+      ...readyRecord,
+      saveStatus: "succeeded",
+      finalPath: "C:\\generated\\gpt-image-2-1.png",
+      relativePath: "无限画布/gpt-image-2-1.png",
+      byteSize: 2048,
+      mimeType: "image/png",
+      sha256: "abc123",
+      savedAt: 2,
+    };
+    act(() => {
+      savedHandler({
+        event: "generation:result-saved",
+        id: 2,
+        payload: { taskId, result: savedRecord },
+      });
+    });
+
+    await waitFor(() => {
+      const saved = document.querySelector<HTMLImageElement>(
+        ".canvas-asset-node--output--image img",
+      );
+      expect(saved?.getAttribute("src")).toContain("gpt-image-2-1.png");
+    });
+    expect(generationCards()).toHaveLength(1);
+    expect(screen.queryByText("已成功 · 等待结果保存")).not.toBeInTheDocument();
+  });
+
   it.each(["queued", "running"] as const)(
     "%s 状态的源节点保持可拖动，不禁用可拖动状态",
     async (taskStatus) => {
