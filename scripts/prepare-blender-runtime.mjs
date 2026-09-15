@@ -21,7 +21,16 @@ import { pipeline } from "node:stream/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 export const BLENDER_VERSION = "4.5.13";
+// 主源 download.blender.org 会对数据中心出口 IP（如 CircleCI）稳定返回 403；
+// 多镜像按序尝试，任一源拿到合法归档后统一走 sha256 校验，多源不降低可信度。
 const BASE_URL = "https://download.blender.org/release/Blender4.5/";
+const DOWNLOAD_MIRROR_BASE_URLS = [
+  BASE_URL,
+  "https://mirrors.aliyun.com/blender/release/Blender4.5/",
+  "https://mirrors.tuna.tsinghua.edu.cn/blender/release/Blender4.5/",
+  "https://mirror.clarkson.edu/blender/release/Blender4.5/",
+  "https://ftp.halifax.rwth-aachen.de/blender/release/Blender4.5/",
+];
 const CHECKSUM_URL = `${BASE_URL}blender-${BLENDER_VERSION}.sha256`;
 // Official manifest checked on 2026-09-14; do not accept an unverified replacement archive.
 const DISTRIBUTIONS = {
@@ -268,35 +277,40 @@ async function cachedDownload(cache, metadata, override) {
       console.log(`[blender:prepare] 缓存归档损坏，将重新下载：${metadata.filename}`);
     }
   }
-  console.log(
-    `[blender:prepare] 下载 ${metadata.url} (${(metadata.size / 1024 / 1024).toFixed(1)} MiB)`,
-  );
   const temporary = path.join(cache, `${metadata.filename}.${randomUUID()}.part`);
   let lastError;
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    try {
-      const response = await fetch(metadata.url, {
-        signal: AbortSignal.timeout(15 * 60_000),
-        headers: {
-          "user-agent": DOWNLOAD_USER_AGENT,
-          accept: "application/octet-stream,*/*",
-        },
-      });
-      if (!response.ok || !response.body)
-        throw new Error(`下载 Blender 失败：HTTP ${response.status}`);
-      await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx" }));
-      await verifyArchive(temporary, metadata);
-      await rename(temporary, filename);
-      return filename;
-    } catch (error) {
-      lastError = error;
-      await rm(temporary, { force: true }).catch(() => {});
-      if (attempt < 3) {
-        const delay = 2 ** attempt * 1000;
+  for (const source of DOWNLOAD_MIRROR_BASE_URLS) {
+    const url = source + metadata.filename;
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      try {
         console.log(
-          `[blender:prepare] 下载失败（第 ${attempt} 次）：${error.message}，${delay / 1000}s 后重试`,
+          `[blender:prepare] 下载 ${url} (${(metadata.size / 1024 / 1024).toFixed(1)} MiB)`,
         );
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        const response = await fetch(url, {
+          signal: AbortSignal.timeout(15 * 60_000),
+          headers: {
+            "user-agent": DOWNLOAD_USER_AGENT,
+            accept: "application/octet-stream,*/*",
+          },
+        });
+        if (!response.ok || !response.body)
+          throw new Error(`下载 Blender 失败：HTTP ${response.status}`);
+        await pipeline(
+          Readable.fromWeb(response.body),
+          createWriteStream(temporary, { flags: "wx" }),
+        );
+        await verifyArchive(temporary, metadata);
+        await rename(temporary, filename);
+        return filename;
+      } catch (error) {
+        lastError = error;
+        await rm(temporary, { force: true }).catch(() => {});
+        if (attempt < 2) {
+          console.log(
+            `[blender:prepare] ${url} 下载失败（第 ${attempt} 次）：${error.message}，2s 后重试`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, 2_000));
+        }
       }
     }
   }

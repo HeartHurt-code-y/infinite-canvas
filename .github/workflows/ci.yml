@@ -46,8 +46,15 @@ jobs:
       # bundle.resources 指向的两个引擎目录由 prepare 脚本生成且被 gitignore，
       # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
       # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
+      #
+      # download.blender.org 对 CI 数据中心出口 IP 稳定返回 403（UA/重试无效），
+      # quality 不产安装包：给 resources/blender 落一个占位目录让编译通过，
+      # 真实 Blender 引擎的下载与校验由 macos-package（tauri build）承担。
       - name: Prepare bundled engines
-        run: pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare
+        run: |
+          pnpm ffmpeg:prepare && pnpm remotion:prepare
+          mkdir -p src-tauri/resources/blender
+          touch src-tauri/resources/blender/.quality-placeholder
 
       - name: Run project checks
         run: pnpm check
