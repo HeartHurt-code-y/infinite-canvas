@@ -1,4 +1,4 @@
-// 预置内置 FFmpeg 引擎：把官方 Windows 构建下载并解包到
+// 预置内置 FFmpeg 引擎：把官方构建下载并解包到
 // src-tauri/resources/ffmpeg/，随安装包分发给客户，使视频合成/转码/抽帧
 // 等能力离线可用（无需首次运行时联网下载）。
 //
@@ -6,9 +6,10 @@
 // 保证“内置优先、运行时下载回退”两条路径拿到的是同一类官方构建。
 //
 // 平台策略：Windows（x64/arm64）、macOS（x64/arm64）、Linux（x64/arm64）
-// 都在构建期预置 ffmpeg 引擎；失败会中断构建（与 remotion:prepare 一致），
-// 其中 macOS 仅要求 ffmpeg 存在；若 ffprobe 缺失则进入“内置降级态”，
-// 让运行时按需回退下载完整引擎。
+// 都在构建期预置 ffmpeg 引擎；ffmpeg 下载失败会中断构建（与 remotion:prepare
+// 一致）。macOS 的 ffmpeg 发行包不含 ffprobe，因此额外做一次**非致命**的
+// ffprobe 补下载：拿到就是完整引擎，拿不到只告警——应用侧会用
+// `ffmpeg -i` 解析时长/分辨率兜底（见 src-tauri/src/backend/composer.rs）。
 
 import { createHash } from "node:crypto";
 import {
@@ -71,6 +72,25 @@ function requireFFprobeBundle() {
   return process.platform !== "darwin";
 }
 
+/// macOS 的 ffmpeg 发行包（evermeet.cx / osxexperts.net）里只有 ffmpeg，没有 ffprobe，
+/// 因此需要单独补一份。两个源都按架构区分：
+///   - darwin/x64   → evermeet.cx（Intel 原生）
+///   - darwin/arm64 → osxexperts.net（Apple Silicon 原生）
+/// 补下载是**非致命**的：失败只告警，不中断安装包构建；应用侧会用
+/// `ffmpeg -i` 解析媒体元数据兜底（见 src-tauri/src/backend/composer.rs）。
+function ffprobeDownloadUrl() {
+  if (process.platform !== "darwin") {
+    return null;
+  }
+  if (process.arch === "arm64") {
+    return "https://www.osxexperts.net/ffprobe80arm.zip";
+  }
+  if (process.arch === "x64") {
+    return "https://evermeet.cx/ffmpeg/getrelease/ffprobe/zip";
+  }
+  return null;
+}
+
 function probeVersion(binaryPath) {
   const result = spawnSync(binaryPath, ["-version"], {
     encoding: "utf8",
@@ -89,6 +109,72 @@ function probeVersion(binaryPath) {
 
 function sha256(filePath) {
   return createHash("sha256").update(readFileSync(filePath)).digest("hex");
+}
+
+/// 校验任意 ffmpeg / ffprobe 二进制可执行，返回 `-version` 首行。
+function probeBinary(binaryPath, expectedPrefix) {
+  const result = spawnSync(binaryPath, ["-version"], {
+    encoding: "utf8",
+    windowsHide: true,
+  });
+  if (result.status !== 0 || !result.stdout) {
+    throw new Error(`无法执行 ${path.basename(binaryPath)} -version（exit=${result.status}）`);
+  }
+  const firstLine = result.stdout.split(/\r?\n/)[0];
+  if (!firstLine.startsWith(expectedPrefix)) {
+    throw new Error(`无法识别的版本输出：${firstLine}`);
+  }
+  return firstLine;
+}
+
+/// macOS：单独补一份 ffprobe（非致命）。
+///
+/// 任何失败都只告警：ffmpeg 已经可用，为了一个第三方源不可用就中断整个
+/// 安装包构建是不划算的；应用侧会退回 `ffmpeg -i` 解析元数据。
+async function fetchDarwinFFprobe(ffprobePath) {
+  const url = ffprobeDownloadUrl();
+  if (!url) {
+    console.warn(
+      `[ffmpeg:prepare] 未为 darwin/${process.arch} 配置 ffprobe 源，跳过（应用将用 ffmpeg -i 兜底）`,
+    );
+    return false;
+  }
+  const tempRoot = path.join(destination, ".prepare-ffprobe");
+  const archivePath = path.join(tempRoot, "ffprobe.zip");
+  const extractDir = path.join(tempRoot, "out");
+  try {
+    console.log(`[ffmpeg:prepare] 补下载 macOS ffprobe：${url}`);
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`下载失败：HTTP ${response.status}`);
+    }
+    const bytes = Buffer.from(await response.arrayBuffer());
+    if (bytes.length === 0) {
+      throw new Error("下载内容为空");
+    }
+    rmSync(tempRoot, { recursive: true, force: true });
+    mkdirSync(extractDir, { recursive: true });
+    writeFileSync(archivePath, bytes);
+    extractArchive(archivePath, extractDir);
+    const candidate = path.join(extractDir, ffprobeName());
+    if (!existsSync(candidate)) {
+      throw new Error(`压缩包中缺少 ${ffprobeName()}`);
+    }
+    cpSync(candidate, ffprobePath);
+    chmodSync(ffprobePath, 0o755);
+    console.log(
+      `[ffmpeg:prepare] macOS ffprobe 就绪：${probeBinary(ffprobePath, "ffprobe version")}`,
+    );
+    return true;
+  } catch (error) {
+    rmSync(ffprobePath, { force: true });
+    console.warn(
+      `[ffmpeg:prepare] macOS ffprobe 补下载失败，降级为仅 ffmpeg（合成改用 ffmpeg -i 解析元数据）：${error.message}`,
+    );
+    return false;
+  } finally {
+    rmSync(tempRoot, { recursive: true, force: true });
+  }
 }
 
 function zipEntryBinaries(extractDir) {
@@ -205,12 +291,16 @@ async function prepare() {
     existing = null;
   }
   const isDarwin = process.platform === "darwin";
+  // macOS 上 ffprobe 是「补下载」而非随包附带，可能拿不到。把「试过但没成功」
+  // 记进 manifest，避免每次构建都为了它重下整个 ffmpeg 归档；
+  // `--force` 仍会重新尝试。
+  const ffprobeSettled = existsSync(ffprobePath) || existing?.ffprobeUnavailable === true;
   const ready =
     !force &&
     existing?.schemaVersion === 1 &&
     existing?.version &&
     existsSync(ffmpegPath) &&
-    (isDarwin ? true : existsSync(ffprobePath));
+    (isDarwin ? ffprobeSettled : existsSync(ffprobePath));
   if (ready) {
     console.log(`[ffmpeg:prepare] 内置 FFmpeg 已就绪：v${existing.version}`);
     process.exit(0);
@@ -258,6 +348,11 @@ async function prepare() {
     const { version, firstLine } = probeVersion(ffmpegPath);
     console.log(`[ffmpeg:prepare] 引擎就绪：${firstLine}`);
 
+    // macOS：发行包不含 ffprobe，单独补一次；失败仅告警，不中断构建。
+    if (isDarwin && !existsSync(ffprobePath)) {
+      await fetchDarwinFFprobe(ffprobePath);
+    }
+
     writeFileSync(
       manifestPath,
       JSON.stringify(
@@ -267,6 +362,7 @@ async function prepare() {
           source: ffmpegDownloadUrlValue,
           ffmpegSha256: sha256(ffmpegPath),
           ffprobeSha256: existsSync(ffprobePath) ? sha256(ffprobePath) : null,
+          ffprobeUnavailable: !existsSync(ffprobePath),
           preparedAt: new Date().toISOString(),
         },
         null,

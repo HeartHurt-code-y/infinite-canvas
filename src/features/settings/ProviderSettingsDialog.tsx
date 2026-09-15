@@ -419,7 +419,7 @@ export function ProviderSettingsDialog({
     }
     // 火山引擎方舟连接通过素材库令牌（AK/SK JSON）鉴权，供应商级 API Key 允许留空。
     if (!existingProvider && !apiKey && !isVolcengineArkConnection) {
-      setRawError("新供应商连接需要输入 API Key；保存后密钥只进入 Windows 凭据管理器。");
+      setRawError("新供应商连接需要输入 API Key；保存后密钥只进入系统凭据管理器。");
       return null;
     }
     return { apiKey };
@@ -738,7 +738,7 @@ export function ProviderSettingsDialog({
                 <small id="api-key-hint">
                   {isVolcengineArkConnection
                     ? "用于拉取模型目录的方舟 API Key（Bearer 令牌）；素材库鉴权在下方「素材库令牌」处分别填写 AK 和 SK。"
-                    : "只保存到 Windows 凭据管理器，不写入数据库、画布或任务日志。"}
+                    : "只保存到系统凭据管理器（macOS 钥匙串 / Windows 凭据管理器），不写入数据库、画布或任务日志。"}
                 </small>
               </label>
             </div>

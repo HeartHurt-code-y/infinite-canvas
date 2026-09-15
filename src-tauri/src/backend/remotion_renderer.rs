@@ -21,6 +21,25 @@ const MAX_CONCURRENT_JOBS: usize = 2;
 const MAX_CACHED_JOBS: usize = 100;
 const MAX_PLAN_BYTES: usize = 64 * 1024;
 
+/// 动画运行时内 Node 与 Chrome headless-shell 的相对路径。
+///
+/// 必须与 `scripts/prepare-remotion-runtime.mjs` 的 `nodeName`
+/// （`process.platform === "win32" ? "node.exe" : "node"`）以及 Remotion
+/// `ensureBrowser` 落盘的浏览器文件名一致：Windows 带 `.exe`，其他平台不带。
+/// 曾因这里硬编码 `node.exe`，macOS 安装包里明明已经完整打包了 `node`，
+/// 应用却永远判定「动画渲染资源缺失」——preflight 直接拦住，无法渲染。
+///
+/// 参数化 `os` 而不是直接读 `cfg!`，是为了让这条映射能在任意平台
+/// （包括跑 `quality` 的 Linux CI）被单测钉住；否则「只在苹果上错」的
+/// 取值永远不会被执行到。
+fn runtime_paths(os: &str) -> (&'static str, &'static str) {
+    if os == "windows" {
+        ("node.exe", "browser/chrome-headless-shell.exe")
+    } else {
+        ("node", "browser/chrome-headless-shell")
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RemotionRenderStatus {
@@ -324,7 +343,8 @@ impl RemotionRenderService {
         }
         let log_path = directory.join("renderer.log");
         let log = std::fs::File::create(&log_path)?;
-        let mut command = tokio::process::Command::new(runtime.join("node.exe"));
+        let (node_binary, _) = runtime_paths(std::env::consts::OS);
+        let mut command = tokio::process::Command::new(runtime.join(node_binary));
         command
             .arg(runtime.join("render.mjs"))
             .arg(directory)
@@ -335,6 +355,8 @@ impl RemotionRenderService {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
+        // 非 Windows：让渲染进程自成进程组，取消/超时时能连同 Chrome、ffmpeg 一起回收。
+        ProcessTree::configure(&mut command);
         let mut child = command.spawn()?;
         // 子进程树绑定操作系统 Job，异常、取消和应用退出都会回收 Chrome/FFmpeg。
         let process_tree = match ProcessTree::attach(&child) {
@@ -403,14 +425,15 @@ impl RemotionRenderService {
 }
 
 fn runtime_ready(directory: &Path) -> bool {
+    let (node_binary, browser_binary) = runtime_paths(std::env::consts::OS);
     [
-        "node.exe",
+        node_binary,
         "render.mjs",
         "plan.mjs",
         "Composition.tsx",
         "bundle/index.html",
         "runtime-manifest.json",
-        "browser/chrome-headless-shell.exe",
+        browser_binary,
         "node_modules/@remotion/renderer/package.json",
     ]
     .iter()
@@ -861,15 +884,34 @@ mod tests {
         assert!(validate_plan(&candidate).is_ok());
     }
 
+    /// 钉住各平台的运行时文件名：macOS 拿到的是 `node`，不是 `node.exe`。
+    /// 这条用例在 Linux CI 上也会跑，因此「只在苹果上错」的取值不会再漏过。
+    #[test]
+    fn runtime_paths_match_the_prepare_script_for_every_platform() {
+        assert_eq!(
+            runtime_paths("windows"),
+            ("node.exe", "browser/chrome-headless-shell.exe")
+        );
+        assert_eq!(
+            runtime_paths("macos"),
+            ("node", "browser/chrome-headless-shell")
+        );
+        assert_eq!(
+            runtime_paths("linux"),
+            ("node", "browser/chrome-headless-shell")
+        );
+    }
+
     #[test]
     fn preflight_requires_the_validation_module_and_export_template() {
         let directory = tempfile::tempdir().unwrap();
+        let (node_binary, browser_binary) = runtime_paths(std::env::consts::OS);
         for name in [
-            "node.exe",
+            node_binary,
             "render.mjs",
             "bundle/index.html",
             "runtime-manifest.json",
-            "browser/chrome-headless-shell.exe",
+            browser_binary,
             "node_modules/@remotion/renderer/package.json",
         ] {
             let path = directory.path().join(name);

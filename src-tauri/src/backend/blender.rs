@@ -1,6 +1,7 @@
 //! Trusted Blender script + validated scene data; durable local jobs never execute user Python.
 
 use std::collections::{HashMap, HashSet};
+use std::ffi::OsString;
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -718,6 +719,8 @@ impl BlenderRenderService {
             .kill_on_drop(true);
         #[cfg(windows)]
         command.creation_flags(0x0800_0000);
+        // 非 Windows：让渲染进程自成进程组，取消/超时时连同其子进程一起回收。
+        ProcessTree::configure(&mut command);
         let mut child = command.spawn()?;
         let tree = match ProcessTree::attach(&child) {
             Ok(tree) => tree,
@@ -791,14 +794,14 @@ impl BlenderRenderService {
         if !engine.available {
             return Err(invalid(engine.message));
         }
-        let mut command = tokio::process::Command::new(
-            engine
-                .executable_path
-                .ok_or_else(|| invalid("Blender 路径缺失"))?,
-        );
+        let executable = engine
+            .executable_path
+            .ok_or_else(|| invalid("Blender 路径缺失"))?;
+        let (program, arguments) =
+            gui_launch_plan(Path::new(&executable), project_path, std::env::consts::OS);
+        let mut command = tokio::process::Command::new(&program);
         command
-            .arg("--disable-autoexec")
-            .arg(project_path)
+            .args(&arguments)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null());
@@ -811,6 +814,49 @@ impl BlenderRenderService {
         });
         Ok(())
     }
+}
+
+/// 打开 Blender GUI 时要执行的命令与参数。
+///
+/// macOS 上直接 exec `Blender.app/Contents/MacOS/Blender` 会绕过 LaunchServices：
+/// 窗口不激活、Dock 不注册、菜单栏不接管。改用 `open -a <Blender.app> --args ...`
+/// 让系统按正常应用方式拉起；其余平台维持直接执行引擎可执行文件。
+///
+/// 参数化 OS 而不是读 `cfg!`，便于在任意平台（含 Linux CI）单测 macOS 分支。
+fn gui_launch_plan(
+    executable: &Path,
+    project: &Path,
+    os: &str,
+) -> (PathBuf, Vec<std::ffi::OsString>) {
+    if os == "macos" {
+        if let Some(bundle) = app_bundle_of(executable) {
+            return (
+                PathBuf::from("open"),
+                vec![
+                    OsString::from("-a"),
+                    bundle.into_os_string(),
+                    OsString::from("--args"),
+                    OsString::from("--disable-autoexec"),
+                    project.as_os_str().to_os_string(),
+                ],
+            );
+        }
+    }
+    (
+        executable.to_path_buf(),
+        vec![
+            OsString::from("--disable-autoexec"),
+            project.as_os_str().to_os_string(),
+        ],
+    )
+}
+
+/// 从 `<...>/Blender.app/Contents/MacOS/Blender` 反推 `.app` 包路径。
+fn app_bundle_of(executable: &Path) -> Option<PathBuf> {
+    executable
+        .ancestors()
+        .find(|candidate| candidate.extension().and_then(|ext| ext.to_str()) == Some("app"))
+        .map(Path::to_path_buf)
 }
 
 async fn wait_for_cancel(cancelled: &AtomicBool) {
@@ -907,6 +953,57 @@ fn validate_record(directory: &Path, record: &BlenderRenderJob) -> BackendResult
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// macOS 上必须经 LaunchServices 打开，否则 GUI 不激活、Dock 不注册。
+    #[test]
+    fn macos_open_project_goes_through_launch_services() {
+        let executable = Path::new(
+            "/Applications/无限画布.app/Contents/Resources/blender/runtime/Blender.app/Contents/MacOS/Blender",
+        );
+        let project = Path::new("/tmp/白模.blend");
+        let (program, arguments) = gui_launch_plan(executable, project, "macos");
+        assert_eq!(program, PathBuf::from("open"));
+        let rendered: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            rendered,
+            vec![
+                "-a",
+                "/Applications/无限画布.app/Contents/Resources/blender/runtime/Blender.app",
+                "--args",
+                "--disable-autoexec",
+                "/tmp/白模.blend",
+            ]
+        );
+    }
+
+    /// 无法反推 .app（非标准布局）时不能猜，退回直接执行。
+    #[test]
+    fn macos_open_project_falls_back_when_no_app_bundle_is_present() {
+        let executable = Path::new("/usr/local/bin/blender");
+        let project = Path::new("/tmp/白模.blend");
+        let (program, arguments) = gui_launch_plan(executable, project, "macos");
+        assert_eq!(program, executable);
+        assert_eq!(arguments.len(), 2);
+    }
+
+    /// 其他平台维持原有行为：直接执行引擎 + `--disable-autoexec`。
+    #[test]
+    fn other_platforms_exec_the_engine_directly() {
+        for os in ["windows", "linux"] {
+            let executable = Path::new("C:/blender/blender.exe");
+            let project = Path::new("C:/tmp/白模.blend");
+            let (program, arguments) = gui_launch_plan(executable, project, os);
+            assert_eq!(program, executable);
+            let rendered: Vec<String> = arguments
+                .iter()
+                .map(|argument| argument.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(rendered, vec!["--disable-autoexec", "C:/tmp/白模.blend"]);
+        }
+    }
 
     fn request() -> StartBlenderRenderRequest {
         serde_json::from_value(json!({

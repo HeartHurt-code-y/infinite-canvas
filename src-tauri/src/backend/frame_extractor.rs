@@ -251,10 +251,10 @@ impl VideoFrameExtractionService {
             .is_some_and(|entry| entry.cancelled.load(Ordering::Relaxed))
     }
 
-    /// FFmpeg 二进制：PATH 中可用则直接用，否则复用合成服务内置引擎。
+    /// FFmpeg 二进制：系统（PATH + 平台兜底目录）可用则直接用，否则复用合成服务内置引擎。
     async fn resolve_ffmpeg_binary(&self) -> Option<PathBuf> {
-        if probe_ffmpeg().await {
-            return Some(PathBuf::from("ffmpeg"));
+        if let Some(system) = super::system_ffmpeg::resolve().await {
+            return Some(system.path);
         }
         self.inner.composer.ensure_ffmpeg().await.ok()
     }
@@ -404,18 +404,6 @@ impl VideoFrameExtractionService {
     }
 }
 
-/// PATH 中是否可直接调用 ffmpeg。
-async fn probe_ffmpeg() -> bool {
-    let mut command = tokio::process::Command::new("ffmpeg");
-    command.arg("-version").stdin(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-        .output()
-        .await
-        .is_ok_and(|output| output.status.success())
-}
-
 /// 用 ffmpeg 探测视频时长（秒）；解析失败返回 None。
 async fn probe_video_duration(ffmpeg: &Path, source: &Path) -> Option<f64> {
     let mut command = tokio::process::Command::new(ffmpeg);
@@ -428,7 +416,8 @@ async fn probe_video_duration(ffmpeg: &Path, source: &Path) -> Option<f64> {
 }
 
 /// 从 ffmpeg 探测文本解析 `Duration: HH:MM:SS.xx`。
-fn parse_duration(text: &str) -> Option<f64> {
+/// 合成服务在缺少 ffprobe 时也复用这里（macOS 的 ffmpeg 发行包不含 ffprobe）。
+pub(crate) fn parse_duration(text: &str) -> Option<f64> {
     let re = Regex::new(r"Duration:\s*(\d{2,}):(\d{2}):(\d{2}(?:\.\d+)?)").ok()?;
     let captures = re.captures(text)?;
     let hours: f64 = captures.get(1)?.as_str().parse().ok()?;
@@ -476,7 +465,7 @@ async fn extract_frame(
 }
 
 /// 从 ffmpeg 探测文本解析 `Video: ... 1920x1080 ...`。
-fn parse_video_dimensions(text: &str) -> Option<(u32, u32)> {
+pub(crate) fn parse_video_dimensions(text: &str) -> Option<(u32, u32)> {
     let re = Regex::new(r"Video:.*?(\d{2,5})x(\d{2,5})").ok()?;
     let captures = re.captures(text)?;
     let width = captures.get(1)?.as_str().parse().ok()?;

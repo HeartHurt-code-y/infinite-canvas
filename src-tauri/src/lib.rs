@@ -149,6 +149,15 @@ pub fn run() {
             backend::thumbnail::create_media_thumbnail,
             commands::backend_health,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|_app_handle, event| {
+            // 应用退出兜底：非 Windows 平台没有 Job 对象，渲染子进程组
+            // （node / Chrome headless-shell / ffmpeg / Blender）必须显式回收，
+            // 否则退出后会留下孤儿进程。Windows 侧由 Job 的
+            // KILL_ON_JOB_CLOSE 自动完成，这里是空实现。
+            if matches!(event, tauri::RunEvent::Exit) {
+                backend::process_tree::ProcessTree::kill_all();
+            }
+        });
 }

@@ -298,9 +298,9 @@ export function AssetLibraryTokenSettings({
         </div>
         <small id={hintId}>
           {isArk
-            ? `通过「${provider?.displayName ?? ""}」的火山引擎方舟素材资产接口访问素材库；AK 与 SK 分别输入，保存时组合为 JSON，只保存在 Windows 凭据管理器。`
+            ? `通过「${provider?.displayName ?? ""}」的火山引擎方舟素材资产接口访问素材库；AK 与 SK 分别输入，保存时组合为 JSON，只保存在系统凭据管理器。`
             : provider?.enabled && provider.baseUrl.trim()
-              ? `通过「${provider.displayName}」的 Base URL 访问素材接口；令牌只保存在 Windows 凭据管理器。`
+              ? `通过「${provider.displayName}」的 Base URL 访问素材接口；令牌只保存在系统凭据管理器。`
               : provider
                 ? "请先在上方填写并保存该供应商的 Base URL，再配置素材库令牌。"
                 : "请先保存供应商连接，再配置素材库令牌。"}

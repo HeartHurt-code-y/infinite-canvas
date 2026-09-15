@@ -23,6 +23,7 @@ pub mod remotion_renderer;
 pub mod reverse_video;
 pub mod staging;
 pub mod storage;
+pub mod system_ffmpeg;
 pub mod tasks;
 pub mod thumbnail;
 pub mod tos_sign;

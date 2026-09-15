@@ -52,6 +52,9 @@
         "upgradeCode": "9c60e3cb-cb4f-5d0f-b15c-8c2a7574b655"
       }
     },
+    "macOS": {
+      "minimumSystemVersion": "11.0"
+    },
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

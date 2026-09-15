@@ -114,6 +114,27 @@ struct Inner {
     resource_dir: PathBuf,
 }
 
+/// ffprobe 是否为本平台的必备引擎文件。
+///
+/// macOS 的 ffmpeg 发行包（evermeet.cx / osxexperts.net）只打包 ffmpeg；
+/// `ffmpeg-sidecar` 的下载解包在 macOS 上同样只有 ffmpeg。把 ffprobe 当成
+/// 硬性条件会导致：内置引擎被判定“不完整” → 每次调用都重下一份 22–100 MiB
+/// 的归档，而且永远凑不齐。因此 macOS 上 ffprobe 属于“有则更好”，
+/// 缺失时由 `probe_media_via_ffmpeg` 用 `ffmpeg -i` 兜底。
+const FFPROBE_REQUIRED: bool = !cfg!(target_os = "macos");
+
+/// 引擎目录是否可用：必须有 ffmpeg，ffprobe 按平台要求。
+fn engine_ready_in(directory: &Path) -> bool {
+    let ffmpeg = directory.join(VideoCompositionService::ffmpeg_binary_name());
+    if !ffmpeg.is_file() {
+        return false;
+    }
+    !FFPROBE_REQUIRED
+        || directory
+            .join(VideoCompositionService::ffprobe_binary_name())
+            .is_file()
+}
+
 /// 画布视频合成服务。可克隆后在异步任务中使用。
 #[derive(Clone)]
 pub struct VideoCompositionService {
@@ -182,11 +203,9 @@ impl VideoCompositionService {
         self.inner.resource_dir.join("ffmpeg")
     }
 
-    /// 内置引擎是否完整可用（ffmpeg + ffprobe 都在资源目录中）。
+    /// 内置引擎是否完整可用。
     fn has_builtin_engine(&self) -> bool {
-        let directory = self.builtin_engine_dir();
-        directory.join(Self::ffmpeg_binary_name()).is_file()
-            && directory.join(Self::ffprobe_binary_name()).is_file()
+        engine_ready_in(&self.builtin_engine_dir())
     }
 
     /// 生效引擎目录：内置构建完整时优先使用只读资源目录，否则回退到应用数据目录。
@@ -256,7 +275,7 @@ impl VideoCompositionService {
         }
         let install_result: BackendResult<String> = async {
             let _guard = self.inner.engine_lock.lock().await;
-            if self.ffmpeg_binary().is_file() && self.ffprobe_binary().is_file() {
+            if engine_ready_in(&self.active_engine_dir()) {
                 return match self.installed_version() {
                     Some(version) => Ok(version),
                     None => self.probe_and_record_version().await,
@@ -311,8 +330,24 @@ impl VideoCompositionService {
     /// 生成提交前复用真实媒体探测，不接受调用方填写的时长元数据。
     pub async fn probe_video_duration(&self, source: &str) -> BackendResult<f64> {
         self.ensure_ffmpeg().await?;
-        let probe = probe_media(&self.ffprobe_binary(), source).await?;
+        let probe = self.probe(source).await?;
         Ok(probe.duration_seconds)
+    }
+
+    /// 探测单个输入的元数据：优先 ffprobe，没有 ffprobe 时用 `ffmpeg -i` 兜底。
+    ///
+    /// macOS 的 ffmpeg 发行包不含 ffprobe（见 `FFPROBE_REQUIRED`），
+    /// 若在这里直接报错，整条视频合成链路都会在苹果上不可用。
+    async fn probe(&self, source: &str) -> BackendResult<MediaProbe> {
+        let ffprobe = self.ffprobe_binary();
+        if ffprobe.is_file() {
+            return probe_media(&ffprobe, source).await;
+        }
+        tauri_plugin_log::log::info!(
+            "[composer] 未找到 ffprobe，改用 ffmpeg -i 解析媒体元数据：{}",
+            super::provider::redact_url_string(source)
+        );
+        probe_media_via_ffmpeg(&self.ffmpeg_binary(), source).await
     }
 
     pub async fn probe_video_bytes_duration(&self, bytes: &[u8]) -> BackendResult<f64> {
@@ -398,13 +433,17 @@ impl VideoCompositionService {
         Ok(version)
     }
 
-    async fn ensure_engine(&self) -> BackendResult<(PathBuf, PathBuf)> {
-        if self.ffmpeg_binary().is_file() && self.ffprobe_binary().is_file() {
-            return Ok((self.ffmpeg_binary(), self.ffprobe_binary()));
+    /// 确保引擎就绪并返回 ffmpeg 可执行文件。
+    ///
+    /// 这里不返回 ffprobe：macOS 的 ffmpeg 发行包不含它，媒体探测由 `probe()`
+    /// 决定用 ffprobe 还是退回 `ffmpeg -i`。
+    async fn ensure_engine(&self) -> BackendResult<PathBuf> {
+        if engine_ready_in(&self.active_engine_dir()) {
+            return Ok(self.ffmpeg_binary());
         }
         self.install_engine().await;
-        if self.ffmpeg_binary().is_file() && self.ffprobe_binary().is_file() {
-            return Ok((self.ffmpeg_binary(), self.ffprobe_binary()));
+        if engine_ready_in(&self.active_engine_dir()) {
+            return Ok(self.ffmpeg_binary());
         }
         let runtime = self.inner.engine.lock().expect("engine runtime poisoned");
         let detail = runtime
@@ -565,8 +604,8 @@ impl VideoCompositionService {
         file_name: String,
     ) {
         // 1. 确保引擎就绪（缺失时自动下载官方构建）。
-        let (ffmpeg, ffprobe) = match self.ensure_engine().await {
-            Ok(paths) => paths,
+        let ffmpeg = match self.ensure_engine().await {
+            Ok(binary) => binary,
             Err(error) => {
                 self.fail_job(&job_id, format!("合成引擎准备失败：{error}"));
                 return;
@@ -579,7 +618,7 @@ impl VideoCompositionService {
         // 2. 探测各输入的时长/尺寸/音轨。
         let mut probes: Vec<MediaProbe> = Vec::with_capacity(sources.len());
         for (index, source) in sources.iter().enumerate() {
-            match probe_media(&ffprobe, source).await {
+            match self.probe(source).await {
                 Ok(probe) => probes.push(probe),
                 Err(error) => {
                     self.fail_job(&job_id, format!("第 {} 段视频无法读取：{error}", index + 1));
@@ -938,6 +977,55 @@ async fn probe_media(ffprobe: &Path, source: &str) -> BackendResult<MediaProbe> 
     parse_probe_json(&String::from_utf8_lossy(&output.stdout))
 }
 
+/// 没有 ffprobe 时的兜底探测：解析 `ffmpeg -i` 写到 stderr 的媒体信息。
+///
+/// 关键细节：不指定输出文件时 ffmpeg 一定以非 0 退出码结束
+/// （`At least one output file must be specified`），但元数据已经完整写在
+/// stderr 上，所以这里**只看 stderr，不检查退出码**。
+async fn probe_media_via_ffmpeg(ffmpeg: &Path, source: &str) -> BackendResult<MediaProbe> {
+    let mut command = tokio::process::Command::new(ffmpeg);
+    if is_remote_source(source) {
+        command.args(["-rw_timeout", REMOTE_READ_TIMEOUT_MICROS]);
+    }
+    command
+        .arg("-i")
+        .arg(source)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .kill_on_drop(true);
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let output = tokio::time::timeout(Duration::from_secs(45), command.output())
+        .await
+        .map_err(|_| {
+            BackendError::protocol(
+                "视频时长探测超时，请检查素材是否可读取",
+                json!({ "timeoutSeconds": 45 }),
+            )
+        })??;
+    parse_ffmpeg_probe_text(&String::from_utf8_lossy(&output.stderr), source)
+}
+
+/// 纯文本解析（不含 IO），因此可以在任意平台单测。
+fn parse_ffmpeg_probe_text(text: &str, source: &str) -> BackendResult<MediaProbe> {
+    let duration = super::frame_extractor::parse_duration(text).ok_or_else(|| {
+        BackendError::protocol(
+            "ffmpeg probe output has no usable duration",
+            json!({ "source": super::provider::redact_url_string(source) }),
+        )
+    })?;
+    let (width, height) = super::frame_extractor::parse_video_dimensions(text).unwrap_or((0, 0));
+    Ok(MediaProbe {
+        duration_seconds: duration,
+        width: i64::from(width),
+        height: i64::from(height),
+        // 音轨与视频流同名行出现：`Stream #0:1(und): Audio: aac ...`。
+        has_audio: text
+            .lines()
+            .any(|line| line.contains("Stream #") && line.contains("Audio:")),
+    })
+}
+
 async fn collect_stderr_tail(stderr: Option<tokio::process::ChildStderr>) -> VecDeque<String> {
     let mut tail: VecDeque<String> = VecDeque::new();
     let Some(stderr) = stderr else {
@@ -1020,6 +1108,43 @@ fn now_ms() -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 没有 ffprobe 的平台上，`ffmpeg -i` 的 stderr 必须能解析出同一组元数据。
+    /// 样本取自真实的 `ffmpeg -i sample.mp4` 输出（不含输出文件，因此退出码为 1）。
+    #[test]
+    fn ffmpeg_stderr_probe_parses_duration_dimensions_and_audio() {
+        let text = "\
+ffmpeg version 7.1 Copyright (c) 2000-2024 the FFmpeg developers
+Input #0, mov,mp4,m4a,3gp,3g2,mj2, from 'sample.mp4':
+  Duration: 00:00:03.05, start: 0.000000, bitrate: 1234 kb/s
+  Stream #0:0[0x1](und): Video: h264 (High) (avc1 / 0x31637661), yuv420p, 1920x1080 [SAR 1:1 DAR 16:9], 1000 kb/s, 30 fps
+  Stream #0:1[0x2](und): Audio: aac (LC) (mp4a / 0x6134706D), 44100 Hz, stereo, fltp, 128 kb/s
+At least one output file must be specified
+";
+        let probe = parse_ffmpeg_probe_text(text, "sample.mp4").expect("必须能解析");
+        assert_eq!(probe.duration_seconds, 3.05);
+        assert_eq!((probe.width, probe.height), (1920, 1080));
+        assert!(probe.has_audio);
+    }
+
+    #[test]
+    fn ffmpeg_stderr_probe_reports_missing_video_track_as_zero_size() {
+        let text = "\
+  Duration: 00:01:02.50, start: 0.000000, bitrate: 128 kb/s
+  Stream #0:0(und): Audio: mp3, 44100 Hz, mono, fltp, 64 kb/s
+";
+        let probe = parse_ffmpeg_probe_text(text, "audio.mp3").expect("必须能解析");
+        assert_eq!(probe.duration_seconds, 62.5);
+        assert_eq!((probe.width, probe.height), (0, 0));
+        assert!(probe.has_audio);
+    }
+
+    #[test]
+    fn ffmpeg_stderr_probe_rejects_output_without_duration() {
+        assert!(
+            parse_ffmpeg_probe_text("sample.mp4: No such file or directory", "sample.mp4").is_err()
+        );
+    }
 
     #[test]
     fn composition_canvas_size_clamps_and_rounds_even() {
@@ -1297,7 +1422,10 @@ mod tests {
                 .join(VideoCompositionService::ffprobe_binary_name())
         );
 
-        // 只放 ffmpeg 缺 ffprobe：仍视为不完整，整体回退到下载目录。
+        // 只放 ffmpeg 缺 ffprobe 的分支：
+        //   Windows/Linux —— 视为不完整，整体回退到下载目录；
+        //   macOS —— 发行包本来就不带 ffprobe，内置 ffmpeg 仍然优先使用，
+        //            元数据探测退回 `ffmpeg -i`（见 FFPROBE_REQUIRED）。
         let partial = resource.path().join("ffmpeg");
         std::fs::create_dir_all(&partial).unwrap();
         std::fs::write(
@@ -1305,12 +1433,14 @@ mod tests {
             b"fixture",
         )
         .unwrap();
-        assert!(!service.has_builtin_engine());
-        assert_eq!(
-            service.ffmpeg_binary(),
+        assert_eq!(service.has_builtin_engine(), !FFPROBE_REQUIRED);
+        let expected_ffmpeg = if FFPROBE_REQUIRED {
             download
                 .path()
                 .join(VideoCompositionService::ffmpeg_binary_name())
-        );
+        } else {
+            partial.join(VideoCompositionService::ffmpeg_binary_name())
+        };
+        assert_eq!(service.ffmpeg_binary(), expected_ffmpeg);
     }
 }

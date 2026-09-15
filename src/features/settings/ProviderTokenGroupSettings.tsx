@@ -16,7 +16,7 @@ const NOOP_TOKEN_GROUPS_CHANGED = () => undefined;
 /**
  * 供应商「令牌分组」设置：同一供应商接口可能签发多组分组令牌，
  * 不同分组能拉取/调用的模型不同（如 as 分组可调 sd、默认分组可调 image）。
- * 每个模型绑定记录使用哪个分组令牌；分组密钥只写入 Windows 凭据管理器。
+ * 每个模型绑定记录使用哪个分组令牌；分组密钥只写入系统凭据管理器。
  */
 export function ProviderTokenGroupSettings({
   provider,

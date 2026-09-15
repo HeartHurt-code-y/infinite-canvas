@@ -926,25 +926,17 @@ async fn wait_for_cancel(flag: Arc<AtomicBool>) {
     }
 }
 
-/// 探测系统 ffmpeg（PATH 上可用即认为可合并音视频流）。
-async fn probe_ffmpeg() -> bool {
-    let mut command = tokio::process::Command::new("ffmpeg");
-    command.arg("-version").stdin(Stdio::null());
-    #[cfg(windows)]
-    command.creation_flags(CREATE_NO_WINDOW);
-    command
-        .output()
-        .await
-        .is_ok_and(|output| output.status.success())
-}
-
 /// 解析本次下载可用的 ffmpeg 位置：
-/// - PATH 上已存在 `ffmpeg` → 返回 `None`（yt-dlp 会自动找到，无需额外指定）；
+/// - 系统 ffmpeg 命中 PATH → 返回 `None`（yt-dlp 继承同一 PATH，自己能找到）；
+/// - 系统 ffmpeg 只命中平台兜底目录（macOS 上 Homebrew 的 `/opt/homebrew/bin` 等，
+///   从 Finder 启动的 .app 不在 PATH 里）→ 返回其所在目录，交给 `--ffmpeg-location`；
 /// - 否则复用视频合成服务自带的 ffmpeg 引擎（缺则按需下载一次），返回其
-///   所在目录，供 `--ffmpeg-location` 使用；下载失败返回 `None`。
+///   所在目录；下载失败返回 `None`。
 async fn resolve_ffmpeg_location(composer: &VideoCompositionService) -> Option<PathBuf> {
-    if probe_ffmpeg().await {
-        return None;
+    match super::system_ffmpeg::resolve().await {
+        Some(system) if system.on_path => return None,
+        Some(system) => return system.path.parent().map(Path::to_path_buf),
+        None => {}
     }
     composer
         .ensure_ffmpeg()
@@ -1001,12 +993,12 @@ async fn probe_video_dimensions(ffmpeg: &Path, source: &Path) -> Option<(u32, u3
 }
 
 /// 解析本次后处理可用的 ffmpeg 可执行文件：
-/// - PATH 上已有 `ffmpeg` → 直接使用命令名；
+/// - 系统 ffmpeg（PATH 或平台兜底目录）可用 → 直接使用其路径；
 /// - 否则复用视频合成服务自带的 ffmpeg 引擎（缺则按需下载）返回二进制路径；
 /// - 均不可用时返回 None（去水印等后处理跳过，不影响下载结果）。
 async fn resolve_ffmpeg_binary(composer: &VideoCompositionService) -> Option<PathBuf> {
-    if probe_ffmpeg().await {
-        return Some(PathBuf::from("ffmpeg"));
+    if let Some(system) = super::system_ffmpeg::resolve().await {
+        return Some(system.path);
     }
     composer.ensure_ffmpeg().await.ok()
 }

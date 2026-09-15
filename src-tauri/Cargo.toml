@@ -31,7 +31,6 @@ hex = "0.4"
 hmac = "0.12"
 infer = "0.19"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "tiff"] }
-keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
 rand = "0.9"
 regex = "1"
 # system-proxy: 启用 Windows 注册表 / macOS 系统配置代理读取（企业代理环境适配；
@@ -68,6 +67,34 @@ tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 tauri-plugin-global-shortcut = "2"
+
+# 系统凭据存储（API Key / AK-SK）必须按平台启用 keyring 的原生后端。
+#
+# keyring 在没有启用任何平台后端 feature 时会**静默**退回内存 mock 实现
+# （keyring::default 被解析为 keyring::mock），而 mock 的每一次 Entry::new 都是
+# 一个全新的空存储，于是「保存成功」之后紧接着的读取永远返回 NoEntry。
+# 之前的写法只在公共 [dependencies] 里声明 features = ["windows-native"]，
+# 该 feature 在 macOS 上完全不生效（windows 模块带 target_os = "windows" 门禁），
+# 导致 macOS 安装包所有密钥「配不上、拉不到」（not found: credential ...）。
+[target.'cfg(target_os = "windows")'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+
+# macOS / iOS 走 Security.framework 的登录钥匙串（MacCredentialBuilder），
+# 持久化级别为 UntilDelete，与 Windows 行为一致。
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+keyring = { version = "3.6.3", default-features = false, features = ["apple-native"] }
+
+# Linux 及其他平台不发布安装包：保持默认不启用后端即可编译，
+# credentials.rs 的持久化守卫会让这类平台显式报错而不是静默丢密钥。
+# 若将来需要 Linux 原生支持，追加 features = ["sync-secret-service", "crypto-rust"]
+# 并在 CI 安装 libdbus-1-dev。
+[target.'cfg(not(any(target_os = "windows", target_os = "macos", target_os = "ios")))'.dependencies]
+keyring = { version = "3.6.3", default-features = false }
+
+# 非 Windows 平台用「独立进程组 + killpg」回收渲染子进程树
+# （见 src/backend/process_tree.rs）。libc 早已是依赖树成员，不引入新包。
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
 
 [profile.release]
 codegen-units = 1
