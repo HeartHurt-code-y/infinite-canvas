@@ -246,6 +246,12 @@ async function verifyLayout(root, distribution) {
   }
 }
 
+// download.blender.org 对无 UA 的大文件请求与数据中心出口 IP 会限流/拒绝
+// （CircleCI 上实测 HTTP 403，家庭宽带无 UA 亦 206）；下载统一带浏览器 UA 并
+// 对 403/网络错误退避重试，避免一次限流把整条构建链打挂。
+const DOWNLOAD_USER_AGENT =
+  "Mozilla/5.0 (compatible; infinite-canvas/0.1; +https://github.com/HeartHurt-code-y/infinite-canvas)";
+
 async function cachedDownload(cache, metadata, override) {
   if (override) {
     const supplied = path.resolve(override);
@@ -265,13 +271,36 @@ async function cachedDownload(cache, metadata, override) {
   console.log(
     `[blender:prepare] 下载 ${metadata.url} (${(metadata.size / 1024 / 1024).toFixed(1)} MiB)`,
   );
-  const response = await fetch(metadata.url, { signal: AbortSignal.timeout(15 * 60_000) });
-  if (!response.ok || !response.body) throw new Error(`下载 Blender 失败：HTTP ${response.status}`);
   const temporary = path.join(cache, `${metadata.filename}.${randomUUID()}.part`);
-  await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx" }));
-  await verifyArchive(temporary, metadata);
-  await rename(temporary, filename);
-  return filename;
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const response = await fetch(metadata.url, {
+        signal: AbortSignal.timeout(15 * 60_000),
+        headers: {
+          "user-agent": DOWNLOAD_USER_AGENT,
+          accept: "application/octet-stream,*/*",
+        },
+      });
+      if (!response.ok || !response.body)
+        throw new Error(`下载 Blender 失败：HTTP ${response.status}`);
+      await pipeline(Readable.fromWeb(response.body), createWriteStream(temporary, { flags: "wx" }));
+      await verifyArchive(temporary, metadata);
+      await rename(temporary, filename);
+      return filename;
+    } catch (error) {
+      lastError = error;
+      await rm(temporary, { force: true }).catch(() => {});
+      if (attempt < 3) {
+        const delay = 2 ** attempt * 1000;
+        console.log(
+          `[blender:prepare] 下载失败（第 ${attempt} 次）：${error.message}，${delay / 1000}s 后重试`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delay));
+      }
+    }
+  }
+  throw lastError;
 }
 
 async function unpackRuntime(archive, stage, distribution) {
