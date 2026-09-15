@@ -7,6 +7,7 @@ import {
   candidateTarget,
   createPromptReference,
   normalizePromptReferenceText,
+  rebindDanglingPromptReferences,
   referenceCandidateFromTarget,
   referenceQueryInText,
   resolvePromptReferences,
@@ -328,6 +329,95 @@ describe("reference identity factory", () => {
     });
     const resolved = resolvePromptReferences(document("@图片1"), [file], { mode: "explicit" });
     expect(references(resolved)[0]?.target).toEqual(createPromptReference(file).target);
+  });
+});
+
+describe("失效引用的自愈重连", () => {
+  /** 引用链路的真实起点：先连着 asset-node-1，再把它整段替换掉。 */
+  function danglingReference() {
+    const original = candidate("asset-node-1", "微信图片_20260914172726_12120_18.png");
+    const reference = createPromptReference(original);
+    const source: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "看向 " }, reference, { kind: "text", text: " 做手势" }],
+    };
+    return { original, reference, source };
+  }
+
+  it("素材节点被删除后重新连接同名素材，引用原地重连并保留 mentionId", () => {
+    const { reference, source } = danglingReference();
+    const replacement = candidate("asset-node-9", "微信图片_20260914172726_12120_18.png", {
+      assetId: "staging-9",
+    });
+    const result = rebindDanglingPromptReferences(source, [replacement], new Set(["asset-node-9"]));
+    expect(result.rebinds).toEqual([
+      {
+        mentionId: reference.mentionId,
+        canvasNodeKey: "asset-node-9",
+        displayName: "微信图片_20260914172726_12120_18.png",
+        matchedBy: "name",
+      },
+    ]);
+    expect(result.document.items).toEqual([
+      { kind: "text", text: "看向 " },
+      {
+        ...reference,
+        canvasNodeKey: "asset-node-9",
+        target: candidateTarget(replacement),
+        displayNameSnapshot: replacement.name,
+      },
+      { kind: "text", text: " 做手势" },
+    ]);
+  });
+
+  it("同一份素材被重新投放时按来源身份重连，不依赖名字", () => {
+    const { source } = danglingReference();
+    const replacement = candidate("asset-node-9", "改过名的素材.png", {
+      assetId: "asset-asset-node-1",
+    });
+    const result = rebindDanglingPromptReferences(source, [replacement], new Set(["asset-node-9"]));
+    expect(result.rebinds).toMatchObject([
+      { canvasNodeKey: "asset-node-9", displayName: "改过名的素材.png", matchedBy: "identity" },
+    ]);
+    expect(result.document.items[1]).toMatchObject({
+      canvasNodeKey: "asset-node-9",
+      displayNameSnapshot: "改过名的素材.png",
+      target: { assetId: "asset-asset-node-1" },
+    });
+  });
+
+  it("节点还在画布上（只是解除连线）时不改绑，交给用户决定", () => {
+    const { source } = danglingReference();
+    const sibling = candidate("asset-node-2", "微信图片_20260914172726_12120_18.png");
+    const result = rebindDanglingPromptReferences(
+      source,
+      [sibling],
+      new Set(["asset-node-1", "asset-node-2"]),
+    );
+    expect(result.rebinds).toEqual([]);
+    expect(result.document).toBe(source);
+  });
+
+  it("画布上有两个同名素材时不猜绑定，引用保持原样", () => {
+    const { source } = danglingReference();
+    const result = rebindDanglingPromptReferences(
+      source,
+      [
+        candidate("asset-node-2", "微信图片_20260914172726_12120_18.png"),
+        candidate("asset-node-3", "微信图片_20260914172726_12120_18.png"),
+      ],
+      new Set(["asset-node-2", "asset-node-3"]),
+    );
+    expect(result.rebinds).toEqual([]);
+    expect(result.document).toBe(source);
+  });
+
+  it("引用仍然连着当前候选时，即使存亡表里没有它也不动", () => {
+    const { original, source } = danglingReference();
+    const result = rebindDanglingPromptReferences(source, [original], new Set());
+    expect(result.rebinds).toEqual([]);
+    expect(result.document).toBe(source);
   });
 });
 

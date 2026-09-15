@@ -88,6 +88,7 @@ export function CanvasGenNode({
   connectedInputs,
   inheritedInputs,
   mentionCandidates,
+  aliveCanvasNodeKeys,
   promptSourceName,
   registerPromptInput,
   providerCatalog,
@@ -116,6 +117,8 @@ export function CanvasGenNode({
   readonly connectedInputs: readonly ConnectedAssetInput[];
   readonly inheritedInputs: readonly InheritedAssetInput[];
   readonly mentionCandidates: readonly MentionCandidate[];
+  /** 画布上仍然存在的节点 key；用于把已删除素材的失效引用按同源/同名自愈重连。 */
+  readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
   readonly promptSourceName?: string | undefined;
   readonly registerPromptInput: (
     nodeKey: string,
@@ -250,6 +253,7 @@ export function CanvasGenNode({
         <PromptMentionInput
           nodeKey={node.key}
           candidates={mentionCandidates}
+          aliveCanvasNodeKeys={aliveCanvasNodeKeys}
           registerInput={registerPromptInput}
           labelledBy={promptLabelId}
           describedBy={promptHintId}

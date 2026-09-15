@@ -236,6 +236,7 @@ export function PromptMentionInput({
   nodeKey,
   candidates,
   annotationMentions,
+  aliveCanvasNodeKeys,
   registerInput,
   labelledBy,
   describedBy,
@@ -248,6 +249,11 @@ export function PromptMentionInput({
   readonly candidates: readonly MentionCandidate[];
   /** 额外的非素材引用候选（如视频局部编辑的区域标注）；缺省时菜单与今天完全一致。 */
   readonly annotationMentions?: readonly PromptMarkReferenceInput[];
+  /**
+   * 画布上仍然存在的节点 key。用来区分「素材节点被删掉」与「只是解除连线」：
+   * 前者按同源/同名素材自愈重连引用，后者保持灰化等用户决定。缺省时不做自愈。
+   */
+  readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
   readonly registerInput: (nodeKey: string, session: PromptContentEditorSession | null) => void;
   readonly labelledBy?: string;
   readonly describedBy?: string;
@@ -736,12 +742,17 @@ export function PromptMentionInput({
     [],
   );
 
-  // 连线集合变化只同步候选和断线状态；既有待确认项继续要求用户选择。
+  /**
+   * 连线集合变化只同步候选和断线状态；既有待确认项继续要求用户选择。
+   * 被引用的素材节点已经不在画布上时，updateConnections 会按同源/同名素材自愈重连，
+   * 这里把重连处数报给用户：灰掉的 chip 变回高亮，说清楚是被谁接上的。
+   */
   useEffect(() => {
     const input = inputRef.current;
     if (input == null) return;
     const currentCandidates = latestCandidatesRef.current;
-    sessionRef.current?.updateConnections(currentCandidates);
+    const rebound =
+      sessionRef.current?.updateConnections(currentCandidates, { aliveCanvasNodeKeys }) ?? 0;
     const pendingCount = sessionRef.current?.read().pendingCount ?? 0;
     if (pendingCount > 0) {
       openFirstPendingAmbiguity();
@@ -753,8 +764,26 @@ export function PromptMentionInput({
       setActiveAmbiguity(null);
       setAutoMentionResolvedNames([]);
       showReadyFeedback();
+      if (rebound > 0) {
+        if (feedbackResetTimerRef.current != null) {
+          window.clearTimeout(feedbackResetTimerRef.current);
+        }
+        setAutoMentionFeedbackState({
+          kind: "success",
+          message: `已按同名素材自动重连 ${rebound} 处引用`,
+        });
+        feedbackResetTimerRef.current = window.setTimeout(() => {
+          feedbackResetTimerRef.current = null;
+          showReadyFeedback();
+        }, AUTO_MENTION_FEEDBACK_MS);
+      }
     }
-  }, [candidateConnectionSignature, openFirstPendingAmbiguity, showReadyFeedback]);
+  }, [
+    aliveCanvasNodeKeys,
+    candidateConnectionSignature,
+    openFirstPendingAmbiguity,
+    showReadyFeedback,
+  ]);
 
   /**
    * 对外展示的识别状态：常驻提示（ready）在每次渲染时按当前候选与已引用数重算，

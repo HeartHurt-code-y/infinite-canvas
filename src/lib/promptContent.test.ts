@@ -590,6 +590,65 @@ describe("prompt content interface", () => {
     host.remove();
   });
 
+  it("素材节点被删除后重连同名素材：引用原地重连并从灰化恢复", () => {
+    const original = assetCandidate("asset-node-1", "角色.png", "asset-1");
+    const session = createPromptContentEditorSession([original]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    session.attach(host);
+    session.insertReference(original);
+    const reference = session.snapshot().items[0]!;
+    expect(reference).toMatchObject({ kind: "media_reference", canvasNodeKey: "asset-node-1" });
+    if (reference.kind !== "media_reference") throw new Error("引用未插入");
+
+    // 原素材节点被删除，用户重新连上一份同名素材（新实例、新上传 job）。
+    const replacement = assetCandidate("asset-node-9", "角色.png", "staging-9");
+    expect(
+      session.updateConnections([replacement], {
+        aliveCanvasNodeKeys: new Set(["asset-node-9"]),
+      }),
+    ).toBe(1);
+
+    const rebound = session.snapshot().items[0]!;
+    // mentionId 不变：DOM 身份、撤销栈与已验证的选择都不被打断，只有实例身份换新。
+    expect(rebound).toMatchObject({
+      kind: "media_reference",
+      mentionId: reference.mentionId,
+      canvasNodeKey: "asset-node-9",
+      target: { kind: "asset", assetId: "staging-9", canvasNodeKey: "asset-node-9" },
+    });
+    const chip = host.querySelector<HTMLElement>(".ProseMirror [data-mention-id]")!;
+    expect(chip).not.toHaveClass("is-stale");
+    // 重连成功的引用按「刚识别到」闪一次高亮，用户能看见是哪一处自愈了。
+    expect(chip).toHaveClass("is-fresh");
+    expect(
+      session.prepareGeneration({
+        connections: [connectionFor(replacement)],
+        allowMediaOnly: false,
+      }),
+    ).toMatchObject({ ok: true });
+    session.attach(null);
+    host.remove();
+  });
+
+  it("只是解除连线时保持灰化，不按同名素材改绑", () => {
+    const first = assetCandidate("asset-node-1");
+    const second = assetCandidate("asset-node-2");
+    const session = createPromptContentEditorSession([first, second]);
+    session.replaceText("@图片1");
+    expect(session.read().referenceCount).toBe(1);
+
+    // 两个节点都还在画布上，只是第一个被解除了连线：这是用户明确的选择，交给他处理。
+    expect(
+      session.updateConnections([second], {
+        aliveCanvasNodeKeys: new Set(["asset-node-1", "asset-node-2"]),
+      }),
+    ).toBe(0);
+    expect(session.read().issues).toMatchObject([
+      { kind: "disconnected_reference", canvasNodeKey: "asset-node-1" },
+    ]);
+  });
+
   it("still converts a typed connected name into a mention chip via auto-resolve", () => {
     // 功能不回归：手输匹配素材名时，auto-resolve 仍应把纯文本转成引用 chip。
     const candidate = assetCandidate("asset-node-1");

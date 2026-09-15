@@ -8002,6 +8002,36 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(currentChip().title).toContain("站台参考图 · 图片1 · asset-image-1");
   });
 
+  it("删除素材节点后重新投放同名素材，@ 引用自愈重连而不是留在灰化态", async () => {
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const firstAsset = await addAssetNode("图片", "站台参考图", 148, 148);
+    connectAssetToGeneration(firstAsset, videoGeneration);
+    await insertMention(videoGeneration, "站台参考图");
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    const mentionId = promptInput.querySelector<HTMLElement>(".mention-chip")!.dataset["mentionId"];
+    const currentChip = () =>
+      promptInput.querySelector<HTMLElement>(`[data-mention-id="${mentionId}"]`)!;
+    const deletedKey = currentChip().dataset["canvasNodeKey"]!;
+
+    // 修改素材的真实流程：删掉原素材节点（引用先进入灰化态），再重新投放同名素材。
+    fireEvent.click(within(firstAsset).getByRole("button", { name: "移除素材节点：站台参考图" }));
+    await waitFor(() => expect(currentChip()).toHaveClass("is-stale"));
+
+    const secondAsset = await addAssetNode("图片", "站台参考图", 148, 400);
+    connectAssetToGeneration(secondAsset, videoGeneration);
+    const replacementKey = secondAsset.dataset["connectionTarget"]!;
+    expect(replacementKey).not.toBe(deletedKey);
+
+    // 无需删除再重新 @：引用按同名素材自动重连，mentionId 与正文都保持不变。
+    await waitFor(() => expect(currentChip()).not.toHaveClass("is-stale"));
+    expect(currentChip()).toHaveAttribute("data-canvas-node-key", replacementKey);
+    expect(currentChip()).toHaveAttribute("data-mention-id", mentionId);
+    expect(promptInput).toHaveTextContent("@站台参考图");
+  });
+
   it("可从画布连线本身删除连接而保留两端节点", async () => {
     render(<App />);
     const imageGeneration = await addGenerationNode("图片", 518, 222);

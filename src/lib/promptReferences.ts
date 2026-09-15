@@ -4,6 +4,7 @@ import type {
   PromptContentItem,
   PromptContentMediaReferenceItem,
 } from "./promptContent";
+import { sameMediaReferenceTarget, sameMediaSourceIdentity } from "./promptReferenceTarget";
 
 /** 引用规则只处理候选和 canonical document，不读取编辑器 DOM。 */
 export interface PromptReferenceCandidate {
@@ -275,7 +276,8 @@ export function referenceQueryInText(
 
 /**
  * explicit 是输入/粘贴默认模式；names 仅供用户主动要求批量识别裸名称时使用。
- * 已有 media/pending 项是明确的文档状态，不根据历史选择或连线变化重新猜测绑定。
+ * 已有 media/pending 项是明确的文档状态，不根据历史选择或连线变化重新猜测绑定；
+ * 唯一的例外见 rebindDanglingPromptReferences：被引用的实例已经不在画布上时按来源/同名自愈。
  */
 export function resolvePromptReferences(
   document: PromptContentDocumentV1,
@@ -354,4 +356,107 @@ export function resolvePromptReferences(
     pending: items.filter((item) => item.kind === "pending_reference").length,
     freshMentionIds,
   };
+}
+
+/** 一处失效引用被重绑到哪个候选，以及凭什么认出来的。 */
+export interface PromptReferenceRebind {
+  readonly mentionId: string;
+  readonly canvasNodeKey: string;
+  readonly displayName: string;
+  /** identity：同一份素材被重新投放；name：画布上只剩唯一同名素材。 */
+  readonly matchedBy: "identity" | "name";
+}
+
+export interface PromptReferenceRebindResult {
+  readonly document: PromptContentDocumentV1;
+  readonly rebinds: readonly PromptReferenceRebind[];
+}
+
+/** 名称归一化后逐字相等，或文件主名相等（同名素材换了扩展名也算同一份）。 */
+function sameReferenceName(first: string, second: string): boolean {
+  const normalized = normalizePromptReferenceText(second);
+  if (!normalized) return false;
+  if (normalizePromptReferenceText(first) === normalized) return true;
+  return nameStem(first) === normalized;
+}
+
+/**
+ * 先看来源身份（同一份素材重新投放），再看唯一同名；两处都不唯一时交还用户选择，
+ * 不在这里另造隐藏优先级。
+ */
+function danglingReplacement(
+  item: PromptContentMediaReferenceItem,
+  candidates: readonly PromptReferenceCandidate[],
+): {
+  readonly candidateIndex: number;
+  readonly matchedBy: PromptReferenceRebind["matchedBy"];
+} | null {
+  const identical: number[] = [];
+  const named: number[] = [];
+  candidates.forEach((candidate, index) => {
+    if (sameMediaSourceIdentity(candidateTarget(candidate), item.target)) identical.push(index);
+    if (sameReferenceName(candidate.name, item.displayNameSnapshot)) named.push(index);
+  });
+  if (identical.length === 1) return { candidateIndex: identical[0]!, matchedBy: "identity" };
+  if (named.length === 1) return { candidateIndex: named[0]!, matchedBy: "name" };
+  return null;
+}
+
+/**
+ * 素材被移除后重新连接同名素材时，引用的画布实例已经不在了：它既解不开、又会阻塞生成，
+ * 用户只能删掉整个 chip 再重新 @。这里按「同源 → 唯一同名」把失效引用原地重绑到当前候选。
+ *
+ * 只处理实例确实已经不在画布上的引用（aliveCanvasNodeKeys 里没有它的 key）：
+ * 仅仅是解除连线时节点还在画布上，那属于用户明确的选择，引用保持灰化等他处理。
+ * mentionId 原样保留，因此 DOM 身份、撤销栈与「已确认的同名引用」都不会被打断。
+ */
+export function rebindDanglingPromptReferences(
+  document: PromptContentDocumentV1,
+  candidates: readonly PromptReferenceCandidate[],
+  aliveCanvasNodeKeys: ReadonlySet<string>,
+): PromptReferenceRebindResult {
+  const aliases = buildReferenceCatalog(candidates).aliases;
+  const items: PromptContentItem[] = [];
+  const rebinds: PromptReferenceRebind[] = [];
+  for (const item of document.items) {
+    if (item.kind !== "media_reference") {
+      items.push(item);
+      continue;
+    }
+    const stillConnected = candidates.some(
+      (candidate) =>
+        candidate.canvasNodeKey === item.canvasNodeKey &&
+        sameMediaReferenceTarget(candidateTarget(candidate), item.target),
+    );
+    if (stillConnected || aliveCanvasNodeKeys.has(item.canvasNodeKey)) {
+      items.push(item);
+      continue;
+    }
+    const replacement = danglingReplacement(item, candidates);
+    if (replacement == null) {
+      items.push(item);
+      continue;
+    }
+    const candidate = candidates[replacement.candidateIndex]!;
+    const target = candidateTarget(candidate);
+    items.push({
+      ...item,
+      canvasNodeKey: candidate.canvasNodeKey,
+      target,
+      displayNameSnapshot: candidate.name,
+      // 别名是连线顺序的下标快照；实例换位后旧快照会指向别的素材，跟着一起更新。
+      ...(item.aliasSnapshot === undefined
+        ? {}
+        : { aliasSnapshot: aliases[replacement.candidateIndex]!.label }),
+    });
+    rebinds.push({
+      mentionId: item.mentionId,
+      canvasNodeKey: candidate.canvasNodeKey,
+      displayName: candidate.name,
+      matchedBy: replacement.matchedBy,
+    });
+  }
+  // 没有自愈发生时原样返回同一份文档，调用方可以直接按引用相等跳过重建。
+  if (rebinds.length === 0) return { document, rebinds };
+  return { document: { schema: "prompt-content", version: 1, items }, rebinds };
 }

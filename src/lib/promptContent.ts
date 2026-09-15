@@ -14,6 +14,7 @@ import {
   candidateTarget,
   createPromptReference,
   normalizePromptReferenceText,
+  rebindDanglingPromptReferences,
   resolvePromptReferences,
   referenceQueryInText,
   referenceCandidateFromTarget,
@@ -184,10 +185,26 @@ export type PromptPlainTextPreparation =
   | { readonly ok: true; readonly text: string }
   | { readonly ok: false; readonly issues: readonly PromptContentIssue[] };
 
+export interface PromptConnectionUpdateOptions {
+  /**
+   * 画布上仍然存在的节点 key。缺省表示调用方不知道实例存亡，此时不做任何自愈重连。
+   * 只有「被引用的实例已经不在画布上」才允许按来源/同名素材重连；仅解除连线时节点还在，
+   * 引用保持灰化交给用户决定。
+   */
+  readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
+}
+
 export interface PromptContentEditorSession {
   attach(element: HTMLDivElement | null, attributes?: Readonly<Record<string, string>>): void;
   isComposing(): boolean;
-  updateConnections(candidates: readonly PromptReferenceCandidate[]): void;
+  /**
+   * 连线集合变化时的唯一入口：同步候选、自愈失效引用、刷新 chip 状态、识别正文里新出现的 @。
+   * 返回本次自动重连的引用处数（0 表示没有自愈发生），供调用方给出反馈。
+   */
+  updateConnections(
+    candidates: readonly PromptReferenceCandidate[],
+    options?: PromptConnectionUpdateOptions,
+  ): number;
   acceptNativeInput(): PromptContentView;
   insertReference(candidate: PromptReferenceCandidate): PromptContentView;
   /** 在光标处插入标注引用；同一标记可以插入多次，每次都是独立的引用身份。 */
@@ -620,6 +637,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   private composing = false;
   private compositionEndTimer: number | null = null;
   private pendingConnections = false;
+  /** 最近一次同步进来的画布存活节点 key；缺省表示调用方不提供实例存亡，自愈重连保持关闭。 */
+  private aliveCanvasNodeKeys: ReadonlySet<string> | null = null;
   private markReferencePresentation: ReadonlyMap<string, PromptMarkReferencePresentation> =
     new Map();
   private readonly placeholder: string;
@@ -646,6 +665,8 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       if (pendingRestore != null) this.restore(pendingRestore);
       if (this.pendingConnections) {
         this.pendingConnections = false;
+        // 组合结束后按最新候选补做自愈重连，再刷新 chip 状态。
+        this.rebindDanglingReferences();
         this.reconcileConnections();
       }
       this.notify();
@@ -700,12 +721,19 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     });
   }
 
-  updateConnections(candidates: readonly PromptReferenceCandidate[]): void {
+  updateConnections(
+    candidates: readonly PromptReferenceCandidate[],
+    options?: PromptConnectionUpdateOptions,
+  ): number {
     this.candidates = candidates;
+    if (options?.aliveCanvasNodeKeys != null)
+      this.aliveCanvasNodeKeys = options.aliveCanvasNodeKeys;
+    const rebound = this.rebindDanglingReferences();
     this.reconcileConnections();
     // 连线集合变化后自动识别提示词中已有的 @素材名 纯文本，转换为高亮引用。
     // fresh=false：不触发新引用的高亮动画，避免连接素材时闪烁。
     this.autoResolve({ fresh: false });
+    return rebound;
   }
 
   acceptNativeInput(): PromptContentView {
@@ -970,6 +998,31 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     this.applyDocument();
     if (freshIds.length > 0) this.notify();
     return freshIds.length;
+  }
+
+  /**
+   * 被引用的素材节点已经不在画布上（删除后重新连接同名素材）时，把失效引用原地重绑到
+   * 当前候选，并保留 mentionId 与已确认的选择。自动重连是连线变化的副作用，不进撤销历史：
+   * 否则撤销会把已经无处可指的灰化引用放回来，下一次同步还会再连一次。
+   */
+  private rebindDanglingReferences(): number {
+    if (this.aliveCanvasNodeKeys == null) return 0;
+    if (this.isComposing()) {
+      this.pendingConnections = true;
+      return 0;
+    }
+    const result = rebindDanglingPromptReferences(
+      this.document,
+      this.candidates,
+      this.aliveCanvasNodeKeys,
+    );
+    if (result.rebinds.length === 0) return 0;
+    this.document = result.document;
+    // 重新连上的引用按「刚识别到」闪一次高亮，用户能直接看出哪几处自愈了。
+    this.rememberFreshMentions(result.rebinds.map((rebind) => rebind.mentionId));
+    this.applyDocument(true, false);
+    this.notify();
+    return result.rebinds.length;
   }
 
   reconcileConnections(): number {

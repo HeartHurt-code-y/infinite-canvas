@@ -7784,6 +7784,28 @@ export function WorkspaceApp({
     return map;
   }, [genNodes, mentionCandidatesFor]);
 
+  /**
+   * 画布上仍然存在的节点 key：提示词的 @ 引用只有在被引用的实例确实已经不在画布上时
+   * （素材节点被删掉、又重新连了同名素材）才按同源/同名自愈重连；只是解除连线时
+   * 节点还在画布上，引用保持灰化交给用户决定。
+   * 拖动只改 x/y、节点集合不变，因此保持集合引用稳定，避免每个 pointer move 重建节点内容。
+   */
+  const aliveCanvasNodeKeysRef = useRef<ReadonlySet<string>>(new Set<string>());
+  const aliveCanvasNodeKeys = useMemo(() => {
+    // 读模型按节点类型分表存放（见 CanvasNodesByKey），这里只取它们的 key 并集。
+    const nodesByType = canvasNodeByKey as unknown as Readonly<
+      Record<string, ReadonlyMap<string, unknown>>
+    >;
+    const next = new Set<string>();
+    for (const nodesByKey of Object.values(nodesByType)) {
+      for (const key of nodesByKey.keys()) next.add(key);
+    }
+    const previous = aliveCanvasNodeKeysRef.current;
+    if (previous.size === next.size && [...next].every((key) => previous.has(key))) return previous;
+    aliveCanvasNodeKeysRef.current = next;
+    return next;
+  }, [canvasNodeByKey]);
+
   const greenScreenResultsByNode = useMemo(
     () =>
       new Map(
@@ -7834,6 +7856,7 @@ export function WorkspaceApp({
             promptSourceByTarget.get(node.key)?.length ?? 0,
             activeTaskByNode.get(node.key) ?? null,
             mentionCandidates,
+            aliveCanvasNodeKeys,
             providerCatalog,
             selectNode,
             ignoreLegacyNodeDrag,
@@ -7893,6 +7916,7 @@ export function WorkspaceApp({
                   promptContents={promptContents}
                   registerPromptInput={registerPromptInput}
                   mentionCandidates={mentionCandidates ?? []}
+                  aliveCanvasNodeKeys={aliveCanvasNodeKeys}
                 />
               ) : (
                 <CanvasGenNode
@@ -7907,6 +7931,7 @@ export function WorkspaceApp({
                   connectedInputs={connectedInputs ?? []}
                   inheritedInputs={[]}
                   mentionCandidates={mentionCandidates ?? []}
+                  aliveCanvasNodeKeys={aliveCanvasNodeKeys}
                   promptSourceName={
                     promptSourceByTarget.has(node.key)
                       ? `${promptSourceByTarget.get(node.key)?.length ?? 0} 份文本`
@@ -7968,6 +7993,7 @@ export function WorkspaceApp({
       handleRunPromptNode,
       activeTaskByNode,
       mentionCandidatesByNode,
+      aliveCanvasNodeKeys,
       promptSourceByTarget,
       registerPromptInput,
       updateImageNodeConfig,

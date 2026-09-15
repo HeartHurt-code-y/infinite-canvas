@@ -32,15 +32,26 @@ const FRAME: MentionCandidate = {
   name: "微信视频2026-09-08_194710_526.mp4 · 0.000s 标注",
 };
 
-function mountPrompt(candidates: readonly MentionCandidate[]) {
+function mountPrompt(
+  candidates: readonly MentionCandidate[],
+  aliveCanvasNodeKeys?: ReadonlySet<string>,
+) {
   const module = createPromptContentModule();
   let session: PromptContentEditorSession | null = null;
   const registerInput = (nodeKey: string, editorSession: PromptContentEditorSession | null) => {
     if (editorSession != null) session = editorSession;
     module.adoptEditor(nodeKey, editorSession);
   };
-  const view = (next: readonly MentionCandidate[]) => (
-    <PromptMentionInput nodeKey={NODE_KEY} candidates={next} registerInput={registerInput} />
+  const view = (
+    next: readonly MentionCandidate[],
+    alive: ReadonlySet<string> | undefined = aliveCanvasNodeKeys,
+  ) => (
+    <PromptMentionInput
+      nodeKey={NODE_KEY}
+      candidates={next}
+      aliveCanvasNodeKeys={alive}
+      registerInput={registerInput}
+    />
   );
   const { rerender } = render(view(candidates));
   const input = screen.getByRole<HTMLDivElement>("textbox", {
@@ -53,7 +64,8 @@ function mountPrompt(candidates: readonly MentionCandidate[]) {
       if (session == null) throw new Error("编辑器会话未注册");
       return session;
     },
-    updateCandidates: (next: readonly MentionCandidate[]) => rerender(view(next)),
+    updateCandidates: (next: readonly MentionCandidate[], alive?: ReadonlySet<string>) =>
+      rerender(view(next, alive ?? aliveCanvasNodeKeys)),
   };
 }
 
@@ -111,5 +123,42 @@ describe("提示词框的自动识别状态", () => {
       expect(statusStrip()).toHaveTextContent("已引用 2 处素材");
     });
     expect(statusStrip()).toHaveTextContent("2 个可引用素材");
+  });
+
+  it("素材节点被删除后重连同名素材，引用自愈重连并给出回执", async () => {
+    const { input, module, updateCandidates } = mountPrompt([VIDEO]);
+    const document: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [createPromptReference(VIDEO), { kind: "text", text: " 换成特写" }],
+    };
+    act(() => {
+      module.restoreDocument(NODE_KEY, document);
+    });
+    const chip = () => input.querySelector<HTMLElement>("[data-mention-id]")!;
+    const mentionId = chip().dataset["mentionId"];
+    expect(chip()).not.toHaveClass("is-stale");
+
+    // 解除连线：素材节点还在画布上，引用灰化但保留。
+    act(() => {
+      updateCandidates([], new Set(["video-1"]));
+    });
+    expect(chip()).toHaveClass("is-stale");
+
+    // 节点被删除后重新连上同名素材（新实例）：引用原地重连，灰化消失。
+    const replacement: MentionCandidate = {
+      ...VIDEO,
+      canvasNodeKey: "video-9",
+      assetId: "/media/重新上传.mp4",
+    };
+    act(() => {
+      updateCandidates([replacement], new Set(["video-9"]));
+    });
+    expect(chip()).toHaveAttribute("data-canvas-node-key", "video-9");
+    expect(chip()).toHaveAttribute("data-mention-id", mentionId!);
+    expect(chip()).not.toHaveClass("is-stale");
+    await waitFor(() => {
+      expect(statusStrip()).toHaveTextContent("已按同名素材自动重连 1 处引用");
+    });
   });
 });

@@ -52,16 +52,15 @@ export function decodeMediaReferenceTarget(
   }
 }
 
-export function sameMediaReferenceTarget(
+/**
+ * 只比较来源身份，忽略画布实例 key：同一份素材被重新投放到画布上（新节点）之后，
+ * 来源身份不变而实例身份变了，用它可以判断「还是同一份素材」。
+ */
+export function sameMediaSourceIdentity(
   first: MediaReferenceTarget,
-  second: ExplicitMediaTarget,
+  second: MediaReferenceTarget,
 ): boolean {
-  if (
-    first.kind !== second.kind ||
-    first.mediaType !== second.mediaType ||
-    first.canvasNodeKey !== second.canvasNodeKey
-  )
-    return false;
+  if (first.kind !== second.kind || first.mediaType !== second.mediaType) return false;
   if (first.kind === "asset" && second.kind === "asset")
     return (
       first.providerConnectionId === second.providerConnectionId && first.assetId === second.assetId
@@ -73,4 +72,14 @@ export function sameMediaReferenceTarget(
       first.generationTaskId === second.generationTaskId && first.resultIndex === second.resultIndex
     );
   return first.kind === "local_file" && second.kind === "local_file" && first.path === second.path;
+}
+
+export function sameMediaReferenceTarget(
+  first: MediaReferenceTarget,
+  second: ExplicitMediaTarget,
+): boolean {
+  // URL 目标不参与提示词 @ 引用，来源身份比较也不接受它。
+  if (second.kind === "url") return false;
+  if (first.canvasNodeKey !== second.canvasNodeKey) return false;
+  return sameMediaSourceIdentity(first, second);
 }
