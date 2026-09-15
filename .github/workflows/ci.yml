@@ -47,7 +47,7 @@ jobs:
       # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
       # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
       - name: Prepare bundled engines
-        run: pnpm ffmpeg:prepare && pnpm remotion:prepare
+        run: pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare
 
       - name: Run project checks
         run: pnpm check

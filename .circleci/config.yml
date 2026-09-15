@@ -95,7 +95,7 @@ jobs:
       # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。
       - run:
           name: Prepare bundled engines
-          command: pnpm ffmpeg:prepare && pnpm remotion:prepare
+          command: pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare
       - run:
           name: Run project checks
           command: pnpm check
