@@ -4663,7 +4663,10 @@ fn version_root(segment: &str) -> Option<&str> {
     let rest = segment
         .strip_prefix('v')
         .or_else(|| segment.strip_prefix('V'))?;
-    let version_len = rest.bytes().take_while(|byte| byte.is_ascii_digit()).count();
+    let version_len = rest
+        .bytes()
+        .take_while(|byte| byte.is_ascii_digit())
+        .count();
     let (version, alias) = rest.split_at(version_len);
     if version.is_empty() || (!alias.is_empty() && !ALIASES.contains(&alias)) {
         return None;
@@ -4710,7 +4713,9 @@ pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     // 免得把网关自带的版本段吃掉；上面的 v1/v1beta 别名切换已经先处理过，这里读到的是
     // 改写后的 Base 段，因此 `.../v1` + `/v1beta/...` 不会被二次削掉版本根。
     let base_version = version_root_within(&base_segments, 3);
-    let request_version = requested_segments.first().and_then(|first| version_root(first));
+    let request_version = requested_segments
+        .first()
+        .and_then(|first| version_root(first));
     let drop_request_version = matches!(
         (base_version, request_version),
         (Some(base), Some(requested)) if base != requested
