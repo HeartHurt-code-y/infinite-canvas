@@ -11946,10 +11946,18 @@ details[open] > summary .history-disclosure__caret {
   background: color-mix(in oklch, var(--color-accent) 20%, var(--color-chrome-3));
 }
 
+/* 分组行：下拉与「新建分组」并排。
+   这里必须允许换行：单行 flex 的固有最小宽度由「下拉里最长分组名 + 操作按钮」决定，
+   面板宽度小于它时整行会溢出内容盒，被 .asset-panel 的 overflow:hidden 静默截掉
+   ——「新建分组」右半截被遮蔽就是这样来的（窄窗口 + 分组名较长时必现）。
+   允许换行后，空间不足只会把按钮落到下一行，不会再裁掉任何内容。 */
 .asset-groups__select-row {
   display: flex;
   align-items: flex-start;
+  flex-wrap: wrap;
   gap: var(--space-xs);
+  /* 换行时的行距比列间距更紧：按钮是同组控件，不该被拉出一道空隙。 */
+  row-gap: var(--space-2xs);
 }
 
 .asset-groups__select-row select {
@@ -11968,14 +11976,18 @@ details[open] > summary .history-disclosure__caret {
 .asset-groups__actions {
   display: flex;
   flex-direction: column;
-  flex: 0 0 auto;
+  /* 允许撑满整行（仅用于靠右对齐），但不参与压缩：按钮宽度始终等于自身文字宽度，
+     因此文字不会被压出按钮外，也不会把整行顶出面板。 */
+  flex: 1 1 auto;
+  align-items: flex-end;
   gap: var(--space-2xs);
   min-width: 0;
 }
 
+/* 按钮按自身内容取宽：width:100% 会让按钮去撑满这一行，窄面板下反而把内容挤出面板。 */
 .asset-groups__actions .asset-groups__create,
 .asset-groups__actions .asset-groups__delete {
-  width: 100%;
+  flex: 0 0 auto;
   white-space: nowrap;
 }
 
