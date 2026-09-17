@@ -57,6 +57,12 @@ const LABELS = {
   video: ["视频", "参考视频", "视"],
   audio: ["音频", "参考音频", "音"],
 } as const;
+/**
+ * 全角 "@"（U+FF20）。中文输入法在 macOS 上常把 Shift+2 提交成全角，
+ * 用户心里它就是引用标记；与 greenScreen／whiteModelControl 的 NFKC 约定一致
+ * （那里用 value.normalize("NFKC") 把全角 at-sign 折叠成 "@"）。
+ */
+const FULLWIDTH_AT_SIGN = "\uff20";
 const LINE_BREAK = /[\r\n\u2028\u2029]/u;
 const HORIZONTAL_SPACE = /[^\S\r\n\u2028\u2029]/u;
 const WORDISH = /[a-z0-9._%+@-]/iu;
@@ -79,7 +85,7 @@ function normalizedText(value: string): NormalizedText {
     const codePoint = value.codePointAt(cursor)!;
     const character = String.fromCodePoint(codePoint);
     cursor += character.length;
-    let normalized = character.toLowerCase();
+    let normalized = character === FULLWIDTH_AT_SIGN ? "@" : character.toLowerCase();
     if (HORIZONTAL_SPACE.test(character)) {
       while (cursor < value.length && HORIZONTAL_SPACE.test(value[cursor]!)) cursor += 1;
       normalized = " ";
@@ -266,7 +272,8 @@ function safeMatchBoundary(text: string, start: number, end: number, explicit: b
 export function referenceQueryInText(
   prefix: string,
 ): { readonly query: string; readonly start: number } | null {
-  const start = prefix.lastIndexOf("@");
+  // 半角与全角 at-sign 都算引用标记，取离光标最近的那一个（全角是单个 UTF-16 单元，偏移不变）。
+  const start = Math.max(prefix.lastIndexOf("@"), prefix.lastIndexOf(FULLWIDTH_AT_SIGN));
   if (start < 0) return null;
   const query = prefix.slice(start + 1);
   if (LINE_BREAK.test(query) || query.includes("\ufffc")) return null;

@@ -232,6 +232,9 @@ type MentionMenuEntry =
   | { readonly type: "media"; readonly candidate: MentionCandidate }
   | { readonly type: "annotation"; readonly annotation: PromptMarkReferenceInput };
 
+/** 本次输入里是否插入了引用标记：半角 "@" 与输入法常用的全角 "＠"。 */
+const MENTION_MARKER_IN_TEXT = /[@\uff20]/u;
+
 export function PromptMentionInput({
   nodeKey,
   candidates,
@@ -270,6 +273,8 @@ export function PromptMentionInput({
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreExpandFocusRef = useRef(false);
   const replaceTypedQueryOnSelectRef = useRef(false);
+  /** 组合结束后补判一次候选菜单的定时器。 */
+  const mentionSyncTimerRef = useRef<number | null>(null);
   // 跟踪最后一次 mousedown 的目标，用于判断 blur 是否由拖拽节点/点击下拉栏触发
   const lastMouseDownTargetRef = useRef<EventTarget | null>(null);
   const [menuOpen, setMenuOpen] = useState(false);
@@ -488,17 +493,50 @@ export function PromptMentionInput({
     [closeMenu, nodeKey],
   );
 
-  /** 输入过程中同步下拉过滤词：取最后一个 "@" 到光标之间的文本。 */
-  const syncQueryFromCaret = useCallback(() => {
-    if (!menuOpen) return;
-    const caretQuery = sessionRef.current?.mentionQueryAtCaret();
-    if (caretQuery == null) {
-      closeMenu();
-      return;
-    }
-    setQuery(caretQuery);
-    setActiveIndex(0);
-  }, [closeMenu, menuOpen]);
+  /**
+   * 输入过程中同步候选菜单：开合与过滤词都以光标所在的 "@查询词" 为准。
+   *
+   * macOS 中文输入法把 "@" 当组合文本提交：keydown 要么报 229、要么根本不报 "@"
+   * （Windows 输入法多半直接透传），只按键盘事件开菜单会让 Mac 上永远等不到候选，
+   * 只剩右下角按钮能用。因此开菜单改看「本次输入是否真的插入了 @」：
+   *   - 本次输入带进 @（键入或输入法组合提交）→ 打开候选；
+   *   - 光标本来就停在某个 @ 查询词里 → 只刷新过滤词，不把 Escape 关掉的菜单弹回来；
+   *   - 光标离开查询词 → 收起菜单。
+   * 只有“打开”需要证据，过滤/收起按光标判定，因此程序化写入（存档恢复、生成结果回填、
+   * 粘贴已解析的引用）不会凭空弹出候选。
+   */
+  const syncMentionMenuFromCaret = useCallback(
+    (options?: { readonly data?: string | undefined; readonly force?: boolean }) => {
+      const caretQuery = sessionRef.current?.mentionQueryAtCaret() ?? null;
+      if (caretQuery == null) {
+        closeMenu();
+        return;
+      }
+      const insertedMarker = MENTION_MARKER_IN_TEXT.test(options?.data ?? "");
+      if (!menuOpen && options?.force !== true && !insertedMarker) return;
+      setActiveAmbiguity(null);
+      replaceTypedQueryOnSelectRef.current = true;
+      setMenuOpen(true);
+      setQuery(caretQuery);
+      setActiveIndex(0);
+    },
+    [closeMenu, menuOpen],
+  );
+
+  /**
+   * 输入法组合提交后 ProseMirror 才写回文档与选区，因此延迟一帧带上提交文本再判一次：
+   * 会话在组合结束时也会派发一次带同样文本的 input，两条路径互为兜底。
+   */
+  const scheduleMentionMenuSync = useCallback(
+    (options?: { readonly data?: string | undefined; readonly force?: boolean }) => {
+      if (mentionSyncTimerRef.current != null) window.clearTimeout(mentionSyncTimerRef.current);
+      mentionSyncTimerRef.current = window.setTimeout(() => {
+        mentionSyncTimerRef.current = null;
+        syncMentionMenuFromCaret(options);
+      }, 0);
+    },
+    [syncMentionMenuFromCaret],
+  );
 
   const composingRef = useRef(false);
   const autoDetectTimerRef = useRef<number | null>(null);
@@ -738,6 +776,7 @@ export function PromptMentionInput({
       if (feedbackResetTimerRef.current != null) {
         window.clearTimeout(feedbackResetTimerRef.current);
       }
+      if (mentionSyncTimerRef.current != null) window.clearTimeout(mentionSyncTimerRef.current);
     },
     [],
   );
@@ -914,7 +953,9 @@ export function PromptMentionInput({
               // IME 组合期间不强制读取/同步编辑器 DOM：此时输入法仍持有未提交的
               // 候选拼音，提前 flush 会把组合文本错误提交成错乱字符。
               if (input != null && !composingRef.current) updatePromptSnapshot(input);
-              syncQueryFromCaret();
+              // 候选菜单由这里的实际输入驱动，不依赖 keydown："@" 是否被浏览器报成
+              // 普通按键由输入法决定，macOS 上常常只报 229。
+              syncMentionMenuFromCaret({ data: event.nativeEvent.data ?? "" });
               scheduleAutoDetect();
             }}
             onCompositionStart={() => {
@@ -923,8 +964,10 @@ export function PromptMentionInput({
                 window.clearTimeout(autoDetectTimerRef.current);
               autoDetectTimerRef.current = null;
             }}
-            onCompositionEnd={() => {
+            onCompositionEnd={(event) => {
               composingRef.current = false;
+              // 输入法提交的文本是 macOS 上 "@" 的唯一线索：keydown 只报 229。
+              scheduleMentionMenuSync({ data: event.data ?? "" });
               scheduleAutoDetect();
             }}
             onPaste={(event) => {
@@ -1004,16 +1047,9 @@ export function PromptMentionInput({
                 }
               }
               if (event.key === "@") {
-                // 让 "@" 字符先落入输入框，再打开候选下拉。
-                window.setTimeout(() => {
-                  const caretQuery = sessionRef.current?.mentionQueryAtCaret();
-                  if (caretQuery == null) return;
-                  setActiveAmbiguity(null);
-                  replaceTypedQueryOnSelectRef.current = true;
-                  setMenuOpen(true);
-                  setQuery(caretQuery);
-                  setActiveIndex(0);
-                }, 0);
+                // 让 "@" 字符先落入输入框，再按光标打开候选下拉。
+                // 键盘事件能报出 "@" 时立刻开，不必等输入法/浏览器的 input 事件。
+                scheduleMentionMenuSync({ force: true });
               }
             }}
           />

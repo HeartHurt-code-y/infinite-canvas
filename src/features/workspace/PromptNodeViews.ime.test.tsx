@@ -137,6 +137,68 @@ describe("PromptMentionInput Tiptap IME regression", () => {
     expect(readSession().snapshot().items).toEqual([{ kind: "text", text: "@不存在的素材" }]);
   });
 
+  /**
+   * macOS 中文输入法把 "@" 当组合文本提交：keydown 只报 229（甚至不报 "@"），
+   * 因此候选菜单必须由实际输入驱动，而不能只认键盘事件。
+   * 这里刻意不派发任何 keydown "@"，也不补发带 data 的 input。
+   */
+  it("opens the candidate menu for an @ committed through IME composition", async () => {
+    const { input } = mountPrompt("", [referenceCandidate]);
+    input.focus();
+    // 组合文本必须在 compositionstart 之后插入：ProseMirror 会在组合开始时重绘空段落。
+    fireEvent.compositionStart(input);
+    const paragraph = input.querySelector("p")!;
+    const compositionText = document.createTextNode("");
+    paragraph.prepend(compositionText);
+    setCaret(compositionText, 0);
+
+    await compositionMutation(input, compositionText, "@");
+    expect(screen.queryByRole("listbox", { name: "素材引用候选" })).not.toBeInTheDocument();
+    fireEvent.compositionEnd(input, { data: "@" });
+    await act(async () => {
+      await new Promise((resolve) => window.setTimeout(resolve, 0));
+    });
+
+    expect(await screen.findByRole("listbox", { name: "素材引用候选" })).toBeInTheDocument();
+    expect(screen.getByRole("option")).toHaveTextContent("角色.png");
+  });
+
+  it("opens the candidate menu for a full-width ＠ typed by a Chinese IME", async () => {
+    const { input } = mountPrompt("", [referenceCandidate]);
+    const paragraph = input.querySelector("p")!;
+    const marker = document.createTextNode("＠");
+    paragraph.append(marker);
+    setCaret(marker, marker.length);
+    fireEvent.input(input, { inputType: "insertText", data: "＠", isComposing: false });
+
+    expect(await screen.findByRole("listbox", { name: "素材引用候选" })).toBeInTheDocument();
+    expect(screen.getByRole("option")).toHaveTextContent("角色.png");
+  });
+
+  it("keeps a dismissed candidate menu closed while the same @ query is edited", async () => {
+    const { input } = mountPrompt("@", [referenceCandidate]);
+    const text = input.querySelector("p")!.firstChild as Text;
+    setCaret(text, text.length);
+    // 键入的 @ 打开候选后按 Escape 关掉：这是「未选中，交给自动识别补扫」的正常路径。
+    fireEvent.input(input, { inputType: "insertText", data: "@", isComposing: false });
+    expect(await screen.findByRole("listbox", { name: "素材引用候选" })).toBeInTheDocument();
+    fireEvent.keyDown(input, { key: "Escape" });
+    expect(screen.queryByRole("listbox", { name: "素材引用候选" })).not.toBeInTheDocument();
+
+    // 同一个 @ 词里继续键入不弹回来（否则自动识别会被菜单一直挡住）。
+    text.data = "@图";
+    setCaret(text, text.length);
+    fireEvent.input(input, { inputType: "insertText", data: "图", isComposing: false });
+    expect(screen.queryByRole("listbox", { name: "素材引用候选" })).not.toBeInTheDocument();
+
+    // 再打一个新的 @ 仍然照开。
+    text.data = "@图@";
+    setCaret(text, text.length);
+    fireEvent.input(input, { inputType: "insertText", data: "@", isComposing: false });
+    expect(await screen.findByRole("listbox", { name: "素材引用候选" })).toBeInTheDocument();
+    expect(screen.getByRole("option")).toHaveTextContent("角色.png");
+  });
+
   it("keeps IME drafts out of the persisted prompt and commits 日本 exactly once", async () => {
     const { input, module, readSession } = mountPrompt();
     input.focus();

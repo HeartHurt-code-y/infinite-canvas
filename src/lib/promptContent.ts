@@ -647,13 +647,17 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     this.placeholder = placeholder;
   }
   private pendingRestore: PromptContentDocumentV1 | null = null;
+  /** 最近一次输入法组合提交的文本；输入法把 "@" 作为组合内容提交时，键盘事件里看不到它。 */
+  private compositionText = "";
   private readonly handleCompositionStart = () => {
     if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
     this.compositionEndTimer = null;
+    this.compositionText = "";
     this.composing = true;
     return false;
   };
-  private readonly handleCompositionEnd = () => {
+  private readonly handleCompositionEnd = (_view: unknown, event: CompositionEvent) => {
+    this.compositionText = typeof event.data === "string" ? event.data : "";
     // 等浏览器的最终 input 和 ProseMirror 的 compositionend 都结束，再读取提交值。
     if (this.compositionEndTimer != null) window.clearTimeout(this.compositionEndTimer);
     this.compositionEndTimer = window.setTimeout(() => {
@@ -669,7 +673,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
         this.rebindDanglingReferences();
         this.reconcileConnections();
       }
-      this.notify();
+      // 带上提交文本：外层据此判断这次输入是否插入了 @（macOS 输入法提交 @ 的唯一线索）。
+      this.notify(this.compositionText);
+      this.compositionText = "";
     }, 0);
     return false;
   };
@@ -770,11 +776,18 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   /**
    * ProseMirror 的 DOMObserver 在真实输入中会先于外层 React onInput 完成；测试里的
    * 直接 DOM 写入没有 beforeinput，因此在读取前显式 flush，确保兼容既有测试工具。
+   * forceFlush 只负责取消 20ms 合并计时器（没有计时器时它是空操作），随后仍要 flush()
+   * 才会处理 takeRecords 里还没交付的变更——否则刚提交的 "@" 与光标会读到旧值，
+   * macOS 输入法提交后候选和正文都会晚一步。
    */
   private flushDomObserver(): void {
     const view = this.editor?.view as
-      (Editor["view"] & { domObserver?: { flush(): void } }) | undefined;
-    view?.domObserver?.flush();
+      | (Editor["view"] & { domObserver?: { flush(): void; forceFlush?(): void } })
+      | undefined;
+    const observer = view?.domObserver;
+    if (observer == null) return;
+    if (typeof observer.forceFlush === "function") observer.forceFlush();
+    observer.flush();
   }
 
   private syncFromEditor(): void {
@@ -806,8 +819,19 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     this.document = promptDocumentFromTiptapJson(this.editor.getJSON());
   }
 
-  private notify(): void {
-    this.editor?.view.dom.dispatchEvent(new Event("input", { bubbles: true }));
+  /**
+   * 通知外层「编辑器内容已变化」（派发 input 事件）。
+   * 带上本次提交的文本：输入法提交 "@" 时 keydown 只报 229，外层只有靠这份 data
+   * 才知道这次输入真的插入了 @（候选菜单据此打开）。
+   */
+  private notify(data = ""): void {
+    const dom = this.editor?.view.dom;
+    if (dom == null) return;
+    dom.dispatchEvent(
+      typeof InputEvent === "function"
+        ? new InputEvent("input", { bubbles: true, data })
+        : new Event("input", { bubbles: true }),
+    );
   }
 
   private rememberFreshMentions(ids: readonly string[]): void {

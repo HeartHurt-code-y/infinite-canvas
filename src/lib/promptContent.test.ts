@@ -741,6 +741,22 @@ describe("prompt content interface", () => {
     });
   });
 
+  it("converts a typed full-width ＠ reference like the ASCII @", () => {
+    // 回归：中文输入法（尤其 macOS）会把 Shift+2 提交成全角 "＠"，它和 "@" 是同义的引用标记，
+    // 转成 chip 时也不该把全角标记留在正文里。
+    const candidate = assetCandidate("asset-node-1");
+    const session = createPromptContentEditorSession([candidate]);
+    session.replaceText("开场 ＠图片1 收尾");
+
+    expect(session.read().referenceCount).toBe(1);
+    expect(session.snapshot().items).toMatchObject([
+      { kind: "text", text: "开场 " },
+      { kind: "media_reference", canvasNodeKey: "asset-node-1" },
+      { kind: "text", text: " 收尾" },
+    ]);
+    expect(session.read().plainText).not.toContain("＠");
+  });
+
   it("converts a typed @别名 split across text items into one mention chip", () => {
     // 回归：手打 @ 后 IME 输入中文时，@ 与别名可能落在不同的文本项/文本节点里，
     // auto-resolve 仍应把「@图片1」整体转成单个引用 chip，且不残留多余的 @。
