@@ -1,14 +1,271 @@
+//! 凭据存储：**默认直接落明文文件**，可选系统凭据库（Windows 凭据管理器）。
+//!
+//! # 为什么默认是文件而不是钥匙串
+//!
+//! macOS 上钥匙串条目的访问控制绑定「创建它的那个应用」的代码签名身份，而且有**两道**
+//! 独立的门：ACL 里的可信应用列表，以及一条按 `partition_id` 授权的条目。没有 Apple 签名
+//! 证书时，进程的 partition id 是 `cdhash:<代码哈希>`，**每出一个新版本都会变**——即使自签
+//! 证书能稳住第一道门，第二道门依然失配，于是每次升级都要用户输入一次登录钥匙串密码；
+//! 而该门无法靠预先列出「未来版本的哈希」来放行。
+//!
+//! 这个弹窗在「不持有 Apple 签名证书」的前提下无法消除：它正是钥匙串保护用户凭据的机制。
+//! 因此本模块直接不碰钥匙串，把密钥写在应用数据目录的 JSON 文件里（Unix 权限 0600）。
+//!
+//! **这是明确的安全取舍**（用户已确认不需要安全性）：能读到该文件的进程就能读到全部密钥。
+//! 换取的是：不弹任何密码框、不需要 Apple 证书、不需要管理员命令，且密钥可被直接备份/查看/编辑。
+//!
+//! 备份密钥（换机、排障）：
+//!   macOS   `~/Library/Application Support/com.infinitecanvas.desktop/credentials.json`
+//!   Windows `%LOCALAPPDATA%\com.infinitecanvas.desktop\credentials.json`（默认走凭据管理器，需显式切换）
+//!
+//! 想换回系统凭据库：设 `INFINITE_CANVAS_CREDENTIAL_BACKEND=keyring`。
+//! 排障入口：`<app 可执行文件> --keychain-access-self-test=<ref>` 会用与线上完全相同的
+//! 代码路径写读一次并输出 `keychain-access-self-test: OK/FAILED`，退出码即结论。
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
 use keyring::{Entry, Error as KeyringError, credential::CredentialPersistence};
+use serde_json::{Map, Value};
 
 use super::{
     error::{BackendError, BackendResult},
     types::CredentialStatus,
 };
 
+/// 系统凭据库中的服务名（仅在 keyring 后端下使用）。
 const SERVICE_NAME: &str = "com.infinitecanvas.desktop";
 
-#[derive(Clone, Default)]
-pub struct CredentialStore;
+/// 切换凭据后端的逃生开关：`file` / `keyring`（大小写不敏感）。
+const BACKEND_ENV: &str = "INFINITE_CANVAS_CREDENTIAL_BACKEND";
+
+const FILE_NAME: &str = "credentials.json";
+
+/// 凭据后端。两种实现语义一致，仅持久化位置不同。
+#[derive(Clone, Debug)]
+enum Backend {
+    /// 应用数据目录下的明文 JSON 文件（默认）。
+    File(PathBuf),
+    /// 系统凭据库（Windows 凭据管理器）。
+    Keyring,
+}
+
+#[derive(Clone, Debug)]
+pub struct CredentialStore {
+    backend: Backend,
+}
+
+impl Default for CredentialStore {
+    fn default() -> Self {
+        Self::file(PathBuf::from(FILE_NAME))
+    }
+}
+
+impl CredentialStore {
+    /// 按平台默认策略构造：macOS 用文件（避开钥匙串弹窗），其余平台用系统凭据库。
+    ///
+    /// `data_dir` 是应用数据目录（与 `infinite-canvas.sqlite3` 同级）。
+    pub fn new(data_dir: &Path) -> Self {
+        let requested = std::env::var(BACKEND_ENV)
+            .ok()
+            .map(|value| value.trim().to_ascii_lowercase())
+            .filter(|value| !value.is_empty());
+
+        match requested.as_deref() {
+            Some("file") => Self::file(data_dir.join(FILE_NAME)),
+            Some("keyring") => Self::keyring(),
+            // 未指定时按平台选：macOS 上钥匙串必然弹密码框（未签名前提），故用文件。
+            _ if cfg!(target_os = "macos") => Self::file(data_dir.join(FILE_NAME)),
+            _ => Self::keyring(),
+        }
+    }
+
+    /// 显式使用明文文件后端。
+    pub fn file(path: PathBuf) -> Self {
+        Self {
+            backend: Backend::File(path),
+        }
+    }
+
+    /// 显式使用系统凭据库后端。
+    pub fn keyring() -> Self {
+        Self {
+            backend: Backend::Keyring,
+        }
+    }
+
+    /// 当前后端的人类可读描述（日志与自检输出用）。
+    pub fn backend_label(&self) -> String {
+        match &self.backend {
+            Backend::File(path) => format!("file:{}", path.display()),
+            Backend::Keyring => format!("keyring:{SERVICE_NAME}"),
+        }
+    }
+
+    pub fn set(&self, credential_ref: &str, secret: &str) -> BackendResult<()> {
+        validate_ref(credential_ref)?;
+        if secret.is_empty() {
+            return Err(BackendError::validation(
+                "credential secret must not be empty",
+                serde_json::json!({ "credentialRef": credential_ref }),
+            ));
+        }
+        match &self.backend {
+            Backend::File(path) => file_set(path, credential_ref, secret),
+            Backend::Keyring => {
+                let entry = keyring_entry(credential_ref)?;
+                entry
+                    .set_password(secret)
+                    .map_err(|error| BackendError::Credential(error.to_string()))
+            }
+        }
+    }
+
+    pub fn get(&self, credential_ref: &str) -> BackendResult<String> {
+        validate_ref(credential_ref)?;
+        match &self.backend {
+            Backend::File(path) => file_get(path, credential_ref),
+            Backend::Keyring => {
+                let entry = keyring_entry(credential_ref)?;
+                entry.get_password().map_err(|error| match error {
+                    KeyringError::NoEntry => not_found(credential_ref),
+                    other => BackendError::Credential(other.to_string()),
+                })
+            }
+        }
+    }
+
+    pub fn delete(&self, credential_ref: &str) -> BackendResult<()> {
+        validate_ref(credential_ref)?;
+        match &self.backend {
+            Backend::File(path) => file_delete(path, credential_ref),
+            Backend::Keyring => match keyring_entry(credential_ref)?.delete_credential() {
+                Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
+                Err(error) => Err(BackendError::Credential(error.to_string())),
+            },
+        }
+    }
+
+    pub fn status(&self, credential_ref: &str) -> BackendResult<CredentialStatus> {
+        validate_ref(credential_ref)?;
+        let configured = match &self.backend {
+            Backend::File(path) => read_map(path)?.contains_key(credential_ref),
+            Backend::Keyring => match keyring_entry(credential_ref)?.get_password() {
+                Ok(_) => true,
+                Err(KeyringError::NoEntry) => false,
+                Err(error) => return Err(BackendError::Credential(error.to_string())),
+            },
+        };
+        Ok(CredentialStatus {
+            credential_ref: credential_ref.to_string(),
+            configured,
+        })
+    }
+}
+
+fn validate_ref(credential_ref: &str) -> BackendResult<()> {
+    if credential_ref.trim().is_empty() {
+        return Err(BackendError::validation(
+            "credential reference must not be empty",
+            serde_json::json!({ "credentialRef": credential_ref }),
+        ));
+    }
+    Ok(())
+}
+
+fn not_found(credential_ref: &str) -> BackendError {
+    BackendError::NotFound(format!("credential {credential_ref}"))
+}
+
+// ---------------------------------------------------------------------------
+// 文件后端
+// ---------------------------------------------------------------------------
+
+/// 读取整个文件为 `ref -> secret` 映射。
+///
+/// 文件不存在 = 还没有任何凭据（返回空表），而不是错误。
+fn read_map(path: &Path) -> BackendResult<Map<String, Value>> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Map::new()),
+        Err(error) => return Err(error.into()),
+    };
+    if text.trim().is_empty() {
+        return Ok(Map::new());
+    }
+    match serde_json::from_str::<Value>(&text)? {
+        Value::Object(map) => Ok(map),
+        other => Err(BackendError::Credential(format!(
+            "credential file {} must contain a JSON object, found {}",
+            path.display(),
+            match other {
+                Value::Array(_) => "an array",
+                _ => "a non-object value",
+            }
+        ))),
+    }
+}
+
+/// 原子写入：先写同目录临时文件再 rename，避免中途崩溃留下半个文件。
+fn write_map(path: &Path, map: &Map<String, Value>) -> BackendResult<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+
+    let mut sorted = BTreeMap::new();
+    for (key, value) in map {
+        sorted.insert(key.clone(), value.clone());
+    }
+    let body = serde_json::to_string_pretty(&sorted)?;
+
+    let temp_path = path.with_extension("json.tmp");
+    std::fs::write(&temp_path, &body)?;
+
+    // 密钥明文落盘，权限收窄到仅本用户可读写（Unix）。
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))?;
+    }
+
+    std::fs::rename(&temp_path, path)?;
+    Ok(())
+}
+
+fn file_set(path: &Path, credential_ref: &str, secret: &str) -> BackendResult<()> {
+    let mut map = read_map(path)?;
+    map.insert(
+        credential_ref.to_string(),
+        Value::String(secret.to_string()),
+    );
+    write_map(path, &map)
+}
+
+fn file_get(path: &Path, credential_ref: &str) -> BackendResult<String> {
+    match read_map(path)?.get(credential_ref) {
+        Some(Value::String(secret)) => Ok(secret.clone()),
+        Some(_) => Err(BackendError::Credential(format!(
+            "credential file {} has a non-string value for {credential_ref}",
+            path.display()
+        ))),
+        None => Err(not_found(credential_ref)),
+    }
+}
+
+fn file_delete(path: &Path, credential_ref: &str) -> BackendResult<()> {
+    let mut map = read_map(path)?;
+    // 不存在即视为已删除，与 keyring 后端的 NoEntry 语义一致。
+    if map.remove(credential_ref).is_none() {
+        return Ok(());
+    }
+    write_map(path, &map)
+}
+
+// ---------------------------------------------------------------------------
+// 系统凭据库后端
+// ---------------------------------------------------------------------------
 
 /// 后端持久化级别是否足以跨进程保存密钥。
 fn persistence_is_durable(persistence: &CredentialPersistence) -> bool {
@@ -26,14 +283,12 @@ fn persistence_is_durable(persistence: &CredentialPersistence) -> bool {
 /// 因此 `set_password` 之后 `get_password` 必然返回 `NoEntry`：
 /// 现象就是「密钥刚保存成功，紧接着的读取/连通性测试立刻 not found」。
 ///
-/// macOS 安装包曾经正是这个状态——`Cargo.toml` 只在公共依赖里声明了
-/// `features = ["windows-native"]`，该 feature 在 macOS 上因
-/// `#[cfg(all(target_os = "windows", feature = "windows-native"))]` 完全不生效，
-/// 于是所有供应商 API Key、素材库令牌、TOS AK/SK 都「配不上」。
+/// 历史故障：`Cargo.toml` 只在公共依赖里声明 `features = ["windows-native"]`，
+/// 该 feature 在 macOS 上完全不生效，于是所有密钥都「配不上」。
 ///
-/// 修复由 `Cargo.toml` 的按平台依赖承担；这里再守一道：
-/// 一旦运行期发现后端不持久化，就返回可诊断的错误，
-/// 而不是让上层拿到误导性的 `not found: credential ...`。
+/// 现在 macOS 默认走文件后端，只剩 Windows 会用 keyring，但守卫仍然保留：
+/// 一旦运行期发现后端不持久化，就返回可诊断的错误，而不是让上层拿到误导性的
+/// `not found: credential ...`。
 fn ensure_persistent_backend() -> BackendResult<()> {
     let persistence = keyring::default::default_credential_builder().persistence();
     if persistence_is_durable(&persistence) {
@@ -42,7 +297,7 @@ fn ensure_persistent_backend() -> BackendResult<()> {
 
     Err(BackendError::Credential(format!(
         "system credential store is not persistent on {} (keyring backend: {}); \
-         rebuild with the platform keyring backend enabled (`windows-native` / `apple-native`)",
+         rebuild with the platform keyring backend enabled, or set {BACKEND_ENV}=file",
         std::env::consts::OS,
         persistence_label(&persistence),
     )))
@@ -58,65 +313,140 @@ fn persistence_label(persistence: &CredentialPersistence) -> &'static str {
     }
 }
 
-impl CredentialStore {
-    fn entry(&self, credential_ref: &str) -> BackendResult<Entry> {
-        if credential_ref.trim().is_empty() {
-            return Err(BackendError::validation(
-                "credential reference must not be empty",
-                serde_json::json!({ "credentialRef": credential_ref }),
-            ));
-        }
-        ensure_persistent_backend()?;
-        Entry::new(SERVICE_NAME, credential_ref)
-            .map_err(|error| BackendError::Credential(error.to_string()))
-    }
+fn keyring_entry(credential_ref: &str) -> BackendResult<Entry> {
+    ensure_persistent_backend()?;
+    Entry::new(SERVICE_NAME, credential_ref)
+        .map_err(|error| BackendError::Credential(error.to_string()))
+}
 
-    pub fn set(&self, credential_ref: &str, secret: &str) -> BackendResult<()> {
-        if secret.is_empty() {
-            return Err(BackendError::validation(
-                "credential secret must not be empty",
-                serde_json::json!({ "credentialRef": credential_ref }),
-            ));
-        }
-        self.entry(credential_ref)?
-            .set_password(secret)
-            .map_err(|error| BackendError::Credential(error.to_string()))
-    }
+// ---------------------------------------------------------------------------
+// 自检入口：`--keychain-access-self-test=<ref>`
+// ---------------------------------------------------------------------------
 
-    pub fn get(&self, credential_ref: &str) -> BackendResult<String> {
-        self.entry(credential_ref)?
-            .get_password()
-            .map_err(|error| match error {
-                KeyringError::NoEntry => {
-                    BackendError::NotFound(format!("credential {credential_ref}"))
-                }
-                other => BackendError::Credential(other.to_string()),
-            })
-    }
+/// 命令行入口 `--keychain-access-self-test=<ref>` 的解析结果。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeychainSelfTestRequest {
+    pub credential_ref: String,
+}
 
-    pub fn delete(&self, credential_ref: &str) -> BackendResult<()> {
-        match self.entry(credential_ref)?.delete_credential() {
-            Ok(()) | Err(KeyringError::NoEntry) => Ok(()),
-            Err(error) => Err(BackendError::Credential(error.to_string())),
-        }
-    }
+impl KeychainSelfTestRequest {
+    const FLAG: &'static str = "--keychain-access-self-test=";
 
-    pub fn status(&self, credential_ref: &str) -> BackendResult<CredentialStatus> {
-        let configured = match self.entry(credential_ref)?.get_password() {
-            Ok(_) => true,
-            Err(KeyringError::NoEntry) => false,
-            Err(error) => return Err(BackendError::Credential(error.to_string())),
-        };
-        Ok(CredentialStatus {
-            credential_ref: credential_ref.to_string(),
-            configured,
+    /// 从 argv 中解析自检请求；返回 `None` 表示这是一次普通启动。
+    ///
+    /// 参数名保留历史的 `keychain-` 前缀以兼容既有脚本与文档；它验证的是**凭据存储**
+    /// 能否被当前进程读写，与具体后端无关（文件 / 钥匙串都适用）。
+    pub fn parse<I, S>(args: I) -> Option<Self>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        args.into_iter().find_map(|arg| {
+            arg.as_ref()
+                .strip_prefix(Self::FLAG)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|credential_ref| Self {
+                    credential_ref: credential_ref.to_string(),
+                })
         })
+    }
+}
+
+/// 自检结果：`write_ok` / `read_ok` 必须都为 true，才说明凭据存取可用。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeychainSelfTestOutcome {
+    pub credential_ref: String,
+    pub write_ok: bool,
+    pub read_ok: bool,
+    pub detail: Option<String>,
+}
+
+impl KeychainSelfTestOutcome {
+    pub fn passed(&self) -> bool {
+        self.write_ok && self.read_ok
+    }
+
+    /// 面向人（和 CI 脚本）的单行结论，脚本靠这行判断而不是靠解析语言习惯。
+    pub fn report(&self) -> String {
+        let verdict = if self.passed() { "OK" } else { "FAILED" };
+        let detail = self
+            .detail
+            .as_deref()
+            .map(|value| format!(" :: {value}"))
+            .unwrap_or_default();
+        format!(
+            "keychain-access-self-test: {verdict} (write={}, read={}, ref={}){detail}",
+            self.write_ok as u8, self.read_ok as u8, self.credential_ref
+        )
+    }
+}
+
+/// 跑一次「写入 → 读取 → 删除」自检。
+///
+/// 走的是与线上完全相同的代码路径（`CredentialStore::set/get/delete`），因此它的
+/// 结论就是真实结论。自检在 Tauri 初始化之前运行，拿不到应用数据目录，所以固定用
+/// 一个临时文件作为存储——对**后端能否持久化读写**这件事来说，文件位置不影响结论。
+/// 探测条目用完即删，不污染用户凭据。
+pub fn run_keychain_self_test(request: &KeychainSelfTestRequest) -> KeychainSelfTestOutcome {
+    let probe = format!("self-test-{}", uuid::Uuid::new_v4());
+    let fail = |write_ok: bool, read_ok: bool, detail: String| KeychainSelfTestOutcome {
+        credential_ref: request.credential_ref.clone(),
+        write_ok,
+        read_ok,
+        detail: Some(detail),
+    };
+
+    let temp_dir = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(error) => return fail(false, false, format!("无法创建临时目录：{error}")),
+    };
+    let store = CredentialStore::file(temp_dir.path().join(FILE_NAME));
+
+    if let Err(error) = store.set(&request.credential_ref, &probe) {
+        return fail(
+            false,
+            false,
+            format!("写入失败：{}", error.payload().message),
+        );
+    }
+
+    match store.get(&request.credential_ref) {
+        // 关闭再重开一次，验证的是**跨进程持久化**而不只是内存态。
+        Ok(value) if value == probe => match CredentialStore::file(temp_dir.path().join(FILE_NAME))
+            .get(&request.credential_ref)
+        {
+            Ok(reopened) if reopened == probe => KeychainSelfTestOutcome {
+                credential_ref: request.credential_ref.clone(),
+                write_ok: true,
+                read_ok: true,
+                detail: None,
+            },
+            Ok(_) => fail(true, false, "重新打开后读回的值不一致".to_string()),
+            Err(error) => fail(
+                true,
+                false,
+                format!("重新打开后读取失败：{}", error.payload().message),
+            ),
+        },
+        Ok(_) => fail(true, false, "读回的值与写入值不一致".to_string()),
+        Err(error) => fail(
+            true,
+            false,
+            format!("读取失败：{}", error.payload().message),
+        ),
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn temp_store() -> (tempfile::TempDir, CredentialStore) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = CredentialStore::file(dir.path().join(FILE_NAME));
+        (dir, store)
+    }
 
     /// 守卫语义：内存 mock（EntryOnly / ProcessOnly）必须被判为不可用。
     ///
@@ -147,8 +477,211 @@ mod tests {
 
     #[test]
     fn blank_credential_reference_is_rejected_before_touching_the_store() {
-        let store = CredentialStore;
+        let (_dir, store) = temp_store();
         let error = store.get("   ").expect_err("blank ref must fail");
         assert_eq!(error.payload().kind, "validation");
+    }
+
+    // ---- 文件后端：这是 macOS 上真正跑的实现，必须逐条钉住 ------------------
+
+    #[test]
+    fn file_backend_round_trips_and_overwrites() {
+        let (_dir, store) = temp_store();
+        assert_eq!(
+            store.get("provider:x:api-key").unwrap_err().payload().kind,
+            "not_found"
+        );
+
+        store.set("provider:x:api-key", "sk-first").expect("set");
+        assert_eq!(store.get("provider:x:api-key").unwrap(), "sk-first");
+        assert!(store.status("provider:x:api-key").unwrap().configured);
+
+        // 覆盖写：同一 ref 再存不得残留旧值。
+        store
+            .set("provider:x:api-key", "sk-second")
+            .expect("overwrite");
+        assert_eq!(store.get("provider:x:api-key").unwrap(), "sk-second");
+    }
+
+    #[test]
+    fn file_backend_keeps_distinct_references_independent() {
+        let (_dir, store) = temp_store();
+        store
+            .set("tos-ak-sk", "{\"accessKey\":\"a\",\"secretKey\":\"b\"}")
+            .unwrap();
+        store.set("provider:y:api-key", "sk-y").unwrap();
+
+        assert_eq!(
+            store.get("tos-ak-sk").unwrap(),
+            "{\"accessKey\":\"a\",\"secretKey\":\"b\"}"
+        );
+        assert_eq!(store.get("provider:y:api-key").unwrap(), "sk-y");
+
+        store.delete("tos-ak-sk").unwrap();
+        assert_eq!(
+            store.get("tos-ak-sk").unwrap_err().payload().kind,
+            "not_found"
+        );
+        // 删除一个 ref 不能影响另一个。
+        assert_eq!(store.get("provider:y:api-key").unwrap(), "sk-y");
+    }
+
+    #[test]
+    fn file_backend_delete_is_idempotent() {
+        let (_dir, store) = temp_store();
+        store
+            .delete("never-existed")
+            .expect("delete of absent ref must succeed");
+        store.set("ref", "value").unwrap();
+        store.delete("ref").unwrap();
+        store.delete("ref").expect("second delete must succeed");
+    }
+
+    /// 非 ASCII 与含引号/换行的密钥必须原样往返——JSON 转义正是历史故障的常见来源。
+    #[test]
+    fn file_backend_preserves_awkward_secret_bytes() {
+        let (_dir, store) = temp_store();
+        let awkward = "密钥-\"引号\"-\n换行-\t制表-\\反斜杠-🙂";
+        store.set("ref", awkward).unwrap();
+        assert_eq!(store.get("ref").unwrap(), awkward);
+    }
+
+    /// 应用每次启动都会 `new`；凭据必须跨进程存活（这是整个 bug 的核心诉求）。
+    #[test]
+    fn file_backend_persists_across_store_instances() {
+        let (dir, store) = temp_store();
+        store.set("ref", "persisted").unwrap();
+        drop(store);
+
+        let reopened = CredentialStore::file(dir.path().join(FILE_NAME));
+        assert_eq!(reopened.get("ref").unwrap(), "persisted");
+    }
+
+    /// 密钥明文落盘，文件权限必须是仅本用户可读写（0600）。
+    #[cfg(unix)]
+    #[test]
+    fn file_backend_restricts_permissions_to_owner_only() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let (dir, store) = temp_store();
+        store.set("ref", "secret").unwrap();
+        let mode = std::fs::metadata(dir.path().join(FILE_NAME))
+            .expect("metadata")
+            .permissions()
+            .mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "credential file must not be group/world readable"
+        );
+    }
+
+    /// 空文件与缺失文件都等价于「没有任何凭据」，不是错误。
+    #[test]
+    fn file_backend_treats_missing_and_empty_file_as_no_credentials() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FILE_NAME);
+        assert!(
+            !CredentialStore::file(path.clone())
+                .status("ref")
+                .unwrap()
+                .configured
+        );
+        std::fs::write(&path, "   ").unwrap();
+        assert!(
+            !CredentialStore::file(path)
+                .status("ref")
+                .unwrap()
+                .configured
+        );
+    }
+
+    /// 损坏的文件必须报出可诊断的错误，而不是静默当成空存储——
+    /// 后者会让用户「密钥明明配过却全部消失」且无从排查。
+    #[test]
+    fn file_backend_reports_corrupt_content_instead_of_silently_resetting() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join(FILE_NAME);
+        std::fs::write(&path, "[1,2,3]").unwrap();
+        let store = CredentialStore::file(path.clone());
+        assert_eq!(store.get("ref").unwrap_err().payload().kind, "credential");
+
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(CredentialStore::file(path).get("ref").is_err());
+    }
+
+    /// 自检必须走真实后端、验证跨进程持久化，并且不碰用户凭据。
+    #[test]
+    fn self_test_round_trips_across_reopen() {
+        let outcome = run_keychain_self_test(&KeychainSelfTestRequest {
+            credential_ref: "self-test-probe".to_string(),
+        });
+        assert!(outcome.passed(), "self test failed: {outcome:?}");
+        assert_eq!(outcome.detail, None);
+    }
+
+    /// 自检入口只在显式给出参数时生效，普通启动（Finder 拉起、含 macOS 注入的
+    /// `-psn_…` 参数）必须完全不受影响。
+    #[test]
+    fn self_test_flag_is_only_recognized_when_explicitly_present() {
+        assert_eq!(
+            KeychainSelfTestRequest::parse([
+                "/Applications/无限画布.app/Contents/MacOS/infinite-canvas",
+                "-psn_0_123456",
+            ]),
+            None,
+        );
+        assert_eq!(
+            KeychainSelfTestRequest::parse([
+                "infinite-canvas",
+                "--keychain-access-self-test=smoke-ref",
+            ]),
+            Some(KeychainSelfTestRequest {
+                credential_ref: "smoke-ref".to_string(),
+            }),
+        );
+    }
+
+    /// 空引用必须被当成「没给参数」而不是「给了空引用」：否则自检会拿空 ref 去查
+    /// 凭据，报出一个与存储后端无关的 validation 错误，误导排查方向。
+    #[test]
+    fn self_test_flag_without_a_reference_is_ignored() {
+        for args in [
+            vec!["infinite-canvas", "--keychain-access-self-test="],
+            vec!["infinite-canvas", "--keychain-access-self-test=   "],
+        ] {
+            assert_eq!(KeychainSelfTestRequest::parse(args), None);
+        }
+    }
+
+    /// 结论行是给脚本 grep 的契约，verdict 与两个布尔必须同进同退。
+    #[test]
+    fn self_test_report_marks_failure_whenever_either_step_fails() {
+        let passed = KeychainSelfTestOutcome {
+            credential_ref: "ref".to_string(),
+            write_ok: true,
+            read_ok: true,
+            detail: None,
+        };
+        assert!(passed.passed());
+        assert_eq!(
+            passed.report(),
+            "keychain-access-self-test: OK (write=1, read=1, ref=ref)",
+        );
+
+        for (write_ok, read_ok) in [(true, false), (false, false)] {
+            let failed = KeychainSelfTestOutcome {
+                credential_ref: "ref".to_string(),
+                write_ok,
+                read_ok,
+                detail: Some("拒绝访问".to_string()),
+            };
+            assert!(!failed.passed());
+            assert!(
+                failed
+                    .report()
+                    .starts_with("keychain-access-self-test: FAILED")
+            );
+            assert!(failed.report().contains("拒绝访问"));
+        }
     }
 }

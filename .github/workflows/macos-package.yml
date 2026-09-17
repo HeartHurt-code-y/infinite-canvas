@@ -17,6 +17,22 @@ jobs:
       artifact_name: ${{ steps.publish-artifact-links.outputs.artifact_name }}
       run_url: ${{ steps.publish-artifact-links.outputs.run_url }}
 
+    # 放在 job 级而不是单个 step：构建步骤要用它们签名与公证，report 步骤要据此
+    # 判断「分发就绪度」。只落在某一个 step 上的话，另一个 step 读不到。
+    env:
+      # --- 签名（Developer ID Application）---
+      APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      # --- 公证：两种凭据任选其一 ---
+      # 1) Apple ID（APPLE_PASSWORD 必须是 App 专用密码，不是账号密码）
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      # 2) App Store Connect API Key（推荐：不受双重验证影响）
+      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
+      APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+
     steps:
       - name: Checkout
         uses: actions/checkout@v5
@@ -44,10 +60,107 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      # Developer ID 证书只影响**能否对外分发**（Gatekeeper），与钥匙串无关：
+      # 凭据已改为存放在应用数据目录的明文 JSON，macOS 上不再碰钥匙串。
+      # 配了证书就正式签名；没配则构建出的包会因缺少签名而在此后步骤明确失败。
+      # 证书与口令已在 job 级 env 里，这里不必重复声明（重复声明反而容易出现不一致）。
+      - name: Import Apple signing certificate
+        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        run: |
+          KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
+          KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
+
+          security create-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # -lut 3600：临时钥匙串 1 小时后自动锁定，构建结束后不必依赖清理步骤。
+          security set-keychain-settings -lut 3600 "$KEYCHAIN_PATH"
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH"
+          # 把临时钥匙串放到搜索列表最前。必须显式限定为「用户域 + 登录钥匙串 + 临时钥匙串」，
+          # 不能直接用 `security list-keychains` 的输出：它可能带出系统钥匙串，
+          # 而 system.keychain 会让后续 codesign 直接报错。
+          security list-keychains -d user -s "$KEYCHAIN_PATH" "$HOME/Library/Keychains/login.keychain-db"
+
+          printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$KEYCHAIN_PATH" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          rm -f "$RUNNER_TEMP/certificate.p12"
+          # 不给这一行，codesign 在 CI 上会卡在 GUI 授权提示上直到超时。
+          security set-key-partition-list -S apple-tool:,apple:,codesign: \
+            -s -k "$KEYCHAIN_PASSWORD" "$KEYCHAIN_PATH" > /dev/null
+
+          security find-identity -v -p codesigning
+
+      # 策略是**自适应**而不是硬性要求 Developer ID：
+      #   - 配了证书 secret → 导入后用 Developer ID 正式签名（可对外分发）；
+      #   - 没配证书 secret、但构建机装有其他 codesigning 身份 → 用它签名，仍产出可用的包；
+      #   - 两者皆无 → 不签名。**这会失败**：Tauri 在没有身份时根本不做签名
+      #     （不是退回 ad-hoc，而是整段跳过，且不打日志），而 Apple Silicon 上未签名的
+      #     arm64 可执行文件会被内核直接杀掉。所以宁可让它显式失败。
+      # 身份选择逻辑与回归用例见 scripts/macos-signing-identity.mjs。
+      - name: Resolve macOS signing identity
+        run: node scripts/macos-signing-identity.mjs --require
+
+      # 把「这个包能不能给所有人打开」写进 run summary。判据有三项，缺一不可：
+      # Developer ID 证书、公证、以及公证凭据；缺任何一项，陌生用户双击都会被拦。
+      - name: Report signing scope
+        run: |
+          source_kind="${INFINITE_CANVAS_SIGNING_IDENTITY_SOURCE:-none}"
+          if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
+            notary_ready="yes (API key)"
+          elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
+            notary_ready="yes (Apple ID)"
+          else
+            notary_ready="no"
+          fi
+          {
+            echo "### macOS 分发就绪度"
+            echo "- 签名身份：\`${APPLE_SIGNING_IDENTITY:-<none>}\`（类型：\`${source_kind}\`）"
+            echo "- 公证凭据：\`${notary_ready}\`"
+            if [ "$source_kind" = "developer-id" ] && [ "$notary_ready" != "no" ]; then
+              echo "- ✅ 可对外分发：陌生用户双击即可打开。"
+            else
+              echo "- ⚠️ **不能直接给所有人用**。要让任何 Mac 双击即可打开，需要同时具备："
+              echo "  1. Developer ID Application 证书（\`APPLE_CERTIFICATE\` / \`APPLE_CERTIFICATE_PASSWORD\`）；"
+              echo "  2. 公证凭据（\`APPLE_ID\`+\`APPLE_PASSWORD\`+\`APPLE_TEAM_ID\`，或 \`APPLE_API_KEY\`+\`APPLE_API_ISSUER\`+\`APPLE_API_KEY_PATH\`）。"
+              echo "  缺任一项时，用户需手动绕过 Gatekeeper：系统设置 → 隐私与安全性 → 「仍要打开」"
+              echo "  （macOS 15 起右键打开已失效），或执行 \`xattr -dr com.apple.quarantine <app>\`。"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # 注意：Developer ID 证书只是**签名**。要让所有用户双击就能打开（不被 Gatekeeper
+      # 拦下），**还必须公证（notarize）**——Apple 自 macOS 10.15 起要求分发到 App Store
+      # 之外的软件必须公证。签名但不公证的包仍会提示「无法验证开发者」。
+      #
+      # Tauri CLI 自己会读取 job 级环境里的 APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
+      # 或 APPLE_API_KEY*，调用 notarytool 公证，再用 stapler 把票据钉进产物
+      # （已在 darwin 二进制里核实这些变量名与 notarize / stapler 相关字符串均存在）。
       - name: Build macOS installer
         run: pnpm tauri:build
         env:
           CI: true
+
+      # 构建后再验一次产物本身：Authority 不是 ad-hoc、designated requirement 里
+      # 没有 cdhash。上一步只保证解析出了身份，这一步保证身份真的签进了包。
+      - name: Verify signed bundle
+        run: |
+          # productName 为中文「无限画布」，直接按路径取，避免 find 的转义问题；
+          # 取不到时回退到 glob，保证改名后这一步不会静默跳过。
+          app_path="src-tauri/target/release/bundle/macos/无限画布.app"
+          if [ ! -d "$app_path" ]; then
+            app_path="$(find src-tauri/target/release/bundle/macos -maxdepth 1 -name '*.app' -print -quit 2>/dev/null || true)"
+          fi
+          if [ -z "$app_path" ] || [ ! -d "$app_path" ]; then
+            echo "::error::未找到构建出的 .app，无法校验签名身份"
+            exit 1
+          fi
+          chmod +x scripts/verify-macos-bundle.sh
+          scripts/verify-macos-bundle.sh "$app_path"
+
+      # install-macos.sh 必须和 DMG 一起发出去：没有 Apple 证书时，用户要跑它才能打开包。
+      # 单独放一份，避免用户还要从仓库里翻脚本。
+      - name: Stage unsigned-install helper
+        run: |
+          mkdir -p src-tauri/target/release/bundle/helper
+          cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
 
       - name: Upload installer artifacts
         id: upload-artifacts
@@ -57,6 +170,7 @@ jobs:
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app
+            src-tauri/target/release/bundle/helper/install-macos.sh
           if-no-files-found: error
           retention-days: 30
 

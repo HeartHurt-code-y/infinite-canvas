@@ -1237,7 +1237,7 @@ mod tests {
         let providers = crate::backend::provider::ProviderRuntime::new(
             Arc::clone(storage),
             lifecycle.clone(),
-            crate::backend::credentials::CredentialStore,
+            crate::backend::credentials::CredentialStore::default(),
         )
         .expect("provider runtime");
         LocalResultService::new(

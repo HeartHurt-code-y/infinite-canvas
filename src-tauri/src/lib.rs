@@ -3,8 +3,41 @@ mod backend;
 use backend::commands;
 use tauri::Manager as _;
 
+/// 处理 `--keychain-access-self-test=<ref>`：返回 true 表示已完成自检、调用方应跳过启动。
+///
+/// 用途：一条命令回答「这个构建产物能不能正常存取凭据」。它走与线上完全相同的
+/// `CredentialStore` 路径（写 → 读 → 重开再读），不依赖任何 GUI。
+/// 参数名保留历史的 `keychain-` 前缀以兼容既有脚本；macOS 默认已改用文件后端，
+/// 不再涉及钥匙串。
+///
+/// 该参数只在命令行显式给出时才生效，正常启动（由 Finder/LaunchServices 拉起）不受影响。
+fn run_keychain_access_self_test_if_requested() -> bool {
+    let Some(request) = backend::credentials::KeychainSelfTestRequest::parse(std::env::args())
+    else {
+        return false;
+    };
+    let outcome = backend::credentials::run_keychain_self_test(&request);
+    println!("{}", outcome.report());
+    if !outcome.passed() {
+        eprintln!(
+            "keychain-access-self-test: 该产物无法正常存取凭据。\
+             这通常意味着应用数据目录不可写；可用 INFINITE_CANVAS_CREDENTIAL_BACKEND 切换后端。"
+        );
+    }
+    // std::process::exit 不跑析构：输出重定向到管道（CI 里正是如此）时 stdout 是块缓冲的，
+    // 不显式 flush 就可能丢掉上面那行结论，而调用方正是按这行判定成败。
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    // 测试脚本按这行结论与退出码判定，不做语言相关的文本匹配。
+    std::process::exit(if outcome.passed() { 0 } else { 1 });
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if run_keychain_access_self_test_if_requested() {
+        return;
+    }
     // Windows: 禁用 WebView2 跟踪预防，避免第三方存储/cookie 被阻止
     // （例如素材库、登录等需要第三方存储的功能）
     #[cfg(target_os = "windows")]

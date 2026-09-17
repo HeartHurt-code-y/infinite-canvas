@@ -28,22 +28,87 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 
 ## 常用命令
 
-| 命令                    | 用途                                                              |
-| ----------------------- | ----------------------------------------------------------------- |
-| `pnpm dev`              | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）     |
-| `pnpm dev:daemon`       | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀） |
-| `pnpm tauri:dev`        | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）          |
-| `pnpm build`            | 类型检查并构建前端                                                |
-| `pnpm tauri:build`      | 构建桌面安装包（内置 FFmpeg 与 Blender，离线可用）                |
-| `pnpm test`             | 运行前端测试                                                      |
-| `pnpm lint`             | 执行类型感知 ESLint 检查                                          |
-| `pnpm format`           | 使用 Prettier 格式化工程文件                                      |
-| `pnpm check`            | 执行前端、Rust 格式化及 Clippy 全量检查                           |
-| `pnpm ffmpeg:prepare`   | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`        |
-| `pnpm remotion:prepare` | 准备内置动画渲染运行时                                            |
-| `pnpm blender:prepare`  | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码         |
+| 命令                       | 用途                                                              |
+| -------------------------- | ----------------------------------------------------------------- |
+| `pnpm dev`                 | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）     |
+| `pnpm dev:daemon`          | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀） |
+| `pnpm tauri:dev`           | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）          |
+| `pnpm build`               | 类型检查并构建前端                                                |
+| `pnpm tauri:build`         | 构建桌面安装包（内置 FFmpeg 与 Blender，离线可用）                |
+| `pnpm test`                | 运行前端测试                                                      |
+| `pnpm lint`                | 执行类型感知 ESLint 检查                                          |
+| `pnpm format`              | 使用 Prettier 格式化工程文件                                      |
+| `pnpm check`               | 执行前端、Rust 格式化及 Clippy 全量检查                           |
+| `pnpm ffmpeg:prepare`      | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`        |
+| `pnpm remotion:prepare`    | 准备内置动画渲染运行时                                            |
+| `pnpm blender:prepare`     | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码         |
+| `pnpm macos:verify-bundle` | 校验 macOS 产物签名与内置可执行文件签名                           |
 
 白模工作室默认使用应用内置 Blender，用户无需另行安装或首次运行时下载引擎。构建准备在开发机器上完成，正式安装包包含完整运行库、Python 与工程精修所需资源。外部 Blender 仅作为高级可选设置；内置资源缺失时会报告安装包损坏。打包方式、支持平台与验证说明见 [Blender 桥接](tools/blender/README.md)。
+
+## 凭据存储：默认明文文件
+
+API Key / 素材库令牌 / TOS AK-SK 默认存放在**应用数据目录下的 JSON 文件**：
+
+- macOS：`~/Library/Application Support/com.infinitecanvas.desktop/credentials.json`
+- Windows：默认走系统凭据管理器（想统一成文件则设 `INFINITE_CANVAS_CREDENTIAL_BACKEND=file`）
+
+原因是 macOS 钥匙串条目的访问控制绑定「创建它的那个应用」的代码签名身份，并且有**两道**独立的门：ACL 里的可信应用列表，以及一条按 `partition_id` 授权的条目。没有 Apple 签名证书时，进程的 partition id 是 `cdhash:<代码哈希>`，**每出一个新版本都会变**——即使自签证书能把第一道门稳住，第二道门依然会失配，于是每次升级都要用户输入一次登录钥匙串密码，且该门无法通过列出「未来版本的哈希」来预先放行。
+
+因此这里直接不碰钥匙串：文件权限收窄到 0600（仅本用户可读写），**不弹任何密码框、不需要 Apple 证书、不需要管理员命令**。
+
+**这是明确的取舍**：能读到该文件的进程就能读到全部密钥。App 内的密钥输入框本来也是明文显示（既定产品行为）。
+
+- 换回系统凭据库：`INFINITE_CANVAS_CREDENTIAL_BACKEND=keyring`。
+- 备份/迁移密钥：直接复制上面那个 JSON 文件。
+
+## macOS 打包：让所有人都能打开
+
+凭据已不走钥匙串，所以**签名与「弹不弹密码框」无关**。签名只关系到**别人能不能打开你的包**：
+
+- 未签名的包在别的 Mac 上会被 Gatekeeper 拦下；macOS 15 起右键「打开」已不再能绕过。
+- Apple Silicon 上未签名的 arm64 可执行文件会被内核直接杀掉。
+- 注意 Tauri 在 macOS 上**没有配置签名身份时根本不做签名**（不是退回 ad-hoc，而是整段跳过且不打日志）。
+
+### 方案 A：没有 Apple 证书 —— 用户跑一条命令
+
+`scripts/install-macos.sh` 随包一起发出去，用户只需：
+
+```bash
+sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
+```
+
+脚本会：清掉 DMG 与 app 的隔离属性 → **由内到外 ad-hoc 重签 app 内所有可执行文件** → 装到 `/Applications` → 校验。
+
+**为什么不能只清 quarantine**（网上最常见的错误建议）：清 quarantine 只解决 Gatekeeper。Apple Silicon 上 **arm64 可执行文件必须有有效签名才能被内核执行**，而 Tauri 在没有证书时什么都不签，内置 FFmpeg / Blender 也可能未签名——只清 quarantine 的话，app 能打开但一用到这些引擎就被杀。所以脚本必须同时做 **ad-hoc 重签**（`codesign -s -`，不需要任何证书）。
+
+代价：用户要手动跑一条命令（**这就是没有 Apple 证书的必然代价**，没有技术替代方案）；且每次把 app 移到新位置或重新下载，都要再跑一次。
+
+### 方案 B：有 Apple 证书 —— 用户双击即可
+
+要让**任何** Mac 双击就能打开，必须同时具备三样：
+
+| 前置                                   | 作用                                                     | 缺失后果                     |
+| -------------------------------------- | -------------------------------------------------------- | ---------------------------- |
+| Apple Developer Program 会员（$99/年） | 签发 Developer ID 证书的前提                             | 无法签名，陌生人必须手动绕过 |
+| **Developer ID Application** 证书      | 证明来源可信                                             | 提示「无法验证开发者」       |
+| **公证（notarization）凭据**           | Apple 自 macOS 10.15 起要求 App Store 之外的软件必须公证 | 签名有效但仍被拦下           |
+
+**只签名不公证是不够的**——这是最常见的误解：Developer ID 签名只解决「谁签的」，公证才解决「Apple 已检查过」。公证凭据两种任选：
+
+- Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
+- App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
+
+CI 侧全部配在 `.github/workflows/macos-package.yml` 的 job 级环境变量里；配齐后流水线会自动签名 → 公证 → 装订票据（stapler）。没配齐时 run summary 会明确写出缺哪一项、以及用户需要手动做什么。
+
+### 自检
+
+- 自己开发用：把包留在本机即可，**不需要任何证书**。
+- 方案 B 打包后自检：`pnpm macos:verify-bundle "src-tauri/target/release/bundle/macos/无限画布.app"`。
+  它会跑 `spctl -a -t exec`（Finder 双击时 Gatekeeper 走的同一判定）与 `stapler validate`，
+  所以**它就是「所有人能不能打开」的答案**；同时检查内置 FFmpeg / Blender 的签名。
+- 方案 A 的参数自检：`bash scripts/install-macos.sh <dmg> --dry-run`（只解析参数、不做任何改动，任意平台可跑）。
+- macOS 14 是本项目 CI 的构建机版本；产物要求 macOS 11.0+（见 `tauri.conf.json` 的 `minimumSystemVersion`）。
 
 ## 系统访问能力
 

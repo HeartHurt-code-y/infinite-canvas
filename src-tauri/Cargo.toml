@@ -60,9 +60,10 @@ tauri-plugin-upload = "2"
 tauri-plugin-websocket = "2"
 ffmpeg-sidecar = "2.5.2"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
+# 凭据自检需要在系统临时目录建一个一次性凭据文件（不碰用户数据）。
+tempfile = "3"
 
 [dev-dependencies]
-tempfile = "3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]

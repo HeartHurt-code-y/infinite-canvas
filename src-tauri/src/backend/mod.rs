@@ -74,14 +74,15 @@ pub struct BackendState {
 
 impl BackendState {
     pub fn initialize(app: &AppHandle) -> BackendResult<Self> {
-        let database_path = app
-            .path()
-            .app_local_data_dir()?
-            .join("infinite-canvas.sqlite3");
+        let data_directory = app.path().app_local_data_dir()?;
+        let database_path = data_directory.join("infinite-canvas.sqlite3");
         let downloads_directory = app.path().download_dir()?;
         let storage = Arc::new(Storage::open(&database_path)?);
         let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
-        let credentials = CredentialStore;
+        // macOS 默认用应用数据目录下的明文文件（避开钥匙串密码框），
+        // 其余平台用系统凭据库；逐字说明与取舍见 credentials.rs 模块文档。
+        let credentials = CredentialStore::new(&data_directory);
+        tauri_plugin_log::log::info!("credential backend: {}", credentials.backend_label());
         let providers =
             ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials.clone())?;
         let assets = AssetLibrary::new(providers.clone());
