@@ -157,6 +157,15 @@ import {
   type BlenderRenderJob,
   type WhiteModelStudioDraft,
 } from "../../lib/whiteModelStudio";
+import {
+  buildBlockingPromptDocument,
+  createWhiteModelBlockingDraft,
+  studioImageInputsFromMedia,
+  whiteModelBlockingSignature,
+  type WhiteModelBlockingCapture,
+  preferredPanoramaParameters,
+  preparePanoramaGeneration,
+} from "../../lib/whiteModelBlocking";
 import { appendVideoLocalEditPrompt, resolveVideoEditFrameTarget } from "../../lib/videoLocalEdit";
 import { sameMediaReferenceTarget } from "../../lib/promptReferenceTarget";
 import type {
@@ -4776,24 +4785,46 @@ export function WorkspaceApp({
 
   const openWhiteModelStudio = useCallback(
     (nodeKey: string) => {
-      const node = snapshotV2({}).genNodes.find((candidate) => candidate.key === nodeKey);
-      if (node?.kind !== "video") return;
-      if (!node.config.whiteModelStudio) {
-        updateVideoNodeConfig(nodeKey, {
-          ...node.config,
-          whiteModelStudio: createWhiteModelStudioDraft(),
-        });
+      const current = snapshotV2({});
+      const node = current.genNodes.find((candidate) => candidate.key === nodeKey);
+      if (node?.kind === "video") {
+        if (!node.config.whiteModelStudio) {
+          updateVideoNodeConfig(nodeKey, {
+            ...node.config,
+            whiteModelStudio: createWhiteModelStudioDraft(),
+          });
+        }
+        setWhiteModelStudioNodeKey(nodeKey);
+        return;
+      }
+      if (node?.kind !== "image") return;
+      const images = studioImageInputsFromMedia(
+        createCanvasInputResolver(canvasNodesByKeyFromDocument(current), current.assetEdges)(
+          nodeKey,
+        ).media,
+      );
+      const base = node.config.whiteModelStudio ?? createWhiteModelBlockingDraft();
+      const first = images[0];
+      const next =
+        base.environment || !first
+          ? base
+          : {
+              ...base,
+              environment: { key: first.key, name: first.name, target: first.target },
+            };
+      if (!node.config.whiteModelStudio || next !== base) {
+        updateImageNodeConfig(nodeKey, { ...node.config, whiteModelStudio: next });
       }
       setWhiteModelStudioNodeKey(nodeKey);
     },
-    [snapshotV2, updateVideoNodeConfig],
+    [snapshotV2, updateVideoNodeConfig, updateImageNodeConfig],
   );
 
   const updateWhiteModelStudioDraft = useCallback(
     (draft: WhiteModelStudioDraft) => {
       if (!whiteModelStudioNodeKey) return;
       patchNode("gen", whiteModelStudioNodeKey, (node) =>
-        node.kind === "video"
+        node.kind === "video" || node.kind === "image"
           ? { ...node, config: { ...node.config, whiteModelStudio: draft } }
           : node,
       );
@@ -4925,6 +4956,100 @@ export function WorkspaceApp({
       insertSubgraph,
       removeAssetEdge,
       updateVideoNodeConfig,
+      setNodeStartError,
+    ],
+  );
+
+  const useWhiteModelBlocking = useCallback(
+    async (capture: WhiteModelBlockingCapture) => {
+      const nodeKey = whiteModelStudioNodeKey;
+      if (!nodeKey) throw new Error("请重新打开白模导演台。");
+      const current = snapshotV2({});
+      const target = current.genNodes.find((node) => node.key === nodeKey);
+      if (target?.kind !== "image") throw new Error("图片节点已移除；站位图仍保留在本地。");
+      const draft = target.config.whiteModelStudio ?? createWhiteModelBlockingDraft();
+      const existingOutput = current.outputNodes?.find(
+        (output) => output.origin === "white_model_still" && output.finalPath === capture.path,
+      );
+      const key = existingOutput?.key ?? outputNodeKey();
+      const name = existingOutput?.name ?? capture.name;
+      const still = {
+        key,
+        name,
+        target: {
+          kind: "local_file" as const,
+          path: capture.path,
+          canvasNodeKey: key,
+          mediaType: "image" as const,
+        },
+      };
+      const prompt = buildBlockingPromptDocument(still, capture.environment, capture.assignments);
+      if (prompt.issue) throw new Error(prompt.issue);
+      const needed = [
+        ...new Set(
+          [
+            still.key,
+            capture.environment?.key,
+            ...capture.assignments.map((assignment) => assignment.character.key),
+          ].filter((fromKey): fromKey is string => Boolean(fromKey) && fromKey !== nodeKey),
+        ),
+      ];
+      const edges = needed
+        .filter(
+          (fromKey) =>
+            !current.assetEdges.some((edge) => edge.fromKey === fromKey && edge.toKey === nodeKey),
+        )
+        .map((fromKey) => ({
+          id: `white-model-still-${fromKey}-${nodeKey}`,
+          fromKey,
+          toKey: nodeKey,
+        }));
+      insertSubgraph(
+        existingOutput
+          ? []
+          : [
+              {
+                type: "output",
+                data: {
+                  key,
+                  resultKey: null,
+                  sourceNodeId: nodeKey,
+                  taskId: `white-model-still-${key}`,
+                  mediaType: "image",
+                  origin: "white_model_still",
+                  finalPath: capture.path,
+                  name,
+                  aspectRatio: capture.width / Math.max(1, capture.height),
+                  x: target.x - 360,
+                  y: target.y,
+                },
+              },
+            ],
+        edges,
+        { selectNodeKey: nodeKey },
+      );
+      updateImageNodeConfig(nodeKey, {
+        ...target.config,
+        panoramaEnabled: false,
+        whiteModelStudio: {
+          ...draft,
+          blockingImagePath: capture.path,
+          blockingImageSignature: whiteModelBlockingSignature(draft),
+        },
+      });
+      promptContents.restoreDocument(nodeKey, prompt.document);
+      setNodeStartError(nodeKey, null);
+      setWhiteModelStudioNodeKey(null);
+      toast.success("站位图已接入", {
+        description: "已连上场景、站位和角色参考，并按假人编号写好多参考提示词。",
+      });
+    },
+    [
+      whiteModelStudioNodeKey,
+      snapshotV2,
+      insertSubgraph,
+      updateImageNodeConfig,
+      promptContents,
       setNodeStartError,
     ],
   );
@@ -5859,24 +5984,35 @@ export function WorkspaceApp({
               connections,
               resolvedSelection.model.remoteModelId,
               seedanceTask?.mode ?? "auto",
-              promptContents.snapshotAll(new Set([nodeKey]))[nodeKey],
+              promptDocument,
             )
           : null;
       if (whiteModel?.issue) {
         setNodeStartError(nodeKey, whiteModel.issue);
         return;
       }
+      const allowMediaOnly = modelAllowsMediaOnlyPrompt(
+        resolvedSelection.model.operationSchema,
+        operation,
+      );
+      const panorama =
+        genNode.kind === "image" && genNode.config.panoramaEnabled
+          ? preparePanoramaGeneration(promptDocument, connections, allowMediaOnly)
+          : null;
+      if (panorama?.issue) {
+        setNodeStartError(nodeKey, panorama.issue);
+        return;
+      }
       const preparedPrompt = greenScreenPreparation
         ? greenScreenPreparation.preparation
         : whiteModel
           ? whiteModel.preparation
-          : promptContents.prepareGeneration(nodeKey, {
-              connections,
-              allowMediaOnly: modelAllowsMediaOnlyPrompt(
-                resolvedSelection.model.operationSchema,
-                operation,
-              ),
-            });
+          : panorama
+            ? panorama.preparation
+            : promptContents.prepareGeneration(nodeKey, {
+                connections,
+                allowMediaOnly,
+              });
       if (preparedPrompt == null || !preparedPrompt.ok) {
         const issue = preparedPrompt?.issues[0] ?? ({ kind: "empty_prompt" } as const);
         setNodeStartError(nodeKey, promptContentIssueMessage(issue));
@@ -5892,7 +6028,12 @@ export function WorkspaceApp({
         ? seedanceTask.parameters
         : generationParameters(
             parameterCapabilities,
-            genNode.config.parameterValues,
+            genNode.kind === "image" && genNode.config.panoramaEnabled
+              ? {
+                  ...genNode.config.parameterValues,
+                  ...preferredPanoramaParameters(parameterCapabilities),
+                }
+              : genNode.config.parameterValues,
             connections.length > 0,
           );
 
@@ -9598,25 +9739,35 @@ export function WorkspaceApp({
       ) : null}
       {active &&
       whiteModelStudioNodeKey &&
-      genNodeByKey.get(whiteModelStudioNodeKey)?.kind === "video"
+      (genNodeByKey.get(whiteModelStudioNodeKey)?.kind === "video" ||
+        genNodeByKey.get(whiteModelStudioNodeKey)?.kind === "image")
         ? (() => {
             const studioNode = genNodeByKey.get(whiteModelStudioNodeKey);
-            if (studioNode?.kind !== "video" || !studioNode.config.whiteModelStudio) return null;
+            if (
+              !studioNode ||
+              (studioNode.kind !== "video" && studioNode.kind !== "image") ||
+              !studioNode.config.whiteModelStudio
+            )
+              return null;
+            const purpose = studioNode.kind === "image" ? "blocking" : "video";
             return (
               <Suspense
                 fallback={
                   <DeferredDialogFallback
                     id="white-model-studio"
-                    label="Blender 白模工作台"
+                    label={purpose === "blocking" ? "白模站位导演台" : "Blender 白模工作台"}
                     onClose={() => setWhiteModelStudioNodeKey(null)}
                   />
                 }
               >
                 <WhiteModelStudioDialog
+                  purpose={purpose}
                   draft={studioNode.config.whiteModelStudio}
+                  imageInputs={studioImageInputsFromMedia(canvasInputsFor(studioNode.key).media)}
                   onDraftChange={updateWhiteModelStudioDraft}
                   onClose={() => setWhiteModelStudioNodeKey(null)}
                   onUse={useWhiteModelVideo}
+                  onExportBlocking={useWhiteModelBlocking}
                 />
               </Suspense>
             );

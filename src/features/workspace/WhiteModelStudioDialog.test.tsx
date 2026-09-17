@@ -9,7 +9,8 @@ import {
   type BlenderRenderRequest,
   type WhiteModelStudioDraft,
 } from "../../lib/whiteModelStudio";
-import { WhiteModelStudioDialog } from "./WhiteModelStudioDialog";
+import { createWhiteModelBlockingDraft } from "../../lib/whiteModelBlocking";
+import { WhiteModelStudioDialog, type WhiteModelStudioDialogProps } from "./WhiteModelStudioDialog";
 
 const mocks = vi.hoisted(() => ({
   engine: vi.fn(),
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   chooseFile: vi.fn(),
   poseAvailable: vi.fn(),
   captureMotion: vi.fn(),
+  saveStill: vi.fn(),
 }));
 vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   ...(await importOriginal<typeof WhiteModelStudioModule>()),
@@ -29,14 +31,26 @@ vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   cancelBlenderRender: mocks.cancel,
   openBlenderProject: mocks.openProject,
 }));
+vi.mock("../../lib/whiteModelBlocking", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../lib/whiteModelBlocking")>();
+  return { ...actual, saveWhiteModelStill: mocks.saveStill };
+});
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.chooseFile }));
 vi.mock("../../lib/poseCapture", () => ({
   poseCaptureAvailable: mocks.poseAvailable,
   captureMotionFromVideo: mocks.captureMotion,
 }));
-vi.mock("./WhiteModelViewport", () => ({
-  WhiteModelViewport: () => <div data-testid="white-model-viewport" />,
-}));
+vi.mock("./WhiteModelViewport", async () => {
+  const { forwardRef, useImperativeHandle } = await import("react");
+  return {
+    WhiteModelViewport: forwardRef((_props: unknown, ref) => {
+      useImperativeHandle(ref, () => ({
+        captureStill: () => "data:image/png;base64,iVBORw0KGgo=",
+      }));
+      return <div data-testid="white-model-viewport" />;
+    }),
+  };
+});
 
 function job(status: BlenderRenderJob["status"], jobId = "render-1"): BlenderRenderJob {
   return {
@@ -56,7 +70,10 @@ function job(status: BlenderRenderJob["status"], jobId = "render-1"): BlenderRen
   };
 }
 
-function harness(initial: WhiteModelStudioDraft) {
+function harness(
+  initial: WhiteModelStudioDraft,
+  extras: Partial<WhiteModelStudioDialogProps> = {},
+) {
   let saved = initial;
   const onClose = vi.fn();
   const onUse = vi.fn();
@@ -71,6 +88,7 @@ function harness(initial: WhiteModelStudioDraft) {
         }}
         onClose={onClose}
         onUse={onUse}
+        {...extras}
       />
     );
   }
@@ -100,6 +118,11 @@ beforeEach(() => {
     frameCount: 24,
     joints: "AAAA",
     sourceName: "walk.mp4",
+  });
+  mocks.saveStill.mockResolvedValue({
+    path: "C:/white-model-stills/still-1.png",
+    width: 1280,
+    height: 720,
   });
 });
 
@@ -304,5 +327,63 @@ describe("白模导演台", () => {
     expect(screen.getByRole("button", { name: "渲染白模视频" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "渲染白模视频" }));
     await waitFor(() => expect(view.saved().jobId).toBe("render-1"));
+  });
+});
+
+describe("白模导演台 · 站位", () => {
+  it("跳过 Blender，摆假人、换场景并导出站位图", async () => {
+    const scene = {
+      key: "scene",
+      name: "宗门全景",
+      kind: "image" as const,
+      target: {
+        kind: "local_file" as const,
+        path: "C:/scene.png",
+        canvasNodeKey: "scene",
+        mediaType: "image" as const,
+      },
+      src: "asset://scene",
+    };
+    const hero = {
+      key: "hero",
+      name: "男主",
+      kind: "image" as const,
+      target: {
+        kind: "local_file" as const,
+        path: "C:/hero.png",
+        canvasNodeKey: "hero",
+        mediaType: "image" as const,
+      },
+      src: "asset://hero",
+    };
+    const onExportBlocking = vi.fn();
+    const view = harness(
+      { ...createWhiteModelBlockingDraft(), environment: { key: scene.key, name: scene.name, target: scene.target } },
+      { purpose: "blocking", imageInputs: [scene, hero], onExportBlocking },
+    );
+    expect(mocks.engine).not.toHaveBeenCalled();
+    expect(screen.getByRole("button", { name: "＋ 假人" })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "渲染白模视频" })).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("时间轴")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("全景图 / 场景图")).toHaveValue(JSON.stringify([scene.key, scene.target]));
+    fireEvent.click(screen.getByRole("button", { name: "↑ 替换" }));
+    await waitFor(() => expect(view.saved().environment?.key).toBe("hero"));
+    fireEvent.change(screen.getByLabelText("1号假人角色参考"), { target: { value: JSON.stringify([hero.key, hero.target]) } });
+    await waitFor(() =>
+      expect(view.saved().characterBindings).toEqual([
+        { actorId: view.saved().plan.objects[0]?.id, reference: { key: hero.key, name: hero.name, target: hero.target } },
+      ]),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "导出站位图" }));
+    await waitFor(() => expect(mocks.saveStill).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(onExportBlocking).toHaveBeenCalledTimes(1));
+    expect(onExportBlocking.mock.calls[0]![0]).toMatchObject({
+      path: "C:/white-model-stills/still-1.png",
+      width: 1280,
+      height: 720,
+      environment: { key: "hero" },
+      assignments: [{ dummyNumber: 1, character: { key: "hero", name: "男主" } }],
+    });
+    expect(view.saved().blockingImagePath).toBe("C:/white-model-stills/still-1.png");
   });
 });

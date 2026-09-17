@@ -861,6 +861,7 @@ export interface OutputNodeData {
     | "frame_extract"
     | "video_edit"
     | "white_model"
+    | "white_model_still"
     | "green_screen";
   /** 本地产物文件绝对路径（桌面端经 convertFileSrc 展示）；任务未完成时为 null。 */
   readonly finalPath: string | null;
@@ -1893,6 +1894,10 @@ export interface ImageNodeConfig {
   /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
    *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
   readonly inputSlots?: readonly (string | null)[];
+  /** 提交时注入 equirectangular 全景说明，并尽量选用模型最宽画幅。 */
+  readonly panoramaEnabled?: boolean;
+  /** 图片节点站位导演台草稿；与视频白模工作台共用结构，不走 Blender。 */
+  readonly whiteModelStudio?: WhiteModelStudioDraft;
 }
 
 export interface VideoNodeConfig {
@@ -2261,7 +2266,7 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   if (node.mediaType === "text") return null;
   // 抽帧产物是带本地绝对路径的普通图片文件，直接作为 local_file 引用
   // （生成节点 / 提示词理解都可直接读取磁盘）。
-  if (node.origin === "frame_extract" || node.origin === "video_edit") {
+  if (node.origin === "frame_extract" || node.origin === "video_edit" || node.origin === "white_model_still") {
     if (node.mediaType !== "image" || node.finalPath == null) return null;
     return {
       kind: "local_file",

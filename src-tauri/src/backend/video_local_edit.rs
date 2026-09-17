@@ -19,8 +19,13 @@ pub struct SavedVideoEditFrame {
     pub height: u32,
 }
 
-fn save_frame(directory: &Path, image_data_url: &str) -> BackendResult<SavedVideoEditFrame> {
-    let invalid = || BackendError::validation("视频标注帧必须是有效的 PNG 图片。", json!({}));
+fn save_frame(
+    directory: &Path,
+    prefix: &str,
+    image_data_url: &str,
+    invalid_message: &str,
+) -> BackendResult<SavedVideoEditFrame> {
+    let invalid = || BackendError::validation(invalid_message, json!({}));
     let encoded = image_data_url
         .strip_prefix("data:image/png;base64,")
         .ok_or_else(invalid)?;
@@ -32,7 +37,7 @@ fn save_frame(directory: &Path, image_data_url: &str) -> BackendResult<SavedVide
         .decode()
         .map_err(|_| invalid())?;
     fs::create_dir_all(directory)?;
-    let path = directory.join(format!("video-edit-{}.png", Uuid::new_v4()));
+    let path = directory.join(format!("{prefix}-{}.png", Uuid::new_v4()));
     fs::write(&path, bytes)?;
     Ok(SavedVideoEditFrame {
         path: path.to_string_lossy().into_owned(),
@@ -52,13 +57,46 @@ pub async fn save_video_edit_frame(
         .app_local_data_dir()
         .map_err(|error| BackendError::from(error).payload())?
         .join("video-edit-frames");
-    tauri::async_runtime::spawn_blocking(move || save_frame(&directory, &image_data_url))
-        .await
+    tauri::async_runtime::spawn_blocking(move || {
+        save_frame(
+            &directory,
+            "video-edit",
+            &image_data_url,
+            "视频标注帧必须是有效的 PNG 图片。",
+        )
+    })
+    .await
         .map_err(|error| {
             BackendError::protocol("保存视频标注帧失败。", json!({"source": error.to_string()}))
                 .payload()
         })?
         .map_err(|error| error.payload())
+}
+
+/// 导演台机位截图：站位图只保存为本地 PNG，不把像素写进画布存档。
+#[tauri::command]
+pub async fn save_white_model_still(
+    app: tauri::AppHandle,
+    image_data_url: String,
+) -> Result<SavedVideoEditFrame, BackendErrorPayload> {
+    let directory = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|error| BackendError::from(error).payload())?
+        .join("white-model-stills");
+    tauri::async_runtime::spawn_blocking(move || {
+        save_frame(
+            &directory,
+            "still",
+            &image_data_url,
+            "站位图必须是有效的 PNG 图片。",
+        )
+    })
+    .await
+    .map_err(|error| {
+        BackendError::protocol("保存站位图失败。", json!({"source": error.to_string()})).payload()
+    })?
+    .map_err(|error| error.payload())
 }
 
 #[cfg(test)]
@@ -73,11 +111,25 @@ mod tests {
             .write_to(&mut png, image::ImageFormat::Png)
             .unwrap();
         let data = format!("data:image/png;base64,{}", STANDARD.encode(png.get_ref()));
-        let first = save_frame(directory.path(), &data).unwrap();
-        let second = save_frame(directory.path(), &data).unwrap();
+        let first = save_frame(
+            directory.path(),
+            "video-edit",
+            &data,
+            "视频标注帧必须是有效的 PNG 图片。",
+        )
+        .unwrap();
+        let second = save_frame(
+            directory.path(),
+            "still",
+            &data,
+            "站位图必须是有效的 PNG 图片。",
+        )
+        .unwrap();
         assert_eq!((first.width, first.height), (320, 240));
         assert_ne!(first.path, second.path);
-        assert_eq!(fs::read(first.path).unwrap(), *png.get_ref());
+        assert!(first.path.contains("video-edit-"));
+        assert!(second.path.contains("still-"));
+        assert_eq!(fs::read(&first.path).unwrap(), *png.get_ref());
     }
 
     #[test]
@@ -88,7 +140,13 @@ mod tests {
             "data:image/png;base64,invalid",
             "data:image/png;base64,iVBORw0KGgo=",
         ] {
-            assert!(save_frame(directory.path(), data).is_err());
+            assert!(save_frame(
+                directory.path(),
+                "video-edit",
+                data,
+                "视频标注帧必须是有效的 PNG 图片。"
+            )
+            .is_err());
         }
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }

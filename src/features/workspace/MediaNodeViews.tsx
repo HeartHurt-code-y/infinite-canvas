@@ -303,6 +303,9 @@ export function CanvasGenNode({
             (input) => input.kind === "image" || input.kind === "video",
           )}
           onChange={(config) => onImageConfigChange(node.key, config)}
+          onOpenWhiteModelStudio={
+            onOpenWhiteModelStudio ? () => onOpenWhiteModelStudio(node.key) : undefined
+          }
         />
       )}
 
@@ -2068,7 +2071,9 @@ export function CanvasOutputNode({
         ? "网络爆款视频下载 · 本地结果"
         : node.origin === "white_model"
           ? "Blender 白模动画 · 本地结果"
-          : node.origin === "green_screen"
+          : node.origin === "white_model_still"
+            ? "白模站位图 · 本地结果"
+            : node.origin === "green_screen"
             ? "绿幕流程 · 本地视频"
             : node.origin === "video_edit"
               ? "视频局部编辑 · 标注参考帧"

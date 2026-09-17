@@ -19,6 +19,7 @@ import {
   type WhiteModelScenePlan,
   type WhiteModelVector,
 } from "../../lib/whiteModelScene";
+import { dummyNumbers, isPanoramaAspect } from "../../lib/whiteModelBlocking";
 import type { PlaybackClock } from "./whiteModelPlayback";
 
 export type WhiteModelViewMode = "director" | "lens";
@@ -71,6 +72,8 @@ interface ActorVisual {
   bones: THREE.Mesh[];
   ring: THREE.Mesh;
   yawHandle: THREE.Mesh;
+  label: THREE.Sprite | null;
+  dummyNumber: number | null;
   material: THREE.MeshStandardMaterial;
   path: THREE.Line;
   pathKeyframes: WhiteModelObject["keyframes"] | null;
@@ -88,6 +91,46 @@ function toVector3(value: WhiteModelVector): THREE.Vector3 {
 
 function fromVector3(value: THREE.Vector3): WhiteModelVector {
   return [value.x, value.y, value.z];
+}
+
+function createNumberSprite(value: number): THREE.Sprite {
+  const canvas = document.createElement("canvas");
+  canvas.width = 128;
+  canvas.height = 128;
+  const context = canvas.getContext("2d");
+  if (context) {
+    context.clearRect(0, 0, 128, 128);
+    context.font = "bold 92px system-ui, sans-serif";
+    context.textAlign = "center";
+    context.textBaseline = "middle";
+    context.lineJoin = "round";
+    context.lineWidth = 12;
+    context.strokeStyle = "rgba(0, 0, 0, 0.78)";
+    context.fillStyle = "#e23a28";
+    context.strokeText(String(value), 64, 72);
+    context.fillText(String(value), 64, 72);
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  const sprite = new THREE.Sprite(
+    new THREE.SpriteMaterial({
+      map: texture,
+      transparent: true,
+      depthTest: false,
+      sizeAttenuation: true,
+    }),
+  );
+  sprite.scale.set(0.46, 0.46, 0.46);
+  sprite.renderOrder = 4;
+  sprite.userData = { dummyNumber: value };
+  return sprite;
+}
+
+function disposeSprite(sprite: THREE.Sprite | null): void {
+  if (!sprite) return;
+  const material = sprite.material;
+  material.map?.dispose();
+  material.dispose();
 }
 
 /**
@@ -109,6 +152,15 @@ export class WhiteModelViewportController {
   private readonly targetMarker: THREE.Mesh;
   private readonly aimLine: THREE.Line;
   private readonly actors = new Map<string, ActorVisual>();
+  private readonly ground: THREE.Mesh;
+  private readonly solidGroundMaterial: THREE.MeshStandardMaterial;
+  private readonly shadowGroundMaterial: THREE.ShadowMaterial;
+  private readonly defaultBackground: THREE.Color;
+  private readonly backdrop: THREE.Mesh;
+  private environmentSrc: string | null = null;
+  private environmentTexture: THREE.Texture | null = null;
+  private environmentLoad = 0;
+  private showDummyLabels = false;
   private plan: WhiteModelScenePlan | null = null;
   private view: WhiteModelViewMode = "director";
   private selected: string | null = null;
@@ -128,7 +180,8 @@ export class WhiteModelViewportController {
     this.renderer.setPixelRatio(Math.min(2, window.devicePixelRatio || 1));
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFSoftShadowMap;
-    this.scene.background = new THREE.Color().setRGB(0.055, 0.055, 0.055, LINEAR);
+    this.defaultBackground = new THREE.Color().setRGB(0.055, 0.055, 0.055, LINEAR);
+    this.scene.background = this.defaultBackground;
 
     this.directorCamera = new THREE.PerspectiveCamera(45, 1, 0.05, 500);
     this.directorCamera.position.set(9, -11, 6.5);
@@ -166,16 +219,28 @@ export class WhiteModelViewportController {
     fill.position.set(-8, 6, 5);
     this.scene.add(hemisphere, sun, fill, new THREE.AmbientLight(0xffffff, 0.15));
 
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(240, 240),
-      new THREE.MeshStandardMaterial({
-        color: new THREE.Color().setRGB(0.16, 0.16, 0.16, LINEAR),
-        roughness: 1,
-      }),
+    this.solidGroundMaterial = new THREE.MeshStandardMaterial({
+      color: new THREE.Color().setRGB(0.16, 0.16, 0.16, LINEAR),
+      roughness: 1,
+    });
+    this.shadowGroundMaterial = new THREE.ShadowMaterial({
+      color: 0x000000,
+      opacity: 0.38,
+      transparent: true,
+    });
+    this.ground = new THREE.Mesh(new THREE.PlaneGeometry(240, 240), this.solidGroundMaterial);
+    this.ground.position.z = -0.015;
+    this.ground.receiveShadow = true;
+    this.scene.add(this.ground);
+
+    this.backdrop = new THREE.Mesh(
+      new THREE.PlaneGeometry(1, 1),
+      new THREE.MeshBasicMaterial({ toneMapped: false }),
     );
-    ground.position.z = -0.015;
-    ground.receiveShadow = true;
-    this.scene.add(ground);
+    this.backdrop.rotation.x = Math.PI / 2;
+    this.backdrop.position.set(0, 8, 2.2);
+    this.backdrop.visible = false;
+    this.scene.add(this.backdrop);
 
     const grid = new THREE.GridHelper(40, 40, 0x5a5a5a, 0x333333);
     grid.rotation.x = Math.PI / 2;
@@ -249,6 +314,11 @@ export class WhiteModelViewportController {
         this.actors.delete(id);
       }
     }
+    const numbers = this.showDummyLabels ? dummyNumbers(plan.objects) : new Map<string, number>();
+    for (const actor of plan.objects) {
+      const visual = this.actors.get(actor.id);
+      if (visual) this.syncDummyLabel(visual, numbers.get(actor.id) ?? null);
+    }
     if (
       !previous ||
       previous.camera.lens !== plan.camera.lens ||
@@ -262,6 +332,157 @@ export class WhiteModelViewportController {
       this.rebuildFrustum(aspect);
     }
     this.requestRender();
+  }
+
+  setShowDummyLabels(show: boolean): void {
+    if (this.showDummyLabels === show) return;
+    this.showDummyLabels = show;
+    if (this.plan) this.setPlan(this.plan);
+    else this.requestRender();
+  }
+
+  setEnvironmentSrc(src: string | null): void {
+    if (this.environmentSrc === src) return;
+    this.environmentSrc = src;
+    this.clearEnvironment();
+    if (!src) {
+      this.requestRender();
+      return;
+    }
+    const loadId = ++this.environmentLoad;
+    const loader = new THREE.TextureLoader();
+    loader.setCrossOrigin("anonymous");
+    loader.load(
+      src,
+      (texture) => {
+        if (this.disposed || loadId !== this.environmentLoad) {
+          texture.dispose();
+          return;
+        }
+        texture.colorSpace = THREE.SRGBColorSpace;
+        const image = texture.image as { width?: number; height?: number };
+        const width = Number(image?.width) || 2;
+        const height = Number(image?.height) || 1;
+        this.environmentTexture = texture;
+        this.ground.material = this.shadowGroundMaterial;
+        if (isPanoramaAspect(width, height)) {
+          texture.mapping = THREE.EquirectangularReflectionMapping;
+          this.scene.background = texture;
+          this.backdrop.visible = false;
+        } else {
+          this.scene.background = this.defaultBackground;
+          const material = this.backdrop.material as THREE.MeshBasicMaterial;
+          material.map?.dispose();
+          material.map = texture;
+          material.needsUpdate = true;
+          const worldHeight = 7.2;
+          this.backdrop.scale.set(worldHeight * (width / Math.max(1, height)), worldHeight, 1);
+          this.backdrop.visible = true;
+        }
+        this.requestRender();
+      },
+      undefined,
+      () => {
+        if (loadId === this.environmentLoad) this.requestRender();
+      },
+    );
+  }
+
+  /**
+   * 按方案画幅从机位相机截一张 PNG。辅助线、选中环和路径不进入站位图，假人编号会留下。
+   */
+  captureStill(): string | null {
+    if (this.disposed || !this.plan) return null;
+    const width = Math.max(16, Math.round(this.plan.width));
+    const height = Math.max(16, Math.round(this.plan.height));
+    this.applyTime(this.clock.get());
+    this.guides.visible = false;
+    for (const visual of this.actors.values()) {
+      visual.ring.visible = false;
+      visual.yawHandle.visible = false;
+      visual.path.visible = false;
+      visual.waypointGroup.visible = false;
+      if (visual.label) visual.label.visible = visual.dummyNumber != null;
+    }
+    const previousAspect = this.shotCamera.aspect;
+    this.shotCamera.aspect = width / height;
+    this.shotCamera.updateProjectionMatrix();
+    const target = new THREE.WebGLRenderTarget(width, height, {
+      colorSpace: THREE.SRGBColorSpace,
+    });
+    const previous = this.renderer.getRenderTarget();
+    this.renderer.setRenderTarget(target);
+    this.renderer.setViewport(0, 0, width, height);
+    this.renderer.setScissorTest(false);
+    this.renderer.setClearColor(0x000000, 1);
+    this.renderer.clear();
+    this.renderer.render(this.scene, this.shotCamera);
+    const pixels = new Uint8Array(width * height * 4);
+    this.renderer.readRenderTargetPixels(target, 0, 0, width, height, pixels);
+    this.renderer.setRenderTarget(previous);
+    target.dispose();
+    this.shotCamera.aspect = previousAspect;
+    this.shotCamera.updateProjectionMatrix();
+    const canvas = document.createElement("canvas");
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!context) {
+      this.requestRender();
+      return null;
+    }
+    const image = context.createImageData(width, height);
+    const row = width * 4;
+    for (let y = 0; y < height; y += 1) {
+      image.data.set(pixels.subarray((height - 1 - y) * row, (height - y) * row), y * row);
+    }
+    context.putImageData(image, 0, 0);
+    const dataUrl = canvas.toDataURL("image/png");
+    this.requestRender();
+    return dataUrl.startsWith("data:image/png") ? dataUrl : null;
+  }
+
+  private clearEnvironment(): void {
+    this.environmentLoad += 1;
+    if (this.environmentTexture && this.scene.background === this.environmentTexture) {
+      this.scene.background = this.defaultBackground;
+    } else {
+      this.scene.background = this.defaultBackground;
+    }
+    const backdropMaterial = this.backdrop.material as THREE.MeshBasicMaterial;
+    if (backdropMaterial.map && backdropMaterial.map !== this.environmentTexture) {
+      backdropMaterial.map.dispose();
+    }
+    backdropMaterial.map = null;
+    this.backdrop.visible = false;
+    this.environmentTexture?.dispose();
+    this.environmentTexture = null;
+    this.ground.material = this.solidGroundMaterial;
+  }
+
+  private syncDummyLabel(visual: ActorVisual, number: number | null): void {
+    if (number == null) {
+      if (visual.label) {
+        visual.group.remove(visual.label);
+        disposeSprite(visual.label);
+        visual.label = null;
+      }
+      visual.dummyNumber = null;
+      return;
+    }
+    if (visual.dummyNumber === number && visual.label) {
+      visual.label.position.set(0, 0, visual.actor.size * 1.14);
+      visual.label.visible = true;
+      return;
+    }
+    if (visual.label) {
+      visual.group.remove(visual.label);
+      disposeSprite(visual.label);
+    }
+    visual.label = createNumberSprite(number);
+    visual.label.position.set(0, 0, visual.actor.size * 1.14);
+    visual.group.add(visual.label);
+    visual.dummyNumber = number;
   }
 
   /** 导演视角回到能看全场的默认位置。 */
@@ -287,6 +508,7 @@ export class WhiteModelViewportController {
     this.controls.dispose();
     for (const visual of this.actors.values()) this.destroyActorVisual(visual);
     this.actors.clear();
+    this.clearEnvironment();
     this.renderer.dispose();
   }
 
@@ -372,6 +594,8 @@ export class WhiteModelViewportController {
       bones,
       ring,
       yawHandle,
+      label: null,
+      dummyNumber: null,
       material,
       path,
       pathKeyframes: null,
@@ -388,6 +612,10 @@ export class WhiteModelViewportController {
     (visual.path.material as THREE.Material).dispose();
     (visual.ring.material as THREE.Material).dispose();
     (visual.yawHandle.material as THREE.Material).dispose();
+    if (visual.label) {
+      visual.group.remove(visual.label);
+      disposeSprite(visual.label);
+    }
     const waypointMaterial = visual.waypoints[0]?.material as THREE.Material | undefined;
     waypointMaterial?.dispose();
   }

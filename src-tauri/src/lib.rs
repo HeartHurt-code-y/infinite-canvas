@@ -117,6 +117,7 @@ pub fn run() {
             commands::fetch_commerce_sources,
             commands::save_reverse_video_evidence,
             backend::video_local_edit::save_video_edit_frame,
+            backend::video_local_edit::save_white_model_still,
             backend::video_edit_source::prepare_video_edit_source,
             backend::video_edit_source::release_video_edit_source,
             commands::get_reverse_video_learning,

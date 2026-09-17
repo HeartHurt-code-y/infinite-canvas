@@ -67,6 +67,21 @@
   background: var(--color-chrome);
   position: relative;
 }
+.white-model-studio__stage--still {
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+.white-model-studio__replace {
+  position: absolute;
+  top: var(--space-sm);
+  right: var(--space-sm);
+  z-index: 3;
+  min-height: var(--size-control);
+  padding-inline: var(--space-sm);
+  border-radius: 999px;
+  color: var(--color-chrome-ink);
+  background: color-mix(in srgb, var(--color-chrome-2) 88%, transparent);
+  box-shadow: var(--shadow-raised);
+}
 .white-model-studio__hud {
   margin: 0;
   padding: var(--space-xs) var(--space-md);

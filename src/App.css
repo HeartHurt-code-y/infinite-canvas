@@ -5916,6 +5916,28 @@ svg[data-spin="true"] {
   gap: var(--space-3xs);
 }
 
+.canvas-gen-node__blocking {
+  display: flex;
+  grid-column: 1 / -1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+
+.canvas-gen-node__check {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  min-height: var(--size-control);
+  color: var(--color-text-2);
+  font-size: var(--text-xs);
+}
+
+.canvas-gen-node__studio {
+  min-height: var(--size-control);
+  padding-inline: var(--space-sm);
+}
+
 .canvas-gen-node__field--provider {
   grid-column: span 3;
 }

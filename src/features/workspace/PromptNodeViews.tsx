@@ -39,6 +39,7 @@ import { isVideoSourceUrl } from "./mediaPreview";
 import { WhiteModelControlSection } from "./WhiteModelControlSection";
 import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
+import { preferredPanoramaParameters } from "../../lib/whiteModelBlocking";
 
 import type {
   AssetKind,
@@ -1410,11 +1411,13 @@ export function ImageNodeSettings({
   providerCatalog,
   hasMediaInputs,
   onChange,
+  onOpenWhiteModelStudio,
 }: {
   readonly config: ImageNodeConfig;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly hasMediaInputs: boolean;
   readonly onChange: (config: ImageNodeConfig) => void;
+  readonly onOpenWhiteModelStudio?: (() => void) | undefined;
 }) {
   const operation: GenerationOperation = hasMediaInputs ? "image_to_image" : "text_to_image";
   const availableProviders = providerCatalog.filter(
@@ -1469,6 +1472,31 @@ export function ImageNodeSettings({
               : "连接参考图片或视频后自动切换"}
           </small>
         </span>
+      </div>
+
+      <div className="canvas-gen-node__blocking">
+        <label className="canvas-gen-node__check">
+          <input
+            type="checkbox"
+            checked={Boolean(config.panoramaEnabled)}
+            onChange={(event) => {
+              const enabled = event.target.checked;
+              onChange({
+                ...config,
+                panoramaEnabled: enabled,
+                parameterValues: enabled
+                  ? { ...config.parameterValues, ...preferredPanoramaParameters(parameterCapabilities) }
+                  : config.parameterValues,
+              });
+            }}
+          />
+          <span>全景图</span>
+        </label>
+        {onOpenWhiteModelStudio ? (
+          <button type="button" className="canvas-gen-node__studio" onClick={onOpenWhiteModelStudio}>
+            打开白模导演台
+          </button>
+        ) : null}
       </div>
 
       <label className="canvas-gen-node__field canvas-gen-node__field--provider">

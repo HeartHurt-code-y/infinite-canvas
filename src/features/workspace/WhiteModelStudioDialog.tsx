@@ -29,9 +29,21 @@ import {
 } from "../../lib/whiteModelStudio";
 import { WhiteModelInspector, type MotionCaptureState } from "./WhiteModelInspector";
 import { WhiteModelTimeline } from "./WhiteModelTimeline";
-import { WhiteModelViewport } from "./WhiteModelViewport";
+import { WhiteModelViewport, type WhiteModelViewportHandle } from "./WhiteModelViewport";
 import { PlaybackClock } from "./whiteModelPlayback";
 import type { WhiteModelViewMode } from "./whiteModelViewportController";
+import {
+  blockingAssignmentsFromDraft,
+  blockingStillName,
+  environmentPreviewSrc,
+  nextEnvironmentBinding,
+  pruneWhiteModelCharacterBindings,
+  saveWhiteModelStill,
+  upsertCharacterBinding,
+  whiteModelBlockingSignature,
+  type WhiteModelBlockingCapture,
+  type WhiteModelStudioMediaInput,
+} from "../../lib/whiteModelBlocking";
 import "./WhiteModelStudioDialog.css";
 
 export interface WhiteModelStudioDialogProps {
@@ -39,6 +51,9 @@ export interface WhiteModelStudioDialogProps {
   readonly onDraftChange: (draft: WhiteModelStudioDraft) => void;
   readonly onClose: () => void;
   readonly onUse: (job: BlenderRenderJob) => Promise<void> | void;
+  readonly purpose?: "video" | "blocking";
+  readonly imageInputs?: readonly WhiteModelStudioMediaInput[];
+  readonly onExportBlocking?: (capture: WhiteModelBlockingCapture) => Promise<void> | void;
 }
 
 const COMMIT_DELAY_MS = 120;
@@ -69,10 +84,15 @@ export function WhiteModelStudioDialog({
   onDraftChange,
   onClose,
   onUse,
+  purpose = "video",
+  imageInputs = [],
+  onExportBlocking,
 }: WhiteModelStudioDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);
+  const viewportRef = useRef<WhiteModelViewportHandle>(null);
   const titleId = useId();
   const formId = useId();
+  const blocking = purpose === "blocking";
 
   // ---- 本地草稿：交互即时更新，节流写回画布，保证拖拽流畅且撤销栈不被刷爆 ----
   const initial = useMemo(() => normalizeWhiteModelStudioDraft(draft), [draft]);
@@ -153,15 +173,16 @@ export function WhiteModelStudioDialog({
   const engineRequestId = useRef(0);
 
   const loadedJob = job?.jobId === local.jobId ? job : null;
-  const restoring = Boolean(local.jobId) && loadedJob == null;
-  const rendering = starting || restoring || activeJob(loadedJob);
+  const restoring = !blocking && Boolean(local.jobId) && loadedJob == null;
+  const rendering = !blocking && (starting || restoring || activeJob(loadedJob));
   const locked = rendering || using;
   const signatureMatches = local.jobInputSignature === whiteModelRenderSignature(local);
-  const finished = loadedJob?.status === "succeeded" && Boolean(loadedJob.videoPath);
+  const finished = !blocking && loadedJob?.status === "succeeded" && Boolean(loadedJob.videoPath);
   const sceneIssue = local.mode === "create" ? whiteModelPlanIssue(local.plan) : null;
   const engineReady = engine?.available && enginePath === local.executablePath.trim();
   const selectedActor =
     local.plan.objects.find((actor) => actor.id === selectedActorId) ?? null;
+  const environmentSrc = environmentPreviewSrc(local.environment ?? null, imageInputs);
 
   useEffect(() => {
     const dialog = dialogRef.current;
@@ -183,6 +204,7 @@ export function WhiteModelStudioDialog({
   }, []);
 
   useEffect(() => {
+    if (blocking) return;
     let alive = true;
     void poseCaptureAvailable().then((available) => {
       if (alive) setCaptureAvailable(available);
@@ -191,9 +213,10 @@ export function WhiteModelStudioDialog({
       alive = false;
       captureAbort.current?.abort();
     };
-  }, []);
+  }, [blocking]);
 
   useEffect(() => {
+    if (blocking) return;
     let alive = true;
     const requestId = ++engineRequestId.current;
     const path = initial.executablePath;
@@ -215,10 +238,10 @@ export function WhiteModelStudioDialog({
     return () => {
       alive = false;
     };
-  }, [initial.executablePath]);
+  }, [blocking, initial.executablePath]);
 
   useEffect(() => {
-    if (!local.jobId) return;
+    if (blocking || !local.jobId) return;
     let alive = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
     const jobId = local.jobId;
@@ -246,12 +269,20 @@ export function WhiteModelStudioDialog({
       alive = false;
       if (timer) clearTimeout(timer);
     };
-  }, [local.jobId, pollVersion]);
+  }, [blocking, local.jobId, pollVersion]);
 
   // ---- 编辑辅助 ----
   const updateDraft = (patch: Partial<WhiteModelStudioDraft>) =>
     commit({ ...localRef.current, ...patch });
-  const updatePlan = (plan: WhiteModelScenePlan) => commit({ ...localRef.current, plan });
+  const updatePlan = (plan: WhiteModelScenePlan) =>
+    commit({
+      ...localRef.current,
+      plan,
+      characterBindings: pruneWhiteModelCharacterBindings(
+        localRef.current.characterBindings,
+        plan.objects,
+      ),
+    });
   const patchPlan = (mutate: (plan: WhiteModelScenePlan) => WhiteModelScenePlan) =>
     updatePlan(mutate(localRef.current.plan));
 
@@ -534,6 +565,45 @@ export function WhiteModelStudioDialog({
       setUsing(false);
     }
   };
+  const exportBlockingStill = async () => {
+    if (!blocking || using || sceneIssue) return;
+    clock.pause();
+    const dataUrl = viewportRef.current?.captureStill() ?? null;
+    if (!dataUrl) {
+      setError("3D 预览尚未就绪，请稍候再导出站位图。");
+      return;
+    }
+    flush();
+    setUsing(true);
+    setError(null);
+    try {
+      const saved = await saveWhiteModelStill(dataUrl);
+      const snapshot = localRef.current;
+      const name = blockingStillName();
+      commitNow({
+        ...snapshot,
+        blockingImagePath: saved.path,
+        blockingImageSignature: whiteModelBlockingSignature(snapshot),
+      });
+      await onExportBlocking?.({
+        path: saved.path,
+        width: saved.width,
+        height: saved.height,
+        name,
+        environment: snapshot.environment ?? null,
+        assignments: blockingAssignmentsFromDraft(snapshot),
+      });
+    } catch (cause) {
+      setError(errorMessage(cause));
+    } finally {
+      setUsing(false);
+    }
+  };
+  const replaceEnvironment = () =>
+    commitNow({
+      ...localRef.current,
+      environment: nextEnvironmentBinding(localRef.current.environment ?? null, imageInputs),
+    });
   const close = () => {
     if (starting || using) return;
     clock.pause();
@@ -559,7 +629,7 @@ export function WhiteModelStudioDialog({
         if (event.key === "Escape") {
           event.preventDefault();
           close();
-        } else if (event.key === " " && !editing && local.mode === "create") {
+        } else if (event.key === " " && !editing && local.mode === "create" && !blocking) {
           event.preventDefault();
           clock.toggle();
         } else if (event.key === "Tab") {
@@ -589,8 +659,12 @@ export function WhiteModelStudioDialog({
     >
       <header className="white-model-studio__header">
         <div>
-          <h2 id={titleId}>白模导演台</h2>
-          <p>像走戏一样摆位、取景、运镜，实时预览即渲染结果；成片用于专业级白模控制。</p>
+          <h2 id={titleId}>{blocking ? "白模导演台 · 站位" : "白模导演台"}</h2>
+          <p>
+            {blocking
+              ? "把全景环境铺进视口，摆好编号假人，导出站位图后自动写好多参考提示词。"
+              : "像走戏一样摆位、取景、运镜，实时预览即渲染结果；成片用于专业级白模控制。"}
+          </p>
         </div>
         {local.mode === "create" ? (
           <div className="white-model-studio__views" role="group" aria-label="视角">
@@ -622,35 +696,55 @@ export function WhiteModelStudioDialog({
         </button>
       </header>
       <div className="white-model-studio__layout">
-        <section className="white-model-studio__stage" aria-label="导演台预览">
+        <section
+          className={`white-model-studio__stage${blocking ? " white-model-studio__stage--still" : ""}`}
+          aria-label="导演台预览"
+        >
           {local.mode === "create" ? (
             <>
               <WhiteModelViewport
+                ref={viewportRef}
                 plan={local.plan}
                 clock={clock}
                 view={view}
                 selectedActorId={selectedActorId}
                 resetSignal={resetSignal}
+                environmentSrc={environmentSrc}
+                showDummyLabels={blocking}
                 onSelectActor={setSelectedActorId}
                 onActorMove={handleActorMove}
                 onWaypointMove={handleWaypointMove}
                 onActorRotate={handleActorRotate}
                 onCameraChange={handleCameraChange}
               />
+              {blocking ? (
+                <button
+                  type="button"
+                  className="white-model-studio__replace"
+                  disabled={locked || imageInputs.length === 0}
+                  onClick={replaceEnvironment}
+                >
+                  ↑ 替换
+                </button>
+              ) : null}
               <p className="white-model-studio__hud">
                 {view === "lens"
-                  ? "机位视角 · 拖动角色走位 · 左键环绕 / 右键摇镜 / Shift 平移 / 滚轮推拉 · 空格播放"
+                  ? blocking
+                    ? "机位视角 · 拖动假人站位 · 左键环绕 / 右键摇镜 / Shift 平移 / 滚轮推拉"
+                    : "机位视角 · 拖动角色走位 · 左键环绕 / 右键摇镜 / Shift 平移 / 滚轮推拉 · 空格播放"
                   : "导演视角 · 拖动角色或路径点走位 · 拖动摄影机改机位 · 空白处拖动旋转视角 · 双击复位"}
               </p>
-              <WhiteModelTimeline
-                clock={clock}
-                plan={local.plan}
-                selectedActorId={selectedActorId}
-                disabled={locked}
-                onAddActorKeyframe={addActorKeyframe}
-                onAddCameraKeyframe={addCameraKeyframe}
-                onDeleteKeyframes={deleteKeyframes}
-              />
+              {blocking ? null : (
+                <WhiteModelTimeline
+                  clock={clock}
+                  plan={local.plan}
+                  selectedActorId={selectedActorId}
+                  disabled={locked}
+                  onAddActorKeyframe={addActorKeyframe}
+                  onAddCameraKeyframe={addCameraKeyframe}
+                  onDeleteKeyframes={deleteKeyframes}
+                />
+              )}
               {sceneIssue ? (
                 <p className="white-model-studio__error" role="alert">
                   {sceneIssue}
@@ -678,7 +772,8 @@ export function WhiteModelStudioDialog({
             className="white-model-studio__settings"
             onSubmit={(event) => {
               event.preventDefault();
-              void startRender();
+              if (blocking) void exportBlockingStill();
+              else void startRender();
             }}
           >
             {local.mode === "create" ? (
@@ -691,6 +786,20 @@ export function WhiteModelStudioDialog({
                 onPlanChange={updatePlan}
                 capture={capture}
                 captureAvailable={captureAvailable}
+                purpose={purpose}
+                imageInputs={imageInputs}
+                environment={local.environment ?? null}
+                onEnvironmentChange={(environment) => updateDraft({ environment })}
+                characterBindings={local.characterBindings ?? []}
+                onCharacterBindingChange={(actorId, reference) =>
+                  updateDraft({
+                    characterBindings: upsertCharacterBinding(
+                      localRef.current.characterBindings,
+                      actorId,
+                      reference,
+                    ),
+                  })
+                }
                 onCaptureMotion={(actorId) => {
                   void captureMotion(actorId);
                 }}
@@ -747,6 +856,7 @@ export function WhiteModelStudioDialog({
                 </div>
               </fieldset>
             )}
+            {blocking ? null : (
             <details className="white-model-studio__advanced white-model-studio__section">
               <summary>场景来源与渲染引擎</summary>
               <div className="white-model-studio__advanced-body">
@@ -882,7 +992,15 @@ export function WhiteModelStudioDialog({
                 </details>
               </div>
             </details>
+            )}
           </form>
+          {blocking ? (
+            error ? (
+              <p role="alert" className="white-model-studio__error">
+                {error}
+              </p>
+            ) : null
+          ) : (
           <section className="white-model-studio__output" aria-label="白模渲染结果">
             <p className="white-model-studio__hint" role="status">
               {enginePath !== local.executablePath.trim() && engine
@@ -991,35 +1109,56 @@ export function WhiteModelStudioDialog({
               </p>
             ) : null}
           </section>
+          )}
         </aside>
       </div>
       <footer className="white-model-studio__footer">
-        <p>
-          预览与成片共用同一份逐帧数据；应用已内置 Blender，无需另行安装或下载。使用视频后可继续配置角色映射。
-        </p>
-        <div className="white-model-studio__actions">
-          <button
-            type="submit"
-            form={formId}
-            disabled={locked || !engineReady || Boolean(sceneIssue)}
-          >
-            {starting
-              ? "正在创建任务…"
-              : finished || loadedJob?.status === "failed" || loadedJob?.status === "cancelled"
-                ? "重新渲染白模"
-                : "渲染白模视频"}
-          </button>
-          <button
-            type="button"
-            className="white-model-studio__primary"
-            disabled={!finished || !signatureMatches || locked}
-            onClick={() => {
-              void handleUseVideo();
-            }}
-          >
-            {using ? "正在加入画布…" : "使用白模视频"}
-          </button>
-        </div>
+        {blocking ? (
+          <>
+            <p>
+              导出站位图后，会把场景图、站位图和角色参考连回当前图片节点，并按假人编号写好多参考提示词。
+            </p>
+            <div className="white-model-studio__actions">
+              <button
+                type="submit"
+                form={formId}
+                className="white-model-studio__primary"
+                disabled={locked || Boolean(sceneIssue)}
+              >
+                {using ? "正在导出…" : "导出站位图"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <>
+            <p>
+              预览与成片共用同一份逐帧数据；应用已内置 Blender，无需另行安装或下载。使用视频后可继续配置角色映射。
+            </p>
+            <div className="white-model-studio__actions">
+              <button
+                type="submit"
+                form={formId}
+                disabled={locked || !engineReady || Boolean(sceneIssue)}
+              >
+                {starting
+                  ? "正在创建任务…"
+                  : finished || loadedJob?.status === "failed" || loadedJob?.status === "cancelled"
+                    ? "重新渲染白模"
+                    : "渲染白模视频"}
+              </button>
+              <button
+                type="button"
+                className="white-model-studio__primary"
+                disabled={!finished || !signatureMatches || locked}
+                onClick={() => {
+                  void handleUseVideo();
+                }}
+              >
+                {using ? "正在加入画布…" : "使用白模视频"}
+              </button>
+            </div>
+          </>
+        )}
       </footer>
     </dialog>,
     document.body,

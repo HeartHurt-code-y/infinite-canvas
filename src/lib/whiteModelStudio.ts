@@ -1,5 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
+import type { WhiteModelBinding } from "./whiteModelControl";
 import {
   bakeWhiteModelScene,
   isWhiteModelScenePlanV1,
@@ -22,6 +23,11 @@ export type {
   WhiteModelVector,
 } from "./whiteModelScene";
 
+export interface WhiteModelCharacterBinding {
+  readonly actorId: string;
+  readonly reference: WhiteModelBinding | null;
+}
+
 export interface WhiteModelStudioDraft {
   executablePath: string;
   sourceBlendPath: string;
@@ -29,6 +35,12 @@ export interface WhiteModelStudioDraft {
   plan: WhiteModelScenePlan;
   jobId: string | null;
   jobInputSignature?: string;
+  /** 全景/场景底图，只影响导演台预览与站位图，不参与 Blender 成片签名。 */
+  environment?: WhiteModelBinding | null;
+  /** 假人 → 角色参考图；导出多参考提示词时按当前假人编号展开。 */
+  characterBindings?: readonly WhiteModelCharacterBinding[];
+  blockingImagePath?: string | null;
+  blockingImageSignature?: string;
 }
 export interface BlenderRenderRequest {
   executablePath: string | null;

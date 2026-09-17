@@ -23,7 +23,9 @@ import {
   type WhiteModelScenePlan,
   type WhiteModelVector,
 } from "../../lib/whiteModelScene";
-import { createWhiteModelObject } from "../../lib/whiteModelStudio";
+import { createWhiteModelBlockingObject, dummyNumbers, type WhiteModelStudioMediaInput } from "../../lib/whiteModelBlocking";
+import type { WhiteModelBinding } from "../../lib/whiteModelControl";
+import { createWhiteModelObject, type WhiteModelCharacterBinding } from "../../lib/whiteModelStudio";
 import type { PlaybackClock } from "./whiteModelPlayback";
 
 export interface MotionCaptureState {
@@ -43,6 +45,12 @@ export interface WhiteModelInspectorProps {
   readonly captureAvailable: boolean;
   readonly onCaptureMotion: (actorId: string) => void;
   readonly onCancelCapture: () => void;
+  readonly purpose?: "video" | "blocking";
+  readonly imageInputs?: readonly WhiteModelStudioMediaInput[];
+  readonly environment?: WhiteModelBinding | null;
+  readonly onEnvironmentChange?: (binding: WhiteModelBinding | null) => void;
+  readonly characterBindings?: readonly WhiteModelCharacterBinding[];
+  readonly onCharacterBindingChange?: (actorId: string, reference: WhiteModelBinding | null) => void;
 }
 
 function NumberField({
@@ -124,6 +132,7 @@ function VectorFields({
 }
 
 const RATIOS = [
+  { value: "1280:720", label: "16:9 · 高清" },
   { value: "960:540", label: "16:9 · 横屏" },
   { value: "540:960", label: "9:16 · 竖屏" },
   { value: "768:768", label: "1:1 · 方形" },
@@ -142,12 +151,22 @@ export function WhiteModelInspector({
   captureAvailable,
   onCaptureMotion,
   onCancelCapture,
+  purpose = "video",
+  imageInputs = [],
+  environment = null,
+  onEnvironmentChange,
+  characterBindings = [],
+  onCharacterBindingChange,
 }: WhiteModelInspectorProps) {
   const [shotSize, setShotSize] = useState<ShotSize>("medium");
   const [shotAngle, setShotAngle] = useState<ShotAngle>("eye");
   const [shotDirection, setShotDirection] = useState<ShotDirection>("front_left");
   const selected = plan.objects.find((actor) => actor.id === selectedActorId) ?? null;
   const subject = selected ?? plan.objects[0] ?? null;
+  const numbers = dummyNumbers(plan.objects);
+  const characterByActor = new Map(
+    characterBindings.map((binding) => [binding.actorId, binding.reference]),
+  );
   const time = () => clock.get();
 
   const updatePlan = (patch: Partial<WhiteModelScenePlan>) => onPlanChange({ ...plan, ...patch });
@@ -158,7 +177,10 @@ export function WhiteModelInspector({
       objects: plan.objects.map((actor) => (actor.id === id ? { ...actor, ...patch } : actor)),
     });
   const addActor = (shape: WhiteModelObject["shape"]) => {
-    const actor = createWhiteModelObject(plan.objects.length, plan.durationSeconds, shape);
+    const actor =
+      purpose === "blocking" && shape === "person"
+        ? createWhiteModelBlockingObject(dummyNumbers(plan.objects).size)
+        : createWhiteModelObject(plan.objects.length, plan.durationSeconds, shape);
     updatePlan({ objects: [...plan.objects, actor] });
     onSelectActor(actor.id);
   };
@@ -208,6 +230,21 @@ export function WhiteModelInspector({
 
   return (
     <div className="white-model-inspector">
+      {purpose === "blocking" ? (
+        <fieldset disabled={locked} className="white-model-studio__section">
+          <legend>场景环境</legend>
+          <StudioImageSelect
+            label="全景图 / 场景图"
+            placeholder="请选择已连接的全景图或场景图"
+            binding={environment}
+            inputs={imageInputs}
+            onChange={(binding) => onEnvironmentChange?.(binding)}
+          />
+          <p className="white-model-studio__hint">
+            宽画幅图会铺成 360° 天空盒；普通透视底图会立在假人身后。点视口右上角「替换」可轮换。
+          </p>
+        </fieldset>
+      ) : null}
       <fieldset disabled={locked} className="white-model-studio__section">
         <legend>角色</legend>
         <div className="white-model-inspector__chips" role="group" aria-label="角色列表">
@@ -220,13 +257,15 @@ export function WhiteModelInspector({
               onClick={() => onSelectActor(actor.id)}
             >
               <span className="white-model-inspector__swatch" style={{ background: actor.color }} />
-              {actor.name}
+              {purpose === "blocking" && numbers.get(actor.id) != null
+                ? `${numbers.get(actor.id)}号 · ${actor.name}`
+                : actor.name}
             </button>
           ))}
         </div>
         <div className="white-model-studio__actions">
           <button type="button" onClick={() => addActor("person")}>
-            ＋ 人形
+            {purpose === "blocking" ? "＋ 假人" : "＋ 人形"}
           </button>
           <button type="button" onClick={() => addActor("box")}>
             ＋ 几何体
@@ -237,6 +276,11 @@ export function WhiteModelInspector({
             key={selected.id}
             plan={plan}
             actor={selected}
+            dummyNumber={numbers.get(selected.id) ?? null}
+            characterReference={characterByActor.get(selected.id) ?? null}
+            imageInputs={imageInputs}
+            purpose={purpose}
+            onCharacterChange={(reference) => onCharacterBindingChange?.(selected.id, reference)}
             onChange={(patch) => updateActor(selected.id, patch)}
             onRemove={() => removeActor(selected.id)}
             onJump={jump}
@@ -463,26 +507,30 @@ export function WhiteModelInspector({
       <fieldset disabled={locked} className="white-model-studio__section">
         <legend>输出</legend>
         <div className="white-model-studio__row">
-          <NumberField
-            label="片长（秒）"
-            value={plan.durationSeconds}
-            min={1}
-            max={30}
-            step={0.5}
-            onChange={(durationSeconds) => {
-              if (durationSeconds <= 0 || durationSeconds > 30) return;
-              onPlanChange(rescalePlanDuration(plan, durationSeconds));
-              clock.setDuration(durationSeconds);
-            }}
-          />
-          <NumberField
-            label="帧率"
-            value={plan.fps}
-            min={8}
-            max={30}
-            step={1}
-            onChange={(fps) => updatePlan({ fps })}
-          />
+          {purpose === "blocking" ? null : (
+            <>
+              <NumberField
+                label="片长（秒）"
+                value={plan.durationSeconds}
+                min={1}
+                max={30}
+                step={0.5}
+                onChange={(durationSeconds) => {
+                  if (durationSeconds <= 0 || durationSeconds > 30) return;
+                  onPlanChange(rescalePlanDuration(plan, durationSeconds));
+                  clock.setDuration(durationSeconds);
+                }}
+              />
+              <NumberField
+                label="帧率"
+                value={plan.fps}
+                min={8}
+                max={30}
+                step={1}
+                onChange={(fps) => updatePlan({ fps })}
+              />
+            </>
+          )}
           <label className="white-model-studio__field">
             <span>画幅</span>
             <select
@@ -513,6 +561,11 @@ export function WhiteModelInspector({
 function ActorPanel({
   plan,
   actor,
+  dummyNumber,
+  characterReference,
+  imageInputs,
+  purpose = "video",
+  onCharacterChange,
   onChange,
   onRemove,
   onJump,
@@ -524,6 +577,11 @@ function ActorPanel({
 }: {
   readonly plan: WhiteModelScenePlan;
   readonly actor: WhiteModelObject;
+  readonly dummyNumber: number | null;
+  readonly characterReference: WhiteModelBinding | null;
+  readonly imageInputs: readonly WhiteModelStudioMediaInput[];
+  readonly purpose: "video" | "blocking";
+  readonly onCharacterChange: (reference: WhiteModelBinding | null) => void;
   readonly onChange: (patch: Partial<WhiteModelObject>) => void;
   readonly onRemove: () => void;
   readonly onJump: (time: number) => void;
@@ -576,6 +634,15 @@ function ActorPanel({
           onChange={(size) => onChange({ size })}
         />
       </div>
+      {isPerson && purpose === "blocking" ? (
+        <StudioImageSelect
+          label={dummyNumber != null ? `${dummyNumber}号假人角色参考` : "角色参考图"}
+          placeholder="不绑定（仅用站位）"
+          binding={characterReference}
+          inputs={imageInputs}
+          onChange={onCharacterChange}
+        />
+      ) : null}
       <div className="white-model-studio__row">
         <label className="white-model-studio__field">
           <span>朝向</span>
@@ -587,7 +654,7 @@ function ActorPanel({
             <option value="manual">手动（拖动朝向手柄）</option>
           </select>
         </label>
-        {isPerson ? (
+        {isPerson && purpose !== "blocking" ? (
           <label className="white-model-studio__field">
             <span>动作来源</span>
             <select
@@ -625,7 +692,7 @@ function ActorPanel({
           ))}
         </div>
       ) : null}
-      {isPerson ? (
+      {isPerson && purpose !== "blocking" ? (
         <div className="white-model-inspector__group">
           <div className="white-model-studio__actions">
             <button
@@ -765,5 +832,56 @@ function ActorPanel({
         </button>
       </div>
     </div>
+  );
+}
+
+function choiceValue(input: WhiteModelStudioMediaInput): string {
+  return JSON.stringify([input.key, input.target]);
+}
+
+function StudioImageSelect({
+  label,
+  placeholder,
+  binding,
+  inputs,
+  onChange,
+}: {
+  readonly label: string;
+  readonly placeholder: string;
+  readonly binding: WhiteModelBinding | null;
+  readonly inputs: readonly WhiteModelStudioMediaInput[];
+  readonly onChange: (binding: WhiteModelBinding | null) => void;
+}) {
+  const selected =
+    binding == null ? null : inputs.find((input) => input.key === binding.key);
+  const missing = binding != null && selected == null;
+  return (
+    <label className="white-model-studio__field">
+      <span>{label}</span>
+      <select
+        value={missing ? "unavailable" : selected ? choiceValue(selected) : ""}
+        aria-invalid={missing || undefined}
+        onChange={(event) => {
+          if (event.target.value === "") {
+            onChange(null);
+            return;
+          }
+          const input = inputs.find((candidate) => choiceValue(candidate) === event.target.value);
+          if (input) onChange({ key: input.key, name: input.name, target: input.target });
+        }}
+      >
+        <option value="">{placeholder}</option>
+        {missing ? (
+          <option value="unavailable" disabled>
+            {binding.name}（已断开/来源已变化）
+          </option>
+        ) : null}
+        {inputs.map((input, index) => (
+          <option key={input.key} value={choiceValue(input)}>
+            图片 {index + 1} · {input.name}
+          </option>
+        ))}
+      </select>
+    </label>
   );
 }
