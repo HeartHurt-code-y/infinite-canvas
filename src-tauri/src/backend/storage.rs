@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeMap,
     path::Path,
     sync::{Mutex, MutexGuard},
     time::Duration,
@@ -12,9 +13,9 @@ use uuid::Uuid;
 use super::{
     error::{BackendError, BackendResult},
     model_schema::{
-        default_model_schema, operations_from_schema, provider_scoped_model_definition_id,
-        refresh_gemini_image_parameter_defaults, refresh_legacy_image_parameter_defaults,
-        schema_for_enabled_operations,
+        RequestDialect, default_model_schema, operations_from_schema,
+        provider_scoped_model_definition_id, refresh_gemini_image_parameter_defaults,
+        refresh_legacy_image_parameter_defaults, schema_for_enabled_operations,
     },
     types::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
@@ -544,6 +545,40 @@ impl Storage {
         Ok(())
     }
 
+    /// 模型定义使用的请求方言：由引用它的供应商连接的适配器决定。
+    ///
+    /// 没有任何绑定（预置定义）或同时被不同方言的连接引用时，映射里没有这一项，
+    /// 调用方按规范（OpenAI 兼容）方言处理。盘趣之类的聚合网关仍是 `moyu_v1`
+    /// 适配器，方言为 OpenAI 兼容；只有方舟连接会得到原生方言。
+    fn model_definition_dialects(&self) -> BackendResult<BTreeMap<String, RequestDialect>> {
+        let adapters = self
+            .list_provider_connections()?
+            .into_iter()
+            .map(|provider| (provider.id, provider.adapter_id))
+            .collect::<BTreeMap<_, _>>();
+        let mut dialects: BTreeMap<String, RequestDialect> = BTreeMap::new();
+        let mut conflicting: BTreeMap<String, bool> = BTreeMap::new();
+        for binding in self.list_bindings(None)? {
+            let Some(adapter_id) = adapters.get(&binding.provider_connection_id) else {
+                continue;
+            };
+            let dialect = RequestDialect::for_adapter(adapter_id);
+            match dialects.get(&binding.model_definition_id) {
+                Some(existing) if *existing != dialect => {
+                    conflicting.insert(binding.model_definition_id.clone(), true);
+                }
+                Some(_) => {}
+                None => {
+                    dialects.insert(binding.model_definition_id.clone(), dialect);
+                }
+            }
+        }
+        for (definition_id, _) in conflicting {
+            dialects.remove(&definition_id);
+        }
+        Ok(dialects)
+    }
+
     /// 修复历史版本遗留的畸形操作 Schema。
     ///
     /// 早期版本曾把操作条目写成只含 `resultType`、缺失 `parameters` /
@@ -561,6 +596,7 @@ impl Storage {
     /// `remote::{provider}::{model}`）——这些行没有任何绑定引用，且 ID 不合法，会污染定义列表。
     fn repair_malformed_model_definitions(&self) -> BackendResult<()> {
         let definitions = self.list_model_definitions()?;
+        let dialects = self.model_definition_dialects()?;
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
         let timestamp = now_ms();
@@ -573,8 +609,18 @@ impl Storage {
                 .remote_model_id
                 .clone()
                 .unwrap_or_else(|| definition.id.clone());
-            let mut repaired =
-                schema_for_enabled_operations(&definition.operations, &identity, &operations);
+            // 绑定到某个连接的模型按该连接的方言落定端点；其余定义（预置定义、
+            // 已无绑定的孤儿）没有连接上下文，按规范方言处理。
+            let dialect = dialects
+                .get(&definition.id)
+                .copied()
+                .unwrap_or(RequestDialect::OpenAiCompatible);
+            let mut repaired = schema_for_enabled_operations(
+                &definition.operations,
+                &identity,
+                &operations,
+                dialect,
+            );
             refresh_legacy_image_parameter_defaults(&mut repaired, &identity);
             refresh_gemini_image_parameter_defaults(&mut repaired, &identity);
             if repaired != definition.operations {
@@ -717,7 +763,12 @@ impl Storage {
         &self,
         command: &ReplaceProviderModelBindingsCommand,
     ) -> BackendResult<Vec<ProviderModelBinding>> {
-        self.get_provider_connection(&command.provider_connection_id)?;
+        // 端点属于供应商连接：保存模型时按本连接的适配器把请求契约落到对应方言上。
+        let dialect = RequestDialect::for_adapter(
+            &self
+                .get_provider_connection(&command.provider_connection_id)?
+                .adapter_id,
+        );
 
         let timestamp = now_ms();
         let mut connection = self.lock()?;
@@ -735,6 +786,7 @@ impl Storage {
                     &selection.operation_schema,
                     &selection.remote_model_id,
                     &selection.enabled_operations,
+                    dialect,
                 )
             } else {
                 selection.operation_schema.clone()
@@ -2948,6 +3000,137 @@ mod tests {
         assert_eq!(operation["request"]["mediaEncoding"], "wan_media_array");
         assert_eq!(operation["parameters"]["resolution"]["default"], "1080P");
         assert_eq!(operation["parameters"]["watermark"]["default"], false);
+    }
+
+    #[test]
+    fn gateway_bound_definition_saved_with_the_ark_native_path_is_repaired_on_open() {
+        // 线上事故回归：`doubao-seedance-*` 曾按模型名被写进方舟原生端点，网关连接于是
+        // 请求 `/v1/contents/generations/tasks` 并拿到 HTTP 404 `Invalid URL`。断言
+        // 打开数据库就把这类已落库的定义改回网关契约，而方舟连接保持原生契约。
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        let storage = Storage::open(&path).expect("open db");
+        let timestamp = now_ms();
+        let native_schema = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/contents/generations/tasks",
+                    "encoding": "json",
+                    "parameterContainer": "root",
+                    "observePath": "/contents/generations/tasks/{task_id}"
+                },
+                "parameters": {
+                    "ratio": { "type": "string", "label": "画幅", "default": "adaptive", "enum": ["16:9", "9:16", "adaptive"] },
+                    "resolution": { "type": "string", "label": "分辨率", "default": "720p", "enum": ["720p", "480p"] },
+                    "duration": { "type": "integer", "label": "时长", "default": -1, "enum": [-1, 5] },
+                    "generate_audio": { "type": "boolean", "label": "生成音频", "default": true },
+                    "output_format": { "type": "string", "label": "输出格式", "default": "mp4", "enum": ["mp4", "mov"] },
+                    "omni_reference_task_type": { "type": "string", "label": "任务类型", "default": "auto", "enum": ["auto", "reference", "edit", "extend"] },
+                    "web_search": { "type": "boolean", "label": "联网搜索", "default": false, "requiresNoMedia": true, "requestField": "tools", "transform": "web_search_tool" }
+                }
+            }
+        })
+        .to_string();
+        {
+            let connection = storage.lock().expect("database lock");
+            for (definition_id, provider_id) in [
+                (
+                    "remote::provider-moyu-ai::doubao-seedance-2.5",
+                    "provider-moyu-ai",
+                ),
+                (
+                    "remote::provider-volcengine-ark::doubao-seedance-2-5-260628",
+                    "provider-volcengine-ark",
+                ),
+            ] {
+                connection
+                    .execute(
+                        "INSERT INTO model_definitions
+                         (id, display_name, remote_model_id, operations_json, created_at, updated_at)
+                         VALUES (?2, 'Seedance 2.5', ?3, ?4, ?1, ?1)",
+                        params![
+                            timestamp,
+                            definition_id,
+                            definition_id.rsplit("::").next().expect("remote model id"),
+                            native_schema,
+                        ],
+                    )
+                    .expect("insert definition");
+                connection
+                    .execute(
+                        "INSERT INTO provider_model_bindings
+                         (provider_connection_id, model_definition_id, enabled_operations_json,
+                          remote_model_id, enabled, token_group, created_at, updated_at)
+                         VALUES (?1, ?2, ?3, ?4, 1, NULL, ?5, ?5)",
+                        params![
+                            provider_id,
+                            definition_id,
+                            json!(["video_generation"]).to_string(),
+                            definition_id.rsplit("::").next().expect("remote model id"),
+                            timestamp,
+                        ],
+                    )
+                    .expect("insert binding");
+            }
+        }
+
+        drop(storage);
+        let storage = Storage::open(&path).expect("reopen db");
+        let definitions = storage.list_model_definitions().expect("list definitions");
+        let request = |id: &str| {
+            definitions
+                .iter()
+                .find(|model| model.id == id)
+                .expect("definition")
+                .operations["video_generation"]["request"]
+                .clone()
+        };
+
+        // 网关连接：原生端点被改回 `/v1/video/generations`，参数回到 metadata 容器，
+        // 原生轮询路径被移除（否则轮询仍会打到方舟端点）。
+        let gateway = request("remote::provider-moyu-ai::doubao-seedance-2.5");
+        assert_eq!(gateway["path"], "/v1/video/generations");
+        assert_eq!(gateway["parameterContainer"], "metadata");
+        assert!(gateway.get("observePath").is_none());
+        // 能力参数原样保留：只改端点，不动参数表（`1080p` 由既有的能力升级补齐）。
+        let gateway_parameters = &definitions
+            .iter()
+            .find(|model| model.id == "remote::provider-moyu-ai::doubao-seedance-2.5")
+            .expect("gateway definition")
+            .operations["video_generation"]["parameters"];
+        assert_eq!(
+            gateway_parameters["resolution"]["enum"],
+            json!(["720p", "480p", "1080p"])
+        );
+        assert_eq!(
+            gateway_parameters["web_search"]["transform"],
+            "web_search_tool"
+        );
+
+        // 方舟连接：保持原生端点，参数与 content 平铺在根级并声明原生轮询路径。
+        let ark = request("remote::provider-volcengine-ark::doubao-seedance-2-5-260628");
+        assert_eq!(ark["path"], "/contents/generations/tasks");
+        assert_eq!(ark["parameterContainer"], "root");
+        assert_eq!(ark["contentContainer"], "root");
+        assert_eq!(ark["observePath"], "/contents/generations/tasks/{task_id}");
+
+        // 幂等：再次打开不会继续改写已经落定的契约。
+        drop(storage);
+        let reopened = Storage::open(&path).expect("reopen db again");
+        let after = reopened
+            .list_model_definitions()
+            .expect("list definitions")
+            .into_iter()
+            .map(|model| (model.id, model.operations))
+            .collect::<BTreeMap<_, _>>();
+        let before = definitions
+            .into_iter()
+            .map(|model| (model.id, model.operations))
+            .collect::<BTreeMap<_, _>>();
+        assert_eq!(after, before);
     }
 
     #[test]

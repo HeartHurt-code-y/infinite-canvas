@@ -2,6 +2,7 @@ use serde_json::{Map, Value, json};
 
 use super::{
     error::{BackendError, BackendResult},
+    provider::ARK_ADAPTER_ID,
     types::GenerationOperation,
 };
 
@@ -24,6 +25,207 @@ pub fn operations_from_schema(schema: &Value) -> Vec<GenerationOperation> {
         .iter()
         .filter_map(|(key, operation)| schema.get(*key).map(|_| *operation))
         .collect()
+}
+
+/// 供应商连接的请求方言。
+///
+/// 端点是**供应商连接**的属性，不是模型名的属性：同一个 `doubao-seedance-*`，
+/// 在火山方舟原生接口上是 `/contents/generations/tasks`，在 OpenAI 兼容网关上
+/// （魔芋聚合平台，以及 new-api / One API 内核的聚合站）是 `/v1/video/generations`。
+/// 历史实现只看模型名，把网关发布的 `doubao-*` 也发到了方舟原生路径，上游于是返回
+/// `HTTP 404 {"error":{"message":"Invalid URL (POST /v1/contents/generations/tasks)"}}`。
+/// 模型名只用来判断能力与参数，端点一律由连接适配器决定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestDialect {
+    /// OpenAI 兼容网关：`/v1/video/generations`、`/v1/images/generations`、
+    /// `/v1/chat/completions`。
+    OpenAiCompatible,
+    /// 火山方舟原生接口：`/contents/generations/tasks`、`/images/generations`、
+    /// `/chat/completions`。
+    VolcengineArk,
+}
+
+impl RequestDialect {
+    /// 适配器 → 方言。方舟推理 API 的 Base URL 自带 `/api/v3`，端点因此不带
+    /// `/v1` 前缀；其余适配器都是 OpenAI 兼容网关。
+    pub fn for_adapter(adapter_id: &str) -> Self {
+        if adapter_id == ARK_ADAPTER_ID {
+            Self::VolcengineArk
+        } else {
+            Self::OpenAiCompatible
+        }
+    }
+}
+
+/// 方舟原生 Seedance 视频任务接口：提交与轮询同路径，参数平铺在顶层。
+const ARK_VIDEO_PATH: &str = "/contents/generations/tasks";
+const ARK_VIDEO_OBSERVE_PATH: &str = "/contents/generations/tasks/{task_id}";
+/// OpenAI 兼容网关的视频任务接口（魔芋 API 文档与 new-api 内核一致）。
+const GATEWAY_VIDEO_PATH: &str = "/v1/video/generations";
+/// 方舟原生 Seedream 文生图接口（网关对应 `/v1/images/generations`）。
+const ARK_IMAGE_PATH: &str = "/images/generations";
+const GATEWAY_IMAGE_PATH: &str = "/v1/images/generations";
+/// doubao 文本模型的原生对话接口（网关对应 `/v1/chat/completions`）。
+const ARK_CHAT_PATH: &str = "/chat/completions";
+const GATEWAY_CHAT_PATH: &str = "/v1/chat/completions";
+
+/// 按连接方言改写操作 Schema 里的请求端点。
+///
+/// `default_operation_schema` 只看得到模型名，只能给出 OpenAI 兼容网关的规范值；
+/// 本函数是方舟连接的唯一改写入口，也在保存模型与打开数据库时把历史按模型名写下的
+/// 方舟原生端点改回网关端点。只在这三对互为替代的端点之间互换，其他家族
+/// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic、盘趣）自己的路径原样保留。
+///
+/// 返回是否发生改写，调用方据此决定是否需要把定义写回数据库。
+pub fn apply_request_dialect(schema: &mut Value, model_id: &str, dialect: RequestDialect) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    let video = apply_video_dialect(schema, &identity, dialect);
+    let image = apply_image_dialect(schema, &identity, dialect);
+    let text = apply_text_dialect(schema, &identity, dialect);
+    video || image || text
+}
+
+fn operation_object_mut(
+    schema: &mut Value,
+    operation: GenerationOperation,
+) -> Option<&mut Map<String, Value>> {
+    schema
+        .get_mut(operation.as_str())
+        .and_then(Value::as_object_mut)
+}
+
+fn request_object_mut(
+    schema: &mut Value,
+    operation: GenerationOperation,
+) -> Option<&mut Map<String, Value>> {
+    operation_object_mut(schema, operation)?
+        .get_mut("request")
+        .and_then(Value::as_object_mut)
+}
+
+fn current_request_path(request: &Map<String, Value>) -> &str {
+    request
+        .get("path")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+}
+
+/// 只在值确实变化时写入，避免仅因键序不同就把定义标记成「已改写」。
+fn set_request_field(request: &mut Map<String, Value>, field: &str, value: Value) -> bool {
+    if request.get(field) == Some(&value) {
+        return false;
+    }
+    request.insert(field.to_string(), value);
+    true
+}
+
+/// 视频：网关 `/v1/video/generations` ↔ 方舟原生 `/contents/generations/tasks`。
+fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
+        return false;
+    };
+    let profile = operation
+        .get("requestProfileId")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let Some(request) = operation.get_mut("request").and_then(Value::as_object_mut) else {
+        return false;
+    };
+    let path = current_request_path(request).to_string();
+    match dialect {
+        // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax / 盘趣在方舟上
+        // 没有端点，它们自己的契约保持原样。
+        RequestDialect::VolcengineArk => {
+            let native_seedance = identity.contains("seedance")
+                && !is_dreamina_seedance_video_model(identity)
+                && !is_panqu_video_model(identity);
+            if !native_seedance {
+                return false;
+            }
+            let mut changed = set_request_field(request, "path", json!(ARK_VIDEO_PATH));
+            changed |= set_request_field(request, "parameterContainer", json!("root"));
+            // 原生请求体的 content 数组也在顶层（网关契约才把它放进 metadata）。
+            changed |= set_request_field(request, "contentContainer", json!("root"));
+            // 原生任务接口的轮询是 `GET /contents/generations/tasks/{id}`；默认的
+            // `/v1/video/generations/{id}` 在方舟上不存在。
+            changed |= set_request_field(request, "observePath", json!(ARK_VIDEO_OBSERVE_PATH));
+            changed
+        }
+        RequestDialect::OpenAiCompatible => {
+            // 方舟原生路径只可能由「按模型名推导」写进定义；网关从来不用它，
+            // 因此这里可以无条件改回网关端点。
+            if path != ARK_VIDEO_PATH {
+                return false;
+            }
+            let mut changed = set_request_field(request, "path", json!(GATEWAY_VIDEO_PATH));
+            // 参数容器随方言走：原生契约把画幅/时长/分辨率平铺在顶层、content 也在顶层，
+            // 网关契约把它们归入 `metadata`。只认通用视频档案，供应商自定义档案的容器
+            // 保持原样（盘趣网关的顶层契约即属此类）。
+            if profile == "moyu_video_metadata_v1"
+                && request.get("parameterContainer").and_then(Value::as_str) == Some("root")
+            {
+                changed |= set_request_field(request, "parameterContainer", json!("metadata"));
+            }
+            if request.get("contentContainer").and_then(Value::as_str) == Some("root") {
+                request.remove("contentContainer");
+                changed = true;
+            }
+            if request.get("observePath").and_then(Value::as_str) == Some(ARK_VIDEO_OBSERVE_PATH) {
+                request.remove("observePath");
+                changed = true;
+            }
+            changed
+        }
+    }
+}
+
+/// 文生图：网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
+fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    let Some(request) = request_object_mut(schema, GenerationOperation::TextToImage) else {
+        return false;
+    };
+    let path = current_request_path(request).to_string();
+    match dialect {
+        // 方舟原生图片接口只承载自家 Seedream；其他家族的图片契约保持原样。
+        RequestDialect::VolcengineArk => {
+            if !is_seedream_image_model(identity) || path != GATEWAY_IMAGE_PATH {
+                return false;
+            }
+            set_request_field(request, "path", json!(ARK_IMAGE_PATH))
+        }
+        RequestDialect::OpenAiCompatible => {
+            if path != ARK_IMAGE_PATH {
+                return false;
+            }
+            set_request_field(request, "path", json!(GATEWAY_IMAGE_PATH))
+        }
+    }
+}
+
+/// 文本对话：网关 `/v1/chat/completions` ↔ 方舟原生 `/chat/completions`。
+fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    let Some(request) = request_object_mut(schema, GenerationOperation::TextGeneration) else {
+        return false;
+    };
+    let path = current_request_path(request).to_string();
+    let domestic_doubao = identity.starts_with("doubao-") || identity == "doubao";
+    match dialect {
+        RequestDialect::VolcengineArk => {
+            if !domestic_doubao || path != GATEWAY_CHAT_PATH {
+                return false;
+            }
+            set_request_field(request, "path", json!(ARK_CHAT_PATH))
+        }
+        // 只处理 OpenAI 兼容对话端点；Anthropic `/v1/messages` 与 Gemini
+        // `…:generateContent` 不受影响。
+        RequestDialect::OpenAiCompatible => {
+            if path != ARK_CHAT_PATH {
+                return false;
+            }
+            set_request_field(request, "path", json!(GATEWAY_CHAT_PATH))
+        }
+    }
 }
 
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
@@ -377,6 +579,7 @@ pub fn schema_for_enabled_operations(
     discovered: &Value,
     model_id: &str,
     operations: &[GenerationOperation],
+    dialect: RequestDialect,
 ) -> Value {
     let discovered = discovered.as_object();
     let mut schema = Map::new();
@@ -417,6 +620,10 @@ pub fn schema_for_enabled_operations(
     refresh_vidu_video_defaults(&mut schema, model_id);
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
     refresh_seedream_image_parameter_defaults(&mut schema, model_id);
+    // 端点属于供应商连接：上面按模型名推导出的契约（以及供应商下发的自定义契约）
+    // 统一改写到本连接的方言上。方舟连接因此保留原生路径，网关连接一定拿到
+    // `/v1/...` 端点。
+    apply_request_dialect(&mut schema, model_id, dialect);
     schema
 }
 
@@ -492,7 +699,14 @@ pub fn validate_schema_for_operations(
     model_id: &str,
     operations: &[GenerationOperation],
 ) -> BackendResult<Value> {
-    let schema = schema_for_enabled_operations(discovered, model_id, operations);
+    // 校验只看契约形状（`resultType` / `parameters` / 参数类型），端点由保存时按
+    // 连接方言确定，因此这里用规范方言即可。
+    let schema = schema_for_enabled_operations(
+        discovered,
+        model_id,
+        operations,
+        RequestDialect::OpenAiCompatible,
+    );
     for operation in operations {
         let definition = schema
             .get(operation.as_str())
@@ -885,14 +1099,12 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
     match operation {
         GenerationOperation::TextGeneration => {
             let profile = text_request_profile(model_id);
-            // 国内火山引擎原生 doubao 文本模型走方舟官方 `/chat/completions`
-            // 接口；其他 OpenAI 兼容模型保持 `/v1/chat/completions`。
-            let identity = model_id.to_ascii_lowercase();
-            let domestic_doubao = identity.starts_with("doubao-") || identity == "doubao";
+            // 对话端点按 OpenAI 兼容网关声明；方舟连接由 `apply_request_dialect`
+            // 改写成原生 `/chat/completions`（两条路径在方舟的 `/api/v3` Base URL 上
+            // 也归一到同一地址）。
             let (path, parameter_container) = match profile {
                 "anthropic_messages_v1" => ("/v1/messages", "root"),
                 "gemini_generate_content_v1" => ("/v1beta/models/{model}:generateContent", "root"),
-                _ if domestic_doubao => ("/chat/completions", "root"),
                 _ => ("/v1/chat/completions", "root"),
             };
             json!({
@@ -917,20 +1129,14 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                 if let Some(parameters_object) = parameters.as_object_mut() {
                     seedream_append_version_parameters(parameters_object, version, false);
                 }
-                // 国内火山引擎原生 Seedream（doubao-seedream-*）走方舟官方
-                // `/images/generations` 接口；魔芋聚合平台保持 `/v1/images/generations`。
-                let domestic_seedream = model_id.to_ascii_lowercase().starts_with("doubao-");
-                let image_path = if domestic_seedream {
-                    "/images/generations"
-                } else {
-                    "/v1/images/generations"
-                };
+                // 文生图端点按 OpenAI 兼容网关声明；方舟连接由
+                // `apply_request_dialect` 改写成原生 `/images/generations`。
                 return json!({
                     "resultType": "image",
                     "requestProfileId": "moyu_seedream_image_v1",
                     "profileVersion": 1,
                     "request": {
-                        "path": image_path,
+                        "path": "/v1/images/generations",
                         "encoding": "json",
                         "parameterContainer": "root"
                     },
@@ -1508,24 +1714,18 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
                     );
                 }
             }
-            // 国内火山引擎原生 Seedance（doubao-seedance-*）走方舟官方
-            // `/contents/generations/tasks` 异步任务接口，参数平铺在顶层；
-            // 海外 Dreamina Seedance 保持魔芋聚合平台的 `/v1/video/generations`
-            // + metadata 容器协议。requestProfileId 保持不变，业务逻辑不动。
-            let domestic_seedance = (seedance_20 || seedance_25) && !dreamina;
-            let (path, parameter_container) = if domestic_seedance {
-                ("/contents/generations/tasks", "root")
-            } else {
-                ("/v1/video/generations", "metadata")
-            };
+            // 视频提交端点按 OpenAI 兼容网关声明（`/v1/video/generations` +
+            // `metadata` 容器）；方舟连接由 `apply_request_dialect` 改写成原生
+            // `/contents/generations/tasks`（参数平铺在根级）。端点属于供应商连接，
+            // 不随模型名变化。
             json!({
                 "resultType": "video",
                 "requestProfileId": "moyu_video_metadata_v1",
                 "profileVersion": 1,
                 "request": {
-                    "path": path,
+                    "path": "/v1/video/generations",
                     "encoding": "json",
-                    "parameterContainer": parameter_container
+                    "parameterContainer": "metadata"
                 },
                 "parameters": parameters
             })
@@ -2414,6 +2614,115 @@ mod tests {
     }
 
     #[test]
+    fn video_endpoints_follow_the_connection_dialect_instead_of_the_model_name() {
+        // 线上事故回归：`doubao-seedance-*` 曾被按模型名硬编码成方舟原生端点，网关连接
+        // 因此请求 `/v1/contents/generations/tasks` 并拿到 HTTP 404 `Invalid URL`。
+        // 契约由连接适配器决定：方舟原生端点只在方舟连接上出现。
+        assert_eq!(
+            RequestDialect::for_adapter(super::super::provider::ARK_ADAPTER_ID),
+            RequestDialect::VolcengineArk
+        );
+        assert_eq!(
+            RequestDialect::for_adapter(super::super::provider::MOYU_ADAPTER_ID),
+            RequestDialect::OpenAiCompatible
+        );
+
+        // 暴露给前端的目录契约（拉取模型）也按连接方言落定。
+        let advertised = json!({
+            "id": "doubao-seedance-2.5",
+            "operations": ["video_generation"],
+        });
+        let gateway =
+            infer_catalog_schema(&advertised, "doubao-seedance-2.5", "doubao-seedance-2.5");
+        // `infer_catalog_schema` 只认识模型名，因此规范值是网关契约；
+        // `apply_request_dialect` 是方舟连接唯一的改写入口。
+        let mut ark = gateway.clone();
+        assert!(apply_request_dialect(
+            &mut ark,
+            "doubao-seedance-2.5",
+            RequestDialect::VolcengineArk
+        ));
+        assert_eq!(
+            ark["video_generation"]["request"]["path"],
+            "/contents/generations/tasks"
+        );
+        assert_eq!(
+            ark["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        assert_eq!(
+            ark["video_generation"]["request"]["contentContainer"],
+            "root"
+        );
+        assert_eq!(
+            ark["video_generation"]["request"]["observePath"],
+            "/contents/generations/tasks/{task_id}"
+        );
+
+        // 已保存/前端回传的方舟原生契约，在网关连接上会被改回 `/v1/video/generations`
+        // （参数与 content 回到 metadata，原生轮询路径移除）。这正是用户库里被写坏的
+        // 定义在下次打开应用时被修好的路径。
+        let mut stale = default_model_schema(
+            "doubao-seedance-2.5",
+            &[GenerationOperation::VideoGeneration],
+        );
+        stale["video_generation"]["request"] = json!({
+            "path": "/contents/generations/tasks",
+            "encoding": "json",
+            "parameterContainer": "root",
+            "contentContainer": "root",
+            "observePath": "/contents/generations/tasks/{task_id}"
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            "doubao-seedance-2.5",
+            &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["path"],
+            "/v1/video/generations"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["parameterContainer"],
+            "metadata"
+        );
+        assert!(
+            repaired["video_generation"]["request"]
+                .get("observePath")
+                .is_none()
+        );
+
+        // 其他家族自己的端点不受影响：盘趣网关顶层字段契约、Vidu 的 `/v1/videos` 轮询
+        // 在两种方言下都保持原样（方舟上没有它们的位置）。
+        let mut panqu =
+            default_model_schema("pan-seedance-2.0", &[GenerationOperation::VideoGeneration]);
+        assert!(!apply_request_dialect(
+            &mut panqu,
+            "pan-seedance-2.0",
+            RequestDialect::VolcengineArk
+        ));
+        assert_eq!(
+            panqu["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        let mut vidu = default_model_schema("viduq3-pro", &[GenerationOperation::VideoGeneration]);
+        assert!(!apply_request_dialect(
+            &mut vidu,
+            "viduq3-pro",
+            RequestDialect::VolcengineArk
+        ));
+        assert_eq!(
+            vidu["video_generation"]["request"]["observePath"],
+            "/v1/videos/{task_id}"
+        );
+        assert_eq!(
+            vidu["video_generation"]["request"]["path"],
+            "/v1/video/generations"
+        );
+    }
+
+    #[test]
     fn domestic_seedance_25_models_support_1080p_and_web_search() {
         let schema = default_model_schema(
             "doubao-seedance-2-5-260628",
@@ -2508,6 +2817,7 @@ mod tests {
             &stale,
             "dreamina-seedance-2.5",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         let parameters = &repaired["video_generation"]["parameters"];
         assert_eq!(parameters["priority"]["default"], 0);
@@ -2651,6 +2961,7 @@ mod tests {
             &stale,
             "veo-3.1-fast",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(
             repaired["video_generation"]["requestProfileId"],
@@ -2674,6 +2985,7 @@ mod tests {
             &stale,
             "company-video",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(generic["video_generation"]["parameters"], json!({}));
         assert_eq!(
@@ -2763,6 +3075,7 @@ mod tests {
             &stale,
             "viduq3-turbo",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(
             repaired["video_generation"]["requestProfileId"],
@@ -2794,6 +3107,7 @@ mod tests {
             &stale,
             "company-video",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(generic["video_generation"]["parameters"], json!({}));
         assert_eq!(
@@ -2931,6 +3245,7 @@ mod tests {
             &stale,
             "MiniMax-H3",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(
             repaired["video_generation"]["requestProfileId"],
@@ -2958,6 +3273,7 @@ mod tests {
             &stale,
             "company-video",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(generic["video_generation"]["parameters"], json!({}));
         assert_eq!(
@@ -2985,6 +3301,7 @@ mod tests {
             &stale,
             "wan3.0-video",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(
             repaired["video_generation"]["requestProfileId"],
@@ -3003,6 +3320,7 @@ mod tests {
             &stale,
             "company-video",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert_eq!(generic["video_generation"]["parameters"], json!({}));
         assert_eq!(
@@ -3064,6 +3382,7 @@ mod tests {
             &discovered,
             "mixed-model",
             &[GenerationOperation::TextToImage],
+            RequestDialect::OpenAiCompatible,
         );
         assert!(image_only.get("text_to_image").is_some());
         assert!(image_only.get("video_generation").is_none());
@@ -3095,6 +3414,7 @@ mod tests {
             &malformed,
             "doubao-seedance-2-0-260128",
             &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
         );
         assert!(
             repaired["video_generation"]["parameters"].is_object(),

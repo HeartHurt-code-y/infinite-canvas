@@ -16,8 +16,8 @@ use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     model_schema::{
-        infer_catalog_schema, is_seedance_25_video_model, operations_from_schema,
-        provider_scoped_model_definition_id,
+        RequestDialect, apply_request_dialect, infer_catalog_schema, is_seedance_25_video_model,
+        operations_from_schema, provider_scoped_model_definition_id,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     storage::{
@@ -2552,6 +2552,7 @@ impl ProviderRuntime {
             .get_provider_connection(provider_connection_id)
             .map(|provider| provider.adapter_id)
             .unwrap_or_default();
+        let dialect = RequestDialect::for_adapter(&adapter_id);
         let response = self
             .raw_json_request_with_token_group(
                 provider_connection_id,
@@ -2562,7 +2563,7 @@ impl ProviderRuntime {
                 None,
             )
             .await?;
-        let mut models = parse_model_catalog(&response)?;
+        let mut models = parse_model_catalog(&response, dialect)?;
         let definitions = self.storage.list_model_definitions()?;
         let bindings = self.storage.list_bindings(Some(provider_connection_id))?;
 
@@ -2599,6 +2600,9 @@ impl ProviderRuntime {
             model.model_definition_id = scoped_definition_id;
             if let Some(definition) = definition {
                 model.operation_schema = definition.operations.clone();
+                // 已保存或预置的定义可能带着另一套方言的端点（例如按模型名推导出的
+                // 方舟原生路径），展示与保存前统一改写成本连接的方言。
+                apply_request_dialect(&mut model.operation_schema, &model.id, dialect);
                 model.suggested_operations = operations_from_schema(&definition.operations);
             }
             model.has_configured_binding = binding.is_some();
@@ -4558,7 +4562,10 @@ fn rejected_field_key(task: &TaskExecutionRecord) -> String {
     format!("{}::{}", task.model_definition_id, task.operation.as_str())
 }
 
-fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<RemoteModelOption>> {
+fn parse_model_catalog(
+    response: &RawProviderResponse,
+    dialect: RequestDialect,
+) -> BackendResult<Vec<RemoteModelOption>> {
     if !(200..300).contains(&response.status) {
         return Err(BackendError::protocol(
             format!(
@@ -4634,7 +4641,10 @@ fn parse_model_catalog(response: &RawProviderResponse) -> BackendResult<Vec<Remo
             if id.is_empty() || !seen.insert(id.to_string()) {
                 return None;
             }
-            let operation_schema = infer_catalog_schema(item, id, display_name);
+            let mut operation_schema = infer_catalog_schema(item, id, display_name);
+            // 模型名只决定能力；端点按本连接的方言落定，避免把网关上的
+            // `doubao-*` 当成方舟原生端点。
+            apply_request_dialect(&mut operation_schema, id, dialect);
             let suggested_operations = operations_from_schema(&operation_schema);
             Some(RemoteModelOption {
                 id: id.to_string(),
@@ -5663,7 +5673,8 @@ mod tests {
             })
             .to_string(),
         };
-        let models = parse_model_catalog(&openai).expect("OpenAI model list");
+        let models = parse_model_catalog(&openai, RequestDialect::OpenAiCompatible)
+            .expect("OpenAI model list");
         assert_eq!(models.len(), 2);
         assert_eq!(models[0].id, "image-1");
         assert_eq!(models[0].owned_by.as_deref(), Some("company"));
@@ -5675,7 +5686,8 @@ mod tests {
             body: json!({ "data": { "models": ["model-a", { "model_id": "model-b" }] } })
                 .to_string(),
         };
-        let models = parse_model_catalog(&company).expect("company model list");
+        let models = parse_model_catalog(&company, RequestDialect::OpenAiCompatible)
+            .expect("company model list");
         assert_eq!(
             models
                 .iter()
@@ -5692,7 +5704,8 @@ mod tests {
             headers: json!({ "x-request-id": "req-1" }),
             body: r#"{"error":{"message":"upstream failed"}}"#.into(),
         };
-        let error = parse_model_catalog(&response).expect_err("protocol error");
+        let error = parse_model_catalog(&response, RequestDialect::OpenAiCompatible)
+            .expect_err("protocol error");
         let payload = error.payload();
         assert_eq!(payload.details["httpStatus"], 502);
         assert_eq!(payload.details["rawResponse"], response.body);
@@ -6271,22 +6284,31 @@ mod tests {
         );
     }
 
-    fn seedance_task_fixture(
-        model: &str,
-        mode: VideoTaskType,
-    ) -> (TaskExecutionRecord, ResolvedGeneration) {
-        let schema = super::super::model_schema::default_model_schema(
+    /// 按连接方言取视频操作 Schema：同一个模型名在方舟原生接口与 OpenAI 兼容网关上
+    /// 是两套端点，契约由连接决定。
+    fn video_schema_for_dialect(model: &str, dialect: RequestDialect) -> Value {
+        let mut schema = super::super::model_schema::default_model_schema(
             model,
             &[GenerationOperation::VideoGeneration],
         );
+        super::super::model_schema::apply_request_dialect(&mut schema, model, dialect);
+        schema["video_generation"].clone()
+    }
+
+    fn seedance_task_fixture(
+        model: &str,
+        mode: VideoTaskType,
+        dialect: RequestDialect,
+    ) -> (TaskExecutionRecord, ResolvedGeneration) {
+        let schema = video_schema_for_dialect(model, dialect);
         let mut parameters = json!({ "ratio": "adaptive", "duration": -1 });
-        if schema["video_generation"]["parameters"]
+        if schema["parameters"]
             .get("omni_reference_task_type")
             .is_some()
         {
             parameters["omni_reference_task_type"] = json!(mode.omni_reference_task_type());
         }
-        let mut generation = resolved(schema["video_generation"].clone(), parameters);
+        let mut generation = resolved(schema, parameters);
         generation.video_task_type = Some(mode);
         let mut video_task = task(GenerationOperation::VideoGeneration);
         video_task.remote_model_id_snapshot = Some(model.into());
@@ -6295,8 +6317,13 @@ mod tests {
 
     #[test]
     fn seedance_edit_requires_real_video_duration_and_keeps_local_mode_out_of_remote_body() {
-        for model in ["doubao-seedance-2-5-260628", "dreamina-seedance-2.5"] {
-            let (task, mut generation) = seedance_task_fixture(model, VideoTaskType::Edit);
+        for (model, dialect) in [
+            // 同一个国内模型名：方舟连接参数平铺在根级，网关连接归入 metadata。
+            ("doubao-seedance-2-5-260628", RequestDialect::VolcengineArk),
+            ("doubao-seedance-2.5", RequestDialect::OpenAiCompatible),
+            ("dreamina-seedance-2.5", RequestDialect::OpenAiCompatible),
+        ] {
+            let (task, mut generation) = seedance_task_fixture(model, VideoTaskType::Edit, dialect);
             assert!(
                 build_video_body(&task, &generation).is_err(),
                 "edit needs video"
@@ -6325,24 +6352,27 @@ mod tests {
                 generation.videos[0].duration_seconds = Some(duration);
                 let body = build_video_body(&task, &generation).expect("valid edit");
                 // 本地任务类型只参与校验，不写进请求体：远端字段由冻结 schema 决定
-                // （国内 Seedance 2.5 的任务类型是根级 `omni_reference_task_type` 字符串）。
+                // （Seedance 2.5 的任务类型 `omni_reference_task_type` 是字符串）。
                 assert!(body.get("videoTaskType").is_none());
                 assert!(body["metadata"].get("videoTaskType").is_none());
-                // 参数容器按方言分流：国内 doubao-seedance-* 走方舟
-                // `/contents/generations/tasks`，参数平铺在根级；海外 Dreamina 走魔芋
-                // `/v1/video/generations`，参数归入 metadata。
-                if model.starts_with("dreamina") {
-                    assert_eq!(body["metadata"]["ratio"], "adaptive");
-                    assert_eq!(body["metadata"]["duration"], -1);
-                    // 海外模型没有任务类型参数，任何容器里都不该出现。
-                    assert!(body.get("omni_reference_task_type").is_none());
-                    assert!(body["metadata"].get("omni_reference_task_type").is_none());
-                } else {
+                if dialect == RequestDialect::VolcengineArk {
                     assert_eq!(body["ratio"], "adaptive");
                     assert_eq!(body["duration"], -1);
                     assert_eq!(body["omni_reference_task_type"], "edit");
                     assert!(body["metadata"].get("ratio").is_none());
                     assert!(body["metadata"].get("omni_reference_task_type").is_none());
+                } else {
+                    assert_eq!(body["metadata"]["ratio"], "adaptive");
+                    assert_eq!(body["metadata"]["duration"], -1);
+                    assert!(body.get("ratio").is_none(), "网关契约参数不在根级");
+                    assert!(body.get("duration").is_none(), "网关契约参数不在根级");
+                    // 海外模型没有任务类型参数，任何容器里都不该出现。
+                    if model.starts_with("dreamina") {
+                        assert!(body.get("omni_reference_task_type").is_none());
+                        assert!(body["metadata"].get("omni_reference_task_type").is_none());
+                    } else {
+                        assert_eq!(body["metadata"]["omni_reference_task_type"], "edit");
+                    }
                 }
             }
             generation.parameters["duration"] = json!(10);
@@ -6355,8 +6385,11 @@ mod tests {
 
     #[test]
     fn seedance_frames_require_first_frame_and_cannot_mix_reference_media() {
-        let (task, mut generation) =
-            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::FirstFrame);
+        let (task, mut generation) = seedance_task_fixture(
+            "doubao-seedance-2-5-260628",
+            VideoTaskType::FirstFrame,
+            RequestDialect::OpenAiCompatible,
+        );
         assert!(build_video_body(&task, &generation).is_err());
         generation.images.push(resolved_media(
             MediaType::Image,
@@ -6404,8 +6437,11 @@ mod tests {
 
     #[test]
     fn seedance_extend_requires_video_and_adaptive_ratio_with_legal_output_duration() {
-        let (task, mut generation) =
-            seedance_task_fixture("dreamina-seedance-2.5", VideoTaskType::Extend);
+        let (task, mut generation) = seedance_task_fixture(
+            "dreamina-seedance-2.5",
+            VideoTaskType::Extend,
+            RequestDialect::OpenAiCompatible,
+        );
         assert!(build_video_body(&task, &generation).is_err());
         generation.videos.push(resolved_media(
             MediaType::Video,
@@ -6434,8 +6470,11 @@ mod tests {
 
     #[test]
     fn seedance_legacy_edit_parameter_is_validated_and_conflicting_local_intent_is_rejected() {
-        let (task, mut generation) =
-            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::Edit);
+        let (task, mut generation) = seedance_task_fixture(
+            "doubao-seedance-2-5-260628",
+            VideoTaskType::Edit,
+            RequestDialect::OpenAiCompatible,
+        );
         generation.video_task_type = None;
         generation.videos.push(resolved_media(
             MediaType::Video,
@@ -6455,7 +6494,8 @@ mod tests {
     fn seedance_edit_and_extend_limit_actual_total_duration_and_video_count() {
         for model in ["doubao-seedance-2-5-260628", "dreamina-seedance-2.5"] {
             for mode in [VideoTaskType::Edit, VideoTaskType::Extend] {
-                let (task, mut generation) = seedance_task_fixture(model, mode);
+                let (task, mut generation) =
+                    seedance_task_fixture(model, mode, RequestDialect::OpenAiCompatible);
                 for position in 1..=2 {
                     let mut video = resolved_media(
                         MediaType::Video,
@@ -6504,8 +6544,11 @@ mod tests {
 
     #[test]
     fn seedance_reference_needs_at_least_one_reference() {
-        let (task, mut generation) =
-            seedance_task_fixture("doubao-seedance-2-5-260628", VideoTaskType::Reference);
+        let (task, mut generation) = seedance_task_fixture(
+            "doubao-seedance-2-5-260628",
+            VideoTaskType::Reference,
+            RequestDialect::OpenAiCompatible,
+        );
         assert!(build_video_body(&task, &generation).is_err());
         generation.images.push(resolved_media(
             MediaType::Image,
@@ -6543,7 +6586,11 @@ mod tests {
     #[test]
     fn seedance_task_prompt_adds_required_intent_without_changing_user_media_order() {
         for mode in [VideoTaskType::Edit, VideoTaskType::Extend] {
-            let (task, mut generation) = seedance_task_fixture("dreamina-seedance-2.5", mode);
+            let (task, mut generation) = seedance_task_fixture(
+                "dreamina-seedance-2.5",
+                mode,
+                RequestDialect::OpenAiCompatible,
+            );
             generation.videos.push(resolved_media(
                 MediaType::Video,
                 1,
@@ -6574,14 +6621,13 @@ mod tests {
     #[test]
     fn seedance_extend_with_reference_video_includes_text_item_in_content() {
         // 回归：带媒体（参考视频延长）的 Seedance 请求必须把渲染提示词写入
-        // metadata.content 的首个 text 条目；缺失时平台以「prompt is required」
-        // 拒绝任务创建（真实的 HTTP 400 fail_to_fetch_task 场景）。
-        let schema = super::super::model_schema::default_model_schema(
-            "doubao-seedance-2-5-260628",
-            &[GenerationOperation::VideoGeneration],
-        );
+        // content 的首个 text 条目；缺失时平台以「prompt is required」
+        // 拒绝任务创建（真实的 HTTP 400 fail_to_fetch_task 场景）。方舟原生契约的
+        // content 数组在顶层。
+        let schema =
+            video_schema_for_dialect("doubao-seedance-2-5-260628", RequestDialect::VolcengineArk);
         let mut generation = resolved(
-            schema["video_generation"].clone(),
+            schema,
             json!({
                 "ratio": "adaptive",
                 "resolution": "480p",
@@ -6613,18 +6659,18 @@ mod tests {
 
         let body = build_video_body(&video_task, &generation).expect("Seedance extend body");
         assert_eq!(body["model"], "doubao-seedance-2.5");
-        // 国内 Seedance 2.5 的参数平铺在根级：任务类型是根级 `omni_reference_task_type` 字符串，
-        // 不在 metadata 里（metadata 只承载 content 与媒体项）。
+        // 方舟原生契约：参数与 content 都在顶层（任务类型是根级
+        // `omni_reference_task_type` 字符串）。
         assert_eq!(body["omni_reference_task_type"], "extend");
         assert!(body["metadata"].get("omni_reference_task_type").is_none());
         assert_eq!(
-            body["metadata"]["content"][0],
+            body["content"][0],
             json!({ "type": "text", "text": "【生成目标】\n向后延长视频1，生成一段对峙戏" })
         );
-        assert_eq!(body["metadata"]["content"][1]["type"], "video_url");
-        assert_eq!(body["metadata"]["content"][1]["role"], "reference_video");
+        assert_eq!(body["content"][1]["type"], "video_url");
+        assert_eq!(body["content"][1]["role"], "reference_video");
         assert_eq!(
-            body["metadata"]["content"][1]["video_url"]["url"],
+            body["content"][1]["video_url"]["url"],
             "https://cdn.example.com/ref.mp4"
         );
         assert!(
@@ -6635,74 +6681,89 @@ mod tests {
     }
 
     #[test]
-    fn domestic_seedance_25_flattens_parameters_at_root_and_keeps_metadata_for_content() {
-        // 契约：国内火山引擎原生 Seedance（doubao-seedance-*）走方舟
-        // `/contents/generations/tasks`，画幅/时长/分辨率/任务类型等参数平铺在请求体根级；
-        // metadata 只承载 content 与媒体项。海外 Dreamina 才把参数归入 metadata。
-        // 这条用例把根级形状单独钉住：此前它只被"参数应在 metadata"的错误预期覆盖，
-        // 结果两个用例长期失败而真实请求体其实是对的。
-        let schema = super::super::model_schema::default_model_schema(
-            "doubao-seedance-2-5-260628",
-            &[GenerationOperation::VideoGeneration],
-        );
-        let mut generation = resolved(
-            schema["video_generation"].clone(),
-            json!({
-                "ratio": "adaptive",
-                "resolution": "1080p",
-                "duration": -1,
-                "generate_audio": true,
-                "output_format": "mp4",
-                "omni_reference_task_type": "edit"
-            }),
-        );
-        generation.rendered_prompt = "把天空换成黄昏".into();
-        generation.content = vec![
-            CompiledContentItem::Text("把天空换成黄昏".into()),
-            CompiledContentItem::Media {
-                media_type: MediaType::Video,
-                type_position: 1,
-            },
-        ];
-        generation.videos.push(resolved_media(
-            MediaType::Video,
-            1,
-            "reference_video",
-            "https://cdn.example.com/source.mp4",
-            Some(1),
-        ));
-        generation.videos[0].duration_seconds = Some(8.0);
-        generation.video_task_type = Some(VideoTaskType::Edit);
-        let mut video_task = task(GenerationOperation::VideoGeneration);
-        video_task.remote_model_id_snapshot = Some("doubao-seedance-2-5-260628".into());
+    fn seedance_video_endpoint_and_parameter_container_follow_the_connection_dialect() {
+        // 线上事故回归：同一个 `doubao-seedance-*` 模型名，端点由**供应商连接**决定。
+        // - 方舟连接：`/contents/generations/tasks`，画幅/时长/分辨率/任务类型与 content
+        //   数组平铺在请求体根级；
+        // - OpenAI 兼容网关（魔芋 / new-api 等）：`/v1/video/generations`，参数与 content
+        //   归入 metadata。历史实现只看模型名，把网关请求发到
+        //   `/v1/contents/generations/tasks`，上游返回 HTTP 404 `Invalid URL`。
+        for (dialect, expected_path, native) in [
+            (
+                RequestDialect::VolcengineArk,
+                "/contents/generations/tasks",
+                true,
+            ),
+            (
+                RequestDialect::OpenAiCompatible,
+                "/v1/video/generations",
+                false,
+            ),
+        ] {
+            let schema = video_schema_for_dialect("doubao-seedance-2-5-260628", dialect);
+            assert_eq!(schema["request"]["path"], expected_path);
+            assert_eq!(
+                schema["request"]["parameterContainer"],
+                if native { "root" } else { "metadata" }
+            );
+            let mut generation = resolved(
+                schema,
+                json!({
+                    "ratio": "adaptive",
+                    "resolution": "1080p",
+                    "duration": -1,
+                    "generate_audio": true,
+                    "output_format": "mp4",
+                    "omni_reference_task_type": "edit"
+                }),
+            );
+            generation.rendered_prompt = "把天空换成黄昏".into();
+            generation.content = vec![
+                CompiledContentItem::Text("把天空换成黄昏".into()),
+                CompiledContentItem::Media {
+                    media_type: MediaType::Video,
+                    type_position: 1,
+                },
+            ];
+            generation.videos.push(resolved_media(
+                MediaType::Video,
+                1,
+                "reference_video",
+                "https://cdn.example.com/source.mp4",
+                Some(1),
+            ));
+            generation.videos[0].duration_seconds = Some(8.0);
+            generation.video_task_type = Some(VideoTaskType::Edit);
+            let mut video_task = task(GenerationOperation::VideoGeneration);
+            video_task.remote_model_id_snapshot = Some("doubao-seedance-2-5-260628".into());
 
-        let body = build_video_body(&video_task, &generation).expect("domestic Seedance edit body");
-        assert_eq!(body["model"], "doubao-seedance-2-5-260628");
-        // 解码类参数平铺在根级。
-        assert_eq!(body["ratio"], "adaptive");
-        assert_eq!(body["resolution"], "1080p");
-        assert_eq!(body["duration"], -1);
-        assert_eq!(body["generate_audio"], true);
-        assert_eq!(body["output_format"], "mp4");
-        assert_eq!(body["omni_reference_task_type"], "edit");
-        // metadata 只放 content：参数不能同时泄进 metadata，否则平台会读到两份口径。
-        let metadata = body["metadata"].as_object().expect("metadata object");
-        assert_eq!(
-            metadata.keys().collect::<Vec<_>>(),
-            vec!["content"],
-            "metadata 只承载 content，参数必须留在根级"
-        );
-        assert_eq!(metadata["content"][0]["type"], "text");
-        // content 首个 text 条目是渲染后的完整提示词：媒体引用渲染为「视频N」短标签，
-        // 编辑任务再补「编辑视频：」前缀；与根级 prompt 保持一致。
-        assert_eq!(metadata["content"][0]["text"], body["prompt"]);
-        assert_eq!(
-            metadata["content"][0]["text"],
-            "编辑视频：\n把天空换成黄昏视频1"
-        );
-        assert_eq!(metadata["content"][1]["role"], "reference_video");
-        // 请求体里没有本地 videoTaskType 字段：远端任务类型用 omni_reference_task_type 表达。
-        assert!(body.get("videoTaskType").is_none());
+            let body = build_video_body(&video_task, &generation).expect("Seedance edit body");
+            assert_eq!(body["model"], "doubao-seedance-2-5-260628");
+            let parameters = if native { &body } else { &body["metadata"] };
+            // 解码类参数只落在一个容器里，不能同时泄进两处（平台会读到两份口径）。
+            assert_eq!(parameters["ratio"], "adaptive");
+            assert_eq!(parameters["resolution"], "1080p");
+            assert_eq!(parameters["duration"], -1);
+            assert_eq!(parameters["generate_audio"], true);
+            assert_eq!(parameters["output_format"], "mp4");
+            assert_eq!(parameters["omni_reference_task_type"], "edit");
+            let other = if native { &body["metadata"] } else { &body };
+            assert!(other.get("ratio").is_none(), "参数不能出现在另一个容器里");
+            assert!(other.get("duration").is_none());
+            // content 与参数同容器：首个 text 条目是渲染后的完整提示词（媒体引用渲染为
+            // 「视频N」短标签，编辑任务再补「编辑视频：」前缀），与顶层 prompt 一致。
+            let content = if native {
+                &body["content"]
+            } else {
+                &body["metadata"]["content"]
+            };
+            assert_eq!(content[0]["type"], "text");
+            assert_eq!(content[0]["text"], body["prompt"]);
+            assert_eq!(content[0]["text"], "编辑视频：\n把天空换成黄昏视频1");
+            assert_eq!(content[1]["role"], "reference_video");
+            // 请求体里没有本地 videoTaskType 字段：远端任务类型用 omni_reference_task_type 表达。
+            assert!(body.get("videoTaskType").is_none());
+        }
     }
 
     #[test]
