@@ -2,14 +2,43 @@
 //!
 //! # 为什么默认是文件而不是钥匙串
 //!
-//! macOS 上钥匙串条目的访问控制绑定「创建它的那个应用」的代码签名身份，而且有**两道**
-//! 独立的门：ACL 里的可信应用列表，以及一条按 `partition_id` 授权的条目。没有 Apple 签名
-//! 证书时，进程的 partition id 是 `cdhash:<代码哈希>`，**每出一个新版本都会变**——即使自签
-//! 证书能稳住第一道门，第二道门依然失配，于是每次升级都要用户输入一次登录钥匙串密码；
-//! 而该门无法靠预先列出「未来版本的哈希」来放行。
+//! macOS 上钥匙串条目的访问控制绑定「创建它的那个应用」的代码签名身份。没有 Apple 签名
+//! 证书时，这个身份每出一个新版本都会变，于是每次升级都要用户输入一次登录钥匙串密码。
 //!
 //! 这个弹窗在「不持有 Apple 签名证书」的前提下无法消除：它正是钥匙串保护用户凭据的机制。
 //! 因此本模块直接不碰钥匙串，把密钥写在应用数据目录的 JSON 文件里（Unix 权限 0600）。
+//!
+//! # 为什么没走「换个签名身份」这条路
+//!
+//! 条目其实有**两道独立的门**，它们对签名身份的要求不同，而第二道门只有 Apple 签发的
+//! 证书才能满足：
+//!
+//!   - **门 1（ACL 可信应用列表）**：自签证书即可稳住——designated requirement 会锚定到
+//!     证书哈希而不是 cdhash。
+//!   - **门 2（`partition_id` 条目）**：`securityd/src/acls.cpp` 的 `validatePartition()`
+//!     在常规 ACL 校验**之外**再查一次，要求客户端 partition id 与条目里的值精确相等。
+//!     而 `securityd/src/clientid.cpp` 的 `partitionIdForProcess()` 只对
+//!     MAS / TestFlight / Developer ID / Apple Development（都要求 `anchor apple generic`）
+//!     返回稳定的 `teamid:<X>`，其余一律是 `cdhash:<hex>`——**自签证书拿不到 `teamid:`，
+//!     因此依然每版失配**，而且没法靠「预先列出未来版本的哈希」来放行。
+//!
+//! Apple 自己的文档描述了同一现象：TN3127《Inside Code Signing: Requirements》说明 ad-hoc
+//! 签名（Xcode 的 "Sign to Run Locally"）虽然有 designated requirement，但它绑定在那一份
+//! 具体代码上，所以改了代码再运行，系统会再次索要授权——受保护资源记下客户端的 DR 并在每次
+//! 访问时重新校验，钥匙串 ACL 记录的正是同一个 DR（`osxverifier.cpp` 通过
+//! `SecCodeCopyDesignatedRequirement` 取得）。Apple 给出的首选解法是改用 data protection
+//! keychain，而那需要 provisioning profile（TN3137），对没有开发者账号的场景不可用。
+//!
+//! 注意区分两种故障、别把结论说混：钥匙串弹的是**提示**，不是「永久读不到」；只有非交互
+//! 路径（`prompt == false`）下的 partition 失配才会硬失败
+//! （`CSSM_ERRCODE_OPERATION_AUTH_DENIED` → `errSecAuthFailed`，-25293）。
+//!
+//! 也**没有**「把 ACL 配成不再问密码」这条捷径：Apple 文档（`SecACLCreateWithSimpleContents`
+//! / `SecACLSetContents`）写明自 macOS 10.13.1 起系统忽略 ACL 的 `promptSelector`，
+//! 询问是否信任某个 app 时**总是**索要钥匙串密码。所以 `-A` 之类只会改可信应用列表，
+//! 免不掉密码框——唯一的杠杆就是别让上面两道门失配。另外「始终允许」要求系统能在磁盘上
+//! 定位到该代码（`acl_keychain.cpp` 的 `errSecSecStaticCodeNotFound` 分支），
+//! 这正是「代码身份必须稳定」否则授权无法生效的原因。
 //!
 //! **这是明确的安全取舍**（用户已确认不需要安全性）：能读到该文件的进程就能读到全部密钥。
 //! 换取的是：不弹任何密码框、不需要 Apple 证书、不需要管理员命令，且密钥可被直接备份/查看/编辑。

@@ -62,6 +62,31 @@ API Key / 素材库令牌 / TOS AK-SK 默认存放在**应用数据目录下的 
 - 换回系统凭据库：`INFINITE_CANVAS_CREDENTIAL_BACKEND=keyring`。
 - 备份/迁移密钥：直接复制上面那个 JSON 文件。
 
+### 排障时别混淆两种钥匙串故障
+
+它们成因和修法都不同，`security(1)` 也把 partition list 描述为「ACL 之外的额外参数」：
+
+| 条目所在                                              | 失效原因                                          | 修法                                                    |
+| ----------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------- |
+| 文件型登录钥匙串（`SecAccess` ACL，**本项目旧实现**） | designated requirement 失配 + partition list 失配 | 稳定签名身份 + 修 partition list                        |
+| Data Protection keychain                              | entitlement / access group 变化                   | 保持 entitlement 稳定（`codesign -d --entitlements -`） |
+
+另外注意：钥匙串弹的是**提示**，不是「永久读不到」。只有非交互路径下的 partition 失配才会硬失败（`errSecAuthFailed`，-25293）。
+
+Apple 的 TN3127《Inside Code Signing: Requirements》描述了同一机制：ad-hoc 签名有 designated requirement，但绑定在那一份具体代码上，因此改了代码再运行会被再次索要授权。Apple 的首选解法是 data protection keychain，但那需要 provisioning profile（TN3137），没有开发者账号时不可用。
+
+### 为什么不能「把 ACL 设成不再问密码」
+
+因为 macOS 从 **10.13.1 起就不允许了**。Apple 文档（`SecACLCreateWithSimpleContents` / `SecACLSetContents` 两页同一段注释）明确写道：为增强安全性，系统**忽略 ACL 对象的 `promptSelector` 属性，并且在询问用户是否把某个 app 加入可信列表时总是索要钥匙串密码**。也就是说：
+
+- 「请输入登录钥匙串密码」不是另一种对话框，而是与「拒绝 / 允许 / 始终允许」**并存**的一行；
+- `-A`（allow all applications）里唯一还有作用的只是把应用列表置空；它清除 REQUIRE_PASSPHRASE 的那部分是历史遗留，在现代 macOS 上不生效；
+- 因此**没有任何 ACL 开关（包括 `-A`）能免掉这个密码框**——唯一的杠杆是「不要把上面那两道门校验弄失配」。
+
+补充一条相关事实：`始终允许` 需要系统能在磁盘上定位到该代码（`acl_keychain.cpp` 里 `remember && validation != errSecSecStaticCodeNotFound` 才记录授权），这正说明了**代码身份稳定**是授权能生效的前提。
+
+> 诚实边界：Apple 文档说密码「总是」需要，但社区在个别更高版本上报告过不带密码句的对话框（VS Code / Azure Data Studio），无截图佐证。因此上面结论以 **securityd 机制**为准，不把对话框 UI 的细节当作已定论。
+
 ## macOS 打包：让所有人都能打开
 
 凭据已不走钥匙串，所以**签名与「弹不弹密码框」无关**。签名只关系到**别人能不能打开你的包**：
