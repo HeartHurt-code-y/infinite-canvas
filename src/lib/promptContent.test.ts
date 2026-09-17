@@ -607,7 +607,7 @@ describe("prompt content interface", () => {
       session.updateConnections([replacement], {
         aliveCanvasNodeKeys: new Set(["asset-node-9"]),
       }),
-    ).toBe(1);
+    ).toMatchObject([{ canvasNodeKey: "asset-node-9", matchedBy: "name" }]);
 
     const rebound = session.snapshot().items[0]!;
     // mentionId 不变：DOM 身份、撤销栈与已验证的选择都不被打断，只有实例身份换新。
@@ -631,6 +631,42 @@ describe("prompt content interface", () => {
     host.remove();
   });
 
+  it("换图：位置快照随存档往返后仍能认出替换关系", () => {
+    // 第 1 位放着旧图；用户把这一处的图换掉（解绑 + 连上新图）。
+    const oldImage = { ...assetCandidate("asset-old", "旧图.png", "asset-old"), slotIndex: 0 };
+    const session = createPromptContentEditorSession([oldImage]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    session.attach(host);
+    session.insertReference(oldImage);
+    // 引用记下了自己占的位置，并随编辑器文档往返保留。
+    expect(session.snapshot().items[0]).toMatchObject({ slotSnapshot: 0 });
+    session.attach(null);
+
+    const restored = createPromptContentEditorSession([]);
+    restored.restore(session.snapshot());
+    const restoredHost = document.createElement("div");
+    document.body.append(restoredHost);
+    restored.attach(restoredHost);
+    expect(restored.snapshot().items[0]).toMatchObject({ slotSnapshot: 0 });
+
+    const newImage = { ...assetCandidate("asset-new", "新图.png", "asset-new"), slotIndex: 0 };
+    expect(
+      restored.updateConnections([newImage], {
+        // 旧图节点仍在画布上（换图是解绑 + 连接，不是删节点）。
+        aliveCanvasNodeKeys: new Set(["asset-old", "asset-new"]),
+      }),
+    ).toMatchObject([{ canvasNodeKey: "asset-new", matchedBy: "slot" }]);
+    expect(restored.snapshot().items[0]).toMatchObject({
+      canvasNodeKey: "asset-new",
+      displayNameSnapshot: "新图.png",
+      slotSnapshot: 0,
+    });
+    restored.attach(null);
+    restoredHost.remove();
+    host.remove();
+  });
+
   it("只是解除连线时保持灰化，不按同名素材改绑", () => {
     const first = assetCandidate("asset-node-1");
     const second = assetCandidate("asset-node-2");
@@ -643,7 +679,7 @@ describe("prompt content interface", () => {
       session.updateConnections([second], {
         aliveCanvasNodeKeys: new Set(["asset-node-1", "asset-node-2"]),
       }),
-    ).toBe(0);
+    ).toEqual([]);
     expect(session.read().issues).toMatchObject([
       { kind: "disconnected_reference", canvasNodeKey: "asset-node-1" },
     ]);

@@ -421,6 +421,106 @@ describe("失效引用的自愈重连", () => {
   });
 });
 
+describe("换图：引用跟随填回原位置的素材", () => {
+  /** 用户把第 1 位的图换成另一份素材：旧图解绑，新图连进同一个位置。 */
+  function swappedSlotReference() {
+    const original = candidate("asset-old", "旧图.png", { slotIndex: 0 });
+    const reference = createPromptReference(original);
+    const source: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [{ kind: "text", text: "参考 " }, reference, { kind: "text", text: " 的姿态" }],
+    };
+    return { reference, source };
+  }
+
+  it("建引用时记下自己占的位置，供换图时认人", () => {
+    const reference = createPromptReference(candidate("asset-old", "旧图.png", { slotIndex: 3 }));
+    expect(reference.slotSnapshot).toBe(3);
+    // 没有位置信息的来源（非生成节点连线）不写快照，行为与今天一致。
+    expect(createPromptReference(candidate("asset-old", "旧图.png")).slotSnapshot).toBeUndefined();
+  });
+
+  it("旧图节点还在画布上（只是解绑）时，位置被新素材顶上就跟随新素材", () => {
+    const { reference, source } = swappedSlotReference();
+    const next = candidate("asset-new", "新图.png", { assetId: "asset-new", slotIndex: 0 });
+    const result = rebindDanglingPromptReferences(
+      source,
+      [next],
+      // 旧素材节点仍然留在画布上：换图是「解绑 + 连接」，不是删节点。
+      new Set(["asset-old", "asset-new"]),
+    );
+    expect(result.rebinds).toEqual([
+      {
+        mentionId: reference.mentionId,
+        canvasNodeKey: "asset-new",
+        displayName: "新图.png",
+        matchedBy: "slot",
+      },
+    ]);
+    expect(result.document.items[1]).toMatchObject({
+      mentionId: reference.mentionId,
+      canvasNodeKey: "asset-new",
+      displayNameSnapshot: "新图.png",
+      slotSnapshot: 0,
+      target: { assetId: "asset-new" },
+    });
+  });
+
+  it("解绑后位置空着时不改绑，引用继续灰化等用户决定", () => {
+    const { source } = swappedSlotReference();
+    const otherSlot = candidate("asset-other", "另一张.png", { slotIndex: 1 });
+    const result = rebindDanglingPromptReferences(
+      source,
+      [otherSlot],
+      new Set(["asset-old", "asset-other"]),
+    );
+    expect(result.rebinds).toEqual([]);
+    expect(result.document).toBe(source);
+  });
+
+  it("位置被填回同一份素材时按连线身份恢复，不算换图", () => {
+    const { source } = swappedSlotReference();
+    const same = candidate("asset-old-again", "旧图.png", {
+      assetId: "asset-asset-old",
+      slotIndex: 0,
+    });
+    const result = rebindDanglingPromptReferences(source, [same], new Set(["asset-old-again"]));
+    expect(result.rebinds).toMatchObject([
+      { canvasNodeKey: "asset-old-again", matchedBy: "identity" },
+    ]);
+  });
+
+  it("同名重连优先于位置匹配：换回同名文件仍按同源身份重连", () => {
+    const { source } = swappedSlotReference();
+    const sameName = candidate("asset-new", "旧图.png", { assetId: "asset-new", slotIndex: 0 });
+    const result = rebindDanglingPromptReferences(source, [sameName], new Set(["asset-new"]));
+    expect(result.rebinds).toMatchObject([{ canvasNodeKey: "asset-new", matchedBy: "name" }]);
+  });
+
+  it("同一个实例换成了另一份素材（身份变了但还连着）时同样跟随", () => {
+    const { reference, source } = swappedSlotReference();
+    const replaced = candidate("asset-old", "新图.png", {
+      assetId: "asset-replaced",
+      slotIndex: 0,
+    });
+    const result = rebindDanglingPromptReferences(source, [replaced], new Set(["asset-old"]));
+    expect(result.rebinds).toEqual([
+      {
+        mentionId: reference.mentionId,
+        canvasNodeKey: "asset-old",
+        displayName: "新图.png",
+        matchedBy: "slot",
+      },
+    ]);
+    expect(result.document.items[1]).toMatchObject({
+      canvasNodeKey: "asset-old",
+      displayNameSnapshot: "新图.png",
+      target: { assetId: "asset-replaced" },
+    });
+  });
+});
+
 describe("referenceQueryInText", () => {
   it("reads incomplete names with spaces using the original UTF-16 caret range", () => {
     expect(referenceQueryInText("😀使用@Red Cat")).toEqual({ query: "Red Cat", start: 4 });

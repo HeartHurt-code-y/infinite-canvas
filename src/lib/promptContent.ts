@@ -19,6 +19,7 @@ import {
   referenceQueryInText,
   referenceCandidateFromTarget,
   type PromptReferenceCandidate,
+  type PromptReferenceRebind,
 } from "./promptReferences";
 import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
@@ -85,6 +86,11 @@ export interface PromptContentMediaReferenceItem {
   readonly displayNameSnapshot: string;
   readonly learnedPattern?: string;
   readonly aliasSnapshot?: string;
+  /**
+   * 建立引用时它在目标节点媒体清单里的位置（0 起）。素材被换成另一份、又填回同一个
+   * 位置时，靠它判断「这一处引用要跟着新素材走」，而不是按名称去猜。
+   */
+  readonly slotSnapshot?: number;
 }
 
 export interface PromptContentPendingReferenceItem {
@@ -136,6 +142,8 @@ export interface PromptContentConnection {
   readonly target: ExplicitMediaTarget;
   /** 显式媒体输入的角色（如首帧/参考图/文档/网页）；缺省时由后端按素材类型推导。 */
   readonly role?: string;
+  /** 该素材在目标生成节点媒体清单里的位置（0 起），与 @ 候选共享同一份位置信息。 */
+  readonly slotIndex?: number | undefined;
 }
 
 export type PromptContentIssue =
@@ -199,12 +207,12 @@ export interface PromptContentEditorSession {
   isComposing(): boolean;
   /**
    * 连线集合变化时的唯一入口：同步候选、自愈失效引用、刷新 chip 状态、识别正文里新出现的 @。
-   * 返回本次自动重连的引用处数（0 表示没有自愈发生），供调用方给出反馈。
+   * 返回本次自动重连的引用（空数组表示没有自愈发生），供调用方按重连原因给出反馈。
    */
   updateConnections(
     candidates: readonly PromptReferenceCandidate[],
     options?: PromptConnectionUpdateOptions,
-  ): number;
+  ): readonly PromptReferenceRebind[];
   acceptNativeInput(): PromptContentView;
   insertReference(candidate: PromptReferenceCandidate): PromptContentView;
   /** 在光标处插入标注引用；同一标记可以插入多次，每次都是独立的引用身份。 */
@@ -453,6 +461,12 @@ export function decodePromptContentDocument(value: unknown): PromptContentDocume
         ...(typeof raw["aliasSnapshot"] === "string"
           ? { aliasSnapshot: raw["aliasSnapshot"] }
           : {}),
+        // 位置快照必须随存档保留：换图靠它认出「这个位置的素材被换成了另一份」。
+        ...(typeof raw["slotSnapshot"] === "number" &&
+        Number.isInteger(raw["slotSnapshot"]) &&
+        raw["slotSnapshot"] >= 0
+          ? { slotSnapshot: raw["slotSnapshot"] }
+          : {}),
       });
       continue;
     }
@@ -495,6 +509,7 @@ function promptContentItemEqual(first: PromptContentItem, second: PromptContentI
     first.displayNameSnapshot === second.displayNameSnapshot &&
     (first.learnedPattern ?? "") === (second.learnedPattern ?? "") &&
     (first.aliasSnapshot ?? "") === (second.aliasSnapshot ?? "") &&
+    (first.slotSnapshot ?? -1) === (second.slotSnapshot ?? -1) &&
     sameMediaReferenceTarget(first.target, second.target)
   );
 }
@@ -730,7 +745,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   updateConnections(
     candidates: readonly PromptReferenceCandidate[],
     options?: PromptConnectionUpdateOptions,
-  ): number {
+  ): readonly PromptReferenceRebind[] {
     this.candidates = candidates;
     if (options?.aliveCanvasNodeKeys != null)
       this.aliveCanvasNodeKeys = options.aliveCanvasNodeKeys;
@@ -782,8 +797,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
    */
   private flushDomObserver(): void {
     const view = this.editor?.view as
-      | (Editor["view"] & { domObserver?: { flush(): void; forceFlush?(): void } })
-      | undefined;
+      (Editor["view"] & { domObserver?: { flush(): void; forceFlush?(): void } }) | undefined;
     const observer = view?.domObserver;
     if (observer == null) return;
     if (typeof observer.forceFlush === "function") observer.forceFlush();
@@ -1025,28 +1039,29 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   }
 
   /**
-   * 被引用的素材节点已经不在画布上（删除后重新连接同名素材）时，把失效引用原地重绑到
-   * 当前候选，并保留 mentionId 与已确认的选择。自动重连是连线变化的副作用，不进撤销历史：
-   * 否则撤销会把已经无处可指的灰化引用放回来，下一次同步还会再连一次。
+   * 被引用的素材不在这次连线里时，把失效引用原地重绑到当前候选，并保留 mentionId 与已确认
+   * 的选择：素材节点被删掉后重新连上（同源/同名），或原来占的位置被另一份素材顶上（换图）。
+   * 自动重连是连线变化的副作用，不进撤销历史：否则撤销会把已经无处可指的灰化引用放回来，
+   * 下一次同步还会再连一次。
    */
-  private rebindDanglingReferences(): number {
-    if (this.aliveCanvasNodeKeys == null) return 0;
+  private rebindDanglingReferences(): readonly PromptReferenceRebind[] {
+    if (this.aliveCanvasNodeKeys == null) return [];
     if (this.isComposing()) {
       this.pendingConnections = true;
-      return 0;
+      return [];
     }
     const result = rebindDanglingPromptReferences(
       this.document,
       this.candidates,
       this.aliveCanvasNodeKeys,
     );
-    if (result.rebinds.length === 0) return 0;
+    if (result.rebinds.length === 0) return [];
     this.document = result.document;
     // 重新连上的引用按「刚识别到」闪一次高亮，用户能直接看出哪几处自愈了。
     this.rememberFreshMentions(result.rebinds.map((rebind) => rebind.mentionId));
     this.applyDocument(true, false);
     this.notify();
-    return result.rebinds.length;
+    return result.rebinds;
   }
 
   reconcileConnections(): number {
@@ -1220,6 +1235,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
                 canvasNodeKey: connection.key,
                 name: connection.name,
                 target: connection.target,
+                ...(connection.slotIndex === undefined ? {} : { slotIndex: connection.slotIndex }),
               }),
             ],
       ),

@@ -135,6 +135,7 @@ const MediaReference = Node.create({
       displayNameSnapshot: { default: "" },
       learnedPattern: { default: null },
       aliasSnapshot: { default: null },
+      slotSnapshot: { default: null },
       referenceLabel: { default: null, rendered: false },
       fresh: { default: false, rendered: false },
       stale: { default: false, rendered: false },
@@ -151,6 +152,7 @@ const MediaReference = Node.create({
           const mentionId = node.dataset["mentionId"] ?? "";
           const canvasNodeKey = node.dataset["canvasNodeKey"] ?? "";
           if (!target || !mentionId || !canvasNodeKey) return false;
+          const slotSnapshot = Number.parseInt(node.dataset["slotSnapshot"] ?? "", 10);
           return {
             mentionId,
             canvasNodeKey,
@@ -158,6 +160,7 @@ const MediaReference = Node.create({
             displayNameSnapshot: node.dataset["displayName"] ?? "",
             learnedPattern: node.dataset["autoPattern"] ?? null,
             aliasSnapshot: node.dataset["autoAlias"] ?? null,
+            slotSnapshot: Number.isInteger(slotSnapshot) ? slotSnapshot : null,
             referenceLabel: node.dataset["referenceLabel"] ?? null,
             fresh: node.dataset["auto"] === "true",
             stale: node.classList.contains("is-stale"),
@@ -195,6 +198,8 @@ const MediaReference = Node.create({
       attrs["data-auto-pattern"] = node.attrs["learnedPattern"];
     if (typeof node.attrs["aliasSnapshot"] === "string" && node.attrs["aliasSnapshot"])
       attrs["data-auto-alias"] = node.attrs["aliasSnapshot"];
+    if (typeof node.attrs["slotSnapshot"] === "number")
+      attrs["data-slot-snapshot"] = String(node.attrs["slotSnapshot"]);
     if (alias) attrs["data-reference-label"] = alias;
     return ["span", attrs, `@${displayName}${alias ? ` · ${alias}` : ""}`];
   },
@@ -397,6 +402,7 @@ export function promptReferenceToTiptapNode(
       displayNameSnapshot: item.displayNameSnapshot,
       learnedPattern: item.learnedPattern ?? null,
       aliasSnapshot: item.aliasSnapshot ?? null,
+      slotSnapshot: item.slotSnapshot ?? null,
       referenceLabel: presentation.referenceLabelsByKey?.get(item.canvasNodeKey) ?? null,
       fresh: presentation.freshMentionIds?.has(item.mentionId) ?? false,
       stale:
@@ -492,6 +498,7 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
       mentionIds.add(mentionId);
       const learnedPattern = attrs["learnedPattern"];
       const aliasSnapshot = attrs["aliasSnapshot"];
+      const slotSnapshot = attrs["slotSnapshot"];
       items.push({
         kind: "media_reference",
         mentionId,
@@ -502,6 +509,9 @@ export function promptDocumentFromTiptapJson(value: JSONContent): PromptContentD
           ? { learnedPattern: normalizePromptReferenceText(learnedPattern) }
           : {}),
         ...(typeof aliasSnapshot === "string" && aliasSnapshot ? { aliasSnapshot } : {}),
+        ...(typeof slotSnapshot === "number" && Number.isInteger(slotSnapshot) && slotSnapshot >= 0
+          ? { slotSnapshot }
+          : {}),
       });
       return;
     }

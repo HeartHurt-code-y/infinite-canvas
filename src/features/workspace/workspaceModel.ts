@@ -196,6 +196,8 @@ export interface ConnectedAssetInput {
   readonly previewUrl: string | null;
   /** 可执行素材的稳定来源，白模控制按此身份绑定，不能按显示名推断。 */
   readonly target?: MediaReferenceTarget;
+  /** 该素材在生成节点媒体清单里的位置（0 起）；非生成节点或未记槽位时不带。 */
+  readonly slotIndex?: number | undefined;
 }
 
 /** 分镜节点实时读取的上游剧本文档；连线只保存节点身份，不复制可能过期的正文。 */
@@ -223,6 +225,11 @@ export interface GenerationMediaInput {
   readonly target: MediaReferenceTarget;
   /** @ 下拉候选的缩略图源；素材节点直用预览图，产物节点经 finalPath/previewSrc 解析。 */
   readonly previewUrl?: string | null;
+  /**
+   * 该素材在目标生成节点媒体清单里的位置（0 起）；只有生成节点的直连素材带这个信息。
+   * 提示词引用据此记住自己占的是第几位，换图回填空槽后能认出替换关系。
+   */
+  readonly slotIndex?: number | undefined;
 }
 
 /**
@@ -2322,12 +2329,15 @@ export function outputGenerationInput(node: OutputNodeData): GenerationMediaInpu
 /** 当前生成节点有效连接中的具体媒体实例，与提示内容共用候选定义。 */
 export type MentionCandidate = PromptReferenceCandidate;
 
-export function generationInputMentionCandidate(input: GenerationMediaInput): MentionCandidate {
+export function generationInputMentionCandidate(
+  input: GenerationMediaInput & { readonly slotIndex?: number | undefined },
+): MentionCandidate {
   return referenceCandidateFromTarget({
     canvasNodeKey: input.key,
     target: input.target,
     name: input.name,
     previewUrl: input.previewUrl ?? null,
+    ...(input.slotIndex === undefined ? {} : { slotIndex: input.slotIndex }),
   });
 }
 

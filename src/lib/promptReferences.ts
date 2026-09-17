@@ -18,6 +18,11 @@ export interface PromptReferenceCandidate {
   readonly kind: "image" | "video" | "audio";
   readonly name: string;
   readonly previewUrl?: string | null;
+  /**
+   * 该素材在目标生成节点媒体清单里的位置（0 起）；只有生成节点连线带这个信息。
+   * 引用会把这个位置记进自己的快照，用于判断「换图后是哪一处引用需要跟随新素材」。
+   */
+  readonly slotIndex?: number | undefined;
 }
 
 export interface PromptReferencePattern {
@@ -202,6 +207,7 @@ export function referenceCandidateFromTarget(input: {
   readonly target: MediaReferenceTarget;
   readonly name: string;
   readonly previewUrl?: string | null;
+  readonly slotIndex?: number | undefined;
 }): PromptReferenceCandidate {
   const { target } = input;
   const shared = {
@@ -212,6 +218,7 @@ export function referenceCandidateFromTarget(input: {
     source: target.kind === "asset" ? ("cloud" as const) : ("local" as const),
     providerConnectionId: target.kind === "asset" ? target.providerConnectionId : "",
     ...(input.previewUrl !== undefined ? { previewUrl: input.previewUrl } : {}),
+    ...(input.slotIndex === undefined ? {} : { slotIndex: input.slotIndex }),
   };
   switch (target.kind) {
     case "asset":
@@ -241,6 +248,8 @@ export function createPromptReference(
     target: candidateTarget(candidate),
     displayNameSnapshot: candidate.name,
     ...(options?.alias ? { aliasSnapshot: options.alias } : {}),
+    // 引用记住自己占的是媒体清单里的第几位：素材被换成另一份时靠它认出替换关系。
+    ...(candidate.slotIndex === undefined ? {} : { slotSnapshot: candidate.slotIndex }),
   };
 }
 
@@ -370,8 +379,11 @@ export interface PromptReferenceRebind {
   readonly mentionId: string;
   readonly canvasNodeKey: string;
   readonly displayName: string;
-  /** identity：同一份素材被重新投放；name：画布上只剩唯一同名素材。 */
-  readonly matchedBy: "identity" | "name";
+  /**
+   * identity：同一份素材被重新投放；name：画布上只剩唯一同名素材；
+   * slot：原来占的媒体位置被换上了另一份素材（换图回填空槽）。
+   */
+  readonly matchedBy: "identity" | "name" | "slot";
 }
 
 export interface PromptReferenceRebindResult {
@@ -410,11 +422,56 @@ function danglingReplacement(
 }
 
 /**
- * 素材被移除后重新连接同名素材时，引用的画布实例已经不在了：它既解不开、又会阻塞生成，
- * 用户只能删掉整个 chip 再重新 @。这里按「同源 → 唯一同名」把失效引用原地重绑到当前候选。
+ * 换图：引用原来占的媒体位置被另一份素材顶上（用户解绑旧的、连上新的）。
  *
- * 只处理实例确实已经不在画布上的引用（aliveCanvasNodeKeys 里没有它的 key）：
- * 仅仅是解除连线时节点还在画布上，那属于用户明确的选择，引用保持灰化等他处理。
+ * 只有当这个位置确实被填上、且填进来的不是引用原本指向的那一份时才算替换：
+ * 解绑后位置空着（用户就是不想再用它）不重绑，引用继续保持灰化等他决定。
+ * 位置是唯一的——一个位置同时只能有一份素材——因此这里不存在猜错的余地，
+ * 也不会像「按候选顺序推断」那样把一处引用错绑到别的素材上。
+ */
+function slotReplacement(
+  item: PromptContentMediaReferenceItem,
+  candidates: readonly PromptReferenceCandidate[],
+): {
+  readonly candidateIndex: number;
+  readonly matchedBy: PromptReferenceRebind["matchedBy"];
+} | null {
+  if (item.slotSnapshot === undefined) return null;
+  const occupants = candidates
+    .map((candidate, index) => ({ candidate, index }))
+    .filter(
+      ({ candidate }) =>
+        candidate.slotIndex === item.slotSnapshot &&
+        !sameMediaSourceIdentity(candidateTarget(candidate), item.target),
+    );
+  return occupants.length === 1 ? { candidateIndex: occupants[0]!.index, matchedBy: "slot" } : null;
+}
+
+/**
+ * 失效引用重绑到哪个候选。
+ *
+ * 实例仍在画布上（只是被解绑）时只认「原位置被换上的素材」：那是换图，不是同名猜测。
+ * 实例已经不在画布上时按「同源 → 唯一同名 → 原位置被换上的素材」依次判断。
+ */
+function referenceReplacement(
+  item: PromptContentMediaReferenceItem,
+  candidates: readonly PromptReferenceCandidate[],
+  referencedInstanceAlive: boolean,
+): {
+  readonly candidateIndex: number;
+  readonly matchedBy: PromptReferenceRebind["matchedBy"];
+} | null {
+  if (referencedInstanceAlive) return slotReplacement(item, candidates);
+  return danglingReplacement(item, candidates) ?? slotReplacement(item, candidates);
+}
+
+/**
+ * 引用不再指向当前连着的那一份素材时，把它原地重绑到合适的候选：接入方式是
+ * 「同源 → 唯一同名 → 原位置被换上的素材」，三者都不成立时交还用户处理。
+ *
+ * 实例已经不在画布上（素材节点被删掉后又连上新的）走完整三步；实例还在画布上时只认
+ * 位置替换——解绑后原位置被另一份素材填上，或这个位置上的素材本身被换成了另一份，
+ * 都是用户主动换图；解绑后位置空着则保持灰化，等他决定。
  * mentionId 原样保留，因此 DOM 身份、撤销栈与「已确认的同名引用」都不会被打断。
  */
 export function rebindDanglingPromptReferences(
@@ -435,11 +492,18 @@ export function rebindDanglingPromptReferences(
         candidate.canvasNodeKey === item.canvasNodeKey &&
         sameMediaReferenceTarget(candidateTarget(candidate), item.target),
     );
-    if (stillConnected || aliveCanvasNodeKeys.has(item.canvasNodeKey)) {
+    if (stillConnected) {
       items.push(item);
       continue;
     }
-    const replacement = danglingReplacement(item, candidates);
+    // 实例还在画布上、也还连着，但来源身份已经不是引用记下的那一份：用户把这个位置的
+    // 素材本身换掉了（同一实例换了另一份图）。这个位置归他所有，同样算换图。
+    const identityChangedInPlace =
+      aliveCanvasNodeKeys.has(item.canvasNodeKey) &&
+      candidates.some((candidate) => candidate.canvasNodeKey === item.canvasNodeKey);
+    const replacement = identityChangedInPlace
+      ? slotReplacement(item, candidates)
+      : referenceReplacement(item, candidates, aliveCanvasNodeKeys.has(item.canvasNodeKey));
     if (replacement == null) {
       items.push(item);
       continue;
@@ -455,6 +519,8 @@ export function rebindDanglingPromptReferences(
       ...(item.aliasSnapshot === undefined
         ? {}
         : { aliasSnapshot: aliases[replacement.candidateIndex]!.label }),
+      // 位置快照跟着新素材走：换图后仍记得自己占的是第几位，下一次换图还能认出替换关系。
+      ...(candidate.slotIndex === undefined ? {} : { slotSnapshot: candidate.slotIndex }),
     });
     rebinds.push({
       mentionId: item.mentionId,

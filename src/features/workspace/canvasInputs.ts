@@ -19,6 +19,11 @@ export interface ConnectedCanvasMediaInput extends GenerationMediaInput {
   readonly sourceLabel: "素材" | "产物";
   readonly src: string | null;
   readonly finalPath: string | null;
+  /**
+   * 该素材在目标生成节点槽位表里的位置（0 起）；非生成节点或未记槽位的来源不带此字段。
+   * 引用据此记住「自己占的是第几位」，换图回填空槽后可判断出是哪一处引用需要跟随。
+   */
+  readonly slotIndex?: number | undefined;
 }
 
 export interface ConnectedCanvasTextInput {
@@ -450,6 +455,12 @@ export function createCanvasInputResolver(
           if (rightRank == null) return -1;
           return leftRank - rightRank;
         });
+        // 位置随素材一路带下去：提示词引用据此记住自己占的是第几位。
+        for (let index = 0; index < media.length; index += 1) {
+          const position = positionByKey.get(media[index]!.sourceKey);
+          if (position == null) continue;
+          media[index] = { ...media[index]!, slotIndex: position };
+        }
       }
     }
     const result = { media, texts, pending, mediaSlotCount, mediaPosition };

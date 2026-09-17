@@ -790,8 +790,8 @@ export function PromptMentionInput({
     const input = inputRef.current;
     if (input == null) return;
     const currentCandidates = latestCandidatesRef.current;
-    const rebound =
-      sessionRef.current?.updateConnections(currentCandidates, { aliveCanvasNodeKeys }) ?? 0;
+    const rebinds =
+      sessionRef.current?.updateConnections(currentCandidates, { aliveCanvasNodeKeys }) ?? [];
     const pendingCount = sessionRef.current?.read().pendingCount ?? 0;
     if (pendingCount > 0) {
       openFirstPendingAmbiguity();
@@ -803,14 +803,18 @@ export function PromptMentionInput({
       setActiveAmbiguity(null);
       setAutoMentionResolvedNames([]);
       showReadyFeedback();
-      if (rebound > 0) {
+      if (rebinds.length > 0) {
         if (feedbackResetTimerRef.current != null) {
           window.clearTimeout(feedbackResetTimerRef.current);
         }
-        setAutoMentionFeedbackState({
-          kind: "success",
-          message: `已按同名素材自动重连 ${rebound} 处引用`,
-        });
+        // 换图（原来占的位置被新素材顶上）与同名素材重连是两回事，回执要分开说。
+        const replaced = rebinds.filter((rebind) => rebind.matchedBy === "slot").length;
+        const renamed = rebinds.length - replaced;
+        const parts = [
+          ...(replaced > 0 ? [`已跟随换上的新素材更新 ${replaced} 处引用`] : []),
+          ...(renamed > 0 ? [`已按同名素材自动重连 ${renamed} 处引用`] : []),
+        ];
+        setAutoMentionFeedbackState({ kind: "success", message: parts.join("；") });
         feedbackResetTimerRef.current = window.setTimeout(() => {
           feedbackResetTimerRef.current = null;
           showReadyFeedback();

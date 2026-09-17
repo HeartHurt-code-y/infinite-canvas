@@ -7569,6 +7569,61 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
   });
 
+  it("换图：解绑旧图、连上新图后提示词引用自动跟随新素材", async () => {
+    const replacementImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-replacement",
+      name: "站台夜景图",
+      previewUrl: "https://cdn.example.com/station-night.jpg",
+      assetUrl: "https://cdn.example.com/station-night.jpg",
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, replacementImage])
+        : baseInvokeImplementation(command),
+    );
+
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const oldImage = await addAssetNode("图片", "站台参考图", 148, 148);
+    const newImage = await addAssetNode("图片", "站台夜景图", 148, 333);
+    connectAssetToGeneration(oldImage, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台参考图" });
+
+    // 在提示词里引用旧图。
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    setPromptText(promptInput, "开场 ");
+    fireEvent.keyDown(promptInput, { key: "@" });
+    const instanceQuery = oldImage.dataset["connectionTarget"]!.slice(-6);
+    appendPromptText(promptInput, "@");
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    appendPromptText(promptInput, instanceQuery);
+    await waitFor(() => expect(within(menu).getAllByRole("option")).toHaveLength(1));
+    fireEvent.click(within(menu).getByRole("option", { name: /站台参考图/ }));
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台参考图 · 图片1");
+
+    // 换图：解绑旧图（位置留空），再把新图连进同一个位置。
+    fireEvent.click(within(videoGeneration).getByRole("button", { name: "解除连线：站台参考图" }));
+    await waitFor(() =>
+      expect(
+        within(videoGeneration).queryByRole("button", { name: "解除连线：站台参考图" }),
+      ).not.toBeInTheDocument(),
+    );
+    connectAssetToGeneration(newImage, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台夜景图" });
+
+    // 引用原地跟随新素材：DOM 身份不变、正文换成新名字、不再有失效引用。
+    await waitFor(() =>
+      expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe("开场 @站台夜景图 · 图片1"),
+    );
+    const chip = promptInput.querySelector<HTMLElement>(".mention-chip")!;
+    expect(chip).toHaveAttribute("data-canvas-node-key", newImage.dataset["connectionTarget"]);
+    expect(chip).not.toHaveClass("is-stale");
+    expect(within(videoGeneration).getByText(/跟随换上的新素材更新 1 处引用/)).toBeInTheDocument();
+  });
+
   it("删除连线再重连同一素材后，画布连线序号仍与节点清单编号一一对应", async () => {
     const cleanImage: CloudAsset = {
       ...CLOUD_ASSETS[0]!,
