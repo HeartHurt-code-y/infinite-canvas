@@ -34,18 +34,19 @@ app_path="${1:-}"
 [ -n "$app_path" ] || fail "用法：$0 <path/to/App.app>"
 [ -d "$app_path" ] || fail "找不到 app bundle：$app_path"
 
-# ---- 1. 必须有签名，且不是 ad-hoc ---------------------------------------------
+# ---- 1. 必须有签名 ------------------------------------------------------------
 #
-# 没有签名身份时 Tauri **什么都不签**（不是退回 ad-hoc，而是整段跳过且不打日志）。
-# ad-hoc（authority 为 "-"）与未签名的包在别的 Mac 上都会被 Gatekeeper 拦下。
+# 没有签名身份时 Tauri 会**整段跳过签名**；而 tauri.conf.json 现在显式设置了
+# `signingIdentity: "-"`，因此正常构建一定是 ad-hoc 签名。未签名的 bundle 在 macOS 上
+# 会被报成「已损坏，无法打开」，所以这里仍然把「完全没签名」当作失败。
+#
+# ad-hoc 本身**不是**失败：它是本项目的合法基线（没有 Apple 证书时的默认），
+# 只影响别人首次打开需要清一次隔离属性，不影响 app 自身能否运行。
 signature_info="$(codesign -dv --verbose=4 "$app_path" 2>&1 || true)"
 if ! grep -q '^Authority=' <<<"$signature_info"; then
-  fail "该 bundle 没有代码签名（很可能是未签名或仅 ad-hoc）：
+  fail "该 bundle 完全没有签名（未签名 bundle 在 macOS 上会被报成「已损坏，无法打开」）。
+检查 tauri.conf.json 的 bundle.macOS.signingIdentity 是否为 \"-\"，以及构建日志里是否有签名相关报错：
 $signature_info"
-fi
-if grep -q '^Authority=-$' <<<"$signature_info"; then
-  fail "该 bundle 是 ad-hoc 签名：其他用户的 Gatekeeper 会拦下它。
-请配置 Developer ID 证书后重新打包（.github/workflows/macos-package.yml）。"
 fi
 
 authority="$(grep -m1 '^Authority=' <<<"$signature_info" | cut -d= -f2-)"
@@ -54,12 +55,15 @@ log "签名 Authority：$authority"
 log "TeamIdentifier：${team_id:-<无>}"
 
 case "$authority" in
+  "-")
+    log "身份等级：ad-hoc（合法基线）。bundle 签名自洽，app 可以运行；"
+    log "      其他用户首次打开需清一次隔离属性：sudo bash scripts/install-macos.sh <dmg>"
+    ;;
   "Developer ID Application:"*)
     log "身份等级：Developer ID（可对外分发）。"
     ;;
   *)
-    log "警告：非 Developer ID 的签名证书，其他用户首次打开需绕过 Gatekeeper"
-    log "      （系统设置 → 隐私与安全性 → 仍要打开，或 xattr -dr com.apple.quarantine）。"
+    log "警告：非 Developer ID 的签名证书，其他用户首次打开需绕过 Gatekeeper。"
     ;;
 esac
 

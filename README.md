@@ -91,23 +91,27 @@ Apple 的 TN3127《Inside Code Signing: Requirements》描述了同一机制：a
 
 凭据已不走钥匙串，所以**签名与「弹不弹密码框」无关**。签名只关系到**别人能不能打开你的包**：
 
-- 未签名的包在别的 Mac 上会被 Gatekeeper 拦下；macOS 15 起右键「打开」已不再能绕过。
-- Apple Silicon 上未签名的 arm64 可执行文件会被内核直接杀掉。
-- 注意 Tauri 在 macOS 上**没有配置签名身份时根本不做签名**（不是退回 ad-hoc，而是整段跳过且不打日志）。
+- `bundle.macOS.signingIdentity` **未设置时 Tauri 整段跳过签名**（不打日志、不退回 ad-hoc）。未签名的 bundle 在 macOS 上被报成「**已损坏，无法打开**」，连绕过 Gatekeeper 的机会都没有。
+- 本项目因此固定设 `"signingIdentity": "-"`（ad-hoc），保证**每次构建都得到签名自洽的 bundle**。有 Developer ID 证书时由 `APPLE_SIGNING_IDENTITY` 环境变量覆盖（该变量优先于配置，Tauri CLI 会读取）。
+- Apple Silicon 上 **arm64 可执行文件必须有有效签名才会被执行**，否则被内核直接杀掉。
 
-### 方案 A：没有 Apple 证书 —— 用户跑一条命令
+### 方案 A：没有 Apple 证书 —— 用户粘贴一条命令
 
-`scripts/install-macos.sh` 随包一起发出去，用户只需：
+**前提（重要）**：`bundle.macOS.signingIdentity` 必须是 `"-"`（本项目已配置）。不设它的话 Tauri 会**整段跳过签名**，产出的未签名 bundle 在 macOS 上会被报成「**已损坏，无法打开**」——这不是 Gatekeeper 的可绕过提示，而是 bundle 签名不自洽。设成 `"-"` 后 Tauri 会执行 **ad-hoc 签名**（`codesign -f -s -`），bundle 签名自洽，app 可以正常运行。
+
+ad-hoc 之后，用户唯一需要做的就是把下载带来的隔离属性清掉。给用户**一条自包含、不依赖任何脚本文件**的命令：
 
 ```bash
-sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
+APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo cp -R "$APP" /Applications/ && sudo xattr -cr "/Applications/$(basename "$APP")" && open "/Applications/$(basename "$APP")"
 ```
 
-脚本会：清掉 DMG 与 app 的隔离属性 → **由内到外 ad-hoc 重签 app 内所有可执行文件** → 装到 `/Applications` → 校验。
+先**双击挂载 DMG**，再粘贴这一行。它做的事：把 DMG 里的 app 复制出来 → 清掉隔离属性 → 安装到 `/Applications` → 直接打开。
 
-**为什么不能只清 quarantine**（网上最常见的错误建议）：清 quarantine 只解决 Gatekeeper。Apple Silicon 上 **arm64 可执行文件必须有有效签名才能被内核执行**，而 Tauri 在没有证书时什么都不签，内置 FFmpeg / Blender 也可能未签名——只清 quarantine 的话，app 能打开但一用到这些引擎就被杀。所以脚本必须同时做 **ad-hoc 重签**（`codesign -s -`，不需要任何证书）。
+> 早期版本让用户执行 `sudo bash install-macos.sh <dmg>`，但那个脚本不在 DMG 里、也不在用户当前目录，用户会撞到 `No such file or directory`。上面这条命令因此不再依赖任何额外文件。`scripts/install-macos.sh` 仍保留给愿意下载脚本的人，功能更全（含由内到外的逐文件重签与校验）。
 
-代价：用户要手动跑一条命令（**这就是没有 Apple 证书的必然代价**，没有技术替代方案）；且每次把 app 移到新位置或重新下载，都要再跑一次。
+**为什么 ad-hoc 是必须的**（网上「只需清 quarantine」的建议不完整）：Apple Silicon 上 **arm64 可执行文件必须有有效签名才能被内核执行**。没有 `signingIdentity: "-"` 时 Tauri 什么都不签，未签名的 bundle 甚至不给你绕过 Gatekeeper 的机会，直接报「已损坏」。
+
+代价：用户要粘贴一条命令（**这是没有 Apple 证书的必然代价**，没有技术替代方案）；每次重新下载都要再做一次。
 
 ### 方案 B：有 Apple 证书 —— 用户双击即可
 

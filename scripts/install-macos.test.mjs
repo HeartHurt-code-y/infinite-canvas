@@ -1,4 +1,4 @@
-﻿// 用例守护 scripts/install-macos.sh 的**参数契约**与**平台守卫**。
+// 用例守护 scripts/install-macos.sh 的**参数契约**与**平台守卫**。
 //
 // 为什么值得写：这个脚本会被贴给终端用户手动执行（`sudo bash install-macos.sh <dmg>`），
 // 参数一旦解析错，用户看到的是「什么都没发生」或误装到别处，而开发者手上没有复现环境。
@@ -110,6 +110,35 @@ test("mentions no developer certificate requirement", () => {
   assert.ok(
     !/Developer ID Application:/.test(source),
     "the unsigned-install path must not require a Developer ID identity",
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 回归守卫：tauri.conf.json 必须让 Tauri 真的签名。
+// ---------------------------------------------------------------------------
+
+// 这是用户实际踩到的坑：bundle.macOS 里没有 signingIdentity 时，Tauri **整段跳过签名**
+// （不打日志、也不退回 ad-hoc），产出的未签名 bundle 在 macOS 上被报成
+// 「已损坏，无法打开」——连绕过 Gatekeeper 的机会都没有。设成 "-" 才会执行 ad-hoc 签名。
+test("tauri.conf.json pins an ad-hoc signing identity so bundles are never unsigned", () => {
+  const confPath = path.resolve(path.dirname(SCRIPT), "..", "src-tauri", "tauri.conf.json");
+  const conf = JSON.parse(readFileSync(confPath, "utf8"));
+  assert.equal(
+    conf?.bundle?.macOS?.signingIdentity,
+    "-",
+    'bundle.macOS.signingIdentity must be "-" (ad-hoc); otherwise Tauri skips signing entirely and the app is reported as damaged',
+  );
+});
+
+// 同一条守卫的另一半：BOM 会让 serde_json 直接报错（"expected value at line 1 column 1"），
+// 而编辑器/PowerShell 很容易在无意间写入 BOM。构建整个挂在解析配置上，值得一条用例钉住。
+test("tauri.conf.json carries no UTF-8 BOM", () => {
+  const confPath = path.resolve(path.dirname(SCRIPT), "..", "src-tauri", "tauri.conf.json");
+  const raw = readFileSync(confPath);
+  assert.notDeepEqual(
+    [...raw.subarray(0, 3)],
+    [0xef, 0xbb, 0xbf],
+    "tauri.conf.json must not start with a UTF-8 BOM; serde_json fails to parse it",
   );
 });
 

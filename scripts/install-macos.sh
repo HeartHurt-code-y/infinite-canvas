@@ -11,7 +11,10 @@
 #
 # 用法（把 <文件> 换成 DMG 或 .app 的路径）：
 #   sudo bash install-macos.sh ~/Downloads/无限画布_0.1.0_aarch64.dmg
-#   sudo bash install-macos.sh ~/Downloads/无限画布.app
+#   sudo bash install-macos.sh /Volumes/无限画布/无限画布.app
+#
+# 注意：这个脚本**不在 DMG 里**。如果你手上只有 DMG 而没有这个脚本，请改用 README
+# 「方案 A」里那条自包含的单行命令，它不依赖任何额外文件。
 #
 # 可选参数：
 #   --target <dir>   安装到指定目录（默认 /Applications）
@@ -55,7 +58,7 @@ while [ $# -gt 0 ]; do
       shift
       ;;
     -h | --help)
-      sed -n '2,26p' "$0"
+      sed -n '2,27p' "$0"
       exit 0
       ;;
     -*)

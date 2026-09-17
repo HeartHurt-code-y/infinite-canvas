@@ -89,15 +89,15 @@ jobs:
 
           security find-identity -v -p codesigning
 
-      # 策略是**自适应**而不是硬性要求 Developer ID：
+      # 身份解析是**可选**的，不再是硬性要求：
       #   - 配了证书 secret → 导入后用 Developer ID 正式签名（可对外分发）；
-      #   - 没配证书 secret、但构建机装有其他 codesigning 身份 → 用它签名，仍产出可用的包；
-      #   - 两者皆无 → 不签名。**这会失败**：Tauri 在没有身份时根本不做签名
-      #     （不是退回 ad-hoc，而是整段跳过，且不打日志），而 Apple Silicon 上未签名的
-      #     arm64 可执行文件会被内核直接杀掉。所以宁可让它显式失败。
+      #   - 没配 → tauri.conf.json 的 signingIdentity:"-" 会让 Tauri 做 **ad-hoc 签名**。
+      # ad-hoc 是合法基线：它让 bundle 具备**自洽**的签名（否则 Tauri 在没有身份时整段跳过，
+      # 产出的未签名 bundle 在 macOS 上会被报成「已损坏，无法打开」——这正是用户遇到的现象）。
+      # ad-hoc 的代价只是别的用户需要清一次隔离属性，见 install-macos.sh。
       # 身份选择逻辑与回归用例见 scripts/macos-signing-identity.mjs。
       - name: Resolve macOS signing identity
-        run: node scripts/macos-signing-identity.mjs --require
+        run: node scripts/macos-signing-identity.mjs
 
       # 把「这个包能不能给所有人打开」写进 run summary。判据有三项，缺一不可：
       # Developer ID 证书、公证、以及公证凭据；缺任何一项，陌生用户双击都会被拦。
