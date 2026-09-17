@@ -20,6 +20,10 @@ use super::{
         operations_from_schema, provider_scoped_model_definition_id,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
+    provider_adapter::{
+        self, ProviderAdapterKind, catalog_path_for_adapter, extra_headers_for_adapter,
+        finalize_video_body,
+    },
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
     },
@@ -30,33 +34,17 @@ use super::{
     volcengine_ark::{self, ArkCredentials},
 };
 
-pub const MOYU_ADAPTER_ID: &str = "moyu_v1";
-/// 火山引擎方舟（Ark）素材资产库适配器：OpenAPI Action 风格 + V4 签名（AK/SK）。
-/// 仅用于素材库连接；生成请求仍走 `moyu_v1` 的 OpenAI 兼容路径。
-pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
+pub use super::provider_adapter::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
+
 /// 历史全局素材库令牌引用；仅用于兼容旧版本凭据。
 ///
 /// 新版本优先使用 `asset-library-token:{provider_connection_id}`，避免不同
 /// Base URL 共用凭据。未配置供应商专用令牌时才回退到本引用。
 pub const ASSET_LIBRARY_CREDENTIAL_REF: &str = "asset-library-token";
 
-/// 火山引擎方舟推理 API 的模型目录路径。
-///
-/// 该连接的 Base URL 已含 `/api/v3` 前缀（`https://ark.cn-beijing.volces.com/api/v3`），
-/// 端点因此是 `/models` 而不是 `/v1/models`。连通性测试与「拉取模型」必须用同一个
-/// 路径，否则测试结论无法代表实际拉取/生成能力。
-const ARK_MODELS_PATH: &str = "/models";
-
-/// 模型目录路径：方舟推理 API 不带 `/v1` 前缀，其余 OpenAI 兼容供应商沿用 `/v1/models`。
-///
-/// 模型列表与连通性测试共用本函数，避免两处各写一份路径判断后互相漂移
-/// （历史上连通性测试用的是 `/v1/models`，而拉取模型用的是 `/models`）。
+/// 模型目录路径：由适配器决定。连通性测试与「拉取模型」共用本函数，避免两处各写一份后漂移。
 fn model_catalog_path(adapter_id: &str) -> &'static str {
-    if adapter_id == ARK_ADAPTER_ID {
-        ARK_MODELS_PATH
-    } else {
-        "/v1/models"
-    }
+    catalog_path_for_adapter(adapter_id)
 }
 
 /// 没有云端素材库的上游主机（小写、不含端口）。
@@ -66,7 +54,7 @@ fn model_catalog_path(adapter_id: &str) -> &'static str {
 /// 素材库请求在解析阶段就按主机挡掉，避免把上游 404 原样当成「素材库故障」展示；
 /// 判定口径与前端 `src/lib/assetLibrarySupport.ts` 保持一致。
 /// 实测记录见 `docs/integrations/panqu-video-api.md`。
-const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 2] = ["115.191.2.88", "panqu.com"];
+const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 3] = ["115.191.2.88", "panqu.com", "maas.aliyuncs.com"];
 
 /// 返回命中的「没有素材库」主机；地址无法解析时退回原始字符串比对（用户可能只填主机）。
 fn host_without_asset_library(base_url: &str) -> Option<&'static str> {
@@ -1141,39 +1129,13 @@ impl ProviderRuntime {
         base_url: String,
         api_key_ref: String,
     ) -> BackendResult<ResolvedProviderContext> {
-        if adapter_id != MOYU_ADAPTER_ID && adapter_id != ARK_ADAPTER_ID {
-            return Err(BackendError::validation(
-                "unsupported provider adapter",
-                json!({
-                    "adapterId": adapter_id,
-                    "supported": [MOYU_ADAPTER_ID, ARK_ADAPTER_ID],
-                }),
-            ));
-        }
+        let kind = ProviderAdapterKind::require(&adapter_id)?;
         validate_base_url(&base_url)?;
-        // 火山引擎方舟推理 API 与素材资产 API 使用不同域名：
-        // - 推理 API：https://ark.cn-beijing.volces.com/api/v3（OpenAI 兼容，Bearer 鉴权）
-        // - 素材资产 API：https://ark.cn-beijing.volcengineapi.com（OpenAPI Action，AK/SK 签名）
-        // 若用户把连接的 Base URL 误填为素材资产 API 域名，自动规范化为推理 API 端点，
-        // 避免模型拉取/生成请求发到 OpenAPI 网关后返回 MissingParameter。
-        let base_url = if adapter_id == ARK_ADAPTER_ID {
-            let parsed = Url::parse(&base_url)?;
-            if parsed
-                .host_str()
-                .map(|host| host.ends_with("volcengineapi.com"))
-                .unwrap_or(false)
-            {
-                "https://ark.cn-beijing.volces.com/api/v3".to_string()
-            } else {
-                base_url
-            }
-        } else {
-            base_url
-        };
+        let base_url = kind.normalize_base_url(base_url)?;
         // ark 连接的主 API Key 允许缺失：素材请求全部走 asset-library 作用域的
         // AK/SK 凭据（`resolve_asset_library` 会覆盖 api_key）；ark 连接不参与
         // Bearer 鉴权的生成路径，空主密钥不会泄漏到任何请求头。
-        let api_key = if adapter_id == ARK_ADAPTER_ID {
+        let api_key = if kind.allows_empty_credential() {
             self.credentials.get(&api_key_ref).unwrap_or_default()
         } else {
             self.credentials.get(&api_key_ref)?
@@ -1192,6 +1154,15 @@ impl ProviderRuntime {
         provider_connection_id: &str,
     ) -> BackendResult<ResolvedProviderContext> {
         let mut context = self.resolve_current(provider_connection_id)?;
+        if ProviderAdapterKind::parse(&context.adapter_id)
+            .is_some_and(|kind| !kind.supports_asset_library())
+        {
+            return Err(BackendError::Conflict(format!(
+                "供应商连接 {} 没有云端素材库：阿里云百炼只提供模型推理接口，\
+                 素材请使用本地素材库或本地生成结果。",
+                context.provider_connection_id
+            )));
+        }
         if let Some(host) = host_without_asset_library(&context.base_url) {
             return Err(BackendError::Conflict(format!(
                 "供应商连接 {}（{host}）没有云端素材库：该网关只有模型生成接口，\
@@ -1264,7 +1235,11 @@ impl ProviderRuntime {
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
-                let body = build_video_body(task, resolved)?;
+                let body = finalize_video_body(
+                    &context.adapter_id,
+                    &resolved.operation_schema,
+                    build_video_body(task, resolved)?,
+                );
                 let path = request_path(&resolved.operation_schema, "/v1/video/generations")?;
                 let response = self
                     .send_submission_json(task, attempt_id, &context, "submit", &path, body)
@@ -1534,16 +1509,23 @@ impl ProviderRuntime {
             body,
         } = request;
         let url = endpoint(&context.base_url, path)?;
+        let extra_headers = extra_headers_for_adapter(&context.adapter_id, &method);
+        let mut archived_headers = json!({
+            "authorization": "已排除敏感凭据",
+            "content-type": "application/json"
+        });
+        if let Some(headers) = archived_headers.as_object_mut() {
+            for (name, value) in extra_headers {
+                headers.insert((*name).to_ascii_lowercase(), json!(*value));
+            }
+        }
         let archive = json!({
             "providerConnectionId": context.provider_connection_id,
             "adapterId": context.adapter_id,
             "credentialReference": context.api_key_ref,
             "method": method.as_str(),
             "url": sanitize_url(&url),
-            "headers": {
-                "authorization": "已排除敏感凭据",
-                "content-type": "application/json"
-            },
+            "headers": archived_headers,
             "bodyType": "json",
             "body": redact_request_value(body),
         });
@@ -1563,6 +1545,9 @@ impl ProviderRuntime {
             .client
             .request(method.clone(), url)
             .bearer_auth(&context.api_key);
+        for (name, value) in extra_headers {
+            request = request.header(*name, *value);
+        }
         if method != Method::GET && !body.is_null() {
             request = request.json(body);
         }
@@ -2338,9 +2323,12 @@ impl ProviderRuntime {
         let method_str = method.as_str().to_string();
         let mut request = self
             .client
-            .request(method, url)
+            .request(method.clone(), url)
             .bearer_auth(&context.api_key);
-        for (name, value) in extra_headers {
+        for (name, value) in extra_headers_for_adapter(&context.adapter_id, &method)
+            .iter()
+            .chain(extra_headers.iter())
+        {
             request = request.header(*name, *value);
         }
         if !query.is_empty() {
@@ -2500,16 +2488,15 @@ impl ProviderRuntime {
     ) -> BackendResult<ConnectivityTestResult> {
         let started_at = std::time::Instant::now();
         let elapsed_ms = || started_at.elapsed().as_millis() as u64;
-        // 指定分组令牌时一律按该分组的 OpenAI 兼容语义探测（分组令牌只存在于聚合网关
-        // 连接上），只有默认令牌才需要区分方舟推理 API 的路径（少一个 `/v1` 前缀）。
-        let adapter_id = if token_group.is_none() {
-            self.storage
-                .get_provider_connection(provider_connection_id)
-                .map(|provider| provider.adapter_id)
-                .unwrap_or_default()
-        } else {
-            String::new()
-        };
+        let adapter_id = self
+            .storage
+            .get_provider_connection(provider_connection_id)
+            .map(|provider| provider.adapter_id)
+            .unwrap_or_default();
+        let kind = ProviderAdapterKind::parse(&adapter_id);
+        let probe_query = kind
+            .map(ProviderAdapterKind::catalog_probe_query)
+            .unwrap_or_default();
         // 只做一次最小探测：GET 模型目录，不落任何生成请求。
         let probe = self
             .raw_json_request_with_token_group(
@@ -2517,7 +2504,7 @@ impl ProviderRuntime {
                 token_group,
                 Method::GET,
                 model_catalog_path(&adapter_id),
-                &[],
+                &probe_query,
                 None,
             )
             .await;
@@ -2553,17 +2540,23 @@ impl ProviderRuntime {
             .map(|provider| provider.adapter_id)
             .unwrap_or_default();
         let dialect = RequestDialect::for_adapter(&adapter_id);
-        let response = self
-            .raw_json_request_with_token_group(
-                provider_connection_id,
-                token_group,
-                Method::GET,
-                model_catalog_path(&adapter_id),
-                &[],
-                None,
-            )
-            .await?;
-        let mut models = parse_model_catalog(&response, dialect)?;
+        let kind = ProviderAdapterKind::parse(&adapter_id);
+        let mut models = if let Some(kind) = kind.filter(|kind| kind.paginates_catalog()) {
+            self.list_paginated_models(provider_connection_id, token_group, kind, dialect)
+                .await?
+        } else {
+            let response = self
+                .raw_json_request_with_token_group(
+                    provider_connection_id,
+                    token_group,
+                    Method::GET,
+                    model_catalog_path(&adapter_id),
+                    &[],
+                    None,
+                )
+                .await?;
+            parse_model_catalog(&response, dialect)?
+        };
         let definitions = self.storage.list_model_definitions()?;
         let bindings = self.storage.list_bindings(Some(provider_connection_id))?;
 
@@ -2617,6 +2610,51 @@ impl ProviderRuntime {
                 .or_else(|| token_group.map(ToOwned::to_owned));
         }
 
+        Ok(models)
+    }
+
+    async fn list_paginated_models(
+        &self,
+        provider_connection_id: &str,
+        token_group: Option<&str>,
+        kind: ProviderAdapterKind,
+        dialect: RequestDialect,
+    ) -> BackendResult<Vec<RemoteModelOption>> {
+        const PAGE_SIZE: u32 = 100;
+        const MAX_PAGES: u32 = 50;
+        let mut page_no = 1_u32;
+        let mut models = Vec::new();
+        let mut seen = HashSet::new();
+        loop {
+            let query = kind.catalog_page_query(page_no, PAGE_SIZE);
+            let response = self
+                .raw_json_request_with_token_group(
+                    provider_connection_id,
+                    token_group,
+                    Method::GET,
+                    kind.catalog_path(),
+                    &query,
+                    None,
+                )
+                .await?;
+            let page = parse_model_catalog(&response, dialect)?;
+            let total = serde_json::from_str::<Value>(&response.body)
+                .ok()
+                .and_then(|value| {
+                    provider_adapter::bailian_catalog_page(&value).map(|(_, total)| total)
+                })
+                .unwrap_or(page.len() as u64);
+            let page_len = page.len();
+            for model in page {
+                if seen.insert(model.id.clone()) {
+                    models.push(model);
+                }
+            }
+            if page_len == 0 || models.len() as u64 >= total || page_no >= MAX_PAGES {
+                break;
+            }
+            page_no += 1;
+        }
         Ok(models)
     }
 
@@ -4195,19 +4233,35 @@ fn parse_image_submission(
 fn parse_video_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
-    value
-        .get("task_id")
+    if let Some(task_id) = value
+        .pointer("/output/task_id")
+        .or_else(|| value.get("task_id"))
         .or_else(|| value.get("id"))
         .or_else(|| value.pointer("/data/task_id"))
         .and_then(Value::as_str)
         .filter(|value| !value.is_empty())
         .map(ToOwned::to_owned)
-        .ok_or_else(|| {
-            BackendError::protocol(
-                "video submission did not return task_id",
-                json!({ "httpStatus": response.status, "rawResponse": response.body }),
-            )
-        })
+    {
+        return Ok(task_id);
+    }
+    let code = value
+        .get("code")
+        .or_else(|| value.pointer("/output/code"))
+        .and_then(Value::as_str)
+        .filter(|code| !code.is_empty());
+    let message = value
+        .get("message")
+        .or_else(|| value.pointer("/output/message"))
+        .and_then(Value::as_str)
+        .unwrap_or("video submission did not return task_id");
+    Err(BackendError::protocol(
+        if let Some(code) = code {
+            format!("video submission failed: {code}: {message}")
+        } else {
+            message.to_string()
+        },
+        json!({ "httpStatus": response.status, "rawResponse": response.body }),
+    ))
 }
 
 fn parse_video_observation(
@@ -4216,7 +4270,8 @@ fn parse_video_observation(
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
     let remote_status = value
-        .pointer("/data/status")
+        .pointer("/output/task_status")
+        .or_else(|| value.pointer("/data/status"))
         .or_else(|| value.get("status"))
         .and_then(Value::as_str)
         .ok_or_else(|| {
@@ -4238,7 +4293,11 @@ fn parse_video_observation(
         .and_then(Value::as_str)
         .filter(|content| !content.trim().is_empty())
         .map(ToOwned::to_owned);
-    let fail_reason = value.pointer("/data/fail_reason").cloned();
+    let fail_reason = value
+        .pointer("/data/fail_reason")
+        .or_else(|| value.pointer("/output/message"))
+        .or_else(|| value.get("message"))
+        .cloned();
     let upstream_error = value
         .pointer("/data/data/data/data/error")
         .or_else(|| value.pointer("/data/data/data/error"))
@@ -4246,7 +4305,7 @@ fn parse_video_observation(
         .cloned();
     let remote_failed = matches!(
         remote_status.to_ascii_uppercase().as_str(),
-        "FAILURE" | "FAILED"
+        "FAILURE" | "FAILED" | "CANCELED" | "CANCELLED"
     );
     let failure = if remote_failed
         && (fail_reason.as_ref().is_some_and(|value| !value.is_null())
@@ -4281,6 +4340,7 @@ fn parse_video_observation(
 ///   `metadata.url` 等。
 fn extract_video_url(value: &Value) -> Option<String> {
     const PROBED_PATHS: &[&str] = &[
+        "/output/video_url",
         "/data/result_url",
         "/data/data/result_url",
         "/data/data/data/result_url",
@@ -4597,7 +4657,8 @@ fn parse_model_catalog(
             .get("data")
             .and_then(Value::as_array)
             .or_else(|| value.get("models").and_then(Value::as_array))
-            .or_else(|| value.pointer("/data/models").and_then(Value::as_array)),
+            .or_else(|| value.pointer("/data/models").and_then(Value::as_array))
+            .or_else(|| value.pointer("/output/models").and_then(Value::as_array)),
         _ => None,
     }
     .ok_or_else(|| {
@@ -5539,6 +5600,10 @@ mod tests {
             host_without_asset_library("https://ark.cn-beijing.volces.com/api/v3"),
             None
         );
+        assert_eq!(
+            host_without_asset_library("https://llm-ws.cn-beijing.maas.aliyuncs.com"),
+            Some("maas.aliyuncs.com")
+        );
         assert_eq!(host_without_asset_library(""), None);
     }
 
@@ -5549,6 +5614,7 @@ mod tests {
         // 实际拉取能力（历史缺陷：连通性测试打 /v1/models，拉取模型打 /models）。
         assert_eq!(model_catalog_path(ARK_ADAPTER_ID), "/models");
         assert_eq!(model_catalog_path(MOYU_ADAPTER_ID), "/v1/models");
+        assert_eq!(model_catalog_path(BAILIAN_ADAPTER_ID), "/api/v1/models");
         // 连接查不到（adapter 为空）时退回 OpenAI 兼容默认路径。
         assert_eq!(model_catalog_path(""), "/v1/models");
     }
@@ -5694,6 +5760,59 @@ mod tests {
                 .map(|model| model.id.as_str())
                 .collect::<Vec<_>>(),
             ["model-a", "model-b"]
+        );
+    }
+
+    #[test]
+    fn model_parser_accepts_bailian_output_models_page() {
+        let response = RawProviderResponse {
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "success": true,
+                "output": {
+                    "total": 2,
+                    "page_no": 1,
+                    "page_size": 10,
+                    "models": [
+                        {
+                            "model": "wan3.0-video",
+                            "name": "万相3.0",
+                            "capabilities": ["VG"],
+                            "provider": "wan"
+                        },
+                        {
+                            "model": "wan3.0-video-prime",
+                            "name": "万相3.0-高速版",
+                            "capabilities": ["VG"]
+                        }
+                    ]
+                }
+            })
+            .to_string(),
+        };
+        let models = parse_model_catalog(&response, RequestDialect::AliyunBailian)
+            .expect("bailian model list");
+        assert_eq!(
+            models
+                .iter()
+                .map(|model| model.id.as_str())
+                .collect::<Vec<_>>(),
+            ["wan3.0-video", "wan3.0-video-prime"]
+        );
+        assert_eq!(models[0].display_name, "万相3.0");
+        assert_eq!(models[0].owned_by.as_deref(), Some("wan"));
+        assert_eq!(
+            models[0].suggested_operations,
+            [GenerationOperation::VideoGeneration]
+        );
+        assert_eq!(
+            models[0].operation_schema["video_generation"]["request"]["path"],
+            "/api/v1/services/aigc/video-generation/video-synthesis"
+        );
+        assert_eq!(
+            models[0].operation_schema["video_generation"]["request"]["envelope"],
+            "dashscope_input_parameters"
         );
     }
 
@@ -6835,6 +6954,42 @@ mod tests {
     }
 
     #[test]
+    fn bailian_adapter_wraps_wan_body_into_dashscope_envelope() {
+        let schema = super::super::model_schema::default_model_schema(
+            "wan3.0-video",
+            &[GenerationOperation::VideoGeneration],
+        );
+        let mut generation = resolved(
+            schema["video_generation"].clone(),
+            json!({
+                "resolution": "480P",
+                "ratio": "adaptive",
+                "duration": 5
+            }),
+        );
+        generation.rendered_prompt = "一只小猫在月光下的屋顶上奔跑".into();
+        generation.content = vec![CompiledContentItem::Text(
+            "一只小猫在月光下的屋顶上奔跑".into(),
+        )];
+        let mut video_task = task(GenerationOperation::VideoGeneration);
+        video_task.remote_model_id_snapshot = Some("wan3.0-video".into());
+        let body = build_video_body(&video_task, &generation).expect("gateway wan body");
+        let wrapped = finalize_video_body(BAILIAN_ADAPTER_ID, &schema["video_generation"], body);
+        assert_eq!(wrapped["model"], "wan3.0-video");
+        assert_eq!(wrapped["input"]["prompt"], "一只小猫在月光下的屋顶上奔跑");
+        assert_eq!(wrapped["parameters"]["resolution"], "480P");
+        assert_eq!(wrapped["parameters"]["duration"], 5);
+        assert!(wrapped.get("prompt").is_none());
+        let unchanged = finalize_video_body(
+            MOYU_ADAPTER_ID,
+            &schema["video_generation"],
+            json!({ "model": "wan3.0-video", "prompt": "x", "duration": 5 }),
+        );
+        assert_eq!(unchanged["prompt"], "x");
+        assert!(unchanged.get("input").is_none());
+    }
+
+    #[test]
     fn wan_video_builder_accepts_media_without_a_prompt() {
         let schema = super::super::model_schema::default_model_schema(
             "wan3.0-video",
@@ -7662,6 +7817,47 @@ mod tests {
         assert_eq!(
             observation.text_content.as_deref(),
             Some("清晨的城市天际线，金色朝阳……（智能扩写后的完整提示词）")
+        );
+    }
+
+    #[test]
+    fn dashscope_video_task_and_observation_use_output_envelope() {
+        let submitted = CapturedHttpResponse {
+            call_id: "call-1".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "output": {
+                    "task_status": "PENDING",
+                    "task_id": "0385dc79-5ff8-4d82-bcb6-xxxxxx"
+                },
+                "request_id": "4909100c-7b5a-9f92-bfe5-xxxxxx"
+            })
+            .to_string(),
+        };
+        assert_eq!(
+            parse_video_task_id(&submitted).expect("task id"),
+            "0385dc79-5ff8-4d82-bcb6-xxxxxx"
+        );
+
+        let succeeded = CapturedHttpResponse {
+            call_id: "call-2".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "output": {
+                    "task_id": "17ed7e50-00cf-4509-aea1-xxxxxx",
+                    "task_status": "SUCCEEDED",
+                    "video_url": "https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/xxx/video.mp4"
+                }
+            })
+            .to_string(),
+        };
+        let observation = parse_video_observation(&succeeded).expect("observation");
+        assert_eq!(observation.remote_status, "SUCCEEDED");
+        assert_eq!(
+            observation.video_url.as_deref(),
+            Some("https://dashscope-result-bj.oss-cn-beijing.aliyuncs.com/xxx/video.mp4")
         );
     }
 

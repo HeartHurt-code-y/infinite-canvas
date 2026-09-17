@@ -18,6 +18,7 @@ pub mod model_schema;
 pub(crate) mod process_tree;
 pub mod prompt_optimize;
 pub mod provider;
+pub mod provider_adapter;
 pub mod remote_video_tasks;
 pub mod remotion_renderer;
 pub mod reverse_video;

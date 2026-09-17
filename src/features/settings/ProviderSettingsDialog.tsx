@@ -28,6 +28,16 @@ import { AssetLibraryTokenSettings } from "./AssetLibraryTokenSettings";
 import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
 import { TosStagingSettings } from "./TosStagingSettings";
 import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
+import {
+  ARK_ADAPTER_ID,
+  BAILIAN_ADAPTER_ID,
+  MOYU_ADAPTER_ID,
+  assembleBailianBaseUrl,
+  isArkAdapter,
+  isBailianAdapter,
+  isValidBailianWorkspaceId,
+  parseBailianWorkspaceId,
+} from "../../lib/providerAdapters";
 import { SearchableMultiSelect } from "../../components/SearchableMultiSelect";
 
 interface ProviderDraft {
@@ -35,6 +45,7 @@ interface ProviderDraft {
   readonly displayName: string;
   readonly baseUrl: string;
   readonly adapterId: string;
+  readonly workspaceId: string;
 }
 
 /** 预置供应商连接模板：与后端 DEFAULT_PROVIDER_CONNECTIONS 保持一致。 */
@@ -47,41 +58,47 @@ interface ProviderPreset {
 
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
   {
+    id: "aliyun-bailian",
+    displayName: "阿里云百炼",
+    baseUrl: "",
+    adapterId: BAILIAN_ADAPTER_ID,
+  },
+  {
     id: "volcengine-ark",
     displayName: "火山引擎",
     baseUrl: "https://ark.cn-beijing.volces.com/api/v3",
-    adapterId: "volcengine_ark_v1",
+    adapterId: ARK_ADAPTER_ID,
   },
   {
     id: "panqu-api",
     displayName: "盘趣API",
     // 必须用域名：直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会直接拒绝。
     baseUrl: "https://aiapis.panqu.com/",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
   },
   {
     id: "moyu-ai",
     displayName: "魔芋AI",
     baseUrl: "https://www.moyu.info/",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
   },
   {
     id: "overseas",
     displayName: "海外平台",
     baseUrl: "https://www.konjac.ai/v1",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
   },
   {
     id: "sd20",
     displayName: "SD2.0",
     baseUrl: "https://47.94.250.161/",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
   },
   {
     id: "maigateway",
     displayName: "MAIGateway",
     baseUrl: "https://mai.anquan.info/v1",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
   },
 ];
 
@@ -117,17 +134,37 @@ function emptyProviderDraft(): ProviderDraft {
     id: createProviderId(),
     displayName: "公司接口",
     baseUrl: "",
-    adapterId: "moyu_v1",
+    adapterId: MOYU_ADAPTER_ID,
+    workspaceId: "",
   };
 }
 
 /** 应用预置模板到新建连接草稿（保持草稿 id 不变）。 */
 function applyProviderPreset(draft: ProviderDraft, preset: ProviderPreset): ProviderDraft {
+  const workspaceId = isBailianAdapter(preset.adapterId)
+    ? parseBailianWorkspaceId(preset.baseUrl)
+    : "";
   return {
     id: draft.id,
     displayName: preset.displayName,
-    baseUrl: preset.baseUrl,
+    baseUrl: isBailianAdapter(preset.adapterId)
+      ? assembleBailianBaseUrl(workspaceId)
+      : preset.baseUrl,
     adapterId: preset.adapterId,
+    workspaceId,
+  };
+}
+
+function providerDraft(provider: ProviderConnection): ProviderDraft {
+  const workspaceId = isBailianAdapter(provider.adapterId)
+    ? parseBailianWorkspaceId(provider.baseUrl)
+    : "";
+  return {
+    id: provider.id,
+    displayName: provider.displayName,
+    baseUrl: provider.baseUrl,
+    adapterId: provider.adapterId,
+    workspaceId,
   };
 }
 
@@ -182,15 +219,6 @@ function usageWithKind(
   const suggested = usageFromOperations(model.suggestedOperations);
   if (suggested.kind === "image") return { ...suggested, imageToImage: true };
   return { ...usage, kind, textToImage: true, imageToImage: true };
-}
-
-function providerDraft(provider: ProviderConnection): ProviderDraft {
-  return {
-    id: provider.id,
-    displayName: provider.displayName,
-    baseUrl: provider.baseUrl,
-    adapterId: provider.adapterId,
-  };
 }
 
 export function ProviderSettingsDialog({
@@ -408,12 +436,22 @@ export function ProviderSettingsDialog({
   };
 
   const isNewProvider = !providers.some((provider) => provider.id === draft.id);
-  const isVolcengineArkConnection = draft.adapterId === "volcengine_ark_v1";
+  const isVolcengineArkConnection = isArkAdapter(draft.adapterId);
+  const isBailianConnection = isBailianAdapter(draft.adapterId);
 
   const validateConnectionDraft = (): { readonly apiKey: string } | null => {
     const existingProvider = providers.some((provider) => provider.id === draft.id);
     const apiKey = apiKeyRef.current?.value ?? "";
-    if (!draft.displayName.trim() || !draft.baseUrl.trim()) {
+    if (!draft.displayName.trim()) {
+      setRawError("供应商名称不能为空。");
+      return null;
+    }
+    if (isBailianConnection) {
+      if (!isValidBailianWorkspaceId(draft.workspaceId)) {
+        setRawError("请填写业务空间 ID。地址会按华北2（北京）拼接为 https://{业务空间ID}.cn-beijing.maas.aliyuncs.com。");
+        return null;
+      }
+    } else if (!draft.baseUrl.trim()) {
       setRawError("供应商名称和 Base URL 不能为空。完整地址会交给后端继续校验。");
       return null;
     }
@@ -426,11 +464,14 @@ export function ProviderSettingsDialog({
   };
 
   const persistConnection = async (apiKey: string): Promise<ProviderConnection> => {
+    const baseUrl = isBailianConnection
+      ? assembleBailianBaseUrl(draft.workspaceId)
+      : draft.baseUrl.trim();
     const provider = await client.upsertProviderConnection({
       id: draft.id,
       displayName: draft.displayName.trim(),
       adapterId: draft.adapterId,
-      baseUrl: draft.baseUrl.trim(),
+      baseUrl,
       enabled: true,
     });
     if (apiKey) {
@@ -677,6 +718,13 @@ export function ProviderSettingsDialog({
                     aria-label="预置模板"
                     value={CUSTOM_PRESET_ID}
                     onChange={(event) => {
+                      if (event.target.value === CUSTOM_PRESET_ID) {
+                        setDraft((current) => ({
+                          ...emptyProviderDraft(),
+                          id: current.id,
+                        }));
+                        return;
+                      }
                       const preset = PROVIDER_PRESETS.find((p) => p.id === event.target.value);
                       if (preset) setDraft((current) => applyProviderPreset(current, preset));
                     }}
@@ -690,7 +738,8 @@ export function ProviderSettingsDialog({
                     ))}
                   </select>
                   <small id="preset-hint">
-                    选择预置模板会自动填入供应商名称、Base URL 与适配器（如火山引擎素材库）。
+                    选择预置模板会自动填入供应商名称与适配器。阿里云百炼需要填写业务空间
+                    ID，地址按华北2（北京）拼接。
                   </small>
                 </label>
               ) : null}
@@ -704,23 +753,49 @@ export function ProviderSettingsDialog({
                   autoComplete="organization"
                 />
               </label>
-              <label className="provider-field--url">
-                <span>Base URL</span>
-                <input
-                  ref={baseUrlRef}
-                  value={draft.baseUrl}
-                  inputMode="url"
-                  spellCheck={false}
-                  placeholder="https://api.company.com 或 …/v1"
-                  onChange={(event) =>
-                    setDraft((current) => ({ ...current, baseUrl: event.target.value }))
-                  }
-                  aria-describedby="base-url-hint"
-                />
-                <small id="base-url-hint">
-                  支持根地址和以 /v1 结尾的地址；模型从 /v1/models 拉取。
-                </small>
-              </label>
+              {isBailianConnection ? (
+                <label className="provider-field--url">
+                  <span>业务空间 ID</span>
+                  <input
+                    id="provider-workspace-id"
+                    value={draft.workspaceId}
+                    spellCheck={false}
+                    autoComplete="off"
+                    placeholder="llm-xxxxxxxx"
+                    onChange={(event) => {
+                      const workspaceId = event.target.value;
+                      setDraft((current) => ({
+                        ...current,
+                        workspaceId,
+                        baseUrl: assembleBailianBaseUrl(workspaceId),
+                      }));
+                    }}
+                    aria-describedby="workspace-id-hint"
+                  />
+                  <small id="workspace-id-hint">
+                    仅阿里云百炼需要。华北2（北京）完整地址：
+                    {assembleBailianBaseUrl(draft.workspaceId || "{WorkspaceId}")}
+                  </small>
+                </label>
+              ) : (
+                <label className="provider-field--url">
+                  <span>Base URL</span>
+                  <input
+                    ref={baseUrlRef}
+                    value={draft.baseUrl}
+                    inputMode="url"
+                    spellCheck={false}
+                    placeholder="https://api.company.com 或 …/v1"
+                    onChange={(event) =>
+                      setDraft((current) => ({ ...current, baseUrl: event.target.value }))
+                    }
+                    aria-describedby="base-url-hint"
+                  />
+                  <small id="base-url-hint">
+                    支持根地址和以 /v1 结尾的地址；模型从 /v1/models 拉取。
+                  </small>
+                </label>
+              )}
               <label className="provider-field--key">
                 <span>API Key</span>
                 <input
@@ -738,7 +813,9 @@ export function ProviderSettingsDialog({
                 <small id="api-key-hint">
                   {isVolcengineArkConnection
                     ? "用于拉取模型目录的方舟 API Key（Bearer 令牌）；素材库鉴权在下方「素材库令牌」处分别填写 AK 和 SK。"
-                    : "只保存到系统凭据管理器（macOS 钥匙串 / Windows 凭据管理器），不写入数据库、画布或任务日志。"}
+                    : isBailianConnection
+                      ? "阿里云百炼 API Key（Bearer）。须与业务空间同属华北2（北京）地域。"
+                      : "只保存到系统凭据管理器（macOS 钥匙串 / Windows 凭据管理器），不写入数据库、画布或任务日志。"}
                 </small>
               </label>
             </div>

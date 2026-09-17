@@ -2,7 +2,10 @@ use serde_json::{Map, Value, json};
 
 use super::{
     error::{BackendError, BackendResult},
-    provider::ARK_ADAPTER_ID,
+    provider_adapter::{
+        ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH, BAILIAN_VIDEO_PATH,
+        DASHSCOPE_VIDEO_ENVELOPE,
+    },
     types::GenerationOperation,
 };
 
@@ -43,14 +46,19 @@ pub enum RequestDialect {
     /// 火山方舟原生接口：`/contents/generations/tasks`、`/images/generations`、
     /// `/chat/completions`。
     VolcengineArk,
+    /// 阿里云百炼（华北2）官方 DashScope：万相走
+    /// `/api/v1/services/aigc/video-generation/video-synthesis`。
+    AliyunBailian,
 }
 
 impl RequestDialect {
     /// 适配器 → 方言。方舟推理 API 的 Base URL 自带 `/api/v3`，端点因此不带
-    /// `/v1` 前缀；其余适配器都是 OpenAI 兼容网关。
+    /// `/v1` 前缀；百炼走官方 MaaS 路径；其余适配器都是 OpenAI 兼容网关。
     pub fn for_adapter(adapter_id: &str) -> Self {
         if adapter_id == ARK_ADAPTER_ID {
             Self::VolcengineArk
+        } else if adapter_id == BAILIAN_ADAPTER_ID {
+            Self::AliyunBailian
         } else {
             Self::OpenAiCompatible
         }
@@ -119,8 +127,12 @@ fn set_request_field(request: &mut Map<String, Value>, field: &str, value: Value
     true
 }
 
-/// 视频：网关 `/v1/video/generations` ↔ 方舟原生 `/contents/generations/tasks`。
+/// 视频：网关 `/v1/video/generations` ↔ 方舟原生 `/contents/generations/tasks`
+/// ↔ 百炼官方万相 `/api/v1/services/aigc/video-generation/video-synthesis`。
 fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    if dialect == RequestDialect::AliyunBailian {
+        return apply_bailian_wan_video_dialect(schema, identity);
+    }
     let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
         return false;
     };
@@ -134,6 +146,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     };
     let path = current_request_path(request).to_string();
     match dialect {
+        RequestDialect::AliyunBailian => false,
         // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax / 盘趣在方舟上
         // 没有端点，它们自己的契约保持原样。
         RequestDialect::VolcengineArk => {
@@ -153,8 +166,23 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
             changed
         }
         RequestDialect::OpenAiCompatible => {
-            // 方舟原生路径只可能由「按模型名推导」写进定义；网关从来不用它，
-            // 因此这里可以无条件改回网关端点。
+            // 方舟/百炼原生路径只可能由「按模型名推导」或连接方言写下；
+            // 网关从来不用它们，因此改回 `/v1/video/generations`。
+            if path == BAILIAN_VIDEO_PATH {
+                let mut changed = set_request_field(request, "path", json!(GATEWAY_VIDEO_PATH));
+                if request.get("observePath").and_then(Value::as_str)
+                    == Some(BAILIAN_VIDEO_OBSERVE_PATH)
+                {
+                    request.remove("observePath");
+                    changed = true;
+                }
+                if request.get("envelope").and_then(Value::as_str) == Some(DASHSCOPE_VIDEO_ENVELOPE)
+                {
+                    request.remove("envelope");
+                    changed = true;
+                }
+                return changed;
+            }
             if path != ARK_VIDEO_PATH {
                 return false;
             }
@@ -180,6 +208,66 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     }
 }
 
+/// 百炼只改写万相 3.0：官方异步视频合成端点 + DashScope input/parameters 信封。
+fn apply_bailian_wan_video_dialect(schema: &mut Value, identity: &str) -> bool {
+    if !is_wan_30_video_model(identity) {
+        return false;
+    }
+    let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
+        return false;
+    };
+    let mut changed = {
+        let Some(request) = operation.get_mut("request").and_then(Value::as_object_mut) else {
+            return false;
+        };
+        let mut changed = set_request_field(request, "path", json!(BAILIAN_VIDEO_PATH));
+        changed |= set_request_field(request, "observePath", json!(BAILIAN_VIDEO_OBSERVE_PATH));
+        changed |= set_request_field(request, "parameterContainer", json!("root"));
+        changed |= set_request_field(request, "envelope", json!(DASHSCOPE_VIDEO_ENVELOPE));
+        changed |= set_request_field(request, "mediaEncoding", json!("wan_media_array"));
+        changed |= set_request_field(request, "promptMode", json!("prompt_or_media"));
+        changed
+    };
+    let Some(parameters) = operation
+        .get_mut("parameters")
+        .and_then(Value::as_object_mut)
+    else {
+        return changed;
+    };
+    if let Some(ratio) = parameters.get_mut("ratio")
+        && let Some(values) = ratio.get_mut("enum").and_then(Value::as_array_mut)
+        && !values.iter().any(|value| value.as_str() == Some("21:9"))
+    {
+        values.insert(1, json!("21:9"));
+        changed = true;
+    }
+    if !parameters.contains_key("audio") {
+        parameters.insert(
+            "audio".into(),
+            json!({
+                "type": "boolean",
+                "label": "输出音频",
+                "default": true,
+                "order": 5
+            }),
+        );
+        changed = true;
+    }
+    if !parameters.contains_key("prompt_extend") {
+        parameters.insert(
+            "prompt_extend".into(),
+            json!({
+                "type": "boolean",
+                "label": "智能改写",
+                "default": true,
+                "order": 6
+            }),
+        );
+        changed = true;
+    }
+    changed
+}
+
 /// 文生图：网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
 fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
     let Some(request) = request_object_mut(schema, GenerationOperation::TextToImage) else {
@@ -187,6 +275,7 @@ fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     };
     let path = current_request_path(request).to_string();
     match dialect {
+        RequestDialect::AliyunBailian => false,
         // 方舟原生图片接口只承载自家 Seedream；其他家族的图片契约保持原样。
         RequestDialect::VolcengineArk => {
             if !is_seedream_image_model(identity) || path != GATEWAY_IMAGE_PATH {
@@ -211,6 +300,7 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
     let path = current_request_path(request).to_string();
     let domestic_doubao = identity.starts_with("doubao-") || identity == "doubao";
     match dialect {
+        RequestDialect::AliyunBailian => false,
         RequestDialect::VolcengineArk => {
             if !domestic_doubao || path != GATEWAY_CHAT_PATH {
                 return false;
@@ -787,13 +877,15 @@ fn advertised_schema(item: &Value) -> Option<&Value> {
 }
 
 fn advertised_operation_names(item: &Value) -> Vec<GenerationOperation> {
-    [
+    let operations = [
         "/operations",
         "/supported_operations",
         "/supportedOperations",
         "/capabilities/operations",
         "/capabilities/supported_operations",
         "/capabilities/supportedOperations",
+        "/capabilities",
+        "/inference_metadata/response_modality",
     ]
     .iter()
     .filter_map(|pointer| item.pointer(pointer).and_then(Value::as_array))
@@ -805,22 +897,21 @@ fn advertised_operation_names(item: &Value) -> Vec<GenerationOperation> {
             operations.push(operation);
         }
         operations
-    })
+    });
+    operations
 }
 
 fn parse_operation_alias(value: &str) -> Option<GenerationOperation> {
     match value.trim().to_ascii_lowercase().as_str() {
-        "text_to_image" | "text-to-image" | "image_generation" | "image-generation" => {
-            Some(GenerationOperation::TextToImage)
-        }
+        "text_to_image" | "text-to-image" | "image_generation" | "image-generation" | "ig"
+        | "image" => Some(GenerationOperation::TextToImage),
         "image_to_image" | "image-to-image" | "image_edit" | "image-edit" => {
             Some(GenerationOperation::ImageToImage)
         }
-        "video_generation" | "video-generation" | "text_to_video" | "text-to-video" => {
-            Some(GenerationOperation::VideoGeneration)
-        }
+        "video_generation" | "video-generation" | "text_to_video" | "text-to-video" | "vg"
+        | "video" => Some(GenerationOperation::VideoGeneration),
         "text_generation" | "text-generation" | "chat" | "chat_completion" | "chat-completion"
-        | "llm" | "text" => Some(GenerationOperation::TextGeneration),
+        | "llm" | "text" | "tg" => Some(GenerationOperation::TextGeneration),
         _ => None,
     }
 }
@@ -2719,6 +2810,72 @@ mod tests {
         assert_eq!(
             vidu["video_generation"]["request"]["path"],
             "/v1/video/generations"
+        );
+    }
+
+    #[test]
+    fn bailian_dialect_rewrites_wan_30_to_official_dashscope_endpoints() {
+        assert_eq!(
+            RequestDialect::for_adapter(super::super::provider_adapter::BAILIAN_ADAPTER_ID),
+            RequestDialect::AliyunBailian
+        );
+        let mut schema =
+            default_model_schema("wan3.0-video", &[GenerationOperation::VideoGeneration]);
+        assert!(apply_request_dialect(
+            &mut schema,
+            "wan3.0-video",
+            RequestDialect::AliyunBailian
+        ));
+        let request = &schema["video_generation"]["request"];
+        assert_eq!(
+            request["path"],
+            "/api/v1/services/aigc/video-generation/video-synthesis"
+        );
+        assert_eq!(request["observePath"], "/api/v1/tasks/{task_id}");
+        assert_eq!(request["envelope"], "dashscope_input_parameters");
+        assert_eq!(request["mediaEncoding"], "wan_media_array");
+        assert_eq!(
+            schema["video_generation"]["parameters"]["audio"]["default"],
+            true
+        );
+        assert_eq!(
+            schema["video_generation"]["parameters"]["prompt_extend"]["default"],
+            true
+        );
+        let ratio_enum = schema["video_generation"]["parameters"]["ratio"]["enum"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        assert!(ratio_enum.iter().any(|value| value == "21:9"));
+
+        // 网关连接会把百炼原生路径改回 `/v1/video/generations`。
+        assert!(apply_request_dialect(
+            &mut schema,
+            "wan3.0-video",
+            RequestDialect::OpenAiCompatible
+        ));
+        assert_eq!(
+            schema["video_generation"]["request"]["path"],
+            "/v1/video/generations"
+        );
+        assert!(
+            schema["video_generation"]["request"]
+                .get("envelope")
+                .is_none()
+        );
+
+        let catalog = infer_catalog_schema(
+            &json!({
+                "model": "wan3.0-video-prime",
+                "name": "万相3.0-高速版",
+                "capabilities": ["VG"],
+            }),
+            "wan3.0-video-prime",
+            "万相3.0-高速版",
+        );
+        assert_eq!(
+            operations_from_schema(&catalog),
+            [GenerationOperation::VideoGeneration]
         );
     }
 

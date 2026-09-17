@@ -7,12 +7,17 @@
 //! 所以在进入素材库的任何供应商选项之前，先按上游主机把它们过滤掉。
 
 import type { ProviderConnection } from "./backend";
+import { adapterSupportsAssetLibrary } from "./providerAdapters";
 
 /**
  * 没有云端素材库的上游主机（小写、不含端口）。判定按主机而不是连接 ID：
  * 用户照着同一个地址新建的连接同样没有素材库，而改名后的连接仍应被排除。
  */
-const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = ["115.191.2.88", "panqu.com"];
+const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = [
+  "115.191.2.88",
+  "panqu.com",
+  "maas.aliyuncs.com",
+];
 
 /** 取 Base URL 的主机名；地址无法解析时退回原始字符串（用户可能只填了主机）。 */
 function hostOf(baseUrl: string): string {
@@ -33,6 +38,7 @@ function hostHasAssetLibrary(host: string): boolean {
 
 /** 该供应商连接是否提供云端素材库；false = 不应出现在素材库的供应商选项里。 */
 export function providerSupportsAssetLibrary(provider: ProviderConnection): boolean {
+  if (!adapterSupportsAssetLibrary(provider.adapterId)) return false;
   return hostHasAssetLibrary(hostOf(provider.baseUrl));
 }
 

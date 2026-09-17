@@ -39,6 +39,7 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   guidance_scale: "引导强度",
   negative_prompt: "反向提示词",
   watermark: "添加水印",
+  prompt_extend: "智能改写",
   aspect_ratio: "画幅",
   movement_amplitude: "运动幅度",
   style: "风格",

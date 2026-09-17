@@ -16,7 +16,8 @@ use super::{
     frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
-    provider::{ARK_ADAPTER_ID, MOYU_ADAPTER_ID},
+    provider::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID},
+    provider_adapter::ProviderAdapterKind,
     remotion_renderer::{
         RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
     },
@@ -967,12 +968,12 @@ fn validate_provider_command(
             json!({ "command": command }),
         ));
     }
-    if command.adapter_id != MOYU_ADAPTER_ID && command.adapter_id != ARK_ADAPTER_ID {
+    if !super::provider_adapter::is_supported_adapter_id(&command.adapter_id) {
         return Err(BackendError::validation(
             "provider adapter is not supported",
             json!({
                 "adapterId": command.adapter_id,
-                "supported": [MOYU_ADAPTER_ID, ARK_ADAPTER_ID],
+                "supported": super::provider_adapter::SUPPORTED_ADAPTER_IDS,
             }),
         ));
     }
@@ -993,6 +994,8 @@ fn validate_provider_command(
             json!({ "baseUrl": command.base_url }),
         ));
     }
+    ProviderAdapterKind::require(&command.adapter_id)?
+        .normalize_base_url(command.base_url.clone())?;
     Ok(())
 }
 
@@ -1259,6 +1262,15 @@ mod tests {
         let mut command = provider("https://ark.cn-beijing.volces.com/api/v3");
         command.adapter_id = ARK_ADAPTER_ID.into();
         assert!(validate_provider_command(&command).is_ok());
+    }
+
+    #[test]
+    fn provider_validation_accepts_aliyun_bailian_beijing_workspace_url() {
+        let mut command = provider("https://llm-ws.cn-beijing.maas.aliyuncs.com");
+        command.adapter_id = BAILIAN_ADAPTER_ID.into();
+        assert!(validate_provider_command(&command).is_ok());
+        command.base_url = "https://dashscope.aliyuncs.com".into();
+        assert!(validate_provider_command(&command).is_err());
     }
 
     fn model_selection(

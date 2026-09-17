@@ -985,7 +985,7 @@ impl GenerationTaskService {
                     self.cleanup_staging_leases(task_id, &staging_leases).await;
                     return Ok(());
                 }
-                "FAILURE" | "FAILED" => {
+                "FAILURE" | "FAILED" | "CANCELED" | "CANCELLED" => {
                     let failure = json!({
                         "kind": "remote_generation_failure",
                         "message": "remote video task reported FAILURE",

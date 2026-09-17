@@ -257,6 +257,55 @@ describe("ProviderSettingsDialog", () => {
     expect(await screen.findByText(/已保存 火山引擎 的连接信息/)).toBeInTheDocument();
   });
 
+  it("新建连接选择阿里云百炼后显示业务空间 ID 并拼接华北2地址", async () => {
+    const bailianProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-new-bailian",
+      displayName: "阿里云百炼",
+      adapterId: "aliyun_bailian_v1",
+      baseUrl: "https://llm-workspace-1.cn-beijing.maas.aliyuncs.com",
+    };
+    const client = createClient({
+      upsertProviderConnection: vi.fn(() => Promise.resolve(bailianProvider)),
+    });
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={vi.fn(() => Promise.resolve())}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "新建" }));
+    expect(screen.queryByPlaceholderText("llm-xxxxxxxx")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("预置模板"), {
+      target: { value: "aliyun-bailian" },
+    });
+    await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("阿里云百炼"));
+    expect(screen.queryByPlaceholderText("https://api.company.com 或 …/v1")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByPlaceholderText("llm-xxxxxxxx"), {
+      target: { value: "llm-workspace-1" },
+    });
+    expect(
+      screen.getByText(/https:\/\/llm-workspace-1\.cn-beijing\.maas\.aliyuncs\.com/),
+    ).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/API Key/), { target: { value: "sk-test" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存连接" }));
+
+    await waitFor(() =>
+      expect(client.upsertProviderConnection).toHaveBeenCalledWith(
+        expect.objectContaining({
+          displayName: "阿里云百炼",
+          adapterId: "aliyun_bailian_v1",
+          baseUrl: "https://llm-workspace-1.cn-beijing.maas.aliyuncs.com",
+        }),
+      ),
+    );
+  });
+
   it("新建连接选择盘趣API预置模板后沿用 moyu_v1 适配器与域名地址", async () => {
     // 盘趣网关是 OpenAI 兼容的转发站，复用 moyu_v1 适配器。地址必须是域名：
     // 直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会在握手阶段拒绝，

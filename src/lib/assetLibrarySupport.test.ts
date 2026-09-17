@@ -51,6 +51,16 @@ describe("素材库供应商支持判定", () => {
     ).toBe(true);
   });
 
+  it("阿里云百炼没有云端素材库", () => {
+    expect(
+      providerSupportsAssetLibrary(
+        provider("https://llm-ws.cn-beijing.maas.aliyuncs.com", {
+          adapterId: "aliyun_bailian_v1",
+        }),
+      ),
+    ).toBe(false);
+  });
+
   it("地址缺失或写法不规范时保持原有行为，不误排除连接", () => {
     expect(providerSupportsAssetLibrary(provider(""))).toBe(true);
     expect(providerSupportsAssetLibrary(provider("   "))).toBe(true);
