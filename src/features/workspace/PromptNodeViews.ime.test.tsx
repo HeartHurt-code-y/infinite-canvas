@@ -159,7 +159,10 @@ describe("PromptMentionInput Tiptap IME regression", () => {
       await new Promise((resolve) => window.setTimeout(resolve, 0));
     });
 
-    expect(await screen.findByRole("listbox", { name: "素材引用候选" })).toBeInTheDocument();
+    const menu = await screen.findByRole("listbox", { name: "素材引用候选" });
+    // 菜单必须浮到 body：留在画布 transform 里会随缩放消失，Mac WebView 还会闪退。
+    expect(menu.parentElement).toBe(document.body);
+    expect(menu).toHaveClass("prompt-mention__menu--floating");
     expect(screen.getByRole("option")).toHaveTextContent("角色.png");
   });
 

@@ -794,20 +794,24 @@
   font-size: var(--text-base);
 }
 
-.react-flow__node .canvas-flow-node :is(.prompt-mention__menu, .prompt-ambiguity__menu) {
+.react-flow__node .canvas-flow-node :is(.prompt-mention__menu, .prompt-ambiguity__menu),
+.prompt-mention__menu--floating,
+.prompt-ambiguity__menu--floating {
   background: var(--color-surface-2);
   border-color: var(--color-rule-strong);
   border-radius: var(--radius-panel);
   box-shadow: var(--shadow-floating);
 }
 
-.react-flow__node .canvas-flow-node .prompt-mention__option {
+.react-flow__node .canvas-flow-node .prompt-mention__option,
+.prompt-mention__menu--floating .prompt-mention__option {
   color: var(--color-text-2);
   font-size: var(--text-sm);
   border-radius: var(--radius-control);
 }
 
-.react-flow__node .canvas-flow-node .prompt-mention__option:is(.is-active, :hover) {
+.react-flow__node .canvas-flow-node .prompt-mention__option:is(.is-active, :hover),
+.prompt-mention__menu--floating .prompt-mention__option:is(.is-active, :hover) {
   color: var(--color-text);
   background: var(--color-surface-3);
 }

@@ -1,6 +1,7 @@
 import { Icon, type IconSize } from "../../components/Icon";
 import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
+import { PromptFloatingMenu } from "./promptFloatingMenu";
 import {
   frontendLog,
   refreshMediaUrlWithStagingFallback,
@@ -31,10 +32,7 @@ import {
   type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
 import { normalizePromptReferenceText } from "../../lib/promptReferences";
-import {
-  referenceTokenFor,
-  type PromptUnboundMention,
-} from "../../lib/promptOrdinalMentions";
+import { referenceTokenFor, type PromptUnboundMention } from "../../lib/promptOrdinalMentions";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
@@ -143,6 +141,7 @@ function MentionOptionThumb({ candidate }: { readonly candidate: MentionCandidat
       {showVideo ? (
         <VideoMiddleFrame
           src={videoSource}
+          eager
           placeholder={<AssetKindIcon kind="video" size="xl" />}
           onAspectRatioChange={(ratio) => measure(videoSource, ratio)}
           onLoadError={() => setFailedUrl(videoSource)}
@@ -274,6 +273,7 @@ export function PromptMentionInput({
   const sessionRef = useRef<PromptContentEditorSession | null>(null);
   sessionRef.current ??= createPromptContentEditorSession(candidates, placeholder);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
+  const fieldRef = useRef<HTMLDivElement | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
   const restoreExpandFocusRef = useRef(false);
   const replaceTypedQueryOnSelectRef = useRef(false);
@@ -688,9 +688,7 @@ export function PromptMentionInput({
         setAutoMentionFeedbackState({
           kind: "no-match",
           message:
-            resolution.unbound.length > 0
-              ? "有位置词没能绑定"
-              : "正文里没有可绑定的位置词或素材名",
+            resolution.unbound.length > 0 ? "有位置词没能绑定" : "正文里没有可绑定的位置词或素材名",
         });
       } else {
         setScanUnbound({ entries: [], candidates: [] });
@@ -1012,7 +1010,7 @@ export function PromptMentionInput({
           </div>
         ) : null}
 
-        <div className="prompt-mention__field">
+        <div ref={fieldRef} className="prompt-mention__field">
           <div
             ref={attachInput}
             className="prompt-mention__editor"
@@ -1197,8 +1195,9 @@ export function PromptMentionInput({
             </button>
           </div>
           {menuOpen ? (
-            <div
-              className="prompt-mention__menu"
+            <PromptFloatingMenu
+              anchorRef={fieldRef}
+              className="prompt-mention__menu prompt-mention__menu--floating nodrag nopan nowheel"
               role="listbox"
               aria-label={
                 annotationMentions != null && annotationMentions.length > 0
@@ -1271,11 +1270,12 @@ export function PromptMentionInput({
                   ),
                 )
               )}
-            </div>
+            </PromptFloatingMenu>
           ) : null}
           {activeAmbiguity != null ? (
-            <div
-              className="prompt-ambiguity__menu"
+            <PromptFloatingMenu
+              anchorRef={fieldRef}
+              className="prompt-ambiguity__menu prompt-ambiguity__menu--floating nodrag nopan nowheel"
               role="group"
               aria-label={`选择“${activeAmbiguity.displayName}”引用的具体素材`}
             >
@@ -1323,7 +1323,7 @@ export function PromptMentionInput({
                   ))
                 )}
               </div>
-            </div>
+            </PromptFloatingMenu>
           ) : null}
         </div>
 

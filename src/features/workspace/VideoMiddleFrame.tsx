@@ -12,11 +12,14 @@ const VIDEO_FRAME_READY_CLASS = "is-frame-ready";
  * - 不经过画布抽帧，因此不受 WebView 跨域限制（与素材卡片、画布素材节点同一做法）；
  * - 通过 `onAspectRatioChange` 上报原始宽高比，调用方据此按比例自适应宽度，完整显示不裁剪；
  * - 滚出视口时摘掉 `src` 释放解码器，滚回后重新抽帧。
+ * - 可见性观察的是定尺寸外壳，而不是 `<video>` 本身：WebKit 上无 src 的 video 盒子经常是 0，
+ *   观察它会形成「不相交 → 永不挂 src」的死锁。
  */
 export function VideoMiddleFrame({
   src,
   placeholder,
   objectFit = "contain",
+  eager = false,
   onAspectRatioChange,
   onLoadError,
 }: {
@@ -24,11 +27,18 @@ export function VideoMiddleFrame({
   /** 中间帧就绪前盖在视频上的占位内容（类型图标等）。 */
   readonly placeholder?: ReactNode;
   readonly objectFit?: CSSProperties["objectFit"];
+  /**
+   * 已脱离画布变换的浮层（@ 候选菜单等）必须紧急挂载：外壳不在 `.canvas-viewport` 内，
+   * 按画布几何会永远判不可见。
+   */
+  readonly eager?: boolean;
   readonly onAspectRatioChange?: (aspectRatio: number) => void;
   /** 视频不可读（签名过期、编码不支持等）：调用方回退为类型图标。 */
   readonly onLoadError?: () => void;
 }) {
-  const { containerRef: videoRef, inView } = useNodeInView<HTMLVideoElement>();
+  const { containerRef, inView } = useNodeInView<HTMLSpanElement>({
+    eager,
+  });
   const [readyKey, setReadyKey] = useState<string | null>(null);
   const proxiedSrc = toMediaProxyUrl(src) ?? src;
   // 换源或滚出视口都会丢失已定位的帧：把就绪标记绑定在“当前源 + 可见性”上自动失效。
@@ -36,10 +46,9 @@ export function VideoMiddleFrame({
   const frameReady = readyKey === frameKey;
 
   return (
-    <>
+    <span ref={containerRef} className="media-frame-host">
       {frameReady ? null : placeholder}
       <video
-        ref={videoRef}
         className={`${VIDEO_FRAME_CLASS}${frameReady ? ` ${VIDEO_FRAME_READY_CLASS}` : ""}`}
         style={{ objectFit }}
         src={inView ? proxiedSrc : undefined}
@@ -64,6 +73,6 @@ export function VideoMiddleFrame({
         onSeeked={() => setReadyKey(frameKey)}
         onError={() => onLoadError?.()}
       />
-    </>
+    </span>
   );
 }

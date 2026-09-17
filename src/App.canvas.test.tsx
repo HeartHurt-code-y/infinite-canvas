@@ -8257,7 +8257,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(within(videoGeneration).getByRole("button", { name: "识别素材名" }));
     const chip = await waitFor(() => {
       const found = promptInput.querySelector<HTMLElement>(".mention-chip")!;
-      expect(found).toHaveAttribute("data-canvas-node-key", secondImage.dataset["connectionTarget"]);
+      expect(found).toHaveAttribute(
+        "data-canvas-node-key",
+        secondImage.dataset["connectionTarget"],
+      );
       return found;
     });
     expect(chip).toHaveTextContent("@站台夜景图");
@@ -8322,7 +8325,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(promptInput.querySelector<HTMLElement>("[data-ambiguous-pattern]")?.textContent).toBe(
       "@站台参考图 · 待确认",
     );
-    const chooser = within(imageGeneration).getByRole("group", {
+    const chooser = screen.getByRole("group", {
       name: "选择“站台参考图”引用的具体素材",
     });
     expect(within(chooser).getByRole("option", { name: /选择 图片1/ })).toBeInTheDocument();
@@ -8351,7 +8354,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       { timeout: 1_600 },
     );
     expect(promptInput.querySelectorAll("[data-mention-id]")).toHaveLength(2);
-    const nextChooser = within(imageGeneration).getByRole("group", {
+    const nextChooser = screen.getByRole("group", {
       name: "选择“站台参考图”引用的具体素材",
     });
     fireEvent.click(within(nextChooser).getByRole("option", { name: /选择 图片1/ }));

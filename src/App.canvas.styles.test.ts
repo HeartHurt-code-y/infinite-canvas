@@ -100,10 +100,18 @@ describe("提示词 @ 引用配色", () => {
     expect(chip).toMatch(/color:\s*var\(--color-mention\)/);
     expect(chip).toMatch(/background:\s*var\(--color-mention-soft\)/);
     expect(chip).not.toMatch(/var\(--color-accent\)/);
+    expect(chip).toMatch(/-webkit-user-select:\s*text;\s*user-select:\s*text/);
     // 深色面与浅色工具区各自声明一支绿，缺失任一都会静默回退成继承色。
     for (const token of ["--color-mention:", "--color-mention-soft:", "--color-mention-ink:"]) {
       expect(tokensCss.split(token).length - 1).toBe(2);
     }
+  });
+
+  it("提示词输入在 WebKit 上覆盖节点禁止选中，@ 菜单以 fixed 浮层脱离画布变换", () => {
+    const input = appCss.match(/(?:^|\n)\.prompt-mention__input\s*\{([^}]+)\}/)?.[1] ?? "";
+    expect(input).toMatch(/-webkit-user-select:\s*text;\s*user-select:\s*text/);
+    expect(cssRule(".prompt-mention__menu--floating")).toMatch(/position:\s*fixed/);
+    expect(cssRule(".prompt-ambiguity__menu--floating")).toMatch(/position:\s*fixed/);
   });
 });
 

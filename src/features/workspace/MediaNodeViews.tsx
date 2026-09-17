@@ -1516,7 +1516,9 @@ export function CanvasAssetNode({
   const [previewing, setPreviewing] = useState(false);
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
   const [failedImageUrl, setFailedImageUrl] = useState<string | null>(null);
-  const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>();
+  const { containerRef: visualRef, inView: visualInView } = useNodeInView<HTMLSpanElement>({
+    heavy: isVideo,
+  });
   // 画布水合后会批量重签本地素材签名；已下载过的素材则直接复用会话内字节，
   // 既不必再等一次续签往返，也不受签名是否过期影响。
   const localMediaUrl = localAssetNodeMediaUrl(node);
@@ -1918,7 +1920,7 @@ export function CanvasOutputNode({
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   // 视口懒挂载与本地图片缩略图：滚出视口卸载 <video>；本地产物图片走缩略图管线。
   const { containerRef: previewButtonRef, inView: previewInView } =
-    useNodeInView<HTMLButtonElement>();
+    useNodeInView<HTMLButtonElement>({ heavy: isVideo });
   const imageThumbnailSrc = useMediaThumbnailSrc(node.finalPath);
   const mediaSrc = node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null);
 
