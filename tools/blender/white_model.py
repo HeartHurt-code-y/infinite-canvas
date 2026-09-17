@@ -2,8 +2,11 @@
 # This Blender bridge script is distributed under tools/blender/LICENSE.
 """Render an app-authored white-model plan using Blender's bundled Python.
 
-Only JSON data is accepted from the job. This fixed script creates an editable
-scene copy and an opaque PNG sequence; the application owns video encoding.
+Only JSON data is accepted from the job. The application bakes every frame of
+camera and actor motion itself (the same evaluator drives its real-time
+viewport), so this fixed script merely turns the baked samples into keyframes,
+builds the geometry, saves an editable scene copy and renders an opaque PNG
+sequence; the application owns video encoding.
 """
 
 from __future__ import annotations
@@ -18,7 +21,7 @@ import sys
 import traceback
 
 import bpy
-from mathutils import Vector
+from mathutils import Quaternion, Vector
 
 for stream in (sys.stdout, sys.stderr):
     if hasattr(stream, "reconfigure"):
@@ -26,6 +29,24 @@ for stream in (sys.stdout, sys.stderr):
 
 
 GEOMETRY_TYPES = {"MESH", "CURVE", "SURFACE", "META", "FONT", "CURVES", "VOLUME"}
+SHAPES = {"box", "sphere", "cylinder", "person"}
+POSES = {"stand", "sit", "kneel", "crouch", "reach", "arms_up"}
+JOINT_COUNT = 17
+# Joint sphere radii and bone segments (start, end, radius) as fractions of body height.
+# Must stay identical to src/lib/whiteModelScene.ts so the viewport matches the render.
+JOINT_RADIUS = [
+    0.06, 0.06, 0.03, 0.075, 0.036, 0.03, 0.03, 0.036, 0.03, 0.03,
+    0.05, 0.045, 0.045, 0.05, 0.045, 0.045, 0.022,
+]
+JOINT_NAMES = [
+    "骨盆", "胸腔", "颈部", "头部", "左肩", "左肘", "左腕", "右肩", "右肘", "右腕",
+    "左髋", "左膝", "左踝", "右髋", "右膝", "右踝", "面部",
+]
+SEGMENTS = [
+    (0, 1, 0.085), (1, 2, 0.03), (2, 3, 0.03), (4, 7, 0.035), (10, 13, 0.045),
+    (4, 5, 0.032), (5, 6, 0.028), (7, 8, 0.032), (8, 9, 0.028),
+    (10, 11, 0.05), (11, 12, 0.04), (13, 14, 0.05), (14, 15, 0.04),
+]
 
 
 def number(value, label, minimum=None, maximum=None):
@@ -43,31 +64,82 @@ def integer(value, label, minimum, maximum):
     return int(value)
 
 
-def vector(value, label):
+def vector(value, label, limit=100):
     if not isinstance(value, list) or len(value) != 3:
         raise ValueError(f"{label}需要三个坐标。")
-    return tuple(number(axis, label, -100, 100) for axis in value)
+    return tuple(number(axis, label, -limit, limit) for axis in value)
+
+
+def series(value, label, expected_length, limit):
+    if not isinstance(value, list) or len(value) != expected_length:
+        raise ValueError(f"{label}的烘焙数据长度与帧数不符。")
+    for entry in value:
+        number(entry, label, -limit, limit)
+    return value
+
+
+def increasing_times(frames, label, duration):
+    if not isinstance(frames, list) or not frames:
+        raise ValueError(f"{label}至少需要一个关键帧。")
+    previous = -1
+    for frame in frames:
+        if not isinstance(frame, dict):
+            raise ValueError(f"{label}关键帧无效。")
+        timestamp = number(frame.get("time"), f"{label}关键帧时间", 0, duration)
+        if timestamp <= previous:
+            raise ValueError(f"{label}关键帧时间必须严格递增。")
+        previous = timestamp
+
+
+def validate_motion(motion):
+    if not isinstance(motion, dict) or motion.get("kind") not in {"auto", "pose", "clip"}:
+        raise ValueError("白模角色的动作来源无效。")
+    if motion["kind"] == "pose" and motion.get("pose") not in POSES:
+        raise ValueError("白模角色的姿势预设无效。")
+    if motion["kind"] == "clip":
+        clip = motion.get("clip")
+        if not isinstance(clip, dict):
+            raise ValueError("动捕片段无效。")
+        integer(clip.get("fps"), "动捕片段帧率", 1, 120)
+        integer(clip.get("frameCount"), "动捕片段帧数", 1, 100000)
+        if not isinstance(clip.get("joints"), str) or not isinstance(clip.get("sourceName"), str):
+            raise ValueError("动捕片段数据无效。")
+        number(motion.get("startTime"), "动捕起始时间", -3600, 3600)
+        number(motion.get("speed"), "动捕速度", 0.01, 100)
+        if not isinstance(motion.get("loop"), bool):
+            raise ValueError("动捕循环设置无效。")
 
 
 def validate_request(request):
     if not isinstance(request, dict) or not isinstance(request.get("plan"), dict):
         raise ValueError("白模任务缺少场景方案。")
     plan = request["plan"]
-    if plan.get("version") != 1:
-        raise ValueError("不支持该白模场景方案版本。")
+    if plan.get("version") != 2:
+        raise ValueError("不支持该白模场景方案版本，请更新应用后重新渲染。")
     duration = number(plan.get("durationSeconds"), "时长", 1, 30)
     fps = integer(plan.get("fps"), "帧率", 8, 30)
     width = integer(plan.get("width"), "画面宽度", 320, 1920)
     height = integer(plan.get("height"), "画面高度", 180, 1920)
     if width % 2 or height % 2:
         raise ValueError("视频宽高必须是偶数。")
+    frame_count = max(1, math.floor(duration * fps + 0.5))
     camera = plan.get("camera")
-    if not isinstance(camera, dict) or camera.get("motion") not in {"static", "dolly", "truck", "orbit"}:
-        raise ValueError("请选择有效的相机运动。")
-    for key in ("start", "end", "target"):
-        vector(camera.get(key), f"相机{key}")
-    number(camera.get("orbitDegrees"), "环绕角度")
+    if not isinstance(camera, dict):
+        raise ValueError("请设置有效的机位。")
     number(camera.get("lens"), "相机焦距", 1)
+    if camera.get("interpolation") not in {"linear", "smooth"}:
+        raise ValueError("机位插值方式无效。")
+    increasing_times(camera.get("keyframes"), "机位", duration)
+    for keyframe in camera["keyframes"]:
+        vector(keyframe.get("position"), "机位位置")
+        vector(keyframe.get("target"), "机位注视点")
+    follow = camera.get("follow")
+    if follow is not None and (
+        not isinstance(follow, dict)
+        or not isinstance(follow.get("actorId"), str)
+        or follow.get("mode") not in {"aim", "track"}
+    ):
+        raise ValueError("机位跟随设置无效。")
     if not isinstance(plan.get("objects"), list):
         raise ValueError("白模对象列表无效。")
     identifiers = set()
@@ -80,28 +152,45 @@ def validate_request(request):
         identifiers.add(identifier)
         if not isinstance(actor.get("name"), str) or not actor["name"].strip():
             raise ValueError("白模对象名称不能为空。")
-        if actor.get("shape") not in {"box", "sphere", "cylinder", "person"}:
+        if actor.get("shape") not in SHAPES:
             raise ValueError("白模对象形状无效。")
         if not isinstance(actor.get("color"), str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", actor["color"]):
             raise ValueError("白模对象颜色需要使用 #rrggbb 格式。")
         number(actor.get("size"), "白模对象大小", 0.1, 10)
-        keyframes = actor.get("keyframes")
-        if not isinstance(keyframes, list) or not keyframes:
-            raise ValueError("每个白模对象至少需要一个路径关键帧。")
-        previous_time = -1
-        for keyframe in keyframes:
-            if not isinstance(keyframe, dict):
-                raise ValueError("路径关键帧无效。")
-            timestamp = number(keyframe.get("time"), "关键帧时间", 0, duration)
-            if timestamp <= previous_time:
-                raise ValueError("路径关键帧时间必须严格递增。")
-            previous_time = timestamp
+        if actor.get("facing") not in {"path", "manual"}:
+            raise ValueError("白模对象朝向模式无效。")
+        increasing_times(actor.get("keyframes"), f"「{actor['name']}」路径", duration)
+        for keyframe in actor["keyframes"]:
             vector(keyframe.get("position"), "对象位置")
             number(keyframe.get("yaw"), "对象朝向")
+        validate_motion(actor.get("motion"))
+    if follow is not None and follow["actorId"] not in identifiers:
+        raise ValueError("机位跟随的角色不存在。")
     source = request.get("sourceBlendPath")
     if source is not None and (not isinstance(source, str) or not source.strip()):
         raise ValueError("Blender 工程路径无效。")
-    return plan, max(1, math.floor(duration * fps + 0.5))
+    bake = request.get("bake")
+    if not source:
+        if not isinstance(bake, dict):
+            raise ValueError("白模任务缺少逐帧烘焙数据。")
+        if bake.get("frameCount") != frame_count:
+            raise ValueError("烘焙帧数与片长、帧率不一致。")
+        series(bake.get("camera"), "机位", frame_count * 6, 100)
+        baked_objects = bake.get("objects")
+        if not isinstance(baked_objects, list) or len(baked_objects) != len(plan["objects"]):
+            raise ValueError("烘焙对象数量与场景方案不一致。")
+        for actor, baked in zip(plan["objects"], baked_objects):
+            if not isinstance(baked, dict) or baked.get("id") != actor["id"]:
+                raise ValueError("烘焙对象顺序与场景方案不一致。")
+            series(baked.get("root"), f"「{actor['name']}」根变换", frame_count * 4, 100000)
+            for frame in range(frame_count):
+                for axis in range(3):
+                    number(baked["root"][frame * 4 + axis], "对象位置", -100, 100)
+            if actor["shape"] == "person":
+                series(baked.get("joints"), f"「{actor['name']}」关节", frame_count * JOINT_COUNT * 3, 20)
+            elif baked.get("joints") is not None:
+                raise ValueError("几何体不应携带关节数据。")
+    return plan, bake, frame_count
 
 
 def write_json(path, value):
@@ -123,6 +212,78 @@ def object_color(hex_color):
     return tuple(srgb_to_linear(int(hex_color[offset:offset + 2], 16) / 255) for offset in (1, 3, 5)) + (1,)
 
 
+class Meshes:
+    """Unit meshes shared by every joint sphere and bone cylinder."""
+
+    def __init__(self):
+        self.sphere = None
+        self.cylinder = None
+
+    def unit_sphere(self):
+        if self.sphere is None:
+            bpy.ops.mesh.primitive_uv_sphere_add(segments=16, ring_count=10, radius=1)
+            self.sphere = self._take("白模关节球")
+        return self.sphere
+
+    def unit_cylinder(self):
+        if self.cylinder is None:
+            bpy.ops.mesh.primitive_cylinder_add(vertices=16, radius=1, depth=1)
+            self.cylinder = self._take("白模骨段")
+        return self.cylinder
+
+    @staticmethod
+    def _take(name):
+        template = bpy.context.object
+        mesh = template.data
+        mesh.name = name
+        for polygon in mesh.polygons:
+            polygon.use_smooth = True
+        bpy.data.objects.remove(template, do_unlink=True)
+        return mesh
+
+
+def link_object(name, mesh, parent, color):
+    obj = bpy.data.objects.new(name, mesh)
+    bpy.context.scene.collection.objects.link(obj)
+    obj.parent = parent
+    obj.color = color
+    return obj
+
+
+def ensure_action(obj):
+    obj.animation_data_create()
+    action = bpy.data.actions.new(f"{obj.name} · 动画")
+    obj.animation_data.action = action
+    # Blender 4.4+ slotted actions: bind the object to its own slot when the API exists.
+    slots = getattr(action, "slots", None)
+    if slots is not None:
+        try:
+            obj.animation_data.action_slot = slots.new(id_type="OBJECT", name=obj.name)
+        except Exception:  # pragma: no cover - older 4.x builds without slot API
+            pass
+    return action
+
+
+def bake_channels(obj, action, data_path, per_frame):
+    """Write one keyframe per frame for every component of `data_path`.
+
+    `per_frame` is a list (frame order) of equal-length sequences (channel values).
+    Frame numbering starts at 1 to match the render range.
+    """
+    channel_count = len(per_frame[0])
+    for index in range(channel_count):
+        fcurve = action.fcurves.new(data_path=data_path, index=index)
+        fcurve.keyframe_points.add(len(per_frame))
+        flat = [0.0] * (len(per_frame) * 2)
+        for frame, values in enumerate(per_frame):
+            flat[2 * frame] = frame + 1
+            flat[2 * frame + 1] = values[index]
+        fcurve.keyframe_points.foreach_set("co", flat)
+        for point in fcurve.keyframe_points:
+            point.interpolation = "LINEAR"
+        fcurve.update()
+
+
 def primitive(shape, name, parent, position, scale, color):
     if shape == "box":
         bpy.ops.mesh.primitive_cube_add(size=1)
@@ -142,7 +303,49 @@ def primitive(shape, name, parent, position, scale, color):
     return obj
 
 
-def create_actor(actor, fps):
+def create_person(actor, root, joints, frame_count, meshes):
+    height = actor["size"]
+    color = object_color(actor["color"])
+    frames = []
+    for frame in range(frame_count):
+        base = frame * JOINT_COUNT * 3
+        frames.append([
+            Vector(joints[base + joint * 3:base + joint * 3 + 3]) for joint in range(JOINT_COUNT)
+        ])
+    for joint in range(JOINT_COUNT):
+        radius = JOINT_RADIUS[joint] * height
+        sphere = link_object(f"{actor['name']} · {JOINT_NAMES[joint]}", meshes.unit_sphere(), root, color)
+        sphere.scale = (radius, radius, radius)
+        action = ensure_action(sphere)
+        bake_channels(sphere, action, "location", [tuple(frames[frame][joint]) for frame in range(frame_count)])
+    for index, (start, end, radius_ratio) in enumerate(SEGMENTS):
+        radius = radius_ratio * height
+        bone = link_object(
+            f"{actor['name']} · 骨段 {index + 1}（{JOINT_NAMES[start]}→{JOINT_NAMES[end]}）",
+            meshes.unit_cylinder(), root, color,
+        )
+        bone.rotation_mode = "QUATERNION"
+        locations, rotations, scales = [], [], []
+        previous = None
+        for frame in range(frame_count):
+            a = frames[frame][start]
+            b = frames[frame][end]
+            direction = b - a
+            length = direction.length
+            rotation = direction.to_track_quat("Z", "Y") if length > 1e-6 else Quaternion((1, 0, 0, 0))
+            if previous is not None and previous.dot(rotation) < 0:
+                rotation = -rotation
+            previous = rotation
+            locations.append(tuple((a + b) / 2))
+            rotations.append(tuple(rotation))
+            scales.append((radius, radius, max(length, 1e-4)))
+        action = ensure_action(bone)
+        bake_channels(bone, action, "location", locations)
+        bake_channels(bone, action, "rotation_quaternion", rotations)
+        bake_channels(bone, action, "scale", scales)
+
+
+def create_actor(actor, baked, frame_count, meshes):
     root = bpy.data.objects.new(actor["name"], None)
     bpy.context.scene.collection.objects.link(root)
     root.empty_display_type = "PLAIN_AXES"
@@ -153,79 +356,65 @@ def create_actor(actor, fps):
     size = actor["size"]
     color = object_color(actor["color"])
     if actor["shape"] == "person":
-        # A simple mannequin keeps the same bottom-origin placement as primitives.
-        parts = [
-            ("躯干", "cylinder", (0, 0, 0.56), (0.43, 0.3, 0.44)),
-            ("头部", "sphere", (0, 0, 0.87), (0.26, 0.26, 0.26)),
-            ("左臂", "cylinder", (-0.29, 0, 0.55), (0.12, 0.12, 0.42)),
-            ("右臂", "cylinder", (0.29, 0, 0.55), (0.12, 0.12, 0.42)),
-            ("左腿", "cylinder", (-0.12, 0, 0.21), (0.17, 0.17, 0.42)),
-            ("右腿", "cylinder", (0.12, 0, 0.21), (0.17, 0.17, 0.42)),
-        ]
-        for suffix, shape, location, scale in parts:
-            primitive(shape, f"{actor['name']} · {suffix}", root,
-                      tuple(value * size for value in location),
-                      tuple(value * size for value in scale), color)
+        create_person(actor, root, baked["joints"], frame_count, meshes)
     else:
         primitive(actor["shape"], f"{actor['name']} · 模型", root,
                   (0, 0, size / 2), (size, size, size), color)
-    for keyframe in actor["keyframes"]:
-        frame = 1 + keyframe["time"] * fps
-        root.location = keyframe["position"]
-        root.rotation_euler = (0, 0, math.radians(keyframe["yaw"]))
-        root.keyframe_insert(data_path="location", frame=frame)
-        root.keyframe_insert(data_path="rotation_euler", frame=frame)
+    samples = baked["root"]
+    locations = [tuple(samples[frame * 4:frame * 4 + 3]) for frame in range(frame_count)]
+    rotations = [(0.0, 0.0, math.radians(samples[frame * 4 + 3])) for frame in range(frame_count)]
+    action = ensure_action(root)
+    bake_channels(root, action, "location", locations)
+    bake_channels(root, action, "rotation_euler", rotations)
 
 
-def point_camera(camera, target):
-    direction = target - camera.location
+def look_at(position, target):
+    direction = target - position
     if direction.length < 0.00001:
         raise ValueError("相机位置不能与观察目标重合。")
     up = "Y" if abs(direction.normalized().z) < 0.9999 else "X"
-    camera.rotation_mode = "QUATERNION"
-    camera.rotation_quaternion = direction.to_track_quat("-Z", up)
+    return direction.to_track_quat("-Z", up)
 
 
-def create_camera(plan, frame_count):
+def create_camera(plan, samples, frame_count):
     options = plan["camera"]
-    start, end, target = (Vector(options[key]) for key in ("start", "end", "target"))
-    bpy.ops.object.camera_add(location=start)
+    bpy.ops.object.camera_add(location=tuple(samples[0:3]))
     camera = bpy.context.object
     camera.name = "白模摄影机"
     camera.data.lens = options["lens"]
+    camera.data.sensor_fit = "AUTO"
+    camera.data.sensor_width = 36
     camera.data.clip_start = 0.01
     camera.data.clip_end = 1000
+    camera.rotation_mode = "QUATERNION"
     bpy.context.scene.camera = camera
-    offset = start - target
-    # Bake camera orientation per frame so dolly/orbit keeps looking at the target.
-    for frame in range(1, frame_count + 2):
-        factor = min(1, (frame - 1) / (plan["durationSeconds"] * plan["fps"]))
-        if options["motion"] == "orbit":
-            angle = math.radians(options["orbitDegrees"]) * factor
-            camera.location = target + Vector((
-                offset.x * math.cos(angle) - offset.y * math.sin(angle),
-                offset.x * math.sin(angle) + offset.y * math.cos(angle),
-                offset.z,
-            ))
-        elif options["motion"] in {"dolly", "truck"}:
-            camera.location = start.lerp(end, factor)
-        else:
-            camera.location = start
-        point_camera(camera, target)
-        camera.keyframe_insert(data_path="location", frame=frame)
-        camera.keyframe_insert(data_path="rotation_quaternion", frame=frame)
+    locations, rotations = [], []
+    previous = None
+    for frame in range(frame_count):
+        position = Vector(samples[frame * 6:frame * 6 + 3])
+        target = Vector(samples[frame * 6 + 3:frame * 6 + 6])
+        rotation = look_at(position, target)
+        if previous is not None and previous.dot(rotation) < 0:
+            rotation = -rotation
+        previous = rotation
+        locations.append(tuple(position))
+        rotations.append(tuple(rotation))
+    action = ensure_action(camera)
+    bake_channels(camera, action, "location", locations)
+    bake_channels(camera, action, "rotation_quaternion", rotations)
 
 
-def create_scene(plan, frame_count):
+def create_scene(plan, bake, frame_count):
     for obj in list(bpy.data.objects):
         bpy.data.objects.remove(obj, do_unlink=True)
     bpy.context.preferences.edit.keyframe_new_interpolation_type = "LINEAR"
-    for actor in plan["objects"]:
-        create_actor(actor, plan["fps"])
+    meshes = Meshes()
+    for actor, baked in zip(plan["objects"], bake["objects"]):
+        create_actor(actor, baked, frame_count, meshes)
     bpy.ops.mesh.primitive_plane_add(size=240, location=(0, 0, -0.015))
     bpy.context.object.name = "白模地面"
     bpy.context.object.color = (0.16, 0.16, 0.16, 1)
-    create_camera(plan, frame_count)
+    create_camera(plan, bake["camera"], frame_count)
     bpy.context.scene.frame_start = 1
 
 
@@ -323,7 +512,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     try:
         request = json.loads(input_path.read_text(encoding="utf-8-sig"))
-        plan, frame_count = validate_request(request)
+        plan, bake, frame_count = validate_request(request)
         if bpy.app.version < (4, 5, 0):
             raise RuntimeError("白模渲染需要 Blender 4.5 或更新版本；当前集成已在 4.5 LTS 验证。")
         progress(output, 3, "正在准备 Blender 白模场景")
@@ -332,7 +521,7 @@ def main():
         if source:
             import_scene(source, project_path)
         else:
-            create_scene(plan, frame_count)
+            create_scene(plan, bake, frame_count)
         hidden_guides = clean_guides()
         if not visible_geometry():
             raise ValueError("活动场景中没有可渲染的可见几何体。")

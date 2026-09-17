@@ -21,15 +21,31 @@ use super::storage::now_ms;
 const SCRIPT: &str = include_str!("../../../tools/blender/white_model.py");
 const PROCESS_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
+/// 人形关节数（与 tools/blender/white_model.py、src/lib/whiteModelScene.ts 一致）。
+const JOINT_COUNT: usize = 17;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelCameraKeyframe {
+    pub time: f64,
+    pub position: [f64; 3],
+    pub target: [f64; 3],
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelCameraFollow {
+    pub actor_id: String,
+    pub mode: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhiteModelCamera {
-    pub motion: String,
-    pub start: [f64; 3],
-    pub end: [f64; 3],
-    pub target: [f64; 3],
-    pub orbit_degrees: f64,
     pub lens: f64,
+    pub interpolation: String,
+    pub keyframes: Vec<WhiteModelCameraKeyframe>,
+    pub follow: Option<WhiteModelCameraFollow>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -42,13 +58,37 @@ pub struct WhiteModelKeyframe {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotionClip {
+    pub fps: u32,
+    pub frame_count: u32,
+    /// base64 小端 int16，frame_count × 17 × 3 个样本；只作为数据保存，渲染端不解码。
+    pub joints: String,
+    pub source_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotion {
+    pub kind: String,
+    pub pose: Option<String>,
+    pub clip: Option<WhiteModelMotionClip>,
+    pub start_time: Option<f64>,
+    #[serde(rename = "loop")]
+    pub looped: Option<bool>,
+    pub speed: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhiteModelObject {
     pub id: String,
     pub name: String,
     pub shape: String,
     pub color: String,
     pub size: f64,
+    pub facing: String,
     pub keyframes: Vec<WhiteModelKeyframe>,
+    pub motion: WhiteModelMotion,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -63,12 +103,33 @@ pub struct WhiteModelScenePlan {
     pub objects: Vec<WhiteModelObject>,
 }
 
+/// 前端按方案逐帧烘焙的样本；Blender 脚本只把它们写成关键帧，不重复任何插值逻辑。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelBakedObject {
+    pub id: String,
+    /// frame_count × 4：x, y, z, yaw（度）
+    pub root: Vec<f64>,
+    /// 人形：frame_count × 17 × 3 局部关节坐标；几何体为 None。
+    pub joints: Option<Vec<f64>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelBake {
+    pub frame_count: u32,
+    /// frame_count × 6：机位 xyz + 注视点 xyz
+    pub camera: Vec<f64>,
+    pub objects: Vec<WhiteModelBakedObject>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct StartBlenderRenderRequest {
     pub executable_path: Option<String>,
     pub source_blend_path: Option<String>,
     pub plan: WhiteModelScenePlan,
+    pub bake: Option<WhiteModelBake>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -145,10 +206,67 @@ fn valid_position(value: &[f64; 3]) -> bool {
         .all(|coordinate| finite_between(*coordinate, -100.0, 100.0))
 }
 
+fn strictly_increasing_times<'a>(
+    times: impl Iterator<Item = &'a f64>,
+    duration_seconds: f64,
+) -> bool {
+    let mut previous = -1.0;
+    for time in times {
+        if !finite_between(*time, 0.0, duration_seconds) || *time <= previous {
+            return false;
+        }
+        previous = *time;
+    }
+    true
+}
+
+fn valid_series(values: &[f64], expected_length: usize, limit: f64) -> bool {
+    values.len() == expected_length
+        && values
+            .iter()
+            .all(|value| finite_between(*value, -limit, limit))
+}
+
+fn validate_motion(motion: &WhiteModelMotion) -> bool {
+    match motion.kind.as_str() {
+        "auto" => true,
+        "pose" => motion.pose.as_deref().is_some_and(|pose| {
+            ["stand", "sit", "kneel", "crouch", "reach", "arms_up"].contains(&pose)
+        }),
+        "clip" => {
+            let Some(clip) = &motion.clip else {
+                return false;
+            };
+            (1..=120).contains(&clip.fps)
+                && (1..=100_000).contains(&clip.frame_count)
+                && motion.looped.is_some()
+                && motion
+                    .start_time
+                    .is_some_and(|value| finite_between(value, -3600.0, 3600.0))
+                && motion
+                    .speed
+                    .is_some_and(|value| finite_between(value, 0.01, 100.0))
+                && base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &clip.joints)
+                    .is_ok_and(|bytes| {
+                        bytes.len() == clip.frame_count as usize * JOINT_COUNT * 3 * 2
+                    })
+        }
+        _ => false,
+    }
+}
+
+pub fn expected_frame_count(plan: &WhiteModelScenePlan) -> u32 {
+    ((plan.duration_seconds * f64::from(plan.fps)).round() as u32).max(1)
+}
+
 pub fn validate_request(request: &StartBlenderRenderRequest) -> BackendResult<()> {
     let plan = &request.plan;
-    if plan.version != 1
-        || !finite_between(plan.duration_seconds, 1.0, 30.0)
+    if plan.version != 2 {
+        return Err(invalid(
+            "白模场景方案版本过旧，请重新打开白模工作室后再渲染",
+        ));
+    }
+    if !finite_between(plan.duration_seconds, 1.0, 30.0)
         || !(8..=30).contains(&plan.fps)
         || !(320..=1920).contains(&plan.width)
         || !(180..=1920).contains(&plan.height)
@@ -160,17 +278,22 @@ pub fn validate_request(request: &StartBlenderRenderRequest) -> BackendResult<()
         ));
     }
     let camera = &plan.camera;
-    if !["static", "dolly", "truck", "orbit"].contains(&camera.motion.as_str())
-        || !valid_position(&camera.start)
-        || !valid_position(&camera.end)
-        || !valid_position(&camera.target)
-        || !camera.orbit_degrees.is_finite()
-        || !camera.lens.is_finite()
+    if !camera.lens.is_finite()
         || camera.lens < 1.0
-        || camera.start == camera.target
+        || !["linear", "smooth"].contains(&camera.interpolation.as_str())
+        || camera.keyframes.is_empty()
+        || !strictly_increasing_times(
+            camera.keyframes.iter().map(|frame| &frame.time),
+            plan.duration_seconds,
+        )
+        || camera.keyframes.iter().any(|frame| {
+            !valid_position(&frame.position)
+                || !valid_position(&frame.target)
+                || frame.position == frame.target
+        })
     {
         return Err(invalid(
-            "白模机位设置无效，请检查运镜、坐标和焦距，机位不能与目标重合",
+            "白模机位设置无效，请检查关键帧时间、坐标和焦距，机位不能与注视点重合",
         ));
     }
     let imported = request
@@ -185,9 +308,10 @@ pub fn validate_request(request: &StartBlenderRenderRequest) -> BackendResult<()
     let mut ids = HashSet::new();
     for object in &plan.objects {
         if object.id.trim().is_empty()
-            || !ids.insert(&object.id)
+            || !ids.insert(object.id.as_str())
             || object.name.trim().is_empty()
             || !["box", "sphere", "cylinder", "person"].contains(&object.shape.as_str())
+            || !["path", "manual"].contains(&object.facing.as_str())
             || !finite_between(object.size, 0.1, 10.0)
             || object.color.len() != 7
             || !object.color.starts_with('#')
@@ -195,23 +319,65 @@ pub fn validate_request(request: &StartBlenderRenderRequest) -> BackendResult<()
                 .bytes()
                 .all(|character| character.is_ascii_hexdigit())
             || object.keyframes.is_empty()
+            || !validate_motion(&object.motion)
         {
             return Err(invalid(
-                "白模对象设置无效，请检查唯一标识、名称、形状、颜色、尺寸和关键帧",
+                "白模对象设置无效，请检查唯一标识、名称、形状、颜色、尺寸、动作来源和关键帧",
             ));
         }
-        let mut previous = -1.0;
-        for keyframe in &object.keyframes {
-            if !finite_between(keyframe.time, 0.0, plan.duration_seconds)
-                || keyframe.time <= previous
-                || !valid_position(&keyframe.position)
-                || !keyframe.yaw.is_finite()
+        if !strictly_increasing_times(
+            object.keyframes.iter().map(|frame| &frame.time),
+            plan.duration_seconds,
+        ) || object
+            .keyframes
+            .iter()
+            .any(|frame| !valid_position(&frame.position) || !frame.yaw.is_finite())
+        {
+            return Err(invalid(
+                "白模关键帧须按时间严格递增，时间不能超出片长，坐标须在 -100–100 范围内",
+            ));
+        }
+    }
+    if camera.follow.as_ref().is_some_and(|follow| {
+        !["aim", "track"].contains(&follow.mode.as_str()) || !ids.contains(follow.actor_id.as_str())
+    }) {
+        return Err(invalid("机位跟随的角色不存在或跟随方式无效"));
+    }
+    if imported.is_none() {
+        let frame_count = expected_frame_count(plan) as usize;
+        let Some(bake) = &request.bake else {
+            return Err(invalid(
+                "白模任务缺少逐帧烘焙数据，请重新打开白模工作室后渲染",
+            ));
+        };
+        if bake.frame_count as usize != frame_count
+            || !valid_series(&bake.camera, frame_count * 6, 100.0)
+            || bake.objects.len() != plan.objects.len()
+        {
+            return Err(invalid("白模烘焙数据与片长、帧率或对象数量不一致"));
+        }
+        for (object, baked) in plan.objects.iter().zip(&bake.objects) {
+            let joints_valid = match (&object.shape[..], &baked.joints) {
+                ("person", Some(joints)) => {
+                    valid_series(joints, frame_count * JOINT_COUNT * 3, 20.0)
+                }
+                ("person", None) => false,
+                (_, None) => true,
+                (_, Some(_)) => false,
+            };
+            if baked.id != object.id
+                || !valid_series(&baked.root, frame_count * 4, 100_000.0)
+                || baked
+                    .root
+                    .chunks(4)
+                    .any(|frame| !valid_position(&[frame[0], frame[1], frame[2]]))
+                || !joints_valid
             {
-                return Err(invalid(
-                    "白模关键帧须按时间严格递增，时间不能超出片长，坐标须在 -100–100 范围内",
-                ));
+                return Err(invalid(format!(
+                    "「{}」的烘焙数据无效，请重新渲染",
+                    object.name
+                )));
             }
-            previous = keyframe.time;
         }
     }
     Ok(())
@@ -633,7 +799,7 @@ impl BlenderRenderService {
             .await?;
         let output: PythonResult =
             serde_json::from_slice(&read_limited(&directory.join("result.json"), 16 * 1024)?)?;
-        let count = (request.plan.duration_seconds * f64::from(request.plan.fps)).round() as u32;
+        let count = expected_frame_count(&request.plan);
         if output.frame_count != count
             || output.fps != request.plan.fps
             || output.width != request.plan.width
@@ -1005,14 +1171,44 @@ mod tests {
         }
     }
 
+    /// 1 秒 × 8 帧：机位从 (6,-8,5) 推到 (5,-7,4)，圆柱从 x=-1 走到 x=1 并转 90°，
+    /// 人形在原点原地站立（关节取站立姿势的骨盆/头部等简化样本）。
     fn request() -> StartBlenderRenderRequest {
+        let frames = 8;
+        let mut camera = Vec::new();
+        let mut cylinder_root = Vec::new();
+        let mut person_root = Vec::new();
+        let mut joints = Vec::new();
+        for frame in 0..frames {
+            let factor = frame as f64 / frames as f64;
+            camera.extend([6.0 - factor, -8.0 + factor, 5.0 - factor, 0.0, 0.0, 1.0]);
+            cylinder_root.extend([-1.0 + 2.0 * factor, 0.0, 0.0, 90.0 * factor]);
+            person_root.extend([0.0, 1.5, 0.0, 0.0]);
+            for joint in 0..JOINT_COUNT {
+                joints.extend([0.0, 0.0, 0.1 + joint as f64 * 0.05]);
+            }
+        }
         serde_json::from_value(json!({
             "executablePath": null, "sourceBlendPath": null,
-            "plan": { "version": 1, "durationSeconds": 1, "fps": 8, "width": 320, "height": 180,
-                "camera": { "motion": "dolly", "start": [6,-8,5], "end": [5,-7,4], "target": [0,0,1], "orbitDegrees": 90, "lens": 50 },
-                "objects": [{ "id": "actor", "name": "红色圆柱", "shape": "cylinder", "color": "#ff6655", "size": 1,
-                    "keyframes": [{ "time": 0, "position": [-1,0,0], "yaw": 0 }, { "time": 1, "position": [1,0,0], "yaw": 90 }] }]
-            }
+            "plan": { "version": 2, "durationSeconds": 1, "fps": 8, "width": 320, "height": 180,
+                "camera": { "lens": 50, "interpolation": "linear", "follow": null,
+                    "keyframes": [
+                        { "time": 0, "position": [6,-8,5], "target": [0,0,1] },
+                        { "time": 1, "position": [5,-7,4], "target": [0,0,1] }
+                    ] },
+                "objects": [
+                    { "id": "actor", "name": "红色圆柱", "shape": "cylinder", "color": "#ff6655", "size": 1, "facing": "manual",
+                      "motion": { "kind": "auto" },
+                      "keyframes": [{ "time": 0, "position": [-1,0,0], "yaw": 0 }, { "time": 1, "position": [1,0,0], "yaw": 90 }] },
+                    { "id": "person", "name": "蓝色人形", "shape": "person", "color": "#698bce", "size": 1.75, "facing": "path",
+                      "motion": { "kind": "pose", "pose": "stand" },
+                      "keyframes": [{ "time": 0, "position": [0,1.5,0], "yaw": 0 }] }
+                ]
+            },
+            "bake": { "frameCount": frames, "camera": camera, "objects": [
+                { "id": "actor", "root": cylinder_root, "joints": null },
+                { "id": "person", "root": person_root, "joints": joints }
+            ] }
         })).unwrap()
     }
 
@@ -1134,9 +1330,97 @@ mod tests {
         bad = base.clone();
         bad.source_blend_path = Some("../source.blend".into());
         assert!(validate_request(&bad).is_err());
+        // 旧版方案与非法机位/跟随/动作来源。
+        bad = base.clone();
+        bad.plan.version = 1;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.plan.camera.keyframes[0].target = bad.plan.camera.keyframes[0].position;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.plan.camera.follow = Some(WhiteModelCameraFollow {
+            actor_id: "missing".into(),
+            mode: "aim".into(),
+        });
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.plan.camera.follow = Some(WhiteModelCameraFollow {
+            actor_id: "person".into(),
+            mode: "track".into(),
+        });
+        validate_request(&bad).unwrap();
+        bad = base.clone();
+        bad.plan.objects[1].motion.pose = Some("moonwalk".into());
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.plan.objects[1].motion = WhiteModelMotion {
+            kind: "clip".into(),
+            pose: None,
+            clip: Some(WhiteModelMotionClip {
+                fps: 24,
+                frame_count: 2,
+                joints: base64::Engine::encode(
+                    &base64::engine::general_purpose::STANDARD,
+                    vec![0_u8; 2 * JOINT_COUNT * 3 * 2],
+                ),
+                source_name: "demo.mp4".into(),
+            }),
+            start_time: Some(0.0),
+            looped: Some(true),
+            speed: Some(1.0),
+        };
+        validate_request(&bad).unwrap();
+        bad.plan.objects[1]
+            .motion
+            .clip
+            .as_mut()
+            .unwrap()
+            .frame_count = 3;
+        assert!(validate_request(&bad).is_err());
         let mut data = serde_json::to_value(base).unwrap();
         data["plan"]["python"] = json!("print('untrusted')");
         assert!(serde_json::from_value::<StartBlenderRenderRequest>(data).is_err());
+    }
+
+    /// 烘焙数据必须与方案逐帧、逐对象对齐；导入工程时不需要烘焙。
+    #[test]
+    fn blender_input_validation_checks_baked_samples_against_plan() {
+        let base = request();
+        let mut bad = base.clone();
+        bad.bake = None;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().frame_count = 9;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().camera.pop();
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().objects[1].joints = None;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().objects[0].joints = Some(vec![0.0; 8 * JOINT_COUNT * 3]);
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().objects.swap(0, 1);
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().objects[0].root[0] = 500.0;
+        assert!(validate_request(&bad).is_err());
+        bad = base.clone();
+        bad.bake.as_mut().unwrap().objects[1]
+            .joints
+            .as_mut()
+            .unwrap()[5] = f64::INFINITY;
+        assert!(validate_request(&bad).is_err());
+        // 导入 .blend 时烘焙可省略（路径校验在真实文件上由 smoke 覆盖）。
+        let temporary = tempfile::tempdir().unwrap();
+        let project = temporary.path().join("scene.blend");
+        std::fs::write(&project, b"BLENDER").unwrap();
+        bad = base.clone();
+        bad.bake = None;
+        bad.source_blend_path = Some(project.to_string_lossy().into_owned());
+        validate_request(&bad).unwrap();
     }
 
     #[tokio::test]

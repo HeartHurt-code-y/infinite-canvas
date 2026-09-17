@@ -55,3 +55,6 @@ src-tauri/resources/ffmpeg/
 
 # Generated Blender distribution, verified and bundled by blender:prepare
 src-tauri/resources/blender/
+
+# MediaPipe pose runtime + model for the white-model motion capture (rebuilt by pose:prepare)
+public/pose/

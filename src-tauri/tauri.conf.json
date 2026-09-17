@@ -4,9 +4,9 @@
   "version": "0.1.0",
   "identifier": "com.infinitecanvas.desktop",
   "build": {
-    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm dev",
+    "beforeDevCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm pose:prepare && pnpm dev",
     "devUrl": "http://localhost:1420",
-    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm build",
+    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm pose:prepare && pnpm build",
     "frontendDist": "../dist"
   },
   "app": {

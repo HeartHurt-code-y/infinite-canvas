@@ -1,31 +1,27 @@
 import { invoke } from "@tauri-apps/api/core";
 import * as v from "valibot";
+import {
+  bakeWhiteModelScene,
+  isWhiteModelScenePlanV1,
+  migrateWhiteModelScenePlan,
+  solveShot,
+  type WhiteModelBake,
+  type WhiteModelObject,
+  type WhiteModelScenePlan,
+} from "./whiteModelScene";
 
-export type WhiteModelVector = [number, number, number];
-export interface WhiteModelObject {
-  id: string;
-  name: string;
-  shape: "box" | "sphere" | "cylinder" | "person";
-  color: string;
-  size: number;
-  keyframes: { time: number; position: WhiteModelVector; yaw: number }[];
-}
-export interface WhiteModelScenePlan {
-  version: 1;
-  durationSeconds: number;
-  fps: number;
-  width: number;
-  height: number;
-  camera: {
-    motion: "static" | "dolly" | "truck" | "orbit";
-    start: WhiteModelVector;
-    end: WhiteModelVector;
-    target: WhiteModelVector;
-    orbitDegrees: number;
-    lens: number;
-  };
-  objects: WhiteModelObject[];
-}
+export type {
+  WhiteModelBake,
+  WhiteModelCamera,
+  WhiteModelCameraKeyframe,
+  WhiteModelMotion,
+  WhiteModelMotionClip,
+  WhiteModelObject,
+  WhiteModelPathKeyframe,
+  WhiteModelScenePlan,
+  WhiteModelVector,
+} from "./whiteModelScene";
+
 export interface WhiteModelStudioDraft {
   executablePath: string;
   sourceBlendPath: string;
@@ -38,6 +34,8 @@ export interface BlenderRenderRequest {
   executablePath: string | null;
   sourceBlendPath: string | null;
   plan: WhiteModelScenePlan;
+  /** 由方案逐帧烘焙得到；导入 .blend 工程时为 null。 */
+  bake: WhiteModelBake | null;
 }
 
 const engineSchema = v.object({
@@ -64,37 +62,56 @@ const jobSchema = v.object({
 export type BlenderEngineStatus = v.InferOutput<typeof engineSchema>;
 export type BlenderRenderJob = v.InferOutput<typeof jobSchema>;
 
-export function createWhiteModelObject(index: number, durationSeconds: number): WhiteModelObject {
+export const WHITE_MODEL_ACTOR_COLORS = ["#dc6868", "#698bce", "#d4ae59", "#73ad8e"] as const;
+/** 默认人形身高（米）。 */
+export const DEFAULT_PERSON_HEIGHT = 1.75;
+
+export function createWhiteModelObject(
+  index: number,
+  durationSeconds: number,
+  shape: WhiteModelObject["shape"] = "person",
+): WhiteModelObject {
+  const lane = index * 1.2;
   return {
     id: crypto.randomUUID(),
-    name: `角色 ${index + 1}`,
-    shape: "person",
-    color: ["#dc6868", "#698bce", "#d4ae59", "#73ad8e"][index % 4]!,
-    size: 1,
+    name: shape === "person" ? `角色 ${index + 1}` : `道具 ${index + 1}`,
+    shape,
+    color: WHITE_MODEL_ACTOR_COLORS[index % WHITE_MODEL_ACTOR_COLORS.length]!,
+    size: shape === "person" ? DEFAULT_PERSON_HEIGHT : 1,
+    facing: "path",
     keyframes: [
-      { time: 0, position: [-2, index * 2, 0], yaw: 0 },
-      { time: durationSeconds, position: [2, index * 2, 0], yaw: 0 },
+      { time: 0, position: [-2, lane, 0], yaw: 90 },
+      { time: durationSeconds, position: [2, lane, 0], yaw: 90 },
     ],
+    motion: { kind: "auto" },
   };
 }
+
 export function createWhiteModelScenePlan(): WhiteModelScenePlan {
+  const durationSeconds = 8;
+  const actor = createWhiteModelObject(0, durationSeconds);
+  const shot = solveShot(
+    { position: [0, 0, 0], yaw: 90, height: actor.size, isPerson: true },
+    { size: "full", angle: "eye", direction: "front_left" },
+    35,
+    16 / 9,
+  );
   return {
-    version: 1,
-    durationSeconds: 8,
+    version: 2,
+    durationSeconds,
     fps: 24,
     width: 960,
     height: 540,
     camera: {
-      motion: "dolly",
-      start: [8, -12, 7],
-      end: [6, -9, 5],
-      target: [0, 0, 1],
-      orbitDegrees: 90,
-      lens: 50,
+      lens: 35,
+      interpolation: "smooth",
+      keyframes: [{ time: 0, ...shot }],
+      follow: { actorId: actor.id, mode: "aim" },
     },
-    objects: [createWhiteModelObject(0, 8)],
+    objects: [actor],
   };
 }
+
 export function createWhiteModelStudioDraft(): WhiteModelStudioDraft {
   return {
     executablePath: "",
@@ -104,16 +121,47 @@ export function createWhiteModelStudioDraft(): WhiteModelStudioDraft {
     jobId: null,
   };
 }
+
+/**
+ * 读取画布里持久化的草稿：旧版 v1 方案自动迁移到 v2。迁移是确定性的，
+ * 若旧签名与旧方案匹配，则同步换算成新签名，已渲染成片继续可用。
+ */
+export function normalizeWhiteModelStudioDraft(draft: WhiteModelStudioDraft): WhiteModelStudioDraft {
+  const plan: unknown = draft.plan;
+  if (!isWhiteModelScenePlanV1(plan)) return draft;
+  const legacyRequest = {
+    executablePath: draft.executablePath.trim() || null,
+    sourceBlendPath: draft.mode === "blend" ? draft.sourceBlendPath.trim() : null,
+    plan,
+  };
+  const matched =
+    draft.jobInputSignature != null && draft.jobInputSignature === JSON.stringify(legacyRequest);
+  const migrated: WhiteModelStudioDraft = { ...draft, plan: migrateWhiteModelScenePlan(plan) };
+  return matched
+    ? { ...migrated, jobInputSignature: whiteModelRenderSignature(migrated) }
+    : migrated;
+}
+
+/** 提交给渲染端的完整请求：方案 + 逐帧烘焙。 */
 export function whiteModelRenderRequest(draft: WhiteModelStudioDraft): BlenderRenderRequest {
+  const importing = draft.mode === "blend";
   return {
+    executablePath: draft.executablePath.trim() || null,
+    sourceBlendPath: importing ? draft.sourceBlendPath.trim() : null,
+    plan: draft.plan,
+    bake: importing ? null : bakeWhiteModelScene(draft.plan),
+  };
+}
+
+/** 判断「设置是否改过」的签名只看语义方案，烘焙数据由方案确定性推出，不参与比较。 */
+export function whiteModelRenderSignature(draft: WhiteModelStudioDraft): string {
+  return JSON.stringify({
     executablePath: draft.executablePath.trim() || null,
     sourceBlendPath: draft.mode === "blend" ? draft.sourceBlendPath.trim() : null,
     plan: draft.plan,
-  };
+  });
 }
-export function whiteModelRenderSignature(draft: WhiteModelStudioDraft): string {
-  return JSON.stringify(whiteModelRenderRequest(draft));
-}
+
 export async function getBlenderEngine(
   executablePath?: string | null,
 ): Promise<BlenderEngineStatus> {

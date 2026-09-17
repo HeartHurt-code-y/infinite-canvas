@@ -37,8 +37,16 @@ const vendorGroups = [
     test: /[\\/]node_modules[\\/]@tauri-apps[\\/]/,
   },
   {
+    name: "three-vendor",
+    test: /[\\/]node_modules[\\/]three[\\/]/,
+  },
+  {
+    name: "mediapipe-vendor",
+    test: /[\\/]node_modules[\\/]@mediapipe[\\/]/,
+  },
+  {
     name: "other-vendor",
-    test: /[\\/]node_modules[\\/](?!@phosphor-icons[\\/]|@xyflow[\\/]|d3-|delaunator[\\/]|internmap[\\/]|robust-predicates[\\/]|@tiptap[\\/]|prosemirror-|react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/]|use-sync-external-store[\\/]|zustand[\\/]|react-markdown|remark-|unified[\\/]|micromark|mdast-util-|hast-util-|unist-util-|vfile|character-entities|decode-named-character-reference|comma-separated-tokens|space-separated-tokens|ccount[\\/]|escape-string-regexp[\\/]|trim-lines[\\/]|zwitch[\\/]|bail[\\/]|trough[\\/]|is-plain-obj[\\/]|is-buffer[\\/]|property-information|stringify-entities|parse-entities|devlop[\\/]|extend[\\/]|emoji-regex[\\/]|html-void-elements[\\/]|web-namespaces[\\/]|diff[\\/]|valibot[\\/]|sonner[\\/]|react-hotkeys-hook[\\/]|zundo[\\/]|@tauri-apps[\\/])/,
+    test: /[\\/]node_modules[\\/](?!@phosphor-icons[\\/]|@xyflow[\\/]|d3-|delaunator[\\/]|internmap[\\/]|robust-predicates[\\/]|@tiptap[\\/]|prosemirror-|react[\\/]|react-dom[\\/]|scheduler[\\/]|@tanstack[\\/]|use-sync-external-store[\\/]|zustand[\\/]|react-markdown|remark-|unified[\\/]|micromark|mdast-util-|hast-util-|unist-util-|vfile|character-entities|decode-named-character-reference|comma-separated-tokens|space-separated-tokens|ccount[\\/]|escape-string-regexp[\\/]|trim-lines[\\/]|zwitch[\\/]|bail[\\/]|trough[\\/]|is-plain-obj[\\/]|is-buffer[\\/]|property-information|stringify-entities|parse-entities|devlop[\\/]|extend[\\/]|emoji-regex[\\/]|html-void-elements[\\/]|web-namespaces[\\/]|diff[\\/]|valibot[\\/]|sonner[\\/]|react-hotkeys-hook[\\/]|zundo[\\/]|@tauri-apps[\\/]|three[\\/]|@mediapipe[\\/])/,
   },
 ];
 

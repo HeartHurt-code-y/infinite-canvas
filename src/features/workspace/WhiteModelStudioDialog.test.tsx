@@ -6,6 +6,7 @@ import {
   createWhiteModelStudioDraft,
   whiteModelRenderSignature,
   type BlenderRenderJob,
+  type BlenderRenderRequest,
   type WhiteModelStudioDraft,
 } from "../../lib/whiteModelStudio";
 import { WhiteModelStudioDialog } from "./WhiteModelStudioDialog";
@@ -17,6 +18,8 @@ const mocks = vi.hoisted(() => ({
   cancel: vi.fn(),
   openProject: vi.fn(),
   chooseFile: vi.fn(),
+  poseAvailable: vi.fn(),
+  captureMotion: vi.fn(),
 }));
 vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   ...(await importOriginal<typeof WhiteModelStudioModule>()),
@@ -27,6 +30,13 @@ vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   openBlenderProject: mocks.openProject,
 }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.chooseFile }));
+vi.mock("../../lib/poseCapture", () => ({
+  poseCaptureAvailable: mocks.poseAvailable,
+  captureMotionFromVideo: mocks.captureMotion,
+}));
+vi.mock("./WhiteModelViewport", () => ({
+  WhiteModelViewport: () => <div data-testid="white-model-viewport" />,
+}));
 
 function job(status: BlenderRenderJob["status"], jobId = "render-1"): BlenderRenderJob {
   return {
@@ -67,6 +77,10 @@ function harness(initial: WhiteModelStudioDraft) {
   return { ...render(<Host />), onClose, onUse, saved: () => saved };
 }
 
+function openEnginePanel() {
+  fireEvent.click(screen.getByText("场景来源与渲染引擎"));
+}
+
 beforeEach(() => {
   vi.clearAllMocks();
   mocks.engine.mockResolvedValue({
@@ -80,49 +94,67 @@ beforeEach(() => {
   mocks.cancel.mockResolvedValue(job("cancelled"));
   mocks.openProject.mockResolvedValue(undefined);
   mocks.chooseFile.mockResolvedValue(null);
+  mocks.poseAvailable.mockResolvedValue(true);
+  mocks.captureMotion.mockResolvedValue({
+    fps: 24,
+    frameCount: 24,
+    joints: "AAAA",
+    sourceName: "walk.mp4",
+  });
 });
 
-describe("白模工作室", () => {
-  it("默认内置引擎无需选择路径，保存角色相机设置并恢复成片与精修工程渲染", async () => {
+describe("白模导演台", () => {
+  it("默认机位视角与镜头语言，保存走位后渲染并可恢复成片与精修工程", async () => {
     const view = harness(createWhiteModelStudioDraft());
     const renderButton = screen.getByRole("button", { name: "渲染白模视频" });
     await waitFor(() => expect(renderButton).toBeEnabled());
     expect(mocks.engine).toHaveBeenCalledWith("");
     expect(screen.getByText(/应用已内置 Blender，无需另行安装或下载/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "机位视角" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByRole("button", { name: "导演视角" })).toBeInTheDocument();
+    expect(screen.getByTestId("white-model-viewport")).toBeInTheDocument();
+    expect(screen.getByLabelText("时间轴")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "按景别取景（写入当前时间的机位关键帧）" })).toBeEnabled();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "一键动捕：从视频提取动作…" })).toBeEnabled(),
+    );
     expect(screen.queryByRole("textbox", { name: "外部 Blender 路径" })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "选择外部 Blender" })).not.toBeInTheDocument();
     expect(mocks.chooseFile).not.toHaveBeenCalled();
-    fireEvent.change(screen.getByLabelText("几何体 1"), { target: { value: "box" } });
-    fireEvent.change(screen.getByLabelText("角色 1 终点 X"), { target: { value: "4" } });
-    fireEvent.change(screen.getByLabelText("角色 1 终点朝向（度）"), { target: { value: "90" } });
-    fireEvent.change(screen.getByLabelText("相机运动"), { target: { value: "orbit" } });
-    fireEvent.change(screen.getByLabelText("环绕角度"), { target: { value: "180" } });
+
+    fireEvent.change(screen.getByLabelText("几何体"), { target: { value: "box" } });
+    fireEvent.change(screen.getByLabelText("路径点 2 X"), { target: { value: "4" } });
+    fireEvent.click(screen.getByRole("button", { name: "左环绕" }));
     fireEvent.change(screen.getByLabelText("片长（秒）"), { target: { value: "0" } });
     expect(view.saved().plan.durationSeconds).toBe(8);
     fireEvent.change(screen.getByLabelText("片长（秒）"), { target: { value: "12" } });
     fireEvent.change(screen.getByLabelText("画幅"), { target: { value: "540:960" } });
-    fireEvent.click(renderButton);
+    const startButton = screen.getByRole("button", { name: "渲染白模视频" });
+    await waitFor(() => expect(startButton).toBeEnabled());
+    fireEvent.click(startButton);
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(1));
-    expect(mocks.start.mock.calls[0]![0]).toMatchObject({
+    const request = mocks.start.mock.calls[0]![0] as BlenderRenderRequest;
+    expect(request).toMatchObject({
       executablePath: null,
       sourceBlendPath: null,
       plan: {
         durationSeconds: 12,
         width: 540,
         height: 960,
-        camera: { motion: "orbit", orbitDegrees: 180 },
         objects: [
           {
             shape: "box",
-            keyframes: [{ time: 0 }, { time: 12, position: [4, 0, 0], yaw: 90 }],
+            keyframes: [{ time: 0 }, { time: 12, position: [4, 0, 0] }],
           },
         ],
       },
     });
+    expect(request.plan.camera.keyframes.length).toBeGreaterThan(1);
+    expect(request.bake?.frameCount).toBe(12 * 24);
     await waitFor(() => expect(view.saved().jobId).toBe("render-1"));
     expect(view.saved().jobInputSignature).toBe(whiteModelRenderSignature(view.saved()));
-    expect(screen.getByLabelText("角色 1 终点 X")).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "关闭工作室" }));
+    expect(screen.getByLabelText("路径点 2 X")).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "关闭导演台" }));
     expect(view.onClose).toHaveBeenCalledOnce();
     expect(mocks.cancel).not.toHaveBeenCalled();
     const persisted = structuredClone(view.saved());
@@ -140,7 +172,7 @@ describe("白模工作室", () => {
     fireEvent.click(use);
     await waitFor(() => expect(restored.onUse).toHaveBeenCalledWith(job("succeeded")));
     await waitFor(() => expect(use).toBeEnabled());
-    fireEvent.change(screen.getByLabelText("角色 1 终点 X"), { target: { value: "5" } });
+    fireEvent.change(screen.getByLabelText("路径点 2 X"), { target: { value: "5" } });
     expect(use).toBeDisabled();
     expect(
       screen.getByText("设置已修改，当前预览属于上次渲染。请重新渲染后使用视频。"),
@@ -150,6 +182,7 @@ describe("白模工作室", () => {
       expect(mocks.openProject).toHaveBeenCalledWith(null, "C:/renders/render-1/scene.blend"),
     );
     fireEvent.click(screen.getByRole("button", { name: "将此工程设为下次渲染源" }));
+    openEnginePanel();
     expect(screen.getByLabelText("场景来源")).toHaveValue("blend");
     expect(screen.getByLabelText("Blender 工程文件")).toHaveValue(
       "C:/renders/render-1/scene.blend",
@@ -161,6 +194,7 @@ describe("白模工作室", () => {
     await waitFor(() => expect(mocks.start).toHaveBeenCalledTimes(2));
     expect(mocks.start.mock.calls[1]![0]).toMatchObject({
       sourceBlendPath: "C:/renders/render-1/scene.blend",
+      bake: null,
       plan: { durationSeconds: 12, width: 540, height: 960 },
     });
     await waitFor(() => expect(use).toBeEnabled());
@@ -169,6 +203,26 @@ describe("白模工作室", () => {
     await waitFor(() =>
       expect(restored.onUse).toHaveBeenLastCalledWith(job("succeeded", "render-2")),
     );
+  });
+
+  it("一键动捕把参考视频编码为角色动作片段", async () => {
+    const view = harness(createWhiteModelStudioDraft());
+    mocks.chooseFile.mockResolvedValueOnce("C:/takes/walk.mp4");
+    const captureButton = await screen.findByRole("button", { name: "一键动捕：从视频提取动作…" });
+    await waitFor(() => expect(captureButton).toBeEnabled());
+    fireEvent.click(captureButton);
+    await waitFor(() => expect(mocks.captureMotion).toHaveBeenCalledTimes(1));
+    expect(mocks.captureMotion.mock.calls[0]![0]).toContain("walk.mp4");
+    await waitFor(() => expect(view.saved().plan.objects[0]?.motion.kind).toBe("clip"));
+    expect(view.saved().plan.objects[0]?.motion).toMatchObject({
+      kind: "clip",
+      startTime: 0,
+      loop: true,
+      speed: 1,
+      clip: { sourceName: "walk.mp4", frameCount: 24 },
+    });
+    expect(screen.getByText(/已从「walk.mp4」提取 24 帧动作/)).toBeInTheDocument();
+    expect(screen.getByLabelText("动作来源")).toHaveValue("clip");
   });
 
   it("恢复中可取消，迟到的运行状态不覆盖取消结果，保留草稿可重试", async () => {
@@ -183,10 +237,11 @@ describe("白模工作室", () => {
       }),
     );
     const view = harness(draft);
+    openEnginePanel();
     expect(screen.getByRole("textbox", { name: "外部 Blender 路径" })).toHaveValue(
       "D:/Tools/Blender/blender.exe",
     );
-    expect(screen.getByLabelText("角色名称 1")).toBeDisabled();
+    expect(screen.getByLabelText("角色名称")).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "取消渲染" }));
     await waitFor(() => expect(mocks.cancel).toHaveBeenCalledWith("render-1"));
     expect(await screen.findByText("渲染已取消，可以调整设置后重新渲染。")).toBeInTheDocument();
@@ -196,7 +251,7 @@ describe("白模工作室", () => {
     });
     expect(screen.getByText("渲染已取消，可以调整设置后重新渲染。")).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "重新渲染白模" })).toBeEnabled();
-    expect(screen.getByLabelText("角色名称 1")).toBeEnabled();
+    expect(screen.getByLabelText("角色名称")).toBeEnabled();
     expect(view.saved().jobId).toBe("render-1");
     expect(screen.getByRole("button", { name: "使用白模视频" })).toBeDisabled();
   });
@@ -213,6 +268,7 @@ describe("白模工作室", () => {
       await screen.findByText("安装包内置 Blender 不完整，请修复安装包或重新安装应用。"),
     ).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "渲染白模视频" })).toBeDisabled();
+    openEnginePanel();
     fireEvent.click(screen.getByText("高级设置：使用外部 Blender（可选）"));
     mocks.chooseFile.mockResolvedValueOnce("D:/Tools/Blender/blender.exe");
     fireEvent.click(await screen.findByRole("button", { name: "选择外部 Blender" }));

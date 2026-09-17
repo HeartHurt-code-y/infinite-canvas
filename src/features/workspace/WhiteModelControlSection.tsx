@@ -119,7 +119,7 @@ export function WhiteModelControlSection({
       <div className="white-model-control__body">
         {onOpenStudio ? (
           <button type="button" className="white-model-control__button" onClick={onOpenStudio}>
-            制作白模动画 · Blender
+            打开白模导演台
           </button>
         ) : null}
         <label className="white-model-control__check">
@@ -131,7 +131,7 @@ export function WhiteModelControlSection({
           <span>启用白模控制</span>
         </label>
         <p className="white-model-control__hint" id={guidanceId}>
-          在 Blender 工作台制作并接入白模动画；也可导入 Maya / Blender 导出的视频，选择为白模来源。
+          在导演台里实时摆位、取景、运镜，也可一键从视频捕捉动作；渲染后的白模视频在此接入生成。也可导入已有白模视频。
         </p>
         <p className="white-model-control__hint">
           启用后，以下预览与上方提示词一起提交；关闭后保留配置。

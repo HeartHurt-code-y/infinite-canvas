@@ -4050,7 +4050,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       return found!;
     });
     await waitForNodeAccessible(node);
-    fireEvent.click(within(node).getByRole("button", { name: "制作白模动画 · Blender" }));
+    fireEvent.click(within(node).getByRole("button", { name: "打开白模导演台" }));
     fireEvent.click(await screen.findByRole("button", { name: "模拟完成白模渲染" }));
     fireEvent.click(screen.getByRole("button", { name: "使用测试白模视频" }));
     await waitFor(() =>
