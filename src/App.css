@@ -8148,7 +8148,8 @@ svg[data-spin="true"] {
 }
 
 .prompt-mention__recognizable,
-.prompt-mention__resolved {
+.prompt-mention__resolved,
+.prompt-mention__unbound {
   display: flex;
   min-width: 0;
   flex-wrap: wrap;
@@ -8177,6 +8178,60 @@ svg[data-spin="true"] {
   border: var(--rule-thin) solid color-mix(in oklch, var(--color-warning) 55%, var(--color-rule));
   border-radius: var(--radius-round);
   line-height: 1.25;
+}
+
+/* 参考名是按钮：点一下等于手输一条完整引用，因此要有可点的反馈。 */
+button.prompt-mention__recognizable-tag {
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+button.prompt-mention__recognizable-tag:hover {
+  background: color-mix(in oklch, var(--color-success) 10%, var(--color-paper));
+  border-color: color-mix(in oklch, var(--color-success) 55%, transparent);
+}
+
+button.prompt-mention__recognizable-tag:active {
+  transform: translateY(1px);
+}
+
+button.prompt-mention__recognizable-tag:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 1px;
+}
+
+/* 没能绑定的位置词：说明原因，但不抢参考名清单的重点。 */
+.prompt-mention__unbound-tag {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+  align-items: center;
+  gap: var(--space-3xs);
+  padding: 2px var(--space-2xs);
+  color: var(--color-muted);
+  background: color-mix(in oklch, var(--color-warning) 8%, var(--color-paper));
+  border: var(--rule-thin) dashed color-mix(in oklch, var(--color-warning) 55%, var(--color-rule));
+  border-radius: var(--radius-round);
+  line-height: 1.25;
+}
+
+.prompt-mention__unbound-tag > strong {
+  flex: 0 0 auto;
+  font-size: var(--text-2xs);
+  font-weight: 650;
+}
+
+.prompt-mention__unbound-tag > small {
+  overflow: hidden;
+  max-width: 14rem;
+  font-size: var(--text-2xs);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .prompt-mention__recognizable-tag > strong {

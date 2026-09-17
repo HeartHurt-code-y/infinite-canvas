@@ -751,7 +751,7 @@ export function RegenerateGenerationDialog({
             />
             <span className="regenerate-field__hint" id="regenerate-prompt-hint">
               输入 @
-              引用素材；未引用的素材仍会作为输入传入。点击「识别素材名」可把正文中的素材名称转换为引用。
+              引用素材；未引用的素材仍会作为输入传入。点击「识别素材名」可把正文里的位置词（图1、参考图2）与素材名转换为引用。
             </span>
           </div>
 

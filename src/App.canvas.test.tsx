@@ -8047,7 +8047,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
   });
 
-  it("已连接素材但立即重扫未命中时，显眼说明原因并展示可识别名称", async () => {
+  it("已连接素材但立即重扫未命中时，说明没命中什么并给出可点的参考名", async () => {
     render(<App />);
     const videoGeneration = await addGenerationNode("视频", 518, 222);
     const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
@@ -8060,7 +8060,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const feedback = within(videoGeneration).getByRole("status", { name: /自动引用状态/ });
     await waitFor(() => expect(feedback).toHaveAttribute("data-state", "ready"));
     expect(feedback).not.toHaveClass("is-prominent");
-    expect(feedback).toHaveTextContent("普通文字保持原样");
+    expect(feedback).toHaveTextContent("1 个可引用素材");
 
     const detectButton = within(videoGeneration).getByRole("button", {
       name: "识别素材名",
@@ -8073,9 +8073,66 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(detectButton).toHaveAttribute("data-result", "no-match");
     });
     expect(feedback).toHaveClass("is-prominent");
-    expect(feedback).toHaveTextContent("本次未匹配到已连接素材名");
-    expect(feedback).toHaveTextContent("站台参考图");
-    expect(feedback).toHaveTextContent("图片1");
+    expect(feedback).toHaveTextContent("没有识别到可绑定的素材");
+    expect(feedback).toHaveTextContent("正文里没有可绑定的位置词或素材名");
+    // 「这个按钮认识什么」必须直接写出来：位置词写法 + 素材名，且点一下就能插入引用。
+    expect(feedback).toHaveTextContent("点参考名插入引用");
+    expect(feedback).toHaveTextContent("识别的是位置词（图1、参考图2、第2张图）");
+    const insert = within(feedback).getByRole("button", {
+      name: "插入 图1 的引用：站台参考图",
+    });
+    fireEvent.click(insert);
+    expect(promptInput.querySelectorAll(".mention-chip")).toHaveLength(1);
+    expect(promptInput.querySelector<HTMLElement>(".mention-chip")).toHaveAttribute(
+      "data-canvas-node-key",
+      assetNode.dataset["connectionTarget"],
+    );
+  });
+
+  it("点「识别素材名」把正文里的位置词绑定成引用，超出范围的序号只提示不改写", async () => {
+    const secondImageAsset: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-position-second",
+      name: "站台夜景图",
+      previewUrl: "https://cdn.example.com/station-night.jpg",
+      assetUrl: "https://cdn.example.com/station-night.jpg",
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, secondImageAsset])
+        : baseInvokeImplementation(command),
+    );
+
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const firstImage = await addAssetNode("图片", "站台参考图", 148, 148);
+    const secondImage = await addAssetNode("图片", "站台夜景图", 148, 333);
+    connectAssetToGeneration(firstImage, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台参考图" });
+    connectAssetToGeneration(secondImage, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台夜景图" });
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+
+    // 名字是随机文件名时用户只会写位置词：「图2」按连线顺序绑定到第二张图。
+    setPromptText(promptInput, "以图2为主，图9收尾");
+    expect(promptInput.querySelector(".mention-chip")).toBeNull();
+
+    fireEvent.click(within(videoGeneration).getByRole("button", { name: "识别素材名" }));
+    const chip = await waitFor(() => {
+      const found = promptInput.querySelector<HTMLElement>(".mention-chip")!;
+      expect(found).toHaveAttribute("data-canvas-node-key", secondImage.dataset["connectionTarget"]);
+      return found;
+    });
+    expect(chip).toHaveTextContent("@站台夜景图");
+    // 没有第 9 个素材：正文保持原样，只说清楚原因。
+    expect(promptInput.textContent?.replaceAll("\u200b", "")).toBe(
+      "以@站台夜景图 · 图片2为主，图9收尾",
+    );
+    const status = within(videoGeneration).getByRole("status", { name: /自动引用状态/ });
+    expect(status).toHaveTextContent("「图9」");
+    expect(status).toHaveTextContent("没有第 9 个参考素材（当时连了 2 个）");
   });
 
   it("手写显式 @ 引用停止后解析，并通过状态条和高亮 chip 明确反馈", async () => {

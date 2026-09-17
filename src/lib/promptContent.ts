@@ -21,6 +21,10 @@ import {
   type PromptReferenceCandidate,
   type PromptReferenceRebind,
 } from "./promptReferences";
+import {
+  resolveOrdinalMentions,
+  type PromptUnboundMention,
+} from "./promptOrdinalMentions";
 import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
   createPromptTiptapExtensions,
@@ -42,7 +46,14 @@ export interface AutoMentionResolutionResult {
   readonly converted: number;
   readonly ambiguous: number;
   readonly pending: number;
+  /**
+   * 正文里写了、但读不出确定序号的位置词（「第一张」「图3」）。它们保持原样，
+   * 报给调用方是为了让状态条能说清楚「为什么这一处没绑定」，而不是笼统地说没识别到。
+   */
+  readonly unbound: readonly PromptUnboundMention[];
 }
+
+const NO_UNBOUND: readonly PromptUnboundMention[] = [];
 
 export function describePromptContentCandidates<T extends PromptReferenceCandidate>(
   candidates: readonly T[],
@@ -873,10 +884,22 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
   ): AutoMentionResolutionResult {
     const result = resolvePromptReferences(this.document, this.candidates, { mode });
     if (fresh) this.rememberFreshMentions(result.freshMentionIds);
-    const changed = !promptDocumentsEqual(result.document, this.document);
-    this.document = result.document;
+    // 位置词识别只在用户主动重扫（names 模式）时进行：输入与粘贴期间静默把「图1」
+    // 换成引用会打断书写，也会把未写完的序号（「图12」打到一半）抢先绑定。
+    const ordinal =
+      mode === "names"
+        ? resolveOrdinalMentions(result.document, this.candidates)
+        : { document: result.document, freshMentionIds: [] as readonly string[], converted: 0, unbound: NO_UNBOUND };
+    if (fresh) this.rememberFreshMentions(ordinal.freshMentionIds);
+    const changed = !promptDocumentsEqual(ordinal.document, this.document);
+    this.document = ordinal.document;
     if (changed || forceApply) this.applyDocument();
-    return { converted: result.converted, ambiguous: result.ambiguous, pending: result.pending };
+    return {
+      converted: result.converted + ordinal.converted,
+      ambiguous: result.ambiguous,
+      pending: result.pending,
+      unbound: ordinal.unbound,
+    };
   }
 
   insertReference(candidate: PromptReferenceCandidate): PromptContentView {
@@ -1004,7 +1027,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     readonly mode?: "explicit" | "names";
   }): AutoMentionResolutionResult {
     if (this.isComposing())
-      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount };
+      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount, unbound: NO_UNBOUND };
     this.syncFromEditor();
     const result = this.resolveReferences(options?.mode ?? "explicit", options?.fresh ?? true);
     if (result.converted > 0 || result.ambiguous > 0) this.notify();
@@ -1104,7 +1127,7 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       this.pendingRestore = resolvePromptReferences(next, this.candidates, {
         mode: "explicit",
       }).document;
-      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount };
+      return { converted: 0, ambiguous: 0, pending: this.read().pendingCount, unbound: NO_UNBOUND };
     }
     this.document = next;
     const result = this.resolveReferences("explicit", true, true);

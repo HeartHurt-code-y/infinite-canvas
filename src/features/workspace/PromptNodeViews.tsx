@@ -31,6 +31,10 @@ import {
   type PromptMarkReferenceInput,
 } from "../../lib/promptContent";
 import { normalizePromptReferenceText } from "../../lib/promptReferences";
+import {
+  referenceTokenFor,
+  type PromptUnboundMention,
+} from "../../lib/promptOrdinalMentions";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
 import { isVideoSourceUrl } from "./mediaPreview";
@@ -209,12 +213,12 @@ function readyAutoMentionFeedback(
   if (ambiguousCount > 0) {
     return {
       kind: "ready",
-      message: `输入 @ 引用素材 · ${bound}${candidates.length} 个素材 · 同名项需确认`,
+      message: `输入 @ 或选素材名引用 · ${bound}${candidates.length} 个素材 · 同名项需确认`,
     };
   }
   return {
     kind: "ready",
-    message: `输入 @ 引用素材 · ${bound}${candidates.length} 个可引用素材 · 普通文字保持原样`,
+    message: `输入 @ 或选素材名引用 · ${bound}${candidates.length} 个可引用素材`,
   };
 }
 
@@ -291,6 +295,14 @@ export function PromptMentionInput({
   const [autoMentionFeedbackState, setAutoMentionFeedbackState] = useState<AutoMentionFeedback>(
     () => readyAutoMentionFeedback(candidates),
   );
+  /**
+   * 最近一次重扫里「写了位置词但没绑定」的正文片段（第一张 / 图3），连同当时各类素材的连接数。
+   * 正文或连线一变就清空：绑定不了是「此刻没有对应素材」，不是「点按钮那一刻没有」。
+   */
+  const [scanUnbound, setScanUnbound] = useState<{
+    readonly entries: readonly PromptUnboundMention[];
+    readonly candidates: readonly MentionCandidate[];
+  }>({ entries: [], candidates: [] });
   /** 提示内容里已绑定的引用数：它是「@ 有没有被识别到」的直接证据，写进常驻提示里。 */
   const [referenceCount, setReferenceCount] = useState(0);
   /**
@@ -366,11 +378,10 @@ export function PromptMentionInput({
   }, [candidates]);
   const recognizableCandidates = useMemo(
     () =>
-      candidates.slice(0, 5).map((candidate, index) => ({
-        candidate,
-        alias: candidateAliases[index]?.label ?? `素材${index + 1}`,
-      })),
-    [candidateAliases, candidates],
+      candidates
+        .slice(0, 5)
+        .map((candidate, index) => ({ candidate, token: referenceTokenFor(candidates, index) })),
+    [candidates],
   );
   const ambiguityOptions = candidateDescription.ambiguityOptions;
 
@@ -421,6 +432,8 @@ export function PromptMentionInput({
       // 外部写入（弹窗「添加到生成节点」、存档恢复、@ 菜单插入）都会派发 input 事件，
       // 因此这里读到的引用数就是当前内容里的真实绑定数。
       setReferenceCount(view?.referenceCount ?? 0);
+      // 正文一变，上一轮的位置词结论就过期了：清掉，等下一次重扫重新判定。
+      setScanUnbound({ entries: [], candidates: [] });
       onTextChange?.(plainText);
     },
     [onTextChange],
@@ -588,7 +601,8 @@ export function PromptMentionInput({
   );
 
   /**
-   * 输入与粘贴只解析显式 @ 引用；“识别素材名”额外扫描普通文字中的名称。
+   * 输入与粘贴只解析显式 @ 引用；「识别素材名」额外扫描正文里的位置词与普通名称。
+   * 位置词（图2、参考图2、第2张图）按连线顺序解析，也就是清单上的行号与请求体里的「图片N」。
    * 粘贴使用 session 的统一解析结果；手输走 scheduleAutoDetect 防抖。
    * 自动模式在 @ 候选菜单打开或 IME 组合中时跳过，避免干扰进行中的查询。
    */
@@ -613,6 +627,7 @@ export function PromptMentionInput({
           converted: 0,
           ambiguous: 0,
           pending: 0,
+          unbound: [],
         };
       const promptText = (input.textContent ?? "").replaceAll("\u200b", "").trim();
       if (resolution.converted > 0 || resolution.ambiguous > 0) {
@@ -625,6 +640,7 @@ export function PromptMentionInput({
         // 合成 input 会先触发 scheduleAutoDetect 并清空旧结果；因此必须在它之后
         // 写入本轮名称，才能让成功卡稳定展示“本次已绑定”的对象。
         setAutoMentionResolvedNames(resolvedNames);
+        setScanUnbound({ entries: resolution.unbound, candidates });
         if (resolution.pending > 0) {
           openFirstPendingAmbiguity();
           setAutoMentionFeedbackState({
@@ -635,7 +651,10 @@ export function PromptMentionInput({
           setActiveAmbiguity(null);
           setAutoMentionFeedbackState({
             kind: "success",
-            message: `已自动引用 ${resolution.converted} 处素材`,
+            message:
+              resolution.unbound.length > 0
+                ? `已自动引用 ${resolution.converted} 处素材 · 另 ${resolution.unbound.length} 处位置词没能绑定`
+                : `已自动引用 ${resolution.converted} 处素材`,
           });
           // 复位只是回到常驻提示：文案由渲染时按当前候选与已引用数重算。
           feedbackResetTimerRef.current = window.setTimeout(() => {
@@ -652,18 +671,29 @@ export function PromptMentionInput({
 
       setAutoMentionResolvedNames([]);
       if (resolution.pending > 0) {
+        setScanUnbound({ entries: [], candidates: [] });
         openFirstPendingAmbiguity();
         setAutoMentionFeedbackState({
           kind: "ambiguous",
           message: `仍有 ${resolution.pending} 处同名引用待确认`,
         });
       } else if (!promptText) {
+        setScanUnbound({ entries: [], candidates: [] });
         showReadyFeedback();
       } else if (candidates.length === 0) {
+        setScanUnbound({ entries: [], candidates: [] });
         setAutoMentionFeedbackState({ kind: "empty", message: "未连接素材，暂时无法引用" });
       } else if (mode === "names") {
-        setAutoMentionFeedbackState({ kind: "no-match", message: "未匹配到已连接素材名" });
+        setScanUnbound({ entries: resolution.unbound, candidates });
+        setAutoMentionFeedbackState({
+          kind: "no-match",
+          message:
+            resolution.unbound.length > 0
+              ? "有位置词没能绑定"
+              : "正文里没有可绑定的位置词或素材名",
+        });
       } else {
+        setScanUnbound({ entries: [], candidates: [] });
         showReadyFeedback();
       }
     },
@@ -695,6 +725,20 @@ export function PromptMentionInput({
       scheduleAutoDetect();
     },
     [insertMention, removeActiveMentionQuery, scheduleAutoDetect],
+  );
+
+  /**
+   * 从状态条的参考名清单直接插入引用：先清掉光标处仍在编辑的 "@查询词"，
+   * 再插到当前光标位置。用户不必记住写法，点一下就等于手输了一条完整引用。
+   */
+  const insertReferenceFromList = useCallback(
+    (candidate: MentionCandidate) => {
+      if (replaceTypedQueryOnSelectRef.current) removeActiveMentionQuery();
+      replaceTypedQueryOnSelectRef.current = false;
+      setActiveAmbiguity(null);
+      insertMention(candidate);
+    },
+    [insertMention, removeActiveMentionQuery],
   );
 
   /** 标注引用插入的是区域标记，不是素材，因此不走素材自动识别。 */
@@ -854,7 +898,7 @@ export function PromptMentionInput({
     autoMentionFeedback.kind === "no-match";
   const autoMentionFeedbackTitle =
     autoMentionFeedback.kind === "ready"
-      ? "使用 @ 引用素材"
+      ? "使用 @ 或参考名引用素材"
       : autoMentionFeedback.kind === "scanning"
         ? "正在识别素材引用…"
         : autoMentionFeedback.kind === "success"
@@ -866,12 +910,38 @@ export function PromptMentionInput({
               : "暂无可自动引用素材";
   const autoMentionFeedbackDetail =
     autoMentionFeedback.kind === "no-match"
-      ? "本次未匹配到已连接素材名。可输入 @ 后选择素材，普通文字保持原样。"
+      ? `${autoMentionFeedback.message}。识别的是位置词（图1、参考图2、第2张图）与已连接素材名；点下方参考名可直接插入引用。`
       : autoMentionFeedback.kind === "success"
         ? `${autoMentionFeedback.message}，已转换成高亮 @ 引用。`
         : autoMentionFeedback.kind === "ambiguous"
           ? `${autoMentionFeedback.message}。请选择具体对象后继续。`
           : autoMentionFeedback.message;
+  /** 位置词已经扫过一轮（成功或没识别到）才算「本次结果」，避免刚打开就说没绑定。 */
+  const scannedThisRound =
+    autoMentionFeedback.kind === "success" || autoMentionFeedback.kind === "no-match";
+  /**
+   * 未绑定的位置词提示：条数是本轮扫描的结论，原因文案按判定当时的连接数生成，
+   * 不随之后的连线变化改写——否则同一句话会被改口成另一种理由。
+   */
+  const unboundMentionHints = useMemo(() => {
+    if (!scannedThisRound) return [];
+    return scanUnbound.entries.map((entry) => {
+      if (entry.reason !== "out-of-range") {
+        return { text: entry.text, hint: "未绑定 · 不写序号时按传入顺序生效，点参考名可绑定" };
+      }
+      return {
+        text: entry.text,
+        hint: `没有第 ${entry.text.replace(/^\D+/u, "")} 个参考素材（当时连了 ${entry.candidateCount} 个）`,
+      };
+    });
+  }, [scanUnbound, scannedThisRound]);
+  /**
+   * 参考名清单就是「这个按钮认识什么」的答案，所以只要这次没识别到、
+   * 或者正文里还有没绑定的位置词，就一并展示出来供直接插入。
+   */
+  const showReferenceList =
+    recognizableCandidates.length > 0 &&
+    (autoMentionFeedback.kind === "no-match" || unboundMentionHints.length > 0);
 
   const editor = (
     <div
@@ -1086,7 +1156,7 @@ export function PromptMentionInput({
               aria-describedby={autoMentionStatusId}
               aria-busy={autoMentionFeedback.kind === "scanning"}
               data-result={autoMentionFeedback.kind}
-              title="识别素材名：将正文中的已连接素材名称转换为引用"
+              title="识别素材名：把正文里的位置词（图1、参考图2、第2张图）与已连接素材名绑定为引用"
               onMouseDown={(event) => event.preventDefault()}
               onClick={() => {
                 closeMenu();
@@ -1273,18 +1343,33 @@ export function PromptMentionInput({
             <strong>{autoMentionFeedbackTitle}</strong>
             <small>{autoMentionFeedbackDetail}</small>
           </span>
-          {autoMentionFeedback.kind === "no-match" && recognizableCandidates.length > 0 ? (
-            <span className="prompt-mention__recognizable" aria-label="可自动识别的素材名称">
-              <span className="prompt-mention__recognizable-label">可识别名称</span>
-              {recognizableCandidates.map(({ candidate, alias }) => (
-                <span
+          {unboundMentionHints.length > 0 ? (
+            <span className="prompt-mention__unbound" aria-label="没能绑定的位置词">
+              <span className="prompt-mention__recognizable-label">未绑定</span>
+              {unboundMentionHints.slice(0, 3).map((entry) => (
+                <span key={entry.text} className="prompt-mention__unbound-tag" title={entry.hint}>
+                  <strong>「{entry.text}」</strong>
+                  <small>{entry.hint}</small>
+                </span>
+              ))}
+            </span>
+          ) : null}
+          {showReferenceList ? (
+            <span className="prompt-mention__recognizable" aria-label="可引用的参考名">
+              <span className="prompt-mention__recognizable-label">点参考名插入引用</span>
+              {recognizableCandidates.map(({ candidate, token }) => (
+                <button
                   key={candidate.canvasNodeKey}
+                  type="button"
                   className="prompt-mention__recognizable-tag"
-                  title={`输入 @${candidate.name} 或 @${alias}`}
+                  title={`插入 ${token} 的引用（${candidate.name}）`}
+                  aria-label={`插入 ${token} 的引用：${candidate.name}`}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => insertReferenceFromList(candidate)}
                 >
                   <strong>{candidate.name}</strong>
-                  <small>{alias}</small>
-                </span>
+                  <small>{token}</small>
+                </button>
               ))}
               {candidates.length > recognizableCandidates.length ? (
                 <span className="prompt-mention__recognizable-more">
