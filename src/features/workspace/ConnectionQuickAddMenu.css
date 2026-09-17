@@ -54,6 +54,17 @@
   flex: 0 0 auto;
 }
 
+.connection-quick-add-menu__item--asset_upload {
+  margin-bottom: var(--space-xs);
+  border-bottom: var(--rule-thin) solid var(--color-rule);
+  border-bottom-left-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.connection-quick-add-menu__item--asset_upload svg {
+  color: var(--color-accent);
+}
+
 .connection-quick-add-menu__item--image svg {
   color: var(--color-image-strong);
 }

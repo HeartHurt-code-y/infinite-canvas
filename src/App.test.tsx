@@ -107,8 +107,9 @@ describe("App workspace", () => {
     expect(assetPanel.querySelector(".repository-card")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
     const menu = screen.getByRole("menu", { name: "添加节点" });
-    expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(10);
     for (const name of [
+      "上传素材",
       "图片生成",
       "视频生成",
       "视频拼接与合成",

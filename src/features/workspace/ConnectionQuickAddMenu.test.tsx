@@ -41,12 +41,13 @@ describe("ConnectionQuickAddMenu", () => {
     expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
   });
 
-  it("offers all nine node templates for creation in both menu modes", async () => {
+  it("offers upload plus all nine node templates for creation in both menu modes", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const props = { position: { x: 100, y: 100 }, onSelect, onClose: vi.fn() };
     const { rerender } = render(<ConnectionQuickAddMenu {...props} />);
     const expectedChoices = [
+      ["上传素材", "asset_upload"],
       ["图片生成", "image"],
       ["视频生成", "video"],
       ["视频拼接与合成", "video_composer"],
@@ -84,11 +85,11 @@ describe("ConnectionQuickAddMenu", () => {
     await user.keyboard("{ArrowUp}");
     expect(screen.getByRole("menuitem", { name: "剧本转工业级分镜脚本" })).toHaveFocus();
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "上传素材" })).toHaveFocus();
     await user.keyboard("{End}");
     expect(screen.getByRole("menuitem", { name: "剧本转工业级分镜脚本" })).toHaveFocus();
     await user.keyboard("{Home}{ArrowDown}{ArrowDown}{Enter}");
-    expect(onSelect).toHaveBeenCalledWith("video_composer");
+    expect(onSelect).toHaveBeenCalledWith("video");
   });
 
   it("keeps focus outside the menu when Shift+Tab follows arrow navigation", async () => {
@@ -96,10 +97,10 @@ describe("ConnectionQuickAddMenu", () => {
     const onSelect = vi.fn();
     render(<Harness onSelect={onSelect} />);
     await user.click(screen.getByRole("button", { name: "打开添加节点菜单" }));
-    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "上传素材" })).toHaveFocus();
 
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "视频生成" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
     await user.tab({ shift: true });
 
     await waitFor(() => {

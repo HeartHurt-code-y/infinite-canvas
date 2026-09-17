@@ -1,6 +1,7 @@
 import type { IconName } from "../../components/Icon";
 
 export type CanvasQuickAddKind =
+  | "asset_upload"
   | "image"
   | "video"
   | "video_composer"
@@ -11,12 +12,13 @@ export type CanvasQuickAddKind =
   | "screenplay"
   | "storyboard";
 
-/** All reusable node templates share the same canvas creation menu. */
+/** Canvas creation menu: upload local media, then reusable node templates. */
 export const CANVAS_QUICK_ADD_CHOICES: readonly {
   readonly kind: CanvasQuickAddKind;
   readonly label: string;
   readonly icon: IconName;
 }[] = [
+  { kind: "asset_upload", label: "上传素材", icon: "upload-simple" },
   { kind: "image", label: "图片生成", icon: "image" },
   { kind: "video", label: "视频生成", icon: "video-camera" },
   { kind: "video_composer", label: "视频拼接与合成", icon: "film-strip" },

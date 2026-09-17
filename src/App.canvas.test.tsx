@@ -1204,7 +1204,7 @@ afterEach(async () => {
 });
 
 describe("画布素材拖拽与连线（桌面运行时）", () => {
-  it("初始画布为空，通过添加节点菜单展示全部九种节点", async () => {
+  it("初始画布为空，通过添加节点菜单展示上传素材和全部九种节点", async () => {
     render(<App />);
 
     expect(await screen.findByText("画布为空")).toBeInTheDocument();
@@ -1214,7 +1214,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(screen.queryByRole("complementary", { name: "节点仓库" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
     const menu = screen.getByRole("menu", { name: "添加节点" });
-    expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(10);
+    expect(within(menu).getByRole("menuitem", { name: "上传素材" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
@@ -1302,7 +1303,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       dropConnectionFromHandle(asset, "source", pane, dropPoint);
 
       const menu = await screen.findByRole("menu", { name: "添加节点" });
-      expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+      expect(within(menu).getAllByRole("menuitem")).toHaveLength(10);
+      expect(within(menu).getByRole("menuitem", { name: "上传素材" })).toBeEnabled();
       for (const name of ["图片生成", "视频生成", "提示词生成与优化"]) {
         expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
       }
@@ -1384,7 +1386,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(document.body).toContainElement(asset);
   });
 
-  it("拖线落在已有节点本体时不弹出添加节点菜单", async () => {
+  it("拖线落在已有节点本体时直接连线，不弹出添加节点菜单", async () => {
     render(<App />);
     const asset = await addAssetNode("图片", "站台参考图", 180, 180);
     const generation = await addGenerationNode("图片", 980, 180);
@@ -1397,7 +1399,107 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
     expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
-    expect(document.querySelectorAll(".react-flow__edge")).toHaveLength(0);
+    await waitFor(() =>
+      expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "选择连线：站台参考图 → 图片生成节点；按 Delete 删除",
+      }),
+    ).toBeInTheDocument();
+  });
+
+  it("从下一步输入端口反拉到素材卡片本体也能连上", async () => {
+    render(<App />);
+    const asset = await addAssetNode("图片", "站台参考图", 180, 180);
+    const generation = await addGenerationNode("图片", 980, 180);
+    const assetPosition = rfNodeFlowPosition(asset);
+
+    dropConnectionFromHandle(generation, "target", asset, {
+      x: assetPosition.x + 220,
+      y: assetPosition.y + 140,
+    });
+
+    expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
+    );
+  });
+
+  it("画布菜单上传素材后直接落到画布", async () => {
+    dialogOpenMock.mockResolvedValue(["C:\\media\\canvas-upload.png"]);
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_tos_staging_config") {
+        return Promise.resolve({
+          region: "cn-beijing",
+          endpoint: "tos-cn-beijing.volces.com",
+          bucket: "test-staging-bucket",
+          credentialRef: "tos-ak-sk",
+          objectPrefix: "staging",
+          enabled: true,
+        });
+      }
+      if (command === "start_staging_upload") return Promise.resolve("canvas-upload-job-1");
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    await screen.findByText("画布为空");
+    createNodeAt("上传素材", 680, 400);
+
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+        true,
+      );
+    });
+
+    const stagingListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "staging:state-changed",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const stagingHandler = tauriCallbacks.get(stagingListener[1]?.["handler"] as number);
+    expect(stagingHandler).toBeDefined();
+    act(() => {
+      stagingHandler!({
+        event: "staging:state-changed",
+        id: 1,
+        payload: {
+          jobId: "canvas-upload-job-1",
+          job: {
+            id: "canvas-upload-job-1",
+            localPath: "C:\\media\\canvas-upload.png",
+            purpose: "asset_import",
+            mediaType: "image",
+            objectKey: "staging/canvas-upload.png",
+            status: "active",
+            bytesTotal: 2048,
+            bytesUploaded: 2048,
+            assetId: "asset-canvas-upload-1",
+            importTarget: {
+              providerConnectionId: PROVIDER.id,
+              name: "canvas-upload.png",
+              groupId: null,
+            },
+            adjustment: null,
+            error: null,
+            createdAt: 0,
+            updatedAt: 2,
+          },
+        },
+      });
+    });
+
+    const uploaded = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(
+        ".canvas-asset-node:not(.canvas-asset-node--output)",
+      );
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    expect(uploaded).toHaveTextContent("canvas-upload.png");
   });
 
   it.each([
@@ -7392,6 +7494,39 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(screen.queryByRole("button", { name: "解除连线：站台参考图" })).not.toBeInTheDocument();
     expect(document.querySelector(".edge--asset")).toBeNull();
     expect(document.querySelector(".canvas-asset-node")).toBeNull();
+  });
+
+  it("选中节点后按 Delete 删除，效果与点击叉号相同", async () => {
+    render(<App />);
+    const generation = await addGenerationNode("图片", 680, 400);
+    fireEvent.click(generation.querySelector(".canvas-gen-node__type-copy")!);
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    expect(rfWrapperOf(generation)).toHaveClass("selected");
+    fireEvent.keyDown(document, { key: "Delete" });
+    await waitFor(() => expect(document.querySelector(".canvas-gen-node")).toBeNull());
+  });
+
+  it("选中素材节点后按 Delete 也会删除", async () => {
+    render(<App />);
+    const assetNode = await addAssetNode("图片", "站台参考图", 148, 148);
+    fireEvent.click(assetNode.querySelector(".canvas-asset-node__identity")!);
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    expect(rfWrapperOf(assetNode)).toHaveClass("selected");
+    fireEvent.keyDown(document, { key: "Delete" });
+    await waitFor(() => expect(document.querySelector(".canvas-asset-node")).toBeNull());
+  });
+
+  it("提示词输入框内按 Delete 不会删掉节点", async () => {
+    render(<App />);
+    const generation = await addGenerationNode("图片", 518, 222);
+    const promptInput = within(generation).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    promptInput.focus();
+    expect(promptInput).toHaveFocus();
+    fireEvent.keyDown(promptInput, { key: "Delete" });
+    fireEvent.keyDown(promptInput, { key: "Backspace" });
+    expect(document.body).toContainElement(generation);
   });
 
   it("素材节点可自由拖动位置，连线端点跟随更新", async () => {
