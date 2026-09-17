@@ -2614,8 +2614,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
     fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
     await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(2));
+    // 节点清单与提交顺序一致：干净底图先连入，占第 1 个位置，站台参考图顺延为第 2 个。
     expect(submittedGenerationCommands()[1]?.["explicitMedia"]).toEqual([
-      pathReference,
       {
         target: {
           kind: "asset",
@@ -2626,9 +2626,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         },
         role: "reference_image",
         displayNameSnapshot: cleanImage.name,
-        typePosition: 2,
-        contentIndex: 2,
+        typePosition: 1,
+        contentIndex: 1,
       },
+      { ...pathReference, typePosition: 2, contentIndex: 2 },
     ]);
 
     // 下游干净底图的连接不改变提示词节点实际读取的路径图。
@@ -7628,6 +7629,91 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const orderByEdgeId = new Map(edgeIds.map((edgeId, index) => [edgeId, badges[index]]));
     expect(orderByEdgeId.get(`${referenceKey}->${targetKey}`)).toBe("1");
     expect(orderByEdgeId.get(`${cleanKey}->${targetKey}`)).toBe("2");
+  });
+
+  it("解绑中间第 2 条参考素材后，第 3 条保持原位并把原位置留成空位", async () => {
+    const cleanImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-clean",
+      name: "站台干净底图",
+      previewUrl: "https://cdn.example.com/station-clean.jpg",
+      assetUrl: "https://cdn.example.com/station-clean.jpg",
+    };
+    const thirdImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-third",
+      name: "站台远景图",
+      previewUrl: "https://cdn.example.com/station-third.jpg",
+      assetUrl: "https://cdn.example.com/station-third.jpg",
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, cleanImage, thirdImage])
+        : baseInvokeImplementation(command),
+    );
+
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const first = await addAssetNode("图片", "站台参考图", 148, 148);
+    const second = await addAssetNode("图片", "站台干净底图", 148, 333);
+    const third = await addAssetNode("图片", "站台远景图", 148, 518);
+    connectAssetToGeneration(first, videoGeneration);
+    connectAssetToGeneration(second, videoGeneration);
+    connectAssetToGeneration(third, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台远景图" });
+
+    const rows = () =>
+      within(videoGeneration)
+        .getByRole("list", { name: "生成参考素材，按传入顺序排列" })
+        .querySelectorAll("li");
+    expect(
+      Array.from(rows()).map((item) => ({
+        order: item.querySelector(".node-media-chip__order")?.textContent,
+        name: item.classList.contains("is-empty-slot")
+          ? "空位"
+          : item.querySelector(".node-media-chip__name")?.textContent,
+      })),
+    ).toEqual([
+      { order: "1", name: "站台参考图" },
+      { order: "2", name: "站台干净底图" },
+      { order: "3", name: "站台远景图" },
+    ]);
+
+    // 点掉中间那条连线：第 3 张不顶上来，原来的第 2 位留成空位。
+    fireEvent.click(
+      within(videoGeneration).getByRole("button", { name: "解除连线：站台干净底图" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        within(videoGeneration).queryByRole("button", { name: "解除连线：站台干净底图" }),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      Array.from(rows()).map((item) => ({
+        order: item.querySelector(".node-media-chip__order")?.textContent,
+        name: item.classList.contains("is-empty-slot")
+          ? "空位"
+          : item.querySelector(".node-media-chip__name")?.textContent,
+      })),
+    ).toEqual([
+      { order: "1", name: "站台参考图" },
+      { order: "—", name: "空位" },
+      { order: "2", name: "站台远景图" },
+    ]);
+    // 画布连线序号仍与清单一致：剩下两条连线占据第 1、2 个提交位，与节点清单编号一一对应。
+    const canvasEdges = Array.from(document.querySelectorAll(".react-flow__edge")).map((edge) =>
+      edge.getAttribute("data-id"),
+    );
+    expect(canvasEdges).toEqual([
+      `${first.dataset["connectionTarget"]}->${videoGeneration.dataset["connectionTarget"]}`,
+      `${third.dataset["connectionTarget"]}->${videoGeneration.dataset["connectionTarget"]}`,
+    ]);
+    expect(
+      Array.from(document.querySelectorAll(".canvas-flow-edge__order")).map(
+        (marker) => marker.textContent,
+      ),
+    ).toEqual(["1", "2"]);
   });
 
   it("多素材连到视频节点后统一冻结连线编号，@ 引用与媒体清单一一对应", async () => {

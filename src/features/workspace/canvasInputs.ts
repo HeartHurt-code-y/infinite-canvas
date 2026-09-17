@@ -51,6 +51,13 @@ export interface ResolvedCanvasInputs {
     readonly edgeId: string;
     readonly name: string;
   }[];
+  /**
+   * 目标生成节点的槽位表长度（含空槽）。媒体按槽位位置占位，中途被解绑/删除的素材
+   * 留下空位：其余素材不整体前移，下次连线回填空槽。清单按此渲染空位行。
+   */
+  readonly mediaSlotCount: number;
+  /** 直连素材在其槽位表里的位置（0 起）；非生成节点或未记槽位的素材不在此表内。 */
+  readonly mediaPosition: ReadonlyMap<string, number>;
 }
 
 type OwnMedia = Omit<ConnectedCanvasMediaInput, "edgeId">;
@@ -340,6 +347,9 @@ export function createCanvasInputResolver(
     const media: ConnectedCanvasMediaInput[] = [];
     const texts: ConnectedCanvasTextInput[] = [];
     const pending: { sourceKey: string; edgeId: string; name: string }[] = [];
+    // 直连素材在槽位表里的位置（0 起）与槽位表长度：清单据此渲染稳定的位置编号与空位行。
+    let mediaPosition = new Map<string, number>();
+    let mediaSlotCount = 0;
     const seenNodes = new Set([targetKey]);
     const seenMedia = new Set([targetKey]);
     const seenTexts = new Set([targetKey]);
@@ -378,10 +388,9 @@ export function createCanvasInputResolver(
         stack.push({ key: parents[i]!.fromKey, edgeId: next.edgeId });
       }
     }
-    const result = { media, texts, pending };
     // 链式连接时按源头优先排序：从目标节点出发，深度越大（越上游的源头）越靠前。
     // 例如 A → B → 生成节点，当前 DFS 会先收集 B 再收集 A，此处重排为 [A, B]。
-    // 直连素材深度相同，相对顺序保持不变，后续 inputSlots 排序再调整直连素材间的顺序。
+    // 直连素材深度相同，相对顺序保持不变；直连素材的位置另有槽位账本，见下。
     const depthByKey = new Map<string, number>();
     const depthVisited = new Set<string>();
     const computeDepth = (key: string): number => {
@@ -399,11 +408,11 @@ export function createCanvasInputResolver(
       return depth;
     };
     media.sort((a, b) => computeDepth(b.sourceKey) - computeDepth(a.sourceKey));
-    // 生成节点（图片/视频）若配置了 inputSlots，则对直连素材按槽位顺序排序；
-    // 只重排有槽位的素材之间的相对顺序，保持它们在原数组中的位置区间，
-    // 不影响继承素材（来自提示词节点）与直连素材之间的先后关系。
-    // 槽位表可能残留指向已删除节点/已解绑素材的 key：它们不出现在本次素材里，
-    // 若继续按槽位下标排序会占用排序位置、把真实素材挤到后面，因此按现有素材压缩序号。
+    // 生成节点（图片/视频）若配置了 inputSlots，则直连素材按槽位位置落座：
+    // 槽位是这份清单的位置账本，被解绑/删除的素材留下空槽（null），其余素材不整体前移，
+    // 新连线回填空槽后拿回原来的位置。素材数组保持同一顺序，空槽不占位，
+    // 渲染层再按 mediaPosition 逐行展开，把空槽显示为空位行。
+    // 槽位表可能残留指向已删除节点/已解绑素材的 key：它们不出现在本次素材里，直接跳过。
     const targetEntry = nodes.get(targetKey);
     const targetSlots =
       targetEntry?.type === "gen" &&
@@ -412,31 +421,38 @@ export function createCanvasInputResolver(
         : undefined;
     if (targetSlots && targetSlots.length > 0) {
       const present = new Set(media.map((item) => item.sourceKey));
-      const slotOrder = new Map<string, number>();
-      // 同一素材 key 重复占位时以第一个槽位为准，避免后一个槽位覆盖真实顺序。
-      for (const slot of targetSlots) {
-        if (slot === null || !present.has(slot) || slotOrder.has(slot)) continue;
-        slotOrder.set(slot, slotOrder.size);
+      const positionByKey = new Map<string, number>();
+      // 同一素材 key 重复占位时以第一个槽位为准，避免后一个槽位覆盖真实位置。
+      targetSlots.forEach((slot, index) => {
+        if (slot === null || !present.has(slot) || positionByKey.has(slot)) return;
+        positionByKey.set(slot, index);
+      });
+      mediaPosition = positionByKey;
+      mediaSlotCount = targetSlots.length;
+      if (positionByKey.size > 0) {
+        // 素材顺序也按槽位位置排：位置编号与提交顺序（请求体里的「图片N」）一一对应，
+        // 不会出现清单上第 2 行的素材实际是第 1 个提交。空槽不参与排序，其余保持既有前后关系。
+        const rankByKey = new Map<string, number>();
+        targetSlots.forEach((slot) => {
+          if (slot === null || !positionByKey.has(slot) || rankByKey.has(slot)) return;
+          rankByKey.set(slot, rankByKey.size);
+        });
+        const orderByIndex = new Map(media.map((item, index) => [item.sourceKey, index]));
+        media.sort((left, right) => {
+          const leftRank = rankByKey.get(left.sourceKey);
+          const rightRank = rankByKey.get(right.sourceKey);
+          if (leftRank == null && rightRank == null) {
+            return (
+              (orderByIndex.get(left.sourceKey) ?? 0) - (orderByIndex.get(right.sourceKey) ?? 0)
+            );
+          }
+          if (leftRank == null) return 1;
+          if (rightRank == null) return -1;
+          return leftRank - rightRank;
+        });
       }
-      const slottedIndices: number[] = [];
-      const slottedItems: ConnectedCanvasMediaInput[] = [];
-      media.forEach((item, index) => {
-        if (slotOrder.has(item.sourceKey)) {
-          slottedIndices.push(index);
-          slottedItems.push(item);
-        }
-      });
-      slottedItems.sort(
-        (left, right) =>
-          (slotOrder.get(left.sourceKey) ?? Number.MAX_SAFE_INTEGER) -
-          (slotOrder.get(right.sourceKey) ?? Number.MAX_SAFE_INTEGER),
-      );
-      const resultMedia = [...media];
-      slottedIndices.forEach((arrayIndex, i) => {
-        resultMedia[arrayIndex] = slottedItems[i]!;
-      });
-      result.media = resultMedia;
     }
+    const result = { media, texts, pending, mediaSlotCount, mediaPosition };
     resolved.set(targetKey, result);
     return result;
   };
@@ -448,6 +464,9 @@ export function createCanvasInputResolver(
  * 同一连线可以承载多条输入：中转素材与随提示词继承的素材都记在进入目标的这条连线上，
  * 这里取它首次出现的位置。解析结果里没有出现的连线（例如上游还没有可用结果）按调用方
  * 给出的原始连线顺序接在末尾，保证每条进入目标的连线都拿到唯一且连续的序号。
+ *
+ * 直连素材按槽位位置排序：空槽不出现在清单里，序号也随之连续；但同一条连线在
+ * 「解绑再重连」「槽位留空后回填」之后仍然拿到与节点清单一致的位置，不会与清单错位。
  */
 export function canvasInputEdgeOrder(
   resolved: ResolvedCanvasInputs,
@@ -460,7 +479,15 @@ export function canvasInputEdgeOrder(
     seen.add(edgeId);
     ordered.push(edgeId);
   };
-  for (const input of resolved.media) collect(input.edgeId);
+  const mediaByPosition = resolved.media
+    .map((input, index) => ({ input, index }))
+    .sort((left, right) => {
+      const leftPosition = resolved.mediaPosition.get(left.input.sourceKey) ?? left.index;
+      const rightPosition = resolved.mediaPosition.get(right.input.sourceKey) ?? right.index;
+      return leftPosition - rightPosition;
+    })
+    .map((entry) => entry.input);
+  for (const input of mediaByPosition) collect(input.edgeId);
   for (const input of resolved.texts) collect(input.edgeId);
   for (const input of resolved.pending) collect(input.edgeId);
   for (const edgeId of fallbackEdgeIds) collect(edgeId);

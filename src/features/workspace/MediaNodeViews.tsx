@@ -87,6 +87,7 @@ export function CanvasGenNode({
   activeTask,
   connectedInputs,
   inheritedInputs,
+  inputSlotPositions,
   mentionCandidates,
   aliveCanvasNodeKeys,
   promptSourceName,
@@ -116,6 +117,8 @@ export function CanvasGenNode({
   readonly activeTask: GenerationTaskSummary | null;
   readonly connectedInputs: readonly ConnectedAssetInput[];
   readonly inheritedInputs: readonly InheritedAssetInput[];
+  /** 直连素材在其槽位表里的位置；参考清单据此保留空位、不自动上移。 */
+  readonly inputSlotPositions?: ReadonlyMap<string, number> | undefined;
   readonly mentionCandidates: readonly MentionCandidate[];
   /** 画布上仍然存在的节点 key；用于把已删除素材的失效引用按同源/同名自愈重连。 */
   readonly aliveCanvasNodeKeys?: ReadonlySet<string> | undefined;
@@ -259,7 +262,11 @@ export function CanvasGenNode({
           describedBy={promptHintId}
           expandable
         />
-        <GenerationInputChips inputs={effectiveInputs} onUnlink={onUnlink} />
+        <GenerationInputChips
+          inputs={effectiveInputs}
+          {...(inputSlotPositions ? { positions: inputSlotPositions } : {})}
+          onUnlink={onUnlink}
+        />
       </div>
 
       {node.kind === "video" ? (
@@ -2600,24 +2607,77 @@ function referenceAssetIdentity(
   return null;
 }
 
-/** 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。 */
+/**
+ * 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。
+ *
+ * 清单按槽位位置逐行展开：某个位置上的素材被解绑或删除后，其余素材不整体上移，
+ * 该位置留一行「空位」，新素材连进来就填回这个空位，位置与前后关系都不再变化。
+ * 每行的编号是该素材实际被提交的序号（即请求体里的「图片N」）；空位没有素材，用「—」占位。
+ */
 export function GenerationInputChips({
   inputs,
+  positions,
   onUnlink,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
+  readonly positions?: ReadonlyMap<string, number>;
   readonly onUnlink: (edgeId: string) => void;
 }) {
   if (inputs.length === 0) return null;
-  // 编号即渲染顺序：inputs 已由 canvasInputs 按槽位排好序，就是实际提交给生成请求的顺序。
-  // 槽位号只负责排序，不再参与编号——槽位表按素材 key 记账，节点被删除或素材解绑后
-  // 槽位可能残留空位（或残留已被替换的 key），直接拿槽位下标当编号会出现跳号、重号。
+  // 每个素材落在哪一行：直连素材按槽位位置落座——被解绑/删除的素材留下空槽，位置留着，
+  // 其余素材不顶上来，新连线填回空槽后拿回原来的位置。没有槽位记录的素材（随提示词继承、
+  // 旧文档残留连线）接在最后一行之后，不会插进前面的空槽（那会让它的编号小于后面的素材）。
+  const rowByIndex = new Map<number, number>();
+  let nextRow = 0;
+  inputs.forEach((input, index) => {
+    const position = positions?.get(input.key);
+    const row = position != null && position >= 0 ? position : nextRow;
+    rowByIndex.set(row, index);
+    nextRow = Math.max(nextRow, row + 1);
+  });
+  // 修复落行冲突：前面的素材占了空槽后，后面素材的槽位号可能与它相同
+  // （例如槽位表 [A, B, C] 删掉 B 后，C 仍在槽位 2，而新素材填回槽位 1）。
+  // 从后往前让位，保证清单自上而下的顺序与提交顺序一致。
+  const rowOrder = [...rowByIndex.keys()].sort((left, right) => right - left);
+  const claimed = new Set<number>();
+  for (const row of rowOrder) {
+    let target = row;
+    while (claimed.has(target)) target += 1;
+    const index = rowByIndex.get(row)!;
+    rowByIndex.delete(row);
+    rowByIndex.set(target, index);
+    claimed.add(target);
+  }
+  const lastRow = rowOrder.length ? Math.max(...claimed) : -1;
+  // 末尾的空槽不渲染：只剩一条连线时解绑不该在清单里留下常驻空行。
+  const rowCount = Math.max(inputs.length, lastRow + 1);
+  // 编号即实际提交顺序：inputs 已由 canvasInputs 按槽位排好序，就是交给生成请求的顺序。
+  // 槽位号只负责落行位置，不参与编号——空槽不占编号，避免与请求体的「图片N」错位。
+  const orderByIndex = new Map(inputs.map((input, index) => [input.key, index + 1]));
   return (
     <ol className="node-media-inputs" aria-label="生成参考素材，按传入顺序排列">
-      {inputs.map((input, index) => {
+      {Array.from({ length: rowCount }, (_, row) => {
+        const index = rowByIndex.get(row);
+        if (index == null) {
+          // 空位没有素材，也就没有提交编号：只标出位置，编号留给填进来的素材。
+          return (
+            <li
+              key={`empty-slot:${row}`}
+              className="node-media-chip is-empty-slot"
+              aria-label={`参考素材第 ${row + 1} 位为空位`}
+              title={`第 ${row + 1} 位空着：新连接的素材会填回这个位置`}
+            >
+              <span className="node-media-chip__order" aria-hidden="true">
+                —
+              </span>
+              <span className="node-media-chip__name">空位 · 新连线填回此处</span>
+            </li>
+          );
+        }
+        const input = inputs[index]!;
         const inherited = "promptNodeKey" in input;
         const isOutput = !inherited && input.sourceLabel === "产物";
-        const orderNumber = index + 1;
+        const orderNumber = orderByIndex.get(input.key)!;
         const identity = referenceAssetIdentity(input.target);
         // 云端素材回读供应商记录、本地素材按 staging job id 重签；产物与本地文件不依赖签名。
         const target = input.target;

@@ -6042,6 +6042,21 @@ export function WorkspaceApp({
     return map;
   }, [canvasInputsFor, genNodes]);
 
+  /**
+   * 每个生成节点的槽位位置：参考素材清单按位置逐行展开，解绑/删除留下的空槽渲染成
+   * 空位行，其余素材保持原位、不自动上移，新连线填回该空槽。
+   */
+  const inputSlotsByNode = useMemo(() => {
+    const map = new Map<string, ReadonlyMap<string, number>>();
+    for (const node of genNodes) {
+      if (node.kind !== "image" && node.kind !== "video") continue;
+      const resolved = canvasInputsFor(node.key);
+      if (resolved.mediaSlotCount === 0) continue;
+      map.set(node.key, resolved.mediaPosition);
+    }
+    return map;
+  }, [canvasInputsFor, genNodes]);
+
   /** 所有上游节点中的可读取视频，按节点保存的顺序排列。 */
   const videoComposerInputsByNode = useMemo(() => {
     const map = new Map<string, VideoComposerInput[]>();
@@ -7985,6 +8000,7 @@ export function WorkspaceApp({
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
             streamingTextByNode[node.key] ?? null,
             connectedInputs,
+            inputSlotsByNode.get(node.key),
             promptTargetsBySource.get(node.key),
             promptSourceByTarget.has(node.key),
             promptSourceByTarget.get(node.key)?.length ?? 0,
@@ -8064,6 +8080,9 @@ export function WorkspaceApp({
                   activeTask={activeTaskByNode.get(node.key) ?? null}
                   connectedInputs={connectedInputs ?? []}
                   inheritedInputs={[]}
+                  {...(inputSlotsByNode.get(node.key)
+                    ? { inputSlotPositions: inputSlotsByNode.get(node.key)! }
+                    : {})}
                   mentionCandidates={mentionCandidates ?? []}
                   aliveCanvasNodeKeys={aliveCanvasNodeKeys}
                   promptSourceName={
@@ -8111,6 +8130,7 @@ export function WorkspaceApp({
       genNodes,
       nodeDescriptorContext,
       connectedInputsByNode,
+      inputSlotsByNode,
       selectedNodeKey,
       startingNodeKeys,
       startErrorsByNode,

@@ -368,6 +368,8 @@ describe("unrestricted canvas payload graph", () => {
       media: [],
       texts: [],
       pending: [],
+      mediaSlotCount: 0,
+      mediaPosition: new Map(),
     });
   });
 

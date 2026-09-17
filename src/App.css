@@ -2460,6 +2460,26 @@ svg[data-spin="true"] {
   border-color: var(--color-video);
 }
 
+/* 空位行：位置留着，等新连线回填；比占位素材更轻，不抢注意力。 */
+.node-media-chip.is-empty-slot {
+  min-height: 2rem;
+  color: var(--color-neutral);
+  font-style: italic;
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--color-rule-2);
+}
+
+.node-media-chip.is-empty-slot .node-media-chip__order {
+  color: var(--color-neutral);
+  background: transparent;
+  border: var(--rule-thin) dashed var(--color-rule-2);
+}
+
+.node-media-chip.is-empty-slot .node-media-chip__name {
+  color: var(--color-neutral);
+}
+
 .node-media-chip.is-inherited .node-media-chip__order {
   background: var(--color-video-strong);
 }

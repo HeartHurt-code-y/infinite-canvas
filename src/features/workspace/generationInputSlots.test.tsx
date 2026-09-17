@@ -57,21 +57,35 @@ const edge = (fromKey: string, toKey: string): AssetEdgeData => ({
   toKey,
 });
 
-/** 读取生成节点参考素材清单上渲染的编号与素材名。 */
+/** 读取生成节点参考素材清单上渲染的编号与素材名（空位行不算素材行）。 */
 function chipRows(container: HTMLElement): { order: string; name: string }[] {
+  const list = container.querySelector<HTMLElement>(".node-media-inputs");
+  expect(list).not.toBeNull();
+  return Array.from(list!.querySelectorAll("li"))
+    .filter((item) => !item.classList.contains("is-empty-slot"))
+    .map((item) => ({
+      order: item.querySelector(".node-media-chip__order")?.textContent ?? "",
+      name: item.querySelector(".node-media-chip__name")?.textContent ?? "",
+    }));
+}
+
+/** 参考素材清单的每一行：空位行单独标记，便于断言「空出来的位置没有被别人占用」。 */
+function referenceRows(container: HTMLElement): { order: string; label: string }[] {
   const list = container.querySelector<HTMLElement>(".node-media-inputs");
   expect(list).not.toBeNull();
   return Array.from(list!.querySelectorAll("li")).map((item) => ({
     order: item.querySelector(".node-media-chip__order")?.textContent ?? "",
-    name: item.querySelector(".node-media-chip__name")?.textContent ?? "",
+    label: item.classList.contains("is-empty-slot")
+      ? "空位"
+      : (item.querySelector(".node-media-chip__name")?.textContent ?? ""),
   }));
 }
 
 describe("生成节点参考素材的传入顺序编号", () => {
   it("编号连续对应渲染顺序，不因槽位表残留空位而跳号或重号", () => {
     // 真实画布上出现过的形态：素材 A 占槽位 0，槽位 1 残留着已删除/已解绑的 key，
-    // 素材 C 占槽位 2，再后来连入的 D 没有槽位，只能按原位附在清单末尾。
-    // 旧实现拿槽位下标（A=1、C=3）和数组下标（D=3）当编号，结果渲染成 1、1、3。
+    // 素材 C 占槽位 2，再后来连入的 D 没有槽位。编号按清单里实际存在的素材连续排，
+    // 没有槽位账本的场景（提示词节点转发、工作流节点）与旧行为一致，不跳号也不重号。
     const inputs = [
       {
         key: "asset-a",
@@ -141,6 +155,131 @@ describe("生成节点参考素材的传入顺序编号", () => {
       { order: "1", name: "A" },
       { order: "2", name: "继承图" },
       { order: "3", name: "C" },
+    ]);
+  });
+
+  it("移除中间一项后原位置留成空位，其余素材的编号与所在位置都不上移", () => {
+    // 用户报告：清单里第 1、2、3 张参考图，点掉第 2 张的叉号后原来的第 3 张被顶上来，
+    // 换图时对不上位置。新行为：空槽保留为空位行，第 3 张仍在原来的行、仍显示 3。
+    const chip = (key: string, name: string) => ({
+      key,
+      name,
+      kind: "image" as const,
+      edgeId: `${key}->gen`,
+      sourceLabel: "素材" as const,
+      previewUrl: null,
+    });
+    // 槽位账本 [A, null, C]：第 2 位刚被解绑，B 的位置空着。
+    render(
+      <GenerationInputChips
+        inputs={[chip("asset-a", "A"), chip("asset-c", "C")]}
+        positions={
+          new Map([
+            ["asset-a", 0],
+            ["asset-c", 2],
+          ])
+        }
+        onUnlink={vi.fn()}
+      />,
+    );
+    expect(referenceRows(document.body)).toEqual([
+      { order: "1", label: "A" },
+      { order: "—", label: "空位" },
+      { order: "2", label: "C" },
+    ]);
+    // 空位不承载素材，因此没有解绑按钮；它只表达「这个位置空着」。
+    expect(
+      screen.queryByRole("button", { name: "解除连线：空位 · 新连线填回此处" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("新素材回填空位后拿回原来的编号，原清单顺序保持不变", () => {
+    const chip = (key: string, name: string) => ({
+      key,
+      name,
+      kind: "image" as const,
+      edgeId: `${key}->gen`,
+      sourceLabel: "素材" as const,
+      previewUrl: null,
+    });
+    // 槽位账本 [A, B, C] → 移除 B → 新素材 B2 填回槽位 1。
+    render(
+      <GenerationInputChips
+        inputs={[chip("asset-a", "A"), chip("asset-b2", "B2"), chip("asset-c", "C")]}
+        positions={
+          new Map([
+            ["asset-a", 0],
+            ["asset-b2", 1],
+            ["asset-c", 2],
+          ])
+        }
+        onUnlink={vi.fn()}
+      />,
+    );
+
+    expect(referenceRows(document.body)).toEqual([
+      { order: "1", label: "A" },
+      { order: "2", label: "B2" },
+      { order: "3", label: "C" },
+    ]);
+  });
+
+  it("末尾与首位的空槽不渲染空位行，单条连线解绑后清单为空", () => {
+    render(<GenerationInputChips inputs={[]} positions={new Map()} onUnlink={vi.fn()} />);
+    expect(document.querySelector(".node-media-inputs")).toBeNull();
+
+    const only = {
+      key: "asset-a",
+      name: "A",
+      kind: "image" as const,
+      edgeId: "asset-a->gen",
+      sourceLabel: "素材" as const,
+      previewUrl: null,
+    };
+    // 只剩一条连线：解绑后槽位表可能还留着旧槽位，但清单里只有一行素材，不留空行。
+    render(
+      <GenerationInputChips
+        inputs={[only]}
+        positions={new Map([["asset-a", 0]])}
+        onUnlink={vi.fn()}
+      />,
+    );
+    expect(referenceRows(document.body)).toEqual([{ order: "1", label: "A" }]);
+  });
+
+  it("没有槽位记录的素材接在末尾空槽之后，编号仍与提交顺序一致", () => {
+    const chip = (key: string, name: string, edgeId: string) => ({
+      key,
+      name,
+      kind: "image" as const,
+      edgeId,
+      sourceLabel: "素材" as const,
+      previewUrl: null,
+    });
+    // 槽位账本 [A, null, C]：C 的槽位空着，而最后一条连线 D 没有槽位记录。
+    // D 是提交顺序里的第 3 个（编号 3），不能塞进 C 前面的空槽里冒充第 2 个。
+    render(
+      <GenerationInputChips
+        inputs={[
+          chip("asset-a", "A", "a->gen"),
+          chip("asset-c", "C", "c->gen"),
+          chip("asset-d", "D", "d->gen"),
+        ]}
+        positions={
+          new Map([
+            ["asset-a", 0],
+            ["asset-c", 2],
+          ])
+        }
+        onUnlink={vi.fn()}
+      />,
+    );
+
+    expect(referenceRows(document.body)).toEqual([
+      { order: "1", label: "A" },
+      { order: "—", label: "空位" },
+      { order: "2", label: "C" },
+      { order: "3", label: "D" },
     ]);
   });
 });
@@ -249,19 +388,74 @@ describe("inputSlots 槽位账本", () => {
       "asset-c->gen",
     ]);
 
-    // 新素材填最小空槽：画布上看到的清单顺序与实际提交顺序都是 A、D、C。
+    // 新素材填最小空槽：D 落在空出来的第 2 位，清单上的位置编号与提交顺序同步回到 A、D、C。
     canvas.commands.insertSubgraph([{ type: "asset", data: imageNode("asset-d") }], []);
     canvas.commands.connect("asset-d", "gen");
     const afterFill = canvas.getSnapshot();
     expect(afterFill.nodeByKey.gen.get("gen")).toMatchObject({
       config: { inputSlots: ["asset-a", "asset-d", "asset-c"] },
     });
-    expect(
-      createCanvasInputResolver(
-        afterFill.nodeByKey,
-        afterFill.graph.edges,
-      )("gen").media.map((input) => input.key),
-    ).toEqual(["asset-a", "asset-d", "asset-c"]);
+    const afterFillResolved = createCanvasInputResolver(
+      afterFill.nodeByKey,
+      afterFill.graph.edges,
+    )("gen");
+    expect(afterFillResolved.media.map((input) => input.key)).toEqual([
+      "asset-a",
+      "asset-d",
+      "asset-c",
+    ]);
+    // 成员与槽位绑定：D 占住第 2 位，A 与 C 的位置没有变化。
+    expect(afterFillResolved.mediaPosition.get("asset-a")).toBe(0);
+    expect(afterFillResolved.mediaPosition.get("asset-d")).toBe(1);
+    expect(afterFillResolved.mediaPosition.get("asset-c")).toBe(2);
+  });
+
+  it("只有纯文本来源连入时不占媒体槽位，参考清单不会凭空多出一行空位", () => {
+    // 用户真实形态：提示词节点先连到视频生成节点（只送文本，不送媒体），
+    // 随后连入第一张图。旧实现把这条纯文本连线也记成槽位 0，第二张图落在槽位 1，
+    // 于是清单在第 1 行显示一行空位、图片从第 2 行开始，与真实素材数量对不上。
+    const canvas = createCanvasState();
+    canvas.commands.insertSubgraph(
+      [
+        { type: "gen", data: imageGenerator("video-gen") },
+        {
+          type: "gen",
+          data: {
+            key: "prompt",
+            kind: "prompt",
+            x: 0,
+            y: 0,
+            config: {
+              modelSelection: model,
+              mode: "seedance_2_0",
+              task: "generate",
+              sourcePrompt: "",
+              generatedPrompt: "",
+              catalogResolved: true,
+            },
+          },
+        },
+        { type: "asset", data: imageNode("asset-a") },
+      ],
+      [],
+    );
+    canvas.commands.connect("prompt", "video-gen");
+    // 纯文本连线不建槽位表：第一次连入素材时它落在第 1 位。
+    expect(canvas.getSnapshot().nodeByKey.gen.get("video-gen")?.config).not.toHaveProperty(
+      "inputSlots",
+    );
+
+    canvas.commands.connect("asset-a", "video-gen");
+    const connected = canvas.getSnapshot();
+    expect(connected.nodeByKey.gen.get("video-gen")).toMatchObject({
+      config: { inputSlots: ["asset-a"] },
+    });
+    const resolved = createCanvasInputResolver(
+      connected.nodeByKey,
+      connected.graph.edges,
+    )("video-gen");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-a"]);
+    expect(resolved.mediaPosition.get("asset-a")).toBe(0);
   });
 
   it("槽位表残留指向已不存在节点的 key 时，不占用排序位置把真实素材挤到后面", () => {

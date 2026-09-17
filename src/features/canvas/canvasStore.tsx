@@ -1164,10 +1164,15 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
               }
               const edge = { id: edgeId, fromKey, toKey };
               result = { status: "connected", edge, replacedEdgeIds: [] };
-              // 生成节点（图片/视频）维护 inputSlots：新素材填充最小空槽，无空槽则追加。
+              // 生成节点（图片/视频）维护 inputSlots：能贡献媒体的来源填充最小空槽，无空槽则追加。
+              // 只走文本/中转的来源（提示词、剧本、分镜、下载与抽帧等）不占媒体位置——
+              // 让纯文本连线占一个槽位，会在参考清单里凭空多出一行空位，也会打乱图片编号。
               if (
                 target.type === "gen" &&
-                (target.data.kind === "image" || target.data.kind === "video")
+                (target.data.kind === "image" || target.data.kind === "video") &&
+                source.type !== "gen" &&
+                source.type !== "screenplay" &&
+                source.type !== "storyboard"
               ) {
                 const slots = [...(target.data.config.inputSlots ?? [])];
                 const emptyIndex = slots.findIndex((slot) => slot === null);
