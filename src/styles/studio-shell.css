@@ -14,9 +14,10 @@ textarea {
   letter-spacing: normal;
 }
 
+/* 选区用主色反相，避免浅字叠在 accent-soft 上，复制时长文看不出高亮。 */
 ::selection {
-  color: var(--color-text);
-  background: var(--color-accent-soft);
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
 }
 
 textarea:focus-visible,
@@ -351,8 +352,6 @@ button:active:focus-visible,
 }
 
 .asset-panel .asset-panel__hint {
-  right: var(--space-md);
-  left: var(--space-md);
   padding-top: var(--space-sm);
   background: var(--color-surface-1);
   border-color: var(--color-rule-faint);

@@ -754,6 +754,10 @@
   line-height: 1.6;
 }
 
+.react-flow__node .canvas-gen-node--prompt .canvas-prompt-node__conversation .markdown-view {
+  color: var(--color-text);
+}
+
 .react-flow__node
   .canvas-flow-node
   .canvas-screenplay-node__message

@@ -204,7 +204,7 @@ describe("素材预览字节缓存", () => {
 
     expect(await cache.loadMediaBytes("asset-1", "image", null)).toBe("blob:imported");
     expect(fetchMock).toHaveBeenCalledWith(
-      "asset://localhost/video?assetId=asset-1",
+      "asset://localhost/asset-1",
       expect.anything(),
     );
     delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];

@@ -1560,12 +1560,15 @@ export function CanvasAssetNode({
         node.kind,
         failedUrl,
       ).then((freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+        if (freshUrl == null || freshUrl === "") return;
+        if (freshUrl !== failedUrl) {
           onRefreshMediaUrls(node.key, freshUrl);
         }
+        setFailedImageUrl(null);
+        imageBytes.reload();
       });
     },
-    [node.assetId, node.key, node.kind, node.providerConnectionId, node.source, onRefreshMediaUrls],
+    [node.assetId, node.key, node.kind, node.providerConnectionId, node.source, onRefreshMediaUrls, imageBytes.reload],
   );
   return (
     <div
@@ -1815,9 +1818,11 @@ export function CanvasAssetLightbox({
       node.kind,
       candidateUrl,
     ).then((freshUrl) => {
-      if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateUrl) {
+      if (freshUrl == null || freshUrl === "") return;
+      if (freshUrl !== candidateUrl) {
         setRefreshedUrl(freshUrl);
       }
+      lightboxBytes.reload();
     });
   };
   if (mediaSrc == null) return null;
@@ -2532,10 +2537,12 @@ export function AutoSizeThumb({
     renewAttemptedRef.current = true;
     void refreshMediaUrlWithStagingFallback(renewAsset, assetKind ?? "image", failedSource).then(
       (freshUrl) => {
-        if (freshUrl != null && freshUrl !== "" && freshUrl !== failedSource) {
+        if (freshUrl == null || freshUrl === "") return;
+        if (freshUrl !== failedSource) {
           setRenewedUrl(freshUrl);
-          setFailedUrl(null);
         }
+        setFailedUrl(null);
+        bytes.reload();
       },
     );
   };

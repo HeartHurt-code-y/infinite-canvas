@@ -255,10 +255,15 @@
 
 /* Light tools / dark canvas: aliases are repeated here so every legacy component
  * resolves its surface locally. Floating workspace dialogs retain the dark set.
+ * 提示词节点的对话、待优化输入和输出是阅读面：客户要在这里选中复制长文，
+ * 近黑字段配弱选区会让高亮消失，所以这三块沿用浅色工具令牌。
  */
 .workspace-header,
 .asset-panel,
-.connection-quick-add-menu {
+.connection-quick-add-menu,
+.canvas-gen-node--prompt .canvas-prompt-node__conversation,
+.canvas-gen-node--prompt .canvas-prompt-node__field textarea,
+.canvas-gen-node--prompt .canvas-prompt-node__output-editor {
   color-scheme: light;
   --color-bg-base: #f5f5f5;
   --color-bg-sunk: #e7e7e7;

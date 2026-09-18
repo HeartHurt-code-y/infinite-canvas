@@ -11,7 +11,7 @@ use super::{
     composer::VideoCompositionService,
     error::{BackendError, BackendResult},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
-    model_schema::is_seedance_25_video_model,
+    model_schema::{is_seedance_25_video_model, is_seedream_image_model},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
         redact_request_value, redact_url_string, seedance_video_task_type,
@@ -56,6 +56,8 @@ struct ResolveTargetRequest<'a> {
     prompt_segment_index: Option<usize>,
     /// 前端按输入（连线）顺序分配的全局序号，用于确定 content 数组顺序。
     content_index: Option<u32>,
+    /// 图生图参考图是否必须读成本地字节。Seedream 图生图要公网 URL，不能走这条。
+    needs_local_bytes: bool,
 }
 
 #[derive(Debug)]
@@ -326,6 +328,15 @@ impl MediaResolver {
             rendered_prompt,
             content,
         } = build_media_plan(&command.prompt, &command.explicit_media)?;
+        let operation_schema = command
+            .model_operation_schema_snapshot
+            .clone()
+            .unwrap_or_else(|| json!({}));
+        let needs_local_bytes = image_edit_needs_local_bytes(
+            task.operation,
+            task.remote_model_id_snapshot.as_deref(),
+            &operation_schema,
+        );
         let task_type = seedance_video_task_type(command.video_task_type, &command.parameters);
         let probe_task_videos = task.operation == GenerationOperation::VideoGeneration
             && task
@@ -345,6 +356,7 @@ impl MediaResolver {
                         display_name: input.display_name,
                         prompt_segment_index: input.prompt_segment_index,
                         content_index: input.content_index,
+                        needs_local_bytes,
                     },
                 )
                 .await
@@ -399,10 +411,6 @@ impl MediaResolver {
             push_media(resolved, &mut images, &mut videos, &mut audios);
         }
 
-        let operation_schema = command
-            .model_operation_schema_snapshot
-            .clone()
-            .unwrap_or_else(|| json!({}));
         validate_compiled_operation(
             task.operation,
             &rendered_prompt,
@@ -503,6 +511,7 @@ impl MediaResolver {
             display_name,
             prompt_segment_index,
             content_index,
+            needs_local_bytes,
         } = request;
         match target {
             MediaReferenceTarget::Asset {
@@ -511,7 +520,6 @@ impl MediaResolver {
                 media_type,
                 canvas_node_key,
             } => {
-                let needs_bytes = task.operation == GenerationOperation::ImageToImage;
                 let resolved =
                     with_transport_retry("云端素材解析", ASSET_RESOLVE_RETRIES, || {
                         self.assets.resolve(ResolveAsset {
@@ -520,7 +528,7 @@ impl MediaResolver {
                                 asset_id: asset_id.clone(),
                             },
                             expected_media_type: *media_type,
-                            delivery: if needs_bytes {
+                            delivery: if needs_local_bytes {
                                 AssetDelivery::Bytes
                             } else {
                                 AssetDelivery::RemoteReadable {
@@ -597,7 +605,6 @@ impl MediaResolver {
                     )
                 })?;
                 validate_detected_type(*media_type, detected.mime_type())?;
-                let needs_bytes = task.operation == GenerationOperation::ImageToImage;
                 Ok((
                     ResolvedMedia {
                         media_type: *media_type,
@@ -614,8 +621,8 @@ impl MediaResolver {
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
-                        bytes: needs_bytes.then_some(bytes),
-                        remote_reference: (!needs_bytes).then_some(get_url),
+                        bytes: needs_local_bytes.then_some(bytes),
+                        remote_reference: (!needs_local_bytes).then_some(get_url),
                         prompt_segment_index,
                         content_index,
                     },
@@ -658,8 +665,7 @@ impl MediaResolver {
                     )
                 })?;
                 validate_detected_type(*media_type, detected.mime_type())?;
-                let needs_bytes = task.operation == GenerationOperation::ImageToImage;
-                let (remote_reference, lease) = if needs_bytes {
+                let (remote_reference, lease) = if needs_local_bytes {
                     (None, None)
                 } else {
                     let lease = self
@@ -685,7 +691,7 @@ impl MediaResolver {
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
-                        bytes: needs_bytes.then_some(bytes),
+                        bytes: needs_local_bytes.then_some(bytes),
                         remote_reference,
                         prompt_segment_index,
                         content_index,
@@ -710,8 +716,7 @@ impl MediaResolver {
                     )
                 })?;
                 validate_detected_type(*media_type, detected.mime_type())?;
-                let needs_bytes = task.operation == GenerationOperation::ImageToImage;
-                let (remote_reference, lease) = if needs_bytes {
+                let (remote_reference, lease) = if needs_local_bytes {
                     (None, None)
                 } else {
                     let lease = self
@@ -736,7 +741,7 @@ impl MediaResolver {
                         byte_size: bytes.len() as u64,
                         sha256: sha256_bytes(&bytes),
                         file_name: media_file_name(display_name, detected.extension()),
-                        bytes: needs_bytes.then_some(bytes),
+                        bytes: needs_local_bytes.then_some(bytes),
                         remote_reference,
                         prompt_segment_index,
                         content_index,
@@ -986,6 +991,29 @@ fn validate_detected_type(expected: MediaType, mime: &str) -> BackendResult<()> 
             json!({ "expectedMediaType": expected, "detectedMimeType": mime }),
         ))
     }
+}
+
+fn image_edit_needs_local_bytes(
+    operation: GenerationOperation,
+    remote_model_id: Option<&str>,
+    operation_schema: &Value,
+) -> bool {
+    // 图生图参考图投递形态由模型契约决定，不能一律按「图生图 = 本地字节」处理：
+    // - GPT Image 等走 multipart `/v1/images/edits`，Gemini 走 data URI，都需要 bytes。
+    // - Seedream 走 JSON `POST /v1/images/generations`，`image` 只接受公网可读 URL
+    //   （https://doc.moyu.info/9280685m0.md）。上一节点本地产物必须暂存后再把
+    //   remote_reference 交给构建器，否则会出现
+    //   `seedream image input has no remote-readable reference`。
+    if operation != GenerationOperation::ImageToImage {
+        return false;
+    }
+    if remote_model_id.is_some_and(is_seedream_image_model) {
+        return false;
+    }
+    operation_schema
+        .pointer("/request/mediaEncoding")
+        .and_then(Value::as_str)
+        != Some("seedream_image_urls")
 }
 
 fn validate_compiled_operation(
@@ -1468,6 +1496,77 @@ mod tests {
             assert!(delay >= nominal);
             assert!(delay <= nominal + nominal / 5);
         }
+    }
+
+    #[test]
+    fn seedream_image_to_image_does_not_prefer_local_bytes() {
+        // 客户反馈：生成一张图后把本地产物连到下一节点二次改图，5.0 / 5.0 pro
+        // 都报 `seedream image input has no remote-readable reference`。原因不是
+        // 模型不支持参考图，而是图生图曾一律按 multipart/Gemini 需要本地字节处理，
+        // 上一节点 local_result 不会被暂存成公网 URL。
+        let seedream = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-260128",
+            &[GenerationOperation::ImageToImage],
+        );
+        let seedream_pro = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-pro-260628",
+            &[GenerationOperation::ImageToImage],
+        );
+        let gemini = super::super::model_schema::default_model_schema(
+            "gemini-3-pro-image-preview",
+            &[GenerationOperation::ImageToImage],
+        );
+        let gpt_image = super::super::model_schema::default_model_schema(
+            "gpt-image-2",
+            &[GenerationOperation::ImageToImage],
+        );
+        assert!(
+            !image_edit_needs_local_bytes(
+                GenerationOperation::ImageToImage,
+                Some("doubao-seedream-5-0-260128"),
+                &seedream["image_to_image"],
+            ),
+            "Seedream 5.0 图生图必须暂存/签发远端可读 URL"
+        );
+        assert!(
+            !image_edit_needs_local_bytes(
+                GenerationOperation::ImageToImage,
+                Some("doubao-seedream-5-0-pro-260628"),
+                &seedream_pro["image_to_image"],
+            ),
+            "Seedream 5.0 pro 图生图必须暂存/签发远端可读 URL"
+        );
+        assert!(
+            !image_edit_needs_local_bytes(
+                GenerationOperation::ImageToImage,
+                None,
+                &seedream["image_to_image"],
+            ),
+            "即使模型 id 缺失，seedream_image_urls 契约也不能改走本地字节"
+        );
+        assert!(
+            !image_edit_needs_local_bytes(
+                GenerationOperation::ImageToImage,
+                Some("doubao-seedream-5-0-260128"),
+                &json!({}),
+            ),
+            "旧画布若没冻结 mediaEncoding，仍按模型 id 识别 Seedream"
+        );
+        assert!(image_edit_needs_local_bytes(
+            GenerationOperation::ImageToImage,
+            Some("gemini-3-pro-image-preview"),
+            &gemini["image_to_image"],
+        ));
+        assert!(image_edit_needs_local_bytes(
+            GenerationOperation::ImageToImage,
+            Some("gpt-image-2"),
+            &gpt_image["image_to_image"],
+        ));
+        assert!(!image_edit_needs_local_bytes(
+            GenerationOperation::VideoGeneration,
+            Some("doubao-seedream-5-0-260128"),
+            &json!({}),
+        ));
     }
 
     /// 回归：本地素材库对象下载曾因单次连接失败（代理 fake-ip 抖动）直接判定

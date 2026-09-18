@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./App";
 import type { CloudAsset, SaveCanvasDocumentCommand } from "./lib/backend";
+import { toMediaProxyUrl } from "./lib/mediaProxy";
 import { fireCanvasMouse } from "./test/canvasEvents";
 
 const DESKTOP_INTERNALS_KEY = "__TAURI_INTERNALS__";
@@ -590,18 +591,12 @@ describe("App workspace", () => {
     const video = card.querySelector<HTMLVideoElement>(".asset-card__video");
     const visual = card.querySelector<HTMLElement>(".asset-card__visual--video");
 
-    expect(cover).toHaveAttribute(
-      "src",
-      `asset://localhost/video?src=${encodeURIComponent(coverUrl)}`,
-    );
+    expect(cover).toHaveAttribute("src", toMediaProxyUrl(coverUrl));
     expect(video).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(videoUrl)}`,
+      toMediaProxyUrl(videoUrl, { assetId: "video-asset-1" }),
     );
-    expect(video).toHaveAttribute(
-      "poster",
-      `asset://localhost/video?src=${encodeURIComponent(coverUrl)}`,
-    );
+    expect(video).toHaveAttribute("poster", toMediaProxyUrl(coverUrl));
     expect(video?.muted).toBe(true);
     expect(video?.loop).toBe(true);
     fireEvent.loadedData(video!);
@@ -695,10 +690,7 @@ describe("App workspace", () => {
       name: "预览视频素材详情：过期封面续签",
     });
     const cover = card.querySelector<HTMLImageElement>(".asset-card__preview");
-    expect(cover).toHaveAttribute(
-      "src",
-      `asset://localhost/video?src=${encodeURIComponent(staleCoverUrl)}`,
-    );
+    expect(cover).toHaveAttribute("src", toMediaProxyUrl(staleCoverUrl));
 
     // 旧封面签名过期：加载失败后先向后端续签（携带素材身份），
     // 拿到新签名后用新封面重试加载，而不是直接回退视频中间帧。
@@ -715,10 +707,7 @@ describe("App workspace", () => {
     await waitFor(() => {
       const freshCover = card.querySelector<HTMLImageElement>(".asset-card__preview");
       expect(freshCover).not.toBeNull();
-      expect(freshCover).toHaveAttribute(
-        "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshCoverUrl)}`,
-      );
+      expect(freshCover).toHaveAttribute("src", toMediaProxyUrl(freshCoverUrl));
     });
   });
 
@@ -786,7 +775,7 @@ describe("App workspace", () => {
     const image = card.querySelector<HTMLImageElement>(".asset-card__preview");
     expect(image).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(stalePreviewUrl)}`,
+      toMediaProxyUrl(stalePreviewUrl, { assetId: "image-asset-1" }),
     );
 
     fireEvent.error(image!);
@@ -804,7 +793,7 @@ describe("App workspace", () => {
       const refreshed = card.querySelector<HTMLImageElement>(".asset-card__preview");
       expect(refreshed).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshPreviewUrl)}`,
+        toMediaProxyUrl(freshPreviewUrl, { assetId: "image-asset-1" }),
       );
     });
 
@@ -891,7 +880,7 @@ describe("App workspace", () => {
     const image = card.querySelector<HTMLImageElement>(".asset-card__preview");
     expect(image).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(staleLocalUrl)}`,
+      toMediaProxyUrl(staleLocalUrl, { assetId: "local-asset-9" }),
     );
 
     fireEvent.error(image!);
@@ -907,7 +896,7 @@ describe("App workspace", () => {
     await waitFor(() => {
       expect(card.querySelector<HTMLImageElement>(".asset-card__preview")).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshLocalUrl)}`,
+        toMediaProxyUrl(freshLocalUrl, { assetId: "local-asset-9" }),
       );
     });
     // 本地素材不得误走云端素材续签接口。
@@ -984,7 +973,7 @@ describe("App workspace", () => {
     const video = card.querySelector<HTMLVideoElement>("video");
     expect(video).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(staleVideoUrl)}`,
+      toMediaProxyUrl(staleVideoUrl, { assetId: "video-asset-2" }),
     );
 
     fireEvent.error(video!);
@@ -1002,7 +991,7 @@ describe("App workspace", () => {
       const refreshed = card.querySelector<HTMLVideoElement>("video");
       expect(refreshed).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshVideoUrl)}`,
+        toMediaProxyUrl(freshVideoUrl, { assetId: "video-asset-2" }),
       );
     });
   });
@@ -1247,7 +1236,7 @@ describe("App workspace", () => {
     const brokenImage = brokenImageCard.querySelector(".asset-card__preview");
     expect(brokenImage).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/a.png")}`,
+      toMediaProxyUrl("https://cdn.example.com/a.png", { assetId: "img-1" }),
     );
 
     // 图片签名 URL 过期时不能只把 img 隐藏并留下无说明的空卡片。
@@ -1783,6 +1772,8 @@ describe("App workspace", () => {
             pageNumber === 1 ? buildItems(0, 40) : pageNumber === 2 ? buildItems(40, 45) : [],
           );
         }
+        case "count_assets_by_kind":
+          return Promise.resolve({ image: 45, video: 0, audio: 0 });
         case "plugin:event|listen":
           return Promise.resolve(1);
         case "plugin:event|unlisten":
@@ -1804,6 +1795,7 @@ describe("App workspace", () => {
     render(<App />);
 
     expect(await screen.findByText("本页 40 个图片素材")).toBeInTheDocument();
+    expect(await screen.findByText("第 1 / 2 页 · 共 45 个")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /预览图片素材详情：分页素材/ })).toHaveLength(40);
     expect(screen.getByRole("button", { name: "下一页素材" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "上一页素材" })).toBeDisabled();
@@ -1811,6 +1803,7 @@ describe("App workspace", () => {
     fireEvent.click(screen.getByRole("button", { name: "下一页素材" }));
 
     expect(await screen.findByText("本页 5 个图片素材")).toBeInTheDocument();
+    expect(screen.getByText("第 2 / 2 页 · 共 45 个")).toBeInTheDocument();
     expect(screen.getAllByRole("button", { name: /预览图片素材详情：分页素材/ })).toHaveLength(5);
     expect(screen.getByRole("button", { name: "下一页素材" })).toBeDisabled();
     expect(screen.getByRole("button", { name: "上一页素材" })).toBeEnabled();
@@ -1890,6 +1883,7 @@ describe("App workspace", () => {
     expect(await screen.findByRole("tab", { name: "图片 45" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "视频 2" })).toBeInTheDocument();
     expect(screen.getByRole("tab", { name: "音频 0" })).toBeInTheDocument();
+    expect(await screen.findByText("第 1 / 2 页 · 共 45 个")).toBeInTheDocument();
     expect(countCalls).toHaveLength(1);
     expect(countCalls[0]).toMatchObject({ providerConnectionId: "count-provider", groupId: null });
 

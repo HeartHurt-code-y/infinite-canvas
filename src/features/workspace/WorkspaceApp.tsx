@@ -1412,7 +1412,7 @@ export function WorkspaceApp({
             setLibraryError(false);
             frontendLog(
               "info",
-              `[assets] 云端素材列表拉取成功: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 页码=${pageNumber}, 共 ${assets.length} 个素材, 耗时 ${Date.now() - startedAt}ms`,
+              `[assets] 云端素材列表拉取成功: providerConnectionId=${providerConnectionId}, 触发来源=${source}, 页码=${pageNumber}, 共 ${assets.length} 个素材, ${assets.filter((asset) => asset.previewUrl != null && asset.previewUrl !== "").length} 个有预览地址, 耗时 ${Date.now() - startedAt}ms`,
             );
           },
           (error: unknown) => {
@@ -7502,6 +7502,14 @@ export function WorkspaceApp({
     ? assetSearch.trim() !== committedAssetSearch
     : assetSearch !== deferredAssetSearch;
   const localAssetTotalPages = Math.max(1, Math.ceil(localAssetTotal / ASSET_PAGE_SIZE));
+  // 云端类型角标已是当前分组的全库计数；无搜索时即可换算总页数。
+  // 名称搜索仍无过滤总数，分页文案退回「第 N 页」。
+  const cloudAssetTotal =
+    committedAssetSearch.trim() === "" && cloudAssetKindTotals != null
+      ? cloudAssetKindTotals[assetKind]
+      : null;
+  const cloudAssetTotalPages =
+    cloudAssetTotal == null ? null : Math.max(1, Math.ceil(cloudAssetTotal / ASSET_PAGE_SIZE));
   const goToCloudAssetPage = useCallback(
     (page: number) => {
       if (!assetProvider || page === cloudAssetPageRef.current) return;
@@ -9438,6 +9446,8 @@ export function WorkspaceApp({
           localTotalPages={localAssetTotalPages}
           localTotal={localAssetTotal}
           cloudPage={cloudAssetPageNumber}
+          cloudTotalPages={cloudAssetTotalPages}
+          cloudTotal={cloudAssetTotal}
           cloudHasMore={cloudAssetHasMore}
           onLocalPageChange={goToLocalAssetPage}
           onCloudPageChange={goToCloudAssetPage}

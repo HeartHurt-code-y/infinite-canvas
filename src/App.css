@@ -795,22 +795,33 @@ h3 {
 }
 
 .asset-pagination {
+  /* 页脚而不是网格内容：参与 flex 文档流且允许换行，避免被
+     .asset-panel 的 overflow:hidden 或底部说明叠盖裁掉。 */
   display: flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-xs);
+  min-width: 0;
   padding-block: var(--space-sm);
   color: var(--color-chrome-subtle);
+  border-top: var(--rule-thin) solid var(--color-chrome-rule);
   font-size: var(--text-2xs);
 }
 
 .asset-pagination__controls {
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-xs);
+  min-width: 0;
 }
 
 .asset-pagination button {
+  flex: 0 0 auto;
+  box-sizing: border-box;
+  height: 2rem;
   min-height: 2rem;
   padding-inline: var(--space-xs);
   color: var(--color-chrome-ink);
@@ -823,12 +834,16 @@ h3 {
 /* 跳页输入：与翻页按钮同高的窄数字框，隐藏 number 自带步进箭头。 */
 .asset-pagination__jump {
   display: inline-flex;
+  flex: 0 0 auto;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-2xs);
 }
 
 .asset-pagination__jump input {
+  box-sizing: border-box;
   width: 3.5em;
+  height: 2rem;
   min-height: 2rem;
   padding-inline: var(--space-2xs);
   color: var(--color-chrome-ink);
@@ -837,6 +852,7 @@ h3 {
   border-radius: var(--radius-control);
   font-size: var(--text-2xs);
   text-align: center;
+  appearance: textfield;
 }
 
 .asset-pagination__jump input::-webkit-outer-spin-button,
@@ -1425,12 +1441,11 @@ svg[data-spin="true"] {
 }
 
 .asset-panel__hint {
-  position: absolute;
-  right: var(--space-sm);
-  bottom: max(var(--space-sm), env(safe-area-inset-bottom));
-  left: var(--space-sm);
+  /* 文档流页脚：绝对定位会盖住上方分页/卡片底部，看起来像控件被截断。 */
+  flex: 0 0 auto;
   margin: 0;
   padding-block-start: var(--space-xs);
+  padding-block-end: env(safe-area-inset-bottom);
   color: var(--color-chrome-subtle);
   background: var(--color-chrome-2);
   border-top: var(--rule-thin) solid var(--color-chrome-rule);

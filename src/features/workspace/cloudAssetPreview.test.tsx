@@ -6,6 +6,7 @@ import { AssetSourceDialog } from "./AssetDialogs";
 import { clearMediaByteCache } from "./mediaByteCache";
 import type { AssetItem } from "./workspaceModel";
 import * as backend from "../../lib/backend";
+import { toMediaProxyUrl } from "../../lib/mediaProxy";
 
 /**
  * 云端素材预览地址：素材库缩略图能显示、点进详情却「预览不可用」的成因。
@@ -29,7 +30,12 @@ vi.mock("../../lib/backend", { spy: true });
 const SIGNED_URL = "https://cdn.example.com/a.png?X-Tos-Signature=expired";
 const ASSET_ID = "asset-20260914103421-82xww";
 const ASSET_NAME = "ScreenShot_2026-09-07_192951_026.png";
-const PROXY_URL = `asset://localhost/video?src=${encodeURIComponent(SIGNED_URL)}&assetId=${encodeURIComponent(ASSET_ID)}`;
+
+function proxyUrl(source: string | null = SIGNED_URL): string {
+  const proxied = toMediaProxyUrl(source, { assetId: ASSET_ID });
+  if (proxied == null) throw new Error("expected desktop proxy url");
+  return proxied;
+}
 
 function cloudImageAsset(): AssetItem {
   return {
@@ -113,7 +119,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
     );
 
     // 卡片把供应商签名地址交给原生代理取字节，拿到本地字节后换成稳定地址。
-    await waitFor(() => expect(fetched).toEqual([PROXY_URL]));
+    await waitFor(() => expect(fetched).toEqual([proxyUrl()]));
     await waitFor(() => expect(cardMediaSrc()).toBe(objectUrl));
 
     // 详情弹窗渲染的就是卡片那一份地址：不再是裸的供应商签名地址，也不再另发请求。
@@ -135,16 +141,14 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
       />,
     );
     // 没有可用字节时回落到同一个原生代理地址，而不是裸的供应商地址。
-    expect(dialogPreview()?.getAttribute("src")).toBe(PROXY_URL);
+    expect(dialogPreview()?.getAttribute("src")).toBe(proxyUrl());
 
     fireEvent.error(dialogPreview()!);
     await waitFor(() =>
       expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
     );
     await waitFor(() =>
-      expect(dialogPreview()?.getAttribute("src")).toBe(
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
-      ),
+      expect(dialogPreview()?.getAttribute("src")).toBe(proxyUrl(freshUrl)),
     );
   });
 
@@ -161,7 +165,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
       />,
     );
     // 供应商签名地址经原生代理取字节：取不到时回落到代理地址，由代理按对象键兜底。
-    await waitFor(() => expect(cardMediaSrc()).toBe(PROXY_URL));
+    await waitFor(() => expect(cardMediaSrc()).toBe(proxyUrl()));
 
     fireEvent.error(document.querySelector<HTMLImageElement>(".asset-card__preview")!);
     // 卡片与画布节点、详情弹窗共用同一个恢复入口：上游回放导入时的死地址时，
@@ -169,11 +173,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
     await waitFor(() =>
       expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
     );
-    await waitFor(() =>
-      expect(cardMediaSrc()).toBe(
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
-      ),
-    );
+    await waitFor(() => expect(cardMediaSrc()).toBe(proxyUrl(freshUrl)));
   });
 
   it("列表项没有预览地址时按素材身份补取一次", async () => {
@@ -193,17 +193,14 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
     await waitFor(() =>
       expect(mocks.refreshMedia).toHaveBeenCalledWith(expect.anything(), "image", null),
     );
-    await waitFor(() =>
-      expect(cardMediaSrc()).toBe(
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
-      ),
-    );
+    await waitFor(() => expect(cardMediaSrc()).toBe(proxyUrl(freshUrl)));
   });
 
   it("刚入库、列表还没有预览地址时按素材身份取本地副本，不立刻显示预览不可用", async () => {
     const objectUrl = "blob:imported-preview";
     vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
-      expect(String(input)).toContain(`assetId=${encodeURIComponent(ASSET_ID)}`);
+      expect(String(input)).toContain(ASSET_ID);
+      expect(String(input)).not.toContain("src=");
       return Promise.resolve({
         ok: true,
         headers: { get: () => null },
@@ -242,7 +239,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
         onDropToCanvas={vi.fn()}
       />,
     );
-    await waitFor(() => expect(cardMediaSrc()).toBe(PROXY_URL));
+    await waitFor(() => expect(cardMediaSrc()).toBe(proxyUrl()));
 
     fireEvent.error(document.querySelector<HTMLImageElement>(".asset-card__preview")!);
     release?.({

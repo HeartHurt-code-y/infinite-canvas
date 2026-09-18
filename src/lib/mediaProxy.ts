@@ -15,11 +15,27 @@ function normalizedAssetId(identity?: MediaProxyIdentity): string {
   return raw.replace(/^asset:\/\//i, "").trim();
 }
 
+/** 短修订号：换签名后强制 WebView 重新请求，完整地址不进查询串。 */
+function sourceRevision(src: string): string {
+  let hash = 2166136261;
+  for (let i = 0; i < src.length; i += 1) {
+    hash ^= src.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return `${src.length.toString(36)}${(hash >>> 0).toString(36)}`;
+}
+
 function nativeProxyUrl(src: string | null, assetId: string): string {
-  const base = convertFileSrc("video", MEDIA_PROXY_SCHEME);
+  // 素材身份放进路径，不要放进查询串。Windows WebView 对自定义协议经常丢掉或截断
+  // query：只带 `?assetId=` 时原生侧收不到身份，登记表形同虚设，整页预览 400。
+  const path = assetId !== "" ? assetId : "video";
+  const base = convertFileSrc(path, MEDIA_PROXY_SCHEME);
   const query: string[] = [];
-  if (src != null && src !== "") query.push(`src=${encodeURIComponent(src)}`);
-  if (assetId !== "") query.push(`assetId=${encodeURIComponent(assetId)}`);
+  if (assetId === "") {
+    if (src != null && src !== "") query.push(`src=${encodeURIComponent(src)}`);
+  } else if (src != null && src !== "") {
+    query.push(`v=${sourceRevision(src)}`);
+  }
   return query.length > 0 ? `${base}?${query.join("&")}` : base;
 }
 
@@ -52,16 +68,19 @@ export function toMediaProxyUrl(
     return url;
   }
   if (parsed.protocol === `${MEDIA_PROXY_SCHEME}:`) {
+    if (assetId !== "") return nativeProxyUrl(parsed.searchParams.get("src"), assetId);
     const source = parsed.searchParams.get("src");
-    return source ? nativeProxyUrl(source, assetId) : withAssetId(url, assetId);
+    return source ? nativeProxyUrl(source, "") : url;
   }
-  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
-  // Tauri local-file URLs and URLs already converted for this platform stay local.
-  if (
-    parsed.hostname === "asset.localhost" ||
-    parsed.hostname === `${MEDIA_PROXY_SCHEME}.localhost`
-  ) {
+  if (parsed.hostname === "asset.localhost") {
     return withAssetId(url, assetId);
   }
+  if (parsed.hostname === `${MEDIA_PROXY_SCHEME}.localhost`) {
+    if (assetId !== "") {
+      return nativeProxyUrl(parsed.searchParams.get("src"), assetId);
+    }
+    return url;
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") return url;
   return nativeProxyUrl(url, assetId);
 }

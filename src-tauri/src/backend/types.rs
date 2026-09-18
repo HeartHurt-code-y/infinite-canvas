@@ -786,7 +786,8 @@ pub struct AssetListCommand {
     pub name: Option<String>,
     /// 所属云端素材库分组 ID（字符串形态，兼容魔芽数值 ID 与火山引擎组 ID）。
     pub group_id: Option<String>,
-    /// 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现。
+    /// 按素材类型过滤。魔芋方言透传国际版 `kind`（`image`/`video`/`audio`）；
+    /// 若上游忽略该参数，后端再逐页扫描并本地过滤。
     pub kind: Option<MediaType>,
 }
 

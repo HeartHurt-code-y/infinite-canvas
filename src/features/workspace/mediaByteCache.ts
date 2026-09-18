@@ -1,7 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 
-import { toMediaProxyUrl } from "../../lib/mediaProxy";
+import { toMediaProxyUrl, type MediaProxyIdentity } from "../../lib/mediaProxy";
 import type { AssetKind } from "./workspaceModel";
+
+/**
+ * 图片正文按素材身份走代理（长签名不进 WebView）。
+ * 视频封面 / 视频正文与登记的 preview_url 不是同一条渲染路径：封面继续把地址放进 `src`。
+ */
+function proxyIdentity(
+  assetId: string,
+  kind: AssetKind,
+  _mediaUrl: string | null | undefined,
+): MediaProxyIdentity | undefined {
+  if (assetId === "" || kind === "video") return undefined;
+  return { assetId };
+}
 
 /**
  * 素材预览的会话内字节缓存。
@@ -100,7 +113,8 @@ export async function loadMediaBytes(
   // 已知太大：保持直连渲染，不必再探一次体积。
   if (directOnlyIdentities.has(key)) return null;
 
-  const requestUrl = toMediaProxyUrl(mediaUrl, { assetId }) ?? mediaUrl ?? null;
+  const requestUrl =
+    toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind, mediaUrl)) ?? mediaUrl ?? null;
   if (requestUrl == null || requestUrl === "") return null;
 
   const request = (async (): Promise<string | null> => {
@@ -108,8 +122,9 @@ export async function loadMediaBytes(
     const controller = new AbortController();
     try {
       const response = await fetch(requestUrl, {
-        // 素材身份已经决定复用，这里不再让 WebView 做二次校验；凭据绝不外发给对象存储。
-        cache: "force-cache",
+        // 自定义协议的 4xx 不能进 HTTP 缓存：身份查询串一旦被 WebView 丢掉，第一次
+        // 400 会被 force-cache 钉死，续签/登记表就绪后同一地址也永远「预览不可用」。
+        cache: "no-store",
         credentials: "omit",
         signal: controller.signal,
       });
@@ -179,6 +194,11 @@ export interface MediaByteSource {
    * 每个素材的每个来源最多重试一次，不会形成重试循环。
    */
   readonly retry: () => void;
+  /**
+   * 回读/续签已经把完整预览地址登记进原生代理后，再拉一次字节。
+   * 与 `retry` 不同：不受「每个来源一次」限制，否则第一次失败会把这次机会用掉。
+   */
+  readonly reload: () => void;
 }
 
 /**
@@ -192,17 +212,19 @@ export function useMediaByteSource(
   kind: AssetKind,
   mediaUrl: string | null | undefined,
 ): MediaByteSource {
-  const { objectUrl, blockedObjectUrl, retryFromBytes, retryFromRemote } = useCachedBytes(
+  const { objectUrl, blockedObjectUrl, retryFromBytes, retryFromRemote, reload } = useCachedBytes(
     assetId,
     kind,
     mediaUrl,
   );
-  const remoteUrl = toMediaProxyUrl(mediaUrl, { assetId }) ?? mediaUrl ?? null;
+  const remoteUrl =
+    toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind, mediaUrl)) ?? mediaUrl ?? null;
   const usableObjectUrl = objectUrl != null && objectUrl !== blockedObjectUrl ? objectUrl : null;
   return {
     url: usableObjectUrl ?? remoteUrl,
     fromCache: usableObjectUrl != null,
     retry: usableObjectUrl != null ? retryFromRemote : retryFromBytes,
+    reload,
   };
 }
 
@@ -221,6 +243,7 @@ function useCachedBytes(
   readonly blockedObjectUrl: string | null;
   readonly retryFromRemote: () => void;
   readonly retryFromBytes: () => void;
+  readonly reload: () => void;
 } {
   const [blockedObjectUrl, setBlockedObjectUrl] = useState<string | null>(null);
   // 下载落定后必须让组件重渲染一次，否则这一次渲染读到的仍是远端地址，
@@ -261,5 +284,6 @@ function useCachedBytes(
     // 远端地址渲染失败：允许再从本地字节里取一次 —— 后端代理的磁盘缓存可能已经有
     // 这份素材（重启前下载过、或另一个渲染路径刚下载完），命中就继续渲染。
     retryFromBytes: () => retryOnce(`bytes:${requestedUrl ?? "none"}`, () => undefined),
+    reload: () => setRetryToken((value) => value + 1),
   };
 }

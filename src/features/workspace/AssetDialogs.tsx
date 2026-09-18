@@ -587,10 +587,12 @@ export function AssetSourceDialog({
     // 租约地址当预览地址回放时续签不会换地址，共享入口会继续按对象键重签暂存副本；
     // 暂存对象已被清理时由媒体代理用导入时留存的原始文件接管，弹窗不再永久停在「预览不可用」。
     void refreshMediaUrlWithStagingFallback(asset, asset.kind, rawMediaUrl).then((freshUrl) => {
-      if (freshUrl != null && freshUrl !== "" && freshUrl !== rawMediaUrl) {
+      if (freshUrl == null || freshUrl === "") return;
+      if (freshUrl !== rawMediaUrl) {
         setRefreshedMediaUrl(freshUrl);
-        setFailedMediaSrc(null);
       }
+      setFailedMediaSrc(null);
+      mediaBytes.reload();
     });
   };
   // 删除采用两段式确认：第一次点击进入「确认删除?」危险态，4 秒内再点才真正删除，

@@ -24,7 +24,7 @@ use super::{
     error::{BackendError, BackendResult},
     image_normalize::normalize_image_for_asset_window,
     local_results::{format_bytes_per_sec, safe_file_stem},
-    media_proxy::{LocalMediaFallback, LocalMediaSource},
+    media_proxy::{LocalMediaFallback, LocalMediaSource, remember_asset_preview_url},
     provider::{redact_request_value, redact_url_string, truncate_connectivity_detail},
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
@@ -779,6 +779,7 @@ impl StagingService {
             .filter(|value| !value.is_empty())
             .unwrap_or(&job.local_path)
             .to_string();
+        remember_asset_preview_url(&job.id, Some(&lease.get_url));
         Ok(LocalAssetRecord {
             id: job.id.clone(),
             name,
@@ -845,6 +846,7 @@ impl StagingService {
             ));
         }
         let lease = self.local_asset_lease(staging_job_id, command.media_type)?;
+        remember_asset_preview_url(staging_job_id, Some(&lease.get_url));
         Ok(lease.get_url)
     }
 

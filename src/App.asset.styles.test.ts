@@ -47,6 +47,20 @@ describe("素材库卡片视觉契约", () => {
     expect(cssRule(".asset-card")).toMatch(/contain-intrinsic-size:\s*auto\s+180px/);
   });
 
+  it("分页与底部说明是不收缩的文档流页脚，窄面板换行而不是被裁切", () => {
+    // 分页曾放进 .asset-grid，底部说明又是 position:absolute 盖在网格上，
+    // 控件下半截被说明的背景裁掉；单行 nowrap 在 --size-assets 宽度下还会
+    // 撑出内容盒，被 .asset-panel 的 overflow:hidden 静默截掉。
+    const pagination = cssRule(".asset-pagination");
+    expect(pagination).toMatch(/flex:\s*0 0 auto/);
+    expect(pagination).toMatch(/flex-wrap:\s*wrap/);
+    expect(pagination).toMatch(/min-width:\s*0/);
+    expect(cssRule(".asset-pagination__controls")).toMatch(/flex-wrap:\s*wrap/);
+    const hint = cssRule(".asset-panel__hint");
+    expect(hint).toMatch(/flex:\s*0 0 auto/);
+    expect(hint).not.toMatch(/position:\s*absolute/);
+  });
+
   it("分组行在窄面板下换行而不是把「新建分组」挤出面板", () => {
     // 该规则前面有一段说明注释，cssRule 的 `(?:^|})` 前缀匹配不到，这里直接取规则体。
     const row = appCss.match(/\.asset-groups__select-row\s*\{([^}]+)\}/)?.[1] ?? "";

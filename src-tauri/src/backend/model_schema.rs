@@ -597,7 +597,7 @@ fn is_gemini_image_model(model_id: &str) -> bool {
 /// （`sequential_image_generation`）与输出格式（`output_format`：jpg/png/webp）
 /// 等 Seedream 专属参数。与视频模型 seedance 名称不同（`seedream` 不含
 /// `seedance` 子串），互不干扰。
-fn is_seedream_image_model(model_id: &str) -> bool {
+pub(crate) fn is_seedream_image_model(model_id: &str) -> bool {
     model_id.to_ascii_lowercase().contains("seedream")
 }
 

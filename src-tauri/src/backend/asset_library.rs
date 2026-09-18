@@ -18,6 +18,7 @@ use url::Url;
 
 use super::{
     error::{BackendError, BackendResult},
+    media_proxy,
     provider::ProviderRuntime,
     provider_adapter::ARK_ADAPTER_ID,
     storage::TaskExecutionRecord,
@@ -397,7 +398,8 @@ impl AssetLibrary {
     /// Remote envelope shapes, status spelling and duplicate rows remain behind this interface.
     ///
     /// 未指定 `kind` 时单次转发上游分页（`page_number`/`page_size` 透传）。
-    /// 指定 `kind` 时上游不支持类型参数，改为逐页扫描（每页 100 条）并按类型过滤，
+    /// 指定 `kind` 时按国际版契约把小写 `image`/`video`/`audio` 写入 `/v1/assets/list`；
+    /// 若上游忽略该参数（旧网关仍返回混杂类型），再逐页扫描（每页 100 条）并本地过滤，
     /// 跳过 `(page_number-1)*page_size` 条命中后收集一页；扫描在命中数集齐、
     /// 上游翻完或到达 [`KIND_SCAN_PAGE_CAP`] 时提前结束。
     pub async fn browse(&self, query: AssetListCommand) -> BackendResult<Vec<CloudAssetRecord>> {
@@ -535,6 +537,9 @@ impl AssetLibrary {
         {
             body.insert("group_id".into(), value.into());
         }
+        if let Some(kind) = query.kind {
+            body.insert("kind".into(), json!(media_type_kind(kind)));
+        }
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -546,7 +551,15 @@ impl AssetLibrary {
             .await?;
         require_success("browse assets", &response)?;
         let payload: Value = serde_json::from_str(&response.body)?;
-        Ok(parse_asset_page(&provider_connection_id, &payload))
+        let assets = parse_asset_page(&provider_connection_id, &payload);
+        remember_cloud_asset_previews(&assets);
+        if !assets.is_empty() && assets.iter().all(|asset| asset.preview_url.is_none()) {
+            warn!(
+                "[assets] 本页 {} 条云素材都没有可预览的 http(s) 地址",
+                assets.len()
+            );
+        }
+        Ok(assets)
     }
 
     /// Create a single-use H5 face-authorization link for a real-person asset group.
@@ -1122,10 +1135,12 @@ impl AssetLibrary {
             .cloned()
             .unwrap_or_default();
         let provider_connection_id = query.provider_connection_id.clone();
-        Ok(items
+        let assets = items
             .iter()
             .filter_map(|entry| parse_ark_asset_entry(&provider_connection_id, entry))
-            .collect())
+            .collect::<Vec<_>>();
+        remember_cloud_asset_previews(&assets);
+        Ok(assets)
     }
 
     /// 火山方言素材删除：`DeleteAsset`（幂等，404 视为已删除）。
@@ -1368,6 +1383,7 @@ impl AssetLibrary {
                 json!({}),
             ));
         }
+        remember_cloud_asset_preview(&asset);
         Ok(asset)
     }
 
@@ -1976,6 +1992,7 @@ impl AssetLibrary {
                 json!({}),
             ));
         }
+        remember_cloud_asset_preview(&asset);
         Ok(asset)
     }
 
@@ -2544,6 +2561,16 @@ fn parse_asset_page(provider_connection_id: &str, payload: &Value) -> Vec<CloudA
         .collect()
 }
 
+fn remember_cloud_asset_preview(asset: &CloudAssetRecord) {
+    media_proxy::remember_asset_preview_url(&asset.id, asset.preview_url.as_deref());
+}
+
+fn remember_cloud_asset_previews(assets: &[CloudAssetRecord]) {
+    for asset in assets {
+        remember_cloud_asset_preview(asset);
+    }
+}
+
 fn asset_array(value: &Value) -> Vec<&Value> {
     if let Some(items) = value.as_array() {
         return items.iter().collect();
@@ -2564,12 +2591,36 @@ fn parse_asset_entry(
     fallback_id: Option<&str>,
 ) -> Option<CloudAssetRecord> {
     let record = raw.as_object()?;
-    let id = string_field(record, &["id"])
-        .or(fallback_id)
-        .map(str::trim)
+    let id = record
+        .get("id")
+        .and_then(asset_id_string)
+        .or_else(|| {
+            fallback_id
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
         .filter(|value| !value.is_empty())?;
     let raw_name = string_field(record, &["name"]).unwrap_or_default();
-    let preview_url = http_url_field(record, &["url", "preview_url", "previewUrl"]);
+    let preview_url = http_url_field(
+        record,
+        &[
+            "url",
+            "preview_url",
+            "previewUrl",
+            "URL",
+            "file_url",
+            "fileUrl",
+            "download_url",
+            "downloadUrl",
+            "signed_url",
+            "signedUrl",
+            "source_url",
+            "sourceUrl",
+            "origin_url",
+            "originUrl",
+        ],
+    );
     let asset_url = string_field(record, &["asset_url", "assetUrl"])
         .map(str::trim)
         .filter(|value| !value.is_empty())
@@ -2601,7 +2652,7 @@ fn parse_asset_entry(
     };
     Some(CloudAssetRecord {
         provider_connection_id: provider_connection_id.to_string(),
-        id: id.to_string(),
+        id,
         name: if raw_name.trim().is_empty() {
             fallback_name.to_string()
         } else {
@@ -2719,12 +2770,26 @@ fn parse_ark_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
 }
 
 fn http_url_field(record: &Map<String, Value>, fields: &[&str]) -> Option<String> {
-    fields
-        .iter()
-        .filter_map(|field| record.get(*field).and_then(Value::as_str))
-        .map(str::trim)
-        .find(|value| value.starts_with("http://") || value.starts_with("https://"))
-        .map(ToOwned::to_owned)
+    fields.iter().find_map(|field| {
+        record
+            .get(*field)
+            .and_then(http_url_from_value)
+    })
+}
+
+fn http_url_from_value(value: &Value) -> Option<String> {
+    match value {
+        Value::String(raw) => {
+            let trimmed = raw.trim();
+            let lower = trimmed.to_ascii_lowercase();
+            (lower.starts_with("http://") || lower.starts_with("https://"))
+                .then(|| trimmed.to_string())
+        }
+        Value::Object(map) => ["url", "href", "preview", "origin", "download", "signed"]
+            .into_iter()
+            .find_map(|key| map.get(key).and_then(http_url_from_value)),
+        _ => None,
+    }
 }
 
 fn parse_media_type(value: &str) -> Option<MediaType> {
@@ -3307,6 +3372,40 @@ mod tests {
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[0].path, "/v1/assets/list");
         assert_eq!(requests[0].body.as_ref().unwrap()["page_size"], 100);
+        assert!(requests[0].body.as_ref().unwrap().get("kind").is_none());
+    }
+
+    #[test]
+    fn parse_konjac_list_item_uses_https_preview_when_asset_url_is_opaque() {
+        let payload = json!({
+            "code": "success",
+            "data": { "items": [{
+                "id": "asset-20260918115256-eh389",
+                "db_id": 962,
+                "name": "封面",
+                "asset_url": "Asset://asset-20260918115256-eh389",
+                "preview_url": "https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Signature=ab%2Fcd+ef",
+                "asset_type": "Image",
+                "status": "Active",
+                "source_url": "https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Signature=ab%2Fcd+ef",
+                "group_id": 16,
+                "created_at": 1
+            }]}
+        });
+        let assets = parse_asset_page("provider-e943eb7e", &payload);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(assets[0].id, "asset-20260918115256-eh389");
+        assert_eq!(assets[0].kind, MediaType::Image);
+        assert_eq!(assets[0].status, CloudAssetStatus::Ready);
+        assert_eq!(
+            assets[0].preview_url.as_deref(),
+            Some("https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Signature=ab%2Fcd+ef")
+        );
+        assert_eq!(
+            assets[0].asset_url.as_deref(),
+            Some("Asset://asset-20260918115256-eh389")
+        );
+        assert_eq!(assets[0].group_id.as_deref(), Some("16"));
     }
 
     /// 火山引擎方舟方言：浏览走 `ListAssets` 动作（`send_ark` 端口），
@@ -3413,6 +3512,7 @@ mod tests {
         assert_eq!(requests.len(), 1);
         assert_eq!(requests[0].body.as_ref().unwrap()["page_number"], 1);
         assert_eq!(requests[0].body.as_ref().unwrap()["page_size"], 100);
+        assert_eq!(requests[0].body.as_ref().unwrap()["kind"], "video");
     }
 
     #[tokio::test]
@@ -3457,6 +3557,8 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].body.as_ref().unwrap()["page_number"], 1);
         assert_eq!(requests[1].body.as_ref().unwrap()["page_number"], 2);
+        assert_eq!(requests[0].body.as_ref().unwrap()["kind"], "video");
+        assert_eq!(requests[1].body.as_ref().unwrap()["kind"], "video");
     }
 
     #[tokio::test]
@@ -3509,6 +3611,7 @@ mod tests {
             assert_eq!(body["page_size"], 100);
             // 计数按全库口径扫描：不叠加类型过滤。
             assert!(body.get("asset_type").is_none());
+            assert!(body.get("kind").is_none());
         }
     }
 
@@ -3531,6 +3634,7 @@ mod tests {
         assert_eq!(totals, CloudAssetKindTotals::default());
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[0].body.as_ref().unwrap()["group_id"], 21);
+        assert!(requests[0].body.as_ref().unwrap().get("kind").is_none());
     }
 
     #[tokio::test]

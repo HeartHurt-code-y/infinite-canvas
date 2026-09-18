@@ -212,10 +212,11 @@ function AssetCardVideoVisual({
               playbackRefreshAttemptedRef.current = true;
               void refreshMediaUrlWithStagingFallback(asset, "video", candidateVideoUrl).then(
                 (freshUrl) => {
-                  if (freshUrl != null && freshUrl !== "" && freshUrl !== candidateVideoUrl) {
+                  if (freshUrl == null || freshUrl === "") return;
+                  if (freshUrl !== candidateVideoUrl) {
                     setRefreshedVideoUrl(freshUrl);
-                    setFailedVideoSrc(null);
                   }
+                  setFailedVideoSrc(null);
                 },
               );
             }
@@ -419,14 +420,14 @@ function AssetCard({
                         "image",
                         candidateImagePreviewUrl,
                       ).then((freshUrl) => {
-                        if (
-                          freshUrl != null &&
-                          freshUrl !== "" &&
-                          freshUrl !== candidateImagePreviewUrl
-                        ) {
+                        if (freshUrl == null || freshUrl === "") return;
+                        if (freshUrl !== candidateImagePreviewUrl) {
                           setRefreshedImagePreviewUrl(freshUrl);
-                          setFailedImagePreviewUrl(null);
                         }
+                        setFailedImagePreviewUrl(null);
+                        // 回读会把完整地址登记进原生代理；第一次失败往往发生在登记之前，
+                        // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
+                        imageBytes.reload();
                       });
                     }
                   }}

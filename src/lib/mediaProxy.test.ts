@@ -63,12 +63,18 @@ describe("media proxy URLs", () => {
     expect(toMediaProxyUrl("")).toBeNull();
   });
 
-  it("builds an identity-only proxy URL when the supplier list has no preview address", () => {
+  it("puts the asset identity in the proxy path so WebView can drop the query", () => {
     expect(toMediaProxyUrl(null, { assetId: "asset-1" })).toBe(
-      "http://assetproxy.localhost/video?assetId=asset-1",
+      "http://assetproxy.localhost/asset-1",
     );
-    expect(toMediaProxyUrl("https://cdn.example.com/a.png", { assetId: "asset-1" })).toBe(
-      `http://assetproxy.localhost/video?src=${encodeURIComponent("https://cdn.example.com/a.png")}&assetId=asset-1`,
+    const source = "https://cdn.example.com/a.png?X-Tos-Signature=ab+cd";
+    const proxied = toMediaProxyUrl(source, { assetId: "asset-1" });
+    expect(mocks.convertFileSrc).toHaveBeenCalledWith("asset-1", "assetproxy");
+    expect(proxied).toMatch(/^http:\/\/assetproxy\.localhost\/asset-1\?v=/);
+    expect(proxied).not.toContain("src=");
+    expect(proxied).not.toContain("assetId=");
+    expect(toMediaProxyUrl(source, { assetId: "asset-1" })).not.toBe(
+      toMediaProxyUrl(`${source}&n=2`, { assetId: "asset-1" }),
     );
   });
 });

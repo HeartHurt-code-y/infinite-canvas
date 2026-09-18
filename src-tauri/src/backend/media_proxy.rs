@@ -561,7 +561,8 @@ async fn proxy_response(
     }
     let is_head = request.method() == Method::HEAD;
     let asset_id = extract_asset_id(request.uri());
-    let Some(upstream_url) = extract_upstream_url(request.uri()) else {
+    let src_url = extract_upstream_url(request.uri());
+    let Some(mut upstream_url) = preferred_upstream(src_url, asset_id.as_deref()) else {
         if let Some(asset_id) = asset_id.as_deref() {
             if let Some(response) =
                 serve_imported_asset(fallback, asset_id, None, request.headers(), cache, is_head)
@@ -570,6 +571,13 @@ async fn proxy_response(
                 return response;
             }
         }
+        tauri_plugin_log::log::warn!(
+            "media proxy rejected: invalid_media_source, path={}, query_id={}, path_id={}, has_src={}",
+            request.uri().path(),
+            query_param(request.uri(), "assetId").is_some(),
+            extract_asset_id_from_path(request.uri().path()).is_some(),
+            query_param(request.uri(), "src").is_some()
+        );
         return error_response(StatusCode::BAD_REQUEST, "invalid_media_source", is_head);
     };
     // Range 请求（视频探测/续播）不参与缓存：分块响应不是完整内容。
@@ -582,19 +590,26 @@ async fn proxy_response(
         }
     }
     // 完整 GET 参与在途合并；Range/HEAD 各自带语义，逐一转发。
-    let fetched = if request.method() == Method::GET && !range_requested {
-        fetch_shared(&upstream_url, request.headers()).await
-    } else {
-        Arc::new(
-            match fetch_upstream(&upstream_url, request.method().clone(), request.headers()).await {
-                Ok((status, headers, body)) => FetchedUpstream::Media {
-                    status,
-                    headers,
-                    body,
-                },
-                Err(failure) => FetchedUpstream::Failed(failure),
-            },
+    let fetched = fetch_media_outcome(
+        &upstream_url,
+        request.method().clone(),
+        request.headers(),
+        range_requested,
+    )
+    .await;
+    let fetched = if let Some(registered) =
+        registry_retry_url(&fetched, &upstream_url, asset_id.as_deref())
+    {
+        upstream_url = registered;
+        fetch_media_outcome(
+            &upstream_url,
+            request.method().clone(),
+            request.headers(),
+            range_requested,
         )
+        .await
+    } else {
+        fetched
     };
     match take_outcome(fetched) {
         FetchedUpstream::Media {
@@ -778,21 +793,167 @@ fn extract_upstream_url(uri: &Uri) -> Option<Url> {
 }
 
 fn extract_asset_id(uri: &Uri) -> Option<String> {
-    let raw = query_param(uri, "assetId")?;
-    let id = raw
-        .strip_prefix("asset://")
-        .unwrap_or(&raw)
-        .trim()
-        .to_string();
+    if let Some(raw) = query_param(uri, "assetId") {
+        let id = normalize_asset_id(&raw);
+        if !id.is_empty() {
+            return Some(id);
+        }
+    }
+    extract_asset_id_from_path(uri.path())
+}
+
+/// `http://assetproxy.localhost/{assetId}`：身份在路径上，不依赖 WebView 是否保留 query。
+fn extract_asset_id_from_path(path: &str) -> Option<String> {
+    let trimmed = path.trim().trim_start_matches('/');
+    if trimmed.is_empty() {
+        return None;
+    }
+    let segment = trimmed.split('/').next().unwrap_or("");
+    let decoded = percent_decode_component(segment)?;
+    if decoded.eq_ignore_ascii_case("video") || decoded.eq_ignore_ascii_case("localhost") {
+        return None;
+    }
+    let id = normalize_asset_id(&decoded);
     (!id.is_empty()).then_some(id)
 }
 
 fn query_param(uri: &Uri, name: &str) -> Option<String> {
     let query = uri.query()?;
-    url::form_urlencoded::parse(query.as_bytes())
-        .find(|(key, _)| key == name)
-        .map(|(_, value)| value.into_owned())
-        .filter(|value| !value.is_empty())
+    for pair in query.split('&') {
+        let Some((key, value)) = pair.split_once('=') else {
+            continue;
+        };
+        if key != name {
+            continue;
+        }
+        // 预览地址由前端 `encodeURIComponent` 写入：只做百分号解码。
+        // `application/x-www-form-urlencoded` 会把 `+` 变成空格，而 TOS 签名经常含 `+`，
+        // 改坏后上游 403，卡片就会整页停在「预览不可用」。
+        let decoded = percent_decode_component(value)?;
+        return (!decoded.is_empty()).then_some(decoded);
+    }
+    None
+}
+
+fn percent_decode_component(value: &str) -> Option<String> {
+    let bytes = value.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'%' if index + 2 < bytes.len() => {
+                let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+                out.push(u8::from_str_radix(hex, 16).ok()?);
+                index += 3;
+            }
+            byte => {
+                out.push(byte);
+                index += 1;
+            }
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn normalize_asset_id(raw: &str) -> String {
+    raw.trim()
+        .strip_prefix("asset://")
+        .unwrap_or_else(|| raw.trim())
+        .trim()
+        .to_string()
+}
+
+fn preview_registry() -> &'static Mutex<HashMap<String, Url>> {
+    static REGISTRY: OnceLock<Mutex<HashMap<String, Url>>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+fn lock_preview_registry() -> MutexGuard<'static, HashMap<String, Url>> {
+    preview_registry()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// 浏览/回读云素材时记下完整预览地址，供媒体代理按素材身份取字节。
+///
+/// 签名 TOS 地址很长，塞进 WebView 的 `assetproxy?src=` 后可能被截断或二次解码；
+/// 客户令牌拉来的素材本机又没有导入原图，截断后的 403 就会整页「预览不可用」。
+pub(crate) fn remember_asset_preview_url(asset_id: &str, preview_url: Option<&str>) {
+    let id = normalize_asset_id(asset_id);
+    if id.is_empty() {
+        return;
+    }
+    let Some(raw) = preview_url.map(str::trim).filter(|value| !value.is_empty()) else {
+        return;
+    };
+    let Ok(url) = Url::parse(raw) else {
+        return;
+    };
+    if !valid_upstream(&url) {
+        return;
+    }
+    lock_preview_registry().insert(id, url);
+}
+
+fn lookup_asset_preview_url(asset_id: &str) -> Option<Url> {
+    let id = normalize_asset_id(asset_id);
+    if id.is_empty() {
+        return None;
+    }
+    lock_preview_registry().get(&id).cloned()
+}
+
+fn preferred_upstream(src: Option<Url>, asset_id: Option<&str>) -> Option<Url> {
+    let registered = asset_id.and_then(lookup_asset_preview_url);
+    match (src, registered) {
+        (None, registered) => registered,
+        (Some(src), None) => Some(src),
+        // 有登记地址时以浏览/回读时的完整签名为准：WebView 传来的 src 可能被截断或二次解码。
+        (Some(_src), Some(registered)) => Some(registered),
+    }
+}
+
+fn outcome_needs_registry_retry(outcome: &FetchedUpstream) -> bool {
+    match outcome {
+        FetchedUpstream::Failed(_) => true,
+        FetchedUpstream::Media { status, .. } => {
+            *status != StatusCode::RANGE_NOT_SATISFIABLE && !status.is_success()
+        }
+    }
+}
+
+fn registry_retry_url(
+    fetched: &FetchedUpstream,
+    attempted: &Url,
+    asset_id: Option<&str>,
+) -> Option<Url> {
+    if !outcome_needs_registry_retry(fetched) {
+        return None;
+    }
+    let registered = lookup_asset_preview_url(asset_id?)?;
+    (registered.as_str() != attempted.as_str()).then_some(registered)
+}
+
+async fn fetch_media_outcome(
+    url: &Url,
+    method: Method,
+    request_headers: &HeaderMap,
+    range_requested: bool,
+) -> SharedOutcome {
+    if method == Method::GET && !range_requested {
+        fetch_shared(url, request_headers).await
+    } else {
+        Arc::new(
+            match fetch_upstream(url, method, request_headers).await {
+                Ok((status, headers, body)) => FetchedUpstream::Media {
+                    status,
+                    headers,
+                    body,
+                },
+                Err(failure) => FetchedUpstream::Failed(failure),
+            },
+        )
+    }
 }
 
 fn valid_upstream(url: &Url) -> bool {
@@ -802,32 +963,39 @@ fn valid_upstream(url: &Url) -> bool {
         && url.password().is_none()
 }
 
+fn upstream_http_client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .no_gzip()
+            .no_brotli()
+            .no_deflate()
+            .no_zstd()
+            .connect_timeout(CONNECT_TIMEOUT)
+            // 整包预算按体积另算（见 `transfer_budget`）：这里只保留「链路卡死」的读间隔保护，
+            // 不用固定总超时把慢但在推进的大图下载判死。
+            .read_timeout(READ_GAP_TIMEOUT)
+            .referer(false)
+            .redirect(reqwest::redirect::Policy::custom(|attempt| {
+                if attempt.previous().len() >= 5 {
+                    attempt.error("media redirect limit reached")
+                } else if !valid_upstream(attempt.url()) {
+                    attempt.error("unsupported media redirect")
+                } else {
+                    attempt.follow()
+                }
+            }))
+            .build()
+            .expect("media proxy client")
+    })
+}
+
 async fn fetch_upstream(
     url: &Url,
     method: Method,
     request_headers: &HeaderMap,
 ) -> Result<(StatusCode, HeaderMap, Vec<u8>), UpstreamFailure> {
-    let client = reqwest::Client::builder()
-        .no_gzip()
-        .no_brotli()
-        .no_deflate()
-        .no_zstd()
-        .connect_timeout(CONNECT_TIMEOUT)
-        // 整包预算按体积另算（见 `transfer_budget`）：这里只保留「链路卡死」的读间隔保护，
-        // 不用固定总超时把慢但在推进的大图下载判死。
-        .read_timeout(READ_GAP_TIMEOUT)
-        .referer(false)
-        .redirect(reqwest::redirect::Policy::custom(|attempt| {
-            if attempt.previous().len() >= 5 {
-                attempt.error("media redirect limit reached")
-            } else if !valid_upstream(attempt.url()) {
-                attempt.error("unsupported media redirect")
-            } else {
-                attempt.follow()
-            }
-        }))
-        .build()
-        .map_err(|_| UpstreamFailure::Unavailable)?;
+    let client = upstream_http_client();
     // Range 单独处理：开放区间钳制为固定窗口，约束单请求内存；其余区间原样转发。
     // 先计算 outgoing（method 之后被 move），再构建请求。
     let outgoing_range = request_headers.get("range").map(|value| {
@@ -1019,6 +1187,22 @@ mod tests {
                             "Content-Type: text/plain\r\n".into(),
                             "secret-signed-url",
                         ),
+                        // 模拟 TOS 签名：缺 Signature 查询串时 403，完整签名才给图。
+                        path if path.starts_with("/tos-object") => {
+                            if path.contains("X-Tos-Signature=good") {
+                                (
+                                    "200 OK",
+                                    "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n".into(),
+                                    "PNGBYTES",
+                                )
+                            } else {
+                                (
+                                    "403 Forbidden",
+                                    "Content-Type: application/xml\r\n".into(),
+                                    "denied",
+                                )
+                            }
+                        }
                         path if path.starts_with("/image") => (
                             "200 OK",
                             "Content-Type: image/png\r\nCache-Control: public, max-age=3600\r\n".into(),
@@ -1028,7 +1212,8 @@ mod tests {
                     };
                     // 图片路径自带 Content-Type，不再追加视频头。路径要在 `request` 被 move
                     // 进夹具记录之前转成自有字符串（它借用自 `request`）。
-                    let is_image_response = path.starts_with("/image");
+                    let is_image_response =
+                        path.starts_with("/image") || path.starts_with("/tos-object");
                     captured.lock().unwrap().push(request);
                     if !is_image_response {
                         headers.push_str(&format!(
@@ -1780,6 +1965,7 @@ mod tests {
             "assetproxy://video",
             "assetproxy://localhost/video",
             "http://assetproxy.localhost/video",
+            "https://assetproxy.localhost/video",
         ] {
             let mut url = Url::parse(prefix).unwrap();
             url.query_pairs_mut().append_pair("src", original);
@@ -1795,5 +1981,129 @@ mod tests {
             url.query_pairs_mut().append_pair("src", source);
             assert!(extract_upstream_url(&url.as_str().parse().unwrap()).is_none());
         }
+    }
+
+    #[test]
+    fn keeps_plus_in_signed_query_when_webview_has_already_decoded_percent_encoding() {
+        // WebView 把 `%2B` 解成 `+` 后再交给协议处理器时，不能再按 form-urlencoded
+        // 把 `+` 当成空格，否则 TOS 签名损坏。
+        let uri: Uri =
+            "http://assetproxy.localhost/video?src=https://cdn.example/a.png%3Fsig%3Dab%2Bcd&assetId=asset-1"
+                .parse()
+                .unwrap();
+        assert_eq!(
+            query_param(&uri, "src").as_deref(),
+            Some("https://cdn.example/a.png?sig=ab+cd")
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_registered_preview_when_webview_splits_signed_query() {
+        let server = HttpFixture::new();
+        let full = format!(
+            "{}/tos-object.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Signature=good",
+            server.url
+        );
+        remember_asset_preview_url("asset-tos-1", Some(&full));
+        // 模拟 WebView 把 src 里未编码的 `&` 当成查询分隔符：签名后半段落成兄弟参数。
+        let uri = format!(
+            "http://assetproxy.localhost/video?src={}/tos-object.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Signature=good&assetId=asset-tos-1",
+            server.url
+        );
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Vec::new())
+                .unwrap(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"PNGBYTES");
+        assert_eq!(response.headers()["content-type"], "image/png");
+        lock_preview_registry().remove("asset-tos-1");
+    }
+
+    #[tokio::test]
+    async fn serves_registered_preview_when_list_omits_src_and_only_asset_id_is_present() {
+        let server = HttpFixture::new();
+        let full = format!(
+            "{}/tos-object.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Signature=good",
+            server.url
+        );
+        remember_asset_preview_url("asset-tos-2", Some(&full));
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri("http://assetproxy.localhost/video?assetId=asset-tos-2")
+                .body(Vec::new())
+                .unwrap(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"PNGBYTES");
+        lock_preview_registry().remove("asset-tos-2");
+    }
+
+    #[tokio::test]
+    async fn serves_registered_preview_when_asset_id_is_in_path_and_query_is_dropped() {
+        let server = HttpFixture::new();
+        let full = format!(
+            "{}/tos-object.png?X-Tos-Algorithm=TOS4-HMAC-SHA256&X-Tos-Signature=good",
+            server.url
+        );
+        remember_asset_preview_url("asset-tos-path", Some(&full));
+        for uri in [
+            "http://assetproxy.localhost/asset-tos-path",
+            "http://assetproxy.localhost/asset-tos-path?v=abc",
+            "https://assetproxy.localhost/asset-tos-path",
+            "assetproxy://localhost/asset-tos-path",
+        ] {
+            let response = proxy_response(
+                Request::builder()
+                    .method(Method::GET)
+                    .uri(uri)
+                    .body(Vec::new())
+                    .unwrap(),
+                None,
+                None,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(response.body(), b"PNGBYTES", "{uri}");
+        }
+        lock_preview_registry().remove("asset-tos-path");
+    }
+
+    #[tokio::test]
+    async fn prefers_registered_preview_when_webview_turns_plus_into_space() {
+        let server = HttpFixture::new();
+        let full = format!(
+            "{}/tos-object.png?X-Tos-Signature=good",
+            server.url
+        );
+        remember_asset_preview_url("asset-tos-3", Some(&full));
+        // src 里签名被解成空格，若仍用这条地址上游会 403；登记表里仍是完整签名。
+        let uri = format!(
+            "http://assetproxy.localhost/video?src={}/tos-object.png?X-Tos-Signature=go%20od&assetId=asset-tos-3",
+            server.url
+        );
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri(uri)
+                .body(Vec::new())
+                .unwrap(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"PNGBYTES");
+        lock_preview_registry().remove("asset-tos-3");
     }
 }

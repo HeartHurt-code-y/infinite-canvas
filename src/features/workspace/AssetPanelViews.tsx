@@ -518,13 +518,15 @@ export function AssetEmptyState({
   );
 }
 
-/** 分页控件：本地显示「第 x/y 页 · 共 N 个」，云端仅页码（上游无总数）。 */
+/** 分页控件：有总数时显示「第 x/y 页 · 共 N 个」；云端搜索无过滤总数时只显示当前页。 */
 export function AssetPagination({
   source,
   localPage,
   localTotalPages,
   localTotal,
   cloudPage,
+  cloudTotalPages,
+  cloudTotal,
   cloudHasMore,
   onLocalPageChange,
   onCloudPageChange,
@@ -534,13 +536,16 @@ export function AssetPagination({
   readonly localTotalPages: number;
   readonly localTotal: number;
   readonly cloudPage: number;
+  /** 云端当前类型的总页数；搜索过滤或计数未就绪时为 null。 */
+  readonly cloudTotalPages: number | null;
+  readonly cloudTotal: number | null;
   readonly cloudHasMore: boolean;
   readonly onLocalPageChange: (page: number) => void;
   readonly onCloudPageChange: (page: number) => void;
 }) {
   const currentPage = source === "local" ? localPage : cloudPage;
-  // 云端上游无过滤总数，无法钳制上限；超出范围的页码会返回空页，用上一页/跳转自然纠正。
-  const maxPage = source === "local" ? localTotalPages : null;
+  // 云端搜索时上游无过滤总数，无法钳制上限；超出范围的页码会返回空页，用上一页/跳转自然纠正。
+  const maxPage = source === "local" ? localTotalPages : cloudTotalPages;
   const [pageDraft, setPageDraft] = useState("");
 
   const submitPageJump = () => {
@@ -559,7 +564,9 @@ export function AssetPagination({
       <span>
         {source === "local"
           ? `第 ${localPage} / ${localTotalPages} 页 · 共 ${localTotal} 个`
-          : `第 ${cloudPage} 页`}
+          : cloudTotalPages != null && cloudTotal != null
+            ? `第 ${cloudPage} / ${cloudTotalPages} 页 · 共 ${cloudTotal} 个`
+            : `第 ${cloudPage} 页`}
       </span>
       <span className="asset-pagination__controls">
         <button
@@ -575,7 +582,13 @@ export function AssetPagination({
         </button>
         <button
           type="button"
-          disabled={source === "local" ? localPage >= localTotalPages : !cloudHasMore}
+          disabled={
+            source === "local"
+              ? localPage >= localTotalPages
+              : cloudTotalPages != null
+                ? cloudPage >= cloudTotalPages && !cloudHasMore
+                : !cloudHasMore
+          }
           aria-label="下一页素材"
           onClick={() => {
             if (source === "local") onLocalPageChange(localPage + 1);
@@ -663,6 +676,8 @@ export function AssetPanel({
   localTotalPages,
   localTotal,
   cloudPage,
+  cloudTotalPages,
+  cloudTotal,
   cloudHasMore,
   onLocalPageChange,
   onCloudPageChange,
@@ -720,6 +735,8 @@ export function AssetPanel({
   readonly localTotalPages: number;
   readonly localTotal: number;
   readonly cloudPage: number;
+  readonly cloudTotalPages: number | null;
+  readonly cloudTotal: number | null;
   readonly cloudHasMore: boolean;
   readonly onLocalPageChange: (page: number) => void;
   readonly onCloudPageChange: (page: number) => void;
@@ -841,24 +858,26 @@ export function AssetPanel({
             }}
           />
         )}
-        {isDesktopRuntime() &&
-        !assetsLoading &&
-        !libraryError &&
-        (source === "local"
-          ? localTotal > 0 || localPage > 1
-          : visibleAssets.length > 0 || cloudPage > 1) ? (
-          <AssetPagination
-            source={source}
-            localPage={localPage}
-            localTotalPages={localTotalPages}
-            localTotal={localTotal}
-            cloudPage={cloudPage}
-            cloudHasMore={cloudHasMore}
-            onLocalPageChange={onLocalPageChange}
-            onCloudPageChange={onCloudPageChange}
-          />
-        ) : null}
       </div>
+      {isDesktopRuntime() &&
+      !assetsLoading &&
+      !libraryError &&
+      (source === "local"
+        ? localTotal > 0 || localPage > 1
+        : visibleAssets.length > 0 || cloudPage > 1) ? (
+        <AssetPagination
+          source={source}
+          localPage={localPage}
+          localTotalPages={localTotalPages}
+          localTotal={localTotal}
+          cloudPage={cloudPage}
+          cloudTotalPages={cloudTotalPages}
+          cloudTotal={cloudTotal}
+          cloudHasMore={cloudHasMore}
+          onLocalPageChange={onLocalPageChange}
+          onCloudPageChange={onCloudPageChange}
+        />
+      ) : null}
       <p className="asset-panel__hint">
         单击素材查看源媒体与完整信息；拖到画布创建节点，连线后可在提示词中 @ 引用。
       </p>

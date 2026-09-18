@@ -12,6 +12,7 @@ import type {
   PromptSegment,
   SaveCanvasDocumentCommand,
 } from "./lib/backend";
+import { toMediaProxyUrl } from "./lib/mediaProxy";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import type { PromptContentDocumentV1 } from "./lib/promptContent";
 import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
@@ -4994,7 +4995,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const image = node.querySelector("img");
     expect(image).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(staleUrl)}`,
+      toMediaProxyUrl(staleUrl, { assetId: "image-asset-1" }),
     );
 
     // 旧签名过期：加载失败后按素材身份向后端续签一次，节点数据回写新地址。
@@ -5003,7 +5004,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       const refreshed = node.querySelector("img");
       expect(refreshed).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+        toMediaProxyUrl(freshUrl, { assetId: "image-asset-1" }),
       );
     });
     const refreshCalls = invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media");
@@ -5020,7 +5021,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() => {
       expect(node.querySelector("img")).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+        toMediaProxyUrl(freshUrl, { assetId: "image-asset-1" }),
       );
     });
     fireEvent.error(node.querySelector("img")!);
@@ -5165,14 +5166,14 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() => expect(refreshLocalCalls).toBe(1));
     expect(node.querySelector("img")).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent(staleUrl)}`,
+      toMediaProxyUrl(staleUrl, { assetId: "5744d2ad-19ee-4d07-a4a7-ada09152027c" }),
     );
 
     fireEvent.error(node.querySelector("img")!);
     await waitFor(() => {
       expect(node.querySelector("img")).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+        toMediaProxyUrl(freshUrl, { assetId: "5744d2ad-19ee-4d07-a4a7-ada09152027c" }),
       );
     });
     expect(refreshLocalCalls).toBe(2);
@@ -5246,7 +5247,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() => {
       expect(node.querySelector("img")).toHaveAttribute(
         "src",
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+        toMediaProxyUrl(freshUrl, { assetId: "5744d2ad-19ee-4d07-a4a7-ada09152027c" }),
       );
     });
     // 续签在水合后主动发生，且每个素材身份只请求一次；节点里那份过期地址没有触发 onError 自愈。
@@ -7065,7 +7066,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
     expect(video).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/train.mp4")}`,
+      toMediaProxyUrl("https://cdn.example.com/train.mp4", { assetId: "asset-video-1" }),
     );
     expect(video).toHaveAttribute(
       "poster",
@@ -7118,7 +7119,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     // 封面就绪前只显示中性加载状态。
     expect(video).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/hem.mp4")}`,
+      toMediaProxyUrl("https://cdn.example.com/hem.mp4", { assetId: "asset-video-2" }),
     );
     expect(video).not.toHaveAttribute("poster");
     expect(within(card).getByText("正在加载预览")).toBeInTheDocument();
@@ -8515,7 +8516,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(thumbImage).not.toBeNull();
     expect(thumbImage).toHaveAttribute(
       "src",
-      `asset://localhost/video?src=${encodeURIComponent("https://cdn.example.com/station.jpg")}`,
+      toMediaProxyUrl("https://cdn.example.com/station.jpg", { assetId: "asset-image-1" }),
     );
     expect(option.querySelector(".prompt-mention__thumb--fallback")).toBeNull();
   });

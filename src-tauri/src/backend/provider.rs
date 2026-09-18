@@ -5,7 +5,7 @@ use std::{
 
 use base64::Engine as _;
 use chrono::Utc;
-use futures_util::StreamExt as _;
+use futures_util::{Stream, StreamExt as _};
 use reqwest::{Method, multipart};
 use serde_json::{Map, Value, json};
 use tauri_plugin_log::log::{error, info, warn};
@@ -356,7 +356,9 @@ struct TextCallRequest<'a> {
 /// 触发反向代理零字节超时（如 Cloudflare 100 秒后的 524）的原因，因此提前给出
 /// 指向明确的本机错误，而不是让代理层返回一个无法归因的状态码。
 const FIRST_BYTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
-/// 流式响应的块间空闲上限：正常增量通常毫秒级到达，停发这么久即视为上游中断。
+/// 流式响应的块间空闲上限。正常增量通常毫秒级到达；部分网关在正文（甚至
+/// `finish_reason`）已经发完后仍不关闭连接、也不再推 `[DONE]` / usage，这时
+/// 已组装出可交付结果就回收，而不是把整轮生成判失败。
 const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(180);
 /// 单个 SSE 帧的缓冲上限。一帧承载一条增量，正常远小于此值；超过它说明上游没有
 /// 按 SSE 分帧回传，继续缓存没有意义。
@@ -385,7 +387,12 @@ struct SseFrameParser {
 impl SseFrameParser {
     /// 累积一个网络块并就地派发其中已完整的事件帧；每个帧处理完都把新增正文推给
     /// `sink`，由它按时间节流后交给上层。
-    fn push(&mut self, chunk: &[u8], dialect: &mut dyn DialectSink, sink: &mut StreamSink<'_>) {
+    fn push<D: DialectSink + ?Sized>(
+        &mut self,
+        chunk: &[u8],
+        dialect: &mut D,
+        sink: &mut StreamSink<'_>,
+    ) {
         self.buffer.extend_from_slice(chunk);
         loop {
             // SSE 事件以空行结束，`\r\n\r\n` 与 `\n\n` 兼容。
@@ -411,10 +418,10 @@ impl SseFrameParser {
     /// 解析一个事件帧。`data:` 承载 JSON 载荷，其余字段（event / id / 注释）忽略：
     /// 三类方言都把有效载荷放在 `data` 里，`event:` 只是事件种类的冗余标注，
     /// 种类可从载荷的字段形状判断，因此不需要单独跟踪。
-    fn accept_frame(
+    fn accept_frame<D: DialectSink + ?Sized>(
         &mut self,
         frame: &str,
-        dialect: &mut dyn DialectSink,
+        dialect: &mut D,
         sink: &mut StreamSink<'_>,
     ) {
         let mut data = String::new();
@@ -447,6 +454,23 @@ impl SseFrameParser {
         // 一帧处理完就把新增正文推出去：正文在方言里是纯追加的，按「已发出长度」
         // 切片即可拿到增量，对三种方言都成立。
         sink.emit(dialect.text());
+    }
+
+    /// 连接结束或空闲超时时，把没有空行结尾的最后一帧也送进方言。
+    ///
+    /// 不少聚合网关会在最后一个 `data:` 事件后既不补 `\n\n` 也不关连接；若不冲掉
+    /// 残余缓冲，已经到达的终态帧（`finish_reason` / 最后一段正文）会被直接丢掉。
+    fn flush_pending<D: DialectSink + ?Sized>(
+        &mut self,
+        dialect: &mut D,
+        sink: &mut StreamSink<'_>,
+    ) {
+        if self.buffer.is_empty() {
+            return;
+        }
+        let frame = String::from_utf8_lossy(&self.buffer).into_owned();
+        self.buffer.clear();
+        self.accept_frame(&frame, dialect, sink);
     }
 
     /// 组装完整响应对象：方言负责正文、终态与用量，这里统一附加流式诊断字段与
@@ -545,6 +569,61 @@ impl<'a> StreamSink<'a> {
             }
         }
         self.emitted_chars = text.len();
+    }
+}
+
+/// SSE 字节流的读取统计。`stalled` 表示块间空闲超时，不等于「没有可用结果」。
+struct SseReadStats {
+    transcript: String,
+    chunks: usize,
+    bytes: usize,
+    stalled: bool,
+}
+
+/// 按空闲超时逐块读取 SSE 正文。连接正常关闭时 `stalled = false`；超过空闲上限仍
+/// 没有下一字节时 `stalled = true`，由调用方决定是回收已组装内容还是报协议错误。
+async fn consume_sse_stream<S, B, E, D>(
+    mut stream: S,
+    idle_timeout: std::time::Duration,
+    parser: &mut SseFrameParser,
+    dialect: &mut D,
+    sink: &mut StreamSink<'_>,
+) -> Result<SseReadStats, E>
+where
+    S: Stream<Item = Result<B, E>> + Unpin,
+    B: AsRef<[u8]>,
+    D: DialectSink + ?Sized,
+{
+    let mut transcript = String::new();
+    let mut chunks = 0usize;
+    let mut bytes = 0usize;
+    loop {
+        let next = tokio::time::timeout(idle_timeout, stream.next()).await;
+        let item = match next {
+            Ok(Some(item)) => item,
+            Ok(None) => {
+                return Ok(SseReadStats {
+                    transcript,
+                    chunks,
+                    bytes,
+                    stalled: false,
+                });
+            }
+            Err(_) => {
+                return Ok(SseReadStats {
+                    transcript,
+                    chunks,
+                    bytes,
+                    stalled: true,
+                });
+            }
+        };
+        let chunk = item?;
+        let chunk = chunk.as_ref();
+        chunks += 1;
+        bytes += chunk.len();
+        transcript.push_str(&String::from_utf8_lossy(chunk));
+        parser.push(chunk, dialect, sink);
     }
 }
 
@@ -1004,6 +1083,107 @@ fn parse_complete_json_payload(transcript: &str) -> Option<Value> {
         }
         _ => None,
     }
+}
+
+/// 空闲超时后是否已经拿到可交付结果：有正文，或上游已经给出终态原因。
+/// 只有思维链、或只有 keep-alive 注释时不能回收，那仍然是真正的中断。
+fn streamed_response_is_usable(payload: &Value, deliverable_text: &str) -> bool {
+    if !deliverable_text.trim().is_empty() {
+        return true;
+    }
+    if payload_has_deliverable_text(payload) {
+        return true;
+    }
+    payload_has_terminal_reason(payload)
+}
+
+fn payload_has_deliverable_text(payload: &Value) -> bool {
+    if payload
+        .pointer("/choices/0/message/content")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    if payload
+        .pointer("/content/0/text")
+        .and_then(Value::as_str)
+        .is_some_and(|text| !text.trim().is_empty())
+    {
+        return true;
+    }
+    payload
+        .pointer("/candidates/0/content/parts")
+        .and_then(Value::as_array)
+        .is_some_and(|parts| {
+            parts.iter().any(|part| {
+                part.get("thought").and_then(Value::as_bool) != Some(true)
+                    && part
+                        .get("text")
+                        .and_then(Value::as_str)
+                        .is_some_and(|text| !text.trim().is_empty())
+            })
+        })
+}
+
+fn payload_has_terminal_reason(payload: &Value) -> bool {
+    [
+        "/choices/0/finish_reason",
+        "/stop_reason",
+        "/candidates/0/finishReason",
+    ]
+    .into_iter()
+    .any(|path| {
+        payload
+            .pointer(path)
+            .and_then(Value::as_str)
+            .is_some_and(|reason| !reason.is_empty())
+    })
+}
+
+fn mark_stream_stalled(payload: &mut Value, chunks: usize, bytes: usize) {
+    let Some(object) = payload.as_object_mut() else {
+        return;
+    };
+    let diagnostics = object.entry("x_stream").or_insert_with(|| json!({}));
+    if let Some(stream) = diagnostics.as_object_mut() {
+        stream.insert("stalled".to_string(), json!(true));
+        stream.insert("receivedChunks".to_string(), json!(chunks));
+        stream.insert("receivedBytes".to_string(), json!(bytes));
+    }
+}
+
+/// 流结束（正常关闭或空闲超时）后的收尾：冲掉没有空行结尾的最后一帧，必要时把
+/// 完整 JSON 退化响应接进来。空闲超时且没有任何可交付结果时返回 `Err(())`。
+fn finalize_streamed_text_payload(
+    mut parser: SseFrameParser,
+    dialect: &mut dyn SseDialect,
+    sink: &mut StreamSink<'_>,
+    status: u16,
+    transcript: &str,
+    stats: &SseReadStats,
+    task_id: &str,
+    call_id: &str,
+) -> Result<Value, ()> {
+    parser.flush_pending(dialect, sink);
+    let deliverable = dialect.text().to_string();
+    let mut payload = parser.assemble(dialect);
+    if (200..300).contains(&status)
+        && payload.pointer("/x_stream/frames").and_then(Value::as_u64) == Some(0)
+        && let Some(complete) = parse_complete_json_payload(transcript)
+    {
+        info!(
+            "[provider] 上游未按 SSE 回传，改用完整 JSON 响应: taskId={task_id}, callId={call_id}"
+        );
+        payload = complete;
+    }
+    if stats.stalled {
+        if !(200..300).contains(&status) || !streamed_response_is_usable(&payload, &deliverable) {
+            return Err(());
+        }
+        mark_stream_stalled(&mut payload, stats.chunks, stats.bytes);
+    }
+    Ok(payload)
 }
 
 /// 返回（帧结束位置, 分隔符宽度）；没有完整帧时返回 None。
@@ -1909,78 +2089,77 @@ impl ProviderRuntime {
             Some(sink) => StreamSink::new(Some(sink)),
             None => StreamSink::new(None),
         };
-        let mut transcript = String::new();
-        let mut chunks = 0usize;
-        let mut bytes = 0usize;
-        loop {
-            // 首块与块间用同一空闲超时：只要上游持续回传就不判定失败，停发即中止。
-            let next = tokio::time::timeout(STREAM_IDLE_TIMEOUT, stream.next()).await;
-            let item = match next {
-                Ok(Some(item)) => item,
-                Ok(None) => break,
-                Err(_) => {
-                    let backend_error = BackendError::protocol(
-                        format!(
-                            "provider stream stalled for {}s",
-                            STREAM_IDLE_TIMEOUT.as_secs()
-                        ),
-                        json!({
-                            "callId": call_id,
-                            "timeoutSeconds": STREAM_IDLE_TIMEOUT.as_secs(),
-                            "receivedChunks": chunks,
-                            "receivedBytes": bytes,
-                        }),
-                    );
-                    error!("[provider] 流式响应中断: label={label}, 已接收 {chunks} 块");
-                    self.lifecycle.commit(
-                        task_id,
-                        GenerationLifecycleFact::ProviderCallFailed {
-                            call_id: call_id.to_string(),
-                            sent_at,
-                            error: backend_error.runtime_record(),
-                        },
-                    )?;
-                    return Err(backend_error);
-                }
-            };
-            let chunk = match item {
-                Ok(chunk) => chunk,
-                Err(error) => {
-                    let backend_error = BackendError::Transport(error);
-                    error!(
-                        "[provider] 读取流式响应失败（网络层）: label={label}, HTTP {status}, 错误: {}",
-                        backend_error.payload().message
-                    );
-                    self.lifecycle.commit(
-                        task_id,
-                        GenerationLifecycleFact::ProviderCallFailed {
-                            call_id: call_id.to_string(),
-                            sent_at,
-                            error: backend_error.runtime_record(),
-                        },
-                    )?;
-                    return Err(backend_error);
-                }
-            };
-            chunks += 1;
-            bytes += chunk.len();
-            transcript.push_str(&String::from_utf8_lossy(&chunk));
-            // 解析器按原始字节累积，只在完整帧上解码，避免块边界撕裂多字节字符。
-            parser.push(&chunk, dialect.as_mut(), &mut delta_sink);
-        }
-        let mut payload = parser.assemble(dialect.as_ref());
-        // 网关可能忽略流式请求直接回一份完整 JSON（聚合平台的常见退化行为，Gemini 的
-        // 非 SSE 返回还会是一个 JSON 数组）。这种情况下一个 SSE 帧都没有，但响应体
-        // 本身就是完整响应，直接采用，避免把一次成功的调用判成「空响应」。
-        // 判定条件用帧数而不是正文长度：上游确实流式回了一个空正文时不应被覆盖。
-        if (200..300).contains(&status)
-            && payload.pointer("/x_stream/frames").and_then(Value::as_u64) == Some(0)
-            && let Some(complete) = parse_complete_json_payload(&transcript)
+        let stats = match consume_sse_stream(
+            &mut stream,
+            STREAM_IDLE_TIMEOUT,
+            &mut parser,
+            dialect.as_mut(),
+            &mut delta_sink,
+        )
+        .await
         {
-            info!(
-                "[provider] 上游未按 SSE 回传，改用完整 JSON 响应: taskId={task_id}, callId={call_id}"
+            Ok(stats) => stats,
+            Err(error) => {
+                let backend_error = BackendError::Transport(error);
+                error!(
+                    "[provider] 读取流式响应失败（网络层）: label={label}, HTTP {status}, 错误: {}",
+                    backend_error.payload().message
+                );
+                self.lifecycle.commit(
+                    task_id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.to_string(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                    },
+                )?;
+                return Err(backend_error);
+            }
+        };
+        let payload = match finalize_streamed_text_payload(
+            parser,
+            dialect.as_mut(),
+            &mut delta_sink,
+            status,
+            &stats.transcript,
+            &stats,
+            task_id,
+            call_id,
+        ) {
+            Ok(payload) => payload,
+            Err(()) => {
+                let backend_error = BackendError::protocol(
+                    format!(
+                        "provider stream stalled for {}s",
+                        STREAM_IDLE_TIMEOUT.as_secs()
+                    ),
+                    json!({
+                        "callId": call_id,
+                        "timeoutSeconds": STREAM_IDLE_TIMEOUT.as_secs(),
+                        "receivedChunks": stats.chunks,
+                        "receivedBytes": stats.bytes,
+                    }),
+                );
+                error!(
+                    "[provider] 流式响应中断: label={label}, 已接收 {} 块",
+                    stats.chunks
+                );
+                self.lifecycle.commit(
+                    task_id,
+                    GenerationLifecycleFact::ProviderCallFailed {
+                        call_id: call_id.to_string(),
+                        sent_at,
+                        error: backend_error.runtime_record(),
+                    },
+                )?;
+                return Err(backend_error);
+            }
+        };
+        if stats.stalled {
+            warn!(
+                "[provider] 流式空闲超时，改用已接收内容: label={label}, 已接收 {} 块 / {} 字节",
+                stats.chunks, stats.bytes
             );
-            payload = complete;
         }
         // 补发被节流窗口挡住的最后一段：上游可能正好在窗口内结束。
         if (200..300).contains(&status) {
@@ -1991,7 +2170,7 @@ impl ProviderRuntime {
         let body_text = if (200..300).contains(&status) {
             serde_json::to_string(&payload).unwrap_or_default()
         } else {
-            transcript
+            stats.transcript
         };
         self.lifecycle.commit(
             task_id,
@@ -5042,6 +5221,149 @@ mod tests {
     }
 
     #[test]
+    fn sse_parser_flushes_a_trailing_frame_without_a_blank_line() {
+        let mut dialect = OpenAiChatDialect::default();
+        let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
+        parser.push(
+            concat!(
+                "data: {\"choices\":[{\"delta\":{\"content\":\"前\"},\"finish_reason\":null}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{\"content\":\"后\"},\"finish_reason\":\"stop\"}]}",
+            )
+            .as_bytes(),
+            &mut dialect,
+            &mut sink,
+        );
+        parser.flush_pending(&mut dialect, &mut sink);
+        let payload = parser.assemble(&dialect);
+        assert_eq!(payload["choices"][0]["message"]["content"], "前后");
+        assert_eq!(payload["choices"][0]["finish_reason"], "stop");
+        assert_eq!(payload["x_stream"]["frames"], 2);
+    }
+
+    fn stalled_stats(transcript: &str, chunks: usize) -> SseReadStats {
+        SseReadStats {
+            transcript: transcript.to_string(),
+            chunks,
+            bytes: transcript.len(),
+            stalled: true,
+        }
+    }
+
+    #[test]
+    fn idle_timeout_salvages_a_stream_that_already_has_deliverable_text() {
+        let sse = concat!(
+            "data: {\"choices\":[{\"delta\":{\"content\":\"# 分镜\"},\"finish_reason\":null}]}\n\n",
+            "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+        );
+        let mut dialect = OpenAiChatDialect::default();
+        let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
+        parser.push(sse.as_bytes(), &mut dialect, &mut sink);
+        let payload = finalize_streamed_text_payload(
+            parser,
+            &mut dialect,
+            &mut sink,
+            200,
+            sse,
+            &stalled_stats(sse, 23),
+            "task-1",
+            "call-1",
+        )
+        .expect("stalled stream with text is usable");
+        assert_eq!(payload["choices"][0]["message"]["content"], "# 分镜");
+        assert_eq!(payload["choices"][0]["finish_reason"], "stop");
+        assert_eq!(payload["x_stream"]["stalled"], true);
+        assert_eq!(payload["x_stream"]["receivedChunks"], 23);
+    }
+
+    #[test]
+    fn idle_timeout_salvages_complete_json_when_the_gateway_never_closes() {
+        let transcript = r#"{"choices":[{"message":{"role":"assistant","content":"完整正文"},"finish_reason":"stop"}]}"#;
+        let mut dialect = OpenAiChatDialect::default();
+        let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
+        parser.push(transcript.as_bytes(), &mut dialect, &mut sink);
+        let payload = finalize_streamed_text_payload(
+            parser,
+            &mut dialect,
+            &mut sink,
+            200,
+            transcript,
+            &stalled_stats(transcript, 23),
+            "task-1",
+            "call-1",
+        )
+        .expect("stalled complete JSON is usable");
+        assert_eq!(
+            payload["choices"][0]["message"]["content"],
+            "完整正文"
+        );
+        assert_eq!(payload["x_stream"]["stalled"], true);
+    }
+
+    #[test]
+    fn idle_timeout_without_deliverable_text_stays_a_protocol_error() {
+        let sse = ": keep-alive\n\ndata: {\"choices\":[{\"delta\":{\"reasoning_content\":\"还在想\"}}]}\n\n";
+        let mut dialect = OpenAiChatDialect::default();
+        let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
+        parser.push(sse.as_bytes(), &mut dialect, &mut sink);
+        assert!(
+            finalize_streamed_text_payload(
+                parser,
+                &mut dialect,
+                &mut sink,
+                200,
+                sse,
+                &stalled_stats(sse, 2),
+                "task-1",
+                "call-1",
+            )
+            .is_err()
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_timeout_salvages_bytes_already_read_from_an_open_connection() {
+        let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"已生成\"},\"finish_reason\":\"stop\"}]}\n\n";
+        let stream = futures_util::StreamExt::chain(
+            futures_util::stream::iter([Ok::<Vec<u8>, &'static str>(
+                sse.as_bytes().to_vec(),
+            )]),
+            futures_util::stream::pending(),
+        );
+        let mut dialect = OpenAiChatDialect::default();
+        let mut parser = SseFrameParser::default();
+        let mut sink = StreamSink::new(None);
+        let stats = consume_sse_stream(
+            stream,
+            STREAM_IDLE_TIMEOUT,
+            &mut parser,
+            &mut dialect,
+            &mut sink,
+        )
+        .await
+        .expect("open connection becomes idle, not a transport error");
+        assert!(stats.stalled);
+        assert_eq!(stats.chunks, 1);
+        assert_eq!(stats.bytes, sse.len());
+        let payload = finalize_streamed_text_payload(
+            parser,
+            &mut dialect,
+            &mut sink,
+            200,
+            &stats.transcript,
+            &stats,
+            "task-1",
+            "call-1",
+        )
+        .expect("idle timeout reuses the already assembled reply");
+        assert_eq!(payload["choices"][0]["message"]["content"], "已生成");
+        assert_eq!(payload["x_stream"]["stalled"], true);
+    }
+
+    #[test]
     fn sse_parser_surfaces_in_stream_errors_and_keeps_reasoning_out_of_the_deliverable() {
         let mut dialect = OpenAiChatDialect::default();
         let mut parser = SseFrameParser::default();
@@ -6023,6 +6345,40 @@ mod tests {
         assert_eq!(body["response_format"], "b64_json");
         assert_eq!(body["background"], "transparent");
         assert_eq!(body["layer_decomposition"], true);
+    }
+
+    #[test]
+    fn seedream_image_to_image_rejects_local_result_without_remote_url() {
+        // 对齐客户二次改图失败现场：上一节点 local_result 只有本地字节、没有
+        // remoteReference 时，构建器必须在发请求前以这条校验信息失败。
+        let schema = super::super::model_schema::default_model_schema(
+            "doubao-seedream-5-0-pro-260628",
+            &[GenerationOperation::ImageToImage],
+        );
+        let mut generation = resolved(schema["image_to_image"].clone(), json!({}));
+        let mut image = resolved_media(MediaType::Image, 1, "reference_image", "", Some(0));
+        image.remote_reference = None;
+        image.bytes = Some(vec![0; 8]);
+        image.display_name = "b8c43a59-02e6-44f4-bd08-af3104dce0b9-1.jpg".into();
+        image.file_name = "b8c43a59-02e6-44f4-bd08-af3104dce0b9-1.jpg.jpg".into();
+        image.stable_identity = json!({
+            "kind": "local_result",
+            "generationTaskId": "b8c43a59-02e6-44f4-bd08-af3104dce0b9",
+            "resultIndex": 1,
+            "canvasNodeKey": "output-6hkhrk08"
+        });
+        generation.images.push(image);
+        let error = build_seedream_image_to_image_body(
+            &task(GenerationOperation::ImageToImage),
+            &generation,
+        )
+        .expect_err("seedream image-to-image must require a remote-readable URL");
+        assert!(
+            error
+                .to_string()
+                .contains("seedream image input has no remote-readable reference"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

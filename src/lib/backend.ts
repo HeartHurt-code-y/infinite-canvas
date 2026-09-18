@@ -842,8 +842,8 @@ export interface AssetListQuery {
   /** 分组 ID（字符串形态，兼容魔芋数值 ID 与火山引擎 `asset-group-…`）。 */
   readonly groupId?: string | null;
   /**
-   * 按素材类型过滤。上游 `/v1/assets/list` 不支持类型参数，由后端逐页扫描实现；
-   * 不传时单次透传上游分页。
+   * 按素材类型过滤。魔芋方言会把国际版 `kind`（`image`/`video`/`audio`）交给
+   * `/v1/assets/list`；若上游忽略该参数，后端再逐页扫描。不传时单次透传上游分页。
    */
   readonly kind?: MediaType | null;
 }
