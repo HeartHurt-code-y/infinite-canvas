@@ -9,6 +9,8 @@ import {
   collectPublishFilePaths,
   contentTypeForFileName,
   isRetryableTosNetworkError,
+  parseTosUploadId,
+  buildCompleteMultipartXml,
   readTosPublishEnv,
   tosFetch,
 } from "./publish-tos-updates.mjs";
@@ -126,5 +128,21 @@ test("tosFetch surfaces the original Headers Timeout after retries are exhausted
         },
       }),
     /请求 TOS 失败：fetch failed \(Headers Timeout Error\)/,
+  );
+});
+
+test("parses TOS multipart upload id and complete XML", () => {
+  assert.equal(
+    parseTosUploadId(
+      `<?xml version="1.0"?><InitiateMultipartUploadResult><UploadId>abc+123==</UploadId></InitiateMultipartUploadResult>`,
+    ),
+    "abc+123==",
+  );
+  assert.equal(
+    buildCompleteMultipartXml([
+      { partNumber: 1, etag: '"etag-a"' },
+      { partNumber: 2, etag: '"etag-b"' },
+    ]),
+    `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"etag-a"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"etag-b"</ETag></Part></CompleteMultipartUpload>`,
   );
 });
