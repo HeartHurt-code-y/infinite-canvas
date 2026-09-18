@@ -14,6 +14,7 @@ use super::{
     downloader::{VideoDownloadJobRecord, VideoDownloaderEngineStatus},
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
+    license::LicenseSnapshot,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider_adapter::ProviderAdapterKind,
@@ -50,11 +51,29 @@ use super::{
     },
 };
 
+fn require_entitlement(state: &BackendState) -> CommandResult<()> {
+    state.license.require_unlocked().command()
+}
+
+#[tauri::command]
+pub fn get_license_status(state: State<'_, BackendState>) -> LicenseSnapshot {
+    state.license.snapshot()
+}
+
+#[tauri::command]
+pub fn activate_license(
+    state: State<'_, BackendState>,
+    code: String,
+) -> CommandResult<LicenseSnapshot> {
+    state.license.activate(&code).command()
+}
+
 #[tauri::command]
 pub async fn save_reverse_video_evidence(
     state: State<'_, BackendState>,
     command: SaveReverseVideoEvidenceCommand,
 ) -> CommandResult<ReverseVideoEvidence> {
+    require_entitlement(&state)?;
     let service = state.reverse_video.clone();
     tokio::task::spawn_blocking(move || service.save_evidence(command))
         .await
@@ -80,6 +99,7 @@ pub async fn deliver_reverse_video(
     state: State<'_, BackendState>,
     command: DeliverReverseVideoCommand,
 ) -> CommandResult<ReverseVideoDelivery> {
+    require_entitlement(&state)?;
     let service = state.reverse_video.clone();
     tokio::task::spawn_blocking(move || service.deliver(command))
         .await
@@ -98,6 +118,7 @@ pub fn save_workflow_history(
     state: State<'_, BackendState>,
     command: SaveWorkflowHistoryCommand,
 ) -> CommandResult<WorkflowHistoryRecord> {
+    require_entitlement(&state)?;
     state.storage.save_workflow_history(command).command()
 }
 
@@ -229,6 +250,7 @@ pub async fn start_blender_render(
     state: State<'_, BackendState>,
     request: StartBlenderRenderRequest,
 ) -> CommandResult<BlenderRenderJob> {
+    require_entitlement(&state)?;
     state.blender.start(request).await.command()
 }
 
@@ -271,6 +293,7 @@ pub fn start_remotion_render(
     state: State<'_, BackendState>,
     command: StartRemotionRenderCommand,
 ) -> CommandResult<RemotionRenderRecord> {
+    require_entitlement(&state)?;
     state.remotion_renderer.start(command).command()
 }
 
@@ -451,6 +474,7 @@ pub fn save_canvas_document(
     state: State<'_, BackendState>,
     command: SaveCanvasDocumentCommand,
 ) -> CommandResult<CanvasDocumentRecord> {
+    require_entitlement(&state)?;
     if command.id.trim().is_empty() || !command.document.is_object() {
         return Err(BackendError::validation(
             "canvas document requires an id and a JSON object",
@@ -481,6 +505,7 @@ pub fn delete_canvas_document(
     state: State<'_, BackendState>,
     canvas_id: String,
 ) -> CommandResult<()> {
+    require_entitlement(&state)?;
     state.storage.delete_canvas_document(&canvas_id).command()
 }
 
@@ -489,6 +514,7 @@ pub fn start_generation(
     state: State<'_, BackendState>,
     command: StartGenerationCommand,
 ) -> CommandResult<String> {
+    require_entitlement(&state)?;
     state.tasks.start(command).command()
 }
 
@@ -500,6 +526,7 @@ pub async fn run_prompt_node(
     state: State<'_, BackendState>,
     command: OptimizeVideoPromptCommand,
 ) -> CommandResult<OptimizedPromptResult> {
+    require_entitlement(&state)?;
     let deps = super::prompt_optimize::PromptVisionDeps {
         app: &app,
         storage: &state.storage,
@@ -743,6 +770,7 @@ pub fn start_staging_upload(
     state: State<'_, BackendState>,
     command: StartStagingCommand,
 ) -> CommandResult<String> {
+    require_entitlement(&state)?;
     let started_at = std::time::Instant::now();
     info!(
         "[staging] start_staging_upload 命令开始: localPath={}, purpose={}, mediaType={}, import={}",
@@ -1130,6 +1158,7 @@ pub fn start_video_download(
     state: State<'_, BackendState>,
     command: StartVideoDownloadCommand,
 ) -> CommandResult<VideoDownloadJobRecord> {
+    require_entitlement(&state)?;
     state.downloader.start_download(&command.url).command()
 }
 
@@ -1170,6 +1199,7 @@ pub fn start_video_composition(
     state: State<'_, BackendState>,
     command: StartVideoCompositionCommand,
 ) -> CommandResult<VideoCompositionJobRecord> {
+    require_entitlement(&state)?;
     state.composer.start_composition(command).command()
 }
 
@@ -1196,6 +1226,7 @@ pub fn start_video_frame_extraction(
     state: State<'_, BackendState>,
     command: StartVideoFrameExtractionCommand,
 ) -> CommandResult<VideoFrameExtractionJobRecord> {
+    require_entitlement(&state)?;
     state
         .frame_extractor
         .start_extraction_with_percentages(

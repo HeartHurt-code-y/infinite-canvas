@@ -29,6 +29,8 @@ pub enum BackendError {
     NotFound(String),
     #[error("conflict: {0}")]
     Conflict(String),
+    #[error("{message}")]
+    Forbidden { message: String, details: Value },
 }
 
 impl BackendError {
@@ -41,6 +43,13 @@ impl BackendError {
 
     pub fn protocol(message: impl Into<String>, details: Value) -> Self {
         Self::Protocol {
+            message: message.into(),
+            details,
+        }
+    }
+
+    pub fn forbidden(message: impl Into<String>, details: Value) -> Self {
+        Self::Forbidden {
             message: message.into(),
             details,
         }
@@ -73,6 +82,7 @@ impl BackendError {
             Self::Protocol { details, .. } => ("protocol", details.clone()),
             Self::NotFound(value) => ("not_found", json!({ "source": value })),
             Self::Conflict(value) => ("conflict", json!({ "source": value })),
+            Self::Forbidden { details, .. } => ("forbidden", details.clone()),
         };
 
         BackendErrorPayload {

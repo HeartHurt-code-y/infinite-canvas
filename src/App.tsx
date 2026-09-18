@@ -3,6 +3,7 @@ import "@xyflow/react/dist/style.css";
 import { useState } from "react";
 import { Toaster } from "sonner";
 import "./App.css";
+import { LicenseGate } from "./features/license/LicenseGate";
 import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { createQueryClient } from "./lib/queryClient";
 import "./styles/studio.css";
@@ -25,7 +26,9 @@ function App() {
   const [queryClient] = useState(createQueryClient);
   return (
     <QueryClientProvider client={queryClient}>
-      <CanvasWorkspace />
+      <LicenseGate>
+        <CanvasWorkspace />
+      </LicenseGate>
       <Toaster
         className="app-toaster"
         closeButton

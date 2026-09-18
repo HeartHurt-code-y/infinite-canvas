@@ -80,6 +80,11 @@ tauri-plugin-updater = "2"
 # 导致 macOS 安装包所有密钥「配不上、拉不到」（not found: credential ...）。
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { version = "3.6.3", default-features = false, features = ["windows-native"] }
+winreg = "0.55"
+
+[[bin]]
+name = "issue-license"
+path = "src/bin/issue_license.rs"
 
 # macOS / iOS 走 Security.framework 的登录钥匙串（MacCredentialBuilder），
 # 持久化级别为 UntilDelete，与 Windows 行为一致。

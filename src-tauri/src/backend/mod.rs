@@ -10,6 +10,7 @@ pub mod error;
 pub mod frame_extractor;
 mod gpt_image_style_library;
 pub mod image_normalize;
+pub mod license;
 pub mod local_results;
 pub mod media;
 pub mod media_cache;
@@ -43,6 +44,7 @@ use credentials::CredentialStore;
 use downloader::VideoDownloadService;
 use error::BackendResult;
 use frame_extractor::VideoFrameExtractionService;
+use license::LicenseService;
 use local_results::LocalResultService;
 use media::MediaResolver;
 use provider::ProviderRuntime;
@@ -71,6 +73,7 @@ pub struct BackendState {
     pub blender: BlenderRenderService,
     pub reverse_video: ReverseVideoService,
     pub video_edit_sources: VideoEditSourceService,
+    pub license: LicenseService,
 }
 
 impl BackendState {
@@ -84,9 +87,9 @@ impl BackendState {
         // 其余平台用系统凭据库；逐字说明与取舍见 credentials.rs 模块文档。
         let credentials = CredentialStore::new(&data_directory);
         tauri_plugin_log::log::info!("credential backend: {}", credentials.backend_label());
-        media_proxy::configure_preview_cache_directory(
-            media_proxy::preview_cache_directory(&data_directory),
-        );
+        media_proxy::configure_preview_cache_directory(media_proxy::preview_cache_directory(
+            &data_directory,
+        ));
         let providers =
             ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials.clone())?;
         let assets = AssetLibrary::new(providers.clone());
@@ -154,6 +157,7 @@ impl BackendState {
         );
         let remotion_renderer =
             RemotionRenderService::new(downloads_directory, app.path().resource_dir()?);
+        let license = LicenseService::open(&data_directory, app.path().home_dir().ok().as_deref());
 
         Ok(Self {
             storage,
@@ -172,6 +176,7 @@ impl BackendState {
             blender,
             reverse_video,
             video_edit_sources,
+            license,
         })
     }
 }

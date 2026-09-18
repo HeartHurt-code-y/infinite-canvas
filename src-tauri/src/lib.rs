@@ -3,6 +3,11 @@ mod backend;
 use backend::commands;
 use tauri::Manager as _;
 
+/// 作者侧签发月卡激活码。绑定机器码后仅该机可用；省略则任意机器可用一次。
+pub fn issue_paid_license(machine_id: Option<&str>, days: u16) -> String {
+    backend::license::issue_code(machine_id, days)
+}
+
 /// 处理 `--keychain-access-self-test=<ref>`：返回 true 表示已完成自检、调用方应跳过启动。
 ///
 /// 用途：一条命令回答「这个构建产物能不能正常存取凭据」。它走与线上完全相同的
@@ -183,6 +188,8 @@ pub fn run() {
             commands::cancel_video_frame_extraction,
             backend::thumbnail::create_media_thumbnail,
             commands::backend_health,
+            commands::get_license_status,
+            commands::activate_license,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application")
