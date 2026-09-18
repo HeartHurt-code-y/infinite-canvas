@@ -10,7 +10,8 @@ import {
   contentTypeForFileName,
   isRetryableTosNetworkError,
   parseTosUploadId,
-  buildCompleteMultipartXml,
+  normalizeTosEtag,
+  buildCompleteMultipartJson,
   readTosPublishEnv,
   tosFetch,
 } from "./publish-tos-updates.mjs";
@@ -144,11 +145,12 @@ test("parses TOS multipart upload id and complete XML", () => {
     ),
     "2c38cf561063d3c3592a07ad7c75ae396aad7c75",
   );
+  assert.equal(normalizeTosEtag('"abc+123=="'), "abc+123==");
   assert.equal(
-    buildCompleteMultipartXml([
+    buildCompleteMultipartJson([
       { partNumber: 1, etag: '"etag-a"' },
       { partNumber: 2, etag: '"etag-b"' },
     ]),
-    `<CompleteMultipartUpload><Part><PartNumber>1</PartNumber><ETag>"etag-a"</ETag></Part><Part><PartNumber>2</PartNumber><ETag>"etag-b"</ETag></Part></CompleteMultipartUpload>`,
+    '{"Parts":[{"PartNumber":1,"ETag":"etag-a"},{"PartNumber":2,"ETag":"etag-b"}]}',
   );
 });

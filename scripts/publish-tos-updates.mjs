@@ -7,6 +7,7 @@ import {
   readFileSync,
   readSync,
   statSync,
+  unlinkSync,
   writeFileSync,
 } from "node:fs";
 import https from "node:https";
@@ -37,6 +38,7 @@ export const TOS_FETCH_MAX_ATTEMPTS = 5;
 /** 单次 PUT 会被 TOS 408 掐掉（约 700MB 安装包）。大于该体积改走分片。 */
 export const TOS_MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 export const TOS_MULTIPART_PART_SIZE_BYTES = 32 * 1024 * 1024;
+export const TOS_MULTIPART_CONCURRENCY = 3;
 
 /**
  * Node 全局 fetch（undici）默认 headersTimeout=300s，计时从**发出请求**开始，
@@ -342,13 +344,54 @@ export function parseTosUploadId(payload) {
   throw new Error(`TOS 分片初始化未返回 UploadId：${text.slice(0, 240)}`);
 }
 
-export function buildCompleteMultipartXml(parts) {
-  const body = parts
-    .map(
-      (part) => `<Part><PartNumber>${part.partNumber}</PartNumber><ETag>${part.etag}</ETag></Part>`,
-    )
-    .join("");
-  return `<CompleteMultipartUpload>${body}</CompleteMultipartUpload>`;
+export function normalizeTosEtag(etag) {
+  return String(etag ?? "")
+    .trim()
+    .replace(/^W\//i, "")
+    .replaceAll('"', "");
+}
+
+export function buildCompleteMultipartJson(parts) {
+  return JSON.stringify({
+    Parts: parts.map((part) => ({
+      PartNumber: part.partNumber,
+      ETag: normalizeTosEtag(part.etag),
+    })),
+  });
+}
+
+function multipartProgressPath(filePath) {
+  return `${filePath}.multipart.json`;
+}
+
+function readMultipartProgress(filePath, objectKey, size) {
+  const progressPath = multipartProgressPath(filePath);
+  if (!existsSync(progressPath)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(progressPath, "utf8"));
+    if (
+      parsed &&
+      parsed.objectKey === objectKey &&
+      parsed.size === size &&
+      typeof parsed.uploadId === "string" &&
+      parsed.uploadId !== "" &&
+      Array.isArray(parsed.parts)
+    ) {
+      return parsed;
+    }
+  } catch {
+    // 进度文件损坏就重新初始化。
+  }
+  return null;
+}
+
+function writeMultipartProgress(filePath, progress) {
+  writeFileSync(`${filePath}.multipart.json`, `${JSON.stringify(progress)}\n`);
+}
+
+function clearMultipartProgress(filePath) {
+  const progressPath = multipartProgressPath(filePath);
+  if (existsSync(progressPath)) unlinkSync(progressPath);
 }
 
 function readFileSlice(filePath, offset, length) {
@@ -362,6 +405,33 @@ function readFileSlice(filePath, offset, length) {
   }
 }
 
+function listMultipartSlices(size) {
+  /** @type {Array<{ partNumber: number, offset: number, length: number }>} */
+  const slices = [];
+  let offset = 0;
+  let partNumber = 1;
+  while (offset < size) {
+    const length = Math.min(TOS_MULTIPART_PART_SIZE_BYTES, size - offset);
+    slices.push({ partNumber, offset, length });
+    offset += length;
+    partNumber += 1;
+  }
+  return slices;
+}
+
+async function runWithConcurrency(items, concurrency, worker) {
+  let nextIndex = 0;
+  async function runNext() {
+    while (nextIndex < items.length) {
+      const current = nextIndex;
+      nextIndex += 1;
+      await worker(items[current], current);
+    }
+  }
+  const poolSize = Math.max(1, Math.min(concurrency, items.length));
+  await Promise.all(Array.from({ length: poolSize }, () => runNext()));
+}
+
 export async function putPublicObjectFromFile(config, objectKey, filePath, fileName) {
   const size = statSync(filePath).size;
   if (size <= TOS_MULTIPART_THRESHOLD_BYTES) {
@@ -369,36 +439,51 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
   }
   const host = tosUpdatesHost(config.bucket, config.endpoint);
   const contentType = contentTypeForFileName(fileName);
-  const initiated = await tosFetch({
-    method: "POST",
-    host,
-    objectKey,
-    region: config.region,
-    accessKey: config.accessKey,
-    secretKey: config.secretKey,
-    extraQuery: [["uploads", ""]],
-    extraHeaders: {
-      "content-type": contentType,
-      "cache-control": cacheControlForFileName(fileName),
-      "x-tos-acl": "public-read",
-    },
-  });
-  if (initiated.status < 200 || initiated.status >= 300) {
-    throw new Error(
-      `初始化分片上传 ${objectKey} 失败：HTTP ${initiated.status} ${initiated.text.slice(0, 300)}`,
+  let progress = readMultipartProgress(filePath, objectKey, size);
+  if (!progress) {
+    const initiated = await tosFetch({
+      method: "POST",
+      host,
+      objectKey,
+      region: config.region,
+      accessKey: config.accessKey,
+      secretKey: config.secretKey,
+      extraQuery: [["uploads", ""]],
+      extraHeaders: {
+        "content-type": contentType,
+        "cache-control": cacheControlForFileName(fileName),
+        "x-tos-acl": "public-read",
+      },
+    });
+    if (initiated.status < 200 || initiated.status >= 300) {
+      throw new Error(
+        `初始化分片上传 ${objectKey} 失败：HTTP ${initiated.status} ${initiated.text.slice(0, 300)}`,
+      );
+    }
+    progress = {
+      objectKey,
+      size,
+      uploadId: parseTosUploadId(initiated.text),
+      parts: [],
+    };
+    writeMultipartProgress(filePath, progress);
+  } else {
+    console.log(
+      `[tos-publish] 续传 ${objectKey}，已有 ${progress.parts.length} 个分片，uploadId=${progress.uploadId}`,
     );
   }
-  const uploadId = parseTosUploadId(initiated.text);
+  const uploadId = progress.uploadId;
   /** @type {Array<{ partNumber: number, etag: string }>} */
-  const parts = [];
+  const parts = [...progress.parts];
+  const doneParts = new Set(parts.map((part) => part.partNumber));
+  const pending = listMultipartSlices(size).filter((slice) => !doneParts.has(slice.partNumber));
+  let abortOnFailure = pending.length > 0;
   try {
-    let offset = 0;
-    let partNumber = 1;
-    while (offset < size) {
-      const length = Math.min(TOS_MULTIPART_PART_SIZE_BYTES, size - offset);
-      const body = readFileSlice(filePath, offset, length);
+    let persistLock = Promise.resolve();
+    await runWithConcurrency(pending, TOS_MULTIPART_CONCURRENCY, async (slice) => {
+      const body = readFileSlice(filePath, slice.offset, slice.length);
       console.log(
-        `[tos-publish] 分片 ${partNumber} ${objectKey} ${offset}-${offset + length - 1}/${size}`,
+        `[tos-publish] 分片 ${slice.partNumber} ${objectKey} ${slice.offset}-${slice.offset + slice.length - 1}/${size}`,
       );
       const uploaded = await tosFetch({
         method: "PUT",
@@ -408,7 +493,7 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
         accessKey: config.accessKey,
         secretKey: config.secretKey,
         extraQuery: [
-          ["partNumber", String(partNumber)],
+          ["partNumber", String(slice.partNumber)],
           ["uploadId", uploadId],
         ],
         extraHeaders: {
@@ -418,13 +503,30 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
       });
       if (uploaded.status < 200 || uploaded.status >= 300 || !uploaded.etag) {
         throw new Error(
-          `上传分片 ${partNumber} ${objectKey} 失败：HTTP ${uploaded.status} ${uploaded.text.slice(0, 300)}`,
+          `上传分片 ${slice.partNumber} ${objectKey} 失败：HTTP ${uploaded.status} ${uploaded.text.slice(0, 300)}`,
         );
       }
-      parts.push({ partNumber, etag: uploaded.etag });
-      offset += length;
-      partNumber += 1;
-    }
+      const previous = persistLock;
+      let release = () => {};
+      persistLock = new Promise((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        parts.push({ partNumber: slice.partNumber, etag: uploaded.etag });
+        writeMultipartProgress(filePath, {
+          objectKey,
+          size,
+          uploadId,
+          parts: [...parts].sort((left, right) => left.partNumber - right.partNumber),
+        });
+      } finally {
+        release();
+      }
+    });
+    abortOnFailure = false;
+    parts.sort((left, right) => left.partNumber - right.partNumber);
+    const completeBody = buildCompleteMultipartJson(parts);
     const completed = await tosFetch({
       method: "POST",
       host,
@@ -434,26 +536,31 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
       secretKey: config.secretKey,
       extraQuery: [["uploadId", uploadId]],
       extraHeaders: {
-        "content-type": "application/xml",
+        "content-type": "application/json",
+        "content-length": String(Buffer.byteLength(completeBody)),
       },
-      body: buildCompleteMultipartXml(parts),
+      body: completeBody,
     });
     if (completed.status < 200 || completed.status >= 300) {
       throw new Error(
         `完成分片上传 ${objectKey} 失败：HTTP ${completed.status} ${completed.text.slice(0, 300)}`,
       );
     }
+    clearMultipartProgress(filePath);
     return completed;
   } catch (error) {
-    await tosFetch({
-      method: "DELETE",
-      host,
-      objectKey,
-      region: config.region,
-      accessKey: config.accessKey,
-      secretKey: config.secretKey,
-      extraQuery: [["uploadId", uploadId]],
-    }).catch(() => {});
+    if (abortOnFailure) {
+      clearMultipartProgress(filePath);
+      await tosFetch({
+        method: "DELETE",
+        host,
+        objectKey,
+        region: config.region,
+        accessKey: config.accessKey,
+        secretKey: config.secretKey,
+        extraQuery: [["uploadId", uploadId]],
+      }).catch(() => {});
+    }
     throw error;
   }
 }
