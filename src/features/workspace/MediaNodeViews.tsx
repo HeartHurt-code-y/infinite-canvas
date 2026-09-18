@@ -2317,7 +2317,7 @@ export function CanvasOutputNode({
                 }
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-valuenow={phase === "saving" ? (savePercent ?? 0) : progress}
+                aria-valuenow={phase === "saving" ? (savePercent ?? 0) : (progress ?? 0)}
               >
                 <i style={{ width: `${phase === "saving" ? savePercent : progress}%` }} />
               </span>
