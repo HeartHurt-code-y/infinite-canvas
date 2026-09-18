@@ -139,6 +139,12 @@ test("parses TOS multipart upload id and complete XML", () => {
     "abc+123==",
   );
   assert.equal(
+    parseTosUploadId(
+      `{"Bucket":"sd20-zq","Key":"infinite-canvas/updates/setup.exe","UploadId":"2c38cf561063d3c3592a07ad7c75ae396aad7c75"}`,
+    ),
+    "2c38cf561063d3c3592a07ad7c75ae396aad7c75",
+  );
+  assert.equal(
     buildCompleteMultipartXml([
       { partNumber: 1, etag: '"etag-a"' },
       { partNumber: 2, etag: '"etag-b"' },

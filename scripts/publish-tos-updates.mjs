@@ -329,10 +329,17 @@ export async function putPublicObject(config, objectKey, body, fileName) {
   return result;
 }
 
-export function parseTosUploadId(xml) {
-  const match = String(xml).match(/<UploadId>([^<]+)<\/UploadId>/i);
+export function parseTosUploadId(payload) {
+  const text = String(payload).trim();
+  if (text.startsWith("{")) {
+    const parsed = JSON.parse(text);
+    if (typeof parsed.UploadId === "string" && parsed.UploadId.trim() !== "") {
+      return parsed.UploadId.trim();
+    }
+  }
+  const match = text.match(/<UploadId>([^<]+)<\/UploadId>/i);
   if (match?.[1]) return match[1].trim();
-  throw new Error(`TOS 分片初始化未返回 UploadId：${String(xml).slice(0, 240)}`);
+  throw new Error(`TOS 分片初始化未返回 UploadId：${text.slice(0, 240)}`);
 }
 
 export function buildCompleteMultipartXml(parts) {
