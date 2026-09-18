@@ -705,6 +705,11 @@ export async function refreshAssetItemMediaUrl(
  * 于是续签「成功」但地址没变、预览依旧只剩类型图标。此时按失败地址重签自己的暂存对象：
  * 对象没被删就能恢复真实预览，地址不属于当前暂存桶则后端拒绝，调用方照旧回退图标。
  * 续签失败一律返回 null，不阻断其他素材行。
+ *
+ * `failedUrl` 同样按「地址缺席」把 undefined 放宽进来：调用方直接传
+ * `AssetItem.previewUrl` / `videoUrl` 这类可选字段，`exactOptionalPropertyTypes`
+ * 下读取结果含 undefined（同 `refreshAssetItemMediaUrl` 的源类型处理）。undefined
+ * 与 null 在这里语义相同 —— 都是「没有失败地址」，只需回读续签结果。
  */
 export async function refreshMediaUrlWithStagingFallback(
   asset: {
@@ -713,7 +718,7 @@ export async function refreshMediaUrlWithStagingFallback(
     readonly providerConnectionId?: string | null | undefined;
   },
   mediaType: MediaType,
-  failedUrl: string | null,
+  failedUrl: string | null | undefined,
 ): Promise<string | null> {
   const renewed = await refreshAssetItemMediaUrl(asset, mediaType);
   // 地址变了就是有效续签；上游回放同一个死地址（或没有素材身份可续签）才走暂存重签。
