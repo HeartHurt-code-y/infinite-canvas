@@ -211,7 +211,9 @@ describe("canvas state interface", () => {
     await flushHistoryBatch();
 
     expect(canvas.getSnapshot().nodes.asset).toEqual([assetNode]);
-    expect(canvas.getSnapshot().nodes.gen).toEqual([genNode]);
+    expect(canvas.getSnapshot().nodes.gen).toEqual([
+      { ...genNode, config: { ...genNode.config, inputSlots: ["asset-1"] } },
+    ]);
     expect(canvas.getSnapshot().graph.edges).toEqual(edges);
     expect(canvas.getSnapshot().selection.nodeKey).toBe("gen-1");
     expect(canvas.getHistory()).toMatchObject({ pastCount: 1, futureCount: 0 });
@@ -221,7 +223,9 @@ describe("canvas state interface", () => {
     expect(canvas.getSnapshot().graph.edges).toEqual([]);
     expect(canvas.commands.redo()).toBe("applied");
     expect(canvas.getSnapshot().nodes.asset).toEqual([assetNode]);
-    expect(canvas.getSnapshot().nodes.gen).toEqual([genNode]);
+    expect(canvas.getSnapshot().nodes.gen).toEqual([
+      { ...genNode, config: { ...genNode.config, inputSlots: ["asset-1"] } },
+    ]);
     expect(canvas.getSnapshot().graph.edges).toEqual(edges);
   });
 

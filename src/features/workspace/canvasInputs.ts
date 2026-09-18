@@ -1,4 +1,8 @@
 import type { CanvasDocument, CanvasNodeEntry, CanvasNodesByKey } from "../canvas/canvasStore";
+import {
+  adoptMissingGenerationInputSlots,
+  occupyingGenerationInputKeys,
+} from "../canvas/generationInputSlots";
 import { toMediaSrc } from "../../lib/backend";
 import { stripMarkdown } from "../../lib/promptContent";
 import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
@@ -418,6 +422,7 @@ export function createCanvasInputResolver(
     // 新连线回填空槽后拿回原来的位置。素材数组保持同一顺序，空槽不占位，
     // 渲染层再按 mediaPosition 逐行展开，把空槽显示为空位行。
     // 槽位表可能残留指向已删除节点/已解绑素材的 key：它们不出现在本次素材里，直接跳过。
+    // 已经连上却没入账的直连来源（拖线建节点的旧文档）按连线先后插回槽位，避免后连的图抢走顺序 1。
     const targetEntry = nodes.get(targetKey);
     const targetSlots =
       targetEntry?.type === "gen" &&
@@ -425,20 +430,24 @@ export function createCanvasInputResolver(
         ? targetEntry.data.config.inputSlots
         : undefined;
     if (targetSlots && targetSlots.length > 0) {
+      const occupyingKeys = occupyingGenerationInputKeys(incoming.get(targetKey) ?? [], (key) =>
+        nodes.get(key),
+      );
+      const effectiveSlots = adoptMissingGenerationInputSlots(targetSlots, occupyingKeys);
       const present = new Set(media.map((item) => item.sourceKey));
       const positionByKey = new Map<string, number>();
       // 同一素材 key 重复占位时以第一个槽位为准，避免后一个槽位覆盖真实位置。
-      targetSlots.forEach((slot, index) => {
+      effectiveSlots.forEach((slot, index) => {
         if (slot === null || !present.has(slot) || positionByKey.has(slot)) return;
         positionByKey.set(slot, index);
       });
       mediaPosition = positionByKey;
-      mediaSlotCount = targetSlots.length;
+      mediaSlotCount = effectiveSlots.length;
       if (positionByKey.size > 0) {
         // 素材顺序也按槽位位置排：位置编号与提交顺序（请求体里的「图片N」）一一对应，
         // 不会出现清单上第 2 行的素材实际是第 1 个提交。空槽不参与排序，其余保持既有前后关系。
         const rankByKey = new Map<string, number>();
-        targetSlots.forEach((slot) => {
+        effectiveSlots.forEach((slot) => {
           if (slot === null || !positionByKey.has(slot) || rankByKey.has(slot)) return;
           rankByKey.set(slot, rankByKey.size);
         });

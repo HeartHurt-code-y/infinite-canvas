@@ -1,7 +1,7 @@
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasState, type CanvasNodeEntry } from "../canvas/canvasStore";
-import { createCanvasInputResolver } from "./canvasInputs";
+import { canvasInputEdgeOrder, createCanvasInputResolver, canvasNodeIndex } from "./canvasInputs";
 import { AssetFlow } from "./AssetLibraryViews";
 import { GenerationInputChips } from "./MediaNodeViews";
 import { clearMediaByteCache } from "./mediaByteCache";
@@ -28,6 +28,18 @@ const imageNode = (key: string): AssetNodeData => ({
 const imageGenerator = (key: string): GenNodeData => ({
   key,
   kind: "image",
+  x: 0,
+  y: 0,
+  config: {
+    modelSelection: model,
+    generationCount: 1,
+    parameterValues: {},
+    catalogResolved: true,
+  },
+});
+const videoGenerator = (key: string): GenNodeData => ({
+  key,
+  kind: "video",
   x: 0,
   y: 0,
   config: {
@@ -468,28 +480,19 @@ describe("inputSlots 槽位账本", () => {
       { type: "asset", data: imageNode("asset-c") },
       { type: "asset", data: imageNode("asset-d") },
     ];
-    const canvas = createCanvasState();
-    canvas.commands.insertSubgraph(entries, [
-      edge("asset-a", "gen"),
-      edge("asset-c", "gen"),
-      edge("asset-d", "gen"),
-    ]);
-    const snapshot = canvas.getSnapshot();
+    const edges = [edge("asset-a", "gen"), edge("asset-c", "gen"), edge("asset-d", "gen")];
     // 悬挂 key 既不在素材里也不在连线里，排序必须忽略它：A 保持第 1，其余按原始顺序接在后面。
     expect(
       createCanvasInputResolver(
-        snapshot.nodeByKey,
-        snapshot.graph.edges,
+        canvasNodeIndex(entries),
+        edges,
       )("gen").media.map((input) => input.key),
     ).toEqual(["asset-a", "asset-c", "asset-d"]);
   });
 
   it("悬挂槽位不把无槽位素材挤到前面，提交顺序与画布清单一致", () => {
-    // 用户真实文档的形态：槽位表是 [A, 已删除节点的 key, B]，连线却是 A、B、C 三条，
-    // C 因为走的是另一条建线入口（拖线建节点等）没有进槽位表。
-    // 旧解析器保留悬挂 key 的位置：A→1、B→3，无槽位的 C 也是 3，
-    // 于是 C 与 B 争夺同一排序位，实际提交顺序不再是清单上的 A、B、C。
-    // 新解析器丢弃悬挂 key 后按现有素材压缩序号：A→1、B→2，C 无槽位仍排在最后。
+    // 旧文档形态：槽位表是 [A, 已删除节点的 key, B]，连线却是 A、B、C 三条，
+    // C 当时没写进槽位。解析器丢弃悬挂 key，再按连线先后把 C 接到 B 后面：A→1、B→2、C→3。
     const entries: CanvasNodeEntry[] = [
       {
         type: "gen",
@@ -499,19 +502,8 @@ describe("inputSlots 槽位账本", () => {
       { type: "asset", data: imageNode("asset-b") },
       { type: "asset", data: imageNode("asset-c") },
     ];
-    const canvas = createCanvasState();
-    // 连线按 A、B、C 写入，C 没有槽位：模拟"槽位表与连线不同步"的旧文档。
-    canvas.commands.insertSubgraph(entries, [
-      edge("asset-a", "gen"),
-      edge("asset-b", "gen"),
-      edge("asset-c", "gen"),
-    ]);
-    const snapshot = canvas.getSnapshot();
-    // insertSubgraph 不写槽位，槽位表保持文档里带进来的残留形态。
-    expect(snapshot.nodeByKey.gen.get("gen")).toMatchObject({
-      config: { inputSlots: ["asset-a", "asset-deleted", "asset-b"] },
-    });
-    const resolved = createCanvasInputResolver(snapshot.nodeByKey, snapshot.graph.edges)("gen");
+    const edges = [edge("asset-a", "gen"), edge("asset-b", "gen"), edge("asset-c", "gen")];
+    const resolved = createCanvasInputResolver(canvasNodeIndex(entries), edges)("gen");
     expect(resolved.media.map((input) => input.key)).toEqual(["asset-a", "asset-b", "asset-c"]);
     expect(resolved.media.map((input) => input.edgeId)).toEqual([
       "asset-a->gen",
@@ -527,18 +519,65 @@ describe("inputSlots 槽位账本", () => {
       { type: "asset", data: imageNode("asset-b") },
       { type: "asset", data: imageNode("asset-c") },
     ];
-    const canvas = createCanvasState();
-    canvas.commands.insertSubgraph(entries, [
-      edge("asset-a", "gen"),
-      edge("asset-b", "gen"),
-      edge("asset-c", "gen"),
-    ]);
-    const snapshot = canvas.getSnapshot();
+    const edges = [edge("asset-a", "gen"), edge("asset-b", "gen"), edge("asset-c", "gen")];
     expect(
       createCanvasInputResolver(
-        snapshot.nodeByKey,
-        snapshot.graph.edges,
+        canvasNodeIndex(entries),
+        edges,
       )("gen").media.map((input) => input.key),
     ).toEqual(["asset-a", "asset-b", "asset-c"]);
+  });
+
+  it("拖线到空白创建视频节点后，再连第二张图时仍保持先连的为顺序 1", () => {
+    // 用户路径：从图 1 拖到空白处选「视频生成」——走 insertSubgraph 建节点并带上第一条连线；
+    // 再把图 2 连到这个节点——走 connect。旧实现只在 connect 里写槽位，第一条线从未入账，
+    // 图 2 占了槽位 0，清单和图上序号都把原来的图 1 挤成 2。
+    const canvas = createCanvasState();
+    canvas.commands.insertSubgraph(
+      [
+        { type: "gen", data: videoGenerator("video") },
+        { type: "asset", data: imageNode("asset-first") },
+        { type: "asset", data: imageNode("asset-second") },
+      ],
+      [edge("asset-first", "video")],
+    );
+    expect(canvas.getSnapshot().nodeByKey.gen.get("video")).toMatchObject({
+      config: { inputSlots: ["asset-first"] },
+    });
+
+    expect(canvas.commands.connect("asset-second", "video")).toMatchObject({ status: "connected" });
+    const snapshot = canvas.getSnapshot();
+    expect(snapshot.nodeByKey.gen.get("video")).toMatchObject({
+      config: { inputSlots: ["asset-first", "asset-second"] },
+    });
+    const resolved = createCanvasInputResolver(snapshot.nodeByKey, snapshot.graph.edges)("video");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-first", "asset-second"]);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        snapshot.graph.edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-first->video", "asset-second->video"]);
+  });
+
+  it("旧文档里先连的图没进槽位表时，解析顺序仍按连线先后而不是把后写入账的挤到前面", () => {
+    // 已保存画布的形态：拖线建节点留下的第一条线不在槽位表里，后来 connect 的图占了槽位 0。
+    // 解析层必须把缺账的连线按原连线顺序插回去，不能再把图 1 显示成 2。
+    const entries: CanvasNodeEntry[] = [
+      { type: "gen", data: imageGeneratorWithSlots("video", ["asset-second"]) },
+      { type: "asset", data: imageNode("asset-first") },
+      { type: "asset", data: imageNode("asset-second") },
+    ];
+    const edges = [edge("asset-first", "video"), edge("asset-second", "video")];
+    const resolved = createCanvasInputResolver(canvasNodeIndex(entries), edges)("video");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-first", "asset-second"]);
+    expect(resolved.mediaPosition.get("asset-first")).toBe(0);
+    expect(resolved.mediaPosition.get("asset-second")).toBe(1);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-first->video", "asset-second->video"]);
   });
 });

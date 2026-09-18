@@ -3,6 +3,15 @@ import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
 import { decodePromptContentDocument, type PromptContentDocumentV1 } from "../../lib/promptContent";
+import {
+  applyNewEdgesToGenerationInputSlots,
+  adoptMissingGenerationInputSlots,
+  assignGenerationInputSlot,
+  generationSourceOccupiesInputSlot,
+  isGenerationMediaConsumer,
+  occupyingGenerationInputKeys,
+  withGenerationInputSlots,
+} from "./generationInputSlots";
 import type {
   AssetEdgeData,
   AssetNodeData,
@@ -988,7 +997,7 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
 
               result = "applied";
               return {
-                nodesById,
+                nodesById: applyNewEdgesToGenerationInputSlots(nodesById, edges),
                 assetEdges: edges.length === 0 ? state.assetEdges : [...state.assetEdges, ...edges],
                 selectedNodeKey,
               };
@@ -1165,29 +1174,24 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
               const edge = { id: edgeId, fromKey, toKey };
               result = { status: "connected", edge, replacedEdgeIds: [] };
               // 生成节点（图片/视频）维护 inputSlots：能贡献媒体的来源填充最小空槽，无空槽则追加。
-              // 只走文本/中转的来源（提示词、剧本、分镜、下载与抽帧等）不占媒体位置——
+              // 只走文本/中转的来源（提示词、剧本、分镜）不占媒体位置——
               // 让纯文本连线占一个槽位，会在参考清单里凭空多出一行空位，也会打乱图片编号。
-              if (
-                target.type === "gen" &&
-                (target.data.kind === "image" || target.data.kind === "video") &&
-                source.type !== "gen" &&
-                source.type !== "screenplay" &&
-                source.type !== "storyboard"
-              ) {
-                const slots = [...(target.data.config.inputSlots ?? [])];
-                const emptyIndex = slots.findIndex((slot) => slot === null);
-                if (emptyIndex >= 0) {
-                  slots[emptyIndex] = fromKey;
-                } else {
-                  slots.push(fromKey);
-                }
-                const nextData = {
-                  ...target.data,
-                  config: { ...target.data.config, inputSlots: slots },
-                };
+              // 先把已连上却没入账的来源按连线先后补进槽位（拖线建节点的旧文档），再给新线分配。
+              if (isGenerationMediaConsumer(target) && generationSourceOccupiesInputSlot(source)) {
+                const healed = adoptMissingGenerationInputSlots(
+                  target.data.config.inputSlots ?? [],
+                  occupyingGenerationInputKeys(
+                    state.assetEdges.filter((candidate) => candidate.toKey === toKey),
+                    (key) => state.nodesById[key],
+                  ),
+                );
+                const slots = assignGenerationInputSlot(healed, fromKey);
                 return {
                   assetEdges: [...state.assetEdges, edge],
-                  nodesById: { ...state.nodesById, [toKey]: { type: "gen", data: nextData } },
+                  nodesById: {
+                    ...state.nodesById,
+                    [toKey]: withGenerationInputSlots(target, slots),
+                  },
                 };
               }
               return { assetEdges: [...state.assetEdges, edge] };
