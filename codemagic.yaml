@@ -1,0 +1,42 @@
+workflows:
+  macos-package:
+    name: macOS Package
+    instance_type: mac_mini_m2
+    max_build_duration: 90
+    environment:
+      vars:
+        CI: "true"
+      node: 24
+    cache:
+      cache_paths:
+        - ~/.pnpm-store
+        - ~/.cargo/registry
+        - ~/.cargo/git
+        - src-tauri/target
+    scripts:
+      - name: Set up pnpm
+        script: |
+          if command -v corepack >/dev/null 2>&1; then
+            corepack enable
+            corepack prepare pnpm@11.21.0 --activate
+          else
+            npm install -g pnpm@11.21.0
+          fi
+          pnpm config set store-dir "$HOME/.pnpm-store"
+      - name: Set up Rust
+        script: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
+          echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$CM_ENV"
+      - name: Install dependencies
+        script: pnpm install --frozen-lockfile
+      - name: Build macOS installer
+        script: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          pnpm tauri:build
+      - name: Stage unsigned-install helper
+        script: |
+          mkdir -p src-tauri/target/release/bundle/helper
+          cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
+    artifacts:
+      - src-tauri/target/release/bundle/dmg/*.dmg
+      - src-tauri/target/release/bundle/helper/install-macos.sh
