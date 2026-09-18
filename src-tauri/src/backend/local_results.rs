@@ -1,10 +1,9 @@
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use futures_util::StreamExt;
 use rand::Rng as _;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -15,7 +14,10 @@ use uuid::Uuid;
 use super::{
     error::{BackendError, BackendResult},
     provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
-    staging::fake_ip_aware_download_client,
+    result_transfer::{
+        self, TransferProgress, download_result, is_retryable_transfer, production_policy,
+    },
+    staging::fake_ip_aware_streaming_download_client,
     storage::{GenerationLifecycleFact, GenerationTaskLifecycle, Storage, now_ms},
     types::{GenerationResultRecord, MediaType, SaveStatus},
 };
@@ -191,14 +193,16 @@ impl LocalResultService {
         }
     }
 
-    pub async fn save_images<F>(
+    pub async fn save_images<F, P>(
         &self,
         task_id: &str,
         sources: Vec<ImageSource>,
         mut on_ready: F,
+        on_progress: P,
     ) -> BackendResult<Vec<GenerationResultRecord>>
     where
         F: FnMut(&GenerationResultRecord, Option<String>) + Send,
+        P: FnMut(u32, TransferProgress) + Send + 'static,
     {
         let total = sources.len();
         info!("[save] 开始保存图片结果: taskId={task_id}, 共 {total} 个结果待处理");
@@ -244,13 +248,34 @@ impl LocalResultService {
         let mut records = Vec::with_capacity(pending.len());
         // 下载鉴权按任务解析一次：同一个任务的全部结果共用同一份冻结连接身份。
         let auth = self.download_auth(task_id);
+        let on_progress = Arc::new(Mutex::new(on_progress));
         for (source, mut record) in pending {
             let result_index = record.result_index;
             let result = match source {
-                ImageSource::Url { url, .. } => match self.download_with_retry(&url, &auth).await {
-                    Ok(bytes) => Ok(bytes),
-                    Err(error) => self.fallback_to_base64(task_id, result_index, &url, error),
-                },
+                ImageSource::Url { url, .. } => {
+                    let progress = Arc::clone(&on_progress);
+                    match self
+                        .download_with_retry(
+                            &url,
+                            &auth,
+                            &self.download_part_path(task_id, result_index),
+                            {
+                                move |progress_update| {
+                                    (progress
+                                        .lock()
+                                        .unwrap_or_else(|poisoned| poisoned.into_inner()))(
+                                        result_index,
+                                        progress_update,
+                                    );
+                                }
+                            },
+                        )
+                        .await
+                    {
+                        Ok(bytes) => Ok(bytes),
+                        Err(error) => self.fallback_to_base64(task_id, result_index, &url, error),
+                    }
+                }
                 ImageSource::Base64 { data, .. } => decode_base64_image(&data),
             }
             .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Image));
@@ -308,6 +333,7 @@ impl LocalResultService {
         remote_task_id: &str,
         video_url: &str,
         mut on_ready: impl FnMut(&GenerationResultRecord, Option<String>) + Send,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
     ) -> BackendResult<GenerationResultRecord> {
         info!(
             "[save] 开始保存视频结果: taskId={}, remoteTaskId={}, url={}",
@@ -333,10 +359,17 @@ impl LocalResultService {
         self.persist_result(&record)?;
         record.save_status = SaveStatus::Writing;
         self.persist_result(&record)?;
-        on_ready(&record, Some(video_url.to_string()));
+        // 不把远程直链交给预览：否则 WebView 会再打一条上游 GET，和本机保存抢
+        // 已经被限速的连接，10MB 的慢直链会在约 10 分钟后被旧超时判失败。
+        on_ready(&record, None);
 
         let result = self
-            .download_with_retry(video_url, &self.download_auth(task_id))
+            .download_with_retry(
+                video_url,
+                &self.download_auth(task_id),
+                &self.download_part_path(task_id, 1),
+                on_progress,
+            )
             .await
             .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Video));
         match result {
@@ -617,6 +650,7 @@ impl LocalResultService {
     pub async fn resume_interrupted_result(
         &self,
         mut record: GenerationResultRecord,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
     ) -> BackendResult<GenerationResultRecord> {
         info!(
             "[save] 恢复中断的本地保存: taskId={}, resultIndex={}, mediaType={}, 来源={}",
@@ -687,7 +721,15 @@ impl LocalResultService {
         let media_type = record.media_type;
         let outcome = match source {
             Ok(ImageSource::Url { url, .. }) => {
-                match self.download_with_retry(&url, &auth).await {
+                match self
+                    .download_with_retry(
+                        &url,
+                        &auth,
+                        &self.download_part_path(&record.task_id, record.result_index),
+                        on_progress,
+                    )
+                    .await
+                {
                     Ok(bytes) => Ok(bytes),
                     // 只有图片结果才有内联 Base64 兜底（视频接口不返回 Base64）。
                     Err(error) if media_type == MediaType::Image => {
@@ -787,18 +829,21 @@ impl LocalResultService {
         Ok(record)
     }
 
-    /// 下载远程结果字节，带指数退避自动重试。
+    /// 下载远程结果字节：卡住才失败、临时文件断点续传、大文件多路 Range。
     ///
-    /// 重试策略：共 6 次尝试（1 次首次 + 5 次重试），仅对传输层错误
-    /// （`BackendError::Transport`，如连接超时、连接拒绝、读取中断等）和
-    /// 5xx HTTP 错误重试；退避节奏：第 1/2/3/4/5 次重试前约等待
-    /// 2s / 4s / 8s / 16s / 32s（含 ±20% 随机抖动），避免雪崩式重试。
+    /// 重试策略：共 6 次尝试（1 次首次 + 5 次重试），仅对传输层错误、卡住、
+    /// 可重试协议错误和 5xx HTTP 错误重试；退避节奏：第 1/2/3/4/5 次重试前约等待
+    /// 2s / 4s / 8s / 16s / 32s（含 ±20% 随机抖动）。已写入的临时文件会保留，
+    /// 下次从已有字节接着传，不再把慢直链下到一半的数据丢掉。
     async fn download_with_retry(
         &self,
         url: &str,
         auth: &ResultDownloadAuth,
+        part_path: &Path,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
     ) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
+        let on_progress = Arc::new(Mutex::new(on_progress));
         let mut last_error = None;
         const MAX_ATTEMPTS: u32 = 6;
         for attempt in 0..MAX_ATTEMPTS {
@@ -807,7 +852,28 @@ impl LocalResultService {
                 let jitter = rand::rng().random_range(0..=(nominal / 5));
                 tokio::time::sleep(std::time::Duration::from_millis(nominal + jitter)).await;
             }
-            match self.download_once(url, auth).await {
+            let progress = Arc::clone(&on_progress);
+            let client = fake_ip_aware_streaming_download_client(
+                url,
+                result_transfer::streaming_client().unwrap_or_else(|_| self.client.clone()),
+            )
+            .await;
+            match download_result(
+                client,
+                url,
+                auth,
+                part_path,
+                production_policy(),
+                move |update| {
+                    (progress
+                        .lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner()))(
+                        update
+                    );
+                },
+            )
+            .await
+            {
                 Ok(bytes) => {
                     if attempt > 0 {
                         info!(
@@ -815,12 +881,11 @@ impl LocalResultService {
                             attempt + 1
                         );
                     }
+                    let _ = tokio::fs::remove_file(part_path).await;
                     return Ok(bytes);
                 }
                 Err(error) => {
-                    let retryable = matches!(&error, BackendError::Transport(_))
-                        || matches!(&error, BackendError::Protocol { details, .. }
-                            if details.get("httpStatus").and_then(|value| value.as_u64()).is_some_and(|status| (500..600).contains(&status)));
+                    let retryable = is_retryable_transfer(&error);
                     let is_last_attempt = attempt == MAX_ATTEMPTS - 1;
                     if !retryable || is_last_attempt {
                         error!(
@@ -831,7 +896,7 @@ impl LocalResultService {
                         return Err(error);
                     }
                     warn!(
-                        "[save] 结果下载失败，将自动重试: 第 {} 次尝试失败, 下次退避约 {}ms, url={redacted_url}, 错误: {}",
+                        "[save] 结果下载失败，将从已下载字节续传: 第 {} 次尝试失败, 下次退避约 {}ms, url={redacted_url}, 错误: {}",
                         attempt + 1,
                         2_000_u64 * 2_u64.pow(attempt),
                         error.payload().message
@@ -848,54 +913,11 @@ impl LocalResultService {
         }))
     }
 
-    async fn download_once(&self, url: &str, auth: &ResultDownloadAuth) -> BackendResult<Vec<u8>> {
-        let redacted_url = redact_url_string(url);
-        let started_at = std::time::Instant::now();
-        // 代理软件 fake-ip 环境下，直链域名会被解析到不可路由的虚拟地址，这一跳
-        // 不经过代理（供应商存储域名通常不在代理规则内），会稳定连接超时。这里复用
-        // 对象存储那条链路已经验证过的兜底：命中 fake-ip 时改用备用 DNS 的真实地址。
-        let client = fake_ip_aware_download_client(url, self.client.clone()).await;
-        // 结果文件下载单请求上限 90s：覆盖大文件慢速传输，同时避免单次卡死
-        // 拖累整体重试节奏（provider 共享 client 的全局 timeout 为 300s）。
-        let response = auth
-            .apply(client.get(url), url)
-            .timeout(std::time::Duration::from_secs(90))
-            .send()
-            .await?;
-        let status = response.status().as_u16();
-        if !(200..300).contains(&status) {
-            let headers = response
-                .headers()
-                .iter()
-                .map(|(name, value)| {
-                    (
-                        name.to_string(),
-                        value.to_str().unwrap_or("<non-UTF8 header>").to_string(),
-                    )
-                })
-                .collect::<std::collections::BTreeMap<_, _>>();
-            let raw_response = String::from_utf8_lossy(&response.bytes().await?).into_owned();
-            warn!(
-                "[save] 结果下载单次请求失败: HTTP {status}, 耗时 {}ms, url={redacted_url}",
-                started_at.elapsed().as_millis()
-            );
-            return Err(BackendError::protocol(
-                format!("result download returned HTTP {status}"),
-                json!({ "httpStatus": status, "headers": headers, "rawResponse": raw_response }),
-            ));
-        }
-        let mut stream = response.bytes_stream();
-        let mut bytes = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            bytes.extend_from_slice(&chunk?);
-        }
-        info!(
-            "[save] 结果下载单次请求完成: HTTP {status}, 耗时 {}ms, 下载 {} 字节, 平均速度 {}/s, url={redacted_url}",
-            started_at.elapsed().as_millis(),
-            bytes.len(),
-            format_bytes_per_sec(bytes.len(), started_at.elapsed())
-        );
-        Ok(bytes)
+    fn download_part_path(&self, task_id: &str, result_index: u32) -> PathBuf {
+        self.downloads_directory.join("无限画布").join(format!(
+            ".{}.r{result_index}.download",
+            safe_file_stem(task_id)
+        ))
     }
 
     fn prepare_bytes(&self, bytes: Vec<u8>, expected: MediaType) -> BackendResult<PreparedMedia> {
@@ -1326,7 +1348,12 @@ mod tests {
             ResultDownloadAuth::from_parts(&format!("http://127.0.0.1:{port}/v1"), "sk-secret");
 
         let bytes = service
-            .download_with_retry(&url, &auth)
+            .download_with_retry(
+                &url,
+                &auth,
+                &directory.path().join("identity.download"),
+                |_| {},
+            )
             .await
             .expect("download succeeds");
         server.join().expect("server joins");

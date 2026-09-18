@@ -378,6 +378,47 @@ pub(crate) async fn fake_ip_aware_download_client(
         .unwrap_or(fallback)
 }
 
+/// 与 [`fake_ip_aware_download_client`] 相同的 fake-ip 判定，但钉扎客户端没有整段
+/// 总超时：结果落盘可能走十几分钟的慢直链，300s 上限会把还在进数据的传输杀掉。
+pub(crate) async fn fake_ip_aware_streaming_download_client(
+    url: &str,
+    fallback: reqwest::Client,
+) -> reqwest::Client {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return fallback;
+    };
+    let Some(host) = parsed.host_str() else {
+        return fallback;
+    };
+    let port = parsed.port_or_known_default().unwrap_or(443);
+    let Ok(addresses) = tokio::net::lookup_host((host, port)).await else {
+        return fallback;
+    };
+    let system_ips: Vec<std::net::IpAddr> = addresses.map(|address| address.ip()).collect();
+    if system_ips.is_empty() || system_ips.iter().any(|ip| !is_fake_ip(*ip)) {
+        return fallback;
+    }
+    let real_ips = resolve_host_real_ips(&fallback, host).await;
+    if real_ips.is_empty() {
+        return fallback;
+    }
+    warn!(
+        "[save] {host} 被代理软件 fake-ip 劫持（系统解析 {system_ips:?}），改用无总超时的钉扎客户端继续下载"
+    );
+    let mut builder = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(30))
+        .user_agent("InfiniteCanvas/0.1")
+        .redirect(reqwest::redirect::Policy::default());
+    if !real_ips.is_empty() {
+        let sockets: Vec<std::net::SocketAddr> = real_ips
+            .iter()
+            .map(|ip| std::net::SocketAddr::new(*ip, port))
+            .collect();
+        builder = builder.resolve_to_addrs(host, &sockets);
+    }
+    builder.build().unwrap_or(fallback)
+}
+
 /// 判断 reqwest 错误是否属于「可重试的网络层失败」（连接、超时、请求传输失败）。
 /// HTTP 非 2xx 状态不在此列——那是 TOS 端拒绝，重试无意义。
 fn is_retryable_upload_error(error: &reqwest::Error) -> bool {

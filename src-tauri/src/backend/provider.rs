@@ -1617,6 +1617,7 @@ impl ProviderRuntime {
             .client
             .get(url)
             .bearer_auth(&context.api_key)
+            .timeout(std::time::Duration::from_secs(30 * 60))
             .send()
             .await
         {
@@ -5295,10 +5296,7 @@ mod tests {
             "call-1",
         )
         .expect("stalled complete JSON is usable");
-        assert_eq!(
-            payload["choices"][0]["message"]["content"],
-            "完整正文"
-        );
+        assert_eq!(payload["choices"][0]["message"]["content"], "完整正文");
         assert_eq!(payload["x_stream"]["stalled"], true);
     }
 
@@ -5328,9 +5326,7 @@ mod tests {
     async fn idle_timeout_salvages_bytes_already_read_from_an_open_connection() {
         let sse = "data: {\"choices\":[{\"delta\":{\"content\":\"已生成\"},\"finish_reason\":\"stop\"}]}\n\n";
         let stream = futures_util::StreamExt::chain(
-            futures_util::stream::iter([Ok::<Vec<u8>, &'static str>(
-                sse.as_bytes().to_vec(),
-            )]),
+            futures_util::stream::iter([Ok::<Vec<u8>, &'static str>(sse.as_bytes().to_vec())]),
             futures_util::stream::pending(),
         );
         let mut dialect = OpenAiChatDialect::default();

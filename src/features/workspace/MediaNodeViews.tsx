@@ -7,6 +7,7 @@ import { toMediaProxyUrl } from "../../lib/mediaProxy";
 import {
   formatBytes,
   formatRawBackendError,
+  formatSaveProgress,
   frontendLog,
   isDesktopRuntime,
   mediaClient,
@@ -14,6 +15,7 @@ import {
   resumeGenerationResult,
   toMediaSrc,
   type GenerationResultRecord,
+  type GenerationResultSaveProgress,
   type GenerationTaskSummary,
   type MediaReferenceTarget,
   type ProviderCatalogEntry,
@@ -1887,6 +1889,7 @@ export function CanvasOutputNode({
   task,
   retryInfo,
   results,
+  saveProgress = null,
   rawResponse,
   modelLabel,
 }: {
@@ -1915,6 +1918,8 @@ export function CanvasOutputNode({
   readonly retryInfo: RetryInfo | null;
   /** 该任务的全部结果记录（判断保存失败等边缘状态）。 */
   readonly results: readonly GenerationResultRecord[];
+  /** 正在把远程结果写入本机时的下载进度。 */
+  readonly saveProgress?: GenerationResultSaveProgress | null;
   /** 失败任务的完整原始返回（按需加载）。 */
   readonly rawResponse: string | null;
   /** 模型展示名（进行中/失败态展示）。 */
@@ -1983,6 +1988,11 @@ export function CanvasOutputNode({
   const isRunning = !hasArtifact && phase === "running";
   const isSaving = !hasLocalArtifact && phase === "saving";
   const isFailed = !hasArtifact && phase === "failed";
+  const savePercent =
+    saveProgress != null && saveProgress.total != null && saveProgress.total > 0
+      ? Math.min(100, Math.max(0, Math.round((saveProgress.received / saveProgress.total) * 100)))
+      : null;
+  const saveProgressLabel = saveProgress != null ? formatSaveProgress(saveProgress) : null;
   const failedTitle = (() => {
     if (task != null && task.status === "succeeded" && failedSaveResult) {
       return SAVE_STATUS_LABELS[failedSaveResult.saveStatus] ?? "结果保存失败";
@@ -2220,7 +2230,7 @@ export function CanvasOutputNode({
                       ? "本地保存失败"
                       : savedResultName != null
                         ? "已保存到本机 · 正在补齐卡片"
-                        : "正在保存本地副本"
+                        : (saveProgressLabel ?? "正在保存本地副本")
                     : "已连线来源节点 · 可作为参考输入"
                 }`}
           </span>
@@ -2292,18 +2302,24 @@ export function CanvasOutputNode({
               )}
             </span>
             <span className="canvas-output-node__status">
-              {phase === "saving" ? "已成功 · 等待结果保存" : statusText}
+              {phase === "saving"
+                ? (saveProgressLabel ?? "已成功 · 等待结果保存")
+                : statusText}
             </span>
-            {isRunning && progress != null ? (
+            {(isRunning && progress != null) || (phase === "saving" && savePercent != null) ? (
               <span
                 className="canvas-output-node__progress"
                 role="progressbar"
-                aria-label={`${isVideo ? "视频生成" : "图片生成"}进度`}
+                aria-label={
+                  phase === "saving"
+                    ? "结果保存进度"
+                    : `${isVideo ? "视频生成" : "图片生成"}进度`
+                }
                 aria-valuemin={0}
                 aria-valuemax={100}
-                aria-valuenow={progress}
+                aria-valuenow={phase === "saving" ? (savePercent ?? 0) : progress}
               >
-                <i style={{ width: `${progress}%` }} />
+                <i style={{ width: `${phase === "saving" ? savePercent : progress}%` }} />
               </span>
             ) : null}
           </span>

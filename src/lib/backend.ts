@@ -15,6 +15,7 @@ import {
   generationResultReadyEventSchema,
   generationResultRecordSchema,
   generationResultSavedEventSchema,
+  generationResultSaveProgressEventSchema,
   generationRetryEventSchema,
   generationRetryExhaustedEventSchema,
   generationStateChangedEventSchema,
@@ -1707,6 +1708,7 @@ export type GenerationEventName =
   | "generation:text-delta"
   | "generation:result-ready"
   | "generation:result-saved"
+  | "generation:result-save-progress"
   | "generation:retry"
   | "generation:retry-exhausted";
 
@@ -1743,6 +1745,14 @@ export interface GenerationResultReadyEvent {
   readonly previewSrc: string | null;
 }
 
+export interface GenerationResultSaveProgress {
+  readonly taskId: string;
+  readonly resultIndex: number;
+  readonly received: number;
+  readonly total: number | null;
+  readonly bytesPerSec: number;
+}
+
 export interface GenerationRetryEvent {
   readonly taskId: string;
   readonly retry: number;
@@ -1759,6 +1769,7 @@ const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
   "generation:text-delta",
   "generation:result-ready",
   "generation:result-saved",
+  "generation:result-save-progress",
   "generation:retry",
   "generation:retry-exhausted",
 ];
@@ -1769,6 +1780,7 @@ const GENERATION_EVENT_SCHEMAS = {
   "generation:text-delta": generationTextDeltaEventSchema,
   "generation:result-ready": generationResultReadyEventSchema,
   "generation:result-saved": generationResultSavedEventSchema,
+  "generation:result-save-progress": generationResultSaveProgressEventSchema,
   "generation:retry": generationRetryEventSchema,
   "generation:retry-exhausted": generationRetryExhaustedEventSchema,
 } as const satisfies Record<GenerationEventName, v.GenericSchema>;
@@ -1821,6 +1833,36 @@ export function formatBytes(bytes: number | null): string | null {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatSizeLabel(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function formatEta(seconds: number): string | null {
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  if (seconds < 45) return "不到 1 分钟";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `约 ${minutes} 分钟`;
+  return `约 ${Math.round(minutes / 60)} 小时`;
+}
+
+/** 生成结果正在落盘时的中文进度：已下/总量 · 速度 · 剩余时间。 */
+export function formatSaveProgress(
+  progress: Pick<GenerationResultSaveProgress, "received" | "total" | "bytesPerSec">,
+): string {
+  const received = formatSizeLabel(progress.received);
+  const speed = progress.bytesPerSec > 0 ? `${formatSizeLabel(progress.bytesPerSec)}/s` : null;
+  if (progress.total != null && progress.total > 0) {
+    const total = formatSizeLabel(progress.total);
+    const remaining = Math.max(0, progress.total - progress.received);
+    const eta = progress.bytesPerSec > 0 ? formatEta(remaining / progress.bytesPerSec) : null;
+    return [`正在保存 ${received} / ${total}`, speed, eta].filter(Boolean).join(" · ");
+  }
+  return [`正在保存 ${received}`, speed].filter(Boolean).join(" · ");
 }
 
 // ---------- 网络爆款视频下载（内置 yt-dlp 引擎） ----------

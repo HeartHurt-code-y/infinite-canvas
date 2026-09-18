@@ -9,6 +9,7 @@ import type {
   ConnectivityTestResult,
   GenerationResultReadyEvent,
   GenerationResultRecord,
+  GenerationResultSaveProgress,
   GenerationResultSavedEvent,
   GenerationRetryEvent,
   GenerationStateChangedEvent,
@@ -458,6 +459,14 @@ export const generationResultReadyEventSchema = v.looseObject({
   result: generationResultRecordSchema,
   previewSrc: nullableStringSchema,
 }) satisfies v.GenericSchema<GenerationResultReadyEvent>;
+
+export const generationResultSaveProgressEventSchema = v.looseObject({
+  taskId: v.string(),
+  resultIndex: v.number(),
+  received: v.number(),
+  total: nullableNumberSchema,
+  bytesPerSec: v.number(),
+}) satisfies v.GenericSchema<GenerationResultSaveProgress>;
 
 export const generationRetryEventSchema = v.looseObject({
   taskId: v.string(),

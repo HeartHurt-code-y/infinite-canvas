@@ -363,9 +363,17 @@ impl GenerationTaskService {
             tauri::async_runtime::spawn(async move {
                 let task_id = result.task_id.clone();
                 let result_index = result.result_index;
+                let progress_service = service.clone();
+                let progress_task_id = task_id.clone();
                 match service
                     .local_results
-                    .resume_interrupted_result(result)
+                    .resume_interrupted_result(result, move |progress| {
+                        progress_service.emit_save_progress(
+                            &progress_task_id,
+                            result_index,
+                            progress,
+                        );
+                    })
                     .await
                 {
                     Ok(result) => {
@@ -518,11 +526,24 @@ impl GenerationTaskService {
                     },
                 )?;
                 let event_service = self.clone();
+                let progress_service = self.clone();
+                let progress_task_id = task_id.to_string();
                 let results = self
                     .local_results
-                    .save_images(task_id, images, move |record, preview_src| {
-                        event_service.emit_result_ready(record, preview_src);
-                    })
+                    .save_images(
+                        task_id,
+                        images,
+                        move |record, preview_src| {
+                            event_service.emit_result_ready(record, preview_src);
+                        },
+                        move |result_index, progress| {
+                            progress_service.emit_save_progress(
+                                &progress_task_id,
+                                result_index,
+                                progress,
+                            );
+                        },
+                    )
                     .await?;
                 for result in results {
                     let error_suffix = result
@@ -912,8 +933,23 @@ impl GenerationTaskService {
                                         task_id,
                                         remote_task_id,
                                         video_url,
-                                        move |record, preview_src| {
-                                            event_service.emit_result_ready(record, preview_src);
+                                        {
+                                            let event_service = event_service.clone();
+                                            move |record, preview_src| {
+                                                event_service
+                                                    .emit_result_ready(record, preview_src);
+                                            }
+                                        },
+                                        {
+                                            let progress_service = event_service.clone();
+                                            let progress_task_id = task_id.to_string();
+                                            move |progress| {
+                                                progress_service.emit_save_progress(
+                                                    &progress_task_id,
+                                                    1,
+                                                    progress,
+                                                );
+                                            }
                                         },
                                     )
                                     .await?
@@ -1209,6 +1245,24 @@ impl GenerationTaskService {
                 "taskId": result.task_id,
                 "result": result,
                 "previewSrc": preview_src
+            }),
+        );
+    }
+
+    fn emit_save_progress(
+        &self,
+        task_id: &str,
+        result_index: u32,
+        progress: super::result_transfer::TransferProgress,
+    ) {
+        self.emit(
+            "generation:result-save-progress",
+            &json!({
+                "taskId": task_id,
+                "resultIndex": result_index,
+                "received": progress.received,
+                "total": progress.total,
+                "bytesPerSec": progress.bytes_per_sec,
             }),
         );
     }

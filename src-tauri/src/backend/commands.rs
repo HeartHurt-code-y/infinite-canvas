@@ -197,7 +197,25 @@ pub async fn resume_generation_result(
         result.media_type.as_str(),
         result.save_status.as_str()
     );
-    match state.local_results.resume_interrupted_result(result).await {
+    let app_for_progress = app.clone();
+    let progress_task_id = command.task_id.clone();
+    let progress_result_index = command.result_index;
+    match state
+        .local_results
+        .resume_interrupted_result(result, move |progress| {
+            let _ = app_for_progress.emit(
+                "generation:result-save-progress",
+                json!({
+                    "taskId": progress_task_id,
+                    "resultIndex": progress_result_index,
+                    "received": progress.received,
+                    "total": progress.total,
+                    "bytesPerSec": progress.bytes_per_sec,
+                }),
+            );
+        })
+        .await
+    {
         Ok(saved) => {
             let _ = app.emit(
                 "generation:result-saved",

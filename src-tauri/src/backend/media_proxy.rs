@@ -1080,16 +1080,14 @@ async fn fetch_media_outcome(
     if method == Method::GET && !range_requested {
         fetch_shared(url, request_headers).await
     } else {
-        Arc::new(
-            match fetch_upstream(url, method, request_headers).await {
-                Ok((status, headers, body)) => FetchedUpstream::Media {
-                    status,
-                    headers,
-                    body,
-                },
-                Err(failure) => FetchedUpstream::Failed(failure),
+        Arc::new(match fetch_upstream(url, method, request_headers).await {
+            Ok((status, headers, body)) => FetchedUpstream::Media {
+                status,
+                headers,
+                body,
             },
-        )
+            Err(failure) => FetchedUpstream::Failed(failure),
+        })
     }
 }
 
@@ -2258,10 +2256,7 @@ mod tests {
     #[tokio::test]
     async fn prefers_registered_preview_when_webview_turns_plus_into_space() {
         let server = HttpFixture::new();
-        let full = format!(
-            "{}/tos-object.png?X-Tos-Signature=good",
-            server.url
-        );
+        let full = format!("{}/tos-object.png?X-Tos-Signature=good", server.url);
         remember_asset_preview_url("asset-tos-3", Some(&full));
         // src 里签名被解成空格，若仍用这条地址上游会 403；登记表里仍是完整签名。
         let uri = format!(

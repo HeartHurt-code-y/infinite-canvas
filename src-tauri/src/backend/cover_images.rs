@@ -62,7 +62,9 @@ pub async fn resume_cover_image_result(
     }
     let detail = storage.get_task_detail(&command.task_id)?;
     let result = select_resumable_cover_result(&detail.results, &command)?;
-    local_results.resume_interrupted_result(result).await
+    local_results
+        .resume_interrupted_result(result, |_| {})
+        .await
 }
 
 fn select_resumable_cover_result(

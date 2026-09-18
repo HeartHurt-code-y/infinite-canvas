@@ -55,6 +55,7 @@ import {
   type CloudAssetKindTotals,
   type GenerationOperation,
   type GenerationResultRecord,
+  type GenerationResultSaveProgress,
   type GenerationTaskSummary,
   type LocalAssetKindTotals,
   type LocalAssetRecord,
@@ -784,6 +785,9 @@ export function WorkspaceApp({
   const [taskResults, setTaskResults] = useState<Record<string, readonly GenerationResultRecord[]>>(
     {},
   );
+  const [saveProgressByResult, setSaveProgressByResult] = useState<
+    Record<string, GenerationResultSaveProgress>
+  >({});
   const [retryInfoByTask, setRetryInfoByTask] = useState<Record<string, RetryInfo>>({});
   const [rawResponses, setRawResponses] = useState<Record<string, string>>({});
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[]>([]);
@@ -5650,9 +5654,31 @@ export function WorkspaceApp({
         }));
         return;
       }
+      if (eventName === "generation:result-save-progress") {
+        const info = payload as GenerationResultSaveProgress | null;
+        if (info?.taskId && Number.isFinite(info.resultIndex) && Number.isFinite(info.received)) {
+          setSaveProgressByResult((current) => ({
+            ...current,
+            [`${info.taskId}#${info.resultIndex}`]: info,
+            [info.taskId]: info,
+          }));
+        }
+        return;
+      }
       if (eventName === "generation:result-ready" || eventName === "generation:result-saved") {
         const record = (payload as { result?: GenerationResultRecord } | null)?.result;
         if (record) {
+          if (eventName === "generation:result-saved") {
+            setSaveProgressByResult((current) => {
+              if (!(record.taskId in current) && !(`${record.taskId}#${record.resultIndex}` in current)) {
+                return current;
+              }
+              const next = { ...current };
+              delete next[record.taskId];
+              delete next[`${record.taskId}#${record.resultIndex}`];
+              return next;
+            });
+          }
           setTaskResults((current) => ({
             ...current,
             [record.taskId]: [
@@ -5696,7 +5722,7 @@ export function WorkspaceApp({
 
   // 事件处理器每次渲染都会重建（依赖 applyResultToOutputCard → outputNodes），因此订阅
   // 必须经过 ref 转发：早期实现把处理器直接作为 effect 依赖，于是每次画布节点变化都会
-  // 把 7 个事件监听全部退订再重新注册。而图片结果的 result-ready 与 result-saved 由后端
+  // 把 8 个事件监听全部退订再重新注册。而图片结果的 result-ready 与 result-saved 由后端
   // 在下载完成后几乎同一时刻连着发出，恰好落在重建窗口里的那次 save 事件会被静默吞掉——
   // 卡片就永远停在「正在保存本地副本」，后端其实早已把文件写进下载目录。
   // 订阅只注册一次，处理器始终读取最新闭包。
@@ -7881,6 +7907,11 @@ export function WorkspaceApp({
                   task={task}
                   retryInfo={retryInfoByTask[node.taskId] ?? null}
                   results={taskResults[node.taskId] ?? []}
+                  saveProgress={
+                    saveProgressByResult[node.resultKey ?? ""] ??
+                    saveProgressByResult[node.taskId] ??
+                    null
+                  }
                   rawResponse={rawResponses[node.taskId] ?? null}
                   modelLabel={task ? modelDisplayNameForTask(task, providerCatalog) : null}
                 />
@@ -7901,6 +7932,7 @@ export function WorkspaceApp({
       handleUploadOutputToCloud,
       retryInfoByTask,
       taskResults,
+      saveProgressByResult,
       rawResponses,
       providerCatalog,
     ],

@@ -2907,11 +2907,9 @@ fn parse_ark_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
 }
 
 fn http_url_field(record: &Map<String, Value>, fields: &[&str]) -> Option<String> {
-    fields.iter().find_map(|field| {
-        record
-            .get(*field)
-            .and_then(http_url_from_value)
-    })
+    fields
+        .iter()
+        .find_map(|field| record.get(*field).and_then(http_url_from_value))
 }
 
 fn http_url_from_value(value: &Value) -> Option<String> {
@@ -4814,7 +4812,11 @@ mod tests {
         assert_eq!(identity.asset_id, "asset-20260902-7hbb2");
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/statuses"]
+            vec![
+                "/v1/assets/groups",
+                "/v1/assets/statuses",
+                "/v1/assets/statuses"
+            ]
         );
         assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
         let requests = adapter.requests.lock().expect("request lock");
@@ -4997,7 +4999,11 @@ mod tests {
         assert_eq!(identity.asset_id, "asset-976-new");
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/statuses"]
+            vec![
+                "/v1/assets/groups",
+                "/v1/assets/statuses",
+                "/v1/assets/statuses"
+            ]
         );
         assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
     }
@@ -5047,7 +5053,11 @@ mod tests {
         assert_eq!(identity.asset_id, "asset-976-new");
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/list"]
+            vec![
+                "/v1/assets/groups",
+                "/v1/assets/statuses",
+                "/v1/assets/list"
+            ]
         );
         let requests = adapter.requests.lock().expect("request lock");
         assert_eq!(requests[1].path, "/v1/assets/statuses");
