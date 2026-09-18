@@ -1608,7 +1608,7 @@ impl AssetLibrary {
         // 海外平台（konjac.ai）素材上传必须走 `POST /v1/assets/upload` multipart 直传：
         // 其网关未实现 JSON 方式（`/v1/assets/async` 返回 404 Invalid URL），且 `/v1/assets/upload`
         // 需要文件字节而非远端 URL。此处从暂存 URL 下载字节后 multipart 直传，并按 `db_id`
-        // 轮询素材列表直到 Active 取回真实素材 ID。
+        // 轮询状态（首选 `/v1/assets/statuses`，未实现时兜底 `/v1/assets/list`）直到 Active。
         if self
             .port
             .is_overseas_gateway(&request.provider_connection_id)?
@@ -1715,7 +1715,7 @@ impl AssetLibrary {
     }
 
     /// 海外平台素材导入：从暂存 URL 下载字节后 multipart 直传 `POST /v1/assets/upload`，
-    /// 再按 `db_id` 轮询 `/v1/assets/list` 直到 Active 取回真实素材 ID。
+    /// 再按 `db_id` 轮询状态直到 Active 取回真实素材 ID。
     /// 有进度回调时上报 `(done, total)`：总工作量 = 2 × 文件大小（下载 + 上传各算一遍），
     /// 下载阶段按流式字节推进（0 → 50%），multipart 直传完成后跳至 100%。
     async fn import_staged_overseas(
@@ -1824,7 +1824,9 @@ impl AssetLibrary {
         .await
     }
 
-    /// 海外平台素材导入轮询：`POST /v1/assets/list` 按 `db_id` 精确匹配，直到 Active 取回真实素材 ID。
+    /// 海外平台素材导入轮询：首选 `POST /v1/assets/statuses` 按 `db_ids` 查状态；
+    /// 网关未实现该端点（404/405/501）或本次请求失败时，兜底 `POST /v1/assets/list`
+    /// 按 `db_id` 精确匹配，直到 Active 取回真实素材 ID。
     async fn wait_for_overseas_import(
         &self,
         provider_connection_id: &str,
@@ -1833,6 +1835,7 @@ impl AssetLibrary {
     ) -> BackendResult<CloudAssetIdentity> {
         let started = tokio::time::Instant::now();
         let mut consecutive_failures = 0;
+        let mut statuses_available = true;
         loop {
             if started.elapsed() >= self.poll_policy.timeout {
                 return Err(BackendError::protocol(
@@ -1840,23 +1843,20 @@ impl AssetLibrary {
                     json!({ "dbId": placeholder_db_id, "waitedMs": started.elapsed().as_millis() }),
                 ));
             }
-            let mut body = Map::new();
-            body.insert("page_number".to_string(), json!(1));
-            body.insert("page_size".to_string(), json!(100));
-            if let Some(name) = display_name {
-                body.insert("name".to_string(), json!(name));
-            }
             let response = match self
-                .port
-                .send(RemoteAssetRequest {
-                    provider_connection_id: provider_connection_id.to_string(),
-                    method: Method::POST,
-                    path: "/v1/assets/list",
-                    body: Some(Value::Object(body)),
-                })
+                .fetch_overseas_upload_poll(
+                    provider_connection_id,
+                    placeholder_db_id,
+                    display_name,
+                    statuses_available,
+                )
                 .await
             {
-                Ok(response) => response,
+                Ok(OverseasPollFetch::StatusesUnimplemented(list_response)) => {
+                    statuses_available = false;
+                    list_response
+                }
+                Ok(OverseasPollFetch::Observed(response)) => response,
                 Err(error) => {
                     consecutive_failures += 1;
                     if consecutive_failures >= self.poll_policy.failure_limit {
@@ -1875,20 +1875,8 @@ impl AssetLibrary {
                 continue;
             }
             let payload: Value = serde_json::from_str(&response.body)?;
-            let candidates = payload
-                .get("data")
-                .map(asset_array)
-                .filter(|items| !items.is_empty())
-                .unwrap_or_else(|| asset_array(&payload));
-            let matched = candidates.into_iter().find(|entry| {
-                entry
-                    .get("db_id")
-                    .or_else(|| entry.get("id"))
-                    .and_then(Value::as_u64)
-                    == Some(placeholder_db_id)
-            });
             consecutive_failures = 0;
-            let Some(entry) = matched else {
+            let Some(entry) = find_overseas_upload_entry(&payload, placeholder_db_id) else {
                 self.wait_before_next_import_poll().await;
                 continue;
             };
@@ -1911,6 +1899,11 @@ impl AssetLibrary {
                             json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
                         )
                     })?;
+                    if let Some(asset) =
+                        parse_asset_entry(provider_connection_id, entry, Some(&asset_id))
+                    {
+                        remember_cloud_asset_preview(&asset);
+                    }
                     return Ok(CloudAssetIdentity {
                         provider_connection_id: provider_connection_id.to_string(),
                         asset_id,
@@ -1921,7 +1914,9 @@ impl AssetLibrary {
                         format!("asset upload reached terminal status {status}"),
                         json!({
                             "dbId": placeholder_db_id,
-                            "itemError": entry.get("error"),
+                            "itemError": entry
+                                .get("review_error_msg")
+                                .or_else(|| entry.get("error")),
                             "rawResponse": response.body
                         }),
                     ));
@@ -1929,6 +1924,77 @@ impl AssetLibrary {
                 _ => self.wait_before_next_import_poll().await,
             }
         }
+    }
+
+    /// 先打 statuses；未实现则关掉该通道并立刻改打 list；其余失败本轮再试一次 list。
+    async fn fetch_overseas_upload_poll(
+        &self,
+        provider_connection_id: &str,
+        placeholder_db_id: u64,
+        display_name: Option<&str>,
+        statuses_available: bool,
+    ) -> BackendResult<OverseasPollFetch> {
+        if statuses_available {
+            match self
+                .port
+                .send(overseas_statuses_poll_request(
+                    provider_connection_id,
+                    placeholder_db_id,
+                ))
+                .await
+            {
+                Ok(response) if overseas_statuses_unimplemented(response.status) => {
+                    warn!(
+                        "[assets] 海外平台未实现 /v1/assets/statuses（HTTP {}），改用 /v1/assets/list 轮询",
+                        response.status
+                    );
+                    let list = self
+                        .port
+                        .send(overseas_list_poll_request(
+                            provider_connection_id,
+                            display_name,
+                        ))
+                        .await?;
+                    return Ok(OverseasPollFetch::StatusesUnimplemented(list));
+                }
+                Ok(response) if should_fallback_overseas_statuses(response.status) => {
+                    match self
+                        .port
+                        .send(overseas_list_poll_request(
+                            provider_connection_id,
+                            display_name,
+                        ))
+                        .await
+                    {
+                        Ok(list) if (200..300).contains(&list.status) => {
+                            return Ok(OverseasPollFetch::Observed(list));
+                        }
+                        _ => return Ok(OverseasPollFetch::Observed(response)),
+                    }
+                }
+                Ok(response) => return Ok(OverseasPollFetch::Observed(response)),
+                Err(error) => {
+                    match self
+                        .port
+                        .send(overseas_list_poll_request(
+                            provider_connection_id,
+                            display_name,
+                        ))
+                        .await
+                    {
+                        Ok(list) => return Ok(OverseasPollFetch::Observed(list)),
+                        Err(_) => return Err(error),
+                    }
+                }
+            }
+        }
+        self.port
+            .send(overseas_list_poll_request(
+                provider_connection_id,
+                display_name,
+            ))
+            .await
+            .map(OverseasPollFetch::Observed)
     }
 
     /// Refresh the authenticated asset record for a local preview, without a generation task.
@@ -2395,6 +2461,64 @@ where
         tokio::time::sleep(Duration::from_millis(delay_ms)).await;
         attempt += 1;
     }
+}
+
+fn overseas_statuses_unimplemented(status: u16) -> bool {
+    matches!(status, 404 | 405 | 501)
+}
+
+fn should_fallback_overseas_statuses(status: u16) -> bool {
+    status >= 500
+}
+
+fn overseas_statuses_poll_request(
+    provider_connection_id: &str,
+    placeholder_db_id: u64,
+) -> RemoteAssetRequest {
+    RemoteAssetRequest {
+        provider_connection_id: provider_connection_id.to_string(),
+        method: Method::POST,
+        path: "/v1/assets/statuses",
+        body: Some(json!({ "db_ids": [placeholder_db_id] })),
+    }
+}
+
+fn overseas_list_poll_request(
+    provider_connection_id: &str,
+    display_name: Option<&str>,
+) -> RemoteAssetRequest {
+    let mut body = Map::new();
+    body.insert("page_number".into(), json!(1));
+    body.insert("page_size".into(), json!(100));
+    if let Some(name) = display_name {
+        body.insert("name".into(), json!(name));
+    }
+    RemoteAssetRequest {
+        provider_connection_id: provider_connection_id.to_string(),
+        method: Method::POST,
+        path: "/v1/assets/list",
+        body: Some(Value::Object(body)),
+    }
+}
+
+fn find_overseas_upload_entry(payload: &Value, placeholder_db_id: u64) -> Option<&Value> {
+    let candidates = payload
+        .get("data")
+        .map(asset_array)
+        .filter(|items| !items.is_empty())
+        .unwrap_or_else(|| asset_array(payload));
+    candidates.into_iter().find(|entry| {
+        entry
+            .get("db_id")
+            .or_else(|| entry.get("id"))
+            .and_then(Value::as_u64)
+            == Some(placeholder_db_id)
+    })
+}
+
+enum OverseasPollFetch {
+    Observed(RawProviderResponse),
+    StatusesUnimplemented(RawProviderResponse),
 }
 
 fn require_success(operation: &str, response: &RawProviderResponse) -> BackendResult<()> {
@@ -4626,7 +4750,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn import_staged_overseas_uploads_via_multipart_and_polls_the_list_by_db_id() {
+    async fn import_staged_overseas_uploads_via_multipart_and_polls_statuses_by_db_id() {
         let adapter = Arc::new(
             InMemoryAssetAdapter::with_responses([
                 // 1) find_upload_group: 列出分组
@@ -4639,18 +4763,18 @@ mod tests {
                     200,
                     json!({ "code": "success", "data": { "db_id": 975, "id": 975, "status": "Processing" }, "success": true }),
                 ),
-                // 3) 第一次轮询 list：仍 Processing
+                // 3) 第一次轮询 statuses：仍 Processing
                 response(
                     200,
                     json!({ "data": { "items": [
-                        { "id": "task-975", "db_id": 975, "asset_type": "image", "status": "Processing" }
+                        { "db_id": 975, "status": "Processing" }
                     ] } }),
                 ),
-                // 4) 第二次轮询 list：Active，取回真实 asset id
+                // 4) 第二次轮询 statuses：Active，取回真实 asset id
                 response(
                     200,
                     json!({ "data": { "items": [
-                        { "id": "asset-20260902-7hbb2", "db_id": 975, "asset_type": "image", "status": "Active" }
+                        { "id": "asset-20260902-7hbb2", "db_id": 975, "status": "Active", "preview_url": "https://cdn.example.com/a.png" }
                     ] } }),
                 ),
             ])
@@ -4675,13 +4799,13 @@ mod tests {
             .expect("overseas import");
 
         assert_eq!(identity.asset_id, "asset-20260902-7hbb2");
-        // JSON 通道：分组发现 + 轮询 /v1/assets/list（两次），不走 /v1/assets/async。
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets/groups", "/v1/assets/list", "/v1/assets/list"]
+            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/statuses"]
         );
-        // multipart 通道只走一次 /v1/assets/upload。
         assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[1].body, Some(json!({ "db_ids": [975] })));
         let uploads = adapter.multipart_requests.lock().expect("multipart lock");
         assert_eq!(uploads[0].0.path, "/v1/assets/upload");
         assert_eq!(uploads[0].0.file_field, "file");
@@ -4824,14 +4948,61 @@ mod tests {
                     200,
                     json!({ "code": "success", "data": { "db_id": 976, "id": 976, "status": "Processing" }, "success": true }),
                 ),
-                // 第一条 db_id=975 是旧素材（同名歧义），必须按 db_id 精确匹配到 976。
                 response(
                     200,
                     json!({ "data": { "items": [
-                        { "id": "asset-old-975", "db_id": 975, "asset_type": "image", "status": "Active" },
-                        { "id": "task-976", "db_id": 976, "asset_type": "image", "status": "Processing" }
+                        { "db_id": 976, "status": "Processing" }
                     ] } }),
                 ),
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "id": "asset-976-new", "db_id": 976, "status": "Active" }
+                    ] } }),
+                ),
+            ])
+            .with_overseas(true),
+        );
+        adapter
+            .downloads
+            .lock()
+            .expect("download lock")
+            .insert("https://tos.example.com/b.png".into(), vec![9, 9, 9]);
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/b.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("同名素材".into()),
+                group_id: None,
+            })
+            .await
+            .expect("overseas import picks the record with matching db_id");
+
+        assert_eq!(identity.asset_id, "asset-976-new");
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/statuses"]
+        );
+        assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
+    }
+
+    #[tokio::test]
+    async fn import_staged_overseas_falls_back_to_list_when_statuses_is_unimplemented() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([
+                response(
+                    200,
+                    json!({ "data": [{ "id": 16, "name": UPLOAD_GROUP_NAME }] }),
+                ),
+                response(
+                    200,
+                    json!({ "code": "success", "data": { "db_id": 976, "id": 976, "status": "Processing" }, "success": true }),
+                ),
+                response(404, json!({ "error": { "message": "Invalid URL" } })),
+                // 兜底 list 里夹着同名旧素材，仍必须按 db_id 命中 976。
                 response(
                     200,
                     json!({ "data": { "items": [
@@ -4858,14 +5029,63 @@ mod tests {
                 group_id: None,
             })
             .await
-            .expect("overseas import picks the record with matching db_id");
+            .expect("overseas import falls back to list");
 
         assert_eq!(identity.asset_id, "asset-976-new");
-        // JSON 通道：分组发现 + 轮询 list（两次）；multipart 通道：仅一次 upload。
         assert_eq!(
             adapter.request_paths(),
-            vec!["/v1/assets/groups", "/v1/assets/list", "/v1/assets/list"]
+            vec!["/v1/assets/groups", "/v1/assets/statuses", "/v1/assets/list"]
         );
-        assert_eq!(adapter.multipart_request_paths(), vec!["/v1/assets/upload"]);
+        let requests = adapter.requests.lock().expect("request lock");
+        assert_eq!(requests[1].path, "/v1/assets/statuses");
+        assert_eq!(requests[1].body, Some(json!({ "db_ids": [976] })));
+        assert_eq!(requests[2].path, "/v1/assets/list");
+        assert_eq!(requests[2].body.as_ref().unwrap()["name"], "同名素材");
+    }
+
+    #[tokio::test]
+    async fn import_staged_overseas_surfaces_statuses_review_error() {
+        let adapter = Arc::new(
+            InMemoryAssetAdapter::with_responses([
+                response(
+                    200,
+                    json!({ "data": [{ "id": 16, "name": UPLOAD_GROUP_NAME }] }),
+                ),
+                response(
+                    200,
+                    json!({ "code": "success", "data": { "db_id": 980, "id": 980, "status": "Processing" }, "success": true }),
+                ),
+                response(
+                    200,
+                    json!({ "data": { "items": [
+                        { "db_id": 980, "status": "Failed", "review_error_msg": "FaceMismatch" }
+                    ] } }),
+                ),
+            ])
+            .with_overseas(true),
+        );
+        adapter
+            .downloads
+            .lock()
+            .expect("download lock")
+            .insert("https://tos.example.com/c.png".into(), vec![1]);
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let error = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/c.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("审核失败".into()),
+                group_id: None,
+            })
+            .await
+            .expect_err("failed statuses must abort import");
+
+        assert!(error.to_string().contains("Failed"));
+        assert_eq!(
+            adapter.request_paths(),
+            vec!["/v1/assets/groups", "/v1/assets/statuses"]
+        );
     }
 }
