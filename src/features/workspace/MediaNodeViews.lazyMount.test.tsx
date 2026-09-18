@@ -2,6 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { QueryClientProvider, type QueryClient } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
+import type { GenerationResultSaveProgress } from "../../lib/backend";
 import { createQueryClient } from "../../lib/queryClient";
 import { CanvasOutputNode } from "./MediaNodeViews";
 import type { OutputNodeData } from "./workspaceModel";
@@ -29,7 +30,11 @@ function makeVideoOutputNode(overrides: Partial<OutputNodeData> = {}): OutputNod
   };
 }
 
-function outputNodeElement(client: QueryClient, node: OutputNodeData) {
+function outputNodeElement(
+  client: QueryClient,
+  node: OutputNodeData,
+  saveProgress: GenerationResultSaveProgress | null = null,
+) {
   return (
     <QueryClientProvider client={client}>
       <CanvasOutputNode
@@ -43,6 +48,7 @@ function outputNodeElement(client: QueryClient, node: OutputNodeData) {
         task={null}
         retryInfo={null}
         results={[]}
+        saveProgress={saveProgress}
         rawResponse={null}
         modelLabel={null}
       />
@@ -88,5 +94,51 @@ describe("画布产物卡片的视口懒挂载", () => {
     const visual = screen.getByRole("button", { name: "全屏浏览产物：saved.mp4" });
     await waitFor(() => expect(visual.querySelector("video")).not.toBeNull());
     expect(visual.querySelector(".canvas-asset-node__video-lazy")).toBeNull();
+  });
+});
+
+describe("画布产物卡片的本地保存进度", () => {
+  it("远程预览卡片顶栏显示已下/总量/速度/剩余时间，不再只靠底部一行小字", () => {
+    render(
+      outputNodeElement(
+        createQueryClient(),
+        makeVideoOutputNode({
+          previewSrc: "https://cdn.example.com/out.mp4",
+          name: "out.mp4",
+        }),
+        {
+          taskId: "task-lazy",
+          resultIndex: 1,
+          received: 848 * 1024,
+          total: 10 * 1024 * 1024,
+          bytesPerSec: 12.8 * 1024,
+        },
+      ),
+    );
+
+    expect(
+      screen.getByText("正在保存 848.0 KB / 10.0 MB · 12.8 KB/s · 约 12 分钟"),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "结果保存进度" })).toHaveAttribute(
+      "aria-valuenow",
+      "8",
+    );
+  });
+
+  it("远程预览尚未收到进度事件时也明确显示正在保存", () => {
+    render(
+      outputNodeElement(
+        createQueryClient(),
+        makeVideoOutputNode({
+          previewSrc: "https://cdn.example.com/out.mp4",
+          name: "out.mp4",
+        }),
+      ),
+    );
+
+    expect(screen.getByText("正在保存本地副本")).toBeInTheDocument();
+    expect(screen.getByRole("progressbar", { name: "结果保存进度" })).toHaveClass(
+      "canvas-output-node__progress--indeterminate",
+    );
   });
 });

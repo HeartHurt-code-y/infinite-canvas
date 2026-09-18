@@ -4,7 +4,7 @@
 // 构建会直接失败。本仓库的 CI 在配齐密钥之前仍要能打出普通安装包，所以默认
 // tauri.conf.json 不打开该开关，由这里按密钥是否存在再合并 tauri.updater.conf.json。
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -55,8 +55,17 @@ export function resolveUpdaterSigningEnv(env, defaultKeyPath) {
   const hasPath =
     typeof next.TAURI_SIGNING_PRIVATE_KEY_PATH === "string" &&
     next.TAURI_SIGNING_PRIVATE_KEY_PATH.trim() !== "";
-  if (!hasInlineKey && !hasPath && existsSync(defaultKeyPath)) {
+  if (!hasPath && existsSync(defaultKeyPath)) {
     next.TAURI_SIGNING_PRIVATE_KEY_PATH = defaultKeyPath;
+  }
+  const keyPath =
+    typeof next.TAURI_SIGNING_PRIVATE_KEY_PATH === "string"
+      ? next.TAURI_SIGNING_PRIVATE_KEY_PATH
+      : "";
+  // `tauri build` 的 updater 产物只认 TAURI_SIGNING_PRIVATE_KEY 正文；
+  // PATH 变量只对 `tauri signer sign` 生效。本地有密钥文件时把正文灌进去。
+  if (!hasInlineKey && keyPath !== "" && existsSync(keyPath)) {
+    next.TAURI_SIGNING_PRIVATE_KEY = readFileSync(keyPath, "utf8").trim();
   }
   return next;
 }

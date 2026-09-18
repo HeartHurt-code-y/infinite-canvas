@@ -482,20 +482,41 @@ function HistoryResultVisual({
   readonly alt: string;
 }) {
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
+  const [failed, setFailed] = useState(false);
   const containerStyle: CSSProperties =
     aspectRatio != null ? { aspectRatio: `${aspectRatio}` } : {};
+  const placeholder = (
+    <Icon
+      name={mediaType === "video" ? "video-camera" : "image-square"}
+      aria-hidden="true"
+      size="xl"
+    />
+  );
 
   return (
-    <span className="history-result__visual history-result__visual--auto" style={containerStyle}>
-      {mediaType === "video" ? (
-        // 视频结果取中间帧作静止封面：首帧常是黑场，中间帧更能辨认内容。
-        <VideoMiddleFrame src={src} onAspectRatioChange={setAspectRatio} />
+    <span
+      className={`history-result__visual${aspectRatio != null ? " history-result__visual--auto" : ""}`}
+      style={containerStyle}
+    >
+      {failed ? (
+        <span className="history-result__missing">{placeholder}</span>
+      ) : mediaType === "video" ? (
+        // 弹层不在画布视口里：必须 eager，否则封面会按画布几何被判不可见，src 永不挂上。
+        // 中间帧定位前先露出类型图标，避免 WebView seek 挂起时只剩一块灰底。
+        <VideoMiddleFrame
+          src={src}
+          eager
+          placeholder={placeholder}
+          onAspectRatioChange={setAspectRatio}
+          onLoadError={() => setFailed(true)}
+        />
       ) : (
         <img
           src={src}
           alt={alt}
           loading="lazy"
           draggable={false}
+          onError={() => setFailed(true)}
           onLoad={(event) => {
             const img = event.currentTarget;
             if (img.naturalWidth > 0 && img.naturalHeight > 0) {

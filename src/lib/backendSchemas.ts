@@ -41,6 +41,12 @@ import type {
 
 export const nullableStringSchema = v.nullable(v.string());
 const nullableNumberSchema = v.nullable(v.number());
+/** 桌面 IPC 偶发把整数编成字符串；保存进度事件必须收下，否则卡片永远不更新。 */
+const ipcNumberSchema = v.pipe(
+  v.union([v.number(), v.string()]),
+  v.transform((value) => (typeof value === "number" ? value : Number(value))),
+  v.number(),
+);
 const jsonObjectSchema = v.record(v.string(), v.unknown());
 
 export const generationOperationSchema = v.picklist([
@@ -460,13 +466,22 @@ export const generationResultReadyEventSchema = v.looseObject({
   previewSrc: nullableStringSchema,
 }) satisfies v.GenericSchema<GenerationResultReadyEvent>;
 
-export const generationResultSaveProgressEventSchema = v.looseObject({
-  taskId: v.string(),
-  resultIndex: v.number(),
-  received: v.number(),
-  total: nullableNumberSchema,
-  bytesPerSec: v.number(),
-}) satisfies v.GenericSchema<GenerationResultSaveProgress>;
+export const generationResultSaveProgressEventSchema = v.pipe(
+  v.looseObject({
+    taskId: v.string(),
+    resultIndex: ipcNumberSchema,
+    received: ipcNumberSchema,
+    total: v.optional(v.nullable(ipcNumberSchema)),
+    bytesPerSec: v.optional(v.nullable(ipcNumberSchema)),
+  }),
+  v.transform((value): GenerationResultSaveProgress => ({
+    taskId: value.taskId,
+    resultIndex: value.resultIndex,
+    received: value.received,
+    total: value.total ?? null,
+    bytesPerSec: Number.isFinite(value.bytesPerSec ?? Number.NaN) ? Number(value.bytesPerSec) : 0,
+  })),
+) satisfies v.GenericSchema<GenerationResultSaveProgress>;
 
 export const generationRetryEventSchema = v.looseObject({
   taskId: v.string(),

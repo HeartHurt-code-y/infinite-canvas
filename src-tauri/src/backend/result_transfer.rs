@@ -489,17 +489,21 @@ struct ProgressEmitter {
 
 impl ProgressEmitter {
     fn new(received: u64, on_progress: impl FnMut(TransferProgress) + Send + 'static) -> Self {
-        Self {
+        let emitter = Self {
             started: Instant::now(),
             last_emit: Arc::new(Mutex::new(Instant::now())),
             received: Arc::new(AtomicU64::new(received)),
             total: Arc::new(AtomicU64::new(0)),
             on_progress: Arc::new(Mutex::new(Box::new(on_progress))),
-        }
+        };
+        // 探测 Content-Length / 建连可能要好几秒，先把 0 B 推到卡片，避免看起来像卡死。
+        emitter.emit_now();
+        emitter
     }
 
     fn set_total(&self, total: Option<u64>) {
         self.total.store(total.unwrap_or(0), Ordering::Relaxed);
+        self.emit_now();
     }
 
     fn reset_received(&self) {

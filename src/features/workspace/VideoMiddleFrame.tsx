@@ -14,6 +14,8 @@ const VIDEO_FRAME_READY_CLASS = "is-frame-ready";
  * - 滚出视口时摘掉 `src` 释放解码器，滚回后重新抽帧。
  * - 可见性观察的是定尺寸外壳，而不是 `<video>` 本身：WebKit 上无 src 的 video 盒子经常是 0，
  *   观察它会形成「不相交 → 永不挂 src」的死锁。
+ * - seek 可能永不回调（本地 asset 协议、缺索引的 mp4）：`loadeddata` 时揭开已有帧，
+ *   与画布产物卡片同一兜底，避免封面永远透明。
  */
 export function VideoMiddleFrame({
   src,
@@ -71,6 +73,7 @@ export function VideoMiddleFrame({
           setReadyKey(frameKey);
         }}
         onSeeked={() => setReadyKey(frameKey)}
+        onLoadedData={() => setReadyKey(frameKey)}
         onError={() => onLoadError?.()}
       />
     </span>

@@ -6,6 +6,7 @@ import type {
   GenerationTaskPage,
   GenerationTaskSummary,
 } from "../../lib/backend";
+import { flushCanvasMediaVisibility } from "../workspace/mediaPreview";
 import { HistoryDialog } from "./HistoryDialog";
 
 const DESKTOP_INTERNALS_KEY = "__TAURI_INTERNALS__";
@@ -469,6 +470,84 @@ describe("HistoryDialog diagnostics", () => {
     fireEvent.click(stage!);
     expect(screen.queryByRole("dialog", { name: "媒体预览" })).not.toBeInTheDocument();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("桌面端历史视频封面不跟画布视口懒挂载，灰底上先露出类型图标", async () => {
+    const pane = document.createElement("div");
+    pane.className = "canvas-viewport";
+    document.body.append(pane);
+    const paneRect = {
+      x: 0,
+      y: 0,
+      left: 0,
+      top: 0,
+      right: 800,
+      bottom: 600,
+      width: 800,
+      height: 600,
+      toJSON: () => ({}),
+    } as DOMRect;
+    const farRect = {
+      x: 4000,
+      y: 4000,
+      left: 4000,
+      top: 4000,
+      right: 4120,
+      bottom: 4120,
+      width: 120,
+      height: 120,
+      toJSON: () => ({}),
+    } as DOMRect;
+    const rectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: Element) {
+        return this === pane ? paneRect : farRect;
+      },
+    );
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: () => Promise.resolve(null),
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    const detailWithVideo: GenerationTaskDetail = {
+      ...DETAIL,
+      results: [
+        {
+          taskId: SUMMARY.id,
+          resultIndex: 1,
+          mediaType: "video",
+          remoteTaskId: "remote-1",
+          source: null,
+          saveStatus: "succeeded",
+          finalPath: "C:\\results\\portrait-video.mp4",
+          relativePath: "portrait-video.mp4",
+          byteSize: 49_070_080,
+          mimeType: "video/mp4",
+          sha256: null,
+          savedAt: 1_777_000_003_000,
+          error: null,
+        },
+      ],
+    };
+
+    try {
+      render(<HistoryDialog open onClose={vi.fn()} client={createClient(detailWithVideo)} />);
+      const resultLabel = await screen.findByText(/结果 2 · 视频/);
+      const preview = resultLabel.closest("button");
+      expect(preview).not.toBeNull();
+      act(() => {
+        flushCanvasMediaVisibility();
+      });
+
+      const video = preview!.querySelector("video");
+      expect(video).toHaveAttribute("src", expect.stringContaining("portrait-video.mp4"));
+      expect(preview!.querySelector(".history-result__visual--auto")).toBeNull();
+      expect(preview!.querySelector("svg")).not.toBeNull();
+    } finally {
+      rectSpy.mockRestore();
+      pane.remove();
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
   });
 });
 

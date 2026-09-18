@@ -1993,6 +1993,7 @@ export function CanvasOutputNode({
       ? Math.min(100, Math.max(0, Math.round((saveProgress.received / saveProgress.total) * 100)))
       : null;
   const saveProgressLabel = saveProgress != null ? formatSaveProgress(saveProgress) : null;
+  const showSaveOverlay = isPreviewOnly && failedSaveResult == null && savedResultName == null;
   const failedTitle = (() => {
     if (task != null && task.status === "succeeded" && failedSaveResult) {
       return SAVE_STATUS_LABELS[failedSaveResult.saveStatus] ?? "结果保存失败";
@@ -2105,7 +2106,9 @@ export function CanvasOutputNode({
       className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       aria-busy={
-        !(isTextResult && node.textContent != null) && (isRunning || isSaving) ? "true" : undefined
+        !(isTextResult && node.textContent != null) && (isRunning || isSaving || showSaveOverlay)
+          ? "true"
+          : undefined
       }
       onMouseDown={(event) => {
         // 整卡任意位置可自由拖动；按在媒体区域上且未发生位移的抬起视为点按，
@@ -2230,10 +2233,37 @@ export function CanvasOutputNode({
                       ? "本地保存失败"
                       : savedResultName != null
                         ? "已保存到本机 · 正在补齐卡片"
-                        : (saveProgressLabel ?? "正在保存本地副本")
+                        : "正在保存到本机"
                     : "已连线来源节点 · 可作为参考输入"
                 }`}
           </span>
+          {showSaveOverlay ? (
+            <div className="canvas-output-node__save-overlay" aria-live="polite">
+              <span className="canvas-output-node__save-overlay-label">
+                {saveProgressLabel ?? "正在保存本地副本"}
+              </span>
+              {savePercent != null ? (
+                <span
+                  className="canvas-output-node__progress"
+                  role="progressbar"
+                  aria-label="结果保存进度"
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-valuenow={savePercent}
+                >
+                  <i style={{ width: `${savePercent}%` }} />
+                </span>
+              ) : (
+                <span
+                  className="canvas-output-node__progress canvas-output-node__progress--indeterminate"
+                  role="progressbar"
+                  aria-label="结果保存进度"
+                >
+                  <i />
+                </span>
+              )}
+            </div>
+          ) : null}
           {isPreviewOnly && failedSaveResult != null ? (
             <span className="canvas-output-node__actions">
               <button

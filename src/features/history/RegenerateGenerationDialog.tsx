@@ -275,7 +275,12 @@ function MaterialThumb({
   return (
     <span className="regenerate-material__thumb">
       {videoSource != null ? (
-        <VideoMiddleFrame src={videoSource} objectFit="cover" onLoadError={handleImageError} />
+        <VideoMiddleFrame
+          src={videoSource}
+          eager
+          objectFit="cover"
+          onLoadError={handleImageError}
+        />
       ) : (
         <img
           src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}
@@ -343,7 +348,12 @@ function AddListThumb({
   return (
     <span className="regenerate-add__thumb">
       {videoSource != null ? (
-        <VideoMiddleFrame src={videoSource} objectFit="cover" onLoadError={handleImageError} />
+        <VideoMiddleFrame
+          src={videoSource}
+          eager
+          objectFit="cover"
+          onLoadError={handleImageError}
+        />
       ) : (
         <img
           src={toMediaProxyUrl(effectiveUrl) ?? effectiveUrl}

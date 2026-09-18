@@ -359,9 +359,7 @@ impl LocalResultService {
         self.persist_result(&record)?;
         record.save_status = SaveStatus::Writing;
         self.persist_result(&record)?;
-        // 不把远程直链交给预览：否则 WebView 会再打一条上游 GET，和本机保存抢
-        // 已经被限速的连接，10MB 的慢直链会在约 10 分钟后被旧超时判失败。
-        on_ready(&record, None);
+        on_ready(&record, Some(video_url.to_string()));
 
         let result = self
             .download_with_retry(
@@ -844,6 +842,20 @@ impl LocalResultService {
     ) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
         let on_progress = Arc::new(Mutex::new(on_progress));
+        let existing = tokio::fs::metadata(part_path)
+            .await
+            .ok()
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        (on_progress
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))(
+            TransferProgress {
+                received: existing,
+                total: None,
+                bytes_per_sec: 0.0,
+            },
+        );
         let mut last_error = None;
         const MAX_ATTEMPTS: u32 = 6;
         for attempt in 0..MAX_ATTEMPTS {

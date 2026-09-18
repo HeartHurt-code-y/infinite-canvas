@@ -83,6 +83,21 @@ describe("VideoMiddleFrame", () => {
     fireEvent.loadedMetadata(video);
     expect(video).toHaveClass("is-frame-ready");
   });
+
+  it("seek 未完成但已有可绘帧时也揭开封面，避免历史卡片一直灰底", () => {
+    const thumb = mountMediaThumb(
+      <VideoMiddleFrame src="https://cdn.example.com/seedance.mp4" placeholder={<span>占位</span>} />,
+    );
+    const video = thumb.querySelector("video")!;
+    stubVideoReadings(video, { duration: 12, width: 1280, height: 720 });
+    fireEvent.loadedMetadata(video);
+    expect(video!.currentTime).toBe(6);
+    expect(video).not.toHaveClass("is-frame-ready");
+
+    fireEvent.loadedData(video);
+    expect(video).toHaveClass("is-frame-ready");
+    expect(screen.queryByText("占位")).not.toBeInTheDocument();
+  });
 });
 
 describe("AutoSizeThumb 视频参考素材", () => {

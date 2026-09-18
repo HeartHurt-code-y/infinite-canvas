@@ -1260,9 +1260,13 @@ impl GenerationTaskService {
             &json!({
                 "taskId": task_id,
                 "resultIndex": result_index,
-                "received": progress.received,
-                "total": progress.total,
-                "bytesPerSec": progress.bytes_per_sec,
+                "received": progress.received as f64,
+                "total": progress.total.map(|value| value as f64),
+                "bytesPerSec": if progress.bytes_per_sec.is_finite() {
+                    progress.bytes_per_sec
+                } else {
+                    0.0
+                },
             }),
         );
     }
