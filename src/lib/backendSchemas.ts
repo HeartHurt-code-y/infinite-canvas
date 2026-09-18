@@ -481,7 +481,9 @@ export const generationResultSaveProgressEventSchema = v.pipe(
     total: value.total ?? null,
     bytesPerSec: Number.isFinite(value.bytesPerSec ?? Number.NaN) ? Number(value.bytesPerSec) : 0,
   })),
-) satisfies v.GenericSchema<GenerationResultSaveProgress>;
+  // pipe 的输入是 string|number，输出才是 GenerationResultSaveProgress；
+  // GenericSchema<T> 要求输入输出同型，这里只能断言输出类型。
+) as v.GenericSchema<GenerationResultSaveProgress>;
 
 export const generationRetryEventSchema = v.looseObject({
   taskId: v.string(),
