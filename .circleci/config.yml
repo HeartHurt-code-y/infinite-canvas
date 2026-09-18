@@ -115,9 +115,11 @@ jobs:
       - save-caches
 
   macos-package:
-    # 对应 GitHub Actions 的 macos-14；CircleCI 免费层 macOS 默认机型即可完成打包
+    # 免费层现已默认 m4pro.medium；Xcode 15.4 镜像会被 brownout，任务直接
+    # 「Task information unavailable」。改用仍在支持列表里的 16.4。
     macos:
-      xcode: "15.4.0"
+      xcode: "16.4.0"
+    resource_class: m4pro.medium
     environment:
       CI: "true"
     steps:

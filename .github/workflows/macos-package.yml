@@ -37,6 +37,15 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v5
 
+      # macos-14 只有 14 GB 盘，内置 Blender ~882 MiB 再加 Rust target 很容易写满。
+      - name: Free disk space
+        run: |
+          df -h /
+          sudo rm -rf /opt/hostedtoolcache \
+            "$HOME/Library/Developer/CoreSimulator" \
+            /usr/local/lib/android || true
+          df -h /
+
       - name: Set up pnpm
         uses: pnpm/action-setup@v4
         with:
@@ -65,7 +74,7 @@ jobs:
       # 配了证书就正式签名；没配则构建出的包会因缺少签名而在此后步骤明确失败。
       # 证书与口令已在 job 级 env 里，这里不必重复声明（重复声明反而容易出现不一致）。
       - name: Import Apple signing certificate
-        if: ${{ secrets.APPLE_CERTIFICATE != '' }}
+        if: env.APPLE_CERTIFICATE != ''
         run: |
           KEYCHAIN_PATH="$RUNNER_TEMP/signing.keychain-db"
           KEYCHAIN_PASSWORD="$(openssl rand -base64 32)"
@@ -169,7 +178,6 @@ jobs:
           name: infinite-canvas-macos-${{ github.sha }}
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
-            src-tauri/target/release/bundle/macos/*.app
             src-tauri/target/release/bundle/helper/install-macos.sh
           if-no-files-found: error
           retention-days: 30
