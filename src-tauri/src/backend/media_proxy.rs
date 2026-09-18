@@ -71,6 +71,15 @@ pub struct LocalMediaSource {
 /// 回到素材导入任务取出原始文件；拿不到映射时返回 `None`，绝不按任意地址读本机文件。
 pub trait LocalMediaFallback: Send + Sync {
     fn resolve(&self, url: &Url) -> Option<LocalMediaSource>;
+    /// 按云端素材身份回到导入时的原始文件。
+    ///
+    /// 上游列表并不总是回放暂存地址：可能换成自己的 CDN、`asset://` 占位，或干脆没有
+    /// `url`。这些地址无法按对象键映射到暂存桶，但导入任务已经记下了 `asset_id` 与本地
+    /// 路径。默认不映射任何身份。
+    fn resolve_asset_id(&self, asset_id: &str) -> Option<LocalMediaSource> {
+        let _ = asset_id;
+        None
+    }
 }
 
 /// 一次本地兜底读取要回答的内容：状态、响应体、以及附加头。
@@ -255,6 +264,29 @@ async fn serve_local_copy(
     is_head: bool,
 ) -> Option<Response<Vec<u8>>> {
     let source = fallback?.resolve(upstream_url)?;
+    serve_resolved_local_copy(source, Some(upstream_url), request_headers, cache, is_head).await
+}
+
+/// 按云端素材身份用导入时的原始文件应答；若同时有上游地址，图片顺带按该地址落盘。
+async fn serve_imported_asset(
+    fallback: Option<&dyn LocalMediaFallback>,
+    asset_id: &str,
+    cache_url: Option<&Url>,
+    request_headers: &HeaderMap,
+    cache: Option<&MediaCache>,
+    is_head: bool,
+) -> Option<Response<Vec<u8>>> {
+    let source = fallback?.resolve_asset_id(asset_id)?;
+    serve_resolved_local_copy(source, cache_url, request_headers, cache, is_head).await
+}
+
+async fn serve_resolved_local_copy(
+    source: LocalMediaSource,
+    cache_url: Option<&Url>,
+    request_headers: &HeaderMap,
+    cache: Option<&MediaCache>,
+    is_head: bool,
+) -> Option<Response<Vec<u8>>> {
     let requested = request_headers
         .get("range")
         .and_then(|value| value.to_str().ok())
@@ -270,11 +302,12 @@ async fn serve_local_copy(
     let copy = read_local_copy(&source.path, sniffed.clone(), requested, is_head).await?;
     // 完整、图片、上游未禁止存储的响应同样落盘：下一次（含签名过期后）直接命中本地字节。
     if copy.status == StatusCode::OK && !is_head {
-        if let (Some(cache), Some(content_type)) = (cache, sniffed.as_deref()) {
+        if let (Some(cache), Some(content_type), Some(url)) = (cache, sniffed.as_deref(), cache_url)
+        {
             if is_cacheable_content_type(Some(content_type))
                 && cache.accepts_length(Some(copy.body.len() as u64))
             {
-                cache.store(upstream_url, Some(content_type), &copy.body);
+                cache.store(url, Some(content_type), &copy.body);
             }
         }
     }
@@ -527,7 +560,16 @@ async fn proxy_response(
         return error_response(StatusCode::METHOD_NOT_ALLOWED, "method_not_allowed", false);
     }
     let is_head = request.method() == Method::HEAD;
+    let asset_id = extract_asset_id(request.uri());
     let Some(upstream_url) = extract_upstream_url(request.uri()) else {
+        if let Some(asset_id) = asset_id.as_deref() {
+            if let Some(response) =
+                serve_imported_asset(fallback, asset_id, None, request.headers(), cache, is_head)
+                    .await
+            {
+                return response;
+            }
+        }
         return error_response(StatusCode::BAD_REQUEST, "invalid_media_source", is_head);
     };
     // Range 请求（视频探测/续播）不参与缓存：分块响应不是完整内容。
@@ -593,6 +635,20 @@ async fn proxy_response(
                 {
                     return response;
                 }
+                if let Some(asset_id) = asset_id.as_deref() {
+                    if let Some(response) = serve_imported_asset(
+                        fallback,
+                        asset_id,
+                        Some(&upstream_url),
+                        request.headers(),
+                        cache,
+                        is_head,
+                    )
+                    .await
+                    {
+                        return response;
+                    }
+                }
                 // Upstream error pages can echo signed URLs or authentication details.
                 let status = if status.is_redirection() {
                     StatusCode::BAD_GATEWAY
@@ -615,6 +671,20 @@ async fn proxy_response(
                 serve_local_copy(fallback, &upstream_url, request.headers(), cache, is_head).await
             {
                 return response;
+            }
+            if let Some(asset_id) = asset_id.as_deref() {
+                if let Some(response) = serve_imported_asset(
+                    fallback,
+                    asset_id,
+                    Some(&upstream_url),
+                    request.headers(),
+                    cache,
+                    is_head,
+                )
+                .await
+                {
+                    return response;
+                }
             }
             error_response(StatusCode::BAD_GATEWAY, kind, is_head)
         }
@@ -702,12 +772,27 @@ fn header_u64(headers: &HeaderMap, name: &str) -> Option<u64> {
 }
 
 fn extract_upstream_url(uri: &Uri) -> Option<Url> {
-    let query = uri.query()?;
-    let source = url::form_urlencoded::parse(query.as_bytes())
-        .find(|(key, _)| key == "src")?
-        .1;
+    let source = query_param(uri, "src")?;
     let url = Url::parse(&source).ok()?;
     valid_upstream(&url).then_some(url)
+}
+
+fn extract_asset_id(uri: &Uri) -> Option<String> {
+    let raw = query_param(uri, "assetId")?;
+    let id = raw
+        .strip_prefix("asset://")
+        .unwrap_or(&raw)
+        .trim()
+        .to_string();
+    (!id.is_empty()).then_some(id)
+}
+
+fn query_param(uri: &Uri, name: &str) -> Option<String> {
+    let query = uri.query()?;
+    url::form_urlencoded::parse(query.as_bytes())
+        .find(|(key, _)| key == name)
+        .map(|(_, value)| value.into_owned())
+        .filter(|value| !value.is_empty())
 }
 
 fn valid_upstream(url: &Url) -> bool {
@@ -992,6 +1077,7 @@ mod tests {
     #[derive(Default)]
     struct StubLocalFallback {
         mapped: std::sync::Mutex<HashMap<String, PathBuf>>,
+        asset_ids: std::sync::Mutex<HashMap<String, PathBuf>>,
     }
 
     impl StubLocalFallback {
@@ -1002,6 +1088,14 @@ mod tests {
                 .insert(url.to_string(), path.to_path_buf());
             self
         }
+
+        fn with_asset_id(self, asset_id: &str, path: &StdPath) -> Self {
+            self.asset_ids
+                .lock()
+                .unwrap()
+                .insert(asset_id.to_string(), path.to_path_buf());
+            self
+        }
     }
 
     impl LocalMediaFallback for StubLocalFallback {
@@ -1010,6 +1104,14 @@ mod tests {
                 .lock()
                 .unwrap()
                 .get(url.as_str())
+                .map(|path| LocalMediaSource { path: path.clone() })
+        }
+
+        fn resolve_asset_id(&self, asset_id: &str) -> Option<LocalMediaSource> {
+            self.asset_ids
+                .lock()
+                .unwrap()
+                .get(asset_id)
                 .map(|path| LocalMediaSource { path: path.clone() })
         }
     }
@@ -1059,6 +1161,70 @@ mod tests {
             cache.read(&Url::parse(&source).unwrap()).is_some(),
             "本地兜底应答的图片必须落盘复用"
         );
+    }
+
+    #[tokio::test]
+    async fn serves_the_imported_local_file_by_asset_id_when_upstream_url_is_not_staging() {
+        // 一口气导入多张图后，魔芋列表经常不回放暂存地址：换成自己的 CDN、`asset://`
+        // 占位，或暂时没有 url。按对象键映射会失败，但导入任务已经记下了素材身份。
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("imported.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nIMPORTED").unwrap();
+        let source = format!("{}/fail", server.url);
+        let fallback =
+            StubLocalFallback::default().with_asset_id("asset-20260914103421-82xww", &image_path);
+
+        let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+        url.query_pairs_mut()
+            .append_pair("src", &source)
+            .append_pair("assetId", "asset-20260914103421-82xww");
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri(url.as_str())
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+            Some(&fallback),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"\x89PNG\r\n\x1a\nIMPORTED");
+        assert!(
+            cache.read(&Url::parse(&source).unwrap()).is_some(),
+            "按素材身份兜底的图片必须按上游地址落盘，后续预览不必再找源文件"
+        );
+    }
+
+    #[tokio::test]
+    async fn serves_imported_local_file_when_request_only_has_asset_id() {
+        let (_guard, cache) = test_cache();
+        let directory = tempfile::tempdir().unwrap();
+        let image_path = directory.path().join("imported.png");
+        std::fs::write(&image_path, b"\x89PNG\r\n\x1a\nIMPORTED").unwrap();
+        let fallback =
+            StubLocalFallback::default().with_asset_id("asset-20260914103421-82xww", &image_path);
+
+        let mut url = Url::parse("http://assetproxy.localhost/video").unwrap();
+        url.query_pairs_mut()
+            .append_pair("assetId", "asset://asset-20260914103421-82xww");
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri(url.as_str())
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+            Some(&fallback),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"\x89PNG\r\n\x1a\nIMPORTED");
+        assert_eq!(response.headers()["content-type"], "image/png");
     }
 
     #[tokio::test]

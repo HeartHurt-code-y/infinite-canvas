@@ -91,7 +91,7 @@ function AssetCardVideoVisual({
   );
   const candidateVideoUrl =
     refreshedVideoUrl ?? recoveredVideoUrl ?? asset.videoUrl ?? asset.previewUrl ?? null;
-  const videoSrc = toMediaProxyUrl(candidateVideoUrl);
+  const videoSrc = toMediaProxyUrl(candidateVideoUrl, { assetId: asset.id });
   const [loadedVideoSrc, setLoadedVideoSrc] = useState<string | null>(null);
   const videoReady = loadedVideoSrc === videoSrc;
   const [failedVideoSrc, setFailedVideoSrc] = useState<string | null>(null);
@@ -280,10 +280,11 @@ function AssetCard({
   // 签名过期也不影响已经下载过的那份内容。
   const imageBytes = useAssetMediaBytes(asset, "image", candidateImagePreviewUrl ?? null);
   const imagePreviewSrc = imageBytes.url;
-  const imagePreviewReady =
-    candidateImagePreviewUrl != null && loadedImagePreviewUrl === candidateImagePreviewUrl;
-  const imagePreviewFailed =
-    candidateImagePreviewUrl == null || failedImagePreviewUrl === candidateImagePreviewUrl;
+  const imagePreviewReady = imagePreviewSrc != null && loadedImagePreviewUrl === imagePreviewSrc;
+  // 失败记账跟「正在渲染的 src」走，而不是跟列表里的签名地址走：字节缓存把 src 从代理
+  // 地址换成 blob 后，旧地址的 onError 不能把已经到手的预览打成「预览不可用」。
+  // 列表没给预览地址时只要素材身份还能拼出代理地址，也不再立刻显示不可用。
+  const imagePreviewFailed = imagePreviewSrc == null || failedImagePreviewUrl === imagePreviewSrc;
   const isRealAsset = asset.source != null;
   // 瀑布流布局：媒体加载后量取原始宽高比，覆盖视觉区的 4:3 占位比例。
   const [intrinsicRatio, setIntrinsicRatio] = useState<number | null>(null);
@@ -385,10 +386,10 @@ function AssetCard({
               {isRealAsset && !imagePreviewReady ? (
                 <AssetMediaState
                   kind="image"
-                  state={imagePreviewFailed ? "unavailable" : "loading"}
+                  state={imagePreviewFailed && !imageBytes.fromCache ? "unavailable" : "loading"}
                 />
               ) : null}
-              {imagePreviewSrc != null && !imagePreviewFailed ? (
+              {imagePreviewSrc != null && (!imagePreviewFailed || imageBytes.fromCache) ? (
                 <img
                   className="asset-card__preview"
                   src={imagePreviewSrc}
@@ -398,12 +399,12 @@ function AssetCard({
                     const image = event.currentTarget;
                     const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
                     if (ratio != null) setIntrinsicRatio(ratio);
-                    setLoadedImagePreviewUrl(candidateImagePreviewUrl ?? null);
+                    setLoadedImagePreviewUrl(imagePreviewSrc);
                     setFailedImagePreviewUrl(null);
                   }}
                   onError={() => {
                     setLoadedImagePreviewUrl(null);
-                    setFailedImagePreviewUrl(candidateImagePreviewUrl ?? null);
+                    setFailedImagePreviewUrl(imagePreviewSrc);
                     // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
                     imageBytes.retry();
                     if (imageBytes.fromCache) return;
@@ -411,7 +412,7 @@ function AssetCard({
                     // 本地重签对象存储地址）。上游把导入时的暂存租约地址当预览地址回放时
                     // 续签不会换地址，共享入口会继续按对象键重签暂存副本；暂存对象已被清理
                     // 时由媒体代理用导入时留存的原始文件接管，预览不再永久停在「不可用」。
-                    if (candidateImagePreviewUrl != null && !imageRefreshAttemptedRef.current) {
+                    if (!imageRefreshAttemptedRef.current) {
                       imageRefreshAttemptedRef.current = true;
                       void refreshMediaUrlWithStagingFallback(
                         asset,

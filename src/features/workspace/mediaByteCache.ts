@@ -84,10 +84,12 @@ export async function loadMediaBytes(
   kind: AssetKind,
   mediaUrl: string | null | undefined,
 ): Promise<string | null> {
-  if (assetId === "" || mediaUrl == null || mediaUrl === "") return null;
+  if (assetId === "") return null;
   if (!isCacheableKind(kind)) return null;
   // 视频节点：地址指向视频本体时只服务播放，不进字节缓存。
-  if (kind === "video" && isVideoMediaPath(mediaUrl)) return null;
+  if (kind === "video" && mediaUrl != null && mediaUrl !== "" && isVideoMediaPath(mediaUrl)) {
+    return null;
+  }
 
   const key = keyOf(assetId, kind);
   const cached = cachedBytes.get(key);
@@ -98,11 +100,14 @@ export async function loadMediaBytes(
   // 已知太大：保持直连渲染，不必再探一次体积。
   if (directOnlyIdentities.has(key)) return null;
 
+  const requestUrl = toMediaProxyUrl(mediaUrl, { assetId }) ?? mediaUrl ?? null;
+  if (requestUrl == null || requestUrl === "") return null;
+
   const request = (async (): Promise<string | null> => {
     // 响应头一到就能判定体积：超限时立刻取消，正文一个字节都不读。
     const controller = new AbortController();
     try {
-      const response = await fetch(toMediaProxyUrl(mediaUrl) ?? mediaUrl, {
+      const response = await fetch(requestUrl, {
         // 素材身份已经决定复用，这里不再让 WebView 做二次校验；凭据绝不外发给对象存储。
         cache: "force-cache",
         credentials: "omit",
@@ -192,7 +197,7 @@ export function useMediaByteSource(
     kind,
     mediaUrl,
   );
-  const remoteUrl = toMediaProxyUrl(mediaUrl) ?? mediaUrl ?? null;
+  const remoteUrl = toMediaProxyUrl(mediaUrl, { assetId }) ?? mediaUrl ?? null;
   const usableObjectUrl = objectUrl != null && objectUrl !== blockedObjectUrl ? objectUrl : null;
   return {
     url: usableObjectUrl ?? remoteUrl,
@@ -227,7 +232,7 @@ function useCachedBytes(
   const requestedUrl = objectUrl ?? mediaUrl ?? null;
 
   useEffect(() => {
-    if (assetId === "" || mediaUrl == null || mediaUrl === "") return;
+    if (assetId === "") return;
     // 已经缓存过这份素材：不再请求，直接用本地字节。
     if (getMediaByteUrl(assetId, kind) != null) return;
     let cancelled = false;

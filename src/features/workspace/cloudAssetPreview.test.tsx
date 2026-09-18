@@ -1,4 +1,4 @@
-import { fireEvent, render, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { AssetFlow } from "./AssetLibraryViews";
 import { resetMissingPreviewUrlAttempts } from "./assetPreviewRecovery";
@@ -27,9 +27,9 @@ vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: mocks.convertFileSrc })
 vi.mock("../../lib/backend", { spy: true });
 
 const SIGNED_URL = "https://cdn.example.com/a.png?X-Tos-Signature=expired";
-const PROXY_URL = `asset://localhost/video?src=${encodeURIComponent(SIGNED_URL)}`;
 const ASSET_ID = "asset-20260914103421-82xww";
 const ASSET_NAME = "ScreenShot_2026-09-07_192951_026.png";
+const PROXY_URL = `asset://localhost/video?src=${encodeURIComponent(SIGNED_URL)}&assetId=${encodeURIComponent(ASSET_ID)}`;
 
 function cloudImageAsset(): AssetItem {
   return {
@@ -143,7 +143,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
     );
     await waitFor(() =>
       expect(dialogPreview()?.getAttribute("src")).toBe(
-        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}`,
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
       ),
     );
   });
@@ -170,7 +170,9 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
       expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
     );
     await waitFor(() =>
-      expect(cardMediaSrc()).toBe(`asset://localhost/video?src=${encodeURIComponent(freshUrl)}`),
+      expect(cardMediaSrc()).toBe(
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
+      ),
     );
   });
 
@@ -192,7 +194,64 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
       expect(mocks.refreshMedia).toHaveBeenCalledWith(expect.anything(), "image", null),
     );
     await waitFor(() =>
-      expect(cardMediaSrc()).toBe(`asset://localhost/video?src=${encodeURIComponent(freshUrl)}`),
+      expect(cardMediaSrc()).toBe(
+        `asset://localhost/video?src=${encodeURIComponent(freshUrl)}&assetId=${encodeURIComponent(ASSET_ID)}`,
+      ),
     );
+  });
+
+  it("刚入库、列表还没有预览地址时按素材身份取本地副本，不立刻显示预览不可用", async () => {
+    const objectUrl = "blob:imported-preview";
+    vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
+      expect(String(input)).toContain(`assetId=${encodeURIComponent(ASSET_ID)}`);
+      return Promise.resolve({
+        ok: true,
+        headers: { get: () => null },
+        blob: () => Promise.resolve({ size: 4 }),
+      } as unknown as Response);
+    });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue(objectUrl);
+
+    render(
+      <AssetFlow
+        assets={[{ ...cloudImageAsset(), previewUrl: null }]}
+        onPreview={() => undefined}
+        onDropToCanvas={vi.fn()}
+      />,
+    );
+
+    expect(screen.queryByText("预览不可用")).not.toBeInTheDocument();
+    await waitFor(() => expect(cardMediaSrc()).toBe(objectUrl));
+  });
+
+  it("预览地址加载失败后本地字节到达时不再停在预览不可用", async () => {
+    let release: ((response: Response) => void) | undefined;
+    vi.stubGlobal(
+      "fetch",
+      () =>
+        new Promise<Response>((resolve) => {
+          release = resolve;
+        }),
+    );
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:recovered-preview");
+
+    render(
+      <AssetFlow
+        assets={[cloudImageAsset()]}
+        onPreview={() => undefined}
+        onDropToCanvas={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(cardMediaSrc()).toBe(PROXY_URL));
+
+    fireEvent.error(document.querySelector<HTMLImageElement>(".asset-card__preview")!);
+    release?.({
+      ok: true,
+      headers: { get: () => null },
+      blob: () => Promise.resolve({ size: 4 }),
+    } as unknown as Response);
+
+    await waitFor(() => expect(cardMediaSrc()).toBe("blob:recovered-preview"));
+    expect(screen.queryByText("预览不可用")).not.toBeInTheDocument();
   });
 });

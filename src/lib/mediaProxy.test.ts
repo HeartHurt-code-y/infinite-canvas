@@ -57,9 +57,18 @@ describe("media proxy URLs", () => {
     expect(mocks.convertFileSrc).not.toHaveBeenCalled();
   });
 
-  it("preserves empty source semantics", () => {
+  it("preserves empty source semantics without an asset identity", () => {
     expect(toMediaProxyUrl(null)).toBeNull();
     expect(toMediaProxyUrl(undefined)).toBeNull();
     expect(toMediaProxyUrl("")).toBeNull();
+  });
+
+  it("builds an identity-only proxy URL when the supplier list has no preview address", () => {
+    expect(toMediaProxyUrl(null, { assetId: "asset-1" })).toBe(
+      "http://assetproxy.localhost/video?assetId=asset-1",
+    );
+    expect(toMediaProxyUrl("https://cdn.example.com/a.png", { assetId: "asset-1" })).toBe(
+      `http://assetproxy.localhost/video?src=${encodeURIComponent("https://cdn.example.com/a.png")}&assetId=asset-1`,
+    );
   });
 });

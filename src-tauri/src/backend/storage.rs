@@ -1615,6 +1615,38 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    /// 按云端素材身份找回导入任务：上游预览地址不可用时，用导入时的原始文件重建预览。
+    ///
+    /// 只认 `purpose = 'asset_import'`。`local_asset` 索引行经常只存文件名，不能当成本地路径。
+    pub fn find_asset_import_job_by_asset_id(
+        &self,
+        asset_id: &str,
+    ) -> BackendResult<Option<StagingJobRecord>> {
+        let asset_id = asset_id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or(asset_id.trim())
+            .trim();
+        if asset_id.is_empty() {
+            return Ok(None);
+        }
+        self.lock()?
+            .query_row(
+                "SELECT id, local_path, purpose, media_type, object_key, status,
+                        bytes_total, bytes_uploaded, asset_id, import_target_json,
+                        error_json, created_at, updated_at, adjustment
+                 FROM staging_jobs
+                 WHERE purpose = 'asset_import'
+                   AND asset_id = ?1
+                 ORDER BY created_at DESC
+                 LIMIT 1",
+                params![asset_id],
+                staging_job_from_row,
+            )
+            .optional()
+            .map_err(Into::into)
+    }
+
     pub fn list_recoverable_staging_jobs(&self) -> BackendResult<Vec<StagingJobRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(

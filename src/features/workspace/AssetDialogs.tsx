@@ -571,15 +571,16 @@ export function AssetSourceDialog({
   // 裸地址会让同一份素材「缩略图可见、点进详情却是预览不可用」。已下载过的字节优先
   // 复用（放大查看不必等一次远端往返，签名过期也不影响）。
   const mediaBytes = useMediaByteSource(asset.id, asset.kind, rawMediaUrl);
-  const mediaSrc = asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl) : mediaBytes.url;
+  const mediaSrc =
+    asset.kind === "video" ? toMediaProxyUrl(rawMediaUrl, { assetId: asset.id }) : mediaBytes.url;
   const [failedMediaSrc, setFailedMediaSrc] = useState<string | null>(null);
-  const mediaFailed = mediaSrc == null || failedMediaSrc === mediaSrc;
+  const mediaFailed = mediaSrc == null || (failedMediaSrc === mediaSrc && !mediaBytes.fromCache);
   const handleMediaError = () => {
     if (mediaSrc != null) setFailedMediaSrc(mediaSrc);
     // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
     mediaBytes.retry();
     if (mediaBytes.fromCache) return;
-    if (mediaRefreshAttemptedRef.current || rawMediaUrl == null) return;
+    if (mediaRefreshAttemptedRef.current) return;
     mediaRefreshAttemptedRef.current = true;
     // 云端素材回读供应商记录、本地素材重签对象存储地址（本地素材没有
     // providerConnectionId），续签后图片预览与视频播放共用新地址。上游把导入时的暂存

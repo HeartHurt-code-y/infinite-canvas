@@ -66,11 +66,11 @@ pub async fn save_video_edit_frame(
         )
     })
     .await
-        .map_err(|error| {
-            BackendError::protocol("保存视频标注帧失败。", json!({"source": error.to_string()}))
-                .payload()
-        })?
-        .map_err(|error| error.payload())
+    .map_err(|error| {
+        BackendError::protocol("保存视频标注帧失败。", json!({"source": error.to_string()}))
+            .payload()
+    })?
+    .map_err(|error| error.payload())
 }
 
 /// 导演台机位截图：站位图只保存为本地 PNG，不把像素写进画布存档。
@@ -140,13 +140,15 @@ mod tests {
             "data:image/png;base64,invalid",
             "data:image/png;base64,iVBORw0KGgo=",
         ] {
-            assert!(save_frame(
-                directory.path(),
-                "video-edit",
-                data,
-                "视频标注帧必须是有效的 PNG 图片。"
-            )
-            .is_err());
+            assert!(
+                save_frame(
+                    directory.path(),
+                    "video-edit",
+                    data,
+                    "视频标注帧必须是有效的 PNG 图片。"
+                )
+                .is_err()
+            );
         }
         assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
     }

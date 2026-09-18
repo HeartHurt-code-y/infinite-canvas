@@ -1576,6 +1576,10 @@ impl LocalMediaFallback for StagingService {
         }
         resolve_staging_local_source(&self.storage, &config, url)
     }
+
+    fn resolve_asset_id(&self, asset_id: &str) -> Option<LocalMediaSource> {
+        resolve_imported_local_source(&self.storage, asset_id)
+    }
 }
 
 /// 本地兜底的解析实现（与 [`LocalMediaFallback`] 分离，便于不构造整套服务直接测试）。
@@ -1587,6 +1591,19 @@ fn resolve_staging_local_source(
     let object_key = staging_object_key(url.as_str(), config)?;
     let job = storage
         .find_asset_import_job_by_object_key(&object_key)
+        .ok()
+        .flatten()?;
+    let path = PathBuf::from(job.local_path.trim());
+    if path.as_os_str().is_empty() || !std::fs::metadata(&path).ok()?.is_file() {
+        return None;
+    }
+    Some(LocalMediaSource { path })
+}
+
+/// 按云端素材身份找回导入时的原始文件（与 [`LocalMediaFallback::resolve_asset_id`] 分离，便于单测）。
+fn resolve_imported_local_source(storage: &Storage, asset_id: &str) -> Option<LocalMediaSource> {
+    let job = storage
+        .find_asset_import_job_by_asset_id(asset_id)
         .ok()
         .flatten()?;
     let path = PathBuf::from(job.local_path.trim());
@@ -2105,6 +2122,42 @@ mod tests {
             resolve_staging_local_source(&storage, &config, &Url::parse(&resigned).unwrap())
                 .is_none()
         );
+    }
+
+    #[test]
+    fn local_fallback_maps_imported_cloud_asset_id_to_existing_file() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("app.sqlite3")).unwrap();
+        let imported_path = directory.path().join("imported.png");
+        std::fs::write(&imported_path, b"PNGBYTES").unwrap();
+        let timestamp = now_ms();
+        storage
+            .insert_staging_job(&StagingJobRecord {
+                id: "job-1".into(),
+                local_path: imported_path.to_string_lossy().into_owned(),
+                purpose: "asset_import".into(),
+                media_type: MediaType::Image,
+                object_key: Some("staging/e90484f4b8801be7/2026/09/14/55be7f2f.png".into()),
+                status: StagingStatus::Cleaned,
+                bytes_total: Some(8),
+                bytes_uploaded: 8,
+                asset_id: Some("asset-20260914103421-82xww".into()),
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })
+            .unwrap();
+
+        assert_eq!(
+            resolve_imported_local_source(&storage, "asset://asset-20260914103421-82xww")
+                .map(|source| source.path),
+            Some(imported_path.clone())
+        );
+        assert!(resolve_imported_local_source(&storage, "asset-unknown").is_none());
+        std::fs::remove_file(&imported_path).unwrap();
+        assert!(resolve_imported_local_source(&storage, "asset-20260914103421-82xww").is_none());
     }
 
     /// 拉取存储桶建立的 `local_asset` 任务只存文件名，绝不能当成本地路径兜底。

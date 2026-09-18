@@ -1,6 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.mock("@tauri-apps/api/core", () => ({
+  convertFileSrc: (path: string) => `asset://localhost/${path}`,
+}));
+
 /**
  * 会话内素材预览字节缓存的行为：同一素材只下载一次、并发合并、失败不留负缓存、
  * 缓存身份只跟素材身份走（签名变化不改变身份），且视频正文不进缓存。
@@ -180,15 +184,30 @@ describe("素材预览字节缓存", () => {
     ).not.toBeNull();
   });
 
-  it("空地址返回空结果，不发起请求", async () => {
+  it("没有素材身份时，空地址不发起请求", async () => {
     const cache = await loadCacheModule();
     const fetchMock = vi.fn(() => Promise.resolve(okBytes()));
     vi.stubGlobal("fetch", fetchMock);
 
-    expect(await cache.loadMediaBytes("id-4", "image", null)).toBeNull();
-    expect(await cache.loadMediaBytes("id-4", "image", "")).toBeNull();
     expect(await cache.loadMediaBytes("", "image", "https://cdn/x.jpg")).toBeNull();
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it("有素材身份但列表没给预览地址时仍按身份取本地导入副本", async () => {
+    const cache = await loadCacheModule();
+    (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = {
+      convertFileSrc: (path: string) => `asset://localhost/${path}`,
+    };
+    const fetchMock = vi.fn(() => Promise.resolve(okBytes()));
+    vi.stubGlobal("fetch", fetchMock);
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:imported");
+
+    expect(await cache.loadMediaBytes("asset-1", "image", null)).toBe("blob:imported");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "asset://localhost/video?assetId=asset-1",
+      expect.anything(),
+    );
+    delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];
   });
 
   it("几十 MB 的大图只走直连渲染：不读进内存，也不再重复探测", async () => {
