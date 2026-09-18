@@ -8,7 +8,9 @@ import {
   cacheControlForFileName,
   collectPublishFilePaths,
   contentTypeForFileName,
+  isRetryableTosNetworkError,
   readTosPublishEnv,
+  tosFetch,
 } from "./publish-tos-updates.mjs";
 import { tosUpdatesLatestJsonUrl } from "./tos-updates-config.mjs";
 
@@ -61,4 +63,68 @@ test("tauri updater endpoint points at the public TOS latest.json", () => {
     readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
   );
   assert.deepEqual(conf.plugins.updater.endpoints, [tosUpdatesLatestJsonUrl()]);
+});
+
+function headersTimeoutError() {
+  const error = new TypeError("fetch failed");
+  error.cause = Object.assign(new Error("Headers Timeout Error"), {
+    code: "UND_ERR_HEADERS_TIMEOUT",
+  });
+  return error;
+}
+
+test("Headers Timeout Error from undici fetch is retryable", () => {
+  assert.equal(isRetryableTosNetworkError(headersTimeoutError()), true);
+  assert.equal(
+    isRetryableTosNetworkError(new Error("TOS 鉴权失败（ListObjects HTTP 403）")),
+    false,
+  );
+});
+
+test("tosFetch retries Headers Timeout then succeeds", async () => {
+  let calls = 0;
+  const result = await tosFetch({
+    method: "GET",
+    host: "sd20-zq.tos-cn-beijing.volces.com",
+    objectKey: "infinite-canvas/updates/latest.json",
+    region: "cn-beijing",
+    accessKey: "ak",
+    secretKey: "sk",
+    anonymous: true,
+    attempts: 3,
+    sleep: async () => {},
+    requestImpl: async () => {
+      calls += 1;
+      if (calls < 3) throw headersTimeoutError();
+      return {
+        status: 200,
+        text: "{}",
+        url: "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/latest.json",
+      };
+    },
+  });
+  assert.equal(calls, 3);
+  assert.equal(result.status, 200);
+  assert.equal(result.text, "{}");
+});
+
+test("tosFetch surfaces the original Headers Timeout after retries are exhausted", async () => {
+  await assert.rejects(
+    () =>
+      tosFetch({
+        method: "GET",
+        host: "sd20-zq.tos-cn-beijing.volces.com",
+        objectKey: "probe",
+        region: "cn-beijing",
+        accessKey: "ak",
+        secretKey: "sk",
+        anonymous: true,
+        attempts: 2,
+        sleep: async () => {},
+        requestImpl: async () => {
+          throw headersTimeoutError();
+        },
+      }),
+    /请求 TOS 失败：fetch failed \(Headers Timeout Error\)/,
+  );
 });
