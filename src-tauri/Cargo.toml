@@ -5,6 +5,9 @@ description = "A Tauri desktop application for an infinite canvas"
 edition = "2024"
 rust-version = "1.85"
 publish = false
+# 收费版额外提供 issue-license 签发工具后，cargo run 必须明确默认入口，
+# 否则 tauri dev 的 `cargo run` 会因双二进制失败。
+default-run = "infinite-canvas"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
