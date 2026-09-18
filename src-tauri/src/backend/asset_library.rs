@@ -2687,12 +2687,25 @@ fn parse_asset_page(provider_connection_id: &str, payload: &Value) -> Vec<CloudA
 
 fn remember_cloud_asset_preview(asset: &CloudAssetRecord) {
     media_proxy::remember_asset_preview_url(&asset.id, asset.preview_url.as_deref());
+    media_proxy::schedule_warm_image_previews(preview_warm_urls(std::slice::from_ref(asset)));
 }
 
 fn remember_cloud_asset_previews(assets: &[CloudAssetRecord]) {
     for asset in assets {
-        remember_cloud_asset_preview(asset);
+        media_proxy::remember_asset_preview_url(&asset.id, asset.preview_url.as_deref());
     }
+    media_proxy::schedule_warm_image_previews(preview_warm_urls(assets));
+}
+
+fn preview_warm_urls(assets: &[CloudAssetRecord]) -> Vec<String> {
+    assets
+        .iter()
+        .filter_map(|asset| match asset.kind {
+            MediaType::Image => asset.preview_url.clone(),
+            MediaType::Video => asset.cover_url.clone(),
+            _ => None,
+        })
+        .collect()
 }
 
 fn asset_array(value: &Value) -> Vec<&Value> {

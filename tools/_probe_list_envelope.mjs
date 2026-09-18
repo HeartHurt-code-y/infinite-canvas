@@ -128,7 +128,7 @@ const response = await fetch(listUrl, {
     "Content-Type": "application/json",
     Accept: "application/json",
   },
-  body: JSON.stringify({ page_number: 1, page_size: 100 }),
+  body: JSON.stringify({ page_number: 1, page_size: 40, kind: "image" }),
   signal: AbortSignal.timeout(30000),
 });
 const text = await response.text();
@@ -143,6 +143,129 @@ const data = json?.data;
 const rustFromData = rustAssetArray(data);
 const rustFromPayload = rustAssetArray(json);
 const rustMerged = rustFromData.length > 0 ? rustFromData : rustFromPayload;
+
+async function fetchPreviewStat(url) {
+  const started = Date.now();
+  try {
+    const preview = await fetch(url, {
+      method: "GET",
+      redirect: "follow",
+      signal: AbortSignal.timeout(20000),
+    });
+    const buf = await preview.arrayBuffer();
+    const type = preview.headers.get("content-type") ?? "";
+    const bytes = new Uint8Array(buf);
+    let tosCode = null;
+    if (type.includes("json") && buf.byteLength > 0 && buf.byteLength < 2000) {
+      try {
+        const parsed = JSON.parse(new TextDecoder().decode(bytes));
+        tosCode = parsed.Code ?? parsed.code ?? parsed.Error?.Code ?? parsed.error ?? null;
+      } catch {
+        tosCode = null;
+      }
+    }
+    return {
+      http: preview.status,
+      contentType: type.split(";")[0] ?? "",
+      bytes: buf.byteLength,
+      looksImage: type.startsWith("image/") || (buf.byteLength > 8 && bytes[0] === 0xff && bytes[1] === 0xd8),
+      tosCode,
+      ms: Date.now() - started,
+    };
+  } catch (error) {
+    return { http: null, error: error instanceof Error ? error.name : "error", ms: Date.now() - started };
+  }
+}
+
+function httpField(item, field) {
+  const value = item?.[field];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null;
+  const parsed = new URL(trimmed);
+  const queryKeys = [...parsed.searchParams.keys()];
+  const expires = parsed.searchParams.get("X-Tos-Expires") ?? parsed.searchParams.get("x-tos-expires");
+  const date = parsed.searchParams.get("X-Tos-Date") ?? parsed.searchParams.get("x-tos-date");
+  return {
+    field,
+    host: parsed.host,
+    path: parsed.pathname,
+    url: trimmed,
+    urlChars: trimmed.length,
+    queryKeys,
+    tosExpires: expires,
+    tosDate: date,
+  };
+}
+
+const sampleItems = rustMerged.slice(0, 8).filter((item) => item && typeof item === "object");
+const previewSamples = [];
+for (const item of sampleItems) {
+  const rustField = rustHttpUrl(item);
+  const rust = rustField ? httpField(item, rustField) : null;
+  const preview = httpField(item, "preview_url") ?? httpField(item, "previewUrl");
+  const source = httpField(item, "source_url") ?? httpField(item, "sourceUrl");
+  const rustFetch = rust ? await fetchPreviewStat(rust.url) : null;
+  const previewFetch =
+    preview && rust && preview.path === rust.path && preview.host === rust.host && preview.url === rust.url
+      ? rustFetch
+      : preview
+        ? await fetchPreviewStat(preview.url)
+        : null;
+  const sourceFetch =
+    source && rust && source.url === rust.url
+      ? rustFetch
+      : source
+        ? await fetchPreviewStat(source.url)
+        : null;
+  previewSamples.push({
+    rustField,
+    rustHost: rust?.host ?? null,
+    previewHost: preview?.host ?? null,
+    sourceHost: source?.host ?? null,
+    rustUrlChars: rust?.urlChars ?? null,
+    rustQueryKeys: rust?.queryKeys ?? [],
+    tosDate: rust?.tosDate ?? null,
+    tosExpires: rust?.tosExpires ?? null,
+    rustSameAsPreview: Boolean(rust && preview && rust.url === preview.url),
+    sourceSameAsPreview: Boolean(source && preview && source.url === preview.url),
+    rustFetch,
+    previewFetch,
+    sourceFetch,
+  });
+}
+
+const firstId = sampleItems[0]?.id ?? sampleItems[0]?.db_id ?? null;
+let getProbe = null;
+if (firstId != null && firstId !== "") {
+  const getUrl = assetEndpoint(String(provider.base_url), "/v1/assets/get");
+  const getResponse = await fetch(getUrl, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({ id: firstId }),
+    signal: AbortSignal.timeout(20000),
+  });
+  const getText = await getResponse.text();
+  let getJson = null;
+  try {
+    getJson = JSON.parse(getText);
+  } catch {
+    getJson = null;
+  }
+  const getRecord = getJson?.data && typeof getJson.data === "object" ? getJson.data : getJson;
+  const getPreview = getRecord ? httpField(getRecord, "preview_url") ?? httpField(getRecord, "url") : null;
+  getProbe = {
+    http: getResponse.status,
+    bodyChars: getText.length,
+    recordKeys: getRecord && typeof getRecord === "object" ? Object.keys(getRecord) : [],
+    previewHost: getPreview?.host ?? null,
+    previewFetch: getPreview ? await fetchPreviewStat(getPreview.url) : null,
+  };
+}
 
 const report = {
   listHttp: response.status,
@@ -163,6 +286,8 @@ const report = {
   rustPickedCount: rustMerged.length,
   rustPickedWithUrl: rustMerged.filter((item) => rustHttpUrl(item)).length,
   rustPickedFirstKeys: rustMerged[0] && typeof rustMerged[0] === "object" ? Object.keys(rustMerged[0]) : [],
+  previewSamples,
+  getProbe,
 };
 
 console.log(JSON.stringify(report, null, 2));

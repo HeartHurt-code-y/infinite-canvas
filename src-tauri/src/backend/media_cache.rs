@@ -246,13 +246,12 @@ pub fn is_cacheable_content_type(content_type: Option<&str>) -> bool {
         .unwrap_or(false)
 }
 
-/// 上游声明不可缓存（`no-store`/`private`）时不落盘，尊重供应商的意图。
+/// `no-store` 表示连用户代理也不该存；`private` 只禁止共享缓存，本机预览副本正是 private。
 pub fn permits_storage(cache_control: Option<&str>) -> bool {
     let Some(value) = cache_control else {
         return true;
     };
-    let lowered = value.to_ascii_lowercase();
-    !lowered.contains("no-store") && !lowered.contains("private")
+    !value.to_ascii_lowercase().contains("no-store")
 }
 
 /// 缓存键：主机 + 路径。签名参数有意不参与运算。
@@ -412,7 +411,7 @@ mod tests {
         assert!(permits_storage(None));
         assert!(permits_storage(Some("public, max-age=3600")));
         assert!(!permits_storage(Some("no-store")));
-        assert!(!permits_storage(Some("private, max-age=60")));
+        assert!(permits_storage(Some("private, max-age=60")));
     }
 
     #[test]

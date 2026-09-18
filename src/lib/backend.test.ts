@@ -499,6 +499,23 @@ describe("refreshMediaUrlWithStagingFallback", () => {
     expect(resign).not.toHaveBeenCalled();
   });
 
+  it("uses a new provider signature even when the failed TOS URL is already expired", async () => {
+    const fresh =
+      "https://tos.example.com/a.png?X-Tos-Date=20260918T080000Z&X-Tos-Expires=7200&X-Tos-Signature=fresh";
+    const read = vi.spyOn(assetLibraryClient, "refreshAssetMedia").mockResolvedValue(fresh);
+    const resign = vi.spyOn(tosStagingClient, "refreshStagingObjectUrl");
+
+    await expect(
+      refreshMediaUrlWithStagingFallback(
+        { id: "asset-1", source: "cloud", providerConnectionId: "provider-1" },
+        "image",
+        deadUrl,
+      ),
+    ).resolves.toBe(fresh);
+    expect(read).toHaveBeenCalled();
+    expect(resign).not.toHaveBeenCalled();
+  });
+
   it("re-signs the staging object when the provider replays the same dead address", async () => {
     // 实测魔芋 `/v1/assets/get` 会把导入时的暂存租约地址原样回放：续签「成功」但地址没变。
     const resigned = "https://tos.example.com/staging/a/b.png?X-Tos-Date=20260914T050000Z";

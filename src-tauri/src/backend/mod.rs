@@ -84,6 +84,9 @@ impl BackendState {
         // 其余平台用系统凭据库；逐字说明与取舍见 credentials.rs 模块文档。
         let credentials = CredentialStore::new(&data_directory);
         tauri_plugin_log::log::info!("credential backend: {}", credentials.backend_label());
+        media_proxy::configure_preview_cache_directory(
+            media_proxy::preview_cache_directory(&data_directory),
+        );
         let providers =
             ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials.clone())?;
         let assets = AssetLibrary::new(providers.clone());

@@ -10,12 +10,14 @@
 //! 「慢但在推进」的下载判成失败，而这正是「预览不可用」最常见的成因。
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path as StdPath, PathBuf},
     sync::{Arc, Mutex, MutexGuard, OnceLock},
-    time::Duration,
+    time::{Duration, SystemTime},
 };
 
+use chrono::{DateTime, Utc};
+use futures_util::future::join_all;
 use tauri::{
     Manager as _, UriSchemeContext, UriSchemeResponder,
     http::{HeaderMap, HeaderValue, Method, Request, Response, StatusCode, Uri},
@@ -519,12 +521,14 @@ pub fn handle_media_proxy_request<R: tauri::Runtime>(
     responder: UriSchemeResponder,
 ) {
     // 缓存目录按应用数据目录解析；解析失败（路径不可用）时退化为直连穿透。
-    let cache = context
-        .app_handle()
-        .path()
-        .app_local_data_dir()
-        .ok()
-        .map(|directory| MediaCache::new(preview_cache_directory(&directory)));
+    let cache = preview_cache().or_else(|| {
+        context
+            .app_handle()
+            .path()
+            .app_local_data_dir()
+            .ok()
+            .map(|directory| MediaCache::new(preview_cache_directory(&directory)))
+    });
     // 本地兜底：暂存对象在导入成功后即被清理，上游素材记录却仍回放那个地址，
     // 于是取字节必然失败。按对象键回到导入任务用原始文件应答（见 `serve_local_copy`）。
     let fallback = context
@@ -544,8 +548,137 @@ pub fn handle_media_proxy_request<R: tauri::Runtime>(
 }
 
 /// 预览媒体缓存目录：与缩略图缓存同级，便于用户按需整体清理。
-fn preview_cache_directory(local_data: &std::path::Path) -> PathBuf {
+pub(crate) fn preview_cache_directory(local_data: &std::path::Path) -> PathBuf {
     local_data.join("media-preview-cache")
+}
+
+fn preview_cache_dir_slot() -> &'static Mutex<Option<PathBuf>> {
+    static DIR: OnceLock<Mutex<Option<PathBuf>>> = OnceLock::new();
+    DIR.get_or_init(|| Mutex::new(None))
+}
+
+/// 启动时钉死缓存目录，浏览暖缓存与协议处理共用同一份副本。
+pub(crate) fn configure_preview_cache_directory(directory: PathBuf) {
+    *preview_cache_dir_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(directory);
+}
+
+fn preview_cache_dir() -> Option<PathBuf> {
+    preview_cache_dir_slot()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+}
+
+fn preview_cache() -> Option<MediaCache> {
+    preview_cache_dir().map(MediaCache::new)
+}
+
+/// 浏览/回读给出仍有效的图片预览时，后台把字节落入磁盘缓存。
+///
+/// 海外 TOS 预签名会过期。`/v1/assets/get` 修好后会返回新签名，回读路径会立刻用上并再暖一次。
+/// 修好之前，有效期内先落到本机，过期后协议层用同一对象键的副本应答。
+/// 未配置缓存目录（单元测试）时直接返回，避免向示例域名发请求。
+pub(crate) fn schedule_warm_image_previews(urls: Vec<String>) {
+    if urls.is_empty() {
+        return;
+    }
+    let Some(dir) = preview_cache_dir() else {
+        return;
+    };
+    tauri::async_runtime::spawn(async move {
+        warm_image_previews(urls, Arc::new(MediaCache::new(dir))).await;
+    });
+}
+
+const WARM_CONCURRENCY: usize = 4;
+
+pub(crate) async fn warm_image_previews(urls: Vec<String>, cache: Arc<MediaCache>) {
+    let mut prepared = Vec::new();
+    let mut seen = HashSet::new();
+    let now = SystemTime::now();
+    for raw in urls {
+        let Ok(url) = Url::parse(raw.trim()) else {
+            continue;
+        };
+        if !valid_upstream(&url) || signed_url_expired(&url, now) {
+            continue;
+        }
+        let key = format!("{}{}", url.host_str().unwrap_or_default(), url.path());
+        if !seen.insert(key) {
+            continue;
+        }
+        if cache.read(&url).is_some() {
+            continue;
+        }
+        prepared.push(url);
+    }
+    for chunk in prepared.chunks(WARM_CONCURRENCY) {
+        let futs = chunk.iter().cloned().map(|url| {
+            let cache = Arc::clone(&cache);
+            async move {
+                warm_one(cache, url).await;
+            }
+        });
+        join_all(futs).await;
+    }
+}
+
+async fn warm_one(cache: Arc<MediaCache>, url: Url) {
+    if cache.read(&url).is_some() {
+        return;
+    }
+    let outcome = fetch_media_outcome(&url, Method::GET, &HeaderMap::new(), false).await;
+    match take_outcome(outcome) {
+        FetchedUpstream::Media {
+            status,
+            headers,
+            body,
+        } => {
+            if status.is_success() {
+                store_cacheable(Some(cache.as_ref()), &url, &status, &headers, &body, false);
+            }
+        }
+        FetchedUpstream::Failed(failure) => {
+            tauri_plugin_log::log::warn!("media preview warm failed: {}", failure.kind());
+        }
+    }
+}
+
+/// 只识别火山 TOS 的 `X-Tos-Date` + `X-Tos-Expires`；无法识别的地址按未过期处理。
+fn signed_url_expired(url: &Url, now: SystemTime) -> bool {
+    let mut date = None;
+    let mut expires = None;
+    for (key, value) in url.query_pairs() {
+        if key.eq_ignore_ascii_case("X-Tos-Date") {
+            date = Some(value.into_owned());
+        } else if key.eq_ignore_ascii_case("X-Tos-Expires") {
+            expires = Some(value.into_owned());
+        }
+    }
+    let Some(date) = date else {
+        return false;
+    };
+    let Some(expires) = expires else {
+        return false;
+    };
+    let Ok(issued) = chrono::NaiveDateTime::parse_from_str(&date, "%Y%m%dT%H%M%SZ") else {
+        return false;
+    };
+    let Ok(ttl) = expires.parse::<i64>() else {
+        return false;
+    };
+    if ttl < 0 {
+        return false;
+    }
+    let Some(expiry) = issued
+        .and_utc()
+        .checked_add_signed(chrono::Duration::seconds(ttl))
+    else {
+        return false;
+    };
+    DateTime::<Utc>::from(now) >= expiry
 }
 
 async fn proxy_response(
@@ -638,6 +771,10 @@ async fn proxy_response(
             } else {
                 // 远端明确报错（常见于签名过期）：本地有副本时继续用副本，
                 // 不必把一屏已经下载过的预览打成「预览不可用」。
+                tauri_plugin_log::log::warn!(
+                    "media proxy upstream_media_error: status={}",
+                    status.as_u16()
+                );
                 if let Some(cache) = cache {
                     if let Some(cached) = cache.read(&upstream_url) {
                         return cached_response(cached.content_type, cached.body, is_head);
@@ -1762,6 +1899,45 @@ mod tests {
         assert_eq!(second.headers()["content-type"], "image/png");
         // 上游错误正文可能带签名或认证细节，不能被透传出去。
         assert!(!String::from_utf8_lossy(second.body()).contains("secret"));
+    }
+
+    #[test]
+    fn tos_signed_url_expires_at_the_deadline() {
+        use chrono::TimeZone as _;
+        let url = Url::parse(
+            "https://tos.example.com/a.png?X-Tos-Date=20260913T040000Z&X-Tos-Expires=3600&X-Tos-Signature=x",
+        )
+        .unwrap();
+        let expiry = Utc.with_ymd_and_hms(2026, 9, 13, 5, 0, 0).unwrap();
+        assert!(signed_url_expired(&url, expiry.into()));
+        assert!(!signed_url_expired(
+            &url,
+            (expiry - chrono::Duration::seconds(1)).into()
+        ));
+        let unsigned = Url::parse("https://cdn.example.com/a.png?sig=stale").unwrap();
+        assert!(!signed_url_expired(&unsigned, expiry.into()));
+    }
+
+    #[tokio::test]
+    async fn warms_live_image_previews_and_skips_expired_signatures() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let cache = Arc::new(cache);
+        let live = format!(
+            "{}/image.png?X-Tos-Date=20990101T000000Z&X-Tos-Expires=3600&X-Tos-Signature=live",
+            server.url
+        );
+        let expired = format!(
+            "{}/image-expired.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead",
+            server.url
+        );
+        warm_image_previews(vec![live.clone(), expired], Arc::clone(&cache)).await;
+        assert!(cache.read(&Url::parse(&live).unwrap()).is_some());
+        assert_eq!(
+            server.requests.lock().unwrap().len(),
+            1,
+            "过期签名不得再打对象存储"
+        );
     }
 
     #[test]
