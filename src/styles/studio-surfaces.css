@@ -201,6 +201,7 @@
     .model-picker-placeholder,
     .asset-token-settings,
     .tos-settings,
+    .app-update-settings,
     .token-group-settings
   ) {
   margin-block-start: var(--space-xl);

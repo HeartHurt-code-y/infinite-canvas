@@ -26,6 +26,7 @@ import {
 } from "../../lib/backend";
 import { AssetLibraryTokenSettings } from "./AssetLibraryTokenSettings";
 import { ProviderTokenGroupSettings } from "./ProviderTokenGroupSettings";
+import { AppUpdateSettings } from "./AppUpdateSettings";
 import { TosStagingSettings } from "./TosStagingSettings";
 import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
 import {
@@ -448,7 +449,9 @@ export function ProviderSettingsDialog({
     }
     if (isBailianConnection) {
       if (!isValidBailianWorkspaceId(draft.workspaceId)) {
-        setRawError("请填写业务空间 ID。地址会按华北2（北京）拼接为 https://{业务空间ID}.cn-beijing.maas.aliyuncs.com。");
+        setRawError(
+          "请填写业务空间 ID。地址会按华北2（北京）拼接为 https://{业务空间ID}.cn-beijing.maas.aliyuncs.com。",
+        );
         return null;
       }
     } else if (!draft.baseUrl.trim()) {
@@ -1171,6 +1174,7 @@ export function ProviderSettingsDialog({
           ) : null}
 
           <TosStagingSettings client={tosClient} />
+          <AppUpdateSettings />
         </div>
       </section>
     </div>

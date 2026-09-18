@@ -32,6 +32,11 @@ jobs:
       APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
       APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
+      # --- 应用内热更新签名（minisign）---
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      # --- 公开 TOS 分发桶 ---
+      TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
+      TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
 
     steps:
       - name: Checkout
@@ -146,6 +151,7 @@ jobs:
         run: pnpm tauri:build
         env:
           CI: true
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
 
       # 构建后再验一次产物本身：Authority 不是 ad-hoc、designated requirement 里
       # 没有 cdhash。上一步只保证解析出了身份，这一步保证身份真的签进了包。
@@ -171,6 +177,9 @@ jobs:
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
 
+      - name: Publish updater artifacts to TOS
+        run: pnpm update:publish
+
       - name: Upload installer artifacts
         id: upload-artifacts
         uses: actions/upload-artifact@v4
@@ -178,6 +187,8 @@ jobs:
           name: infinite-canvas-macos-${{ github.sha }}
           path: |
             src-tauri/target/release/bundle/dmg/*.dmg
+            src-tauri/target/release/bundle/macos/*.app.tar.gz
+            src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
             src-tauri/target/release/bundle/helper/install-macos.sh
           if-no-files-found: error
           retention-days: 30

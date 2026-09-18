@@ -4,6 +4,8 @@ workflows:
     instance_type: mac_mini_m2
     max_build_duration: 90
     environment:
+      groups:
+        - updater_signing
       vars:
         CI: "true"
       node: 24
@@ -37,6 +39,12 @@ workflows:
         script: |
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
+      - name: Publish updater artifacts to TOS
+        script: |
+          export PATH="$HOME/.cargo/bin:$PATH"
+          pnpm update:publish
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
+      - src-tauri/target/release/bundle/macos/*.app.tar.gz
+      - src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
       - src-tauri/target/release/bundle/helper/install-macos.sh

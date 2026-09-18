@@ -1,4 +1,5 @@
 import { Icon } from "../../components/Icon";
+import { AppUpdateBanner } from "./AppUpdateBanner";
 import { videoDownloadInputs } from "./videoDownloadInputs";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -464,7 +465,10 @@ interface CanvasUploadPlacement {
   readonly x: number;
   readonly y: number;
   readonly slotIndex: number;
-  readonly connection: { readonly nodeKey: string; readonly handleType: "source" | "target" } | null;
+  readonly connection: {
+    readonly nodeKey: string;
+    readonly handleType: "source" | "target";
+  } | null;
 }
 
 function promptContentIssueMessage(issue: PromptContentIssue): string {
@@ -4368,7 +4372,8 @@ export function WorkspaceApp({
       const placement = canvasUploadPlacementsRef.current.get(jobId);
       if (placement == null || placedCanvasUploadJobIdsRef.current.has(jobId)) return;
       const entry = uploadEntriesRef.current.find((item) => item.jobId === jobId);
-      const destination = entry?.destination ?? (job?.purpose === "local_asset" ? "local" : "cloud");
+      const destination =
+        entry?.destination ?? (job?.purpose === "local_asset" ? "local" : "cloud");
       const assetId = stagingJobAssetIdForCanvas(job, destination);
       const kind = job?.mediaType ?? entry?.kind;
       if (assetId == null || (kind !== "image" && kind !== "video" && kind !== "audio")) return;
@@ -4799,9 +4804,10 @@ export function WorkspaceApp({
       }
       if (node?.kind !== "image") return;
       const images = studioImageInputsFromMedia(
-        createCanvasInputResolver(canvasNodesByKeyFromDocument(current), current.assetEdges)(
-          nodeKey,
-        ).media,
+        createCanvasInputResolver(
+          canvasNodesByKeyFromDocument(current),
+          current.assetEdges,
+        )(nodeKey).media,
       );
       const base = node.config.whiteModelStudio ?? createWhiteModelBlockingDraft();
       const first = images[0];
@@ -9443,6 +9449,7 @@ export function WorkspaceApp({
           aria-label="无限画布工作区"
           tabIndex={-1}
         >
+          <AppUpdateBanner />
           <div
             className={`canvas-viewport${isPanning ? " is-panning" : ""}`}
             ref={canvasViewportRef}

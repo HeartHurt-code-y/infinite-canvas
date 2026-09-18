@@ -147,6 +147,9 @@ jobs:
           name: Build macOS installer
           command: pnpm tauri:build
       - run:
+          name: Publish updater artifacts to TOS
+          command: pnpm update:publish
+      - run:
           name: List bundle outputs
           command: |
             ls -lh src-tauri/target/release/bundle/dmg || true

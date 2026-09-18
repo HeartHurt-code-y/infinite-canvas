@@ -351,6 +351,7 @@
     "process:allow-exit",
     "process:allow-restart",
     "process:default",
+    "updater:default",
     "shell:allow-kill",
     "shell:allow-open",
     "shell:allow-stdin-write",

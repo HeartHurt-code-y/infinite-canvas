@@ -53,6 +53,11 @@ tools/remotion-runtime/.build-node/
 # Generated, bundled FFmpeg engine (rebuilt by ffmpeg:prepare)
 src-tauri/resources/ffmpeg/
 
+# App-update signing private key (pubkey is in src-tauri/tauri.conf.json)
+src-tauri/.updater-key
+src-tauri/.updater-key.pub
+.tos-updates.env
+
 # Generated Blender distribution, verified and bundled by blender:prepare
 src-tauri/resources/blender/
 

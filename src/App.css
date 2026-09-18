@@ -1453,6 +1453,75 @@ svg[data-spin="true"] {
   outline-offset: calc(var(--rule-active) * -1);
 }
 
+.app-update-banner {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  top: var(--space-sm);
+  left: 50%;
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  width: min(36rem, calc(100% - (2 * var(--space-lg))));
+  margin-inline: 0;
+  padding: var(--space-xs) var(--space-sm);
+  color: var(--color-ink);
+  background: var(--color-surface-1);
+  border: var(--rule-thin) solid var(--color-rule-strong);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-floating);
+  transform: translateX(-50%);
+}
+
+.app-update-banner__copy {
+  display: grid;
+  gap: var(--space-3xs);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.app-update-banner__copy strong,
+.app-update-banner__copy span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.app-update-banner__copy strong {
+  font-size: var(--text-sm);
+}
+
+.app-update-banner__copy span {
+  color: var(--color-ink-2);
+  font-size: var(--text-2xs);
+}
+
+.app-update-banner button,
+.app-update-settings__secondary {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--size-control);
+  padding-inline: var(--space-sm);
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+  font-weight: 700;
+}
+
+.app-update-banner button:not(.app-update-banner__dismiss) {
+  color: var(--color-paper);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.app-update-banner progress,
+.app-update-settings__progress progress {
+  width: 7.5rem;
+  height: 0.5rem;
+  accent-color: var(--color-accent);
+}
+
 /* 无限画布视口：网格由 React Flow <Background> 在视口变换层内原生平移缩放。 */
 .canvas-viewport {
   position: absolute;
@@ -9625,6 +9694,47 @@ button.prompt-mention__recognizable-tag:focus-visible {
   opacity: 0.6;
 }
 
+.app-update-settings {
+  display: grid;
+  gap: var(--space-md);
+  margin-block-start: var(--space-xl);
+  padding-block-start: var(--space-lg);
+  border-top: var(--rule-thin) solid var(--color-rule);
+}
+
+.app-update-settings .provider-form__heading {
+  align-items: flex-start;
+}
+
+.app-update-settings__version,
+.app-update-settings__notes,
+.app-update-settings__hint {
+  margin: 0;
+  color: var(--color-ink-2);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.app-update-settings__progress {
+  display: flex;
+  align-items: center;
+  gap: var(--space-sm);
+  color: var(--color-ink-2);
+  font-size: var(--text-xs);
+}
+
+.app-update-settings__progress progress {
+  flex: 1 1 auto;
+  width: auto;
+}
+
+.app-update-settings__actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-sm);
+}
+
 @media (pointer: coarse) {
   .asset-origin {
     height: auto;
@@ -9730,6 +9840,8 @@ button.prompt-mention__recognizable-tag:focus-visible {
   .provider-save-action,
   .provider-fetch-action,
   .asset-token-save-action,
+  .app-update-banner button,
+  .app-update-settings__secondary,
   .model-search,
   .model-save-action,
   .model-type-filter button,

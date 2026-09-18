@@ -1,7 +1,7 @@
 {
   "name": "infinite-canvas",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "A Tauri, React, and TypeScript desktop application for an infinite canvas.",
   "type": "module",
   "packageManager": "pnpm@11.21.0",
@@ -28,7 +28,7 @@
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "rust:clippy": "cargo clippy --manifest-path src-tauri/Cargo.toml --locked --all-targets -- -D warnings",
     "rust:test": "cargo test --manifest-path src-tauri/Cargo.toml --locked --lib",
-    "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:tokens && pnpm macos:signing-test && pnpm macos:install-test && pnpm test:coverage",
+    "check:frontend": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm check:tokens && pnpm macos:signing-test && pnpm macos:install-test && pnpm update:manifest-test && pnpm test:coverage",
     "check:tokens": "node scripts/check-design-tokens.mjs --self-test",
     "audit:visuals": "node scripts/audit-visuals.mjs",
     "audit:icons": "node scripts/audit-icons.mjs",
@@ -44,8 +44,11 @@
     "macos:install-test": "node --test scripts/install-macos.test.mjs",
     "macos:signing-identity": "node scripts/macos-signing-identity.mjs",
     "macos:verify-bundle": "bash scripts/verify-macos-bundle.sh",
+    "update:manifest": "node scripts/write-latest-json.mjs",
+    "update:publish": "node scripts/publish-tos-updates.mjs",
+    "update:manifest-test": "node --test scripts/write-latest-json.test.mjs scripts/tauri-build.test.mjs scripts/tos-v4.test.mjs scripts/publish-tos-updates.test.mjs",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "node scripts/tauri-build.mjs"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "5.3.0",
@@ -68,6 +71,7 @@
     "@tauri-apps/plugin-process": "^2.3.1",
     "@tauri-apps/plugin-shell": "^2.3.5",
     "@tauri-apps/plugin-store": "^2.4.4",
+    "@tauri-apps/plugin-updater": "^2",
     "@tauri-apps/plugin-upload": "^2.4.0",
     "@tauri-apps/plugin-websocket": "^2.4.2",
     "@tiptap/core": "^3.30.5",
