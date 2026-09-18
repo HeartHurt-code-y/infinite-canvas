@@ -16,7 +16,6 @@ use super::{
     frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
-    provider::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID},
     provider_adapter::ProviderAdapterKind,
     remotion_renderer::{
         RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
@@ -1225,6 +1224,8 @@ pub fn cancel_video_frame_extraction(
 
 #[cfg(test)]
 mod tests {
+    // 适配器 id 常量只被下面的校验用例消费（生产代码走 is_supported_adapter_id / require）。
+    use super::super::provider_adapter::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
     use super::*;
 
     fn provider(base_url: &str) -> UpsertProviderConnectionCommand {

@@ -877,7 +877,7 @@ fn advertised_schema(item: &Value) -> Option<&Value> {
 }
 
 fn advertised_operation_names(item: &Value) -> Vec<GenerationOperation> {
-    let operations = [
+    [
         "/operations",
         "/supported_operations",
         "/supportedOperations",
@@ -897,8 +897,7 @@ fn advertised_operation_names(item: &Value) -> Vec<GenerationOperation> {
             operations.push(operation);
         }
         operations
-    });
-    operations
+    })
 }
 
 fn parse_operation_alias(value: &str) -> Option<GenerationOperation> {
@@ -2710,11 +2709,11 @@ mod tests {
         // 因此请求 `/v1/contents/generations/tasks` 并拿到 HTTP 404 `Invalid URL`。
         // 契约由连接适配器决定：方舟原生端点只在方舟连接上出现。
         assert_eq!(
-            RequestDialect::for_adapter(super::super::provider::ARK_ADAPTER_ID),
+            RequestDialect::for_adapter(super::super::provider_adapter::ARK_ADAPTER_ID),
             RequestDialect::VolcengineArk
         );
         assert_eq!(
-            RequestDialect::for_adapter(super::super::provider::MOYU_ADAPTER_ID),
+            RequestDialect::for_adapter(super::super::provider_adapter::MOYU_ADAPTER_ID),
             RequestDialect::OpenAiCompatible
         );
 

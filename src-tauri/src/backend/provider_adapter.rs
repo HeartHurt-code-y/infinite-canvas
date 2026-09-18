@@ -60,6 +60,8 @@ impl ProviderAdapterKind {
         })
     }
 
+    /// `parse` 的逆映射：只有往返用例需要它（生产代码始终沿用连接记录里的 adapter id 字符串）。
+    #[cfg(test)]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Moyu => MOYU_ADAPTER_ID,

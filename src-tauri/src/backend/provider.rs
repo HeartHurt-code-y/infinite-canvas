@@ -21,8 +21,8 @@ use super::{
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
-        self, ProviderAdapterKind, catalog_path_for_adapter, extra_headers_for_adapter,
-        finalize_video_body,
+        self, ARK_ADAPTER_ID, ProviderAdapterKind, catalog_path_for_adapter,
+        extra_headers_for_adapter, finalize_video_body,
     },
     storage::{
         GenerationLifecycleFact, GenerationTaskLifecycle, Storage, TaskExecutionRecord, now_ms,
@@ -33,8 +33,6 @@ use super::{
     },
     volcengine_ark::{self, ArkCredentials},
 };
-
-pub use super::provider_adapter::{ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
 
 /// 历史全局素材库令牌引用；仅用于兼容旧版本凭据。
 ///
@@ -4933,6 +4931,8 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Value {
 
 #[cfg(test)]
 mod tests {
+    // 适配器 id 常量只被用例消费（生产代码走 catalog_path_for_adapter / finalize_video_body）。
+    use super::super::provider_adapter::{BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
     use super::*;
 
     /// 按原始 SSE 文本投喂解析器，块边界由 `chunk_size` 决定（模拟真实网络分块）。

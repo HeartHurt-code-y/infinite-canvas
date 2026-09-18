@@ -18,7 +18,8 @@ use url::Url;
 
 use super::{
     error::{BackendError, BackendResult},
-    provider::{ARK_ADAPTER_ID, ProviderRuntime},
+    provider::ProviderRuntime,
+    provider_adapter::ARK_ADAPTER_ID,
     storage::TaskExecutionRecord,
     types::{
         AssetGroupRecord, AssetKindCountCommand, AssetListCommand, CloudAssetIdentity,
@@ -923,7 +924,7 @@ impl AssetLibrary {
                 "当前素材库供应商不支持更新素材分组信息",
                 json!({
                     "providerConnectionId": command.provider_connection_id,
-                    "supported": ["volcengine_ark_v1"],
+                    "supported": [ARK_ADAPTER_ID],
                 }),
             ));
         }
