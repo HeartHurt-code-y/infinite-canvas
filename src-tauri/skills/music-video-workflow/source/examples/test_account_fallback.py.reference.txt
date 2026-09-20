@@ -1,0 +1,135 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""离线单测：账号降级（消费级→企业级）的**判定逻辑** —— 零算力、零网络。
+
+为什么单独有这个测试：`examples/smoke_test.py` 跑的是「离线全链」，
+**永远碰不到「提交失败要降级」这条分支**；而这条分支涉及**烧真钱**，
+恰恰是最不能靠人手测的。所以用打桩（stub）把三种判定钉死：
+
+  ① 没授权 → **必须拒绝**（给了 key ≠ 同意花钱）
+  ② 授权了、但错误不像「池子被占」→ **必须拒绝**（别拿真钱补自己的 bug）
+  ③ 授权了、错误像「池子被占」→ 才降级，并写 `状态/调度日志.csv`
+  ④ 连续 3 次「降级也失败」→ 熔断，之后**不再尝试**（不再白花真钱）
+
+用法：python examples/test_account_fallback.py
+"""
+import csv
+import os
+import sys
+import tempfile
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+REF = os.path.join(os.path.dirname(HERE), "references")
+sys.path.insert(0, REF)
+import batch_run_mv as bm  # noqa: E402
+import rh_client as rh  # noqa: E402
+
+CFG = {"id": "1234567890"}
+FAIL_OK = [0]
+PASS = [0]
+
+
+class Args:
+    def __init__(self, key_e="EK", allow=False):
+        self.instance_type = "plus"
+        self._key_e = key_e
+        self.allow_enterprise = allow
+        self._degrade_bad = 0
+
+
+def call(args, root, seq=1):
+    return bm.submit_with_fallback(CFG, [], None, args, seq, root, "CK")
+
+
+def expect_raise(name, fn, why_sub=""):
+    try:
+        fn()
+    except Exception as e:  # noqa: BLE001
+        PASS[0] += 1
+        print(f"  ✅ {name}：按预期拒绝（{type(e).__name__}: {str(e)[:70]}）")
+        return
+    FAIL_OK[0] += 1
+    print(f"  ❌ {name}：本该拒绝却放行了 {why_sub}")
+
+
+def expect_ok(name, got, want):
+    if got == want:
+        PASS[0] += 1
+        print(f"  ✅ {name}：{got}")
+    else:
+        FAIL_OK[0] += 1
+        print(f"  ❌ {name}：期望 {want}，实得 {got}")
+
+
+def main():
+    root = tempfile.mkdtemp(prefix="mvfallback_")
+    real = rh.submit_task
+    calls = []
+
+    def fake(key, **kw):
+        calls.append(key)
+        if key == "CK":
+            raise RuntimeError('提交失败: {"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}')
+        return "T-ENT-1"
+
+    rh.submit_task = fake
+    try:
+        print("① 未授权：给了企业级 key 也不许自动花钱")
+        expect_raise("allow=False", lambda: call(Args(allow=False), root))
+
+        print("② 授权了，但错误不像「池子被占」")
+        def bad_flow():
+            def f2(key, **kw):
+                raise RuntimeError('提交失败: {"code":380,"msg":"WORKFLOW_NOT_EXISTS"}')
+            rh.submit_task = f2
+            try:
+                return call(Args(allow=True), root)
+            finally:
+                rh.submit_task = fake
+        expect_raise("错误不匹配 DEGRADE_PAT", bad_flow)
+        print(f"     （DEGRADE_PAT 命中 'QUEUE_FULL' = "
+              f"{bool(bm.DEGRADE_PAT.search('APIKEY_TASK_QUEUE_FULL'))}，"
+              f"命中 'WORKFLOW_NOT_EXISTS' = "
+              f"{bool(bm.DEGRADE_PAT.search('WORKFLOW_NOT_EXISTS'))}）")
+
+        print("③ 授权 + 错误像池子被占 → 降级并留痕")
+        calls.clear()
+        got = call(Args(allow=True), root)
+        expect_ok("返回 (taskId, pool)", got, ("T-ENT-1", "enterprise"))
+        expect_ok("先试消费级再试企业级", calls, ["CK", "EK"])
+        sp = os.path.join(root, "状态", "调度日志.csv")
+        rows = list(csv.DictReader(open(sp, encoding="utf-8-sig"))) if os.path.isfile(sp) else []
+        expect_ok("调度日志.csv 有 1 条降级记录", len(rows) >= 1, True)
+        if rows:
+            print(f"     留痕：{rows[0].get('事件')} · 计费口径 = {rows[0].get('计费口径')}")
+
+        print("④ 熔断：连续 3 次降级也失败 → 之后不再尝试")
+        def always_fail(key, **kw):
+            raise RuntimeError('提交失败: {"code":813,"msg":"QUEUE_FULL"}')
+        rh.submit_task = always_fail
+        a = Args(allow=True)
+        for _ in range(3):
+            try:
+                call(a, root)
+            except Exception:  # noqa: BLE001
+                pass
+        before = a._degrade_bad
+        try:
+            call(a, root)
+            FAIL_OK[0] += 1
+            print("  ❌ 熔断后仍尝试了降级")
+        except Exception as e:  # noqa: BLE001
+            tripped = "熔断" in str(e) or a._degrade_bad >= 3
+            PASS[0] += 1 if tripped else 0
+            FAIL_OK[0] += 0 if tripped else 1
+            print(f"  {'✅' if tripped else '❌'} 熔断生效（_degrade_bad={before}）"
+                  f"：{str(e)[:60]}")
+    finally:
+        rh.submit_task = real
+        print(f"\n单测结果：{PASS[0]} 通过 / {FAIL_OK[0]} 失败")
+        print("（本测试不联网、不花钱、不写项目目录，全部在临时目录里）")
+
+
+if __name__ == "__main__":
+    main()
+    sys.exit(1 if FAIL_OK[0] else 0)

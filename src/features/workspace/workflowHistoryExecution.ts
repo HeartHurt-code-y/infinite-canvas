@@ -33,6 +33,7 @@ import {
 import { validateWorkflowMaterialsResume, workflowMaterialsSignature } from "./workflowMaterials";
 import { createAiFilmWorkflowRunner } from "./aiFilmWorkflowRunner";
 import { createComicDramaWorkflowRunner } from "./comicDramaWorkflowRunner";
+import { createMusicVideoWorkflowRunner } from "./musicVideoWorkflowRunner";
 import { createCommerceWorkflowRunner } from "./commerceWorkflowRunner";
 import {
   createKnowledgeVideoWorkflowRunner,
@@ -81,6 +82,7 @@ export interface RecordedWorkflowDependencies extends RecordedClients {
 }
 
 export function workflowKindForNode(node: KnowledgeVideoWorkflowNodeData): WorkflowHistoryKind {
+  if (node.config.musicVideo) return "musicVideo";
   if (node.config.reverseVideo) return "reverseVideo";
   if (node.config.xhsCover) return "xhsCover";
   if (node.config.remotion) return "remotion";
@@ -94,6 +96,7 @@ const TITLES: Record<WorkflowHistoryKind, string> = {
   knowledge: "知识视频",
   film: "影视制作",
   comicDrama: "漫剧制作",
+  musicVideo: "音乐 MV",
   commerce: "带货创作",
   remotion: "动画制作",
   xhsCover: "小红书封面",
@@ -105,6 +108,8 @@ function defaultRunnerFactory(
   clients: RecordedClients,
 ): KnowledgeVideoWorkflowRunner {
   switch (kind) {
+    case "musicVideo":
+      return createMusicVideoWorkflowRunner(clients);
     case "film":
       return createAiFilmWorkflowRunner(clients);
     case "comicDrama":
@@ -192,6 +197,7 @@ function modelSnapshots(
   const roles =
     kind === "remotion" ||
     kind === "reverseVideo" ||
+    (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
     (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
       ? (["text"] as const)
       : kind === "xhsCover"

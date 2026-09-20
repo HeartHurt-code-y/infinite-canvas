@@ -1,0 +1,427 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""歌词 ↔ 时间轴 强制对齐器（mv-auto-pipeline · 铁律 A2/A3/A4）
+
+为什么需要它：
+  歌曲的 ASR 结果**不可能 100% 准**（同音字、连读、伴奏掩蔽、和声）。
+  但**官方歌词**通常能拿到（用户粘贴 / 平台歌词页）。
+  所以正确做法是：**用 ASR 拿时间，用官方歌词定文本**，两者做强制对齐。
+
+算法：Needleman-Wunsch 字符级全局对齐（纯标准库，不依赖 numpy）
+  - 两侧先去标点/空白，只留 alnum（中文/假名/字母/数字都算 alnum）
+  - 打分：match +2 / mismatch -1 / gap -1
+  - 对齐后，每个「官方歌词行」的时间 = 它命中到的 ASR 字符时间的 min/max
+  - 命中率过低的行标 review_needed（不静默放过）
+
+输入三选一：
+  ① --asr <asr.json>  +  --official <官方歌词.txt>   ← 推荐（文本准 + 时间准）
+  ② --asr <asr.json>                                  ← 无官方歌词，直接信 ASR（全行标 review）
+  ③ --lrc <现成.lrc>                                  ← 已有 LRC，只做解析 + 自检
+
+输出（落到 <项目根>/歌词/）：
+  lyrics.json          权威时间轴（逐行 + 逐字插值 + 结构标记）
+  lyrics.lrc           权威 LRC
+  lyrics_review.html   关 1 审核页（逐行显示：行号 / 起止 / 时长 / 文本 / 对齐置信度 / 可改）
+
+自检（铁律 A4，任一不过就 red flag）：
+  行起止单调递增、行间不重叠、无 >2s 无标记空档（空档 = 间奏，显式插 [instrumental]）
+
+用法：
+  python align_lyrics.py --project-root "<项目根>" \\
+      --asr "歌词/lyrics_asr.json" --official "歌词/lyrics_raw.txt"
+  python align_lyrics.py --project-root "<项目根>" --lrc "歌词/lyrics.lrc" --qc-only
+"""
+import argparse
+import html
+import json
+import os
+import re
+import sys
+
+# ---------------------------------------------------------------- 文本规范化
+PUNCT_RE = re.compile(r"[^\w\u3040-\u30ff\u4e00-\u9fff]+", re.UNICODE)
+
+
+def norm_text(s: str) -> str:
+    """去标点/空白，保留字母数字/汉字/假名。"""
+    s = s or ""
+    s = s.replace("\u3000", " ")
+    out = []
+    for ch in s:
+        if ch.isalnum():
+            out.append(ch.lower())
+    return "".join(out)
+
+
+def split_lines(text: str, keep_meta: bool = True):
+    """拆行；带 [xx] 的行默认当结构标记保留。"""
+    lines = []
+    for raw in (text or "").splitlines():
+        raw = raw.strip()
+        if not raw:
+            continue
+        if raw.startswith("[") and raw.endswith("]"):
+            if keep_meta:
+                lines.append({"kind": "meta", "text": raw})
+            continue
+        lines.append({"kind": "lyric", "text": raw})
+    return lines
+
+
+# ---------------------------------------------------------------- NW 对齐
+def needleman_wunsch(a: str, b: str):
+    """返回 b 中每个字符对齐到 a 的下标列表（无对齐则 None）。O(len(a)*len(b)) 内存已优化。"""
+    la, lb = len(a), len(b)
+    if la == 0 or lb == 0:
+        return [None] * lb
+    GAP = -1
+
+    # 只留两行 + 回溯矩阵（字节级，省内存）
+    prev = [j * GAP for j in range(lb + 1)]
+    tb = [bytearray(lb + 1) for _ in range(la + 1)]  # 0=diag 1=up 2=left
+    for j in range(1, lb + 1):
+        tb[0][j] = 2
+    for i in range(1, la + 1):
+        cur = [i * GAP] + [0] * lb
+        tb[i][0] = 1
+        ai = a[i - 1]
+        for j in range(1, lb + 1):
+            sc = 2 if ai == b[j - 1] else -1
+            d = prev[j - 1] + sc
+            u = prev[j] + GAP
+            l = cur[j - 1] + GAP
+            if d >= u and d >= l:
+                cur[j], tb[i][j] = d, 0
+            elif u >= l:
+                cur[j], tb[i][j] = u, 1
+            else:
+                cur[j], tb[i][j] = l, 2
+        prev = cur
+
+    # 回溯
+    map_b = [None] * lb
+    i, j = la, lb
+    while i > 0 or j > 0:
+        if i > 0 and j > 0 and tb[i][j] == 0:
+            if a[i - 1] == b[j - 1]:
+                map_b[j - 1] = i - 1
+            i, j = i - 1, j - 1
+        elif i > 0 and (j == 0 or tb[i][j] == 1):
+            i -= 1
+        else:
+            j -= 1
+    return map_b
+
+
+# ---------------------------------------------------------------- ASR 装载
+def flatten_asr(asr: dict):
+    """ASR → 逐字时间轴 [(char, start, end)]，行内按字数线性插值。"""
+    chars = []
+    for seg in (asr.get("segments") or []):
+        try:
+            st, en = float(seg.get("start") or 0), float(seg.get("end") or 0)
+        except (TypeError, ValueError):
+            continue
+        txt = norm_text(seg.get("text") or "")
+        if not txt or en <= st:
+            continue
+        n = len(txt)
+        step = (en - st) / n
+        for k, ch in enumerate(txt):
+            chars.append((ch, round(st + k * step, 3), round(st + (k + 1) * step, 3)))
+    return chars
+
+
+def parse_lrc(text: str):
+    """解析 LRC → [{start, text}]（含多时间戳行）。"""
+    tag = re.compile(r"\[(\d{1,2}):(\d{1,2})(?:[.:](\d{1,3}))?\]")
+    rows = []
+    for raw in (text or "").splitlines():
+        stamps = list(tag.finditer(raw))
+        body = tag.sub("", raw).strip()
+        if not stamps or not body:
+            continue
+        for m in stamps:
+            mi, se, cs = m.group(1), m.group(2), m.group(3) or "0"
+            frac = int(cs) / (10 ** len(cs))
+            rows.append({"start": int(mi) * 60 + int(se) + frac, "text": body})
+    rows.sort(key=lambda x: x["start"])
+    return rows
+
+
+def write_lrc(rows, path):
+    def fmt(t):
+        t = max(0.0, t)
+        mi = int(t // 60)
+        se = t - mi * 60
+        return f"[{mi:02d}:{se:05.2f}]"
+    with open(path, "w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(f"{fmt(r['start'])}{r['text']}\n")
+
+
+# ---------------------------------------------------------------- 核心对齐
+def align(official_lines, asr_chars, min_hit=0.55):
+    """官方歌词行 → 时间轴。返回 (rows, stats)。"""
+    off_chars, owner = [], []
+    for li, ln in enumerate(official_lines):
+        t = norm_text(ln["text"])
+        off_chars.extend(t)
+        owner.extend([li] * len(t))
+
+    a = "".join(c for c, _, _ in asr_chars)
+    b = "".join(off_chars)
+    if not a or not b:
+        return [], {"reason": "ASR 或歌词为空", "hit_chars": 0, "total_chars": len(b)}
+    mapping = needleman_wunsch(a, b)
+
+    hits = {li: [] for li in range(len(official_lines))}
+    matched = 0
+    for bi, ai in enumerate(mapping):
+        if ai is None:
+            continue
+        ch, st, en = asr_chars[ai]
+        if ch != b[bi]:
+            continue
+        matched += 1
+        hits[owner[bi]].append((st, en))
+
+    rows = []
+    cursor = 0.0
+    for li, ln in enumerate(official_lines):
+        h = sorted(hits.get(li) or [])
+        total = len(norm_text(ln["text"])) or 1
+        ratio = len(h) / total
+        if h and ratio >= min_hit:
+            st, en = h[0][0], h[-1][1]
+            review = False
+        elif h:
+            st = max(cursor, h[0][0])
+            en = max(st + 0.6, h[-1][1])
+            review = True
+        else:
+            st = cursor
+            en = cursor + max(1.2, total / 4.5)
+            review = True
+        if st < cursor:                      # 强制单调不重叠（铁律 A4）
+            st = cursor
+            en = max(en, st + 0.6)
+        rows.append({
+            "idx": len(rows), "start": round(st, 3), "end": round(en, 3),
+            "text": ln["text"], "kind": "lyric",
+            "hit_ratio": round(ratio, 3), "review_needed": bool(review),
+            "chars": total,
+        })
+        cursor = en
+    stats = {"hit_chars": matched, "total_chars": len(b),
+             "hit_ratio": round(matched / max(1, len(b)), 3),
+             "review_lines": sum(1 for r in rows if r["review_needed"])}
+    return rows, stats
+
+
+def insert_instrumental(rows, total_dur, gap_threshold=2.0, head_threshold=1.5):
+    """把空档显式标成 [instrumental]（铁律 A4：空档不许无声无息）。"""
+    out = []
+    prev_end = 0.0
+    for r in rows:
+        if r["start"] - prev_end > gap_threshold:
+            out.append({"idx": len(out), "start": round(prev_end, 3),
+                        "end": round(r["start"], 3), "text": "[instrumental]",
+                        "kind": "instrumental", "chars": 0,
+                        "hit_ratio": 1.0, "review_needed": False})
+        out.append(r)
+        prev_end = r["end"]
+    if total_dur and total_dur - prev_end > head_threshold:
+        out.append({"idx": len(out), "start": round(prev_end, 3),
+                    "end": round(total_dur, 3), "text": "[instrumental]",
+                    "kind": "instrumental", "chars": 0,
+                    "hit_ratio": 1.0, "review_needed": False})
+    for i, r in enumerate(out):
+        r["idx"] = i
+    return out
+
+
+def qc(rows, total_dur):
+    """时间轴自检（铁律 A4）。返回问题清单。"""
+    problems = []
+    for i in range(1, len(rows)):
+        if rows[i]["start"] < rows[i - 1]["end"] - 0.02:
+            problems.append(f"第 {i} 行起点 {rows[i]['start']}s 早于上一行终点 "
+                            f"{rows[i-1]['end']}s（重叠）")
+    for r in rows:
+        if r["end"] - r["start"] < 0.3:
+            problems.append(f"第 {r['idx']} 行时长过短（{r['end']-r['start']:.2f}s）：「{r['text'][:14]}」")
+    if total_dur:
+        if rows and rows[-1]["end"] > total_dur + 0.5:
+            problems.append(f"末行终点 {rows[-1]['end']}s 超出歌曲时长 {total_dur}s")
+        # 语速体检：中文 4.5 字/秒
+        for r in rows:
+            if r.get("chars"):
+                cps = r["chars"] / max(0.3, r["end"] - r["start"])
+                if cps > 9.0:
+                    problems.append(f"第 {r['idx']} 行语速异常 {cps:.1f} 字/秒（疑似时间轴错位）")
+    return problems
+
+
+# ---------------------------------------------------------------- 审核页
+def build_review_html(rows, stats, problems, total_dur, path, title="关 1 · 歌词时间轴审核"):
+    def mmss(t):
+        return f"{int(t // 60)}:{t % 60:05.2f}"
+    tr = []
+    for r in rows:
+        cls = "warn" if r["review_needed"] else ("meta" if r["kind"] != "lyric" else "")
+        tr.append(
+            f"<tr class='{cls}' data-idx='{r['idx']}'>"
+            f"<td>{r['idx']}</td><td>{mmss(r['start'])}</td><td>{mmss(r['end'])}</td>"
+            f"<td>{r['end']-r['start']:.2f}s</td>"
+            f"<td class='txt'>{html.escape(r['text'])}</td>"
+            f"<td>{r['hit_ratio']:.0%}</td>"
+            f"<td>{'⚠ 待核' if r['review_needed'] else '✅'}</td></tr>"
+        )
+    prob = "".join(f"<li>{html.escape(p)}</li>" for p in problems) or "<li>无</li>"
+    overlay = is_music_style = ""
+    doc = f"""<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>{html.escape(title)}</title>
+<style>
+:root{{--bg:#f6f7f9;--card:#fff;--line:#e3e6ea;--tx:#1c2025;--tx2:#5b6570;--hl:#2f6fed}}
+*{{box-sizing:border-box}}body{{margin:0;background:var(--bg);color:var(--tx);
+font:14px/1.6 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}}
+header{{background:var(--card);border-bottom:1px solid var(--line);padding:18px 24px;position:sticky;top:0;z-index:9}}
+h1{{margin:0 0 6px;font-size:18px}} .kpi{{display:flex;gap:18px;flex-wrap:wrap;color:var(--tx2);font-size:13px}}
+.kpi b{{color:var(--tx)}} main{{padding:20px 24px 60px}}
+.wrap{{background:var(--card);border:1px solid var(--line);border-radius:10px;overflow:auto}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+th,td{{padding:7px 10px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}}
+th{{background:#fafbfc;color:var(--tx2);font-weight:600;position:sticky;top:0}}
+tr.warn{{background:#fff8e6}} tr.meta td.txt{{color:#8a939c;font-style:italic}}
+td.txt{{font-size:14px}}
+.box{{margin-top:16px;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px 18px}}
+.box 项目视频模型{{margin:0 0 8px;font-size:14px}} ul{{margin:0;padding-left:20px}}
+.red{{color:#c0392b}} 
+</style></head><body>
+<header>
+  <h1>{html.escape(title)}</h1>
+  <div class="kpi">
+    <span>歌曲总长 <b>{total_dur or '?'}s</b></span>
+    <span>行数 <b>{len(rows)}</b></span>
+    <span>歌词行 <b>{sum(1 for r in rows if r['kind']=='lyric')}</b></span>
+    <span>对齐命中率 <b>{stats.get('hit_ratio', 0):.1%}</b></span>
+    <span>待核行 <b class="{'red' if stats.get('review_lines') else ''}">{stats.get('review_lines', 0)}</b></span>
+  </div>
+</header>
+<main>
+  <div class="wrap"><table>
+    <thead><tr><th>#</th><th>起</th><th>止</th><th>时长</th><th>歌词</th><th>对齐命中</th><th>状态</th></tr></thead>
+    <tbody>{''.join(tr)}</tbody>
+  </table></div>
+  <div class="box"><项目视频模型>时间轴自检（铁律 A4）</项目视频模型><ul>{prob}</ul></div>
+  <div class="box"><项目视频模型>怎么改</项目视频模型><ul>
+    <li>改文本：直接编辑 <code>歌词/lyrics_raw.txt</code> 后重跑 <code>align_lyrics.py</code></li>
+    <li>改时间：编辑 <code>歌词/lyrics.lrc</code> 后跑 <code>align_lyrics.py --lrc ... --adopt</code></li>
+    <li><b>⚠ 待核</b> 行 = 对齐置信度低于阈值，必须人工听一遍再定稿（铁律 A2）</li>
+    <li>确认无误后回对话说「歌词时间轴通过」，我再锁定并进入关 2 风格</li>
+  </ul></div>
+</main></body></html>{overlay}{is_music_style}"""
+    os.makedirs(os.path.dirname(os.path.abspath(path)) or ".", exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        f.write(doc)
+    return path
+
+
+# ---------------------------------------------------------------- main
+def probe_duration(song_path):
+    """用 ffprobe 取歌曲时长（找不到 ffprobe 就返回 None，不阻塞流程）。"""
+    import shutil
+    import subprocess
+    exe = shutil.which("ffprobe") or r"D:\AIxiufu\ffprobe.exe"
+    if not os.path.isfile(exe) and not shutil.which("ffprobe"):
+        return None
+    try:
+        r = subprocess.run(
+            [exe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", song_path],
+            capture_output=True, text=True, timeout=60)
+        return round(float((r.stdout or "0").strip()), 3)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--asr", help="ASR 结果 JSON（faster-whisper / openai-whisper 的 JSON）")
+    ap.add_argument("--official", help="官方歌词 txt（一行一句）")
+    ap.add_argument("--lrc", help="现成 LRC（与 --asr 二选一）")
+    ap.add_argument("--song", help="歌曲文件（用于取总时长做自检）")
+    ap.add_argument("--min-hit", type=float, default=0.55, help="行对齐命中率阈值")
+    ap.add_argument("--gap", type=float, default=2.0, help="空档 > 该秒数就插 [instrumental]")
+    ap.add_argument("--qc-only", action="store_true", help="只做自检与审核页，不改 lyrics.json")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.project_root)
+    lyric_dir = os.path.join(root, "歌词")
+    os.makedirs(lyric_dir, exist_ok=True)
+    total_dur = probe_duration(args.song) if args.song and os.path.isfile(args.song) else None
+    if total_dur is None:
+        info_p = os.path.join(root, "音乐", "song_info.json")
+        if os.path.isfile(info_p):
+            try:
+                total_dur = json.load(open(info_p, encoding="utf-8")).get("duration")
+            except Exception:  # noqa: BLE001
+                pass
+
+    official_lines, stats = [], {}
+    if args.lrc or (args.qc_only and os.path.isfile(os.path.join(lyric_dir, "lyrics.lrc"))):
+        lrc_path = args.lrc or os.path.join(lyric_dir, "lyrics.lrc")
+        base = parse_lrc(open(lrc_path, encoding="utf-8").read())
+        rows = []
+        for i, r in enumerate(base):
+            end = base[i + 1]["start"] if i + 1 < len(base) else (total_dur or r["start"] + 3.0)
+            rows.append({"idx": i, "start": round(r["start"], 3), "end": round(end, 3),
+                         "text": r["text"], "kind": "lyric", "chars": len(norm_text(r["text"])),
+                         "hit_ratio": 1.0, "review_needed": False})
+        stats = {"hit_ratio": 1.0, "review_lines": 0, "source": "lrc"}
+        print(f"[lrc] 解析 {len(rows)} 行")
+    else:
+        if not args.asr:
+            sys.exit("❌ 需要 --asr（ASR JSON）或 --lrc（现成 LRC）之一")
+        asr = json.load(open(args.asr, encoding="utf-8"))
+        asr_chars = flatten_asr(asr)
+        print(f"[asr] 逐字时间点 {len(asr_chars)} 个")
+        if args.official:
+            official_lines = split_lines(open(args.official, encoding="utf-8").read())
+        else:
+            print("⚠ 未给官方歌词 → 直接信 ASR 文本，全部行标 review_needed")
+            official_lines = [{"kind": "lyric", "text": (s.get("text") or "").strip()}
+                              for s in (asr.get("segments") or []) if (s.get("text") or "").strip()]
+        if not official_lines:
+            sys.exit("❌ 歌词为空（--official 文件为空 / ASR 无 segments）")
+        rows, stats = align(official_lines, asr_chars, args.min_hit)
+        print(f"[align] 字符命中率 {stats['hit_ratio']:.1%} · 待核 {stats['review_lines']} 行")
+
+    rows = insert_instrumental(rows, total_dur, args.gap)
+    problems = qc(rows, total_dur)
+
+    out_html = os.path.join(lyric_dir, "lyrics_review.html")
+    build_review_html(rows, stats, problems, total_dur, out_html)
+
+    if not args.qc_only:
+        payload = {"source": stats.get("source", "asr+official"), "song_duration": total_dur,
+                   "aligned_at": __import__("datetime").datetime.now().isoformat(timespec="seconds"),
+                   "stats": stats, "lines": rows}
+        json.dump(payload, open(os.path.join(lyric_dir, "lyrics.json"), "w", encoding="utf-8"),
+                  ensure_ascii=False, indent=1)
+        write_lrc([{"start": r["start"], "text": r["text"]} for r in rows],
+                  os.path.join(lyric_dir, "lyrics.lrc"))
+
+    print(f"\n{'='*66}\n时间轴自检（铁律 A4）：{'✅ 通过' if not problems else f'⚠ {len(problems)} 项待处理'}")
+    for p in problems:
+        print("  ·", p)
+    print(f"\n产物：\n  {out_html}\n  {os.path.join(lyric_dir, 'lyrics.json')}"
+          f"\n  {os.path.join(lyric_dir, 'lyrics.lrc')}")
+    if stats.get("review_lines"):
+        print(f"\n⚠ 有 {stats['review_lines']} 行对齐置信度低 —— 必须人工听一遍再定稿（铁律 A2）")
+
+
+if __name__ == "__main__":
+    main()

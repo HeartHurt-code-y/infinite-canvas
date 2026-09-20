@@ -29,6 +29,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use uuid::Uuid;
 
 use super::error::{BackendError, BackendResult};
+use super::mv_media::{self, StartMvCompositionCommand};
 use super::types::StartVideoCompositionCommand;
 
 /// Windows 下隐藏子进程控制台窗口。
@@ -152,6 +153,14 @@ struct MediaProbe {
 
 /// 即使异步探测被取消，也移除临时媒体副本。
 struct VideoProbeFile(PathBuf);
+
+struct CompositionFilterFile(PathBuf);
+
+impl Drop for CompositionFilterFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
 
 impl Drop for VideoProbeFile {
     fn drop(&mut self) {
@@ -486,8 +495,62 @@ impl VideoCompositionService {
             }
             sources.push(source.to_string());
         }
-        let file_name = composed_video_file_name(&command.output_name, chrono::Local::now());
+        self.start_job(sources, &command.output_name, None)
+    }
+
+    /// MV always passes through original-song mastering, including a single video window.
+    pub async fn start_mv_composition(
+        &self,
+        command: StartMvCompositionCommand,
+    ) -> BackendResult<VideoCompositionJobRecord> {
+        let song = mv_media::probe_song(self, &command.song_path).await?;
+        if song.source_signature != command.source_signature {
+            return Err(BackendError::validation(
+                "歌曲文件已改变，请重新确认音乐时窗。",
+                json!(null),
+            ));
+        }
+        mv_media::validate_windows(&command.windows, song.duration_seconds)?;
+        let sources = command
+            .windows
+            .iter()
+            .map(|window| window.source.clone())
+            .collect();
+        let name = command.output_name.clone();
+        self.start_job(sources, &name, Some(command))
+    }
+
+    pub async fn prepare_mv_audio_window(
+        &self,
+        command: mv_media::PrepareMvAudioWindowCommand,
+    ) -> BackendResult<mv_media::MvAudioWindow> {
+        mv_media::prepare_audio_window(
+            self,
+            &self.inner.downloads_dir.join("无限画布").join("MV音频切片"),
+            command,
+        )
+        .await
+    }
+
+    fn start_job(
+        &self,
+        sources: Vec<String>,
+        output_name: &str,
+        mv_command: Option<StartMvCompositionCommand>,
+    ) -> BackendResult<VideoCompositionJobRecord> {
+        let file_name = composed_video_file_name(output_name, chrono::Local::now());
+        // Parallel MV runs can share a title and second; reserve distinct paths before encoding starts.
+        let file_name = if mv_command.is_some() {
+            format!(
+                "{}-{}.mp4",
+                file_name.trim_end_matches(".mp4"),
+                Uuid::new_v4()
+            )
+        } else {
+            file_name
+        };
         let directory = self.inner.downloads_dir.join("无限画布");
+        std::fs::create_dir_all(&directory)?;
         let output_path = unique_output_path(&directory, &file_name);
 
         let job_id = format!("composition-{}", Uuid::new_v4());
@@ -519,7 +582,7 @@ impl VideoCompositionService {
         let service = self.clone();
         tauri::async_runtime::spawn(async move {
             service
-                .run_composition(job_id, sources, output_path, file_name)
+                .run_composition(job_id, sources, output_path, file_name, mv_command)
                 .await;
         });
         Ok(record)
@@ -602,6 +665,7 @@ impl VideoCompositionService {
         sources: Vec<String>,
         output_path: PathBuf,
         file_name: String,
+        mv_command: Option<StartMvCompositionCommand>,
     ) {
         // 1. 确保引擎就绪（缺失时自动下载官方构建）。
         let ffmpeg = match self.ensure_engine().await {
@@ -636,13 +700,72 @@ impl VideoCompositionService {
 
         // 3. 输出尺寸跟随首段视频（与画布 MediaRecorder 路径同一规则）。
         let (width, height) = composition_canvas_size(probes[0].width, probes[0].height);
-        let total_duration: f64 = probes.iter().map(|probe| probe.duration_seconds).sum();
-        let filter = build_composition_filter(&probes, width, height);
+        let mut all_sources = sources;
+        let (total_duration, filter) = if let Some(mv) = &mv_command {
+            let song = match mv_media::probe_song(self, &mv.song_path).await {
+                Ok(song) if song.source_signature == mv.source_signature => song,
+                Ok(_) => {
+                    self.fail_job(&job_id, "歌曲已改变，请重新确认后合成。".into());
+                    return;
+                }
+                Err(error) => {
+                    self.fail_job(&job_id, error.to_string());
+                    return;
+                }
+            };
+            if let Err(error) = mv_media::validate_windows(&mv.windows, song.duration_seconds) {
+                self.fail_job(&job_id, error.to_string());
+                return;
+            }
+            all_sources.push(mv.song_path.clone());
+            (
+                song.duration_seconds,
+                mv_media::composition_filter(&mv.windows, width, height, song.duration_seconds),
+            )
+        } else {
+            (
+                probes.iter().map(|probe| probe.duration_seconds).sum(),
+                build_composition_filter(&probes, width, height),
+            )
+        };
+        let mut args = composition_args(&all_sources, &filter, &output_path);
+        // Keep large MV filter graphs outside Windows' command-line length limit.
+        let _filter_file = if mv_command.is_some() {
+            let option = match mv_media::filter_file_option(&ffmpeg).await {
+                Ok(option) => option,
+                Err(error) => {
+                    self.fail_job(&job_id, error.to_string());
+                    return;
+                }
+            };
+            let path = output_path.with_extension("fffilter");
+            if let Err(error) = tokio::fs::write(&path, &filter).await {
+                self.fail_job(&job_id, format!("MV 合成滤镜保存失败：{error}"));
+                return;
+            }
+            let index = args
+                .iter()
+                .position(|arg| arg == "-filter_complex")
+                .expect("composition filter argument");
+            args[index] = option.into();
+            args[index + 1] = path.to_string_lossy().into_owned();
+            Some(CompositionFilterFile(path))
+        } else {
+            None
+        };
+        if mv_command.is_some() {
+            args.pop();
+            args.extend([
+                "-t".into(),
+                format!("{total_duration:.9}"),
+                output_path.to_string_lossy().into_owned(),
+            ]);
+        }
 
         // 4. 启动 ffmpeg 子进程。
         let mut command = tokio::process::Command::new(&ffmpeg);
         command
-            .args(composition_args(&sources, &filter, &output_path))
+            .args(args)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -697,6 +820,38 @@ impl VideoCompositionService {
                 if !output_path.is_file() {
                     self.fail_job(&job_id, "合成结束但输出文件不存在。".into());
                     return;
+                }
+                if let Some(mv) = &mv_command {
+                    if let Err(error) =
+                        mv_media::verify_source(&mv.song_path, &mv.source_signature).await
+                    {
+                        remove_partial_output(&output_path).await;
+                        self.fail_job(&job_id, error.to_string());
+                        return;
+                    }
+                    let alignment = mv_media::check_alignment(
+                        self,
+                        mv_media::CheckMvAlignmentCommand {
+                            final_path: output_path.to_string_lossy().into_owned(),
+                            expected_duration_seconds: Some(total_duration),
+                        },
+                    )
+                    .await;
+                    if !matches!(alignment, Ok(ref report) if report.aligned) {
+                        remove_partial_output(&output_path).await;
+                        self.fail_job(
+                            &job_id,
+                            alignment.err().map_or_else(
+                                || "成片音视频时长未与原曲对齐，请检查镜头时窗。".into(),
+                                |error| error.to_string(),
+                            ),
+                        );
+                        return;
+                    }
+                    if self.is_cancelled(&job_id) {
+                        remove_partial_output(&output_path).await;
+                        return;
+                    }
                 }
                 self.update_record(&job_id, |record| {
                     record.status = VideoCompositionStatus::Completed;

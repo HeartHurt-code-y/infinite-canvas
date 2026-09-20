@@ -106,6 +106,46 @@ export const comicDramaReviewOutputSchema = v.looseObject({
   recommendation: v.optional(v.string()),
 });
 
+export const musicVideoStageOutputSchema = v.looseObject({
+  schemaVersion: v.literal("music-video-stage.v1"),
+  stage: v.picklist(["timeline", "style", "storyboard", "prompts"]),
+  status: workflowStatusSchema,
+  decision: v.nullable(v.optional(workflowDecisionSchema)),
+  content: v.pipe(v.string(), v.nonEmpty()),
+  inputSummary: v.pipe(v.string(), v.nonEmpty()),
+  timeline: v.array(
+    v.looseObject({
+      id: v.pipe(v.string(), v.nonEmpty()),
+      startSeconds: v.number(),
+      endSeconds: v.number(),
+      kind: v.picklist(["vocal", "instrumental"]),
+      text: v.string(),
+      section: v.pipe(v.string(), v.nonEmpty()),
+    }),
+  ),
+  style: v.nullable(
+    v.looseObject({
+      description: v.pipe(v.string(), v.nonEmpty()),
+      assets: v.array(workflowAssetSchema),
+    }),
+  ),
+  shots: v.array(
+    v.looseObject({
+      id: v.pipe(v.string(), v.nonEmpty()),
+      segmentId: v.pipe(v.string(), v.nonEmpty()),
+      title: v.pipe(v.string(), v.nonEmpty()),
+      startSeconds: v.number(),
+      endSeconds: v.number(),
+      durationSeconds: v.number(),
+      framing: v.picklist(["close", "medium", "wide"]),
+      lipSync: v.picklist(["sync", "offscreen", "none"]),
+      visual: v.pipe(v.string(), v.nonEmpty()),
+      videoPrompt: v.pipe(v.string(), v.nonEmpty()),
+      referenceAssetIds: v.array(v.string()),
+    }),
+  ),
+});
+
 // ---------- 工具函数 ----------
 
 /**

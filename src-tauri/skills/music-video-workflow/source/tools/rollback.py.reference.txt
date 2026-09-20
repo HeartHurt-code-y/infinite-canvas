@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""mv-auto-pipeline 版本回退工具
+
+万一某次「进化」把 skill 搞坏了，用它退回指定版本。
+
+用法：
+  python tools/rollback.py --list                 # 看所有历史版本（git tag + zip 快照）
+  python tools/rollback.py --to V1.3.1            # 从 git 历史回退到 V1.3.1
+  python tools/rollback.py --to V1.3.1 --prune    # 顺带删掉回退后多出来的文件
+  python tools/rollback.py --to V1.3.1 --from-zip # 用 _versions 里的快照回退（git 坏了也能用）
+  python tools/rollback.py --to V1.3.1 --dry-run  # 只看会改什么
+
+安全保证：
+  - 回退**前**自动把当前状态另存为 _versions/_pre_rollback_<版本>_<时间戳>.zip，
+    并在 git 里提交一次当前状态 → 回退本身也能被回退
+  - 回退动作会作为一次新的提交记录下来（不丢历史，不 force push）
+"""
+import argparse
+import datetime
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+
+SKILL_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+VERSION_FILE = os.path.join(SKILL_DIR, "VERSION")
+VERSIONS_DIR = os.path.join(SKILL_DIR, "_versions")
+SNAP_IGNORE_DIRS = {"_versions", "__pycache__", ".git"}
+SNAP_IGNORE_SUFFIX = (".pyc", ".zip")
+
+
+def read_version():
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return "?"
+
+
+def git(args, check=False):
+    r = subprocess.run(["git", "-C", SKILL_DIR] + args, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        print("   ⚠️ git %s 失败：%s" % (" ".join(args), (r.stderr or r.stdout).strip()[:300]))
+    return r
+
+
+def has_git():
+    return os.path.isdir(os.path.join(SKILL_DIR, ".git"))
+
+
+def git_tags():
+    if not has_git():
+        return []
+    out = git(["tag", "--sort=creatordate", "--format=%(refname:short)|%(creatordate:short)|%(subject)"]).stdout
+    rows = []
+    for line in out.splitlines():
+        if "|" in line:
+            parts = line.split("|", 2)
+            rows.append((parts[0], parts[1], parts[2] if len(parts) > 2 else ""))
+    return rows
+
+
+def zip_snapshots():
+    if not os.path.isdir(VERSIONS_DIR):
+        return []
+    rows = []
+    for fn in sorted(os.listdir(VERSIONS_DIR)):
+        if fn.startswith("mv-auto-pipeline-V") and fn.endswith(".zip"):
+            rows.append((fn, os.path.getsize(os.path.join(VERSIONS_DIR, fn))))
+    return rows
+
+
+def list_versions():
+    cur = read_version()
+    print("当前 VERSION：V%s" % cur)
+    print()
+    print("① git 历史版本（推荐用这个回退，可看精确 diff）")
+    tags = git_tags()
+    if not tags:
+        print("   （无 git tag——仓库可能还没初始化）")
+    for name, date, subj in tags:
+        mark = " ← 当前" if name == "V" + cur else ""
+        print("   %-10s %s  %s%s" % (name, date, subj[:60], mark))
+    print()
+    print("② zip 快照（git 坏掉时的兜底）")
+    snaps = zip_snapshots()
+    if not snaps:
+        print("   （无快照）")
+    for fn, sz in snaps:
+        print("   %-52s %8.1f KB" % (fn, sz / 1024.0))
+    print()
+    print("回退：python tools/rollback.py --to V1.3.1")
+
+
+def make_backup(cur):
+    """回退前把当前状态另存一份，保证回退可逆"""
+    os.makedirs(VERSIONS_DIR, exist_ok=True)
+    ts = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+    out = os.path.join(VERSIONS_DIR, "_pre_rollback_V%s_%s.zip" % (cur, ts))
+    n = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for root, dirs, files in os.walk(SKILL_DIR):
+            dirs[:] = [d for d in dirs if d not in SNAP_IGNORE_DIRS]
+            for fn in files:
+                if fn.endswith(SNAP_IGNORE_SUFFIX):
+                    continue
+                fp = os.path.join(root, fn)
+                z.write(fp, os.path.relpath(fp, SKILL_DIR).replace("\\", "/"))
+                n += 1
+    return out, n
+
+
+def rollback_from_zip(zip_path, prune, dry):
+    if not os.path.isfile(zip_path):
+        sys.exit("❌ 找不到快照 %s" % zip_path)
+    with zipfile.ZipFile(zip_path) as z:
+        names = z.namelist()
+        print("   从快照恢复 %d 个条目" % len(names))
+        if dry:
+            for n in names:
+                print("      -", n)
+            return
+        # 注意：必须在 with 块内解压，zip 句柄一旦关闭就不能再读
+        z.extractall(SKILL_DIR)
+    print("   ✅ 已从 %s 恢复" % os.path.basename(zip_path))
+    if prune:
+        keep = set(n.replace("\\", "/") for n in names if not n.endswith("/"))
+        removed = []
+        for root, dirs, files in os.walk(SKILL_DIR):
+            dirs[:] = [d for d in dirs if d not in SNAP_IGNORE_DIRS]
+            for fn in files:
+                rel = os.path.relpath(os.path.join(root, fn), SKILL_DIR).replace("\\", "/")
+                if rel not in keep and not fn.endswith(SNAP_IGNORE_SUFFIX):
+                    try:
+                        os.remove(os.path.join(root, fn))
+                        removed.append(rel)
+                    except OSError:
+                        pass
+        print("   🧹 --prune 删掉了 %d 个快照里没有的文件" % len(removed))
+        for r in removed[:20]:
+            print("      -", r)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="版本回退")
+    ap.add_argument("--list", action="store_true", help="列出所有历史版本")
+    ap.add_argument("--to", help="目标版本号，如 V1.3.1 或 1.3.1")
+    ap.add_argument("--from-zip", action="store_true", help="改用 _versions 里的 zip 快照回退")
+    ap.add_argument("--zip", help="直接指定快照 zip 路径")
+    ap.add_argument("--prune", action="store_true", help="删除回退后多余的（目标版本不存在的）文件")
+    ap.add_argument("--dry-run", action="store_true")
+    args = ap.parse_args()
+
+    if args.list or not args.to:
+        list_versions()
+        return
+
+    target = args.to if args.to.startswith("V") else "V" + args.to
+    cur = read_version()
+    print("↩️  回退：V%s → %s" % (cur, target))
+
+    if target == "V" + cur:
+        sys.exit("❌ 目标版本就是当前版本，无需回退")
+
+    # 0) 先备份当前状态（无论如何都做）
+    if not args.dry_run:
+        bak, n = make_backup(cur)
+        print("   🛡  当前状态已备份 → %s（%d 文件）" % (os.path.basename(bak), n))
+        if has_git():
+            git(["add", "-A"])
+            git(["commit", "-q", "-m", "chore: 回退前的状态存档（V%s）" % cur])
+
+    # 1) 选路径：zip / git
+    if args.zip or args.from_zip:
+        if args.zip:
+            zp = args.zip
+        else:
+            cands = [f for f in os.listdir(VERSIONS_DIR)
+                     if f"V{target.lstrip('V')}-" in f and f.endswith(".zip")
+                     and not f.startswith("_")]
+            if not cands:
+                sys.exit("❌ _versions 里没有 %s 的快照；试试 git 回退（去掉 --from-zip）" % target)
+            zp = os.path.join(VERSIONS_DIR, sorted(cands)[-1])
+        rollback_from_zip(zp, args.prune, args.dry_run)
+        if not args.dry_run:
+            # 老快照（如 V1.3.1）里可能没有 VERSION 文件，或被 --prune 删掉 → 必须补写
+            with open(VERSION_FILE, "w", encoding="utf-8") as f:
+                f.write(target.lstrip("V") + "\n")
+            print("   VERSION → %s" % target.lstrip("V"))
+            if has_git():
+                git(["add", "-A"])
+                git(["commit", "-q", "-m", "rollback: %s → %s（zip 快照）" % (cur, target)])
+        print("✅ 回退完成（zip 快照路径）：现为 %s" % target)
+        return
+
+    if not has_git():
+        sys.exit("❌ 没有 git 仓库，请加 --from-zip 用快照回退")
+    tags = [t[0] for t in git_tags()]
+    if target not in tags:
+        sys.exit("❌ 没有 tag %s。可用：%s" % (target, ", ".join(tags) or "无"))
+
+    if args.dry_run:
+        chk = git(["checkout", target, "--", "."])
+        print(chk.stdout or "（dry-run：未改动）")
+        git(["checkout", "HEAD", "--", "."])
+        print("（dry-run 已还原）")
+        return
+
+    # 还原该 tag 跟踪的全部文件
+    r = git(["checkout", target, "--", "."], check=True)
+    print("   ✅ 已把工作区内容还原到 %s" % target)
+
+    # 找出「目标版本里不存在、但现在多出来」的文件
+    listed = git(["ls-tree", "-r", "--name-only", target]).stdout.splitlines()
+    keep = set(x.strip().replace("\\", "/") for x in listed if x.strip())
+    extra = []
+    for root, dirs, files in os.walk(SKILL_DIR):
+        dirs[:] = [d for d in dirs if d not in SNAP_IGNORE_DIRS]
+        for fn in files:
+            rel = os.path.relpath(os.path.join(root, fn), SKILL_DIR).replace("\\", "/")
+            if rel not in keep:
+                extra.append(rel)
+    if extra:
+        print("   ⚠️ 有 %d 个文件不在 %s 里（回退后新增的）：" % (len(extra), target))
+        for e in extra[:25]:
+            print("      -", e)
+        if args.prune:
+            for e in extra:
+                try:
+                    os.remove(os.path.join(SKILL_DIR, e))
+                except OSError:
+                    pass
+            print("   🧹 --prune 已删除")
+        else:
+            print("      （想一起删掉，加 --prune 再跑一次）")
+
+    with open(VERSION_FILE, "w", encoding="utf-8") as f:
+        f.write(target.lstrip("V") + "\n")
+    print("   VERSION → %s" % target.lstrip("V"))
+
+    git(["add", "-A"])
+    git(["commit", "-q", "-m", "rollback: %s → %s" % (cur, target)])
+    print("\n✅ 回退完成：现为 %s（HEAD=%s）"
+          % (target, git(["log", "-1", "--oneline"]).stdout.strip()))
+    print("   想撤销这次回退：python tools/rollback.py --list 找到回退前版本再退回去")
+
+
+if __name__ == "__main__":
+    main()

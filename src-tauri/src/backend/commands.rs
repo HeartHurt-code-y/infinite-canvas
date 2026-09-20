@@ -1174,6 +1174,46 @@ pub fn cancel_video_download(
 // ---------- 画布视频合成（内置 FFmpeg 引擎） ----------
 
 #[tauri::command]
+pub async fn probe_mv_song(
+    state: State<'_, BackendState>,
+    command: super::mv_media::ProbeMvSongCommand,
+) -> CommandResult<super::mv_media::MvSongProbe> {
+    super::mv_media::probe_song(&state.composer, &command.source_path)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn prepare_mv_audio_window(
+    state: State<'_, BackendState>,
+    command: super::mv_media::PrepareMvAudioWindowCommand,
+) -> CommandResult<super::mv_media::MvAudioWindow> {
+    state
+        .composer
+        .prepare_mv_audio_window(command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn start_mv_composition(
+    state: State<'_, BackendState>,
+    command: super::mv_media::StartMvCompositionCommand,
+) -> CommandResult<VideoCompositionJobRecord> {
+    state.composer.start_mv_composition(command).await.command()
+}
+
+#[tauri::command]
+pub async fn check_mv_media_alignment(
+    state: State<'_, BackendState>,
+    command: super::mv_media::CheckMvAlignmentCommand,
+) -> CommandResult<super::mv_media::MvMediaAlignment> {
+    super::mv_media::check_alignment(&state.composer, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
 pub fn get_video_composer_engine(
     state: State<'_, BackendState>,
 ) -> CommandResult<VideoComposerEngineStatus> {

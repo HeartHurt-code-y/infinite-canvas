@@ -44,6 +44,7 @@
       "resources/ffmpeg/": "ffmpeg/",
       "resources/blender/": "blender/",
       "skills/anime-drama-v23/": "skills/anime-drama-v23/",
+      "skills/music-video-workflow/": "skills/music-video-workflow/",
       "skills/gpt-image-2-style-library/LICENSE": "licenses/gpt-image-2-style-library-LICENSE",
       "skills/gpt-image-2-style-library/": "skills/gpt-image-2-style-library/"
     },

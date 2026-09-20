@@ -11,6 +11,7 @@ import {
   type VideoComposerClient,
   type VideoCompositionJobRecord,
   type VideoFrameExtractionClient,
+  type ExplicitMediaInput,
 } from "../../lib/backend";
 import {
   generationParameters,
@@ -18,6 +19,7 @@ import {
   type ModelParameterCapability,
 } from "../../lib/modelCapabilities";
 import { formatWorkflowError } from "../../lib/workflowErrors";
+import { stableJsonSignature } from "../../lib/workflowSignatures";
 import {
   CANVAS_ID,
   isTextGenerationModel,
@@ -33,6 +35,7 @@ import { currentAiFilmAssets } from "./aiFilmWorkflowModel";
 import {
   createVideoWorkflowExecutionSteps,
   createWorkflowDeliveryPlan,
+  createWorkflowExecutionPlan,
   createWorkflowMediaReviewPlan,
   executeWorkflowSteps,
   getWorkflowExecutionPlan,
@@ -145,7 +148,22 @@ export interface VideoWorkflowDefinition {
   readonly validateResume?: (
     request: KnowledgeVideoWorkflowRunRequest,
     checkpoint: KnowledgeVideoWorkflowCheckpoint,
-  ) => void;
+  ) => void | Promise<void>;
+  readonly requiresMediaReview?: boolean;
+  readonly forceComposition?: boolean;
+  readonly validateMedia?: (context: WorkflowPlanningContext) => void;
+  readonly prepareShotMedia?: (
+    context: WorkflowPlanningContext,
+    shot: KnowledgeVideoWorkflowShot,
+  ) => Promise<readonly ExplicitMediaInput[]>;
+  readonly startComposition?: (
+    context: WorkflowPlanningContext,
+    clips: readonly { shot: KnowledgeVideoWorkflowShot; path: string }[],
+  ) => Promise<VideoCompositionJobRecord>;
+  readonly validateDelivery?: (
+    context: WorkflowPlanningContext,
+    finalPath: string,
+  ) => Promise<void>;
   readonly qcMode?: TextSkillMode;
   readonly title: string;
   readonly plan: (context: WorkflowPlanningContext) => Promise<WorkflowPlan>;
@@ -800,9 +818,16 @@ export function createKnowledgeVideoWorkflowRunner(
         message: string,
         error: string | null = null,
       ) => onProgress({ phase, progress: percentage, message, error });
+      const context = (): WorkflowPlanningContext => ({
+        request,
+        dependencies,
+        checkpoint: () => checkpoint,
+        commit,
+        progress: onProgress,
+      });
 
       const requireMediaReview = (kind: WorkflowMediaReviewKind): boolean => {
-        if (!getWorkflowExecutionPlan(node)) return true;
+        if (!getWorkflowExecutionPlan(node) && !definition?.requiresMediaReview) return true;
         const signature = workflowMediaReviewSignature(checkpoint, kind);
         if (checkpoint.mediaApprovals?.[kind]?.signature === signature) return true;
         const currentNode = { ...node, config: { ...node.config, checkpoint } };
@@ -827,6 +852,13 @@ export function createKnowledgeVideoWorkflowRunner(
           composition: "全部分镜视频已完成，请预览并确认采用这些片段后合成。",
           final: "成片已生成，请预览并确认最终交付。",
         };
+        if (node.config.musicVideo) {
+          messages.first_shot =
+            "首段 MV 试产已完成，请试听并检查人物、风格、节拍及实际嘴型；确认后才批量制作。";
+          messages.composition =
+            "全部 MV 片段已完成，请逐段试听检查唱词、节拍和嘴型，确认采用后贴原曲合成。";
+          messages.final = "原曲 MV 已合成，请试听成片确认交付；音视频时长检查不代表口型通过。";
+        }
         commit((current) => ({
           ...current,
           executionPlan: createWorkflowMediaReviewPlan(currentNode, kind),
@@ -894,7 +926,29 @@ export function createKnowledgeVideoWorkflowRunner(
           script: plan.script,
           storyboard: plan.storyboard,
           shots: plan.shots,
-          shotRuns: emptyShotRuns(plan.shots),
+          shotRuns: node.config.musicVideo
+            ? {
+                ...current.shotRuns,
+                ...Object.fromEntries(
+                  plan.shots.map((shot) => {
+                    const previous = current.shots.find((item) => item.id === shot.id);
+                    const run = current.shotRuns[shot.id];
+                    return [
+                      shot.id,
+                      run
+                        ? {
+                            ...run,
+                            ...(previous &&
+                            stableJsonSignature(previous) === stableJsonSignature(shot)
+                              ? {}
+                              : { promptEdited: true }),
+                          }
+                        : { shotId: shot.id, qcStatus: "pending" as const, retryCount: 0 },
+                    ];
+                  }),
+                ),
+              }
+            : emptyShotRuns(plan.shots),
           decision: plan.decision,
           ...(plan.documentsOnly === undefined ? {} : { documentsOnly: plan.documentsOnly }),
         }));
@@ -903,9 +957,24 @@ export function createKnowledgeVideoWorkflowRunner(
       try {
         throwIfAborted(signal);
         if (
+          definition?.requiresMediaReview &&
+          !isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(node), node)
+        ) {
+          commit((current) => ({
+            ...current,
+            executionPlan: createWorkflowExecutionPlan(node, request.resume ? "resume" : "restart"),
+            phase: "awaiting_approval",
+            decision: null,
+            error: null,
+          }));
+          progress("awaiting_approval", 0, "请先审阅并确认本次工作流执行计划。");
+          return checkpoint;
+        }
+        if (
           !node.config.brief.trim() &&
           !node.config.comicDrama?.episodes.some((episode) => episode.script.trim()) &&
-          !node.config.commerce
+          !node.config.commerce &&
+          !node.config.musicVideo
         )
           throw new Error("请先填写制作要求或原文。");
         if (!enabledModel(node.config.models.text, providerCatalog, isTextGenerationModel)) {
@@ -920,11 +989,12 @@ export function createKnowledgeVideoWorkflowRunner(
           (checkpoint.shots.length === 0 &&
             checkpoint.film == null &&
             checkpoint.comicDrama == null &&
-            checkpoint.commerce == null);
+            checkpoint.commerce == null &&
+            checkpoint.musicVideo == null);
         validateWorkflowMaterials(node.config);
         if (!startsNewRun) {
           validateWorkflowMaterialsResume(node.config, checkpoint);
-          definition?.validateResume?.(request, checkpoint);
+          await definition?.validateResume?.(request, checkpoint);
         }
         if (startsNewRun) {
           const runId = dependencies.createId();
@@ -1075,7 +1145,8 @@ export function createKnowledgeVideoWorkflowRunner(
           checkpoint.documentsOnly ||
           node.config.film?.deliverable === "documents" ||
           node.config.comicDrama?.deliverable === "documents" ||
-          node.config.commerce?.deliverable === "documents"
+          node.config.commerce?.deliverable === "documents" ||
+          node.config.musicVideo?.deliverable === "documents"
         ) {
           commit((current) => ({
             ...current,
@@ -1087,10 +1158,11 @@ export function createKnowledgeVideoWorkflowRunner(
           progress("done", 100, "制作文档已完成并保存在节点中。");
           return checkpoint;
         }
+        definition?.validateMedia?.(context());
         const models = resolveWorkflowModels(node, providerCatalog);
         // The initial review authorizes planning only. Actual generated shot prompts and dependencies
         // receive a separate review before the first paid image/video submission.
-        if (getWorkflowExecutionPlan(node)) {
+        if (getWorkflowExecutionPlan(node) || definition?.requiresMediaReview) {
           const plannedNode = { ...node, config: { ...node.config, checkpoint } };
           const approved = getWorkflowExecutionPlan(plannedNode);
           if (
@@ -1368,26 +1440,29 @@ export function createKnowledgeVideoWorkflowRunner(
                 let prompt = run.repairPrompt
                   ? `${shot.videoPrompt}\n\n自动质检修复要求：${run.repairPrompt}`
                   : shot.videoPrompt;
-                const explicitMedia = (checkpoint.film ? (shot.referenceAssetIds ?? []) : []).map(
-                  (id, index) => {
-                    const asset = currentAiFilmAssets(checkpoint.film).find(
-                      (item) => item.id === id,
-                    );
-                    if (!asset?.path)
-                      throw new Error(`镜头 ${shot.title} 缺少已生成的参考资产 ${id}。`);
-                    return {
-                      target: {
-                        kind: "local_file" as const,
-                        path: asset.path,
-                        mediaType: "image" as const,
-                      },
-                      role: "reference_image",
-                      displayNameSnapshot: asset.name,
-                      typePosition: index + 1,
-                      contentIndex: index + 1,
-                    };
-                  },
-                );
+                const explicitMedia: ExplicitMediaInput[] = (
+                  checkpoint.film ? (shot.referenceAssetIds ?? []) : []
+                ).map((id, index) => {
+                  const asset = currentAiFilmAssets(checkpoint.film).find((item) => item.id === id);
+                  if (!asset?.path)
+                    throw new Error(`镜头 ${shot.title} 缺少已生成的参考资产 ${id}。`);
+                  return {
+                    target: {
+                      kind: "local_file" as const,
+                      path: asset.path,
+                      mediaType: "image" as const,
+                    },
+                    role: "reference_image",
+                    displayNameSnapshot: asset.name,
+                    typePosition: index + 1,
+                    contentIndex: index + 1,
+                  };
+                });
+                if (definition?.prepareShotMedia) {
+                  await request.beforeSideEffect?.();
+                  explicitMedia.push(...(await definition.prepareShotMedia(context(), shot)));
+                  throwIfAborted(signal);
+                }
                 if (shot.continuationFromShotId) {
                   const predecessor = checkpoint.shotRuns[shot.continuationFromShotId];
                   if (!predecessor?.clipPath || predecessor.qcStatus !== "passed")
@@ -1733,7 +1808,7 @@ export function createKnowledgeVideoWorkflowRunner(
           let finalPath: string;
           if (checkpoint.finalPath && checkpoint.executionPlan?.review?.kind === "final") {
             finalPath = checkpoint.finalPath;
-          } else if (clipPaths.length === 1) {
+          } else if (clipPaths.length === 1 && !definition?.forceComposition) {
             finalPath = clipPaths[0]!;
           } else {
             commit((current) => ({ ...current, phase: "composing", lastActivePhase: "composing" }));
@@ -1769,14 +1844,19 @@ export function createKnowledgeVideoWorkflowRunner(
             }
             if (!compositionJobId) {
               await request.beforeSideEffect?.();
-              const job = await dependencies.composerClient.startComposition(
-                clipPaths.map((path, index) => ({
-                  key: checkpoint.shots[index]!.id,
-                  name: `${String(index + 1).padStart(2, "0")}-${checkpoint.shots[index]!.section}`,
-                  source: path!,
-                })),
-                `${workflowTitle}-完整交付`,
-              );
+              const job = definition?.startComposition
+                ? await definition.startComposition(
+                    context(),
+                    checkpoint.shots.map((shot, index) => ({ shot, path: clipPaths[index]! })),
+                  )
+                : await dependencies.composerClient.startComposition(
+                    clipPaths.map((path, index) => ({
+                      key: checkpoint.shots[index]!.id,
+                      name: `${String(index + 1).padStart(2, "0")}-${checkpoint.shots[index]!.section}`,
+                      source: path!,
+                    })),
+                    `${workflowTitle}-完整交付`,
+                  );
               commit((current) => ({ ...current, activeCompositionJobId: job.jobId }));
               if (signal.aborted) {
                 await dependencies.composerClient.cancelJob(job.jobId).catch(() => undefined);
@@ -1790,6 +1870,7 @@ export function createKnowledgeVideoWorkflowRunner(
               );
             }
           }
+          await definition?.validateDelivery?.(context(), finalPath!);
           commit((current) => ({
             ...current,
             phase: "done",
@@ -1798,7 +1879,11 @@ export function createKnowledgeVideoWorkflowRunner(
             finalPath,
             error: null,
           }));
-          if (node.config.comicDrama && !requireMediaReview("final")) return false as const;
+          if (
+            (node.config.comicDrama || definition?.requiresMediaReview) &&
+            !requireMediaReview("final")
+          )
+            return false as const;
           progress("done", 100, `完整${workflowTitle}已生成并保存。`);
         };
 
@@ -1812,7 +1897,11 @@ export function createKnowledgeVideoWorkflowRunner(
             if (step.action === "assets") return prepareAssets();
             if (step.action === "cover") {
               await prepareCover();
-              if (node.config.comicDrama && !requireMediaReview("assets")) return false;
+              if (
+                (node.config.comicDrama || definition?.requiresMediaReview) &&
+                !requireMediaReview("assets")
+              )
+                return false;
               return;
             }
             if (step.action === "compose") return composeDelivery();
@@ -1820,7 +1909,10 @@ export function createKnowledgeVideoWorkflowRunner(
             if (!shot) throw new Error(`执行计划引用了不存在的镜头：${step.shotId ?? step.id}`);
             if (step.action === "video") {
               await generateShot(shot);
-              if (node.config.comicDrama && orderedWorkflowShots(checkpoint)[0]?.id === shot.id) {
+              if (
+                (node.config.comicDrama || definition?.requiresMediaReview) &&
+                orderedWorkflowShots(checkpoint)[0]?.id === shot.id
+              ) {
                 if ((await checkShot(shot)) === false) return false;
                 if (!requireMediaReview("first_shot")) return false;
               }

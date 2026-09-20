@@ -95,6 +95,7 @@ const CHECKPOINT_RUNTIME_FIELDS = new Set([
   "history",
   "inputSignature",
   "materialsSignature",
+  "alignment",
 ]);
 
 function authoredPlan(value: unknown): unknown {

@@ -208,6 +208,7 @@ import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
 import { workflowMaterialPathKey } from "./workflowMaterials";
 import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown, comicDramaDeliveryBundle } from "./comicDramaWorkflowModel";
+import { musicVideoDeliveryMarkdown, musicVideoDeliveryBundle } from "./musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
 import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
@@ -2714,7 +2715,14 @@ export function WorkspaceApp({
   const insertWorkflow = useCallback(
     async (
       kind:
-        "knowledge" | "film" | "comicDrama" | "commerce" | "remotion" | "xhsCover" | "reverseVideo",
+        | "knowledge"
+        | "film"
+        | "comicDrama"
+        | "musicVideo"
+        | "commerce"
+        | "remotion"
+        | "xhsCover"
+        | "reverseVideo",
     ) => {
       try {
         const anchor = viewportCenterBoardCoordinates();
@@ -2731,6 +2739,7 @@ export function WorkspaceApp({
           knowledge: templateModule.createKnowledgeVideoDirectorWorkflow,
           film: templateModule.createAiFilmWorkflow,
           comicDrama: templateModule.createComicDramaWorkflow,
+          musicVideo: templateModule.createMusicVideoWorkflow,
           commerce: templateModule.createCommerceWorkflow,
           remotion: templateModule.createRemotionWorkflow,
           xhsCover: templateModule.createXhsCoverWorkflow,
@@ -2740,6 +2749,7 @@ export function WorkspaceApp({
           knowledge: "知识教学视频",
           film: "AI影视",
           comicDrama: "漫剧自动",
+          musicVideo: "音乐 MV",
           commerce: "剧情带货",
           remotion: "动画逻辑图",
           xhsCover: "小红书封面",
@@ -2762,17 +2772,19 @@ export function WorkspaceApp({
         );
         toast.success(`${title}工作流已放入画布`, {
           description:
-            kind === "reverseVideo"
-              ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
-              : kind === "xhsCover"
-                ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
-                : kind === "remotion"
-                  ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
-                  : kind === "commerce"
-                    ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
-                    : kind === "comicDrama"
-                      ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
-                      : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+            kind === "musicVideo"
+              ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
+              : kind === "reverseVideo"
+                ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
+                : kind === "xhsCover"
+                  ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
+                  : kind === "remotion"
+                    ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
+                    : kind === "commerce"
+                      ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
+                      : kind === "comicDrama"
+                        ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
+                        : "填写制作要求并点击开始，其余步骤由节点自动完成。",
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -2811,6 +2823,9 @@ export function WorkspaceApp({
   const insertReverseVideoWorkflow = useCallback(() => {
     void insertWorkflow("reverseVideo");
   }, [insertWorkflow]);
+  const insertMusicVideoWorkflow = useCallback(() => {
+    void insertWorkflow("musicVideo");
+  }, [insertWorkflow]);
   const toggleWorkflowRepository = useCallback(
     () => setWorkflowRepositoryExpanded((current) => !current),
     [],
@@ -2819,6 +2834,13 @@ export function WorkspaceApp({
   const updateKnowledgeVideoWorkflowConfig = useCallback(
     (key: string, config: KnowledgeVideoWorkflowConfig) => {
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
+      if (config.musicVideo && !knowledgeVideoWorkflowAbortControllersRef.current.has(key)) {
+        setKnowledgeVideoWorkflowRuns((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      }
     },
     [patchNode],
   );
@@ -3013,17 +3035,19 @@ export function WorkspaceApp({
         .then((checkpoint) => {
           if (checkpoint.phase === "done") {
             toast.success(
-              node.config.xhsCover
-                ? "小红书封面制作完成"
-                : node.config.remotion
-                  ? "动画逻辑图制作完成"
-                  : node.config.commerce
-                    ? "剧情带货制作完成"
-                    : node.config.comicDrama
-                      ? "漫剧制作完成"
-                      : node.config.film
-                        ? "影视制作完成"
-                        : "知识视频制作完成",
+              node.config.musicVideo
+                ? "音乐 MV 制作完成"
+                : node.config.xhsCover
+                  ? "小红书封面制作完成"
+                  : node.config.remotion
+                    ? "动画逻辑图制作完成"
+                    : node.config.commerce
+                      ? "剧情带货制作完成"
+                      : node.config.comicDrama
+                        ? "漫剧制作完成"
+                        : node.config.film
+                          ? "影视制作完成"
+                          : "知识视频制作完成",
               {
                 description: node.config.xhsCover
                   ? "封面方案、提示词与交付物已保存在工作流节点中。"
@@ -3195,6 +3219,56 @@ export function WorkspaceApp({
       setHistoryOpen(true);
     },
     [knowledgeVideoWorkflowNodes],
+  );
+
+  const handlePickMusicVideoMaterial = useCallback(
+    async (key: string, role: "song" | "character") => {
+      try {
+        const picked = await pickPromptMultimodalFiles({
+          title: role === "song" ? "选择 MV 原曲" : "添加 MV 人物参考图",
+          kinds: role === "song" ? ["audio"] : ["image"],
+        });
+        if (!picked.length) return;
+        if (role === "song" && picked.length !== 1) {
+          toast.error("一次请选择一首完整歌曲");
+          return;
+        }
+        patchNode("knowledgeVideoWorkflow", key, (node) => {
+          const options = node.config.musicVideo;
+          if (
+            !options ||
+            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+            node.config.checkpoint.phase === "awaiting_approval"
+          )
+            return node;
+          const refs = [...options.characterReferences];
+          const paths = new Set(refs.map(workflowMaterialPathKey));
+          for (const item of role === "character" ? picked : []) {
+            if (
+              item.kind === "image" &&
+              item.byteSize > 0 &&
+              !paths.has(workflowMaterialPathKey(item))
+            ) {
+              paths.add(workflowMaterialPathKey(item));
+              refs.push(item);
+            }
+          }
+          return {
+            ...node,
+            config: {
+              ...node.config,
+              musicVideo:
+                role === "song"
+                  ? { ...options, songPath: picked[0]!.localPath, songName: picked[0]!.displayName }
+                  : { ...options, characterReferences: refs },
+            },
+          };
+        });
+      } catch (error) {
+        toast.error("选择 MV 素材失败", { description: formatWorkflowError(error) });
+      }
+    },
+    [patchNode],
   );
 
   const handlePickReverseVideo = useCallback(
@@ -3666,6 +3740,7 @@ export function WorkspaceApp({
       const node = knowledgeVideoWorkflowNodes.find((item) => item.key === key);
       if (!node) return;
       const isDrama = Boolean(node.config.comicDrama);
+      const isMusicVideo = Boolean(node.config.musicVideo);
       const isCommerce = Boolean(node.config.commerce);
       const isRemotion = Boolean(node.config.remotion);
       const isCover = Boolean(node.config.xhsCover);
@@ -3673,38 +3748,46 @@ export function WorkspaceApp({
         !isCover &&
         !isRemotion &&
         !isDrama &&
+        !isMusicVideo &&
         !isCommerce &&
         !node.config.checkpoint.film?.artifacts.length
       )
         return;
-      const content = isCover
-        ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
-        : isRemotion
-          ? remotionDeliveryMarkdown(node.config.checkpoint)
-          : isCommerce
-            ? commerceDeliveryMarkdown(node.config.checkpoint)
-            : isDrama
-              ? comicDramaDeliveryMarkdown(node.config.checkpoint)
-              : aiFilmDeliveryMarkdown(node.config.checkpoint);
+      const content = isMusicVideo
+        ? musicVideoDeliveryMarkdown(node.config.checkpoint)
+        : isCover
+          ? xhsCoverDeliveryMarkdown(node.config.checkpoint)
+          : isRemotion
+            ? remotionDeliveryMarkdown(node.config.checkpoint)
+            : isCommerce
+              ? commerceDeliveryMarkdown(node.config.checkpoint)
+              : isDrama
+                ? comicDramaDeliveryMarkdown(node.config.checkpoint)
+                : aiFilmDeliveryMarkdown(node.config.checkpoint);
       if (!content) return;
-      const title = isCover
-        ? "小红书封面制作文档"
-        : isRemotion
-          ? "动画逻辑图制作文档"
-          : isCommerce
-            ? "剧情带货制作文档"
-            : isDrama
-              ? "漫剧制作文档"
-              : "影视制作文档";
+      const title = isMusicVideo
+        ? "MV 制作文档"
+        : isCover
+          ? "小红书封面制作文档"
+          : isRemotion
+            ? "动画逻辑图制作文档"
+            : isCommerce
+              ? "剧情带货制作文档"
+              : isDrama
+                ? "漫剧制作文档"
+                : "影视制作文档";
       const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
         try {
-          if (isDrama) {
-            const files = comicDramaDeliveryBundle(node.config.checkpoint);
+          if (isDrama || isMusicVideo) {
+            const files = isMusicVideo
+              ? musicVideoDeliveryBundle(node.config.checkpoint)
+              : comicDramaDeliveryBundle(node.config.checkpoint);
+            const bundleTitle = isMusicVideo ? "音乐 MV" : "动漫短剧";
             if (isDesktopRuntime()) {
-              const folder = await saveWorkflowBundleToDesktop(files);
+              const folder = await saveWorkflowBundleToDesktop(files, bundleTitle);
               if (!folder) return;
-              toast.success("动漫短剧四件套已导出", { description: folder });
+              toast.success(`${bundleTitle}四件套已导出`, { description: folder });
             } else {
               for (const file of files) {
                 const url = URL.createObjectURL(
@@ -3716,7 +3799,7 @@ export function WorkspaceApp({
                 anchor.click();
                 URL.revokeObjectURL(url);
               }
-              toast.success("动漫短剧四件套已导出");
+              toast.success(`${bundleTitle}四件套已导出`);
             }
             return;
           }
@@ -8419,6 +8502,7 @@ export function WorkspaceApp({
             handlePickWorkflowMaterials,
             handleRemoveWorkflowMaterial,
             handlePickReverseVideo,
+            handlePickMusicVideoMaterial,
             handleRemoveReverseVideo,
             importDownloaderCookies,
             exportFilmDocuments,
@@ -8477,6 +8561,8 @@ export function WorkspaceApp({
                   onPickMaterials={handlePickWorkflowMaterials}
                   onRemoveMaterial={handleRemoveWorkflowMaterial}
                   onPickReverseVideo={handlePickReverseVideo}
+                  onPickMusicVideoMaterial={handlePickMusicVideoMaterial}
+                  onExportMusicVideoDocuments={exportFilmDocuments}
                   onRemoveReverseVideo={handleRemoveReverseVideo}
                   onOpenDownloadSettings={importDownloaderCookies}
                   onExportFilmDocuments={exportFilmDocuments}
@@ -8521,6 +8607,7 @@ export function WorkspaceApp({
       handlePickWorkflowMaterials,
       handleRemoveWorkflowMaterial,
       handlePickReverseVideo,
+      handlePickMusicVideoMaterial,
       handleRemoveReverseVideo,
       importDownloaderCookies,
       exportFilmDocuments,
@@ -9608,6 +9695,7 @@ export function WorkspaceApp({
               onInsertRemotionWorkflow={insertRemotionWorkflow}
               onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
               onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
+              onInsertMusicVideoWorkflow={insertMusicVideoWorkflow}
             />
             <button
               ref={setNodeMenuTriggerElement}

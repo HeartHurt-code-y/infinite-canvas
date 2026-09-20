@@ -1,0 +1,133 @@
+# -*- coding: utf-8 -*-
+"""mv-auto-pipeline 离线冒烟测试（不调 project_provider，只跑本地链路）"""
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+REF = r"[项目工作目录]"
+PY = sys.executable
+ROOT = os.path.join(tempfile.gettempdir(), "mvtest")
+
+
+def run(args, tag):
+    print("\n" + "=" * 78)
+    print(f"### {tag}\n$ python {' '.join(args)}")
+    print("=" * 78)
+    r = subprocess.run([PY] + args, capture_output=True, text=True, encoding="utf-8",
+                       errors="replace", timeout=900)
+    print(r.stdout or "")
+    if r.stderr.strip():
+        print("--- stderr ---")
+        print(r.stderr[-3000:])
+    print(f"[rc={r.returncode}]")
+    return r.returncode
+
+
+def main():
+    if os.path.isdir(ROOT):
+        shutil.rmtree(ROOT, ignore_errors=True)
+    for d in ("音乐", "歌词", "状态", "分镜脚本", "视频", "审核"):
+        os.makedirs(os.path.join(ROOT, d), exist_ok=True)
+
+    ff = "ffmpeg"
+    for c in (r"D:\AIxiufu\ffmpeg.exe", "ffmpeg"):
+        if os.path.isfile(c) or shutil.which(c):
+            ff = c
+            break
+    song = os.path.join(ROOT, "音乐", "song.mp3")
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                    "-i", "sine=frequency=440:duration=45",
+                    "-af", "volume='0.25+0.75*abs(sin(2*PI*t/9))':eval=frame",
+                    "-ac", "2", "-ar", "44100", song], timeout=300)
+    print(f"[setup] 测试歌曲 {os.path.getsize(song)//1024}KB · 45s")
+
+    # 官方歌词（8 行）+ 对应 LRC
+    lines = ["月光落在旧琴弦上", "我把名字写进夜里", "风吹过没有回头的路",
+             "你在光里慢慢走远", "如果还有一次机会", "我会把话说完",
+             "让所有沉默都有回声", "在每一句歌的尽头"]
+    with open(os.path.join(ROOT, "歌词", "lyrics_raw.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(lines) + "\n")
+    lrc, t = [], 1.5
+    for ln in lines:
+        lrc.append((t, ln))
+        t += 4.6
+    with open(os.path.join(ROOT, "歌词", "lyrics.lrc"), "w", encoding="utf-8") as f:
+        for ts, ln in lrc:
+            f.write(f"[{int(ts//60):02d}:{ts%60:05.2f}]{ln}\n")
+
+    # 状态机
+    import json
+    json.dump({"project": "冒烟测试MV", "kind": "music_video",
+               "config": {"aspect_ratio": "16:9", "resolution_desc": "1920x1080 · 分辨率档 2",
+                          "instance_type": "plus", "workers": 5, "audit_mode": "auto",
+                          "hero_source": "user_image", "no_hero": False},
+               "song": {"file": "音乐/song.mp3", "duration": 45.0},
+               "hero": {"source": "user_image"},
+               "style_prompt": {"locked": True, "choice": "A",
+                                "label": "胶片颗粒 + 冷调城市夜光",
+                                "prompt_zh": "电影感音乐 MV 质感，柯达 Portra 400 胶片颗粒，冷蓝夜光与暖橙街灯对撞，浅景深，真实皮肤质感"},
+               "stages": {}, "cost_tracking": {}},
+              open(os.path.join(ROOT, "状态", "pipeline_state.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+
+    # 主角图（纯色测试图）
+    d = os.path.join(ROOT, "人物资产", "char_01_林晚照", "images")
+    os.makedirs(d, exist_ok=True)
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                    "-i", "color=c=0xE8DCCB:s=768x1024", "-frames:v", "1",
+                    os.path.join(d, "front.png")], timeout=120)
+    with open(os.path.join(ROOT, "人物资产", "char_01_林晚照", "profile.md"), "w",
+              encoding="utf-8") as f:
+        f.write("""# 林晚照
+
+**中文名**：林晚照
+**英文名**：Wanzhao
+**性别**：女
+**年龄**：24 岁
+**职业**：独立音乐人
+
+## 服装
+- 中文：米白色粗针高领毛衣 + 深灰阔腿长裤
+- 英文：a cream chunky-knit turtleneck sweater with dark grey wide-leg trousers
+""")
+
+    # 场景图
+    sd = os.path.join(ROOT, "场景资产", "scene_01_深夜排练室")
+    os.makedirs(sd, exist_ok=True)
+    subprocess.run([ff, "-y", "-v", "error", "-f", "lavfi",
+                    "-i", "color=c=0x1B2430:s=1024x576", "-frames:v", "1",
+                    os.path.join(sd, "main.png")], timeout=120)
+
+    rc = 0
+    rc |= run([os.path.join(REF, "extract_lyrics.py"), "--project-root", ROOT, "--song", song,
+               "--probe"], "1 · 歌曲探测")
+    rc |= run([os.path.join(REF, "align_lyrics.py"), "--project-root", ROOT,
+               "--lrc", os.path.join(ROOT, "歌词", "lyrics.lrc"),
+               "--song", song], "2 · 歌词时间轴（LRC 路径 + 自检 + 审核页）")
+    rc |= run([os.path.join(REF, "plan_mv_storyboard.py"), "--project-root", ROOT,
+               "--target-dur", "9"], "3 · MV 分镜切分")
+    rc |= run([os.path.join(REF, "check_alignment.py"), "--project-root", ROOT, "--plan"],
+              "4 · 关 6 音乐窗口核对")
+    rc |= run([os.path.join(REF, "mv_to_h3_prompts.py"), "--project-root", ROOT,
+               "--dump-prompts", "--no-validate"], "5 · 项目视频模型 提示词派生（跳过官方校验器）")
+    rc |= run([os.path.join(REF, "batch_run_mv.py"), "--project-root", ROOT, "--dry-run"],
+              "6 · 驱动器 dry-run（门禁 + 注入计划）")
+    rc |= run([os.path.join(REF, "audit_html_builder.py"), "--project-root", ROOT,
+               "--stage", "all"], "7 · 8 张审核页 + 全链总览")
+    rc |= run([os.path.join(REF, "build_mv_workflow.py"), "--inspect"], "8 · 工作流体检（无 JSON，应给指引）")
+
+    print("\n" + "#" * 78)
+    print("汇总：产物清单")
+    for dp, dn, fn in os.walk(ROOT):
+        for f in fn:
+            p = os.path.join(dp, f)
+            print(f"  {os.path.relpath(p, ROOT):<58} {os.path.getsize(p)//1024:>6} KB")
+    print(f"\n最终 rc 汇总 = {rc}" + ("（0=全通过）" if rc == 0 else "（有非零，见上）"))
+    if os.path.isfile(os.path.join(ROOT, "视频", "shot_01_月光落在旧琴")):
+        pass
+
+
+if __name__ == "__main__":
+    main()

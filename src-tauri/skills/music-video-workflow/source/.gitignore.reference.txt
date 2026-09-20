@@ -1,0 +1,5 @@
+# 维护态内容不进版本库/快照
+_versions/
+__pycache__/
+*.pyc
+*.zip

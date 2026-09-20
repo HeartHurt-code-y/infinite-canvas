@@ -1,0 +1,497 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""MV 分镜规划器（mv-auto-pipeline · 铁律 A1/A5 + B1~B5 + C1~C6）
+
+输入：歌词/lyrics.json（align_lyrics.py 的权威产物）+ 状态/pipeline_state.json
+输出：分镜脚本/storyboard.json + 分镜脚本/分镜表.md
+
+核心思想（与短剧 skill 最大的不同）：
+  **音乐是唯一时间基准。** 段长不是设计师拍的，是从歌词时间轴切出来的。
+  每一段的 music_window 首尾相接，Σ 窗口 = 全曲长 → 音画天然对齐。
+
+三件事必须同时满足（铁律 A5 / C1 / C3）：
+  ① 段长 ∈ [4,15]s，且落 17 帧网格（12s→12.25s；6s→6.58s）
+  ② 窗口连续：win[i].end == win[i+1].start，末段 window 收在歌曲终点
+  ③ 段边界优先落在结构转折（间奏 / 长空档 / 主歌→副歌），不切在歌词行中间
+
+口型策略（铁律 B1/B2，用户明确要求）：
+  · 只有**中近景**（大特写/特写/近景/中景）才设计对口型 —— 中远景/全景/远景/空镜/背影一律不对
+  · **不是每句都对口型** —— 对口型段占比默认 45%（区间 35%~60%）
+  · 连续对口型不超过 N 段（默认 3），中间强制插叙事镜/空镜
+  · 不对口型段硬约束：正文不出现 sings/says，必须声明嘴唇不跟随歌词
+
+用法：
+  python plan_mv_storyboard.py --project-root "<项目根>"                 # 自动切分
+  python plan_mv_storyboard.py --project-root "<项目根>" --target-dur 12 # 目标平均段长
+  python plan_mv_storyboard.py --project-root "<项目根>" --sync-ratio 0.5 --dry-run
+"""
+import argparse
+import json
+import os
+import sys
+from datetime import datetime
+
+FPS = 24
+FRAME_MOD = 17
+
+# ⚠️ 两个区间别混（混过一次，见下方 QCFIX 注释）：
+#   H3_MIN/MAX_SEC = **项目视频模型 模型的硬区间**，段长必须落在这里，否则工作流/模型层过不去。
+#                    这是 SKILL.md 铁律 C1 的口径，也是 cut_segments() 的 min/max_dur 契约。
+#   MIN_REQ/MAX_REQ = **请求时长区间**。下限是 5.0 而非 4.0，因为 17 帧对齐公式里带
+#                    max(5, …)，窗口只有 4~5s 时实际会请求 5s 出头、成片再裁回窗口长度。
+H3_MIN_SEC, H3_MAX_SEC = 4.0, 15.0
+MIN_REQ, MAX_REQ = 5.0, 15.0
+
+# 景别词表（与 项目视频模型 提示词/审核页共用，禁止在这之外另造词）
+# SHOT_SYNC = 「可以对口型」的景别（用户 2026-09-17 拍板：特写 + 近景 + 中景 算）
+SHOT_SYNC = ["ECU", "CU", "MCU", "MS"]
+# SHOT_NOSYNC = 「不对口型段」可选的景别池（以中远景/全景/远景/空镜为主）
+# ⚠️ MS 同时出现在两个池里是**有意**的：中景是边界景别，既能承载对口型镜头，
+#    也能承载不对口型的叙事镜头。判「某景别能不能对口型」一律只认 SHOT_ALLOW_LIPSYNC，
+#    不要因为看到 SHOT_NOSYNC 里有 MS 就以为中景不能对口型（这是最容易踩的误读）。
+SHOT_NOSYNC = ["MS", "MLS", "LS", "WS", "EMPTY"]
+SHOT_ZH = {"ECU": "大特写", "CU": "特写", "MCU": "近景", "MS": "中景",
+           "MLS": "中远景", "LS": "全景", "WS": "远景", "EMPTY": "空镜"}
+SHOT_ALLOW_LIPSYNC = set(SHOT_SYNC)
+
+# 对口型段的景别轮转（避免连续同景别）
+PAT_SYNC = ["CU", "MCU", "MS", "MCU", "CU", "MCU"]
+# 不对口型段的景别轮转（叙事 / 环境 / 群像）
+PAT_NOSYNC = ["LS", "MS", "WS", "MLS", "LS", "EMPTY", "MLS", "MS"]
+
+
+def read_json(p, default=None):
+    try:
+        return json.load(open(p, encoding="utf-8"))
+    except (OSError, ValueError):
+        return default
+
+
+def align_frames(sec):
+    """请求秒数 → 17 帧对齐后的帧数（drama W-A 实测公式，MV 工作流待实测确认）。"""
+    x = max(5, round(sec * FPS))
+    return x + (5 - (x % FRAME_MOD)) % FRAME_MOD
+
+
+def align_sec(sec):
+    return round(align_frames(sec) / FPS, 3)
+
+
+def load_lines(project_root):
+    p = os.path.join(project_root, "歌词", "lyrics.json")
+    d = read_json(p)
+    if not d or not (d.get("lines") or []):
+        sys.exit(f"❌ 读不到歌词时间轴：{p}\n   先跑 align_lyrics.py（关 1 之前必须有它）")
+    return d
+
+
+def detect_structure(lines):
+    """轻量结构识别：重复出现的歌词行簇 = 副歌；给每段打 structure 标签。
+
+    不追求专业曲式分析，只服务一件事：**同一段副歌重复出现时必须换视觉处理**（铁律 C5）。
+    """
+    key_of = {}
+    for ln in lines:
+        if ln["kind"] != "lyric":
+            continue
+        k = "".join(ch for ch in ln["text"] if ch.isalnum()).lower()
+        key_of.setdefault(k, []).append(ln["idx"])
+    repeated = {k for k, v in key_of.items() if len(v) >= 2}
+    # 连续重复行簇 → chorus 区间
+    chorus_spans = []
+    for k in repeated:
+        idxs = key_of[k]
+        for a in idxs:
+            chorus_spans.append((a, a))
+    for ln in lines:
+        k = "".join(ch for ch in ln["text"] if ch.isalnum()).lower()
+        if ln["kind"] == "instrumental":
+            ln["structure"] = "间奏/空镜"
+        elif k in repeated:
+            ln["structure"] = "副歌（重复句）"
+        else:
+            ln["structure"] = "主歌/叙事"
+    # 整段 chorus 区间（相邻重复行聚合）
+    if chorus_spans:
+        chorus_spans.sort()
+        merged, cur = [], list(chorus_spans[0])
+        for a, b in chorus_spans[1:]:
+            if a - cur[1] <= 3:
+                cur[1] = b
+            else:
+                merged.append(tuple(cur))
+                cur = [a, b]
+        merged.append(tuple(cur))
+    else:
+        merged = []
+    for ln in lines:
+        if ln["kind"] != "instrumental":
+            ln["in_chorus_block"] = any(a <= ln["idx"] <= b for a, b in merged)
+    return merged
+
+
+def cut_segments(lines, total_dur, target_dur, min_dur=4.0, max_dur=15.0):
+    """按歌词时间轴切段：窗口连续、边界只落在歌词行尾、段长落 [min,max]。
+
+    设计取舍：**宁可略微超长，也不把一句歌词切成两半**（铁律 B3）。
+    因此切点只取「行尾」，超长的段会被 qc() 标记出来让 Agent 调 target_dur。
+    """
+    bounds = [0.0]
+    cur = 0.0
+    i, n = 0, len(lines)
+    guard = 0
+    while cur < total_dur - 1e-6 and guard < 500:
+        guard += 1
+        if i >= n:
+            bounds.append(total_dur)
+            break
+        # j = 第一个「加进来就超 max」的行下标；候选切点 = i..j-1 的行尾
+        j = i
+        while j < n and (lines[j]["end"] - cur) <= max_dur + 1e-6:
+            j += 1
+        if j == i:
+            # 单行就超过 max_dur（数据异常）：直接切在这一行末尾，交给 qc 报出来
+            seg_end = lines[i]["end"]
+            i += 1
+        else:
+            best = j - 1
+            for k in range(i, j):
+                if lines[k]["kind"] == "instrumental" and (lines[k]["end"] - cur) >= min_dur:
+                    best = k          # 间奏边界优先
+                    break
+                if (lines[k]["end"] - cur) >= target_dur:
+                    best = k          # 够长就切
+                    break
+            seg_end = lines[best]["end"]
+            i = best + 1
+        seg_end = min(seg_end, total_dur)
+        if seg_end - cur < min_dur - 1e-6:      # 太短 → 吞掉后续行凑够 min_dur
+            while i < n and (lines[i]["end"] - cur) < min_dur:
+                i += 1
+            if i > 0:
+                seg_end = min(lines[i - 1]["end"], cur + max_dur, total_dur)
+        if seg_end <= cur + 0.4:                # 兜底：绝不允许零长段
+            seg_end = min(cur + max_dur, total_dur)
+        bounds.append(round(seg_end, 3))
+        cur = bounds[-1]
+        while i < n and lines[i]["end"] <= cur + 1e-6:
+            i += 1
+
+    # 尾巴太短就并进上一段（避免出现 1s 的碎段）
+    if len(bounds) > 2 and (total_dur - bounds[-2]) < min_dur:
+        bounds[-2] = bounds[-1]
+        bounds.pop()
+    # 去重（防御）
+    dedup = [bounds[0]]
+    for b in bounds[1:]:
+        if b - dedup[-1] > 0.4:
+            dedup.append(b)
+    if dedup[-1] < total_dur - 0.4:
+        dedup.append(total_dur)
+    return dedup
+
+
+def assign_plan(segs, sync_ratio, max_consec, no_hero):
+    """给每段定 sing_mode / shot_size / subject_in_frame。
+
+    规则（铁律 B1/B2/B3）：
+      · 间奏段 & 太长段 & 无歌词段 → 一律 no_sync
+      · 其余按比例抽样为 sync；连续 sync 不超过 max_consec，否则强制插 no_sync
+      · sync 段景别只能取 SHOT_SYNC（中近景）
+      · no_sync 段景别取 SHOT_NOSYNC，可含空镜
+    """
+    n = len(segs)
+    want = max(1, round(n * sync_ratio)) if not no_hero else 0
+    # 优先给「有完整歌词行、时长适中」的段
+    cand = [i for i, s in enumerate(segs)
+            if s["lyric_lines"] and 5.0 <= s["dur"] <= 15.0]
+    if no_hero:
+        cand = []
+    # 均匀抽样，保证对口型段分布在全曲而不是挤在开头
+    picked = []
+    if cand:
+        step = max(1, len(cand) / want) if want else 1
+        k = 0.0
+        while len(picked) < want and len(picked) < len(cand):
+            idx = cand[min(len(cand) - 1, int(k))]
+            if idx not in picked:
+                picked.append(idx)
+            k += step
+    picked = sorted(set(picked))
+
+    # 拆开连续 sync（超过 max_consec 就丢一个）
+    final, run = [], 0
+    for i in range(n):
+        if i in picked:
+            run += 1
+            if run > max_consec:
+                run = 0
+                continue
+            final.append(i)
+        else:
+            run = 0
+    picked = set(final)
+
+    ci = cn = 0
+    for i, s in enumerate(segs):
+        if i in picked and not no_hero:
+            s["sing_mode"] = "sync"
+            s["shot_size"] = PAT_SYNC[ci % len(PAT_SYNC)]
+            s["subject_in_frame"] = True
+            ci += 1
+        else:
+            s["sing_mode"] = "no_sync"
+            s["shot_size"] = PAT_NOSYNC[cn % len(PAT_NOSYNC)]
+            s["subject_in_frame"] = (s["shot_size"] != "EMPTY") and not no_hero
+            cn += 1
+        if s["shot_size"] == "EMPTY":
+            s["subject_in_frame"] = False
+    return segs
+
+
+def build(project_root, target_dur, min_dur, max_dur, sync_ratio, max_consec):
+    st = read_json(os.path.join(project_root, "状态", "pipeline_state.json"), {}) or {}
+    cfg = st.get("config") or {}
+    no_hero = bool(cfg.get("no_hero")) or cfg.get("hero_source") == "none"
+    total_dur = float((st.get("song") or {}).get("duration") or 0) or None
+
+    lyric = load_lines(project_root)
+    lines = lyric["lines"]
+    total_dur = total_dur or lyric.get("song_duration")
+    if not total_dur:
+        total_dur = lines[-1]["end"]
+    print(f"[lyric] {len(lines)} 行 · 歌曲总长 {total_dur}s")
+
+    chorus_blocks = detect_structure(lines)
+    bounds = cut_segments(lines, total_dur, target_dur, min_dur, max_dur)
+    print(f"[cut] 切出 {len(bounds)-1} 段（目标均长 {target_dur}s）")
+
+    segs = []
+    overflow = []
+    for k in range(len(bounds) - 1):
+        a, b = bounds[k], bounds[k + 1]
+        raw = b - a
+        if raw < min_dur - 0.05 or raw > max_dur + 0.05:
+            overflow.append({"seq": k + 1,
+                             "note": f"段长 {round(raw, 2)}s 越出 [{min_dur},{max_dur}]"})
+        seg_lines = [ln for ln in lines if ln["start"] >= a - 1e-6 and ln["start"] < b - 1e-6]
+        # 歌词行完整性：末行不得越出本段
+        for ln in seg_lines:
+            if ln["end"] > b + 0.35:
+                overflow.append({"seq": k + 1,
+                                 "note": f"歌词行 {ln['idx']} 越出段尾 {round(ln['end']-b, 2)}s"})
+        segs.append({
+            "shot_id": f"shot_{k+1:02d}",
+            "seq": k + 1,
+            "kw": (seg_lines[0]["text"][:8].replace(" ", "") if seg_lines else "间奏"),
+            "dur": align_sec(raw),
+            "dur_requested": round(raw, 3),
+            "music_window": {"start": round(a, 3), "end": round(b, 3),
+                             "dur": round(raw, 3), "tail": (k == len(bounds) - 2)},
+            "music_start": round(a, 3),
+            "music_dur": round(raw, 3),
+            "lyric_lines": [{"idx": ln["idx"], "start": ln["start"], "end": ln["end"],
+                             "text": ln["text"], "kind": ln["kind"],
+                             "structure": ln.get("structure", "")} for ln in seg_lines],
+            "lyric_text": "\n".join(ln["text"] for ln in seg_lines if ln["kind"] == "lyric"),
+            "structure": (seg_lines[0].get("structure", "") if seg_lines else "间奏"),
+            "in_chorus_block": any(ln.get("in_chorus_block") for ln in seg_lines),
+            "sing_mode": "no_sync",
+            "shot_size": "MS",
+            "subject_in_frame": False,
+            "on_screen_char_ids": [],
+            "scene_id": None,
+            "prop_ids": [],
+            "props_in_frame": [],
+            "link": "origin",
+            "visual_brief": "",
+            "acting": {},
+            "status": "draft",
+        })
+
+    segs = assign_plan(segs, sync_ratio, max_consec, no_hero)
+    sync_n = sum(1 for s in segs if s["sing_mode"] == "sync")
+    ratio = sync_n / max(1, len(segs))
+    sum_win = sum(s["music_window"]["dur"] for s in segs)
+    sum_dur = sum(s["dur"] for s in segs)
+
+    sb = {
+        "project": st.get("project") or os.path.basename(project_root),
+        "kind": "music_video",
+        "status": "draft",
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "song": {"file": (st.get("song") or {}).get("file", "音乐/song.mp3"),
+                 "duration": round(total_dur, 3)},
+        "style_prompt": st.get("style_prompt") or {},
+        "meta": {
+            "segments": len(segs),
+            "sync_segments": sync_n,
+            "sync_ratio": round(ratio, 3),
+            "window_sum": round(sum_win, 3),
+            "dur_sum": round(sum_dur, 3),
+            "chorus_blocks": chorus_blocks,
+            "no_hero": no_hero,
+            "align_formula": "max(5,round(a*24)) + (5-(max(5,round(a*24))%17))%17  → frames @24fps",
+        },
+        "segments": segs,
+    }
+    return sb, overflow, total_dur, ratio
+
+
+def qc(sb, overflow, total_dur, ratio, sync_ratio):
+    """分镜自检（机检，关 4 用；任一硬项不过 → 不许提交生成）。"""
+    hard, soft = [], []
+    segs = sb["segments"]
+    for s in segs:
+        wd = s["music_window"]["dur"]
+        # QCFIX（V1.0.1）：这里原写 `MIN_REQ - 0.3`（= 4.7s），但 cut_segments() 的契约是
+        # min_dur = 4.0 —— 于是 4.0~4.7s 的段「合法产出、却被自己的校验器判死」，属校验器
+        # 假阳性（冒烟测试实测段 4 = 4.6s 被误报为硬错）。硬边界只认 项目视频模型 硬区间 [4,15]。
+        if not (H3_MIN_SEC - 1e-6 <= wd <= H3_MAX_SEC + 0.05):
+            hard.append(f"段 {s['seq']} 时长 {wd}s 越出 [{H3_MIN_SEC:g},{H3_MAX_SEC:g}]")
+        elif wd < MIN_REQ:
+            # 4~5s 的窗口会被 17 帧公式里的 max(5, …) 抬到 5s 出头，成片再裁回窗口长度
+            soft.append(f"段 {s['seq']} 窗口 {wd}s < 5s：请求时长会被 17 帧公式抬到 "
+                        f"{align_sec(wd)}s，成片裁回 {wd}s（差 {round(align_sec(wd)-wd,3)}s，属正常）")
+        if s["sing_mode"] == "sync" and s["shot_size"] not in SHOT_ALLOW_LIPSYNC:
+            hard.append(f"段 {s['seq']} 对口型但景别 {s['shot_size']}（{SHOT_ZH[s['shot_size']]}）"
+                        f"不是中近景 —— 违反铁律 B1")
+        if s["sing_mode"] == "no_sync" and not s["visual_brief"]:
+            soft.append(f"段 {s['seq']} 尚未写 visual_brief（no_sync 段也要有画面构想）")
+        if s["sing_mode"] == "sync" and not s["lyric_text"]:
+            hard.append(f"段 {s['seq']} 标了对口型却没有歌词行")
+    for i in range(1, len(segs)):
+        if abs(segs[i]["music_window"]["start"] - segs[i - 1]["music_window"]["end"]) > 0.02:
+            hard.append(f"段 {segs[i]['seq']} 音乐窗口不连续"
+                        f"（{segs[i-1]['music_window']['end']} → {segs[i]['music_window']['start']}）")
+    if abs(segs[-1]["music_window"]["end"] - total_dur) > 0.5:
+        hard.append(f"末段窗口终点 {segs[-1]['music_window']['end']}s 与歌曲长 {total_dur}s 差 >0.5s")
+    if not (0.30 <= ratio <= 0.65):
+        soft.append(f"对口型段占比 {ratio:.0%} 落在建议区间 35%~60% 之外"
+                    f"（目标 {sync_ratio:.0%}）——不是错误，但先确认这是你要的")
+    for it in (overflow or []):
+        hard.append(f"段 {it['seq']} 切分异常：{it['note']}")
+    return hard, soft
+
+
+def to_md(sb, detail=True):
+    L = [f"# {sb['project']} · MV 分镜表", ""]
+    m = sb["meta"]
+    st = sb.get("style_prompt") or {}
+    style_txt = st.get("label") or st.get("name") or "（未锁）"
+    L += [f"- 歌曲：`{sb['song']['file']}` · 总长 **{sb['song']['duration']}s**",
+          f"- 段数：**{m['segments']}** ｜ 对口型段：**{m['sync_segments']}**"
+          f"（{m['sync_ratio']:.0%}）｜ 无主角模式：{'是' if m['no_hero'] else '否'}",
+          f"- 音乐窗口合计：**{m['window_sum']}s**（= 全曲长）｜ 请求时长合计 {m['dur_sum']}s",
+          f"- 风格：{style_txt}",
+          ""]
+    if st.get("prompt_zh") or st.get("zh"):
+        L += [f"- 风格句：{st.get('prompt_zh') or st.get('zh')}", ""]
+    L += ["> 铁律 B1：只有**中近景（大特写/特写/近景/中景）**才设计对口型；"
+          "中远景/全景/远景/空镜一律不对口型，且**不是每句都对口型**。", ""]
+    L += ["| 段 | 时间窗口 | 时长 | 歌词行 | 结构 | 口型 | 景别 | 画面构想 |",
+          "|---|---|---|---|---|---|---|---|"]
+    for s in sb["segments"]:
+        w = s["music_window"]
+        lip = "🎤 对口型" if s["sing_mode"] == "sync" else "—"
+        txt = s["lyric_text"].replace("\n", " / ") or "（间奏）"
+        brief = (s.get("visual_brief") or "（待填）").replace("|", "/")
+        if len(brief) > 46:
+            brief = brief[:46] + "…"
+        L.append(f"| {s['seq']} | {w['start']:.2f}–{w['end']:.2f}s | {w['dur']:.2f}s "
+                 f"| {txt[:34]} | {s['structure']} | {lip} "
+                 f"| {SHOT_ZH[s['shot_size']]} {s['shot_size']} | {brief} |")
+    if detail:
+        # ★ V1.0.2：分镜表原来只到表格为止，画面构想被截断、尾帧/切点/逐镜全丢。
+        #   而「怎么做的」正是这份交付物要回答的问题 —— 补一段逐段细纲。
+        L += ["", "---", "", "## 逐段细纲（画面 / 歌词 / 尾帧 / 下段切点 / 段内镜头）", ""]
+        for s in sb["segments"]:
+            w = s["music_window"]
+            lip = "对口型" if s["sing_mode"] == "sync" else "不对口型"
+            L.append(f"### 段 {s['seq']} · {s.get('kw') or ''}")
+            L.append("")
+            L.append(f"- **窗口**：{w['start']:.2f}–{w['end']:.2f}s（{w['dur']:.2f}s）· "
+                     f"请求 {s.get('dur_requested') or s['dur']}s · 景别 {SHOT_ZH[s['shot_size']]} "
+                     f"{s['shot_size']} · {lip} · 结构 {s['structure']}")
+            L.append(f"- **画面**：{s.get('visual_brief') or '（待填）'}")
+            L.append(f"- **歌词**：{s['lyric_text'].replace(chr(10), ' / ') or '（间奏）'}")
+            if s.get("ending_zh"):
+                L.append(f"- **尾帧**：{s['ending_zh']}")
+            if s.get("next_cut_zh"):
+                L.append(f"- **下段切点**：{s['next_cut_zh']}")
+            for i, sh in enumerate(s.get("shots") or [], 1):
+                L.append(f"- 镜头 {i} @ {float(sh.get('t') or 0):.2f}s"
+                         f"（{sh.get('size') or ''}）：{sh.get('zh') or ''}")
+            L.append("")
+    return "\n".join(L) + "\n"
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--target-dur", type=float, default=11.0, help="目标平均段长（默认 11s）")
+    ap.add_argument("--min-dur", type=float, default=4.0)
+    ap.add_argument("--max-dur", type=float, default=15.0)
+    ap.add_argument("--sync-ratio", type=float, default=0.45, help="对口型段占比目标（默认 45%%）")
+    ap.add_argument("--max-consec-sync", type=int, default=3, help="连续对口型段上限")
+    ap.add_argument("--dry-run", action="store_true", help="只打印不落盘")
+    ap.add_argument("--rewrite-md", action="store_true",
+                    help="只按现有 storyboard.json 重写 分镜表.md（不重算切分、不动 json）")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.project_root)
+
+    # ★ V1.0.2：设计阶段（阶段三 3.2）会给每段补 visual_brief / shots / ending_zh，
+    #   但那时**不会**回头重写 分镜表.md —— 结果交付物里风格停在「（未锁）」、
+    #   画面构想整列「（待填）」。这里给一个只重写 markdown 的入口，安全且幂等：
+    #   它**不碰** storyboard.json，因此绝不会覆盖已经设计好的分镜内容。
+    if args.rewrite_md:
+        p = os.path.join(root, "分镜脚本", "storyboard.json")
+        sb0 = read_json(p)
+        if not sb0:
+            sys.exit(f"❌ 读不到 {p}")
+        out_dir0 = os.path.join(root, "分镜脚本")
+        with open(os.path.join(out_dir0, "分镜表.md"), "w", encoding="utf-8") as f:
+            f.write(to_md(sb0))
+        print(f"✅ 已按现有 storyboard.json 重写 {os.path.join(out_dir0, '分镜表.md')}"
+              f"（{len(sb0.get('segments') or [])} 段 · json 未改动）")
+        return
+
+    sb, overflow, total_dur, ratio = build(root, args.target_dur, args.min_dur,
+                                          args.max_dur, args.sync_ratio, args.max_consec_sync)
+    hard, soft = qc(sb, overflow, total_dur, ratio, args.sync_ratio)
+
+    print(f"\n{'='*70}")
+    print(f"段数 {len(sb['segments'])} · 对口型段 {sb['meta']['sync_segments']}（{ratio:.0%}）"
+          f" · 窗口合计 {sb['meta']['window_sum']}s / 曲长 {total_dur}s")
+    for s in sb["segments"]:
+        w = s["music_window"]
+        print(f"  {s['seq']:>2} {w['start']:>7.2f}–{w['end']:>7.2f}  {w['dur']:>5.2f}s "
+              f"{ '🎤' if s['sing_mode']=='sync' else '  ' } {s['shot_size']:<5} "
+              f"{s['lyric_text'][:22].replace(chr(10), ' / ')}")
+    if hard:
+        print(f"\n⛔ 硬性机检 {len(hard)} 项不过（关 4 会拦下）——")
+        for h in hard:
+            print("  ·", h)
+    if soft:
+        print(f"\n⚠ 提示 {len(soft)} 项：")
+        for h in soft[:10]:
+            print("  ·", h)
+    if not hard:
+        print("\n✅ 硬性机检全过（段长/窗口连续/口型-景别一致）")
+
+    if args.dry_run:
+        return
+    out_dir = os.path.join(root, "分镜脚本")
+    os.makedirs(out_dir, exist_ok=True)
+    json.dump(sb, open(os.path.join(out_dir, "storyboard.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+    with open(os.path.join(out_dir, "分镜表.md"), "w", encoding="utf-8") as f:
+        f.write(to_md(sb))
+    print(f"\n产物：\n  {os.path.join(out_dir, 'storyboard.json')}"
+          f"\n  {os.path.join(out_dir, '分镜表.md')}")
+    print("\n下一步：给每段填 visual_brief（中文导演画面构想）+ acting，然后跑关 4 分镜审核。")
+
+
+if __name__ == "__main__":
+    main()

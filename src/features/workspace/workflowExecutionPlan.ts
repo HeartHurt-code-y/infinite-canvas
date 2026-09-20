@@ -150,6 +150,19 @@ function deliveryContentSignature(checkpoint: KnowledgeVideoWorkflowCheckpoint):
     script: checkpoint.script,
     storyboard: checkpoint.storyboard,
     shots: checkpoint.shots,
+    ...(checkpoint.musicVideo
+      ? {
+          musicVideo: {
+            song: checkpoint.musicVideo.song,
+            stages: Object.fromEntries(
+              Object.entries(checkpoint.musicVideo.stages).map(([stage, run]) => [
+                stage,
+                run?.artifact,
+              ]),
+            ),
+          },
+        }
+      : {}),
     assets: checkpoint.film?.assets.map(({ id, kind, name, prompt }) => ({
       id,
       kind,
@@ -288,6 +301,24 @@ export function createWorkflowExecutionPlan(
                   "合成并保存成片",
                 ];
   let steps = serialSteps(titles);
+  if (config.musicVideo) {
+    steps = serialSteps([
+      "读取原曲并审核完整歌词时间线",
+      "确认视觉风格与人物设定",
+      "确认逐段分镜与音乐窗口",
+      "审核视频提示词与唱词、嘴型策略",
+      ...(config.musicVideo.deliverable === "documents"
+        ? ["导出歌词、时间线、分镜提示词与审核报告"]
+        : [
+            "确认镜头依赖与制作计划",
+            "确认人物及场景资产",
+            "首镜试产并人工审核",
+            "按依赖生成并逐段检查",
+            "选用片段并按原曲窗口合成",
+            "检查音视频时长并预览确认成片",
+          ]),
+    ]);
+  }
   if (config.comicDrama) {
     const drama = config.comicDrama;
     const stages = comicDramaStageDependencies(drama.episodes).map((stage) => ({

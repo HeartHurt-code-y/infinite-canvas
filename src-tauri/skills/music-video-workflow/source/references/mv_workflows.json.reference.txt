@@ -1,0 +1,124 @@
+{
+  "_doc": [
+    "mv-auto-pipeline 工作流注册表（铁律 D1：换工作流必须成对换整套节点映射）。",
+    "默认工作流 = 用户 2026-09-17 指定的「AI音乐MV数字人（项目模型+项目模型 项目视频模型 项目模型）」。",
+    "节点契约由用户给定（87 提示词 / 85 音乐时长截取 / 61 分辨率 / 42 图片入口），",
+    "**但字段名与其它节点必须用 --inspect 从真实 JSON 里读出来后再填**（铁律 D4）。",
+    "新增工作流 = 往 workflows 里加一条 + 放一份 API 格式 JSON，不改代码。"
+  ],
+  "default": "MV-1",
+  "_contract_note": [
+    "contract_verified=false 时，batch_run_mv.py 会在提交前 fetch 真 JSON 做一次自检，",
+    "字段名对不上就报错退出（不允许猜字段名提交，猜错 = 白烧币）。",
+    "拿到真 JSON 后跑：python references/build_mv_workflow.py --inspect  --workflow MV-1",
+    "按输出把 fields / img_slots / resolution_map 填实，并把 contract_verified 改成 true。"
+  ],
+  "workflows": {
+    "MV-1": {
+      "id": "PROJECT_WORKFLOW_BINDING",
+      "label": "AI音乐MV数字人（项目模型+项目模型 项目视频模型 项目模型）",
+      "role": "default",
+      "contract_verified": true,
+      "contract_verified_note": "2026-09-17 用真实 key fetch 到 30 节点 JSON 后逐节点 --inspect 核实：87 Text Multiline.text / 85 TrimAudioDuration.{start_index,duration} / 61 ResolutionSelector.aspect_ratio / 34 LoadAudio.audio / 36 LoadImage.image / 78 项目模型AvatarH3Sampler.seed / 65 VHS_VideoCombine 全部存在且字段名与下面一致。",
+      "note": "用户 2026-09-17 指定的 MV 主工作流。用户口述的四个关键节点：87 提示词输入 / 85 音乐时长截取（决定每次跑多长视频）/ 61 分辨率（横竖屏，默认 2）/ 42 可改造节点（按需接收图片）。",
+      "source_url": "[项目内资源]",
+      "api_json": "mv_workflow_api.json",
+      "api_json_modified": "mv_workflow_api.modified.json",
+      "noref_json": null,
+      "noref_default": false,
+      "nodes": {
+        "prompt": "87",
+        "music": "85",
+        "music_source": "34",
+        "resolution": "61",
+        "image": "36",
+        "img_slots": [
+          "36"
+        ],
+        "seed": "78",
+        "output": "65",
+        "core": "78"
+      },
+      "fields": {
+        "prompt": "text",
+        "music_start": "start_index",
+        "music_dur": "duration",
+        "music_audio": "audio",
+        "music_source": "audio",
+        "resolution": "aspect_ratio",
+        "resolution_mp": "megapixels",
+        "image": "image",
+        "seed": "seed"
+      },
+      "graph": {
+        "audio_chain": "34 LoadAudio.audio → 85 TrimAudioDuration(start_index,duration) → 72 SoundFlow_GetLength → 73 ComfyNumberConvert → 71 ComfyMathExpression → 42 项目模型.length；同时 85.audio → 38 LTXVAudioVAEEncode（音频进 latent）与 65 VHS_VideoCombine.audio（原声混流）",
+        "image_chain": "36 LoadImage.image → 42.ref_images.ref_image_0（node 42 只吃 1 张图，多图必须由 build_mv_workflow.py 扩槽）",
+        "prompt_chain": "87 Text Multiline.text → 42.prompt",
+        "resolution_chain": "61 ResolutionSelector(aspect_ratio, megapixels=2, multiple=32) → 42.width / 42.height",
+        "output_chain": "78 项目模型AvatarH3Sampler → 63 → 64 VAEDecode → 65 VHS_VideoCombine(images, audio) → 成片"
+      },
+      "audio_policy": "master_direct",
+      "audio_policy_note": "node 65 VHS_VideoCombine 的 audio 直接来自 node 85 截取后的**母带窗口**，且 trim_to_audio=false、frame_rate=24、crf=12、filename_prefix=项目模型Avatar。→ 成片自带母带音频，不需要后期贴轨；但视频帧数由 17 帧公式算出会比窗口长，必须本地 conform 裁回窗口长度（铁律 D7）。",
+      "video_frame_rate": 24,
+      "music_mode": "offset",
+      "music_mode_options": {
+        "offset": "node 85 自带「起点 + 时长」两个入参 → 直接注入秒数（首选，无需切音频）",
+        "upload": "node 85 只有时长、起点不可控 → 由驱动脚本用 ffmpeg 切好本段音频再上传注入"
+      },
+      "resolution_default": 2,
+      "resolution_map": {
+        "16:9": "16:9 (Widescreen)",
+        "9:16": "9:16 (Portrait Widescreen)",
+        "1:1": "1:1 (Square)",
+        "4:3": "4:3 (Standard)",
+        "3:4": "3:4 (Portrait Standard)",
+        "21:9": "21:9 (Ultrawide)"
+      },
+      "resolution_map_note": "值域来自 ComfyUI 核心节点 ResolutionSelector（comfy_extras/nodes_resolution.py 的 AspectRatio 枚举）——工作流里 aspect_ratio 的现值 '9:16 (Portrait Widescreen)' 与该枚举逐字一致，故枚举可信。⚠️ 16:9 的字符串是 '16:9 (Widescreen)'，**没有 Landscape 字样**（凭直觉写成 '16:9 (Landscape Widescreen)' 会被平台判非法枚举）。node 61 的 multiple=32、megapixels=2 → 16:9@2MP 实算 = **1920×1088**（不是 1920×1080）。",
+      "resolution_measured": {
+        "aspect": "16:9",
+        "aspect_ratio_value": "16:9 (Widescreen)",
+        "megapixels": 2,
+        "width": 1920,
+        "height": 1088,
+        "fps": 24,
+        "measured_at": "2026-09-18 首镜试产(段 1) ffprobe output_raw.mp4",
+        "note": "枚举被平台接受；multiple=32 + megapixels=2 实算 1920×1088（**不是** 1920×1080），与推算一致。"
+      },
+      "align_formula": "max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17",
+      "align_formula_note": "drama W-A 的 17 帧对齐公式。MV 工作流是否同样对齐**必须实测确认**（跑一次 12s，ffprobe 看真实帧数）。未确认前 batch_run_mv.py 按该公式预对齐段长，保证各段音乐窗口首尾相接。",
+      "align_formula_source": "已从真实 JSON 读到工作流**自带**该公式：node 71 ComfyMathExpression.expression = 'max(5, round(a * 24)) + (5 - (max(5, round(a * 24)) % 17)) % 17+24'，a 来自 node 72 SoundFlow_GetLength（量 node 85 截取后音频的秒数）。→ 段长由母带窗口自动推导（时间基准唯一），末尾额外 +24 帧，所以成片比窗口长约 1s，必须 conform 裁回。",
+      "frame_align_confirmed": true,
+      "frame_align_pending": "",
+      "measured": {
+        "seg1": {
+          "window": 10.7,
+          "raw_frames": 277,
+          "raw_dur": 11.542,
+          "conform_dur": 10.708,
+          "conform_frames": 257,
+          "coins": 198,
+          "cost_s": 493,
+          "instance_type": "plus",
+          "taskId": "PROJECT_WORKFLOW_BINDING"
+        }
+      },
+      "instance_type": "plus",
+      "submit": "workflow 参数直传改造后的完整 JSON（平台按 workflowId 定位模板、用 workflow 整体覆盖）",
+      "ref_limits": {
+        "img_slots_available": 1,
+        "img_slots_note": "原工作流 node 42 只吃 1 张图。若分镜需要「主角 + 场景/道具」多图，由 build_mv_workflow.py 增加图槽（铁律 D5），未用槽必须断开。",
+        "aud_slots_available": 0,
+        "aud_note": "MV 不传音色参考——声音全部来自歌曲母带（node 85 切的音乐窗口）。分镜里不要出现 <Audio N>。"
+      },
+      "verified_at": "2026-09-17T23:37:26",
+      "align_formula_measured": "align_frames(window_sec) + 17",
+      "align_formula_measured_note": "实测：窗口 10.700s → align_frames(10.7)=260 帧；平台直出 **277 帧 = 11.542s**，正好 = 260 + 17（**多一个 17 帧网格**，即 +0.708s）。⚠️ 注册表里从 node 71 表达式抄来的 `+24` **复现不出来**（+24 应得 284 帧）。原因：F(X)=X+(5-X%17)%17 恒 ≡5 (mod 17)，而 +24 会破坏这个同余，说明表达式里的 +24 在真实链路里没生效（可能被 % 运算吃掉，或 node 42 的 length 另有一次量化）。**结论：不依赖该公式预测成片长度，一律走本地 conform 裁/补到恰好等于窗口长度**（铁律 D7）。",
+      "audio_policy_measured": "实测 output_raw.mp4 自带 AAC 音轨、时长 11.540s ≈ 视频轨 11.542s，波形与母带窗口同源 → 确认 node 65 VHS_VideoCombine 混的就是 node 85 截取的母带窗口。"
+    }
+  },
+  "gotcha": {
+    "id_confusion": "PROJECT_WORKFLOW_BINDING 是本 MV 工作流 id。project_provider 的 workflowId 与 webappId 不可混用，混用报 380 WORKFLOW_NOT_EXISTS。",
+    "music_is_master": "音乐是唯一时间基准（铁律 A1）。node 85 切的窗口必须与 歌词/lyrics.json 的切点同源同序，禁止手算。"
+  }
+}

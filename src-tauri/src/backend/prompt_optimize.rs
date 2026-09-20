@@ -163,6 +163,16 @@ pub enum PromptOptimizationMode {
     ComicDramaStoryboardReview,
     #[serde(rename = "comic_drama_content_review")]
     ComicDramaContentReview,
+    #[serde(rename = "music_video_timeline")]
+    MusicVideoTimeline,
+    #[serde(rename = "music_video_style")]
+    MusicVideoStyle,
+    #[serde(rename = "music_video_storyboard")]
+    MusicVideoStoryboard,
+    #[serde(rename = "music_video_prompts")]
+    MusicVideoPrompts,
+    #[serde(rename = "music_video_review")]
+    MusicVideoReview,
     #[serde(rename = "commerce_research")]
     CommerceResearch,
     #[serde(rename = "commerce_creative")]
@@ -241,6 +251,11 @@ impl PromptOptimizationMode {
             Self::ComicDramaArtReview => "comic_drama_art_review",
             Self::ComicDramaStoryboardReview => "comic_drama_storyboard_review",
             Self::ComicDramaContentReview => "comic_drama_content_review",
+            Self::MusicVideoTimeline => "music_video_timeline",
+            Self::MusicVideoStyle => "music_video_style",
+            Self::MusicVideoStoryboard => "music_video_storyboard",
+            Self::MusicVideoPrompts => "music_video_prompts",
+            Self::MusicVideoReview => "music_video_review",
             Self::CommerceResearch => "commerce_research",
             Self::CommerceCreative => "commerce_creative",
             Self::CommerceScript => "commerce_script",
@@ -299,6 +314,11 @@ impl PromptOptimizationMode {
             Self::ComicDramaArtReview => "builtin://comic-drama-workflow/art-review",
             Self::ComicDramaStoryboardReview => "builtin://comic-drama-workflow/storyboard-review",
             Self::ComicDramaContentReview => "builtin://comic-drama-workflow/content-review",
+            Self::MusicVideoTimeline => "builtin://music-video-workflow/timeline",
+            Self::MusicVideoStyle => "builtin://music-video-workflow/style",
+            Self::MusicVideoStoryboard => "builtin://music-video-workflow/storyboard",
+            Self::MusicVideoPrompts => "builtin://music-video-workflow/prompts",
+            Self::MusicVideoReview => "builtin://music-video-workflow/review",
             Self::CommerceResearch => "builtin://commerce-video-workflow/research",
             Self::CommerceCreative => "builtin://commerce-video-workflow/creative",
             Self::CommerceScript => "builtin://commerce-video-workflow/script",
@@ -328,6 +348,16 @@ impl PromptOptimizationMode {
             Self::AiFilmAssets => Some("assets"),
             Self::AiFilmActing => Some("acting"),
             Self::AiFilmPrompts => Some("prompts"),
+            _ => None,
+        }
+    }
+
+    fn music_video_stage(self) -> Option<&'static str> {
+        match self {
+            Self::MusicVideoTimeline => Some("timeline"),
+            Self::MusicVideoStyle => Some("style"),
+            Self::MusicVideoStoryboard => Some("storyboard"),
+            Self::MusicVideoPrompts => Some("prompts"),
             _ => None,
         }
     }
@@ -562,6 +592,9 @@ pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<S
         return Ok(load_builtin_ai_film_qc_system_prompt());
     }
     if let Some(prompt) = load_builtin_comic_drama_system_prompt(mode) {
+        return Ok(prompt);
+    }
+    if let Some(prompt) = load_builtin_music_video_system_prompt(mode) {
         return Ok(prompt);
     }
     if let Some(prompt) = load_builtin_commerce_system_prompt(mode) {
@@ -1314,6 +1347,43 @@ report 总是非空；其他字段仅对应状态出现并为非空字符串。P
     ))
 }
 
+fn load_builtin_music_video_system_prompt(mode: PromptOptimizationMode) -> Option<String> {
+    let method = match mode {
+        PromptOptimizationMode::MusicVideoTimeline => {
+            include_str!("../../skills/music-video-workflow/timeline.md")
+        }
+        PromptOptimizationMode::MusicVideoStyle => {
+            include_str!("../../skills/music-video-workflow/style.md")
+        }
+        PromptOptimizationMode::MusicVideoStoryboard => {
+            include_str!("../../skills/music-video-workflow/storyboard.md")
+        }
+        PromptOptimizationMode::MusicVideoPrompts => {
+            include_str!("../../skills/music-video-workflow/prompts.md")
+        }
+        PromptOptimizationMode::MusicVideoReview => {
+            include_str!("../../skills/music-video-workflow/review.md")
+        }
+        _ => return None,
+    };
+    let contract = if let Some(stage) = mode.music_video_stage() {
+        format!(
+            r#"最终输出合同（高于方法正文中的一切来源示例）：只输出一个严格 JSON 对象，不加 Markdown 围栏、前言或 JSON 之外的说明。
+{{"schemaVersion":"music-video-stage.v1","stage":"{stage}","status":"ready","decision":null,"content":"完整且非空的本阶段 Markdown 正文","inputSummary":"非空的实际输入与依据","timeline":[],"style":null,"shots":[]}}
+status 仅为 ready 或 needs_confirmation；确实缺少材料或有关键取舍时 decision={{"question":"明确问题","recommendation":"可执行建议"}}，其余为 null。即使 ready 也只是可供审核，应用仍须用户批准当前版本。
+timeline 项严格为 {{"id":"稳定ID","startSeconds":0,"endSeconds":1,"kind":"vocal","text":"完整歌词或间奏说明","section":"段落名称"}}，kind 只能 vocal/instrumental。全部窗口连续无重叠，从 0 覆盖探测到的真实全曲时长。每项保留一行或多行完整歌词，不得拆字或编造时间。用户 LRC 是时间依据；没有 LRC 时必须依据实际附带歌曲音频，无法听取或无法确定时间则请求用户提供/校时。原始歌词、重复句、和声与间奏不可丢弃。全部时间与歌词均待人工核对；本项目未提供专用 ASR/强制对齐调用时，不宣称已执行 Needleman-Wunsch 或已测得识别置信度。
+style 仅在风格阶段填写 {{"description":"完整选定风格与候选说明","assets":[{{"id":"稳定ID","kind":"character","name":"资产名","prompt":"完整图片提示词"}}]}}，kind 只能 character/scene/prop。characterMode=none 禁止 character 资产；reference 以用户真实参考为准；generate 才建立待生成人物。
+shots 项严格为 {{"id":"镜头ID","segmentId":"时间轴ID","title":"镜头名","startSeconds":0,"endSeconds":1,"durationSeconds":1,"framing":"close","lipSync":"none","visual":"完整画面构想","videoPrompt":"完整视频提示词","referenceAssetIds":[]}}。framing 只能 close/medium/wide，lipSync 只能 sync/offscreen/none。storyboard/prompts 阶段每个时间轴项恰好一个镜头，窗口逐值一致，durationSeconds 必须是本次项目视频模型实际支持的请求时长且 >= 音乐窗口长度；完整歌词窗口超长时返回待修订，不强拆词。sync 只 close/medium 且需要有主人公，建议占比 35%–60%、默认约45%、连续最多3镜；无主角每镜 none。prompts 保持已批准镜头身份、窗口和素材绑定。音频参考仅提供生成引导，不宣称已使用专用口型同步或已通过视觉口型验收。
+非本阶段产物使用空数组或 null；不得用虚假文件路径、未发生的测量或用户批准填充结果。"#
+        )
+    } else {
+        r#"最终输出合同（高于方法正文中的一切来源示例）：只输出一个严格 JSON 对象，不加 Markdown 围栏或 JSON 之外的说明。
+{"result":"PASS","report":"非空、定位到具体阶段或镜头的完整检查报告"}
+result 只能 PASS、REVISE、NEEDS_DECISION。REVISE 必须同时给非空 repairInstructions；NEEDS_DECISION 必须同时给非空 question、recommendation；不得编造已实施的修订。核查真实歌曲、歌词窗口、项目模型能力、人物模式、口型白名单、素材身份与当前版本。缺少实际音频/视频或测量结果时清楚标明未验证。音频与母带一致不等于视觉口型正确，对口型仍需用户观看试听。自动 PASS 不能代表人工批准，也不能推进下一阶段。"#.to_string()
+    };
+    Some(format!("{method}\n\n## 应用执行协议\n\n{contract}"))
+}
+
 fn load_builtin_comic_drama_system_prompt(mode: PromptOptimizationMode) -> Option<String> {
     let (path, document) = match mode {
         PromptOptimizationMode::ComicDramaScreenplay => (
@@ -1844,6 +1914,11 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::ComicDramaArtReview
         | PromptOptimizationMode::ComicDramaStoryboardReview
         | PromptOptimizationMode::ComicDramaContentReview
+        | PromptOptimizationMode::MusicVideoTimeline
+        | PromptOptimizationMode::MusicVideoStyle
+        | PromptOptimizationMode::MusicVideoStoryboard
+        | PromptOptimizationMode::MusicVideoPrompts
+        | PromptOptimizationMode::MusicVideoReview
         | PromptOptimizationMode::CommerceResearch
         | PromptOptimizationMode::CommerceCreative
         | PromptOptimizationMode::CommerceScript
@@ -1969,6 +2044,16 @@ fn build_system_and_user_prompts(
     } else if let Some(review) = command.mode.comic_drama_review() {
         format!(
             "请只执行当前一集的 {review} 独立检查。依据当前材料与实际项目能力定位问题，不修改成果、不替下一阶段创作，也不根据另一位检查者结论投票。只输出 PASS、REVISE 或 NEEDS_DECISION 三态合同的 JSON 对象：\n\n{}",
+            command.user_prompt
+        )
+    } else if let Some(stage) = command.mode.music_video_stage() {
+        format!(
+            "仅执行音乐 MV 的 {stage} 阶段，依据实际附带歌曲、用户歌词/LRC、权威上游版本和项目模型能力。所有歌词、时间窗与口型均待用户审核，不得声称未经执行的 ASR、强制对齐或口型检测。仅输出 music-video-stage.v1 严格 JSON：\n\n{}",
+            command.user_prompt
+        )
+    } else if command.mode == PromptOptimizationMode::MusicVideoReview {
+        format!(
+            "独立检查当前音乐 MV 阶段，定位全部可修复问题并说明证据与未验证项。只输出 PASS、REVISE 或 NEEDS_DECISION 严格 JSON，不代替用户批准或人审口型：\n\n{}",
             command.user_prompt
         )
     } else if let Some(stage) = command.mode.commerce_stage() {
@@ -3799,6 +3884,11 @@ mod tests {
                 | PromptOptimizationMode::ComicDramaArtReview
                 | PromptOptimizationMode::ComicDramaStoryboardReview
                 | PromptOptimizationMode::ComicDramaContentReview
+                | PromptOptimizationMode::MusicVideoTimeline
+                | PromptOptimizationMode::MusicVideoStyle
+                | PromptOptimizationMode::MusicVideoStoryboard
+                | PromptOptimizationMode::MusicVideoPrompts
+                | PromptOptimizationMode::MusicVideoReview
                 | PromptOptimizationMode::CommerceResearch
                 | PromptOptimizationMode::CommerceCreative
                 | PromptOptimizationMode::CommerceScript
@@ -3841,12 +3931,21 @@ mod tests {
             PromptOptimizationMode::AiFilmPrompts,
             PromptOptimizationMode::AiFilmQc,
             PromptOptimizationMode::ComicDramaDirector,
+            PromptOptimizationMode::ComicDramaScreenplay,
+            PromptOptimizationMode::ComicDramaStyle,
+            PromptOptimizationMode::ComicDramaScreenplayReview,
+            PromptOptimizationMode::ComicDramaStyleReview,
             PromptOptimizationMode::ComicDramaArt,
             PromptOptimizationMode::ComicDramaStoryboard,
             PromptOptimizationMode::ComicDramaDirectorReview,
             PromptOptimizationMode::ComicDramaArtReview,
             PromptOptimizationMode::ComicDramaStoryboardReview,
             PromptOptimizationMode::ComicDramaContentReview,
+            PromptOptimizationMode::MusicVideoTimeline,
+            PromptOptimizationMode::MusicVideoStyle,
+            PromptOptimizationMode::MusicVideoStoryboard,
+            PromptOptimizationMode::MusicVideoPrompts,
+            PromptOptimizationMode::MusicVideoReview,
             PromptOptimizationMode::CommerceResearch,
             PromptOptimizationMode::CommerceCreative,
             PromptOptimizationMode::CommerceScript,
@@ -3862,7 +3961,7 @@ mod tests {
             PromptOptimizationMode::ReverseVideoReview,
             PromptOptimizationMode::ViralRemix,
         ];
-        assert_eq!(MODES.len(), 45, "MODES 列表登记数量与 enum 变体数不一致");
+        assert_eq!(MODES.len(), 54, "MODES 列表登记数量与 enum 变体数不一致");
         for mode in MODES {
             // 编译期 helper 已被引用，触发穷尽检查。
             let _ = assert_mode_skill_dir_in_sync(*mode);
@@ -6809,6 +6908,137 @@ mod tests {
             .unwrap(),
             review
         );
+    }
+
+    #[test]
+    fn music_video_modes_load_native_methods_and_strict_contracts() {
+        for (mode, stage, marker) in [
+            (
+                PromptOptimizationMode::MusicVideoTimeline,
+                "timeline",
+                "Needleman-Wunsch",
+            ),
+            (
+                PromptOptimizationMode::MusicVideoStyle,
+                "style",
+                "风格先于资产",
+            ),
+            (
+                PromptOptimizationMode::MusicVideoStoryboard,
+                "storyboard",
+                "音乐分镜与口型策略",
+            ),
+            (
+                PromptOptimizationMode::MusicVideoPrompts,
+                "prompts",
+                "no mouthing lyrics",
+            ),
+            (
+                PromptOptimizationMode::MusicVideoReview,
+                "review",
+                "视觉口型正确",
+            ),
+        ] {
+            let serialized = format!("music_video_{stage}");
+            assert_eq!(mode.as_str(), serialized);
+            assert_eq!(serde_json::to_value(mode).unwrap(), json!(serialized));
+            assert_eq!(
+                serde_json::from_value::<PromptOptimizationMode>(json!(serialized)).unwrap(),
+                mode
+            );
+            assert_eq!(
+                mode.skill_dir(),
+                format!("builtin://music-video-workflow/{stage}")
+            );
+            let prompt = load_skill_system_prompt(mode).unwrap();
+            assert!(prompt.contains(marker));
+            assert!(prompt.contains("用户批准"));
+            for forbidden in [
+                "RunningHub",
+                "WorkBuddy",
+                "https://",
+                "17 帧",
+                "[4,15]",
+                "--skip-gate",
+                "跳过人工那一关",
+            ] {
+                assert!(!prompt.contains(forbidden), "{mode:?} retained {forbidden}");
+            }
+            if stage == "review" {
+                for required in [
+                    "PASS",
+                    "REVISE",
+                    "NEEDS_DECISION",
+                    "repairInstructions",
+                    "question",
+                    "recommendation",
+                ] {
+                    assert!(prompt.contains(required));
+                }
+                assert!(!prompt.contains("music-video-stage.v1"));
+            } else {
+                assert!(prompt.contains("music-video-stage.v1"));
+                assert!(prompt.contains(&format!("\"stage\":\"{stage}\"")));
+                for required in [
+                    "segmentId",
+                    "durationSeconds",
+                    "characterMode=none",
+                    "实际附带歌曲音频",
+                    "不宣称已执行 Needleman-Wunsch",
+                ] {
+                    assert!(prompt.contains(required));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn music_video_requests_keep_stage_json_and_review_reports_intact() {
+        let command = OptimizeVideoPromptCommand {
+            workflow_run_id: None,
+            canvas_id: Some("mv-canvas".to_string()),
+            source_node_id: Some("mv-node".to_string()),
+            provider_connection_id: "project-provider".to_string(),
+            model_definition_id: "project-model".to_string(),
+            mode: PromptOptimizationMode::MusicVideoTimeline,
+            task: PromptTask::Generate,
+            user_prompt: "按当前用户 LRC 保留重复歌词与间奏。".to_string(),
+            context_history: Vec::new(),
+            vision_images: Vec::new(),
+            multimodal_inputs: Vec::new(),
+            reference_inputs: Vec::new(),
+        };
+        for mode in [
+            PromptOptimizationMode::MusicVideoTimeline,
+            PromptOptimizationMode::MusicVideoStyle,
+            PromptOptimizationMode::MusicVideoStoryboard,
+            PromptOptimizationMode::MusicVideoPrompts,
+        ] {
+            let scoped = OptimizeVideoPromptCommand {
+                mode,
+                ..command.clone()
+            };
+            let prompt = build_system_and_user_prompts(&scoped, "native MV method");
+            assert!(
+                prompt
+                    .user
+                    .contains(&format!("{} 阶段", mode.music_video_stage().unwrap()))
+            );
+            assert!(prompt.user.contains(&command.user_prompt));
+            let result = json!({"schemaVersion":"music-video-stage.v1","stage":mode.music_video_stage(),"status":"ready","decision":null,"content":"# 全文\n```text\n完整原词\n```","inputSummary":"实际 LRC","timeline":[],"style":null,"shots":[]});
+            let extracted = extract_optimized_prompt(mode, &format!("```json\n{result}\n```"));
+            assert_eq!(serde_json::from_str::<Value>(&extracted).unwrap(), result);
+        }
+        let review = OptimizeVideoPromptCommand {
+            mode: PromptOptimizationMode::MusicVideoReview,
+            ..command
+        };
+        let prompt = build_system_and_user_prompts(&review, "native MV review");
+        assert!(prompt.user.contains("独立检查"));
+        assert!(prompt.user.contains("不代替用户批准"));
+        let result = json!({"result":"REVISE","report":"第二镜音乐窗口越界","repairInstructions":"恢复已批准时间轴的起止值，不改变歌词"});
+        let extracted = extract_optimized_prompt(review.mode, &format!("```json\n{result}\n```"));
+        assert_eq!(serde_json::from_str::<Value>(&extracted).unwrap(), result);
     }
 
     #[test]

@@ -1,0 +1,287 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""歌曲 → 歌词时间轴提取（mv-auto-pipeline · 铁律 A2）
+
+四路后端，按「准 → 快」自动降级（哪个能跑走哪个，跑不了给明确安装指引，不静默失败）：
+  ① faster-whisper   本地、免 API key、中文效果好（推荐，需 pip install faster-whisper）
+  ② whisper(openai)  本地 CLI（pip install openai-whisper），重但准
+  ③ whisper.cpp      whisper-cli / main 可执行文件（零 Python 依赖，最快）
+  ④ ASR HTTP API     OpenAI 兼容 /audio/transcriptions（--api-base/--api-key/--model）
+                     —— 国内可用 SiliconFlow / 汇取云 / 自建，秒级返回
+
+⚠️ 铁律 A2：ASR 只提供**时间**，文本必须用官方歌词校正
+   → 本脚本出 lyrics_asr.json，接着跑 align_lyrics.py --asr ... --official ...
+
+用法：
+  python extract_lyrics.py --project-root "<项目根>" --song "音乐/song.mp3" --probe
+  python extract_lyrics.py --project-root "<项目根>" --song "音乐/song.mp3" --backend auto
+  python extract_lyrics.py --project-root "<项目根>" --song ... --backend api \\
+      --api-base [项目内资源] --api-key $ASR_KEY --model FunAudioLLM/SenseVoiceSmall
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+FFMPEG_CANDIDATES = ["ffmpeg", r"D:\AIxiufu\ffmpeg.exe", r"C:\ffmpeg\bin\ffmpeg.exe"]
+FFPROBE_CANDIDATES = ["ffprobe", r"D:\AIxiufu\ffprobe.exe", r"C:\ffmpeg\bin\ffprobe.exe"]
+
+
+def _which(cands):
+    for c in cands:
+        if os.path.sep in c or ":" in c:
+            if os.path.isfile(c):
+                return c
+        else:
+            p = shutil.which(c)
+            if p:
+                return p
+    return None
+
+
+def probe(song_path):
+    """歌曲探测：时长 / 采样率 / 声道 / 码率。写 音乐/song_info.json。"""
+    ff = _which(FFPROBE_CANDIDATES)
+    info = {"file": os.path.basename(song_path),
+            "size_kb": round(os.path.getsize(song_path) / 1024, 1)}
+    if not ff:
+        print("⚠ 找不到 ffprobe，跳过歌曲探测（时长自检会失效）")
+        return info
+    try:
+        r = subprocess.run(
+            [ff, "-v", "error", "-show_format", "-show_streams", "-of", "json", song_path],
+            capture_output=True, text=True, timeout=120)
+        d = json.loads(r.stdout or "{}")
+        fmt = d.get("format") or {}
+        info["duration"] = round(float(fmt.get("duration") or 0), 3)
+        info["bit_rate"] = fmt.get("bit_rate")
+        for s in (d.get("streams") or []):
+            if s.get("codec_type") == "audio":
+                info["codec"] = s.get("codec_name")
+                info["sample_rate"] = s.get("sample_rate")
+                info["channels"] = s.get("channels")
+                break
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ 歌曲探测失败（{type(e).__name__}: {e}）")
+    return info
+
+
+def to_wav16k(song_path, out_path):
+    """转 16k 单声道 wav（所有 ASR 后端的通用输入）。"""
+    ff = _which(FFMPEG_CANDIDATES)
+    if not ff:
+        raise RuntimeError("找不到 ffmpeg —— ASR 需要它转码。请安装 ffmpeg 或加进 PATH。")
+    os.makedirs(os.path.dirname(os.path.abspath(out_path)) or ".", exist_ok=True)
+    cmd = [ff, "-y", "-v", "error", "-i", song_path,
+           "-ac", "1", "-ar", "16000", "-vn", out_path]
+    subprocess.run(cmd, capture_output=True, text=True, timeout=900, check=True)
+    print(f"[ffmpeg] 转码 {os.path.basename(out_path)} "
+          f"({round(os.path.getsize(out_path)/1024/1024,1)}MB)")
+    return out_path
+
+
+# ------------------------------------------------------------ 后端 ①faster-whisper
+def run_faster_whisper(wav, language, model_size, device):
+    try:
+        from faster_whisper import WhisperModel  # noqa: PLC0415
+    except Exception:  # noqa: BLE001
+        return None
+    print(f"[faster-whisper] model={model_size} device={device} …（首次会下模型）")
+    m = WhisperModel(model_size, device=device, compute_type="int8")
+    segs, info = m.transcribe(wav, language=language or None,
+                              vad_filter=True, word_timestamps=True)
+    out = []
+    for s in segs:
+        out.append({"start": round(s.start, 3), "end": round(s.end, 3),
+                    "text": (s.text or "").strip(),
+                    "words": [{"w": w.word, "start": round(w.start, 3),
+                               "end": round(w.end, 3)}
+                              for w in (getattr(s, "words", None) or [])]})
+    return {"language": getattr(info, "language", language), "segments": out,
+            "duration": getattr(info, "duration", None)}
+
+
+# ------------------------------------------------------------ 后端 ②openai-whisper CLI
+def run_whisper_cli(wav, language, model_size, out_dir):
+    exe = shutil.which("whisper")
+    if not exe:
+        return None
+    print(f"[whisper-cli] model={model_size} …（首次会下模型）")
+    cmd = [exe, wav, "--model", model_size, "--output_format", "json",
+           "--output_dir", out_dir, "--word_timestamps", "True", "--verbose", "False"]
+    if language:
+        cmd += ["--language", language]
+    subprocess.run(cmd, capture_output=True, text=True, timeout=7200, check=True)
+    stem = os.path.splitext(os.path.basename(wav))[0]
+    p = os.path.join(out_dir, stem + ".json")
+    if not os.path.isfile(p):
+        return None
+    d = json.load(open(p, encoding="utf-8"))
+    return {"language": d.get("language"), "segments": d.get("segments") or [],
+            "duration": (d.get("segments") or [{}])[-1].get("end")}
+
+
+# ------------------------------------------------------------ 后端 ③whisper.cpp
+def run_whisper_cpp(wav, language, model_path, exe_path=None):
+    exe = exe_path or next((p for p in
+                            (shutil.which("whisper-cli"), shutil.which("main"),
+                             shutil.which("whisper"))
+                            if p and os.path.basename(p) not in ("whisper",)), None)
+    if not exe or not model_path or not os.path.isfile(model_path):
+        return None
+    out_base = wav + ".cpp"
+    cmd = [exe, "-m", model_path, "-f", wav, "-oj", "-of", out_base, "-np"]
+    if language:
+        cmd += ["-l", language]
+    print(f"[whisper.cpp] {os.path.basename(exe)} …")
+    subprocess.run(cmd, capture_output=True, text=True, timeout=7200, check=True)
+    p = out_base + ".json"
+    if not os.path.isfile(p):
+        return None
+    d = json.load(open(p, encoding="utf-8"))
+    segs = []
+    for s in (d.get("transcription") or []):
+        offs = s.get("offsets") or {}
+        segs.append({"start": round((offs.get("from") or 0) / 1000, 3),
+                     "end": round((offs.get("to") or 0) / 1000, 3),
+                     "text": (s.get("text") or "").strip(), "words": []})
+    return {"language": language, "segments": segs, "duration": segs[-1]["end"] if segs else None}
+
+
+# ------------------------------------------------------------ 后端 ④ HTTP API
+def run_api(wav, api_base, api_key, model, language):
+    if not api_base:
+        return None
+    if not api_key:
+        raise RuntimeError("--backend api 需要 --api-key（或环境变量 ASR_API_KEY / project_provider_ASR_KEY）")
+    url = api_base.rstrip("/") + "/audio/transcriptions"
+    boundary = f"----asr{uuid.uuid4().hex}"
+    with open(wav, "rb") as f:
+        blob = f.read()
+    fields = {"model": model, "response_format": "verbose_json",
+              "timestamp_granularities[]": "segment"}
+    if language:
+        fields["language"] = language
+    parts = []
+    for k, v in fields.items():
+        parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{k}\"\r\n\r\n{v}\r\n".encode())
+    parts.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                  f"filename=\"audio.wav\"\r\nContent-Type: audio/wav\r\n\r\n").encode()
+                 + blob + f"\r\n--{boundary}--\r\n".encode())
+    req = urllib.request.Request(url, data=b"".join(parts), method="POST")
+    req.add_header("Authorization", f"Bearer {api_key}")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    print(f"[api] POST {url} model={model} …")
+    t0 = time.time()
+    try:
+        with urllib.request.urlopen(req, timeout=1800) as r:
+            d = json.loads(r.read().decode("utf-8", "replace"))
+    except urllib.error.HTTPError as e:
+        detail = e.read().decode("utf-8", "replace")[:300]
+        raise RuntimeError(f"ASR API {e.code}: {detail}") from None
+    segs = []
+    for s in (d.get("segments") or []):
+        segs.append({"start": round(float(s.get("start") or 0), 3),
+                     "end": round(float(s.get("end") or 0), 3),
+                     "text": (s.get("text") or "").strip(), "words": []})
+    if not segs and d.get("text"):
+        segs = [{"start": 0.0, "end": float(d.get("duration") or 0), "text": d["text"], "words": []}]
+    print(f"[api] {int(time.time()-t0)}s · {len(segs)} 段")
+    return {"language": d.get("language") or language, "segments": segs,
+            "duration": d.get("duration")}
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--song", help="歌曲路径（默认 <项目根>/音乐/song.mp3）")
+    ap.add_argument("--backend", default="auto",
+                    choices=["auto", "faster-whisper", "whisper-cli", "whisper.cpp", "api"])
+    ap.add_argument("--language", default="zh", help="zh / ja / en / auto（留空=自动检测）")
+    ap.add_argument("--model-size", default="medium", help="faster-whisper / whisper-cli 模型档")
+    ap.add_argument("--device", default="cpu", help="cpu / cuda")
+    ap.add_argument("--cpp-exe", help="whisper.cpp 可执行文件路径")
+    ap.add_argument("--cpp-model", help="whisper.cpp ggml 模型路径")
+    ap.add_argument("--api-base", default=os.environ.get("ASR_API_BASE", ""))
+    ap.add_argument("--api-key", default=os.environ.get("ASR_API_KEY", ""))
+    ap.add_argument("--model", default=os.environ.get("ASR_MODEL", "whisper-1"))
+    ap.add_argument("--probe", action="store_true", help="只做歌曲探测，不跑 ASR")
+    args = ap.parse_args()
+
+    root = os.path.abspath(args.project_root)
+    music_dir = os.path.join(root, "音乐")
+    lyric_dir = os.path.join(root, "歌词")
+    os.makedirs(music_dir, exist_ok=True)
+    os.makedirs(lyric_dir, exist_ok=True)
+
+    song = args.song or os.path.join(music_dir, "song.mp3")
+    if not os.path.isfile(song):
+        sys.exit(f"❌ 找不到歌曲文件: {song}\n   请把歌曲放到 {music_dir}（建议命名 song.mp3）")
+    print(f"[song] {song}")
+
+    info = probe(song)
+    json.dump(info, open(os.path.join(music_dir, "song_info.json"), "w", encoding="utf-8"),
+              ensure_ascii=False, indent=1)
+    print(f"[probe] 时长 {info.get('duration', '?')}s · "
+          f"{info.get('sample_rate', '?')}Hz · {info.get('channels', '?')}ch · "
+          f"{info.get('codec', '?')}")
+    if args.probe:
+        return
+
+    wav = os.path.join(music_dir, "song_16k.wav")
+    if not os.path.isfile(wav):
+        to_wav16k(song, wav)
+
+    order = (["faster-whisper", "whisper-cli", "whisper.cpp", "api"]
+             if args.backend == "auto" else [args.backend])
+    result, used = None, None
+    errors = []
+    for b in order:
+        try:
+            if b == "faster-whisper":
+                result = run_faster_whisper(wav, args.language, args.model_size, args.device)
+            elif b == "whisper-cli":
+                result = run_whisper_cli(wav, args.language, args.model_size, music_dir)
+            elif b == "whisper.cpp":
+                result = run_whisper_cpp(wav, args.language, args.cpp_model, args.cpp_exe)
+            elif b == "api":
+                result = run_api(wav, args.api_base, args.api_key, args.model, args.language)
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{b}: {type(e).__name__}: {e}")
+            print(f"⚠ 后端 {b} 失败：{type(e).__name__}: {e}")
+            result = None
+        if result and result.get("segments"):
+            used = b
+            break
+
+    if not used:
+        print("\n❌ 四路后端全部不可用。按需二选一：")
+        print("   ① 本地：pip install faster-whisper   （免 key，中文效果好，首次下模型）")
+        print("   ② 接口：--backend api --api-base <OpenAI兼容地址> --api-key <KEY> --model <模型>")
+        print("   (或直接提供现成 LRC：把 LRC 放 歌词/lyrics.lrc，跑 align_lyrics.py --lrc ...)")
+        for e in errors:
+            print("   ·", e)
+        sys.exit(2)
+
+    result.setdefault("duration", info.get("duration"))
+    result["source"] = used
+    result["generated_at"] = time.strftime("%Y-%m-%d %H:%M:%S")
+    out_p = os.path.join(lyric_dir, "lyrics_asr.json")
+    json.dump(result, open(out_p, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+
+    print(f"\n✅ 后端 {used} 完成：{len(result['segments'])} 段 → {out_p}")
+    print("\n下一步（铁律 A2：ASR 只给时间，文本必须用官方歌词校正）：")
+    print("  · 有官方歌词 → 存成 歌词/lyrics_raw.txt（一行一句）")
+    print(f"  · python references/align_lyrics.py --project-root \"{root}\" "
+          f"--asr \"{out_p}\" --official \"{os.path.join(lyric_dir, 'lyrics_raw.txt')}\" "
+          f"--song \"{song}\"")
+
+
+if __name__ == "__main__":
+    main()

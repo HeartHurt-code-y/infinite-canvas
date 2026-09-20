@@ -1,0 +1,1306 @@
+---
+name: mv-auto-pipeline
+description: 音乐 MV 自动生成 SOP V1.0。用户给一首歌（必须）+ 一张主人公图（可选），主 Agent 调度全链：**歌词与时间轴完整提取（ASR + 官方歌词强制对齐）** → 歌词时间轴审核（关1）→ 风格锁定（关2）→ 人物/场景资产（关3，无主角模式跳过）→ **按歌曲线切段的 MV 分镜（口型策略前置）**（关4）→ 项目视频模型 六段式提示词派生（**唱歌不是说话：sings 官方框架；MV 不带音色参考**）（关5 硬门禁）→ **音乐窗口与口型对齐核对**（关6 硬门禁）→ project_provider 「AI音乐MV数字人（项目模型+项目模型 项目视频模型 项目模型）」工作流改造与批量生成（节点 87 提示词 / 85 音乐时长截取 / 61 分辨率默认2 / 42 图片入口；支持消费级单池，或**消费级+企业级双池并行**并把真钱封顶、池满放回队列；**凭证四级自愈读取，新项目零参数即可跑，永不问用户要 key**）→ 时长贴合（逐段裁到音乐窗口长度）→ 拼接成片（逐段内嵌音乐版 + 视频轨重贴母带版）→ **对齐三验**（关7/关8）→ 收尾交付四件套 → 项目复盘把经验固化进本 skill（可用 tools/rollback.py 回退任意版本）。**三条不可动摇的判据**：① **音乐是唯一时间基准**，所有段长与切点都从歌词时间轴推导；② **只有中近景（大特写/特写/近景/中景）才设计对口型**，中远景/全景/远景/空镜/背影一律不对，且**不是每句都对口型**（目标占比 45%）；③ **每一段的音乐窗口首尾相接且 Σ = 全曲长**，配合逐段时长贴合，保证口型-画面-音乐严格对齐。每步都双关审核（Agent 自审 + 用户 HTML 审），用户可放权。触发词：音乐MV、MV自动生成、歌曲转MV、歌词分镜、对口型MV、数字人MV、全参考MV、AI MV SOP、双池并行、两把key一起跑、消费级企业级并行、key永久记住、凭证配置、不用再给key、缺少project_provider API Key。
+agent_created: true
+---
+
+# 音乐 MV 自动生成 SOP V1.0（mv-auto-pipeline）
+
+> **当前精确版本：以本目录 `VERSION` 文件为唯一权威**（发版/回退见 `CHANGELOG.md` 与 `tools/`）。
+> 标题行与 frontmatter 只写**主版本号**（minor 时才动）；精确版本一律以 `VERSION` 为准。
+> ⚠️ **正文里不再重复写精确版本号** —— 同一个版本号写两遍就是漂移源
+> （drama-auto-pipeline 出过「VERSION=1.5 但正文还停在 V1.3」的事故，见其 CHANGELOG）。
+>
+> **本 skill 与 `drama-auto-pipeline` 的关系**：同构但**不同源**。
+> 流程骨架、审核关制度、进化/回退机制（铁律 F）、project_provider 客户端口径共享同一套经验；
+> 但**时间基准、发声类型、口型规则、工作流**这四件事完全不同 ——
+> 短剧是「剧本驱动」，MV 是**歌曲线驱动**。千万不要把短剧的段长设计逻辑套到 MV 上。
+
+---
+
+## 一句话需求 → 交付物
+
+> 「给一首歌和一张图，出来一个完整的、完美的音乐 MV。」
+
+| 输入 | 必需 | 说明 |
+|---|---|---|
+| **歌曲文件** | ✅ 必须 | mp3 / wav / flac / m4a，放 `音乐/`；没有歌就没有 MV，这一项不接受「推断」 |
+| **官方歌词**（文本） | ⚠️ 强烈建议 | 没有也能跑（只用 ASR），但 ASR 必然有错字，交付前必须逐行核 |
+| **主人公图** | ⭕ 可选 | 给了 → 走 Ref2VA 多参模式（主角跨段一致）；不给 → **必须问一句**「要不要帮你生成一个主人公」；用户说不要 → **无主角音乐 MV**（全程无固定面孔、全员不对口型） |
+| 风格参考图 / 判据 | ⭕ 可选 | 给了就直接反推风格，跳过三选一推荐但仍需用户确认 |
+
+| 交付物 | 回答什么问题 |
+|---|---|
+| `视频/final/final_master.mp4` | **成片（交付首选）** = 画面轨 + 原曲母带重贴，绝对对齐 |
+| `视频/final/final.mp4` | 逐段内嵌音乐版（各段自带音乐直接拼，可交叉验证对齐） |
+| `视频/final/对齐验收.html` | **口型-画面-音乐对齐有没有做到**（逐段滞后量 + 波形相关度 + 能量） |
+| `分镜脚本/分镜表.md` | 怎么做的（逐段窗口/口型/景别/画面构想） |
+| `歌词/lyrics.lrc` + `歌词/lyrics.json` | 歌曲线是什么（权威时间轴） |
+| `审核/01..08 + 全链总览.html` | 8 道关逐段细审 + 整条链怎么走的 + 花了多少 |
+
+---
+
+## 🔒 不可变铁律
+
+**以下规则不可在后续版本中修改或弱化，除非用户明确说"改"。**
+
+### 铁律 A · 音乐基准与歌词（MV 特有）
+
+**A1. 音乐是唯一时间基准。**
+- 段长、切点、口型位置**全部**从 `歌词/lyrics.json` 的时刻推导。
+- ❌ 禁止凭空设计段长；❌ 禁止「先想好画面再去找音乐位置」。
+- 判据：任何一段的 `music_window` 必须能在 `lyrics.json` 里指出来源。
+
+**A2. 歌词时间轴必须完整提取，而且必须逐行核对。**
+- 歌词**一行不能少**（含重复段、和声行、桥段）；时间轴**必须落盘**：
+  `歌词/lyrics.json`（权威，逐行 + 对齐置信度）+ `歌词/lyrics.lrc`（人读 / 外部工具用）。
+- **ASR 只提供时间，文本必须用官方歌词校正**（铁律 A3）。ASR 的同音字错误率在歌曲上很高
+  ——「海啸 → 海上」「循环 → 生还」这类错误必须靠官方歌词纠正。
+- 对齐命中率低于阈值（默认 55%）的行标 `review_needed`，**必须人工听一遍再定稿**；
+  **禁止静默放过** —— 一行错位会让整段口型全错。
+
+**A3. 强制对齐优先，三条取值路径按优先级**
+1. **官方歌词 + ASR** → `align_lyrics.py --asr ... --official ...`（推荐：文本准 + 时间准）
+2. **现成 LRC** → `align_lyrics.py --lrc ...`（直接解析 + 自检；改时间最方便）
+3. **只有 ASR** → 全部行标 `review_needed`，必须人工过一遍
+- 对齐算法是字符级 **Needleman-Wunsch 全局对齐**（纯标准库，不依赖 numpy）：
+  两侧去标点后逐字做 DP，把官方歌词行映射到 ASR 的字符时间上。
+
+**A4. 时间轴必须过连续性自检（`align_lyrics.py` 自动跑）**
+- 行起止**单调递增、行间不重叠、无 >2s 无标记空档**；
+- 空档必须**显式**插 `[instrumental]`（间奏不是bug，但必须被标出来，因为它决定了分镜切点）；
+- 语速体检：中文 > 9 字/秒 视为时间轴错位的嫌疑。
+- 任一不过 → 关 1 不放行。
+
+**A5. 音乐窗口必须连续无缝、Σ = 全曲长、且不许手算**
+- 段 i 的窗口 = `[t_i, t_{i+1})`，且 `t_{i+1}` 就是段 i+1 的起点 —— **无缝、不重叠**。
+- `Σ 窗口 = 全曲长`（末段窗口收到歌曲终点，标记 `tail: true`）。
+- 窗口由 `plan_mv_storyboard.py` 统一产出、写入 `storyboard.json`，
+  **由 `check_alignment.py --plan` 复核**（关 6）。**任何环节不得手写窗口秒数。**
+- 切点**只落在歌词行尾**：宁可某段略微超长，也不把一句歌词切成两半。
+
+**A6. 歌曲文件原样保留。**
+- 用户给的原始音频**不许覆盖、不许重编码**（`音乐/song.mp3` 只读）。
+- 需要 16k wav 给 ASR、需要切窗给工作流，一律写到 `音乐/song_16k.wav`、`音乐/cuts/`。
+
+### 铁律 B · 口型策略（MV 特有，用户明确要求）
+
+**B1. 只有中近景才设计对口型。**
+- 允许对口型的景别（白名单，只有这四类）：
+  `ECU 大特写` / `CU 特写` / `MCU 近景` / `MS 中景`。
+- ❌ **禁止**在 `MLS 中远景` / `LS 全景` / `WS 远景` / `EMPTY 空镜` / 背影 / 群像 上设计对口型。
+- 机检硬约束：`sing_mode=sync` 的段，`shot_size` 必须落在白名单里，否则关 4 / 关 6 拦下。
+
+**B2. 不是每句都对口型。**
+- 对口型段占比目标 **45%**（可调 `--sync-ratio`），建议区间 **35%~60%**。
+- 连续对口型段 **≤3**，中间强制插叙事镜 / 空镜 / 群像（否则观众审美疲劳，也更容易看出穿帮）。
+- 其余画面由这些承载：叙事镜（人物不对口型地生活）、环境空镜、群像、道具特写、意境镜头。
+- 抽样要**均匀撒在全曲**（脚本按位置等距抽样），不许把对口型全挤在开头或副歌。
+
+**B3. 对口型段只唱完整的歌词行。**
+- 一段只包含**完整的**歌词行（行首到行尾都在这段窗口里）。
+- 确需让一句歌词跨段延续 → 显式用官方 `<scenetrans>` + 连续性短语，并在 `summary` 声明
+  「台词不要求与本镜画面同步收尾，不加快、不吞字」（项目视频模型 铁律 R37）。
+
+**B4. 不对口型段的硬约束（这是最容易翻车的地方）。**
+- 正文**严禁**出现 `sings:` / `says:` / `shout together,` —— 一旦出现，项目视频模型 会让人物跟着唱。
+- 必须写 `NO_SYNC_DECL`（脚本自动注入）：
+  > 本段人物**不对口型**：嘴唇保持自然闭合，或只做与歌词无关的日常动作（呼吸、吞咽、微笑、说话前吸气），不得跟随音乐人声开合。
+- `Negative` 必须含 `no lip sync, no mouthing lyrics, no extra vocals`（脚本自动注入）。
+
+**B5. 对口型段必须声明「口型严格跟随音乐母带」。**
+- `summary` 写：本段人物**跟随音乐母带对口型演唱**，口型必须与音乐人声严格同步，
+  每一句歌词的起止都与母带人声一致。
+- 验收（关 8）：该段音频必须有非空人声能量，且与母带同位置波形相关度达标。
+
+### 铁律 C · 分镜与提示词
+
+**C1. 段长 ∈ [4,15] 秒，并按 17 帧网格对齐。**
+- 请求时长 = `align(窗口长)`，公式 `max(5, round(a*24)) + (5 - (max(5, round(a*24)) % 17)) % 17`
+  → `12s → 12.25s`、`6s → 6.58s`。
+- 因为公式有 `max(5, …)` 下限，**4~5s 的窗口会被请求成 5s，成片再裁回窗口长度** —— 这是正常的。
+- ⚠️ 该公式来自 drama W-A 的实测，**MV 工作流是否同样对齐必须实测确认**
+  （跑一次 12s，ffprobe 看真实帧数），确认后把 `align_formula_confirmed` 改成 true。
+
+**C2. 是唱歌，不是说台词 —— 提示词口径（用户明确要求）。**
+- 发声行一律走**官方英文框架**（项目视频模型-ref2va-optimizer 铁律 35，官方 `base-en §4.4` 逐字依据）：
+  `→林晚照 (S1) sings: <d>[中文]月光落在旧琴弦上</d>`
+- **一句歌词独立成行，行首 `→`**；严禁写成 `says:`、严禁写成「角色说"…"」、严禁埋在段落中间。
+- **MV 不出现 `<Audio N>`** —— 声音全部来自歌曲母带（工作流切窗注入），
+  写 `<Audio N>` 会 `LBL-UNDEF`（没有上传对应音频）且与「母带为准」自相矛盾。
+- 台词/歌词语言控制四层（外语歌）：
+  ① `<d>[Japanese]` 或 `<d>[English]` ② `summary` 声明「全片歌词一律为 X 语言」
+  ③ 演唱角色 Subject 写「该角色说/唱日语」 ④ `Negative` 压掉**非目标语言**
+  （⚠️ 目标语言是英语时**只**写 `no Chinese dialogue`）。
+
+**C3. 六段式结构一个字段都不能少**（项目视频模型 铁律 1）：
+`subject_definitions:` → `summary:` → `retention_analysis:` → `detailed_description:`
+→ `overall_soundscape:` → `non_diegetic_music:`，末尾跟 `Negative:`。
+- 语言分层：**字段名 / 标签 / 保留标记 / Negative / `(S1)` 说话人 ID / 官方框架词 / R34 表演指导行 / 官方运镜句** 用**英文**；
+  **Subject 描述 / summary / retention 正文 / 节拍 / 声场 / 风格句 / 歌词原文** 用**中文**。
+- `non_diegetic_music:` 一律写 `N/A`（音乐后期统一配，用户全局偏好；项目视频模型 铁律 32）。
+- `overall_soundscape:` 必须写明：**以歌曲母带为准，本段使用原曲第 X–Y 秒的音乐片段**；
+  画面内不出现额外人声、不出现对白、不出现第二层人声。
+
+**C4. R34 活人感表演指导行默认必写（唱歌专用模板）。**
+- `detailed_description` 的 `[Shot 1]` **之前**、与风格句同段，
+  写 `Acting direction for the whole sequence: …`。
+- 模板按结构切换（`mv_to_h3_prompts.py` 的 `ACTING`）：`intro` / `chorus` / `bridge` / `outro` / `ambient`。
+- **核心判据**：写「她不是在给观众表演，是在对一个人说实话」，
+  写呼吸/眨眼/吞咽/手的小动作，**严禁**写「对口型要夸张」「唱给镜头」。
+- 纯空镜段豁免（校验器 `LIVE-MISS` / `LIVE-OK` 判）。
+
+**C5. 一段 = 一个场景。**
+- 项目视频模型 单段禁止把两个地点写进同一段 —— 实测跨场景同段必丢一整场戏。
+- 需要多地点 → 拆段；确需同段多镜头时用官方 `[Shot N]` 写法，
+  首镜不加时间戳，后续切点**统一写 `At 00:03.000，`**（英文 `At`，写成「在 00:03.000」解析不出切点）。
+
+**C6. 无主角模式（用户不要主人公时的通道）。**
+- 走 `image_mode=text_only`：不建人物资产、关 3 跳过；
+  每个 Subject 标「无参考图，由文字描述定义」，保留标记降级 `weak_reference`。
+- 全片 `on_screen_char_ids: []`，所有段 `sing_mode=no_sync`，**零 `sings:` 行**。
+- 提示词写死 `NO_HERO_DECL`：
+  > 本片为**无主角音乐 MV**：全部画面由场景、环境、光影、人群与道具承载，
+  > 全片不出现固定主角面孔，任何镜头都不对口型。
+- 画面承载靠：环境空镜、群像、道具特写、跟拍背影、自然景观、材质与光影特写。
+- ⚠️ 无主角 ≠ 无人物：可以有远景人影/群像/剪影，但**不出现可辨认的固定面孔**。
+
+**C7. 同一段副歌重复出现时必须换视觉处理。**（铁律 C5 的延伸）
+- `plan_mv_storyboard.py` 会自动识别重复句簇并标 `in_chorus_block`；
+  第二次副歌出现在审核页上必须能看出**与第一次不同的画面构想**，否则重写 `visual_brief`。
+
+### 铁律 D · 工作流与生成
+
+**D1. 工作流注册表驱动，换工作流必须成对换整套节点映射。**
+- 注册表：`references/mv_workflows.json`；默认 `MV-1`。
+- 新增工作流 = 往注册表加一条 + 放一份 API 格式 JSON，**不改代码**。
+
+**D2. 节点契约（用户 2026-09-17 给定，语义权威）：**
+
+| 节点 | 语义 | 脚本字段 |
+|---|---|---|
+| **87** | 提示词输入 | `nodes.prompt` / `fields.prompt` |
+| **85** | **音乐时长的截取 —— 决定每一次跑多长的视频** | `nodes.music` / `fields.music_start` / `fields.music_dur` |
+| **61** | 分辨率（横屏/竖屏），**默认值 2** | `nodes.resolution` / `fields.resolution` |
+| **42** | **可改造节点**，按需接收图片 | `nodes.image` / `nodes.img_slots` |
+
+- ⚠️ 这只是**语义**，不是字段名。**字段名必须实测**（铁律 D4）。
+- ⚠️ 分辨率默认 **2**（用户指定）；横竖屏的具体取值映射在 `--inspect` 看清值域后填
+  `resolution_map`，**不许猜**。
+
+**D2b. 分辨率是「两个入参」，不是一个数字（本项目实测踩雷）。**
+- node 61 = `ResolutionSelector`，吃**两个**入参：
+  - `aspect_ratio` —— **枚举字符串**，值域来自 ComfyUI 核心节点 `ResolutionSelector`
+    的 AspectRatio 枚举。⚠️ **16:9 的字符串是 `16:9 (Widescreen)`，没有 Landscape 字样**
+    （凭直觉写成 `16:9 (Landscape Widescreen)` 会被平台判非法枚举）。
+  - `megapixels` —— **数字档位**，本项目默认 **2**。
+- ❌ 旧实现把「分辨率档 2」这个**数字**注进 `aspect_ratio` 枚举 → 平台收到非法枚举。
+  两个入参**必须分开注**（注册表里 `fields.resolution` = `aspect_ratio`、
+  `fields.resolution_mp` = `megapixels`）。
+- `multiple=32` + `megapixels=2` → 16:9 实算 = **1920×1088**（**不是** 1920×1080），
+  首镜试产时用 ffprobe 实测回写 `resolution_measured`。
+
+
+**D3. 先取真 JSON，再改造 —— 绝不允许按猜测的字段名提交。**
+```bash
+python references/build_mv_workflow.py --fetch --inspect --write-registry
+```
+它会：拉 `/api/openapi/getJsonApiFormat` → 体检 87/85/61/42 是否存在 →
+猜字段名 → 回写注册表并置 `contract_verified`。
+`batch_run_mv.py` 提交前会用 `rh_client.audit_contract()` 再硬校验一次，
+**契约不过 = 拒绝提交**（猜错字段名 = 白烧币）。
+- 没有 API key 时，用户在 project_provider 导出 API 格式 JSON →
+  `--src <文件>` 走同一条路。
+
+**D4. 图槽改造：从图槽节点扩槽 + 未用槽必须断开。**
+- ⚠️ **「图片入口」不是 node 42（采样器），而是 node 36 LoadImage**。MV-1 实测：
+  `36 LoadImage.image → 42 项目模型.ref_images.ref_image_0`。
+  node 42 是**消费端**，node 36 才是**注入端** —— 把文件名注到 42 会报「没有输入字段 image」。
+- node 42 原生只吃 1 张图（只有 `ref_images.ref_image_0`）。需要「主角 + 场景/道具」时用
+  `--build --image-slots N` 扩槽。
+- 脚本只做**安全的节点克隆**（新 LoadImage 节点），**不擅自乱改接线** ——
+  接线要在 ComfyUI 里确认（脚本会把「下游是单值输入还是列表输入」报告出来）。
+- 未用满的槽**必须断开**，否则会带上工作流作者的默认素材
+  → 音频变杂音 / 主角不像本人（drama 铁律 D8 的血泪教训）。
+  **MV 里这条尤其致命**：原工作流 node 36 挂着一张**示例人物图**，空镜段不断线
+  → 画面里冒出别人的脸（见 D11）。
+
+**D5. 共享模板必须去参考化。**
+- 平台共享模板的参考素材入口会残留**上一位使用者**的图/音频直连
+  → 人脸服装被污染（drama《世界要毁灭了·日本版》段 3 实测翻车）。
+- `build_mv_workflow.py` 默认只**报告**残留，确认后跑 `--drop-refs` 真断开。
+- 自建的私有工作流才允许直接带参考素材。换工作流时先问一句「这工作流是共享模板还是我的私有工作流」。
+
+**D6. 提交走 `workflow` 参数直传改造后的完整 JSON**（平台按 workflowId 定位模板、用 workflow 整体覆盖）
+→ 节点结构完全可控，不依赖平台上的模板状态。
+
+**D7. 时长贴合 = 音画对齐的工程保证（关键机制，别删）。**
+- 请求时长 = `align(窗口长)`（向上对齐 17 帧网格）；音乐窗口 = `[t_i, t_{i+1})`。
+- 下载后用 ffmpeg **把每段裁/补到恰好等于窗口长度**：
+  - 长了 → `-t 窗口长` 裁掉；
+  - 短了 → `tpad=stop_mode=clone` 补尾帧。
+- **为什么必须做**：项目视频模型 每段多出 0.1~0.4s，几十段累加下来画面就会漂到音乐后面去，
+  口型全废。裁回窗口长度后 **Σ各段 = 全曲长**，首尾相接即对齐。
+- 双保险：`final_master.mp4` 用「画面轨 + 原曲母带」重贴并 `-t 曲长`，
+  即使前一道有微小残差也被裁掉 → **交付首选这一版**。
+
+**D8. 音乐取用方式二选一，按注册表的 `music_mode` 走。**
+- `offset`（首选）：node 85 自带「起点 + 时长」两个入参 → 直接注入秒数，零额外成本。
+- `upload`（兜底）：node 85 只有时长、起点不可控 → 驱动脚本用 ffmpeg 按歌词时间轴
+  切好本段音频（`音乐/cuts/cut_NN_*.wav`）再上传注入。
+- **两种都必须与 `lyrics.json` 同源**，不许手算秒数。
+
+**D8b. 母带本体必须注入音频加载节点（MV-1 = node 34 LoadAudio.audio）。**
+- ⚠️ **本项目实测暴露的大坑**：`offset` 模式原来只注 node 85 的「起点 + 时长」，
+  **从不替换 node 34 里的示例 mp3** —— 结果是「窗口取对了、歌是别人的」。
+  整片 22 段全废，而且烧完币才发现。
+- 所以：**与 music_mode 无关，母带都要原样注入 node 34**（铁律 A6 的落地点），
+  且全片**只上传一次**（`upload_cached()` 走 sha1 指纹 + `状态/素材上传台账.json`）。
+- 参考图同理走缓存 —— 同一张主角图 21 段各传一遍既慢又浪费额度。
+- `music_mode=upload` 时，切好的片段要注到**音频加载节点**（34），不是截取节点（85）。
+
+**D8c. 上传台账里绝不允许出现「占位串」——占位串会被原样注进节点，任务当场挂。**
+- ⚠️ **本项目实测血泪（首镜 FAILED 的真凶）**：`状态/素材上传台账.json` 里 song.mp3 的
+  `fileName` 是 `<上传:song.mp3>`（一个「还没真传」的占位标记），`upload_cached()` 命中缓存后
+  把它**原样返回**并注进 node 34 → 平台报
+  `LoadAudio → audio - Invalid audio file: <上传:song.mp3>` → 任务 FAILED，白等一轮。
+- **判据写死**：project_provider 的 `fileName` 永远长这样 `api/<hash>.<ext>`，
+  **绝不以 `<` 开头**。`upload_cached()` 已加守卫：缓存值以 `<` 开头 = 判定「未上传」→ 重新上传。
+  自己写状态文件时也不要塞任何「看起来像占位符」的值。
+- **通用教训**：**任何「缓存/台账」都可能缓存住一个「未完成状态」**。缓存写入前先问一句
+  「这个值是真结果，还是『还没做』的标记？」——两者的区别必须能从值本身看出来（这里是
+  `api/` 前缀），不能靠人记。
+
+**D8d. 任务失败必须回挖真实原因，别信 status 的 `code=0 msg=success`。**
+- ⚠️ 实测：任务 FAILED 时 `/task/openapi/status` 只回
+  `{"code":0,"msg":"success","data":"FAILED"}` —— **真实原因一个字都没有**。
+  旧版 `poll_task` 照它抛错，于是报错信息就是一句
+  `任务失败: code=0 msg=success`，**等于没报**，人只能靠猜。
+- 真实原因藏在 `/task/openapi/outputs`：`code=805 APIKEY_TASK_STATUS_ERROR`，
+  `data.failedReason` 里有 `exception_type` / `node_id` / `node_name` / `traceback`。
+- 已封装 `rh_client.fetch_failure()` + `format_failure()`，`poll_task` 失败时自动回挖，
+  报错形如：`prompt_outputs_failed_validation @ node 34(LoadAudio) → Custom validation failed
+  for node ["audio - Invalid audio file: <上传:song.mp3>"]`。
+- **排障口径**：拿到 FAILED 先用**那个 taskId** 去 `outputs` 回挖（失败任务的消息不会消失），
+  不必重跑烧币。
+
+**D9. 显式记录音频策略。**
+- 首镜试产时必须**实测确认**音频取用方式（母带直出 / 项目视频模型 生成音频与母带混合 /
+  只出环境声），把结论回写 `mv_workflows.json` 的 `audio_policy` 字段。
+- 在确认之前，提示词一律按「以母带为准、不出额外人声」写，并靠 `final_master.mp4` 兜底。
+
+**D10. 并发、断点续跑、在途 rescue、降级留痕。**
+- 状态落 `状态/rh_state.json`；`done` 跳过。
+- **在途 `submitted` 段一律走 rescue，绝不重新提交**（★ V1.0.3 补实）：
+  段一旦已有 `taskId` 就**先拿这个 id 去轮询**，SUCCESS 就下载交付、RUNNING 就继续等、
+  FAILED 才重新提交。**旧版会把它当新任务重新提交 = 双倍烧币**；
+  这条必须是代码，不能靠人记得（《野心家》首镜失败后是靠人工拿 taskId 回挖才救回币的）。
+- `TimeoutError` / `outputs 未就绪` → 状态**保留 `submitted` + taskId**（任务还在平台上跑），
+  下次跑自然走 rescue；真失败才置 `failed`（但 taskId 仍保留，便于回挖 `failedReason`）。
+- **账号降级（消费级 → 企业级）必须显式授权**（★ V1.0.3 补实）：
+  - `--api-key-e <KEY>`（或 `.env` 的 `project_provider_API_KEY_E`）= **提供凭证**
+  - `--allow-enterprise-fallback` = **授权花钱**
+  - ⚠️ **两件事不能互相推定**：给了 key ≠ 同意烧真钱。没加授权开关时，
+    即使提供了企业级 key 也**只打印提示、绝不降级**。- 降级只对**像「池子被占」的错误**生效（`DEGRADE_PAT` 命中 QUEUE/BUSY/LIMIT/并发/占用/余额…）；
+  像 `WORKFLOW_NOT_EXISTS` 这种**自己的 bug** 一律不降级 —— **别拿真钱补自己的错**。
+- **熔断**：连续 3 次「降级也失败」→ 停手，之后不再尝试（不再白花真钱）。
+- 每次降级写 `状态/调度日志.csv`（时间 / 段 / 事件 / 原因 / **计费口径**）
+  —— **不留痕就事后算不清「这段烧的是币还是钱」**。
+- ⚠️ **企业级不费 供应商报告费用，但按秒扣钱包真钱**（Plus ¥6/小时）。默认一律用消费级。
+- 每 10–15 分钟主动汇报进度，**禁止启动后沉默等通知**。
+- 离线单测：`python examples/test_account_fallback.py`（零算力、零网络，锁住上面五条判定）。
+
+**D11. 双池并行：消费级 + 企业级**同时**开跑（★ V1.0.4）。**
+
+- 触发：`--enterprise-parallel`。**这是第三个独立开关**，三者关系必须分清、互不推定：
+
+  | 开关 | 含义 | 不推出的结论 |
+  |---|---|---|
+  | `--api-key-e` | **提供凭证** | ≠ 同意花钱 |
+  | `--allow-enterprise-fallback` | 授权「消费级失败 → 改走企业级」 | ≠ 同意并行 |
+  | `--enterprise-parallel` | 授权「两条车道**同时**开跑」 | — |
+
+- **机制：一个共享任务队列 + 两条车道同时抢**（消费级 `--workers` 宽 ∥ 企业级 `--workers-e` 宽）。
+  为什么不是对半切开：实测单段机器耗时 600~900s 差得很远，静态对半必然一条车道空转；
+  谁先空出手谁接着取，墙钟才真的减半（离线单测实测并行度 ≈ **2.0x**）。
+- **真钱封顶**：`--enterprise-parallel-max N` = 最多 N 段走企业级，额度用满该车道**退役**、
+  剩下的段回消费级。不设就是**不限**；开跑前会打印最坏 / 对半两档预估
+  （按实测单段 727s × ¥6/小时 ≈ **¥1.21/段** 折算）。
+- **池满 = 没烧钱**（`SubmitBusy`，实测 `{"code":813,"msg":"APIKEY_TASK_QUEUE_FULL"}`）：
+  段**放回队列**重试，**绝不记 `failed`**。判据：提交被拒时一分钱都没扣，
+  记成失败会让「重跑一次就能成」的段变成需要人工介入。
+  ⚠️ 双池模式下池满**不走降级** —— 两条车道同时在跑，正确动作是放回队列让另一条接走；
+  本车道自己改走真钱的话，消费级一旦被占，5 个 worker 会把**整片同时甩给企业级 = 全片烧真钱**。
+- **「可重试」≠「可降级」**：只有 `TRANSIENT_PAT`（QUEUE/BUSY/TOO_MANY/RATE_LIMIT/OVERLOAD/
+  WORKER/并发/占用/排队/繁忙）才是「等一会儿就好」；`余额不足` / `APIKEY_INVALID`
+  重试一万次也一样，**不进**这张表（也不该触发降级）。
+- ⚠️ **静默丢活是双池并行最阴的一种错**（不报错，只让成片凭空短一截）：
+  车道会因「真钱封顶用满」或「池满持续超过 `BUSY_GIVE_UP_SEC`（默认 30 分钟）」**主动退役**，
+  而退役那一刻它可能刚把一段 `put` 回队列、另一条车道却早已因「当时队列空」退出 →
+  那几段**既没跑也没记 failed**，账面上看不出任何异常。所以车道全停后必须**队列兜底**：
+  队列里剩的段一律回落消费级单池跑完。
+  > ★ **判据是「等了多久」不是「错了几次」**（V1.0.5 更正）：次数上限对消费级太狠
+  > （3 次 ≈ 2 分钟就退役，池子只是有点挤而已，退役反而把活推给兜底路径直接判死），
+  > 对「池子真的挂了」又太宽容。**池满就等，等够 30 分钟才交棒**；
+  > 且这条**对两条车道一视同仁** —— 否则消费级池满会**无限重试**，进程永远转不停。
+- 每次「授权 / 退役 / 池满放回 / 兜底」都写 `状态/调度日志.csv`；
+  `状态/成本台账.csv` 新增 **「钱包元」** 列（企业级段的 供应商报告费用为 0，真钱记在这一列）。
+- 离线单测：`python examples/test_parallel_lanes.py`（零算力零网络，锁住三条**错了也不报错**的判据：
+  「真钱封顶不被绕过」「不许静默丢活」「池子全满时不许挂死」）。
+
+**D12. 凭证跨项目自愈：**永远不问用户要 key**（★ V1.0.6）。**
+
+- **用户原话（2026-09-17）**：「我不是说了把这些key永久记住吗，怎么还找我要？」
+  → 根因**不是**记忆丢了（key 早在 2026-09-14 就永久写进 `~/.project_provider/MEMORY.md`），
+  而是 `load_dotenv()` 只认「当前项目目录下的 `.env`」—— 换个新项目就找不到、就报缺 key。
+- **所以本铁律的判据只有一条**：
+  > **写在 `MEMORY.md` 里不算修好，代码能读到才算修好。**
+  凡「用户说过一次、以后不该再问」的东西，必须落成**代码可读的持久化文件**。
+  只写记忆不写代码 = 下次一定还会再问一遍，而且用户会认为你根本没记。
+- 落地：`~/.project_provider/credentials/mv-auto-pipeline/keys.env`（用户级，跨项目），
+  与 `<项目根>/.env`（项目级覆盖）、真实环境变量（永不被改写）合成四级读取，见「阶段〇 · 凭证」。
+- **两处入口必须同时自愈**：`resolve_key()`（消费级）+ `enterprise_key()`（企业级）。
+  只修消费级 = 用户级文件里的企业级 key 形同虚设——要用时照样报「没给企业级 key」。
+- **`self_heal` 是无条件加载**，不是「环境变量空才加载」：
+  后者会让 `LAST_SOURCE` 留空 → 诊断报告**说谎**（声称不知道来源，其实来自环境变量）。
+- **验收动作**：拿一个**全新空目录**，不传 `--api-key`、不放 `.env`，跑 `resolve_key()`
+  ——必须读到 key。`python examples/test_credentials.py`（22 条断言，零算力零网络）。
+
+### 铁律 E · 审核与对齐验收
+
+**E1. 8 道审核关（比短剧多一道「歌词时间轴」、多一道「音乐窗口与口型对齐」）**
+
+| 关 | 页面 | 审什么 | 关卡性质 |
+|---|---|---|---|
+| 1 | `01_歌词时间轴审核.html` | 歌词是否完整、时间轴是否对 | 放行前 |
+| 2 | `02_风格审核.html` | 三选一风格 / 用户给图反推 | 放行前 |
+| 3 | `03_人物与资产审核.html` | 主人公图 + 场景 + 道具（无主角模式跳过） | 放行前 |
+| 4 | `04_分镜审核.html` | 段切分 / 口型策略 / 景别 / 画面构想 | 放行前 |
+| 5 | `05_提示词审核.html` | 六段式 + 机检 + 项目视频模型 官方校验器 | **硬门禁** |
+| 6 | `06_音乐窗口与口型审核.html` | 窗口连续 / Σ=曲长 / 口型-景别一致 | **硬门禁** |
+| 7 | `07_分段视频审核.html` | 每段画面 + 时长 + 成本 | 放行前 |
+| 8 | `08_成片审核.html` | 成片 + 对齐验收 | 放行前 |
+
+**E2. 每关双关制，用户可放权。**
+- ① **Agent 自审** = 机检 + 项目视频模型 官方校验器（错误必须 0）+ 语义审（贴合歌词/口型策略/节拍合理）
+- ② **用户 HTML 审** = 逐段可看可改
+- 用户说「全自动」/「你自己审」→ **跳过人工那一关，但 Agent 自审 + 机检 + 硬门禁一律保留**。
+  放权的是「谁来点头」，不是「要不要检查」。
+
+**E3. 关 5 + 关 6 是硬门禁，全流程唯一挡在「花算力」之前的闸门。**
+`batch_run_mv.py` 提交前读 `状态/prompt_review.json` + `状态/music_plan.json` 硬校验：
+- 关 5：整体 `status ∈ {approved, partial}` / 逐段 `reviewed_ok` /
+  `resolution_confirmed == true` / **逐段 prompt.txt 的 sha1 与审核时一致**；
+- 关 6：`music_plan.ok == true` / 逐段窗口与计划一致；
+- 任一不满足 → `sys.exit`，**一段视频都不会提交**。
+- **改动即重审**：提示词改过 → sha1 失效 → 置回 `pending`，
+  **且不静默改写 sha1**（改写了等于默许下次直接放行）。
+- 唯一逃生口 `--skip-gate`（仅排障，正常流程禁用）。
+
+**E4. 对齐三验（关 8，`check_alignment.py --verify`）。**
+1. **时长**：Σ各段 `output.mp4` 时长 == 原曲长（±0.15s 目标，>0.4s 报错）；
+2. **波形**：逐段提取 RMS 包络，在「预期位置 ±1.5s」内做局部相关 ——
+   最优滞后量应 ≈ 0s（|滞后| > 0.35s 报错，相关度 < 0.35 报错）；
+3. **人声**：对口型段的音频能量必须非空（RMS 阈值）且与母带同位置相关。
+- 输出 `视频/final/对齐验收.html`。**任一不过 → 不许说「MV 做完了」。**
+- 为什么用「包络 + 局部搜索」而不是原始互相关：213 秒的歌按 8k 单声道接近 1.7M 采样，
+  纯 Python 全量互相关是十亿级运算；降到 10 帧/秒的 RMS 包络再局部搜，运算量降到万级，
+  **纯标准库秒级出结果**，判据完全够用。
+
+**E5. 审核页必须「齐全 + 最新 + 缺失也显式渲染」。**
+- 8 关 ↔ 8 张页，一关不漏；另加 `全链总览.html` 作收尾交付。
+- 徽章读**真实状态**（`pipeline_state.json` / `prompt_review.json` / `music_plan.json`），
+  不许永远显示「⏳ 待审核」。
+- 缺文件时渲染灰底「**未审**」，**不许什么都不显示**。
+- 图片/视频用 **`file:///` 绝对路径**（相对路径在 host 预览服务下解析不到 —— 实测踩过）。
+- 改了关号/文件名，必须**同步改生成器**（只改文档不改代码 = 没修）。
+
+### 铁律 F · 进化与回退（沿用并强化自 drama-auto-pipeline V1.4）
+
+**F1. 每一支 MV 收尾必须做「项目复盘」（强制，不许省）**
+触发时机：关 8 通过 / 用户说「收尾」「完成」。三问逐条回答并落盘 `状态/production_log.md`：
+1. **实测 vs 预设**：段数 / 对口型占比 / 时长 / 供应商报告费用 / 耗时，与预期差多少？
+2. **本次翻车清单**：哪里报错、哪里返工、哪里手动补了脚本、用户提了什么意见？
+3. **可沉淀项**：上面每一条，能不能变成**铁律**（文档）/ **代码改动** / **不变式自检**？
+- 判定规则：**只要有一条能沉淀 → 必须当轮就改 skill**，不允许「只记在项目日志里以后再说」。
+
+**F2. 沉淀必须落到「代码 + 文档 + 自检」三处（缺一不可）**
+- 代码：改 `references/*.py`，能用 grep 找到 diff（**只写文档不改代码 = 没修**）
+- 文档：SKILL.md 铁律正文 + 版本历史，重要改动同步 `CHANGELOG.md`
+- 自检：往 `tools/checks.txt` 加一行 `<相对路径>|<关键字>`，**这条修复以后就再也丢不掉了**
+
+**F3. 改完必须发版（唯一收尾动作）**
+```bash
+python tools/snapshot.py --version <新版本> --kind patch|minor|major \
+    --project "《项目名》" --summary "一句话" \
+    --item "改了 X，因为 Y" --verify "实测：..." \
+    --add-check "references/xxx.py|新关键字"
+```
+依次：跑 `checks.txt` 回归自检（**老修复丢一条就拒绝发版**）→ 追加 `CHANGELOG.md`
+→ 打 `_versions/mv-auto-pipeline-V<版本>-<日期>.zip` 快照 → git commit + `git tag V<版本>`。
+
+**F4. 回退（进化把版本搞坏时的救命绳）**
+```bash
+python tools/rollback.py --list            # 看所有历史版本（git tag + zip 快照）
+python tools/rollback.py --to V1.0         # 退回指定版本
+python tools/rollback.py --to V1.0 --from-zip   # git 也坏了 → 用 zip 快照兜底
+```
+- 回退**前**自动把当前状态备份为 `_versions/_pre_rollback_V<版本>_<时间戳>.zip` → **回退本身也能被回退**。
+- 回退动作作为一次**新提交**记录，不重写历史、不 force push。
+- ⚠️ 兜底路径（尤其「回退」这种平时不用、出事才用的）**必须在隔离环境主动演练一遍**。
+
+**F5. 向用户汇报的话术（每轮收尾必说）**
+- 本次沉淀了什么（改了几处代码 / 几条铁律 / 几条自检）
+- 版本号从 V?a.b → V?c.d，回退命令是什么
+
+---
+
+## 总流程（12 步）
+
+```
+⓪ 主 Agent 启动（建项目目录 + 初始化 pipeline_state.json）
+① 首问六件套（歌曲 / 主人公图 / 比例分辨率 / 审核模式 / 算力 / 工作流）—— 缺图必问
+② 歌词提取与强制对齐  → ⛔ 关 1（歌词时间轴审核）        ← 整条链的时间基准在这里诞生
+③ 风格锁定（三选一 / 用户图反推）→ ⛔ 关 2（风格审核）   ← 必须先于资产（服装色调依赖风格）
+④ 人物与资产（主人公图 + 场景 + 道具 / 项目模型 生图）→ ⛔ 关 3
+   └─ 无主角模式：本步与关 3 整体跳过，走 image_mode=text_only
+⑤ MV 分镜设计（歌曲线切段 + 口型策略 + 景别 + 画面构想）→ ⛔ 关 4（分镜审核）
+⑥ 项目视频模型 六段式提示词派生（sings 官方框架 + R34 表演指导）→ ⛔ 关 5（提示词审核 · 硬门禁）
+⑦ 音乐窗口与口型对齐核对 → ⛔ 关 6（音乐窗口审核 · 硬门禁）
+⑧ 工作流改造（fetch → inspect → 扩槽 → 去参考化）+ 首镜试产
+⑨ 批量生成（并发 + 断点续跑 + rescue + 降级留痕 + 时长贴合）
+⑩ 重抽卡（`--only N --new-seed`；改过提示词必须重过关 5）
+⑪ 拼接成片（final.mp4 / final_master.mp4）+ 对齐三验 → ⛔ 关 7 / 关 8
+⑫ 项目复盘 → 沉淀进 skill（代码+文档+自检）→ 发版打 tag + 交付四件套
+```
+
+**8 道审核关全部落 HTML**；关 5 与关 6 是**唯一挡在花算力之前**的硬门禁。
+**第 ⑫ 步不是可选项**：每支 MV 跑完都要把经验固化进 skill 并发版，否则这个 skill 不会长进。
+
+---
+
+## 阶段〇：项目初始化
+
+### 目录结构
+
+```
+<项目根>/
+├── 音乐/
+│   ├── song.mp3               # 用户输入 · 原样保留（只读）
+│   ├── song_info.json         # 时长/采样率/声道/码率（song_probe）
+│   ├── song_16k.wav           # ASR 用的 16k 单声道副本
+│   └── cuts/                  # music_mode=upload 时的逐段切窗
+│       └── cut_03_19.90s.wav
+│
+├── 歌词/
+│   ├── lyrics_raw.txt         # 官方歌词（用户提供，一行一句，可选但强烈建议）
+│   ├── lyrics_asr.json        # ASR 原始结果（extract_lyrics.py）
+│   ├── lyrics.json            # ✅ 权威时间轴（逐行 + 对齐置信度 + 结构标记）
+│   ├── lyrics.lrc             # ✅ 权威 LRC
+│   └── lyrics_review.html     # 关 1 审核页
+│
+├── 人物资产/
+│   └── char_01_<主角名>/
+│       ├── images/front.png   # 用户给的图 或 项目模型 生成（3:4 半身正面纯白底）
+│       └── profile.md         # 含 **中文名**/**英文名**/年龄/性别/职业/服装中英双行
+│
+├── 场景资产/scene_NN_<名>/{main.png, description.md}    # 严禁有人
+├── 道具资产/prop_NN_<名>/{main.png, description.md}     # 严禁有人
+│
+├── 分镜脚本/
+│   ├── storyboard.json        # ✅ 权威分镜（含 music_window / sing_mode / shot_size）
+│   └── 分镜表.md               # 人读版
+│
+├── 视频/
+│   ├── shot_NN_<kw>/
+│   │   ├── prompt.txt         # 本段 项目视频模型 提示词
+│   │   ├── refs/              # 本段实际上传的参考图快照
+│   │   ├── output_raw.mp4     # 原样下载
+│   │   ├── output.mp4         # ✅ 已贴合到窗口长度
+│   │   └── log.json           # taskId / 窗口 / 实得时长 / conform / 耗时 / 币
+│   └── final/
+│       ├── final.mp4          # 逐段内嵌音乐直接拼
+│       ├── final_master.mp4   # ✅ 交付首选（画面轨 + 原曲母带重贴）
+│       └── 对齐验收.html       # 关 8 的三验报告
+│
+├── 审核/
+│   ├── 01_歌词时间轴审核.html … 08_成片审核.html
+│   └── 全链总览.html
+│
+└── 状态/
+    ├── pipeline_state.json    # 全局状态机（含 song / hero / style_prompt / config）
+    ├── style_options.json     # 关 2 用：3 个候选风格方向 + locked_choice
+    ├── prompt_review.json     # 关 5 门禁状态机（逐段 status + sha1 + 分辨率确认）
+    ├── music_plan.json        # 关 6 门禁状态机（窗口计划 + ok + problems）
+    ├── rh_state.json          # 逐段生成状态（断点续跑 / rescue）
+    ├── 成本台账.csv            # 逐段 供应商报告费用 / **钱包元** / 生成耗时 / 视频时长
+    ├── 调度日志.csv            # 账号留痕（降级 / 并行授权 / 车道退役 / 池满放回 / 兜底）
+    ├── production_log.md      # 全片制作过程 + 复盘三问
+    └── .env                   # 可选 · 项目级覆盖（不进 git；通常**不需要**建，见下）
+```
+
+### 凭证：四级读取，**永远不问用户要 key**（V1.0.6）
+
+```
+① --api-key <KEY>                                  当次显式指定（最高优先）
+② 真实环境变量 project_provider_API_KEY                    shell 里 export 的，永不被文件改写
+③ <项目根>/.env                                     项目级覆盖（不同项目可用不同账号）
+④ ~/.project_provider/credentials/mv-auto-pipeline/keys.env ★ 用户级、跨项目永久生效
+```
+
+**④ 是默认就位的那一层** —— 新项目里什么都不传也应该跑得通：
+
+```bash
+python references/batch_run_mv.py --project-root "<新项目根>" --workers 5   # 不带 --api-key
+```
+
+文件格式（`ENV_NAMES` 里列出的键才会被读）：
+
+```ini
+project_provider_API_KEY=<消费级 · 走 供应商报告费用>
+project_provider_API_KEY_C=<同上，兼容旧写法>
+project_provider_API_KEY_E=<企业级 · 按秒扣钱包真钱，仅在用户当次明确要求时使用>
+项目模型_API_KEY=<项目模型 项目模型 网关>
+项目模型_API_BASE=[项目内资源]
+```
+
+🔒 **不可动摇的三条**：
+1. **`resolve_key()` 必须自愈** —— 调用方忘了 `load_dotenv` 也要读得到（`self_heal=True` 时无条件加载）。
+   只做「环境变量为空才加载」是**错**的：环境变量已有时不加载 → `LAST_SOURCE` 留空 → 诊断报告说谎。
+2. **`enterprise_key()` 与 `resolve_key()` 同级** —— 只修消费级 = 用户级文件里的企业级 key 形同虚设。
+3. **「用户说记住」= 必须落成代码可读的形态**。写在 `MEMORY.md` 里的 key，代码不读就等于没记。
+   凡「用户说过一次、以后不该再问」的东西，一律落 `keys.env` 这类**代码可读的持久化文件**，
+   而不是只落一句记忆。**判据：新项目、零参数、能跑通。**
+
+诊断（不打印 key 本体，只报「有没有 + 从哪来」）：
+
+```bash
+python -c "import sys; sys.path.insert(0,'references'); import rh_client as r; [print(x) for x in r.credential_report('.')]"
+```
+
+| 症状 | 真因 | 处置 |
+|---|---|---|
+| 换项目后报「❌ 缺少 project_provider API Key」 | 用户级 keys.env 不存在或被改坏 | 补 `~/.project_provider/credentials/mv-auto-pipeline/keys.env`；**不要**改成向用户索要 |
+| 项目里读到的是旧账号 | 项目 `.env` 覆盖了用户级 | 删该项目的 `.env`，或确认它确实该生效 |
+| 企业级 key 读不到（但消费级正常） | 只改了一半 —— `enterprise_key` 没接进读取链 | 两处入口必须同时走 `load_dotenv` |
+
+### `pipeline_state.json` 关键字段
+
+```json
+{
+  "project": "《歌名》MV",
+  "kind": "music_video",
+  "song": {"file": "音乐/song.mp3", "duration": 213.42},
+  "hero": {"source": "user_image|generated|none", "char_id": "char_01"},
+  "config": {
+    "gen_mode": "multi_ref | text_only",
+    "no_hero": false,
+    "aspect_ratio": "16:9",
+    "resolution_desc": "1920x1080 · 分辨率档 2",
+    "resolution_value": 2,
+    "sync_ratio": 0.45,
+    "instance_type": "plus",
+    "workers": 5,
+    "audit_mode": "auto | dual | manual"
+  },
+  "style_prompt": {"locked": true, "choice": "A", "label": "...", "prompt_zh": "..."}
+}
+```
+
+---
+
+## 阶段一：首问六件套
+
+| # | 必问题 | 选项要点 |
+|---|---|---|
+| 1 | **歌曲** | 文件路径（必须）；有没有**官方歌词文本**；歌是什么语言（zh/ja/en） |
+| 2 | **主人公图** | 给图 / **要不要帮你生成一个主人公** / 不要主人公 → **无主角音乐 MV** |
+| 3 | **比例与分辨率** | 16:9·1080P（横屏）/ 9:16·1080P（竖屏短视频）/ 1:1；工作流分辨率值默认 **2** |
+| 4 | **审核模式** | **双关审（Agent + 人工，推荐）** / 仅 Agent 自审 / 全自动（放权） |
+| 5 | **算力与并发** | default 24G / **plus 48G（推荐）** / ultra；并发 1~5 |
+| 6 | **工作流** | **MV-1 = AI音乐MV数字人（项目模型+项目模型 项目视频模型 项目模型）** — 默认且当前唯一 |
+
+### 第 2 问详解：主人公图（**不许自己替他决定**）
+
+| 情况 | 动作 |
+|---|---|
+| 用户已给图 | 立即读图校准（看实际内容，**不看文件名、不采信描述**）→ 写 `profile.md` → 进资产阶段 |
+| 用户没提 | **必须开口问**：「要不要我帮你生成一个主人公作为 MV 主角？如果你更想要纯氛围/群像的无主角 MV，也可以直接说不。」 |
+| 用户说不要 / 不需要主角 | → **无主角音乐 MV**（铁律 C6）；`config.no_hero=true`、`gen_mode=text_only`；阶段四与关 3 跳过，全片 `sing_mode=no_sync` |
+| 用户说「你定」 | 默认**给一个主人公**（MV 有主角时对口型镜头才有意义）；但要在关 3 让用户看一眼图再往下走 |
+
+### 第 3 问详解：比例与分辨率
+
+- 工作流 node **61** 的分辨率值**默认 = 2**（用户指定）。
+- **横屏 / 竖屏的取值映射必须先 `--inspect` 看清值域再填** `mv_workflows.json` 的
+  `resolution_map`，**不许猜**（猜错 = 整片比例错，全部作废）。
+- 关 5 的 `--confirmed-resolution` 只是**复核**首问已经选好的档位，不是重选。
+
+### 全自动方案（用户说「全自动」时）
+
+```yaml
+gen_mode: multi_ref
+no_hero: false
+aspect_ratio: 16:9
+resolution_value: 2          # 用户指定默认
+sync_ratio: 0.45
+instance_type: plus
+workers: 5
+audit_mode: auto             # 跳过人工审，但 Agent 自审 + 机检 + 硬门禁全保留
+```
+
+必须给用户明确提示：
+
+> ✅ 已启用全自动模式。后续全程无人工干预，预计 [X] 分钟、约 [Y] 供应商报告费用。
+> ⚠️ 唯一需要你点头的地方是**关 1 歌词时间轴** —— ASR 必然有错字，
+> 我会把「待核行」列给你，你只需确认那几行。其余我自己审。
+> 每段独立落盘 `视频/shot_NN/`，含原料快照与 log.json，事后可单独追溯/重抽。
+
+---
+
+## 阶段二：歌词提取与强制对齐 → ⛔ 关 1
+
+**这是整条链的地基。地基歪了，后面全白做。**
+
+### 2.1 歌曲探测
+
+```bash
+python references/extract_lyrics.py --project-root "<根>" --song "音乐/song.mp3" --probe
+```
+→ `音乐/song_info.json`（时长 / 采样率 / 声道 / 码率）+ `音乐/song_16k.wav`。
+
+### 2.2 ASR 拿时间（四路后端自动降级）
+
+```bash
+python references/extract_lyrics.py --project-root "<根>" --song "音乐/song.mp3" --backend auto
+```
+优先级：`faster-whisper`（本地推荐）→ `whisper` CLI → `whisper.cpp` → OpenAI 兼容 ASR API。
+- 全部不可用时给**明确指引**（不是静默失败）：
+  ① `pip install faster-whisper` ② `--backend api --api-base ... --api-key ... --model ...`
+  ③ 直接提供现成 LRC 走 `align_lyrics.py --lrc ...`。
+- 歌曲语速/和声多，**model-size 建议 `medium` 起**。
+
+### 2.3 官方歌词强制对齐
+
+```bash
+# 有官方歌词（推荐）
+python references/align_lyrics.py --project-root "<根>" \
+  --asr "歌词/lyrics_asr.json" --official "歌词/lyrics_raw.txt" --song "音乐/song.mp3"
+# 有现成 LRC
+python references/align_lyrics.py --project-root "<根>" --lrc "歌词/lyrics.lrc" --song "音乐/song.mp3"
+```
+算法：字符级 Needleman-Wunsch 全局对齐（去标点、match +2 / mismatch −1 / gap −1），
+把**官方歌词行**映射到 **ASR 字符时间**上；命中率低于 55% 的行标 `review_needed`。
+同时：插 `[instrumental]`、跑自检、出 `lyrics.json` / `lyrics.lrc` / `lyrics_review.html`。
+
+### 2.4 ⛔ 关 1：歌词时间轴审核
+
+```bash
+python references/audit_html_builder.py --project-root "<根>" --stage lyrics
+```
+用户看 `审核/01_歌词时间轴审核.html`：逐行「起 / 止 / 时长 / 歌词 / 对齐命中 / 状态」。
+**「⚠ 待核」行必须人工听一遍**（这一句是整条链唯一必须人工的地方，别省）。
+
+**通过后**把 `pipeline_state.json.stages.lyrics.status` 置 `approved`，才允许进关 2。
+
+---
+
+## 阶段三：风格锁定 → ⛔ 关 2（先于资产）
+
+**铁律：风格必须三选一推荐给用户，禁止主 Agent 直接定。**
+（翻车现场：《孤独鲸鱼》主 Agent 直接锁风格，用户质问「这个风格没有让我选择哦」。）
+
+| 选项 | 风格 | 参考片 | 适合 |
+|---|---|---|---|
+| A | 胶片颗粒 + 冷调城市夜光 | 《重庆森林》《堕落天使》 | 都市、孤独、夜晚 |
+| B | 逆光暖调 + 青春质感 | 《情书》《四月物语》 | 校园、明亮、回忆 |
+| C | 高对比霓虹 + 强色块 | 《Drive》《霓虹恶魔》 | 电子、舞台、情绪爆发 |
+
+用户给了参考图 → **直接反推风格关键词**，跳过三选一，但**仍需用户确认**。
+候选三个方向必须**立刻落盘** `状态/style_options.json`（否则事后补 02 页只剩已锁定方向）。
+
+**MV 特有**：风格句里要带**摄影机质感与光比**（MV 靠光影和镜头说话），
+例如「柯达 Portra 400 胶片颗粒，冷蓝夜光与暖橙街灯对撞，浅景深，真实皮肤质感」。
+
+### 3.x ⛔ 关 2 审核
+`--stage style` → `审核/02_风格审核.html`（3 方向卡片 + 用户选定高亮 + 风格提示词全文）。
+
+---
+
+## 阶段四：人物与资产 → ⛔ 关 3
+
+> **无主角模式（`config.no_hero=true`）整体跳过本节与关 3**，直接进阶段五。
+
+### 4.1 主人公图
+
+| 来源 | 做法 |
+|---|---|
+| 用户给图 | **读图校准三步法**：① 逐张打开看清实际内容（不看文件名、不采信描述）② 列校准表（文案描述 vs 图片实际 vs 采用）③ 按**图片实际内容**写 `profile.md`。校准表随交付一起给用户看 |
+| 需要生成 | 项目模型 生图：**只出人物半身正面照、比例 3:4、背景纯白**；不要三视图/全身/多角度拼接/场景元素 |
+
+`profile.md` 必含：`**中文名**` / `**英文名**` / `**性别**` / `**年龄**` / `**职业**` /
+服装段 `- 中文：xxx` 与 `- 英文：xxx` 两行。
+
+### 4.2 场景 / 道具资产
+
+- ❌ **场景图与道具图严禁出现任何人**（`no people, no humans, empty scene` 写进提示词）。
+- ❌ 禁止画「占位人」「剪影人」「远景人」—— 模型会把这些人的脸/服装当成参考锚点，
+  覆盖主人公图的锚定（drama V0.5.7 实测：场景图画了学生 → 男主服装错 + 人脸不像）。
+- ✅ 场景图只保留：空间布局 / 家具道具 / 光线方向 / 氛围色调。
+- ✅ 道具图：白底无手、单体居中。
+
+### 4.3 ⛔ 关 3 审核
+`--stage cast` → `审核/03_人物与资产审核.html`（人物卡片墙 + 场景卡片墙 + 道具卡片墙）。
+自查：人物图**只有一个人、半身正面、3:4、纯白底**；场景/道具图**没有任何人**（连剪影都不行）。
+
+---
+
+## 阶段五：MV 分镜设计 → ⛔ 关 4
+
+### 5.1 歌曲线切段
+
+```bash
+python references/plan_mv_storyboard.py --project-root "<根>" --target-dur 11 --sync-ratio 0.45
+```
+它做四件事：
+1. **切段**：按歌词时间轴切，窗口连续、切点只落在歌词行尾、段长落 [4,15]
+2. **口型策略**：按 `sync_ratio` 等距抽样 → 标 `sing_mode=sync|no_sync`、
+   定 `shot_size`（sync 只能取 ECU/CU/MCU/MS，no_sync 取 MS/MLS/LS/WS/EMPTY）、
+   拆开连续 ≥3 的 sync 段
+3. **结构识别**：重复句簇 = 副歌，标 `in_chorus_block`（供 C7 视觉变奏用）
+4. **机检**：窗口连续 / 段长合法 / 口型-景别一致 / 歌词不越窗 → 不过就报出来
+
+> ⚠️ **两个区间别混**（V1.0.1 踩过）：
+> - **项目视频模型 硬区间 `[4,15]` 秒** —— 段长必须落在这里。这是本铁律 C1 的口径，
+>   也是 `cut_segments(min_dur=4.0)` 的契约，关 6 同样按 `4.0/15.0` 核。
+> - **请求时长区间 `[5,15]` 秒** —— 下限是 5.0 而非 4.0，因为 17 帧公式带 `max(5, …)`：
+>   窗口只有 4~5s 时实际请求 5s 出头，成片再裁回窗口长度（正常，不是错误）。
+>
+> 曾经 `qc()` 把硬边界写成 `MIN_REQ - 0.3`（= 4.7s），结果 **4.0~4.7s 的段合法产出却被判死**
+> ——校验器假阳性。**判「段长是否合法」只认 `[4,15]`；`4~5s` 只提示、不拦。**
+
+### 5.2 主 Agent 必须补的字段（脚本给不出画面）
+
+| 字段 | 说明 |
+|---|---|
+| `visual_brief` | **中文导演画面构想**：这一段画什么、机位在哪、光从哪来、人物是什么状态 |
+| `shots`（可选） | 段内镜头表 `[{t, size, zh}]`。不给就自动切（sync 段按歌词行 ≤3 镜，no_sync 段 ≥9s 切 2 镜） |
+| `ending_zh` | 收势：段末停在什么姿态（下段的起始锚点） |
+| `next_cut_zh` | 下段切点：切到什么景别/视点 |
+| `scene_id` / `prop_ids` | 本段用到的场景/道具 |
+| `crowd` | 场景天然含群众（街拍/演唱会/食堂）→ true，自动加背景人群三锁定 |
+| `duet` | 双人对唱 → true，发声行写 `(S1,S2) sings:` |
+
+**视觉变奏要求（C7）**：同一段副歌第二次、第三次出现时，
+`visual_brief` **必须**与首次不同（换景别/换空间/换光比/换主体），否则重写。
+
+### 5.3 ⛔ 关 4 审核
+`--stage storyboard` → `审核/04_分镜审核.html`：
+逐段「音乐窗口 / 时长 / 结构 / 口型 / 景别 / 歌词 / 画面构想」+ 口型规则提示条。
+
+**通过后**必须把 `storyboard.json` 的 `"status"` 置 `"approved"`（下游脚本会读）。
+
+---
+
+## 阶段六：项目视频模型 六段式提示词派生 → ⛔ 关 5（硬门禁）
+
+### 6.1 生成提示词 + 机检（零 API 成本）
+
+```bash
+python references/mv_to_h3_prompts.py --project-root "<根>" --dump-prompts --lang zh
+```
+产物：每段 `视频/shot_NN_<kw>/prompt.txt` + 机检明细 + `状态/prompt_review.json`。
+
+### 6.2 提示词长什么样（关键差异，务必照抄口径）
+
+```
+[reference generation]
+@图片1：人物资产/char_01_林晚照/images/front.png  → 主角正脸锚定（林晚照）
+@图片2：场景资产/scene_01_深夜排练室/main.png  → 场景锚定（深夜排练室）
+按上述顺序上传参考图，提示词中的 <Picture N> 与上传顺序一一对应。
+
+subject_definitions:
+<Subject 1>：林晚照（Wanzhao），24 岁，女，独立音乐人。服装为米白色粗针高领毛衣 + 深灰阔腿长裤。完全参照 <Picture 1> 外观，保留其面部特征、发型与整体形象。<Picture 1> 不得展示参考图自带的棚拍纯色背景，替换为深夜排练室的实际场景环境。
+<Subject 2>：深夜排练室（场景）。完全参照 <Picture 2> 外观，锁定空间布局、色彩与光线方向。<Picture 2> 不得展示参考图自带的棚拍纯色背景，替换为深夜排练室的实际场景环境。
+
+summary:
+10.833 秒，一段多镜头的音乐 MV 段落（原曲第 0.00s–10.70s），场景在深夜排练室。林晚照在画面中。本段人物**跟随音乐母带对口型演唱**，口型必须与音乐人声严格同步，每一句歌词的起止都与母带人声一致。
+
+retention_analysis:
+<Subject 1>：fully_preserved —— 保留林晚照的面部特征、发型、服装与体态；动作：注视 → 呼吸起落 → 开口演唱。
+<Subject 2>：fully_preserved —— 保留深夜排练室的空间布局、材质、色彩关系与光线方向。
+全片镜头几何锁定：机位与人物朝向一经确立不再漂移；人物在画面中的左右位置保持一致。
+
+detailed_description:
+电影感音乐 MV 质感，柯达 Portra 400 胶片颗粒，冷蓝夜光与暖橙街灯对撞，浅景深，真实皮肤质感。 Acting direction for the whole sequence: she is not performing for an audience — she is telling one person something true. …
+[Shot 1] 0–10.833s，机位与构图：……。
+→林晚照 (S1) sings: <d>[中文]月光落在旧琴弦上</d>
+At 00:04.600，镜头切至……。
+→林晚照 (S1) sings: <d>[中文]我把名字写进夜里</d>
+【本段尾帧】……
+【下段切点】……
+
+overall_soundscape:
+以歌曲母带为准：本段使用原曲第 0.00s–10.70s 的音乐片段，人声与伴奏均取自母带。画面内不出现额外人声、不出现对白、不出现第二层人声。环境声极轻，不得压过母带人声。
+
+non_diegetic_music:
+N/A
+
+Negative:
+no watermark, no text overlay, no logo, no extra limbs, no deformed hands, no cross-eyed, no plastic skin
+```
+
+**不对口型段（`sing_mode=no_sync`）的差异（这一条最容易翻车）**：
+- **没有一句 `sings:`**，正文改成 `→画面中的一切照常进行，没有人对镜头唱歌。` + `NO_SYNC_DECL`
+- `Negative` 追加 `no lip sync, no mouthing lyrics, no extra vocals`
+
+### 6.3 机检 11 项（`audit_machine()`）
+
+| 码 | 查什么 |
+|---|---|
+| S1 | 六段式字段齐全（六个字段名一个不少） |
+| S2 | `<Picture N>` 编号连续（1..N 不跳号） |
+| S3 | **无 `<Audio N>`**（MV 用母带） |
+| S4 | 发声行带 `<d>[语言]` |
+| S5 | R34 表演指导行存在（段内有角色时） |
+| S6 | 声乐预算 ≤ 段长（中文 4.5 字/秒 · 日语 7.0 モーラ/秒 · 英语 2.5 词/秒） |
+| S7 | 发声行独立成行（行首 `→`） |
+| M1 | **口型开关一致**（sync 有 `sings:` 且无 `says:`；no_sync 两者都无） |
+| M2 | 口型段景别是中近景 |
+| M3 | 声明了音乐窗口（`原曲第 Xs`） |
+| M4 | 引用了对齐后的实际时长 |
+
+再叠加 **项目视频模型 官方双校验器**（有就自动跑，错误必须 0）：
+`项目视频模型-ref2va-optimizer/scripts/validate_ref2va.py` + `validate_ref2va_local.py --cross-shot`。
+
+### 6.4 ⛔ 关 5 审核（双关 + 分辨率复核）
+
+```bash
+python references/audit_html_builder.py --project-root "<根>" --stage prompt
+```
+页面顶部是**分辨率复核区块**（首问所选档位 / 工作流默认值 2 / 已确认值），
+下面是逐段卡片：参考图槽位（顺序 = `<Picture N>`，缺文件显红）+ 机检明细表 +
+校验器结果 + 可展开的提示词全文。
+
+通过后：
+```bash
+python references/mv_to_h3_prompts.py --project-root "<根>" --approve-prompts \
+  --confirmed-resolution "1920x1080 · 分辨率档 2 · 16:9 横屏"
+```
+- 逐段比对 sha1，**提示词在审核后变过的段会被拒绝放行**（置回 `pending` 且不改写 sha1）。
+- 用户放权（全自动）时，这一步由 Agent 在机检全绿后自己执行，但仍必须落库 sha1 与分辨率确认。
+
+---
+
+## 阶段七：音乐窗口与口型对齐核对 → ⛔ 关 6（硬门禁）
+
+```bash
+python references/check_alignment.py --project-root "<根>" --plan
+python references/audit_html_builder.py --project-root "<根>" --stage music
+```
+核：窗口连续无缝 / Σ窗口 = 全曲长 / 每段歌词行都落在自己窗口内 /
+对口型段景别合法 / 段长落 [4,15]。产物 `状态/music_plan.json`（`batch_run_mv.py` 的门禁读它）。
+
+**为什么关 6 必须独立存在**：段切错了、窗口错位了，提示词写得再好也救不回来 ——
+而这两种错在关 5 的视角里完全看不出来（提示词是「自洽」的）。
+
+---
+
+## 阶段八：工作流改造 + 首镜试产
+
+### 8.1 拿到真实节点表（一次做完）
+
+```bash
+python references/build_mv_workflow.py --fetch --inspect --write-registry
+# 没有 API key：在 project_provider 导出 API 格式 JSON 后
+python references/build_mv_workflow.py --src "<导出.json>" --inspect --write-registry
+```
+体检报告会打印：87 / 85 / 61 / 42 的 `class_type`、标量输入、连出去的线、
+全部图片类与音频类节点、参考素材残留清单。
+`--write-registry` 把猜到的字段名回写 `mv_workflows.json` 并置 `contract_verified`。
+
+⚠️ **必须确认的四件事**（体检报告里逐条看）：
+1. 节点 85 有没有**起点**入参？有 → `music_mode=offset`；没有 → `music_mode=upload`
+2. 节点 61 的**值域**是什么？1/2/3 分别对应什么比例 → 填 `resolution_map`
+3. 节点 42 的下游是**单值输入**还是**列表输入**？单值 → 扩槽后需手工接线
+4. 音频是从哪儿进的？→ 记进 `audio_policy`（铁律 D9）
+
+### 8.2 改造
+
+```bash
+python references/build_mv_workflow.py --build --image-slots 2      # 主角 + 场景
+python references/build_mv_workflow.py --build --drop-refs          # 确认后断开残留
+```
+
+### 8.3 首镜试产（**必做，不许跳过**）
+
+```bash
+python references/batch_run_mv.py --project-root "<根>" --only 1 --workers 1
+```
+（★ V1.0.6：key 从用户级凭证自愈读取，不必传 `--api-key`；见铁律 D12）
+
+看四件事，并**把实测结论回写注册表**：
+- 视频真实帧数 vs 请求帧数（确认 17 帧对齐公式是否适用 → `frame_align_confirmed`）
+- 音频是母带直出、还是 项目视频模型 生成音频（→ `audio_policy`）
+- 对口型段的嘴部是否真的跟母带人声同步
+- 不对口型段的嘴是否真的不动（若动了 → 加强 `NO_SYNC_DECL` 与 Negative，重试）
+
+---
+
+## 阶段九：批量生成
+
+```bash
+# 单池（默认，只烧 供应商报告费用）—— ★ V1.0.6：--api-key 可以**整个省掉**
+python references/batch_run_mv.py --project-root "<根>" \
+  --workers 5 --instance-type plus
+
+# 双池并行（★ V1.0.4）：消费级 + 企业级同时跑，墙钟约减半，企业级那份是**真钱**
+# ★ V1.0.6：两把 key 都在用户级 keys.env 里，--api-key / --api-key-e 也都可以省
+python references/batch_run_mv.py --project-root "<根>" \
+  --enterprise-parallel --enterprise-parallel-max 8 \
+  --workers 5 --workers-e 5 --instance-type plus
+```
+> 🔑 **不传 key 是**正常**用法，不是省略**：凭证从用户级 `keys.env` 自愈读取（铁律 D12）。
+> 只有「临时换一个账号跑这一次」时才需要 `--api-key`。
+流程：门禁（关 5 + 关 6）→ 逐段注入（87 提示词 / 85 音乐窗口 / 61 分辨率 / 42 图片 / seed）
+→ 并发提交 → 轮询 → 下载 `output_raw.mp4` → **贴合到窗口长度** → `output.mp4` → 写 log + 台账。
+
+- 断点续跑：`状态/rh_state.json` 的 `done` 跳过；`submitted` 保留 taskId 走 rescue，**不重复烧币**。
+- 消费级被占 → 单池模式：经显式授权后降级企业级；双池模式：**放回队列**（池满没烧钱）。
+- 想两条车道同时跑 → `--enterprise-parallel`（第三个独立开关，见铁律 D11）。
+- 每 10–15 分钟主动汇报进度（drama 铁律 D21：曾经沉默 6 小时被用户追问）。
+- 完成后自动拼接：`视频/final/final.mp4` + `final_master.mp4`。
+
+**成本口径**（实测规律，收尾汇报必须写明）：
+- 消费级 **0.4 供应商报告费用 / 秒耗时**；企业级 **¥6 / 小时耗时**；**按墙钟秒计费、含排队、与视频时长无关**。
+- 余额：`POST /uc/openapi/accountStatus`（⚠️ 参数名小写 **`apikey`**）→ `remainCoins` / `remainMoney` / `apiType` / `currentTaskCounts`。
+  ⚠️ **`currentTaskCounts` = 此刻正在跑的任务数，不是并发额度**（★ V1.0.4 更正）
+  —— 两把 key 在无任务时都返回 `0`；账号能开多大并发**没有接口能读**，
+  只能靠「池满就放回队列」这种自适应写法兜住。
+  `apiType` 才决定计费口径：`NORMAL` = 消费级走 供应商报告费用；`SHARED` = **按秒扣钱包真钱**；
+  同一账号的两把 key 会指向**同一个钱包**（余额数字完全相同）。
+- 逐任务：`POST /task/openapi/outputs` → `consumeCoins` / `consumeMoney` / `taskCostTime`。
+- 币/元比值**从账号现算**，不许写死。
+- **只给数值的页面，用户一定会回来问** → 任何「花了多少 / 慢了多久」的页，必须
+  **数值 + 出处 + 可复核算式** 三件齐全。
+
+---
+
+## 阶段十：重抽卡
+
+```bash
+# 单段
+python references/batch_run_mv.py --project-root "<根>" --api-key <KEY> --only 3 --new-seed --workers 1
+# 多段（MV 各段之间零依赖，可全并行）
+python references/batch_run_mv.py --project-root "<根>" --api-key <KEY> --only 1,5,9 --new-seed --workers 3
+```
+- **MV 的段之间天然零依赖**（每段吃的是母带的固定窗口，不需要上一段尾帧）
+  → 重抽多段**直接并行**，耗时 = 最慢那一段。
+- 改过提示词 → 必须重跑 `--dump-prompts`（**不带 `--only`**，全量 dump 零成本）
+  → 用户重审 → `--approve-prompts` → 再重抽。门禁会拦，别想绕过。
+
+---
+
+## 阶段十一：拼接成片 → ⛔ 关 7 → ⛔ 关 8
+
+### 11.1 两条成片
+
+| 文件 | 做法 | 用途 |
+|---|---|---|
+| `视频/final/final.mp4` | 逐段 `output.mp4`（已含各自的音乐窗口）直接 `concat -c copy` | 交叉验证：听上去是否天衣无缝 |
+| `视频/final/final_master.mp4` | 画面轨 + **原曲母带**重贴，`-t 曲长` | **交付首选**：绝对对齐，无累积残差 |
+
+### 11.2 ⛔ 关 7 分段视频审核
+```bash
+python references/audit_html_builder.py --project-root "<根>" --stage video
+```
+逐段：视频播放 + 窗口 / 目标时长 / 实得时长 / conform 结论 / 耗时 / 币。
+
+### 11.3 ⛔ 关 8 成片 + 对齐三验
+
+```bash
+python references/check_alignment.py --project-root "<根>" --verify
+python references/audit_html_builder.py --project-root "<根>" --stage final
+```
+三验（铁律 E4）：**时长**（Σ各段 = 曲长）/ **波形**（最优滞后 ≈ 0s、相关度达标）/
+**人声**（对口型段能量非空）。任一不过 → **不许说「MV 做完了」**。
+
+常见问题与处置：
+
+| 现象 | 根因 | 处置 |
+|---|---|---|
+| 某段滞后 > 0.5s | 该段 `output.mp4` 没走 conform / 窗口与计划不一致 | 查 `log.json.conform`；重跑该段 |
+| 波形相关度普遍偏低 | 音频整体不是母带（工作流在生成自己的音频） | 以 `final_master.mp4` 为准；同时把 `audio_policy` 记进注册表 |
+| 对口型段能量过低 | 该段其实没出声（项目视频模型 没唱） | 检查 `sings:` 行是否独立成行、是否被 `says:` 污染；重抽 |
+| 不对口型段的嘴在动 | `NO_SYNC_DECL` 未生效 | 强化 Negative + 把该段改成**中远景/背影/空镜**（换景别比改提示词更稳） |
+| Σ各段 ≠ 曲长 | 有段落没跑完 / conform 失败 | 补齐后重新拼接 |
+| 报错只有 `任务失败: code=0 msg=success` | status 端点失败时**不给原因** | 用该 taskId 调 `outputs` 回挖 `data.failedReason`（`fetch_failure()` 已自动化）——**不用重跑烧币** |
+| `Invalid audio file: <...>` | 台账里存的是占位串，被原样注进音频节点 | 清掉该条缓存重传（`upload_cached()` 已加 `<` 前缀守卫，见 D8c） |
+| 空镜段画面里冒出人脸 | node 36 的示例图没断线，且走的是 nodeInfoList | 走 `bake_workflow()` 摘线 + `workflow` 整包直传（见 D4/D11） |
+
+---
+
+## 阶段十二：项目收尾 → 交付四件套（每个项目都必做）
+
+| # | 交付物 | 回答什么问题 | 生成命令 |
+|---|---|---|---|
+| 1 | `视频/final/final_master.mp4` | **成片是什么样** | 阶段十一 |
+| 2 | `分镜脚本/分镜表.md` | **怎么做**（逐段窗口/口型/景别/画面构想） | 阶段五 |
+| 3 | `审核/01..08_*.html` | **做得对不对**（8 关逐段细审） | `--stage all` |
+| 4 | `审核/全链总览.html` | **整条链怎么走的 / 花了多少** | `--stage overview` |
+| + | `视频/final/对齐验收.html` | **音画对齐有没有做到** | `check_alignment.py --verify` |
+
+**「总消耗时长」与「供应商报告费用」必须在总览页最前面的 KPI 带里**（用户第一眼要看的是
+「这支 MV 值不值」——成片多少秒 / 机器跑了多久 / 花了多少，三个数并排才有决策价值）。
+
+收尾自查：
+```bash
+ls "视频/final/final_master.mp4" "分镜脚本/分镜表.md" "审核/08_成片审核.html" "审核/全链总览.html"
+```
+四件齐 → 走 **F1 项目复盘 → F3 发版 → F5 汇报（含版本号 + 沉淀项 + 回退命令）**。
+
+---
+
+## 主 Agent 决策树
+
+```
+读 pipeline_state.json：
+  - 无 歌词/lyrics.json                  → 进阶段二（关 1）
+  - stages.lyrics.status != approved      → 进阶段二（关 1 未过）
+  - style_prompt 未锁定                    → 进阶段三（关 2）
+  - gen_mode == multi_ref 且无人物资产     → 进阶段四（关 3）；no_hero=true → 跳到阶段五
+  - storyboard 不存在或 status != approved → 进阶段五（关 4）
+  - prompt_review.json 不存在              → 进阶段六（--dump-prompts）
+  - prompt_review.status ∉ {approved,partial} 或 resolution_confirmed != true
+                                          → 进阶段六（关 5）
+  - music_plan.json 不存在或 ok != true    → 进阶段七（关 6）
+  - mv_workflows.json 的 contract_verified != true → 进阶段八 8.1（--fetch --inspect）
+  - rh_state 里没有 done 段                → 进阶段九（批量生成）
+  - 有段 failed                            → 进阶段十（重抽 / rescue）
+  - 对齐验收.html 不存在或有三验不通过项     → 进阶段十一（关 8）
+  - 全通过                                 → 进阶段十二（收尾四件套）
+```
+
+⚠️ 分镜通过 ≠ 提示词通过 ≠ 窗口核对通过：**三道关必须各自独立走一遍**。
+
+---
+
+## 错误处理与恢复
+
+| 场景 | 处置 |
+|---|---|
+| 拿不到官方歌词 | 走纯 ASR，全部行标 `review_needed`，**逐行人工过一遍**；实在不行让用户手打 LRC |
+| ASR 后端全不可用 | 给三条明确指引（装 faster-whisper / 用 ASR API / 提供 LRC），不许静默失败 |
+| 歌词时间轴有空档 | 自动插 `[instrumental]`；空档段一律 `no_sync` + 空镜/群像 |
+| 段长算完不落 [4,15] | 调 `--target-dur`；单行歌词占满一段的极短段 → 与邻段合并 |
+| 某句歌词被切成两半 | 切点只落行尾（算法已保证）；真需要跨界 → `<scenetrans>` + summary 声明 |
+| 工作流契约对不上 | `--inspect --node <id>` 看真实字段名 → 手工改注册表 → 重跑 `--write-registry` |
+| 提交被门禁拦下 | 按提示回关 5 / 关 6 补审；**别用 `--skip-gate`** |
+| 消费级被占用 | 需用户显式授权才降级：`--api-key-e` + `--allow-enterprise-fallback`；降级写调度日志。**先告知用户「这是拿真钱换速度」** |
+| 想用两把 key 一起跑（墙钟减半） | `--enterprise-parallel`（**第三个独立开关**，不能由前两个推定）+ 建议 `--enterprise-parallel-max N` 给真钱封顶；池满只会「放回队列」，不烧钱 |
+| 换新项目后报「❌ 缺少 project_provider API Key」 | 用户级 `keys.env` 缺失/被改坏，**不是**「用户没给 key」→ 补 `~/.project_provider/credentials/mv-auto-pipeline/keys.env`（铁律 D12）。**禁止**回头找用户索要；跑 `examples/test_credentials.py` 自证已修 |
+| 抽卡不满意 | `--only N --new-seed`；MV 各段零依赖，可多段并行 |
+| 音画对不齐 | 先看 `log.json.conform`，再看 `audio_policy`；实在不行以 `final_master.mp4` 交付 |
+| 无主角模式某些段显得空 | 用环境空镜 / 群像 / 道具特写 / 跟拍背影填充；必要时**调小 `--target-dur` 增加切镜密度** |
+
+---
+
+## 版本历史
+
+- **1.0.6（2026-09-17）凭证跨项目自愈：永远不再问用户要 key**
+  - **触发（用户原话）**：「我不是说了把这些key永久记住吗，怎么还找我要？」
+  - **根因**：key **早就永久记住了**（2026-09-14 即写入 `~/.project_provider/MEMORY.md`），
+    但 `rh_client.load_dotenv()` 只认「当前项目目录下的 `.env`」——
+    换个新项目 → 找不到 → `resolve_key()` 抛「❌ 缺少 project_provider API Key」。
+    **记忆没丢，是代码不读。**
+  - **判据升级（本版最重要的一条）**：
+    > **写在 `MEMORY.md` 里不算修好，代码能读到才算修好。**
+    凡「用户说过一次、以后不该再问」的东西，必须落成**代码可读的持久化文件**。
+  - **落地**：新建用户级凭证 `~/.project_provider/credentials/mv-auto-pipeline/keys.env`
+    （与既有 `credentials/meituan-living-deals-assistant/token.json` 同规矩），
+    读取链升级为**四级**：`--api-key` > 真实环境变量（永不被改写）> `<项目根>/.env`（项目级覆盖）
+    > 用户级 `keys.env`（跨项目兜底）。
+  - **`resolve_key()` 加 `self_heal`（无条件加载）** —— 调用方忘了 `load_dotenv` 也读得到。
+    写成「环境变量为空才加载」是**错**的：会让 `LAST_SOURCE` 留空、诊断报告说谎。
+  - **`enterprise_key()` 同级改造**：只修消费级 = 用户级文件里的企业级 key 形同虚设
+    （要用时照样报「没给企业级 key」）。`build_mv_workflow.py` 无显式 `load_dotenv`，
+    正是靠 `resolve_key` 的自愈才读得到。
+  - **`_INJECTED` 快照**：排除「本模块自己注入过的键」，否则第二次 `load` 会把自己上次写的
+    当成「真实环境变量」→ 项目级再也覆盖不了用户级。保证幂等。
+  - 新增离线单测 `examples/test_credentials.py`（**22 条断言**，零算力零网络零真钱），
+    核心断言是「**全新空目录 + 无 .env + 不传任何 key → 必须自愈读到**」；
+    另锁「项目级覆盖用户级」「真实环境变量最高」「幂等」「报错文案指向实际凭证路径」。
+  - 新增铁律 **D12**；`checks.txt` 新增 30 条不变式（此前**一条凭证相关自检都没有**——
+    这正是「记了却读不到」能潜伏至今的原因）。
+
+- **1.0.5（2026-09-18）池满退役改成「限时」而不是「限次」**
+  - V1.0.4 发出去几分钟后发现池满处理会把进程**挂死**：判据写的是「连续 3 次池满退役」，
+    而且**只让企业级退役** → ① **消费级池满会无限重试**（池子真满了就永远转不停，没有任何出口）；
+    ② 反过来 3 次（≈2 分钟）就退役**又太狠**（池子只是有点挤，退役反而把活推给兜底路径直接判死）。
+  - **判据错在「次数」**：该看的是「等了多久」。新增 `BUSY_GIVE_UP_SEC`（默认 **30 分钟**，0 = 永不放弃）
+    + 每车道 `busy_since`；池满持续超时 → 退役、队列交兜底，**两条车道一视同仁**；
+    某次提交成功即把 `strikes` 与 `busy_since` 一起清零。
+  - **单测新增 ④b：两条车道**全都**池满** —— 只测「一条退役」测不出挂死。断言秒级收敛且
+    4 段最终全部由兜底跑完（实测 **1.4s 收敛**）。
+  - 退役原因写实：打印实际等待秒数并写 `状态/调度日志.csv`，取代原来语焉不详的「连续 3 次池满」。
+
+- **1.0.4（2026-09-18）双池并行：消费级 + 企业级同时开跑（真钱可封顶，且不许静默丢活）**
+  - **需求**：用户「消费级+企业级一起并行」—— 要的不是「失败才降级」，是**两条车道同时开工**。
+  - **机制**：`--enterprise-parallel` 开启后，**一个共享任务队列 + 两条车道同时抢**
+    （消费级 `--workers` 宽 ∥ 企业级 `--workers-e` 宽）。
+    为什么不用「对半切开」：实测单段机器耗时 600~900s 差得很远，静态对半必然一条车道先空转；
+    共享队列让「谁先空出手谁接着取」，墙钟才真的减半 —— 离线单测实测并行度 **≈2.0x**。
+  - **第三个独立开关**：`--api-key-e`（提供凭证）/ `--allow-enterprise-fallback`（授权降级）/
+    `--enterprise-parallel`（授权并行）**三者互不推定**。只给 key 不等于同意花钱，
+    同意降级不等于同意并行。
+  - **真钱封顶**：`--enterprise-parallel-max N` = 最多 N 段走企业级，用完该车道**退役**、
+    剩下的回消费级。开跑前打印最坏 / 对半两档预估（实测单段 727s × ¥6/h ≈ **¥1.21/段**）。
+  - **池满 = 没烧钱** → 新增 `SubmitBusy`：段**放回队列**重试，**绝不记 `failed`**。
+    ⚠️ 双池模式下池满**不走降级** —— 两条车道同时在跑，本车道改走真钱的话，
+    消费级一被占就会把**整片同时甩给企业级 = 全片烧真钱**。
+  - **「可重试」≠「可降级」**：新增 `TRANSIENT_PAT`（QUEUE/BUSY/TOO_MANY/RATE_LIMIT/
+    OVERLOAD/WORKER/并发/占用/排队/繁忙）；`余额不足`、`APIKEY_INVALID` 重试一万次也一样，
+    **不进**这张表。
+  - ⚠️ **静默丢活**（双池最阴的错，不报错、只让成片短一截）：企业级车道会因「真钱封顶用满」
+    或「连续 3 次池满」**主动退役**（★ V1.0.5 已把这条判据改成「池满持续超过 `BUSY_GIVE_UP_SEC`」，
+    理由见上；此处保留原文以便对照），退役那一刻可能刚把一段放回队列，而消费级车道早已因
+    「当时队列空」退出 → 那几段**既没跑也没记 failed**。修法：车道全停后**队列兜底**，
+    把队列里剩的段一律回落消费级单池跑完。
+  - **台账能加列了**：`append_csv` 原来只要文件存在就直接 `writerow`，而 `DictWriter` 对
+    「row 里有、fieldnames 里没有」的键会 raise —— **给台账加一列 = 让跑过的项目再跑一次就崩**。
+    改为**自动升级表头**（老列顺序在前、新列补末尾、缺的填空），老行不丢。
+    新增「**钱包元**」列：企业级段的 供应商报告费用为 0，真钱记在这一列。
+  - **口径更正**：`currentTaskCounts` 是**此刻正在跑的任务数**，不是并发额度
+    （无任务时两把 key 都返回 `0`）—— 之前记的「消费级支持 5 并发」是误读；
+    账号并发上限**没有接口能读**，只能靠「池满放回」自适应兜住。
+  - **测试基建**：`BUSY_BACKOFF_BASE` / `SUPERVISE_TICK` 提成模块常量
+    （否则单测测「连续 3 次池满退役」要真等 2 分钟、任何并行测试墙钟下限 5s）。
+  - **V1.0.5 补正**：池满退役判据由「次数」改为「持续时长」（`BUSY_GIVE_UP_SEC`，默认 30 分钟），
+    并**对两条车道一视同仁** —— 原写法只让企业级退役，消费级会**无限重试**（进程挂死）。
+    单测新增 ④b：两条车道**全都**池满时也必须在秒级收敛，不能转不停。
+  - **新增离线单测** `examples/test_parallel_lanes.py`（零算力零网络）：
+    ①池满→`SubmitBusy` ②`run_one` 三态不写 `failed` ③**真钱封顶不被绕过**且全部段跑完
+    ④**池满退役后不许静默丢活** ⑤两车道真的同时在跑 ⑥台账加列不崩 ⑦留痕齐全。
+
+- **1.0.3（2026-09-18）补实两处「文档承诺过、代码里根本没有」的功能：在途 rescue + 企业级降级**
+  - **背景**：用户提供企业级 key 时顺带核查，发现**两处文档与代码不一致**（老账：drama 也踩过
+    同类坑）——`D10` 写着「在途任务走 rescue」和「消费级被占自动降级企业级」，
+    而代码里：`status=submitted` 的段**会被当新任务重新提交**（**双倍烧币**），
+    `--api-key-e` **从未被引用**（`args._pool_name` 硬编码 `"consumer"`，
+    `状态/调度日志.csv` 从不生成）。**文档承诺 ≠ 代码实现。**
+  - **补实 ①在途 rescue**：段一旦有 `taskId` 就**先拿它去轮询** —— SUCCESS 就下载交付、
+    RUNNING 就继续等、FAILED 才重提。`TimeoutError` / `outputs 未就绪` 时状态**保留
+    `submitted` + taskId**（任务还在平台上跑），下次跑自然接上；真失败才置 `failed`
+    （taskId 仍保留，便于回挖 `failedReason`）。
+    > 这条必须是**代码**，不能靠人记得 ——《野心家》首镜失败后，是靠人工拿 taskId
+    > 回挖 `failedReason` 才定位到根因、把币救回来的。
+  - **补实 ②企业级降级**：`--api-key-e`（提供凭证）+ `--allow-enterprise-fallback`（授权花钱）
+    **两个开关分开**，因为**「提供凭证」和「授权花钱」是两件事，不能由前者推定后者**。
+    没加授权时即使给了企业级 key 也**只打印提示、绝不降级**。
+  - **降级只对「池子被占」类错误生效**：新增 `DEGRADE_PAT`
+    （QUEUE/BUSY/LIMIT/TOO_MANY/RATE/OVERLOAD/WORKER/APIKEY_/并发/占用/排队/余额/超出/繁忙）。
+    像 `WORKFLOW_NOT_EXISTS` 这种**自己的 bug 一律不降级** —— **别拿真钱补自己的错**。
+  - **熔断**：连续 3 次「降级也失败」→ 打印警示并停手，之后不再尝试企业级。
+  - **留痕**：每次降级写 `状态/调度日志.csv`（时间 / 段 / 事件 / 原因 / **计费口径**），
+    否则事后算不清「这段烧的是币还是钱」。
+  - **每段各自记账**：去掉全局 `args._pool_name`（多线程会互相污染），
+    `pool` 变成 `run_one` 的局部变量，并落进 `log.json` / `rh_state.json` / 成本台账的「账号」列；
+    企业级段的钱包消耗另记 `money` 字段。
+  - **新增离线单测** `examples/test_account_fallback.py`（**零算力、零网络**）：
+    把四种判定钉死 —— ①未授权必拒 ②错误不像「池子被占」必拒 ③授权+池子被占才降级并留痕
+    ④连续 3 次降级失败必熔断。**离线冒烟测试永远碰不到这条烧钱分支，所以必须单独测。**
+  - **验证**：单测 **6/6 通过**；真实 rescue 实测 —— 用段 22 的**真实 taskId** 把状态改成
+    `submitted` 后重跑，日志出现 `♻ 段 22 发现在途任务 … → rescue` 且**没有 `[submit]`**
+    （= 确认没有重复烧币），并正常下载 + 按帧贴合到 14.5s；
+    `tools/checks.txt` **128 条不变式全通过**。
+
+- **1.0.2（2026-09-18）《野心家》实跑复盘：把「全链能不能真跑通」的五个隐藏坑全部打掉**
+  - **修坑 ①（会毁全片）母带从未注入音频加载节点**：`offset` 模式原来只注 node 85 的
+    「起点 + 时长」，**从不替换 node 34 LoadAudio 里的示例 mp3** → 「窗口取对了、歌是别人的」，
+    22 段全废且要烧完币才发现。新增 `song_path()` + `upload_cached()`：**与 music_mode 无关，
+    母带都原样注入 node 34，且全片只上传一次**（sha1 指纹 + `状态/素材上传台账.json`）。
+  - **修坑 ②（首镜 FAILED 的真凶）上传台账缓存住了「未完成状态」**：台账里 song.mp3 的
+    `fileName` 是个占位串 `<上传:song.mp3>`，被 `upload_cached()` 原样返回并注进 node 34 →
+    平台报 `LoadAudio → audio - Invalid audio file: <上传:song.mp3>`。
+    **判据写死**：RH 的 fileName 永远形如 `api/<hash>.<ext>`，**以 `<` 开头的一律判「未上传」并重传**。
+    > 通用教训：**任何缓存都可能缓存住一个「未完成状态」**；写入前先问「这个值是真结果，
+    > 还是『还没做』的标记」——两者的区别必须**能从值本身看出来**，不能靠人记。
+  - **修坑 ③（报错被吞）任务失败拿不到真实原因**：FAILED 时 `/task/openapi/status` 只回
+    `{"code":0,"msg":"success","data":"FAILED"}`，旧版照它抛错 → 报错信息就是
+    `任务失败: code=0 msg=success`，**等于没报**。真实原因在 `/task/openapi/outputs`
+    （`code=805 APIKEY_TASK_STATUS_ERROR`）的 `data.failedReason`（含 node_id / traceback）。
+    新增 `rh_client.fetch_failure() / format_failure()`，`poll_task` 失败自动回挖。
+    **排障口径：拿到 FAILED 先用那个 taskId 回挖，不用重跑烧币。**
+  - **修坑 ④（分辨率）把「档位数字」注进了枚举字段**：旧实现把「分辨率档 2」这个**数字**
+    注进 node 61 的 `aspect_ratio` → 平台判非法枚举。分辨率其实是**两个入参**：
+    `aspect_ratio`（枚举字符串，16:9 = `16:9 (Widescreen)`，**没有 Landscape 字样**）+
+    `megapixels`（数字档位，本工作流默认 2），必须**分开注**。实测 2MP@16:9 = **1920×1088**。
+  - **修坑 ⑤（空镜段泄漏别人的脸）**：原工作流 node 36 挂着**示例人物图**，空镜段只走
+    `nodeInfoList` 时那张图会被当成本段参考。新增 `bake_workflow()`：**把注入烧进工作流 JSON +
+    摘掉指向图槽的连线 + 用 `workflow` 整包直传**（rh_client 在给了 workflow 时根本不发
+    nodeInfoList），并顺手剥掉本地 API JSON 里的 `_meta`（真 API 格式没这个键）。
+  - **首镜试产实测回写注册表**：`resolution_measured` = **1920×1088 @24fps**（与枚举推算一致）·
+    `audio_policy` = `master_direct` 确认（成片自带母带 AAC 音轨）·
+    `frame_align_confirmed` = true，实测规律 = **`align_frames(window) + 17`**
+    （10.7s 窗口 → 260+17 = **277 帧 = 11.542s**；⚠️ 从 node 71 表达式抄的 `+24` **复现不出来**，
+    +24 应得 284 帧。**结论：不靠公式预测成片长度，一律本地 conform 裁/补到恰好等于窗口长度**）。
+  - **提示词校验器四处回补（本项目把全片 22 段的警告清零）**：
+    ① 空镜段 `retention_analysis` 必须补 `<Subject N>` 行（否则 `RET-NOMARK` + `RET-MISS`
+    + `LBL-UNUSED` 三码齐发）；② `Negative` 改**两级拼装**（旧实现按列表元素数截断，
+    把 `"no lip sync, no mouthing lyrics, no extra vocals"` 当 1 个元素 → 实际 11 词判 `NEG-LONG`）；
+    ③ 中文运镜描述要补官方英文三维度句（否则 `CAM-VAGUE`）；④ 上传顺序块必须含
+    「图片上传顺序」字样（`PIC-ORDER`）；⑤ 表演指导行**必须独立成行**且风格句**必须最靠前**
+    （否则 `LANG-MIX` 与 `VAGUE-CINE` 互斥打架）。
+  - **新增 `plan_mv_storyboard.py --rewrite-md`**：设计阶段补完 `visual_brief` 后**不会**回头重写
+    分镜表 → 交付物里风格停在「（未锁）」、画面构想整列「（待填）」。新入口**只重写 markdown、
+    不碰 storyboard.json**（幂等且不可能覆盖已设计内容），并新增「逐段细纲」段落
+    （画面 / 歌词 / 尾帧 / 下段切点 / 段内逐镜）。
+  - **验证**：见 `CHANGELOG.md` V1.0.2 条目。
+
+- **1.0.1（2026-09-17）首次「复盘 → 回补校验器」迭代：修掉段长区间的口径漂移**
+  - **修一个真 bug（校验器假阳性）**：`plan_mv_storyboard.qc()` 的硬边界原写成
+    `MIN_REQ - 0.3`（= 4.7s），而 `cut_segments()` 的契约是 `min_dur = 4.0` ——
+    于是 **4.0~4.7s 的段「合法产出、却被自己的校验器判死」**（离线冒烟测试实测段 4 = 4.6s
+    被误报为「越出 [4,15]」硬错，连关 4 都会被拦下）。改为只认 项目视频模型 硬区间
+    `H3_MIN_SEC / H3_MAX_SEC = 4.0 / 15.0`，并把两个区间**显式命名 + 写清用途**，防止再漂。
+    > **判据**：生成器没错、校验器报错 = **校验器假阳性，回补校验器**，不是去改生成器。
+  - **连带修一处会误导的注释**：`SHOT_NOSYNC` 尾注原写 `# 不允许对口型`，而 `MS 中景`
+    同时出现在 `SHOT_SYNC` 与 `SHOT_NOSYNC` 两个池里（**有意**：中景是边界景别，两种模式都能承载），
+    极易读成「中景禁止对口型」。已显式写明「判能否对口型只认 `SHOT_ALLOW_LIPSYNC`」。
+  - **消灭一处版本号漂移源**：正文顶部原硬写「当前精确版本：V1.0」，与 `VERSION` 文件重复 →
+    改为「以 `VERSION` 为唯一权威」，**正文不再重复精确版本号**。
+  - **补交付形态**：新增 `references/README.md`（10 个脚本的 CLI 用法 / 三个实现要点 /
+    四个 project_provider 口径坑）与 `tools/README.md`（进化与回退纪律），与参考技能交付形态对齐。
+  - **验证**：`tools/checks.txt` **64 条不变式全通过**；`compileall` 全绿；
+    离线冒烟测试复跑 —— 4.6s 段不再误报，降为软提示「请求 5.167s → 裁回 4.6s，属正常」。
+
+- **1.0（2026-09-17 首版）** 用户需求原话：「参考 drama-auto-pipeline 生成一个新的 skill（不要动原 skill），
+  全自动音乐 MV 制作 skill，输入一首歌（必须）+ 一张主人公图（可选），自动提取歌词并据此做分镜，
+  分镜定下后按需做资产、改造工作流（AI音乐MV数字人 项目模型+项目模型 项目视频模型 项目模型，节点 87/85/61/42），
+  最终交付一条口型-画面-音乐全对齐的完整 MV。」
+  - **八条铁律体系 A~F**：A 音乐基准与歌词 / B 口型策略 / C 分镜与提示词 /
+    D 工作流与生成 / E 审核与对齐验收 / F 进化与回退（沿用并强化自 drama V1.4）
+  - **三件事从需求直接固化为铁律**：
+    ① 「音乐是唯一时间基准」—— 段长/切点全部从歌词时间轴推导（A1/A5）
+    ② 「只有中近景才对口型，且不是每句都对口型」—— 景别白名单 + 占比区间 + 硬机检（B1/B2/B3/B4）
+    ③ 「唱歌不是说台词」—— 发声行走官方 `sings:` 框架，**MV 不出现 `<Audio N>`**（C2）
+  - **两个原创机制**（本 skill 相对 drama 的核心增量）：
+    - **时长贴合**（D7）：请求时长向上对齐 17 帧网格、成片裁/补回窗口长度 →
+      Σ各段 = 全曲长 → 首尾相接即对齐。**不这么做，几十段累加就会漂到音乐后面。**
+    - **对齐三验**（E4）：时长 / RMS 包络局部相关（滞后 ≈ 0s）/ 人声能量。
+      用「包络 + 局部搜索」替代原始互相关，**纯标准库秒级出结果**。
+  - **8 道审核关**（比短剧多一道歌词时间轴、多一道音乐窗口与口型对齐），
+    关 5 + 关 6 双硬门禁挡在花算力之前。
+  - **10 个自包含脚本**（纯标准库，不依赖 numpy/torch）：
+    `rh_client` / `extract_lyrics` / `align_lyrics` / `plan_mv_storyboard` /
+    `mv_to_h3_prompts` / `build_mv_workflow` / `batch_run_mv` / `check_alignment` /
+    `audit_html_builder` + `mv_workflows` 注册表。
+    **歌词强制对齐用字符级 Needleman-Wunsch（纯 Python DP）**，官方歌词定文本 + ASR 定时间。
+  - **四个 project_provider 客户端口径坑**（从实战带来，别再踩）：
+    `accountStatus` 参数名是小写 **`apikey`**；`outputs` 返回 `code=804` 时 `data` 是 dict 不是 list；
+    节点注入要用 upload 返回的 **`fileName`** 而不是 `download_url`；产物 URL **仅 24h 有效**。
+  - **工作流契约前置**：`contract_verified=false` 时提交前会 `fetch` 真 JSON 硬校验字段名，
+    **契约不过 = 拒绝提交**（猜字段名 = 白烧币）。
+  - **离线冒烟测试**：`examples/smoke_test.py` 用 ffmpeg 合成测试歌曲，
+    端到端跑通「歌词对齐 → 分镜 → 关 6 → 提示词 → dry-run 注入 → 8 张审核页」（不消耗任何算力）。
+    实测通过：45s 测试曲切 5 段 · 对口型 40% · 窗口合计 45.00s = 曲长 · 5/5 段机检全绿。

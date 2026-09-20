@@ -9,6 +9,7 @@ export interface WorkflowRepositoryProps {
   readonly onInsertKnowledgeVideoWorkflow: () => void;
   readonly onInsertAiFilmWorkflow?: () => void;
   readonly onInsertComicDramaWorkflow?: () => void;
+  readonly onInsertMusicVideoWorkflow?: () => void;
   readonly onInsertCommerceWorkflow?: () => void;
   readonly onInsertRemotionWorkflow?: () => void;
   readonly onInsertXhsCoverWorkflow?: () => void;
@@ -21,6 +22,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
   onInsertKnowledgeVideoWorkflow,
   onInsertAiFilmWorkflow,
   onInsertComicDramaWorkflow,
+  onInsertMusicVideoWorkflow,
   onInsertCommerceWorkflow,
   onInsertRemotionWorkflow,
   onInsertXhsCoverWorkflow,
@@ -114,7 +116,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
         hidden={!expanded}
       >
         <div className="workflow-repository__content-heading">
-          <span className="workflow-repository__count">7 个自动工作流</span>
+          <span className="workflow-repository__count">8 个自动工作流</span>
           <button
             type="button"
             className="workflow-repository__close"
@@ -124,6 +126,37 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <Icon name="x" size="lg" aria-hidden="true" />
           </button>
         </div>
+        <article className="workflow-repository__card">
+          <div className="workflow-repository__card-mark" aria-hidden="true">
+            <Icon name="film-slate" size="2xl" />
+          </div>
+          <div className="workflow-repository__card-body">
+            <div className="workflow-repository__card-heading">
+              <span className="workflow-repository__badge">单节点</span>
+              <h2 className="workflow-repository__card-title">音乐 MV 工作流 V1.0.6</h2>
+            </div>
+            <p className="workflow-repository__description">
+              以原曲为时间轴，确认歌词、风格、人物和分镜，首镜试产通过后生成全片，按音乐窗口合成并保留制作版本。
+            </p>
+            <ol className="workflow-repository__stages" aria-label="音乐 MV 工作流能力">
+              {["歌曲与歌词", "风格与分镜", "首镜与片段审核", "原曲合成交付"].map((label) => (
+                <li key={label} className="workflow-repository__stage">
+                  <span className="workflow-repository__stage-name">{label}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <button
+            type="button"
+            className="workflow-repository__insert"
+            onClick={onInsertMusicVideoWorkflow}
+            disabled={!onInsertMusicVideoWorkflow}
+            aria-label="添加音乐 MV 工作流节点"
+          >
+            <Icon name="plus" aria-hidden="true" size="lg" />
+            添加 MV 工作流
+          </button>
+        </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
             <Icon name="film-slate" size="2xl" />

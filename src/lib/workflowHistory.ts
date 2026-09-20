@@ -7,7 +7,14 @@ import type {
 } from "../features/workspace/workspaceModel";
 
 export type WorkflowHistoryKind =
-  "knowledge" | "film" | "comicDrama" | "commerce" | "remotion" | "xhsCover" | "reverseVideo";
+  | "knowledge"
+  | "film"
+  | "comicDrama"
+  | "musicVideo"
+  | "commerce"
+  | "remotion"
+  | "xhsCover"
+  | "reverseVideo";
 
 export interface WorkflowHistoryModelSnapshot {
   readonly role: "text" | "image" | "video";
@@ -111,6 +118,7 @@ const recordSchema = v.object({
     "knowledge",
     "film",
     "comicDrama",
+    "musicVideo",
     "commerce",
     "remotion",
     "xhsCover",

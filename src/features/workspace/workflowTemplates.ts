@@ -2,6 +2,7 @@ import type { ProviderCatalogEntry } from "../../lib/backend";
 import type { CanvasNodeEntry } from "../canvas/canvasStore";
 import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createComicDramaCheckpoint, createComicDramaOptions } from "./comicDramaWorkflowModel";
+import { createMusicVideoCheckpoint, createMusicVideoOptions } from "./musicVideoWorkflowModel";
 import { createCommerceCheckpoint, createCommerceOptions } from "./commerceWorkflowModel";
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import { createXhsCoverCheckpoint, createXhsCoverOptions } from "./xhsCoverWorkflowModel";
@@ -26,6 +27,7 @@ export const KNOWLEDGE_VIDEO_DIRECTOR_TEMPLATE_ID = "knowledge-video-director-v2
 export const KNOWLEDGE_VIDEO_DIRECTOR_TEMPLATE_TITLE = "知识教学视频导演 V2.4";
 export const AI_FILM_WORKFLOW_TEMPLATE_ID = "ai-film-workflow-v1.3";
 export const COMIC_DRAMA_WORKFLOW_TEMPLATE_ID = "comic-drama-workflow-v2.3";
+export const MUSIC_VIDEO_WORKFLOW_TEMPLATE_ID = "music-video-workflow-v1.0.6";
 export const COMMERCE_WORKFLOW_TEMPLATE_ID = "commerce-video-workflow-v1";
 export const REMOTION_WORKFLOW_TEMPLATE_ID = "remotion-animation-workflow-v1";
 export const XHS_COVER_WORKFLOW_TEMPLATE_ID = "xhs-cover-workflow-v1";
@@ -147,6 +149,34 @@ export function createComicDramaWorkflow(
                 checkpoint: {
                   ...entry.data.config.checkpoint,
                   comicDrama: createComicDramaCheckpoint(),
+                  film: createAiFilmCheckpoint(),
+                },
+              },
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
+export function createMusicVideoWorkflow(
+  options: CreateKnowledgeVideoDirectorWorkflowOptions,
+): WorkflowTemplateSubgraph {
+  const template = createKnowledgeVideoDirectorWorkflow(options);
+  return {
+    ...template,
+    nodes: template.nodes.map((entry) =>
+      entry.type === "knowledgeVideoWorkflow"
+        ? {
+            ...entry,
+            data: {
+              ...entry.data,
+              config: {
+                ...entry.data.config,
+                musicVideo: createMusicVideoOptions(),
+                checkpoint: {
+                  ...entry.data.config.checkpoint,
+                  musicVideo: createMusicVideoCheckpoint(),
                   film: createAiFilmCheckpoint(),
                 },
               },

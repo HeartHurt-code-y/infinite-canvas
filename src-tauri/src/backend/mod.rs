@@ -15,6 +15,7 @@ pub mod media;
 pub mod media_cache;
 pub mod media_proxy;
 pub mod model_schema;
+pub mod mv_media;
 pub(crate) mod process_tree;
 pub mod prompt_optimize;
 pub mod provider;

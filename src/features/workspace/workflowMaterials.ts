@@ -118,6 +118,7 @@ export function workflowReferenceMaterials(
   config: KnowledgeVideoWorkflowConfig,
 ): readonly PickedPromptMaterial[] {
   return uniqueMaterials([
+    ...(config.musicVideo?.characterReferences ?? []),
     ...(config.commerce?.materials ?? []),
     ...(config.xhsCover?.portraits ?? []),
     ...(config.xhsCover?.materials ?? []),

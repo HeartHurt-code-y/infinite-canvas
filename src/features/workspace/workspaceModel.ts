@@ -35,6 +35,10 @@ import type { GreenScreenConfig } from "../../lib/greenScreen";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import type {
+  MusicVideoWorkflowCheckpoint,
+  MusicVideoWorkflowOptions,
+} from "./musicVideoWorkflowModel";
+import type {
   WorkflowExecutionPlan,
   WorkflowMediaReviewKind,
   WorkflowMediaApproval,
@@ -703,6 +707,7 @@ export interface KnowledgeVideoWorkflowCheckpoint {
   readonly materialsSignature?: string;
   readonly film?: AiFilmWorkflowCheckpoint;
   readonly comicDrama?: ComicDramaWorkflowCheckpoint;
+  readonly musicVideo?: MusicVideoWorkflowCheckpoint;
   readonly commerce?: CommerceWorkflowCheckpoint;
   readonly remotion?: RemotionWorkflowCheckpoint;
   readonly xhsCover?: XhsCoverWorkflowCheckpoint;
@@ -758,6 +763,7 @@ export interface KnowledgeVideoWorkflowConfig {
   /** 缺省为知识视频，影视模板复用同一封装式执行与持久化接口。 */
   readonly film?: AiFilmWorkflowOptions;
   readonly comicDrama?: ComicDramaWorkflowOptions;
+  readonly musicVideo?: MusicVideoWorkflowOptions;
   readonly commerce?: CommerceWorkflowOptions;
   readonly remotion?: RemotionWorkflowOptions;
   readonly xhsCover?: XhsCoverWorkflowOptions;

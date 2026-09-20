@@ -83,7 +83,7 @@ describe("WorkflowRepository", () => {
         onInsertKnowledgeVideoWorkflow={insertKnowledge}
       />,
     );
-    expect(screen.getByText("7 个自动工作流")).toBeInTheDocument();
+    expect(screen.getByText("8 个自动工作流")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "AI影视工作流 V1.3" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加AI影视工作流节点" }));
     expect(insertFilm).toHaveBeenCalledTimes(1);
@@ -133,7 +133,7 @@ describe("WorkflowRepository", () => {
     expect(content).toHaveAttribute("hidden");
   });
 
-  it("opens all seven templates and restores focus when dismissed with Escape or close", async () => {
+  it("opens all eight templates and restores focus when dismissed with Escape or close", async () => {
     const user = userEvent.setup();
     function Harness() {
       const [expanded, setExpanded] = useState(false);
@@ -155,7 +155,7 @@ describe("WorkflowRepository", () => {
     const toggle = screen.getByRole("button", { name: "工作流仓库" });
     await user.click(toggle);
     const dialog = screen.getByRole("dialog", { name: "工作流仓库" });
-    expect(within(dialog).getAllByRole("heading")).toHaveLength(7);
+    expect(within(dialog).getAllByRole("heading")).toHaveLength(8);
     expect(within(dialog).getByRole("button", { name: "添加短视频反推工作流节点" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

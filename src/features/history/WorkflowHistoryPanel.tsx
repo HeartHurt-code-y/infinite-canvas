@@ -12,6 +12,7 @@ import {
 } from "../../lib/workflowHistory";
 import { aiFilmDeliveryMarkdown } from "../workspace/aiFilmWorkflowModel";
 import { comicDramaDeliveryMarkdown } from "../workspace/comicDramaWorkflowModel";
+import { musicVideoDeliveryMarkdown } from "../workspace/musicVideoWorkflowModel";
 import { commerceDeliveryMarkdown } from "../workspace/commerceWorkflowModel";
 import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "../workspace/desktopActions";
 import { remotionDeliveryMarkdown } from "../workspace/remotionWorkflowModel";
@@ -40,6 +41,7 @@ const KIND_LABELS: Record<string, string> = {
   knowledge: "知识视频",
   film: "AI 影视",
   comicDrama: "漫剧自动",
+  musicVideo: "音乐 MV",
   commerce: "剧情带货",
   remotion: "动画逻辑图",
   xhsCover: "小红书封面",
@@ -108,6 +110,7 @@ function DeferredSection({
 }
 
 function deliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
+  if (checkpoint.musicVideo) return musicVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.reverseVideo) return reverseVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.xhsCover) return xhsCoverDeliveryMarkdown(checkpoint);
   if (checkpoint.remotion) return remotionDeliveryMarkdown(checkpoint);

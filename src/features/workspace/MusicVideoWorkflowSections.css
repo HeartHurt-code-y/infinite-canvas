@@ -1,0 +1,89 @@
+.canvas-music-video__settings > fieldset,
+.canvas-music-video__editor,
+.canvas-music-video__editor fieldset {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+  margin: 0;
+  padding: var(--space-sm);
+  border: 0;
+}
+.canvas-music-video__settings label,
+.canvas-music-video__editor label {
+  display: grid;
+  gap: var(--space-2xs);
+  min-width: 0;
+}
+.canvas-music-video__settings :is(input, select, textarea, button),
+.canvas-music-video__editor :is(input, select, textarea, button) {
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--size-control);
+  padding: var(--space-xs);
+  color: var(--color-ink);
+  background: var(--color-paper-2);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font: inherit;
+}
+.canvas-music-video__settings textarea,
+.canvas-music-video__editor textarea {
+  width: 100%;
+  resize: vertical;
+}
+.canvas-music-video__settings :is(small, p),
+.canvas-music-video__editor p {
+  color: var(--color-text-3);
+  line-height: 1.6;
+}
+.canvas-music-video__settings button,
+.canvas-music-video__editor button {
+  cursor: pointer;
+}
+.canvas-music-video__settings :disabled,
+.canvas-music-video__editor :disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+.canvas-music-video__settings :focus-visible,
+.canvas-music-video__editor :focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+.canvas-music-video__row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+}
+.canvas-music-video__row > label {
+  flex: 1 1 100px;
+}
+.canvas-music-video__file {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-xs);
+}
+.canvas-music-video__file > strong {
+  flex-basis: 100%;
+  overflow-wrap: anywhere;
+}
+.canvas-music-video__file audio {
+  width: 100%;
+}
+.canvas-music-video__file figure {
+  width: 100px;
+  margin: 0;
+}
+.canvas-music-video__file img {
+  width: 100%;
+  border-radius: var(--radius-control);
+}
+.canvas-music-video__file figcaption {
+  overflow-wrap: anywhere;
+  font-size: var(--text-xs);
+}
+.canvas-music-video__editor fieldset {
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
