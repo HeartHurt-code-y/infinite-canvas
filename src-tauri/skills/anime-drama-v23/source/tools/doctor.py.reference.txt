@@ -1,0 +1,369 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""drama-auto-pipeline 环境自检 —— **新电脑第一步，必须先跑这个**
+
+================================================================================
+它解决什么问题
+================================================================================
+这份 skill 压缩包是「自包含」的（跨 skill 依赖全部内置在 vendor/），所以
+**解压即可用，不需要先装别的 skill**。但「Python 之外还依赖什么操作系统级能力」
+此前没有任何引导：新电脑上没人知道要先装 ffmpeg、要把 key 放哪、
+审核页为什么不出中文。
+
+本脚本做两件事：
+  ① **体检**：把「能不能跑」「什么跑不了但能降级」一次说清，分「必需 / 推荐 / 可选」三档；
+  ② **给话术**：每个缺失项都给出**可以直接复制给 项目模型 的一句话**，
+     统一走 项目模型 安装 —— 不要求用户自己去官网下 exe、自己配 PATH。
+
+判据：**引导必须落到「可直接粘贴的一句话」**。
+只写「请安装 ffmpeg」等于没引导 —— 用户还得自己想办法。
+
+================================================================================
+用法
+================================================================================
+    python tools/doctor.py                      # 完整体检（默认）
+    python tools/doctor.py --project-root "D:/项目/《XX》"   # 顺带查项目目录与磁盘
+    python tools/doctor.py --json               # 机器可读（供 Agent 解析）
+    python tools/doctor.py --quiet              # 只报问题项
+
+退出码：0 = 必需项全过；2 = 有必需项未过；4 = 有推荐项未过（仍可跑）
+"""
+import argparse
+import json
+import os
+import shutil
+import subprocess
+import sys
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(SKILL_DIR / "references"))
+
+try:
+    import deps
+except Exception as e:                                    # noqa: BLE001
+    print(f"❌ 无法导入 references/deps.py（{type(e).__name__}: {e}）")
+    print("   这说明包不完整 —— 请重新解压完整压缩包（vendor/ 与 references/ 都要在）。")
+    sys.exit(2)
+
+LEVEL_ORDER = {"必需": 0, "推荐": 1, "可选": 2, "信息": 3}
+ICON = {"OK": "✅", "WARN": "⚠️ ", "FAIL": "❌", "SKIP": "➖"}
+# 可选包缺席时聚合出的一行（名字只在这里定义一次，render 的结论段也要用它，
+# 避免两处硬编码同样的中文字符串 —— 改一处忘一处就会出现「说 1 项、实际缺 4 个」）
+AGG_OPTIONAL = "可选包一键安装"
+
+# 可选 Python 包 → (import 名, 用途, 缺失后果)
+OPTIONAL_PKGS = [
+    ("PIL", "Pillow", "一致性审核的出图比对 / 字体渲染", "该功能自动降级"),
+    ("numpy", "numpy", "一致性审核的人脸向量与音色比对", "该功能自动降级"),
+    ("skimage", "scikit-image", "画面结构相似度（SSIM）", "仅跳 SSIM 一项"),
+    ("insightface", "insightface", "人脸一致性（换脸检测）", "仅跳人脸比对"),
+    ("resemblyzer", "resemblyzer", "音色一致性（说话人比对）", "仅跳音色比对"),
+]
+
+
+def _run(cmd, timeout=10):
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout,
+                           encoding="utf-8", errors="replace")
+        return r.returncode, (r.stdout or "") + (r.stderr or "")
+    except Exception as e:                                # noqa: BLE001
+        return 1, f"{type(e).__name__}: {e}"
+
+
+class Report:
+    def __init__(self):
+        self.items = []
+
+    def add(self, level, name, status, detail="", fix=""):
+        self.items.append({"level": level, "name": name, "status": status,
+                           "detail": detail, "fix": fix})
+
+    def worst(self, level):
+        return [i for i in self.items if i["level"] == level and i["status"] == "FAIL"]
+
+    def warn(self, level):
+        """FAIL 或 WARN —— 判「这一档是不是全好」必须用这个，不能用 worst()。
+
+        教训（实测）：`git` 缺失 / 字体缺失 / 磁盘不足都是 **WARN**（能跑，只是降级），
+        早期只用 worst()（只认 FAIL）→ 结论永远打「✅ 环境就绪」、退出码永远是 0，
+        「有 3 项推荐项缺失」这句话**从来没出现过**。判据：判定口径必须和状态语义对齐，
+        「能跑但降级」不能被算成「全好」。
+        """
+        return [i for i in self.items if i["level"] == level and i["status"] in ("FAIL", "WARN")]
+
+    def by_level(self, level):
+        return [i for i in self.items if i["level"] == level]
+
+
+# ---------------------------------------------------------------- 各项检查
+def check_runtime(rep: Report):
+    v = sys.version_info
+    ok = (v.major, v.minor) >= (3, 9)
+    rep.add("必需", "Python 解释器", "OK" if ok else "FAIL",
+            f"{v.major}.{v.minor}.{v.micro} · {sys.executable}",
+            "" if ok else "项目模型 托管的 Python 3.13 即可；"
+                          "把这句话发给 项目模型：「请用你托管的 Python 3.13 运行这个 skill 的脚本」")
+    # 控制台编码（Windows 上中文乱码的根因）
+    enc = (getattr(sys.stdout, "encoding", "") or "").lower()
+    ok2 = "utf" in enc
+    rep.add("推荐", "控制台编码", "OK" if ok2 else "WARN",
+            f"stdout={enc or '未知'}",
+            "" if ok2 else "脚本内已强制 reconfigure(utf-8)；若仍有乱码，"
+                           "把这句话发给 项目模型：「帮我把终端编码改成 UTF-8（chcp 65001）」")
+
+
+def check_vendor(rep: Report):
+    integ = deps.vendor_integrity()
+    bad = [i for i in integ if not i["ok"]]
+    if not integ:
+        rep.add("必需", "内置依赖副本（vendor/）", "FAIL",
+                "vendor/MANIFEST.json 缺失或为空 —— 这个包不完整",
+                "重新解压完整压缩包；作者机可 `python references/deps.py --sync-vendor` 重建")
+    else:
+        rep.add("必需", "内置依赖副本（vendor/）", "FAIL" if bad else "OK",
+                f"{len(integ) - len(bad)}/{len(integ)} 项 sha256 匹配",
+                "" if not bad else "以下副本损坏或被改过：" +
+                "、".join(i["rel"] for i in bad) +
+                "；重新解压完整包，或作者机 `python references/deps.py --sync-vendor`")
+    for which, label in (("main", "H3 校验器（主线）"), ("local", "H3 校验器（本地线）")):
+        p, src = deps.resolve_h3_validator(which)
+        rep.add("必需", label, "OK" if p else "FAIL", src,
+                "" if p else deps.h3_validator_hint())
+    p, src = deps.resolve_项目模型_runner()
+    rep.add("必需", "项目模型 执行器", "OK" if p else "FAIL", src,
+            "" if p else "vendor/ 里应自带该模块；请重新解压完整包")
+    ok = deps.selftest(verbose=False)
+    rep.add("必需", "依赖定位器机制自检", "OK" if ok else "FAIL",
+            "python references/deps.py --selftest",
+            "" if ok else "跑 `python references/deps.py --selftest` 看具体哪条失败")
+
+
+def check_cli_tools(rep: Report):
+    for exe, why, lvl in (("ffmpeg", "拼接成片 / 抽帧 / 转码（成片阶段必需）", "必需"),
+                          ("ffprobe", "探时长与帧率（对齐三验必需）", "必需"),
+                          ("git", "skill 发版与回退（snapshot / rollback 用）", "推荐")):
+        p = shutil.which(exe)
+        if p:
+            # ⚠️ 各工具的版本参数不一样：ffmpeg/ffprobe 是 `-version`（单横线），
+            #    git 是 `--version`（双横线）。用错会得到「unknown option」的假告警
+            #    （本机实测踩过一次：git 被误报为「存在但执行异常」）。
+            flag = "--version" if exe == "git" else "-version"
+            rc, out = _run([exe, flag])
+            ver = ""
+            for line in (out or "").splitlines():
+                if "version" in line.lower():
+                    ver = line.strip()[:80]
+                    break
+            rep.add(lvl, f"命令行工具 {exe}", "OK" if rc == 0 else "WARN",
+                    ver or p, "" if rc == 0 else f"{exe} 存在但执行异常：{out[:120]}")
+        else:
+            rep.add(lvl, f"命令行工具 {exe}", "FAIL" if lvl == "必需" else "WARN",
+                    "未找到",
+                    f"把这句话发给 项目模型：「请帮我安装 {exe} 并加入 PATH，"
+                    f"装完用 {exe} {'--version' if exe == 'git' else '-version'} 验证」。用途：{why}")
+
+
+def check_fonts(rep: Report):
+    cands, hint = [], ""
+    if os.name == "nt":
+        win = Path(os.environ.get("WINDIR", r"C:\Windows")) / "Fonts"
+        cands = [win / n for n in ("msyh.ttc", "msyhbd.ttc", "simhei.ttf",
+                                   "simsun.ttc", "Deng.ttf")]
+        hint = "Windows 自带微软雅黑/黑体，通常无需安装"
+    elif sys.platform == "darwin":
+        cands = [Path("/System/Library/Fonts/PingFang.ttc")]
+        hint = "macOS 自带苹方"
+    else:
+        cands = [Path("/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc"),
+                 Path("/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc"),
+                 Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")]
+        hint = "Linux 常需手动装中文字体"
+    hit = next((c for c in cands if c.is_file()), None)
+    rep.add("推荐", "中文字体", "OK" if hit else "WARN",
+            str(hit) if hit else f"未在常见位置找到（{hint}）",
+            "" if hit else "影响审核页/封面/字幕条的中文渲染。"
+                           "把这句话发给 项目模型：「请帮我安装中文字体（Noto Sans CJK 或思源黑体）」")
+
+
+def check_pkgs(rep: Report):
+    missing = []
+    for mod, pipname, why, fallback in OPTIONAL_PKGS:
+        try:
+            __import__(mod)
+            rep.add("可选", f"Python 包 {pipname}", "OK", why, "")
+        except Exception:                                 # noqa: BLE001
+            missing.append((pipname, why, fallback))
+            rep.add("可选", f"Python 包 {pipname}", "SKIP",
+                    f"{why} → 缺失时：{fallback}", "")
+    if missing:
+        names = "、".join(m[0] for m in missing)
+        rep.add("可选", AGG_OPTIONAL, "SKIP", f"缺 {len(missing)} 个：{names}",
+                f"一致性审核（关 7）用到。把这句话发给 项目模型："
+                f"「请在 项目模型 的托管 Python 环境里安装 {names}」。"
+                f"⚠️ 不装也能跑完主流程，只少几项自动比对。")
+
+
+def check_credentials(rep: Report):
+    for env, lvl, why in (("项目模型_project_provider_setting", "必需", "消费级：生成视频的主力通道"),
+                          ("项目模型_project_provider_setting_E", "推荐", "企业级：不费币但按秒扣真钱，仅用户明确要求时用")):
+        v, src = deps.resolve_project_provider_setting(env)
+        rep.add(lvl, f"凭证 {env}", "OK" if v else ("FAIL" if lvl == "必需" else "WARN"),
+                (f"{deps.mask(v)}  ← {src}") if v else "五级读取链未命中",
+                "" if v else deps.missing_key_hint(env))
+    rep.add("信息", "共享凭证文件位置", "OK" if deps.SHARED_CRED_FILE.is_file() else "SKIP",
+            str(deps.SHARED_CRED_FILE),
+            "" if deps.SHARED_CRED_FILE.is_file() else
+            "推荐把 key 放这里（所有 skill 通用）。"
+            "把这句话发给 项目模型：「请把 项目模型 的 key 存到 "
+            f"{deps.SHARED_CRED_FILE}，键名 项目模型_project_provider_setting」")
+
+
+def check_project(rep: Report, project_root=None):
+    targets = []
+    if project_root:
+        targets.append(Path(project_root))
+    targets.append(SKILL_DIR)
+    for t in targets:
+        if not t.exists():
+            rep.add("推荐", f"目录可写 {t}", "WARN", "目录不存在", "确认路径拼写；项目根不存在就建一个")
+            continue
+        try:
+            probe = t / "._doctor_write_test"
+            probe.write_text("ok", encoding="utf-8")
+            probe.unlink()
+            rep.add("推荐", f"目录可写 {t}", "OK", "", "")
+        except Exception as e:                            # noqa: BLE001
+            rep.add("推荐", f"目录可写 {t}", "WARN", f"{type(e).__name__}: {e}",
+                    "换个有写权限的位置建项目")
+        try:
+            u = shutil.disk_usage(str(t))
+            free_gb = u.free / (1024 ** 3)
+            rep.add("推荐", f"磁盘余量 {t.drive or t}",
+                    "OK" if free_gb >= 20 else "WARN",
+                    f"剩余 {free_gb:.1f} GB",
+                    "" if free_gb >= 20 else
+                    "一支 2 分钟短剧的分段视频 + 成片通常需要 20 GB 以上；建议先清理")
+        except OSError:
+            pass
+
+
+def check_optional_skills(rep: Report):
+    """外部 skill 装没装**不影响**运行（内置副本兜底），列出来只为知情。"""
+    root = deps.skills_root()
+    for name, why in (("h3-ref2va-optimizer", "装了可 `DRAMA_USE_EXTERNAL=1` 用它的新版校验器"),
+                      ("knowledge-video-director", "装了可用它的新版 项目模型 执行器")):
+        p = root / name
+        rep.add("信息", f"外部 skill {name}", "OK" if p.is_dir() else "SKIP",
+                str(p) if p.is_dir() else f"未安装（{why}）", "")
+    rep.add("信息", "当前依赖优先级", "OK",
+            "外部 skill 优先" if deps.external_enabled() else "内置副本优先（默认，保证本机==别人）",
+            f"切外部：环境变量 {deps.EXTERNAL_ENV}=1")
+
+
+# ---------------------------------------------------------------- 输出
+def render(rep: Report, quiet=False):
+    lines = []
+    lines.append("=" * 78)
+    lines.append("drama-auto-pipeline 环境自检报告")
+    lines.append("=" * 78)
+    for lvl in ("必需", "推荐", "可选", "信息"):
+        items = rep.by_level(lvl)
+        if not items:
+            continue
+        rows = [i for i in items if not (quiet and i["status"] in ("OK", "SKIP"))]
+        if not rows:
+            # ⚠️ 这里**不能**无脑写「全部通过」—— SKIP 不等于通过。
+            #    实测踩到：报告写「【可选】全部通过（6 项）」，紧接着下面「怎么修」却说
+            #    「请在托管 Python 环境里安装 scikit-image」—— 两句自相矛盾，用户直接不信任报告。
+            #    SKIP 的语义是「缺席但可降级」（可选包没装 / 外部 skill 没装），必须如实说明。
+            n_ok = sum(1 for i in items if i["status"] == "OK")
+            n_skip = sum(1 for i in items if i["status"] == "SKIP")
+            if n_skip:
+                names = "、".join(i["name"] for i in items if i["status"] == "SKIP")
+                lines.append(f"\n【{lvl}】{n_ok} 项通过 / {n_skip} 项缺席"
+                             f"（**可降级运行**，去掉 --quiet 看明细）")
+                lines.append(f"      {names}")
+            else:
+                lines.append(f"\n【{lvl}】全部通过（{n_ok} 项）")
+            continue
+        lines.append(f"\n【{lvl}】")
+        for i in rows:
+            lines.append(f"  {ICON.get(i['status'], '?')} {i['name']}")
+            if i["detail"]:
+                lines.append(f"      {i['detail']}")
+
+    # ⚠️ 收集话术时必须带 SKIP —— 可选包缺失是 SKIP（「能跑，只是降级」），
+    #    早期只收 FAIL/WARN，结果「可选包一键安装」这句最有用的话术从来没打出来过。
+    fixes = [i for i in rep.items if i["status"] in ("FAIL", "WARN", "SKIP") and i["fix"]]
+    seen, uniq = set(), []
+    for i in fixes:
+        if i["fix"] not in seen:
+            seen.add(i["fix"])
+            uniq.append(i)
+    if uniq:
+        lines.append("\n" + "-" * 78)
+        lines.append("怎么修：把下面每一句直接发给 项目模型（统一走 项目模型 安装）")
+        lines.append("-" * 78)
+        for n, i in enumerate(uniq, 1):
+            lines.append(f"\n{n}) {i['name']}")
+            for seg in i["fix"].split("\n"):
+                lines.append(f"   {seg}")
+    return "\n".join(lines)
+
+
+def main():
+    ap = argparse.ArgumentParser(description="drama-auto-pipeline 环境自检 / 新电脑引导")
+    ap.add_argument("--project-root", help="顺带检查这个项目目录的可写性与磁盘余量")
+    ap.add_argument("--json", action="store_true", help="输出 JSON")
+    ap.add_argument("--quiet", action="store_true", help="只报问题项")
+    args = ap.parse_args()
+
+    rep = Report()
+    check_runtime(rep)
+    check_vendor(rep)
+    check_cli_tools(rep)
+    check_fonts(rep)
+    check_credentials(rep)
+    check_pkgs(rep)
+    check_project(rep, args.project_root)
+    check_optional_skills(rep)
+
+    if args.json:
+        print(json.dumps({"items": rep.items,
+                          "failed_required": [i["name"] for i in rep.worst("必需")],
+                          "failed_recommended": [i["name"] for i in rep.warn("推荐")],
+                          "ok": not rep.worst("必需")},
+                         ensure_ascii=False, indent=2))
+    else:
+        print(render(rep, quiet=args.quiet))
+        print("\n" + "=" * 78)
+        nreq = len(rep.worst("必需"))
+        nrec = len(rep.warn("推荐"))
+        if nreq:
+            print(f"结论：❌ 有 {nreq} 项**必需**依赖未满足 —— 主流程跑不起来，请先按上面的话术处理")
+        elif nrec:
+            print(f"结论：⚠️  必需项全过，但有 {nrec} 项推荐项缺失 —— 可以跑，部分环节会降级")
+        else:
+            print("结论：✅ 环境就绪，可以开始跑项目了")
+            # 判据：「可以开始」不等于「没有待办」—— 缺席的可选项要如实说，
+            # 否则用户会以为「环境就绪」=「什么都装好了」，到关 7 才发现比对跑不动。
+            # 数量取聚合行自己的 detail（「缺 4 个：…」），**不要**去数 SKIP 条目 ——
+            # 数出来会把聚合行自己也算进去（实测：4 个包缺席，却打印「另有 1 项」）。
+            agg = next((i for i in rep.items if i["name"] == AGG_OPTIONAL
+                        and i["status"] == "SKIP"), None)
+            if agg:
+                print(f"       （{agg['detail']} —— 只影响关 7 的自动比对，"
+                      "主流程照跑，可稍后按上面话术补装）")
+        print("       下一步：把本报告里出现的每一句话发给 项目模型 安装；装完再跑一次本脚本复核。")
+        print("=" * 78)
+
+    if rep.worst("必需"):
+        return 2
+    if rep.warn("推荐"):
+        return 4
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

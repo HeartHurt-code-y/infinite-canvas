@@ -675,6 +675,48 @@ describe("knowledge video workflow runner", () => {
     expect(fake.frames.startExtraction).toHaveBeenCalledTimes(7);
   });
 
+  it("stops paid QC regeneration at the configured limit and preserves the clip for explicit adoption", async () => {
+    const retry = JSON.stringify({
+      result: "RETRY",
+      report: "人物尾帧仍有偏差",
+      repairPrompt: "保持人物完整可见",
+    });
+    const fake = fakeDependencies(planJson(), [retry, retry]);
+    const source = node();
+    const sourceNode = { ...source, config: { ...source.config, maxAutomaticRetries: 1 } };
+    const runner = createKnowledgeVideoWorkflowRunner({
+      promptClient: fake.promptClient,
+      generationClient: fake.generation,
+      frameClient: fake.frames,
+      composerClient: fake.composer,
+      sleep: () => Promise.resolve(),
+    });
+    const request = {
+      node: sourceNode,
+      providerCatalog: catalog,
+      signal: new AbortController().signal,
+      onCheckpoint: vi.fn(),
+      onProgress: vi.fn(),
+    };
+    const paused = await runner.run(request);
+    expect(paused.phase).toBe("awaiting_approval");
+    expect(paused.decision?.kind).toBe("qc");
+    expect(paused.decision?.question).toContain("1 次自动返工上限");
+    expect(paused.shotRuns["shot-01"]?.retryCount).toBe(1);
+    expect(paused.shotRuns["shot-01"]?.videoTaskId).toBe("video-7");
+    expect(paused.shotRuns["shot-01"]?.clipPath).toBe("C:\\output\\video-7.mp4");
+    expect(fake.generation.start).toHaveBeenCalledTimes(8);
+    expect(fake.composer.startComposition).not.toHaveBeenCalled();
+    const adopted = await runner.run({
+      ...request,
+      resume: true,
+      node: { ...sourceNode, config: { ...sourceNode.config, checkpoint: paused } },
+    });
+    expect(adopted.phase).toBe("done");
+    expect(fake.generation.start).toHaveBeenCalledTimes(8);
+    expect(adopted.shotRuns["shot-01"]?.clipPath).toBe(paused.shotRuns["shot-01"]?.clipPath);
+  });
+
   it("pauses for confirmation when visual QC infrastructure cannot produce five frames", async () => {
     const fake = fakeDependencies(planJson());
     vi.mocked(fake.frames.getJob).mockResolvedValue({
@@ -763,7 +805,7 @@ describe("knowledge video workflow runner", () => {
     });
 
     expect(resumed.phase).toBe("done");
-    expect(resumed.shotRuns["shot-02"]?.redoRequested).toBe(true);
+    expect(resumed.shotRuns["shot-02"]?.redoRequested).toBe(false);
     expect(resumed.shotRuns["shot-02"]?.clipPath).not.toBeNull();
     // 只重新生成被重做的镜头，其余镜头复用原片段。
     const videoStarts = vi

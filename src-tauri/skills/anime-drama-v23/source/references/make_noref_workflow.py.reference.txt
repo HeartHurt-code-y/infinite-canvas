@@ -1,0 +1,158 @@
+# -*- coding: utf-8 -*-
+"""把 项目模型 工作流「去参考化」：断开核心节点上的参考图与参考音频连线。
+
+为什么要做（铁律 D31）：
+    W-A（PROJECT_MODEL_BINDING）是**平台共享模板**，里面会残留
+    **上一位使用者**的角色参考图 + 音色音频，且直连到 MiniMaxH3ReferenceToVideo（265）：
+
+        265.ref_images.ref_image_0 ← 51 (LoadImage)
+        265.ref_images.ref_image_1 ← 49 (LoadImage)
+        265.ref_images.ref_image_2 ← 50 (LoadImage)
+        265.ref_audios.ref_audio_0 ← 48 (LoadAudio)
+        265.ref_audios.ref_audio_1 ← 14 (LoadAudio)
+        265.ref_audios.ref_audio_2 ← 15 (LoadAudio)
+
+    实测后果：《世界要毁灭了·日本版》段 3 新闻主播人脸/服装被污染
+    —— 残留的「班主任」参考图（中年女性 · 深红口红 · 深藏青西装）
+    与主播李静（38 岁 · 深蓝西装）高度相似，模型直接混了脸。
+
+做法：
+    官方 /task/openapi/create 支持 `workflow` 参数（传完整 JSON 即忽略 workflowId）。
+    于是在本地把 API 格式 JSON 里这些连线删掉、并摘掉失去引用的素材节点，
+    提交时直接传这份干净 JSON —— **不向平台上传任何替代素材**。
+
+用法：
+    python make_noref_workflow.py --src workflow_wa_api.json --dst workflow_wa_noref.json
+    python make_noref_workflow.py --check workflow_wa_noref.json     # 只校验是否已干净
+"""
+import argparse
+import io
+import json
+import os
+import sys
+
+REF_PREFIX = ("ref_images.", "ref_audios.")
+TARGET_DEFAULT = "265"
+# 出图必需的链路（去参考化后仍必须在位）——按 W-A 的实测拓扑
+MUST_WA = {"prompt": "263", "length": "250", "width": "252", "height": "252",
+           "vae": "36", "clip": "355", "audio_vae": "37"}
+
+
+def references_of(workflow, target):
+    """列出核心节点上所有参考素材连线 → [(key, 源节点id), ...]"""
+    ins = workflow.get(target, {}).get("inputs", {})
+    out = []
+    for k, v in ins.items():
+        if k.startswith(REF_PREFIX) and isinstance(v, list) and v:
+            out.append((k, str(v[0])))
+    return out
+
+
+def strip(workflow, target):
+    """删参考连线 + 摘掉失去引用的素材节点 → (workflow, refs, removed)"""
+    refs = references_of(workflow, target)
+    src_ids = sorted({sid for _k, sid in refs})
+
+    ins = workflow[target]["inputs"]
+    for k, _sid in refs:
+        ins.pop(k, None)
+
+    # 保守：只摘 LoadImage / LoadAudio 且已无其它引用者
+    still_used = set()
+    for nid, node in workflow.items():
+        if nid == target:
+            continue
+        for v in (node.get("inputs") or {}).values():
+            if isinstance(v, list) and v and str(v[0]) in src_ids:
+                still_used.add(str(v[0]))
+
+    removed = []
+    for sid in src_ids:
+        if sid in still_used:
+            continue
+        cls = workflow.get(sid, {}).get("class_type", "")
+        if cls in ("LoadImage", "LoadAudio"):
+            workflow.pop(sid, None)
+            removed.append((sid, cls))
+    return workflow, refs, removed
+
+
+def verify(workflow, target):
+    """返回 (ok, 问题列表)：参考连线已清空 + 必需链路在位。"""
+    probs = []
+    left = references_of(workflow, target)
+    if left:
+        probs.append("仍有参考连线：%s" % left)
+    ins = workflow.get(target, {}).get("inputs", {})
+    for k, want in MUST_WA.items():
+        got = ins.get(k)
+        if not (isinstance(got, list) and str(got[0]) == want):
+            probs.append("%s 期望 ←%s 实际 %s" % (k, want, got))
+    return (not probs), probs
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--src", help="源 API 格式 JSON")
+    ap.add_argument("--dst", help="输出去参考化 JSON")
+    ap.add_argument("--target", default=TARGET_DEFAULT, help="核心节点 id（默认 265）")
+    ap.add_argument("--check", help="只校验指定文件是否已去参考化，不写文件")
+    a = ap.parse_args()
+
+    if a.check:
+        wf = json.load(io.open(a.check, encoding="utf-8"))
+        ok, probs = verify(wf, a.target)
+        print("=" * 66)
+        print("  校验 %s" % a.check)
+        print("=" * 66)
+        print("  结果：%s" % ("干净 ✓" if ok else "未通过 ❌"))
+        for p in probs:
+            print("    - %s" % p)
+        sys.exit(0 if ok else 1)
+
+    if not (a.src and a.dst):
+        sys.exit("必须给 --src 与 --dst（或用 --check）")
+
+    wf = json.load(io.open(a.src, encoding="utf-8"))
+    before_nodes = len(wf)
+    refs = references_of(wf, a.target)
+
+    print("=" * 66)
+    print("  工作流去参考化 · 断开前")
+    print("=" * 66)
+    if not refs:
+        print("  核心节点 %s 上未发现参考素材连线（已经是干净的？）" % a.target)
+    for k, sid in refs:
+        cls = wf.get(sid, {}).get("class_type", "?")
+        val = wf.get(sid, {}).get("inputs", {})
+        name = val.get("image") or val.get("audio") or ""
+        print("  ✂ %-28s ← %-4s %-11s %s" % (k, sid, cls, str(name)[:28]))
+    print()
+
+    wf, refs, removed = strip(wf, a.target)
+
+    print("=" * 66)
+    print("  断开后")
+    print("=" * 66)
+    left = references_of(wf, a.target)
+    print("  剩余参考连线：%s" % ("无 ✓" if not left else left))
+    print("  摘除的孤立素材节点：%s"
+          % (", ".join("%s(%s)" % r for r in removed) if removed else "无"))
+    print("  节点数：%d → %d" % (before_nodes, len(wf)))
+    print("  核心节点保留输入：%s" % sorted(wf[a.target]["inputs"].keys()))
+    print()
+
+    ok, probs = verify(wf, a.target)
+    print("  必需链路自检：%s" % ("全部在位 ✓" if ok else "❌ " + "; ".join(probs)))
+    if not ok:
+        sys.exit("自检未通过，不写出。")
+
+    tmp = a.dst + ".tmp"
+    io.open(tmp, "w", encoding="utf-8").write(json.dumps(wf, ensure_ascii=False, indent=1))
+    os.replace(tmp, a.dst)          # 原子替换（刷新 ctime/mtime）
+    print("\n  已写出：%s" % a.dst)
+    print("  大小：%d bytes" % os.path.getsize(a.dst))
+
+
+if __name__ == "__main__":
+    main()

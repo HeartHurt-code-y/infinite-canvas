@@ -171,13 +171,13 @@ describe("canvas state interface", () => {
 
   it("exposes and patches the composite knowledge-video workflow as one node", () => {
     const canvas = createCanvasState();
-    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode, {
+    const added = canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode, {
       select: true,
     });
 
-    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow).toEqual([knowledgeVideoWorkflowNode]);
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow).toEqual([added]);
     expect(canvas.getSnapshot().nodeByKey.knowledgeVideoWorkflow.get("knowledge-video-1")).toBe(
-      knowledgeVideoWorkflowNode,
+      added,
     );
     expect(
       canvas.commands.patchNode("knowledgeVideoWorkflow", "knowledge-video-1", (node) => ({

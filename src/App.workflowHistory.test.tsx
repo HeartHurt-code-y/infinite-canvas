@@ -15,6 +15,7 @@ import type {
   ProviderCatalogEntry,
 } from "./lib/backend";
 import type * as BackendModule from "./lib/backend";
+import type * as TauriCoreModule from "@tauri-apps/api/core";
 import type * as WorkflowHistoryModule from "./lib/workflowHistory";
 import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "./lib/workflowHistory";
 import { catalog, node } from "./test/videoWorkflowFixtures";
@@ -24,6 +25,11 @@ import {
 } from "./features/workspace/reverseVideoWorkflowModel";
 import { createCommerceOptions } from "./features/workspace/commerceWorkflowModel";
 import { createXhsCoverOptions } from "./features/workspace/xhsCoverWorkflowModel";
+import {
+  initializeWorkflowVersions,
+  recordWorkflowVersion,
+} from "./features/workspace/workflowVersionHistory";
+import { createWorkflowExecutionPlan } from "./features/workspace/workflowExecutionPlan";
 
 const mocks = vi.hoisted(() => ({
   run: vi.fn<RecordedWorkflowRunner["run"]>(),
@@ -85,6 +91,11 @@ vi.mock("@tauri-apps/api/window", () => ({
     onCloseRequested: () => Promise.resolve(() => {}),
     destroy: () => Promise.resolve(),
   }),
+}));
+vi.mock("@tauri-apps/api/core", async (importOriginal) => ({
+  ...(await importOriginal<typeof TauriCoreModule>()),
+  convertFileSrc: (path: string, protocol = "asset") =>
+    `http://${protocol}.localhost/${encodeURIComponent(path)}`,
 }));
 
 function historyRecord(): WorkflowHistoryRecord {
@@ -211,13 +222,18 @@ beforeEach(() => {
     }),
   );
   mocks.run.mockImplementation((request) => {
+    const checkpoint = {
+      ...request.node.config.checkpoint,
+      phase: request.resume ? ("paused" as const) : ("idle" as const),
+    };
+    request.onCheckpoint(checkpoint);
     request.onProgress({
-      phase: request.node.config.checkpoint.phase,
+      phase: checkpoint.phase,
       progress: 0,
       message: "测试工作流已返回",
       error: null,
     });
-    return Promise.resolve(request.node.config.checkpoint);
+    return Promise.resolve(checkpoint);
   });
 });
 
@@ -226,10 +242,123 @@ async function resumeFromHistory() {
   // 全量并行运行时主线程负载高，历史数据渲染可能超过默认 1s 超时，放宽到 10s。
   fireEvent.click(await screen.findByRole("tab", { name: "工作流" }, { timeout: 10_000 }));
   fireEvent.click(await screen.findByRole("button", { name: "从断点继续" }, { timeout: 10_000 }));
+  expect(mocks.run).not.toHaveBeenCalled();
+  fireEvent.click(
+    await screen.findByRole("button", { name: "确认计划并执行" }, { timeout: 10_000 }),
+  );
   await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce(), { timeout: 10_000 });
 }
 
 describe("workflow history canvas integration", () => {
+  it("requires renewed approval and resumes the restored draft without clearing it", async () => {
+    const source = node();
+    const plan = createWorkflowExecutionPlan(source, "restart");
+    const original = initializeWorkflowVersions({
+      ...source.config,
+      executionPlan: plan,
+      checkpoint: {
+        ...source.config.checkpoint,
+        script: "恢复后需要继续的旧稿",
+        executionPlan: plan,
+      },
+    });
+    const updated = recordWorkflowVersion(original, {
+      ...original,
+      checkpoint: { ...original.checkpoint, script: "后来的新稿", phase: "done" },
+    });
+    loadCanvasNodes([{ ...source, config: updated }]);
+    render(<App />);
+    fireEvent.click(await screen.findByRole("button", { name: "查看当前工作流版本历史" }));
+    const dialog = await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "回到版本 1" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭工作流版本历史" }));
+    expect(mocks.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认计划并执行" }));
+    await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
+    expect(mocks.run.mock.calls[0]![0].resume).toBe(true);
+    expect(mocks.run.mock.calls[0]![0].node.config.checkpoint.script).toBe("恢复后需要继续的旧稿");
+  });
+
+  it("requires explicit approval and refreshes a stale plan before allowing execution", async () => {
+    loadCanvasNodes([node()]);
+    render(<App />);
+    const brief = await screen.findByLabelText("知识视频制作要求");
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    expect(mocks.run).not.toHaveBeenCalled();
+    fireEvent.change(brief, { target: { value: "改成面向中学生的教学视频" } });
+    fireEvent.click(screen.getByRole("button", { name: "确认计划并执行" }));
+    expect(mocks.run).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "确认计划并执行" }));
+    await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
+    expect(mocks.run.mock.calls[0]![0].node.config.brief).toBe("改成面向中学生的教学视频");
+    expect(mocks.run.mock.calls[0]![0].node.config.executionPlan?.approval).not.toBeNull();
+  });
+
+  it("versions each workflow independently and preserves branches across reload", async () => {
+    const firstNode = node();
+    const otherNode = { ...node(), key: "other-workflow", x: 870, y: 260 };
+    loadCanvasNodes([firstNode, otherNode]);
+    const view = render(<App />);
+    const briefs = await screen.findAllByLabelText("知识视频制作要求");
+    const firstControls = within(briefs[0]!.closest(".canvas-knowledge-workflow") as HTMLElement);
+    fireEvent.change(briefs[1]!, { target: { value: "另一工作流的编辑" } });
+    fireEvent.change(briefs[0]!, { target: { value: "版本甲" } });
+    expect(screen.queryByRole("button", { name: "打开画布版本历史" })).not.toBeInTheDocument();
+    fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
+    const dialog = await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" });
+    const first = within(dialog).getByRole("listitem", { current: true });
+    const number = within(first)
+      .getByText(/版本 \d+ ·/)
+      .textContent!.match(/版本 (\d+)/)![1];
+    fireEvent.click(within(dialog).getByRole("button", { name: "关闭工作流版本历史" }));
+    fireEvent.change(briefs[0]!, { target: { value: "版本乙" } });
+    fireEvent.click(firstControls.getByRole("button", { name: "撤销当前工作流编辑" }));
+    expect(briefs[0]).toHaveValue("版本甲");
+    expect(briefs[1]).toHaveValue("另一工作流的编辑");
+    fireEvent.click(firstControls.getByRole("button", { name: "重做当前工作流编辑" }));
+    expect(briefs[0]).toHaveValue("版本乙");
+    fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
+    const reopened = await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" });
+    const count = within(reopened).getAllByRole("listitem").length;
+    fireEvent.click(within(reopened).getByRole("button", { name: `回到版本 ${number}` }));
+    fireEvent.click(within(reopened).getByRole("button", { name: "关闭工作流版本历史" }));
+    expect(briefs[0]).toHaveValue("版本甲");
+    fireEvent.change(briefs[0]!, { target: { value: "版本丙" } });
+    fireEvent.click(firstControls.getByRole("button", { name: "查看当前工作流版本历史" }));
+    expect(
+      within(await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" })).getAllByRole(
+        "listitem",
+      ),
+    ).toHaveLength(count + 1);
+    expect(briefs[1]).toHaveValue("另一工作流的编辑");
+    await waitFor(() => {
+      const saved = mocks.saveCanvas.mock.lastCall?.[0].document as CanvasDocumentV2 | undefined;
+      expect(
+        saved?.knowledgeVideoWorkflowNodes?.find((item) => item.key === firstNode.key)?.config
+          .brief,
+      ).toBe("版本丙");
+    });
+    const saved = mocks.saveCanvas.mock.lastCall![0].document as CanvasDocumentV2;
+    expect(
+      saved.knowledgeVideoWorkflowNodes?.find((item) => item.key === otherNode.key),
+    ).toMatchObject({
+      x: 870,
+      y: 260,
+      config: { brief: "另一工作流的编辑" },
+    });
+    view.unmount();
+    loadCanvasNodes(saved.knowledgeVideoWorkflowNodes!);
+    render(<App />);
+    expect((await screen.findAllByLabelText("知识视频制作要求"))[0]).toHaveValue("版本丙");
+    fireEvent.click(screen.getAllByRole("button", { name: "查看当前工作流版本历史" })[0]!);
+    expect(
+      within(await screen.findByRole("dialog", { name: "知识视频工作流 · 版本历史" })).getAllByRole(
+        "listitem",
+      ),
+    ).toHaveLength(count + 1);
+    expect(mocks.run).not.toHaveBeenCalled();
+  });
+
   it("reuses a historical workflow with unchanged live edges without retaining detached copies", async () => {
     const record = historyRecord();
     const asset: CanvasDocumentV2["assetNodes"][number] = {
@@ -294,6 +423,7 @@ describe("workflow history canvas integration", () => {
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
     fireEvent.click(screen.getByRole("button", { name: "继续制作" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(2));
     expect(mocks.run.mock.calls[1]![0].node.config.connectedMaterials ?? []).toEqual([]);
   });
@@ -341,8 +471,9 @@ describe("workflow history canvas integration", () => {
     render(<App />);
     const region = await screen.findByRole("region", { name: "工作流参考素材" });
     expect(within(region).getByText(/全部参考资料 12 项/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
     expect(mocks.run.mock.calls[0]![0].node.config.connectedMaterials).toEqual([
       {
@@ -389,7 +520,8 @@ describe("workflow history canvas integration", () => {
     await waitFor(() => expect(unlink).toBeEnabled());
     fireEvent.click(unlink);
     expect(within(region).queryByText("参考audio")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(2));
     expect(
       mocks.run.mock.calls[1]![0].node.config.connectedMaterials?.map(
@@ -545,7 +677,8 @@ describe("workflow reference material integration", () => {
       2,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
     expect(mocks.run.mock.calls[0]![0].node.config.materials).toEqual([image, document]);
     const remove = await screen.findByRole("button", {
@@ -555,7 +688,8 @@ describe("workflow reference material integration", () => {
     fireEvent.click(remove);
     expect(within(materials).queryByText(image.displayName)).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledTimes(2));
     expect(mocks.run.mock.calls[1]![0].node.config.materials).toEqual([document]);
   });
@@ -589,7 +723,8 @@ describe("workflow reference material integration", () => {
     const region = await screen.findByRole("region", { name: "工作流参考素材" });
     expect(within(region).getByText("voice.wav")).toBeInTheDocument();
     expect(within(region).getByText("scene.mp4")).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
     expect(mocks.run.mock.calls[0]![0].node.config.materials).toEqual(materials);
   });
@@ -632,7 +767,8 @@ describe("workflow reference material integration", () => {
     expect(within(region).queryByText("empty.md")).not.toBeInTheDocument();
     expect(within(region).getByText(large.displayName)).toBeInTheDocument();
     expect(within(region).getByText(overflow.displayName)).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
     await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
     expect(mocks.run.mock.calls[0]![0].node.config.materials).toEqual([
       existing,
@@ -730,9 +866,10 @@ describe("workflow reference material integration", () => {
       fireEvent.click(within(region).getByRole("button", { name: buttonName }));
       expect(await within(region).findByText(large.displayName)).toBeInTheDocument();
       expect(within(region).queryByText("empty.png")).not.toBeInTheDocument();
-      const start = screen.getByRole("button", { name: "开始制作" });
+      const start = screen.getByRole("button", { name: "查看执行计划" });
       await waitFor(() => expect(start).toBeEnabled());
       fireEvent.click(start);
+      fireEvent.click(await screen.findByRole("button", { name: "确认计划并执行" }));
       await waitFor(() => expect(mocks.run).toHaveBeenCalledOnce());
       const submitted = mocks.run.mock.calls[0]![0].node.config;
       expect(

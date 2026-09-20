@@ -198,7 +198,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
               <h2 className="workflow-repository__card-title">知识教学视频导演 V2.4</h2>
             </div>
             <p className="workflow-repository__description">
-              画布只增加一个节点。全部模型只使用项目内已配置的供应商，一次执行自动产出完整交付物。
+              画布只增加一个节点。使用项目内已配置的模型，确认计划后按依赖执行，检查片段后合成交付。
             </p>
             <ol className="workflow-repository__stages" aria-label="知识教学视频自动工作流能力">
               {KNOWLEDGE_VIDEO_WORKFLOW_STAGES.map((stage, index) => (
@@ -259,13 +259,13 @@ export const WorkflowRepository = memo(function WorkflowRepository({
           <div className="workflow-repository__card-body">
             <div className="workflow-repository__card-heading">
               <span className="workflow-repository__badge">单节点</span>
-              <h2 className="workflow-repository__card-title">漫剧自动工作流</h2>
+              <h2 className="workflow-repository__card-title">动漫短剧工作流 V2.3</h2>
             </div>
             <p className="workflow-repository__description">
-              导入分集剧本，自动完成导演分析、服化道设计和分镜编写。每步自动检查与修订，跨集复用角色、场景和道具。
+              剧本共创、风格锁定、服化道、导演分镜与执行提示词逐阶段确认。检查资产、首镜与全部片段后合成，交付制作四件套。
             </p>
             <ol className="workflow-repository__stages" aria-label="漫剧自动工作流能力">
-              {["导演分析", "服化道设计", "分镜编写", "自动交付"].map((label) => (
+              {["剧本与风格", "资产与分镜", "首镜与批量审核", "成片与四件套"].map((label) => (
                 <li key={label} className="workflow-repository__stage">
                   <span className="workflow-repository__stage-name">{label}</span>
                 </li>

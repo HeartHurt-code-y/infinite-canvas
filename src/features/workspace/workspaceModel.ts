@@ -1,3 +1,4 @@
+import type { WorkflowVersionHistory } from "./workflowVersionHistory";
 import {
   referenceCandidateFromTarget,
   type PromptReferenceCandidate,
@@ -33,6 +34,11 @@ import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
 import type { GreenScreenConfig } from "../../lib/greenScreen";
 import { type VideoCompositionInput } from "../../lib/videoComposer";
 import type { AiFilmWorkflowCheckpoint, AiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
+import type {
+  WorkflowExecutionPlan,
+  WorkflowMediaReviewKind,
+  WorkflowMediaApproval,
+} from "./workflowExecutionPlan";
 import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./commerceWorkflowModel";
 import type { RemotionWorkflowCheckpoint, RemotionWorkflowOptions } from "./remotionWorkflowModel";
 import type { XhsCoverWorkflowCheckpoint, XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
@@ -649,6 +655,8 @@ export type KnowledgeVideoWorkflowTrack = "LECTURER" | "DEMO" | "METAPHOR" | "FI
 
 /** 文本模型定稿后供媒体生成阶段消费的单个镜头。 */
 export interface KnowledgeVideoWorkflowShot {
+  readonly dependsOn?: readonly string[];
+  readonly continuationFromShotId?: string;
   readonly id: string;
   readonly sequence: number;
   readonly section: KnowledgeVideoWorkflowSection;
@@ -665,6 +673,8 @@ export interface KnowledgeVideoWorkflowShot {
 
 /** 单镜头的可恢复执行记录。任务本身仍由现有 generation task 表持久化。 */
 export interface KnowledgeVideoWorkflowShotRun {
+  readonly continuationReferencePath?: string | null;
+  readonly continuationSourcePath?: string | null;
   readonly shotId: string;
   readonly imageTaskId?: string | null;
   readonly videoTaskId?: string | null;
@@ -687,6 +697,8 @@ export interface KnowledgeVideoWorkflowShotRun {
  * 用户已批准的计划版本与外部任务身份，避免恢复后重复计费提交。
  */
 export interface KnowledgeVideoWorkflowCheckpoint {
+  readonly executionPlan?: WorkflowExecutionPlan;
+  readonly mediaApprovals?: Partial<Record<WorkflowMediaReviewKind, WorkflowMediaApproval>>;
   /** 参考素材变更后不得复用旧计划；缺省兼容未添加素材的旧画布。 */
   readonly materialsSignature?: string;
   readonly film?: AiFilmWorkflowCheckpoint;
@@ -737,6 +749,10 @@ export interface KnowledgeVideoWorkflowModelSelections {
 
 /** 一个节点封装从内容规划到最终合成的全部业务配置与恢复检查点。 */
 export interface KnowledgeVideoWorkflowConfig {
+  /** Durable revision graph scoped to this workflow; independent from canvas edits. */
+  readonly versionHistory?: WorkflowVersionHistory;
+  /** Explicit approval binds this exact multi-step plan to the current input. */
+  readonly executionPlan?: WorkflowExecutionPlan;
   /** Independent execution archive; restarting creates a new history identity. */
   readonly historyRunId?: string;
   /** 缺省为知识视频，影视模板复用同一封装式执行与持久化接口。 */
@@ -2266,7 +2282,11 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   if (node.mediaType === "text") return null;
   // 抽帧产物是带本地绝对路径的普通图片文件，直接作为 local_file 引用
   // （生成节点 / 提示词理解都可直接读取磁盘）。
-  if (node.origin === "frame_extract" || node.origin === "video_edit" || node.origin === "white_model_still") {
+  if (
+    node.origin === "frame_extract" ||
+    node.origin === "video_edit" ||
+    node.origin === "white_model_still"
+  ) {
     if (node.mediaType !== "image" || node.finalPath == null) return null;
     return {
       kind: "local_file",

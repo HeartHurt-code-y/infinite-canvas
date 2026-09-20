@@ -1,0 +1,174 @@
+<!DOCTYPE html><html lang="zh-CN"><head><meta charset="utf-8">
+<title>全链总览 · __PROJECT__（__VARIANT__）</title>
+<style>
+:root{--bg:#f6f7f9;--card:#fff;--bd:#e3e6ea;--tx:#1b1f24;--mut:#6b7280;
+--acc:#c0392b;--grn:#1a7f4b;--yel:#9a6b00;--blu:#1f5fa8}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);
+ font:15px/1.7 "Microsoft YaHei","PingFang SC",system-ui,sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:30px 22px 70px}
+h1{font-size:25px;margin:0 0 6px}
+h1 small{font-size:14px;color:var(--mut);font-weight:400;margin-left:8px}
+h2{font-size:19px;margin:38px 0 12px;padding-left:11px;border-left:4px solid var(--acc)}
+h3{font-size:15.5px;margin:20px 0 8px;color:#374151}
+.sub{color:var(--mut);font-size:13.5px;margin:0 0 14px}
+.cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(148px,1fr));gap:12px;margin:18px 0 6px}
+.card{background:var(--card);border:1px solid var(--bd);border-radius:11px;padding:14px 16px}
+.card.hl{border-color:var(--acc);background:linear-gradient(180deg,#fff5f3,var(--card))}
+.card.hl .k{color:var(--acc)}
+.card .k{font-size:12px;color:var(--mut)}
+.card .v{font-size:20px;font-weight:700;margin-top:4px}
+.card .v span{font-size:12.5px;font-weight:400;color:var(--mut)}
+table{width:100%;border-collapse:collapse;background:var(--card);
+ border:1px solid var(--bd);border-radius:10px;overflow:hidden;font-size:13.5px}
+th{background:#eef1f4;text-align:left;padding:9px 10px;font-weight:600;font-size:12.5px;color:#374151}
+td{padding:8px 10px;border-top:1px solid var(--bd);vertical-align:top}
+td.s{font-variant-numeric:tabular-nums;white-space:nowrap}
+td.ok{color:var(--grn);font-weight:600}
+td.bad{color:var(--acc);font-weight:600}
+tr:hover td{background:#fafbfc}
+tr.first td{background:#fbfcfd;color:#4b5563}
+.box{background:var(--card);border:1px solid var(--bd);border-left:4px solid var(--bd);
+ border-radius:9px;padding:13px 16px;margin:11px 0}
+.box.good{border-left-color:var(--grn)}
+.box.warn{border-left-color:var(--yel)}
+.box.info{border-left-color:var(--blu)}
+.box b{display:block;margin-bottom:5px}
+.mut{color:var(--mut);font-size:12.5px}
+code{background:#eef1f4;padding:1px 5px;border-radius:4px;font-size:12.5px;
+ font-family:Consolas,"Courier New",monospace}
+ul{margin:6px 0 0 20px;padding:0}li{margin:4px 0}
+.chain{margin:16px 0 4px}
+.step{display:grid;grid-template-columns:56px 1fr;gap:0}
+.step .no{display:flex;align-items:flex-start;justify-content:center;padding-top:16px}
+.step .no i{width:34px;height:34px;border-radius:50%;display:flex;align-items:center;
+ justify-content:center;font-style:normal;font-weight:700;font-size:12.5px;
+ border:2px solid #dfe3e8;background:#fff;color:#4b5563;z-index:2}
+.step.done .no i,.step.pass .no i{background:#eaf5ef;border-color:#9ed0b3;color:var(--grn)}
+.step.skip .no i{background:#fdf6e3;border-color:#e3cd8e;color:var(--yel)}
+.step .body{border-left:2px solid #e3e6ea;padding:14px 0 18px 18px}
+.step:last-child .body{border-left-color:transparent}
+.step.skip .body{background:#fffdf5;border-radius:0 8px 8px 0}
+.step .hd{display:flex;align-items:center;gap:9px;flex-wrap:wrap;margin-bottom:6px}
+.step .hd b{font-size:15.5px}
+.bdg{font-size:11.5px;padding:2px 9px;border-radius:20px;font-weight:600}
+.sd-done,.sd-pass{background:#eaf5ef;color:var(--grn)}
+.sd-skip{background:#fdf6e3;color:var(--yel)}
+.step .prod{font-size:13.8px;margin:2px 0 6px}
+.step .fl{font-size:12px;color:var(--mut);font-family:Consolas,monospace;
+ word-break:break-all;margin-top:3px}
+.step .fl.note{font-family:"Microsoft YaHei",sans-serif;color:#8b9099}
+</style></head><body><div class="wrap">
+
+<h1>全链总览 · __PROJECT__<small>__VARIANT__ · 全链</small></h1>
+<p class="sub">从「一句话创意」到「__FDUR__ 秒成片」的完整链路 ｜ 10 个阶段（1 个整体跳过）｜
+项目模型 工作流 <code>PROJECT_MODEL_BINDING</code>（MiniMax H3 · Ref2VA 六段式 · 去参考化）</p>
+
+<h2>一、片子的全貌</h2>
+<div class="cards">
+  <div class="card"><div class="k">成片时长</div><div class="v">__FDUR__<span> s</span></div></div>
+  <div class="card"><div class="k">段数 / 镜数</div><div class="v">__NSEG__<span> 段 / __NSHOT__ 镜</span></div></div>
+  <div class="card"><div class="k">平均镜长</div><div class="v">__AVGSHOT__<span> s / 镜</span></div></div>
+  <div class="card"><div class="k">画面规格</div><div class="v">__FW__×__FH__<span> @__FPS__</span></div></div>
+  <div class="card"><div class="k">台词句数</div><div class="v">__NDLG__<span> 句（全中文）</span></div></div>
+  <div class="card"><div class="k">累计花费</div><div class="v">≈¥__TOTCNY__<span>（__NROUNDS__ 轮）</span></div></div>
+  <div class="card hl"><div class="k">总消耗时长</div><div class="v">__WALLH__<span> h（__WALL__ s）</span></div></div>
+</div>
+<div class="box info"><b>一句话总结</b>__LOGLINE__</div>
+
+<h2>二、剧本 → 成片：10 个阶段</h2>
+<p class="sub">绿色 = 已执行 / 已通过；黄色 = 按生成模式<b>整体跳过</b>的阶段。
+每个阶段都列出真实产物与对应文件。</p>
+<div class="chain">__CHAIN__</div>
+
+<h2>三、逐段总表（__NSEG__ 段 · 全部实时解析）</h2>
+<p class="sub">「期望帧」按工作流 nodeId=250 的 17 帧对齐公式复算 ——
+<code>max(5, round(s×24)) + (5 − 该值 % 17) % 17</code>；13 段逐项吻合。</p>
+<table>
+<tr><th>段</th><th>内容</th><th>段长</th><th>镜</th><th>台词</th><th>Subject</th>
+<th>实测帧</th><th>期望帧</th><th>视频s</th><th>体积</th><th>账号</th><th>RH币</th><th>钱包</th>
+<th>生成耗时s</th><th>规格</th></tr>
+__SEGROWS__
+</table>
+<div class="box good"><b>✅ 帧数守恒</b>
+13 段帧数之和 <b>__SEGFRAMES__</b> = 成片实测 <b>__FINFRAMES__</b> 帧；
+段时长之和 <b>__SEGDUR__ s</b> ≈ 成片 <b>__FDUR__ s</b>（差值来自容器时间基，非丢帧）。</div>
+
+<h2>四、花了多少钱（分轮）</h2>
+<div class="cards">
+  <div class="card"><div class="k">第 1 轮 · 首跑 __NSEG__ 段</div><div class="v">__R1C__<span> 币 + ¥__R1M__</span></div></div>
+  <div class="card"><div class="k">第 2–__NROUNDS__ 轮 · 重跑 __NRR__ 次</div><div class="v">__RRC__<span> 币 + ¥__RRM__</span></div></div>
+  <div class="card"><div class="k">累计支出</div><div class="v">__TOTC__<span> 币 + ¥__TOTM__</span></div></div>
+  <div class="card"><div class="k">当前有效产物成本</div><div class="v">__CURC__<span> 币 + ¥__CURM__</span></div></div>
+  <div class="card"><div class="k">生成耗时合计（13 段）</div><div class="v">__WALLH__<span> h（__WALL__ s）</span></div></div>
+</div>
+<table>
+<tr><th>轮次</th><th>段</th><th>账号</th><th>请求s</th><th>实际耗时s</th><th>RH币</th><th>钱包CNY</th></tr>
+__COSTROWS__
+</table>
+<div class="box warn"><b>计费口径与沉没成本</b>
+计费按 <code>taskCostTime</code>（<b>含排队的墙钟秒</b>），与视频时长无关 ——
+消费级 0.4 币/秒（≈¥__RATE__/币）、企业级 ¥6/小时。<br>
+累计支出 <b>__TOTC__ 币 + ¥__TOTM__</b>（≈¥__TOTCNY__）；
+其中被后续重跑顶掉的白烧部分约 <b>__BURNED__ 币</b>；
+<b>当前有效台账</b>（每段取最新）= <b>__CURC__ 币 + ¥__CURM__</b> ⇒ ≈¥__CURCNY__。</div>
+<div class="box info"><b>这 __CONSC__ 币是怎么来的 / 依据是什么（可复核）</b>
+<b>① 币不是估的，是逐段实测累加</b> —— 每个 taskId 跑完调
+<code>/task/openapi/outputs</code>，取返回的 <code>consumeCoins</code> / <code>consumeMoney</code> /
+<code>taskCostTime</code>，逐段写进 <code>状态/成本台账.csv</code>（列：账号 / 请求时长s /
+<b>实际耗时s</b> / RH币 / 钱包CNY）。<br>
+<b>② 交叉验证（两条费率都能对上）</b><br>
+&nbsp;&nbsp;· 消费级：<b>__CONSC__ 币 ÷ __CONSS__ s = __COINRATE__ 币/秒</b> ≈ 平台费率 <code>0.4 币/秒</code> ✓<br>
+&nbsp;&nbsp;· 企业级：<b>¥__TOTM_E__ ÷ (¥6 ÷ 3600) = __ENTTS__ s</b>，与台账里企业级 __NENT__ 段实际耗时之和完全吻合 ✓<br>
+<b>③ 计费口径：按 <code>taskCostTime</code>（含排队的墙钟秒），与视频时长无关</b> ——
+所以一段 5 秒的视频可能烧 232 秒；并发 5 路时排队时间会摊在各自任务上。<br>
+<b>④ <code>≈¥__CURCNY__</code> 是折算值，不是实付现金</b> —— 换成人民币用的是账号自己的
+币/元比值（<code>1 元 ≈ __PERCNY__ 币</code>，即 <code>1 币 ≈ ¥__RATE__</code>，
+取自 <code>/uc/openapi/accountStatus</code> 返回的 <code>remainCoins / remainMoney</code>）。
+消费级是**预付币**模式，钱包余额只是平台的展示口径；
+**真正扣现金的是企业级那 ¥__TOTM_E__**。<br>
+<b>⑤ 13 段生成耗时合计 __WALL__ s（__WALLH__ h）</b>；但因为 5 路并发，
+用户实际等待时间远小于这个数（首轮 13 段在跑约 13 分钟）。</div>
+
+<h2>五、产物文件</h2>
+<h3>核心交付</h3>
+<ul>
+<li><code>视频_cn/final/final.mp4</code> —— 成片（唯一权威路径，__FDUR__ s / __FINMB__ MB / __FINFRAMES__ 帧）</li>
+<li><code>分镜脚本/分镜_H3提示词_中文版.md</code> —— 分镜提示词（__NSEG__ 段 / __NSHOT__ 镜，官方校验 0 错 0 警）</li>
+<li><code>剧本/分场剧本.md</code> —— 分场剧本（__NSCENE__ 场 / 三幕）</li>
+<li><code>审核页_中文版.html</code> —— 逐段细审（关 1–7 全量 + 6 条意见逐条落地）</li>
+<li><code>成片报告_中文版.html</code> —— 成片规格 + 逐段成本 + 问题清单</li>
+<li><code>全链总览_中文版.html</code> —— <b>本页</b>（全局链路）</li>
+</ul>
+<h3>过程产物</h3>
+<ul>
+<li><code>视频_cn/seg01.mp4 … seg13.mp4</code> —— 13 个分段（__SEGDUR__ s 合计）</li>
+<li><code>视频_cn/音频_对白速听.mp3</code> —— 纯音轨，用于人耳确认中文对白</li>
+<li><code>全片总览_中文版.png</code> —— 5×3 抽帧总览大图</li>
+<li><code>状态/pipeline_state.json</code> —— 全链状态机（各阶段 status / 风格 / 工作流节点）</li>
+<li><code>状态/task_registry.csv</code> —— 全部 taskId 登记（成本核算依据）</li>
+<li><code>状态/成本台账*.csv</code> —— 分轮成本台账（第 1 轮 / 重跑轮 / 全部轮次）</li>
+<li><code>状态/调度日志.csv</code> —— 消费级被占用时的自动降级留痕</li>
+<li><code>状态/regen*.log</code> —— 各轮重跑日志</li>
+</ul>
+
+<h2>六、复盘：三条每次都要盯的通用判据</h2>
+<div class="box good"><b>① 品牌渗漏是模型结构性先验，提示词压不住</b>
+「户外 / 运动 / 专业装备」类场景（雪山、赛场、工装、护目镜等）下，
+模型<b>必然</b>在胸前、袖标等显眼位生成真实品牌标。实测过的四版对策 ——
+改颜色、改品类、加 Negative 品牌词、加道具遮挡 —— <b>常常全部失败</b>。
+判据：<b>同一问题换 3 个角度都不动 = 结构性先验，立刻停止试提示词</b>，
+要么换构图（让该位置不出现在画面里），要么接受并在交付说明里写明。</div>
+<div class="box good"><b>② 共享工作流模板必须先「去参考化」</b>
+平台共享模板在核心节点（W-A/W-B 都是 <code>265</code>）上会残留<b>上一位使用者</b>的
+参考图 / 参考音频直连，直接污染人脸与服装。提交前必须断开这些连线
+（<code>references/make_noref_workflow.py</code>），改用 <code>workflow</code> 参数直传干净 JSON，
+<b>不向平台上传任何素材</b>。已固化铁律 D31。</div>
+<div class="box good"><b>③ 派生页的数字必须实时解析</b>
+派生的 HTML 页里<b>禁止硬编码</b>「N 镜 / N 币」这类统计 —— 分镜一修订就全部失效。
+所有数字都要现场从产物文件解析（分镜 md / ffprobe / 成本台账），本页即按此生成。</div>
+
+<p class="sub" style="margin-top:34px">本页由 <code>脚本/make_chain_overview.py</code> 生成，
+数字实时解析自 分镜 md / ffprobe / 成本台账。生成时间：__NOW__。</p>
+
+</div></body></html>

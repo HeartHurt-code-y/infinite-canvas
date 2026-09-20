@@ -25,6 +25,10 @@ import {
 } from "./ReverseVideoWorkflowSections";
 import { reverseVideoInputReady } from "./reverseVideoWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
+import { WorkflowPlanReview } from "./WorkflowPlanReview";
+import { WorkflowVersionHistoryPanel } from "./WorkflowVersionHistoryPanel";
+import { workflowVersionState } from "./workflowVersionHistory";
+import { getWorkflowExecutionPlan, isWorkflowExecutionPlanApproved } from "./workflowExecutionPlan";
 import { withCanvasWorkflowMaterials, type WorkflowCanvasInput } from "./workflowCanvasInputs";
 import type { ConnectedCanvasTextInput } from "./canvasInputs";
 import {
@@ -231,12 +235,16 @@ export interface KnowledgeVideoWorkflowNodeProps {
   readonly onSizeChange?: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onChange: (config: KnowledgeVideoWorkflowConfig) => void;
   readonly onExecute: (key: string) => void;
+  readonly onApprovePlan?: (key: string) => void;
   readonly onContinue: (key: string, resolution?: string) => void;
   readonly onCancel: (key: string) => void;
   readonly onRedoShot?: (key: string, shotId: string) => void;
   readonly onRemove: (key: string) => void;
   readonly onRevealResult: (key: string) => void;
   readonly onOpenHistory?: (key: string) => void;
+  readonly onUndoVersion?: (key: string) => void;
+  readonly onRedoVersion?: (key: string, versionId?: string) => void;
+  readonly onRestoreVersion?: (key: string, versionId: string) => void;
   readonly onExportFilmDocuments?: (key: string) => void;
   readonly onExportComicDramaDocuments?: (key: string) => void;
   readonly onExportCommerceDocuments?: (key: string) => void;
@@ -269,12 +277,16 @@ export function KnowledgeVideoWorkflowNode({
   onSizeChange,
   onChange,
   onExecute,
+  onApprovePlan,
   onContinue,
   onCancel,
   onRedoShot,
   onRemove,
   onRevealResult,
   onOpenHistory,
+  onUndoVersion,
+  onRedoVersion,
+  onRestoreVersion,
   onExportFilmDocuments,
   onExportComicDramaDocuments,
   onExportCommerceDocuments,
@@ -294,6 +306,8 @@ export function KnowledgeVideoWorkflowNode({
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const pickingMaterialsRef = useRef(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
+  const [showVersionHistory, setShowVersionHistory] = useState(false);
+  const versions = useMemo(() => workflowVersionState(node.config), [node.config]);
   const [editingShotId, setEditingShotId] = useState<string | null>(null);
   const [shotDraft, setShotDraft] = useState<{
     videoPrompt: string;
@@ -324,11 +338,12 @@ export function KnowledgeVideoWorkflowNode({
         : isCommerce
           ? "剧情带货工作流"
           : isComicDrama
-            ? "漫剧自动工作流"
+            ? "动漫短剧工作流 V2.3"
             : isFilm
               ? "AI影视工作流"
               : "知识视频工作流";
   const phase = runState?.phase ?? node.config.checkpoint.phase;
+  const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
     phase === "paused" || phase === "failed"
       ? (node.config.checkpoint.lastActivePhase ?? phase)
@@ -388,7 +403,8 @@ export function KnowledgeVideoWorkflowNode({
     pickingMaterials ||
     isActivePhase(phase) ||
     ((isReverse || isCover || isRemotion || isCommerce || isComicDrama) &&
-      phase === "awaiting_approval");
+      phase === "awaiting_approval" &&
+      decision != null);
 
   const configuredModels = useMemo(
     () => ({
@@ -435,6 +451,10 @@ export function KnowledgeVideoWorkflowNode({
     (material) => Number.isFinite(material.byteSize) && material.byteSize > 0,
   );
   const readyToExecute = inputReady && modelsReady && materialsValid && !pickingMaterials;
+  const effectiveNode = { ...node, config: effectiveConfig };
+  const executionPlan = getWorkflowExecutionPlan(effectiveNode);
+  const awaitingPlan =
+    executionPlan != null && !isWorkflowExecutionPlanApproved(executionPlan, effectiveNode);
 
   async function pickReferenceMaterials(pick: () => Promise<void> | void) {
     if (pickingMaterialsRef.current || configurationLocked || phase === "awaiting_approval") return;
@@ -473,6 +493,14 @@ export function KnowledgeVideoWorkflowNode({
     });
   };
 
+  const changeWorkflowVersion = (change: () => void) => {
+    if (versionBusy) return;
+    setEditingShotId(null);
+    setShotDraft(null);
+    setDecisionDraft({ key: "", value: "" });
+    change();
+  };
+
   return (
     <div
       ref={nodeElementRef}
@@ -502,7 +530,7 @@ export function KnowledgeVideoWorkflowNode({
                     : isCommerce
                       ? "商品资料自动转为剧情、镜头与成片交付"
                       : isComicDrama
-                        ? "分集剧本自动完成导演、服化道、分镜与交付"
+                        ? "从剧本共创到成片，逐阶段审核并保留制作版本"
                         : isFilm
                           ? "八个制作阶段封装执行，支持已有资料接力"
                           : "一个节点自动完成策划、生成、质检与交付"}
@@ -547,6 +575,33 @@ export function KnowledgeVideoWorkflowNode({
       </header>
 
       <div className="canvas-knowledge-workflow__body">
+        <div className="workflow-version-controls" role="group" aria-label="当前工作流版本控制">
+          <span>{versions.versions.length} 个工作流版本</span>
+          <button
+            type="button"
+            aria-label="撤销当前工作流编辑"
+            disabled={versionBusy || !versions.canUndo || !onUndoVersion}
+            onClick={() => changeWorkflowVersion(() => onUndoVersion?.(node.key))}
+          >
+            撤销
+          </button>
+          <button
+            type="button"
+            aria-label="重做当前工作流编辑"
+            disabled={versionBusy || !versions.canRedo || !onRedoVersion}
+            onClick={() => changeWorkflowVersion(() => onRedoVersion?.(node.key))}
+          >
+            重做
+          </button>
+          <button
+            type="button"
+            aria-label="查看当前工作流版本历史"
+            disabled={versionBusy || versions.versions.length === 0}
+            onClick={() => setShowVersionHistory(true)}
+          >
+            版本历史
+          </button>
+        </div>
         {!isReverse && !isCommerce && !isComicDrama ? (
           <label className="canvas-knowledge-workflow__brief">
             <span>这次要制作什么？</span>
@@ -745,7 +800,7 @@ export function KnowledgeVideoWorkflowNode({
                   <option value="documents">仅制作文档与提示词</option>
                 </select>
               </label>
-              <p>指定“只做某阶段”时直接交付该阶段；常规制作自动继续，关键冲突才请求确认。</p>
+              <p>指定“只做某阶段”时交付该阶段；执行前审核计划，制作片段后确认合成。</p>
             </div>
           </details>
         ) : null}
@@ -859,7 +914,13 @@ export function KnowledgeVideoWorkflowNode({
           </section>
         ) : null}
 
-        {phase === "awaiting_approval" ? (
+        <WorkflowPlanReview
+          node={effectiveNode}
+          disabled={!readyToExecute || isActivePhase(phase) || !onApprovePlan}
+          onApprove={() => onApprovePlan?.(node.key)}
+        />
+
+        {phase === "awaiting_approval" && !awaitingPlan ? (
           <section
             className="canvas-knowledge-workflow__decision"
             aria-label="需要确认"
@@ -903,7 +964,7 @@ export function KnowledgeVideoWorkflowNode({
               type="button"
               disabled={pickingMaterials || !materialsValid}
               onClick={() => {
-                const resolution = decisionResolution.trim();
+                const resolution = decisionResolution.trim() || decision?.recommendation?.trim();
                 setDecisionDraft({ key: "", value: "" });
                 if ((decision?.kind === "planning" || isCover || isReverse) && resolution) {
                   onContinue(node.key, resolution);
@@ -1335,7 +1396,7 @@ export function KnowledgeVideoWorkflowNode({
                         : isReverse || isRemotion || documentsOnly
                           ? "请先配置文本模型"
                           : "请先完成三个模型配置"
-                      : "其余步骤将自动完成"}
+                      : "先查看执行计划，确认后开始"}
               </span>
               <button
                 type="button"
@@ -1344,7 +1405,7 @@ export function KnowledgeVideoWorkflowNode({
                 onClick={() => onExecute(node.key)}
               >
                 <Icon name="play" aria-hidden="true" size="md" />
-                {isReverse ? "开始反推" : "开始制作"}
+                查看执行计划
               </button>
             </>
           ) : isActivePhase(phase) ? (
@@ -1400,7 +1461,7 @@ export function KnowledgeVideoWorkflowNode({
                 onClick={() => onExecute(node.key)}
               >
                 <Icon name="play" aria-hidden="true" size="md" />
-                重新制作
+                规划新一版
               </button>
             </>
           ) : (
@@ -1418,6 +1479,22 @@ export function KnowledgeVideoWorkflowNode({
           ) : null}
         </footer>
       </div>
+      {showVersionHistory ? (
+        <WorkflowVersionHistoryPanel
+          workflowTitle={workflowTitle}
+          versions={versions.versions}
+          currentVersionId={versions.currentVersionId}
+          redoVersionIds={versions.redoVersionIds}
+          busy={versionBusy || !onRestoreVersion}
+          onRestore={(versionId) => {
+            changeWorkflowVersion(() => onRestoreVersion?.(node.key, versionId));
+          }}
+          onRedo={(versionId) => {
+            changeWorkflowVersion(() => onRedoVersion?.(node.key, versionId));
+          }}
+          onClose={() => setShowVersionHistory(false)}
+        />
+      ) : null}
     </div>
   );
 }

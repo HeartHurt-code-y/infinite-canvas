@@ -17,6 +17,19 @@ import {
 } from "../../lib/workflowHistory";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import {
+  initializeWorkflowVersions,
+  recordWorkflowVersion,
+  type WorkflowVersionHistory,
+} from "./workflowVersionHistory";
+import {
+  createWorkflowDeliveryPlan,
+  createWorkflowExecutionPlan,
+  getWorkflowExecutionPlan,
+  isWorkflowExecutionPlanApproved,
+  isWorkflowExecutionPlanCurrent,
+  workflowExecutionInputSignature,
+} from "./workflowExecutionPlan";
 import { validateWorkflowMaterialsResume, workflowMaterialsSignature } from "./workflowMaterials";
 import { createAiFilmWorkflowRunner } from "./aiFilmWorkflowRunner";
 import { createComicDramaWorkflowRunner } from "./comicDramaWorkflowRunner";
@@ -31,7 +44,9 @@ import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { createReverseVideoWorkflowRunner } from "./reverseVideoWorkflowRunner";
 import {
   CANVAS_ID,
+  createKnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowCheckpoint,
+  type KnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowNodeData,
   type KnowledgeVideoWorkflowRunState,
 } from "./workspaceModel";
@@ -43,6 +58,13 @@ interface RecordedClients {
 export interface RecordedWorkflowRunRequest extends KnowledgeVideoWorkflowRunRequest {
   /** Explicit migration of an existing canvas checkpoint into its first history record. */
   readonly newHistory?: boolean;
+  /** Editable node inputs before live canvas references are expanded for execution. */
+  readonly versionConfig?: KnowledgeVideoWorkflowConfig;
+  /** Keep the node and durable execution archive on the same workflow revision graph. */
+  readonly onCheckpoint: (
+    checkpoint: KnowledgeVideoWorkflowCheckpoint,
+    versionHistory?: WorkflowVersionHistory,
+  ) => void;
 }
 export interface RecordedWorkflowRunner {
   run(request: RecordedWorkflowRunRequest): Promise<KnowledgeVideoWorkflowCheckpoint>;
@@ -215,6 +237,82 @@ export function createRecordedWorkflowRunner(
         ...input,
         node: JSON.parse(stableJsonSignature(input.node)) as KnowledgeVideoWorkflowNodeData,
       };
+      let versionedConfig = initializeWorkflowVersions(
+        request.versionConfig ?? request.node.config,
+      );
+      const versionCheckpoint = (value: KnowledgeVideoWorkflowCheckpoint) => {
+        versionedConfig = recordWorkflowVersion(versionedConfig, {
+          ...versionedConfig,
+          checkpoint: value,
+        });
+        return versionedConfig;
+      };
+      const publishCheckpoint = (value: KnowledgeVideoWorkflowCheckpoint) => {
+        request.onCheckpoint(value, versionCheckpoint(value).versionHistory);
+      };
+      if (
+        request.resume &&
+        request.node.config.checkpoint.phase === "done" &&
+        getWorkflowExecutionPlan(request.node)?.scope === "delivery" &&
+        (!request.node.config.checkpoint.finalPath ||
+          Object.values(request.node.config.checkpoint.shotRuns).some((run) => run.promptEdited))
+      ) {
+        request.node = {
+          ...request.node,
+          config: {
+            ...request.node.config,
+            checkpoint: { ...request.node.config.checkpoint, phase: "paused" },
+          },
+        };
+      }
+      let executionPlan = getWorkflowExecutionPlan(request.node);
+      // Every production workflow enters here, including retry, restored history and local renderers.
+      // No runner, downloader, model, compositor or history mutation is started before review.
+      const repeatsCompletedRun =
+        !request.resume &&
+        (request.node.config.checkpoint.runId != null ||
+          executionPlan?.executionIntent === "resume");
+      const changedInput =
+        executionPlan != null &&
+        executionPlan.inputSignature !== workflowExecutionInputSignature(request.node);
+      if (!isWorkflowExecutionPlanApproved(executionPlan, request.node) || repeatsCompletedRun) {
+        executionPlan =
+          isWorkflowExecutionPlanCurrent(executionPlan, request.node) && !repeatsCompletedRun
+            ? executionPlan!
+            : executionPlan?.scope === "delivery" && !changedInput && !repeatsCompletedRun
+              ? createWorkflowDeliveryPlan(request.node)
+              : createWorkflowExecutionPlan(
+                  request.node,
+                  repeatsCompletedRun || changedInput
+                    ? "restart"
+                    : request.resume
+                      ? "resume"
+                      : "restart",
+                );
+        const pending = {
+          ...(changedInput || repeatsCompletedRun
+            ? createKnowledgeVideoWorkflowConfig(
+                {
+                  prompt: request.node.config.models.text,
+                  image: request.node.config.models.image,
+                  video: request.node.config.models.video,
+                },
+                request.node.config.catalogResolved,
+              ).checkpoint
+            : request.node.config.checkpoint),
+          executionPlan,
+          phase: "awaiting_approval" as const,
+          error: null,
+        };
+        publishCheckpoint(pending);
+        request.onProgress({
+          phase: "awaiting_approval",
+          progress: 0,
+          message: "请确认当前版本的执行计划，确认后才开始执行。",
+          error: null,
+        });
+        return pending;
+      }
       let checkpoint = request.resume
         ? request.node.config.checkpoint
         : { ...request.node.config.checkpoint, runId: null, phase: "idle" as const, error: null };
@@ -238,7 +336,7 @@ export function createRecordedWorkflowRunner(
       const publishFailure = (error: unknown, historyFailure: boolean) => {
         const message = `${historyFailure ? "工作流历史记录保存失败：" : "工作流历史恢复失败："}${formatWorkflowError(error)}`;
         checkpoint = { ...checkpoint, phase: "failed", error: message };
-        request.onCheckpoint(checkpoint);
+        publishCheckpoint(checkpoint);
         request.onProgress({
           phase: "failed",
           progress: latestProgress.progress,
@@ -255,7 +353,14 @@ export function createRecordedWorkflowRunner(
           progress: latestProgress.progress,
           message: latestProgress.message,
           error: checkpoint.error ?? latestProgress.error,
-          nodeSnapshot: { ...request.node, config: { ...request.node.config, checkpoint } },
+          nodeSnapshot: {
+            ...request.node,
+            config: {
+              ...request.node.config,
+              checkpoint,
+              versionHistory: versionCheckpoint(checkpoint).versionHistory!,
+            },
+          },
           updatedAt: dependencies.now(),
         });
         queue = queue.then(async () => {
@@ -283,6 +388,13 @@ export function createRecordedWorkflowRunner(
       const beforeModelCall = async () => {
         await flush();
         if (request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+        if (
+          !isWorkflowExecutionPlanApproved(executionPlan, {
+            ...request.node,
+            config: { ...request.node.config, checkpoint },
+          })
+        )
+          throw new Error("当前执行计划尚未确认或已发生变化，已阻止模型请求。");
       };
       const eventFor = (state: KnowledgeVideoWorkflowRunState): WorkflowHistoryEvent => ({
         id: dependencies.createId(),
@@ -322,6 +434,15 @@ export function createRecordedWorkflowRunner(
             ...checkpoint,
             materialsSignature: workflowMaterialsSignature(detail.record.nodeSnapshot.config),
           });
+          versionedConfig = recordWorkflowVersion(
+            {
+              ...versionedConfig,
+              ...(detail.record.nodeSnapshot.config.versionHistory
+                ? { versionHistory: detail.record.nodeSnapshot.config.versionHistory }
+                : {}),
+            },
+            versionedConfig,
+          );
           revision = detail.record.revision;
           record = {
             ...detail.record,
@@ -356,7 +477,14 @@ export function createRecordedWorkflowRunner(
             progress: 0,
             message: latestProgress.message,
             error: null,
-            nodeSnapshot: snapshot(request.node),
+            nodeSnapshot: snapshot({
+              ...request.node,
+              config: {
+                ...request.node.config,
+                checkpoint,
+                versionHistory: versionCheckpoint(checkpoint).versionHistory!,
+              },
+            }),
             models: modelSnapshots(request, kind),
             attemptCount: 1,
             revision: 0,
@@ -432,9 +560,11 @@ export function createRecordedWorkflowRunner(
         let lastEvent = latestProgress;
         checkpoint = await dependencies.runnerFactory(kind, clients).run({
           ...request,
+          beforeSideEffect: beforeModelCall,
           onCheckpoint(value) {
-            checkpoint = value;
-            request.onCheckpoint(value);
+            executionPlan = value.executionPlan ?? executionPlan;
+            checkpoint = { ...value, ...(executionPlan ? { executionPlan } : {}) };
+            publishCheckpoint(checkpoint);
             enqueue();
           },
           onProgress(value) {
@@ -451,6 +581,7 @@ export function createRecordedWorkflowRunner(
             }
           },
         });
+        checkpoint = { ...checkpoint, ...(executionPlan ? { executionPlan } : {}) };
         enqueue();
         await flush();
         return checkpoint;
@@ -467,7 +598,7 @@ export function createRecordedWorkflowRunner(
             message: "已暂停，断点已保留",
             error: null,
           };
-          request.onCheckpoint(checkpoint);
+          publishCheckpoint(checkpoint);
           request.onProgress(latestProgress);
           enqueue(eventFor(latestProgress));
           try {

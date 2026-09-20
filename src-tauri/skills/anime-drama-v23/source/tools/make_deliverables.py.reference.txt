@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""make_deliverables.py —— 生成/刷新交付物（单文件版 + 项目说明介绍页）
+
+为什么必须有它、而且必须**接进发版流程**（V2.2.3 的由来）：
+  交付三件套里的「单文件版」与「项目说明介绍页」里印着版本号。
+  第一版是**发版前手写**的 —— 于是把 skill 从 V2.2.1 升到 V2.2.2 之后，
+  两个交付物里印的还是 **V2.2.1**，而包已经是新的，**而且它们已经被打进那一版的 zip 了**：
+  等于「发出去的说明书上写着上一个版本」。
+  ⇒ 判据（铁律 D2-o）：**能自动生成的数字，就必须让程序生成。**
+    交付物不是「发版前手写的文档」，而是**发版流程的产物**。
+
+  所以 `tools/snapshot.py` 在写完 `VERSION` 之后、打 zip 之前，会调用本脚本：
+  交付物里的版本号、统计数字、版本历史表**都从实现里取**，永远不可能错位。
+
+它负责三件事：
+  1) 从 `SKILL.md` **抽取**全部铁律 → 生成 `drama-auto-pipeline-standalone.md`
+     （手抄一定会漂；抽取不会）
+  2) 把 `VERSION` / 统计数字 / `CHANGELOG.md` 的版本历史 → 填进项目说明介绍页的占位符
+     （`<!--@VER@-->` / `<!--@STATS@-->` / `<!--HISTORY-START-->…<!--HISTORY-END-->`）
+  3) `--check` 模式：只报告会不会变，不写盘（供回归自检用）
+
+用法：
+  python tools/make_deliverables.py            # 生成/刷新
+  python tools/make_deliverables.py --check    # 只检查是否需要刷新（退出码 0/1）
+"""
+import argparse
+import os
+import re
+import sys
+from pathlib import Path
+
+TOOLS = Path(__file__).resolve().parent
+SKILL = TOOLS.parent
+
+STANDALONE = SKILL / "drama-auto-pipeline-standalone.md"
+ARTICLE = SKILL / "drama-auto-pipeline-项目说明介绍页.html"
+
+# ---- 通用判据：**手工精编**，不从正文正则抽取 ----
+# 为什么不用抽取：正则会截断在半句（实测第 1/4/8 条都断了尾），
+# 而「一句不完整的判据」比没有更坏 —— 它看起来像结论，实际缺了成立条件。
+# （判据：能自动生成的用自动生成；要表达完整语义的，就得人写。）
+JUS = [
+    ("改动落在「能被读回文件验证」的链路上，就必须有读回文件的断言",
+     "「命令没报错」不等于「文件写对了」；--dry-run 输出正确也 ≠ 文件正确。"),
+    ("同一条规则在 A 处是建议、在 B 处是门禁 —— 这是必然的返工源",
+     "下游是硬门禁的约束，上游不许降级成软提示；发现两处判同一件事，先问「哪一处更严」，把更严的提上去。"),
+    ("凡是「自动生成的描述句」，都要有一条断言盯着它「说的是不是真的」",
+     "这类缺陷不崩、不报错，只让模型收到错误或自相矛盾的指令 —— 它是静的。"),
+    ("「谁说了算」要在代码里明确一次",
+     "运行时参数 > 文件静态值；显式参数 > 默认值；源数据 > 识别结果。"),
+    ("默认值就是产品决策，别让它是个历史遗留",
+     "默认必须是「一致的那条路」；会伤一致性的模式只能显式进入，且必须大声警告。"),
+    ("「命令跑成功了」与「东西做对了」是两件事",
+     "前者是退出码，后者要靠独立证据。汇总行只说明「提交了 N 次」，不说明「提交对了」。"),
+    ("凡是「文档说了什么」与「代码做了什么」不一致的地方，先按最贵的那个方向去想",
+     "文案歧义在别处只是难看，在花钱的地方是账单。"),
+    ("门禁是代码，就有 bug；bug 分两种，必须分清",
+     "「真的拦住了坏东西」和「门禁自己坏了」。后者的特征是「一切正常时也报错」，所以每道门禁都要有「正常输入必须放行」的基线断言。"),
+    ("同一套业务枚举只能有一份定义，其余一律派生",
+     "四份定义里的三份一致，说明不了任何问题。"),
+    ("识别失败 ≠ 不存在",
+     "「有没有」必须问源数据，不能问「我识别到了几个」—— 后者会把「我没看懂」误报成「本来就没有」，而豁免逻辑会自动把错误洗白。"),
+    ("派生值只能有一个产出点，而且那个产出点必须是代码",
+     "同一个值有两份实现，合并时「后写的覆盖先写的」，源头反而说了不算；必然会错的字段就该由代码维护。"),
+    ("能反推的都不要反推；作者才知道的事实必须显式声明",
+     "关键词只能当提示不能当判据 —— 一个词出现在多种语境里，就不能单拿它当判据。"),
+    ("会被机器比对的字符串，必须格式化到「语义等价即字符串相等」",
+     "浮点误差、对象 repr、内存地址、时间戳一个都不许混进去，否则「同一个值」会被判成两个。"),
+    ("缓存必须跟着源数据一起失效",
+     "「文件在就复用」不是缓存策略，是忘了失效 —— 源数据换了下游还在用旧的，而且完全静默。"),
+    ("启动预检要比「提交」更早",
+     "能不花钱就失败的事，绝不等到第一步提交时才炸。"),
+    ("拿不准时选「更贵但更稳」的那条",
+     "多参只多一次上传、几乎不加钱，却是一致性的唯一抓手；省下的那点成本会以「整批重做」的形式还回来。"),
+]
+
+TOP_RULES = [
+    ("D2-m", "**一致性第一位：默认必须多参**；纯文生视频只能显式指定（`--noref`）"),
+    ("D2-l", "**「命令跑成功了」≠「东西做对了」**；批量跑完必须抽检产出物（素材计数 + 抽帧 + 对照参考）"),
+    ("D2-e", "**同一套业务枚举只能有一份定义**，其余一律派生；识别失败 ≠ 不存在"),
+    ("D2-f", "**下游是硬门禁的约束，上游不许降级成软提示**；校验器发现的约束必须回流成生成约束"),
+    ("D2-d", "**派生值只能有一个产出点**（且那个产出点必须是代码）"),
+    ("D2-h", "**文案不许断言事实不支持的东西**；作者才知道的事实必须显式声明，不能反推"),
+    ("D2-c", "**发版门禁必须「静态 + 动态」两条出口**；只做 grep 等于没有门禁"),
+    ("D2-b", "派生字段不许开放编辑；改了宿主字段就必须同步派生字段"),
+    ("D2-a", "「导出 → 合并」两端都必须是受校验的执行体，不许手工改 JSON"),
+    ("D1-b", "「双关审」写了两半，两半都要有各自的执行体"),
+    ("A7-b", "资产要查「主体完整性」——不许只查「有没有人」"),
+    ("G4", "打包前必须过绝对路径门禁 + 凭证门禁，**两条出口都要堵**"),
+    ("C5", "并发与耗时按实测模型估算，不许拍脑袋"),
+    ("D24", "一段 = 一个场景；跨场景必须重新开链"),
+]
+
+FAM_DESC = {
+    'A': '资产 —— 角色 = 图 + 音色 + 档案，三件套绑死',
+    'B': '剧本与分镜 —— 风格先锁、自由分镜、段间参考复用',
+    'C': '生成 —— 提示词写法、重抽 SOP、并发与耗时模型',
+    'D': '审核与工程纪律 —— 七道关卡、双关审、派生值、单一来源（最厚的一族）',
+    'E': '调度 —— 主 Agent 编排 + 子 Agent 执行、每段独立快照',
+    'F': '沉淀 —— 每个坑必须落到「代码 + 文档 + 自检 + 可执行性」四处',
+    'G': '分发 —— 自包含、凭证可读、打包双门禁、错误信息不许被吞',
+}
+
+
+def read_version():
+    return (SKILL / "VERSION").read_text(encoding="utf-8").strip()
+
+
+def count_invariants():
+    return len([l for l in (TOOLS / "checks.txt").read_text(encoding="utf-8").splitlines()
+                if l.strip() and not l.strip().startswith("#")])
+
+
+def count_adversarial():
+    return len([p for p in (SKILL / "examples").glob("test_*.py")])
+
+
+def extract_rules():
+    """从 SKILL.md 抽取铁律（code + 标题）。**抽取，不手抄。**"""
+    skill = (SKILL / "SKILL.md").read_text(encoding="utf-8")
+    pat = re.compile(r'^\*\*([A-G]\d+[a-z\-]*(?:\.\d+)?)\s*[\.·]?\s*(.{0,90})', re.M)
+    rules, seen = [], set()
+    for m in pat.finditer(skill):
+        code = m.group(1).strip()
+        title = re.sub(r'（.*?）', '', m.group(2)).strip('** ').strip()
+        if title and code not in seen:
+            seen.add(code)
+            rules.append((code, title))
+    return rules
+
+
+def gen_standalone():
+    ver = read_version()
+    rules = extract_rules()
+    n_inv, n_adv = count_invariants(), count_adversarial()
+    out = []
+    w = out.append
+    w("# drama-auto-pipeline · 单文件版（standalone）")
+    w("")
+    w(f"> **版本 V{ver}** ｜ 铁律 **{len(rules)} 条** ｜ 不变式 **{n_inv} 条** ｜ "
+      f"对抗测试 **{n_adv} 个** ｜ 审核关 **7 道** ｜ 发版门禁 **4 道**")
+    w("> ")
+    w("> **一份文件读完全流程。** 无需安装、无外部依赖，可直接把本文件喂给任意 AI 当操作手册。")
+    w("> 安装包与完整实现见同目录 `drama-auto-pipeline-V<版本>.zip`。")
+    w("> ")
+    w("> ⚙ 本文件的数字与铁律清单**由 `tools/make_deliverables.py` 从 `VERSION` / `SKILL.md` / "
+      "`tools/checks.txt` 自动生成**，发版时刷新 —— 手抄一定会漂。")
+    w("")
+    w("---")
+    w("")
+    w("## 0 · 这是什么")
+    w("")
+    w("把**一部小说或一个创意**，变成**一部能交付的短剧成片**的全自动流水线。")
+    w("")
+    w("它不是「生成几个片段」：整条链路有 7 道审核关卡，每一关都停下来让用户审；")
+    w("每一段视频都带上同一套参考素材（角色图 / 场景图 / 上一段尾帧 / 角色音色）；")
+    w("所有改动都要过 4 道发版门禁才能发出去。")
+    w("")
+    w("```")
+    w("小说/创意 + 主角图")
+    w("   ↓")
+    w("关1 剧本 → 关2 风格 → 关3 资产 → 关4 分镜 → 关5 提示词 → 批量生成 → 关6 视频 → 拼接 → 关7 成片")
+    w("   ↓            （每关一个 HTML 审核页，可改、可导出 diff、可退回）")
+    w("交付四件套（成片 + 全链总览 + 资产包 + 成本台账）")
+    w("```")
+    w("")
+    w("---")
+    w("")
+    w("## 1 · 铁律速查（最重要的一页）")
+    w("")
+    w("> 排在前面的是「错了会整批返工」的硬约束。")
+    w("")
+    w("| 铁律 | 一句话 |")
+    w("|---|---|")
+    for c, t in TOP_RULES:
+        w(f"| **{c}** | {t} |")
+    w("")
+    w("---")
+    w("")
+    w("## 2 · 七道审核关：做什么 / 用什么命令 / 交付什么")
+    w("")
+    w("| 关 | 做什么 | 关键命令 | 产物 |")
+    w("|---|---|---|---|")
+    w("| 关 1 剧本 | 改编说明 / 人物表 / 分集 / 场次 | （主 Agent 生成） | `剧本/` + `审核/01_剧本审核.html` |")
+    w("| 关 2 风格 | 三选一，全片锁死 | （主 Agent 生成） | `状态/style_options.json` + `02_风格审核.html` |")
+    w("| 关 3 资产 | 角色图 / 场景图 / 道具图 / 音色 | 生图 + Breeze TTS | `角色资产/` `场景资产/` `道具资产/` + `03_资产审核.html` |")
+    w("| 关 4 分镜 | 中文导演分镜（可逐行改台词） | `check_storyboard.py` → `approve_storyboard.py` | `分镜脚本/storyboard.json` + `04_分镜审核.html` |")
+    w("| 关 5 提示词 | H3 六段式提示词 + 分辨率复核 | `batch_run_drama.py --dump-prompts` → `--approve-prompts` | `视频/shot_*/prompt.txt` + `05_提示词审核.html` |")
+    w("| 关 6 视频 | 逐段生成 / 一致性审核 / 重抽 | `batch_run_drama.py` · `consistency_auditor.py` | `视频/shot_*/output.mp4` + `06_视频审核.html` |")
+    w("| 关 7 成片 | 拼接 + 全链总览 | 自动拼接 | `视频/final/final.mp4` + `07_成片审核.html` |")
+    w("")
+    w("---")
+    w("")
+    w("## 3 · 常用命令（照抄可用）")
+    w("")
+    w("```bash")
+    w("# 环境自检")
+    w("python tools/doctor.py")
+    w("")
+    w("# 关 4 · 分镜机检（0 硬错误才允许冻结）")
+    w('python references/check_storyboard.py --project-root "<项目根>"')
+    w("")
+    w("# 冻结分镜方案（双条件事务：机检 0 错 + 人工已批）")
+    w('python references/approve_storyboard.py --project-root "<项目根>" --by 用户 --note "关 4 通过"')
+    w('python references/approve_storyboard.py --project-root "<项目根>" --revoke --reason "规则变严/方案改过"')
+    w("")
+    w("# 阶段六 + 关 5 · 生成提示词与审核页（纯本地零算力）")
+    w('python references/batch_run_drama.py --project-root "<项目根>" \\')
+    w('  --storyboard "<项目根>/分镜脚本/storyboard.json" \\')
+    w('  --aspect "16:9 (Widescreen)" --dump-prompts')
+    w("")
+    w("# 关 5 · 标记通过（必须同时确认分辨率；确认值要写真实数字）")
+    w('python references/batch_run_drama.py --project-root "<项目根>" \\')
+    w('  --storyboard "<项目根>/分镜脚本/storyboard.json" \\')
+    w('  --aspect "16:9 (Widescreen)" --approve-prompts \\')
+    w('  --confirmed-resolution "16:9 · 一采 0.7 MP · 二采 ×1.5 · 推算输出 1680×960｜交付不标 1080P"')
+    w("")
+    w("# 阶段八/九 · 批量生成（**默认多参**；首镜试产用 --only；双通道并行按需）")
+    w('python references/batch_run_drama.py --project-root "<项目根>" \\')
+    w('  --storyboard "<项目根>/分镜脚本/storyboard.json" \\')
+    w('  --aspect "16:9 (Widescreen)" --only 3,4,5 --workers 5')
+    w("  # 纯文生视频（明确的例外，一致性无锚点）才加 --noref")
+    w("  # 企业级通道按秒扣真实钱包：不用就加 --no-enterprise")
+    w("")
+    w("# 审核页导出合并（用户在页面上改完，点导出得到 seg_N_edit.json）")
+    w('python references/apply_seg_edit.py --project-root "<项目根>" --edit <seg_N_edit.json>')
+    w('python references/apply_seg_edit.py --project-root "<项目根>" --sync-derived   # 重算顶层派生字段')
+    w("")
+    w("# 重建任意一关的审核页")
+    w('python references/audit_html_builder.py --project-root "<项目根>" --stage storyboard|prompt|video|final')
+    w("")
+    w("# 逐段一致性审核")
+    w('python references/consistency_auditor.py --shot-dir "<项目根>/视频/shot_03_xxx" --project-root "<项目根>"')
+    w("")
+    w("# 发版四道门禁（任一不过 → 拒绝发版、不写快照、不打 tag）")
+    w("python tools/snapshot.py --check-only")
+    w('python tools/snapshot.py --version 2.3 --kind minor --project "《片名》" --summary "…" \\')
+    w('  --item "…" --verify "…"')
+    w("")
+    w("# 回退到任意历史版本")
+    w("python tools/rollback.py --list")
+    w("python tools/rollback.py --to V" + ver)
+    w("")
+    w("# 刷新交付物（发版流程会自动调用；也可手动跑）")
+    w("python tools/make_deliverables.py")
+    w("```")
+    w("")
+    w("---")
+    w("")
+    w("## 4 · 全部铁律（按族分）")
+    w("")
+    by_fam = {}
+    for c, t in rules:
+        by_fam.setdefault(c[0], []).append((c, t))
+    for f in "ABCDEFG":
+        sub = by_fam.get(f) or []
+        if not sub:
+            continue
+        w(f"### {f} · {FAM_DESC[f]}（{len(sub)} 条）")
+        w("")
+        for c, t in sub:
+            w(f"- **{c}**　{t}")
+        w("")
+    w("---")
+    w("")
+    w("## 5 · 通用判据（跨项目可复用，值得抄到别处）")
+    w("")
+    w("> 这些不是「本 skill 的规矩」，是「凡是做 AI 生成流水线都该守的」。每条都来自真实事故。")
+    w("")
+    for i, (head, why) in enumerate(JUS, 1):
+        w(f"**{i}. {head}**")
+        w(f"　　{why}")
+        w("")
+    w("---")
+    w("")
+    w("## 6 · 四个最容易踩的坑（血泪版）")
+    w("")
+    w("### ① 默认值悄悄关掉了「一致性」")
+    w("")
+    w("```")
+    w("整批 20 段提交时：noref=true · ref_count=0 · audio_count=0")
+    w("→ 用户自带的角色图没用上、尾帧锚点没生效、音色没上传")
+    w("→ 同一角色逐段换脸换发型 → 20 段全废 + 3259 币")
+    w("```")
+    w("")
+    w("根因：默认值把「多参」关了，而它引用的工作流文件本来就是多参版本 —— **默认值与它指向的资源互相矛盾**。")
+    w("规矩：**默认必须是「一致的那条路」；会伤一致性的模式只能显式进入，且必须大声警告。**")
+    w("")
+    w("### ② 报「20/20 成功」，而出片不可交付")
+    w("")
+    w("汇总行是程序自己打的 —— 它会诚实地报告「我提交了 20 次」，**但不会告诉你「我提交错了」**。")
+    w("规矩：**批量跑完必须抽检产出物**：① 逐段提交记录里的素材计数 ② 抽帧触点图肉眼过 ③ 与参考素材对照。")
+    w("")
+    w("### ③ 同一套枚举写了四份，唯独最要紧的那份漂了")
+    w("")
+    w("```")
+    w('四处都定义「哪些 beat type 算台词」：三处含 "line"，唯独生成提示词那份漏了')
+    w("→ 全片台词被当动作输出 → 人物不会说话")
+    w("→ 校验器因缺标记整块跳过 → 「0 错误 0 警告」= 假安全")
+    w("→ 机检把「识别失败」当成「本来就没有」→ 直接豁免（19/19 全绿）")
+    w("```")
+    w("")
+    w("规矩：**同一套业务枚举只能有一份定义**；**识别失败 ≠ 不存在**。")
+    w("")
+    w("### ④ 门禁自己也会坏，而且坏起来会「一切正常时也报错」")
+    w("")
+    w("- 覆盖范围：被改的那张页面**没被冒烟覆盖**（夹具里没它的数据 → 每次「数据不足」跳过）")
+    w("- 唯一实现：门禁脚本**又实现了一遍**同一检查，返回值一改就静默错位，报出「看起来很严重的假消息」")
+    w("- 命名极性：`failed` 写成 `ok` → **全绿时也拒绝发版**")
+    w("")
+    w("规矩：冒烟要覆盖「会被改到的产物」；同一条逻辑只能有一处实现；布尔值的名字必须和它的极性一致；")
+    w("**每道门禁都要有一条「正常输入必须放行」的基线断言。**")
+    w("")
+    w("---")
+    w("")
+    w("## 7 · 门禁与自检（这套 skill 的可靠性来源）")
+    w("")
+    w("| 门禁 | 内容 | 规模 |")
+    w("|---|---|---|")
+    w(f"| ① 静态不变式 | 把每个修好的坑钉成 grep 规则，防止老修复被弄丢 | **{n_inv} 条** |")
+    w("| ② 端到端冒烟 | 7 个审核页生成器真调一遍；逐页核对关键区块是否渲染 | 04 页 8 项 + 05 页 6 项 |")
+    w(f"| ③ 对抗测试 | 每个都**主动伪造故障**，看门禁拦不拦得住 | **{n_adv} 个脚本** |")
+    w("| ④ 双出口扫描 | 绝对路径（别人跑不起来）+ 真实凭证（发出去等于送密钥） | 打包前后各一遍 |")
+    w("")
+    w("任何时候自查：`python tools/snapshot.py --check-only`")
+    w("")
+    w("---")
+    w("")
+    w("## 8 · 交付四件套")
+    w("")
+    w("1. **成片** `视频/final/final.mp4`")
+    w("2. **全链总览页**（带生成耗时列 + 成本依据）")
+    w("3. **资产包**（角色 / 场景 / 道具 / 音色）")
+    w("4. **成本台账**（逐段耗时与花费，真实数据不估算）")
+    w("")
+    w("---")
+    w("")
+    w(f"*drama-auto-pipeline V{ver} · 单文件版 · 数字与铁律清单自动生成，与实现同源不漂移*")
+    w("")
+    return "\n".join(out)
+
+
+def gen_history():
+    """从 CHANGELOG.md 生成版本历史 HTML 行（最新 N 条）。"""
+    cl = (SKILL / "CHANGELOG.md").read_text(encoding="utf-8")
+    rows = []
+    for m in re.finditer(r'^## V(\d+\.\d+(?:\.\d+)?)\s*·\s*(.*?)$', cl, re.M):
+        ver, rest = m.group(1), m.group(2).strip()
+        # 一句话摘要：取紧随其后的 `**一句话**：…`
+        tail = cl[m.end():m.end() + 900]
+        sm = re.search(r'\*\*一句话\*\*[：:]\s*(.+)', tail)
+        gist = (sm.group(1).strip() if sm else rest)
+        gist = re.split(r'\n', gist)[0].strip('*。 ')
+        gist = re.sub(r'（[^）]*铁律[^）]*）', '', gist).strip()
+        rows.append((ver, gist[:78]))
+    rows = rows[:18]
+    # ⚠ 用 <table> 而不是 <p> 列表：项目说明对表格的保留最稳，
+    #   而 <p> 上的 display:inline-block / 负 margin 会被剥掉（铁律 D2-q）。
+    html = ['  <table width="100%" cellspacing="0" cellpadding="0" border="0" '
+            'style="border-collapse:collapse;">']
+    for i, (ver, gist) in enumerate(rows):
+        color = '#b3541e' if i == 0 else '#0f2b3d'
+        html.append('    <tr>')
+        html.append(f'      <td width="62" style="padding:6px 8px 6px 0;font-size:13px;'
+                    f'line-height:1.75;font-weight:bold;color:{color};vertical-align:top;">V{ver}</td>')
+        html.append(f'      <td style="padding:6px 0;font-size:13px;line-height:1.75;'
+                    f'color:#4a4a4a;vertical-align:top;">{gist}</td>')
+        html.append('    </tr>')
+    html.append('  </table>')
+    return "\n".join(html)
+
+
+def fill_article(ver, n_rules, n_inv, n_adv):
+    t = ARTICLE.read_text(encoding="utf-8")
+    before = t
+    # ⚠ 必须是**幂等**的：第一版用 `t.replace("<!--@VER@-->", ...)`，
+    #   占位符**第一次填充后就被消耗掉**了 —— 第二次运行无处可填，
+    #   于是「介绍页的版本徽章永远停在第一次填的那个版本」（实测：单文件版已是 V2.2.3，
+    #   介绍页徽章还写着 V2.2.2）。**一次性占位符不是模板，是坑。**
+    #   改为按「当前版本位」的上下文正则替换：token 在就用 token，不在就改现值。
+    # ⚠ 三轮踩坑换来的写法（**别再按「当时那一段长什么样」写替换**）：
+    #   ① 只认 `</b>` → 页面改成 `</span>` 后徽章**再也没被更新**（停在上一版）；
+    #   ② 只认「恰好一个 V」→ 模板里已有字面 V 时出 `VV2.2.5`；
+    #   ③ 只认 `.zip</code>` → 「怎么用」那处是 `</span>`，又漏了。
+    #   ⇒ 现在只按**语义位**匹配，且**不依赖闭合标签**、容忍重复的 V（`V*`）：
+    #      · 包名：`drama-auto-pipeline-V<版本>...`（历史表里没有包名，可全局替换）
+    #      · 页头徽章 / 页脚 / 页面标题 / 版本历史副标题：各自唯一的前缀锚点
+    _V = r'V*\d+\.\d+(?:\.\d+)?'
+    _VER = 'V%s' % ver
+    t = t.replace("<!--@VER@-->", _VER)                                  # 模板占位符（首次）
+    t = re.sub(r'drama-auto-pipeline-' + _V, 'drama-auto-pipeline-' + _VER, t)   # 所有包名（含 <日期> 变体）
+    t = re.sub(r'(font-size:15px;">)' + _V, r'\g<1>' + _VER, t)                 # 页头徽章
+    t = re.sub(r'(color:#1d6f7a;">)' + _V, r'\g<1>' + _VER, t)                 # 页脚
+    t = re.sub(r'(<title>drama-auto-pipeline )' + _V, r'\g<1>' + _VER, t)      # 页面标题
+    t = re.sub(r'(从 V1\.0 到 )' + _V, r'\g<1>' + _VER, t)                      # 版本历史副标题
+    t = t.replace("<!--@STATS@-->",
+                  f'累计：<b style="color:#0f2b3d;">{n_rules} 条铁律</b> · '
+                  f'<b style="color:#0f2b3d;">{n_inv} 条不变式</b> · '
+                  f'<b style="color:#0f2b3d;">{n_adv} 个对抗测试</b> · '
+                  f'<b style="color:#0f2b3d;">7 道审核关</b> · '
+                  f'<b style="color:#0f2b3d;">4 道发版门禁</b>')
+    a = t.find("<!--HISTORY-START-->")
+    b = t.find("<!--HISTORY-END-->")
+    if a >= 0 and b > a:
+        head = t[:a + len("<!--HISTORY-START-->")]
+        tail = t[b:]
+        t = head + "\n" + gen_history() + "\n" + tail
+    ARTICLE.write_text(t, encoding="utf-8")
+    return t != before
+
+
+def main():
+    ap = argparse.ArgumentParser(description="生成/刷新交付物（单文件版 + 项目说明介绍页）")
+    ap.add_argument("--check", action="store_true", help="只检查是否需要刷新，不写盘")
+    args = ap.parse_args()
+
+    ver = read_version()
+    rules = extract_rules()
+    n_inv, n_adv = count_invariants(), count_adversarial()
+
+    st_new = gen_standalone()
+    st_old = STANDALONE.read_text(encoding="utf-8") if STANDALONE.exists() else ""
+    art_old = ARTICLE.read_text(encoding="utf-8") if ARTICLE.exists() else ""
+
+    if args.check:
+        need = []
+        if st_new != st_old:
+            need.append("drama-auto-pipeline-standalone.md")
+        # 项目说明页：只在占位符还留着、或填出来与现状不同时需要刷新
+        tmp = art_old
+        for tok, val in (("<!--@VER@-->", f"V{ver}"),):
+            if tok in art_old and val not in art_old:
+                need.append("drama-auto-pipeline-项目说明介绍页.html")
+                break
+        if need:
+            print("⚠ 交付物需要刷新：%s（跑 python tools/make_deliverables.py）" % "、".join(need))
+            sys.exit(1)
+        print("✅ 交付物与实现已同步（V%s · 铁律 %d · 不变式 %d · 对抗测试 %d）"
+              % (ver, len(rules), n_inv, n_adv))
+        sys.exit(0)
+
+    STANDALONE.write_text(st_new, encoding="utf-8")
+    changed_art = fill_article(ver, len(rules), n_inv, n_adv)
+
+    # 3) 项目说明安全校验（铁律 D2-q）：**交付前必须过**，否则发版中断。
+    #    判据：「在浏览器里好看」与「粘进项目说明还好看」是两件事 ——
+    #    交付物要在它**真正要被使用的地方**验收，不能在「我这边看起来对」就收工。
+    try:
+        import subprocess as _sp2
+        r = _sp2.run([sys.executable,
+                      os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   "check_mp_html.py"), str(ARTICLE)],
+                     capture_output=True, text=True, encoding="utf-8", errors="replace")
+    except Exception as e:                                    # noqa: BLE001
+        print("⚠️ 项目说明安全校验未能执行：%s: %s" % (type(e).__name__, e))
+        r = None
+    if r is not None:
+        if r.returncode != 0:
+            print(r.stdout or "")
+            print("❌ 项目说明介绍页**没通过项目说明安全校验** —— 拒绝交付。")
+            print("   （粘进项目说明会塌版面。排查：python tools/check_mp_html.py --all）")
+            sys.exit(1)
+        print("   ✅ 项目说明安全校验通过（粘贴即排版）")
+    print("✅ 交付物已刷新（V%s）" % ver)
+    print("   drama-auto-pipeline-standalone.md　%d 行 · 铁律 %d 条 · 通用判据 %d 条"
+          % (st_new.count("\n") + 1, len(rules), len(JUS)))
+    print("   drama-auto-pipeline-项目说明介绍页.html　%s"
+          % ("已更新" if changed_art else "无变化"))
+    print("   统计：不变式 %d 条 · 对抗测试 %d 个" % (n_inv, n_adv))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

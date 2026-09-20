@@ -30,3 +30,28 @@ export async function saveMarkdownDocumentToDesktop(
   await writeTextFile(filePath, content);
   return filePath;
 }
+
+/** Export a cohesive delivery into its own directory, without overwriting earlier exports. */
+export async function saveWorkflowBundleToDesktop(
+  files: readonly { readonly fileName: string; readonly content: string }[],
+): Promise<string | null> {
+  const [{ open }, { mkdir, writeTextFile }, { join }] = await Promise.all([
+    import("@tauri-apps/plugin-dialog"),
+    import("@tauri-apps/plugin-fs"),
+    import("@tauri-apps/api/path"),
+  ]);
+  const parent = await open({ title: "选择动漫短剧交付文件夹", directory: true, multiple: false });
+  if (typeof parent !== "string" || !parent) return null;
+  const folder = await join(
+    parent,
+    `动漫短剧-${new Date().toISOString().replace(/[:.]/g, "-")}-${crypto.randomUUID().slice(0, 6)}`,
+  );
+  await mkdir(folder);
+  for (const file of files) {
+    if (/[\\/]/.test(file.fileName) || file.fileName === "." || file.fileName === "..") {
+      throw new Error("交付文件名无效。");
+    }
+    await writeTextFile(await join(folder, file.fileName), file.content);
+  }
+  return folder;
+}

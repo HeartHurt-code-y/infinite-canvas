@@ -1,0 +1,2822 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+drama-auto-pipeline 短剧批量驱动器 —— 基于 batch_run_rh.py 改造
+关键差异：
+1. 支持每段独立参考图（char_ref + scene_ref 字段，非全局单一 base_image）
+2. 支持每段独立音景（soundscape 字段）
+3. 提示词模板为短剧对白风格（非知识讲解风格）
+4. 兼容土豆 30s 分镜拆分出的 H3 小段
+5. 沿用原脚本的：断点续跑、失败重试、尾帧接力、双 Key 混跑、rescue 机制
+"""
+import argparse
+import hashlib
+import json
+import math
+import os
+import random
+import re
+import shutil
+import subprocess
+import sys
+import threading
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from pathlib import Path
+
+# 跨 skill 依赖统一走 deps.py（V2.0 自包含机制）
+# 旧写法（已删）：把 knowledge-video-director/references 这个**本机绝对路径** insert 进 sys.path
+#   —— 硬编码个人机器路径，别人解压后必崩。
+# 现在：内置副本 vendor/ 优先（随包分发，压缩包在新电脑上独立可用）；
+#       想用本机已安装的外部版本 → 环境变量 DRAMA_USE_EXTERNAL=1。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import deps  # noqa: E402
+
+# V2.0.9：业务枚举**统一从 drama_schema 取**（同一套枚举只能有一份定义）。
+# 本文件原先自带一份 LINE_KIND，且**漏了 "line"** —— 而它正是最终生成视频提示词的那份，
+# 后果是全片 `type:"line"` 的台词被当动作输出（提示词里没有 `(SN) says: <d>[中文]…</d>`）。
+# 详见 references/drama_schema.py 的模块说明。
+from drama_schema import LINE_KIND as _LINE_KIND  # noqa: E402
+from drama_schema import count_line_beats as _count_line_beats  # noqa: E402
+# V2.0.10：时长对齐 / 语速 / 台词容量也统一到共享模块 ——
+# 关 4 机检与关 5 机检必须用**同一套公式**，否则必然出现「上游说合格、下游说超标」。
+from drama_schema import CPS_BY_LANG as _CPS_BY_LANG  # noqa: E402
+from drama_schema import align_duration  # noqa: E402
+from drama_schema import cps_of  # noqa: E402
+from drama_schema import max_chars as _max_chars  # noqa: E402
+from drama_schema import over_capacity as _over_capacity  # noqa: E402
+from drama_schema import occupy_pct as _occupy_pct  # noqa: E402
+
+rh = deps.load_项目模型_runner()  # 缺依赖时只在「真正调用它」处报错并给安装指引
+
+_LOCK = threading.Lock()
+# 「尾帧挤掉道具」的提示每次生成只报一次（plan_ref_slots 是纯函数，会被调多次）
+_PROP_DROPPED_NOTED = set()
+
+# ---------- 工作流注册表（铁律 D30：换工作流必须成对换整套节点映射） ----------
+# 用户 2026-09-15 拍板：W-A 为默认、W-B 为备选。映射清单外置在 references/workflows.json，
+# 新增工作流 = 加一条 + 放一份 API 格式 JSON，本文件不用再改。
+WORKFLOW_REGISTRY = os.path.join(os.path.dirname(os.path.abspath(__file__)), "workflows.json")
+WORKFLOW_W_A = "PROJECT_MODEL_BINDING"   # 项目制作方案 + 项目制作方案（MiniMax H3）· 默认
+WORKFLOW_W_B = "PROJECT_MODEL_BINDING"   # 项目制作方案（混合模型+二采放大）· 备选
+
+
+def load_registry():
+    try:
+        return json.load(open(WORKFLOW_REGISTRY, encoding="utf-8"))
+    except Exception as e:                                   # noqa: BLE001
+        print(f"⚠ 工作流注册表读取失败（{type(e).__name__}: {e}），回退 W-B 节点映射")
+        return {}
+
+
+def resolve_workflow(args):
+    """解析本次要用的工作流 → (key, cfg)。
+
+    优先级：--workflow-id（显式 id，反查是哪套）> --workflow（W-A / W-B）。
+    解析不到就退回 W-B（历史行为），并把实际 id 写回 cfg，避免静默用错映射。
+    """
+    reg = load_registry()
+    wfs = reg.get("workflows") or {}
+    key = getattr(args, "workflow", None) or reg.get("default") or "W-B"
+    cfg = dict(wfs.get(key) or {})
+
+    wid = getattr(args, "workflow_id", None)
+    if wid and str(cfg.get("id")) != str(wid):
+        for k, v in wfs.items():
+            if str(v.get("id")) == str(wid):
+                key, cfg = k, dict(v)
+                break
+        else:
+            warn_key, cfg = "?", dict(wfs.get("W-B") or {})
+            cfg["id"] = wid
+            cfg["_unknown"] = True
+            print(f"⚠ 未登记的工作流 id {wid}，暂按 W-B 节点映射走（请先补进 workflows.json）")
+            key = warn_key
+
+    # V2.0.16：**`--multi-ref-workflow` 也必须参与解析**。
+    #   原实现只看 `--workflow / --workflow-id`（缺省 W-A），于是当用户显式给了一份
+    #   **W-B 的**多参考图 JSON 时，节点映射仍是 W-A 的（prompt=263 / img_slots=51…），
+    #   而那份文件里的节点是 339 / 326… → 一旦真的走多参考图分支就会
+    #   `RuntimeError: 工作流中不存在节点 263`。
+    #   **「用哪份文件」和「用哪套节点映射」必须同源**（铁律 D30：换工作流必须成对换整套节点映射）。
+    mrp = getattr(args, "multi_ref_workflow", None)
+    if mrp:
+        base = os.path.basename(str(mrp))
+        for k, v in wfs.items():
+            names = {os.path.basename(str(v.get(x) or ""))
+                     for x in ("api_json", "noref_json")}
+            if base in names:
+                if k != key:
+                    print(f"ℹ️ --multi-ref-workflow={base} → 工作流映射改用 {k}"
+                          f"（原解析为 {key}，**节点映射必须与文件同源**）")
+                key, cfg = k, dict(v)
+                break
+        else:
+            print(f"⚠ --multi-ref-workflow={base} 未在注册表登记 → 沿用 {key} 的节点映射。"
+                  f"若该文件节点 id 与 {key} 不同，提交前会被预检拦下（见 preflight）。")
+    return key, cfg
+
+
+def preflight_workflow(wf_path, cfg, *, need_images, need_audios, label):
+    """提交前预检：**节点映射与工作流文件必须同源**（V2.0.16）。
+
+    为什么必须有它（2026-09-18 实测）：`--multi-ref-workflow` 给的是 W-B 的文件，
+    而节点映射却按 W-A 解析 → 一旦真的走多参考图分支就会
+    `RuntimeError: 工作流中不存在节点 263`。这类错**只会在第一个段提交时才炸**，
+    而且前提还是「先修好了另一个 bug 让它走到这条分支」—— 两层遮蔽叠在一起，
+    非常难查。预检把它变成**启动即失败**，一分钱不花。
+
+    检查项：
+      · 必需节点 id（prompt / duration / resolution / seed / core）都在文件里
+      · 图片槽位数量 ≥ 本片最大参考图数（否则 <Picture N> 会指到不存在的图）
+      · 音频槽位数量 ≥ 本片最大音色数
+      · core 节点的 class_type 含 "ReferenceToVideo"（防止把文生视频工作流当参考用）
+    """
+    try:
+        wf = json.load(open(wf_path, encoding="utf-8"))
+    except Exception as e:                                    # noqa: BLE001
+        sys.exit(f"❌ 预检失败：读不到 {label} {wf_path}（{type(e).__name__}: {e}）")
+
+    nodes = cfg.get("nodes") or {}
+    missing = [f"{k}={nodes.get(k)}"
+               for k in ("prompt", "duration", "resolution", "seed", "core")
+               if nodes.get(k) and str(nodes[k]) not in wf]
+    if missing:
+        sys.exit(
+            f"❌ 预检失败：节点映射与工作流文件**不同源**（{label}）。\n"
+            f"   映射里这些节点在文件中不存在：{missing}\n"
+            f"   文件 = {os.path.basename(str(wf_path))}\n"
+            f"   → 换工作流必须**成对换整套节点映射**（铁律 D30）；\n"
+            f"     通常是 --multi-ref-workflow 给的文件与 --workflow 解析出的不是同一套。")
+
+    n_img = len(nodes.get("img_slots") or [])
+    n_aud = len(nodes.get("aud_slots") or [])
+    if n_img and n_img < need_images:
+        sys.exit(f"❌ 预检失败：本片最大参考图 {need_images} 张，但 {label} 只有 {n_img} 个图片槽位")
+    if n_aud and n_aud < need_audios:
+        sys.exit(f"❌ 预检失败：本片最大音色 {need_audios} 条，但 {label} 只有 {n_aud} 个音频槽位")
+
+    core = str(nodes.get("core") or "")
+    if core and core in wf:
+        ct = str((wf[core] or {}).get("class_type") or "")
+        if "ReferenceToVideo" not in ct and not cfg.get("_unknown"):
+            print(f"⚠ 预检提醒：core 节点 {core} 的 class_type={ct!r} 不像参考生视频节点，"
+                  f"请确认这份工作流（{os.path.basename(str(wf_path))}）选对了")
+    print(f"✅ 预检通过：{label} = {os.path.basename(str(wf_path))}"
+          f"｜图片槽位 {n_img}（需 ≥{need_images}）· 音频槽位 {n_aud}（需 ≥{need_audios}）")
+
+
+def wf_id_of(cfg):
+    return str((cfg or {}).get("id") or WORKFLOW_W_B)
+
+
+def wf_nodes(cfg):
+    return (cfg or {}).get("nodes") or {}
+
+
+def wf_fields(cfg):
+    return (cfg or {}).get("fields") or {}
+
+
+def wf_ref_path(cfg, noref):
+    """返回本次要直传的工作流 JSON 路径（相对 references/ 解析）。"""
+    fname = cfg.get("noref_json") if noref else cfg.get("api_json")
+    if not fname:
+        return None
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), fname)
+
+
+def describe_workflow(key, cfg):
+    return (f"{key} '{cfg.get('id')}' · {cfg.get('label', '')}"
+            + ("（未登记，按 W-B 映射）" if cfg.get("_unknown") else ""))
+
+
+# ---------- 分镜预处理 ----------
+
+def parse_link(seg):
+    link = seg["link"] if seg["seq"] > 1 else "origin"
+    if ":" in link:
+        mode, ref = link.split(":", 1)
+        return mode, int(ref)
+    return link, seg["seq"] - 1 if link != "origin" else None
+
+
+def calc_duration(narration):
+    return max(4, min(15, math.ceil(len(narration) / 4.5) + 1.5))
+
+
+def load_storyboard(path, return_dict=False):
+    obj = json.load(open(path, encoding="utf-8"))
+    if isinstance(obj, dict):
+        segs = obj.get("segments", [])
+    else:
+        segs = obj
+    for i, s in enumerate(segs):
+        s.setdefault("seq", i + 1)
+        s.setdefault("mode", "lecturer")
+        s.setdefault("link", "origin" if i == 0 else "tailframe")
+        # V0.5.5：对白可以只写在 dialogue 里，narration 作为兼容字段自动补齐
+        if not s.get("narration"):
+            dlg = s.get("dialogue") or []
+            s["narration"] = "".join(
+                str(d.get("text") or "") if isinstance(d, dict) else str(d)
+                for d in dlg)
+        s.setdefault("dur", calc_duration(s["narration"]))
+        # V1.3 修复（漏洞）：用户手动写的 dur 也要强制 clamp 到 [4, 15]
+        if s["dur"] > 15:
+            print(f"[warn] 段{s['seq']} 手动指定 dur={s['dur']}s 超过 15s 上限，强制 clamp 到 15s")
+            s["dur"] = 15
+        elif s["dur"] < 4:
+            print(f"[warn] 段{s['seq']} 手动指定 dur={s['dur']}s 低于 4s 下限，强制 clamp 到 4s")
+            s["dur"] = 4
+        if s["dur"] >= 15 and len(s["narration"]) > 62:
+            print(f"[warn] 段{s['seq']} 台词 {len(s['narration'])} 字超出 15s 容量(~62字），"
+                  f"请拆段，否则说完会被截断")
+    if return_dict:
+        return obj if isinstance(obj, dict) else {"segments": segs, "status": "draft"}
+    return segs
+
+
+# ---------- 提示词（短剧对白风格 · V0.5.5 对齐 h3-ref2va-optimizer 混合版） ----------
+
+DEFAULT_SOUNDSCAPE_ZH = "现场环境底噪，安静的室内氛围，无音乐。"
+
+
+def seg_soundscape(seg):
+    """音景：V0.5.5 起叙述层用中文，优先 soundscape_zh，退回英文 soundscape。"""
+    return (seg.get("soundscape_zh") or seg.get("soundscape")
+            or DEFAULT_SOUNDSCAPE_ZH)
+
+
+# ============================================================================
+# V2.2.9 · 语音泄漏检测（2026-09-19 用户逐段核对后新增）
+#
+# 现象：用户报「多出来的台词」。逐条把原话定位到字段，结果全部命中**非台词字段**：
+#   段2  「她一声"让一下"压下去」            ← overall_soundscape（**引号内的直接引语**）
+#   段6  「他不说话…手上一点力都没收」        ← detailed_description 的 → 动作行
+#   段14 「把话推出去的时候声音是抖的…」      ← 同上
+#   段18 「准备好的所有后话都被这一句堵回去」  ← 同上
+#   段19 「她整个人僵住。那句话是她自己说的」  ← 同上
+#   （段15「停了一拍，没有收回来」同属动作行，但**不含**下列高置信词 → 关键词抓不到，
+#     只能靠人眼 —— 这也是为什么「机检」永远不能替代关 6 的人眼复核。）
+#
+# 机制：H3 是音频生成模型，它**分不清「这是旁白描述」还是「这是要念出来的内容」**。
+#   凡是"描述语音/言语"的中文文本，都可能被合成为人声。
+#
+# 判据：**非台词字段里不许出现"听得见的东西"的描述 —— 只写"看得见的东西"。**
+#   要表达「声音抖」就写「下唇抖了一下」；要表达「被打断」就写「唇还张着，没合上」。
+# ============================================================================
+_SL_QUOTE_RE = re.compile(r'[“"「『]([^”"」』]{1,40})[”"」』]')
+# 高置信「语音性」短语（用户实测命中的形态 + 同类）
+_SL_PHRASES = ("声音", "嗓门", "语气", "语速", "破音", "哭腔", "念白", "台词", "方言",
+               "那句话", "这句话", "一句话", "后话", "把话", "说完", "没说完",
+               "堵回去", "压下去", "不说话")
+# 被检查的非台词字段（含 beats 里的 action 行）
+_SL_FIELDS = ("soundscape_zh", "soundscape", "camera_lock_zh", "action_zh", "ending_zh")
+# 改写建议（给作者看的，直接可抄）
+_SPEECH_REWRITE_HINT = (
+    "把「听得见的」改写成「看得见的」：\n"
+    "      × 声音是抖的      → √ 下唇抖了一下\n"
+    "      × 他不说话        → √ 他看着她，没动\n"
+    "      × 后话被堵回去    → √ 唇还张着，没合上\n"
+    "      × 那句话是她说的  → √ 一个字都没接上\n"
+    "      × 议论声被一声「让一下」压下去 → √ 人声低了一瞬，只剩椅腿刮地"
+)
+
+
+def _sl_is_onomatopoeia(inner):
+    """引号里的是「拟声/语气词」吗（咔 砰 啪 吱呀 嗯 哦…）？
+
+    ⚠ 第一版**没有这个判别器**，于是把 `"咔"`（笔断）`"砰"`（门撞墙）`"啪"`（水搁桌上）
+    全报成「引语泄漏」→ 30 处硬拦里大半是噪音，真正的缺陷（段2 的「让一下」）被淹了。
+    判据（本项目反复出现的同一条）：**「有没有引号」不是判据，要问「引号里的是不是人说的话」。**
+    拟声词本来就是**要被发出的音效**，写进音景里是正确的，不是泄漏。
+    """
+    s = re.sub(r"[^\u4e00-\u9fffA-Za-z]", "", str(inner or ""))
+    if not s:
+        return True
+    return bool(re.fullmatch(r"[咔砰啪咚叮吱哗沙呼嗡哐咣嚓嘀嗒啦呀哈嘿嗯哦啊哟哎]{1,3}", s))
+
+
+def speech_leak(seg):
+    """返回 (hard, soft)：非台词字段里可能被念出来的**人声**文本。
+
+    hard = 引号内的**人声短句**（去掉拟声/语气词）—— 几乎必被念，应当硬拦；
+    soft = 高置信语音短语（声音/后话/那句话…）—— 很危险，但可能误报，报出来让人看一眼。
+
+    ⚠ 只检查**实际会进提示词的那份音景**（`seg_soundscape()` 的结果）。
+      第一版分别查了 `soundscape_zh` 与英文 `soundscape` 两个字段 →
+      中文项目里那份英文音景根本不会进提示词，却报出一堆英文「引语」噪音。
+      判据：**检查对象必须与实际生效的那份一致**（同 D2-d「派生值只能有一个产出点」）。
+    """
+    hard, soft = [], []
+    # 本段**已在台词块里**的内容（去掉标点后比对）——用来区分两种引语：
+    #   · 引号里是**新增人声**（台词块里没有）→ 高危：模型一定会把它念出来
+    #     （实测用户听到的那句「她一声"让一下"压下去」就是**台词块里没有的路人台词**）
+    #   · 引号里是**本段台词的原文**（重复引用）→ 风险较低，但仍建议删掉引号
+    _dlg_core = "".join(re.sub(r"[^\u4e00-\u9fffA-Za-z]", "", d.get("text") or "")
+                        for d in (seg.get("dialogue") or []))
+
+    def _scan(field, text):
+        if not text:
+            return
+        s = str(text)
+        for m in _SL_QUOTE_RE.finditer(s):
+            inner = m.group(1)
+            if _sl_is_onomatopoeia(inner):
+                continue
+            core = re.sub(r"[^\u4e00-\u9fffA-Za-z]", "", inner)
+            if core and core in _dlg_core:
+                soft.append((field, m.group(0) + "（本段台词原文重复引用）"))
+            else:
+                hard.append((field, m.group(0)))
+        for w in _SL_PHRASES:
+            if w in s:
+                soft.append((field, w))
+                break
+
+    _scan("overall_soundscape", seg_soundscape(seg))     # 只查**实际进提示词**的那份
+    for f in ("camera_lock_zh", "action_zh", "ending_zh"):
+        _scan(f, seg.get(f))
+    for b in (seg.get("beats") or []):
+        if b.get("type") in ("action", "action_offscreen"):
+            _scan("beats.action", b.get("zh"))
+    return hard, soft
+
+
+def report_speech_leaks(segs, project_root=None, label=""):
+    """生成期就把泄漏**大声报出来**（别等成片了从用户耳朵里发现）。"""
+    tot_h = tot_s = 0
+    for s in segs:
+        h, so = speech_leak(s)
+        if not (h or so):
+            continue
+        tot_h += len(h)
+        tot_s += len(so)
+        bits = []
+        if h:
+            bits.append("硬拦 %d（引语）：%s" % (len(h), "；".join(
+                "%s %s" % (f, t) for f, t in h[:2])))
+        if so:
+            bits.append("警告 %d（语音词）：%s" % (len(so), "；".join(
+                "%s「%s」" % (f, w) for f, w in so[:3])))
+        print("  [speech-leak] 段%s %s" % (s.get("seq"), " ｜ ".join(bits)), flush=True)
+    if tot_h or tot_s:
+        print("  [speech-leak] 合计：硬拦 %d 处 · 警告 %d 处 —— "
+              "**非台词字段里的「语音性文本」会被 H3 念出来**。" % (tot_h, tot_s))
+        print("  [speech-leak] %s" % _SPEECH_REWRITE_HINT)
+    else:
+        print("  [speech-leak] ✅ 未发现非台词字段的语音性文本%s"
+              % ("（%s）" % label if label else ""))
+    return tot_h, tot_s
+
+
+# ---- V2.2.10：嘴唇闭合标记（每句台词后必须跟一个，让模型知道台词在哪里结束）----
+# 官方示例（h3-ref2va-optimizer/04-complete-examples.md）：
+#   →…says: <d>[中文]台词</d> 说完嘴唇合上。
+#   →…says: <d>[中文]台词</d> 说完双唇闭合。
+#   →…says: <d>[中文]台词</d> 说完抿住嘴。
+_LIP_CLOSURES = ["说完嘴唇合上。", "说完双唇闭合。", "说完抿住嘴。"]
+_lip_closure_state = [0]  # 用 list 避免嵌套函数 global 赋值
+
+
+def _next_lip_closure():
+    r = _LIP_CLOSURES[_lip_closure_state[0] % len(_LIP_CLOSURES)]
+    _lip_closure_state[0] += 1
+    return r
+
+
+# ---------- H3 官方框架 & 本地线铁律（V1.8.4 对齐 h3-ref2va-optimizer V2.4） ----------
+
+# R34 · 活人感表演指导行（默认逐字使用；与 h3-ref2va-optimizer 的
+# references/09-liveness.md 同源，改一处必须改两处）
+DEFAULT_ACTING_DIRECTION = (
+    "Acting direction for the whole sequence: nobody stands idle or poses for the "
+    "camera. Every character is always occupied with some small piece of business — "
+    "handling an object, finishing a movement, glancing at something off-topic. "
+    "In every exchange one character acts while the other reacts, and reactions "
+    "arrive a beat late, the way real people respond while their attention is still "
+    "somewhere else. Small involuntary gestures (swallowing, shifting weight, thumb "
+    "rubbing an edge, a delayed look-up) matter more than polished facial expressions."
+)
+
+# R36 · 语速基准按语言切换 —— V2.0.10 起**唯一来源**在 references/drama_schema.py。
+# 本文件原先自带一份副本，与 drama_to_h3_prompts.py 的另一份**恰好一致**（碰巧，不是设计）。
+CPS_BY_LANG = _CPS_BY_LANG
+
+# 语言的「中文显示名」——`<d>[Language]` 标签必须用官方英文名（Japanese），
+# 但叙述句里写中文更自然（h3 铁律 R36 原文示例就是「说日语（関東標準語）」）。
+LANG_ZH = {"中文": "中文", "Chinese": "中文", "普通话": "中文", "Mandarin": "中文",
+           "日语": "日语", "Japanese": "日语", "英语": "英语", "English": "英语",
+           "韩语": "韩语", "Korean": "韩语"}
+
+# 视频提示词的叙述层必须中文（h3 V2.4 的 LANG-MIX 口径：detailed_description 里
+# 允许出现的英文只有「R34 表演指导行」与「铁律 11 官方运镜句」两类）。
+# style_prompt 是给「生图」定的英文风格锚，进视频提示词时要落成中文。
+DEFAULT_STYLE_ZH = "真人实拍，电影感光影，浅景深，全片风格统一不漂移。"
+
+
+def _has_cjk(s):
+    return bool(re.search(r"[\u4e00-\u9fff]", s or ""))
+
+
+def lang_zh_of(seg):
+    """语言的中文显示名（叙述层用）。`<d>` 标签仍用官方英文名。"""
+    return LANG_ZH.get(seg_lang(seg), seg_lang(seg))
+
+# R39 · 17 帧对齐 —— V2.0.10 起**唯一来源**在 references/drama_schema.py。
+# 原先 FRAME_ALIGN + align_duration 在本文件与 drama_to_h3_prompts.py 各存一份
+# （两份恰好一致 → 正是「碰巧一致」的典型，见 drama_schema 模块说明）。
+
+
+def seg_lang(seg):
+    """R36 ① · 本段台词语言 → 官方 `<d>[Language]` 标签用。默认中文。"""
+    return str(seg.get("dialogue_language") or "中文")
+
+
+def seg_rate(seg):
+    """本段语速基准（字或モーラ每秒）。"""
+    return CPS_BY_LANG.get(seg_lang(seg), 4.5)
+
+
+def _poss(profile):
+    """his / her / their —— 供 `while his lips remain completely closed.` 用。"""
+    g = (profile or {}).get("gender")
+    return "her" if g == "female" else ("his" if g == "male" else "their")
+
+
+def seg_is_cross_shot(seg):
+    """R37 · 本段是否走「台词跨镜延续」口径。
+
+    显式 `cross_shot: true`，或段内声明了多镜（`shots` >= 2，对应铁律 38
+    「长段塞更多 shot」）时自动启用。一镜到底段用不到跨镜口径。
+    """
+    if seg.get("cross_shot"):
+        return True
+    return len(seg.get("shots") or []) > 1
+
+
+def is_living_segment(seg):
+    """R34 · 本段是否需要写表演指导行：段内有角色就写；纯空镜 / 无人段省略。"""
+    if seg.get("on_screen_char_ids") or seg.get("speaker_char_id"):
+        return True
+    for b in (seg.get("beats") or []):
+        if isinstance(b, dict) and b.get("char_id"):
+            return True
+    return False
+
+
+def scene_zh_name(scene_id):
+    """scene_01_教学楼门口 → 教学楼门口"""
+    if not scene_id:
+        return "当前场景"
+    parts = str(scene_id).split("_", 2)
+    return parts[-1] if len(parts) >= 2 else str(scene_id)
+
+
+def scene_label(project_root, scene_id):
+    """场景中文名：优先从 场景资产/<scene_id>_*/ 目录名取（storyboard 里只写 scene_01）。"""
+    if not scene_id:
+        return "当前场景"
+    if project_root:
+        hit = next(iter(Path(project_root).glob(f"场景资产/{scene_id}_*/")), None)
+        if hit is not None:
+            parts = hit.name.split("_", 2)
+            if len(parts) >= 3 and parts[2]:
+                return parts[2]
+    return scene_zh_name(scene_id)
+
+
+def _char_sort_key(cid):
+    """角色排序键：取 char_NN 的数字。"""
+    import re as _re
+    m = _re.search(r"(\d+)", str(cid) or "")
+    return (int(m.group(1)) if m else 999, str(cid) or "")
+
+
+def plan_ref_slots(seg):
+    """参考图槽位计划 —— 顺序即 <Picture N> 编号顺序。
+
+    角色按 char_NN 数字**固定升序**（不跟说话人走），保证
+    <Subject N> / <Picture N> / (SN) / <Audio N> 在全片所有段里编号完全一致
+    （铁律 12：说话人 ID 跨镜头必须稳定）。
+
+    必须与 run_one → resolve_ref_images 的上传顺序严格一致，
+    否则 <Picture N> 会指错图（历史翻车根源）。
+    返回 [{"kind": "char"/"scene"/"prop"/"tail", "id": ...}, ...]
+    """
+    on_screen = {c for c in (seg.get("on_screen_char_ids") or []) if c}
+    speaker = seg.get("speaker_char_id")
+    if speaker:
+        on_screen.add(speaker)
+    # V0.5.8-fix：分镜可显式声明 max_char_refs（默认 3；双宇宙镜像等 4 人同框段允许 4）
+    max_chars = seg.get("max_char_refs", 3)
+    chars = sorted(on_screen, key=_char_sort_key)[:max_chars]
+
+    slots = [{"kind": "char", "id": cid} for cid in chars]
+    if seg.get("scene_id") and len(slots) < 5:
+        slots.append({"kind": "scene", "id": seg["scene_id"]})
+    # V2.0.12：尾帧槽位 —— **dualref 也要**，且**排在道具之前**。
+    #   原实现 `if mode == "tailframe"` 只认纯尾帧模式，而 SKILL.md B5 / 铁律
+    #   「只有 link: tailframe / dualref 才依赖前一段尾帧」把 dualref 也算在内 ——
+    #   文档说双锚定、代码只给了一半（角色图），13 段实际**没有衔接锚点**。
+    #   更冤的是：dualref 段本来就 `deps_ok` 要等前段跑完（成本已付），
+    #   等的却是一张永远不被用到的尾帧。
+    #   顺序改为 chars → scene → tail → prop：尾帧让 5 张额度刚好用满，
+    #   3 角色段（3+1+1=5）自然挤掉道具（道具另有文字描述兜底）。
+    mode, ref_seq = parse_link(seg)
+    tail_added = False
+    if mode in ("tailframe", "dualref") and ref_seq and len(slots) < 5:
+        slots.append({"kind": "tail", "id": ref_seq})
+        tail_added = True
+    props = seg.get("prop_ids") or []
+    if props and len(slots) < 5:
+        slots.append({"kind": "prop", "id": props[0]})
+    elif props and tail_added:
+        # plan_ref_slots 是纯函数、一次生成里会被调 4 遍（deriving / 机检 / 音色 / 审核页）
+        # → 同一段会重复刷 4 遍同样的 note。用模块级集合只报一次。
+        _k = (str(seg.get("seq")), props[0])
+        if _k not in _PROP_DROPPED_NOTED:
+            _PROP_DROPPED_NOTED.add(_k)
+            print(f"  [note] 段{seg['seq']} 为 {mode}、需要尾帧锚点：5 张额度已给"
+                  f"「角色+场景+尾帧」，道具 {props[0]} 不进参考图（仍由节拍文字描述）。",
+                  flush=True)
+    # V0.5.8-fix：6-9 张警告不拒绝；>9 直接报错（Minimax 硬上限）
+    if len(slots) > 9:
+        raise ValueError(f"参考图槽位 {len(slots)} 张超过 Minimax 硬上限 9 张，必须缩减")
+    if 5 < len(slots) <= 9:
+        print(f"  [warn] 本段参考图 {len(slots)} 张 > 软上限 5，已按用户确认的 max_char_refs={max_chars} 放行", flush=True)
+    return slots
+
+
+def plan_audio_chars(project_root, seg):
+    """本段要传几个音色、各是谁 —— 顺序与 <Subject N> 完全一致（跨段稳定）。
+
+    只统计磁盘上真的存在 `角色资产/<cid>_*/voice/voice_sample.mp3` 的角色；
+    gen_drama_prompt 与 resolve_audios 共用本函数 → 两边编号天然对齐，
+    不会出现「提示词写 <Audio 2> 但工作流里没传第 2 条音色」的错配。
+    """
+    out = []
+    if not project_root:
+        return out
+    # V0.5.8-fix：无台词段不传音色（dialogue 为空且 beats 里也没有 line 节拍）
+    # 原逻辑会传所有在场角色音色 → 无台词时浪费 Minimax 硬上限 3 个名额
+    has_dialogue = bool(seg.get("dialogue"))
+    if not has_dialogue:
+        for b in (seg.get("beats") or []):
+            if b.get("type") in ("line", "line_offscreen"):
+                has_dialogue = True
+                break
+    if not has_dialogue:
+        return out
+    root = Path(project_root)
+    # V0.5.8-fix：只传「本段实际有台词」的角色音色（Minimax 硬上限 3 段）
+    # 原逻辑传所有在场角色音色 → 4 人同框但只有 1 人说话时，其他 3 人音色全浪费且报错
+    speakers = set()
+    for d in (seg.get("dialogue") or []):
+        if d.get("char_id"):
+            speakers.add(d["char_id"])
+    for b in (seg.get("beats") or []):
+        if b.get("type") in ("line", "line_offscreen") and b.get("char_id"):
+            speakers.add(b["char_id"])
+    # 兼容旧分镜：speaker_char_id 兜底
+    if seg.get("speaker_char_id"):
+        speakers.add(seg["speaker_char_id"])
+    # 画外音角色单独入列——不上图（on_screen 里没有他们），
+    # 但需要传音色（dialogue 里声明了 char_id）
+    audio_candidates = []
+    for sl in plan_ref_slots(seg):
+        if sl["kind"] == "char":
+            audio_candidates.append(sl["id"])
+    # 补充画外音角色
+    for cid in (seg.get("offscreen_char_ids") or []):
+        if cid not in audio_candidates:
+            audio_candidates.append(cid)
+    for cid in audio_candidates:
+        # 只传有台词的
+        if speakers and cid not in speakers:
+            continue
+        hit = next(iter(root.glob(f"角色资产/{cid}_*/voice/voice_sample.mp3")), None)
+        if hit is not None and hit.exists():
+            out.append(cid)
+    return out
+
+
+def ref_slot_local_path(project_root, kind, rid):
+    """按槽位类型定位本地素材文件 → (Path|None, label)。
+
+    label 同时用作「实跑时的参考图快照文件名」，所以直接用 rid
+    （rid 本身已带 kind 前缀：char_01 / scene_01 / prop_01）。
+    """
+    root = Path(project_root)
+    if kind == "char":
+        return next(iter(root.glob(f"角色资产/{rid}_*/images/front.png")), None), rid
+    if kind == "scene":
+        return next(iter(root.glob(f"场景资产/{rid}_*/main.png")), None), rid
+    if kind == "prop":
+        return next(iter(root.glob(f"道具资产/{rid}_*/main.png")), None), rid
+    return None, str(rid)
+
+
+def plan_ref_locals(seg, project_root, st=None, tf_dir=None, for_review=False):
+    """纯本地的槽位解析（**不上传**）→ [(local_path|None, label, slot_dict), ...]
+
+    顺序与 `<Picture N>` 严格同序，与 `plan_ref_slots()` 同源。
+    审核阶段（`for_review=True`）与实跑共用这一份 —— 保证「审核页里看到的顺序」
+    就是「真跑时上传到工作流的顺序」，不存在两套算法漂移的可能。
+
+    tail 槽特例：实跑必须有前段尾帧（缺失就抛错，禁止静默跳过）；
+    审核阶段前段还没生成、尾帧文件必然不存在，此时返回 `local_path=None` 并在
+    label 上标注，**不阻塞审核**（真跑时才会因为缺文件而中止）。
+    """
+    out = []
+    for sl in plan_ref_slots(seg):
+        kind, rid = sl["kind"], sl["id"]
+        if kind == "tail":
+            prev = (st or {}).get(str(rid), {})
+            png = os.path.join(tf_dir, f"seg_{rid}_tail.png") if tf_dir else None
+            if png and not os.path.exists(png) and not for_review:
+                if prev.get("status") != "done":
+                    raise RuntimeError(
+                        f"段{seg['seq']} 需要前段 {rid} 的尾帧，但该段状态="
+                        f"{prev.get('status')!r}（未完成）")
+                extract_tailframe(prev["file"], png)
+            if png and os.path.exists(png):
+                out.append((png, f"tailframe_seg_{rid}", sl))
+            elif for_review:
+                out.append((None, f"tailframe_seg_{rid}", sl))
+            else:
+                raise RuntimeError(f"段{seg['seq']} 尾帧提取失败：{png}")
+            continue
+
+        hit, label = ref_slot_local_path(project_root, kind, rid)
+        if hit is None or not Path(hit).exists():
+            if for_review:
+                out.append((None, label, sl))
+            else:
+                raise RuntimeError(
+                    f"段{seg['seq']} 参考（{kind}={rid}）缺文件 → "
+                    f"<Picture N> 会整体错位，中止（不要静默跳过）")
+        else:
+            out.append((str(hit), label, sl))
+    return out
+
+
+def seg_dialogue(seg):
+    """归一化对白 → [{"char_id":..., "text":...}]（V0.5.5 多角色）
+
+    优先读 seg['dialogue']（谁说话谁开口，一段内可多人轮流）；
+    没有则退回 narration + speaker_char_id（单角色，向后兼容 V0.5.4 分镜）。
+    """
+    d = seg.get("dialogue")
+    if isinstance(d, list) and d:
+        out = []
+        for item in d:
+            if isinstance(item, dict):
+                cid = (item.get("char_id") or item.get("speaker")
+                       or seg.get("speaker_char_id"))
+                txt = str(item.get("text") or "").strip()
+            else:
+                cid, txt = seg.get("speaker_char_id"), str(item).strip()
+            if txt:
+                out.append({"char_id": cid, "text": txt,
+                            "offscreen": bool(item.get("offscreen")) if isinstance(item, dict) else False})
+        if out:
+            return out
+    nar = str(seg.get("narration") or "").strip()
+    return [{"char_id": seg.get("speaker_char_id"), "text": nar}] if nar else []
+
+
+def _split_beats(text, limit=6):
+    """把一句中文动作描述切成短节拍（按中文逗号/分号切）。"""
+    import re as _re
+    parts = [p.strip() for p in _re.split(r"[，,；;]", str(text or "")) if p.strip()]
+    return parts[:limit]
+
+
+def load_char_profile(project_root, char_id):
+    """读角色档案，返回 {name, name_en, gender, age, occupation, default_costume, ...}
+    name_en 从 profile.md 的 **英文名** 字段抓，没有则用 char_id 兜底
+    default_costume 从 profile.md 的 **默认服装** 字段抓（用于非 speaker 角色的服装锚定）"""
+    if not project_root:
+        return {}
+    root = Path(project_root)
+    for d in (root / "角色资产").glob(f"{char_id}_*"):
+        profile = d / "profile.md"
+        if not profile.exists():
+            continue
+        text = profile.read_text(encoding="utf-8")
+        info = {"char_id": char_id}
+        # 中文名：从目录名抓
+        name = d.name.split("_", 2)[-1] if "_" in d.name else d.name
+        info["name"] = name
+        # 默认英文名 = char_id
+        info["name_en"] = char_id
+        # 从 profile 抓字段
+        in_costume_section = False
+        costume_lines = []
+        for line in text.splitlines():
+            line = line.strip().lstrip("-*").strip()
+            if line.startswith("**英文名**") or line.startswith("英文名"):
+                v = line.split("：", 1)[-1].split(":", 1)[-1].strip().rstrip("*").strip()
+                if v:
+                    info["name_en"] = v
+            elif line.startswith("**性别**") or line.startswith("性别"):
+                v = line.split("：", 1)[-1].split(":", 1)[-1].strip().rstrip("*").strip()
+                info["gender"] = "female" if "女" in v else "male"
+            elif line.startswith("**年龄**") or line.startswith("年龄"):
+                v = line.split("：", 1)[-1].split(":", 1)[-1].strip().rstrip("*").strip()
+                import re
+                m = re.search(r"\d+", v)
+                if m:
+                    info["age"] = int(m.group(0))
+            elif line.startswith("**职业**") or line.startswith("职业"):
+                v = line.split("：", 1)[-1].split(":", 1)[-1].strip().rstrip("*").strip()
+                info["occupation"] = v
+            elif line.startswith("**身份一句话**") or line.startswith("身份一句话"):
+                v = line.split("：", 1)[-1].split(":", 1)[-1].strip().rstrip("*").strip()
+                if v:
+                    info["identity_oneliner"] = v
+            # 抓服装英文版（匹配 "- 英文：" 或 "**英文**：" 行）
+            line_clean = line.lstrip("-*").strip()
+            if (line_clean.startswith("英文") or line_clean.startswith("**英文**")) and ("：" in line_clean or ":" in line_clean):
+                v = line_clean.split("：", 1)[-1].split(":", 1)[-1].strip()
+                # 排除其他字段的英文（比如英文名）
+                if "wear" in v or "apron" in v or "coat" in v or "dress" in v or "sweater" in v or "tracksuit" in v or "blazer" in v:
+                    info["default_costume"] = v
+            # 抓服装中文版（V0.5.5：叙述层中文化用）
+            if line_clean.startswith("中文") and ("：" in line_clean or ":" in line_clean):
+                v = line_clean.split("：", 1)[-1].split(":", 1)[-1].strip()
+                if any(k in v for k in ("校服", "外套", "衬衫", "裤", "鞋", "裙", "衣",
+                                        "帽", "围巾", "包", "西装", "毛衣", "围裙")):
+                    info["default_costume_zh"] = v
+        return info
+    return {}
+
+
+def gen_drama_prompt(seg, continuing, project_root=None):
+    """
+    短剧对白分镜提示词 V0.4 多角色版（融合 h3-ref2va-optimizer 33 条铁律核心）
+
+    关键升级（vs V0.3）：
+    - 强制写入角色名+性别+年龄（解决 shot_03 人音错配）
+    - **多在场角色每个都写 Subject 定义**（解决 shot_04/08 非 speaker 角色服装失控）
+    - 加镜头几何锁（机位 + 朝向）
+    - 加说话人 ID (S1) 放在 <d> 外
+    - 加服装锚定（同剧跨段一致）
+    - 加去污染声明（棚拍背景不继承）
+    - 台词行用"角色名说"格式（中文叙述）
+    - BGM 默认 N/A
+    """
+    # ⚠ `cont`（段间承接句）**不在这里拼** —— 它必须引用尾帧槽位的**真实 <Picture N> 编号**，
+    #   而槽位要到下面 slots 算完才知道。V2.0.12 前的写法是硬编码 `<Picture 1>`，
+    #   于是提示词对着**排在第一位的人物参考图**说「承接这张图里的姿势」——
+    #   <Picture 1> 永远是角色设计图，不是上一段尾帧。见下方 `_build_cont()`。
+
+    # ---- 对白（多角色，V0.5.5 谁说话谁开口）----
+    dialogue = seg_dialogue(seg)
+    speakers = []
+    for line in dialogue:
+        cid = line["char_id"]
+        if cid and cid not in speakers:
+            speakers.append(cid)
+
+    # R36 ③：外语版要给**所有实际发声的角色**挂「该角色说 X 语言」——
+    # 不只 dialogue，beats 里的 line / line_offscreen / inner / together / sing 都算发声源
+    speaking_ids = set(speakers)
+    for _b in (seg.get("beats") or []):
+        if not isinstance(_b, dict):
+            continue
+        if str(_b.get("type") or "").lower() in (
+                "line", "dialogue", "say", "line_offscreen", "inner",
+                "together", "chorus", "sing"):
+            _c = _b.get("char_id") or _b.get("speaker")
+            if _c:
+                speaking_ids.add(_c)
+
+    # ---- V1.8.4：语言 / 跨镜口径（summary 与台词行都依赖，先定下来）----
+    d_lang = seg_lang(seg)                     # R36 ① 台词语言
+    cross_shot_mode = seg_is_cross_shot(seg)   # R37 段级跨镜口径
+
+    # ---- 参考图槽位（顺序 = <Picture N> 编号顺序）----
+    slots = plan_ref_slots(seg)
+
+    # ---- 角色档案（缓存）----
+    prof_cache = {}
+
+    def prof(cid):
+        if cid not in prof_cache:
+            prof_cache[cid] = (load_char_profile(project_root, cid)
+                               if (project_root and cid) else {})
+        return prof_cache[cid]
+
+    def _uniform_anchor(order_zh):
+        """在「本段在场角色」里挑一个**真穿校服**的人当群演服装锚点。
+
+        V2.0.12 新增。为什么不能简单 `"校服" in costume`：
+        陆星野的服装设定原文是「白色长袖衬衫 + 松开两扣的领带，**不穿校服外套**」——
+        **「校服」二字恰恰出现在否定句里**。直接 substring 会把他挑成锚点，
+        生成出「统一穿着与陆星野同款的校服」这种自相矛盾的句子（实测就是这样）。
+
+        判据（同 h3 校验器「完全参照」那次假阳性）：
+        **一个词如果是所有对象共用的写法，它就不能用来区分对象类别** ——
+        正确做法是加一道判别器（先判否定、再判肯定），而不是往关键词表里加词。
+
+        优先级：运动服/运动校服 > 其它含「校服」> 都不满足则返回 None（改用通用措辞）。
+        """
+        cands = []
+        for cid in (seg.get("on_screen_char_ids") or []):
+            zh = names(cid)[0]
+            if zh not in order_zh:
+                continue
+            c = (prof(cid) or {}).get("default_costume_zh") or ""
+            cands.append((zh, c.replace("*", "").replace(" ", "")))
+        for neg in ("不穿", "未穿", "没穿", "不著", "未著"):
+            cands = [(zh, c) for zh, c in cands if neg not in c]
+        for zh, c in cands:
+            if "运动服" in c or "运动校服" in c:
+                return zh
+        for zh, c in cands:
+            if "校服" in c:
+                return zh
+        return None
+
+    def names(cid):
+        info = prof(cid) or {}
+        return (info.get("name") or cid, info.get("name_en") or cid)
+
+    # ---- 说话人 ID 与音色编号：统统锚在 <Subject N> 上 → 跨段稳定（铁律 12）----
+    subj_idx = {sl["id"]: i for i, sl in enumerate(slots, start=1) if sl["kind"] == "char"}
+    sid = {cid: f"S{i}" for cid, i in subj_idx.items()}
+    # V0.5.8-fix：画外音角色（不出镜但有台词）给虚拟 sid，基于 char_NN 数字保证跨段稳定
+    for cid in (seg.get("offscreen_char_ids") or []):
+        if cid not in sid:
+            m = re.match(r"char_(\d+)", cid or "")
+            n = int(m.group(1)) if m else 99
+            sid[cid] = f"S{n}"
+    audio_chars = plan_audio_chars(project_root, seg)
+    aud_of = {cid: j + 1 for j, cid in enumerate(audio_chars)}
+
+    # ---- 旁白（narrator）稳定 ID（V2.4 铁律 35 · 官方 ref-en §5.4）----
+    # 旁白是独立发声源、不对应任何 <Subject>：按「实际发声顺序」分配 (Sx)，
+    # 画面角色已用到 S2 时旁白就是 S3。跨段一致靠 seg["narrator_id"] 固定。
+    narrator_sid = None
+    if seg.get("narrator_voice_zh") or any(
+            isinstance(b, dict)
+            and str(b.get("type") or "").lower() in ("narration", "narrator")
+            for b in (seg.get("beats") or [])):
+        _used = sorted(int(m.group(1)) for m in
+                       (re.match(r"S(\d+)", v or "") for v in sid.values()) if m)
+        narrator_sid = str(seg.get("narrator_id") or f"S{(_used[-1] + 1) if _used else 1}")
+
+    # ---- 图片上传顺序（铁律 17）----
+    up_rows = []
+    for i, sl in enumerate(slots, start=1):
+        if sl["kind"] == "char":
+            zh, en = names(sl["id"])
+            up_rows.append(f"@图片{i}：{zh}（{en}）人物主参考，锁定面容、发型、服装和体型")
+        elif sl["kind"] == "scene":
+            up_rows.append(f"@图片{i}：场景参考，锁定空间、色彩和光线方向")
+        elif sl["kind"] == "prop":
+            up_rows.append(f"@图片{i}：道具参考，锁定外形、材质与颜色")
+        else:
+            up_rows.append(f"@图片{i}：上一段尾帧，锁定姿势与构图")
+    upload_block = "图片上传顺序：\n" + "\n".join(up_rows) + "\n"
+
+    # ---- subject_definitions ----
+    # 去污染句必须**紧跟各自的 <Picture N>**（同一个逻辑行内），
+    # 否则校验器会把前一张图的匹配吞掉后一张（实测 <Picture 3> 的匹配会吃掉 <Picture 1>）
+    scene_now = scene_label(project_root, seg.get("scene_id"))
+    decontam = (f"<Picture {{i}}> 不得展示参考图自带的棚拍纯色背景，"
+                f"替换为{scene_now}的实际场景环境。")
+    subj_lines = []
+    people_zh = []
+    for i, sl in enumerate(slots, start=1):
+        if sl["kind"] == "char":
+            cid = sl["id"]
+            info = prof(cid) or {}
+            zh, en = names(cid)
+            age = info.get("age")
+            gender_zh = {"male": "男", "female": "女"}.get(info.get("gender"), "")
+            # V0.5.8-fix：身份不再硬编码「中国男高中生」——
+            # 优先取 profile.md 的「**身份一句话**」字段（支持非人类角色：全息投影/AI/外星生命等）
+            # 否则用「年龄+国籍+性别+职业」组合；都没有再退回「高中生」默认（兼容旧项目）
+            identity_oneliner = info.get("identity_oneliner") or ""
+            if identity_oneliner:
+                identity = identity_oneliner
+            else:
+                occupation = info.get("occupation") or "高中生"
+                age_part = f"{age} 岁" if age else ""
+                nation_part = "" if ("鲸星" in occupation or "外星" in occupation
+                                     or "全息" in occupation or "AI" in occupation) else "中国"
+                identity = f"{age_part}{nation_part}{gender_zh}{occupation}".strip()
+            people_zh.append(zh)
+            if cid == seg.get("speaker_char_id") and seg.get("costume_zh"):
+                costume = seg["costume_zh"]
+            else:
+                costume = (info.get("default_costume_zh")
+                           or info.get("default_costume") or "")
+            line = f"<Subject {i}>：{zh}（{en}），{identity}。"
+            if costume:
+                line += f"服装为{costume}。"
+            # R36 ③：外语版必须在该说话角色的 Subject 定义里写「说 X 语言」，
+            # 否则 H3 是中文语境模型，很可能直接改用中文朗读
+            if d_lang != "中文" and (cid in speaking_ids or cid in audio_chars):
+                _dia = f"（{seg['dialect_zh']}）" if seg.get("dialect_zh") else ""
+                line += f"该角色说{lang_zh_of(seg)}{_dia}。"
+            note = (seg.get("costume_notes") or {}).get(cid)
+            if note:
+                line += str(note)
+            line += f"完全参照 <Picture {i}> 外观，保留其面部特征、发型与整体形象。"
+        elif sl["kind"] == "scene":
+            line = (f"<Subject {i}>：{scene_now}（场景）。"
+                    f"完全参照 <Picture {i}> 外观，锁定空间布局、色彩与光线方向。")
+        elif sl["kind"] == "prop":
+            line = (f"<Subject {i}>：关键道具。完全参照 <Picture {i}> 外观，"
+                    f"锁定外形、材质与颜色。")
+        else:
+            # V2.2.9（2026-09-19 用户逐段核对后修）：尾帧原写法有两处**反向**错误 ——
+            #   ① 措辞在**弱化**它（「仅用于承接姿势与构图，不是独立主体」）
+            #      → 模型理解成「只参考姿势/构图」，于是重新构图、人物位置与状态照旧自由发挥；
+            #   ② 给它套了**去污染句**（「不得展示参考图自带的棚拍纯色背景，替换为X的实际场景环境」）
+            #      —— 尾帧是**上一段的实拍场景帧**，本来就没有棚拍背景；
+            #      这句话反而在暗示「把这张图的场景替换掉」→ **正好破坏衔接**。
+            #   ⇒ 改成：明确「**本段第一帧 = 这张图**」并逐项列出必须延续的东西；
+            #      背景句改成「不得替换、原样延续」—— 刻意保留 `不得展示` 字样以过官方校验器
+            #      的 BG-POLLUTION 覆盖匹配，但**语义已完全反过来**。
+            line = (f"<Picture {i}>：**本段画面的起点** —— 上一段的最后一帧。"
+                    f"本段第一帧必须与它完全接续：同一场景与同一光线、同一景别与机位、"
+                    f"同一人物及其位置、朝向、姿势与服装。动作从这一帧继续，"
+                    f"人物的位置、姿态与状态均不得改变。")
+            line += (f"<Picture {i}> 不得展示任何「棚拍纯色背景」式的替换环境 —— "
+                     f"它本身就是上一段的实拍场景，背景必须原样延续、不得重绘。")
+        if sl["kind"] == "tail":
+            # 尾帧**不加**通用去污染句（那句是给棚拍资产图用的，套在实拍尾帧上会破坏衔接）
+            subj_lines.append(line)
+        else:
+            subj_lines.append(line + decontam.format(i=i))
+
+    # ---- <Audio N>：每个在场角色一条，编号与 <Subject N> 对齐（V0.5.5 多音色）----
+    # V0.5.8-fix：画外音角色（offscreen）没有 <Subject N>，直接以名字标识
+    offscreen_set = set(seg.get("offscreen_char_ids") or [])
+    audio_lines = []
+    for cid in audio_chars:
+        zh_name, _ = names(cid)
+        if cid in subj_idx:
+            audio_lines.append(
+                f"<Audio {aud_of[cid]}> 是 <Subject {subj_idx[cid]}>（{sid[cid]}）"
+                f"的音色参考，含一段中文人声，仅取用其音色与语速。")
+        elif cid in offscreen_set:
+            audio_lines.append(
+                f"<Audio {aud_of[cid]}> 是 {zh_name} 的音色参考（画外音，角色不出镜），"
+                f"含一段中文人声，仅取用其音色与语速。")
+        else:
+            audio_lines.append(
+                f"<Audio {aud_of[cid]}> 是 {zh_name} 的音色参考，"
+                f"含一段中文人声，仅取用其音色与语速。")
+
+    # ---- summary ----
+    # V2.0.12：`cont` 在这里拼 —— 只有拿到尾帧槽位才能写出**正确的 <Picture N>**。
+    #   三种情形严格区分，**不许把「承接」指到不存在的锚点上**：
+    #     · 有尾帧槽 → 「承接 <Picture N>」（N = 尾帧槽真实编号）
+    #     · 没有尾帧槽但声明了段间衔接（dualref/tailframe）→ 改成不指图的呼应句
+    #     · 不衔接（origin）→ 不写
+    _tail_idx = next((i for i, sl in enumerate(slots, start=1)
+                      if sl["kind"] == "tail"), None)
+    if _tail_idx is not None:
+        # V2.2.9：承接句从「承接姿势」升级为**首帧锁定**。
+        #   原句只说「承接 <Picture N> 中的姿势与同一场景」—— 只约束了姿势，
+        #   没有约束**景别/机位/构图/人物位置与状态**，于是实测「人物位置老是变动」
+        #   「原本躺着变成坐着」「本来闭着眼却醒了」（用户逐段核对的原话）。
+        cont = (f"**本段开头必须与 <Picture {_tail_idx}> 完全接续**：同一景别、同一机位与构图、"
+                f"同一光线、同一人物及其位置、朝向、姿势与服装，"
+                f"从这一帧的画面继续动作，不停顿、不换场景、不改变人物的位置与状态。")
+    elif continuing:
+        cont = ("与上一段同一场景、同一人物，保持服装、人物位置与视线方向一致，"
+                "动作从第一帧开始，不停顿。")
+    else:
+        cont = ""
+
+    who = "与".join(people_zh) if people_zh else "人物"
+    # V2.0.12：单人段不写「同框」（实测段 20 只有夏小满一人，却写「夏小满同框」）；
+    #   多人段也**不再写「同框」** —— 本集段 19 的机位是「近景对切，两人始终不同框」，
+    #   而 summary 却写「顾砚辞与夏小满同框」= 自己跟自己打架。
+    #   「同框」断言的是**同一画面内**，而 summary 要表达的只是**本段有谁出场**。
+    if len(people_zh) >= 2:
+        subj = f"{who}均在本段出场"
+    elif people_zh:
+        subj = f"{people_zh[0]}一人出场"
+    else:
+        subj = "画面中的人物"
+    cam_zh = seg.get("camera_lock_zh") or "镜头保持稳定中景平视"
+    has_aud = " + audio reference" if audio_chars else ""
+    # R39：段长写 17 帧对齐后的**实际**时长（12s -> 12.25s），台词预算与镜数都按它算
+    dur_actual = align_duration(seg.get("dur"))
+    # V2.0.12：**不能无条件写「一镜到底」**，也不能靠关键词猜。
+    #   两条路都试过，都错：
+    #     ① 无条件写 → 本集段 5/8/9/11/12/14/17/18/19 的 camera_lock_zh 明确要求
+    #        「正反打 / 对切 / 切到特写」，summary 却说「一镜到底」= 两条互斥指令同时下发；
+    #     ② 关键词判据（对切/正反打/切点…）→ **漏了 4 段**（段 9「→」箭头、段 12「切她的近景」、
+    #        段 14「切她眼睛特写」、段 18「她给中近景/他用越肩」都不含那些词）。
+    #   ⇒ 判据：**「这是几个镜头」是作者才知道的内容事实，必须显式声明，不能反推。**
+    #     正则可以辅助提示，但不能当判据（同 h3 校验器「完全参照」那次假阳性）。
+    #   现在优先读分镜的显式字段 `single_take`；没写才退回启发式（并在下方注明不可靠）。
+    _st = seg.get("single_take")
+    if _st is None:
+        _CAM_CUT_HINT = ("对切", "正反打", "切点", "切回", "切成", "切换到", "反打")
+        _st = not (any(_h in cam_zh for _h in _CAM_CUT_HINT)
+                   or bool(re.search(r"切(近景|中景|远景|全景|特写|大全景|到|至)|"
+                                     r"(近景|中景|特写)\s*切", cam_zh)))
+    _head = (f"{dur_actual:g} 秒一镜到底" if _st else
+             f"{dur_actual:g} 秒，段内按下方机位描述切换视角（不是一个连续镜头）")
+    summary = (f"[reference generation{has_aud}] {_head}，"
+               f"场景是{scene_label(project_root, seg.get('scene_id'))}。"
+               f"{cont}{subj}；{cam_zh}。")
+    # R36 ②：外语版必须在 summary 声明语言
+    if d_lang != "中文":
+        summary += f"全片对白一律为{lang_zh_of(seg)}。"
+    # R37：跨镜口径必须显式声明，否则 H3 会把台词加快语速 / 吞字硬塞进本镜
+    if cross_shot_mode:
+        summary += ("台词不要求与本镜画面同步收尾，若一句没说完，声音直接延续到下一镜，"
+                    "语速保持平稳，不加快、不吞字。")
+
+    # ---- retention_analysis ----
+    ret = []
+    for i, sl in enumerate(slots, start=1):
+        if sl["kind"] == "char":
+            zh, _en = names(sl["id"])
+            info = prof(sl["id"]) or {}
+            costume = info.get("default_costume_zh") or info.get("default_costume") or ""
+            got = f"（{costume}）" if costume else ""
+            ret.append(f"<Subject {i}>：fully_preserved {zh}的全套外观{got}。")
+        elif sl["kind"] == "scene":
+            ret.append(f"<Subject {i}>：fully_preserved "
+                       f"{scene_label(project_root, sl['id'])}"
+                       f"（空间布局、色彩与光线方向）。")
+        elif sl["kind"] == "prop":
+            ret.append(f"<Subject {i}>：fully_preserved 关键道具（外形、材质、颜色）。")
+        else:
+            # V2.2.9：retention 也要写成「首帧锚点」，与 subject_definitions / summary 一致 ——
+            #   三处口径不一致时，模型会挑最弱的那句执行。
+            ret.append(f"<Picture {i}>：**画面起点锚点** —— 本段第一帧与它一致"
+                       f"（场景 / 光线 / 景别 / 机位 / 人物位置与朝向 / 姿势 / 服装全部延续）。")
+    if seg.get("crowd"):
+        # V2.0.12：群演服装锚点必须**挑一个真穿校服的人**。
+        #   原实现 `people_zh[-1]`（最后一个在场角色）当锚 —— 实测在教室段出事：
+        #   三人里最后一个是陆星野，他的服装设定原文就写着「**不穿校服外套**」，
+        #   于是提示词写出「统一穿着与陆星野同款的校服」= 自相矛盾、无所指。
+        #   ⚠ 判据（同 h3 校验器「完全参照」那次假阳性）：
+        #     **一个词如果是所有人共用的写法，它就不能用来区分对象**；
+        #     这里「校服」二字同时出现在「穿校服」和「不穿校服」里 → 必须先判否定。
+        anchor = _uniform_anchor(people_zh)
+        if anchor:
+            ret.append(f"背景人群全程虚化、无清晰面部、不开口说话，"
+                       f"统一穿着与{anchor}同款的校服，不出现深色西装款。")
+        else:
+            ret.append(f"背景人群全程虚化、无清晰面部、不开口说话，"
+                       f"统一穿着运动校服（不作款式特写），不出现深色西装款。")
+    elif len(people_zh) >= 2:
+        ret.append(f"画面里只有{'和'.join(people_zh)}，绝对没有其它人。")
+    for cid in audio_chars:
+        # V0.5.8-fix：画外音角色没有 sid（不在 <Subject N> 列表里），用中文名代替
+        speaker_ref = sid.get(cid) or names(cid)[0]
+        ret.append(f"<Audio {aud_of[cid]}>: reference - 仅以 {speaker_ref} 的音色与语速"
+                   f"引导其念白，台词内容完全来自台本。")
+    ret.append("每个 <Picture N> 的棚拍纯色背景都不被继承，替换为实际场景环境。")
+
+    # ---- detailed_description（节拍模式，一句台词独立成行、行首 →）----
+    # V1.8.4：台词及一切有声源改用 h3-ref2va-optimizer V2.4 铁律 35 的
+    # 官方英文框架（框架词英文 / 内容中文 / 一句一行）。
+    # 旧的 `→(S1)角色名用 <Audio 1> 的音色说"…"` 已不再生成（校验器仍认，但非默认）。
+    # V2.0.9：改为引用共享枚举（原先在这里自带一份，漏了 "line" → 全片台词被当动作）。
+    LINE_KIND = _LINE_KIND
+
+    def line_beat(cid, text, kind="line", truncated=False, cross_cut=False,
+                  gaze=""):
+        """一条有声源行 —— 官方英文框架（铁律 35 + 旁白三规则）。
+
+        kind: line / offscreen（画外音）/ inner（内心独白）/ narrator（旁白）
+              / together（齐说）/ sing（唱）
+        gaze: 可选视线 / 动作小句，并入本行行首（h3 官方写法
+              `→林浩看着唐糖。林浩 (S1) says: <d>[中文]…</d>`）。
+              不写则由校验器的 BEAT-EYE 提示补一句，不自动编造。
+        """
+        zh, _en = names(cid)
+        poss = _poss(prof(cid))
+        aud = f"用 <Audio {aud_of[cid]}> 的音色" if cid in aud_of else ""
+        sn = (sid.get(cid) if cid else narrator_sid) or ""
+        sn_part = f" ({sn})" if sn else ""
+        d = f"<d>[{d_lang}]{text}{'<cutoff>' if truncated else ''}</d>"
+        st = " <scenetrans>" if cross_cut else ""
+        pre = ""
+        if gaze:
+            pre = gaze if gaze.endswith(("。", ".", "！", "？")) else gaze + "。"
+
+        if kind == "narrator":
+            voice = seg.get("narrator_voice_zh") or "一位清亮的旁白"
+            return (f"→{pre}{voice}{sn_part} says in an off-screen voiceover: {d}"
+                    f" while nobody on screen is speaking.{st}")
+        if kind == "inner":
+            return (f"→{pre}{zh}{aud}{sn_part} says in an off-screen voiceover as "
+                    f"{poss} inner thoughts: {d} while {poss} lips remain "
+                    f"completely closed.{st}")
+        if kind == "offscreen":
+            return (f"→{pre}{zh}{aud}{sn_part} says in an off-screen voiceover: {d}"
+                    f" while {poss} lips remain completely closed.{st}")
+        if kind == "together":
+            return f"→{pre}{zh}{aud}{sn_part} shout together, {d}{st}"
+        if kind == "sing":
+            return f"→{pre}{zh}{aud}{sn_part} sings: {d}{st}"
+        # V2.2.10（2026-09-19 用户实测反馈）：台词后**必须**加嘴唇闭合标记 ——
+        #   不加则模型不知道台词在哪里结束，会把后面的动作行也念出来
+        #   （实测用户报「部分台词还是把动作说了一遍」）。
+        #   官方示例（h3-ref2va-optimizer/04-complete-examples.md）每句台词后
+        #   都带「说完嘴唇合上」/「说完双唇闭合」/「说完抿住嘴」。
+        #   用计数器在三种变体间轮换，避免全片 20 段全用同一句。
+        _lc = _next_lip_closure()
+        return f"→{pre}{zh}{aud}{sn_part} says: {d} {_lc}{st}"
+
+    beat_rows = []
+    beats = seg.get("beats")
+    if isinstance(beats, list) and beats:
+        for b in beats:
+            if isinstance(b, str):
+                if b.strip():
+                    beat_rows.append(f"→{b.strip()}")
+                continue
+            kind = str(b.get("type") or "").lower()
+            if kind in LINE_KIND:
+                txt = str(b.get("text") or "").strip()
+                if not txt:
+                    continue
+                _k = LINE_KIND[kind]
+                # 旁白不是画面角色：cid 必须为 None，否则会回落成 speaker_char_id
+                # 而拿到画内角色的 (SN)，导致旁白与说话人撞号（实测撞成 S2）
+                _cid = None if _k == "narrator" else (
+                    b.get("char_id") or b.get("speaker") or seg.get("speaker_char_id"))
+                beat_rows.append(line_beat(
+                    _cid, txt, kind=_k,
+                    truncated=bool(b.get("cutoff")),
+                    cross_cut=bool(b.get("cross_cut") or b.get("scenetrans")),
+                    gaze=str(b.get("gaze_zh") or "").strip()))
+            else:
+                txt = str(b.get("zh") or b.get("text") or "").strip()
+                if txt:
+                    beat_rows.append(f"→{txt}")
+    else:
+        for ab in _split_beats(seg.get("action_zh") or seg.get("action"), 6):
+            beat_rows.append(f"→{ab}。")
+        for line in dialogue:
+            beat_rows.append(line_beat(
+                line["char_id"], line["text"],
+                kind=(str(line.get("kind") or "").lower()
+                      or ("offscreen" if line.get("offscreen") else "line")),
+                truncated=bool(line.get("cutoff")),
+                cross_cut=bool(line.get("cross_cut") or line.get("scenetrans")),
+                gaze=str(line.get("gaze_zh") or "").strip()))
+    if seg.get("ending_zh"):
+        beat_rows.append(f"→{seg['ending_zh']}")
+
+    # ---- <cutoff>：本段台词总量超预算（说完不）→ 最后一句末尾加 <cutoff> ----
+    # 官方 §4.4：台词到视频结尾还没说完才加；说得完的台词加了反而被掐断。
+    dur_aligned = align_duration(seg.get("dur"))
+    need_secs = sum(len(d["text"]) for d in dialogue) / seg_rate(seg) + 1.2
+    if need_secs > dur_aligned and beat_rows:
+        for _i in range(len(beat_rows) - 1, -1, -1):
+            if "</d>" in beat_rows[_i]:
+                beat_rows[_i] = beat_rows[_i].replace("</d>", "<cutoff></d>")
+                break
+
+    # ---- Negative（英文，≤10 词）----
+    # V2.0.12：`no dark blazers on students` **与主角服装设定直接冲突** ——
+    #   顾砚辞的服装原文是「深藏青色**西装**校服外套（左胸有圆形校徽）」，
+    #   而这句 Negative 是一个**全局**指令，模型分不清「说的是群众还是主角」，
+    #   很可能把主角的西服校服也去掉 → 服装一致性直接崩（而服装一致性正是
+    #   dualref 双锚定想保的东西，等于自己拆自己的台）。
+    #   修法：群众不穿深色西装这条**已经**在 retention_analysis 里**限定主语**写过了
+    #   （「背景人群……统一穿着与 X 同款的校服，不出现深色西装款」），
+    #   所以这里只需保留「背景脸」与常规项，**不要**再下全局否定。
+    #   判据（通用）：**全局 Negative 不能用来表达「只针对某一类对象」的约束** ——
+    #   它没有主语，只会误伤。带主语的约束要写进正向描述里。
+    negative = seg.get("negative") or (
+        "no sharp background faces, no text, no watermark,"
+        if seg.get("crowd") else
+        "no other people, no text, no watermark, no camera static,")
+    # R36 ④：外语版 Negative 必须反向压掉**非目标语言**，否则模型会回落到中文。
+    # ⚠️ 目标语言是英语时**不能**写 no English dialogue —— 那是自相矛盾
+    #    （用户 `--lang en` 时实测暴露；两个生成器同源 bug，V1.8.4 一并修）
+    if d_lang != "中文" and "no Chinese dialogue" not in negative:
+        _ban = ("no Chinese dialogue" if d_lang == "英语"
+                else "no Chinese dialogue, no English dialogue")
+        negative = negative.rstrip().rstrip(",") + ", " + _ban + "."
+
+    style_prompt = seg.get("_style_prompt") or \
+        "Modern drama style, live-action, soft cinematic lighting, shallow depth of field."
+    # V1.8.4：视频提示词的叙述层必须中文 —— h3 V2.4 的 LANG-MIX 口径下，
+    # detailed_description 里允许的英文只有 R34 表演指导行与铁律 11 官方运镜句两类，
+    # 英文风格句会被判「成句英文叙述」。所以这里落中文：
+    # 优先 storyboard 的 style_prompt_zh，其次原句本身已是中文，再次用中文默认风格句。
+    style_zh = (seg.get("style_prompt_zh")
+                or (style_prompt if _has_cjk(style_prompt) else DEFAULT_STYLE_ZH))
+
+    # ---- R34 表演指导行（活人感，默认生效；纯空镜 / 无人段省略）----
+    acting = ""
+    if is_living_segment(seg):
+        acting = (seg.get("acting_direction_zh") or seg.get("acting_direction")
+                  or DEFAULT_ACTING_DIRECTION)
+    acting_block = (acting + chr(10)) if acting else ""
+
+    return f"""{upload_block}
+subject_definitions:
+{chr(10).join(subj_lines)}
+{chr(10).join(audio_lines)}
+
+summary:
+{summary}
+
+retention_analysis:
+{chr(10).join(ret)}
+
+detailed_description:
+{style_zh}
+{acting_block}{cam_zh}。
+[Shot 1] {dur_aligned:g}s，场景是{scene_label(project_root, seg.get('scene_id'))}。
+{chr(10).join(beat_rows)}
+
+overall_soundscape:
+{seg_soundscape(seg)}
+
+non_diegetic_music:
+N/A
+
+Negative: {negative}
+"""
+
+
+def gen_prompt(seg, project_root=None, style_prompt=None):
+    continuing = parse_link(seg)[0] in ("tailframe", "dualref")
+    # 把 style_prompt 注入到 seg（V0.4 全片统一风格）
+    if style_prompt and "_style_prompt" not in seg:
+        seg["_style_prompt"] = style_prompt
+    return gen_drama_prompt(seg, continuing, project_root)
+
+
+# ---------- 视频提示词审核（V0.5.6 新增：审核关 5 · 双关） ----------
+#
+# 关 5 在「H3 提示词派生完成」之后、「任何一段视频开始生成」之前。
+# 两道审核：
+#   ① 子 Agent 自审 —— 机检（本文件的 audit_prompt_machine + 官方校验器）
+#                     + 语义审（子 Agent 用 Task 工具判：是否贴合剧本 / 说话人对不对 /
+#                       节拍是否合理），语义结论由主 Agent 合并进 prompt_review.json
+#   ② 用户 HTML 审 —— `审核/05_提示词审核.html`，每段可看/可编辑提示词与参考图
+# 关 5 未通过 → 禁止进入阶段八（首镜试产）。门禁在 main() 里硬校验。
+
+PROMPT_REVIEW_NAME = "prompt_review.json"
+
+# V2.0：路径由 deps.py 解析 —— 内置副本优先，压缩包在新电脑上也能独立校验。
+# 旧写法（已删）：H3_VALIDATOR 直接写死 h3-ref2va-optimizer 的**本机绝对路径**。
+# 硬编码路径的后果不是「崩」而是更坏 —— 静默降级成「不校验」，审核关 5 看起来跑过了。
+#
+# 双校验器分工（V2.4）：主线版管台词官方框架 / 旁白三码 / 活人感（LIVE-MISS）；
+# 本地线版管段级预算（SEG-OVER / SEG-TIGHT），且只有它支持 --cross-shot（R37）。
+H3_VALIDATOR, H3_VALIDATOR_SRC = deps.resolve_h3_validator("main")
+H3_VALIDATOR_LOCAL, H3_VALIDATOR_LOCAL_SRC = deps.resolve_h3_validator("local")
+
+
+def run_h3_validator(prompt_path, duration=None, cross_shot=False, validator="main"):
+    """跑 H3 官方校验器（内置副本优先，来源随结果返回）。
+
+    validator="main"（默认）→ validate_ref2va.py（台词官方框架 / 旁白三码 / LIVE-MISS）
+    validator="local"      → validate_ref2va_local.py（段级 SEG-OVER / SEG-TIGHT）
+    cross_shot=True 仅对 local 版生效（R37：单镜塞不下降为提示，改由段级预算兜底）
+    返回 {"errors": n|None, "warnings": n|None, "infos": n|None, "raw": str,
+          "validator": str, "source": str, "path": str}
+    """
+    path = H3_VALIDATOR_LOCAL if validator == "local" else H3_VALIDATOR
+    src = H3_VALIDATOR_LOCAL_SRC if validator == "local" else H3_VALIDATOR_SRC
+    res = {"errors": None, "warnings": None, "infos": None, "raw": "",
+           "validator": validator, "source": src,
+           "path": str(path) if path else ""}
+    if path is None or not Path(path).is_file():
+        # ⚠️ 找不到校验器必须**报错**，不许静默跳过 —— 静默跳过 = 审核关 5 假装跑过了
+        res["raw"] = ("❌ 找不到 H3 校验器（%s 版）：%s\n%s"
+                      % (validator, path, deps.h3_validator_hint()))
+        return res
+    cmd = [sys.executable, str(path), str(prompt_path)]
+    if duration:
+        cmd += ["--duration", str(duration)]
+    if cross_shot and validator == "local":
+        cmd.append("--cross-shot")
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=180)
+        out = (r.stdout or "") + (r.stderr or "")
+    except Exception as e:  # noqa: BLE001
+        res["raw"] = f"校验器执行失败：{type(e).__name__}: {e}"
+        return res
+    res["raw"] = out
+    import re as _re
+    m = _re.search(r"错误\s*(\d+)\s*·\s*警告\s*(\d+)\s*·\s*提示\s*(\d+)", out)
+    if m:
+        res["errors"], res["warnings"], res["infos"] = (int(x) for x in m.groups())
+    return res
+
+
+def _en_ratio(text):
+    """英文字母占「非空白字符」的比例 —— 铁律 A6 / D5-5 的机检口径。"""
+    body = "".join(ch for ch in text if not ch.isspace())
+    if not body:
+        return 0.0
+    n = sum(1 for ch in body if ch.isascii() and ch.isalpha())
+    return n / len(body)
+
+
+def audit_prompt_machine(seg, prompt, project_root, plan=None, audio_chars=None):
+    """铁律 D5 的 5 条 + 结构自检 7 项（V1.8.4 起）—— 子 Agent 自审的「机检」部分。
+
+    返回 {"items": [{"code","name","pass","detail"}], "pass": bool}
+    """
+    plan = plan if plan is not None else plan_ref_locals(
+        seg, project_root, for_review=True)
+    audio_chars = audio_chars if audio_chars is not None else plan_audio_chars(
+        project_root, seg)
+    dlg = seg_dialogue(seg)
+    on_screen = {c for c in (seg.get("on_screen_char_ids") or []) if c}
+    if seg.get("speaker_char_id"):
+        on_screen.add(seg["speaker_char_id"])
+    items = []
+
+    def add(code, name, ok, detail):
+        items.append({"code": code, "name": name, "pass": bool(ok), "detail": detail})
+
+    # ---- 1. 角色名 ↔ 参考图（<Subject i> 的中文名必须与角色目录名一致）----
+    char_slots = [t for t in plan if t[2]["kind"] == "char"]
+    name_problems = []
+    for i, (local, label, sl) in enumerate(plan, start=1):
+        if sl["kind"] != "char":
+            continue
+        cid = sl["id"]
+        info = load_char_profile(project_root, cid) or {}
+        zh = info.get("name") or ""
+        if f"<Subject {i}>：" not in prompt:
+            name_problems.append(f"<Subject {i}> 缺失")
+        elif zh and zh not in prompt.split(f"<Subject {i}>：", 1)[1][:40]:
+            name_problems.append(f"<Subject {i}> 名字不符（期望 {zh}）")
+    add("D5-1", "角色名 ↔ 参考图一致", not name_problems,
+        "；".join(name_problems) or f"{len(char_slots)} 个角色图与 Subject 定义对齐")
+
+    # ---- 2. 性别 ↔ 音色 ----
+    gender_problems = []
+    no_voice = []
+    for cid in audio_chars:
+        info = load_char_profile(project_root, cid) or {}
+        g = info.get("gender")
+        zh = info.get("name") or cid
+        head = prompt.split(f"{zh}（", 1)[-1][:30] if f"{zh}（" in prompt else ""
+        if g == "male" and "女性" in head:
+            gender_problems.append(f"{zh} 档案为男性但提示词写成女性")
+        elif g == "female" and "男性" in head:
+            gender_problems.append(f"{zh} 档案为女性但提示词写成男性")
+    for cid in sorted(on_screen, key=_char_sort_key):
+        if cid not in audio_chars:
+            info = load_char_profile(project_root, cid) or {}
+            if info.get("name"):
+                no_voice.append(info["name"])
+    detail = "；".join(gender_problems) if gender_problems else \
+        f"{len(audio_chars)} 条音色与角色性别一致"
+    if no_voice:
+        detail += f"（在场但无音色样本：{'、'.join(no_voice)}，若本段不开口可忽略）"
+    add("D5-2", "性别 ↔ 音色一致", not gender_problems, detail)
+
+    # ---- 3. 说话人 ∈ 在场角色（逐个 dialogue / beats.line 校验）----
+    # V0.5.8-fix：画外音角色（offscreen_char_ids）不出镜也算合法说话人
+    offscreen_ok = set(seg.get("offscreen_char_ids") or [])
+    bad_spk = sorted({d["char_id"] for d in dlg
+                      if d["char_id"] and d["char_id"] not in on_screen
+                      and d["char_id"] not in offscreen_ok
+                      and not d.get("offscreen")})
+    for b in (seg.get("beats") or []):
+        if b.get("type") in ("line", "line_offscreen") and b.get("char_id") \
+                and b["char_id"] not in on_screen and b["char_id"] not in offscreen_ok \
+                and b.get("type") != "line_offscreen":
+            if b["char_id"] not in bad_spk:
+                bad_spk.append(b["char_id"])
+    add("D5-3", "说话人 ∈ 在场角色", not bad_spk,
+        ("越界说话人：" + ",".join(bad_spk)) if bad_spk
+        else f"{len(dlg)} 句台词的说话人全在场")
+
+    # ---- 4. 时长 ↔ 台词字数（「说得完吗」）----
+    # V2.0.10：口径统一到 drama_schema.align_duration + cps_of。
+    # 旧写法 `dur >= need - 2.0` 自带 2s 白送容差（等于默许说完被截断），已删。
+    # 与 S6 的分工：D5-4 管「物理上说不说完」，S6 管「排得太满没留白」—— 两条都必要。
+    nchar = sum(len(d["text"]) for d in dlg)
+    _cps = cps_of(lang_zh_of(seg))
+    need = nchar / _cps
+    dur = float(seg.get("dur") or 0)
+    dur_a = align_duration(dur)
+    ok4 = need <= dur_a
+    add("D5-4", "时长 ↔ 台词字数", ok4,
+        f"{nchar} 字 ÷ {_cps:g} 字/秒 = {need:.1f}s，本段 {dur:g}s（17 帧对齐 {dur_a:g}s）"
+        + ("" if ok4 else "（说不完，必然被截断）"))
+
+    # ---- 5. 英文占比 < 60%（铁律 A6 机检口径）----
+    ratio = _en_ratio(prompt)
+    add("D5-5", "英文占比 < 60%", ratio < 0.60, f"实测 {ratio * 100:.1f}%")
+
+    # ---- 6. 结构：六段式齐全 ----
+    sections = ["subject_definitions:", "summary:", "retention_analysis:",
+                "detailed_description:", "overall_soundscape:", "non_diegetic_music:"]
+    miss = [s for s in sections if s not in prompt]
+    add("S1", "六段式字段齐全", not miss,
+        ("缺：" + ",".join(miss)) if miss else "六个字段名齐全（英文）")
+
+    # ---- 7. 结构：<Picture N> 数 == 槽位数，<Audio N> 数 == 音色数 ----
+    import re as _re
+    pics = sorted(int(x) for x in _re.findall(r"<Picture\s*(\d+)>", prompt))
+    pics_set = sorted(set(pics))
+    auds = sorted({int(x) for x in _re.findall(r"<Audio\s*(\d+)>", prompt)})
+    ok7 = pics_set == list(range(1, len(plan) + 1)) and auds == list(range(1, len(audio_chars) + 1))
+    add("S2", "参考编号连续", ok7,
+        f"<Picture> {pics_set} / 期望 1..{len(plan)} · <Audio> {auds} / 期望 1..{len(audio_chars)}")
+
+    # ---- 8. 台词行：官方英文框架 + 一句一行（V1.8.4 对齐 V2.4 铁律 35）----
+    # V2.0.9：新增「**源数据**台词数」与「提示词里识别到的台词行数」的对比。
+    # 旧逻辑只用后者反推「本段有没有台词」，于是「台词一行都没被识别出来」
+    # 被解释成「本段无台词」→ 直接豁免。
+    # 实测：《橘子汽水味的夏天》第二集 20 段全部命中这条陷阱 ——
+    # 因 beat type → kind 映射漏了 `"line"`，台词被当动作渲染，
+    # 19 段在「无台词」豁免里全绿，只有段 5 因台词里恰好含「说"」二字才偶然揭开。
+    # 判据：**识别失败 ≠ 不存在。** 有无台词必须看源数据，不能看识别结果。
+    n_src_lines = _count_line_beats(seg.get("beats")) or len(dialogue)
+    n_line_beats = 0
+    bad_lines = []
+    legacy_lines = []
+    for ln in prompt.splitlines():
+        s = ln.strip()
+        if not s.startswith("→"):
+            continue
+        if "<d>" not in s:
+            # 旧式「角色名说"…"」：校验器仍认（兼容写法），但 V2.2 起不再是默认
+            if '说"' in s or "说“" in s:
+                legacy_lines.append(s[:40])
+                n_line_beats += 1
+            continue
+        n_line_beats += 1
+        if not _re.search(r"\(S\d+(?:,S\d+)*\)", s):
+            bad_lines.append("缺 (SN)：" + s[:34])
+        elif not _re.search(
+                r"\((?:S\d+(?:,S\d+)*)\)\s*(?:says|sings|shout together)", s):
+            bad_lines.append("框架词非官方写法：" + s[:34])
+    if n_src_lines and n_line_beats == 0:
+        bad_lines.append(
+            "本段有 %d 句台词，但提示词里**一行台词都没生成** —— "
+            "查 beat type → kind 的映射（references/drama_schema.py 的 LINE_KIND）"
+            % n_src_lines)
+    if bad_lines:
+        detail3 = "；".join(bad_lines)
+    else:
+        detail3 = ("%d 行台词全部为 `(SN) says / sings / shout together: <d>[语言]…</d>`"
+                   % n_line_beats)
+        if legacy_lines:
+            detail3 += ("；⚠ %d 行仍为旧式「角色名说…」（兼容写法，建议改官方框架）"
+                        % len(legacy_lines))
+    add("S3", "台词行 = 官方英文框架 + 一句一行（铁律 35）", not bad_lines, detail3)
+
+    # ---- 9. 台词全部包在 <d>[语言] 内（铁律 35 / R36 ①）----
+    n_d_lang = len(_re.findall(r"<d>\[[^\]]+\]", prompt))
+    n_d_plain = len(_re.findall(r"<d>(?!\[)", prompt))
+    # 豁免必须看**源数据**有没有台词，不能看「识别到几行」（V2.0.9 修）
+    if n_src_lines == 0:
+        ok9, detail4 = True, "本段无台词，按豁免处理"
+    elif n_d_lang == 0:
+        ok9, detail4 = False, ("无 `<d>` 标签 —— 校验器的逐镜台词预算会整块跳过，"
+                               "「0 错误 0 警告」属假安全（实测日语版因此藏了 7 个 SHOT-OVER）")
+    elif n_d_plain:
+        ok9, detail4 = False, f"{n_d_plain} 个 `<d>` 未标语言（R36 ① 要求 `<d>[语言]`）"
+    else:
+        ok9, detail4 = True, f"{n_d_lang} 个 `<d>[语言]` 标签"
+    add("S4", "台词带 <d>[语言] 标记（R36 ①）", ok9, detail4)
+
+    # ---- 10. 表演指导行（R34 活人感，段内有角色即必写）----
+    has_acting = ("Acting direction for the whole sequence:" in prompt
+                  or "表演指导：" in prompt)
+    need_acting = is_living_segment(seg)
+    if not need_acting:
+        detail5 = "本段无人，按 R34 豁免"
+    elif has_acting:
+        detail5 = "已写且落在 [Shot 1] 之前"
+    else:
+        detail5 = "缺表演指导行 —— 段内有角色却没给行为动机，人物会「太闲、一眼 AI」"
+    add("S5", "表演指导行存在（R34 活人感）", (not need_acting) or has_acting, detail5)
+
+    # ---- 11. 段内台词容量上限（R37 · SEG-TIGHT 口径，用 17 帧对齐后的实际时长）----
+    # V2.0.10：判定改用共享的 drama_schema.max_chars()（取「留 1.2s 反应余量」与
+    # 「占比 ≤85%」两条铁律里**更严**的一条）。关 4 机检现在用**同一个函数**，
+    # 不会再出现「上游说合格、下游说超标」。
+    dur_a = align_duration(dur)
+    ov = _over_capacity(nchar, dur, _cps)
+    ok11 = ov is None
+    occupy = _occupy_pct(nchar, dur, _cps)
+    detail11 = ("%d 字 ≤ 上限 %d 字（%gs 对齐 %gs，占比 %.0f%%）"
+                % (nchar, _max_chars(dur, _cps), dur, dur_a, occupy))
+    if ov:
+        detail11 += ("　→ 超 %d 字：**拆段或压台词**，不要靠加速 —— 硬区间 [4,15]s "
+                     "装不下就是这个信息本身" % ov[0])
+    add("S6", "段内台词 ≤ 容量上限（R37 · 占比≤85% 且留 ≥1.2s 反应）", ok11, detail11)
+
+    # ---- 12. 台词独立成行、未被埋进段落（DLG-FMT 口径）----
+    buried = [ln.strip()[:44] for ln in prompt.splitlines()
+              if "<d>" in ln and not ln.strip().startswith("→")]
+    add("S7", "台词独立成行、未埋在段落中（DLG-FMT）", not buried,
+        "；".join(buried) if buried else "每句台词都独占一行")
+
+    # ---- 13. 语音泄漏（V2.2.9 新增）：非台词字段里的「语音性文本」会被 H3 当台词念出来 ----
+    #   实测（2026-09-19 用户逐段核对）：用户听到的「多出来的台词」全部来自
+    #   `overall_soundscape` 的**直接引语** 与 `detailed_description` 动作行里
+    #   **描述语音的句子**（声音是抖的 / 他不说话 / 后话被堵回去 / 那句话是她自己说的）。
+    #   ⇒ 这条是**硬门禁**：`hard`（引号里的**新增人声**）非空即判不过，关 5 拒放行。
+    #      `soft`（语音短语 / 台词原文的重复引用）**只作清单**、不拦 ——
+    #      实测 20 段里有 46 处 soft，全拦会把门禁变成噪音，反而被绕过（同「永远红的门禁会被人绕过」）。
+    #      **硬拦拦真高危，警告给人看清单。**
+    _sl_hard, _sl_soft = speech_leak(seg)
+    _sl_ok = not _sl_hard
+    if _sl_ok and not _sl_soft:
+        _sl_detail = "✅ 非台词字段无引语、无语音性描述"
+    elif _sl_ok:
+        _sl_detail = ("✅ 硬拦 0 处 ｜ ⚠ 建议优化 %d 处语音性描述：%s"
+                      % (len(_sl_soft),
+                         "；".join("%s「%s」" % (f, w) for f, w in _sl_soft[:4])))
+    else:
+        _sl_detail = []
+        _sl_detail.append("❌ 硬拦 %d 处**引号里的新增人声**（台词块里没有的内容，必被念出来）：%s"
+                          % (len(_sl_hard),
+                             "；".join("%s %s" % (f, t) for f, t in _sl_hard[:4])))
+        if _sl_soft:
+            _sl_detail.append("⚠ 另有 %d 处语音性描述（不拦，建议顺手改）：%s"
+                              % (len(_sl_soft),
+                                 "；".join("%s「%s」" % (f, w) for f, w in _sl_soft[:4])))
+        _sl_detail.append(_SPEECH_REWRITE_HINT)
+        _sl_detail = "\n      ".join(_sl_detail)
+    add("S8", "非台词字段无「会被念出来的人声」（防 H3 把旁白/音景当台词念）", _sl_ok, _sl_detail)
+
+    return {"items": items, "pass": all(i["pass"] for i in items),
+            "eyeball": {"pic_ids": pics_set, "audio_ids": auds,
+                        "dialogue_lines": len(dlg), "chars": nchar,
+                        "en_ratio": round(ratio, 4), "dur": dur,
+                        "dur_aligned": dur_a,
+                        "dialogue_occupy_pct": round(occupy, 1),
+                        "lang": seg_lang(seg), "cross_shot": seg_is_cross_shot(seg),
+                        "has_acting_direction": has_acting,
+                        "slot_count": len(plan), "audio_count": len(audio_chars)}}
+
+
+def workflow_resolution_summary(workflow_path):
+    """从多参考图工作流 JSON 里读出「一采分辨率 / 二采放大倍数」→ 人读字符串。
+
+    二采倍数允许两种写法：
+      - 内联数字：`mode.scale = 2` 或 `mode.scale = [2]`
+      - 引用另一个节点：`mode.scale = ["335", 0]` → 顺着引用去读
+        node 335（`easy float`）的 `inputs.value`
+    """
+    try:
+        wf = json.load(open(workflow_path, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "（读不到工作流参数）"
+
+    def _float_node_value(nid):
+        """引用节点的值：easy float / easy int 等纯参数节点。"""
+        n = wf.get(str(nid))
+        if not n:
+            return None
+        ins = n.get("inputs") or {}
+        for k in ("value", "number", "float", "int"):
+            if k in ins and isinstance(ins[k], (int, float)):
+                return ins[k]
+        return None
+
+    def _scale_of(v):
+        # v 可能是 数字 / [数字] / ["节点id", idx]
+        if isinstance(v, (int, float)):
+            return v
+        if isinstance(v, list) and v:
+            head = v[0]
+            if isinstance(head, (int, float)):
+                return head
+            if isinstance(head, str):
+                return _float_node_value(head)
+        return None
+
+    mp = None
+    scale = None
+    for nid, node in wf.items():
+        ct = (node.get("class_type") or "")
+        ins = node.get("inputs") or {}
+        if ct == "ResolutionSelector" and "megapixels" in ins:
+            mp = ins["megapixels"]
+        if ct == "MinimaxH3LatentUpscaler3D":
+            # 真实结构：mode 是字符串 "scale by multiplier"，scale 在独立 key "mode.scale" 里
+            # 同时兼容某些变体把 mode 写成 dict 的情况
+            sc = None
+            for k in ("mode.scale", "scale"):
+                if k in ins:
+                    sc = _scale_of(ins[k])
+                    if sc is not None:
+                        break
+            if sc is None:
+                mode = ins.get("mode") or {}
+                if isinstance(mode, dict) and "scale" in mode:
+                    sc = _scale_of(mode["scale"])
+            if sc is not None:
+                scale = sc
+    # ⚠ 必须格式化浮点：W-A 的文件里 megapixels 读出来是 `0.PROJECT_MODEL_BINDING`、
+    #   倍数是 `1.PROJECT_MODEL_BINDING` —— 直接 f-string 会把这串裸 repr 写进**门槛比对用的档位字符串**，
+    #   于是「同一个 0.7MP/×1.5」在两份文件之间被判定成「档位变了」→ 白白触发重审。
+    #   判据：**任何一个会被拿去比对的字符串，都不许带实现细节**（浮点误差、对象 repr、内存地址）。
+    def _fmt(v):
+        try:
+            f = float(v)
+        except (TypeError, ValueError):
+            return str(v)
+        return str(int(f)) if f == int(f) else ("%g" % f)
+
+    parts = []
+    if mp is not None:
+        parts.append(f"一采 {_fmt(mp)} MP")
+    if scale is not None:
+        parts.append(f"二采 ×{_fmt(scale)}")
+    return " · ".join(parts) or "（未识别到分辨率参数）"
+
+
+def resolution_pixel_estimate(workflow_path, aspect=None):
+    """按工作流节点语义**推算**输出像素 → (人读字符串, dict)。
+
+    为什么必须有它（V2.0.14）：首问八件套里选的「1080P」只是**一个词**，
+    而工作流真正输出多少像素，取决于 `ResolutionSelector(megapixels, multiple)`
+    与二采倍数 —— 本集实测推算只有 **1680×960（1.61 MP）**，远低于
+    1920×1080（2.07 MP）。**「选了什么档位」和「实际出多少像素」是两件事**；
+    只把前者记进确认值，等于让一份假 1080P 一路走到交付。
+
+    判据：**手上有确定性的算式就把它算出来给人看**，不要让人对着两个数字自己乘。
+
+    ⚠ 返回值是**推算值**，不是实测值。真实像素只有拿到 output.mp4 用 ffprobe
+      量过才算数（阶段八首镜试产时回填 `resolution_measured`）。
+    """
+    try:
+        wf = json.load(open(workflow_path, encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return "（读不到工作流参数）", {}
+
+    def _num(v):
+        if isinstance(v, (int, float)):
+            return float(v)
+        if isinstance(v, list) and v:
+            head = v[0]
+            if isinstance(head, (int, float)):
+                return float(head)
+            if isinstance(head, str):
+                ins = (wf.get(str(head)) or {}).get("inputs") or {}
+                for k in ("value", "number", "float", "int"):
+                    if isinstance(ins.get(k), (int, float)):
+                        return float(ins[k])
+        return None
+
+    mp, multiple, ar_name, up = None, 32, "", None
+    for _nid, node in wf.items():
+        ct = (node.get("class_type") or "")
+        ins = node.get("inputs") or {}
+        if ct == "ResolutionSelector" and "megapixels" in ins:
+            mp = ins.get("megapixels")
+            multiple = int(ins.get("multiple") or 32)
+            ar_name = str(ins.get("aspect_ratio") or "")
+        if ct == "MinimaxH3LatentUpscaler3D":
+            for k in ("mode.scale", "scale"):
+                if k in ins:
+                    v = _num(ins[k])
+                    if v:
+                        up = v
+                        break
+    if not mp:
+        return "（未识别到一采分辨率参数）", {}
+
+    # ⚠ 比例要用**运行时传入的 `--aspect`**：文件里那个 `aspect_ratio` 是模板作者的静态值，
+    #   实跑时会被 `put(resolution_node, "aspect_ratio", args.aspect)` 覆盖。
+    #   （实测：W-A 模板里存的是竖屏，直接读文件会算出「640×1120」——与实跑的横屏正好反过来。
+    #     **一个方向说反了的数字，比没有数字更坏**：它会让人以为片子是竖的。）
+    m = re.search(r"(\d+)\s*:\s*(\d+)", str(aspect or ar_name))
+    ar = (float(m.group(1)) / float(m.group(2))) if m else 16.0 / 9.0
+
+    def _snap(v):
+        return max(multiple, int(round(v / multiple)) * multiple)
+
+    h1 = math.sqrt(float(mp) * 1e6 / ar)
+    w1, h1 = _snap(h1 * ar), _snap(h1)
+    est = {"aspect": ar_name, "aspect_used": str(aspect or ar_name),
+           "megapixels_1st": float(mp), "multiple": multiple,
+           "w1": w1, "h1": h1, "upscale": up}
+    txt = f"一采 {w1}×{h1}"
+    if up:
+        w2, h2 = int(round(w1 * up)), int(round(h1 * up))
+        est.update({"w2": w2, "h2": h2, "megapixels_final": round(w2 * h2 / 1e6, 2)})
+        _up_s = str(int(up)) if float(up) == int(up) else ("%g" % float(up))
+        txt += f" → 二采 ×{_up_s} → **{w2}×{h2}（{w2 * h2 / 1e6:.2f} MP）**"
+        if h2 < 1080 or w2 < 1920:
+            txt += "　⚠ 低于 1920×1080（2.07 MP）—— 交付时不要标 1080P"
+    return txt + "（推算值，未经实测）", est
+
+
+def prompt_sha1(text):
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()[:12]
+
+
+def _voice_path(project_root, cid):
+    hit = next(iter((Path(project_root) / "角色资产").glob(
+        f"{cid}_*/voice/voice_sample.mp3")), None)
+    return str(hit) if hit is not None and hit.exists() else ""
+
+
+def dump_prompt_review(segs, project_root, style_prompt, aspect, workflow_path,
+                       resolution_label=None):
+    """审核关 5 的产物生成（**不消耗算力、不调 API**）。
+
+    产出：
+      - 每段 `视频/shot_NN_<kw>/prompt.txt`（最终要提交的 H3 提示词）
+      - 每段 `视频/shot_NN_<kw>/prompt_audit.json`（机检 + 校验器 + 参考槽位快照）
+      - `状态/prompt_review.json`（关 5 状态机，门禁读它）
+      - `审核/05_提示词审核.html`（用户审的那一道）
+    """
+    project_root = Path(project_root)
+    out_dir = project_root / "视频"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    tf_dir = out_dir / "tailframes"
+    tf_dir.mkdir(parents=True, exist_ok=True)
+    st = load_state(str(project_root / "状态" / "rh_state.json"))
+
+    seg_reports = []
+    for s in segs:
+        prompt = gen_prompt(s, project_root, style_prompt)
+        shot_dir = out_dir / f"shot_{s['seq']:02d}_{s['kw']}"
+        shot_dir.mkdir(parents=True, exist_ok=True)
+        (shot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+
+        plan = plan_ref_locals(s, project_root, st=st, tf_dir=str(tf_dir), for_review=True)
+        audio_chars = plan_audio_chars(project_root, s)
+        machine = audit_prompt_machine(s, prompt, project_root, plan, audio_chars)
+        val = run_h3_validator(shot_dir / "prompt.txt", s.get("dur"))
+        machine["validator"] = val
+        if val["errors"] is not None:
+            machine["pass"] = bool(machine["pass"] and val["errors"] == 0)
+        # R37：跨镜口径的段再跑一遍本地线校验器（段级 SEG-OVER / SEG-TIGHT 兜底）
+        if seg_is_cross_shot(s):
+            val_cs = run_h3_validator(shot_dir / "prompt.txt", s.get("dur"),
+                                      cross_shot=True, validator="local")
+            machine["validator_cross_shot"] = val_cs
+            if val_cs["errors"] is not None:
+                machine["pass"] = bool(machine["pass"] and val_cs["errors"] == 0)
+
+        dlg = seg_dialogue(s)
+        nchar = sum(len(d["text"]) for d in dlg)
+        rec = {
+            "seq": s["seq"],
+            "kw": s["kw"],
+            "shot_dir": str(shot_dir),
+            "dur": s["dur"],
+            "link": s["link"],
+            # V2.0.12：镜数必须进审核页 —— 铁律 D1-a 的教训是
+            # 「铁律写了字段、页面没渲染，等于用户审不到」。用户要看得到这一段
+            # 是单镜还是多镜（直接决定 summary 里写「一镜到底」还是「切换视角」）。
+            "single_take": s.get("single_take"),
+            "scene_id": s.get("scene_id"),
+            "scene_label": scene_label(project_root, s.get("scene_id")),
+            "prompt_chars": len(prompt),
+            "prompt_sha1": prompt_sha1(prompt),
+            "dialogue": dlg,
+            "speakers": sorted({d["char_id"] for d in dlg if d["char_id"]}, key=_char_sort_key),
+            "dialogue_chars": nchar,
+            "budget_secs": round(nchar / 4.5 + 1.2, 1),
+            "refs": [{"label": lb, "path": lp, "kind": sl["kind"], "id": sl["id"],
+                      "exists": bool(lp and os.path.exists(lp))}
+                     for lp, lb, sl in plan],
+            "audios": [{"char_id": cid, "name": (load_char_profile(project_root, cid) or {}).get("name", cid),
+                        "path": _voice_path(project_root, cid)} for cid in audio_chars],
+            "machine_audit": machine,
+            "subagent_audit": None,      # 语义审结论，由主 Agent 用 Task 工具判完后回填
+            "user_status": "pending",
+        }
+        (shot_dir / "prompt_audit.json").write_text(
+            json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        seg_reports.append(rec)
+
+    wf_res = workflow_resolution_summary(workflow_path) if workflow_path else ""
+    # V2.0.14：把「推算输出像素」一起落盘 —— 「选了什么档位」与「实际出多少像素」是两件事
+    wf_est, wf_est_raw = (resolution_pixel_estimate(workflow_path, aspect=aspect)
+                          if workflow_path else ("", {}))
+    summary = {
+        "status": "pending",
+        "stage": "prompt_review",
+        "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        "aspect": aspect,
+        "resolution_requested": resolution_label or "",
+        "workflow_resolution": wf_res,
+        "resolution_estimate": wf_est,
+        "resolution_estimate_raw": wf_est_raw,
+        "resolution_confirmed": False,
+        "confirmed_resolution": "",
+        "approved_at": "",
+        "machine_pass": all(r["machine_audit"]["pass"] for r in seg_reports),
+        "segments": {str(r["seq"]): {"status": "pending",
+                                     "prompt_sha1": r["prompt_sha1"]}
+                     for r in seg_reports},
+        "reports": seg_reports,
+    }
+    state_dir = project_root / "状态"
+    state_dir.mkdir(parents=True, exist_ok=True)
+    (state_dir / PROMPT_REVIEW_NAME).write_text(
+        json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    out_html, err = None, None
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        import audit_html_builder as ahb
+        out_html, err = ahb.build_prompt_review(project_root)
+    except Exception as e:  # noqa: BLE001
+        out_html, err = None, f"{type(e).__name__}: {e}"
+    return summary, out_html, err
+
+
+# ---------- 注入与提交 ----------
+
+def build_node_info(key, seg, image_file, audio_file, aspect, prompt, cfg=None):
+    """单图模式（向后兼容）。节点 id 走注册表，取不到就回退 rh.N_*（= W-B 旧行为）。"""
+    nodes, flds = wf_nodes(cfg), wf_fields(cfg)
+    n_prompt = nodes.get("prompt") or rh.N_PROMPT
+    n_img = (nodes.get("img_slots") or [rh.N_REF_IMG])[0]
+    n_aud = (nodes.get("aud_slots") or [rh.N_REF_AUD])[0]
+    n_dur = nodes.get("duration") or rh.N_DUR
+    n_seed = nodes.get("seed") or rh.N_SEED
+    n_res = nodes.get("resolution") or rh.N_RES
+    ni = [
+        {"nodeId": n_prompt, "fieldName": flds.get("prompt") or "text", "fieldValue": prompt},
+        {"nodeId": n_img, "fieldName": "image", "fieldValue": image_file},
+        {"nodeId": n_aud, "fieldName": "audio", "fieldValue": audio_file},
+        {"nodeId": n_dur, "fieldName": flds.get("duration") or "value",
+         "fieldValue": float(seg["dur"])},
+        {"nodeId": n_seed, "fieldName": flds.get("seed") or "noise_seed",
+         "fieldValue": random.randint(0, 2 ** 53)},
+    ]
+    if aspect:
+        ni.append({"nodeId": n_res, "fieldName": flds.get("resolution") or "aspect_ratio",
+                   "fieldValue": aspect})
+    return ni
+
+
+# ---------- 状态与工具 ----------
+
+def load_state(path):
+    if os.path.exists(path):
+        return json.load(open(path, encoding="utf-8"))
+    return {}
+
+
+def save_state(path, st):
+    tmp = path + ".tmp"
+    json.dump(st, open(tmp, "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    os.replace(tmp, path)
+
+
+def invalidate_tailframe(tf_dir, seq):
+    """段 seq 的视频被**(重)生成**后，必须作废它的尾帧缓存。
+
+    为什么必须有它（V2.0.12）：尾帧的提取条件是 `if not os.path.exists(png)`
+    —— **「不存在才重建」不是缓存策略，是忘了失效**。
+    重抽上游段（关 6 重抽是本 SOP 的正式阶段）之后，下游段会一直拿
+    **上一版**的尾帧当衔接锚点：画面接不上，而且**完全静默**，没有任何报警。
+    判据（通用）：**缓存必须跟着源数据一起失效**；凡是「文件在就复用」的写法，
+    都要问一句「源数据变了它会不会被换掉」。
+    """
+    if not tf_dir:
+        return 0
+    n = 0
+    for f in Path(tf_dir).glob("seg_%s_tail*.png" % seq):
+        try:
+            f.unlink()
+            n += 1
+        except OSError:
+            pass
+    return n
+
+
+def extract_tailframe(video_path, out_png):
+    r = subprocess.run(["ffmpeg", "-y", "-sseof", "-0.1", "-i", video_path,
+                        "-frames:v", "1", out_png], capture_output=True)
+    if r.returncode != 0 or not os.path.exists(out_png):
+        raise RuntimeError(f"截尾帧失败: {video_path}")
+    return out_png
+
+
+def backup_existing_video(out_mp4):
+    """V1.3.1 修复：覆盖前备份旧片。
+
+    SKILL.md 一直写着「旧视频备份为 output_v<旧版本>_backup.mp4」，但代码里从未实现 →
+    《青铜信号》段 10 从 18.62s 重跑成 15.08s 时，旧片被直接覆盖（只能从合成片里捞回）。
+    命名带旧时长 + 时间戳，避免多次重跑互相覆盖。
+    """
+    if not out_mp4 or not os.path.exists(out_mp4) or os.path.getsize(out_mp4) <= 0:
+        return None
+    old_dur = None
+    try:
+        pr = subprocess.run(["ffprobe", "-v", "error", "-show_entries",
+                             "format=duration", "-of", "default=nw=1:nk=1", out_mp4],
+                            capture_output=True, text=True)
+        if pr.returncode == 0 and pr.stdout.strip():
+            old_dur = "%.2fs" % float(pr.stdout.strip())
+    except Exception:  # noqa: BLE001
+        pass
+    bak = os.path.join(
+        os.path.dirname(out_mp4) or ".",
+        f"output_v_prev_{old_dur or 'unknown'}_{time.strftime('%Y%m%d-%H%M%S')}_backup.mp4")
+    try:
+        shutil.copy2(out_mp4, bak)
+        print(f"  [backup] 旧片已备份 → {os.path.basename(bak)}")
+        return bak
+    except Exception as e:  # noqa: BLE001
+        print(f"  [backup] 旧片备份失败（不阻断覆盖）：{e}")
+        return None
+
+
+def concat_segments(files, out_path):
+    lst = out_path + ".list.txt"
+    with open(lst, "w", encoding="utf-8") as f:
+        for p in files:
+            f.write(f"file '{os.path.abspath(p)}'\n")
+    # 铁律 D20 补充（V1.3.1）：先拼到临时文件再 os.replace 覆盖。
+    # 原因：Windows 上「原地覆盖」不会更新文件的**创建时间**（只更新修改时间），
+    # 用户在资源管理器按「创建日期」列看，成片会一直显示第一次拼接的旧时间，
+    # 误以为「没重新合成」。写 tmp + os.replace（MoveFileEx 替换）可让创建时间刷新。
+    tmp_out = out_path + ".tmp.mp4"
+    r = subprocess.run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", lst,
+                        "-c", "copy", tmp_out], capture_output=True)
+    if r.returncode != 0:
+        try:
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except OSError:
+            pass
+        raise RuntimeError("拼接失败: " + r.stderr.decode("utf-8", "replace")[-300:])
+    os.replace(tmp_out, out_path)
+    return out_path
+
+
+# ---------- 主流程 ----------
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--project_provider_setting", default="",
+                   help="消费级 Key：优先占满 --workers 路。缺省走 deps 五级读取链："
+                        "--project_provider_setting > 环境变量 项目模型_project_provider_setting > 项目 .env > "
+                        "本 skill 凭证文件 > 共享凭证文件（推荐）")
+    p.add_argument("--project_provider_setting-e", default="",
+                   help="企业级 Key：不费 RH 币但按秒扣钱包真钱（Plus ¥6/h）—— 默认别用，除非用户当次明确要求")
+    p.add_argument("--workers-e", type=int, default=0)
+    # V2.0.15：企业级池「按秒扣真实钱包」，必须有一个**明确**的关闭开关。
+    # 原实现的语义坑：help 写「默认别用」、默认值 0，但代码把 0 当「用满」→ 读 help 的人会误判。
+    p.add_argument("--no-enterprise", action="store_true",
+                   help="**关闭**企业级 Key 池（只花 RH 币、不动真钱包）。"
+                        "不加此开关且 --workers-e 为 0 时，企业级会**用满**（=按秒计费）。")
+    p.add_argument("--workflow", choices=["W-A", "W-B"], default="W-A",
+                   help="工作流（V1.8 · 铁律 D30）：W-A=项目制作方案+项目制作方案 默认 / W-B=项目制作方案 备选")
+    p.add_argument("--workflow-id", default=WORKFLOW_W_A,
+                   help="显式指定工作流 id（会反查注册表拿对应节点映射；未知 id 按 W-B 映射并告警）")
+    p.add_argument("--noref", dest="noref", action="store_true", default=None,
+                   help="[W-A 默认] 去参考化提交：直传干净 JSON，不向平台上传任何参考素材（铁律 D31）")
+    p.add_argument("--with-ref", dest="noref", action="store_false",
+                   help="[危险] 关掉去参考化：W-A 共享模板会带上别人残留的参考图/音频 → 人脸污染")
+    p.add_argument("--project-root", help="V0.3 项目模式：项目根目录（自动读 角色资产/场景资产/状态）")
+    p.add_argument("--audio-dir", help="[旧模式] 音色目录（char_01.mp3 / char_02.mp3 等）")
+    p.add_argument("--base-audio", help="兜底音色（段里没写 voice_ref 时用）")
+    p.add_argument("--aspect", default="16:9 (Widescreen)",
+                   help='如 "16:9 (Widescreen)" / "9:16 (Portrait Widescreen)"')
+    p.add_argument("--storyboard", required=True, help="分镜 JSON，每段可含 char_ref/scene_ref/soundscape")
+    p.add_argument("--assets-dir", help="[旧模式] 资产图片目录")
+    p.add_argument("--out-dir", help="分段视频输出目录")
+    p.add_argument("--state", help="状态文件路径")
+    p.add_argument("--workers", type=int, default=5)
+    p.add_argument("--instance-type", default="plus")
+    p.add_argument("--retries", type=int, default=3)
+    p.add_argument("--timeout", type=int, default=2400)
+    p.add_argument("--dry-run", action="store_true")
+    p.add_argument("--ignore-approval", action="store_true")
+    p.add_argument("--only", help="只重跑指定段，支持逗号分隔（如 1,2,5）——重抽卡用；"
+                                  "origin 段之间零依赖，配 --workers N 即可并行")
+    p.add_argument("--new-seed", action="store_true", help="重抽时强制换 seed")
+    p.add_argument("--multi-ref-workflow", help="多参考图改造版工作流 JSON（含 LoadImage × 5 + LoadAudio × 3 节点）")
+    # ---- 审核关 5：视频提示词审核（V0.5.6）----
+    p.add_argument("--dump-prompts", action="store_true",
+                   help="审核关 5 第一步：生成每段 prompt.txt + 机检 + 审核/05_提示词审核.html（不消耗算力）")
+    p.add_argument("--approve-prompts", action="store_true",
+                   help="审核关 5 第二步：用户审过 05 页后标记通过（必须同时给 --confirmed-resolution）")
+    p.add_argument("--confirmed-resolution",
+                   help="与用户复核确认的分辨率描述，如 '16:9 1080P · 一采 0.2 MP · 二采 ×1'")
+    p.add_argument("--skip-prompt-approval", action="store_true",
+                   help="[危险] 跳过审核关 5 门禁，仅用于调试，正常流程禁用")
+    args = p.parse_args()
+
+    # V2.0：凭证走 deps 五级读取链 —— 新电脑只需建一个共享凭证文件，
+    # 不再要求「先 export 环境变量」（bash 的 export 在 PowerShell 子进程里还读不到，D15）。
+    _proj_hint = args.project_root
+    if not _proj_hint and args.storyboard:
+        _proj_hint = os.path.dirname(os.path.abspath(args.storyboard))
+    for _attr, _env in (("project_provider_setting", "项目模型_project_provider_setting"),
+                        ("project_provider_setting_e", "项目模型_project_provider_setting_E")):
+        if not getattr(args, _attr):
+            _v, _src = deps.resolve_project_provider_setting(_env, project_root=_proj_hint)
+            if _v:
+                setattr(args, _attr, _v)
+                print("🔑 %s 来源：%s（%s）" % (_env, _src, deps.mask(_v)))
+    if not args.project_provider_setting:
+        sys.exit(deps.missing_key_hint("项目模型_project_provider_setting"))
+
+    # V1.8：解析工作流 + 节点映射（铁律 D30，必须成对使用）
+    wf_key, wf_cfg = resolve_workflow(args)
+    wf_id_use = wf_id_of(wf_cfg)
+    args.workflow_id = wf_id_use
+    # ============================================================================
+    # 铁律 D2-m【一致性第一位】（2026-09-19 用户拍板，V2.2）
+    #   整片由 20 段**独立生成**拼成 —— 一致性只能靠「每段都拿到同一套参考素材」
+    #   （角色图 + 场景图 + 上一段尾帧 + 角色音色）来保证。
+    #   所以：**默认必须多参**；文生视频（`--noref`）只是**明确的例外**，
+    #   必须由用户显式指定，且用了它就等于接受「一致性无锚点」。
+    #   2026-09-18 实测事故：W-A 的 `noref_default=true` 让整批 20 段以**零参考素材**提交，
+    #   用户自带角色图没用上、尾帧锚点没生效、音色没上传 → 同一角色逐段换脸换发型。
+    # ============================================================================
+    _explicit_noref = args.noref is not None
+    if not _explicit_noref:
+        args.noref = bool(wf_cfg.get("noref_default"))
+        if args.noref:
+            print(f"⚠️ 本次按 {wf_key} 的 noref_default=true 走**纯文生视频**："
+                  f"角色图 / 场景图 / 尾帧 / 音色**一律不上传** —— 一致性无锚点。\n"
+                  f"   这与「一致性第一位」（铁律 D2-m）的默认策略相悖，请确认是有意为之。\n"
+                  f"   要回到多参（推荐）：去掉该工作流的 noref_default，或显式加 `--with-ref`。")
+        if args.multi_ref_workflow and args.noref:
+            args.noref = False
+            print("ℹ️ 检测到 --multi-ref-workflow → 已忽略该工作流的 noref_default，本次**带参考**")
+    else:
+        if args.noref:
+            print("⚠️ 用户**显式**指定了纯文生视频（--noref）：参考图 / 尾帧 / 音色都不会上传，"
+                  "**一致性无锚点**（铁律 D2-m 允许的明确例外）。\n"
+                  "   要改回多参（推荐）：去掉 --noref，或显式加 `--with-ref`。")
+        # 用户显式 --with-ref → 强制多参，覆盖任何 noref_default
+        else:
+            args.noref = False
+    # 互斥校验（只有「两个都显式给」才会走到这里）
+    if args.multi_ref_workflow and args.noref:
+        sys.exit("❌ --multi-ref-workflow 与 --noref 互斥：一个要带参考图、一个不要，\n"
+                 "   两个都显式给出时无法判断你的意图，**拒绝启动**（不许静默二选一）。\n"
+                 "   要带参考：去掉 --noref；要纯文生视频：去掉 --multi-ref-workflow。")
+    if args.noref and not wf_cfg.get("noref_json"):
+        print(f"⚠ {wf_key} 没有去参考化 JSON，忽略 --noref")
+        args.noref = False
+    print(f"工作流：{describe_workflow(wf_key, wf_cfg)}"
+          f"｜{'去参考化' if args.noref else '带参考'}")
+
+    # 未显式给 --multi-ref-workflow 时，按注册表拿本工作流的 API 格式 JSON
+    if not args.multi_ref_workflow and not args.noref:
+        _mp = wf_ref_path(wf_cfg, noref=False)
+        if _mp and os.path.exists(_mp):
+            args.multi_ref_workflow = _mp
+    # 去参考化时要用那份"已断开所有参考素材"的 JSON（铁律 D31）
+    noref_wf_path = wf_ref_path(wf_cfg, noref=True) if args.noref else None
+
+    # ---- V2.0.16 预检：启动即验，一分钱不花（详见 preflight_workflow 的说明）----
+    # 刻意**不跳过 --dry-run** —— 预检是纯读文件的检查，没有理由不跑；
+    # 而且这样对抗测试才能在「不花钱」的前提下验证它真的会拦。
+    try:
+        _segs_all = load_storyboard(args.storyboard)
+    except Exception:                                     # noqa: BLE001
+        _segs_all = []
+    _need_img = max([len(plan_ref_slots(s)) for s in _segs_all] or [0])
+    _need_aud = max([len(plan_audio_chars(args.project_root, s)) for s in _segs_all] or [0])
+    _pf = noref_wf_path if args.noref else (args.multi_ref_workflow
+                                            or wf_ref_path(wf_cfg, noref=False))
+    if _pf:
+        preflight_workflow(_pf, wf_cfg, need_images=_need_img, need_audios=_need_aud,
+                           label=("去参考化工作流" if args.noref else "多参考图工作流"))
+
+    # V0.3 项目模式：从 project-root 派生路径
+    project_root = None
+    if args.project_root:
+        project_root = Path(args.project_root)
+        args.assets_dir = str(project_root / "角色资产")
+        args.audio_dir = str(project_root / "角色资产")
+        args.out_dir = args.out_dir or str(project_root / "视频")
+        args.state = args.state or str(project_root / "状态" / "rh_state.json")
+    else:
+        if not args.assets_dir or not args.audio_dir:
+            sys.exit("❌ 必须提供 --project-root 或 (--assets-dir + --audio-dir)")
+        args.out_dir = args.out_dir or "03_产出/segments"
+        args.state = args.state or "02_过程/state/rh_state.json"
+
+    sb = load_storyboard(args.storyboard, return_dict=True)
+    sb_status = sb.get("status") if isinstance(sb, dict) else None
+    if not args.ignore_approval and sb_status != "approved":
+        sys.exit(f"❌ 方案未冻结（storyboard.status={sb_status!r}）")
+    segs = sb["segments"] if isinstance(sb, dict) else sb
+    # V0.4 全片统一风格提示词
+    style_prompt = sb.get("style_prompt") if isinstance(sb, dict) else None
+
+    # ================== 审核关 5：视频提示词审核（V0.5.6）==================
+    # 在「H3 提示词派生完成」之后、「任何一段视频开始生成」之前。
+    # 这两个分支都不碰 rh_state，纯读 + 写审核产物，可反复跑。
+    wf_path = args.multi_ref_workflow or args.workflow_id
+    # V1.8：审核页要能看出本次跑的是哪套工作流（铁律 D22「审核页必须齐全+最新」）
+    print(f"  工作流      ：{args.workflow_id}（{'去参考化' if args.noref else '带参考'}）")
+    review_file = (project_root / "状态" / PROMPT_REVIEW_NAME) if project_root else None
+
+    def _pick(subset):
+        if not args.only:
+            return list(subset)
+        want = {int(x) for x in str(args.only).replace("，", ",").split(",") if x.strip()}
+        return [s for s in subset if s["seq"] in want]
+
+    if args.dump_prompts:
+        if not project_root:
+            sys.exit("❌ --dump-prompts 需要 --project-root")
+        picked = _pick(segs)
+        if not picked:
+            sys.exit(f"❌ 找不到段 {args.only}")
+        # V2.2.9：生成期就把「非台词字段里的语音性文本」大声报出来 ——
+        #   这些文本会被 H3 当台词念，实测就是用户听到的「多出来的台词」。
+        #   别等到成片后从用户耳朵里发现（那时已经花钱了）。
+        report_speech_leaks(picked, project_root, label="关 5 提示词生成")
+        summary, out_html, err = dump_prompt_review(
+            picked, project_root, style_prompt, args.aspect, wf_path,
+            args.confirmed_resolution)
+        print("=" * 62)
+        print("  审核关 5 · 视频提示词审核（第一步：产物生成）")
+        print("=" * 62)
+        print(f"  段数        ：{len(summary['reports'])}")
+        print(f"  比例        ：{summary['aspect']}")
+        print(f"  分辨率档位  ：{summary['workflow_resolution']}")
+        if summary.get("resolution_estimate"):
+            print(f"  推算输出像素：{summary['resolution_estimate']}")
+        print(f"  机检总判定  ：{'✅ 全部通过' if summary['machine_pass'] else '❌ 有未通过项'}")
+        print("-" * 62)
+        for r in summary["reports"]:
+            m = r["machine_audit"]
+            v = m.get("validator") or {}
+            vtxt = (f"校验器 {v.get('errors')}E/{v.get('warnings')}W"
+                    if v.get("errors") is not None else "校验器未跑")
+            bad = [i["code"] for i in m["items"] if not i["pass"]]
+            print(f"  段{r['seq']} {r['kw']}｜{r['dur']}s｜"
+                  f"{len(r['refs'])}图{len(r['audios'])}音｜"
+                  f"{r['dialogue_chars']}字/{r['budget_secs']}s｜{vtxt}｜"
+                  f"{'✅' if m['pass'] else '❌ ' + ','.join(bad)}")
+        print("-" * 62)
+        print("  第一道（子 Agent 自审）机检已完成；语义审请用 Task 工具判" 
+              "「是否贴合剧本 / 说话人对应 / 节拍合理」后回填 prompt_review.json")
+        print("  第二道（用户审）请打开：" + (str(out_html) if out_html else f"失败 {err}"))
+        print("=" * 62)
+        return
+
+    if args.approve_prompts:
+        if not review_file or not review_file.exists():
+            sys.exit("❌ 先跑 --dump-prompts 生成 状态/prompt_review.json")
+        if not args.confirmed_resolution:
+            sys.exit("❌ --approve-prompts 必须同时给 --confirmed-resolution"
+                     "（把与用户复核确认过的分辨率写进去）")
+        data = json.loads(review_file.read_text(encoding="utf-8"))
+        picked = _pick(segs)
+        # 只有「prompt 摘要与审核时一致」的段才允许标记通过 —— 审核后改过提示词必须重审
+        changed = []
+        approved_seqs = []
+        for s in picked:
+            key = str(s["seq"])
+            slot = data["segments"].setdefault(key, {"status": "pending", "prompt_sha1": ""})
+            cur = gen_prompt(s, project_root, style_prompt)
+            cur_sha = prompt_sha1(cur)
+            if slot.get("prompt_sha1") and slot["prompt_sha1"] != cur_sha:
+                # 审核后提示词被改动 → **拒绝放行**，且刻意不改写 prompt_sha1。
+                # 改了 sha1 就等于默许「下次 approve 直接过」，用户根本没复审过新提示词。
+                # 正确路径：重跑 --dump-prompts 让用户重新看到新提示词 → 再 approve。
+                changed.append(s["seq"])
+                slot["status"] = "pending"
+                continue
+            slot.update({"status": "approved", "prompt_sha1": cur_sha})
+            approved_seqs.append(s["seq"])
+        all_ok = all(v.get("status") == "approved" for v in data["segments"].values())
+        data["status"] = "approved" if all_ok else "partial"
+        data["approved_at"] = time.strftime("%Y-%m-%dT%H:%M:%S")
+        data["resolution_confirmed"] = True
+        data["confirmed_resolution"] = args.confirmed_resolution
+        data["aspect"] = args.aspect
+        data["workflow_resolution"] = workflow_resolution_summary(wf_path) if wf_path else ""
+        review_file.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                               encoding="utf-8")
+        print(f"[gate] 关 5 标记通过：段 {approved_seqs} · 状态 {data['status']}")
+        if changed:
+            print(f"[gate] ⚠️ 段 {changed} 的提示词在审核后变过 → 已置回 pending，"
+                  f"必须重跑 --dump-prompts 重新审（不会静默放行）")
+        print(f"[gate] 分辨率已确认：{data['confirmed_resolution']}"
+              f"（档位 {data['workflow_resolution']}）")
+        return
+    # ====================================================================
+
+    # ---- 门禁：审核关 5 未通过 → 禁止生成视频（V0.5.6）----
+    # 刻意放在 `--only` 清状态**之前**：门禁不通过时绝不改动 rh_state，
+    # 避免「被拦下却已经清掉 done 状态」的二次浪费。
+    # 仅项目模式（--project-root）启用；旧单图模式没有 状态/ 目录，保持原行为。
+    if not args.dry_run and not args.skip_prompt_approval and project_root:
+        if not review_file or not review_file.exists():
+            sys.exit("❌ 审核关 5 未完成：先跑 --dump-prompts 生成提示词与 "
+                     "审核/05_提示词审核.html，子 Agent 自审 + 用户审都过了再跑视频。")
+        data = json.loads(review_file.read_text(encoding="utf-8"))
+        probs = []
+        if data.get("status") not in ("approved", "partial"):
+            probs.append(f"整体状态 {data.get('status')!r}（未通过）")
+        if not data.get("resolution_confirmed"):
+            probs.append("分辨率未与用户复核确认（resolution_confirmed=false）")
+        if (data.get("aspect") or "") != (args.aspect or ""):
+            probs.append(f"比例变了：审核时 {data.get('aspect')!r}，"
+                         f"本次 {args.aspect!r} → 需重新审")
+        cur_res = workflow_resolution_summary(wf_path) if wf_path else ""
+        if cur_res and data.get("workflow_resolution") and cur_res != data["workflow_resolution"]:
+            probs.append(f"分辨率档位变了：审核时 {data['workflow_resolution']!r}，"
+                         f"本次 {cur_res!r} → 需重新复核并重新审")
+        check_segs = [s for s in segs
+                      if not args.only or s["seq"] in
+                      {int(x) for x in str(args.only).replace("，", ",").split(",") if x.strip()}]
+        for s in check_segs:
+            slot = (data.get("segments") or {}).get(str(s["seq"])) or {}
+            if slot.get("status") != "approved":
+                probs.append(f"段{s['seq']} 未通过关 5（status={slot.get('status')!r}）")
+                continue
+            cur_sha = prompt_sha1(gen_prompt(s, project_root, style_prompt))
+            if slot.get("prompt_sha1") and slot["prompt_sha1"] != cur_sha:
+                probs.append(f"段{s['seq']} 的提示词在审核后被改动 → 必须重新审")
+        if probs:
+            sys.exit("❌ 审核关 5 未通过，禁止生成视频：\n   - " + "\n   - ".join(probs))
+        print(f"[gate] 审核关 5 已通过（{data.get('approved_at')}）· "
+              f"分辨率已与用户复核：{data.get('confirmed_resolution')} "
+              f"（档位 {data.get('workflow_resolution')}）")
+
+    # --only 过滤（重抽卡）：清掉 done 状态强制重跑
+    # 关键：在途（submitted）的段 **保留 taskId 走救回**，不重复提交、不重复消耗
+    all_segs = list(segs)  # 过滤前全量，用于最终拼接判断
+    if args.only:
+        want = {int(x) for x in str(args.only).replace("，", ",").split(",") if x.strip()}
+        segs = [s for s in segs if s["seq"] in want]
+        if not segs:
+            sys.exit(f"❌ 找不到段 {args.only}")
+        st_existing = load_state(args.state) if os.path.exists(args.state) else {}
+        touched = False
+        for sq in sorted(want):
+            rec = st_existing.get(str(sq))
+            if not rec:
+                continue
+            if rec.get("status") == "submitted" and rec.get("taskId"):
+                print(f"[reshoot] 段 {sq} 在途（taskId={rec['taskId']}），保留状态 → 走救回，不重复消耗")
+                continue
+            print(f"[reshoot] 段 {sq} 已有状态 {rec.get('status')}，强制清空重跑")
+            del st_existing[str(sq)]
+            touched = True
+        if touched:
+            save_state(args.state, st_existing)
+
+    os.makedirs(args.out_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(args.state) or ".", exist_ok=True)
+    tf_dir = os.path.join(args.out_dir, "tailframes")
+    os.makedirs(tf_dir, exist_ok=True)
+    st = load_state(args.state)
+
+    if args.dry_run:
+        total = 0
+        for s in segs:
+            total += s["dur"]
+            dlg = seg_dialogue(s)
+            nchar = sum(len(d["text"]) for d in dlg)
+            spk = "/".join(sorted({d["char_id"] or "?" for d in dlg}))
+            print(f"—— 段{s['seq']} [{s['link']}] {s['dur']}s · "
+                  f"{len(dlg)}句/{nchar}字 · 说话人={spk} · {s['kw']}")
+        print(f"计划: {len(segs)} 段 / 总时长≈{total}s")
+        print("\n== 段1 提示词预览 ==\n" + gen_prompt(segs[0], project_root))
+        if len(segs) > 1:
+            print("== 末段 提示词预览 ==\n" + gen_prompt(segs[-1], project_root))
+        return
+
+    # 上传缓存（按 Key 隔离）
+    up_cache = {}
+
+    def up(path, key):
+        k = (key, path)
+        if k not in up_cache:
+            up_cache[k] = rh.upload_media(key, path, "b2")
+        return up_cache[k]
+
+    key_c, key_e = args.project_provider_setting, args.project_provider_setting_e
+    # V2.0.15：把「企业级到底开没开」变成显式事实 + 花钱警告。
+    #   ⚠ 原实现的坑：`--workers-e` 的 help 写着「默认别用」，默认值也是 0，
+    #     但调度里 `0` 被解释成「**用满**」（n_slots_e = len(pending)）——
+    #     **读 help 的人以为关着，实际全开，而且企业级是按秒扣真实钱包（Plus ¥6/h）**。
+    #     这是同一类缺陷（文档声明 ≠ 实现行为），只这次它**直接花钱**。
+    #   现在：① 加 `--no-enterprise` 一键关掉；② 只要 e 池启用就打一行醒目警告，
+    #         把计费口径与「怎么关」都写出来。
+    if getattr(args, "no_enterprise", False):
+        key_e = None
+
+    # 按段解析音色（speaker_char_id 优先 → voice_ref → base_audio）
+    def resolve_audio(seg, key):
+        # V0.3 项目模式：speaker_char_id 自动去角色目录拿 voice_sample.mp3
+        if project_root and seg.get("speaker_char_id"):
+            cid = seg["speaker_char_id"]
+            # 角色目录格式：char_NN_<名字>/voice/voice_sample.mp3
+            for d in (project_root / "角色资产").glob(f"{cid}_*/voice/voice_sample.mp3"):
+                if d.exists():
+                    return up(str(d), key)
+        # 旧模式：voice_ref 字段
+        if seg.get("voice_ref"):
+            p = os.path.join(args.audio_dir, f"{seg['voice_ref']}.mp3")
+            if os.path.exists(p):
+                return up(p, key)
+        if args.base_audio and os.path.exists(args.base_audio):
+            return up(args.base_audio, key)
+        return None
+
+    # 每段参考图列表（V0.4 多参考图版）：
+    # 返回 (fileName列表, 本地路径列表, 标签列表)
+    # 顺序：speaker 角色图 → 其他在场角色图 → 场景图 → 道具图 → 尾帧图
+    def resolve_ref_images(seg, key):
+        """返回 (fileName列表, 本地路径列表, 标签列表)
+        标签用于快照目录里区分文件用途"""
+        ref_files = []   # 上传后的 fileName
+        ref_locals = []  # 本地路径
+        ref_labels = []  # 标签
+
+        if not project_root:
+            # 旧模式：只支持单图
+            img, _ = resolve_ref_image(seg, key)
+            if img:
+                return [img], [seg.get("ref_image") or ""], ["ref"]
+            return [], [], []
+
+        # V0.5.5 项目模式：槽位计划驱动 —— 与 gen_drama_prompt 的 <Picture N> 严格同序
+        # 与审核阶段（--dump-prompts）共用 plan_ref_locals()，顺序不可能漂移
+        # 计划内素材缺文件 → 立刻抛错，绝不静默跳过（跳过会让 <Picture N> 整体错位）
+        for local, label, _sl in plan_ref_locals(seg, project_root, st=st, tf_dir=tf_dir):
+            if local is None or not Path(local).exists():
+                raise RuntimeError(
+                    f"段{seg['seq']} 参考 {label} 缺文件 → <Picture N> 会错位，中止")
+            ref_files.append(up(local, key))
+            ref_locals.append(local)
+            ref_labels.append(label)
+
+        return ref_files, ref_locals, ref_labels
+
+    def resolve_audios(seg, key):
+        """多音色：按 plan_audio_chars 的顺序上传，编号与 <Audio N>/<Subject N> 对齐。"""
+        if not project_root:
+            one = resolve_audio(seg, key)
+            return [one] if one else []
+        out = []
+        for cid in plan_audio_chars(project_root, seg):
+            hit = next(iter((project_root / "角色资产").glob(
+                f"{cid}_*/voice/voice_sample.mp3")), None)
+            if hit is None or not hit.exists():
+                raise RuntimeError(f"段{seg['seq']} 角色 {cid} 缺 voice_sample.mp3")
+            out.append(up(str(hit), key))
+        return out
+
+    def deps_ok(s):
+        mode, ref_seq = parse_link(s)
+        if mode == "origin" or ref_seq is None:
+            return True
+        prev = st.get(str(ref_seq), {})
+        return prev.get("status") == "done"
+
+    def run_one(s, key, instance_type):
+        t0 = time.time()
+        prompt = gen_prompt(s, project_root, style_prompt)
+        mode, ref_seq = parse_link(s)
+
+        # V1.8 去参考化模式（铁律 D31）：
+        # W-A 是平台共享模板，265 上会残留上一位使用者的参考图/音频直连，
+        # 会导致人脸与服装污染。→ 直传"已断开全部参考连线"的干净 JSON，
+        # **不向平台上传任何参考素材**（官方 /task/openapi/create 支持 workflow 参数，
+        # 传完整 JSON 即忽略 workflowId）。
+        ref_files, ref_locals, ref_labels = [], [], []
+        audio_files, tail_local = [], None
+        if args.noref and noref_wf_path:
+            # V2.0.16：把事实**打在它真正成立的那条分支里**。
+            #   我第一版把这句话放在分支外 → 带参考的跑里也照打，成了「文案与事实不符」
+            #   （正是本项目一路在修的那一类）。**日志文案必须落在它所描述的那个分支内。**
+            print(f"  [noref] 段{s['seq']}：**不带任何参考素材**提交"
+                  f"（无角色图 / 无场景图 / 无尾帧 / 无音色 —— 一致性无锚点）", flush=True)
+            wf = json.load(open(noref_wf_path, encoding="utf-8"))
+            _nodes, _flds = wf_nodes(wf_cfg), wf_fields(wf_cfg)
+
+            def put_nr(nid, field, value):
+                if nid not in wf:
+                    raise RuntimeError(f"去参考化工作流中不存在节点 {nid}")
+                wf[nid].setdefault("inputs", {})[field] = value
+
+            put_nr(_nodes.get("prompt") or rh.N_PROMPT, _flds.get("prompt") or "text", prompt)
+            put_nr(_nodes.get("duration") or rh.N_DUR, _flds.get("duration") or "value",
+                   float(s["dur"]))
+            put_nr(_nodes.get("seed") or rh.N_SEED, _flds.get("seed") or "noise_seed",
+                   random.randint(0, 2 ** 53))
+            if args.aspect:
+                put_nr(_nodes.get("resolution") or rh.N_RES,
+                       _flds.get("resolution") or "aspect_ratio", args.aspect)
+
+            # 硬校验：核心节点上不许残留任何参考连线（否则等于没去）
+            _core = str(_nodes.get("core") or "265")
+            _left = [k for k in (wf.get(_core, {}).get("inputs") or {})
+                     if k.startswith(("ref_images.", "ref_audios."))]
+            if _left:
+                raise RuntimeError(f"段{s['seq']}：去参考化工作流仍残留参考连线 {_left}"
+                                   f" —— 请先跑 references/make_noref_workflow.py")
+
+            task_id = rh.submit_task(key, None, "b2", workflow_id=args.workflow_id,
+                                     instance_type=instance_type, workflow_json=wf)
+
+        # V0.4 多参考图模式
+        elif args.multi_ref_workflow:
+            # 用多参考图工作流：ref_files 是 fileName 列表
+            ref_files, ref_locals, ref_labels = resolve_ref_images(s, key)
+            audio_files = resolve_audios(s, key)
+            # V2.0.16：正面对照 —— 带参考时也要**大声说清带了几张图几条音色**。
+            #   事故：零参考的 20 段跑完花了 3259 币，日志里一个字都没提，
+            #   全靠事后翻 log.json 才发现。**能大声说的事实，别留给事后查。**
+            print(f"  [refs] 段{s['seq']}：带 {len(ref_files)} 张参考图"
+                  f"（{', '.join(ref_labels) or '无'}）+ {len(audio_files)} 条音色", flush=True)
+
+            # V0.5.8-fix：纯视觉段（无 dialogue 也无 beats.line）允许 0 音色
+            seg_has_dialogue = bool(s.get("dialogue")) or any(
+                b.get("type") in ("line", "line_offscreen")
+                for b in (s.get("beats") or []))
+            if not audio_files and seg_has_dialogue:
+                raise RuntimeError(f"段{s['seq']} 无可用音色（speaker_char_id="
+                                   f"{s.get('speaker_char_id')}，请确认角色目录有 "
+                                   f"voice/voice_sample.mp3）")
+            if not ref_files:
+                raise RuntimeError(f"段{s['seq']} 无可用参考图")
+
+            # 加载改造版工作流 JSON
+            wf = json.load(open(args.multi_ref_workflow, encoding="utf-8"))
+            _nodes, _flds = wf_nodes(wf_cfg), wf_fields(wf_cfg)
+
+            # 注入字段到工作流节点
+            def put(nid, field, value):
+                if nid not in wf:
+                    raise RuntimeError(f"工作流中不存在节点 {nid}")
+                wf[nid].setdefault("inputs", {})[field] = value
+
+            # 提示词 / 时长 / seed / 分辨率（节点 id 走注册表）
+            put(_nodes.get("prompt") or rh.N_PROMPT, _flds.get("prompt") or "text", prompt)
+            put(_nodes.get("duration") or rh.N_DUR, _flds.get("duration") or "value",
+                float(s["dur"]))
+            put(_nodes.get("seed") or rh.N_SEED, _flds.get("seed") or "noise_seed",
+                random.randint(0, 2 ** 53))
+            if args.aspect:
+                put(_nodes.get("resolution") or rh.N_RES,
+                    _flds.get("resolution") or "aspect_ratio", args.aspect)
+
+            # ---- 参考图：槽位与节点一一对应 ----
+            # 已用的槽填本段素材；**未用的槽必须整条断开**（删键 + 删 LoadImage 节点）。
+            # 不这么做，未用槽会带着工作流作者的默认占位图上传 →
+            # <Picture N> 之外多出两张无关的脸（历史翻车：主角不像本人）。
+            # 槽位兜底清单 = 9（H3 模型硬上限；"建议 ≤5" 是使用建议，不是槽位数）
+            img_node_ids = [str(x) for x in (_nodes.get("img_slots") or
+                                             ["326", "1326", "1327", "1328", "1329",
+                                              "1330", "1331", "1332", "1333"])]
+            core_node = str(_nodes.get("core") or "265")
+            core_inputs = wf[core_node].setdefault("inputs", {})
+            for i, nid in enumerate(img_node_ids):
+                slot_key = f"ref_images.ref_image_{i}"
+                if i < len(ref_files):
+                    put(nid, "image", ref_files[i])
+                else:
+                    core_inputs.pop(slot_key, None)
+                    wf.pop(nid, None)
+
+            # ---- 音色：多音色逐槽注入，未用槽同样断开 ----
+            # 旧逻辑只填 node 340，1340/1341 仍挂着作者的默认音频 →
+            # 模型拿到 2 条无关音频参考，输出全是杂音（本次翻车根因）。
+            aud_node_ids = [str(x) for x in (_nodes.get("aud_slots") or
+                                             ["340", "1340", "1341"])]
+            for i, nid in enumerate(aud_node_ids):
+                slot_key = f"ref_audios.ref_audio_{i}"
+                if i < len(audio_files):
+                    put(nid, "audio", audio_files[i])
+                else:
+                    core_inputs.pop(slot_key, None)
+                    wf.pop(nid, None)
+
+            # 直传整份工作流 JSON
+            task_id = rh.submit_task(key, None, "b2", workflow_id=args.workflow_id,
+                                     instance_type=instance_type, workflow_json=wf)
+        else:
+            # 旧单图模式（向后兼容）
+            img, ref_locals = resolve_ref_image(s, key)
+            audio_f = resolve_audio(s, key)
+            ref_labels = ["ref"]
+
+            if audio_f is None:
+                raise RuntimeError(f"段{s['seq']} 无可用音色（voice_ref={s.get('voice_ref')}, "
+                                   f"speaker_char_id={s.get('speaker_char_id')}）")
+
+            # 尾帧接力：尾帧覆盖参考图
+            if mode == "tailframe":
+                src_file = st[str(ref_seq)]["file"]
+                tail_png = os.path.join(tf_dir, f"seg_{ref_seq}_tail.png")
+                if not os.path.exists(tail_png):
+                    extract_tailframe(src_file, tail_png)
+                img = up(tail_png, key)
+
+            if img is None:
+                raise RuntimeError(f"段{s['seq']} 无可用参考图（char_ref={s.get('char_ref')}, "
+                                   f"scene_ref={s.get('scene_ref')}, link={s['link']}）")
+
+            ni = build_node_info(key, s, img, audio_f, args.aspect, prompt, cfg=wf_cfg)
+            task_id = rh.submit_task(key, ni, "b2", workflow_id=args.workflow_id,
+                                     instance_type=instance_type)
+
+        # 提交后立即落状态（救回机制）
+        with _LOCK:
+            st[str(s["seq"])] = {"status": "submitted", "taskId": task_id}
+            save_state(args.state, st)
+
+        results = rh.poll_task(key, task_id, "b2", timeout=args.timeout)
+        vids = [r for r in results if (r.get("type") or "") in ("mp4", "gif")] or results
+
+        # V0.3 项目模式：每段独立目录
+        if project_root:
+            shot_dir = Path(args.out_dir) / f"shot_{s['seq']:02d}_{s['kw']}"
+            shot_dir.mkdir(parents=True, exist_ok=True)
+            refs_dir = shot_dir / "refs"
+            refs_dir.mkdir(exist_ok=True)
+            out_mp4 = str(shot_dir / "output.mp4")
+        else:
+            out_mp4 = os.path.join(args.out_dir, f"shot_{s['seq']:02d}_{s['kw']}.mp4")
+
+        backup_existing_video(out_mp4)   # V1.3.1：覆盖前先备份旧片
+        rh.download(vids[0]["url"], out_mp4)
+        # V2.0.12：本段视频换了 → 作废它的尾帧缓存，否则下游会用旧尾帧做衔接锚（静默错）
+        _n_killed = invalidate_tailframe(tf_dir, s["seq"])
+        if _n_killed:
+            print(f"  [tailframe] 段{s['seq']} 重新生成 → 已作废 {_n_killed} 个过期尾帧缓存，"
+                  f"下游会按新视频重新截取", flush=True)
+        coins = sum(int(r.get("coins") or 0) for r in results)
+
+        # V0.3：快照本段原料 + 写 log.json
+        if project_root:
+            # 复制参考图（V0.4 多参考图模式：用 ref_locals + ref_labels 命名）
+            if args.noref:
+                pass          # 去参考化：本次没有向平台上传任何素材，无可快照
+            elif args.multi_ref_workflow:
+                for local_path, label in zip(ref_locals, ref_labels):
+                    if local_path and os.path.exists(local_path):
+                        # 用标签命名（speaker_char_01.png / char_02.png / scene_01.png / prop_01.png / tailframe_seg_N.png）
+                        ext = Path(local_path).suffix
+                        shutil.copy2(local_path, refs_dir / f"{label}{ext}")
+            else:
+                # 旧模式：单图
+                for i, rp in enumerate(ref_locals):
+                    if rp and os.path.exists(rp):
+                        shutil.copy2(rp, refs_dir / Path(rp).name)
+                # 复制尾帧
+                if tail_local and os.path.exists(tail_local):
+                    shutil.copy2(tail_local, refs_dir / "tailframe_prev.png")
+
+            # 复制音色（V0.5.5：本段实际用到的全部音色，逐个快照）
+            if args.noref:
+                pass          # 去参考化：音色以文本 <Audio N> 描述进提示词，未上传音频
+            elif args.multi_ref_workflow:
+                for cid in plan_audio_chars(project_root, s):
+                    hit = next(iter((project_root / "角色资产").glob(
+                        f"{cid}_*/voice/voice_sample.mp3")), None)
+                    if hit is not None and hit.exists():
+                        shutil.copy2(str(hit), refs_dir / f"voice_{cid}.mp3")
+            elif s.get("speaker_char_id"):
+                cid = s["speaker_char_id"]
+                for d in (project_root / "角色资产").glob(f"{cid}_*/voice/voice_sample.mp3"):
+                    if d.exists():
+                        shutil.copy2(str(d), refs_dir / f"voice_{cid}.mp3")
+                        break
+
+            # 写 prompt.txt
+            (shot_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+            # 写 log.json
+            log = {
+                "shot_id": f"shot_{s['seq']:02d}",
+                "seq": s["seq"],
+                "kw": s["kw"],
+                "taskId": task_id,
+                "speaker_char_id": s.get("speaker_char_id"),
+                "on_screen_char_ids": s.get("on_screen_char_ids", []),
+                "scene_id": s.get("scene_id"),
+                "prop_ids": s.get("prop_ids", []),
+                "link": s["link"],
+                "dur": s["dur"],
+                "coins": coins,
+                "secs": int(time.time() - t0),
+                "aspect": args.aspect,
+                "instance_type": instance_type,
+                "workflow": args.workflow_id,
+                "noref": bool(args.noref),
+                "ref_count": len(ref_files) if args.multi_ref_workflow else (
+                    0 if args.noref else 1),
+                "audio_count": len(audio_files) if args.multi_ref_workflow else (
+                    0 if args.noref else 1),
+                "dialogue_lines": len(seg_dialogue(s)),
+                "speakers": [d["char_id"] for d in seg_dialogue(s)],
+                "generated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            }
+            (shot_dir / "log.json").write_text(
+                json.dumps(log, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        return {"status": "done", "taskId": task_id, "file": out_mp4,
+                "dur": s["dur"], "coins": coins, "secs": int(time.time() - t0)}
+
+    def attempt(s, key, instance_type):
+        for i in range(args.retries):
+            try:
+                rec = run_one(s, key, instance_type)
+                with _LOCK:
+                    st[str(s["seq"])] = rec
+                    save_state(args.state, st)
+                print(f"[seg {s['seq']}/{len(segs)}] ✅ {rec['file']} "
+                      f"({rec['secs']}s, {rec['coins']}币, link={s['link']})")
+                return True
+            except Exception as e:
+                print(f"[seg {s['seq']}] 第{i+1}次失败: {str(e)[:200]}")
+                time.sleep(min(2 ** i * 5, 30))
+        with _LOCK:
+            st[str(s["seq"])] = {"status": "failed"}
+            save_state(args.state, st)
+        return False
+
+    pending = [s for s in segs if st.get(str(s["seq"]), {}).get("status") not in ("done", "submitted")]
+    # 在途救回
+    rescue_jobs = [(int(seq), v["taskId"]) for seq, v in st.items()
+                   if v.get("status") == "submitted"]
+    for seq, tid in rescue_jobs:
+        seg = next((x for x in segs if x["seq"] == int(seq)), None) or \
+            next((x for x in all_segs if x["seq"] == int(seq)), None)
+        # 与 run_one 保持一致：V0.3 项目模式落在 shot_NN_<kw>/output.mp4
+        if seg and project_root:
+            out_mp4 = os.path.join(args.out_dir, f"shot_{int(seq):02d}_{seg['kw']}", "output.mp4")
+        elif seg:
+            out_mp4 = os.path.join(args.out_dir, f"shot_{int(seq):02d}_{seg['kw']}.mp4")
+        else:
+            out_mp4 = os.path.join(args.out_dir, f"shot_{int(seq):02d}.mp4")
+
+        def _rescue(seq=seq, tid=tid, out_mp4=out_mp4, seg=seg):
+            try:
+                print(f"[rescue] 段{seq} 凭 taskId={tid} 轮询救回（不重新提交）...")
+                results = rh.poll_task(key_c, tid, "b2", timeout=args.timeout)
+                vids = [r for r in results if (r.get("type") or "") in ("mp4", "gif")] or results
+                os.makedirs(os.path.dirname(out_mp4) or ".", exist_ok=True)
+                backup_existing_video(out_mp4)   # V1.3.1：救回前也先备份旧片
+                rh.download(vids[0]["url"], out_mp4)
+                with _LOCK:
+                    st[str(seq)] = {"status": "done", "taskId": tid, "file": out_mp4,
+                                    "dur": (seg or {}).get("dur"),
+                                    "rescued": True,
+                                    "coins": sum(int(r.get("coins") or 0) for r in results)}
+                    save_state(args.state, st)
+                print(f"[rescue] 段{seq} ✅ {out_mp4}")
+            except Exception as e:
+                print(f"[rescue] 段{seq} 暂不可取（{str(e)[:80]}），保持 submitted 下次再救")
+
+    n_slots_c = args.workers
+    n_slots_e = 0
+    if key_e:
+        n_slots_e = len(pending) if args.workers_e == 0 else args.workers_e
+        print(f"⚠️  企业级 Key 已启用（{n_slots_e} 路）：**不消耗 RH 币，但按秒扣真实钱包**"
+              f"（Plus 实例 ¥6/小时·路）。本次并行 {n_slots_e} 路 = 约 ¥{6 * n_slots_e}/小时。"
+              f"只想用 RH 币请加 `--no-enterprise`。（V2.0.15：原 help 写「默认别用」而 0 实际是"
+              f"「用满」，已加显式开关与这行警告。）")
+    print(f"共 {len(segs)} 段，待跑 {len(pending)} 段，救回 {len(rescue_jobs)} 段；"
+          f"消费级x{n_slots_c} · 企业级x{n_slots_e or '未启用'} · 实例 {args.instance_type}")
+
+    todo = list(pending)
+    with ThreadPoolExecutor(max_workers=n_slots_c + n_slots_e + len(rescue_jobs) + 2) as ex:
+        futures = {}
+        for tid_job in rescue_jobs:
+            ex.submit(_rescue)
+        while todo or futures:
+            c_running = sum(1 for _, pl in futures.values() if pl == "c")
+            e_running = len(futures) - c_running
+            launched = False
+            for s in list(todo):
+                if c_running < n_slots_c:
+                    pool = "c"
+                elif key_e and (args.workers_e == 0 or e_running < args.workers_e):
+                    pool = "e"
+                else:
+                    break
+                if deps_ok(s):
+                    if pool == "c":
+                        futures[ex.submit(attempt, s, key_c,
+                                          args.instance_type)] = (s, pool)
+                    else:
+                        futures[ex.submit(attempt, s, key_e,
+                                          args.instance_type)] = (s, pool)
+                    todo.remove(s)
+                    launched = True
+                    if pool == "c":
+                        c_running += 1
+                    else:
+                        e_running += 1
+            done, _ = wait(list(futures), timeout=30,
+                           return_when=FIRST_COMPLETED)
+            for f in done:
+                futures.pop(f, None)
+            if not launched and not done:
+                time.sleep(5)
+
+    # 汇总（基于全量段，--only 重抽时同样能正确判断能否拼片）
+    # 口径（V0.5.6 修复）：
+    #   - 成功：全量段里有产出 file 的段数（拼片判断用）
+    #   - 失败：只统计**本次实际调度**的段（pending + rescue），不含 --only 之外的历史残留
+    seg_files = [st.get(str(s["seq"]), {}).get("file") for s in all_segs]
+    done_count = sum(1 for f in seg_files if f)
+    attempted = {str(s["seq"]) for s in segs} | {str(seq) for seq, _ in rescue_jobs}
+    failed_count = sum(1 for k, v in st.items()
+                       if k in attempted and v.get("status") == "failed")
+    total_coins = sum(int(v.get("coins", 0)) for v in st.values() if v.get("status") == "done")
+    print(f"\n=== 批量完成 ===")
+    print(f"  成功：{done_count} / {len(all_segs)} 段（本次调度 {len(attempted)} 段 · "
+          f"失败：{failed_count}）· 总消耗：{total_coins} RH 币")
+
+    # 拼接成片：全片所有段都有视频才拼（重抽后会自动重拼）
+    if len(all_segs) == len(seg_files) and all(seg_files):
+        # 铁律 D20：final.mp4 路径统一为 <项目根>/视频/final/final.mp4
+        # （V1.3 修复：原实现用 dirname(out_dir) 把「视频」这一层剥掉了，
+        #   导致成片落在 <项目根>/final/ 下，而审核页读的是 视频/final/，
+        #   于是「跑完却不更新成片」→ 用户看到的是旧片）
+        _pf = args.out_dir.rstrip("/\\")
+        _proj = str(args.project_root) if getattr(args, "project_root", None) else os.path.dirname(_pf)
+        if os.path.basename(_pf) == "视频":
+            out_final = os.path.join(_pf, "final", "final.mp4")
+        else:
+            out_final = os.path.join(_proj, "视频", "final", "final.mp4")
+        os.makedirs(os.path.dirname(out_final), exist_ok=True)
+        concat_segments(seg_files, out_final)
+        print(f"  成片：{out_final}")
+
+        # V1.3 新增：拼接完成后自动刷新审核页（确保提示词/视频都是最新）
+        try:
+            import subprocess as _sp
+            _ab = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "audit_html_builder.py")
+            # 关 5 / 关 6 / 关 7 三张页都跟着刷新：
+            # 重抽通常伴随提示词改动，05 页也必须是最新的（铁律 D22「齐全 + 最新」）
+            for _stage in ("prompt", "video", "final"):
+                _r = _sp.run([sys.executable, _ab, "--project-root", _proj,
+                              "--stage", _stage],
+                             capture_output=True, text=True, encoding='utf-8', errors='ignore')
+                if _r.returncode == 0:
+                    print(f"  [auto-refresh] 审核页 {_stage} 已刷新")
+                else:
+                    print(f"  [auto-refresh] 审核页 {_stage} 刷新失败: {_r.stderr[:100]}")
+        except Exception as _e:
+            print(f"  [auto-refresh] 审核页刷新异常: {_e}")
+
+        # ================================================================
+        # V2.2.8 新增：**拼接完成后自动生成「全链总览页」**（铁律 D32 四件套的第 4 件）
+        #   D32 要求交付四件套「缺任何一件都算没交付」，用户 2026-09-15 也明确
+        #   「以后所有的项目完成后，都做一个全链总览网页」。
+        #   但它一直是**靠人记得跑** —— 2026-09-19 用户追问「跑完的视频怎么没有出总览？」
+        #   才发现：本集从头到尾**从没生成过**这一页。
+        #   而更早一层的原因是：原生成器 `make_chain_overview.py` 只认 V1.x 目录结构
+        #   （分镜_H3提示词_*.md / 视频/segNN.mp4 / 成本台账 csv），
+        #   在 V2 结构（storyboard.json / 视频/shot_NN_*）下**根本跑不起来**。
+        #   ⇒ 现在：拼完片**自动调 V2 生成器**，失败也不中断（但会**大声报错**，
+        #     不像以前那样静默缺件）。
+        #   判据：**「交付四件套」里凡是能自动产出的，就必须自动产出** ——
+        #     靠人记得的那一件，一定会缺。
+        # ================================================================
+        try:
+            import subprocess as _sp2
+            _co = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                               "make_chain_overview_v2.py")
+            _variant = (seg_lang(all_segs[0]) if False else None) or "中文版"
+            _r = _sp2.run([sys.executable, _co, "--project-root", _proj,
+                           "--variant", _variant],
+                          capture_output=True, text=True, encoding='utf-8', errors='ignore')
+            if _r.returncode == 0:
+                _line = (_r.stdout or "").strip().splitlines()
+                print("  [auto-overview] 全链总览页已生成"
+                      + ("：" + _line[0].split("：", 1)[-1] if _line else ""))
+            else:
+                print(f"  [auto-overview] ⚠️ 全链总览页生成失败（交付四件套会缺第 4 件）："
+                      f"{(_r.stderr or _r.stdout or '')[:160]}")
+        except Exception as _e:                                  # noqa: BLE001
+            print(f"  [auto-overview] ⚠️ 全链总览页生成异常：{_e}")
+    else:
+        missing = [s["seq"] for s, f in zip(all_segs, seg_files) if not f]
+        print(f"  未拼片（缺段 {missing}）")
+
+
+if __name__ == "__main__":
+    main()

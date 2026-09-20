@@ -127,7 +127,11 @@ import {
   RealPersonAssetDialog,
 } from "./deferredDialogs";
 import { preloadHistoryDialog, preloadProviderSettingsDialog } from "./deferredDialogLoaders";
-import { revealDesktopItem, saveMarkdownDocumentToDesktop } from "./desktopActions";
+import {
+  revealDesktopItem,
+  saveMarkdownDocumentToDesktop,
+  saveWorkflowBundleToDesktop,
+} from "./desktopActions";
 import {
   CanvasDocumentSkillNode,
   CanvasPromptNode,
@@ -177,6 +181,20 @@ import type {
 } from "./VideoLocalEditDialog";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import {
+  restoreWorkflowVersion,
+  undoWorkflowVersion,
+  redoWorkflowVersion,
+} from "./workflowVersionHistory";
+import {
+  approveWorkflowExecutionPlan,
+  createWorkflowDeliveryPlan,
+  createWorkflowExecutionPlan,
+  getWorkflowExecutionPlan,
+  isWorkflowExecutionPlanApproved,
+  isWorkflowExecutionPlanCurrent,
+  workflowExecutionInputSignature,
+} from "./workflowExecutionPlan";
+import {
   workflowCanvasInputsFromResolved,
   workflowCanvasInputsFromDocument,
   withCanvasWorkflowMaterials,
@@ -189,7 +207,7 @@ import { workflowHistoryClient, type WorkflowHistoryRecord } from "../../lib/wor
 import { restoreWorkflowHistoryNode } from "./workflowHistoryRestore";
 import { workflowMaterialPathKey } from "./workflowMaterials";
 import { aiFilmDeliveryMarkdown } from "./aiFilmWorkflowModel";
-import { comicDramaDeliveryMarkdown } from "./comicDramaWorkflowModel";
+import { comicDramaDeliveryMarkdown, comicDramaDeliveryBundle } from "./comicDramaWorkflowModel";
 import { commerceDeliveryMarkdown } from "./commerceWorkflowModel";
 import { remotionDeliveryMarkdown } from "./remotionWorkflowModel";
 import { xhsCoverDeliveryMarkdown } from "./xhsCoverWorkflowModel";
@@ -333,6 +351,7 @@ import {
   resolvePendingDocumentNodeConfig,
   resolvePendingGenerationNodeConfig,
   resolvePendingKnowledgeVideoWorkflowConfig,
+  createKnowledgeVideoWorkflowConfig,
   saveComposedVideoBlob,
   screenplayMessageId,
   screenplayMaterialId,
@@ -693,8 +712,8 @@ export function WorkspaceApp({
     clear: clearCanvasState,
     snapshotV2,
     restoreDocument,
-    undo,
-    redo,
+    undo: undoCanvasOperation,
+    redo: redoCanvasOperation,
   } = useCanvasCommands();
   // 撤销/重做按钮的可用态；历史栈变化频率低，独立订阅避免额外渲染放大。
   const { pastCount, futureCount } = useCanvasHistoryCounts();
@@ -1133,7 +1152,7 @@ export function WorkspaceApp({
       const restored = restoreDocument(raw);
       if (!restored.ok) throw new Error(`画布存档无法恢复：${restored.issues.join("；")}`);
       const document = raw as CanvasDocument;
-      // restoreDocument 已原子替换节点、连线、视图与选择并清空历史；这里只同步 RF 与提示内容 adapter。
+      // restoreDocument 已原子替换节点、连线、视图与选择并清空画布操作历史。
       void flowInstanceRef.current?.setViewport({
         x: restored.view.pan.x,
         y: restored.view.pan.y,
@@ -2804,6 +2823,56 @@ export function WorkspaceApp({
     [patchNode],
   );
 
+  const navigateWorkflowVersion = useCallback(
+    (
+      key: string,
+      operation: (config: KnowledgeVideoWorkflowConfig) => KnowledgeVideoWorkflowConfig,
+    ) => {
+      const source = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((node) => node.key === key);
+      if (!source) return;
+      const run = knowledgeVideoWorkflowRuns[key];
+      if (
+        knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+        (source.config.historyRunId &&
+          workflowHistoryActionsRef.current.has(source.config.historyRunId)) ||
+        ["planning", "generating", "qc", "composing"].includes(
+          run?.phase ?? source.config.checkpoint.phase,
+        )
+      ) {
+        toast.info("请先暂停当前工作流或等待完成，再切换工作流版本。");
+        return;
+      }
+      try {
+        const config = operation(source.config);
+        if (config === source.config) return;
+        patchNode("knowledgeVideoWorkflow", key, (current) => ({ ...current, config }));
+        setKnowledgeVideoWorkflowRuns((current) => {
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+        scheduleCanvasSave();
+      } catch (error) {
+        toast.error("工作流版本无法恢复", { description: formatWorkflowError(error) });
+      }
+    },
+    [snapshotV2, knowledgeVideoWorkflowRuns, patchNode, scheduleCanvasSave],
+  );
+  const undoKnowledgeVideoWorkflowVersion = useCallback(
+    (key: string) => navigateWorkflowVersion(key, undoWorkflowVersion),
+    [navigateWorkflowVersion],
+  );
+  const redoKnowledgeVideoWorkflowVersion = useCallback(
+    (key: string, id?: string) =>
+      navigateWorkflowVersion(key, (config) => redoWorkflowVersion(config, id)),
+    [navigateWorkflowVersion],
+  );
+  const restoreKnowledgeVideoWorkflowVersion = useCallback(
+    (key: string, id: string) =>
+      navigateWorkflowVersion(key, (config) => restoreWorkflowVersion(config, id)),
+    [navigateWorkflowVersion],
+  );
+
   const runKnowledgeVideoWorkflow = useCallback(
     (
       key: string,
@@ -2817,6 +2886,69 @@ export function WorkspaceApp({
         restoredNode ??
         document.knowledgeVideoWorkflowNodes?.find((candidate) => candidate.key === key);
       if (!sourceNode) return;
+      const currentNode = withCanvasWorkflowMaterials(
+        sourceNode,
+        workflowCanvasInputsFromDocument(document, key),
+      );
+      if (!isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(currentNode), currentNode)) {
+        try {
+          const previousPlan = getWorkflowExecutionPlan(currentNode);
+          const changedInput =
+            previousPlan != null &&
+            previousPlan.inputSignature !== workflowExecutionInputSignature(currentNode);
+          const plan = isWorkflowExecutionPlanCurrent(previousPlan, currentNode)
+            ? previousPlan!
+            : previousPlan?.scope === "delivery" && resume && !changedInput
+              ? createWorkflowDeliveryPlan(currentNode)
+              : createWorkflowExecutionPlan(
+                  currentNode,
+                  resume && !changedInput ? "resume" : "restart",
+                );
+          patchNode("knowledgeVideoWorkflow", key, (current) => ({
+            ...current,
+            config: {
+              ...current.config,
+              executionPlan: plan,
+              checkpoint: {
+                ...(changedInput
+                  ? createKnowledgeVideoWorkflowConfig(
+                      {
+                        prompt: current.config.models.text,
+                        image: current.config.models.image,
+                        video: current.config.models.video,
+                      },
+                      current.config.catalogResolved,
+                    ).checkpoint
+                  : current.config.checkpoint),
+                executionPlan: plan,
+                phase: "awaiting_approval",
+                error: null,
+              },
+            },
+          }));
+          setKnowledgeVideoWorkflowRuns((current) => ({
+            ...current,
+            [key]: {
+              phase: "awaiting_approval",
+              progress: 0,
+              message: "请检查执行计划并确认后开始。",
+              error: null,
+            },
+          }));
+        } catch (error) {
+          const message = formatWorkflowError(error);
+          setKnowledgeVideoWorkflowRuns((current) => ({
+            ...current,
+            [key]: {
+              phase: "failed",
+              progress: 0,
+              message,
+              error: message,
+            },
+          }));
+        }
+        return;
+      }
       if (!isDesktopRuntime()) {
         setKnowledgeVideoWorkflowRuns((current) => ({
           ...current,
@@ -2857,15 +2989,20 @@ export function WorkspaceApp({
         .then(() =>
           recordedWorkflowRunner.run({
             node,
+            versionConfig: savedNode.config,
             providerCatalog,
             resume,
             newHistory: !sourceNode.config.historyRunId,
             ...(decisionResolution === undefined ? {} : { decisionResolution }),
             signal: controller.signal,
-            onCheckpoint: (checkpoint) => {
+            onCheckpoint: (checkpoint, versionHistory) => {
               patchNode("knowledgeVideoWorkflow", key, (currentNode) => ({
                 ...currentNode,
-                config: { ...currentNode.config, checkpoint },
+                config: {
+                  ...currentNode.config,
+                  checkpoint,
+                  ...(versionHistory ? { versionHistory } : {}),
+                },
               }));
             },
             onProgress: (runState) => {
@@ -3312,8 +3449,118 @@ export function WorkspaceApp({
   );
 
   const executeKnowledgeVideoWorkflow = useCallback(
-    (key: string) => runKnowledgeVideoWorkflow(key, false),
-    [runKnowledgeVideoWorkflow],
+    (key: string) => {
+      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      const document = snapshotV2({});
+      const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
+      if (!source) return;
+      const node = withCanvasWorkflowMaterials(
+        source,
+        workflowCanvasInputsFromDocument(document, key),
+      );
+      const plan = createWorkflowExecutionPlan(node, "restart");
+      patchNode("knowledgeVideoWorkflow", key, (current) => ({
+        ...current,
+        config: {
+          ...current.config,
+          executionPlan: plan,
+          checkpoint: {
+            ...createKnowledgeVideoWorkflowConfig(
+              {
+                prompt: current.config.models.text,
+                image: current.config.models.image,
+                video: current.config.models.video,
+              },
+              current.config.catalogResolved,
+            ).checkpoint,
+            executionPlan: plan,
+            phase: "awaiting_approval",
+          },
+        },
+      }));
+      setKnowledgeVideoWorkflowRuns((current) => ({
+        ...current,
+        [key]: {
+          phase: "awaiting_approval",
+          progress: 0,
+          message: "请检查执行计划并确认后开始。",
+          error: null,
+        },
+      }));
+    },
+    [snapshotV2, patchNode],
+  );
+  const approveKnowledgeVideoWorkflowPlan = useCallback(
+    (key: string) => {
+      if (knowledgeVideoWorkflowAbortControllersRef.current.has(key)) return;
+      const document = snapshotV2({});
+      const source = document.knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
+      if (!source) return;
+      const node = withCanvasWorkflowMaterials(
+        source,
+        workflowCanvasInputsFromDocument(document, key),
+      );
+      const plan = getWorkflowExecutionPlan(node);
+      if (!plan) return;
+      try {
+        if (!isWorkflowExecutionPlanCurrent(plan, node)) {
+          const changedInput = plan.inputSignature !== workflowExecutionInputSignature(node);
+          const refreshed =
+            plan.scope === "delivery" && !changedInput
+              ? createWorkflowDeliveryPlan(node)
+              : createWorkflowExecutionPlan(node, changedInput ? "restart" : plan.executionIntent);
+          patchNode("knowledgeVideoWorkflow", key, (current) => ({
+            ...current,
+            config: {
+              ...current.config,
+              executionPlan: refreshed,
+              checkpoint: {
+                ...(changedInput
+                  ? createKnowledgeVideoWorkflowConfig(
+                      {
+                        prompt: current.config.models.text,
+                        image: current.config.models.image,
+                        video: current.config.models.video,
+                      },
+                      current.config.catalogResolved,
+                    ).checkpoint
+                  : current.config.checkpoint),
+                executionPlan: refreshed,
+                phase: "awaiting_approval",
+              },
+            },
+          }));
+          toast.info("输入已改变，执行计划已更新，请重新检查后确认。");
+          return;
+        }
+        const approved = approveWorkflowExecutionPlan(plan, node);
+        const approvedNode = {
+          ...source,
+          config: {
+            ...source.config,
+            executionPlan: approved,
+            checkpoint: {
+              ...(plan.executionIntent === "restart"
+                ? createKnowledgeVideoWorkflowConfig(
+                    {
+                      prompt: source.config.models.text,
+                      image: source.config.models.image,
+                      video: source.config.models.video,
+                    },
+                    source.config.catalogResolved,
+                  ).checkpoint
+                : source.config.checkpoint),
+              executionPlan: approved,
+            },
+          },
+        };
+        patchNode("knowledgeVideoWorkflow", key, () => approvedNode);
+        runKnowledgeVideoWorkflow(key, plan.executionIntent === "resume", undefined, approvedNode);
+      } catch (error) {
+        toast.error("执行计划无法确认", { description: formatWorkflowError(error) });
+      }
+    },
+    [snapshotV2, patchNode, runKnowledgeVideoWorkflow],
   );
   const continueKnowledgeVideoWorkflow = useCallback(
     (key: string, resolution?: string) => runKnowledgeVideoWorkflow(key, true, resolution),
@@ -3346,6 +3593,7 @@ export function WorkspaceApp({
         phase: "paused",
         lastActivePhase: checkpoint.lastActivePhase ?? "generating",
         activeCompositionJobId: null,
+        finalPath: null,
         error: null,
         decision: null,
         shotRuns: { ...checkpoint.shotRuns, [shotId]: nextRun },
@@ -3451,6 +3699,27 @@ export function WorkspaceApp({
       const fileName = markdownDocumentExportName(content, key, title);
       void (async () => {
         try {
+          if (isDrama) {
+            const files = comicDramaDeliveryBundle(node.config.checkpoint);
+            if (isDesktopRuntime()) {
+              const folder = await saveWorkflowBundleToDesktop(files);
+              if (!folder) return;
+              toast.success("动漫短剧四件套已导出", { description: folder });
+            } else {
+              for (const file of files) {
+                const url = URL.createObjectURL(
+                  new Blob([file.content], { type: `${file.mediaType};charset=utf-8` }),
+                );
+                const anchor = document.createElement("a");
+                anchor.href = url;
+                anchor.download = file.fileName;
+                anchor.click();
+                URL.revokeObjectURL(url);
+              }
+              toast.success("动漫短剧四件套已导出");
+            }
+            return;
+          }
           if (isDesktopRuntime()) {
             if (!(await saveMarkdownDocumentToDesktop(content, fileName, title))) return;
           } else {
@@ -4971,7 +5240,7 @@ export function WorkspaceApp({
   );
 
   const useWhiteModelBlocking = useCallback(
-    async (capture: WhiteModelBlockingCapture) => {
+    (capture: WhiteModelBlockingCapture) => {
       const nodeKey = whiteModelStudioNodeKey;
       if (!nodeKey) throw new Error("请重新打开白模导演台。");
       const current = snapshotV2({});
@@ -5670,7 +5939,10 @@ export function WorkspaceApp({
         if (record) {
           if (eventName === "generation:result-saved") {
             setSaveProgressByResult((current) => {
-              if (!(record.taskId in current) && !(`${record.taskId}#${record.resultIndex}` in current)) {
+              if (
+                !(record.taskId in current) &&
+                !(`${record.taskId}#${record.resultIndex}` in current)
+              ) {
                 return current;
               }
               const next = { ...current };
@@ -7661,6 +7933,15 @@ export function WorkspaceApp({
     [active, canvasHydrated, settingsOpen, selectEdge, selectNode],
   );
 
+  const undo = useCallback(
+    () => undoCanvasOperation(new Set(knowledgeVideoWorkflowAbortControllersRef.current.keys())),
+    [undoCanvasOperation],
+  );
+  const redo = useCallback(
+    () => redoCanvasOperation(new Set(knowledgeVideoWorkflowAbortControllersRef.current.keys())),
+    [redoCanvasOperation],
+  );
+
   // 文本输入框内默认不触发这些快捷键，继续使用浏览器原生的文本撤销行为。
   useHotkeys(
     ["mod+z", "mod+shift+z", "mod+y"],
@@ -8125,6 +8406,9 @@ export function WorkspaceApp({
             ignoreLegacyNodeDrag,
             handleGenNodeSizeChange,
             updateKnowledgeVideoWorkflowConfig,
+            undoKnowledgeVideoWorkflowVersion,
+            redoKnowledgeVideoWorkflowVersion,
+            restoreKnowledgeVideoWorkflowVersion,
             executeKnowledgeVideoWorkflow,
             continueKnowledgeVideoWorkflow,
             cancelKnowledgeVideoWorkflow,
@@ -8179,7 +8463,11 @@ export function WorkspaceApp({
                   onNodeDragStart={ignoreLegacyNodeDrag}
                   onSizeChange={handleGenNodeSizeChange}
                   onChange={(config) => updateKnowledgeVideoWorkflowConfig(node.key, config)}
+                  onUndoVersion={undoKnowledgeVideoWorkflowVersion}
+                  onRedoVersion={redoKnowledgeVideoWorkflowVersion}
+                  onRestoreVersion={restoreKnowledgeVideoWorkflowVersion}
                   onExecute={executeKnowledgeVideoWorkflow}
+                  onApprovePlan={approveKnowledgeVideoWorkflowPlan}
                   onContinue={continueKnowledgeVideoWorkflow}
                   onCancel={cancelKnowledgeVideoWorkflow}
                   onRedoShot={redoKnowledgeVideoWorkflowShot}
@@ -8219,7 +8507,11 @@ export function WorkspaceApp({
       ignoreLegacyNodeDrag,
       handleGenNodeSizeChange,
       updateKnowledgeVideoWorkflowConfig,
+      undoKnowledgeVideoWorkflowVersion,
+      redoKnowledgeVideoWorkflowVersion,
+      restoreKnowledgeVideoWorkflowVersion,
       executeKnowledgeVideoWorkflow,
+      approveKnowledgeVideoWorkflowPlan,
       continueKnowledgeVideoWorkflow,
       redoKnowledgeVideoWorkflowShot,
       cancelKnowledgeVideoWorkflow,

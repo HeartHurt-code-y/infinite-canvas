@@ -1,0 +1,110 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""对抗测试 · V2.0.10「撤销通过也要有执行体」
+
+为什么必须有它（2026-09-18《橘子汽水味的夏天》第二集）：
+  修好关 4 的逐段容量检查后，20 段里 4 段被判超容 —— 而它头上还顶着
+  上一版规则给的 `status="approved"`。这份批准**已经失效**，但全 skill
+  **没有任何工具能撤回它**，只能手工改 JSON —— 正是 approve_storyboard.py 存在的理由。
+  「通过门禁要有执行体」的另一半是「**撤销**通过也要有执行体」。
+
+判据（通用）：凡是会**阻断下游**的状态位，都必须有「设置」与「撤销」两个执行体。
+            只有设置没有撤销 = 旧状态会一直合法地挡在那里，谁也不敢动。
+
+三项断言：
+  A 正常撤销：approved → draft；撤销原因进 approval_revoked；旧批准留痕**保留不删**
+    （撤销的是「通行资格」，不是「曾经审过」这段历史）
+  B 匿名撤销必须被拒：不给 --reason 就拒绝，且**不写盘**
+  C 幂等：本来就没冻结时撤销 → **零写入**，不许凭空造一条撤销历史
+
+退出码：0 = 全通过；1 = 有断言失败
+"""
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL_DIR = HERE.parent
+TOOLS_DIR = SKILL_DIR / "tools"
+PY = sys.executable
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def run(args):
+    p = subprocess.run([PY, str(SKILL_DIR / "references" / "approve_storyboard.py")] + args,
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return p.returncode, (p.stdout or "") + (p.stderr or "")
+
+
+def main():
+    print("=" * 68)
+    print("对抗测试 · 撤销冻结（approve_storyboard.py --revoke）")
+    print("=" * 68)
+
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("_smoke", TOOLS_DIR / "smoke_pages.py")
+    smoke = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(smoke)
+
+    with tempfile.TemporaryDirectory(prefix="dap_revoke_") as tmp:
+        root = Path(tmp)
+        smoke.make_fixture(root)
+        f = root / "分镜脚本" / "storyboard.json"
+
+        # 造一个「已批准」的历史现场
+        sb = json.loads(f.read_text(encoding="utf-8"))
+        sb.update({"status": "approved", "approved_at": "2026-09-18T21:16:13",
+                   "approved_by": "用户", "approved_note": "关 4 通过"})
+        f.write_text(json.dumps(sb, ensure_ascii=False, indent=2), encoding="utf-8")
+
+        # ---- B 先测匿名撤销（顺序刻意：先证明它拒，再证明它写）----
+        before = f.read_text(encoding="utf-8")
+        rc, out = run(["--project-root", str(root), "--revoke"])
+        ok("B", rc != 0 and f.read_text(encoding="utf-8") == before,
+           "不给 --reason → 拒绝且**零写入**（留痕不能匿名撤回）")
+
+        # ---- A 正常撤销 ----
+        rc, out = run(["--project-root", str(root), "--revoke",
+                       "--reason", "关 4 新增逐段容量检查，跑出 4 段超容", "--by", "主 Agent"])
+        sb2 = json.loads(f.read_text(encoding="utf-8"))
+        ok("A1", rc == 0 and sb2.get("status") == "draft",
+           "approved → draft（退出码 %d）" % rc)
+        rv = sb2.get("approval_revoked") or []
+        ok("A2", bool(rv) and "4 段超容" in (rv[0].get("reason") or ""),
+           "撤销原因已留痕：%s" % (rv[0].get("reason") if rv else "（无）"))
+        ok("A3", rv and rv[0].get("was_approved_by") == "用户"
+           and rv[0].get("was_approved_at") == "2026-09-18T21:16:13",
+           "旧批准留痕**没被删**，移进了 approval_revoked[0]（撤销资格 ≠ 抹掉历史）")
+        ok("A4", sorted(root.glob("分镜脚本/storyboard_*_before_revoke.json"))
+           and True,
+           "撤销前先落备份：%s"
+           % [p.name for p in root.glob("分镜脚本/storyboard_*_before_revoke.json")])
+
+        # ---- C 幂等 ----
+        before = f.read_text(encoding="utf-8")
+        rc, out = run(["--project-root", str(root), "--revoke", "--reason", "再撤一次"])
+        ok("C", rc == 0 and f.read_text(encoding="utf-8") == before,
+           "已 draft 再撤销 → **零写入**，不凭空造第二条撤销历史")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for x in FAIL:
+            print("   " + x)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

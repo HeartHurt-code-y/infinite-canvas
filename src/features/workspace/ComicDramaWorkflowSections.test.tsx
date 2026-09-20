@@ -6,6 +6,7 @@ import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
 import {
   comicDramaDeliveryMarkdown,
+  comicDramaDeliveryBundle,
   createComicDramaCheckpoint,
   createComicDramaOptions,
   type ComicDramaWorkflowOptions,
@@ -40,16 +41,16 @@ describe("comic drama node", () => {
       );
     }
     render(<Harness />);
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByText("分集剧本与制作设置"));
     fireEvent.change(screen.getByLabelText("第 1 集剧本"), {
       target: { value: "女儿推门进店，父亲抬头微笑。" },
     });
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "添加一集" }));
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "移除第 2 集" }));
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
   });
 
   it("imports sorted episode files and preserves existing episodes", async () => {
@@ -126,7 +127,7 @@ describe("comic drama node", () => {
     const onExport = vi.fn();
     render(<ComicDramaDeliverables checkpoint={checkpoint} onExport={onExport} />);
     fireEvent.click(screen.getByText("第一集"));
-    fireEvent.click(screen.getByText("导演分析 · v1 · 待检查或修订"));
+    fireEvent.click(screen.getByText("导演分镜 · v1 · 待检查或修订"));
     expect(screen.getByText("业务检查 · 通过")).toBeInTheDocument();
     expect(screen.getByText("内容检查 · 待修订")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "导出漫剧制作文档" }));
@@ -135,5 +136,26 @@ describe("comic drama node", () => {
     expect(markdown).toContain("蓝布衣修表匠");
     expect(markdown).toContain("待修订");
     expect(markdown).toContain("表达存在歧义");
+    const bundle = comicDramaDeliveryBundle({
+      ...checkpoint,
+      comicDrama: {
+        ...checkpoint.comicDrama,
+        episodes: checkpoint.comicDrama.episodes.map((episode) => ({
+          ...episode,
+          title: '<script>alert("x")</script>',
+        })),
+      },
+    });
+    expect(bundle).toHaveLength(4);
+    expect(bundle.map((file) => file.fileName)).toEqual([
+      "01-分镜与制作文档.md",
+      "02-审核记录.html",
+      "03-成片报告.md",
+      "04-全链总览.html",
+    ]);
+    expect(bundle[1]?.content).toContain("&lt;script&gt;");
+    expect(bundle[1]?.content).not.toContain('<script>alert("x")</script>');
+    expect(bundle[3]?.content).toContain("未批准");
+    expect(bundle[2]?.content).toContain("非媒体实测");
   });
 });

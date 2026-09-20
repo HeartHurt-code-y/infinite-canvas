@@ -7,13 +7,25 @@ import {
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import type { OptimizeVideoPromptCommand } from "../../lib/backend";
 import { catalog, fakeDependencies, node, planJson } from "../../test/videoWorkflowFixtures";
-import { createComicDramaOptions, type ComicDramaStage } from "./comicDramaWorkflowModel";
+import {
+  COMIC_DRAMA_STAGES,
+  comicDramaStageDependencies,
+  createComicDramaOptions,
+  type ComicDramaStage,
+} from "./comicDramaWorkflowModel";
+import {
+  approveWorkflowExecutionPlan,
+  topologicallySortWorkflowSteps,
+} from "./workflowExecutionPlan";
 import {
   createComicDramaWorkflowRunner,
+  COMIC_DRAMA_APPROVAL,
+  comicDramaDialogueCapacity,
   parseComicDramaReview,
   parseComicDramaStage,
 } from "./comicDramaWorkflowRunner";
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
+import type { KnowledgeVideoWorkflowRunRequest } from "./knowledgeVideoWorkflowRunner";
 
 const sharedAssets = [
   { id: "father", kind: "character", name: "修表匠", prompt: "灰发修表匠，蓝布工服，暖色电影光影" },
@@ -87,7 +99,7 @@ function setup(deliverable: "video" | "documents" = "documents") {
       },
     },
   };
-  const runner = createComicDramaWorkflowRunner({
+  const rawRunner = createComicDramaWorkflowRunner({
     promptClient: fake.promptClient,
     generationClient: fake.generation,
     frameClient: fake.frames,
@@ -95,6 +107,51 @@ function setup(deliverable: "video" | "documents" = "documents") {
     sleep: () => Promise.resolve(),
     now: () => 42,
   });
+  const runner = {
+    async run(initial: KnowledgeVideoWorkflowRunRequest) {
+      let next = initial;
+      for (let step = 0; step < 80; step += 1) {
+        const checkpoint = await rawRunner.run(next);
+        if (checkpoint.phase !== "awaiting_approval") return checkpoint;
+        const resumedNode = { ...next.node, config: { ...next.node.config, checkpoint } };
+        if (
+          checkpoint.comicDrama?.pending?.step === "approval" &&
+          checkpoint.decision?.recommendation === COMIC_DRAMA_APPROVAL
+        ) {
+          next = {
+            ...next,
+            node: resumedNode,
+            resume: true,
+            decisionResolution: COMIC_DRAMA_APPROVAL,
+          };
+          continue;
+        }
+        if (checkpoint.executionPlan && !checkpoint.executionPlan.approval) {
+          next = {
+            ...next,
+            node: {
+              ...resumedNode,
+              config: {
+                ...resumedNode.config,
+                checkpoint: {
+                  ...checkpoint,
+                  executionPlan: approveWorkflowExecutionPlan(
+                    checkpoint.executionPlan,
+                    resumedNode,
+                    42,
+                  ),
+                },
+              },
+            },
+            resume: true,
+          };
+          continue;
+        }
+        return checkpoint;
+      }
+      throw new Error("Workflow approval loop did not finish");
+    },
+  };
   const request = {
     node: dramaNode,
     providerCatalog: catalog,
@@ -103,10 +160,104 @@ function setup(deliverable: "video" | "documents" = "documents") {
     onProgress: vi.fn(),
   };
   const calls = () => vi.mocked(fake.promptClient.run).mock.calls.map(([command]) => command);
-  return { fake, runner, request, calls };
+  return { fake, runner, rawRunner, request, calls };
 }
 
 describe("comic drama composite workflow", () => {
+  it("waits for a real user approval after both reviews and preserves a rejected draft as a new version", async () => {
+    const { rawRunner, request, fake, calls } = setup();
+    const first = await rawRunner.run(request);
+    expect(first.phase).toBe("awaiting_approval");
+    expect(first.comicDrama?.pending).toEqual({
+      episodeId: "ep01",
+      stage: "screenplay",
+      step: "approval",
+    });
+    expect(calls().map((call) => call.mode)).toEqual([
+      "comic_drama_screenplay",
+      "comic_drama_screenplay_review",
+      "comic_drama_content_review",
+    ]);
+    expect(fake.generation.start).not.toHaveBeenCalled();
+    const merelyResumed = await rawRunner.run({
+      ...request,
+      resume: true,
+      node: { ...request.node, config: { ...request.node.config, checkpoint: first } },
+    });
+    expect(merelyResumed.comicDrama?.pending?.stage).toBe("screenplay");
+    expect(
+      merelyResumed.comicDrama?.episodes[0]?.stages.screenplay?.approvedVersion,
+    ).toBeUndefined();
+    expect(calls()).toHaveLength(3);
+    const edited = await rawRunner.run({
+      ...request,
+      resume: true,
+      decisionResolution: "保留父亲的迟疑，再明确结尾",
+      node: { ...request.node, config: { ...request.node.config, checkpoint: first } },
+    });
+    expect(edited.phase).toBe("awaiting_approval");
+    expect(edited.comicDrama?.episodes[0]?.stages.screenplay?.artifact?.version).toBe(2);
+    expect(edited.comicDrama?.episodes[0]?.stages.screenplay?.history).toHaveLength(1);
+    expect(edited.comicDrama?.episodes[0]?.stages.screenplay?.approvedVersion).toBeUndefined();
+    expect(calls()[3]?.userPrompt).toContain("保留父亲的迟疑");
+    const approved = await rawRunner.run({
+      ...request,
+      resume: true,
+      decisionResolution: COMIC_DRAMA_APPROVAL,
+      node: { ...request.node, config: { ...request.node.config, checkpoint: edited } },
+    });
+    expect(approved.comicDrama?.episodes[0]?.stages.screenplay?.approvedVersion).toBe(2);
+    expect(approved.comicDrama?.pending?.stage).toBe("style");
+    expect(approved.comicDrama?.episodes[0]?.stages.screenplay?.approvals).toHaveLength(1);
+  });
+
+  it("uses dependency order even when the episode stage graph is shuffled", () => {
+    const episodes = [
+      { id: "one", title: "一", script: "a" },
+      { id: "two", title: "二", script: "b" },
+    ];
+    const graph = comicDramaStageDependencies(episodes).reverse();
+    expect(topologicallySortWorkflowSteps(graph).map((step) => step.id)).toEqual(
+      episodes.flatMap((episode) => COMIC_DRAMA_STAGES.map((stage) => `${episode.id}:${stage}`)),
+    );
+  });
+
+  it("qualifies actual shot dependencies and continuity identities by episode", () => {
+    const art = parseComicDramaStage(JSON.stringify(stageData("art")), "art", "ep02", []).assets;
+    const data = stageData("storyboard");
+    const shots = [{ ...data.shots[0], dependsOn: ["P0"], continuationFromShotId: "ep01:P9" }];
+    const parsed = parseComicDramaStage(
+      JSON.stringify({ ...data, shots }),
+      "storyboard",
+      "ep02",
+      art,
+    );
+    expect(parsed.shots[0]?.dependsOn).toEqual(["ep02:P0"]);
+    expect(parsed.shots[0]?.continuationFromShotId).toBe("ep01:P9");
+    expect(() =>
+      parseComicDramaStage(
+        JSON.stringify({ ...data, shots: [{ ...shots[0], dependsOn: ["P1-1"] }] }),
+        "storyboard",
+        "ep02",
+        art,
+      ),
+    ).toThrow("依赖自身");
+  });
+
+  it("enforces dialogue capacity without importing a provider-specific frame grid and closes spoken lines", () => {
+    expect(comicDramaDialogueCapacity(5, "回来就好")).toBe(17);
+    const art = parseComicDramaStage(JSON.stringify(stageData("art")), "art", "ep01", []).assets;
+    const data = stageData("storyboard");
+    data.shots[0]!.videoPrompt = "父亲 says: <d>[中文]回来就好。</d>";
+    const shot = parseComicDramaStage(JSON.stringify(data), "storyboard", "ep01", art).shots[0]!;
+    expect(shot.videoPrompt).toContain("</d> 说完嘴唇合上。");
+    expect(shot.videoPrompt.match(/回来就好/g)).toHaveLength(1);
+    data.shots[0]!.dialogue = "这段台词超过了五秒镜头所能容纳的实际容量需要拆镜头";
+    expect(() => parseComicDramaStage(JSON.stringify(data), "storyboard", "ep01", art)).toThrow(
+      "对白超过当前时长容量",
+    );
+  });
+
   it("reads every general reference in planning and independent reviews and rejects changed resume inputs", async () => {
     const { runner, request, fake } = setup();
     const withMaterials = {
@@ -145,7 +296,7 @@ describe("comic drama composite workflow", () => {
     expect(fake.promptClient.run).not.toHaveBeenCalled();
   });
 
-  it("runs generation and independent business/content reviews for all three stages using only the project text model", async () => {
+  it("runs generation and independent business/content reviews for all five stages using only the project text model", async () => {
     const { fake, runner, request, calls } = setup();
     const result = await runner.run({
       ...request,
@@ -164,17 +315,13 @@ describe("comic drama composite workflow", () => {
     expect(result.phase).toBe("done");
     expect(result.documentsOnly).toBe(true);
     expect(result.finalPath).toBeNull();
-    expect(calls().map((command) => command.mode)).toEqual([
-      "comic_drama_director",
-      "comic_drama_director_review",
-      "comic_drama_content_review",
-      "comic_drama_art",
-      "comic_drama_art_review",
-      "comic_drama_content_review",
-      "comic_drama_storyboard",
-      "comic_drama_storyboard_review",
-      "comic_drama_content_review",
-    ]);
+    expect(calls().map((command) => command.mode)).toEqual(
+      COMIC_DRAMA_STAGES.flatMap((stage) => [
+        `comic_drama_${stage}`,
+        `comic_drama_${stage}_review`,
+        "comic_drama_content_review",
+      ]),
+    );
     expect(
       calls().every(
         (command) =>
@@ -182,8 +329,8 @@ describe("comic drama composite workflow", () => {
           command.modelDefinitionId === "project-text",
       ),
     ).toBe(true);
-    expect(calls()[3]?.userPrompt).toContain("ep01 director 完整成果");
-    expect(calls()[6]?.userPrompt).toContain("ep01 art 完整成果");
+    expect(calls()[12]?.userPrompt).toContain("ep01 director 完整成果");
+    expect(calls()[9]?.userPrompt).toContain("ep01 art 完整成果");
     expect(
       Object.values(result.comicDrama!.episodes[0]!.stages).every(
         (run) =>
@@ -203,26 +350,30 @@ describe("comic drama composite workflow", () => {
     vi.mocked(fake.promptClient.run).mockImplementation((command) => {
       if (command.mode === "comic_drama_director_review" && business++ === 0)
         return response(revise("补全剧情点 P2"));
-      if (command.mode === "comic_drama_content_review" && content++ === 0)
+      if (
+        command.mode === "comic_drama_content_review" &&
+        command.userPrompt.includes("阶段：director") &&
+        content++ === 0
+      )
         return response(revise("补充父亲克制的动作"));
       return normalResponse(command);
     });
     const result = await runner.run(request);
     expect(result.phase).toBe("done");
-    expect(calls()).toHaveLength(12);
+    expect(calls()).toHaveLength(18);
     const repairs = calls().filter((command) => command.mode === "comic_drama_director");
     expect(repairs).toHaveLength(2);
     expect(repairs[1]?.userPrompt).toContain("补全剧情点 P2");
     expect(repairs[1]?.userPrompt).toContain("补充父亲克制的动作");
     expect(
       calls()
-        .slice(3, 7)
+        .slice(12, 16)
         .map((command) => command.mode),
     ).toEqual([
       "comic_drama_director",
       "comic_drama_director_review",
       "comic_drama_content_review",
-      "comic_drama_art",
+      "comic_drama_storyboard",
     ]);
     expect(result.comicDrama?.episodes[0]?.stages.director?.artifact?.version).toBe(2);
     expect(result.comicDrama?.episodes[0]?.stages.director?.history).toHaveLength(1);
@@ -240,8 +391,8 @@ describe("comic drama composite workflow", () => {
     });
     const first = await runner.run(request);
     expect(first.phase).toBe("failed");
-    expect(first.comicDrama?.episodes[0]?.stages.director?.businessReview?.result).toBe("PASS");
-    expect(first.comicDrama?.episodes[0]?.stages.director?.contentReview).toBeNull();
+    expect(first.comicDrama?.episodes[0]?.stages.screenplay?.businessReview?.result).toBe("PASS");
+    expect(first.comicDrama?.episodes[0]?.stages.screenplay?.contentReview).toBeNull();
     const options = request.node.config.comicDrama!;
     const restored = {
       ...request.node,
@@ -267,8 +418,8 @@ describe("comic drama composite workflow", () => {
       node: JSON.parse(stableJsonSignature(restored)) as KnowledgeVideoWorkflowNodeData,
     });
     expect(next.phase).toBe("done");
-    expect(calls()).toHaveLength(10);
-    expect(calls().filter((command) => command.mode === "comic_drama_director")).toHaveLength(1);
+    expect(calls()).toHaveLength(16);
+    expect(calls().filter((command) => command.mode === "comic_drama_screenplay")).toHaveLength(1);
     expect(
       calls().filter((command) => command.mode === "comic_drama_director_review"),
     ).toHaveLength(1);
@@ -292,7 +443,7 @@ describe("comic drama composite workflow", () => {
     });
     const first = await runner.run(request);
     expect(first.phase).toBe("awaiting_approval");
-    expect(calls()).toHaveLength(3);
+    expect(calls()).toHaveLength(12);
     expect(first.comicDrama?.episodes[0]?.stages.director?.passed).toBe(false);
     const next = await runner.run({
       ...request,
@@ -301,16 +452,16 @@ describe("comic drama composite workflow", () => {
       node: { ...request.node, config: { ...request.node.config, checkpoint: first } },
     });
     expect(next.phase).toBe("done");
-    expect(calls()[3]?.userPrompt).toContain("父亲早已知情但没有说破");
+    expect(calls()[12]?.userPrompt).toContain("父亲早已知情但没有说破");
     expect(
       calls()
-        .slice(3, 7)
+        .slice(12, 16)
         .map((command) => command.mode),
     ).toEqual([
       "comic_drama_director",
       "comic_drama_director_review",
       "comic_drama_content_review",
-      "comic_drama_art",
+      "comic_drama_storyboard",
     ]);
   });
 

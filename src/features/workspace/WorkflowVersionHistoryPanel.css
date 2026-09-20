@@ -1,0 +1,102 @@
+.workflow-version-history {
+  width: min(48rem, calc(100vw - var(--space-lg) * 2));
+  max-height: calc(100dvh - var(--space-lg) * 2);
+  overflow: auto;
+  padding: var(--space-lg);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-panel);
+  background: var(--color-paper-2);
+  color: var(--color-ink);
+  box-shadow: var(--shadow-raised);
+}
+.workflow-version-history::backdrop {
+  background: var(--color-scrim);
+}
+.workflow-version-history header,
+.workflow-version-history li {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-md);
+}
+.workflow-version-history h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+.workflow-version-history p {
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+.workflow-version-history ol {
+  display: grid;
+  padding: 0;
+  gap: var(--space-sm);
+}
+.workflow-version-history li {
+  padding: var(--space-sm);
+  border-bottom: var(--rule-thin) solid var(--color-rule-2);
+}
+.workflow-version-history li[aria-current] {
+  background: var(--color-paper);
+}
+.workflow-version-history li div {
+  display: grid;
+  gap: var(--space-xs);
+  flex: 1;
+}
+.workflow-version-history li span {
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+.workflow-version-history button {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+.workflow-version-history button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.workflow-version-history button:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
+.workflow-version-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  padding: var(--space-sm) 0;
+  border-bottom: var(--rule-thin) solid var(--color-rule-2);
+}
+
+.workflow-version-controls > span {
+  margin-right: auto;
+  color: var(--color-muted);
+  font-size: var(--text-sm);
+}
+
+.workflow-version-controls button {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  cursor: pointer;
+}
+
+.workflow-version-controls button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.workflow-version-controls button:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}

@@ -2,6 +2,11 @@ import { createContext, createElement, useContext, useState, type ReactNode } fr
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
+import {
+  initializeWorkflowVersions,
+  mergeWorkflowVersionHistory,
+  recordWorkflowVersion,
+} from "../workspace/workflowVersionHistory";
 import { decodePromptContentDocument, type PromptContentDocumentV1 } from "../../lib/promptContent";
 import {
   applyNewEdgesToGenerationInputSlots,
@@ -16,6 +21,7 @@ import type {
   AssetEdgeData,
   AssetNodeData,
   GenNodeData,
+  KnowledgeVideoWorkflowConfig,
   KnowledgeVideoWorkflowNodeData,
   OutputNodeData,
   ResultNodeData,
@@ -253,8 +259,8 @@ export interface CanvasCommands {
     promptContents: Readonly<Record<string, PromptContentDocumentV1>>,
   ) => CanvasDocumentV2;
   readonly restoreDocument: (document: unknown) => CanvasRestoreResult;
-  readonly undo: () => CanvasWriteResult;
-  readonly redo: () => CanvasWriteResult;
+  readonly undo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
+  readonly redo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
 }
 
 /** Zustand/zundo 细节不越过此 interface。 */
@@ -1396,13 +1402,116 @@ function historySummary(store: CanvasStore): CanvasHistorySummary {
 
 function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplementation {
   const store = createCanvasStore(initialZoom);
+  // Canvas structural undo stays in zundo. Each workflow's durable version branches outlive
+  // the older node snapshots stored there, including a delete followed by canvas undo.
+  const workflowVersions = new Map<string, KnowledgeVideoWorkflowConfig>();
+  const versionedNode = <T extends CanvasNodeData>(type: CanvasNodeType, node: T): T => {
+    if (type !== "knowledgeVideoWorkflow") return node;
+    const workflow = node as KnowledgeVideoWorkflowNodeData;
+    const previous = workflowVersions.get(workflow.key);
+    const config = previous
+      ? recordWorkflowVersion(previous, workflow.config)
+      : initializeWorkflowVersions(workflow.config);
+    return config === workflow.config ? node : ({ ...workflow, config } as T);
+  };
+  const rememberWorkflows = () => {
+    for (const node of canvasNodeLists(store.getState().nodesById).knowledgeVideoWorkflow)
+      workflowVersions.set(node.key, node.config);
+  };
+  const protectedWorkflows = (
+    keys?: ReadonlySet<string>,
+  ): ReadonlyMap<string, KnowledgeVideoWorkflowNodeData> =>
+    new Map(
+      canvasNodeLists(store.getState().nodesById)
+        .knowledgeVideoWorkflow.filter(
+          (node) =>
+            keys?.has(node.key) === true ||
+            INTERRUPTED_KNOWLEDGE_VIDEO_PHASES.has(node.config.checkpoint.phase),
+        )
+        .map((node) => [node.key, node] as const),
+    );
+  const reconcileWorkflows = (
+    freshDocument = false,
+    protectedNodes: ReadonlyMap<string, KnowledgeVideoWorkflowNodeData> = new Map(),
+  ) => {
+    if (freshDocument) workflowVersions.clear();
+    const current = store.getState().nodesById;
+    let nodesById = current;
+    for (const entry of Object.values(current)) {
+      if (entry.type !== "knowledgeVideoWorkflow") continue;
+      const previous = workflowVersions.get(entry.data.key);
+      const config =
+        protectedNodes.get(entry.data.key)?.config ??
+        (previous
+          ? mergeWorkflowVersionHistory(previous, entry.data.config)
+          : initializeWorkflowVersions(entry.data.config));
+      workflowVersions.set(entry.data.key, config);
+      if (config === entry.data.config) continue;
+      if (nodesById === current) nodesById = { ...current };
+      (nodesById as Record<string, CanvasNodeEntry>)[entry.data.key] = {
+        type: "knowledgeVideoWorkflow",
+        data: { ...entry.data, config },
+      };
+    }
+    // Undoing the insertion of an active workflow cannot orphan its paid in-flight execution.
+    for (const [key, data] of protectedNodes) {
+      if (nodesById[key]) continue;
+      if (nodesById === current) nodesById = { ...current };
+      (nodesById as Record<string, CanvasNodeEntry>)[key] = {
+        type: "knowledgeVideoWorkflow",
+        data,
+      };
+      workflowVersions.set(key, data.config);
+    }
+    if (nodesById !== current) {
+      // Reattaching version metadata must not push another canvas undo or clear its redo stack.
+      store.temporal.getState().pause();
+      try {
+        store.setState({ nodesById });
+      } finally {
+        store.temporal.getState().resume();
+      }
+    }
+  };
   const commands: CanvasCommands = {
-    insertSubgraph: (nodes, edges, options) =>
-      store.getState().insertSubgraph(nodes, edges, options),
-    addNode: (type, node, options) => store.getState().addNode(type, node, options),
+    insertSubgraph: (nodes, edges, options) => {
+      const prepared = nodes.map((entry): CanvasNodeEntry =>
+        entry.type === "knowledgeVideoWorkflow"
+          ? { ...entry, data: versionedNode(entry.type, entry.data) }
+          : entry,
+      );
+      const result = store.getState().insertSubgraph(prepared, edges, options);
+      rememberWorkflows();
+      return result;
+    },
+    addNode: (type, node, options) => {
+      const added = store
+        .getState()
+        .addNode(
+          type,
+          (siblings) => versionedNode(type, typeof node === "function" ? node(siblings) : node),
+          options,
+        );
+      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
+      return added;
+    },
     addOutput: (node) => store.getState().addOutput(node),
-    patchNode: (type, key, update) => store.getState().patchNode(type, key, update),
-    patchNodes: (type, update) => store.getState().patchNodes(type, update),
+    patchNode: (type, key, update) => {
+      const result = store.getState().patchNode(type, key, (node) => {
+        const next = update(node);
+        return next === node ? node : versionedNode(type, next);
+      });
+      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
+      return result;
+    },
+    patchNodes: (type, update) => {
+      const result = store.getState().patchNodes(type, (node) => {
+        const next = update(node);
+        return next === node ? node : versionedNode(type, next);
+      });
+      if (type === "knowledgeVideoWorkflow") rememberWorkflows();
+      return result;
+    },
     removeNode: (key) => store.getState().removeNode(key),
     connect: (fromKey, toKey) => store.getState().connect(fromKey, toKey),
     disconnect: (edgeId) => store.getState().disconnect(edgeId),
@@ -1412,9 +1521,23 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
     selectEdge: (edgeId) => store.getState().selectEdge(edgeId),
     clear: () => store.getState().clear(),
     snapshotV2: (promptContents) => snapshotCanvasV2(store.getState(), promptContents),
-    restoreDocument: (document) => store.getState().restoreDocument(document),
-    undo: () => store.getState().undo(),
-    redo: () => store.getState().redo(),
+    restoreDocument: (document) => {
+      const result = store.getState().restoreDocument(document);
+      if (result.ok) reconcileWorkflows(true);
+      return result;
+    },
+    undo: (protectedWorkflowKeys) => {
+      const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
+      const result = store.getState().undo();
+      if (result === "applied") reconcileWorkflows(false, protectedNodes);
+      return result;
+    },
+    redo: (protectedWorkflowKeys) => {
+      const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
+      const result = store.getState().redo();
+      if (result === "applied") reconcileWorkflows(false, protectedNodes);
+      return result;
+    },
   };
   return {
     store,

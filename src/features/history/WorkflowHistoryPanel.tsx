@@ -182,7 +182,7 @@ function WorkflowDetail({
   const running = active || ACTIVE_PHASES.includes(record.status);
   const resumable = ["failed", "paused", "awaiting_approval", "idle"].includes(record.status);
   const decision = checkpoint.decision;
-  const requiresDecision = record.status === "awaiting_approval";
+  const requiresDecision = record.status === "awaiting_approval" && decision != null;
   const answer = resolution.trim() || (decision?.recommendation?.trim() ?? "");
   const media = retainedMedia(checkpoint);
   const reverseDelivery = checkpoint.reverseVideo?.delivery;
@@ -310,7 +310,11 @@ function WorkflowDetail({
               type="button"
               disabled={busy}
               onClick={() =>
-                void runAction(() => onRestartWorkflow(record), "已创建新的工作流运行。", true)
+                void runAction(
+                  () => onRestartWorkflow(record),
+                  "已恢复到画布，请检查并确认新的执行计划。",
+                  true,
+                )
               }
             >
               重新制作

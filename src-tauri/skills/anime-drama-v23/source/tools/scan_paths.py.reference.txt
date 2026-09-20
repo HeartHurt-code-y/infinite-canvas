@@ -1,0 +1,328 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""drama-auto-pipeline 打包前扫描器 —— 拦住「本机绝对路径」混进分发包
+
+================================================================================
+为什么需要它
+================================================================================
+V1.9 之前，本 skill 里混着 `C:{sep}Users{sep}<本机用户名>{sep}.项目模型{sep}skills{sep}...`
+这种硬编码路径。分享压缩包给别人 → 路径不存在 → 崩，或者更糟：静默降级成「不校验」。
+
+**判据：「碰巧没事」和「不会出事」是两件事。**
+这次包里干净，只是因为「恰好那几行被改掉了」，**不是因为有东西在拦**。
+所以不靠「我记得要检查」，靠这个脚本 + 接进 snapshot.py 发版流程硬拦。
+
+================================================================================
+两条出口都要堵（这两个不能互相替代）
+================================================================================
+  ① `_versions/*.zip`（给别人用的成品）  → 本脚本在 snapshot.py 里「打包前扫目录 + 打包后扫包本体」
+  ② git 版本库                          → .gitignore 管不着内容里的路径，靠本脚本扫工作区
+
+================================================================================
+自指陷阱（踩过一次，写下来）
+================================================================================
+脚本自己在 skill 目录里，如果**字面量**写着真实用户名，它就会把自己报成泄漏源。
+正确解法是**运行时生成**：用户名从 `os.environ` / `Path.home()` 取，
+示例路径用 chr(92) 拼接。**不是**给扫描器加白名单放过自己 —— 白名单 = 削弱防护。
+
+================================================================================
+误报也是故障（踩过一次，写下来）
+================================================================================
+一个门禁只要**经常报假警**，人就会开始整段跳过它 —— 那它等于不存在。
+所以「不该报的」和「该报的」一样要有对抗测试。
+实测踩到的三处误报：
+  ① `C:{sep}Windows`（系统目录，换机器也在）—— 加 SYSTEM_DIRS 排除
+  ② 文档里的省略号写法 `C:{sep}Users{sep}...` —— 纯点号段按占位符放行
+  ③ 部署文档必须给出的模板 `C:{sep}Users{sep}<你的用户名>{sep}...` —— 同上
+而 ② 的第一次修法（只把 `...` 加进占位符名单）**没修好**：路径段字符类用了负向排除，
+把中文标点一起吞了（`...）不报（硬拦与…`），占位符判定看不到纯 `...` 段。
+最终解法是把路径段字符类改成**正向白名单**（见 `_name_class`）。
+
+================================================================================
+用法
+================================================================================
+    python tools/scan_paths.py                # 扫 skill 目录（默认）
+    python tools/scan_paths.py --zip _versions/xxx.zip
+    python tools/scan_paths.py --all-zips     # 复检所有历史包
+    python tools/scan_paths.py --path <其他目录>
+
+退出码：0 = 干净；3 = 命中硬拦（**不许发版**）；4 = 仅有软提示
+"""
+import argparse
+import os
+import re
+import sys
+import zipfile
+from pathlib import Path
+
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+except Exception:                                    # noqa: BLE001
+    pass
+
+SKILL_DIR = Path(__file__).resolve().parent.parent
+SEP = chr(92)                                        # 反斜杠，避免在源码里写出真实盘符路径
+
+SCAN_EXT = {".py", ".md", ".txt", ".json", ".jsonc", ".html", ".htm", ".css", ".js",
+            ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".ps1", ".bat", ".cmd",
+            ".env", ".example", ".template", ".reg", ".csv", ".tsv", ".xml"}
+SKIP_DIRS = {".git", "__pycache__", "_versions", "node_modules", ".venv", "venv",
+             ".mypy_cache", ".pytest_cache", ".idea", ".vscode"}
+MAX_BYTES = 4 * 1024 * 1024                          # 超过 4MB 的文本不扫（避免卡死）
+
+# 允许出现的「明显的占位符」写法 —— 这些是要教给用户的模板，不是泄漏
+PLACEHOLDER_CHARS = set("<>{}[]%$*?")
+# 省略号写法：文档里常写 `C:{sep}Users{sep}...{sep}x` 表示「你自己那台机器的用户名」。
+# 一个纯点号的路径段**不含任何机器信息** → 语义上就是占位符，不是泄漏。
+# 判据：这是**修正误报**，不是放宽门禁 —— 真泄漏（`...Administrator...`）里的
+#      用户名段仍会被下面的 win_user_dir / local_username 抓住（见 examples/test_scan_paths.py）。
+PLACEHOLDER_ELLIPSIS = ("...", "…", "..")
+# 系统目录：盘符相同、路径相同、换台机器也在，不算「本机绝对路径」
+SYSTEM_DIRS = ("Windows", "Program Files", "Program Files (x86)", "ProgramData",
+               "System32", "Users" + SEP + "Public")
+
+
+def _user_names():
+    """运行时收集本机可能的用户名 —— **绝不硬编码**（否则脚本自己成了泄漏源）。"""
+    names = set()
+    for env in ("USERNAME", "USER", "LOGNAME"):
+        v = (os.environ.get(env) or "").strip()
+        if v:
+            names.add(v)
+    try:
+        n = Path.home().name
+        if n:
+            names.add(n)
+    except Exception:                                # noqa: BLE001
+        pass
+    return {n for n in names if n and len(n) >= 2}
+
+
+def _name_class():
+    """捕获「路径段名字」的字符类 —— 用**正向白名单**，不是「排除几个坏字符」。
+
+    为什么必须用白名单（踩过一次）：
+      原来写成「排除分隔符/空白/引号/括号类字符」(`[^/\\\\\\s\"'`()\\[\\]{}<>*+?|,;:]+`)，
+      这个类**不排除中文标点**。于是源码里一行
+
+          chk("省略号模板（C:\\\\Users\\\\...）不报 …")
+
+      被 rule ① 捕获成 `...）不报（硬拦与软提示都要为` —— 占位符判定失效 → **误报硬拦**。
+      教训：负向类永远漏（你排除不完）；**路径段里合法的字符是有限的**，用正向白名单。
+
+    白名单 = `\\w`（Unicode 字母/数字/下划线，覆盖中文目录名如「野心家」）
+             + `.-~@#$%=`（真实用户名/目录名的常见符号）。
+    特意**不含**引号与各类括号/标点 —— 这同时保证扫描器不会命中自己源码里的路径正则
+    （源码写 `/home/(...)`，`(` 不在白名单里 → 不匹配），而不是靠白名单放过自己。
+
+    也**不含** `+`：`+` 是正则拼接运算符，本文件里就有字面量 `"/Users/+("`，
+    允许 `+` 会让扫描器把自己第 130 行报成泄漏源（实测踩到）。
+    真实路径段里 `+` 极罕见；即使有，正则也会捕获到 `+` 之前的字符 → **照样命中**，
+    只是报告里显示得短一点，不会漏报。
+    """
+    return r"[\w.\-~@#$%=]+"
+
+
+def _build_rules():
+    names = _user_names()
+    nm_alt = "|".join(sorted((re.escape(n) for n in names), key=len, reverse=True))
+    nc = _name_class()
+
+    rules = []
+    # ① Windows 用户目录：<盘符>:\Users\<某人>\... → 硬拦（占位符除外）
+    rules.append(("win_user_dir", "硬拦",
+                  re.compile(r"[A-Za-z]:" + re.escape(SEP) + r"+Users" + re.escape(SEP)
+                             + r"+(" + nc + r")")))
+    # ② Windows 用户目录（正斜杠写法）
+    rules.append(("win_user_dir_fwd", "硬拦",
+                  re.compile(r"[A-Za-z]:/Users/+(" + nc + r")")))
+    # ③ POSIX 家目录
+    rules.append(("posix_home", "硬拦",
+                  re.compile(r"/(?:Users|home)/+(" + nc + r")")))
+    # ④ 本机真实用户名出现在任何路径位置上
+    if nm_alt:
+        rules.append(("local_username", "硬拦",
+                      re.compile(r"(?<![A-Za-z0-9_.-])(" + nm_alt + r")(?![A-Za-z0-9_.-])")))
+    # ⑤ 其它盘符绝对路径（可能是合法示例，只在分享前提醒）
+    #    排除系统目录：`C:{sep}Windows` 这种在**任何**机器上都存在，不是「本机路径」。
+    #    如果不排除，扫描器会长期带着几条合法噪声 → 用户学会忽略它 → 扫描器就废了。
+    #    捕获「盘符之后整段路径 token」而不是只捕获首段：这样部署文档里那条**必须给出**的
+    #    模板（`C:{sep}Users{sep}<你的用户名>{sep}.项目模型{sep}...`）能被占位符判定放行。
+    #    只捕获首段时首段是 `Users`（不是占位符）→ 模板会被永久误报 → 同上，扫描器废掉。
+    sys_alt = "|".join(re.escape(s) for s in SYSTEM_DIRS)
+    rules.append(("other_drive_path", "软提示",
+                  re.compile(r"(?<![A-Za-z0-9])[A-Za-z]:" + re.escape(SEP)
+                             + r"(?![\\/]|$)(?!(?:" + sys_alt + r")(?:[\\/\"'\s`]|$))"
+                             + r"([^\s\"'`|]+)",
+                             re.IGNORECASE)))
+    return rules
+
+
+def _is_placeholder(name: str) -> bool:
+    """捕获到的东西是不是「模板写法」（是则放行）。四类：
+
+    ① 空捕获（规则没分组）    ② 含占位符括号类字符（`<你的用户名>` / `%USERNAME%` / `*`）
+    ③ 含省略号路径段（`...`）  ④ 纯点号段（`....`）
+
+    ③④ 是**修正误报**：纯点号段不带任何机器信息。真泄漏里那个用户名字段仍会被
+    win_user_dir / local_username 抓住 —— 见 examples/test_scan_paths.py 的反向断言。
+    """
+    if not name:
+        return True
+    if any(c in PLACEHOLDER_CHARS for c in name):
+        return True
+    for part in re.split(r"[\\/]+", name):
+        if part in PLACEHOLDER_ELLIPSIS or part.strip(".") == "":
+            return True
+    return False
+
+
+def _mask(text: str, names) -> str:
+    for n in sorted(names, key=len, reverse=True):
+        text = text.replace(n, "*" * max(3, min(len(n), 8)))
+    return text
+
+
+def _scan_text(text, rel, rules, names):
+    """按**行**归并命中：同一行被多条规则命中只报一条（列出全部标签）。
+
+    归并是必要的，不只是好看：一条 `C:{sep}Users{sep}<用户>{sep}...` 会同时命中
+    「Windows 用户目录」和「裸用户名」两条规则，不归并就会报两遍 —— 报告显得像两个问题，
+    而人一旦觉得报告在重复说废话，就会开始跳过它。
+    等级取该行最高者（硬拦 > 软提示）。
+    """
+    hits = []
+    for i, line in enumerate(text.splitlines(), 1):
+        tags, levels = [], []
+        for tag, level, rx in rules:
+            for m in rx.finditer(line):
+                cap = m.group(1) if m.groups() else ""
+                if cap and _is_placeholder(cap):
+                    continue                            # 占位符/模板 → 放行
+                tags.append(tag)
+                levels.append(level)
+                break
+        if tags:
+            hits.append({"rel": rel, "line": i, "tag": "+".join(tags),
+                         "level": "硬拦" if "硬拦" in levels else "软提示",
+                         "snippet": _mask(line.strip()[:160], names)})
+    return hits
+
+
+def _iter_files(root: Path):
+    for r, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for fn in files:
+            p = Path(r) / fn
+            if p.suffix.lower() not in SCAN_EXT:
+                continue
+            try:
+                if p.stat().st_size > MAX_BYTES:
+                    continue
+            except OSError:
+                continue
+            yield p, str(p.relative_to(root)).replace(os.sep, "/")
+
+
+def scan_tree(root, verbose=False):
+    root = Path(root)
+    rules, names = _build_rules(), _user_names()
+    hits = []
+    n_files = 0
+    for p, rel in _iter_files(root):
+        n_files += 1
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        hits += _scan_text(text, rel, rules, names)
+    return {"target": str(root), "kind": "dir", "files": n_files, "hits": hits}
+
+
+def scan_zip(zpath, verbose=False):
+    zpath = Path(zpath)
+    rules, names = _build_rules(), _user_names()
+    hits, n_files = [], 0
+    with zipfile.ZipFile(zpath) as z:
+        for info in z.infolist():
+            if info.is_dir() or Path(info.filename).suffix.lower() not in SCAN_EXT:
+                continue
+            if info.file_size > MAX_BYTES:
+                continue
+            n_files += 1
+            try:
+                text = z.read(info).decode("utf-8", "replace")
+            except Exception:                            # noqa: BLE001
+                continue
+            hits += _scan_text(text, info.filename, rules, names)
+    return {"target": str(zpath), "kind": "zip", "files": n_files, "hits": hits}
+
+
+def report(res, quiet=False):
+    hard = [h for h in res["hits"] if h["level"] == "硬拦"]
+    soft = [h for h in res["hits"] if h["level"] == "软提示"]
+    ok = not hard
+    if not quiet or not ok:
+        print("=" * 78)
+        print("绝对路径扫描：%s（%s，%d 个文本文件）"
+              % (res["target"], res["kind"], res["files"]))
+        print("=" * 78)
+        if hard:
+            print(f"\n❌ 硬拦命中 {len(hard)} 处 —— **不许发版**（别人解压后路径不存在）：")
+            for h in hard[:40]:
+                print(f"   {h['rel']}:{h['line']}  [{h['tag']}]  {h['snippet']}")
+            if len(hard) > 40:
+                print(f"   …… 另有 {len(hard) - 40} 处")
+        if soft:
+            print(f"\n⚠️  软提示 {len(soft)} 处（可能是合法示例，分享前建议改成占位符）：")
+            for h in soft[:20]:
+                print(f"   {h['rel']}:{h['line']}  [{h['tag']}]  {h['snippet']}")
+            if len(soft) > 20:
+                print(f"   …… 另有 {len(soft) - 20} 处")
+        if ok and not soft:
+            print("\n✅ 干净：没有本机绝对路径（本机用户名在报告里已打码）")
+    return ok
+
+
+def main():
+    ap = argparse.ArgumentParser(description="drama-auto-pipeline 绝对路径扫描器")
+    ap.add_argument("--path", help="扫描目录（默认：本 skill 根目录）")
+    ap.add_argument("--zip", help="扫描指定 zip")
+    ap.add_argument("--all-zips", action="store_true",
+                    help="复检 _versions/ 下所有历史包（一条命令看清全部）")
+    ap.add_argument("--quiet", action="store_true", help="只在有问题时输出")
+    args = ap.parse_args()
+
+    if args.all_zips:
+        vd = SKILL_DIR / "_versions"
+        zips = sorted(vd.glob("*.zip")) if vd.is_dir() else []
+        if not zips:
+            print("（_versions/ 下没有 zip）")
+            return 0
+        bad = 0
+        for z in zips:
+            res = scan_zip(z)
+            hard = [h for h in res["hits"] if h["level"] == "硬拦"]
+            flag = "❌ 命中 %d" % len(hard) if hard else "✅ 干净"
+            print(f"  {flag:<12} {z.name}（{res['files']} 文件）")
+            if hard:
+                bad += 1
+                for h in hard[:6]:
+                    print(f"        {h['rel']}:{h['line']}  {h['snippet']}")
+        print(f"\n复检 {len(zips)} 个包：{len(zips) - bad} 干净 / {bad} 命中")
+        return 3 if bad else 0
+
+    if args.zip:
+        res = scan_zip(args.zip)
+    else:
+        res = scan_tree(args.path or SKILL_DIR)
+    ok = report(res, quiet=args.quiet)
+    hard = [h for h in res["hits"] if h["level"] == "硬拦"]
+    soft = [h for h in res["hits"] if h["level"] == "软提示"]
+    if hard:
+        return 3
+    return 4 if soft else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

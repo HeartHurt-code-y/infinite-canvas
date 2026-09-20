@@ -133,7 +133,7 @@ export function ComicDramaConfiguration({
                 rows={5}
                 aria-label={`第 ${index + 1} 集剧本`}
                 value={episode.script}
-                placeholder="粘贴本集剧本。导演分析、服化道设计、分镜编写与检查将在节点内部自动完成。"
+                placeholder="粘贴小说、创意或已有剧本。依次完成剧本共创、风格锁定、服化道、导演分镜与执行提示词；每阶段审阅确认后继续。"
                 onValueChange={(value) =>
                   onChange({
                     ...options,
@@ -212,6 +212,7 @@ export function ComicDramaConfiguration({
           />
         </label>
       </fieldset>
+      <small>角色音色在本节点交付设计文档，当前不自动生成独立配音音轨。</small>
     </details>
   );
 }
@@ -278,7 +279,11 @@ export function ComicDramaDeliverables({
                 <details className="canvas-knowledge-workflow__deliverables" key={stage}>
                   <summary>
                     {COMIC_DRAMA_STAGE_LABELS[stage]} · v{run.artifact.version} ·{" "}
-                    {run.passed ? "已通过" : "待检查或修订"}
+                    {run.passed
+                      ? run.approvedVersion === run.artifact.version
+                        ? "已确认"
+                        : "检查通过，待人工确认"
+                      : "待检查或修订"}
                   </summary>
                   <div>
                     <small>依据：{run.artifact.inputSummary}</small>

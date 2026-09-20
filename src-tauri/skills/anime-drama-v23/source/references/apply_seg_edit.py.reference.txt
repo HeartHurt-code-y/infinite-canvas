@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""apply_seg_edit.py —— 把用户从 04 审核页导出的 seg_N_edit.json 合并回 storyboard.json
+
+为什么需要它：铁律 D2 让用户在审核页上改、导出 json、回对话交给主 Agent 合并。
+但「主 Agent 手工改 JSON」这件事**没有校验**，而用户可能：
+  · 把改动写在错的字段上
+  · 表演设计改成了非法 JSON
+  · 顺手把页面内部字段一起带回来（旧版导出会带 `_camera_action_zh`）
+  · 导出的是一个**旧格式**的 payload（`acting` 是字符串、`soundscape` 被中文覆盖）
+
+本脚本把合并变成一次**受校验的事务**：白名单字段 + 类型校验 + 自动备份 + 改完自动跑机检。
+
+用法：
+  python references/apply_seg_edit.py --project-root <项目根> --edit <seg_N_edit.json>
+  python references/apply_seg_edit.py --project-root <项目根> --edit x.json --dry-run
+
+退出码：0 = 已合并且机检通过；2 = 校验不过（未写入）；3 = 文件/结构问题
+"""
+import argparse
+import ast
+import importlib.util
+import json
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+# V2.0.9：业务枚举统一从 drama_schema 取（单一事实来源）
+# V2.0.11：时长/语速/台词容量也统一从共享模块取 ——
+#   合并器现在**写盘前**就用与关 4/关 5 同一个公式自查容量（铁律 D2-f），
+#   而不是「先写盘、再靠合并后的机检告诉我超标、再回滚」。
+#   判据：**门禁必须排在「改状态」之前**（2026-09-13 已固化）——
+#   写入后才发现问题，就得靠备份回滚，白折腾一遍还留下一个可疑的中间态。
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from drama_schema import DUR_MAX, DUR_MIN  # noqa: E402
+from drama_schema import LINE_TYPES  # noqa: E402
+from drama_schema import cps_of, max_chars, occupy_pct, over_capacity  # noqa: E402
+
+# 允许用户改的字段（其余一律拒绝，防止把页面内部字段或拼错的键写进方案）
+EDITABLE = {
+    "camera_lock_zh", "action_zh", "narration", "soundscape_zh", "acting", "dur",
+    "kw", "mood_zh", "ending_zh", "camera_lock", "action", "soundscape",
+    "link", "crowd", "crowd_note", "costume_notes",
+    "on_screen_char_ids", "prop_ids", "dialogue", "speaker_char_id",
+    "scene_id", "shot_id",
+}
+# 已知的页面内部/辅助字段：静默忽略并提示
+PAGE_ONLY = {"_changed", "_camera_action_zh", "_note"}
+# 派生字段（铁律 D2-d）：不由用户直接改，也**不接受「页面自己算出来的版本」** ——
+# 它们只能从 dialogue 单点派生。收到时忽略内容、由源头重算。
+# 为什么必须这样：同一套派生逻辑一旦有第二份实现（页面 JS）就必然漂移；
+# 而且合并器是「先写 dialogue、再逐字段合并」，两边算得不一样时
+# **页面算出来的派生值会覆盖合并器的结果** —— 源头反而说了不算。
+DERIVED = {"beats", "narration"}
+ACTING_FIELDS = ["goal", "obstacle", "tactic", "beat_change",
+                 "subtext", "physical_task", "eye_detail"]
+# beats 里会渲染成「谁说了什么」的节拍类型 —— 见文件头导入
+# （单一事实来源：references/drama_schema.py。V2.0.9 前本文件自带一份，
+#   与 batch_run_drama 的那份漂移，导致台词被当动作。）
+
+
+def _load_checker(skill_root):
+    p = Path(skill_root) / "references" / "check_storyboard.py"
+    if not p.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("check_storyboard", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def coerce_acting(val):
+    """把各种形态的 acting 归一成 dict。
+    旧版审核页导出的是 **Python repr 字符串**（单引号），不是 JSON —— 用 literal_eval 救回来。"""
+    if isinstance(val, dict):
+        return val, None
+    if not isinstance(val, str):
+        return None, "acting 类型是 %s，无法解析" % type(val).__name__
+    s = val.strip()
+    for parse, name in ((json.loads, "JSON"), (ast.literal_eval, "Python 字面量")):
+        try:
+            obj = parse(s)
+        except Exception:
+            continue
+        if isinstance(obj, dict):
+            return obj, "（按 %s 解析）" % name
+    return None, "acting 既不是合法 JSON 也不是合法 Python 字面量"
+
+
+# ---- 台词三件套：dialogue / beats(line) / narration 必须同步（V2.0.6）----
+# 为什么：`narration` 是 dialogue 的**派生摘要**（= 各句用 ／ 连接），阶段六派生只读
+# `dialogue` 与 `beats`，`narration` 只在「没有 dialogue」时作单角色兜底。
+# 所以**只改 narration 等于没改**——用户以为改了台词，生成出来还是旧台词。
+# 这是最阴的一类缺陷：改动被静默忽略。故三者强制同向更新。
+NARR_SEP = "／"
+
+
+def _split_narration(s):
+    return [p.strip() for p in str(s).split(NARR_SEP) if p.strip()]
+
+
+def _narration_of(dialogue):
+    return NARR_SEP.join(d.get("text", "") for d in dialogue)
+
+
+def _line_slots(seg):
+    return [i for i, b in enumerate(seg.get("beats") or [])
+            if isinstance(b, dict) and b.get("type") in LINE_TYPES]
+
+
+def _sync_beats(seg, new_dialogue):
+    """把新 dialogue 按顺序写进 beats 的 line 条目。返回 (new_beats, error)"""
+    slots = _line_slots(seg)
+    if len(slots) != len(new_dialogue):
+        return None, ("beats 里有 %d 条台词、dialogue 有 %d 句 —— 数量必须一致才能自动同步"
+                      "（要增删台词请回对话让主 Agent 改，审核页只能逐句替换）"
+                      % (len(slots), len(new_dialogue)))
+    new_beats, k = [], 0
+    for b in (seg.get("beats") or []):
+        if isinstance(b, dict) and b.get("type") in LINE_TYPES:
+            nb = dict(b)
+            nb["char_id"] = new_dialogue[k]["char_id"]
+            nb["text"] = new_dialogue[k]["text"]
+            new_beats.append(nb)
+            k += 1
+        else:
+            new_beats.append(b)
+    return new_beats, None
+
+
+def _validate_dialogue(val):
+    if not isinstance(val, list) or not val:
+        return None, "dialogue 必须是非空数组"
+    out = []
+    for i, x in enumerate(val, 1):
+        if not isinstance(x, dict) or not x.get("char_id") or not str(x.get("text", "")).strip():
+            return None, "dialogue 第 %d 句必须是 {char_id, text} 且都不为空" % i
+        out.append({"char_id": x["char_id"], "text": str(x["text"])})
+    return out, None
+
+
+def _apply_dialogue(seg, new_dialogue, changes, warnings, errors, source):
+    """把新台词同步进 dialogue / beats / narration 三处"""
+    nb, err = _sync_beats(seg, new_dialogue)
+    if err:
+        errors.append(err)
+        return
+    old_d = seg.get("dialogue") or []
+    for i, (o, n) in enumerate(zip(old_d, new_dialogue), 1):
+        if o.get("char_id") != n["char_id"] or o.get("text") != n["text"]:
+            changes.append(("台词 第%d句" % i, "「%s」→「%s」（%s）"
+                            % (_short(o.get("text")), _short(n["text"]), n["char_id"])))
+    seg["dialogue"] = new_dialogue
+    seg["beats"] = nb
+    new_narr = _narration_of(new_dialogue)
+    if seg.get("narration") != new_narr:
+        warnings.append("已按台词重算 narration 摘要（该字段是派生值，不单独手改）")
+        seg["narration"] = new_narr
+    if not [c for c in changes if c[0].startswith("台词")]:
+        warnings.append("台词解析%s与原方案一致，视为未改动" % source)
+
+
+def _sync_derived(sb, describe):
+    """重算 storyboard 顶层**派生**聚合字段并返回改了什么。
+
+    V2.0.11：`total_duration_sec` / `segment_count` 都是 `segments` 的派生值
+    （铁律 D2-d：派生值只能有一个产出点）。原先它们既不在 EDITABLE 里、
+    也没人自动重算 —— 于是「改了段长」必然把它们改错，然后由机检报一句
+    「total_duration_sec=206 与逐段求和 219 不符」，等着人去手工修数字。
+    **一个必然会错的字段，就该由代码维护，而不是靠人记得。**
+    """
+    segs = sb.get("segments") or []
+    fixed = []
+    total = sum(s.get("dur", 0) for s in segs if isinstance(s.get("dur"), int))
+    if sb.get("total_duration_sec") != total:
+        fixed.append("total_duration_sec：%r → %d" % (sb.get("total_duration_sec"), total))
+        sb["total_duration_sec"] = total
+    if sb.get("segment_count") != len(segs):
+        fixed.append("segment_count：%r → %d" % (sb.get("segment_count"), len(segs)))
+        sb["segment_count"] = len(segs)
+    if fixed:
+        describe("已按逐段求和重算派生字段（这些字段由 segments 派生，不手工改）："
+                 + "；".join(fixed))
+    return fixed
+
+
+def main():
+    ap = argparse.ArgumentParser(description="合并审核页导出的分段修改")
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--edit", help="seg_N_edit.json 路径（--sync-derived 时可省）")
+    ap.add_argument("--skill-root", default=str(Path(__file__).resolve().parents[1]))
+    ap.add_argument("--dry-run", action="store_true", help="只校验不写入")
+    ap.add_argument("--sync-derived", action="store_true",
+                    help="只重算顶层派生聚合字段（段/时长变动后的收尾）")
+    args = ap.parse_args()
+    if not args.edit and not args.sync_derived:
+        ap.error("必须给 --edit，或用 --sync-derived 只重算派生字段")
+
+    root = Path(args.project_root)
+    sb_file = root / "分镜脚本" / "storyboard.json"
+    if not sb_file.exists():
+        sys.exit("❌ 找不到 %s" % sb_file)
+
+    # ---- --sync-derived：只维护派生聚合字段，不碰内容 ----
+    if args.sync_derived:
+        sb = json.loads(sb_file.read_text(encoding="utf-8"))
+        print("=" * 68)
+        print("重算派生字段 · %s" % root.name)
+        print("=" * 68)
+        notes = []
+        fixed = _sync_derived(sb, notes.append)
+        if not fixed:
+            print("\n○ 派生字段本来就是对的，无需改动（未写入）")
+            sys.exit(0)
+        for n in notes:
+            print("\n📝 %s" % n)
+        if args.dry_run:
+            print("\n（--dry-run，未写入）")
+            sys.exit(0)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        bak = sb_file.with_name("storyboard_%s_before_syncderived.json" % stamp)
+        shutil.copy2(sb_file, bak)
+        sb_file.write_text(json.dumps(sb, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+        print("\n💾 已备份 → %s" % bak.name)
+        print("✅ 已写入 %s" % sb_file)
+        sys.exit(0)
+
+    edit_file = Path(args.edit)
+    if not edit_file.exists():
+        sys.exit("❌ 找不到 %s" % edit_file)
+
+    try:
+        sb = json.loads(sb_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        sys.exit("❌ storyboard.json 解析失败：%s" % e)
+    try:
+        edit = json.loads(edit_file.read_text(encoding="utf-8"))
+    except Exception as e:
+        sys.exit("❌ %s 解析失败：%s" % (edit_file.name, e))
+
+    segs = sb.get("segments") or []
+    seq = edit.get("seq")
+    if seq is None:
+        sys.exit("❌ 导出文件里没有 seq —— 无法确定要改哪一段")
+    target = next((s for s in segs if s.get("seq") == seq), None)
+    if target is None:
+        sys.exit("❌ storyboard.json 里没有 seq=%s 的段" % seq)
+
+    print("=" * 68)
+    print("合并分段修改 · 段 %s（%s）" % (seq, target.get("kw")))
+    print("来源：%s" % edit_file)
+    print("=" * 68)
+
+    unknown = [k for k in edit
+               if k not in EDITABLE and k not in PAGE_ONLY and k not in DERIVED and k != "seq"]
+    if unknown:
+        sys.exit("❌ 导出文件里有不认识的字段 %s —— 拒绝合并（可能是页面版本不匹配或字段拼错）" % unknown)
+    ignored = [k for k in edit if k in PAGE_ONLY]
+    if ignored:
+        print("ℹ️  忽略页面内部字段：%s" % "、".join(ignored))
+
+    # ---- 台词三件套：先处理（dialogue 优先，narration-only 视为台词修改）----
+    changes, warnings, errors = [], [], []
+    has_dlg = "dialogue" in edit
+    if has_dlg:
+        # 页面若把**自己算出的** beats / narration 也塞进 payload，一律不采信：
+        # 只认 dialogue 这个源头，其余由下面的单点派生重算（铁律 D2-d）。
+        extra_derived = [k for k in edit if k in DERIVED]
+        if extra_derived:
+            warnings.append("已忽略导出里的派生字段 %s —— 只认 dialogue 这一个源头，"
+                            "beats / narration 由本脚本单点重算" % "、".join(extra_derived))
+        nd, err = _validate_dialogue(edit["dialogue"])
+        if err:
+            errors.append(err)
+        else:
+            _apply_dialogue(target, nd, changes, warnings, errors, "（按 dialogue）")
+    elif "narration" in edit and edit["narration"] != target.get("narration"):
+        # 用户只改了「台词（摘要）」字段 —— narration 是派生值，判定为台词修改并向下同步
+        old_d = target.get("dialogue") or []
+        if not old_d:
+            errors.append("本段没有 dialogue，narration 是唯一台词来源；"
+                          "这种段请让主 Agent 直接改 beats")
+        else:
+            parts = _split_narration(edit["narration"])
+            if len(parts) != len(old_d):
+                errors.append(
+                    "只改了「台词」字段，但按 %s 切出的句数（%d）与本段对话句数（%d）不一致 ——\n"
+                    "      → 若要增删句子请回对话说明；若只是改词，请保证句数与原来相同"
+                    % (NARR_SEP, len(parts), len(old_d)))
+            else:
+                nd = [{"char_id": old_d[i].get("char_id"), "text": parts[i]}
+                      for i in range(len(old_d))]
+                _apply_dialogue(target, nd, changes, warnings, errors, "（按 narration 推断）")
+                warnings.append("只收到「台词（摘要）」的改动 → 已判定为台词修改，"
+                                "并同步写入 dialogue 与 beats（否则生成时会被静默忽略）")
+    elif "beats" in edit and edit["beats"] != target.get("beats"):
+        # 防削弱：派生字段被忽略，但**不能连用户的改动意图一起吞掉**。
+        # 整份 payload 只有 beats、没有 dialogue 这个源头 → 我们解读不了他想改什么 → 拒绝。
+        errors.append(
+            "这份导出里**只有 beats**（派生值）、没有 dialogue 这个源头：\n"
+            "     → beats 的台词条目由 dialogue 派生，不能单独改；审核页上也没有直接改节拍的入口。\n"
+            "     → 请回 04 页用「台词（每行一句）」改，或回对话说明要改哪一拍。")
+
+    # ---- 其余字段逐项校验 ----
+    for k, v in edit.items():
+        if k in PAGE_ONLY or k in DERIVED or k == "seq":
+            continue
+        old = target.get(k)
+        if k == "acting":
+            obj, how = coerce_acting(v)
+            if obj is None:
+                errors.append("acting 无法解析：%s" % how)
+                continue
+            missing = [f for f in ACTING_FIELDS if not obj.get(f)]
+            if missing:
+                errors.append("acting 缺字段：%s（七字段必须齐全）" % "、".join(missing))
+                continue
+            extra = [f for f in obj if f not in ACTING_FIELDS]
+            if extra:
+                warnings.append("acting 多出字段 %s，已保留但下游不会用" % "、".join(extra))
+            if obj == old:
+                continue
+            diff = [f for f in ACTING_FIELDS if str(old.get(f)) != str(obj.get(f))] \
+                if isinstance(old, dict) else ACTING_FIELDS
+            changes.append(("acting", "改了 %d 个字段：%s" % (len(diff), "、".join(diff))))
+            target[k] = obj
+            if how:
+                warnings.append("acting%s" % how)
+            continue
+        if v == old:
+            continue
+        # 旧版审核页把「声音」textarea 绑在 soundscape 上，导出时会把英文音景描述
+        # 覆盖成中文。这不是用户的意图，是导出痕迹 → 丢弃，只保留 soundscape_zh。
+        if k == "soundscape" and v == edit.get("soundscape_zh"):
+            warnings.append("已丢弃 soundscape 的旧版导出痕迹（中文覆盖），"
+                            "保留原文与 soundscape_zh")
+            continue
+        changes.append((k, "「%s」→「%s」" % (_short(old), _short(v))))
+        target[k] = v
+
+    # ---- 写盘前自查：段长合法性 + 台词容量（铁律 D2-f · V2.0.11）----
+    # 用与关 4 / 关 5 完全相同的公式（drama_schema），否则就是又一个「两套口径」。
+    # 只查**本段** —— 别的段本来就不该被这次编辑牵连（各自修各自的）。
+    _d = target.get("dur")
+    if not isinstance(_d, int) or isinstance(_d, bool):
+        errors.append("dur=%r 不是整数秒（铁律 B2 的硬区间是按整数秒定的）" % (_d,))
+    elif not (DUR_MIN <= _d <= DUR_MAX):
+        errors.append("dur=%ds 超出铁律 B2 硬区间 [%d, %d]" % (_d, DUR_MIN, DUR_MAX))
+    else:
+        _n = sum(len(x.get("text", "")) for x in (target.get("dialogue") or [])
+                 if isinstance(x, dict))
+        _cps = cps_of(target.get("dialogue_language") or "中文")
+        _ov = over_capacity(_n, _d, _cps)
+        if _ov:
+            errors.append(
+                "改完之后这一段仍然超容：台词 %d 字 > 上限 %d 字"
+                "（%ds → 对齐 %gs，占比 %.0f%%）\n"
+                "     → 与关 4 / 关 5 机检用的是**同一个上限**（references/drama_schema.py）。\n"
+                "     → 要么把 dur 再加长（%ds 时上限 %d 字），要么再压掉 %d 字。"
+                "**不要指望靠加速** —— 模型不会听你的。"
+                % (_n, _ov[1], _d, _ov[2], occupy_pct(_n, _d, _cps),
+                   DUR_MAX, max_chars(DUR_MAX, _cps), _ov[0]))
+
+    if errors:
+        print("\n❌ 校验不通过，**未写入任何内容**：")
+        for e in errors:
+            print("   · %s" % e)
+        sys.exit(2)
+
+    # ---- 顶层派生聚合字段：凡写盘就顺手算对（否则必错、且要人来修数字）----
+    _sync_derived(sb, warnings.append)
+
+    if not changes:
+        print("\n⚠️  导出文件与实际方案**没有差异** —— 无需合并。")
+        print("   （旧版审核页会把整段原样吐出，所以「没改也算改了」；V2.0.5 起只导出真正的改动。）")
+        sys.exit(0)
+
+    print("\n📝 实际改动 %d 处：" % len(changes))
+    for k, desc in changes:
+        print("   · %s：%s" % (k, desc))
+    for w in warnings:
+        print("   ⚠️  %s" % w)
+
+    # 顺带报一下旧版 payload 的痕迹（不拦，只是提醒）
+    if isinstance(edit.get("soundscape"), str) and edit.get("soundscape") == edit.get("soundscape_zh"):
+        print("   ℹ️  soundscape 与 soundscape_zh 相同 —— 这是旧版审核页的导出痕迹，"
+              "英文音景描述被中文覆盖了；下游优先读 soundscape_zh，不影响生成。")
+
+    if args.dry_run:
+        print("\n（--dry-run，未写入）")
+        sys.exit(0)
+
+    # ---- 写盘（先备份）----
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = sb_file.with_name("storyboard_%s_before_seg%s.json" % (stamp, seq))
+    shutil.copy2(sb_file, bak)
+    print("\n💾 已备份 → %s" % bak.name)
+    sb_file.write_text(json.dumps(sb, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    print("✅ 已写入 %s" % sb_file)
+
+    # ---- 合并后立刻跑机检 ----
+    checker = _load_checker(args.skill_root)
+    if checker is None:
+        print("\n⚠️  找不到 check_storyboard.py，跳过机检")
+        sys.exit(0)
+    print("\n" + "-" * 68)
+    stats, hard, soft, err = checker.check(str(root))
+    if err:
+        print("❌ 机检读不到：%s" % err)
+        sys.exit(3)
+    # V2.0.11：机检是**项目级**的，而这次编辑是**段级**的。
+    # 分批修多段时（一次只修一段），中间几次必然看到「别的段还没修」的硬错误 ——
+    # 若一律报「不通过 + 可回滚」，操作者会去回滚一次**完全正确**的写入。
+    # 判据（同 D2-f「口径要分清」）：**失败信息必须指明到底是谁的问题**。
+    #   · 报错里点名了本段  → 真的没修好，exit 3，可回滚
+    #   · 报错全是别的段    → 本段已合规，exit 0 + 明确列出剩余待修段
+    mine = "段 %s(" % seq
+    hard_mine = [m for m in hard if m.startswith(mine)]
+    hard_other = [m for m in hard if m not in hard_mine]
+    if hard_mine:
+        print("❌ 合并后机检不通过（%d 条），**其中包含本段**：" % len(hard))
+        for m in hard_mine:
+            print("   · %s" % m)
+        print("\n→ 备份在 %s，可手工回滚：copy /Y \"%s\" \"%s\"" % (bak.name, bak, sb_file))
+        sys.exit(3)
+    print("✅ 本段合并后机检通过（本段 0 硬错误%s）"
+          % ("，%d 条软提示" % len(soft) if soft else ""))
+    if hard_other:
+        print("\n⚠️  项目里还有 %d 条硬错误，**都不属于本段**（本段这次写对了，不要回滚）："
+              % len(hard_other))
+        for m in hard_other:
+            print("   · %s" % m.splitlines()[0])
+        print("   → 一次只修一段时，这是正常的中间态；全部修完后再跑一次 check_storyboard")
+    for m in soft:
+        print("   ⚠️  %s" % m)
+    print("\n下一步：重新生成审核页 → python references/audit_html_builder.py "
+          "--project-root \"%s\" --stage storyboard" % root)
+    sys.exit(0)
+
+
+def _short(v, n=48):
+    s = str(v).replace("\n", " ")
+    return s if len(s) <= n else s[:n] + "…"
+
+
+if __name__ == "__main__":
+    main()

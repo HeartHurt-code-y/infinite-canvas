@@ -1,0 +1,335 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""smoke_pages.py —— 发版前的**端到端冒烟门禁**
+
+为什么必须有它（V2.0.7 的由来，2026-09-18《橘子汽水味的夏天》第二集）：
+  V2.0.6 带着 **349 条不变式全绿**发了版，但 04 审核页**根本生成不出来** ——
+  我在模板的 JS 注释里写了一个裸花括号 ``{char_id, text}``，而那段是 Python
+  f-string，于是它被当成**插值表达式**求值 → ``NameError: name 'char_id' is not defined``。
+  后果不是「显示难看」，是**审核页连文件都产不出**，用户什么都审不到。
+
+  而 tools/checks.txt 只做「关键字还在不在文件里」的 grep：
+  **它证明不了代码能跑**。语法错、运行期错、模板转义坑对它是完全隐形的。
+  349 条全绿 + 页面根本出不来 —— 这两件事可以同时成立。
+
+判据（通用，值得抄到别处）：
+  · 静态 grep（内容还在不在）与动态冒烟（跑一遍会不会炸）是**两条不能互相替代的出口**,
+    正如 G4 的 zip 与 git 两条出口、A7-b 的机械筛查与人眼复核 —— 少一条就漏一类问题。
+  · 「检查」如果自己没有执行体，就只是安慰剂（同判据 D1-b、D2-a 的教训）。
+  · 冒烟必须跑**真实调用路径**：`py_compile` 抓不到 f-string 运行期求值错误，
+    只有真的把 builder 调起来才会炸。
+
+三层，逐层收紧：
+  1) 语法 —— py_compile 全部 .py（抓 SyntaxError）
+  2) 端到端 —— 造最小 fixture 项目，真的调 7 个审核页 builder
+       · storyboard 必须成功出页
+       · 其余 builder 允许「数据不足」返回 err，但**一律不许抛异常**
+  3) 页面自检 —— 04 页必须含台词编辑器三要素 / 节拍 / 收势 / 群众 / 时长区间校验
+
+退出码：0 = 全通过；1 = 有不通过项
+"""
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+TOOLS_DIR = Path(__file__).resolve().parent
+SKILL_DIR = TOOLS_DIR.parent
+
+# 第 3 层：审核页必须真的渲染出来的东西。
+# 每一条都对应一次「规范写了、页面没渲染」或「字段开放了编辑却没人收」的实测教训。
+REQUIRED_IN_PAGE = [
+    ("【节拍】有序展开", "结构化的 beats 必须有序展开（否则用户看不到表演节奏）"),
+    ("收势：", "段末收势（ending_zh）必须展示"),
+    ("群众：", "群众标记必须展示（铁律 A3/A5）"),
+    ("落在铁律 B2 硬区间", "时长区间 [4,15] 秒校验必须逐段跑"),
+    ("台词（每行一句", "台词必须可逐行编辑（V2.0.6）"),
+    ("句数不要变", "逐行编辑必须写明「句数不变」这一约束"),
+    ("台词摘要（只读", "narration 是派生字段，必须降为只读展示（铁律 D2-b）"),
+    ("说话人|台词", "逐行编辑的格式说明必须给出"),
+]
+
+# 05 提示词审核页必须渲染出来的东西。
+# V2.0.12 补：原先夹具里**没有** `状态/prompt_review.json`，于是 prompt builder
+# 每次都走「数据不足」被跳过 —— 也就是说**05 页的渲染完全没有门禁覆盖**，
+# 改坏了没人知道（与 V2.0.6「04 页产不出却 349 条不变式全绿」是同一个洞）。
+# 判据：**冒烟要覆盖「会被改到的产物」**，不是只覆盖最容易造夹具的那个。
+REQUIRED_IN_PROMPT_PAGE = [
+    ("分辨率复核", "跑视频前必须让用户复核分辨率档位"),
+    ("单镜（一镜到底）", "镜数必须渲染（V2.0.12：决定 summary 写「一镜到底」还是「切换视角」）"),
+    ("多镜（段内有剪辑）", "多镜标记必须渲染，用户才能和 camera_lock_zh 对照审"),
+    ("子 Agent", "子 Agent 语义审的结论必须展示（关 5 第一道）"),
+    ("&lt;Picture", "参考图槽位必须可见（改错编号就是「承接到了角色图」）"),
+    ("推算输出像素", "必须展示工作流的推算输出尺寸（V2.0.14：确认的是「词」还是「尺寸」）"),
+]
+
+
+# 7 个审核页的 builder 入口（函数名以 audit_html_builder.main 的 builders 表为准；
+# 注意是 build_asset_review 单数 —— 踩过一次，别再猜）
+BUILDERS = [
+    ("script", "build_script_review"),
+    ("style", "build_style_review"),
+    ("assets", "build_asset_review"),
+    ("storyboard", "build_storyboard_review"),
+    ("prompt", "build_prompt_review"),
+    ("video", "build_video_review"),
+    ("final", "build_final_review"),
+]
+
+
+def _load_builder():
+    """加载 references/audit_html_builder.py（被冒烟的对象）"""
+    p = SKILL_DIR / "references" / "audit_html_builder.py"
+    spec = importlib.util.spec_from_file_location("audit_html_builder", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def check_syntax():
+    """第 1 层：全部 .py 过一遍语法检查。
+
+    用内置 compile() 而不是 py_compile —— 后者要写 .pyc 落盘，
+    在 Windows 上重定向到 os.devnull（nul）并不可靠，且会在 skill 目录留 __pycache__。
+    """
+    bad, n = [], 0
+    for sub in ("references", "tools", "examples", "vendor"):
+        d = SKILL_DIR / sub
+        if not d.is_dir():
+            continue
+        for f in sorted(d.rglob("*.py")):
+            if "__pycache__" in f.parts:
+                continue
+            n += 1
+            rel = str(f.relative_to(SKILL_DIR))
+            try:
+                src = f.read_text(encoding="utf-8", errors="replace")
+                compile(src, str(f), "exec")
+            except SyntaxError as e:
+                bad.append((rel, "SyntaxError: %s (第 %s 行)" % (e.msg, e.lineno)))
+            except Exception as e:                          # noqa: BLE001
+                bad.append((rel, "%s: %s" % (type(e).__name__, e)))
+    return n, bad
+
+
+def make_fixture(root):
+    """公开入口：造一个最小项目。
+
+    供合并器 / 校验器的对抗测试**复用同一套夹具** —— 每个测试各造一份夹具，
+    迟早会互相漂移（一个能过机检、另一个过不了），让测试结果变得没法解释。
+    """
+    return _make_fixture(Path(root))
+
+
+def _make_fixture(root):
+    """造一个最小但**字段齐全**的项目，让 builder 真的能跑到渲染层。
+
+    刻意写成两段：① 单角色多句台词 ② 双角色对话 + 群众。
+    这样一段就能覆盖台词编辑器、beats 同步、节拍展开、群众/收势渲染。
+    """
+    (root / "分镜脚本").mkdir(parents=True, exist_ok=True)
+    (root / "状态").mkdir(parents=True, exist_ok=True)
+    for d in ("角色资产/char_01_夏小满", "角色资产/char_02_顾砚辞",
+              "场景资产/scene_01_教室", "道具资产/prop_01_断笔"):
+        (root / d).mkdir(parents=True, exist_ok=True)
+
+    seg_tpl = {
+        "link": "origin", "crowd": False, "crowd_note": "试产段，画面里只有两个人",
+        "costume_notes": {"char_01": "蓝白运动校服"},
+        "camera_lock": "medium shot, static, subject slightly left of center",
+        "camera_lock_zh": "中景固定，人物居中偏左",
+        "action": "she holds the bottle out, he turns his face away",
+        "action_zh": "她把水递过去，他别开脸",
+        "soundscape": "distant chatter in the classroom, pages turning",
+        "soundscape_zh": "教室远处人声，纸页翻动",
+        "mood_zh": "试探 / 逞强",
+        "ending_zh": "两个人都没动，画面停在她举着的手上。",
+        "acting": {f: "冒烟占位" for f in
+                   ("goal", "obstacle", "tactic", "beat_change",
+                    "subtext", "physical_task", "eye_detail")},
+    }
+    segs = []
+    for i, (dlg, crowd) in enumerate([
+        ([{"char_id": "char_01", "text": "好烫！"}], True),
+        ([{"char_id": "char_01", "text": "你发烧了！"},
+          {"char_id": "char_02", "text": "我没事的……"}], False),
+    ], 1):
+        s = dict(seg_tpl)
+        s.update({
+            "seq": i, "shot_id": "shot_%02d" % i, "kw": "冒烟段%d" % i,
+            "dur": 9, "scene_id": "scene_01", "speaker_char_id": dlg[0]["char_id"],
+            "on_screen_char_ids": ["char_01", "char_02"], "prop_ids": ["prop_01"],
+            "crowd": crowd, "dialogue": dlg,
+            "narration": "／".join(d["text"] for d in dlg),
+            "beats": [{"type": "action", "zh": "她伸手探他额头"},
+                      {"type": "line", "char_id": dlg[0]["char_id"], "text": dlg[0]["text"]},
+                      {"type": "action", "zh": "他别开脸"}],
+            # V2.0.12：夹具必须**两种镜数各来一段** —— 单镜段与多镜段在 05 页上
+            # 渲染的是两个不同徽章（「单镜（一镜到底）」/「多镜（段内有剪辑）」）。
+            # 只造单镜段，「多镜」那条渲染路径就永远没被冒烟跑到
+            # （本次加了 05 页自检后，门禁**立刻**报出「找不到『多镜（段内有剪辑）』」= 它真的在拦）。
+            "single_take": (i == 1),
+        })
+        if len(dlg) > 1:
+            s["beats"].insert(2, {"type": "line", "char_id": dlg[1]["char_id"],
+                                  "text": dlg[1]["text"]})
+        segs.append(s)
+
+    (root / "分镜脚本" / "storyboard.json").write_text(json.dumps(
+        {"segment_count": len(segs), "style_prompt": "smoke", "segments": segs},
+        ensure_ascii=False, indent=2), encoding="utf-8")
+    (root / "状态" / "pipeline_state.json").write_text(json.dumps({
+        "project": "冒烟夹具", "current_stage": "storyboard_review",
+        "style_prompt": {"locked": True, "label": "冒烟风格", "ref_films": "—",
+                         "shot_language": "—", "palette": "—", "prompt_en": "smoke style"},
+        "budget_estimate": {"segments": len(segs), "duration_sec": 18,
+                            "rh_coins": 800, "wallclock_minutes": 14},
+        "stages": {k: {"status": "todo"} for k in
+                   ("script", "style", "assets", "storyboard", "prompt", "video", "final")},
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    # V2.0.12：**给 prompt builder 也造一份数据**。
+    # 原先没有它 → 05 页每次都因「数据不足」被跳过 → 05 页渲染零覆盖。
+    # 判据：冒烟要覆盖「会被改到的产物」，不是只覆盖最容易造夹具的那个。
+    reports = []
+    for s in segs:
+        reports.append({
+            "seq": s["seq"], "kw": s["kw"], "dur": s["dur"], "link": s["link"],
+            "single_take": s.get("single_take", True),
+            "scene_id": s.get("scene_id"), "scene_label": "冒烟场景",
+            "prompt_chars": 1200, "prompt_sha1": "smoke%02d" % s["seq"],
+            "dialogue": s.get("dialogue") or [],
+            "speakers": [d["char_id"] for d in (s.get("dialogue") or [])],
+            "dialogue_chars": sum(len(d["text"]) for d in (s.get("dialogue") or [])),
+            "budget_secs": 0, "refs": [], "audios": [],
+            "machine_audit": {"items": [], "pass": True},
+            "subagent_audit": {"verdict": "pass", "note": "冒烟占位",
+                               "auditor": "冒烟", "round": 1},
+            "user_status": "pending",
+        })
+    (root / "状态" / "prompt_review.json").write_text(json.dumps({
+        "status": "pending", "stage": "prompt", "aspect": "16:9 (Widescreen)",
+        "resolution_requested": "冒烟档位", "workflow_resolution": "冒烟工作流参数",
+        "resolution_confirmed": False, "confirmed_resolution": "",
+        "resolution_estimate": "一采 1120×640 → 二采 ×1.5 → 1680×960（1.61 MP）（冒烟推算值）",
+        "machine_pass": True, "segments": {}, "reports": reports,
+    }, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def check_builders():
+    """第 2 层：7 个 builder 真的调一遍。
+
+    返回 (pages, crashes, skipped)。
+    `pages` 是 {stage: 页面文本} —— 只收**必须成功出页**的那几个 stage
+    （storyboard / prompt）。刻意返回**页面文本**而不是路径 ——
+    临时目录一退出就被销毁，拿着路径出去读会 FileNotFoundError（冒烟脚本自己踩过这个坑）。
+    """
+    mod = _load_builder()
+    crashes, skipped, pages = [], [], {}
+    with tempfile.TemporaryDirectory(prefix="dap_smoke_") as td:
+        root = Path(td)
+        _make_fixture(root)
+        for stage, fname in BUILDERS:
+            fn = getattr(mod, fname, None)
+            if fn is None:
+                crashes.append((stage, "audit_html_builder 里找不到 %s（函数改名了？）" % fname))
+                continue
+            try:
+                out, err = fn(str(root))
+            except Exception as e:                          # noqa: BLE001
+                # 这里才是真正的收获：V2.0.6 的 NameError 就落在这儿
+                crashes.append((stage, "%s: %s" % (type(e).__name__, e)))
+                continue
+            if err:
+                skipped.append((stage, err))
+                continue
+            if stage in ("storyboard", "prompt"):
+                p = Path(out)
+                if not p.exists() or p.stat().st_size == 0:
+                    crashes.append((stage, "返回了 %s，但文件不存在或为空" % out))
+                else:
+                    pages[stage] = p.read_text(encoding="utf-8")
+    return pages, crashes, skipped
+
+
+def check_page(text):
+    """第 3 层：页面里必须真的渲染出那些区块"""
+    return [(kw, why) for kw, why in REQUIRED_IN_PAGE if kw not in text]
+
+
+def check_prompt_page(text):
+    """第 3 层（05 页）：提示词审核页必须渲染出来 —— V2.0.12 补"""
+    return [(kw, why) for kw, why in REQUIRED_IN_PROMPT_PAGE if kw not in text]
+
+
+def run_checks():
+    """跑三层，返回 (failed: bool, lines: [str])。
+
+    **这是唯一的实现** —— `main()` 与 `snapshot.py` 都调它。
+    为什么（V2.0.12 实测）：原先 snapshot 自己又写了一遍「解包 check_builders()
+    + 调 check_page + 拼报错」，于是 `check_builders()` 的返回值一改（加上 05 页），
+    那份副本就**静默错位**：把返回的 dict 当页面文本喂给 check_page → 8 项全报缺失。
+    **门禁的副本错位了，报出来的还是一条「看起来很严重」的假消息** ——
+    比没有门禁更坏（会让人去修一个不存在的故障）。
+    判据（同 D2-d / D2-f）：同一条逻辑只能有一处实现。
+    """
+    lines, failed = [], False
+
+    n, bad = check_syntax()
+    lines.append("① 语法：%d 个 .py，%d 个失败" % (n, len(bad)))
+    for f, msg in bad:
+        lines.append("   ❌ %s：%s" % (f, msg))
+        failed = True
+
+    pages, crashes, skipped = check_builders()
+    lines.append("② 端到端：%d 个 builder｜抛异常 %d 个｜数据不足 %d 个（允许）"
+                 % (len(BUILDERS), len(crashes), len(skipped)))
+    for st, msg in skipped:
+        lines.append("   ○ %s：数据不足（%s）—— 允许，不计失败" % (st, msg))
+    for st, msg in crashes:
+        lines.append("   ❌ %s 抛异常：%s" % (st, msg))
+        failed = True
+
+    for stage, required, chk, label in (
+            ("storyboard", REQUIRED_IN_PAGE, check_page, "04 分镜审核页"),
+            ("prompt", REQUIRED_IN_PROMPT_PAGE, check_prompt_page, "05 提示词审核页")):
+        text = pages.get(stage)
+        if text is None:
+            lines.append("③ %s：❌ 没能生成出来（builder 未成功返回）" % label)
+            failed = True
+            continue
+        miss = chk(text)
+        if miss:
+            lines.append("③ %s：%d 项中缺 %d 项" % (label, len(required), len(miss)))
+            for kw, why in miss:
+                lines.append("   ❌ 页面里找不到 %r —— %s" % (kw, why))
+            failed = True
+        else:
+            lines.append("③ %s：%d 项全部命中" % (label, len(required)))
+    return failed, lines
+
+
+def main():
+    print("=" * 68)
+    print("端到端冒烟门禁 · drama-auto-pipeline")
+    print("（静态 grep 证明不了代码能跑 —— 这一道专门抓「跑起来就炸」）")
+    print("=" * 68)
+    print()
+
+    failed, lines = run_checks()
+    for ln in lines:
+        print(ln)
+
+    print("\n" + "=" * 68)
+    if failed:
+        print("❌ 冒烟不通过 —— **拒绝发版**。")
+        print("   修好再发。历史教训：V2.0.6 就是在这个位置漏掉的（349 条不变式全绿，")
+        print("   但审核页因 f-string 里的裸花括号 NameError，一个文件都产不出）。")
+        sys.exit(1)
+    print("✅ 冒烟通过（3 层全绿）。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_apply_seg_edit.py —— 合并器的对抗测试（真实写入，读回验证）
+
+判据：**只跑一次「现在正常」的合并等于没测** —— 它证明不了「以后出问题会被拦住」。
+
+背景（V2.0.8 · 铁律 D2-d）：
+  04 页曾把**自己算出来的** beats / narration 一起塞进导出 payload。
+  于是同一套派生逻辑有了两份实现（页面 JS + 合并器 Python），
+  而合并器的顺序是「先写 dialogue、再逐字段合并」——
+  一旦两边算得不一样，**页面算出来的派生值会覆盖合并器的结果**，源头反而说了不算。
+
+本测试把三种 payload 都**真的合并一遍**，然后读回 storyboard.json 验证：
+
+  A. 只有 beats（派生值）没有 dialogue → 必须**拒绝**（非 0）且**一个字节都不许写**
+  B. dialogue + 页面自算的 beats + narration（beats 里故意塞了一条假动作）
+     → 必须成功；**假动作绝不许进文件**（这是核心断言）；三处同步；备份照旧
+  C. dialogue 与原方案完全一致（无改动）→ 必须走「无差异」且不写盘
+
+夹具复用 tools/smoke_pages.py 的 make_fixture —— 不各造一份，避免两份夹具漂移后
+「一个能过机检、另一个过不了」，让测试结果没法解释。
+
+用法：python examples/test_apply_seg_edit.py
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import json
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+APPLY = SKILL_DIR / "references" / "apply_seg_edit.py"
+
+sys.path.insert(0, str(SKILL_DIR / "tools"))
+import smoke_pages  # noqa: E402
+
+FAKE_ACTION = "【若这段假动作进了文件，就说明派生字段没被拦住】"
+SEG_SEQ = 2          # 夹具里唯一有两句台词的一段（改第 2 句才有意义）
+NARR_SEP = "／"
+
+
+def _run(root, payload):
+    r = subprocess.run([sys.executable, str(APPLY), "--project-root", str(root),
+                        "--edit", str(payload)],
+                       capture_output=True, encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def _sb_path(root):
+    return root / "分镜脚本" / "storyboard.json"
+
+
+def _seg(root, seq):
+    data = json.loads(_sb_path(root).read_text(encoding="utf-8"))
+    return next(s for s in data["segments"] if s.get("seq") == seq)
+
+
+def _write(p, obj):
+    p.write_text(json.dumps(obj, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main():
+    fails = []
+
+    def check(name, ok, detail=""):
+        print("   %s %s%s" % ("✅" if ok else "❌", name, ("：" + detail) if detail else ""))
+        if not ok:
+            fails.append("%s%s" % (name, ("：" + detail) if detail else ""))
+
+    print("=" * 68)
+    print("合并器 · 对抗测试（真实写入 + 读回验证）")
+    print("=" * 68)
+
+    with tempfile.TemporaryDirectory(prefix="dap_apply_") as td:
+        base = Path(td) / "proj"
+        smoke_pages.make_fixture(base)
+        pdir = Path(td) / "payloads"
+        pdir.mkdir()
+
+        orig_text = _sb_path(base).read_text(encoding="utf-8")
+        seg0 = _seg(base, SEG_SEQ)
+        old_dlg = seg0["dialogue"]
+        n_old_beats = len(seg0["beats"])
+
+        # ---------- A. 只有 beats、没有源头 → 必须拒绝且不写盘 ----------
+        print("\n[A] 只交 beats（派生值）而没有 dialogue —— 期望：拒绝 + 零写入")
+        pa = pdir / "a_only_beats.json"
+        _write(pa, {"seq": SEG_SEQ, "beats": [{"type": "action", "zh": FAKE_ACTION}]})
+        code, out = _run(base, pa)
+        check("退出码非 0", code != 0, "实际 %d" % code)
+        check("说明了原因（只有 beats）", "只有 beats" in out)
+        check("一个字节都没写", _sb_path(base).read_text(encoding="utf-8") == orig_text)
+
+        # ---------- B. dialogue + 页面自算的派生值 → 只认源头 ----------
+        print("\n[B] dialogue + 假 beats + narration —— 期望：成功，但假动作绝不进文件")
+        new_text = "测试新词……"
+        new_dlg = [{"char_id": d["char_id"], "text": d["text"]} for d in old_dlg]
+        new_dlg[1]["text"] = new_text
+        pb = pdir / "b_dlg_plus_derived.json"
+        _write(pb, {
+            "seq": SEG_SEQ,
+            "dialogue": new_dlg,
+            # 页面自算的派生值：故意塞一条假动作进去，若被采纳一眼可辨
+            "beats": [{"type": "action", "zh": FAKE_ACTION}],
+            "narration": NARR_SEP.join(d["text"] for d in new_dlg),
+            "_changed": ["dialogue", "beats", "narration"],
+        })
+        code, out = _run(base, pb)
+        check("退出码 0（合并成功）", code == 0, "实际 %d\n%s" % (code, out.strip()[-400:]))
+        check("提示已忽略派生字段", "已忽略导出里的派生字段" in out)
+
+        seg1 = _seg(base, SEG_SEQ)
+        blob = json.dumps(seg1, ensure_ascii=False)
+        check("★ 假动作没有进文件", FAKE_ACTION not in blob)
+        check("beats 条数未被替换（%d → %d）" % (n_old_beats, len(seg1["beats"])),
+              len(seg1["beats"]) == n_old_beats)
+        check("dialogue 已更新", seg1["dialogue"] == new_dlg)
+        line_texts = [b.get("text") for b in seg1["beats"] if b.get("type") == "line"]
+        check("beats 的 line 已同向同步",
+              line_texts == [d["text"] for d in new_dlg], str(line_texts))
+        check("narration 已按源头重算",
+              seg1["narration"] == NARR_SEP.join(d["text"] for d in new_dlg),
+              seg1["narration"])
+        check("备份照旧生成",
+              len(list((base / "分镜脚本").glob("storyboard_*_before_seg%d.json" % SEG_SEQ))) >= 1)
+
+        # ---------- C. 无改动 → 不写盘 ----------
+        print("\n[C] 再交一份与当前完全一致的 dialogue —— 期望：提示无差异 + 不写盘")
+        pc = pdir / "c_no_change.json"
+        _write(pc, {"seq": SEG_SEQ, "dialogue": new_dlg})
+        before = _sb_path(base).read_text(encoding="utf-8")
+        code, out = _run(base, pc)
+        check("退出码 0", code == 0, "实际 %d" % code)
+        check("提示没有差异", "没有差异" in out or "无需合并" in out)
+        check("未写盘", _sb_path(base).read_text(encoding="utf-8") == before)
+
+        # ---------- D. 段长 / 容量必须在**写盘前**拦（V2.0.11 · 铁律 D2-f）----------
+        # 判据：门禁必须排在「改状态」之前。写入后才发现问题 = 白折腾一遍 + 留个可疑中间态。
+        print("\n[D] dur 非法 / 改完仍超容 —— 期望：写盘前就拒绝 + 零写入")
+        before = _sb_path(base).read_text(encoding="utf-8")
+
+        pd1 = pdir / "d1_dur_range.json"
+        _write(pd1, {"seq": SEG_SEQ, "dur": 30})
+        code, out = _run(base, pd1)
+        check("D1 超出硬区间 [4,15] → 拒绝", code != 0 and "硬区间" in out, "退出码 %d" % code)
+        check("D1 零写入", _sb_path(base).read_text(encoding="utf-8") == before)
+
+        pd2 = pdir / "d2_dur_not_int.json"
+        _write(pd2, {"seq": SEG_SEQ, "dur": 9.5})
+        code, out = _run(base, pd2)
+        check("D2 dur 非整数秒 → 拒绝", code != 0 and "整数秒" in out, "退出码 %d" % code)
+        check("D2 零写入", _sb_path(base).read_text(encoding="utf-8") == before)
+
+        # D3 反向证伪：改完**真的超容**时必须报「仍超容」而不是放行
+        #     （夹具段 dur=9 → 上限 36 字；塞 60 字，dur 保持 9 必然超）
+        long_dlg = [{"char_id": d["char_id"], "text": "字" * 60} for d in new_dlg]
+        pd3 = pdir / "d3_still_over.json"
+        _write(pd3, {"seq": SEG_SEQ, "dialogue": long_dlg, "dur": 9})
+        code, out = _run(base, pd3)
+        check("D3 改完仍超容 → 拒绝", code != 0 and "仍然超容" in out, "退出码 %d" % code)
+        check("D3 零写入", _sb_path(base).read_text(encoding="utf-8") == before)
+
+        # D4 但把 dur 拉到 15s 后、字数压到限额内，必须放行 —— 证明 D3 不是恒报错
+        #    ⚠ 注意算的是**总字数**：夹具有两句，2×25 = 50 字 ≤ 57
+        #    （写测试时第一版写成"每句 50 字"= 100 字，D4 挂了 —— 是**测试错了**，不是工具错）
+        pd4 = pdir / "d4_ok_15s.json"
+        _write(pd4, {"seq": SEG_SEQ, "dialogue": [{"char_id": d["char_id"], "text": "字" * 25}
+                                                  for d in new_dlg], "dur": 15})
+        code, out = _run(base, pd4)
+        check("D4 同样字数压进限额、放进 15s 段（上限 57）→ 放行", code == 0,
+              "退出码 %d\n%s" % (code, out.strip()[-300:]))
+
+    print("\n" + "=" * 68)
+    if fails:
+        print("❌ 对抗测试不通过：")
+        for f in fails:
+            print("   · %s" % f)
+        sys.exit(1)
+    print("✅ 对抗测试通过：合并器只认源头，派生值进不来；拒绝时零写入。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

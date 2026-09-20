@@ -1,0 +1,199 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""approve_storyboard.py —— 「冻结分镜方案」的执行体（铁律 D1-c）
+
+为什么必须有它（2026-09-18《橘子汽水味的夏天》第二集 · 阶段六实测缺失）：
+  `batch_run_drama.py --dump-prompts` 会硬校验 `storyboard.json` 顶层
+  `status == "approved"`，但**全 skill 没有任何工具能设置这个字段** ——
+  只能手工改 JSON。而「手工改 JSON」正是本 skill 一路在消除的坏做法
+  （D2-a：导出/合并两端都必须有执行体）。
+  缺口的后果不是崩，而是**门禁形同虚设**：要么有人手工写个 `approved` 绕过去，
+  要么整条流程卡死在这里。
+
+  「冻结」不是一个空动作，它是一次**双条件事务**：
+    ① Agent 那一半 —— `check_storyboard.py` 机检必须 **0 硬错误**；
+    ② 人工那一半 —— `状态/pipeline_state.json` 里
+       `stages.storyboard.audit_human == "approved"`。
+  两条都满足才允许写 `approved`。否则「双关审」就退化成「想冻结就冻结」。
+
+用法：
+  python references/approve_storyboard.py --project-root <项目根> \
+      --by "用户" --note "关 4 通过"
+  python references/approve_storyboard.py --project-root <项目根> --dry-run
+  python references/approve_storyboard.py --project-root <项目根> \
+      --revoke --reason "关 4 机检新增逐段容量检查，段 8/11/12/18 超容，方案需重审"
+
+退出码：0 = 已冻结 / 已撤销；2 = 条件不满足（**未写入任何内容**）；3 = 文件/结构问题
+
+【V2.0.10 · 为什么 --revoke 也必须在这里】
+  「通过门禁要有执行体」的另一半是「**撤销**通过也要有执行体」。
+  否则一旦上游规则变严（本次：关 4 新增逐段容量硬检查），
+  已经躺在 `status="approved"` 上的旧方案就成了一份**没人能合法撤回**的通行证 ——
+  而唯一的撤回手段又是「手工改 JSON」，正是本脚本存在的理由。
+  判据：凡是会**阻断**下游的状态位，都必须有「设置」和「撤销」两个执行体。
+"""
+import argparse
+import importlib.util
+import json
+import shutil
+import sys
+from datetime import datetime
+from pathlib import Path
+
+
+def _load_checker(skill_root):
+    p = Path(skill_root) / "references" / "check_storyboard.py"
+    if not p.exists():
+        return None
+    spec = importlib.util.spec_from_file_location("check_storyboard", p)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def main():
+    ap = argparse.ArgumentParser(description="冻结分镜方案（机检 + 人工两半都过才允许）")
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--by", default="用户", help="谁确认的（写进留痕）")
+    ap.add_argument("--note", default="", help="确认说明（写进留痕）")
+    ap.add_argument("--skill-root", default=str(Path(__file__).resolve().parents[1]))
+    ap.add_argument("--force", action="store_true",
+                    help="机检/人工审未过也强行冻结（**不推荐**：等于把门禁关掉）")
+    ap.add_argument("--dry-run", action="store_true", help="只校验不写入")
+    ap.add_argument("--revoke", action="store_true",
+                    help="撤销冻结（status → draft，并记录撤销原因）—— "
+                         "上游规则变严 / 方案被改后，旧批准必须能合法撤回")
+    ap.add_argument("--reason", default="", help="撤销原因（--revoke 时必填）")
+    args = ap.parse_args()
+
+    root = Path(args.project_root)
+    sb_file = root / "分镜脚本" / "storyboard.json"
+    ps_file = root / "状态" / "pipeline_state.json"
+    if not sb_file.exists():
+        sys.exit("❌ 找不到 %s" % sb_file)
+
+    print("=" * 68)
+    print("冻结分镜方案 · %s" % root.name)
+    print("=" * 68)
+
+    # ---- --revoke：撤销分支（放在两条条件校验**之前** —— 撤销不需要任何条件）----
+    if args.revoke:
+        if not args.reason.strip():
+            sys.exit("❌ --revoke 必须给 --reason（撤销理由要留痕，不能匿名撤回）")
+        sb = json.loads(sb_file.read_text(encoding="utf-8"))
+        old = sb.get("status")
+        if old not in ("approved", "partial"):
+            print("\n○ 当前 status=%r，本来就没冻结，无需撤销（未写入）" % old)
+            sys.exit(0)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        rev = [{"at": datetime.now().strftime("%Y-%m-%dT%H:%M:%S"),
+                "by": args.by, "from": old, "reason": args.reason.strip()}]
+        rev += (sb.get("approval_revoked") or [])
+        sb["approval_revoked"] = rev
+        sb["status"] = "draft"
+        # 旧的批准留痕**保留**（approved_at / approved_by 不删）——
+        # 撤销的是「通行资格」，不是「曾经审过」这段历史。
+        old_dec = sb.pop("approved_at", None)
+        old_by = sb.pop("approved_by", None)
+        if old_dec:
+            rev[0]["was_approved_at"] = old_dec
+        if old_by:
+            rev[0]["was_approved_by"] = old_by
+        if args.dry_run:
+            print("\n（--dry-run，未写入）status %r → 'draft'" % old)
+            sys.exit(0)
+        bak = sb_file.with_name("storyboard_%s_before_revoke.json" % stamp)
+        shutil.copy2(sb_file, bak)
+        sb_file.write_text(json.dumps(sb, ensure_ascii=False, indent=2) + "\n",
+                           encoding="utf-8")
+        print("\n💾 已备份 → %s" % bak.name)
+        print("✅ storyboard.status：%r → 'draft'" % old)
+        print("   撤销原因：%s" % args.reason.strip())
+        print("   旧的批准留痕已移入 approval_revoked[0]（保留历史，不删）")
+        print("\n下一步：改完方案 → 重跑 check_storyboard → 重建 04 页交用户复审 → "
+              "再 --approve")
+        sys.exit(0)
+
+    errors, warnings = [], []
+
+    # ---- 条件 ①：Agent 那一半（机检）----
+    checker = _load_checker(args.skill_root)
+    if checker is None:
+        errors.append("找不到 references/check_storyboard.py —— 无法跑机检，"
+                      "「双关审」的 Agent 那一半不成立")
+    else:
+        stats, hard, soft, err = checker.check(str(root))
+        if err:
+            errors.append("机检读不到：%s" % err)
+        else:
+            print("\n① Agent 那一半（机检）：")
+            if isinstance(stats, dict):
+                print("   %s 段 · %ss · 台词 %s 字 · 语速占比 %s"
+                      % (stats.get("segments"), stats.get("total_duration_sec"),
+                         stats.get("dialogue_chars"), stats.get("speech_ratio")))
+            if hard:
+                errors.append("机检有 %d 条硬错误，不能冻结" % len(hard))
+                for m in hard:
+                    print("   ❌ %s" % m)
+            else:
+                print("   ✅ 0 硬错误%s" % ("（%d 条软提示）" % len(soft) if soft else ""))
+                warnings.extend(soft)
+
+    # ---- 条件 ②：人工那一半 ----
+    print("\n② 人工那一半（审核状态）：")
+    if not ps_file.exists():
+        errors.append("找不到 %s —— 无法确认人工是否审过" % ps_file)
+    else:
+        try:
+            ps = json.loads(ps_file.read_text(encoding="utf-8"))
+        except Exception as e:                              # noqa: BLE001
+            errors.append("pipeline_state.json 解析失败：%s" % e)
+            ps = None
+        if isinstance(ps, dict):
+            st = ((ps.get("stages") or {}).get("storyboard") or {})
+            human = st.get("audit_human")
+            if human == "approved":
+                print("   ✅ audit_human = approved（%s）" % (st.get("audit_human_at") or "无时间戳"))
+            else:
+                errors.append("stages.storyboard.audit_human = %r（不是 approved）——"
+                              "人工还没审过，不能冻结" % human)
+
+    if errors and not args.force:
+        print("\n❌ 条件不满足，**未写入任何内容**：")
+        for e in errors:
+            print("   · %s" % e)
+        print("\n→ 先补齐上面两条：机检不过就改方案；没人工审就先把 04 页交给用户。")
+        print("   确认要无视时加 --force（不推荐 —— 那等于把这道门禁关掉）。")
+        sys.exit(2)
+
+    print("\n✅ 两个条件都满足" if not errors else "\n⚠️ --force：已无视上述问题")
+    if args.dry_run:
+        print("\n（--dry-run，未写入）")
+        sys.exit(0)
+
+    # ---- 写盘（先备份）----
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak = sb_file.with_name("storyboard_%s_before_approve.json" % stamp)
+    shutil.copy2(sb_file, bak)
+
+    sb = json.loads(sb_file.read_text(encoding="utf-8"))
+    old = sb.get("status")
+    sb["status"] = "approved"
+    sb["approved_at"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+    sb["approved_by"] = args.by
+    if args.note:
+        sb["approved_note"] = args.note
+    sb_file.write_text(json.dumps(sb, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+    print("\n💾 已备份 → %s" % bak.name)
+    print("✅ storyboard.status：%r → 'approved'" % old)
+    print("✅ 已写入 %s" % sb_file)
+    print("\n下一步（阶段六 → 关 5，纯本地零算力）："
+          "\n   python references/batch_run_drama.py --project-root \"%s\" \\"
+          "\n     --storyboard \"%s\" --multi-ref-workflow references/workflow_b2_multi_ref.json \\"
+          "\n     --aspect \"16:9 (Widescreen)\" --dump-prompts" % (root, sb_file))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

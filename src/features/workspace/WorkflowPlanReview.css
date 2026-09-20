@@ -1,0 +1,50 @@
+.workflow-plan-review {
+  margin: var(--space-md) 0;
+  padding: var(--space-md);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  background: var(--color-paper-2);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+.workflow-plan-review header,
+.workflow-plan-review li {
+  display: grid;
+  gap: var(--space-xs);
+}
+.workflow-plan-review header span,
+.workflow-plan-review li span,
+.workflow-plan-review p {
+  color: var(--color-muted);
+}
+.workflow-plan-review ol {
+  display: grid;
+  gap: var(--space-sm);
+  max-height: 22rem;
+  overflow: auto;
+  padding-left: var(--space-lg);
+}
+.workflow-plan-review li {
+  display: list-item;
+}
+.workflow-plan-review li span {
+  display: block;
+}
+.workflow-plan-review button {
+  min-height: var(--size-control);
+}
+.workflow-plan-review__media {
+  display: grid;
+  gap: var(--space-sm);
+}
+.workflow-plan-review__media img,
+.workflow-plan-review__media video {
+  width: 100%;
+  max-height: 24rem;
+  object-fit: contain;
+  background: var(--color-paper);
+}
+.workflow-plan-review button:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}

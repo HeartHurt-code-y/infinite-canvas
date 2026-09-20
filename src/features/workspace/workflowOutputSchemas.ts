@@ -40,6 +40,10 @@ export const workflowShotSchema = v.looseObject({
   videoPrompt: v.pipe(v.string(), v.nonEmpty("shot.videoPrompt 不能为空")),
   acceptance: v.array(v.pipe(v.string(), v.nonEmpty("shot.acceptance 不能为空"))),
   referenceAssetIds: v.array(v.string()),
+  dependsOn: v.optional(v.array(v.pipe(v.string(), v.nonEmpty("shot.dependsOn 不能为空")))),
+  continuationFromShotId: v.optional(
+    v.pipe(v.string(), v.nonEmpty("shot.continuationFromShotId 不能为空")),
+  ),
 });
 
 /** 执行状态：ready = 直接产出，needs_confirmation = 需要用户确认。 */

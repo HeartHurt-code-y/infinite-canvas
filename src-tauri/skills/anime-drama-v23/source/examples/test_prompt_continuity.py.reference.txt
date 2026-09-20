@@ -1,0 +1,185 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_prompt_continuity.py —— 段间衔接与文案自洽的对抗测试（V2.0.12）
+
+为什么需要它（2026-09-18《橘子汽水味的夏天》第二集 · 关 5 第一道审出）：
+  关 5 的独立语义审报出 **13 段** 提示词在撒谎：
+  summary 写「直接承接 `<Picture 1>` 中的姿势」，而 `<Picture 1>` 永远是
+  **排在第一位的人物参考图**；`link=dualref` 的段**根本没有尾帧参考图槽位** ——
+  文档（SKILL.md B5）说 dualref 是「尾帧 + 角色图双锚定」，代码只给了一半。
+
+  一批同源文案缺陷（全都是「文案断言了事实不支持的东西」）：
+    · 硬编码 `<Picture 1>`：即使有尾帧槽位，它的编号也不一定是 1
+    · 群演服装锚点取 `people_zh[-1]` → 教室段取到陆星野，而他设定是「**不穿**校服外套」
+      （注意「校服」二字就出现在**否定句**里 —— 直接 substring 必错）
+    · 单人段写「同框」（段 20 只有夏小满一人）
+    · 多人段写「同框」而机位是「对切，两人始终不同框」（段 19 自己跟自己打架）
+    · Negative 全局写 `no dark blazers on students`，而主角的服装就是
+      「深藏青色**西装**校服外套」→ 全局否定没有主语，只会误伤主角
+    · 无条件写「一镜到底」，而 9 段的机位要求正反打/对切/切到特写
+
+  ⇒ 判据（通用）：**文案不许断言事实不支持的东西**；
+     「作者才知道的内容事实」（几个镜头、锚点是谁）必须**显式声明**，不能靠关键词反推 ——
+     本次关键词判据实测**漏了 4 段**（段 9 用「→」箭头、段 12「切她的近景」…）。
+
+七项断言，每项都有**反向证伪**（证明判据有分辨力，而不是恒真）：
+  A  dualref 必须真的有尾帧槽位（反向：origin 必须没有）
+  B  summary 的「承接 <Picture N>」N 必须等于尾帧槽的真实行号（不能硬编码 1）
+  C  尾帧槽必须排在道具之前（额度上限 5，尾帧优先于道具）
+  D  群演服装锚点必须挑「真穿校服」的人；挑不到就用中性措辞，不许硬套某人
+  E  单人段不写「同框」；多人段也不写（机位可能就是对切）
+  F  Negative 不得出现与在场角色服装冲突的全局否定
+  G  「一镜到底」必须跟随分镜的 `single_take` 显式声明
+
+退出码：0 = 全部符合预期；1 = 有不符合
+"""
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL_DIR = HERE.parent
+REF_DIR = SKILL_DIR / "references"
+TOOLS_DIR = SKILL_DIR / "tools"
+
+FAIL, NOTE = [], []
+
+
+def ok(tag, cond, detail=""):
+    (NOTE if cond else FAIL).append("%s %s %s" % (tag, "✅" if cond else "❌", detail))
+    return bool(cond)
+
+
+def _load(path, name):
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _fixture(tmp):
+    smoke = _load(TOOLS_DIR / "smoke_pages.py", "_dap_smoke_cont")
+    root = Path(tmp)
+    smoke.make_fixture(root)
+    sb = json.loads((root / "分镜脚本" / "storyboard.json").read_text(encoding="utf-8"))
+    return root, sb
+
+
+def _write_sb(root, sb):
+    (root / "分镜脚本" / "storyboard.json").write_text(
+        json.dumps(sb, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def main():
+    print("=" * 68)
+    print("对抗测试 · V2.0.12 段间衔接与文案自洽")
+    print("（文案不许断言事实不支持的东西 —— 这里主动伪造每一类事故）")
+    print("=" * 68)
+
+    batch = _load(REF_DIR / "batch_run_drama.py", "_dap_batch_cont")
+
+    with tempfile.TemporaryDirectory(prefix="dap_cont_") as tmp:
+        root, sb = _fixture(tmp)
+        seg = sb["segments"][1]                    # 夹具第 2 段（双角色对话）
+
+        # ---------- A. dualref 必须真的有尾帧槽 ----------
+        seg["link"] = "dualref"
+        _write_sb(root, sb)
+        slots = batch.plan_ref_slots(seg)
+        kinds = [s["kind"] for s in slots]
+        ok("A1", "tail" in kinds,
+           "dualref 段真的有尾帧槽位：%s（旧实现只认 tailframe）" % kinds)
+
+        seg["link"] = "origin"
+        kinds_o = [s["kind"] for s in batch.plan_ref_slots(seg)]
+        ok("A2", "tail" not in kinds_o,
+           "反向证伪：origin 段不注入尾帧槽：%s" % kinds_o)
+
+        # ---------- B/C. 承接句的编号 = 真实尾帧行号；尾帧排在道具之前 ----------
+        seg["link"] = "dualref"
+        seg["prop_ids"] = ["prop_01"]
+        _write_sb(root, sb)
+        slots = batch.plan_ref_slots(seg)
+        tail_i = next((i for i, s in enumerate(slots, start=1)
+                       if s["kind"] == "tail"), None)
+        prop_i = next((i for i, s in enumerate(slots, start=1)
+                       if s["kind"] == "prop"), None)
+        ok("C1", tail_i is not None and (prop_i is None or tail_i < prop_i),
+           "尾帧排在道具之前（tail=Picture %s / prop=%s，额度上限 5）" % (tail_i, prop_i))
+        ok("C2", len(slots) <= 5, "参考图张数 ≤5（实得 %d）" % len(slots))
+
+        prompt = batch.gen_drama_prompt(seg, True, project_root=str(root))
+        # V2.2.9：承接句文案从「承接 <Picture N> 中的姿势」升级为**首帧锁定**
+        #   （用户实测「没接续上一段尾帧」，只约束姿势不够）。
+        #   ⇒ 断言跟着升级，但**核心不变量不变**：引用的必须是**真实尾帧行号**，不是硬编码 1。
+        #   判据：测试断言要盯「语义不变量」，不要盯「当时那句文案」——否则文案一改就误报。
+        ok("B1", f"与 <Picture {tail_i}> 完全接续" in prompt,
+           "承接句引用了**真实**尾帧行号 `<Picture %s>`（不是硬编码 1）" % tail_i)
+        ok("B2", ("<Picture 1> 中的姿势" not in prompt
+                  and "与 <Picture 1> 完全接续" not in prompt),
+           "反向证伪：硬编码到 `<Picture 1>` 的承接句已消失")
+        # B3：尾帧必须被写成「画面起点 + 首帧一致」，且**不得**弱化（原「不是独立主体」）
+        ok("B3", ("本段画面的起点" in prompt and "不得改变" in prompt),
+           "尾帧被写成**首帧锁定**（画面起点 + 位置状态不得改变）")
+        ok("B4", "不是独立主体" not in prompt,
+           "反向证伪：弱化尾帧的措辞「不是独立主体」已消失")
+
+        # ---------- D. 群演服装锚点 ----------
+        seg["crowd"] = True
+        _write_sb(root, sb)                        # 夹具角色没有 profile → 挑不到锚点
+        p2 = batch.gen_drama_prompt(seg, True, project_root=str(root))
+        ok("D1", "统一穿着运动校服" in p2 and "同款的校服" not in p2,
+           "挑不到「真穿校服」的角色时用中性措辞，不硬套某人当锚点")
+
+        # ---------- E. 「同框」 ----------
+        ok("E1", "同框" not in p2.split("retention_analysis")[0],
+           "summary 里不再出现「同框」（单人段 / 对切机位都不会自相矛盾）")
+
+        # ---------- F. Negative 不得与在场角色服装冲突 ----------
+        ok("F1", "dark blazers" not in p2,
+           "Negative 不再有全局否定 `no dark blazers on students`（主角就是西装校服）")
+        ok("F2", "no sharp background faces" in p2,
+           "反向证伪：crowd 段该保留的 `no sharp background faces` 还在")
+
+        # ---------- G. 一镜到底跟随显式声明 ----------
+        seg["single_take"] = True
+        _write_sb(root, sb)
+        ok("G1", "一镜到底" in batch.gen_drama_prompt(seg, True, project_root=str(root)),
+           "single_take=true → summary 写「一镜到底」")
+        seg["single_take"] = False
+        _write_sb(root, sb)
+        p3 = batch.gen_drama_prompt(seg, True, project_root=str(root))
+        ok("G2", "一镜到底" not in p3 and "不是一个连续镜头" in p3,
+           "反向证伪：single_take=false → 不再宣称一镜到底")
+
+        # ---------- H. 尾帧缓存必须跟着源视频失效 ----------
+        tf = root / "视频" / "tailframes"
+        tf.mkdir(parents=True, exist_ok=True)
+        (tf / "seg_1_tail.png").write_bytes(b"stale")
+        (tf / "seg_2_tail.png").write_bytes(b"stale")
+        killed = batch.invalidate_tailframe(str(tf), 1)
+        ok("H1", killed == 1 and not (tf / "seg_1_tail.png").exists()
+           and (tf / "seg_2_tail.png").exists(),
+           "重抽段 1 → 只作废 seg_1 的尾帧缓存，别人的不动")
+        ok("H2", batch.invalidate_tailframe(None, 1) == 0,
+           "反向证伪：tf_dir 为空时不炸、也不误删")
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for x in FAIL:
+            print("   " + x)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

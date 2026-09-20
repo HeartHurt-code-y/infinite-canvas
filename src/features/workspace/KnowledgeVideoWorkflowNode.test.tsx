@@ -109,8 +109,8 @@ describe("KnowledgeVideoWorkflowNode", () => {
     expect(screen.getByLabelText("动画制作要求")).toHaveValue(animationNode.config.brief);
     expect(screen.queryByLabelText("图片生成模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
     expect(props.onExecute).toHaveBeenCalledWith(animationNode.key);
   });
 
@@ -165,7 +165,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     expect(screen.getByLabelText("策划与审核模型")).toBeDisabled();
     expect(screen.queryByText("AI影视工作流")).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "采用推荐并继续" }));
-    expect(props.onContinue).toHaveBeenCalledWith(animationNode.key);
+    expect(props.onContinue).toHaveBeenCalledWith(animationNode.key, "保留现有数值");
     rerender(
       <KnowledgeVideoWorkflowNode
         {...props}
@@ -203,7 +203,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     fireEvent.change(screen.getByLabelText("影视交付方式"), { target: { value: "documents" } });
     expect(screen.getByLabelText("影视已有资料")).toHaveValue("父亲合上怀表，女儿进门");
     expect(screen.getByLabelText("影视起始阶段")).toHaveValue("acting");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
   });
 
   it("shows versioned film documents even when no movie was requested", () => {
@@ -269,7 +269,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     const modelDetails = screen.getByText("模型配置").closest("details");
     expect(modelDetails).not.toHaveAttribute("open");
 
-    const start = screen.getByRole("button", { name: "开始制作" });
+    const start = screen.getByRole("button", { name: "查看执行计划" });
     expect(start).toBeDisabled();
     fireEvent.change(screen.getByRole("textbox", { name: "知识视频制作要求" }), {
       target: { value: "面向新员工制作一条 60 秒的 RAG 入门视频" },
@@ -363,7 +363,10 @@ describe("KnowledgeVideoWorkflowNode", () => {
     const decision = screen.getByRole("region", { name: "需要确认" });
     expect(within(decision).getByText("更适合面向管理者还是一线员工？")).toBeInTheDocument();
     fireEvent.click(within(decision).getByRole("button", { name: "采用推荐并继续" }));
-    expect(onContinue).toHaveBeenCalledWith("knowledge-video-workflow-1");
+    expect(onContinue).toHaveBeenCalledWith(
+      "knowledge-video-workflow-1",
+      "建议先面向一线员工，减少术语并增加现场示例。",
+    );
 
     fireEvent.change(within(decision).getByRole("textbox", { name: "你的回答（可选）" }), {
       target: { value: "面向管理者，强调决策价值" },
@@ -453,7 +456,7 @@ describe("KnowledgeVideoWorkflowNode", () => {
     expect(screen.getByText("五点画面一致")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "查看成片" }));
     expect(onRevealResult).toHaveBeenCalledWith("knowledge-video-workflow-1");
-    fireEvent.click(screen.getByRole("button", { name: "重新制作" }));
+    fireEvent.click(screen.getByRole("button", { name: "规划新一版" }));
     expect(onExecute).toHaveBeenCalledWith("knowledge-video-workflow-1");
   });
 

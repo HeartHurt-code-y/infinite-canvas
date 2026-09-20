@@ -31,6 +31,17 @@ import {
 } from "./workspaceModel";
 import { currentAiFilmAssets } from "./aiFilmWorkflowModel";
 import {
+  createVideoWorkflowExecutionSteps,
+  createWorkflowDeliveryPlan,
+  createWorkflowMediaReviewPlan,
+  executeWorkflowSteps,
+  getWorkflowExecutionPlan,
+  isWorkflowExecutionPlanApproved,
+  orderedWorkflowShots,
+  workflowMediaReviewSignature,
+  type WorkflowMediaReviewKind,
+} from "./workflowExecutionPlan";
+import {
   validateWorkflowMaterials,
   validateWorkflowMaterialsResume,
   withWorkflowMaterials,
@@ -98,6 +109,8 @@ export interface KnowledgeVideoWorkflowRunRequest {
   readonly resume?: boolean;
   readonly decisionResolution?: string;
   readonly signal: AbortSignal;
+  /** Recorded execution flushes its approved checkpoint before local renderer/composer effects too. */
+  readonly beforeSideEffect?: () => Promise<void>;
   readonly onCheckpoint: (checkpoint: KnowledgeVideoWorkflowCheckpoint) => void;
   readonly onProgress: (state: KnowledgeVideoWorkflowRunState) => void;
 }
@@ -771,7 +784,14 @@ export function createKnowledgeVideoWorkflowRunner(
       const commit = (
         update: (current: KnowledgeVideoWorkflowCheckpoint) => KnowledgeVideoWorkflowCheckpoint,
       ) => {
-        checkpoint = { ...update(checkpoint), updatedAt: dependencies.now() };
+        const next = update(checkpoint);
+        const executionPlan =
+          next.executionPlan ?? checkpoint.executionPlan ?? node.config.executionPlan;
+        checkpoint = {
+          ...next,
+          ...(executionPlan ? { executionPlan } : {}),
+          updatedAt: dependencies.now(),
+        };
         onCheckpoint(checkpoint);
       };
       const progress = (
@@ -780,6 +800,47 @@ export function createKnowledgeVideoWorkflowRunner(
         message: string,
         error: string | null = null,
       ) => onProgress({ phase, progress: percentage, message, error });
+
+      const requireMediaReview = (kind: WorkflowMediaReviewKind): boolean => {
+        if (!getWorkflowExecutionPlan(node)) return true;
+        const signature = workflowMediaReviewSignature(checkpoint, kind);
+        if (checkpoint.mediaApprovals?.[kind]?.signature === signature) return true;
+        const currentNode = { ...node, config: { ...node.config, checkpoint } };
+        const plan = getWorkflowExecutionPlan(currentNode);
+        if (
+          plan?.review?.kind === kind &&
+          plan.review.signature === signature &&
+          isWorkflowExecutionPlanApproved(plan, currentNode)
+        ) {
+          commit((current) => ({
+            ...current,
+            mediaApprovals: {
+              ...current.mediaApprovals,
+              [kind]: { signature, approvedAt: plan.approval!.approvedAt },
+            },
+          }));
+          return true;
+        }
+        const messages: Record<WorkflowMediaReviewKind, string> = {
+          assets: "资产图已生成，请检查人物、场景和道具后确认试产首镜。",
+          first_shot: "首镜试产已完成，请检查画面和风格后确认批量制作。",
+          composition: "全部分镜视频已完成，请预览并确认采用这些片段后合成。",
+          final: "成片已生成，请预览并确认最终交付。",
+        };
+        commit((current) => ({
+          ...current,
+          executionPlan: createWorkflowMediaReviewPlan(currentNode, kind),
+          phase: "awaiting_approval",
+          decision: null,
+          error: null,
+        }));
+        progress(
+          "awaiting_approval",
+          kind === "final" ? 98 : kind === "composition" ? 88 : 24,
+          messages[kind],
+        );
+        return false;
+      };
 
       const requestPlan = async (resolution?: string): Promise<WorkflowPlan> => {
         if (definition) {
@@ -922,6 +983,18 @@ export function createKnowledgeVideoWorkflowRunner(
             return checkpoint;
           }
         } else if (
+          checkpoint.phase === "awaiting_approval" &&
+          !checkpoint.decision &&
+          getWorkflowExecutionPlan(node)?.scope === "delivery" &&
+          isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(node), node)
+        ) {
+          commit((current) => ({
+            ...current,
+            phase: "generating",
+            error: null,
+            approvedPlanRevision: current.planRevision,
+          }));
+        } else if (
           checkpoint.phase === "awaiting_approval" ||
           checkpoint.decision?.kind === "planning"
         ) {
@@ -1015,6 +1088,68 @@ export function createKnowledgeVideoWorkflowRunner(
           return checkpoint;
         }
         const models = resolveWorkflowModels(node, providerCatalog);
+        // The initial review authorizes planning only. Actual generated shot prompts and dependencies
+        // receive a separate review before the first paid image/video submission.
+        if (getWorkflowExecutionPlan(node)) {
+          const plannedNode = { ...node, config: { ...node.config, checkpoint } };
+          const approved = getWorkflowExecutionPlan(plannedNode);
+          if (
+            approved?.scope !== "delivery" ||
+            !isWorkflowExecutionPlanApproved(approved, plannedNode)
+          ) {
+            const executionPlan = createWorkflowDeliveryPlan(plannedNode, checkpoint);
+            commit((current) => ({
+              ...current,
+              executionPlan,
+              phase: "awaiting_approval",
+              approvedPlanRevision: null,
+              decision: null,
+              error: null,
+            }));
+            progress(
+              "awaiting_approval",
+              20,
+              "脚本与分镜已生成，请确认具体镜头、依赖和执行顺序后制作媒体。",
+            );
+            return checkpoint;
+          }
+        }
+        if (checkpoint.shots.some((shot) => checkpoint.shotRuns[shot.id]?.promptEdited)) {
+          const invalidated = new Set(
+            checkpoint.shots
+              .filter((shot) => checkpoint.shotRuns[shot.id]?.promptEdited)
+              .map((shot) => shot.id),
+          );
+          for (const shot of orderedWorkflowShots(checkpoint))
+            if (shot.dependsOn.some((id) => invalidated.has(id))) invalidated.add(shot.id);
+          commit((current) => ({
+            ...current,
+            finalPath: null,
+            activeCompositionJobId: null,
+            mediaApprovals: {},
+            shotRuns: Object.fromEntries(
+              Object.entries(current.shotRuns).map(([id, run]) => [
+                id,
+                invalidated.has(id)
+                  ? {
+                      ...run,
+                      promptEdited: false,
+                      videoTaskId: null,
+                      clipPath: null,
+                      qcStatus: "pending" as const,
+                      retryCount: 0,
+                      repairPrompt: null,
+                      redoRequested: true,
+                      supersededTaskIds: [
+                        ...(run.supersededTaskIds ?? []),
+                        ...(run.videoTaskId ? [run.videoTaskId] : []),
+                      ],
+                    }
+                  : run,
+              ]),
+            ),
+          }));
+        }
         if (checkpoint.film) {
           for (const shot of checkpoint.shots) {
             const parameters = videoParametersForShot(
@@ -1034,159 +1169,191 @@ export function createKnowledgeVideoWorkflowRunner(
           }
         }
         progress("generating", 22, "正在生成封面与视频片段…");
-        const filmAssets = currentAiFilmAssets(checkpoint.film);
-        if (filmAssets.length) {
-          await runPool(filmAssets, 2, async (asset) => {
-            for (let attempt = 0; attempt <= node.config.maxAutomaticRetries; attempt += 1) {
-              throwIfAborted(signal);
-              const currentAsset = checkpoint.film!.assets.find((item) => item.id === asset.id)!;
-              if (currentAsset.path) return;
-              try {
-                let taskId = currentAsset.taskId;
-                if (!taskId) {
-                  taskId = await dependencies.generationClient.start({
-                    canvasId: CANVAS_ID,
-                    sourceNodeId: node.key,
-                    operation: "text_to_image",
-                    providerConnectionId: node.config.models.image.providerId,
-                    modelDefinitionId: node.config.models.image.modelDefinitionId,
-                    prompt: [{ kind: "text", text: asset.prompt }],
-                    parameters: mediaParameters(
-                      models.image,
-                      "text_to_image",
-                      node.config.imageParameterValues,
-                      requestedAspectRatio,
-                    ),
-                    generationCount: 1,
-                  });
-                  const savedTaskId = taskId;
+        const prepareAssets = async () => {
+          const filmAssets = currentAiFilmAssets(checkpoint.film);
+          if (filmAssets.length) {
+            await runPool(filmAssets, 2, async (asset) => {
+              for (let attempt = 0; attempt <= node.config.maxAutomaticRetries; attempt += 1) {
+                throwIfAborted(signal);
+                const currentAsset = checkpoint.film!.assets.find((item) => item.id === asset.id)!;
+                if (currentAsset.path) return;
+                try {
+                  let taskId = currentAsset.taskId;
+                  if (!taskId) {
+                    taskId = await dependencies.generationClient.start({
+                      canvasId: CANVAS_ID,
+                      sourceNodeId: node.key,
+                      operation: "text_to_image",
+                      providerConnectionId: node.config.models.image.providerId,
+                      modelDefinitionId: node.config.models.image.modelDefinitionId,
+                      prompt: [{ kind: "text", text: asset.prompt }],
+                      parameters: mediaParameters(
+                        models.image,
+                        "text_to_image",
+                        node.config.imageParameterValues,
+                        requestedAspectRatio,
+                      ),
+                      generationCount: 1,
+                    });
+                    const savedTaskId = taskId;
+                    commit((current) => ({
+                      ...current,
+                      film: {
+                        ...current.film!,
+                        assets: current.film!.assets.map((item) =>
+                          item.id === asset.id ? { ...item, taskId: savedTaskId } : item,
+                        ),
+                      },
+                    }));
+                  }
+                  const path = await waitForGenerationResult(
+                    dependencies.generationClient,
+                    taskId,
+                    signal,
+                    dependencies.sleep,
+                  );
                   commit((current) => ({
                     ...current,
                     film: {
                       ...current.film!,
                       assets: current.film!.assets.map((item) =>
-                        item.id === asset.id ? { ...item, taskId: savedTaskId } : item,
+                        item.id === asset.id ? { ...item, path } : item,
                       ),
                     },
                   }));
+                  return;
+                } catch (error: unknown) {
+                  if (!(error instanceof ConfirmedGenerationFailure)) throw error;
+                  commit((current) => ({
+                    ...current,
+                    film: {
+                      ...current.film!,
+                      assets: current.film!.assets.map((item) =>
+                        item.id === asset.id ? { ...item, taskId: null } : item,
+                      ),
+                    },
+                  }));
+                  if (attempt >= node.config.maxAutomaticRetries) throw error;
                 }
-                const path = await waitForGenerationResult(
-                  dependencies.generationClient,
-                  taskId,
-                  signal,
-                  dependencies.sleep,
-                );
-                commit((current) => ({
-                  ...current,
-                  film: {
-                    ...current.film!,
-                    assets: current.film!.assets.map((item) =>
-                      item.id === asset.id ? { ...item, path } : item,
-                    ),
-                  },
-                }));
-                return;
-              } catch (error: unknown) {
-                if (!(error instanceof ConfirmedGenerationFailure)) throw error;
-                commit((current) => ({
-                  ...current,
-                  film: {
-                    ...current.film!,
-                    assets: current.film!.assets.map((item) =>
-                      item.id === asset.id ? { ...item, taskId: null } : item,
-                    ),
-                  },
-                }));
-                if (attempt >= node.config.maxAutomaticRetries) throw error;
               }
-            }
-          });
-          commit((current) => ({
-            ...current,
-            coverImagePath: currentAiFilmAssets(current.film)[0]?.path ?? null,
-          }));
-        }
-        const firstShot = checkpoint.shots[0];
-        const coverPrompt = firstShot?.imagePrompt?.trim();
-        for (
-          let coverAttempt = 0;
-          firstShot &&
-          coverPrompt &&
-          !checkpoint.coverImagePath &&
-          coverAttempt <= node.config.maxAutomaticRetries;
-          coverAttempt += 1
-        ) {
-          throwIfAborted(signal);
-          try {
-            const firstRun = checkpoint.shotRuns[firstShot.id]!;
-            let imageTaskId = firstRun.imageTaskId ?? null;
-            if (!imageTaskId) {
-              imageTaskId = await dependencies.generationClient.start({
-                canvasId: CANVAS_ID,
-                sourceNodeId: node.key,
-                operation: "text_to_image",
-                providerConnectionId: node.config.models.image.providerId,
-                modelDefinitionId: node.config.models.image.modelDefinitionId,
-                prompt: [{ kind: "text", text: coverPrompt }],
-                parameters: mediaParameters(
-                  models.image,
-                  "text_to_image",
-                  node.config.imageParameterValues,
-                  requestedAspectRatio,
-                ),
-                generationCount: 1,
-              });
+            });
+            commit((current) => ({
+              ...current,
+              coverImagePath: currentAiFilmAssets(current.film)[0]?.path ?? null,
+            }));
+          }
+        };
+        const prepareCover = async () => {
+          const firstShot = checkpoint.shots[0];
+          const coverPrompt = firstShot?.imagePrompt?.trim();
+          for (
+            let coverAttempt = 0;
+            firstShot &&
+            coverPrompt &&
+            !checkpoint.coverImagePath &&
+            coverAttempt <= node.config.maxAutomaticRetries;
+            coverAttempt += 1
+          ) {
+            throwIfAborted(signal);
+            try {
+              const firstRun = checkpoint.shotRuns[firstShot.id]!;
+              let imageTaskId = firstRun.imageTaskId ?? null;
+              if (!imageTaskId) {
+                imageTaskId = await dependencies.generationClient.start({
+                  canvasId: CANVAS_ID,
+                  sourceNodeId: node.key,
+                  operation: "text_to_image",
+                  providerConnectionId: node.config.models.image.providerId,
+                  modelDefinitionId: node.config.models.image.modelDefinitionId,
+                  prompt: [{ kind: "text", text: coverPrompt }],
+                  parameters: mediaParameters(
+                    models.image,
+                    "text_to_image",
+                    node.config.imageParameterValues,
+                    requestedAspectRatio,
+                  ),
+                  generationCount: 1,
+                });
+                commit((current) => ({
+                  ...current,
+                  phase: "generating",
+                  lastActivePhase: "generating",
+                  shotRuns: {
+                    ...current.shotRuns,
+                    [firstShot.id]: { ...current.shotRuns[firstShot.id]!, imageTaskId },
+                  },
+                }));
+              }
+              const coverImagePath = await waitForGenerationResult(
+                dependencies.generationClient,
+                imageTaskId,
+                signal,
+                dependencies.sleep,
+              );
               commit((current) => ({
                 ...current,
-                phase: "generating",
-                lastActivePhase: "generating",
+                coverImagePath,
                 shotRuns: {
                   ...current.shotRuns,
-                  [firstShot.id]: { ...current.shotRuns[firstShot.id]!, imageTaskId },
+                  [firstShot.id]: {
+                    ...current.shotRuns[firstShot.id]!,
+                    referenceImagePath: coverImagePath,
+                  },
                 },
               }));
-            }
-            const coverImagePath = await waitForGenerationResult(
-              dependencies.generationClient,
-              imageTaskId,
-              signal,
-              dependencies.sleep,
-            );
-            commit((current) => ({
-              ...current,
-              coverImagePath,
-              shotRuns: {
-                ...current.shotRuns,
-                [firstShot.id]: {
-                  ...current.shotRuns[firstShot.id]!,
-                  referenceImagePath: coverImagePath,
+            } catch (error: unknown) {
+              if (!(error instanceof ConfirmedGenerationFailure)) throw error;
+              commit((current) => ({
+                ...current,
+                shotRuns: {
+                  ...current.shotRuns,
+                  [firstShot.id]: {
+                    ...current.shotRuns[firstShot.id]!,
+                    imageTaskId: null,
+                    qcReport: `封面生成失败：${errorMessage(error)}`,
+                  },
                 },
-              },
-            }));
-          } catch (error: unknown) {
-            if (!(error instanceof ConfirmedGenerationFailure)) throw error;
-            commit((current) => ({
-              ...current,
-              shotRuns: {
-                ...current.shotRuns,
-                [firstShot.id]: {
-                  ...current.shotRuns[firstShot.id]!,
-                  imageTaskId: null,
-                  qcReport: `封面生成失败：${errorMessage(error)}`,
-                },
-              },
-            }));
-            if (coverAttempt >= node.config.maxAutomaticRetries) {
-              throw new Error(`封面生成失败：${errorMessage(error)}`, { cause: error });
+              }));
+              if (coverAttempt >= node.config.maxAutomaticRetries) {
+                throw new Error(`封面生成失败：${errorMessage(error)}`, { cause: error });
+              }
             }
           }
-        }
+        };
 
         let completedShots = checkpoint.shots.filter(
           (shot) => checkpoint.shotRuns[shot.id]?.clipPath,
         ).length;
         const generateShot = async (shot: KnowledgeVideoWorkflowShot) => {
           let run = checkpoint.shotRuns[shot.id]!;
+          if (
+            run.clipPath &&
+            shot.continuationFromShotId &&
+            run.continuationSourcePath !==
+              checkpoint.shotRuns[shot.continuationFromShotId]?.clipPath
+          ) {
+            commit((current) => ({
+              ...current,
+              finalPath: null,
+              activeCompositionJobId: null,
+              shotRuns: {
+                ...current.shotRuns,
+                [shot.id]: {
+                  ...current.shotRuns[shot.id]!,
+                  videoTaskId: null,
+                  clipPath: null,
+                  qcStatus: "pending",
+                  retryCount: 0,
+                  repairPrompt: null,
+                  supersededTaskIds: [
+                    ...(run.supersededTaskIds ?? []),
+                    ...(run.videoTaskId ? [run.videoTaskId] : []),
+                  ],
+                },
+              },
+            }));
+            run = checkpoint.shotRuns[shot.id]!;
+          }
           if (run.clipPath) return;
           for (
             let attempt = Math.min(run.retryCount, node.config.maxAutomaticRetries);
@@ -1198,9 +1365,80 @@ export function createKnowledgeVideoWorkflowRunner(
             try {
               let taskId = run.videoTaskId ?? null;
               if (!taskId) {
-                const prompt = run.repairPrompt
+                let prompt = run.repairPrompt
                   ? `${shot.videoPrompt}\n\n自动质检修复要求：${run.repairPrompt}`
                   : shot.videoPrompt;
+                const explicitMedia = (checkpoint.film ? (shot.referenceAssetIds ?? []) : []).map(
+                  (id, index) => {
+                    const asset = currentAiFilmAssets(checkpoint.film).find(
+                      (item) => item.id === id,
+                    );
+                    if (!asset?.path)
+                      throw new Error(`镜头 ${shot.title} 缺少已生成的参考资产 ${id}。`);
+                    return {
+                      target: {
+                        kind: "local_file" as const,
+                        path: asset.path,
+                        mediaType: "image" as const,
+                      },
+                      role: "reference_image",
+                      displayNameSnapshot: asset.name,
+                      typePosition: index + 1,
+                      contentIndex: index + 1,
+                    };
+                  },
+                );
+                if (shot.continuationFromShotId) {
+                  const predecessor = checkpoint.shotRuns[shot.continuationFromShotId];
+                  if (!predecessor?.clipPath || predecessor.qcStatus !== "passed")
+                    throw new Error(
+                      `接续镜头 ${shot.id} 的前置镜头 ${shot.continuationFromShotId} 尚未生成并通过质检。`,
+                    );
+                  let tailPath =
+                    run.continuationSourcePath === predecessor.clipPath
+                      ? run.continuationReferencePath
+                      : null;
+                  if (!tailPath) {
+                    await request.beforeSideEffect?.();
+                    const extraction = await dependencies.frameClient.startExtraction(
+                      predecessor.clipPath,
+                      [],
+                      [0.99],
+                    );
+                    const frames = await waitForFrameJob(
+                      dependencies.frameClient,
+                      extraction.jobId,
+                      signal,
+                      dependencies.sleep,
+                    );
+                    tailPath = frames.frames.at(-1)?.path;
+                    if (!tailPath)
+                      throw new Error(
+                        `前置镜头 ${shot.continuationFromShotId} 没有返回可用的尾帧。`,
+                      );
+                    const path = tailPath;
+                    commit((current) => ({
+                      ...current,
+                      shotRuns: {
+                        ...current.shotRuns,
+                        [shot.id]: {
+                          ...current.shotRuns[shot.id]!,
+                          continuationReferencePath: path,
+                          continuationSourcePath: predecessor.clipPath ?? null,
+                        },
+                      },
+                    }));
+                  }
+                  const referenceIndex = explicitMedia.length + 1;
+                  explicitMedia.push({
+                    target: { kind: "local_file", path: tailPath, mediaType: "image" },
+                    role: "reference_image",
+                    displayNameSnapshot: `镜头 ${shot.continuationFromShotId} 的接续尾帧`,
+                    typePosition: referenceIndex,
+                    contentIndex: referenceIndex,
+                  });
+                  prompt += `\n【镜头接续】参考图 ${referenceIndex} 是前置镜头 ${shot.continuationFromShotId} 的实际尾帧；从该画面的角色位置、朝向、构图和动作状态连续起拍。`;
+                }
                 taskId = await dependencies.generationClient.start({
                   canvasId: CANVAS_ID,
                   sourceNodeId: node.key,
@@ -1208,28 +1446,7 @@ export function createKnowledgeVideoWorkflowRunner(
                   providerConnectionId: node.config.models.video.providerId,
                   modelDefinitionId: node.config.models.video.modelDefinitionId,
                   prompt: [{ kind: "text", text: prompt }],
-                  ...(checkpoint.film
-                    ? {
-                        explicitMedia: (shot.referenceAssetIds ?? []).map((id, index) => {
-                          const asset = currentAiFilmAssets(checkpoint.film).find(
-                            (item) => item.id === id,
-                          );
-                          if (!asset?.path)
-                            throw new Error(`镜头 ${shot.title} 缺少已生成的参考资产 ${id}。`);
-                          return {
-                            target: {
-                              kind: "local_file" as const,
-                              path: asset.path,
-                              mediaType: "image" as const,
-                            },
-                            role: "reference_image",
-                            displayNameSnapshot: asset.name,
-                            typePosition: index + 1,
-                            contentIndex: index + 1,
-                          };
-                        }),
-                      }
-                    : {}),
+                  ...(explicitMedia.length || checkpoint.film ? { explicitMedia } : {}),
                   parameters: videoParametersForShot(
                     models.video,
                     node.config.videoParameterValues,
@@ -1266,6 +1483,8 @@ export function createKnowledgeVideoWorkflowRunner(
                     ...current.shotRuns[shot.id]!,
                     clipPath,
                     qcStatus: "pending",
+                    promptEdited: false,
+                    redoRequested: false,
                   },
                 },
               }));
@@ -1295,15 +1514,13 @@ export function createKnowledgeVideoWorkflowRunner(
           }
         };
 
-        if (firstShot) await generateShot(firstShot);
-        await runPool(checkpoint.shots.slice(1), 2, (shot) => generateShot(shot));
-
-        commit((current) => ({ ...current, phase: "qc", lastActivePhase: "qc" }));
-        progress("qc", 74, "正在按 30% / 60% / 80% / 95% / 99% 自动抽帧验收…");
-        for (const [index, shot] of checkpoint.shots.entries()) {
+        const checkShot = async (shot: KnowledgeVideoWorkflowShot) => {
+          const index = checkpoint.shots.findIndex((item) => item.id === shot.id);
+          commit((current) => ({ ...current, phase: "qc", lastActivePhase: "qc" }));
+          progress("qc", 74, "正在按 30% / 60% / 80% / 95% / 99% 自动抽帧验收…");
           throwIfAborted(signal);
           let run = checkpoint.shotRuns[shot.id]!;
-          if (run.qcStatus === "passed") continue;
+          if (run.qcStatus === "passed") return;
           let qcInfrastructureFailure = "";
           let finished = false;
           for (
@@ -1312,6 +1529,7 @@ export function createKnowledgeVideoWorkflowRunner(
             qcAttempt += 1
           ) {
             try {
+              await request.beforeSideEffect?.();
               const started = await dependencies.frameClient.startExtraction(
                 run.clipPath!,
                 [],
@@ -1411,11 +1629,38 @@ export function createKnowledgeVideoWorkflowRunner(
                   },
                 }));
                 progress("awaiting_approval", 78, "自动质检发现一项需要确认的问题。");
-                return checkpoint;
+                return false as const;
               }
               run = checkpoint.shotRuns[shot.id]!;
-              // 审查不通过时自动返工不再受次数限制：持续重新生成并再次质检，
-              // 直到 PASS、需要用户决策（NEEDS_DECISION）或用户取消为止。
+              if (run.retryCount >= node.config.maxAutomaticRetries) {
+                commit((current) => ({
+                  ...current,
+                  phase: "awaiting_approval",
+                  lastActivePhase: "qc",
+                  decision: {
+                    kind: "qc",
+                    question: `镜头 ${shot.sequence} 已达到 ${node.config.maxAutomaticRetries} 次自动返工上限，仍未通过质检：${qc.report}`,
+                    recommendation:
+                      "检查当前片段后明确选用；如需继续改进，请修改分镜并选择重做该镜头。",
+                  },
+                  shotRuns: {
+                    ...current.shotRuns,
+                    [shot.id]: {
+                      ...current.shotRuns[shot.id]!,
+                      qcStatus: "failed",
+                      qcReport: qc.report,
+                      repairPrompt: qc.repairPrompt,
+                    },
+                  },
+                }));
+                progress(
+                  "awaiting_approval",
+                  78,
+                  "自动返工已达到上限，请检查并选用当前片段或明确重做。",
+                );
+                return false as const;
+              }
+              // A review may request another attempt only within the explicitly configured budget.
               commit((current) => ({
                 ...current,
                 phase: "generating",
@@ -1472,84 +1717,121 @@ export function createKnowledgeVideoWorkflowRunner(
               },
             }));
             progress("awaiting_approval", 78, "视觉质检链路需要确认后继续。");
-            return checkpoint;
+            return false as const;
           }
           progress(
             "qc",
             74 + Math.round(((index + 1) / checkpoint.shots.length) * 12),
             `已验收 ${index + 1}/${checkpoint.shots.length} 个片段。`,
           );
-        }
+        };
 
-        const clipPaths = checkpoint.shots.map((shot) => checkpoint.shotRuns[shot.id]?.clipPath);
-        if (clipPaths.some((path) => !path)) throw new Error("部分视频片段尚未保存，无法合成。");
-        let finalPath: string;
-        if (clipPaths.length === 1) {
-          finalPath = clipPaths[0]!;
-        } else {
-          commit((current) => ({ ...current, phase: "composing", lastActivePhase: "composing" }));
-          progress("composing", 90, "正在顺序合成完整知识视频…");
-          let compositionJobId = checkpoint.activeCompositionJobId;
-          if (compositionJobId) {
-            const existing = await readExistingComposition(
-              dependencies.composerClient,
-              compositionJobId,
-              signal,
-              dependencies.sleep,
-            );
-            if (existing?.status === "completed" && existing.finalPath) {
-              finalPath = existing.finalPath;
-            } else {
-              if (
-                existing == null ||
-                existing.status === "failed" ||
-                existing.status === "cancelled"
-              ) {
-                compositionJobId = null;
-                commit((current) => ({ ...current, activeCompositionJobId: null }));
-              }
-              if (compositionJobId) {
-                finalPath = await waitForComposition(
-                  dependencies.composerClient,
-                  compositionJobId,
-                  signal,
-                  dependencies.sleep,
-                );
+        const composeDelivery = async () => {
+          if (!requireMediaReview("composition")) return false as const;
+          const clipPaths = checkpoint.shots.map((shot) => checkpoint.shotRuns[shot.id]?.clipPath);
+          if (clipPaths.some((path) => !path)) throw new Error("部分视频片段尚未保存，无法合成。");
+          let finalPath: string;
+          if (checkpoint.finalPath && checkpoint.executionPlan?.review?.kind === "final") {
+            finalPath = checkpoint.finalPath;
+          } else if (clipPaths.length === 1) {
+            finalPath = clipPaths[0]!;
+          } else {
+            commit((current) => ({ ...current, phase: "composing", lastActivePhase: "composing" }));
+            progress("composing", 90, "正在顺序合成完整知识视频…");
+            let compositionJobId = checkpoint.activeCompositionJobId;
+            if (compositionJobId) {
+              const existing = await readExistingComposition(
+                dependencies.composerClient,
+                compositionJobId,
+                signal,
+                dependencies.sleep,
+              );
+              if (existing?.status === "completed" && existing.finalPath) {
+                finalPath = existing.finalPath;
+              } else {
+                if (
+                  existing == null ||
+                  existing.status === "failed" ||
+                  existing.status === "cancelled"
+                ) {
+                  compositionJobId = null;
+                  commit((current) => ({ ...current, activeCompositionJobId: null }));
+                }
+                if (compositionJobId) {
+                  finalPath = await waitForComposition(
+                    dependencies.composerClient,
+                    compositionJobId,
+                    signal,
+                    dependencies.sleep,
+                  );
+                }
               }
             }
-          }
-          if (!compositionJobId) {
-            const job = await dependencies.composerClient.startComposition(
-              clipPaths.map((path, index) => ({
-                key: checkpoint.shots[index]!.id,
-                name: `${String(index + 1).padStart(2, "0")}-${checkpoint.shots[index]!.section}`,
-                source: path!,
-              })),
-              `${workflowTitle}-完整交付`,
-            );
-            compositionJobId = job.jobId;
-            commit((current) => ({ ...current, activeCompositionJobId: job.jobId }));
-            if (signal.aborted) {
-              await dependencies.composerClient.cancelJob(job.jobId).catch(() => undefined);
-              throwIfAborted(signal);
+            if (!compositionJobId) {
+              await request.beforeSideEffect?.();
+              const job = await dependencies.composerClient.startComposition(
+                clipPaths.map((path, index) => ({
+                  key: checkpoint.shots[index]!.id,
+                  name: `${String(index + 1).padStart(2, "0")}-${checkpoint.shots[index]!.section}`,
+                  source: path!,
+                })),
+                `${workflowTitle}-完整交付`,
+              );
+              commit((current) => ({ ...current, activeCompositionJobId: job.jobId }));
+              if (signal.aborted) {
+                await dependencies.composerClient.cancelJob(job.jobId).catch(() => undefined);
+                throwIfAborted(signal);
+              }
+              finalPath = await waitForComposition(
+                dependencies.composerClient,
+                job.jobId,
+                signal,
+                dependencies.sleep,
+              );
             }
-            finalPath = await waitForComposition(
-              dependencies.composerClient,
-              job.jobId,
-              signal,
-              dependencies.sleep,
-            );
           }
-        }
-        commit((current) => ({
-          ...current,
-          phase: "done",
-          decision: null,
-          activeCompositionJobId: null,
-          finalPath,
-          error: null,
-        }));
-        progress("done", 100, `完整${workflowTitle}已生成并保存。`);
+          commit((current) => ({
+            ...current,
+            phase: "done",
+            decision: null,
+            activeCompositionJobId: null,
+            finalPath,
+            error: null,
+          }));
+          if (node.config.comicDrama && !requireMediaReview("final")) return false as const;
+          progress("done", 100, `完整${workflowTitle}已生成并保存。`);
+        };
+
+        const executionSteps =
+          checkpoint.executionPlan?.scope === "delivery"
+            ? checkpoint.executionPlan.steps
+            : createVideoWorkflowExecutionSteps(checkpoint);
+        await executeWorkflowSteps(
+          executionSteps,
+          async (step) => {
+            if (step.action === "assets") return prepareAssets();
+            if (step.action === "cover") {
+              await prepareCover();
+              if (node.config.comicDrama && !requireMediaReview("assets")) return false;
+              return;
+            }
+            if (step.action === "compose") return composeDelivery();
+            const shot = checkpoint.shots.find((item) => item.id === step.shotId);
+            if (!shot) throw new Error(`执行计划引用了不存在的镜头：${step.shotId ?? step.id}`);
+            if (step.action === "video") {
+              await generateShot(shot);
+              if (node.config.comicDrama && orderedWorkflowShots(checkpoint)[0]?.id === shot.id) {
+                if ((await checkShot(shot)) === false) return false;
+                if (!requireMediaReview("first_shot")) return false;
+              }
+              return;
+            }
+            if (step.action === "qc") return checkShot(shot);
+            throw new Error(`执行计划步骤无法执行：${step.id}`);
+          },
+          { signal, concurrency: 2 },
+        );
+
         return checkpoint;
       } catch (error: unknown) {
         const cancelled = isAbortError(error) || signal.aborted;

@@ -19,9 +19,17 @@ import { createReverseVideoOptions } from "./reverseVideoWorkflowModel";
 import { createXhsCoverOptions } from "./xhsCoverWorkflowModel";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+import { restoreWorkflowVersion } from "./workflowVersionHistory";
+import { workflowConnectedTextBlock } from "./workflowMaterials";
+import {
+  approveWorkflowExecutionPlan,
+  createWorkflowDeliveryPlan,
+  createWorkflowExecutionPlan,
+} from "./workflowExecutionPlan";
 import {
   createRecordedWorkflowRunner,
   type RecordedWorkflowDependencies,
+  type RecordedWorkflowRunRequest,
 } from "./workflowHistoryExecution";
 import {
   CANVAS_ID,
@@ -92,7 +100,7 @@ function setup(canvasId = CANVAS_ID) {
     },
   }));
   let id = 0;
-  const runner = createRecordedWorkflowRunner({
+  const unreviewedRunner = createRecordedWorkflowRunner({
     canvasId,
     historyClient,
     promptClient: fake.promptClient,
@@ -101,6 +109,28 @@ function setup(canvasId = CANVAS_ID) {
     now: () => 42,
     createId: () => `event-${++id}`,
   });
+  // These cases exercise history recovery after a user explicitly reviews the current inputs.
+  // Gate rejection itself is tested against unreviewedRunner below.
+  const runner = {
+    run(input: RecordedWorkflowRunRequest) {
+      const executionPlan = approveWorkflowExecutionPlan(
+        createWorkflowExecutionPlan(input.node, input.resume ? "resume" : "restart"),
+        input.node,
+        40,
+      );
+      return unreviewedRunner.run({
+        ...input,
+        node: {
+          ...input.node,
+          config: {
+            ...input.node.config,
+            executionPlan,
+            checkpoint: { ...input.node.config.checkpoint, executionPlan },
+          },
+        },
+      });
+    },
+  };
   const source = node();
   const request = {
     node: { ...source, config: { ...source.config, historyRunId: "history-1" } },
@@ -137,10 +167,97 @@ function setup(canvasId = CANVAS_ID) {
       node: { ...request.node, config: { ...request.node.config, checkpoint } },
     };
   };
-  return { fake, records, events, historyClient, runnerFactory, runner, request, seed };
+  return {
+    fake,
+    records,
+    events,
+    historyClient,
+    runnerFactory,
+    runner,
+    unreviewedRunner,
+    request,
+    seed,
+  };
 }
 
 describe("recorded workflow execution", () => {
+  it.each([
+    ["knowledge", {}],
+    ["film", { film: createAiFilmWorkflowOptions() }],
+    ["comicDrama", { comicDrama: createComicDramaOptions() }],
+    ["commerce", { commerce: createCommerceOptions() }],
+    ["remotion", { remotion: createRemotionOptions() }],
+    ["xhsCover", { xhsCover: createXhsCoverOptions() }],
+    ["reverseVideo", { reverseVideo: createReverseVideoOptions() }],
+  ] as const)(
+    "requires review before the %s production entry starts any effects",
+    async (_kind, config) => {
+      const { unreviewedRunner, request, runnerFactory, historyClient, fake } = setup();
+      const result = await unreviewedRunner.run({
+        ...request,
+        node: { ...request.node, config: { ...request.node.config, ...config } },
+      });
+      expect(result.phase).toBe("awaiting_approval");
+      expect(result.executionPlan?.approval).toBeNull();
+      expect(runnerFactory).not.toHaveBeenCalled();
+      expect(historyClient.save).not.toHaveBeenCalled();
+      expect(fake.promptClient.run).not.toHaveBeenCalled();
+      expect(fake.generation.start).not.toHaveBeenCalled();
+    },
+  );
+
+  it("archives generated workflow revisions and returns the same chain to the node", async () => {
+    const { runner, request, records } = setup();
+    await runner.run(request);
+    const config = records.get("history-1")!.nodeSnapshot.config;
+    expect(config.versionHistory?.versions.length).toBeGreaterThan(1);
+    expect(request.onCheckpoint.mock.lastCall?.[1]).toEqual(config.versionHistory);
+    const initial = restoreWorkflowVersion(config, config.versionHistory!.versions[0]!.id);
+    expect(initial.checkpoint.manifest).toBe(request.node.config.checkpoint.manifest);
+    expect(initial.versionHistory!.versions).toEqual(config.versionHistory!.versions);
+    expect(initial.checkpoint.executionPlan?.approval).toBeNull();
+  });
+
+  it("archives live execution references while versioning only the editable workflow inputs", async () => {
+    const { runner, request, records } = setup();
+    const versionConfig = request.node.config;
+    const configWithReference = {
+      ...versionConfig,
+      connectedTexts: [
+        { key: "reference", sourceKey: "text-node", displayName: "参考", text: "连线内容" },
+      ],
+    };
+    const expanded = {
+      ...configWithReference,
+      brief: `${versionConfig.brief}\n\n${workflowConnectedTextBlock(configWithReference)}`,
+    };
+    await runner.run({ ...request, node: { ...request.node, config: expanded }, versionConfig });
+    const saved = records.get("history-1")!.nodeSnapshot.config;
+    expect(saved.brief).toContain("连线内容");
+    expect(saved.connectedTexts).toEqual(configWithReference.connectedTexts);
+    expect(
+      saved.versionHistory!.versions.every(
+        (version) => version.config.brief === versionConfig.brief,
+      ),
+    ).toBe(true);
+    expect(request.onCheckpoint.mock.lastCall?.[1]).toEqual(saved.versionHistory);
+  });
+
+  it("persists the exact approval before the first model call and retains it when runners replace checkpoints", async () => {
+    const { runner, request, records, fake } = setup();
+    vi.mocked(fake.promptClient.run).mockImplementation(async () => {
+      expect(
+        records.get("history-1")?.nodeSnapshot.config.checkpoint.executionPlan?.approval
+          ?.approvedAt,
+      ).toBe(40);
+      return Promise.resolve({ optimizedPrompt: "计划", rawModelOutput: "计划" });
+    });
+    const result = await runner.run(request);
+    expect(result.executionPlan?.approval?.approvedAt).toBe(40);
+    expect(
+      records.get("history-1")?.nodeSnapshot.config.checkpoint.executionPlan?.approval?.approvedAt,
+    ).toBe(40);
+  });
   it("binds new history and nested model requests to the owning canvas", async () => {
     const canvasId = "canvas-scene-two";
     const { runner, request, fake, records } = setup(canvasId);
@@ -159,6 +276,38 @@ describe("recorded workflow execution", () => {
       canvasId,
       workflowRunId: "history-1",
     });
+  });
+
+  it("does not skip edited completed deliveries when an older authoring version is restored", async () => {
+    const { unreviewedRunner, request, seed, runnerFactory } = setup();
+    const resumed = seed({
+      ...request.node.config.checkpoint,
+      runId: "completed-run",
+      phase: "done",
+      finalPath: null,
+    });
+    const executionPlan = approveWorkflowExecutionPlan(
+      createWorkflowDeliveryPlan(resumed.node),
+      resumed.node,
+    );
+    runnerFactory.mockImplementation(() => ({
+      run(input) {
+        expect(input.node.config.checkpoint.phase).toBe("paused");
+        return Promise.resolve({ ...input.node.config.checkpoint, phase: "done" });
+      },
+    }));
+    await unreviewedRunner.run({
+      ...resumed,
+      node: {
+        ...resumed.node,
+        config: {
+          ...resumed.node.config,
+          executionPlan,
+          checkpoint: { ...resumed.node.config.checkpoint, executionPlan },
+        },
+      },
+    });
+    expect(runnerFactory).toHaveBeenCalledTimes(1);
   });
 
   it("resumes a non-default canvas history and rejects history owned by another canvas", async () => {
@@ -321,7 +470,10 @@ describe("recorded workflow execution", () => {
     const result = await runner.run(request);
     expect(result).toMatchObject({ phase: "failed", finalPath: "C:\\result.png" });
     expect(result.error).toContain("最终写盘失败");
-    expect(request.onCheckpoint).toHaveBeenLastCalledWith(result);
+    expect(request.onCheckpoint).toHaveBeenLastCalledWith(
+      result,
+      expect.objectContaining({ version: 1 }),
+    );
   });
 
   it("resumes the same run with a higher attempt count and the latest revision", async () => {

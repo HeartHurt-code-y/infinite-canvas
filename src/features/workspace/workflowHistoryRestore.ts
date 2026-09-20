@@ -28,6 +28,8 @@ export function sameWorkflowHistoryInput(
           ([key]) =>
             ![
               "checkpoint",
+              "executionPlan",
+              "versionHistory",
               "historyRunId",
               "catalogResolved",
               "materials",
@@ -66,7 +68,10 @@ export function restoreWorkflowHistoryNode(
       ? record.sourceNodeId
       : options.newKey;
   const config = { ...record.nodeSnapshot.config };
-  if (options.restart) delete config.historyRunId;
+  if (options.restart) {
+    delete config.historyRunId;
+    delete config.executionPlan;
+  }
   const checkpoint = options.restart
     ? createKnowledgeVideoWorkflowConfig(
         {

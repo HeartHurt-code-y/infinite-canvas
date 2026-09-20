@@ -1,0 +1,586 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""drama-auto-pipeline 版本快照工具
+
+一次进化结束时的**唯一收尾动作**。做六件事：
+  1) 跑回归自检（tools/checks.txt 里的「不变式」逐条 grep，缺任何一条就拒绝发版）
+  2) **跑绝对路径扫描**（tools/scan_paths.py：工作区一遍 + 打好的包再一遍）——
+     保证分享出去的包在新电脑上不会因为「写死了作者机器的路径」而崩
+  3) **跑凭证泄漏扫描**（tools/scan_secrets.py：同样两遍）——
+     保证包里没有真密钥（`_versions/*.zip` 与 git 是**两条出口**，
+     路径靠扫描器 + `.gitignore` 各堵一条，密钥则两条都可能漏）
+  4) 往 CHANGELOG.md 追加一条进化记录（版本 / 项目 / 改了什么 / 为什么 / 验证）
+  5) 打一份完整快照到 _versions/drama-auto-pipeline-V<版本>-<日期>.zip（可离线回退）
+  6) git commit + git tag（精确 diff 与回退点）
+
+判据：**「碰巧没事」≠「不会出事」。** 这三道门禁的价值不在「今天是干净的」，
+而在「以后脏了会被拦住」—— 所以配套的对抗测试（examples/test_scan_*.py）是必跑的。
+
+用法：
+  python tools/snapshot.py \\
+      --version 1.3.2 --kind patch \\
+      --project "《青铜信号》" \\
+      --summary "一句话说明这一版干了什么" \\
+      --item "改了 X：原因是 Y" --item "改了 Z：原因是 W" \\
+      --verify "实测：10/10 段 PASS" \\
+      --check "references/xxx.py|新函数名"
+      [--add-check "references/xxx.py|新关键字"]   # 同时把新不变式写进 checks.txt
+      [--dry-run] [--no-git] [--force] [--force-paths]
+
+  --kind patch  补丁号 +1（V1.3.1 → V1.3.2）  小修小补
+  --kind minor  次版本 +1（V1.3.1 → V1.4）    铁律级 / 行为变更
+  --kind major  主版本 +1（V1.3.1 → V2.0）    架构级重做
+
+回退见 tools/rollback.py。
+"""
+import argparse
+import datetime
+import os
+import shutil
+import subprocess
+import sys
+import zipfile
+
+TOOLS_DIR = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, TOOLS_DIR)
+SKILL_DIR = os.path.dirname(TOOLS_DIR)
+VERSION_FILE = os.path.join(SKILL_DIR, "VERSION")
+CHANGELOG = os.path.join(SKILL_DIR, "CHANGELOG.md")
+CHECKS_FILE = os.path.join(SKILL_DIR, "tools", "checks.txt")
+VERSIONS_DIR = os.path.join(SKILL_DIR, "_versions")
+
+# 不进快照的内容（维护态 / 历史快照自身 / 本地备份）
+SNAP_IGNORE_DIRS = {"_versions", "__pycache__", ".git"}
+SNAP_IGNORE_SUFFIX = (".pyc", ".zip")
+# `.bak*` 是本机改版时的临时备份（如 SKILL.md.bak_V1.2），不是交付物：
+# 打进包只会让接收方多一份「不知道以哪个为准」的重复文档。
+SNAP_IGNORE_NAME_PARTS = (".bak",)
+# 凭证文件：**连打都不许打进去**（纵深防御）。
+# 注意这**不能**替代 tools/scan_secrets.py —— 这一层只管「按文件名排除」，
+# 管不了「密钥被硬编码进 .py 里」；两边都要，缺一条就漏。
+SNAP_IGNORE_NAMES = {"keys.env", ".env", "token.json", "secrets.json", "credentials.json"}
+SNAP_IGNORE_CRED_SUFFIX = (".key", ".pem", ".p12", ".pfx", ".keystore", ".jks", ".ppk")
+
+
+def _run_adversarial():
+    """门禁 1.6：对抗测试（V2.0.8）。返回 True=通过。
+
+    为什么要有这一道：门禁 1.5 的冒烟保住了「审核页能生成」，
+    但**合并器**（`apply_seg_edit.py` —— 用户每次在审核页改分镜都会用到）
+    此前**没有任何自动化验证**。它改坏的表现不是崩，而是**静默写错**或**误拒绝**：
+      · 静默写错：把页面自算的派生值当改动写进方案，覆盖源头（V2.0.8 修的就是这个）
+      · 误拒绝：用户明明改对了却被拦住 → 只能绕过工具手工改 JSON，防护形同虚设
+    两者都不会出现在任何日志里，只能靠**主动伪造故障**的测试盯住。
+
+    `examples/test_*.py` 全是这类对抗测试，跑通即证明防护仍在。
+
+    防递归：`test_smoke_pages.py` 会回调 `snapshot --check-only`，
+    所以用环境变量做一次性熔断，否则门禁会自己套自己。
+    """
+    if os.environ.get("DAP_IN_ADVERSARIAL") == "1":
+        print("🧪 对抗测试门禁：已在对抗测试中（防递归），跳过")
+        return True
+
+    d = os.path.join(SKILL_DIR, "examples")
+    if not os.path.isdir(d):
+        print("⚠️ 找不到 examples/ 目录 → 对抗测试门禁**未生效**")
+        return False
+    tests = sorted(f for f in os.listdir(d) if f.startswith("test_") and f.endswith(".py"))
+    if not tests:
+        print("⚠️ examples/ 下没有 test_*.py → 对抗测试门禁**未生效**")
+        return False
+
+    print("🧪 对抗测试门禁：%d 个（每个都主动伪造故障，验证防护仍会拦）" % len(tests))
+    env = dict(os.environ, DAP_IN_ADVERSARIAL="1")
+    ok = True
+    for t in tests:
+        r = subprocess.run([sys.executable, os.path.join(d, t)],
+                           capture_output=True, encoding="utf-8",
+                           errors="replace", env=env)
+        if r.returncode == 0:
+            print("   ✅ %s" % t)
+        else:
+            ok = False
+            print("   ❌ %s（退出码 %d）" % (t, r.returncode))
+            tail = ((r.stdout or "") + (r.stderr or "")).strip().splitlines()[-6:]
+            for ln in tail:
+                print("      %s" % ln)
+    return ok
+
+
+def _run_smoke():
+    """门禁 1.5：端到端冒烟。返回 True=通过。
+
+    委托给 tools/smoke_pages.py（三层：语法 / 7 个 builder 真调一遍 / 页面必须渲染出关键区块）。
+    这里只做「编排 + 打印」，检查逻辑集中在 smoke_pages 里，避免两份实现漂移。
+    """
+    try:
+        import smoke_pages
+    except Exception as e:                                # noqa: BLE001
+        print("⚠️ 无法导入 tools/smoke_pages.py（%s: %s）" % (type(e).__name__, e))
+        print("   → 端到端冒烟门禁**未生效**。本次发版建议中断。")
+        return False
+
+    print("🔬 端到端冒烟（静态 grep 证明不了代码能跑）")
+    # V2.0.12：改为调用 smoke_pages.run_checks() —— **唯一实现**。
+    # 原先这里自己又写了一遍「解包 check_builders() + 调 check_page + 自己拼报错」，
+    # 于是 check_builders() 的返回值一改（加上了 05 页），这份副本就**静默错位**：
+    # 它把返回的 dict 当页面文本喂给 check_page → 8 项全报缺失（假故障）。
+    # 判据（同 D2-d / D2-f）：**同一条逻辑只能有一处实现**；
+    # 门禁尤其如此 —— 它的副本错位了，报出来的还是「看起来很严重」的假消息。
+    try:
+        # ⚠ 返回的是 **failed**（True = 有问题），不是 ok —— 命名必须跟着语义走。
+        #   这里第一次写错过：把 failed 当 ok 返回，于是「全绿」时 _run_smoke() 返回 False，
+        #   调用方的 `smoke_bad = not _run_smoke()` 反而变成 True → **全绿也拒绝发版**。
+        #   判据：**布尔值的名字必须和它的极性一致**；反着用一定会有人（包括自己）踩。
+        failed, lines = smoke_pages.run_checks()
+    except Exception as e:                                # noqa: BLE001
+        print("   ② 端到端：**builder 模块加载不起来** —— %s: %s" % (type(e).__name__, e))
+        return False
+    for ln in lines:
+        print("   " + ln if ln.startswith(("①", "②", "③")) else "      " + ln)
+    print("   %s 冒烟%s" % ("❌" if failed else "✅", "不通过" if failed else "通过"))
+    return not failed
+
+
+def _scan_paths():
+    """延迟导入扫描器 —— 这样 `snapshot.py --help` 在包不完整时也能跑。"""
+    try:
+        import scan_paths
+        return scan_paths
+    except Exception as e:                                # noqa: BLE001
+        print("⚠️ 无法导入 tools/scan_paths.py（%s: %s）" % (type(e).__name__, e))
+        print("   → 绝对路径门禁**未生效**。请确认包完整；本次发版建议中断。")
+        return None
+
+
+def _scan_secrets():
+    """延迟导入凭证扫描器（同上，包不完整时 --help 仍可用）。"""
+    try:
+        import scan_secrets
+        return scan_secrets
+    except Exception as e:                                # noqa: BLE001
+        print("⚠️ 无法导入 tools/scan_secrets.py（%s: %s）" % (type(e).__name__, e))
+        print("   → 凭证门禁**未生效**。请确认包完整；本次发版建议中断。")
+        return None
+
+
+def read_version():
+    try:
+        with open(VERSION_FILE, encoding="utf-8") as f:
+            return f.read().strip()
+    except OSError:
+        return "0.0.0"
+
+
+def bump(cur, kind):
+    parts = (cur.split(".") + ["0", "0", "0"])[:3]
+    try:
+        a, b, c = (int(x) for x in parts)
+    except ValueError:
+        sys.exit("❌ VERSION 格式不对：%r（应为 1.3.1 这种三段式）" % cur)
+    if kind == "major":
+        return "%d.0" % (a + 1)
+    if kind == "minor":
+        return "%d.%d" % (a, b + 1)
+    return "%d.%d.%d" % (a, b, c + 1)
+
+
+def run_checks(checks_file, verbose=True):
+    """跑不变式自检：<相对路径>|<必须出现的关键字>"""
+    if not os.path.isfile(checks_file):
+        if verbose:
+            print("⚠️  未找到自检清单 %s，跳过自检" % checks_file)
+        return []
+    bad = []
+    total = 0
+    with open(checks_file, encoding="utf-8") as f:
+        for raw in f:
+            line = raw.strip()
+            if not line or line.startswith("#") or "|" not in line:
+                continue
+            rel, kw = line.rsplit("|", 1)
+            rel, kw = rel.strip(), kw.strip()
+            total += 1
+            fp = os.path.join(SKILL_DIR, rel)
+            ok = False
+            if os.path.isfile(fp):
+                try:
+                    with open(fp, encoding="utf-8", errors="replace") as fh:
+                        ok = kw in fh.read()
+                except OSError:
+                    ok = False
+            if not ok:
+                bad.append((rel, kw))
+    if verbose:
+        print("🔍 回归自检：%d 条不变式，%d 条通过，%d 条丢失" %
+              (total, total - len(bad), len(bad)))
+        for rel, kw in bad:
+            print("   ❌ %s  <- 找不到 %r" % (rel, kw))
+    return bad
+
+
+def add_checks(pairs):
+    if not pairs:
+        return 0
+    os.makedirs(os.path.dirname(CHECKS_FILE), exist_ok=True)
+    existing = ""
+    if os.path.isfile(CHECKS_FILE):
+        with open(CHECKS_FILE, encoding="utf-8") as f:
+            existing = f.read()
+    added = 0
+    with open(CHECKS_FILE, "a", encoding="utf-8") as f:
+        if existing and not existing.endswith("\n"):
+            f.write("\n")
+        for p in pairs:
+            if p.strip() and p not in existing:
+                f.write(p.strip() + "\n")
+                added += 1
+    return added
+
+
+def prepend_changelog(version, kind, project, summary, items, verify, today):
+    entry = ["## V%s · %s%s" % (version, project, ("（%s）" % today) if today else ""), ""]
+    entry.append("**一句话**：%s" % summary)
+    if items:
+        entry.append("")
+        for it in items:
+            entry.append("- %s" % it)
+    if verify:
+        entry.append("")
+        entry.append("**验证**：%s" % verify)
+    entry.append("")
+    entry.append("---")
+    entry.append("")
+    block = "\n".join(entry)
+
+    if os.path.isfile(CHANGELOG):
+        with open(CHANGELOG, encoding="utf-8") as f:
+            old = f.read()
+    else:
+        old = ("# CHANGELOG · drama-auto-pipeline 进化史\n\n"
+               "> 每个项目测试完成后，把本次沉淀的修复记录在这里，并打一份快照 + git tag。\n"
+               "> 回退方法见 `tools/rollback.py`。**最新版本在最上面。**\n\n---\n\n")
+    # 插到第一个 '## V' 之前（保持最新在顶部）；没有就追加到 header 之后
+    marker = old.find("\n## V")
+    if marker == -1:
+        new = old.rstrip() + "\n\n" + block
+    else:
+        new = old[:marker + 1] + block + old[marker + 1:]
+    with open(CHANGELOG, "w", encoding="utf-8") as f:
+        f.write(new)
+
+
+def make_snapshot(version, today):
+    os.makedirs(VERSIONS_DIR, exist_ok=True)
+    out = os.path.join(VERSIONS_DIR,
+                       "drama-auto-pipeline-V%s-%s.zip" % (version, today.replace("-", "")))
+    if os.path.exists(out):
+        out = out.replace(".zip", "-%s.zip" % datetime.datetime.now().strftime("%H%M%S"))
+    n = 0
+    with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+        for root, dirs, files in os.walk(SKILL_DIR):
+            dirs[:] = [d for d in dirs if d not in SNAP_IGNORE_DIRS]
+            for fn in files:
+                if fn.endswith(SNAP_IGNORE_SUFFIX):
+                    continue
+                if any(part in fn for part in SNAP_IGNORE_NAME_PARTS):
+                    continue
+                if fn in SNAP_IGNORE_NAMES or fn.endswith(SNAP_IGNORE_CRED_SUFFIX):
+                    continue
+                fp = os.path.join(root, fn)
+                z.write(fp, os.path.relpath(fp, SKILL_DIR).replace("\\", "/"))
+                n += 1
+    return out, n
+
+
+def git(args, check=True):
+    r = subprocess.run(["git", "-C", SKILL_DIR] + args, capture_output=True, text=True)
+    if check and r.returncode != 0:
+        print("   ⚠️ git %s 失败：%s" % (" ".join(args), (r.stderr or r.stdout).strip()[:300]))
+    return r
+
+
+def main():
+    ap = argparse.ArgumentParser(description="版本快照（自检 + CHANGELOG + zip + git tag）")
+    ap.add_argument("--version", help="新版本号，如 1.3.2；不给则按 --kind 自增")
+    ap.add_argument("--kind", default="patch", choices=["patch", "minor", "major"])
+    ap.add_argument("--project", default="", help="本次测试的项目名，如 《青铜信号》")
+    ap.add_argument("--summary", default="", help="一句话说明这一版干了什么（--check-only 时可省略）")
+    ap.add_argument("--item", action="append", default=[], help="具体改动（可多次）")
+    ap.add_argument("--verify", default="", help="验证结论")
+    ap.add_argument("--add-check", action="append", default=[],
+                    help="同时把新不变式写进 checks.txt（格式 相对路径|关键字）")
+    ap.add_argument("--check-only", action="store_true", help="只跑自检，不发版")
+    ap.add_argument("--no-smoke", action="store_true",
+                    help="跳过端到端冒烟（**不推荐**：这正是 V2.0.6 漏掉的那一道）")
+    ap.add_argument("--no-adversarial", action="store_true",
+                    help="跳过对抗测试门禁（**不推荐**：防护失效了没人知道）")
+    ap.add_argument("--dry-run", action="store_true", help="只打印将要做什么")
+    ap.add_argument("--no-git", action="store_true", help="跳过 git 提交打标")
+    ap.add_argument("--force", action="store_true", help="自检失败也强行发版")
+    ap.add_argument("--force-paths", action="store_true",
+                    help="绝对路径扫描命中硬拦也强行发版（**强烈不推荐**：别人解压后跑不起来）")
+    ap.add_argument("--force-secrets", action="store_true",
+                    help="凭证扫描命中也强行发版（**危险**：收到包的人就拿到了你的密钥，"
+                         "只该在确认是误报、或那些密钥已作废时用）")
+    args = ap.parse_args()
+
+    today = datetime.date.today().strftime("%Y-%m-%d")
+
+    if args.add_check:
+        n = add_checks(args.add_check)
+        print("➕ 新增不变式 %d 条 → tools/checks.txt" % n)
+
+    # V2.2.5：**门禁之前**先刷新一次交付物 —— 这是它唯一有效的位置。
+    #   交付物（单文件版 / 项目说明介绍页）是从 SKILL.md / checks.txt / CHANGELOG 派生的；
+    #   本版改了 SKILL.md（比如加了一条铁律），交付物就必须先跟着更新，
+    #   否则门禁会报「单文件版报的铁律条数 90 ≠ 现抽的 91」——它报得对，但发版人被卡住。
+    #   ⚠ 第一版我把这段放在了 `--dry-run` 判断之后，而那里**已经在门禁之后了** → 等于没生效。
+    #     判据：**「预处理」必须排在「检查」之前 —— 放晚了等于没放。**
+    #   写盘之后还会再刷一次（那时让版本号也同步）。
+    try:
+        import subprocess as _sp0
+        _sp0.run([sys.executable,
+                  os.path.join(os.path.dirname(os.path.abspath(__file__)), "make_deliverables.py")],
+                 check=True, stdout=_sp0.DEVNULL)
+    except Exception as e:                                    # noqa: BLE001
+        print("⚠️ 交付物预刷新失败（%s: %s）—— 门禁可能因此报「交付物滞后」"
+              % (type(e).__name__, e))
+
+    bad = run_checks(CHECKS_FILE)
+
+    # ---------- 门禁 1.5：端到端冒烟（V2.0.7）----------
+    # 为什么必须在「静态 grep」之外再加一道：
+    #   V2.0.6 带着 349 条不变式全绿发版，但 04 审核页因 f-string 模板里一个裸花括号
+    #   NameError —— **一个文件都产不出**。checks.txt 只做「关键字还在不在文件里」的 grep，
+    #   语法错与运行期错对它完全隐形。
+    #   判据：静态 grep 与动态冒烟是两条**不能互相替代**的出口（同 G4 的 zip/git）。
+    smoke_bad = False
+    if not args.no_smoke:
+        smoke_bad = not _run_smoke()
+    elif args.check_only:
+        print("⚠️ 已跳过端到端冒烟（--no-smoke）")
+
+    # ---------- 门禁 1.6：对抗测试（V2.0.8）----------
+    adv_bad = False
+    if not args.no_adversarial:
+        adv_bad = not _run_adversarial()
+    elif args.check_only:
+        print("⚠️ 已跳过对抗测试门禁（--no-adversarial）")
+
+    if args.check_only:
+        sys.exit(1 if (bad or smoke_bad or adv_bad) else 0)
+
+    # 修正：--check-only 是「只跑自检」，不该被 --summary 拦住（原先 required=True
+    # 导致 `snapshot.py --check-only` 直接 argparse 报错、自检根本跑不起来）。
+    # 改成：只在真正发版时才要求 --summary。
+    if not args.summary:
+        sys.exit("❌ 发版必须提供 --summary（只跑自检请加 --check-only）")
+
+    cur = read_version()
+    new = args.version or bump(cur, args.kind)
+    if new == cur:
+        sys.exit("❌ 新版本号与当前一致（%s），没有变化就不该发版" % cur)
+
+    print("📦 版本：V%s → V%s（%s）" % (cur, new, args.kind))
+    if bad and not args.force:
+        print("\n❌ 自检未通过：有 %d 条老修复在当前代码里找不到了。" % len(bad))
+        print("   这通常意味着这次进化**把之前的修复弄丢了**。请先修好，")
+        print("   确认是故意移除时再跑 --force（不推荐）。")
+        sys.exit(2)
+
+    if smoke_bad and not args.force:
+        print("\n❌ 端到端冒烟未通过 —— **拒绝发版**。")
+        print("   静态检查全绿、却连一张审核页都产不出来，是真实发生过的（V2.0.6）。")
+        print("   修好再发；确认要无视时加 --force（不推荐）。")
+        sys.exit(2)
+
+    if adv_bad and not args.force:
+        print("\n❌ 对抗测试未通过 —— **拒绝发版**。")
+        print("   它证明的是「防护还在」：防护失效的表现是**静默写错**或**误拒绝**，")
+        print("   不会自己冒出来，所以只能靠主动伪造故障的测试盯住。")
+        print("   修好再发；确认要无视时加 --force（不推荐）。")
+        sys.exit(2)
+
+    if args.dry_run:
+        print("（dry-run，不落盘）")
+        return
+
+    # （预刷新已上移到门禁之前 —— 放这里等于没放，见那一处的说明）
+
+    # ---------- 门禁 2：绝对路径扫描（工作区）----------
+    # 判据：不靠「我记得检查」，靠工具拦。检查项写进 checks.txt 是「正向」的
+    # （关键字必须存在），而「关键字不许存在」checks.txt 表达不了 —— 所以必须另设门禁。
+    sp = _scan_paths()
+    if sp is not None:
+        tree = sp.scan_tree(SKILL_DIR)
+        tree_hard = [h for h in tree["hits"] if h["level"] == "硬拦"]
+        print("\n🔍 绝对路径扫描（工作区）：%d 个文本文件，硬拦 %d 处 / 软提示 %d 处"
+              % (tree["files"], len(tree_hard),
+                 len([h for h in tree["hits"] if h["level"] == "软提示"])))
+        if tree_hard:
+            sp.report(tree)
+            if not args.force_paths:
+                print("\n❌ 工作区里有本机绝对路径，**拒绝发版**。")
+                print("   别人解压后这些路径不存在 → 崩，或更坏：静默降级成「不校验」。")
+                print("   修法：改走 references/deps.py 解析（内置副本 vendor/ 优先）。")
+                print("   确认要无视时加 --force-paths。")
+                sys.exit(3)
+            print("   ⚠️ --force-paths：已无视上述硬拦")
+
+    # ---------- 门禁 3：凭证泄漏扫描（工作区）----------
+    sc = _scan_secrets()
+    if sc is not None:
+        wsec = sc.scan_tree(SKILL_DIR)
+        print("🔍 凭证泄漏扫描（工作区）：%d 个文本文件，命中 %d 处（比对 %d 个本机凭证值）"
+              % (wsec["files"], len(wsec["hits"]), wsec.get("n_secrets", 0)))
+        if wsec["hits"]:
+            sc.report(wsec)
+            if not args.force_secrets:
+                print("\n❌ 工作区里有明文密钥/凭证文件，**拒绝发版**。")
+                print("   修法：把密钥移出仓库，改走环境变量或 ~/.项目模型/credentials/。")
+                print("   若确属误报（例如公开文档里的示例串）再考虑 --force-secrets。")
+                sys.exit(3)
+            print("   ⚠️ --force-secrets：已无视上述命中（**请确认那些密钥已作废**）")
+
+    # ========================================================================
+    # V2.2.3 重大修复：**先写版本号与 CHANGELOG、再打包**（原先反了）
+    #   原实现是「先打包 → 扫描 → 再写 VERSION/CHANGELOG」，注释里的理由是
+    #   「若包里有问题需要中断，先写后中断会留下『版本号已涨、却没有对应快照』的残局」。
+    #   但它的实际后果是：**每个 _versions/*.zip 里装的都是上一个版本的 VERSION 与 CHANGELOG**。
+    #   实测（2026-09-19）：`-V2.2.2-*.zip` 里 `VERSION` 写的是 `2.2.1`，
+    #   CHANGELOG 里**没有** V2.2.2 条目 ——
+    #     · 别人拿到的「安装包」版本号是错的；
+    #     · `rollback.py --to V2.2.2` 解回来的工作区 **VERSION 也变成 2.2.1** →
+    #       下次发版会从 2.2.1 再涨一次，**版本号重复**。
+    #   判据：**「先产出再改状态」和「先改状态再产出」的差别，就是「包里的版本对不对」。**
+    #     要防中断留残局，正确做法是**事务化**（失败就把状态改回去），
+    #     而不是**把产出建立在旧状态上**。
+    # ========================================================================
+    # ⚠ 本文件用的是 os.path（没 import pathlib）—— 别想当然用 Path，会 NameError。
+    old_version_text = (open(VERSION_FILE, encoding="utf-8").read()
+                        if os.path.exists(VERSION_FILE) else "")
+    old_changelog_text = (open(CHANGELOG, encoding="utf-8").read()
+                          if os.path.exists(CHANGELOG) else "")
+
+    def _abort_and_rollback(msg, zpath=None):
+        """发版中断：把 VERSION / CHANGELOG 改回去、删掉半成品包 —— 真正做到「当没发生过」。"""
+        try:
+            with open(VERSION_FILE, "w", encoding="utf-8") as f:
+                f.write(old_version_text)
+            with open(CHANGELOG, "w", encoding="utf-8") as f:
+                f.write(old_changelog_text)
+        except OSError as e:
+            print("   ⚠️ 回滚 VERSION/CHANGELOG 失败：%s（请手工确认这两个文件）" % e)
+        if zpath and os.path.exists(zpath):
+            os.remove(zpath)
+        print("\n" + msg)
+        print("   ↩ 已回滚：VERSION / CHANGELOG 恢复原状，半成品包已删除。")
+        sys.exit(3)
+
+    # 1) VERSION
+    with open(VERSION_FILE, "w", encoding="utf-8") as f:
+        f.write(new + "\n")
+    # 2) CHANGELOG
+    prepend_changelog(new, args.kind, args.project, args.summary,
+                      args.item, args.verify, today)
+
+    # 3) 交付物（单文件版 / 项目说明介绍页）—— **发版流程的产物，不是发版前手写的东西**。
+    #    它们的版本号/统计数字/版本历史表全部从实现取（见 tools/make_deliverables.py），
+    #    所以必须在 VERSION 与 CHANGELOG 写完之后刷新，否则又会「包里的说明书印着上一个版本」。
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        subprocess.run([sys.executable,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "make_deliverables.py")],
+                       check=True)
+    except Exception as e:                                    # noqa: BLE001
+        _abort_and_rollback("❌ 交付物刷新失败（%s: %s），已中断发版。"
+                            % (type(e).__name__, e))
+
+    # ---------- 打包（此时 VERSION / CHANGELOG / 交付物都已是新版本）----------
+    zpath, zn = make_snapshot(new, today)
+
+    # ---------- 门禁 1.7：包内版本必须与包名一致（V2.2.3 新增）----------
+    # 为什么放在「打包之后」：这是对**本次产物**的检查。
+    # （原先这条检查被我写进对抗测试里，去查「_versions/ 里最新的包」——
+    #  而本 bug 影响的是**所有历史包**，结果门禁永远打响、谁都没法发版。
+    #  判据：**检查器由对抗测试验证；对本次产物的检查，放在产出之后。**）
+    try:
+        sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "examples"))
+        import importlib
+        _tp = importlib.import_module("test_snapshot_package")
+        _probs = _tp.package_problems(zpath)
+    except Exception as e:                                    # noqa: BLE001
+        _probs = ["包内自洽性检查未能执行：%s: %s" % (type(e).__name__, e)]
+    print("🔍 包内自洽性：%s" % ("✅ 版本号与包名一致、CHANGELOG 含本条"
+                                if not _probs else "❌ " + "；".join(_probs)))
+    if _probs:
+        _abort_and_rollback("❌ 打出来的包**自己不自洽**（包里的说明书与实物对不上），中断发版。",
+                            zpath)
+
+    if sp is not None:
+        zres = sp.scan_zip(zpath)
+        zip_hard = [h for h in zres["hits"] if h["level"] == "硬拦"]
+        print("🔍 绝对路径扫描（包本体）：%s，硬拦 %d 处 / 软提示 %d 处"
+              % (os.path.basename(zpath), len(zip_hard),
+                 len([h for h in zres["hits"] if h["level"] == "软提示"])))
+        if zip_hard:
+            sp.report(zres)
+            if not args.force_paths:
+                _abort_and_rollback(
+                    "❌ 打好的包里发现硬编码本机路径，**中断发版**。\n"
+                    "   （工作区扫描没报、包里有 → 说明是扫描器与打包排除规则不一致，请查）",
+                    zpath)
+            os.remove(zpath)                 # 只扫不拦？那也把包删掉重打
+            zpath, zn = make_snapshot(new, today)
+            print("   ⚠️ --force-paths：已无视上述硬拦（包已重新保留）")
+
+    # ---------- 门禁 3：凭证泄漏扫描（包本体）----------
+    # 放在「打包之后」是必须的：工作区干净不等于**包里**干净 ——
+    # 打包排除规则一改（比如漏掉了某个 .bak），工作区扫不到的东西就可能进包。
+    # 所以两道都扫，且以「包本体」这一道为最终判据。
+    if sc is not None:
+        zsec = sc.scan_zip(zpath)
+        print("🔍 凭证泄漏扫描（包本体）：%s，命中 %d 处（比对 %d 个本机凭证值）"
+              % (os.path.basename(zpath), len(zsec["hits"]), zsec.get("n_secrets", 0)))
+        if zsec["hits"]:
+            sc.report(zsec)
+            if not args.force_secrets:
+                _abort_and_rollback(
+                    "❌ 打好的包里有密钥/凭证文件，**已把该包原地删除**并中断发版。\n"
+                    "   注意：旧包若已发出去，光改工作区不够 —— 请**作废那个密钥**再重打。",
+                    zpath)
+            print("   ⚠️ --force-secrets：已无视上述命中（**请确认那些密钥已作废**）")
+
+    print("\n✅ VERSION → %s" % new)
+    print("✅ CHANGELOG.md 已追加 V%s 条目" % new)
+    print("✅ 快照 %s（%d 个文件 · %.1f KB）" %
+          (os.path.basename(zpath), zn, os.path.getsize(zpath) / 1024.0))
+
+    # 4) git
+    if not args.no_git:
+        if not os.path.isdir(os.path.join(SKILL_DIR, ".git")):
+            git(["init", "-q"])
+            print("   git 仓库已初始化")
+        git(["add", "-A"])
+        msg = "V%s %s: %s" % (new, args.project, args.summary)
+        r = git(["commit", "-q", "-m", msg], check=False)
+        if r.returncode != 0:
+            print("   ⚠️ 提交失败（可能无改动）：%s" % (r.stdout + r.stderr).strip()[:200])
+        tag = "V%s" % new
+        t = git(["tag", tag], check=False)
+        if t.returncode == 0:
+            print("   ✅ git tag %s" % tag)
+        else:
+            print("   ⚠️ tag %s 已存在或创建失败" % tag)
+        head = git(["log", "-1", "--oneline"], check=False).stdout.strip()
+        print("   HEAD: %s" % head)
+
+    print("\n🎉 已发版 V%s。回退到任意历史版本：python tools/rollback.py --list / --to V1.3.1" % new)
+
+
+if __name__ == "__main__":
+    main()

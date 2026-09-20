@@ -1,0 +1,272 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""对抗测试 · V2.0.9「同一套业务枚举只能有一份定义」
+
+为什么必须有它（2026-09-18《橘子汽水味的夏天》第二集 · 阶段六实测）：
+  「哪些 beat type 算台词」这个枚举曾在四处各写一份，**三处一致、一处漂移**，
+  而漂移的恰好是**最终生成视频提示词**的那一份（batch_run_drama 的 LINE_KIND 漏了 `"line"`）。
+  后果是一整条失效链，而且**每一环都让上一环的报警哑掉**：
+
+    ① `type:"line"` 的台词被当动作输出 → 提示词里没有 `(SN) says: <d>[中文]…</d>`
+    ② 校验器因缺 `<d>` 整块跳过逐镜台词预算 → 「0 错误 0 警告」= 假安全
+    ③ 机检 S3 用「prompt 里识别到几行台词」反推「本段有没有台词」，
+       识别失败被解释成「本段无台词」→ S4 直接豁免（19/19 全绿）
+    ④ 只有段 5 因台词里恰好含「说"」二字才偶然揭开盖子
+
+  判据：**识别失败 ≠ 不存在。** 「有没有台词」必须问源数据（beats / dialogue），
+        不能问「我识别到了几行」—— 后者把「我没看懂」误报成「本来就没有」。
+
+本测试五条腿，每条都**先证明它在好的时候过、在坏的时候挂**：
+  A 表完整性 —— 每个 LINE_TYPE 都必须能映射到 kind（一条断言，就能拦住 V2.0.9）
+  B 端到端   —— 真的跑 gen_drama_prompt，断言真出 `says: <d>[`（只查表不算数）
+  C 反向证伪 —— 把表改坏（模拟 V2.0.9 前的代码）→ 断言 B 的判据**真的会挂**
+  D 假安全   —— 把好 prompt 里的台词行删掉（模拟老输出）→ 断言 S3/S4 **必须报错**
+                 （这条专门盯「识别失败被当成不存在」的复发）
+  E 容量口径 —— 关 4 与关 5 必须是同一个 max_chars 函数对象；关 4 必须**硬拦**超容段
+                 （这条盯「上游说合格、下游说超标」：20 段在关 4 全绿、
+                   到关 5 一次冒出 4 段超容，就是它没被盯住）
+
+C/D/E 是关键：没有它们，A/B 可能只是恒真的断言。
+「只跑一次现在干净」证明不了防护有效 —— 必须主动伪造事故，看它拦不拦。
+
+退出码：0 = 全通过；1 = 有断言失败
+"""
+import importlib.util
+import json
+import sys
+import tempfile
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+SKILL_DIR = HERE.parent
+REF_DIR = SKILL_DIR / "references"
+TOOLS_DIR = SKILL_DIR / "tools"
+
+FAIL = []          # (编号, 说明)
+NOTE = []          # 通过项的人类可读说明
+
+
+def ok(tag, cond, detail=""):
+    if cond:
+        NOTE.append("%s ✅ %s" % (tag, detail))
+    else:
+        FAIL.append("%s ❌ %s" % (tag, detail))
+    return bool(cond)
+
+
+def _load(path, name):
+    """按文件路径加载模块（不受文件名重复影响）"""
+    if str(path.parent) not in sys.path:
+        sys.path.insert(0, str(path.parent))
+    spec = importlib.util.spec_from_file_location(name, path)
+    mod = importlib.util.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)
+    return mod
+
+
+# ---------------------------------------------------------------- A 表完整性
+def leg_a(schema):
+    """每个 LINE_TYPE 都必须能映射到 kind。
+
+    这一条断言只有一行，却**正好命中 V2.0.9 的全部破坏力** ——
+    `"line"` 是最常用的默认类型，漏掉它等于漏掉全片的对白。
+    """
+    missing = [t for t in schema.LINE_TYPES if schema.line_kind_of(t) is None]
+    ok("A", not missing,
+       "LINE_TYPES 全部有 kind 映射（%d 个）" % len(schema.LINE_TYPES)
+       if not missing else "有 %d 个 LINE_TYPE 查不到 kind：%s" % (len(missing), missing))
+
+    # 反向：坏表必须能被这一条断言识别出来（否则 A 只是句废话）
+    broken = {k: v for k, v in schema.LINE_KIND.items() if k != "line"}
+    caught = [t for t in schema.LINE_TYPES if broken.get(t) is None]
+    ok("A'", "line" in caught,
+       "反向证伪：把 `\"line\"` 从表里删掉 → 断言确实会报 %s" % caught)
+
+
+# ---------------------------------------------------------------- B 端到端
+def _fixture(tmp):
+    """复用冒烟夹具（各测试各造一份迟早互相漂移，让结果没法解释）"""
+    smoke = _load(TOOLS_DIR / "smoke_pages.py", "_dap_smoke")
+    root = Path(tmp)
+    smoke.make_fixture(root)
+    sb = json.loads((root / "分镜脚本" / "storyboard.json").read_text(encoding="utf-8"))
+    return root, sb
+
+
+def _line_rows(prompt):
+    """提示词里**真正的台词行**（官方框架：行首 → 且带 <d>）"""
+    return [ln.strip() for ln in prompt.splitlines()
+            if ln.strip().startswith("→") and "<d>" in ln]
+
+
+def leg_b(batch, root, sb):
+    """真的跑提示词生成，断言台词行真的出来了。
+
+    只查表（A）不够 —— 表对了但生成路径没用到它，一样是错的。
+    这正是铁律 D2-c 说的：内容检查与可执行性检查是两条不能互相替代的出口。
+    """
+    seg = sb["segments"][1]                     # 双角色对话那段
+    prompt = batch.gen_drama_prompt(seg, False, project_root=str(root))
+    rows = _line_rows(prompt)
+    n_src = batch._count_line_beats(seg.get("beats")) or len(seg.get("dialogue") or [])
+
+    ok("B1", n_src > 0, "夹具段有 %d 句台词（源数据）" % n_src)
+    ok("B2", len(rows) == n_src,
+       "生成的台词行数 = 源数据句数（%d = %d）" % (len(rows), n_src))
+    ok("B3", bool(rows) and all("says:" in r for r in rows),
+       "每句都用了官方框架 `(SN) says: <d>[语言]…</d>`"
+       if rows else "**一行台词都没生成** —— 台词被当动作了（V2.0.9 症状）")
+    return prompt, seg
+
+
+# ---------------------------------------------------------------- C 反向证伪
+def leg_c(batch, root, sb):
+    """把表改坏 → B2/B3 的判据必须真的挂。
+
+    没有这一条，B 可能只是「恰好恒真」：万一 gen_drama_prompt 根本没用 LINE_KIND
+    而走了别的分支，B 照样全绿，我们就白测了。
+    """
+    seg = sb["segments"][1]
+    good_n = len(_line_rows(batch.gen_drama_prompt(seg, False, project_root=str(root))))
+
+    saved = batch._LINE_KIND
+    try:
+        # 精确复刻 V2.0.9 之前的表：其余九项都在，唯独没有 "line"
+        batch._LINE_KIND = {k: v for k, v in saved.items() if k != "line"}
+        bad_prompt = batch.gen_drama_prompt(seg, False, project_root=str(root))
+        bad_n = len(_line_rows(bad_prompt))
+    finally:
+        batch._LINE_KIND = saved
+
+    ok("C1", bad_n < good_n,
+       "反向证伪：表里删掉 `line` → 台词行 %d 行掉到 %d 行（判据确实有分辨力）"
+       % (good_n, bad_n))
+    ok("C2", len(_line_rows(batch.gen_drama_prompt(seg, False, project_root=str(root)))) == good_n,
+       "还原表后恢复正常（测试没有留下副作用）")
+
+
+# ---------------------------------------------------------------- D 假安全
+def leg_d(batch, root, prompt, seg):
+    """把好 prompt 里的台词行删掉 → S3/S4 必须报错，不许豁免。
+
+    这是 V2.0.9 最阴的一环：识别不到台词被解释成「本段无台词」，
+    于是 S4 直接豁免、19 段全绿。判据：**识别失败 ≠ 不存在。**
+    """
+    items = batch.audit_prompt_machine(seg, prompt, str(root))
+    by = {i["code"]: i for i in items["items"]}
+    if "S3" not in by or "S4" not in by:
+        ok("D0", False, "机检里没有 S3/S4（检查项改名了？）")
+        return
+    ok("D0", by["S3"]["pass"] and by["S4"]["pass"],
+       "好 prompt 下 S3/S4 均通过（S3=%s）" % by["S3"]["detail"][:46])
+
+    # 伪造 V2.0.9 的输出：台词行整块消失
+    stripped = "\n".join(ln for ln in prompt.splitlines()
+                         if not (ln.strip().startswith("→") and "<d>" in ln))
+    items2 = batch.audit_prompt_machine(seg, stripped, str(root))
+    by2 = {i["code"]: i for i in items2["items"]}
+    ok("D1", not by2["S3"]["pass"],
+       "反向证伪：台词行全删 → S3 **必须**报错（报的是：%s）"
+       % by2["S3"]["detail"][:60] if not by2["S3"]["pass"]
+       else "台词行全删了，S3 竟然还通过 —— 假安全回来了")
+    ok("D2", not by2["S4"]["pass"],
+       "反向证伪：台词行全删 → S4 **不再豁免**（%s）" % by2["S4"]["detail"][:60]
+       if not by2["S4"]["pass"] else "S4 又把它豁免成「本段无台词」了")
+    ok("D3", "本段无台词" not in by2["S4"]["detail"],
+       "源数据有台词时，S4 不许说「本段无台词」")
+
+
+# ---------------------------------------------------------------- E 容量规则
+def leg_e(schema, batch, check_mod, h3, tmp):
+    """V2.0.10：关 4 与关 5 必须用**同一个容量公式**，且关 4 必须**硬拦**超容段。
+
+    这一条盯的是「上游说合格、下游说超标」——实测 20 段在关 4 全绿、
+    到关 5 一次冒出 4 段超容，就是它没被盯住的结果。
+    """
+    # E0 同一个函数对象：两边不是 import 同一份，就迟早会漂移
+    ok("E0", batch._max_chars is schema.max_chars
+       and getattr(check_mod, "max_chars", None) is schema.max_chars,
+       "关 4 与关 5 引用的是**同一个** max_chars 函数对象（不是两份拷贝）")
+    # E0b 第三条副本（drama_to_h3 的 SEG_LINE_CAP）也必须落在同一公式上
+    ok("E0b", h3.seg_line_cap(schema.DUR_MAX) == schema.max_chars(schema.DUR_MAX),
+       "drama_to_h3.seg_line_cap(15s) = %d 与共享公式一致（旧硬编码是 62）"
+       % h3.seg_line_cap(schema.DUR_MAX))
+
+    # E1 关 4 必须**硬拦**超容（不是软提示、不是全片平均）
+    smoke = _load(TOOLS_DIR / "smoke_pages.py", "_dap_smoke_cap")
+    root = Path(tmp) / "cap"
+    smoke.make_fixture(root)
+    p = root / "分镜脚本" / "storyboard.json"
+    sb = json.loads(p.read_text(encoding="utf-8"))
+    seg = sb["segments"][0]
+    cap10 = schema.max_chars(10)
+    over = "字" * (cap10 + 5)
+    seg["dur"] = 10
+    seg["dialogue"] = [{"char_id": "char_01", "text": over}]
+    seg["narration"] = over
+    for b in seg["beats"]:
+        if b.get("type") == "line":
+            b["text"] = over
+    p.write_text(json.dumps(sb, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    _stats, hard, _soft, err = check_mod.check(str(root))
+    ok("E1", err is None, "关 4 机检能跑起来")
+    hit = [h for h in hard if "容量上限" in h]
+    ok("E1b", bool(hit),
+       "关 4 把「%d 字 > 上限 %d 字（10s）」判成**硬错误**（旧版只给全片软提示）"
+       % (len(over), cap10) if hit else
+       "关 4 没有硬拦超容段 —— 上游又在放行下游必拒的产物")
+
+    # E2 反向证伪：把同样字数放进 15s 段（容量 57）→ 硬错必须消失
+    #     没有这一条，E1b 可能只是「这条检查恒报错」
+    seg["dur"] = 15
+    p.write_text(json.dumps(sb, ensure_ascii=False, indent=2), encoding="utf-8")
+    _s2, hard2, _so2, _e2 = check_mod.check(str(root))
+    ok("E2", not [h for h in hard2 if "容量上限" in h],
+       "反向证伪：同样 %d 字放进 15s 段（上限 %d）→ 容量硬错消失（检查确实看时长）"
+       % (len(over), schema.max_chars(15)))
+
+    # E3 容量公式本身：两条铁律取更严的一条
+    ok("E3", schema.max_chars(5) == int(4.5 * min(5.17 - 1.2, 0.85 * 5.17))
+       and schema.max_chars(15) == int(4.5 * min(15.08 - 1.2, 0.85 * 15.08)),
+       "取更严的一条：5.17s→%d 字（反应余量更严）· 15.08s→%d 字（占比更严）"
+       % (schema.max_chars(5), schema.max_chars(15)))
+
+
+def main():
+    print("=" * 68)
+    print("对抗测试 · V2.0.9/D2-e 台词枚举单一来源 · V2.0.10/D2-f 约束松紧上下游一致")
+    print("（只跑一次「现在干净」证明不了防护有效 —— 这里主动伪造事故）")
+    print("=" * 68)
+
+    # 必须以 **drama_schema** 这个名字注册：后面三个消费方都写 `from drama_schema import ...`，
+    # 若这里换个别名加载，它们会各自再 import 一份 —— E0 的「同一个函数对象」就永远为假，
+    # 而那不是被测代码的问题，是测试自己造出来的假象。
+    schema = _load(REF_DIR / "drama_schema.py", "drama_schema")
+    batch = _load(REF_DIR / "batch_run_drama.py", "_dap_batch")
+    check_mod = _load(REF_DIR / "check_storyboard.py", "_dap_check")
+    h3 = _load(REF_DIR / "drama_to_h3_prompts.py", "_dap_h3")
+
+    with tempfile.TemporaryDirectory(prefix="dap_schema_") as tmp:
+        root, sb = _fixture(tmp)
+        leg_a(schema)
+        prompt, seg = leg_b(batch, root, sb)
+        leg_c(batch, root, sb)
+        leg_d(batch, root, prompt, seg)
+        leg_e(schema, batch, check_mod, h3, tmp)
+
+    for n in NOTE:
+        print("   " + n)
+    print("\n" + "=" * 68)
+    if FAIL:
+        for f in FAIL:
+            print("   " + f)
+        print("❌ 对抗测试未通过 —— 拒绝发版。")
+        sys.exit(1)
+    print("✅ 全部通过（%d 项断言）。" % len(NOTE))
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

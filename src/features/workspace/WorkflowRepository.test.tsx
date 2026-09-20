@@ -67,7 +67,7 @@ describe("WorkflowRepository", () => {
         onInsertComicDramaWorkflow={insertDrama}
       />,
     );
-    expect(screen.getByRole("heading", { name: "漫剧自动工作流" })).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "动漫短剧工作流 V2.3" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加漫剧自动工作流节点" }));
     expect(insertDrama).toHaveBeenCalledTimes(1);
     expect(insertKnowledge).not.toHaveBeenCalled();
@@ -210,7 +210,7 @@ describe("WorkflowRepository", () => {
     );
 
     expect(screen.getByRole("heading", { name: "知识教学视频导演 V2.4" })).toBeInTheDocument();
-    expect(screen.getByText(/只使用项目内已配置的供应商/)).toBeInTheDocument();
+    expect(screen.getByText(/使用项目内已配置的模型/)).toBeInTheDocument();
 
     const stages = screen.getByRole("list", { name: "知识教学视频自动工作流能力" });
     expect(within(stages).getAllByRole("listitem")).toHaveLength(4);

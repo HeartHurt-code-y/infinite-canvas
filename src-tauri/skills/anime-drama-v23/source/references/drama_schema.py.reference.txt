@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""drama_schema.py —— 全 skill 的**共享业务枚举与业务规则**（单一事实来源）
+
+【第一部分：业务枚举】为什么必须有它（V2.0.9，2026-09-18 实测致命缺陷）：
+
+  「哪些 beat type 算台词」这个枚举曾在**四个地方各写一份**：
+    · check_storyboard.py  的 LINE_TYPES
+    · apply_seg_edit.py    的 LINE_TYPES
+    · audit_html_builder.py 的页面 JS `const LINE_TYPES`
+    · batch_run_drama.py   的 LINE_KIND
+  前三份都含 `"line"`，**唯独 batch_run_drama 的 LINE_KIND 漏了它** ——
+  而它恰好是**最终生成视频提示词**的那一份。后果是一条完整的失效链：
+
+    ① `type: "line"` 的台词被当动作输出 → 提示词里没有
+       `(SN) says: <d>[中文]…</d>`，也没有 `<Audio N>` 引用
+    ② 校验器因缺 `<d>` **整块跳过逐镜台词预算** → 「0 错误 0 警告」= **假安全**
+    ③ 机检 S3 用「prompt 里识别到几行台词」反推「本段有没有台词」，
+       识别失败被解释成「本段无台词」→ **直接豁免**（19 段全绿）
+    ④ 靠段 5 的台词里恰好有「说"」二字才偶然揭开盖子
+
+  判据（与铁律 D2-d 同构）：**同一套业务枚举只能有一份定义，其余一律派生。**
+  「碰巧一致」不是设计；四份定义里的三份一致，说明不了任何问题。
+
+用法：其余模块一律 `from drama_schema import LINE_TYPES, LINE_KIND, line_kind_of`。
+
+【第二部分：时长 / 语速 / 台词容量规则】为什么也放这里（V2.0.10，同日 · 关 5 实测）：
+
+  同一条「一段能装多少字」的约束，在三个地方写了**三个不同版本**、给出**三种判定**：
+
+    · SKILL.md 铁律        ：`dur ≥ 字数 ÷ 4.5 + 1.2s`（15s 段 → 上限 ≈62 字）
+    · drama_to_h3_prompts  ：`SEG_LINE_CAP = 62`（同上，硬编码一份副本）
+    · 关 5 机检 S6         ：`字数 ÷ 4.5 ÷ 对齐时长 ≤ 85%`（15s 段 → 上限 ≈57 字）
+
+  于是同一个项目里，**上游说合格、下游说超标**：
+  关 4 的 check_storyboard 只把「语速占比 >85%」当**软提示**（S()），
+  而且算的是**全片平均**占比 —— 单段塞爆被平均值抹平；
+  到关 5 才被 S6 按**逐段硬门禁**拦下，一次冒出 4 段。
+  这就是「一条约束，上游软、下游硬」的必然结果：**上游一定会放行一批下游必拒的产物。**
+
+  判据（V2.0.10，与 D2-d「派生值单点产出」同为单一来源原则，但方向相反）：
+    **下游是硬门禁的约束，上游不许降级成软提示；同一条约束的松紧必须上下游一致。**
+    校验器发现的约束，必须**回流**成生成器（切段）的约束 ——
+    否则每次都在下游重新发现同一个错误，只是把返工推后。
+
+  所以容量公式在这里定死一次，三个消费方全部 import，禁止再抄第二份。
+"""
+import math as _math
+import sys as _sys
+from pathlib import Path as _Path
+
+# 让「从其它目录被 importlib 加载」的调用方也能找到本模块
+_HERE = str(_Path(__file__).resolve().parent)
+if _HERE not in _sys.path:
+    _sys.path.insert(0, _HERE)
+
+# ---- 台词类 beat type（判断「这一拍是不是有台词」的唯一依据）----
+LINE_TYPES = ("line", "line_offscreen", "inner", "together", "sing")
+
+# ---- beat type → line_beat 的 kind ----
+# kind: line / offscreen（画外音）/ inner（内心独白）/ narrator（旁白）
+#       / together（齐说）/ sing（唱）
+# 只收录**语义明确表示有声源**的类型；宁可少收，不要把动作误判成台词。
+LINE_KIND = {
+    "line": "line",                 # ★ 最常用的默认类型 —— 曾在这里漏掉，酿成上述失效链
+    "dialogue": "line",
+    "say": "line",
+    "line_offscreen": "offscreen",
+    "offscreen": "offscreen",
+    "inner": "inner",
+    "narration": "narrator",
+    "narrator": "narrator",
+    "together": "together",
+    "chorus": "together",
+    "sing": "sing",
+}
+
+
+def is_line_type(t):
+    """这个 beat type 是否算台词"""
+    return str(t or "").lower() in LINE_TYPES
+
+
+def line_kind_of(t):
+    """beat type → kind；不是台词类返回 None"""
+    return LINE_KIND.get(str(t or "").lower())
+
+
+def is_line_beat(b):
+    """这条 beat 是否是一条台词"""
+    return isinstance(b, dict) and is_line_type(b.get("type"))
+
+
+def count_line_beats(beats):
+    """源数据里到底有几句台词（用于「有台词却没生成台词行」的对比，
+    不能拿「prompt 里识别到几行」反推有无台词 —— 那正是 V2.0.9 的假安全来源）"""
+    if not isinstance(beats, list):
+        return 0
+    return sum(1 for b in beats if is_line_beat(b) and str(b.get("text") or "").strip())
+
+
+# ============================================================================
+# 第二部分：时长对齐 / 语速 / 台词容量（V2.0.10）
+# 这三个函数必须被 关4机检 / 关5机检 / 提示词生成 三处**共用同一份**。
+# ============================================================================
+
+# ---- R39 · 17 帧对齐 ----
+# 工作流 nodeId=250（ComfyMathExpression）把请求时长吸附到 17 帧网格。
+# 实测对照表（2026-09-15 固化）——台词预算 / 镜数一律按「对齐后实际时长」算，不按请求值。
+# ⚠ 这张表原先在 batch_run_drama.py 与 drama_to_h3_prompts.py 各存一份（两份恰好一致）。
+FRAME_STEP = 17
+FRAME_ALIGN = {5: 5.17, 8: 8.00, 9: 9.42, 10: 10.13, 12: 12.25}
+
+
+def align_duration(dur):
+    """R39 · 请求时长 → 17 帧对齐后的实际时长（秒）。表内直取，表外按官方公式算。
+
+    公式：max(5, round(a*24)) + (5 - (max(5, round(a*24)) % 17)) % 17  （帧 /24）
+    """
+    try:
+        d = int(round(float(dur)))
+    except (TypeError, ValueError):
+        return float(dur or 0)
+    if d in FRAME_ALIGN:
+        return FRAME_ALIGN[d]
+    frames = max(5, int(round(d * 24)))
+    frames = frames + (5 - (frames % FRAME_STEP)) % FRAME_STEP
+    return round(frames / 24.0, 2)
+
+
+# ---- R36 · 语速基准按语言切（中文 4.5 字/秒 / 日语 7.0 モーラ/秒 / 英语 2.5 词/秒）----
+CPS_BY_LANG = {
+    "中文": 4.5, "Chinese": 4.5, "chinese": 4.5, "普通话": 4.5, "Mandarin": 4.5,
+    "日语": 7.0, "Japanese": 7.0, "japanese": 7.0, "日本語": 7.0,
+    "英语": 2.5, "English": 2.5, "english": 2.5,
+}
+DEFAULT_CPS = 4.5
+
+# ---- 单段时长硬区间（铁律 B2）----
+DUR_MIN, DUR_MAX = 4, 15
+
+# ---- 台词容量：两条铁律取**更严**的那条 ----
+REACT_RESERVE_SEC = 1.2   # SKILL.md 铁律：单段必须留 ≥1.2s 给动作与反应
+OCCUPY_MAX = 0.85         # 铁律 S6 / R37：段内台词占比 ≤85%（过高说明该拆段，不是该加速）
+
+
+def cps_of(lang="中文"):
+    """语速基准（字或モーラ每秒）"""
+    return CPS_BY_LANG.get(str(lang or "中文"), DEFAULT_CPS)
+
+
+def max_chars(dur, cps=DEFAULT_CPS, reserve=True):
+    """本段**最多**能装多少字（按 17 帧对齐后的实际时长算）。
+
+    取两条铁律里更严的一条：
+      · `dur - 1.2s`（留反应余量）—— 短段（<8s）时更严
+      · `0.85 × dur`（S6 占比上限）—— 长段（>8s）时更严
+    只取其中一条都会漏：只留 1.2s 会放过「15s 段塞 62 字」（占比 91%）;
+    只看 85% 会放过「5s 段塞 19 字」（只剩 0.77s 反应余量）。
+
+    ★ 这个函数就是关 4 切段时该用的约束 —— 校验器发现的约束必须回流成生成约束。
+    """
+    a = align_duration(dur)
+    if not a:
+        return 0
+    budget = min(a - REACT_RESERVE_SEC, OCCUPY_MAX * a) if reserve else OCCUPY_MAX * a
+    return int(_math.floor(max(0.0, cps * budget)))
+
+
+def occupy_pct(nchar, dur, cps=DEFAULT_CPS):
+    """段内台词占比（%），按 17 帧对齐后的实际时长算 —— 与 S6 同一口径"""
+    a = align_duration(dur)
+    return (nchar / cps / a * 100.0) if a else 0.0
+
+
+def over_capacity(nchar, dur, cps=DEFAULT_CPS):
+    """超容返回 (超了几字, 上限, 对齐时长)；不超返回 None。三处口径必须一致。"""
+    cap = max_chars(dur, cps)
+    if nchar > cap:
+        return (nchar - cap, cap, align_duration(dur))
+    return None

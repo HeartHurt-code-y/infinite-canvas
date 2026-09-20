@@ -1,0 +1,77 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+改造 RH B2 工作流：支持多参考图（最多 9 张）+ 多音色（最多 3 个）
+
+⚠️ 上限口径（2026-09-15 用户明确）：
+   9 张 = **H3 模型硬上限**（槽位就开到 9）；
+   5 张 = **使用建议**，不是限制 —— 参考图塞太多模型处理不了、彼此干扰，
+   所以提示词规范里写「建议 ≤5」。分镜真需要 6~9 张时（多人同框）走 max_char_refs 显式放行。
+输入：原 workflow JSON
+输出：改造版 workflow JSON
+
+策略：
+- 原节点 326 (LoadImage) → ref_image_0（保留）
+- 新增节点 1326~1333 (LoadImage) → ref_image_1...8（共 9 图槽）
+- 原节点 340 (LoadAudio) → ref_audio_0（保留）
+- 新增节点 1340/1341 (LoadAudio) → ref_audio_1/2
+- 改 265 (MiniMaxH3ReferenceToVideo) 的 inputs，挂全部参考
+"""
+import json
+import sys
+from pathlib import Path
+
+
+def build_multi_ref_workflow(orig_wf_path, out_path,
+                              num_images=9, num_audios=3):
+    wf = json.load(open(orig_wf_path, encoding="utf-8"))
+
+    # 原节点
+    ORIG_IMG = "326"   # LoadImage → ref_image_0
+    ORIG_AUD = "340"   # LoadAudio → ref_audio_0
+    CORE = "265"       # MiniMaxH3ReferenceToVideo
+
+    # 模板：复制原 LoadImage / LoadAudio 节点结构
+    img_template = wf[ORIG_IMG]
+    aud_template = wf[ORIG_AUD]
+
+    # 新增 LoadImage 节点（ref_image_1 ~ ref_image_{num_images-1}）
+    new_img_ids = []
+    for i in range(1, num_images):
+        new_id = str(1326 + i - 1)  # 1326 .. 1333（9 图槽时的最大 id）
+        wf[new_id] = json.loads(json.dumps(img_template))
+        new_img_ids.append((i, new_id))
+
+    # 新增 LoadAudio 节点（ref_audio_1 ~ ref_audio_{num_audios-1}）
+    new_aud_ids = []
+    for i in range(1, num_audios):
+        new_id = str(1340 + i - 1)  # 1340, 1341
+        wf[new_id] = json.loads(json.dumps(aud_template))
+        new_aud_ids.append((i, new_id))
+
+    # 改 MiniMaxH3ReferenceToVideo 的 inputs
+    core_inputs = wf[CORE].setdefault("inputs", {})
+    # 保留 ref_image_0 / ref_audio_0（原样）
+    # 加 ref_image_1 ~ ref_image_{num_images-1}
+    for i, nid in new_img_ids:
+        core_inputs[f"ref_images.ref_image_{i}"] = [nid, 0]
+    for i, nid in new_aud_ids:
+        core_inputs[f"ref_audios.ref_audio_{i}"] = [nid, 0]
+
+    json.dump(wf, open(out_path, "w", encoding="utf-8"), ensure_ascii=False, indent=2)
+    print(f"✅ 改造版工作流已保存: {out_path}")
+    print(f"   参考图节点: {ORIG_IMG} (ref_image_0) + {[nid for _, nid in new_img_ids]}")
+    print(f"   音色节点: {ORIG_AUD} (ref_audio_0) + {[nid for _, nid in new_aud_ids]}")
+    print(f"   总节点数: {len(wf)}")
+
+
+if __name__ == "__main__":
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--orig", required=True, help="原 workflow JSON")
+    ap.add_argument("--out", required=True, help="输出改造版 JSON")
+    ap.add_argument("--num-images", type=int, default=9,
+                    help="参考图槽位数（默认 9 = H3 模型硬上限）")
+    ap.add_argument("--num-audios", type=int, default=3)
+    args = ap.parse_args()
+    build_multi_ref_workflow(args.orig, args.out, args.num_images, args.num_audios)

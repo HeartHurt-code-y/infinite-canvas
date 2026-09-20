@@ -1,0 +1,357 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""check_storyboard.py —— 阶段五 storyboard.json 机检（关 4 的「Agent 独立审」那一半）
+
+为什么需要它：铁律 D1 要求「双关审 = Agent 独立审 + 人工 HTML 审」，
+但阶段五原本**只有人工 HTML 页**，Agent 那一半全靠肉眼 —— 肉眼漏了就漏了
+（V2.0.2 的「班主任人脸被切」就是这么漏的）。
+
+本脚本只做**能确定性判定**的事，不做审美判断：
+  1. 结构：23 个必填字段齐全、acting 七字段非空、seq 与下标一致
+  2. 时长：每段落在铁律 B2 硬区间 [4, 15] 秒；总时长与声明一致
+  3. 台词一致性：dialogue 与 beats 里的 line 逐条必须相等
+     —— 不一致的后果是「用户审的台词」和「模型听到的台词」是两份
+  4. 说话人在场：每段说话人必须出现在该段 on_screen_char_ids 里
+  5. 场景纪律（铁律 D24）：换场景的那一段 link 必须是 origin
+  6. 群众标记：教室/食堂/街道等天然含人的场景，crowd 必须为 true，
+     否则铁律 A3/A5 的背景虚化约束不会注入 → 群众穿深色西装抢戏。
+     **若这一段画面里确实没有别人，必须写 `crowd_note` 说明原因** ——
+     脚本不替人决定「这里该不该有人」，只要求「这个决定被写下来」。
+     （V2.0.4：原先命中关键词就硬拦，在「走廊尽头背光墙角」上误报 4 条；
+     按判据「误报也是故障」改成「要求显式记录判断」。）
+  7. 索引有效：scene_id / on_screen_char_ids / prop_ids 必须真实存在
+  8. 密度提示（软）：**全片**语速占比过低或过高只给提示，不拦
+
+  2b. 台词容量（硬 · V2.0.10 新增）：
+     **逐段**算 `字数 ≤ drama_schema.max_chars(dur)`，超了直接算硬错误。
+     为什么必须硬、必须逐段：
+       · 同一条约束在关 5 机检 S6 是**逐段硬门禁**，在这里却是**全片软提示**，
+         而且算的是全片平均占比 —— 单段塞爆会被平均值抹平。
+         后果是必然的：**上游放行一批下游必拒的产物**，返工只是被推后。
+         （实测：20 段在关 4「全绿」，到关 5 一次冒出 4 段超容。）
+       · 判据：下游是硬门禁的约束，上游不许降级成软提示；
+              校验器发现的约束必须**回流**成切段时的约束。
+     容量公式（取更严的那条）：`min(dur-1.2s, 0.85×dur) × 语速`
+       —— 只留 1.2s 会放过「15s 段塞 62 字」（占比 91%）；
+          只看 85% 会放过「5s 段塞 19 字」（只剩 0.77s 反应余量）。
+
+退出码：0 = 全过（可能有软提示）；2 = 有硬错误；3 = 文件读不到 / 格式不对
+
+用法：
+  python references/check_storyboard.py --project-root <项目根>
+  python references/check_storyboard.py --project-root <项目根> --json out.json
+"""
+import argparse
+import json
+import sys
+from pathlib import Path
+
+# V2.0.9：业务枚举统一从 drama_schema 取（单一事实来源）。
+# 原先本文件与 batch_run_drama.py 各自定义一份「哪些 type 算台词」，
+# 后者漏了 "line" → 台词被当动作。四份定义里的三份一致说明不了任何问题。
+from drama_schema import LINE_TYPES  # noqa: E402
+# V2.0.10：时长对齐 / 语速 / 台词容量统一从 drama_schema 取 ——
+# 关 4 与关 5 必须用**同一套公式**，否则「上游说合格、下游说超标」是必然结果。
+from drama_schema import align_duration, cps_of, max_chars, occupy_pct  # noqa: E402
+
+# ---- 规范常量 ----
+REQUIRED_FIELDS = [
+    "shot_id", "seq", "kw", "mood_zh", "dur", "speaker_char_id",
+    "on_screen_char_ids", "scene_id", "prop_ids", "narration", "dialogue",
+    "beats", "ending_zh", "costume_notes", "crowd",
+    "camera_lock", "camera_lock_zh", "action", "action_zh",
+    "link", "soundscape", "soundscape_zh", "acting",
+]
+ACTING_FIELDS = ["goal", "obstacle", "tactic", "beat_change",
+                 "subtext", "physical_task", "eye_detail"]
+DUR_MIN, DUR_MAX = 4, 15          # 铁律 B2
+VALID_LINKS = ("origin", "tailframe", "dualref")
+BEAT_TYPES = ("action", "line", "line_offscreen", "inner",
+              "narration", "together", "sing")
+# LINE_TYPES 见文件头导入（单一事实来源：references/drama_schema.py）
+# 天然含群众的场景关键词（命中就要求 crowd=true）
+CROWD_HINTS = ("教室", "食堂", "走廊", "操场", "图书馆", "礼堂", "大厅", "街道", "车站")
+
+
+def load_storyboard(project_root):
+    p = Path(project_root) / "分镜脚本" / "storyboard.json"
+    if not p.exists():
+        return None, None, "找不到 %s" % p
+    try:
+        return json.loads(p.read_text(encoding="utf-8")), p, None
+    except Exception as e:
+        return None, p, "storyboard.json 解析失败：%s" % e
+
+
+def scan_assets(project_root):
+    """扫出真实存在的 char_/scene_/prop_ 目录 id"""
+    root = Path(project_root)
+    ids = {"char": set(), "scene": set(), "prop": set()}
+    for kind, sub in (("char", "角色资产"), ("scene", "场景资产"), ("prop", "道具资产")):
+        d = root / sub
+        if d.exists():
+            for x in d.glob("%s_*" % kind):
+                if x.is_dir():
+                    parts = x.name.split("_")
+                    ids[kind].add("_".join(parts[:2]))
+    return ids
+
+
+def check(project_root, verbose=True):
+    hard, soft = [], []
+
+    def H(msg):
+        hard.append(msg)
+
+    def S(msg):
+        soft.append(msg)
+
+    sb, p, err = load_storyboard(project_root)
+    if err:
+        return None, [], [], err
+    segs = sb.get("segments") or []
+    if not segs:
+        return sb, [], [], "storyboard.json 里没有 segments"
+
+    ids = scan_assets(project_root)
+
+    # ---- 1. 结构 ----
+    for i, s in enumerate(segs, 1):
+        tag = "段 %s" % s.get("seq", i)
+        if s.get("seq") != i:
+            H("%s：seq=%r 与位置 %d 不一致（seq 必须连续从 1 开始）"
+              % (tag, s.get("seq"), i))
+        for k in REQUIRED_FIELDS:
+            if k not in s:
+                H("%s：缺字段 %s" % (tag, k))
+        act = s.get("acting") or {}
+        for k in ACTING_FIELDS:
+            if not act.get(k):
+                H("%s：acting.%s 为空（表演设计七字段必填，铁律 5.0）" % (tag, k))
+        if not s.get("shot_id"):
+            H("%s：shot_id 为空" % tag)
+
+    # ---- 2. 时长 ----
+    for s in segs:
+        d = s.get("dur")
+        tag = "段 %s(%s)" % (s.get("seq"), s.get("kw"))
+        if not isinstance(d, int):
+            H("%s：dur=%r 不是整数" % (tag, d))
+        elif not (DUR_MIN <= d <= DUR_MAX):
+            H("%s：dur=%ss 超出铁律 B2 硬区间 [%d, %d]"
+              % (tag, d, DUR_MIN, DUR_MAX))
+    total = sum(s.get("dur", 0) for s in segs if isinstance(s.get("dur"), int))
+    if sb.get("segment_count") not in (None, len(segs)):
+        H("segment_count=%r 与实际 %d 段不符" % (sb.get("segment_count"), len(segs)))
+    if sb.get("total_duration_sec") not in (None, total):
+        H("total_duration_sec=%r 与逐段求和 %d 不符"
+          % (sb.get("total_duration_sec"), total))
+
+    # ---- 2b. 台词容量（逐段硬检查 · V2.0.10）----
+    # 与关 5 机检 S6 共用 drama_schema.max_chars()：同一套公式、同一条松紧。
+    for s in segs:
+        d = s.get("dur")
+        if not isinstance(d, int):
+            continue                        # 时长本身不合法，第 2 节已报
+        tag = "段 %s(%s)" % (s.get("seq"), s.get("kw"))
+        nchar = sum(len(x.get("text", "")) for x in (s.get("dialogue") or [])
+                    if isinstance(x, dict))
+        cps = cps_of(s.get("dialogue_language") or "中文")
+        cap = max_chars(d, cps)
+        if nchar > cap:
+            a = align_duration(d)
+            H("%s：台词 %d 字 > 容量上限 %d 字（%ds → 对齐 %gs，占比 %.0f%%）\n"
+              "      → 这句在 %gs 里**说不完/没有留白余量**。改法只有两条：\n"
+              "        · 拆段：把这一段的台词分到两段（一段一个反应拍，最稳）\n"
+              "        · 压台词：删掉可省的套话（不要靠加速——模型不会听你的）\n"
+              "      ⚠ 关 5 机检 S6 会用**同一个上限**再拦一次，这里不拦等于把返工推后"
+              % (tag, nchar, cap, d, a, occupy_pct(nchar, d, cps), a))
+
+    # ---- 3. 台词一致性 + 4. 说话人在场 + 7. 索引有效 ----
+    for s in segs:
+        seq = s.get("seq")
+        tag = "段 %s(%s)" % (seq, s.get("kw"))
+        dlg = s.get("dialogue") or []
+        if not dlg:
+            S("%s：无台词（纯动作/空镜段，确认是有意为之）" % tag)
+        d = [(x.get("char_id"), x.get("text")) for x in dlg if isinstance(x, dict)]
+        b = [(x.get("char_id"), x.get("text")) for x in (s.get("beats") or [])
+             if isinstance(x, dict) and x.get("type") in LINE_TYPES]
+        if d != b:
+            H("%s：dialogue 与 beats 里的台词不一致\n"
+              "      dialogue = %s\n"
+              "      beats    = %s\n"
+              "      → 用户审的台词与模型听到的台词会变成两份" % (tag, d, b))
+
+        onscreen = set(s.get("on_screen_char_ids") or [])
+        for cid, _ in d:
+            if cid and cid not in onscreen:
+                H("%s：说话人 %s 不在 on_screen_char_ids 里（谁会对着画面外的人说这句话？）"
+                  % (tag, cid))
+        cid = s.get("speaker_char_id")
+        if cid and cid not in onscreen:
+            H("%s：speaker_char_id=%s 不在 on_screen_char_ids 里" % (tag, cid))
+
+        for c in onscreen:
+            if ids["char"] and c not in ids["char"]:
+                H("%s：on_screen 里的 %s 没有对应角色资产目录" % (tag, c))
+        sid = s.get("scene_id")
+        if sid and ids["scene"] and sid not in ids["scene"]:
+            H("%s：scene_id=%s 没有对应场景资产目录" % (tag, sid))
+        for pid in (s.get("prop_ids") or []):
+            if ids["prop"] and pid not in ids["prop"]:
+                H("%s：prop_ids 里的 %s 没有对应道具资产目录" % (tag, pid))
+
+        # beats 类型合法性 + action 必须有 zh
+        for j, x in enumerate(s.get("beats") or [], 1):
+            if not isinstance(x, dict):
+                H("%s：beats[%d] 不是对象" % (tag, j))
+                continue
+            t = x.get("type")
+            if t not in BEAT_TYPES:
+                H("%s：beats[%d].type=%r 不是合法节拍类型 %s" % (tag, j, t, BEAT_TYPES))
+            if t == "action" and not (x.get("zh") or x.get("en")):
+                H("%s：beats[%d] 是 action 但没有 zh/en 文本" % (tag, j))
+            if t in LINE_TYPES and not x.get("text"):
+                H("%s：beats[%d] 是 %s 但没有 text" % (tag, j, t))
+
+    # ---- 5. 场景纪律：换场景必须 origin ----
+    prev = None
+    for s in segs:
+        tag = "段 %s(%s)" % (s.get("seq"), s.get("kw"))
+        link = s.get("link")
+        if link not in VALID_LINKS:
+            H("%s：link=%r 不是 %s 之一" % (tag, link, VALID_LINKS))
+        if prev is not None and s.get("scene_id") != prev:
+            if link != "origin":
+                H("%s：场景从 %s 切到 %s，link 必须是 origin（铁律 D24：一段一场景，"
+                  "跨场景用尾帧接力会把上一个场景的光与陈设带进来）"
+                  % (tag, prev, s.get("scene_id")))
+        prev = s.get("scene_id")
+    if segs and segs[0].get("link") != "origin":
+        S("段 %s：全片首段建议 link=origin" % segs[0].get("seq"))
+
+    # ---- 6. 群众标记 ----
+    # V2.0.4 修订：原先命中场景关键词就硬拦，实测在「走廊尽头背光墙角」上误报 4 条
+    # （3B 是空走廊的戏，本就不该有群众）。按判据「误报也是故障」改成：
+    # 命中关键词但 crowd≠true 时，**要求作者写 crowd_note 记录判断**。
+    # 脚本不替人决定「这里该不该有人」，只要求「这个决定被写下来」。
+    scene_name = {}
+    root = Path(project_root) / "场景资产"
+    if root.exists():
+        for d in root.glob("scene_*"):
+            if d.is_dir():
+                parts = d.name.split("_")
+                scene_name["_".join(parts[:2])] = d.name
+    for s in segs:
+        tag = "段 %s(%s)" % (s.get("seq"), s.get("kw"))
+        nm = scene_name.get(s.get("scene_id"), "") + str(s.get("scene_id"))
+        if not any(h in nm for h in CROWD_HINTS):
+            continue
+        if s.get("crowd"):
+            continue
+        note = s.get("crowd_note")
+        if not note:
+            H("%s：场景「%s」天然含人，但 crowd 不是 true —— 要么把 crowd 改成 true"
+              "（铁律 A3/A5 才会注入背景虚化 +「群众不穿深色西装」约束），"
+              "要么写 crowd_note 说明为什么这一段画面里没有别人（例如「走廊尽头背光墙角，"
+              "课间人都在教室里」）" % (tag, nm))
+        else:
+            S("%s：场景含人但声明无群众 —— 理由：%s" % (tag, note))
+
+    # ---- 8. 密度提示（软 · **全片**口径）----
+    # ⚠ 这里只做「整部片子节奏松不松」的观感提示，**不是容量门禁** ——
+    #   容量门禁在上面第 2b 节，逐段、硬、与关 5 的 S6 同一公式。
+    #   曾经这里兼作容量检查（全片平均、只给提示）→ 单段塞爆被平均值抹平，
+    #   20 段在关 4 全绿、到关 5 冒出 4 段超容。这是 V2.0.10 的由来。
+    chars = sum(len(x.get("text", "")) for s in segs for x in (s.get("dialogue") or [])
+                if isinstance(x, dict))
+    speech = chars / 4.5
+    if total:
+        ratio = speech / total
+        if ratio < 0.35:
+            S("全片语速占比仅 %.0f%%（%d 字 / %ds）——台词偏少，确认不是动作段灌水"
+              % (ratio * 100, chars, total))
+        elif ratio > 0.85:
+            S("全片语速占比 %.0f%%（%d 字 / %ds）——整片排得偏满"
+              % (ratio * 100, chars, total))
+
+    stats = {
+        "segments": len(segs),
+        "total_duration_sec": total,
+        "mean_duration_sec": round(total / len(segs), 2) if segs else 0,
+        "dialogue_chars": chars,
+        "speech_ratio": round(speech / total, 3) if total else 0,
+        "per_scene": {},
+        "links": {},
+    }
+    for s in segs:
+        stats["per_scene"][s.get("scene_id")] = stats["per_scene"].get(s.get("scene_id"), 0) + 1
+    for s in segs:
+        stats["links"][s.get("link")] = stats["links"].get(s.get("link"), 0) + 1
+    return stats, hard, soft, None
+
+
+def main():
+    ap = argparse.ArgumentParser(description="storyboard.json 机检（关 4 的 Agent 独立审）")
+    ap.add_argument("--project-root", required=True)
+    ap.add_argument("--json", help="把结果另存为 json")
+    args = ap.parse_args()
+
+    stats, hard, soft, err = check(args.project_root)
+    if err:
+        print("❌ %s" % err)
+        sys.exit(3)
+
+    print("=" * 68)
+    print("storyboard.json 机检 · 关 4 Agent 独立审")
+    print("=" * 68)
+    print("段数 %d · 总时长 %ds · 均长 %.2fs · 台词 %d 字 · 语速占比 %.0f%%"
+          % (stats["segments"], stats["total_duration_sec"], stats["mean_duration_sec"],
+             stats["dialogue_chars"], stats["speech_ratio"] * 100))
+    print("每场景段数 %s" % stats["per_scene"])
+    print("衔接分布   %s" % stats["links"])
+    print("-" * 68)
+
+    g1 = ["结构（23 必填字段 + acting 七字段 + seq 连续）",
+          "时长（铁律 B2 每段 [4,15] 秒 + 总时长自洽）",
+          "台词容量（逐段 字数 ≤ 上限，与关 5 的 S6 同一公式 · V2.0.10）",
+          "台词一致性（dialogue ↔ beats 逐条相等）",
+          "说话人在场（说话人必在该段 on_screen 内）",
+          "索引有效（char_/scene_/prop_ id 都有对应资产目录）",
+          "场景纪律（换场景必须 origin，铁律 D24）",
+          "群众标记（含人场景必须 crowd=true，铁律 A3/A5）",
+          "节拍结构（type 合法 + action 有 zh + line 有 text）"]
+    print("✅ 已通过的 9 组硬检查：")
+    for g in g1:
+        print("   · %s" % g)
+    print("-" * 68)
+
+    if hard:
+        print("❌ 硬错误 %d 条：" % len(hard))
+        for i, m in enumerate(hard, 1):
+            print("  %2d. %s" % (i, m))
+    else:
+        print("✅ 硬检查全过，0 条错误")
+
+    if soft:
+        print("\n⚠️ 软提示 %d 条（不拦，请确认是有意为之）：" % len(soft))
+        for i, m in enumerate(soft, 1):
+            print("  %2d. %s" % (i, m))
+
+    if args.json:
+        Path(args.json).write_text(json.dumps(
+            {"stats": stats, "hard": hard, "soft": soft},
+            ensure_ascii=False, indent=2), encoding="utf-8")
+        print("\n结果已写入 %s" % args.json)
+
+    print("=" * 68)
+    if hard:
+        print("结论：❌ 不通过 —— 修完再送给用户审（关 4 不过就进不了阶段六）")
+        sys.exit(2)
+    print("结论：✅ 机检通过 —— 可以生成 04 审核页交给用户人工审")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

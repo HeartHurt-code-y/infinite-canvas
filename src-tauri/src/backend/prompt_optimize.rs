@@ -141,6 +141,14 @@ pub enum PromptOptimizationMode {
     AiFilmPrompts,
     #[serde(rename = "ai_film_qc")]
     AiFilmQc,
+    #[serde(rename = "comic_drama_screenplay")]
+    ComicDramaScreenplay,
+    #[serde(rename = "comic_drama_style")]
+    ComicDramaStyle,
+    #[serde(rename = "comic_drama_screenplay_review")]
+    ComicDramaScreenplayReview,
+    #[serde(rename = "comic_drama_style_review")]
+    ComicDramaStyleReview,
     #[serde(rename = "comic_drama_director")]
     ComicDramaDirector,
     #[serde(rename = "comic_drama_art")]
@@ -222,6 +230,10 @@ impl PromptOptimizationMode {
             Self::AiFilmActing => "ai_film_acting",
             Self::AiFilmPrompts => "ai_film_prompts",
             Self::AiFilmQc => "ai_film_qc",
+            Self::ComicDramaScreenplay => "comic_drama_screenplay",
+            Self::ComicDramaStyle => "comic_drama_style",
+            Self::ComicDramaScreenplayReview => "comic_drama_screenplay_review",
+            Self::ComicDramaStyleReview => "comic_drama_style_review",
             Self::ComicDramaDirector => "comic_drama_director",
             Self::ComicDramaArt => "comic_drama_art",
             Self::ComicDramaStoryboard => "comic_drama_storyboard",
@@ -276,6 +288,10 @@ impl PromptOptimizationMode {
             Self::AiFilmActing => "builtin://ai-film-workflow/acting",
             Self::AiFilmPrompts => "builtin://ai-film-workflow/prompts",
             Self::AiFilmQc => "builtin://ai-film-workflow/qc",
+            Self::ComicDramaScreenplay => "builtin://comic-drama-workflow/screenplay",
+            Self::ComicDramaStyle => "builtin://comic-drama-workflow/style",
+            Self::ComicDramaScreenplayReview => "builtin://comic-drama-workflow/screenplay-review",
+            Self::ComicDramaStyleReview => "builtin://comic-drama-workflow/style-review",
             Self::ComicDramaDirector => "builtin://comic-drama-workflow/director",
             Self::ComicDramaArt => "builtin://comic-drama-workflow/art",
             Self::ComicDramaStoryboard => "builtin://comic-drama-workflow/storyboard",
@@ -318,6 +334,8 @@ impl PromptOptimizationMode {
 
     fn comic_drama_stage(self) -> Option<&'static str> {
         match self {
+            Self::ComicDramaScreenplay => Some("screenplay"),
+            Self::ComicDramaStyle => Some("style"),
             Self::ComicDramaDirector => Some("director"),
             Self::ComicDramaArt => Some("art"),
             Self::ComicDramaStoryboard => Some("storyboard"),
@@ -327,6 +345,8 @@ impl PromptOptimizationMode {
 
     fn comic_drama_review(self) -> Option<&'static str> {
         match self {
+            Self::ComicDramaScreenplayReview => Some("screenplay"),
+            Self::ComicDramaStyleReview => Some("style"),
             Self::ComicDramaDirectorReview => Some("director"),
             Self::ComicDramaArtReview => Some("art"),
             Self::ComicDramaStoryboardReview => Some("storyboard"),
@@ -1296,6 +1316,22 @@ report 总是非空；其他字段仅对应状态出现并为非空字符串。P
 
 fn load_builtin_comic_drama_system_prompt(mode: PromptOptimizationMode) -> Option<String> {
     let (path, document) = match mode {
+        PromptOptimizationMode::ComicDramaScreenplay => (
+            "comic-drama-workflow/screenplay.md",
+            include_str!("../../skills/comic-drama-workflow/screenplay.md"),
+        ),
+        PromptOptimizationMode::ComicDramaStyle => (
+            "comic-drama-workflow/style.md",
+            include_str!("../../skills/comic-drama-workflow/style.md"),
+        ),
+        PromptOptimizationMode::ComicDramaScreenplayReview => (
+            "comic-drama-workflow/screenplay-review.md",
+            include_str!("../../skills/comic-drama-workflow/screenplay-review.md"),
+        ),
+        PromptOptimizationMode::ComicDramaStyleReview => (
+            "comic-drama-workflow/style-review.md",
+            include_str!("../../skills/comic-drama-workflow/style-review.md"),
+        ),
         PromptOptimizationMode::ComicDramaDirector => (
             "comic-drama-workflow/director.md",
             include_str!("../../skills/comic-drama-workflow/director.md"),
@@ -1326,13 +1362,42 @@ fn load_builtin_comic_drama_system_prompt(mode: PromptOptimizationMode) -> Optio
         ),
         _ => return None,
     };
+    let source_method = match mode {
+        PromptOptimizationMode::ComicDramaScreenplay
+        | PromptOptimizationMode::ComicDramaScreenplayReview => {
+            include_str!("../../skills/anime-drama-v23/screenplay.md")
+        }
+        PromptOptimizationMode::ComicDramaStyle | PromptOptimizationMode::ComicDramaStyleReview => {
+            include_str!("../../skills/anime-drama-v23/style.md")
+        }
+        PromptOptimizationMode::ComicDramaArt | PromptOptimizationMode::ComicDramaArtReview => {
+            include_str!("../../skills/anime-drama-v23/art.md")
+        }
+        PromptOptimizationMode::ComicDramaDirector
+        | PromptOptimizationMode::ComicDramaDirectorReview => {
+            include_str!("../../skills/anime-drama-v23/director.md")
+        }
+        PromptOptimizationMode::ComicDramaStoryboard
+        | PromptOptimizationMode::ComicDramaStoryboardReview => {
+            include_str!("../../skills/anime-drama-v23/storyboard.md")
+        }
+        _ => "",
+    };
+    let acting = if matches!(
+        mode,
+        PromptOptimizationMode::ComicDramaDirector | PromptOptimizationMode::ComicDramaStoryboard
+    ) {
+        include_str!("../../skills/anime-drama-v23/emotion-performance-library.md")
+    } else {
+        ""
+    };
     let contract = if let Some(stage) = mode.comic_drama_stage() {
         let stage_data = match mode {
             PromptOptimizationMode::ComicDramaArt => {
                 r#"assets 必须是本集实际使用的 1～64 个资产，每项格式为 {"id":"稳定资产ID","kind":"character","name":"资产名称","prompt":"脱离上下文也能执行的完整中文图片提示词"}。kind 仅允许 character、scene、prop；同一数组内 id 不重复。复用项保留共享库原 id、kind、name、prompt，不覆盖已有资产，变体使用新 ID 并在文档说明原 ID 与变化。shots 必须为 []。"#
             }
             PromptOptimizationMode::ComicDramaStoryboard => {
-                r#"assets 必须为 []。shots 必须按叙事顺序列出本集 1～120 个片段，每项格式为 {"id":"S01","sceneId":"P01","title":"镜头标题","durationSeconds":5,"visual":"具体画面与动作","dialogue":"逐字对白，无对白填空字符串","videoPrompt":"完整动态提示词","referenceAssetIds":[],"acceptance":["可观察验收标准"]}。id 在本集内唯一，不自行添加应用的集数前缀。durationSeconds 为 1～30 秒的有限数字；制作成片时还必须满足本次请求中项目视频模型枚举或范围，例示的 5 秒不是固定参数。dialogue 必须是字符串并逐字保留原文，不为凑时长删改对白。referenceAssetIds 必须是数组，每个 ID 必须精确来自本集可用资产，不能重复或编造；不需要参考时可以是 []。acceptance 必须是非空字符串数组，文字正文与结构化字段一致。"#
+                r#"assets 必须为 []。shots 必须按叙事顺序列出本集 1～120 个片段，每项格式为 {"id":"S01","sceneId":"P01","title":"镜头标题","durationSeconds":5,"visual":"具体画面与动作","dialogue":"逐字对白，无对白填空字符串","videoPrompt":"完整动态提示词","referenceAssetIds":[],"acceptance":["可观察验收标准"]}。id 在本集内唯一，不自行添加应用的集数前缀。durationSeconds 为 1～30 秒的有限数字；制作成片时还必须满足本次请求中项目视频模型枚举或范围，例示的 5 秒不是固定参数。dialogue 必须是字符串并逐字保留原文，不为凑时长删改对白。referenceAssetIds 必须是数组，每个 ID 必须精确来自本集可用资产，不能重复或编造；不需要参考时可以是 []。如镜头有制作依赖，提供 dependsOn 字符串数组；如须承接上一镜尾帧，另提供 continuationFromShotId。两者都只使用 shots 中真实镜头 id，本集用原 id，跨集用集 ID:镜头 ID，禁止自依赖、重复依赖或成环；不相关的镜头不要强加顺序。续接镜头明确首帧保持参考尾帧的场景、光线、机位、人物位置、朝向、姿势与服装。acceptance 必须是非空字符串数组，文字正文与结构化字段一致。"#
             }
             _ => {
                 "assets 与 shots 必须都为 []；人物、场景、道具清单写在 content 的完整导演分析文档中，不代替服化道或分镜阶段创作。"
@@ -1368,7 +1433,7 @@ result 只允许 PASS、REVISE、NEEDS_DECISION；report 总是非空字符串�
         document.len()
     );
     Some(format!(
-        "{contract}\n\n---\n# 当前唯一方法：{path}\n\n{document}"
+        "{contract}\n\n# 项目执行顺序\n剧本共创→风格锁定→资产设计→导演分镜→执行提示词。每阶段独立双审后等待用户确认；图片、首镜、视频与成片也由应用审核。音色当前只交付设计档案，不承诺已生成声音。\n\n---\n# 当前唯一方法：{path}\n\n{document}\n\n{source_method}\n\n{acting}"
     ))
 }
 
@@ -1768,6 +1833,10 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::AiFilmActing
         | PromptOptimizationMode::AiFilmPrompts
         | PromptOptimizationMode::AiFilmQc
+        | PromptOptimizationMode::ComicDramaScreenplay
+        | PromptOptimizationMode::ComicDramaStyle
+        | PromptOptimizationMode::ComicDramaScreenplayReview
+        | PromptOptimizationMode::ComicDramaStyleReview
         | PromptOptimizationMode::ComicDramaDirector
         | PromptOptimizationMode::ComicDramaArt
         | PromptOptimizationMode::ComicDramaStoryboard
@@ -3719,6 +3788,10 @@ mod tests {
                 | PromptOptimizationMode::AiFilmActing
                 | PromptOptimizationMode::AiFilmPrompts
                 | PromptOptimizationMode::AiFilmQc
+                | PromptOptimizationMode::ComicDramaScreenplay
+                | PromptOptimizationMode::ComicDramaStyle
+                | PromptOptimizationMode::ComicDramaScreenplayReview
+                | PromptOptimizationMode::ComicDramaStyleReview
                 | PromptOptimizationMode::ComicDramaDirector
                 | PromptOptimizationMode::ComicDramaArt
                 | PromptOptimizationMode::ComicDramaStoryboard
@@ -6742,6 +6815,30 @@ mod tests {
     fn comic_drama_modes_load_one_provider_neutral_method_each() {
         let modes = [
             (
+                PromptOptimizationMode::ComicDramaScreenplay,
+                "comic_drama_screenplay",
+                "screenplay.md",
+                "分场剧本",
+            ),
+            (
+                PromptOptimizationMode::ComicDramaStyle,
+                "comic_drama_style",
+                "style.md",
+                "风格锚定",
+            ),
+            (
+                PromptOptimizationMode::ComicDramaScreenplayReview,
+                "comic_drama_screenplay_review",
+                "screenplay-review.md",
+                "剧本独立检查",
+            ),
+            (
+                PromptOptimizationMode::ComicDramaStyleReview,
+                "comic_drama_style_review",
+                "style-review.md",
+                "风格独立检查",
+            ),
+            (
                 PromptOptimizationMode::ComicDramaDirector,
                 "comic_drama_director",
                 "director.md",
@@ -6831,6 +6928,8 @@ mod tests {
     #[test]
     fn comic_drama_contracts_separate_stage_outputs_and_independent_reviews() {
         for (mode, stage) in [
+            (PromptOptimizationMode::ComicDramaScreenplay, "screenplay"),
+            (PromptOptimizationMode::ComicDramaStyle, "style"),
             (PromptOptimizationMode::ComicDramaDirector, "director"),
             (PromptOptimizationMode::ComicDramaArt, "art"),
             (PromptOptimizationMode::ComicDramaStoryboard, "storyboard"),
@@ -6854,6 +6953,8 @@ mod tests {
         assert!(storyboard.contains("不为凑时长删改对白"));
         assert!(storyboard.contains("不自行添加应用的集数前缀"));
         for mode in [
+            PromptOptimizationMode::ComicDramaScreenplayReview,
+            PromptOptimizationMode::ComicDramaStyleReview,
             PromptOptimizationMode::ComicDramaDirectorReview,
             PromptOptimizationMode::ComicDramaArtReview,
             PromptOptimizationMode::ComicDramaStoryboardReview,

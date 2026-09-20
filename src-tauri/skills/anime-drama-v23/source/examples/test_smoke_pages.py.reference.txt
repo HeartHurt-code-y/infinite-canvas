@@ -1,0 +1,167 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""test_smoke_pages.py —— 冒烟门禁的**对抗测试**
+
+判据（通用，写在 ~/.项目模型/MEMORY.md）：**只跑一次「现在干净」的检查等于没测。**
+它证明不了「以后出问题会被拦住」。要证明一道防护有效，必须**主动伪造它要拦的故障**，
+看它是否拒绝 —— 顺带证明拒绝**确实来自这条断言**（而不是因为别的原因顺带失败）。
+
+背景：V2.0.6 带着 349 条不变式全绿发版，但 04 审核页因 f-string 模板里一个裸花括号
+NameError、一个文件都产不出。这个测试把那类故障**故意放回去**两次：
+
+  A. 端到端对抗：往 f-string 模板里注入裸花括号 → 冒烟必须失败，且原因里出现
+     NameError 与 storyboard（证明拦的是「跑起来就炸」，不是别的东西）
+  B. 渲染削弱对抗：把页面上的「句数不要变」约束改成「句数可以变」
+     → 冒烟第 3 层必须报「页面里找不到」（证明字段级的渲染缺失拦得住）
+  C. 接线对抗：注入故障后跑 snapshot.py --check-only → 必须非 0
+     （「写了个检查脚本」与「发版时真的会跑它」是两件事，只做 A/B 证明不了后者）
+
+两轮都做完后**必须把文件恢复原状**（finally 兜底），并再跑一次冒烟确认已复原。
+
+用法：python examples/test_smoke_pages.py
+退出码：0 = 对抗测试全部符合预期；1 = 有不符合
+"""
+import subprocess
+import sys
+from pathlib import Path
+
+SKILL_DIR = Path(__file__).resolve().parents[1]
+BUILDER = SKILL_DIR / "references" / "audit_html_builder.py"
+SMOKE = SKILL_DIR / "tools" / "smoke_pages.py"
+SNAPSHOT = SKILL_DIR / "tools" / "snapshot.py"
+
+INJECT_TOKEN = "dap_smoke_injected"
+
+
+def run_smoke():
+    r = subprocess.run([sys.executable, str(SMOKE)], capture_output=True,
+                       encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def run_snapshot_check():
+    """跑发版门禁（自检 + 冒烟），不发版"""
+    r = subprocess.run([sys.executable, str(SNAPSHOT), "--check-only"], capture_output=True,
+                       encoding="utf-8", errors="replace")
+    return r.returncode, (r.stdout or "") + (r.stderr or "")
+
+
+def inject_bare_brace(src):
+    """把裸花括号注入 f-string 模板（精确复刻 V2.0.6 那个真实 bug）。
+
+    故意不依赖具体注释文案（文案以后会改），而是找模板里第一个 <script> 后插一行。
+    """
+    marker = "<script>"
+    i = src.find(marker)
+    if i < 0:
+        return None
+    i += len(marker)
+    return src[:i] + "\n// 对抗注入：{%s}\n" % INJECT_TOKEN + src[i:]
+
+
+def main():
+    orig = BUILDER.read_text(encoding="utf-8")
+    fails = []
+
+    print("=" * 68)
+    print("冒烟门禁 · 对抗测试（主动伪造故障，验证它真的会拦）")
+    print("=" * 68)
+
+    # ---- 基准：先确认「现在」是通过的，否则后面的失败说明不了任何事 ----
+    code, out = run_smoke()
+    print("\n[基准] 当前代码跑冒烟 → 退出码 %d" % code)
+    if code != 0:
+        print("   ❌ 基准都不通过，对抗测试无意义。先修好冒烟本身。")
+        print(out)
+        sys.exit(1)
+    print("   ✅ 基准通过（说明后面若失败，是注入导致的）")
+
+    try:
+        # ---- A. 端到端对抗：注入裸花括号 ----
+        print("\n[A] 注入 f-string 裸花括号（复刻 V2.0.6 的 NameError）")
+        broken = inject_bare_brace(orig)
+        if broken is None:
+            fails.append("A：文件里找不到 <script>，注入失败（测试本身要更新）")
+            print("   ❌ 找不到注入点")
+        else:
+            BUILDER.write_text(broken, encoding="utf-8")
+            code, out = run_smoke()
+            hit_err = "NameError" in out
+            hit_stage = "storyboard" in out
+            print("   冒烟退出码 %d（期望非 0）｜出现 NameError：%s｜指向 storyboard：%s"
+                  % (code, hit_err, hit_stage))
+            if code == 0:
+                fails.append("A：注入了 NameError 级故障，冒烟竟然还通过了 —— 门禁是安慰剂")
+            elif not (hit_err and hit_stage):
+                fails.append("A：冒烟失败了，但原因不是预期的 NameError/storyboard —— "
+                             "要确认它拦的到底是不是这条")
+            else:
+                print("   ✅ 被拦下，且原因正确（这正是 V2.0.6 漏掉的那一类）")
+            BUILDER.write_text(orig, encoding="utf-8")
+
+        # ---- B. 渲染削弱对抗：删掉页面上的约束提示 ----
+        print("\n[B] 把页面上的「句数不要变」改成「句数可以变」（削弱渲染）")
+        if "句数不要变" not in orig:
+            fails.append("B：原文里找不到「句数不要变」，测试本身要更新")
+            print("   ❌ 找不到注入点")
+        else:
+            BUILDER.write_text(orig.replace("句数不要变", "句数可以变"), encoding="utf-8")
+            code, out = run_smoke()
+            hit = "页面里找不到" in out
+            print("   冒烟退出码 %d（期望非 0）｜出现「页面里找不到」：%s" % (code, hit))
+            if code == 0:
+                fails.append("B：削弱了页面渲染，冒烟竟然还通过了 —— 第 3 层是空的")
+            elif not hit:
+                fails.append("B：冒烟失败了，但原因不是页面缺项")
+            else:
+                print("   ✅ 被拦下（字段级渲染缺失也拦得住）")
+            BUILDER.write_text(orig, encoding="utf-8")
+
+        # ---- C. 接线对抗：冒烟失败必须真的拦住 snapshot（否则它只是摆设）----
+        # 判据：「写了个检查脚本」与「发版时真的会跑它」是两件事。
+        # 只验证 A/B 只能证明 smoke_pages.py 自己有效 —— 证明不了**发版流程会用它**。
+        print("\n[C] 注入故障后跑 snapshot.py --check-only（验证门禁真的接线了）")
+        broken = inject_bare_brace(orig)
+        if broken is None:
+            fails.append("C：找不到注入点")
+            print("   ❌ 找不到注入点")
+        else:
+            BUILDER.write_text(broken, encoding="utf-8")
+            code, out = run_snapshot_check()
+            print("   发版门禁退出码 %d（期望非 0）" % code)
+            if code == 0:
+                fails.append("C：冒烟已判定失败，但 snapshot 仍放行 —— "
+                             "门禁脚本存在却没接进流程（摆设）")
+                print("   ❌ 仍然放行")
+            else:
+                print("   ✅ 发版被拦下（门禁确实接上了）")
+            BUILDER.write_text(orig, encoding="utf-8")
+    finally:
+        # 无论中途怎么炸，都要把文件恢复原状 —— 否则这个测试自己成了故障源
+        cur = BUILDER.read_text(encoding="utf-8")
+        if cur != orig:
+            BUILDER.write_text(orig, encoding="utf-8")
+            print("\n🔧 已恢复 audit_html_builder.py 原状")
+
+    # ---- 复原确认 ----
+    print("\n[复原确认] 再跑一次冒烟")
+    code, out = run_smoke()
+    if code != 0:
+        fails.append("复原后冒烟仍不通过 —— 测试留下了残局！")
+        print("   ❌ 退出码 %d" % code)
+        print(out)
+    else:
+        print("   ✅ 退出码 0，文件已复原")
+
+    print("\n" + "=" * 68)
+    if fails:
+        print("❌ 对抗测试不通过：")
+        for f in fails:
+            print("   · %s" % f)
+        sys.exit(1)
+    print("✅ 对抗测试通过：门禁确实会拦，且拦的原因正确。")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    main()

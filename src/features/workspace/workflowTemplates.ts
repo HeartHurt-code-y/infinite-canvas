@@ -25,7 +25,7 @@ import {
 export const KNOWLEDGE_VIDEO_DIRECTOR_TEMPLATE_ID = "knowledge-video-director-v2.4";
 export const KNOWLEDGE_VIDEO_DIRECTOR_TEMPLATE_TITLE = "知识教学视频导演 V2.4";
 export const AI_FILM_WORKFLOW_TEMPLATE_ID = "ai-film-workflow-v1.3";
-export const COMIC_DRAMA_WORKFLOW_TEMPLATE_ID = "comic-drama-workflow-v1";
+export const COMIC_DRAMA_WORKFLOW_TEMPLATE_ID = "comic-drama-workflow-v2.3";
 export const COMMERCE_WORKFLOW_TEMPLATE_ID = "commerce-video-workflow-v1";
 export const REMOTION_WORKFLOW_TEMPLATE_ID = "remotion-animation-workflow-v1";
 export const XHS_COVER_WORKFLOW_TEMPLATE_ID = "xhs-cover-workflow-v1";

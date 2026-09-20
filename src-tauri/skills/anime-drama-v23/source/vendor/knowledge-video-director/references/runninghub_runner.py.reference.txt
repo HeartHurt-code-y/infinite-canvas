@@ -1,0 +1,377 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+项目模型 双通道运行器（knowledge-video-director SOP 阶段五·通道 B）
+通道 B1 AI 应用：--webapp-id PROJECT_MODEL_BINDING（仅暴露字段，适合快跑）
+通道 B2 工作流：--workflow-id PROJECT_MODEL_BINDING（任意节点任意字段，权限最大）
+⚠️ B1/B2 是两个不同 id 不可混用：webappId 走 B2 报 380 WORKFLOW_NOT_EXISTS
+
+三端点（B1，官方文档 2026-09-01 实测校准）：
+  提交  POST /task/openapi/ai-app/run      Body: {"webappId","project_provider_setting","nodeInfoList"}
+  查询  POST /openapi/v2/query             Body: {"taskId"}（扁平结构 results[].url）
+  上传  POST /openapi/v2/media/upload/binary（form file）→ data.fileName（注入用）
+
+三端点（B2，官方文档 api-425749013 系列）：
+  提交  POST /task/openapi/create          Body: {"workflowId","project_provider_setting","nodeInfoList","instanceType"}
+  状态  POST /task/openapi/status          Body: {"taskId"} → data.taskStatus (QUEUED/RUNNING/FAILED/SUCCESS)
+  结果  POST /task/openapi/outputs         Body: {"taskId"} → data[]{fileUrl,fileType,nodeId,consumeCoins}
+  上传  POST /task/openapi/upload          form: project_provider_setting+file(+fileType) → data.fileName
+  取工作流 JSON  POST /api/openapi/getJsonApiFormat  Body: {"workflowId"} → 节点自省，注入不用猜
+
+铁律：
+  ⚠️ 结果 fileUrl 仅 24h 有效——SUCCESS 后立刻下载
+  ⚠️ ComfyUI 节点注入用 upload 返回的 fileName（openapi/xxx.jpg），不是 download_url
+  ⚠️ H3 时长 4~15s 硬上限；成品 >15s 拆段
+  ⚠️ 上传/提交域名必须 www.项目模型.cn
+
+API Key 三级读取（不得写死）：--project_provider_setting > 环境变量 项目模型_project_provider_setting > 报错提示
+
+用法：
+  # 工作流通道（推荐，权限大）
+  python 项目模型_runner.py --workflow-id PROJECT_MODEL_BINDING --prompt-file p.txt --ref-image a.jpg --ref-audio b.wav --duration 10 --instance-type plus --out out.mp4
+  # 自省节点表（提交前校准注入字段）
+  python 项目模型_runner.py --workflow-id ... --show-nodes
+  # AI 应用通道（旧）
+  python 项目模型_runner.py --webapp-id PROJECT_MODEL_BINDING --prompt-file p.txt --out out.mp4
+"""
+import argparse
+import json
+import os
+import random
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+try:
+    sys.stdout.reconfigure(line_buffering=True)
+    sys.stderr.reconfigure(line_buffering=True)
+except Exception:
+    pass
+
+HOST = "[项目内资源]"
+# B1 AI 应用
+B1_RUN = HOST + "/task/openapi/ai-app/run"
+B1_QUERY = HOST + "/openapi/v2/query"
+B1_UPLOAD = HOST + "/openapi/v2/media/upload/binary"
+# B2 工作流
+B2_CREATE = HOST + "/task/openapi/create"
+B2_STATUS = HOST + "/task/openapi/status"
+B2_OUTPUTS = HOST + "/task/openapi/outputs"
+B2_UPLOAD = HOST + "/task/openapi/upload"
+B2_GETJSON = HOST + "/api/openapi/getJsonApiFormat"
+
+DEFAULT_WEBAPP_ID = PROJECT_MODEL_BINDING   # AI 应用：项目制作方案（09 托管版）
+DEFAULT_WORKFLOW_ID = "PROJECT_MODEL_BINDING"  # 工作流：项目制作方案（混合模型+结构lora+二采潜空间放大）
+# 09 节点表（339:text / 326:image / 340:audio / 256:noise_seed / 336:value 时长 / 337 分辨率）
+N_PROMPT, N_REF_IMG, N_REF_AUD, N_SEED, N_DUR, N_RES = "339", "326", "340", "256", "336", "337"
+
+
+def _headers(project_provider_setting):
+    return {"Authorization": f"Bearer {project_provider_setting}", "Content-Type": "application/json"}
+
+
+def _post_json(url, payload, project_provider_setting, timeout=60, retries=5):
+    """防线1：瞬时网络错误指数退避就地重试，不向上抛半途异常。"""
+    for i in range(retries):
+        try:
+            req = urllib.request.Request(
+                url, data=json.dumps(payload).encode("utf-8"),
+                headers=_headers(project_provider_setting), method="POST")
+            with urllib.request.urlopen(req, timeout=timeout) as r:
+                return json.loads(r.read().decode("utf-8", "replace"))
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            wait = min(2 ** i * 2, 30)
+            print(f"[net] {type(e).__name__} 第{i+1}次重试，{wait}s 后重发 ...")
+            time.sleep(wait)
+    raise RuntimeError(f"网络重试 {retries} 次仍失败: {url}")
+
+
+def upload_media(project_provider_setting, local_path, channel="b1"):
+    """上传本地文件（图/音频/视频），返回 fileName（ComfyUI 节点注入专用，非 download_url）。"""
+    if channel == "b2":
+        # B2 官方上传：form project_provider_setting + file(+fileType)，返回 data.fileName
+        boundary = f"----rh{uuid.uuid4().hex}"
+        fn = os.path.basename(local_path)
+        ext = fn.rsplit(".", 1)[-1].lower()
+        ftype = ("audio" if ext in ("mp3", "wav", "m4a", "aac", "flac", "ogg")
+                 else "video" if ext in ("mp4", "avi", "mov", "webm")
+                 else "image")
+        with open(local_path, "rb") as f:
+            data = f.read()
+        parts = []
+        for name, val in (("project_provider_setting", project_provider_setting), ("fileType", ftype)):
+            parts.append(f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{val}\r\n".encode())
+        parts.append((f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+                      f"filename=\"{fn}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode()
+                     + data + f"\r\n--{boundary}--\r\n".encode())
+        req = urllib.request.Request(B2_UPLOAD, data=b"".join(parts), method="POST")
+        req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+        with urllib.request.urlopen(req, timeout=300) as r:
+            resp = json.loads(r.read().decode("utf-8", "replace"))
+        if resp.get("code") != 0:
+            raise RuntimeError(f"B2 上传失败: {json.dumps(resp, ensure_ascii=False)[:200]}")
+        d = resp.get("data", {}) or {}
+        fname = d.get("fileName") or d.get("file_name") or ""
+        if not fname:
+            raise RuntimeError(f"B2 上传响应无 fileName: {json.dumps(resp, ensure_ascii=False)[:200]}")
+        print(f"[upload/B2] {fn} -> fileName={fname}")
+        return fname
+    # B1 上传（实测校准版）
+    boundary = f"----rh{uuid.uuid4().hex}"
+    fn = os.path.basename(local_path)
+    with open(local_path, "rb") as f:
+        data = f.read()
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; "
+            f"filename=\"{fn}\"\r\nContent-Type: application/octet-stream\r\n\r\n").encode() \
+        + data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(B1_UPLOAD, data=body, method="POST")
+    req.add_header("Authorization", f"Bearer {project_provider_setting}")
+    req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+    with urllib.request.urlopen(req, timeout=300) as r:
+        resp = json.loads(r.read().decode("utf-8", "replace"))
+    if resp.get("code") != 0:
+        raise RuntimeError(f"上传失败: {resp}")
+    d = resp.get("data", {}) or {}
+    url = d.get("download_url") or d.get("downloadUrl") or ""
+    fn_server = d.get("fileName") or ""
+    print(f"[upload/B1] {fn} -> fileName={fn_server} url={url[:60]}...")
+    return fn_server or url
+
+
+def fetch_workflow_json(project_provider_setting, workflow_id):
+    """B2 专属：按 workflowId 拉取完整工作流 JSON（节点自省，注入字段不用猜）。"""
+    resp = _post_json(B2_GETJSON, {"project_provider_setting": project_provider_setting, "workflowId": workflow_id}, project_provider_setting)
+    if resp.get("code") != 0:
+        raise RuntimeError(f"取工作流 JSON 失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    d = resp.get("data", {})
+    raw = d.get("prompt") if isinstance(d, dict) else d
+    wf = json.loads(raw) if isinstance(raw, str) else raw
+    return wf
+
+
+def show_nodes(wf):
+    """打印工作流节点表：有直接取值的节点 + 关键输入字段，供注入前校准。"""
+    print(f"节点总数: {len(wf)}")
+    for nid, nd in sorted(wf.items(), key=lambda x: int(x[0]) if str(x[0]).isdigit() else 0):
+        ct = nd.get("class_type", "")
+        inp = nd.get("inputs", {})
+        simple = {k: (str(v)[:48]) for k, v in inp.items() if not isinstance(v, list)}
+        if simple:
+            print(f"[{nid}] {ct}")
+            for k, v in simple.items():
+                print(f"      {k} = {v}")
+
+
+def submit_task(project_provider_setting, node_info_list, channel="b1", webapp_id=None, workflow_id=None,
+                instance_type=None, workflow_json=None):
+    if channel == "b2" and workflow_json is not None:
+        # 终极模式：直传改造后的工作流 JSON（实测：workflow 必须为 JSON 字符串且需同时带 workflowId，
+        # 服务端按 workflowId 定位模板、用 workflow 内容整体覆盖——可加节点/改接线）
+        payload = {"project_provider_setting": project_provider_setting, "workflowId": str(workflow_id or DEFAULT_WORKFLOW_ID),
+                   "workflow": workflow_json if isinstance(workflow_json, str) else json.dumps(workflow_json)}
+        if instance_type:
+            payload["instanceType"] = instance_type
+        resp = _post_json(B2_CREATE, payload, project_provider_setting)
+    elif channel == "b2":
+        payload = {"workflowId": str(workflow_id), "project_provider_setting": project_provider_setting, "nodeInfoList": node_info_list}
+        if instance_type:
+            payload["instanceType"] = instance_type
+        resp = _post_json(B2_CREATE, payload, project_provider_setting)
+    else:
+        payload = {"webappId": int(webapp_id), "project_provider_setting": project_provider_setting, "nodeInfoList": node_info_list}
+        if instance_type:
+            payload["instanceType"] = instance_type
+        resp = _post_json(B1_RUN, payload, project_provider_setting)
+    if resp.get("code") not in (0, None) or not resp.get("data", {}).get("taskId"):
+        raise RuntimeError(f"提交失败: {json.dumps(resp, ensure_ascii=False)[:300]}")
+    d = resp["data"]
+    print(f"[submit/{channel.upper()}] taskId={d['taskId']} status={d.get('taskStatus', d.get('status'))}"
+          + (f" promptTips={str(d.get('promptTips'))[:120]}" if d.get("promptTips") else ""))
+    return d["taskId"]
+
+
+def poll_task(project_provider_setting, task_id, channel="b1", interval=10, timeout=2400):
+    """B1 轮询 /openapi/v2/query（扁平 results[].url）；B2 轮询 status + outputs。"""
+    t0 = time.time()
+    while True:
+        time.sleep(interval)
+        if channel == "b2":
+            resp = _post_json(B2_STATUS, {"project_provider_setting": project_provider_setting, "taskId": task_id}, project_provider_setting, timeout=30)
+            status = (resp.get("data") or {}).get("taskStatus") if isinstance(resp.get("data"), dict) else resp.get("data")
+            if status == "SUCCESS":
+                out = _post_json(B2_OUTPUTS, {"project_provider_setting": project_provider_setting, "taskId": task_id}, project_provider_setting, timeout=30)
+                items = out.get("data") or []
+                results = [{"url": x.get("fileUrl"), "type": x.get("fileType"),
+                            "nodeId": x.get("nodeId"), "coins": x.get("consumeCoins")} for x in items]
+                coins = sum(int(x.get("consumeCoins") or 0) for x in items)
+                print(f"[done/B2] 耗时 {int(time.time()-t0)}s，产物 {len(results)} 个，消耗 {coins} RH 币")
+                return results
+            if status == "FAILED":
+                raise RuntimeError(f"任务失败: msg={resp.get('msg')} code={resp.get('code')}")
+        else:
+            resp = _post_json(B1_QUERY, {"taskId": task_id}, project_provider_setting, timeout=30)
+            status = resp.get("status") or resp.get("data", {}).get("status")
+            if status == "SUCCESS":
+                results = resp.get("results") or resp.get("data", {}).get("results") or []
+                print(f"[done/B1] 耗时 {int(time.time()-t0)}s，产物 {len(results)} 个")
+                return results
+            if status == "FAILED":
+                raise RuntimeError(f"任务失败: {resp.get('errorMessage')} "
+                                   f"(errorCode={resp.get('errorCode')}, failedReason={resp.get('failedReason')})")
+        if time.time() - t0 > timeout:
+            raise TimeoutError(f"轮询超时 {timeout}s（taskId={task_id}，可凭此 id 查 RH 控制台救回）")
+        print(f"[poll] {status} {int(time.time()-t0)}s ...")
+
+
+DOWNLOADS_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+
+
+def download(url, out_path):
+    from urllib.parse import quote
+    # 产物 URL 可能含中文文件名，必须按组件转义后再请求（防 ASCII 编码错误）
+    safe_url = quote(url, safe=":/?&=%.#-_.~")
+    last_err = None
+    for i in range(5):
+        try:
+            # 必须用完整浏览器 UA：CDN 对 "Mozilla/5.0" 这种短 UA 直接拒（实测 音色设计能力
+            # 的 .flac 产物 URL 全部 403；同一 URL 换完整 UA 立刻 200）
+            req = urllib.request.Request(safe_url, headers={"User-Agent": DOWNLOADS_UA})
+            with urllib.request.urlopen(req, timeout=300) as r, open(out_path, "wb") as f:
+                f.write(r.read())
+            print(f"[download] {out_path} ({os.path.getsize(out_path)//1024}KB)")
+            return out_path
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # 关键：保留最后一次真实错误。原来直接 raise "下载失败: url" 把原因整个吞掉，
+            # 403/超时/DNS 全都长得一样，只能靠手工重放才能定位
+            last_err = e
+            time.sleep(min(2 ** i * 2, 30))
+    raise RuntimeError(f"下载失败: {url} —— 最后一次错误：{type(last_err).__name__}: {last_err}")
+
+
+def _cast(v):
+    for cast in (int, float):
+        try:
+            return cast(v)
+        except ValueError:
+            pass
+    return v
+
+
+def build_node_info(args, channel):
+    """按 09 节点表组装 nodeInfoList；图片/音频字段传本地路径则自动上传换 fileName。"""
+    up = lambda p: p if p.startswith("http") else upload_media(args.project_provider_setting, p, channel)
+    ni = []
+    if args.prompt_file:
+        text = open(args.prompt_file, encoding="utf-8").read().strip()
+        ni.append({"nodeId": N_PROMPT, "fieldName": "text", "fieldValue": text})
+    if args.ref_image:
+        ni.append({"nodeId": N_REF_IMG, "fieldName": "image", "fieldValue": up(args.ref_image)})
+    if args.ref_audio:
+        ni.append({"nodeId": N_REF_AUD, "fieldName": "audio", "fieldValue": up(args.ref_audio)})
+    if args.duration:
+        ni.append({"nodeId": N_DUR, "fieldName": "value", "fieldValue": float(args.duration)})
+    ni.append({"nodeId": N_SEED, "fieldName": "noise_seed", "fieldValue": random.randint(0, 2 ** 53)})
+    for spec in (args.set or []):
+        nid, rest = spec.split(":", 1)
+        field, val = rest.split("=", 1)
+        if os.path.isfile(val):
+            val = upload_media(args.project_provider_setting, val, channel)
+        ni.append({"nodeId": nid.strip(), "fieldName": field.strip(), "fieldValue": _cast(val)})
+    return ni
+
+
+def build_workflow_json(args, wf):
+    """--workflow-json 模式：把标准注入（339/326/340/336/256/337）+ --set + --link 直接写进工作流 JSON。
+    --link 格式 "265:ref_images.ref_image_1=400.0" → inputs 值置为链接 ["400", 0]（结构改造用）。"""
+    up = lambda p: p if p.startswith("http") else upload_media(args.project_provider_setting, p, "b2")
+
+    def put(nid, field, value):
+        if nid not in wf:
+            raise RuntimeError(f"工作流中不存在节点 {nid}")
+        wf[nid].setdefault("inputs", {})[field] = value
+
+    if args.prompt_file:
+        put(N_PROMPT, "text", open(args.prompt_file, encoding="utf-8").read().strip())
+    if args.ref_image:
+        put(N_REF_IMG, "image", up(args.ref_image))
+    if args.ref_audio:
+        put(N_REF_AUD, "audio", up(args.ref_audio))
+    if args.duration:
+        put(N_DUR, "value", float(args.duration))
+    put(N_SEED, "noise_seed", random.randint(0, 2 ** 53))
+    for spec in (args.set or []):
+        nid, rest = spec.split(":", 1)
+        field, val = rest.split("=", 1)
+        if os.path.isfile(val):
+            val = up(val)
+        put(nid.strip(), field.strip(), _cast(val))
+    for spec in (args.link or []):
+        nid, rest = spec.split(":", 1)
+        field, val = rest.split("=", 1)
+        src, idx = val.split(".")
+        put(nid.strip(), field.strip(), [src.strip(), int(idx)])
+    return wf
+
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--project_provider_setting", default=os.environ.get("项目模型_project_provider_setting", ""))
+    p.add_argument("--webapp-id", type=int, help="B1 AI 应用 id（与 --workflow-id 二选一）")
+    p.add_argument("--workflow-id", help="B2 工作流 id（权限大，推荐）")
+    p.add_argument("--workflow-json", help="B2 终极模式：直传改造后的工作流 JSON 文件（可与 --link 配合做结构改造）")
+    p.add_argument("--link", action="append", help="结构接线 NodeId:field=SrcNode.索引（仅 --workflow-json 模式），可多次")
+    p.add_argument("--show-nodes", action="store_true", help="仅打印工作流节点表后退出（B2）")
+    p.add_argument("--prompt-file", help="提示词文本文件（注入 339:text）")
+    p.add_argument("--ref-image", help="参考图路径或 URL（注入 326:image，路径自动上传）")
+    p.add_argument("--ref-audio", help="参考音频路径或 URL（注入 340:audio，路径自动上传）")
+    p.add_argument("--duration", type=float, help="时长秒数（注入 336:value，H3 上限 15s）")
+    p.add_argument("--set", action="append", help="任意节点注入 nodeId:fieldName=value，可多次")
+    p.add_argument("--instance-type", default=None, help="default(24G)/plus(48G)")
+    p.add_argument("--out", help="产物下载落盘路径")
+    p.add_argument("--timeout", type=int, default=2400)
+    args = p.parse_args()
+    if not args.project_provider_setting:
+        sys.exit("缺少 API Key：请设环境变量 项目模型_project_provider_setting 或传 --project_provider_setting")
+
+    channel = "b2" if (args.workflow_id or args.workflow_json) else "b1"
+    if channel == "b2":
+        if args.show_nodes:
+            show_nodes(fetch_workflow_json(args.project_provider_setting, args.workflow_id or DEFAULT_WORKFLOW_ID))
+            return
+        if not args.out:
+            sys.exit("B2 提交任务需要 --out")
+        if args.workflow_json:
+            wf = json.load(open(args.workflow_json, encoding="utf-8"))
+            wf = build_workflow_json(args, wf)
+            print("[workflow-json] 直传模式，注入后节点数:", len(wf))
+            ni = None
+        else:
+            wid = args.workflow_id
+            ni = build_node_info(args, channel)
+            print("[nodeInfoList]", json.dumps(
+                [{**x, "fieldValue": str(x["fieldValue"])[:60]} for x in ni], ensure_ascii=False, indent=1))
+        task_id = submit_task(args.project_provider_setting, ni, channel, workflow_id=args.workflow_id,
+                              instance_type=args.instance_type, workflow_json=wf if args.workflow_json else None)
+    else:
+        wid = args.webapp_id or DEFAULT_WEBAPP_ID
+        if args.show_nodes:
+            sys.exit("--show-nodes 仅支持 --workflow-id（B2）")
+        if not args.out:
+            sys.exit("提交任务需要 --out")
+        ni = build_node_info(args, channel)
+        print("[nodeInfoList]", json.dumps(
+            [{**x, "fieldValue": str(x["fieldValue"])[:60]} for x in ni], ensure_ascii=False, indent=1))
+        task_id = submit_task(args.project_provider_setting, ni, channel, webapp_id=wid,
+                              instance_type=args.instance_type)
+
+    results = poll_task(args.project_provider_setting, task_id, channel, timeout=args.timeout)
+    vids = [r for r in results if (r.get("type") or r.get("url", "").rsplit(".", 1)[-1]) in ("mp4", "gif")]
+    pick = vids[0] if vids else results[0]
+    download(pick["url"], args.out)
+
+
+if __name__ == "__main__":
+    main()
