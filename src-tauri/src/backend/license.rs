@@ -25,6 +25,8 @@ pub const TRIAL_MS: i64 = TRIAL_HOURS as i64 * 60 * 60 * 1000;
 pub const DAY_MS: i64 = 24 * 60 * 60 * 1000;
 const MAX_TICK_MS: i64 = 60 * 60 * 1000;
 const CLOCK_SKEW_MS: i64 = 15 * 60 * 1000;
+/// 试用进行中最多每隔这么久把累计时长写盘，避免 15s 心跳把注册表/凭据刷爆。
+const PERSIST_USAGE_EVERY_MS: i64 = 5 * 60 * 1000;
 const MAX_NONCES: usize = 32;
 const BYPASS_ENV: &str = "INFINITE_CANVAS_LICENSE_BYPASS";
 const HMAC_KEY: &[u8] = b"ic.paid.v1.9f3a7c1e2b8d4f06a5c7e9b1d3f5082a7e4c";
@@ -78,6 +80,7 @@ enum ReadOutcome {
 
 struct Runtime {
     state: LicenseState,
+    last_persisted: Option<LicenseState>,
     last_instant: Instant,
     machine_id: String,
     sinks: Vec<Box<dyn EntitlementSink>>,
@@ -161,6 +164,7 @@ impl LicenseService {
         persist_all(&sinks, &state);
         Self {
             inner: Mutex::new(Runtime {
+                last_persisted: Some(state.clone()),
                 state,
                 last_instant: Instant::now(),
                 machine_id,
@@ -172,7 +176,7 @@ impl LicenseService {
     pub fn snapshot(&self) -> LicenseSnapshot {
         let mut runtime = lock_runtime(&self.inner);
         tick_runtime(&mut runtime, now_ms());
-        persist_all(&runtime.sinks, &runtime.state);
+        persist_if_changed(&mut runtime);
         evaluate(
             &runtime.state,
             now_ms(),
@@ -186,7 +190,7 @@ impl LicenseService {
         tick_runtime(&mut runtime, now_ms());
         let machine_id = runtime.machine_id.clone();
         apply_code(&mut runtime.state, code, &machine_id, now_ms())?;
-        persist_all(&runtime.sinks, &runtime.state);
+        persist_now(&mut runtime);
         Ok(evaluate(
             &runtime.state,
             now_ms(),
@@ -222,11 +226,16 @@ fn tick_runtime(runtime: &mut Runtime, now_ms: i64) {
 }
 
 fn bypass_enabled() -> bool {
+    bypass_requested(std::env::var(BYPASS_ENV).ok().as_deref())
+}
+
+fn bypass_requested(raw: Option<&str>) -> bool {
+    // 正式安装包不得读运行时环境变量绕过付费墙。
+    if !cfg!(debug_assertions) {
+        return false;
+    }
     matches!(
-        std::env::var(BYPASS_ENV)
-            .ok()
-            .as_deref()
-            .map(|value| value.trim().to_ascii_lowercase())
+        raw.map(|value| value.trim().to_ascii_lowercase())
             .as_deref(),
         Some("1") | Some("true") | Some("yes")
     )
@@ -262,6 +271,40 @@ fn persist_all(sinks: &[Box<dyn EntitlementSink>], state: &LicenseState) {
     for sink in sinks {
         let _ = sink.write(&blob);
     }
+}
+
+fn persist_now(runtime: &mut Runtime) {
+    persist_all(&runtime.sinks, &runtime.state);
+    runtime.last_persisted = Some(runtime.state.clone());
+}
+
+fn persist_if_changed(runtime: &mut Runtime) {
+    if !license_state_needs_persist(runtime.last_persisted.as_ref(), &runtime.state) {
+        return;
+    }
+    persist_now(runtime);
+}
+
+fn license_state_needs_persist(previous: Option<&LicenseState>, current: &LicenseState) -> bool {
+    let Some(previous) = previous else {
+        return true;
+    };
+    if previous.trial_expired != current.trial_expired
+        || previous.clock_untrusted != current.clock_untrusted
+        || previous.paid_until_ms != current.paid_until_ms
+        || previous.used_nonces != current.used_nonces
+        || previous.first_seen_ms != current.first_seen_ms
+    {
+        return true;
+    }
+    if current.trial_expired || current.paid_until_ms.is_some() {
+        return false;
+    }
+    current
+        .accumulated_ms
+        .saturating_sub(previous.accumulated_ms)
+        >= PERSIST_USAGE_EVERY_MS
+        || current.last_seen_ms.saturating_sub(previous.last_seen_ms) >= PERSIST_USAGE_EVERY_MS
 }
 
 pub fn apply_tick(state: &mut LicenseState, now_ms: i64, elapsed_ms: i64) {
@@ -614,6 +657,7 @@ impl EntitlementSink for KeyringSink {
 #[cfg(test)]
 struct MemorySink {
     blob: Mutex<Option<String>>,
+    writes: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 #[cfg(test)]
@@ -631,6 +675,8 @@ impl EntitlementSink for MemorySink {
     }
 
     fn write(&self, blob: &str) -> Result<(), String> {
+        self.writes
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         *self
             .blob
             .lock()
@@ -642,14 +688,25 @@ impl EntitlementSink for MemorySink {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
     const MACHINE: &str = "ABCD-EFGH-IJKL-MNOP";
     const T0: i64 = 1_700_000_000_000;
 
+    fn counting_sink(state: Option<LicenseState>) -> (Box<dyn EntitlementSink>, Arc<AtomicUsize>) {
+        let writes = Arc::new(AtomicUsize::new(0));
+        (
+            Box::new(MemorySink {
+                blob: Mutex::new(state.map(|value| encode_blob(&value))),
+                writes: writes.clone(),
+            }),
+            writes,
+        )
+    }
+
     fn sink_with(state: Option<LicenseState>) -> Box<dyn EntitlementSink> {
-        Box::new(MemorySink {
-            blob: Mutex::new(state.map(|value| encode_blob(&value))),
-        })
+        counting_sink(state).0
     }
 
     #[test]
@@ -726,6 +783,7 @@ mod tests {
     fn tampered_blob_without_valid_copy_locks() {
         let sink = Box::new(MemorySink {
             blob: Mutex::new(Some(r#"{"payload":{"version":1},"mac":"dead"}"#.into())),
+            writes: Arc::new(AtomicUsize::new(0)),
         });
         let service = LicenseService::from_sinks(vec![sink], MACHINE.to_string(), T0);
         assert!(!service.snapshot().unlocked);
@@ -810,5 +868,70 @@ mod tests {
         let service =
             LicenseService::from_sinks(vec![sink_with(Some(state))], MACHINE.to_string(), T0);
         assert!(service.require_unlocked().is_err());
+    }
+
+    #[test]
+    fn debug_bypass_unlocks_expired_trial() {
+        let mut state = LicenseState::fresh(T0);
+        state.trial_expired = true;
+        let snapshot = evaluate(&state, T0, MACHINE, true);
+        assert!(snapshot.unlocked);
+        assert_eq!(snapshot.phase, "paid");
+        assert_eq!(snapshot.reason, "bypass");
+    }
+
+    #[test]
+    fn bypass_request_is_compile_time_gated() {
+        assert_eq!(bypass_requested(Some("1")), cfg!(debug_assertions));
+        assert_eq!(bypass_requested(Some("true")), cfg!(debug_assertions));
+        assert!(!bypass_requested(Some("no")));
+        assert!(!bypass_requested(None));
+    }
+
+    #[test]
+    fn persist_skips_identical_expired_snapshots() {
+        let mut state = LicenseState::fresh(T0);
+        state.trial_expired = true;
+        let (sink, writes) = counting_sink(Some(state));
+        let service = LicenseService::from_sinks(vec![sink], MACHINE.to_string(), T0);
+        let after_init = writes.load(Ordering::SeqCst);
+        assert!(after_init >= 1);
+        service.snapshot();
+        service.snapshot();
+        let _ = service.require_unlocked();
+        assert_eq!(writes.load(Ordering::SeqCst), after_init);
+    }
+
+    #[test]
+    fn activation_persists_even_after_expired_snapshots() {
+        let mut state = LicenseState::fresh(T0);
+        state.trial_expired = true;
+        let (sink, writes) = counting_sink(Some(state));
+        let service = LicenseService::from_sinks(vec![sink], MACHINE.to_string(), T0);
+        let after_init = writes.load(Ordering::SeqCst);
+        service.snapshot();
+        let code = encode_code(b"persist1", PERIOD_DAYS, Some(MACHINE));
+        service.activate(&code).expect("activate");
+        assert!(writes.load(Ordering::SeqCst) > after_init);
+    }
+
+    #[test]
+    fn trial_usage_persists_only_after_interval() {
+        let previous = LicenseState::fresh(T0);
+        let mut soon = previous.clone();
+        soon.accumulated_ms = 60_000;
+        soon.last_seen_ms = T0 + 60_000;
+        assert!(!license_state_needs_persist(Some(&previous), &soon));
+
+        let mut later = previous.clone();
+        later.accumulated_ms = PERSIST_USAGE_EVERY_MS;
+        later.last_seen_ms = T0 + PERSIST_USAGE_EVERY_MS;
+        assert!(license_state_needs_persist(Some(&previous), &later));
+
+        let mut expired = previous.clone();
+        expired.trial_expired = true;
+        expired.accumulated_ms = PERSIST_USAGE_EVERY_MS * 4;
+        assert!(license_state_needs_persist(Some(&previous), &expired));
+        assert!(!license_state_needs_persist(Some(&expired), &expired));
     }
 }

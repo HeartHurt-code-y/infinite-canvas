@@ -118,7 +118,7 @@ pub fn save_workflow_history(
     state: State<'_, BackendState>,
     command: SaveWorkflowHistoryCommand,
 ) -> CommandResult<WorkflowHistoryRecord> {
-    require_entitlement(&state)?;
+    // 试用过期后仍允许保存已有流程，避免自动保存把未落盘记录丢掉。
     state.storage.save_workflow_history(command).command()
 }
 
@@ -474,7 +474,7 @@ pub fn save_canvas_document(
     state: State<'_, BackendState>,
     command: SaveCanvasDocumentCommand,
 ) -> CommandResult<CanvasDocumentRecord> {
-    require_entitlement(&state)?;
+    // 付费墙只拦生成/渲染/下载；已有画布在试用结束后仍可落盘。
     if command.id.trim().is_empty() || !command.document.is_object() {
         return Err(BackendError::validation(
             "canvas document requires an id and a JSON object",
