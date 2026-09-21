@@ -74,6 +74,11 @@ export function SearchableMultiSelect({
     }
   };
 
+  const toggleOpen = () => {
+    if (disabled) return;
+    setOpen((prev) => !prev);
+  };
+
   const removeSelected = (optionValue: string, event: React.MouseEvent) => {
     event.stopPropagation();
     onChange(value.filter((v) => v !== optionValue));
@@ -84,22 +89,25 @@ export function SearchableMultiSelect({
     .filter(Boolean);
 
   return (
-    <div className="searchable-multi-select" ref={containerRef}>
-      <div
-        className="searchable-multi-select__trigger"
-        role="button"
-        tabIndex={disabled ? -1 : 0}
-        aria-label={ariaLabel}
-        aria-expanded={open}
-        onClick={() => !disabled && setOpen((prev) => !prev)}
-        onKeyDown={(event) => {
-          if (disabled) return;
-          if (event.key === "Enter" || event.key === " ") {
-            event.preventDefault();
-            setOpen((prev) => !prev);
-          }
-        }}
-      >
+    <div
+      className={`searchable-multi-select${disabled ? " is-disabled" : ""}`}
+      ref={containerRef}
+    >
+      <div className="searchable-multi-select__trigger">
+        {/*
+         * 展开控件必须是真正的 <button>，chip 上的「移除」也是 <button>。
+         * 二者不能嵌套：外层若再用 role="button"，屏幕阅读器会把两个控件读成一个，
+         * 键盘焦点顺序也会乱。展开按钮铺满整格，chip 移除按钮叠在它上面单独接收点击。
+         */}
+        <button
+          type="button"
+          className="searchable-multi-select__toggle"
+          disabled={disabled}
+          aria-label={ariaLabel}
+          aria-expanded={open}
+          aria-haspopup="listbox"
+          onClick={toggleOpen}
+        />
         {selectedLabels.length > 0 ? (
           <span className="searchable-multi-select__chips">
             {selectedLabels.map((label, index) => (
@@ -109,6 +117,7 @@ export function SearchableMultiSelect({
                   type="button"
                   className="searchable-multi-select__chip-remove"
                   aria-label={`移除 ${label}`}
+                  disabled={disabled}
                   onClick={(event) => removeSelected(value[index]!, event)}
                 >
                   ×
