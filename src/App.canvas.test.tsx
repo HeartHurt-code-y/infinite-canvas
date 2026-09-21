@@ -3,14 +3,15 @@ import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App, { ASSET_LIBRARY_SOURCE_STORAGE_KEY } from "./App";
 import * as videoFrameSampler from "./lib/videoFrameSampler";
-import type {
-  CloudAsset,
-  ExplicitMediaInput,
-  GenerationTaskDetail,
-  GenerationTaskSummary,
-  MediaReferenceTarget,
-  PromptSegment,
-  SaveCanvasDocumentCommand,
+import {
+  GENERATION_EVENT_NAMES,
+  type CloudAsset,
+  type ExplicitMediaInput,
+  type GenerationTaskDetail,
+  type GenerationTaskSummary,
+  type MediaReferenceTarget,
+  type PromptSegment,
+  type SaveCanvasDocumentCommand,
 } from "./lib/backend";
 import { toMediaProxyUrl } from "./lib/mediaProxy";
 import { defaultModelOperationSchema } from "./lib/modelCapabilities";
@@ -6547,7 +6548,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         handlerIdsByName.set(name, handlerId);
       }
     }
-    expect(handlerIdsByName.size).toBe(7);
+    expect(handlerIdsByName.size).toBe(GENERATION_EVENT_NAMES.length);
     // 画布交互（节点/边变化）会让事件处理器闭包重建，订阅本身不能跟着重建。
     const listensBefore = invokeMock.mock.calls.filter(
       ([command, args]) =>

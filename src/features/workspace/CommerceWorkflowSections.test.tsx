@@ -72,16 +72,16 @@ describe("commerce workflow node", () => {
     expect(screen.getByText("剧情带货工作流")).toBeInTheDocument();
     expect(screen.getByText("商品资料与制作设置").closest("details")).not.toHaveAttribute("open");
     expect(screen.queryByLabelText("知识视频制作要求")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     expect(screen.getByLabelText("带货制作模式")).toHaveValue("quick");
     expect(screen.getByLabelText("带货剧情类型")).toHaveValue("智能推荐");
     fireEvent.click(screen.getByRole("button", { name: "添加商品资料" }));
-    await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled());
     expect(onPick).toHaveBeenCalledWith(node().key);
     expect(screen.getByRole("img", { name: "商品实物.png" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "移除商品资料 商品实物.png" }));
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
   });
 
   it("starts document production with text facts and only the project text model", () => {
@@ -100,13 +100,13 @@ describe("commerce workflow node", () => {
       return <KnowledgeVideoWorkflowNode {...nodeProps(config)} onChange={setConfig} />;
     }
     render(<Harness />);
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     fireEvent.change(screen.getByLabelText("带货商品事实与卖点"), {
       target: { value: "咖啡杯，陶瓷材质，容量 350 毫升" },
     });
     fireEvent.change(screen.getByLabelText("带货制作模式"), { target: { value: "full" } });
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.getByLabelText("带货制作模式")).toHaveValue("full");
   });
 

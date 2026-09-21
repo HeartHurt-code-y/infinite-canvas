@@ -20,9 +20,9 @@ workflows:
         script: |
           if command -v corepack >/dev/null 2>&1; then
             corepack enable
-            corepack prepare pnpm@11.21.0 --activate
+            corepack prepare pnpm@12.5.1 --activate
           else
-            npm install -g pnpm@11.21.0
+            npm install -g pnpm@12.5.1
           fi
           pnpm config set store-dir "$HOME/.pnpm-store"
       - name: Set up Rust

@@ -5,7 +5,7 @@
 ## 环境要求
 
 - Node.js 22.12 或更高版本
-- pnpm 11 或更高版本
+- pnpm 12 或更高版本
 - Rust stable（项目会自动安装 `rustfmt` 与 `clippy` 组件）
 - 对应操作系统的 [Tauri 前置依赖](https://v2.tauri.app/start/prerequisites/)
 

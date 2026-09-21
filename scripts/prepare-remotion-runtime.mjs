@@ -110,7 +110,7 @@ if (
 }
 
 async function pnpmInstall(directory, production = false) {
-  // pnpm 11 已移除 --no-fund（fund 提示默认关闭）。目标目录必须自带
+  // pnpm 已移除 --no-fund（fund 提示默认关闭）。目标目录必须自带
   // pnpm-workspace.yaml（packages: []），使其成为独立 workspace 根：
   // 否则 pnpm 会把 install 提升到仓库根执行，不创建本目录 node_modules；
   // 也不能用 --ignore-workspace，那会让构建白名单 settings 一并失效。

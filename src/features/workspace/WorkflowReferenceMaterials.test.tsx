@@ -39,7 +39,7 @@ function nodeProps(overrides: Partial<KnowledgeVideoWorkflowConfig> = {}) {
 const templates: readonly [string, Partial<KnowledgeVideoWorkflowConfig>][] = [
   ["知识视频工作流", {}],
   ["AI影视工作流", { film: createAiFilmWorkflowOptions() }],
-  ["漫剧自动工作流", { comicDrama: createComicDramaOptions() }],
+  ["动漫短剧工作流 V2.3", { comicDrama: createComicDramaOptions() }],
   ["剧情带货工作流", { commerce: createCommerceOptions() }],
   ["动画逻辑图工作流", { remotion: createRemotionOptions() }],
   ["小红书封面工作流", { xhsCover: createXhsCoverOptions() }],
@@ -72,7 +72,7 @@ describe("workflow reference materials", () => {
         onUnlink={onUnlink}
       />,
     );
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     const list = screen.getByRole("list", { name: "工作流连线文本" });
     expect(within(list).getAllByRole("listitem")).toHaveLength(2);
     fireEvent.click(within(list).getByRole("button", { name: "断开工作流文本：上游剧本" }));
@@ -113,7 +113,7 @@ describe("workflow reference materials", () => {
       />,
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.getByText(/全部参考资料 9 项/)).toBeVisible();
   });
 
@@ -266,7 +266,7 @@ describe("workflow reference materials", () => {
       />,
     );
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeEnabled();
     expect(screen.getByText(/全部参考资料 1 项 · 15.0 MB/)).toBeVisible();
     expect(
@@ -278,7 +278,7 @@ describe("workflow reference materials", () => {
     render(
       <KnowledgeVideoWorkflowNode {...nodeProps({ materials: [{ ...material, byteSize }] })} />,
     );
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
   });
 
   it.each<KnowledgeVideoWorkflowPhase>(["planning", "awaiting_approval"])(
@@ -312,12 +312,12 @@ describe("workflow reference materials", () => {
       "true",
     );
     expect(screen.getByLabelText("知识视频制作要求")).toBeDisabled();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
-    fireEvent.click(screen.getByRole("button", { name: "开始制作" }));
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
     expect(props.onExecute).not.toHaveBeenCalled();
     rejectPick(new Error("文件已移动，请重新选择"));
     expect(await screen.findByRole("alert")).toHaveTextContent("文件已移动，请重新选择");
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
     expect(
       Array.from(document.querySelectorAll<HTMLImageElement>("img")).some(
         (img) => img.getAttribute("src") === material.localPath,
@@ -337,7 +337,7 @@ describe("workflow reference materials", () => {
       props.onPickMaterials.mockImplementation(() => pendingPick);
       render(<KnowledgeVideoWorkflowNode {...props} />);
       const action =
-        phase === "paused" ? "继续制作" : phase === "failed" ? "重试当前步骤" : "重新制作";
+        phase === "paused" ? "继续制作" : phase === "failed" ? "重试当前步骤" : "规划新一版";
       fireEvent.click(screen.getByRole("button", { name: "添加工作流多模态参考素材" }));
       expect(screen.getByRole("button", { name: action })).toBeDisabled();
       finishPick();
@@ -375,8 +375,8 @@ describe("workflow reference materials", () => {
     fireEvent.click(screen.getByText("商品资料与制作设置"));
     fireEvent.click(screen.getByRole("button", { name: "添加商品资料" }));
     expect(screen.getByRole("button", { name: "添加工作流多模态参考素材" })).toBeDisabled();
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     finishPick();
-    await waitFor(() => expect(screen.getByRole("button", { name: "开始制作" })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled());
   });
 });

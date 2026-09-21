@@ -1807,7 +1807,7 @@ export interface GenerationRetryEvent {
   readonly risk: string;
 }
 
-const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
+export const GENERATION_EVENT_NAMES: readonly GenerationEventName[] = [
   "generation:created",
   "generation:state-changed",
   "generation:text-delta",

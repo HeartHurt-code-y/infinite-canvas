@@ -746,7 +746,7 @@ export function KnowledgeVideoWorkflowNode({
           <CommerceConfiguration
             options={commerceOptions}
             brief={node.config.brief}
-            disabled={configurationLocked}
+            disabled={configurationLocked || phase === "awaiting_approval"}
             onChange={(commerce) => onChange({ ...node.config, commerce })}
             onBriefChange={(brief) => onChange({ ...node.config, brief })}
             {...(onPickCommerceMaterials

@@ -260,7 +260,7 @@ describe("App workspace", () => {
       "aria-expanded",
       "false",
     );
-    expect(screen.getByRole("button", { name: "开始制作" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     fireEvent.click(screen.getByText("模型配置"));
     expect(screen.getByLabelText("策划与审核供应商")).toBeInTheDocument();
     expect(screen.getByLabelText("图片生成供应商")).toBeInTheDocument();

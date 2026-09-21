@@ -279,8 +279,8 @@ describe("reverse-video workflow node", () => {
     expect(screen.queryByLabelText("图片生成模型")).not.toBeInTheDocument();
     expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
     expect(screen.getByLabelText("视觉反推与审核模型")).toHaveValue("project-text");
-    expect(screen.getByRole("button", { name: "开始反推" })).toBeEnabled();
-    fireEvent.click(screen.getByRole("button", { name: "开始反推" }));
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
     expect(props.onExecute).toHaveBeenCalledWith(props.node.key);
     fireEvent.click(screen.getByRole("button", { name: "查看短视频反推工作流历史记录" }));
     expect(props.onOpenHistory).toHaveBeenCalledWith(props.node.key);
@@ -305,7 +305,7 @@ describe("reverse-video workflow node", () => {
         }}
       />,
     );
-    expect(screen.getByRole("button", { name: "开始反推" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
     rerender(
       <KnowledgeVideoWorkflowNode
         {...props}
@@ -318,7 +318,7 @@ describe("reverse-video workflow node", () => {
         }}
       />,
     );
-    expect(screen.getByRole("button", { name: "开始反推" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
   });
 
   it("keeps the review step selected while forwarding a confirmed decision for rechecking", () => {
@@ -353,7 +353,7 @@ describe("reverse-video workflow node", () => {
     const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
     expect(screen.getByLabelText("反推补充方向")).toBeDisabled();
     expect(screen.getByLabelText("视觉反推与审核模型")).toBeDisabled();
-    expect(screen.queryByRole("button", { name: "开始反推" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "查看执行计划" })).not.toBeInTheDocument();
     expect(screen.getByText("下载与抽帧")).toBeInTheDocument();
     expect(screen.getByText("入库")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "暂停后续步骤" }));
