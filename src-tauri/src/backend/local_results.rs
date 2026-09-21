@@ -849,13 +849,11 @@ impl LocalResultService {
             .unwrap_or(0);
         (on_progress
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()))(
-            TransferProgress {
-                received: existing,
-                total: None,
-                bytes_per_sec: 0.0,
-            },
-        );
+            .unwrap_or_else(|poisoned| poisoned.into_inner()))(TransferProgress {
+            received: existing,
+            total: None,
+            bytes_per_sec: 0.0,
+        });
         let mut last_error = None;
         const MAX_ATTEMPTS: u32 = 6;
         for attempt in 0..MAX_ATTEMPTS {
