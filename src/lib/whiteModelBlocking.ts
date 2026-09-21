@@ -291,7 +291,8 @@ export function environmentPreviewSrc(
 }
 
 export function blockingStillName(jobHint?: string): string {
-  const stamp = jobHint?.slice(0, 8) || Date.now().toString(36);
+  const hint = jobHint?.slice(0, 8);
+  const stamp = hint ? hint : Date.now().toString(36);
   return `站位图 · ${stamp}.png`;
 }
 

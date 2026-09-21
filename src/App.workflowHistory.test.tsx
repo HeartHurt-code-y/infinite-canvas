@@ -309,7 +309,7 @@ describe("workflow history canvas integration", () => {
     const first = within(dialog).getByRole("listitem", { current: true });
     const number = within(first)
       .getByText(/版本 \d+ ·/)
-      .textContent!.match(/版本 (\d+)/)![1];
+      .textContent.match(/版本 (\d+)/)![1];
     fireEvent.click(within(dialog).getByRole("button", { name: "关闭工作流版本历史" }));
     fireEvent.change(briefs[0]!, { target: { value: "版本乙" } });
     fireEvent.click(firstControls.getByRole("button", { name: "撤销当前工作流编辑" }));

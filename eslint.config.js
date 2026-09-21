@@ -14,6 +14,9 @@ export default defineConfig([
     ".vitest/**",
     "dist/**",
     "node_modules/**",
+    // 姿态 WASM 与 Blender 运行时由 prepare 脚本生成，不纳入前端 lint。
+    "public/pose/**",
+    "src-tauri/resources/blender/**",
     // src-tauri 下的 skills 为 Rust 侧技能资产的独立 CommonJS 工具脚本，
     // 不参与前端构建，不纳入前端 lint 范围。
     "src-tauri/skills/**",

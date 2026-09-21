@@ -31,6 +31,12 @@ const SIGNED_URL = "https://cdn.example.com/a.png?X-Tos-Signature=expired";
 const ASSET_ID = "asset-20260914103421-82xww";
 const ASSET_NAME = "ScreenShot_2026-09-07_192951_026.png";
 
+function requestUrl(input: RequestInfo | URL): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.href;
+  return input.url;
+}
+
 function proxyUrl(source: string | null = SIGNED_URL): string {
   const proxied = toMediaProxyUrl(source, { assetId: ASSET_ID });
   if (proxied == null) throw new Error("expected desktop proxy url");
@@ -147,9 +153,7 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
     await waitFor(() =>
       expect(mocks.refreshMedia).toHaveBeenCalledWith(cloudImageAsset(), "image", SIGNED_URL),
     );
-    await waitFor(() =>
-      expect(dialogPreview()?.getAttribute("src")).toBe(proxyUrl(freshUrl)),
-    );
+    await waitFor(() => expect(dialogPreview()?.getAttribute("src")).toBe(proxyUrl(freshUrl)));
   });
 
   it("素材库卡片的图片预览失败时走同一条恢复入口", async () => {
@@ -199,8 +203,8 @@ describe("云端素材预览地址在缩略图与详情之间的解析一致性"
   it("刚入库、列表还没有预览地址时按素材身份取本地副本，不立刻显示预览不可用", async () => {
     const objectUrl = "blob:imported-preview";
     vi.stubGlobal("fetch", (input: RequestInfo | URL) => {
-      expect(String(input)).toContain(ASSET_ID);
-      expect(String(input)).not.toContain("src=");
+      expect(requestUrl(input)).toContain(ASSET_ID);
+      expect(requestUrl(input)).not.toContain("src=");
       return Promise.resolve({
         ok: true,
         headers: { get: () => null },

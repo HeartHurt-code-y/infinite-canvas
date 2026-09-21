@@ -1372,7 +1372,8 @@ export function WorkspaceApp({
       try {
         const prefs = await workspaceUiClient.get();
         if (cancelled) return;
-        const storedProvider = prefs.activeAssetProviderId?.trim() || null;
+        const trimmedProvider = prefs.activeAssetProviderId?.trim();
+        const storedProvider = trimmedProvider ? trimmedProvider : null;
         const storedSource = parseAssetLibrarySource(prefs.assetLibrarySource);
         if (storedProvider) {
           persistActiveAssetProviderId(storedProvider);

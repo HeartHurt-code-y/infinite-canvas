@@ -87,9 +87,7 @@ export function PromptFloatingMenu({
     };
   }, [anchorRef]);
 
-  const anchor = anchorRef.current;
-  const initial =
-    anchor != null ? placeMenu(anchor, null) : { top: 0, left: 0, width: 280, maxHeight: 180 };
+  const initial = { top: 0, left: 0, width: 280, maxHeight: 180 };
 
   return createPortal(
     <div

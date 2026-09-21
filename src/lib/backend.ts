@@ -680,8 +680,9 @@ export const workspaceUiClient = {
         v.union([workspaceUiPrefsSchema, v.null()]),
       );
       if (payload == null) return emptyWorkspaceUiPrefs;
+      const trimmedProvider = payload.activeAssetProviderId?.trim();
       return {
-        activeAssetProviderId: payload.activeAssetProviderId?.trim() || null,
+        activeAssetProviderId: trimmedProvider ? trimmedProvider : null,
         assetLibrarySource:
           payload.assetLibrarySource === "local" || payload.assetLibrarySource === "cloud"
             ? payload.assetLibrarySource

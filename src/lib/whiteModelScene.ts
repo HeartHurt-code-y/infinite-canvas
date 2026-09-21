@@ -565,7 +565,7 @@ export function locomotionPose(phase: number, speedFactor: number): UnitPose {
     const thighAngle = swing * Math.sin(legPhase);
     const flex = kneeFlex * Math.max(0, Math.cos(legPhase));
     pose[knee] = limb(pose[hip]!, THIGH, thighAngle);
-    pose[ankle] = limb(pose[knee]!, SHIN, thighAngle - flex);
+    pose[ankle] = limb(pose[knee], SHIN, thighAngle - flex);
   }
   for (const [shoulder, elbow, wrist, sign] of [
     [JOINT.leftShoulder, JOINT.leftElbow, JOINT.leftWrist, 1],
@@ -576,7 +576,7 @@ export function locomotionPose(phase: number, speedFactor: number): UnitPose {
     const upper = armSwing * Math.sin(armPhase);
     const bend = run ? 1.5 : 0.35 + 0.45 * Math.max(0, Math.sin(armPhase));
     pose[elbow] = limb(pose[shoulder]!, UPPER_ARM, upper, sign * 0.02);
-    pose[wrist] = limb(pose[elbow]!, FOREARM, upper + bend, sign * 0.01);
+    pose[wrist] = limb(pose[elbow], FOREARM, upper + bend, sign * 0.01);
   }
   // 站立腿的脚踝落地：用最低脚踝把整个身体抬到地面。
   const lowest = Math.min(pose[JOINT.leftAnkle]![2], pose[JOINT.rightAnkle]![2]);
@@ -717,10 +717,7 @@ function clipJoints(clip: WhiteModelMotionClip): Float32Array {
   return joints;
 }
 
-function clipPose(
-  motion: Extract<WhiteModelMotion, { kind: "clip" }>,
-  time: number,
-): UnitPose {
+function clipPose(motion: Extract<WhiteModelMotion, { kind: "clip" }>, time: number): UnitPose {
   const { clip } = motion;
   const joints = clipJoints(clip);
   const local = Math.max(0, (time - motion.startTime) * Math.max(0.01, motion.speed));
@@ -767,11 +764,12 @@ export function evaluateJoints(
     case "clip":
       pose = clipPose(actor.motion, time);
       break;
-    default:
+    case "auto":
       pose =
         state.speed > MOVING_SPEED
           ? locomotionPose(state.phase, state.speed / WALK_SPEED)
           : idlePose(time);
+      break;
   }
   return pose.map((joint) => vec.scale(joint, actor.size));
 }
@@ -1001,7 +999,8 @@ export function solveShot(
   const height = Math.max(0.2, subject.height);
   // 几何体没有「腰部」「胸口」，注视中心并全身取景。
   const aimHeight = subject.isPerson ? framing.aim * height : height * 0.5;
-  const frameHeight = (subject.isPerson ? framing.frameHeight : Math.max(framing.frameHeight, 1.3)) * height;
+  const frameHeight =
+    (subject.isPerson ? framing.frameHeight : Math.max(framing.frameHeight, 1.3)) * height;
   const vfov = verticalFovDegrees(lens, aspect) * DEG;
   const distance = Math.max(0.3, frameHeight / 2 / Math.tan(vfov / 2));
   const azimuth = subject.yaw + SHOT_AZIMUTH[spec.direction];
@@ -1213,7 +1212,10 @@ export function migrateWhiteModelScenePlan(plan: WhiteModelScenePlanV1): WhiteMo
     for (let index = 0; index <= samples; index += 1) {
       const angle = (camera.orbitDegrees * index) / samples;
       keyframes.push(
-        key((plan.durationSeconds * index) / samples, vec.add(camera.target, rotateAboutZ(offset, angle))),
+        key(
+          (plan.durationSeconds * index) / samples,
+          vec.add(camera.target, rotateAboutZ(offset, angle)),
+        ),
       );
     }
   } else if (camera.motion === "static") {
@@ -1276,7 +1278,10 @@ export function whiteModelPlanIssue(plan: WhiteModelScenePlan): string | null {
   if (camera.some((frame) => vec.distance(frame.position, frame.target) < 0.01)) {
     return "机位不能与注视点重合。";
   }
-  if (plan.camera.follow && !plan.objects.some((actor) => actor.id === plan.camera.follow!.actorId)) {
+  if (
+    plan.camera.follow &&
+    !plan.objects.some((actor) => actor.id === plan.camera.follow!.actorId)
+  ) {
     return "机位跟随的角色已不存在，请重新选择。";
   }
   return null;

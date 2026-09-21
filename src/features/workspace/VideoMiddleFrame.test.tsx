@@ -91,7 +91,7 @@ describe("VideoMiddleFrame", () => {
     const video = thumb.querySelector("video")!;
     stubVideoReadings(video, { duration: 12, width: 1280, height: 720 });
     fireEvent.loadedMetadata(video);
-    expect(video!.currentTime).toBe(6);
+    expect(video.currentTime).toBe(6);
     expect(video).not.toHaveClass("is-frame-ready");
 
     fireEvent.loadedData(video);

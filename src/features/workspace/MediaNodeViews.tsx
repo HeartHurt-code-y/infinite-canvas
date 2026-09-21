@@ -1577,7 +1577,7 @@ export function CanvasAssetNode({
       node.providerConnectionId,
       node.source,
       onRefreshMediaUrls,
-      imageBytes.reload,
+      imageBytes,
     ],
   );
   return (

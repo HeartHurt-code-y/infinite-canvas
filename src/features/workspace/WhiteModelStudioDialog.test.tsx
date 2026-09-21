@@ -1,6 +1,8 @@
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { createWhiteModelBlockingDraft } from "../../lib/whiteModelBlocking";
+import type * as WhiteModelBlockingModule from "../../lib/whiteModelBlocking";
 import type * as WhiteModelStudioModule from "../../lib/whiteModelStudio";
 import {
   createWhiteModelStudioDraft,
@@ -9,7 +11,6 @@ import {
   type BlenderRenderRequest,
   type WhiteModelStudioDraft,
 } from "../../lib/whiteModelStudio";
-import { createWhiteModelBlockingDraft } from "../../lib/whiteModelBlocking";
 import { WhiteModelStudioDialog, type WhiteModelStudioDialogProps } from "./WhiteModelStudioDialog";
 
 const mocks = vi.hoisted(() => ({
@@ -32,7 +33,7 @@ vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   openBlenderProject: mocks.openProject,
 }));
 vi.mock("../../lib/whiteModelBlocking", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("../../lib/whiteModelBlocking")>();
+  const actual = await importOriginal<typeof WhiteModelBlockingModule>();
   return { ...actual, saveWhiteModelStill: mocks.saveStill };
 });
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.chooseFile }));

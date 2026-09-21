@@ -119,6 +119,8 @@ describe("画布产物卡片的本地保存进度", () => {
     expect(
       screen.getByText("正在保存 848.0 KB / 10.0 MB · 12.8 KB/s · 约 12 分钟"),
     ).toBeInTheDocument();
+    // progressbar 不是表单控件，jest-dom 的 toHaveValue 不适用。
+    // eslint-disable-next-line jest-dom/prefer-to-have-value -- aria-valuenow is the accessible progress value
     expect(screen.getByRole("progressbar", { name: "结果保存进度" })).toHaveAttribute(
       "aria-valuenow",
       "8",

@@ -7,11 +7,7 @@ import type { AssetKind } from "./workspaceModel";
  * 图片正文按素材身份走代理（长签名不进 WebView）。
  * 视频封面 / 视频正文与登记的 preview_url 不是同一条渲染路径：封面继续把地址放进 `src`。
  */
-function proxyIdentity(
-  assetId: string,
-  kind: AssetKind,
-  _mediaUrl: string | null | undefined,
-): MediaProxyIdentity | undefined {
+function proxyIdentity(assetId: string, kind: AssetKind): MediaProxyIdentity | undefined {
   if (assetId === "" || kind === "video") return undefined;
   return { assetId };
 }
@@ -113,8 +109,7 @@ export async function loadMediaBytes(
   // 已知太大：保持直连渲染，不必再探一次体积。
   if (directOnlyIdentities.has(key)) return null;
 
-  const requestUrl =
-    toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind, mediaUrl)) ?? mediaUrl ?? null;
+  const requestUrl = toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind)) ?? mediaUrl ?? null;
   if (requestUrl == null || requestUrl === "") return null;
 
   const request = (async (): Promise<string | null> => {
@@ -217,8 +212,7 @@ export function useMediaByteSource(
     kind,
     mediaUrl,
   );
-  const remoteUrl =
-    toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind, mediaUrl)) ?? mediaUrl ?? null;
+  const remoteUrl = toMediaProxyUrl(mediaUrl, proxyIdentity(assetId, kind)) ?? mediaUrl ?? null;
   const usableObjectUrl = objectUrl != null && objectUrl !== blockedObjectUrl ? objectUrl : null;
   return {
     url: usableObjectUrl ?? remoteUrl,

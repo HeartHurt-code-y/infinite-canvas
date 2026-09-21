@@ -3,6 +3,8 @@
     "target": "ES2023",
     "lib": ["ES2023"],
     "skipLibCheck": true,
+    "libReplacement": false,
+    "stableTypeOrdering": true,
     "module": "ESNext",
     "moduleResolution": "bundler",
     "allowSyntheticDefaultImports": true,

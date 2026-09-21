@@ -379,8 +379,7 @@ describe("旧版方案迁移", () => {
 
   it("渲染请求携带烘焙数据，签名只看方案；导入工程不烘焙", () => {
     const draft = createWhiteModelStudioDraft();
-    const request = whiteModelRenderRequest(draft);
-    expect(request.bake?.frameCount).toBe(8 * 24);
+    expect(whiteModelRenderRequest(draft).bake?.frameCount).toBe(8 * 24);
     expect(whiteModelRenderSignature(draft)).not.toContain("frameCount");
     expect(whiteModelRenderRequest({ ...draft, mode: "blend", sourceBlendPath: "C:/a.blend" }).bake).toBeNull();
   });

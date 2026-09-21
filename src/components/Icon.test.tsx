@@ -1,6 +1,7 @@
 import { render, screen } from "@testing-library/react";
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, relative } from "node:path";
+import { cwd } from "node:process";
 import { describe, expect, it } from "vitest";
 
 import { Icon, isIconName, type IconSize } from "./Icon";
@@ -113,14 +114,14 @@ function walkTsx(dir: string, out: string[] = []): string[] {
   return out;
 }
 
-const SRC = join(process.cwd(), "src");
+const SRC = join(cwd(), "src");
 const ICON_MODULE = "src/components/Icon.tsx";
 
 describe("图标层不变量", () => {
   it("除图标层自身外，没有文件直接导入 Phosphor", () => {
     const offenders: string[] = [];
     for (const file of walkTsx(SRC)) {
-      const rel = relative(process.cwd(), file).replace(/\\/g, "/");
+      const rel = relative(cwd(), file).replace(/\\/g, "/");
       if (rel === ICON_MODULE) continue; // 图标层是唯一允许深导入的地方
       if (/@phosphor-icons\/react/.test(readFileSync(file, "utf8"))) offenders.push(rel);
     }
@@ -132,7 +133,7 @@ describe("图标层不变量", () => {
   it("没有调用点再手写像素尺寸或字重", () => {
     const offenders: string[] = [];
     for (const file of walkTsx(SRC)) {
-      const rel = relative(process.cwd(), file).replace(/\\/g, "/");
+      const rel = relative(cwd(), file).replace(/\\/g, "/");
       if (rel === ICON_MODULE) continue;
       readFileSync(file, "utf8")
         .split("\n")
@@ -153,7 +154,7 @@ describe("图标层不变量", () => {
     const VALID: readonly IconSize[] = ["2xs", "xs", "sm", "md", "lg", "xl", "2xl", "3xl"];
     const offenders: string[] = [];
     for (const file of walkTsx(SRC)) {
-      const rel = relative(process.cwd(), file).replace(/\\/g, "/");
+      const rel = relative(cwd(), file).replace(/\\/g, "/");
       if (rel === ICON_MODULE) continue;
       for (const match of readFileSync(file, "utf8").matchAll(/<Icon\b[^>]*?size="([^"]+)"/gs)) {
         if (!VALID.includes(match[1] as IconSize)) offenders.push(`${rel} size="${match[1]}"`);

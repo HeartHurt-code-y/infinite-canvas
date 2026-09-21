@@ -2341,11 +2341,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(screen.getByText("画布为空")).toBeInTheDocument();
 
     // 顶栏跟随当前工作区重新挂载；切回时查询当前顶栏中的标签。
-    const returnTab = screen.getByRole("tab", { name: originalTab.textContent! });
+    const returnTab = screen.getByRole("tab", { name: originalTab.textContent });
     await waitFor(() => expect(returnTab).not.toHaveAttribute("aria-disabled", "true"));
     fireEvent.click(returnTab);
     await waitFor(() =>
-      expect(screen.getByRole("tab", { name: originalTab.textContent! })).toHaveAttribute(
+      expect(screen.getByRole("tab", { name: originalTab.textContent })).toHaveAttribute(
         "aria-selected",
         "true",
       ),
