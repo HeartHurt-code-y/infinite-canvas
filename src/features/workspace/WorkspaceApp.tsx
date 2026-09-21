@@ -23,6 +23,7 @@ import {
   useCallback,
   useDeferredValue,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -374,6 +375,7 @@ import {
 } from "./workspaceModel";
 
 const CANVAS_FLOW_NODE_TYPES = { canvas: CanvasFlowNodeView };
+const EMPTY_CANVAS_FLOW_NODES: CanvasFlowNode[] = [];
 const VideoLocalEditDialog = lazy(() =>
   import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
 );
@@ -433,7 +435,7 @@ function stableCanvasFlowNode(
  * 每个 pointer move 都重渲染；上游节点内容变化时仍以业务状态为准同步进来。
  */
 function LiveCanvasFlow({
-  nodes: upstreamNodes = [],
+  nodes: upstreamNodes = EMPTY_CANVAS_FLOW_NODES,
   onNodesChange,
   ...props
 }: ReactFlowProps<CanvasFlowNode, CanvasFlowEdge>) {
@@ -596,7 +598,8 @@ export function WorkspaceApp({
   readonly services: CanvasSessionServices;
   readonly canvasNavigation?: ReactNode;
 }) {
-  const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>(readAssetLibrarySource);
+  const [assetLibrarySource, setAssetLibrarySource] =
+    useState<AssetLibrarySource>(readAssetLibrarySource);
   const [workspaceUiHydrated, setWorkspaceUiHydrated] = useState(() => !isDesktopRuntime());
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
@@ -775,7 +778,9 @@ export function WorkspaceApp({
   } | null>(null);
   const [activeAssetProviderId, setActiveAssetProviderId] = useState(readActiveAssetProviderId);
   const activeAssetProviderIdRef = useRef(activeAssetProviderId);
-  activeAssetProviderIdRef.current = activeAssetProviderId;
+  useEffect(() => {
+    activeAssetProviderIdRef.current = activeAssetProviderId;
+  }, [activeAssetProviderId]);
   const [nodeModelSelections, setNodeModelSelections] = useState<NodeModelSelections>(
     DEFAULT_NODE_MODEL_SELECTIONS,
   );
@@ -840,7 +845,7 @@ export function WorkspaceApp({
   const [deletingAssetGroupId, setDeletingAssetGroupId] = useState<string | null>(null);
   // 正在改名的云端素材 ID（详情弹窗显示保存中状态，并阻止重复提交）。
   const [renamingAssetId, setRenamingAssetId] = useState<string | null>(null);
-  const [assetsLoading, setAssetsLoading] = useState(isDesktopRuntime());
+  const [assetsLoading, setAssetsLoading] = useState(() => isDesktopRuntime());
   const [assetsError, setAssetsError] = useState<string | null>(null);
   // 上一次云端素材列表拉取是否失败。assetsError 同时承载列表错误与上传错误，
   // 但空状态的"素材库不可用"提示只应针对列表拉取失败显示。
@@ -1242,6 +1247,12 @@ export function WorkspaceApp({
     schedule: scheduleCanvasSave,
     documentChanged,
   } = canvasPersistence;
+  // 视口 `input` 监听不能随 schedule 引用重挂：提示词编辑器的 input 会冒泡到这里触发
+  // 防抖保存，退订窗口里的那次击键会丢一次落盘。订阅只跟激活/水合走，回调读 ref。
+  const scheduleCanvasSaveRef = useRef(scheduleCanvasSave);
+  useLayoutEffect(() => {
+    scheduleCanvasSaveRef.current = scheduleCanvasSave;
+  }, [scheduleCanvasSave]);
 
   useEffect(() => {
     if (canvasHydrated) documentChanged();
@@ -1268,9 +1279,12 @@ export function WorkspaceApp({
     if (!canvasHydrated || !active) return;
     const viewport = canvasViewportRef.current;
     if (viewport == null) return;
-    viewport.addEventListener("input", scheduleCanvasSave);
-    return () => viewport.removeEventListener("input", scheduleCanvasSave);
-  }, [active, canvasHydrated, scheduleCanvasSave]);
+    const onInput = () => {
+      scheduleCanvasSaveRef.current();
+    };
+    viewport.addEventListener("input", onInput);
+    return () => viewport.removeEventListener("input", onInput);
+  }, [active, canvasHydrated]);
 
   useEffect(() => {
     if (!active) flowInstanceRef.current = null;
@@ -4835,7 +4849,9 @@ export function WorkspaceApp({
     },
     [addAssetNode, assetProvider?.id, connectCanvasNodes],
   );
-  placeCanvasUploadRef.current = placeCanvasUploadFromJob;
+  useEffect(() => {
+    placeCanvasUploadRef.current = placeCanvasUploadFromJob;
+  }, [placeCanvasUploadFromJob]);
 
   /** 媒体加载完成后记录原始比例，卡片与连线端点随尺寸同步更新。 */
   const handleAssetAspectRatioChange = useCallback(
@@ -6158,7 +6174,9 @@ export function WorkspaceApp({
   // 卡片就永远停在「正在保存本地副本」，后端其实早已把文件写进下载目录。
   // 订阅只注册一次，处理器始终读取最新闭包。
   const generationEventHandlerRef = useRef(handleGenerationEvent);
-  generationEventHandlerRef.current = handleGenerationEvent;
+  useEffect(() => {
+    generationEventHandlerRef.current = handleGenerationEvent;
+  }, [handleGenerationEvent]);
   useEffect(() => {
     return subscribeGenerationEvents((eventName, payload) => {
       generationEventHandlerRef.current(eventName, payload);
@@ -8243,7 +8261,8 @@ export function WorkspaceApp({
   const ignoreLegacyConnectionStart = useCallback(() => undefined, []);
 
   // 画布节点 per-node 引用稳定缓存（配合 memo 化的 CanvasFlowNodeView）。
-  const canvasFlowNodeCachesRef = useRef<CanvasFlowNodeCache>(new Map());
+  const canvasFlowNodeCachesRef = useRef<CanvasFlowNodeCache>(undefined!);
+  canvasFlowNodeCachesRef.current ??= new Map();
 
   const assetFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
@@ -8787,21 +8806,22 @@ export function WorkspaceApp({
    * 节点还在画布上，引用保持灰化交给用户决定。
    * 拖动只改 x/y、节点集合不变，因此保持集合引用稳定，避免每个 pointer move 重建节点内容。
    */
-  const aliveCanvasNodeKeysRef = useRef<ReadonlySet<string>>(new Set<string>());
-  const aliveCanvasNodeKeys = useMemo(() => {
+  const aliveCanvasNodeKeySignature = useMemo(() => {
     // 读模型按节点类型分表存放（见 CanvasNodesByKey），这里只取它们的 key 并集。
     const nodesByType = canvasNodeByKey as unknown as Readonly<
       Record<string, ReadonlyMap<string, unknown>>
     >;
-    const next = new Set<string>();
+    const keys: string[] = [];
     for (const nodesByKey of Object.values(nodesByType)) {
-      for (const key of nodesByKey.keys()) next.add(key);
+      for (const key of nodesByKey.keys()) keys.push(key);
     }
-    const previous = aliveCanvasNodeKeysRef.current;
-    if (previous.size === next.size && [...next].every((key) => previous.has(key))) return previous;
-    aliveCanvasNodeKeysRef.current = next;
-    return next;
+    keys.sort();
+    return keys.join("\0");
   }, [canvasNodeByKey]);
+  const aliveCanvasNodeKeys = useMemo(() => {
+    if (aliveCanvasNodeKeySignature === "") return new Set<string>();
+    return new Set(aliveCanvasNodeKeySignature.split("\0"));
+  }, [aliveCanvasNodeKeySignature]);
 
   const greenScreenResultsByNode = useMemo(
     () =>

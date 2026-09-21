@@ -27,6 +27,8 @@ export function ConnectionQuickAddMenu({
   const buttonsRef = useRef<(HTMLButtonElement | null)[]>([]);
   const previousFocusRef = useRef<HTMLElement | null>(null);
   const tabCloseTimerRef = useRef<number | undefined>(undefined);
+  const onCloseRef = useRef(onClose);
+  const triggerElementRef = useRef(triggerElement);
   const [focusedIndex, setFocusedIndex] = useState(0);
 
   useLayoutEffect(() => {
@@ -51,23 +53,31 @@ export function ConnectionQuickAddMenu({
     buttonsRef.current[0]?.focus({ preventScroll: true });
   }, []);
 
+  useLayoutEffect(() => {
+    onCloseRef.current = onClose;
+    triggerElementRef.current = triggerElement;
+  }, [onClose, triggerElement]);
+
   useEffect(() => {
     function handleOutsidePointerDown(event: PointerEvent) {
       if (
         event.target instanceof Node &&
         !menuRef.current?.contains(event.target) &&
-        !triggerElement?.contains(event.target)
+        !triggerElementRef.current?.contains(event.target)
       ) {
-        onClose();
+        onCloseRef.current();
       }
     }
+    function handleResize() {
+      onCloseRef.current();
+    }
     document.addEventListener("pointerdown", handleOutsidePointerDown, true);
-    window.addEventListener("resize", onClose);
+    window.addEventListener("resize", handleResize);
     return () => {
       document.removeEventListener("pointerdown", handleOutsidePointerDown, true);
-      window.removeEventListener("resize", onClose);
+      window.removeEventListener("resize", handleResize);
     };
-  }, [onClose, triggerElement]);
+  }, []);
 
   useEffect(() => () => window.clearTimeout(tabCloseTimerRef.current), []);
 

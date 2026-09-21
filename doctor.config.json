@@ -1,0 +1,19 @@
+{
+  "$schema": "https://react.doctor/schema/config.json",
+  "ignore": {
+    "files": ["src-tauri/target/**", "src-tauri/resources/**"],
+    "overrides": [
+      {
+        "files": ["src/features/workspace/CanvasWorkspace.tsx"],
+        "rules": ["react-doctor/no-impure-state-updater"]
+      },
+      {
+        "files": [
+          "src/features/workspace/VideoLocalEditDialog.tsx",
+          "src/features/workspace/WhiteModelStudioDialog.tsx"
+        ],
+        "rules": ["react-doctor/effect-needs-cleanup"]
+      }
+    ]
+  }
+}

@@ -1563,7 +1563,11 @@ function VideoLocalEditDialogContent({
                   max={duration}
                   step={0.01}
                   value={rangeStart}
-                  onChange={(event) => setRangeStart(Number(event.target.value))}
+                  onChange={(event) => {
+                    const next = event.currentTarget.valueAsNumber;
+                    if (!Number.isFinite(next)) return;
+                    setRangeStart(next);
+                  }}
                 />
               </label>
               <label>
@@ -1574,7 +1578,11 @@ function VideoLocalEditDialogContent({
                   max={duration}
                   step={0.01}
                   value={rangeEnd}
-                  onChange={(event) => setRangeEnd(Number(event.target.value))}
+                  onChange={(event) => {
+                    const next = event.currentTarget.valueAsNumber;
+                    if (!Number.isFinite(next)) return;
+                    setRangeEnd(next);
+                  }}
                 />
               </label>
               {!validRange && <p role="alert">结束时间须晚于开始时间，且范围须在视频时长内。</p>}

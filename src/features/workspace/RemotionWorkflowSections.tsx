@@ -83,7 +83,7 @@ export function RemotionConfiguration({ options, disabled, onChange }: RemotionC
             step={1}
             value={options.durationSeconds}
             onChange={(event) => {
-              const durationSeconds = Number(event.target.value);
+              const durationSeconds = event.currentTarget.valueAsNumber;
               if (
                 Number.isInteger(durationSeconds) &&
                 durationSeconds >= 6 &&

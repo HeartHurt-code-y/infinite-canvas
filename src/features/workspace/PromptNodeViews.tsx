@@ -271,8 +271,8 @@ export function PromptMentionInput({
   readonly placeholder?: string;
 }) {
   const inputRef = useRef<HTMLDivElement | null>(null);
-  const sessionRef = useRef<PromptContentEditorSession | null>(null);
-  sessionRef.current ??= createPromptContentEditorSession(candidates, placeholder);
+  const [promptSession] = useState(() => createPromptContentEditorSession(candidates, placeholder));
+  const sessionRef = useRef(promptSession);
   const surfaceRef = useRef<HTMLDivElement | null>(null);
   const fieldRef = useRef<HTMLDivElement | null>(null);
   const expandButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -1485,7 +1485,10 @@ export function ImageNodeSettings({
                 ...config,
                 panoramaEnabled: enabled,
                 parameterValues: enabled
-                  ? { ...config.parameterValues, ...preferredPanoramaParameters(parameterCapabilities) }
+                  ? {
+                      ...config.parameterValues,
+                      ...preferredPanoramaParameters(parameterCapabilities),
+                    }
                   : config.parameterValues,
               });
             }}
@@ -1493,7 +1496,11 @@ export function ImageNodeSettings({
           <span>全景图</span>
         </label>
         {onOpenWhiteModelStudio ? (
-          <button type="button" className="canvas-gen-node__studio" onClick={onOpenWhiteModelStudio}>
+          <button
+            type="button"
+            className="canvas-gen-node__studio"
+            onClick={onOpenWhiteModelStudio}
+          >
             打开白模导演台
           </button>
         ) : null}

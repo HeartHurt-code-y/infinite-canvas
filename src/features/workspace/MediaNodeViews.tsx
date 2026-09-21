@@ -1570,7 +1570,15 @@ export function CanvasAssetNode({
         imageBytes.reload();
       });
     },
-    [node.assetId, node.key, node.kind, node.providerConnectionId, node.source, onRefreshMediaUrls, imageBytes.reload],
+    [
+      node.assetId,
+      node.key,
+      node.kind,
+      node.providerConnectionId,
+      node.source,
+      onRefreshMediaUrls,
+      imageBytes.reload,
+    ],
   );
   return (
     <div
@@ -1596,6 +1604,16 @@ export function CanvasAssetNode({
             onPreview(node.key);
           }
         }}
+        onKeyDown={
+          onPreview
+            ? (event) => {
+                if (event.key !== "Enter" && event.key !== " ") return;
+                event.preventDefault();
+                event.stopPropagation();
+                onPreview(node.key);
+              }
+            : undefined
+        }
         role={onPreview ? "button" : undefined}
         tabIndex={onPreview ? 0 : undefined}
         aria-label={onPreview ? `放大查看${node.name}` : undefined}
@@ -1751,6 +1769,7 @@ export function CanvasOutputLightbox({
             aria-label={mediaName}
             controls
             autoPlay
+            muted
             playsInline
           />
         ) : (
@@ -1853,6 +1872,7 @@ export function CanvasAssetLightbox({
             aria-label={node.name}
             controls
             autoPlay
+            muted
             playsInline
             onError={handleMediaError}
           />
@@ -2090,16 +2110,16 @@ export function CanvasOutputNode({
           : node.origin === "white_model_still"
             ? "白模站位图 · 本地结果"
             : node.origin === "green_screen"
-            ? "绿幕流程 · 本地视频"
-            : node.origin === "video_edit"
-              ? "视频局部编辑 · 标注参考帧"
-              : task
-                ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
-                    isFailed
-                      ? formatTaskClock(task.completedAt ?? task.updatedAt)
-                      : formatTaskClock(task.createdAt)
-                  }`
-                : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
+              ? "绿幕流程 · 本地视频"
+              : node.origin === "video_edit"
+                ? "视频局部编辑 · 标注参考帧"
+                : task
+                  ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
+                      isFailed
+                        ? formatTaskClock(task.completedAt ?? task.updatedAt)
+                        : formatTaskClock(task.createdAt)
+                    }`
+                  : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   return (
     <div
@@ -2332,18 +2352,14 @@ export function CanvasOutputNode({
               )}
             </span>
             <span className="canvas-output-node__status">
-              {phase === "saving"
-                ? (saveProgressLabel ?? "已成功 · 等待结果保存")
-                : statusText}
+              {phase === "saving" ? (saveProgressLabel ?? "已成功 · 等待结果保存") : statusText}
             </span>
             {(isRunning && progress != null) || (phase === "saving" && savePercent != null) ? (
               <span
                 className="canvas-output-node__progress"
                 role="progressbar"
                 aria-label={
-                  phase === "saving"
-                    ? "结果保存进度"
-                    : `${isVideo ? "视频生成" : "图片生成"}进度`
+                  phase === "saving" ? "结果保存进度" : `${isVideo ? "视频生成" : "图片生成"}进度`
                 }
                 aria-valuemin={0}
                 aria-valuemax={100}

@@ -216,6 +216,9 @@ function stageIndexFor(phase: KnowledgeVideoWorkflowPhase): number {
   return -1;
 }
 
+const EMPTY_WORKFLOW_MEDIA: readonly WorkflowCanvasInput[] = [];
+const EMPTY_WORKFLOW_TEXTS: readonly ConnectedCanvasTextInput[] = [];
+
 export interface KnowledgeVideoWorkflowNodeProps {
   readonly node: KnowledgeVideoWorkflowNodeData;
   readonly connectedInputs?: readonly WorkflowCanvasInput[];
@@ -268,8 +271,8 @@ export interface KnowledgeVideoWorkflowNodeProps {
 
 export function KnowledgeVideoWorkflowNode({
   node,
-  connectedInputs = [],
-  connectedTexts = [],
+  connectedInputs = EMPTY_WORKFLOW_MEDIA,
+  connectedTexts = EMPTY_WORKFLOW_TEXTS,
   onUnlink,
   onRemoveHistoricalReference,
   providerCatalog,
@@ -1363,12 +1366,14 @@ export function KnowledgeVideoWorkflowNode({
                             min={4}
                             max={15}
                             value={shotDraft.durationSeconds}
-                            onChange={(event) =>
+                            onChange={(event) => {
+                              const durationSeconds = event.currentTarget.valueAsNumber;
+                              if (!Number.isFinite(durationSeconds)) return;
                               setShotDraft({
                                 ...shotDraft,
-                                durationSeconds: Number(event.target.value),
-                              })
-                            }
+                                durationSeconds,
+                              });
+                            }}
                           />
                         </label>
                         <div className="canvas-knowledge-workflow__shot-editor-actions">

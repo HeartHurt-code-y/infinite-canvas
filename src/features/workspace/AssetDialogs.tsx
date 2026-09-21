@@ -280,10 +280,9 @@ export function RealPersonAssetDialog({
                   type="button"
                   disabled={linkExpired}
                   onClick={() => {
-                    void copyLink(authLink.h5Url).then(
-                      () => setNotice("认证链接已复制，可发送给本人在手机上打开。"),
-                      (copyError: unknown) => setError(realPersonErrorSummary(copyError)),
-                    );
+                    void copyLink(authLink.h5Url)
+                      .then(() => setNotice("认证链接已复制，可发送给本人在手机上打开。"))
+                      .catch((copyError: unknown) => setError(realPersonErrorSummary(copyError)));
                   }}
                 >
                   <Icon name="copy" aria-hidden="true" size="md" />

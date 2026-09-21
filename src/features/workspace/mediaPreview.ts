@@ -177,7 +177,6 @@ export function useNodeInView<T extends HTMLElement>(
   const eager = options?.eager === true;
   const heavy = options?.heavy === true;
   const heavyRef = useRef(heavy);
-  heavyRef.current = heavy;
   // 不在画布里（对话框、测试、浮层）时没有 `.canvas-viewport`，默认可见，避免首帧空白。
   const [inView, setInView] = useState(
     () => eager || document.querySelector(PANE_SELECTOR) == null,
@@ -186,7 +185,10 @@ export function useNodeInView<T extends HTMLElement>(
   const leaveTimerRef = useRef<number | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const eagerRef = useRef(eager);
-  eagerRef.current = eager;
+  useEffect(() => {
+    heavyRef.current = heavy;
+    eagerRef.current = eager;
+  }, [eager, heavy]);
 
   const publish = useCallback((next: boolean) => {
     if (eagerRef.current || next) {

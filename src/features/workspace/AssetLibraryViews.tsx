@@ -168,12 +168,14 @@ function AssetCardVideoVisual({
             // （与画布素材节点一致）。
             if (failedUrl != null && !coverRefreshAttemptedRef.current) {
               coverRefreshAttemptedRef.current = true;
-              void refreshAssetItemCoverUrl(asset).then((freshUrl) => {
-                if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
-                  setRefreshedCoverUrl(freshUrl);
-                  setFailedCoverUrl(null);
-                }
-              });
+              void refreshAssetItemCoverUrl(asset)
+                .then((freshUrl) => {
+                  if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
+                    setRefreshedCoverUrl(freshUrl);
+                    setFailedCoverUrl(null);
+                  }
+                })
+                .catch(() => undefined);
             }
             const video = videoRef.current;
             if (video != null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
@@ -210,15 +212,15 @@ function AssetCardVideoVisual({
             // 续签失败保持置灰，不反复请求。视频正文不落字节缓存，按需播放。
             if (candidateVideoUrl != null && !playbackRefreshAttemptedRef.current) {
               playbackRefreshAttemptedRef.current = true;
-              void refreshMediaUrlWithStagingFallback(asset, "video", candidateVideoUrl).then(
-                (freshUrl) => {
+              void refreshMediaUrlWithStagingFallback(asset, "video", candidateVideoUrl)
+                .then((freshUrl) => {
                   if (freshUrl == null || freshUrl === "") return;
                   if (freshUrl !== candidateVideoUrl) {
                     setRefreshedVideoUrl(freshUrl);
                   }
                   setFailedVideoSrc(null);
-                },
-              );
+                })
+                .catch(() => undefined);
             }
           }}
           onLoadedMetadata={(event) => {
@@ -331,10 +333,9 @@ function AssetCard({
   }, [onDropToCanvas]);
 
   return (
-    <div
+    <button
+      type="button"
       className={`asset-card${pointerDragging ? " is-dragging" : ""}`}
-      role="button"
-      tabIndex={0}
       aria-label={`预览${typeLabel}素材详情：${asset.name}`}
       onPointerDown={(event) => {
         if (!event.isPrimary || event.button !== 0) return;
@@ -358,11 +359,6 @@ function AssetCard({
       }}
       onMouseLeave={() => {
         if (asset.kind === "video") setHovered(false);
-      }}
-      onKeyDown={(event) => {
-        if (event.key !== "Enter" && event.key !== " ") return;
-        event.preventDefault();
-        onPreview();
       }}
       onFocus={() => {
         if (asset.kind === "video") {
@@ -419,16 +415,18 @@ function AssetCard({
                         asset,
                         "image",
                         candidateImagePreviewUrl,
-                      ).then((freshUrl) => {
-                        if (freshUrl == null || freshUrl === "") return;
-                        if (freshUrl !== candidateImagePreviewUrl) {
-                          setRefreshedImagePreviewUrl(freshUrl);
-                        }
-                        setFailedImagePreviewUrl(null);
-                        // 回读会把完整地址登记进原生代理；第一次失败往往发生在登记之前，
-                        // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
-                        imageBytes.reload();
-                      });
+                      )
+                        .then((freshUrl) => {
+                          if (freshUrl == null || freshUrl === "") return;
+                          if (freshUrl !== candidateImagePreviewUrl) {
+                            setRefreshedImagePreviewUrl(freshUrl);
+                          }
+                          setFailedImagePreviewUrl(null);
+                          // 回读会把完整地址登记进原生代理；第一次失败往往发生在登记之前，
+                          // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
+                          imageBytes.reload();
+                        })
+                        .catch(() => undefined);
                     }
                   }}
                 />
@@ -448,7 +446,7 @@ function AssetCard({
           ) : null}
         </span>
       )}
-    </div>
+    </button>
   );
 }
 

@@ -167,12 +167,14 @@ export function MusicVideoConfiguration({
               max={100}
               step={5}
               value={Math.round(options.syncRatio * 100)}
-              onChange={(e) =>
+              onChange={(e) => {
+                const percent = e.currentTarget.valueAsNumber;
+                if (!Number.isFinite(percent)) return;
                 onChange({
                   ...options,
-                  syncRatio: Math.min(1, Math.max(0, Number(e.target.value) / 100)),
-                })
-              }
+                  syncRatio: Math.min(1, Math.max(0, percent / 100)),
+                });
+              }}
             />
           </label>
         ) : null}

@@ -867,13 +867,16 @@ h3 {
   /* 跳过视口外媒体卡片的布局与绘制；首次估算高度后由 auto 记住实测尺寸。 */
   content-visibility: auto;
   contain-intrinsic-size: auto 180px;
+  width: 100%;
   min-width: 0;
   overflow: hidden;
   margin-block-end: var(--space-xs);
   break-inside: avoid;
   padding: 0;
   color: var(--color-chrome-ink);
+  font: inherit;
   text-align: start;
+  appearance: none;
   background: var(--color-chrome-3);
   border: 0;
   border-radius: var(--radius-control);
@@ -12619,6 +12622,19 @@ details[open] > summary .history-disclosure__caret {
   object-fit: contain;
 }
 
+.history-lightbox__dismiss-media {
+  padding: 0;
+  color: inherit;
+  background: transparent;
+  border: 0;
+  cursor: zoom-out;
+}
+
+.history-lightbox__dismiss-media:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--rule-active);
+}
+
 .history-lightbox__stage img {
   cursor: zoom-out;
   transition: opacity var(--dur-micro) var(--ease-out);
@@ -12626,11 +12642,6 @@ details[open] > summary .history-disclosure__caret {
 
 .history-lightbox__stage img:active {
   opacity: 0.9;
-}
-
-.history-lightbox__stage img:focus-visible {
-  outline: var(--rule-active) solid var(--color-focus);
-  outline-offset: var(--rule-active);
 }
 
 /* 历史预览灯箱里的文本结果（Context-IR 扩写正文） */

@@ -34,11 +34,13 @@ export function CanvasWorkspace() {
   const [canvases, setCanvases] = useState<readonly CanvasTab[]>([
     { id: initialCanvasId, name: CANVAS_DOCUMENT_TITLE },
   ]);
-  const canvasNames = useRef(new Map([[initialCanvasId, CANVAS_DOCUMENT_TITLE]]));
+  const canvasNames = useRef<Map<string, string>>(undefined!);
+  canvasNames.current ??= new Map([[initialCanvasId, CANVAS_DOCUMENT_TITLE]]);
   const [activeCanvasId, setActiveCanvasId] = useState(initialCanvasId);
   const activeId = useRef(initialCanvasId);
   const [visited, setVisited] = useState<readonly string[]>([initialCanvasId]);
-  const sessions = useRef(new Map<string, CanvasSessionHandle>());
+  const sessions = useRef<Map<string, CanvasSessionHandle>>(undefined!);
+  sessions.current ??= new Map();
   const [readyIds, setReadyIds] = useState<ReadonlySet<string>>(new Set());
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);

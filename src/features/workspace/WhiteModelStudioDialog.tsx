@@ -57,6 +57,7 @@ export interface WhiteModelStudioDialogProps {
 }
 
 const COMMIT_DELAY_MS = 120;
+const EMPTY_IMAGE_INPUTS: readonly WhiteModelStudioMediaInput[] = [];
 
 const activeJob = (job: BlenderRenderJob | null) =>
   job?.status === "queued" || job?.status === "running";
@@ -85,7 +86,7 @@ export function WhiteModelStudioDialog({
   onClose,
   onUse,
   purpose = "video",
-  imageInputs = [],
+  imageInputs = EMPTY_IMAGE_INPUTS,
   onExportBlocking,
 }: WhiteModelStudioDialogProps) {
   const dialogRef = useRef<HTMLDialogElement>(null);

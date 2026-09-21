@@ -434,25 +434,24 @@ function HistoryLightbox({
             src={result.finalPath ? toMediaSrc(result.finalPath) : undefined}
             controls
             autoPlay
+            muted
             playsInline
           />
         ) : (
-          <img
+          <button
             key={result.finalPath ?? result.resultIndex}
-            className="history-lightbox__media"
-            src={result.finalPath ? toMediaSrc(result.finalPath) : undefined}
-            alt={`任务结果 ${index + 1}`}
-            role="button"
-            tabIndex={0}
+            type="button"
+            className="history-lightbox__dismiss-media"
             aria-label={`任务结果 ${index + 1}，关闭媒体预览`}
-            draggable={false}
             onClick={onClose}
-            onKeyDown={(event) => {
-              if (event.key !== "Enter" && event.key !== " ") return;
-              event.preventDefault();
-              onClose();
-            }}
-          />
+          >
+            <img
+              className="history-lightbox__media"
+              src={result.finalPath ? toMediaSrc(result.finalPath) : undefined}
+              alt=""
+              draggable={false}
+            />
+          </button>
         )}
         {hasNext ? (
           <button
