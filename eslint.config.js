@@ -11,6 +11,7 @@ import tseslint from "typescript-eslint";
 export default defineConfig([
   globalIgnores([
     "coverage/**",
+    ".vitest/**",
     "dist/**",
     "node_modules/**",
     // src-tauri 下的 skills 为 Rust 侧技能资产的独立 CommonJS 工具脚本，
