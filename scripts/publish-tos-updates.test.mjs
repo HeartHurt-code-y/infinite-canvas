@@ -31,21 +31,26 @@ test("publish file picker keeps updater artifacts, signatures and first-install 
     mkdirSync(path.join(dir, "macos"));
     mkdirSync(path.join(dir, "nsis"));
     mkdirSync(path.join(dir, "helper"));
+    mkdirSync(path.join(dir, "dmg"));
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz"), "pkg");
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz.sig"), "sig");
     writeFileSync(path.join(dir, "nsis", "无限画布_0.1.1_x64-setup.exe"), "exe");
     writeFileSync(path.join(dir, "helper", "install-macos.sh"), "#!/bin/sh\n");
+    writeFileSync(path.join(dir, "dmg", "无限画布_0.1.1_aarch64.dmg"), "dmg");
+    writeFileSync(path.join(dir, "latest.json"), "{}\n");
     writeFileSync(path.join(dir, "notes.txt"), "skip me");
-    const picked = new Set(collectPublishFilePaths(dir).map((filePath) => path.basename(filePath)));
+    const picked = collectPublishFilePaths(dir).map((filePath) => path.basename(filePath));
     assert.deepEqual(
-      picked,
+      new Set(picked),
       new Set([
         "install-macos.sh",
+        "latest.json",
         "无限画布.app.tar.gz",
         "无限画布.app.tar.gz.sig",
         "无限画布_0.1.1_x64-setup.exe",
       ]),
     );
+    assert.equal(picked.at(-1), "latest.json");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

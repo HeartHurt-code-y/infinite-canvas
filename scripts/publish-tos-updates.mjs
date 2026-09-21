@@ -150,11 +150,13 @@ export function collectPublishFilePaths(bundleDir) {
   const files = listFilesRecursive(bundleDir);
   /** @type {string[]} */
   const selected = [];
+  /** @type {string[]} */
+  const manifests = [];
   for (const filePath of files) {
     const fileName = path.basename(filePath);
     const lower = fileName.toLowerCase();
     if (lower === "latest.json") {
-      selected.push(filePath);
+      manifests.push(filePath);
       continue;
     }
     if (lower.endsWith(".sig")) {
@@ -169,11 +171,13 @@ export function collectPublishFilePaths(bundleDir) {
       selected.push(filePath);
       continue;
     }
-    if (lower.endsWith(".dmg") || lower === "install-macos.sh") {
+    // 不上传 .dmg：海外 CI 传到 tos-cn-beijing 约 700MB×2 会超过 Codemagic 时限，
+    // 自动更新只用 .app.tar.gz。首次安装脚本仍随包发布。
+    if (lower === "install-macos.sh") {
       selected.push(filePath);
     }
   }
-  return selected;
+  return [...selected, ...manifests];
 }
 
 export function readTosPublishEnv(env = process.env) {
@@ -656,6 +660,11 @@ export async function publishUpdaterArtifacts(options) {
   });
   const uploads = collectPublishFilePaths(bundleDir);
   if (!uploads.includes(out) && existsSync(out)) uploads.push(out);
+  uploads.sort((left, right) => {
+    const leftManifest = path.basename(left).toLowerCase() === "latest.json" ? 1 : 0;
+    const rightManifest = path.basename(right).toLowerCase() === "latest.json" ? 1 : 0;
+    return leftManifest - rightManifest;
+  });
   /** @type {string[]} */
   const uploadedKeys = [];
   for (const filePath of uploads) {
