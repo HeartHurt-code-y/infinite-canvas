@@ -65,7 +65,6 @@ import {
   type PromptMultimodalInput,
   type PromptVisionImageInput,
   type ProviderCatalogEntry,
-  type ProviderConnection,
   type RealPersonGroup,
   type StagingJobRecord,
   type StartGenerationCommand,
