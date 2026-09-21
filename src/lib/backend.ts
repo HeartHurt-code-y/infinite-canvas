@@ -44,6 +44,7 @@ import {
   tosBucketPullSummarySchema,
   unknownSchema,
   videoComposerEngineStatusSchema,
+  workspaceUiPrefsSchema,
   videoCompositionJobRecordSchema,
   videoDownloaderEngineStatusSchema,
   videoDownloadJobRecordSchema,
@@ -456,6 +457,11 @@ export interface TosStagingConfig {
   readonly enabled: boolean;
 }
 
+export interface WorkspaceUiPrefs {
+  readonly activeAssetProviderId: string | null;
+  readonly assetLibrarySource: "cloud" | "local" | null;
+}
+
 export type StagingStatus =
   // 仅前端占位：文件已选定、startUpload 尚未返回 jobId 前的等待期状态，后端任务记录不会出现该值。
   | "preparing"
@@ -659,6 +665,35 @@ export const tosStagingClient: TosStagingClient = {
     }),
   refreshStagingObjectUrl: (url) =>
     invokeDesktop("refresh_staging_object_url", stringSchema, { command: { url } }),
+};
+
+const emptyWorkspaceUiPrefs: WorkspaceUiPrefs = {
+  activeAssetProviderId: null,
+  assetLibrarySource: null,
+};
+
+export const workspaceUiClient = {
+  async get(): Promise<WorkspaceUiPrefs> {
+    try {
+      const payload = await invokeDesktop(
+        "get_workspace_ui_prefs",
+        v.union([workspaceUiPrefsSchema, v.null()]),
+      );
+      if (payload == null) return emptyWorkspaceUiPrefs;
+      return {
+        activeAssetProviderId: payload.activeAssetProviderId?.trim() || null,
+        assetLibrarySource:
+          payload.assetLibrarySource === "local" || payload.assetLibrarySource === "cloud"
+            ? payload.assetLibrarySource
+            : null,
+      };
+    } catch {
+      return emptyWorkspaceUiPrefs;
+    }
+  },
+  save(prefs: WorkspaceUiPrefs): Promise<void> {
+    return invokeDesktopVoid("save_workspace_ui_prefs", { prefs });
+  },
 };
 
 /**

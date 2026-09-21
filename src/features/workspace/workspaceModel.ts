@@ -1430,6 +1430,7 @@ export type AssetRefreshSource =
 export const ASSET_PAGE_SIZE = 40;
 
 export const ACTIVE_ASSET_PROVIDER_STORAGE_KEY = "infinite-canvas:active-asset-provider-connection";
+export const ASSET_LIBRARY_SOURCE_STORAGE_KEY = "infinite-canvas:asset-library-source";
 
 export function readActiveAssetProviderId(): string | null {
   if (typeof window === "undefined") return null;
@@ -1437,6 +1438,27 @@ export function readActiveAssetProviderId(): string | null {
     return window.localStorage.getItem(ACTIVE_ASSET_PROVIDER_STORAGE_KEY);
   } catch {
     return null;
+  }
+}
+
+export function parseAssetLibrarySource(value: unknown): AssetLibrarySource | null {
+  return value === "local" || value === "cloud" ? value : null;
+}
+
+export function readAssetLibrarySource(): AssetLibrarySource {
+  if (typeof window === "undefined") return "cloud";
+  try {
+    return parseAssetLibrarySource(window.localStorage.getItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY)) ?? "cloud";
+  } catch {
+    return "cloud";
+  }
+}
+
+export function persistAssetLibrarySource(source: AssetLibrarySource): void {
+  try {
+    window.localStorage.setItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY, source);
+  } catch {
+    // WebView 存储不可用时仍保留当前会话内的选择。
   }
 }
 

@@ -806,6 +806,9 @@ impl StagingService {
     }
 
     /// 将一个本地素材 staging job 转换为素材记录（含按次签发的只读预签名 URL）。
+    ///
+    /// 预签名失败（对象存储未配置、凭据丢失、签名被拒）不得把整页索引打掉：
+    /// 卡片身份仍在 SQLite 里，预览可以空着等用户补回 TOS。
     fn local_asset_record(&self, job: &StagingJobRecord) -> BackendResult<LocalAssetRecord> {
         let object_key = job.object_key.as_deref().ok_or_else(|| {
             BackendError::protocol(
@@ -813,20 +816,31 @@ impl StagingService {
                 json!({ "stagingJobId": job.id }),
             )
         })?;
-        let lease = self.presign_existing_object(&job.id, object_key)?;
+        let preview_url = match self.presign_existing_object(&job.id, object_key) {
+            Ok(lease) => {
+                remember_asset_preview_url(&job.id, Some(&lease.get_url));
+                lease.get_url
+            }
+            Err(error) => {
+                warn!(
+                    "[staging] 本地素材预览签发失败，仍返回索引条目: stagingJobId={}, objectKey={object_key}, 错误: {error}",
+                    job.id
+                );
+                String::new()
+            }
+        };
         let name = Path::new(&job.local_path)
             .file_name()
             .and_then(|value| value.to_str())
             .filter(|value| !value.is_empty())
             .unwrap_or(&job.local_path)
             .to_string();
-        remember_asset_preview_url(&job.id, Some(&lease.get_url));
         Ok(LocalAssetRecord {
             id: job.id.clone(),
             name,
             media_type: job.media_type,
             object_key: object_key.to_string(),
-            preview_url: lease.get_url,
+            preview_url,
             byte_size: job.bytes_total.unwrap_or(job.bytes_uploaded),
             created_at: job.created_at,
         })
@@ -2732,5 +2746,72 @@ mod tests {
         );
 
         server.join().unwrap();
+    }
+
+    fn test_staging_service(directory: &tempfile::TempDir) -> StagingService {
+        use std::sync::Arc;
+        let storage = Arc::new(Storage::open(&directory.path().join("app.sqlite3")).unwrap());
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        let lifecycle = crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(&storage));
+        let providers = crate::backend::provider::ProviderRuntime::new(
+            Arc::clone(&storage),
+            lifecycle,
+            credentials.clone(),
+        )
+        .unwrap();
+        StagingService::new(
+            storage,
+            credentials,
+            AssetLibrary::new(providers),
+            VideoCompositionService::new(
+                directory.path().join("downloads"),
+                directory.path().join("ffmpeg"),
+                directory.path().join("resources"),
+            )
+            .unwrap(),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn list_local_assets_keeps_index_when_tos_is_not_configured() {
+        // 升级后 TOS 行暂时读不出来时，SQLite 本地索引必须仍能列出；
+        // 预览可以空，但不能把整页素材库打成「不可用」。
+        let directory = tempfile::tempdir().unwrap();
+        let staging = test_staging_service(&directory);
+        let timestamp = now_ms();
+        staging
+            .storage
+            .insert_staging_job(&StagingJobRecord {
+                id: "job-keep".into(),
+                local_path: "portrait.png".into(),
+                purpose: "local_asset".into(),
+                media_type: MediaType::Image,
+                object_key: Some("staging/portrait.png".into()),
+                status: StagingStatus::Staged,
+                bytes_total: Some(32),
+                bytes_uploaded: 32,
+                asset_id: None,
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: timestamp,
+                updated_at: timestamp,
+            })
+            .unwrap();
+
+        let page = staging
+            .list_local_assets(Some(LocalAssetListQuery {
+                media_type: None,
+                name: None,
+                page: Some(1),
+                page_size: Some(40),
+            }))
+            .expect("local index must list without TOS");
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, "job-keep");
+        assert_eq!(page.items[0].object_key, "staging/portrait.png");
+        assert_eq!(page.items[0].preview_url, "");
+        assert_eq!(page.kind_totals.image, 1);
     }
 }

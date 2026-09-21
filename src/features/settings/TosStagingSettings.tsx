@@ -70,6 +70,7 @@ export function TosStagingSettings({
   const secretKeyRef = useRef<HTMLInputElement | null>(null);
   const [draft, setDraft] = useState<TosDraft>(() => draftFromConfig(null));
   const [savedConfig, setSavedConfig] = useState<TosStagingConfig | null>(null);
+  const [leftoverCredential, setLeftoverCredential] = useState(false);
   const [loadingConfig, setLoadingConfig] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
@@ -90,15 +91,18 @@ export function TosStagingSettings({
         setDraft(draftFromConfig(config));
         // 重新打开设置时把已保存的 AK/SK 明文回填到输入框（用户要求「持久化一直显露」）。
         // TOS 凭据以 JSON 形式存储，解析出 accessKey/secretKey 分别填回两个输入框。
-        if (!config?.credentialRef) return;
+        // sqlite 配置行若在升级后暂时读不到，仍按固定引用名探测系统凭据管理器：
+        // Windows 凭据不在用户数据目录里，自动更新清不掉。
+        const credentialRef = config?.credentialRef ?? TOS_CREDENTIAL_REF;
         try {
-          const secret = await client.getCredential(config.credentialRef);
+          const secret = await client.getCredential(credentialRef);
           if (!active) return;
           if (!secret) return;
           const parsed = v.safeParse(storedTosCredentialSchema, JSON.parse(secret) as unknown);
           if (!parsed.success) return;
           if (accessKeyRef.current) accessKeyRef.current.value = parsed.output.accessKey;
           if (secretKeyRef.current) secretKeyRef.current.value = parsed.output.secretKey;
+          if (!config?.credentialRef) setLeftoverCredential(true);
         } catch {
           // 凭据读取或解析失败：保持留空，由 credentialSaved 决定「留空则沿用」语义。
         }
@@ -115,7 +119,7 @@ export function TosStagingSettings({
   }, [client]);
 
   const badge = statusBadge(loadingConfig, savedConfig);
-  const credentialSaved = savedConfig?.credentialRef != null;
+  const credentialSaved = savedConfig?.credentialRef != null || leftoverCredential;
 
   const handleSave = async (event: FormEvent) => {
     event.preventDefault();
@@ -163,7 +167,7 @@ export function TosStagingSettings({
       setSavedConfig(config);
       setSuccessMessage(
         enabled
-          ? "对象存储直连配置已保存并启用。"
+          ? "对象存储直连配置已保存并启用。素材文件仍在桶里，不会因升级丢失；若素材库是空的，请切换到「本地素材」后点「拉取整桶」。"
           : "桶名为空，对象存储直连已停用；需要时填写桶名即可启用。",
       );
     } catch (error) {
@@ -202,8 +206,9 @@ export function TosStagingSettings({
           <p>
             只有远程接口必须拿到公网 URL 时（例如本地图片作为视频生成输入），才会短期上传到火山引擎
             TOS 暂存桶；生成结果本身始终只保存到本机。填写桶名和 AK/SK
-            即自动启用，清空桶名即停用；凭据只保存到系统凭据管理器。 地域固定为 {DEFAULT_REGION}（
-            {DEFAULT_ENDPOINT}），暂存对象写入 {DEFAULT_OBJECT_PREFIX}/ 前缀。
+            即自动启用，清空桶名即停用；凭据只保存到系统凭据管理器，自动更新不会删除桶里的文件。
+            地域固定为 {DEFAULT_REGION}（{DEFAULT_ENDPOINT}），暂存对象写入 {DEFAULT_OBJECT_PREFIX}/
+            前缀。
           </p>
         </div>
         <span className="tos-status-badge" data-state={badge.state}>
@@ -280,6 +285,13 @@ export function TosStagingSettings({
           {saving ? "正在保存…" : testing ? "正在测试连通性…" : "保存直连配置"}
         </button>
       </form>
+
+      {leftoverCredential && !savedConfig?.enabled ? (
+        <p className="settings-success" role="status">
+          <Icon name="check-circle" aria-hidden="true" size="md" />
+          系统凭据管理器里还留着上次的 AccessKey，自动更新没有清掉密钥。补填原来的桶名后保存即可；素材文件仍在桶里，可到「本地素材」点「拉取整桶」。
+        </p>
+      ) : null}
 
       {rawError ? (
         <div className="settings-error" role="alert">

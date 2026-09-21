@@ -47,6 +47,7 @@ use super::{
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
         TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
         UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
+        WorkspaceUiPrefs,
     },
 };
 
@@ -330,6 +331,12 @@ pub fn set_credential(
     state: State<'_, BackendState>,
     command: SetCredentialCommand,
 ) -> CommandResult<CredentialStatus> {
+    super::provider::preserve_asset_library_token_when_replacing_provider_key(
+        &state.credentials,
+        &command.credential_ref,
+        &command.secret,
+    )
+    .command()?;
     state
         .credentials
         .set(&command.credential_ref, &command.secret)
@@ -716,6 +723,19 @@ pub fn get_tos_staging_config(
     state: State<'_, BackendState>,
 ) -> CommandResult<Option<TosStagingConfig>> {
     state.storage.get_tos_config().command()
+}
+
+#[tauri::command]
+pub fn get_workspace_ui_prefs(state: State<'_, BackendState>) -> CommandResult<WorkspaceUiPrefs> {
+    state.storage.get_workspace_ui_prefs().command()
+}
+
+#[tauri::command]
+pub fn save_workspace_ui_prefs(
+    state: State<'_, BackendState>,
+    prefs: WorkspaceUiPrefs,
+) -> CommandResult<()> {
+    state.storage.save_workspace_ui_prefs(&prefs).command()
 }
 
 #[tauri::command]

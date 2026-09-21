@@ -458,6 +458,49 @@ describe("ProviderSettingsDialog", () => {
     expect(client.fetchProviderModels).not.toHaveBeenCalled();
   });
 
+  it("保存连接不会切换工作区素材库，切换供应商连接才会跟随", async () => {
+    const otherProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-other",
+      displayName: "海外平台",
+      baseUrl: "https://new-provider.example/v1",
+      apiKeyRef: "provider:provider-other:api-key",
+    };
+    const client = createClient({
+      listProviderConnections: vi.fn(() => Promise.resolve([SAVED_PROVIDER, otherProvider])),
+      upsertProviderConnection: vi.fn(() =>
+        Promise.resolve({ ...SAVED_PROVIDER, baseUrl: "https://api.company.com/updated/v1" }),
+      ),
+    });
+    const onAssetProviderChanged = vi.fn();
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={vi.fn()}
+        activeAssetProviderId={SAVED_PROVIDER.id}
+        onAssetProviderChanged={onAssetProviderChanged}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    const saveButton = screen.getByRole("button", { name: "保存连接" });
+    await waitFor(() => expect(saveButton).toBeEnabled());
+    fireEvent.change(screen.getByLabelText(/^Base URL/), {
+      target: { value: "https://api.company.com/updated/v1" },
+    });
+    fireEvent.click(saveButton);
+
+    expect(await screen.findByText(/已保存 公司接口 的连接信息/)).toBeInTheDocument();
+    expect(onAssetProviderChanged).not.toHaveBeenCalled();
+
+    fireEvent.change(screen.getByLabelText("供应商连接"), {
+      target: { value: otherProvider.id },
+    });
+    expect(onAssetProviderChanged).toHaveBeenCalledWith(otherProvider.id);
+  });
+
   it("restores saved models from the local database when the dialog opens", async () => {
     const savedModels: RemoteModelOption[] = [
       {

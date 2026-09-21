@@ -1,6 +1,9 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./App";
+import App, {
+  ACTIVE_ASSET_PROVIDER_STORAGE_KEY,
+  ASSET_LIBRARY_SOURCE_STORAGE_KEY,
+} from "./App";
 import type { CloudAsset, SaveCanvasDocumentCommand } from "./lib/backend";
 import { toMediaProxyUrl } from "./lib/mediaProxy";
 import { fireCanvasMouse } from "./test/canvasEvents";
@@ -19,6 +22,8 @@ function defaultCanvasInvoke(command: string, args?: Record<string, unknown>): P
     const saved = args?.["command"] as SaveCanvasDocumentCommand;
     return Promise.resolve({ ...saved, revision: 1, createdAt: 1, updatedAt: 1 });
   }
+  if (command === "get_workspace_ui_prefs") return Promise.resolve({});
+  if (command === "save_workspace_ui_prefs") return Promise.resolve(null);
   return Promise.resolve(null);
 }
 
@@ -79,6 +84,7 @@ async function waitForNodeVisible(node: HTMLElement): Promise<HTMLElement> {
 afterEach(() => {
   vi.restoreAllMocks();
   window.localStorage.removeItem(ACTIVE_ASSET_PROVIDER_STORAGE_KEY);
+  window.localStorage.removeItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY);
 });
 
 afterAll(() => {

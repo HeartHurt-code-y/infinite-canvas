@@ -7,7 +7,10 @@ import { CanvasWorkspace } from "./features/workspace/CanvasWorkspace";
 import { createQueryClient } from "./lib/queryClient";
 import "./styles/studio.css";
 
-export { ACTIVE_ASSET_PROVIDER_STORAGE_KEY } from "./features/workspace/workspaceModel";
+export {
+  ACTIVE_ASSET_PROVIDER_STORAGE_KEY,
+  ASSET_LIBRARY_SOURCE_STORAGE_KEY,
+} from "./features/workspace/workspaceModel";
 export type {
   AssetEdgeData,
   AssetNodeData,

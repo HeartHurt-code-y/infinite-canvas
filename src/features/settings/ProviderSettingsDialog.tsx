@@ -487,8 +487,9 @@ export function ProviderSettingsDialog({
       );
     });
     setDraft(providerDraft(provider));
+    // 保存连接只更新配置，不切换工作区素材库。素材库仍随「供应商连接」下拉选择
+    // 以及素材面板「素材库供应商」变更。
     setAssetTokenProviderId(provider.id);
-    onAssetProviderChanged(provider.id);
     return provider;
   };
 

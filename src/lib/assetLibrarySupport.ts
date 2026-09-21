@@ -48,3 +48,38 @@ export function assetLibraryProviders(
 ): ProviderConnection[] {
   return providers.filter(providerSupportsAssetLibrary);
 }
+
+/**
+ * 选定当前素材库供应商：已记住的连接优先，绝不被「最近保存」的另一条连接抢走。
+ * 云端素材按供应商+令牌隔离，猜错连接会显示成空库，看起来像被清空。
+ */
+export function resolveActiveAssetLibraryProvider(
+  available: readonly ProviderConnection[],
+  persistedId: string | null,
+): ProviderConnection | null {
+  if (available.length === 0) return null;
+  const remembered = persistedId?.trim()
+    ? available.find((provider) => provider.id === persistedId)
+    : undefined;
+  if (remembered) return remembered;
+  if (available.length === 1) return available[0] ?? null;
+  return available.reduce<ProviderConnection | null>(
+    (latest, provider) =>
+      latest == null || provider.updatedAt > latest.updatedAt ? provider : latest,
+    null,
+  );
+}
+
+/**
+ * 只有已经落在云端的分组才能删除。魔芋上游约定 `id = -2` 会删掉该令牌下全部历史分组，
+ * 创建中的临时负数 ID 也不得发往删除接口。
+ */
+export function isDeletableCloudAssetGroupId(id: string | null | undefined): boolean {
+  const trimmed = id?.trim() ?? "";
+  if (!trimmed) return false;
+  if (/^-?\d+$/.test(trimmed)) {
+    const parsed = Number.parseInt(trimmed, 10);
+    return Number.isSafeInteger(parsed) && parsed > 0;
+  }
+  return !trimmed.startsWith("-");
+}

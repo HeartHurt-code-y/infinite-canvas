@@ -156,6 +156,8 @@ pub fn run() {
             commands::delete_asset,
             commands::configure_tos_staging,
             commands::get_tos_staging_config,
+            commands::get_workspace_ui_prefs,
+            commands::save_workspace_ui_prefs,
             commands::test_tos_connectivity,
             commands::start_staging_upload,
             commands::get_staging_job,

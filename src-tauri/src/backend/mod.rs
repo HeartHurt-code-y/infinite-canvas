@@ -80,12 +80,33 @@ impl BackendState {
         let data_directory = app.path().app_local_data_dir()?;
         let database_path = data_directory.join("infinite-canvas.sqlite3");
         let downloads_directory = app.path().download_dir()?;
+        let sqlite_existed = database_path.exists();
+        tauri_plugin_log::log::info!(
+            "app local data dir: {}, sqlite existed before open: {sqlite_existed}",
+            data_directory.display()
+        );
         let storage = Arc::new(Storage::open(&database_path)?);
         let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
         // macOS 默认用应用数据目录下的明文文件（避开钥匙串密码框），
         // 其余平台用系统凭据库；逐字说明与取舍见 credentials.rs 模块文档。
         let credentials = CredentialStore::new(&data_directory);
         tauri_plugin_log::log::info!("credential backend: {}", credentials.backend_label());
+        let tos_loaded = match storage.get_tos_config() {
+            Ok(Some(config)) => format!(
+                "enabled={}, bucket_set={}",
+                config.enabled,
+                !config.bucket.trim().is_empty()
+            ),
+            Ok(None) => "none".to_string(),
+            Err(error) => format!("read_error:{error}"),
+        };
+        let tos_credential = credentials
+            .status("tos-ak-sk")
+            .map(|status| status.configured)
+            .unwrap_or(false);
+        tauri_plugin_log::log::info!(
+            "TOS staging loaded: {tos_loaded}; leftover tos-ak-sk credential: {tos_credential}"
+        );
         media_proxy::configure_preview_cache_directory(media_proxy::preview_cache_directory(
             &data_directory,
         ));

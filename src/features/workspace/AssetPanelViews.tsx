@@ -10,6 +10,7 @@ import {
   type AssetGroupRecord,
   type ProviderConnection,
 } from "../../lib/backend";
+import { isDeletableCloudAssetGroupId } from "../../lib/assetLibrarySupport";
 import { AssetFlow, AssetPanelError, AssetUploadRow } from "./AssetLibraryViews";
 import { AssetKindIcon } from "./PromptNodeViews";
 import type { AssetItem, AssetKind, AssetLibrarySource, AssetUploadEntry } from "./workspaceModel";
@@ -285,7 +286,7 @@ export function AssetGroupsPicker({
             <Icon name="plus" aria-hidden="true" size="xs" />
             新建分组
           </button>
-          {selectedGroupId != null ? (
+          {isDeletableCloudAssetGroupId(selectedGroupId) ? (
             <button
               type="button"
               className={`asset-groups__delete${confirmingDelete ? " is-armed" : ""}`}
@@ -499,7 +500,7 @@ export function AssetEmptyState({
                   ? "上传的素材只会写入对象存储，不会导入云端素材库。"
                   : uploadGroupName != null
                     ? `该分组还没有素材；从此处上传的素材会归入「${uploadGroupName}」。`
-                    : "试试上传本地素材，或切换素材类型。"
+                    : "当前供应商令牌下没有素材。云端库按令牌隔离，自动更新或改原配置不会删数据；换令牌或换供应商会看到另一份库，请先核对后再重新上传。"
                 : "试试更短的名称，或切换素材类型。"}
       </span>
       {!loading && search ? (

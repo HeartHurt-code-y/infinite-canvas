@@ -1,7 +1,7 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App from "./App";
+import App, { ASSET_LIBRARY_SOURCE_STORAGE_KEY } from "./App";
 import * as videoFrameSampler from "./lib/videoFrameSampler";
 import type {
   CloudAsset,
@@ -1089,6 +1089,10 @@ function baseInvokeImplementation(
       const saved = args?.["command"] as SaveCanvasDocumentCommand;
       return Promise.resolve({ ...saved, revision: 1, createdAt: 1, updatedAt: 1 });
     }
+    case "get_workspace_ui_prefs":
+      return Promise.resolve({});
+    case "save_workspace_ui_prefs":
+      return Promise.resolve(null);
     case "list_provider_connections":
       return Promise.resolve([PROVIDER, SECOND_PROVIDER]);
     case "list_model_definitions":
@@ -1202,6 +1206,7 @@ afterEach(async () => {
   await Promise.resolve();
   vi.restoreAllMocks();
   vi.clearAllMocks();
+  window.localStorage.removeItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY);
 });
 
 describe("画布素材拖拽与连线（桌面运行时）", () => {

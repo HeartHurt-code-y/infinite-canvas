@@ -25,7 +25,7 @@ use super::{
         ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
         SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingJobRecord,
         StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
-        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand,
+        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
     },
 };
 
@@ -1425,18 +1425,65 @@ impl Storage {
             )
             .optional()?;
         match value {
-            Some(value) => match serde_json::from_str::<TosStagingConfig>(&value) {
-                Ok(config) => Ok(Some(config)),
-                Err(error) => {
-                    // 历史版本（Broker 中转）保存的配置无法映射到直连 TOS 的字段，
-                    // 视为未配置：用户需要在设置中重新填写桶名与 AK/SK。
-                    tauri_plugin_log::log::warn!(
-                        "[staging] 已忽略无法解析的旧版 TOS 配置: {error}"
-                    );
+            Some(value) => match parse_stored_tos_config(&value) {
+                Some(config) => {
+                    if serde_json::from_str::<TosStagingConfig>(&value).is_err()
+                        && !config.bucket.trim().is_empty()
+                    {
+                        // 把还能认出桶名的旧行改写成现行字段，避免下次启动再走恢复分支。
+                        if let Err(error) = self.save_tos_config(&config) {
+                            tauri_plugin_log::log::warn!(
+                                "[staging] 已恢复旧版 TOS 配置但未能回写: {error}"
+                            );
+                        }
+                    }
+                    Ok(Some(config))
+                }
+                None => {
+                    tauri_plugin_log::log::warn!("[staging] 无法解析 TOS 配置，按未配置处理");
                     Ok(None)
                 }
             },
             None => Ok(None),
+        }
+    }
+
+    const WORKSPACE_UI_SETTING_KEY: &'static str = "workspace_ui";
+
+    pub fn save_workspace_ui_prefs(&self, prefs: &WorkspaceUiPrefs) -> BackendResult<()> {
+        let mut merged = self.get_workspace_ui_prefs()?;
+        if prefs.active_asset_provider_id.is_some() {
+            merged.active_asset_provider_id = prefs.active_asset_provider_id.clone();
+        }
+        if prefs.asset_library_source.is_some() {
+            merged.asset_library_source = prefs.asset_library_source.clone();
+        }
+        self.lock()?.execute(
+            "INSERT INTO application_settings(key, value_json, updated_at)
+             VALUES (?1, ?2, ?3)
+             ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json,
+               updated_at = excluded.updated_at",
+            params![
+                Self::WORKSPACE_UI_SETTING_KEY,
+                serde_json::to_string(&merged)?,
+                now_ms()
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_workspace_ui_prefs(&self) -> BackendResult<WorkspaceUiPrefs> {
+        let value = self
+            .lock()?
+            .query_row(
+                "SELECT value_json FROM application_settings WHERE key = ?1",
+                params![Self::WORKSPACE_UI_SETTING_KEY],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        match value {
+            Some(value) => Ok(serde_json::from_str(&value).unwrap_or_default()),
+            None => Ok(WorkspaceUiPrefs::default()),
         }
     }
 
@@ -1693,6 +1740,78 @@ impl Storage {
 
 pub fn now_ms() -> i64 {
     Utc::now().timestamp_millis()
+}
+
+const DEFAULT_TOS_REGION: &str = "cn-beijing";
+const DEFAULT_TOS_ENDPOINT: &str = "tos-cn-beijing.volces.com";
+const DEFAULT_TOS_OBJECT_PREFIX: &str = "staging";
+
+fn json_text(value: &Value, keys: &[&str]) -> Option<String> {
+    for key in keys {
+        if let Some(text) = value.get(*key).and_then(Value::as_str) {
+            let trimmed = text.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 读取历史 TOS 行：现行 camelCase、升级前 snake_case、以及 Broker 时代缺桶名的 JSON。
+/// 有桶名就尽量保住启用态；没有桶名也返回一份禁用配置，设置页至少还能打开而不是空白。
+fn parse_stored_tos_config(raw: &str) -> Option<TosStagingConfig> {
+    if let Ok(config) = serde_json::from_str::<TosStagingConfig>(raw) {
+        return Some(sanitize_tos_config(config));
+    }
+    let value: Value = serde_json::from_str(raw).ok()?;
+    Some(sanitize_tos_config(recover_tos_config_from_value(&value)?))
+}
+
+fn credential_ref_is_present(credential_ref: Option<&str>) -> bool {
+    credential_ref
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty())
+}
+
+/// 旧行缺字段或 enabled 与桶名/凭据不一致时，补默认值并避免「空桶却显示已启用」。
+fn sanitize_tos_config(mut config: TosStagingConfig) -> TosStagingConfig {
+    if config.region.trim().is_empty() {
+        config.region = DEFAULT_TOS_REGION.to_string();
+    }
+    if config.endpoint.trim().is_empty() {
+        config.endpoint = DEFAULT_TOS_ENDPOINT.to_string();
+    }
+    if config.object_prefix.trim().is_empty() {
+        config.object_prefix = DEFAULT_TOS_OBJECT_PREFIX.to_string();
+    }
+    if config.bucket.trim().is_empty()
+        || !credential_ref_is_present(config.credential_ref.as_deref())
+    {
+        config.enabled = false;
+    }
+    config
+}
+
+fn recover_tos_config_from_value(value: &Value) -> Option<TosStagingConfig> {
+    if !value.is_object() {
+        return None;
+    }
+    let bucket = json_text(value, &["bucket"]).unwrap_or_default();
+    let credential_ref = json_text(value, &["credentialRef", "credential_ref"]);
+    Some(TosStagingConfig {
+        region: json_text(value, &["region"]).unwrap_or_else(|| DEFAULT_TOS_REGION.to_string()),
+        endpoint: json_text(value, &["endpoint"])
+            .unwrap_or_else(|| DEFAULT_TOS_ENDPOINT.to_string()),
+        bucket,
+        credential_ref,
+        object_prefix: json_text(value, &["objectPrefix", "object_prefix"])
+            .unwrap_or_else(|| DEFAULT_TOS_OBJECT_PREFIX.to_string()),
+        enabled: value
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(false),
+    })
 }
 
 /// 旧版本数据库的 generation_tasks 表没有 tokens_json 列（tokens 用量功能之前创建的库）。
@@ -2620,6 +2739,32 @@ mod tests {
 
         assert_eq!(original.api_key_ref, updated.api_key_ref);
         assert_eq!(updated.display_name, "已改名");
+    }
+
+    #[test]
+    fn reseeding_default_providers_does_not_overwrite_user_edits() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        {
+            let storage = Storage::open(&path).expect("open db");
+            storage
+                .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                    id: "provider-moyu-ai".into(),
+                    display_name: "客户魔芋".into(),
+                    adapter_id: "moyu_v1".into(),
+                    base_url: "https://custom.moyu.example/v1".into(),
+                    enabled: true,
+                })
+                .expect("customize moyu connection");
+        }
+        let storage = Storage::open(&path).expect("reopen must reseed with INSERT OR IGNORE");
+        let moyu = storage
+            .get_provider_connection("provider-moyu-ai")
+            .expect("moyu connection survives upgrade");
+        assert_eq!(moyu.display_name, "客户魔芋");
+        assert_eq!(moyu.base_url, "https://custom.moyu.example/v1");
+        assert!(moyu.enabled);
+        assert_eq!(moyu.api_key_ref, "provider:provider-moyu-ai:api-key");
     }
 
     #[test]
@@ -3617,5 +3762,132 @@ mod tests {
         );
         // 幂等：再次执行不报错。
         migrate_provider_token_groups(&connection).expect("migration is idempotent");
+    }
+
+    fn insert_raw_tos_config(storage: &Storage, json: &str) {
+        storage
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO application_settings(key, value_json, updated_at)
+                 VALUES ('tos_staging', ?1, 1)",
+                params![json],
+            )
+            .unwrap();
+    }
+
+    #[test]
+    fn tos_config_survives_snake_case_and_legacy_broker_rows() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+
+        // 直连 TOS 落地后字段改成了 camelCase；升级前 SQLite 里可能仍是 snake_case。
+        insert_raw_tos_config(
+            &storage,
+            r#"{
+                "region":"cn-beijing",
+                "endpoint":"tos-cn-beijing.volces.com",
+                "bucket":"customer-staging",
+                "credential_ref":"tos-ak-sk",
+                "object_prefix":"staging",
+                "enabled":true
+            }"#,
+        );
+        let recovered = storage
+            .get_tos_config()
+            .expect("read snake_case tos config")
+            .expect("snake_case tos config must not be dropped");
+        assert_eq!(recovered.bucket, "customer-staging");
+        assert_eq!(recovered.object_prefix, "staging");
+        assert_eq!(recovered.credential_ref.as_deref(), Some("tos-ak-sk"));
+        assert!(recovered.enabled);
+
+        storage
+            .lock()
+            .unwrap()
+            .execute(
+                "DELETE FROM application_settings WHERE key = 'tos_staging'",
+                [],
+            )
+            .unwrap();
+
+        // Broker 时代只有中转地址、没有桶名：不能当成「从未配置」丢掉整行，
+        // 否则设置页空白、本地素材列表也会因为缺 TOS 整页失败。
+        insert_raw_tos_config(
+            &storage,
+            r#"{"enabled":true,"brokerUrl":"https://broker.example/presign","credentialRef":"tos-broker"}"#,
+        );
+        let broker = storage
+            .get_tos_config()
+            .expect("read broker tos config")
+            .expect("legacy broker row must still surface a config");
+        assert!(broker.bucket.is_empty());
+        assert!(!broker.enabled);
+        assert_eq!(broker.region, "cn-beijing");
+        assert_eq!(broker.endpoint, "tos-cn-beijing.volces.com");
+        assert_eq!(broker.object_prefix, "staging");
+    }
+
+    #[test]
+    fn tos_config_survives_reopening_the_same_sqlite_file() {
+        // 自动更新只替换安装目录里的程序，用户数据目录的 sqlite 必须原样读回；
+        // 这条用例钉住「升级 ≠ 清空对象存储配置」。
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        let original = TosStagingConfig {
+            region: "cn-beijing".into(),
+            endpoint: "tos-cn-beijing.volces.com".into(),
+            bucket: "customer-staging".into(),
+            credential_ref: Some("tos-ak-sk".into()),
+            object_prefix: "staging".into(),
+            enabled: true,
+        };
+        {
+            let storage = Storage::open(&path).expect("open");
+            storage.save_tos_config(&original).expect("save");
+        }
+        let reopened = Storage::open(&path).expect("reopen after upgrade");
+        let loaded = reopened
+            .get_tos_config()
+            .expect("read")
+            .expect("tos config must still be in the same sqlite file");
+        assert_eq!(loaded.bucket, "customer-staging");
+        assert_eq!(loaded.credential_ref.as_deref(), Some("tos-ak-sk"));
+        assert!(loaded.enabled);
+        assert_eq!(loaded.object_prefix, "staging");
+    }
+
+    #[test]
+    fn workspace_ui_prefs_survive_reopening_the_same_sqlite_file() {
+        let directory = TempDir::new().expect("temp dir");
+        let path = directory.path().join("backend.sqlite");
+        let original = WorkspaceUiPrefs {
+            active_asset_provider_id: Some("provider-moyu-ai".into()),
+            asset_library_source: Some("local".into()),
+        };
+        {
+            let storage = Storage::open(&path).expect("open");
+            storage.save_workspace_ui_prefs(&original).expect("save");
+        }
+        let reopened = Storage::open(&path).expect("reopen after upgrade");
+        let loaded = reopened.get_workspace_ui_prefs().expect("read");
+        assert_eq!(
+            loaded.active_asset_provider_id.as_deref(),
+            Some("provider-moyu-ai")
+        );
+        assert_eq!(loaded.asset_library_source.as_deref(), Some("local"));
+
+        reopened
+            .save_workspace_ui_prefs(&WorkspaceUiPrefs {
+                active_asset_provider_id: None,
+                asset_library_source: Some("cloud".into()),
+            })
+            .expect("merge source without dropping provider");
+        let merged = reopened.get_workspace_ui_prefs().expect("read merged");
+        assert_eq!(
+            merged.active_asset_provider_id.as_deref(),
+            Some("provider-moyu-ai")
+        );
+        assert_eq!(merged.asset_library_source.as_deref(), Some("cloud"));
     }
 }

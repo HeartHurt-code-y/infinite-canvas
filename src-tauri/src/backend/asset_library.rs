@@ -753,6 +753,10 @@ impl AssetLibrary {
                 json!({ "id": command.id }),
             ));
         }
+        warn!(
+            "[assets] 即将按用户确认删除云端素材: providerConnectionId={}, assetId={}",
+            provider_connection_id, id
+        );
         let response = self
             .port
             .send(RemoteAssetRequest {
@@ -809,7 +813,17 @@ impl AssetLibrary {
             .map(asset_array)
             .filter(|groups| !groups.is_empty())
             .unwrap_or_else(|| asset_array(&payload));
-        Ok(groups.into_iter().filter_map(parse_asset_group).collect())
+        let parsed: Vec<AssetGroupRecord> = groups
+            .into_iter()
+            .filter_map(|entry| {
+                let parsed = parse_asset_group(entry);
+                if parsed.is_none() {
+                    warn!("[assets] 跳过无法解析的素材分组记录，未向云端发起删除");
+                }
+                parsed
+            })
+            .collect();
+        Ok(parsed)
     }
 
     /// Create a cloud 素材库 group with a user-defined display name.
@@ -865,10 +879,14 @@ impl AssetLibrary {
                     json!({ "rawResponse": response.body }),
                 )
             })?;
+        // 仅用于本地立刻选中；真实 id 均为正数。禁止使用 -1/-2：上游约定
+        // `id = -2` 会删除该令牌下全部历史分组。时钟异常时用 i64::MIN，仍会被删除路径拒绝。
         let temp_id = SystemTime::now()
             .duration_since(UNIX_EPOCH)
+            .ok()
             .map(|d| -(d.as_millis() as i64))
-            .unwrap_or(-1);
+            .filter(|id| *id < -2)
+            .unwrap_or(i64::MIN);
         Ok(AssetGroupRecord {
             // 临时负数 ID 的字符串形态（魔芋真实 id 均为正数），后台 list 刷新后同步真实 id。
             id: temp_id.to_string(),
@@ -1002,26 +1020,28 @@ impl AssetLibrary {
 
     /// 删除云端素材库分组及组内全部素材（不可逆），返回被删除的分组 ID。
     /// 魔芋方言走 `POST /v1/assets/groups/delete`，火山引擎方舟方言走 `DeleteAssetGroup`。
+    ///
+    /// 客户端**不会**自动删库：此接口只在用户两段式确认后由前端调用。上游魔芋约定
+    /// `id = -2` 会删除该令牌下全部历史分组，因此任何非正数 ID（含临时负数、`-2`）
+    /// 在发往上游之前一律拒绝。
     pub async fn delete_asset_group(
         &self,
         command: DeleteAssetGroupCommand,
     ) -> BackendResult<String> {
         require_asset_library_connection(&command.provider_connection_id)?;
+        let id = require_deletable_asset_group_id(&command.id)?;
+        warn!(
+            "[assets] 即将按用户确认删除云端素材分组: providerConnectionId={}, groupId={}",
+            command.provider_connection_id, id
+        );
         if self.dialect(&command.provider_connection_id)? == AssetDialect::VolcengineArk {
             return self
-                .ark_delete_asset_group(&command.provider_connection_id, &command.id)
+                .ark_delete_asset_group(&command.provider_connection_id, id)
                 .await;
         }
         // 魔芋方言：`POST /v1/assets/groups/delete`，请求体为 `{"id": <group id>}`。
         // 上游 `DeleteAssetGroupRequest.id` 为 int 类型（`id > 0` 删除指定分组，
         // `id = -2` 删除所有历史分组），必须传数字而非字符串。
-        let id = command.id.trim();
-        if id.is_empty() {
-            return Err(BackendError::validation(
-                "asset group deletion requires a group id",
-                json!({ "field": "id" }),
-            ));
-        }
         let group_id: i64 = id.parse().map_err(|_| {
             BackendError::validation(
                 "asset group id must be an integer",
@@ -2572,30 +2592,70 @@ fn require_asset_library_connection(value: &str) -> BackendResult<()> {
     Ok(())
 }
 
+/// 只允许删除已经落在上游的分组。魔芋约定 `id = -2` 会清空该令牌下全部历史分组，
+/// 因此非正数（含创建中的临时负数 ID）一律在发请求之前拒绝。
+fn require_deletable_asset_group_id(id: &str) -> BackendResult<&str> {
+    let id = id.trim();
+    if id.is_empty() {
+        return Err(BackendError::validation(
+            "asset group deletion requires a group id",
+            json!({ "field": "id" }),
+        ));
+    }
+    if let Ok(group_id) = id.parse::<i64>() {
+        if group_id <= 0 {
+            return Err(BackendError::validation(
+                "asset group deletion requires a positive group id; the upstream magic value -2 would delete every group and is rejected",
+                json!({ "field": "id", "value": id }),
+            ));
+        }
+    }
+    Ok(id)
+}
+
+/// 从 `user-{uid}-token-{tid}-{展示名}` 里取出展示名；对不上前缀时原样返回。
+fn strip_token_group_prefix(group_name: &str) -> &str {
+    let Some(rest) = group_name.strip_prefix("user-") else {
+        return group_name;
+    };
+    let Some(token_at) = rest.find("-token-") else {
+        return group_name;
+    };
+    let after_token = &rest[token_at + "-token-".len()..];
+    after_token
+        .split_once('-')
+        .map(|(_, display)| display)
+        .filter(|display| !display.is_empty())
+        .unwrap_or(group_name)
+}
+
 fn parse_asset_group(raw: &Value) -> Option<AssetGroupRecord> {
     let record = raw.as_object()?;
     // 魔芋数值 ID 与火山字符串 ID（asset-group-…）统一按字符串承载；
-    // 魔芋负数临时 ID 兜底场景由创建路径另行处理。
-    let id = record
-        .get("id")
-        .and_then(asset_id_string)
+    // 魔芋负数临时 ID 兜底场景由创建路径另行处理，列表里丢弃以免误点删除。
+    let id = ["id", "group_id", "groupId"]
+        .into_iter()
+        .find_map(|field| record.get(field).and_then(asset_id_string))
         .filter(|id| !id.is_empty() && !id.starts_with('-'))?;
+    let group_name = ["group_name", "groupName"].into_iter().find_map(|field| {
+        record
+            .get(field)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    });
     let name = record
         .get("name")
         .and_then(Value::as_str)
         .map(str::trim)
-        .filter(|value| !value.is_empty())?;
-    let group_name = record
-        .get("group_name")
-        .or_else(|| record.get("groupName"))
-        .and_then(Value::as_str)
-        .map(str::trim)
         .filter(|value| !value.is_empty())
-        .unwrap_or(name);
+        .map(ToOwned::to_owned)
+        .or_else(|| group_name.map(strip_token_group_prefix).map(str::to_string))?;
+    let group_name = group_name.unwrap_or(name.as_str()).to_string();
     Some(AssetGroupRecord {
         id,
-        name: name.to_string(),
-        group_name: group_name.to_string(),
+        name,
+        group_name,
         is_default: record
             .get("is_default")
             .and_then(Value::as_bool)
@@ -4100,6 +4160,63 @@ mod tests {
             .expect_err("non-integer group id must be rejected before any request");
 
         assert!(error.to_string().contains("integer"));
+    }
+
+    #[tokio::test]
+    async fn delete_asset_group_rejects_the_upstream_wipe_all_magic_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        for id in ["-2", "0", "-1", "-1726900000000"] {
+            let error = library
+                .delete_asset_group(DeleteAssetGroupCommand {
+                    provider_connection_id: "provider-1".into(),
+                    id: id.into(),
+                })
+                .await
+                .expect_err("wipe-all and temporary group ids must never be forwarded");
+            assert!(
+                error.to_string().contains("positive group id"),
+                "unexpected error for {id}: {error}"
+            );
+        }
+
+        let requests = adapter.requests.lock().expect("request lock");
+        assert!(
+            requests.is_empty(),
+            "wipe-all and temporary group ids must not reach POST /v1/assets/groups/delete"
+        );
+    }
+
+    #[tokio::test]
+    async fn list_asset_groups_keeps_records_that_only_have_group_name() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([response(
+            200,
+            json!({
+                "code": "success",
+                "data": [
+                    {
+                        "group_id": 7,
+                        "group_name": "user-u1-token-t9-广告图",
+                        "asset_count": 4
+                    }
+                ]
+            }),
+        )]));
+        let library = test_library(adapter, immediate_poll());
+
+        let groups = library
+            .list_asset_groups(ListAssetGroupsCommand {
+                provider_connection_id: "provider-1".into(),
+            })
+            .await
+            .expect("list asset groups with group_name only");
+
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].id, "7");
+        assert_eq!(groups[0].name, "广告图");
+        assert_eq!(groups[0].group_name, "user-u1-token-t9-广告图");
+        assert_eq!(groups[0].asset_count, 4);
     }
 
     #[tokio::test]

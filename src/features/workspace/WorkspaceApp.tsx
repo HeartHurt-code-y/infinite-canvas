@@ -46,6 +46,7 @@ import {
   subscribeStagingEvents,
   toMediaSrc,
   tosStagingClient,
+  workspaceUiClient,
   videoComposerClient,
   videoDownloaderClient,
   videoFrameExtractionClient,
@@ -73,7 +74,11 @@ import {
   type VideoDownloaderEngineStatus,
   type VideoFrameExtractionJobRecord,
 } from "../../lib/backend";
-import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
+import {
+  assetLibraryProviders,
+  isDeletableCloudAssetGroupId,
+  resolveActiveAssetLibraryProvider,
+} from "../../lib/assetLibrarySupport";
 import {
   generationParameters,
   modelAllowsMediaOnlyPrompt,
@@ -343,9 +348,12 @@ import {
   outputNodeKey,
   outputNodeReferenceTarget,
   persistActiveAssetProviderId,
+  persistAssetLibrarySource,
+  parseAssetLibrarySource,
   promptConversationRoleLabel,
   promptMessageId,
   readActiveAssetProviderId,
+  readAssetLibrarySource,
   reconcileNodeModelSelections,
   reconcileTextModelSelection,
   resolveGenerationSelection,
@@ -589,7 +597,8 @@ export function WorkspaceApp({
   readonly services: CanvasSessionServices;
   readonly canvasNavigation?: ReactNode;
 }) {
-  const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>("cloud");
+  const [assetLibrarySource, setAssetLibrarySource] = useState<AssetLibrarySource>(readAssetLibrarySource);
+  const [workspaceUiHydrated, setWorkspaceUiHydrated] = useState(() => !isDesktopRuntime());
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
   // 搜索防抖提交值：桌面端分页查询把它发给后端过滤，避免每次击键都发起请求。
@@ -766,6 +775,8 @@ export function WorkspaceApp({
     readonly requestId: number;
   } | null>(null);
   const [activeAssetProviderId, setActiveAssetProviderId] = useState(readActiveAssetProviderId);
+  const activeAssetProviderIdRef = useRef(activeAssetProviderId);
+  activeAssetProviderIdRef.current = activeAssetProviderId;
   const [nodeModelSelections, setNodeModelSelections] = useState<NodeModelSelections>(
     DEFAULT_NODE_MODEL_SELECTIONS,
   );
@@ -1326,29 +1337,87 @@ export function WorkspaceApp({
     [providerCatalog],
   );
 
-  const assetProvider = useMemo(() => {
-    const persisted = availableAssetProviders.find(
-      (provider) => provider.id === activeAssetProviderId,
-    );
-    if (persisted) return persisted;
-    // 旧版本没有保存素材库当前供应商，或保存的连接已不再提供素材库（如盘趣API）：
-    // 用最近修改的可用连接作为迁移默认，避免回退到按名称排序的旧 SD2.0 连接。
-    return (
-      availableAssetProviders.reduce<ProviderConnection | null>(
-        (latest, provider) =>
-          latest == null || provider.updatedAt > latest.updatedAt ? provider : latest,
-        null,
-      ) ?? null
-    );
-  }, [activeAssetProviderId, availableAssetProviders]);
+  const persistWorkspaceUi = useCallback(
+    (providerId: string | null, source: AssetLibrarySource) => {
+      if (providerId) persistActiveAssetProviderId(providerId);
+      persistAssetLibrarySource(source);
+      if (!isDesktopRuntime()) return;
+      void workspaceUiClient
+        .save({
+          activeAssetProviderId: providerId,
+          assetLibrarySource: source,
+        })
+        .catch(() => undefined);
+    },
+    [],
+  );
 
-  const rememberAssetProvider = useCallback((providerConnectionId: string) => {
-    setActiveAssetProviderId(providerConnectionId);
-    persistActiveAssetProviderId(providerConnectionId);
+  useEffect(() => {
+    if (!isDesktopRuntime()) return;
+    let cancelled = false;
+    void (async () => {
+      try {
+        const prefs = await workspaceUiClient.get();
+        if (cancelled) return;
+        const storedProvider = prefs.activeAssetProviderId?.trim() || null;
+        const storedSource = parseAssetLibrarySource(prefs.assetLibrarySource);
+        if (storedProvider) {
+          persistActiveAssetProviderId(storedProvider);
+          setActiveAssetProviderId(storedProvider);
+        }
+        if (storedSource) {
+          persistAssetLibrarySource(storedSource);
+          setAssetLibrarySource(storedSource);
+        }
+        if (!storedProvider && !storedSource) {
+          const localProvider = readActiveAssetProviderId();
+          const localSource = readAssetLibrarySource();
+          if (localProvider || localSource === "local") {
+            await workspaceUiClient.save({
+              activeAssetProviderId: localProvider,
+              assetLibrarySource: localSource,
+            });
+          }
+        }
+      } catch {
+        // sqlite 读失败时仍用 localStorage，避免卡住素材库。
+      } finally {
+        if (!cancelled) setWorkspaceUiHydrated(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  const assetProvider = useMemo(() => {
+    if (isDesktopRuntime() && !workspaceUiHydrated && !activeAssetProviderId) {
+      return null;
+    }
+    return resolveActiveAssetLibraryProvider(availableAssetProviders, activeAssetProviderId);
+  }, [activeAssetProviderId, availableAssetProviders, workspaceUiHydrated]);
+
+  const rememberAssetProvider = useCallback(
+    (providerConnectionId: string) => {
+      setActiveAssetProviderId(providerConnectionId);
+      persistWorkspaceUi(providerConnectionId, assetLibrarySource);
+    },
+    [assetLibrarySource, persistWorkspaceUi],
+  );
+
+  useEffect(() => {
+    if (!workspaceUiHydrated) return;
+    if (assetProvider == null) return;
+    if (assetProvider.id === activeAssetProviderId) return;
+    rememberAssetProvider(assetProvider.id);
+  }, [activeAssetProviderId, assetProvider, rememberAssetProvider, workspaceUiHydrated]);
 
   const handleAssetProviderChanged = useCallback(
     (providerConnectionId: string) => {
+      if (providerConnectionId === activeAssetProviderIdRef.current) {
+        rememberAssetProvider(providerConnectionId);
+        return;
+      }
       // 供应商切换立即使旧 provider 的所有素材请求失效；新 provider 的 effect 会启动下一次请求。
       cloudAssetsRequestRef.current += 1;
       settingsAssetRequestRef.current = null;
@@ -1731,6 +1800,14 @@ export function WorkspaceApp({
   const handleDeleteAssetGroup = useCallback(
     (providerConnectionId: string, groupId: string): void => {
       if (deletingAssetGroupId != null) return;
+      if (!isDeletableCloudAssetGroupId(groupId)) {
+        frontendLog(
+          "warn",
+          `[assets] 拒绝删除未落库的临时分组，未向云端发删除请求: providerConnectionId=${providerConnectionId}, groupId=${groupId}`,
+        );
+        setAssetsError("该分组还在同步到云端，请稍候再删，以免误伤整库。");
+        return;
+      }
       setDeletingAssetGroupId(groupId);
       void assetLibraryClient
         .deleteAssetGroup({ providerConnectionId, id: groupId })
@@ -9791,6 +9868,7 @@ export function WorkspaceApp({
           source={assetLibrarySource}
           onSourceChange={(next) => {
             setAssetLibrarySource(next);
+            persistWorkspaceUi(activeAssetProviderId, next);
             setAssetSearch("");
             if (!isDesktopRuntime()) return;
             if (next === "local") refreshLocalAssets("initial");

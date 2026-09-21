@@ -1,6 +1,7 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import type { StagingJobRecord, StagingStatus } from "../../lib/backend";
 import {
+  ASSET_LIBRARY_SOURCE_STORAGE_KEY,
   DEFAULT_ZOOM,
   MAX_ZOOM,
   MIN_ZOOM,
@@ -9,6 +10,9 @@ import {
   isTerminalAssetUpload,
   isTerminalStagingJob,
   mergeStagingJobsIntoUploads,
+  persistAssetLibrarySource,
+  parseAssetLibrarySource,
+  readAssetLibrarySource,
   shouldAutoDismissUpload,
   stagingImportReachedLibrary,
   type AssetUploadEntry,
@@ -284,5 +288,23 @@ describe("canvas zoom bounds", () => {
     expect(clampCanvasZoom(DEFAULT_ZOOM)).toBe(50);
     expect(clampCanvasZoom(DEFAULT_ZOOM - 8)).toBe(42);
     expect(clampCanvasZoom(99.6)).toBe(100);
+  });
+});
+
+describe("asset library source persistence", () => {
+  afterEach(() => {
+    window.localStorage.removeItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY);
+  });
+
+  it("只接受 cloud / local，升级重启后仍停留在用户上次的来源", () => {
+    expect(readAssetLibrarySource()).toBe("cloud");
+    persistAssetLibrarySource("local");
+    expect(window.localStorage.getItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY)).toBe("local");
+    expect(readAssetLibrarySource()).toBe("local");
+    window.localStorage.setItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY, "not-a-source");
+    expect(readAssetLibrarySource()).toBe("cloud");
+    expect(parseAssetLibrarySource("local")).toBe("local");
+    expect(parseAssetLibrarySource("cloud")).toBe("cloud");
+    expect(parseAssetLibrarySource("not-a-source")).toBeNull();
   });
 });

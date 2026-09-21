@@ -138,6 +138,11 @@ export const tosStagingConfigSchema = v.looseObject({
 
 export const nullableTosStagingConfigSchema = v.nullable(tosStagingConfigSchema);
 
+export const workspaceUiPrefsSchema = v.looseObject({
+  activeAssetProviderId: v.optional(nullableStringSchema),
+  assetLibrarySource: v.optional(v.nullable(v.picklist(["cloud", "local"]))),
+});
+
 const mediaTypeSchema = v.picklist(["image", "video", "audio"]);
 
 /** 生成结果记录的类型：媒体产物之外，Context-IR 等任务产出文本（"text"）。 */

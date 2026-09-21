@@ -317,4 +317,33 @@ describe("TosStagingSettings", () => {
     expect(screen.getByLabelText(/^AccessKey ID/)).toHaveValue("");
     expect(screen.getByLabelText(/^Secret Access Key/)).toHaveValue("");
   });
+
+  it("reuses leftover system credentials when sqlite config is missing after upgrade", async () => {
+    const client = createClient(
+      {
+        getCredential: vi.fn(() =>
+          Promise.resolve(JSON.stringify({ accessKey: "AKLEFT", secretKey: "SKLEFT" })),
+        ),
+      },
+      null,
+    );
+    render(<TosStagingSettings client={client} />);
+
+    await waitFor(() => expect(screen.getByLabelText(/^AccessKey ID/)).toHaveValue("AKLEFT"));
+    expect(screen.getByLabelText(/^Secret Access Key/)).toHaveValue("SKLEFT");
+    expect(screen.getByText("未配置")).toBeInTheDocument();
+    expect(screen.getByText(/系统凭据管理器里还留着上次的 AccessKey/)).toBeInTheDocument();
+
+    fireEvent.change(screen.getByLabelText(/^桶名/), { target: { value: "old-bucket" } });
+    fireEvent.click(screen.getByRole("button", { name: "保存直连配置" }));
+
+    await waitFor(() => expect(client.configure).toHaveBeenCalledTimes(1));
+    expect(client.configure).toHaveBeenCalledWith(
+      expect.objectContaining({
+        bucket: "old-bucket",
+        credentialRef: "tos-ak-sk",
+        enabled: true,
+      }),
+    );
+  });
 });

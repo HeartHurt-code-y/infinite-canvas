@@ -976,18 +976,46 @@ pub struct RefreshStagingObjectCommand {
     pub url: String,
 }
 
+fn default_tos_region() -> String {
+    "cn-beijing".to_string()
+}
+
+fn default_tos_endpoint() -> String {
+    "tos-cn-beijing.volces.com".to_string()
+}
+
+fn default_tos_object_prefix() -> String {
+    "staging".to_string()
+}
+
+/// 工作区 UI 偏好：随 sqlite 持久化，避免自动更新清空 WebView localStorage 后切到别的供应商。
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceUiPrefs {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_asset_provider_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub asset_library_source: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TosStagingConfig {
     /// TOS 地域，例如 `cn-beijing`。
+    #[serde(default = "default_tos_region")]
     pub region: String,
     /// TOS Endpoint 主机，例如 `tos-cn-beijing.volces.com`。
+    #[serde(default = "default_tos_endpoint")]
     pub endpoint: String,
     /// 暂存桶名。
+    #[serde(default)]
     pub bucket: String,
     /// AK/SK 在系统凭据管理器中的引用名。
+    #[serde(default, alias = "credential_ref")]
     pub credential_ref: Option<String>,
+    #[serde(default = "default_tos_object_prefix", alias = "object_prefix")]
     pub object_prefix: String,
+    #[serde(default)]
     pub enabled: bool,
 }
 

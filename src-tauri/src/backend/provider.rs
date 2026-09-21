@@ -69,6 +69,36 @@ pub fn asset_library_credential_ref(provider_connection_id: &str) -> String {
     format!("{ASSET_LIBRARY_CREDENTIAL_REF}:{provider_connection_id}")
 }
 
+fn provider_connection_id_from_api_key_ref(credential_ref: &str) -> Option<&str> {
+    let rest = credential_ref.strip_prefix("provider:")?;
+    let id = rest.strip_suffix(":api-key")?;
+    (!id.is_empty()).then_some(id)
+}
+
+/// 用户在配置页更换供应商主 API Key 时，若尚未单独配置素材库令牌，把旧 Key 快照到
+/// 供应商专用素材库凭据。素材库按令牌命名空间隔离：直接覆盖主 Key 会让云端库看起来被清空。
+pub(super) fn preserve_asset_library_token_when_replacing_provider_key(
+    credentials: &CredentialStore,
+    credential_ref: &str,
+    new_secret: &str,
+) -> BackendResult<()> {
+    let Some(provider_id) = provider_connection_id_from_api_key_ref(credential_ref) else {
+        return Ok(());
+    };
+    let dedicated = asset_library_credential_ref(provider_id);
+    if credentials.status(&dedicated)?.configured
+        || credentials.status(ASSET_LIBRARY_CREDENTIAL_REF)?.configured
+    {
+        return Ok(());
+    }
+    match credentials.get(credential_ref) {
+        Ok(previous) if previous != new_secret => credentials.set(&dedicated, &previous),
+        Ok(_) => Ok(()),
+        Err(BackendError::NotFound(_)) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
 #[derive(Clone)]
 pub struct ProviderRuntime {
     storage: Arc<Storage>,
@@ -5895,6 +5925,48 @@ mod tests {
             asset_library_credential_ref("provider-overseas"),
             "asset-library-token:provider-overseas"
         );
+    }
+
+    #[test]
+    fn replacing_generation_api_key_snapshots_previous_secret_into_asset_library_token() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = CredentialStore::file(dir.path().join("credentials.json"));
+        store
+            .set("provider:moyu:api-key", "sk-old")
+            .expect("set old key");
+        preserve_asset_library_token_when_replacing_provider_key(
+            &store,
+            "provider:moyu:api-key",
+            "sk-new",
+        )
+        .expect("preserve");
+        store
+            .set("provider:moyu:api-key", "sk-new")
+            .expect("replace");
+        assert_eq!(
+            store.get("asset-library-token:moyu").expect("snapshot"),
+            "sk-old"
+        );
+        assert_eq!(store.get("provider:moyu:api-key").unwrap(), "sk-new");
+    }
+
+    #[test]
+    fn replacing_generation_api_key_keeps_existing_asset_library_token() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let store = CredentialStore::file(dir.path().join("credentials.json"));
+        store
+            .set("provider:moyu:api-key", "sk-old")
+            .expect("set old key");
+        store
+            .set("asset-library-token:moyu", "sk-library")
+            .expect("set library token");
+        preserve_asset_library_token_when_replacing_provider_key(
+            &store,
+            "provider:moyu:api-key",
+            "sk-new",
+        )
+        .expect("preserve");
+        assert_eq!(store.get("asset-library-token:moyu").unwrap(), "sk-library");
     }
 
     #[test]

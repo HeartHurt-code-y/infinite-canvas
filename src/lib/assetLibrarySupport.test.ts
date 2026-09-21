@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import type { ProviderConnection } from "./backend";
-import { assetLibraryProviders, providerSupportsAssetLibrary } from "./assetLibrarySupport";
+import {
+  assetLibraryProviders,
+  isDeletableCloudAssetGroupId,
+  providerSupportsAssetLibrary,
+  resolveActiveAssetLibraryProvider,
+} from "./assetLibrarySupport";
 
 function provider(
   baseUrl: string,
@@ -80,5 +85,42 @@ describe("素材库供应商支持判定", () => {
       "provider-ark",
     ]);
     expect(assetLibraryProviders([panqu])).toEqual([]);
+  });
+});
+
+describe("素材库当前供应商回退", () => {
+  const older = provider("https://www.moyu.info/", {
+    id: "provider-moyu",
+    displayName: "魔芋AI",
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  const newer = provider("https://www.konjac.ai/v1", {
+    id: "provider-overseas",
+    displayName: "海外平台",
+    createdAt: 2,
+    updatedAt: 9,
+  });
+
+  it("记住的供应商优先于最近修改的另一条连接", () => {
+    expect(resolveActiveAssetLibraryProvider([older, newer], "provider-moyu")?.id).toBe(
+      "provider-moyu",
+    );
+  });
+
+  it("只有一条可用连接时直接使用，不要求事先记住", () => {
+    expect(resolveActiveAssetLibraryProvider([older], null)?.id).toBe("provider-moyu");
+  });
+});
+
+describe("云端分组删除资格", () => {
+  it("只允许已落库的正整数或非临时字符串 ID", () => {
+    expect(isDeletableCloudAssetGroupId("21")).toBe(true);
+    expect(isDeletableCloudAssetGroupId("asset-group-1")).toBe(true);
+    expect(isDeletableCloudAssetGroupId("-2")).toBe(false);
+    expect(isDeletableCloudAssetGroupId("0")).toBe(false);
+    expect(isDeletableCloudAssetGroupId("-1726900000000")).toBe(false);
+    expect(isDeletableCloudAssetGroupId("")).toBe(false);
+    expect(isDeletableCloudAssetGroupId(null)).toBe(false);
   });
 });
