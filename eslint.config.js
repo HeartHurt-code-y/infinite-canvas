@@ -93,6 +93,17 @@ export default defineConfig([
     },
   },
   {
+    // Browser Mode 用 vitest/browser 的 locator，不走 Testing Library 的 screen。
+    files: ["**/*.browser.test.{ts,tsx}"],
+    rules: {
+      "testing-library/prefer-screen-queries": "off",
+      "testing-library/prefer-presence-queries": "off",
+      "testing-library/no-node-access": "off",
+      "testing-library/no-container": "off",
+      "testing-library/render-result-naming-convention": "off",
+    },
+  },
+  {
     // vitest 未启用 globals，@testing-library/react 无法自动注册 cleanup，
     // setup.ts 中的 afterEach(cleanup) 是必须的，非冗余清理。
     files: ["src/test/setup.ts"],

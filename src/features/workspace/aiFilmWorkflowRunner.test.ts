@@ -1,10 +1,10 @@
-import { describe, expect, it, vi } from "vitest";
 import {
   workflowReferenceFixtures,
   workflowReferenceInputs,
   workflowConnectedReferenceFixtures,
 } from "../../test/workflowMaterialFixtures";
 import { catalog, node, fakeDependencies, planJson } from "../../test/videoWorkflowFixtures";
+import { describe, expect, it, vi } from "../../test/workflowTest";
 import {
   AI_FILM_STAGES,
   createAiFilmWorkflowOptions,
@@ -16,6 +16,7 @@ import {
   parseAiFilmStage,
 } from "./aiFilmWorkflowRunner";
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
+import type { OptimizeVideoPromptCommand } from "../../lib/backend";
 
 const assets = [
   {
@@ -73,18 +74,32 @@ function filmNode(): KnowledgeVideoWorkflowNodeData {
   };
 }
 
-function setup(stages: readonly AiFilmStage[] = AI_FILM_STAGES, mode = "full") {
-  const fake = fakeDependencies(planJson());
-  vi.mocked(fake.promptClient.run).mockImplementation((command) => {
-    const output =
-      command.mode === "ai_film_router"
-        ? routeData(stages, mode)
-        : command.mode === "ai_film_qc"
-          ? { result: "PASS", report: "人物与场景连续" }
-          : stageData(command.mode.replace("ai_film_", "") as AiFilmStage);
-    const optimizedPrompt = JSON.stringify(output);
-    return Promise.resolve({ optimizedPrompt, rawModelOutput: optimizedPrompt });
-  });
+function packPrompt(output: unknown) {
+  const optimizedPrompt = JSON.stringify(output);
+  return { optimizedPrompt, rawModelOutput: optimizedPrompt };
+}
+
+function stubAiFilmPrompt(
+  fake: ReturnType<typeof fakeDependencies>,
+  stages: readonly AiFilmStage[],
+  mode: string,
+) {
+  vi.when(fake.promptClient.run, {
+    onUnmatched: (command) =>
+      Promise.resolve(packPrompt(stageData(command.mode.replace("ai_film_", "") as AiFilmStage))),
+  })
+    .calledWith(expect.objectContaining({ mode: "ai_film_router" }) as OptimizeVideoPromptCommand)
+    .thenResolve(packPrompt(routeData(stages, mode)))
+    .calledWith(expect.objectContaining({ mode: "ai_film_qc" }) as OptimizeVideoPromptCommand)
+    .thenResolve(packPrompt({ result: "PASS", report: "人物与场景连续" }));
+}
+
+function setup(
+  stages: readonly AiFilmStage[] = AI_FILM_STAGES,
+  mode = "full",
+  fake: ReturnType<typeof fakeDependencies> = fakeDependencies(planJson()),
+) {
+  stubAiFilmPrompt(fake, stages, mode);
   const runner = createAiFilmWorkflowRunner({
     promptClient: fake.promptClient,
     generationClient: fake.generation,
@@ -104,8 +119,10 @@ function setup(stages: readonly AiFilmStage[] = AI_FILM_STAGES, mode = "full") {
 }
 
 describe("AI film composite workflow", () => {
-  it("reads every general reference in planning and independent reviews and rejects changed resume inputs", async () => {
-    const { runner, request, fake } = setup();
+  it("reads every general reference in planning and independent reviews and rejects changed resume inputs", async ({
+    workflowFakes,
+  }) => {
+    const { runner, request, fake } = setup(AI_FILM_STAGES, "full", workflowFakes);
     const withMaterials = {
       ...request,
       node: {

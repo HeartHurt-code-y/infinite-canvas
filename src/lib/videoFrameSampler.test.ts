@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { buildVideoContactSheets, videoSamplingTimeline } from "./videoFrameSampler";
 
@@ -41,4 +42,30 @@ describe("videoSamplingTimeline", () => {
     expect(videoSamplingTimeline(0)).toEqual([]);
     expect(videoSamplingTimeline(Number.NaN)).toEqual([]);
   });
+});
+
+it("rejects contact sheets before creating a decoder when already aborted", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  await expect(buildVideoContactSheets("/reference.mp4", controller.signal)).rejects.toMatchObject({
+    name: "AbortError",
+  });
+});
+
+it("rejects contact sheets when the video has no dimensions", async () => {
+  const nativeCreate = document.createElement.bind(document);
+  const video = nativeCreate("video");
+  Object.defineProperty(video, "readyState", {
+    configurable: true,
+    get: () => HTMLMediaElement.HAVE_CURRENT_DATA,
+  });
+  Object.defineProperty(video, "duration", { configurable: true, get: () => 4 });
+  Object.defineProperty(video, "videoWidth", { configurable: true, get: () => 0 });
+  Object.defineProperty(video, "videoHeight", { configurable: true, get: () => 0 });
+  vi.spyOn(document, "createElement").mockImplementation((tagName, options) => {
+    if (tagName === "video") return video;
+    return nativeCreate(tagName, options);
+  });
+
+  await expect(buildVideoContactSheets("/reference.mp4")).rejects.toThrow("视频元数据无效");
 });

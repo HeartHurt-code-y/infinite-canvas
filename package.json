@@ -24,6 +24,9 @@
     "format:check": "prettier . --check",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:unit": "vitest run --project unit",
+    "test:dom": "vitest run --project dom",
+    "test:browser": "vitest run --project browser",
     "test:coverage": "vitest run --coverage",
     "rust:check": "cargo check --manifest-path src-tauri/Cargo.toml --locked",
     "rust:fmt": "cargo fmt --manifest-path src-tauri/Cargo.toml --check",
@@ -107,6 +110,7 @@
     "@types/react-dom": "^19.1.6",
     "@types/three": "0.186.0",
     "@vitejs/plugin-react": "^6.1.1",
+    "@vitest/browser-playwright": "5.0.1",
     "@vitest/coverage-v8": "^5.0.1",
     "eslint": "^10.8.1",
     "eslint-config-prettier": "^10.1.8",
@@ -116,11 +120,13 @@
     "eslint-plugin-testing-library": "^7.16.2",
     "globals": "^17.11.0",
     "jsdom": "^30.0.1",
+    "playwright": "^1.63.0",
     "prettier": "^3.9.6",
     "react-doctor": "^0.9.14",
     "typescript": "~5.8.3",
     "typescript-eslint": "^8.67.0",
     "vite": "^8.2.2",
-    "vitest": "^5.0.1"
+    "vitest": "^5.0.1",
+    "vitest-browser-react": "^2.3.0"
   }
 }

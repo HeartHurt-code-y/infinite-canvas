@@ -43,6 +43,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install Playwright Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
       # bundle.resources 指向的两个引擎目录由 prepare 脚本生成且被 gitignore，
       # Tauri build script 在 clippy 编译时也会校验其存在，必须先行准备
       # （与 tauri.conf.json 的 beforeDevCommand / beforeBuildCommand 保持一致）。

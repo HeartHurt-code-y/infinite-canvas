@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -203,10 +204,7 @@ describe("素材预览字节缓存", () => {
     vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:imported");
 
     expect(await cache.loadMediaBytes("asset-1", "image", null)).toBe("blob:imported");
-    expect(fetchMock).toHaveBeenCalledWith(
-      "asset://localhost/asset-1",
-      expect.anything(),
-    );
+    expect(fetchMock).toHaveBeenCalledWith("asset://localhost/asset-1", expect.anything());
     delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];
   });
 

@@ -1,6 +1,8 @@
-import { describe, expect, it } from "vitest";
+// @vitest-environment jsdom
+import { describe, expect, it, vi } from "vitest";
 import {
   composedVideoFileName,
+  composeVideosInOrder,
   compositionCanvasSize,
   normalizeVideoInputOrder,
   preferredVideoCompositionFormat,
@@ -30,5 +32,40 @@ describe("视频拼接与合成工具", () => {
     expect(composedVideoFileName("成片:第一版?.mp4", "webm", new Date(2026, 7, 28, 16, 8, 9))).toBe(
       "成片-第一版--20260828-160809.webm",
     );
+  });
+
+  it("缺少尺寸时回退到 1280×720", () => {
+    expect(compositionCanvasSize(0, 0)).toEqual({ width: 1280, height: 720 });
+  });
+
+  it("输入不足两段时拒绝合成", async () => {
+    await expect(composeVideosInOrder([])).rejects.toThrow("至少连接 2 段视频后才能合成。");
+    await expect(
+      composeVideosInOrder([{ key: "clip-a", name: "A", src: "blob:clip-a" }]),
+    ).rejects.toThrow("至少连接 2 段视频后才能合成。");
+  });
+
+  it("已经取消的信号立刻以 AbortError 退出", async () => {
+    const controller = new AbortController();
+    controller.abort();
+    await expect(
+      composeVideosInOrder(
+        [
+          { key: "clip-a", name: "A", src: "blob:clip-a" },
+          { key: "clip-b", name: "B", src: "blob:clip-b" },
+        ],
+        { signal: controller.signal },
+      ),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
+  it("系统没有 MediaRecorder 时拒绝合成", async () => {
+    vi.stubGlobal("MediaRecorder", undefined);
+    await expect(
+      composeVideosInOrder([
+        { key: "clip-a", name: "A", src: "blob:clip-a" },
+        { key: "clip-b", name: "B", src: "blob:clip-b" },
+      ]),
+    ).rejects.toThrow("当前系统 WebView 不支持视频录制");
   });
 });
