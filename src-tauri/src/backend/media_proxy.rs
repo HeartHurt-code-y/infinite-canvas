@@ -647,7 +647,7 @@ async fn warm_one(cache: Arc<MediaCache>, url: Url) {
 }
 
 /// 只识别火山 TOS 的 `X-Tos-Date` + `X-Tos-Expires`；无法识别的地址按未过期处理。
-fn signed_url_expired(url: &Url, now: SystemTime) -> bool {
+pub(crate) fn signed_url_expired(url: &Url, now: SystemTime) -> bool {
     let mut date = None;
     let mut expires = None;
     for (key, value) in url.query_pairs() {
@@ -722,6 +722,9 @@ async fn proxy_response(
             }
         }
     }
+    // 预览路径不按 X-Tos-Date 短接：本机时钟或登记表里的旧签名都可能误判过期，
+    // 宁可多打一次 TOS，由对象存储决定 200 还是 403。浏览暖缓存仍会跳过看起来
+    // 已过期的地址（那不是用户正在看的那张图）。列表侧另有一条汇总日志。
     // 完整 GET 参与在途合并；Range/HEAD 各自带语义，逐一转发。
     let fetched = fetch_media_outcome(
         &upstream_url,
@@ -1936,6 +1939,56 @@ mod tests {
             1,
             "过期签名不得再打对象存储"
         );
+    }
+
+    #[tokio::test]
+    async fn serves_cached_bytes_for_expired_signed_urls_without_hitting_origin() {
+        let server = HttpFixture::new();
+        let (_guard, cache) = test_cache();
+        let expired = Url::parse(&format!(
+            "{}/image.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead",
+            server.url
+        ))
+        .unwrap();
+        cache.store(&expired, Some("image/png"), b"PNGBYTES");
+        remember_asset_preview_url("asset-expired-cached", Some(expired.as_str()));
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri("http://assetproxy.localhost/asset-expired-cached")
+                .body(Vec::new())
+                .unwrap(),
+            Some(&cache),
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"PNGBYTES");
+        assert_eq!(server.requests.lock().unwrap().len(), 0);
+    }
+
+    #[tokio::test]
+    async fn still_fetches_when_tos_query_looks_expired() {
+        let server = HttpFixture::new();
+        // 查询串按我们的解析已经过期，但上游若仍给图就必须显示，不能在本地直接失败。
+        let looks_expired = format!(
+            "{}/image.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=maybe-live",
+            server.url
+        );
+        remember_asset_preview_url("asset-expired-1", Some(&looks_expired));
+        let response = proxy_response(
+            Request::builder()
+                .method(Method::GET)
+                .uri("http://assetproxy.localhost/asset-expired-1")
+                .body(Vec::new())
+                .unwrap(),
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.body(), b"PNGBYTES");
+        assert_eq!(server.requests.lock().unwrap().len(), 1);
     }
 
     #[test]

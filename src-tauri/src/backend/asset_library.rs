@@ -559,6 +559,14 @@ impl AssetLibrary {
                 assets.len()
             );
         }
+        let expired = count_expired_preview_urls(&assets, SystemTime::now());
+        if expired > 0 {
+            warn!(
+                "[assets] 本页 {} / {} 条云素材预览地址已过期，供应商未重新签名",
+                expired,
+                assets.len()
+            );
+        }
         Ok(assets)
     }
 
@@ -2731,6 +2739,15 @@ fn parse_real_person_group(raw: &Value) -> BackendResult<RealPersonGroup> {
     })
 }
 
+fn count_expired_preview_urls(assets: &[CloudAssetRecord], now: SystemTime) -> usize {
+    assets
+        .iter()
+        .filter_map(|asset| asset.preview_url.as_deref())
+        .filter_map(|raw| Url::parse(raw).ok())
+        .filter(|url| media_proxy::signed_url_expired(url, now))
+        .count()
+}
+
 fn parse_asset_page(provider_connection_id: &str, payload: &Value) -> Vec<CloudAssetRecord> {
     let mut candidates = Vec::new();
     if let Some(data) = payload.get("data") {
@@ -3601,6 +3618,29 @@ mod tests {
             Some("Asset://asset-20260918115256-eh389")
         );
         assert_eq!(assets[0].group_id.as_deref(), Some("16"));
+    }
+
+    #[test]
+    fn parse_konjac_list_item_uses_url_when_preview_url_is_absent() {
+        let payload = json!({
+            "code": "success",
+            "data": { "items": [{
+                "id": "asset-20260920105211-edhhv",
+                "name": "封面",
+                "url": "https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead",
+                "asset_url": "Asset://asset-20260920105211-edhhv",
+                "asset_type": "Image",
+                "status": "Active",
+                "create_time": 1
+            }]}
+        });
+        let assets = parse_asset_page("provider-e943eb7e", &payload);
+        assert_eq!(assets.len(), 1);
+        assert_eq!(
+            assets[0].preview_url.as_deref(),
+            Some("https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead")
+        );
+        assert_eq!(count_expired_preview_urls(&assets, SystemTime::now()), 1);
     }
 
     /// 火山引擎方舟方言：浏览走 `ListAssets` 动作（`send_ark` 端口），
