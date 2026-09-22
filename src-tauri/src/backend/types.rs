@@ -1086,6 +1086,16 @@ pub struct AssetImportOutputRecord {
     pub updated_at: i64,
 }
 
+/// 云端素材导入时留在本机的原件。预览确认不可用时用它重新上传，再删除旧记录。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportedAssetSource {
+    pub local_path: String,
+    pub media_type: MediaType,
+    pub group_id: Option<String>,
+    pub name: Option<String>,
+}
+
 /// 分组 ID 兼容历史数据：早期版本只支持真人分组，把数值 ID 直接序列化成 JSON 数字，
 /// 旧的暂存任务记录里仍是 `"groupId": 128`；统一为字符串后必须仍能读回这些行。
 fn deserialize_optional_group_id<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>

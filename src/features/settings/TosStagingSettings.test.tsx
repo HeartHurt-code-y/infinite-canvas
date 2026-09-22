@@ -35,6 +35,7 @@ function createClient(
       throw new Error("not used in these tests");
     }),
     listAssetImportOutputs: vi.fn(() => Promise.resolve([])),
+    resolveImportedAssetSource: vi.fn(() => Promise.resolve(null)),
     listLocalAssets: vi.fn(() =>
       Promise.resolve({
         items: [],

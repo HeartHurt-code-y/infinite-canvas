@@ -211,6 +211,15 @@ const assetImportOutputRecordSchema = v.looseObject({
 
 export const assetImportOutputRecordsSchema = v.array(assetImportOutputRecordSchema);
 
+export const nullableImportedAssetSourceSchema = v.nullable(
+  v.looseObject({
+    localPath: v.string(),
+    mediaType: mediaTypeSchema,
+    groupId: nullableStringSchema,
+    name: nullableStringSchema,
+  }),
+);
+
 export const localAssetRecordSchema = v.looseObject({
   id: v.string(),
   name: v.string(),

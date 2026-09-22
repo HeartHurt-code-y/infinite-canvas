@@ -29,10 +29,10 @@ use super::{
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
-        AssetImportOutputRecord, ConnectivityTestResult, LocalAssetKindTotals, LocalAssetListQuery,
-        LocalAssetPage, LocalAssetRecord, MediaType, RefreshLocalAssetMediaCommand,
-        RefreshStagingObjectCommand, StagingJobRecord, StagingStatus, StartStagingCommand,
-        TosBucketPullSummary, TosStagingConfig,
+        AssetImportOutputRecord, ConnectivityTestResult, ImportedAssetSource, LocalAssetKindTotals,
+        LocalAssetListQuery, LocalAssetPage, LocalAssetRecord, MediaType,
+        RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand, StagingJobRecord,
+        StagingStatus, StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
     },
 };
 
@@ -348,38 +348,8 @@ pub(crate) async fn fake_ip_aware_client(url: &str, fallback: reqwest::Client) -
 /// 也不干扰 reqwest 已启用的系统代理自动读取。
 ///
 /// 重定向策略保持默认（跟随 3xx）：结果直链没有预签名 Host 绑定约束，上游 CDN 用
-/// 302 做实际分发是常见行为。
-pub(crate) async fn fake_ip_aware_download_client(
-    url: &str,
-    fallback: reqwest::Client,
-) -> reqwest::Client {
-    let Ok(parsed) = url::Url::parse(url) else {
-        return fallback;
-    };
-    let Some(host) = parsed.host_str() else {
-        return fallback;
-    };
-    let port = parsed.port_or_known_default().unwrap_or(443);
-    let Ok(addresses) = tokio::net::lookup_host((host, port)).await else {
-        return fallback;
-    };
-    let system_ips: Vec<std::net::IpAddr> = addresses.map(|address| address.ip()).collect();
-    if system_ips.is_empty() || system_ips.iter().any(|ip| !is_fake_ip(*ip)) {
-        return fallback;
-    }
-    let real_ips = resolve_host_real_ips(&fallback, host).await;
-    if real_ips.is_empty() {
-        return fallback;
-    }
-    warn!(
-        "[save] {host} 被代理软件 fake-ip 劫持（系统解析 {system_ips:?}），改用备用 DNS 的真实地址直连下载"
-    );
-    build_fake_ip_pinned_client(host, port, &real_ips, reqwest::redirect::Policy::default())
-        .unwrap_or(fallback)
-}
-
-/// 与 [`fake_ip_aware_download_client`] 相同的 fake-ip 判定，但钉扎客户端没有整段
-/// 总超时：结果落盘可能走十几分钟的慢直链，300s 上限会把还在进数据的传输杀掉。
+/// 302 做实际分发是常见行为。钉扎客户端没有整段总超时：结果落盘可能走十几分钟的
+/// 慢直链，300s 上限会把还在进数据的传输杀掉。
 pub(crate) async fn fake_ip_aware_streaming_download_client(
     url: &str,
     fallback: reqwest::Client,
@@ -720,6 +690,36 @@ impl StagingService {
                 }
             })
             .collect())
+    }
+
+    /// 按云端素材身份找回导入时的本机原件。文件已经不在磁盘上时返回 `None`，调用方不得删除云端记录。
+    pub fn imported_asset_source(
+        &self,
+        asset_id: &str,
+    ) -> BackendResult<Option<ImportedAssetSource>> {
+        let Some(job) = self.storage.find_asset_import_job_by_asset_id(asset_id)? else {
+            return Ok(None);
+        };
+        let path = PathBuf::from(job.local_path.trim());
+        let file_exists = !path.as_os_str().is_empty()
+            && std::fs::metadata(&path)
+                .map(|meta| meta.is_file())
+                .unwrap_or(false);
+        if !file_exists {
+            return Ok(None);
+        }
+        Ok(Some(ImportedAssetSource {
+            local_path: path.to_string_lossy().into_owned(),
+            media_type: job.media_type,
+            group_id: job
+                .import_target
+                .as_ref()
+                .and_then(|target| target.group_id.clone()),
+            name: job
+                .import_target
+                .as_ref()
+                .and_then(|target| target.name.clone()),
+        }))
     }
 
     /// 列出本机索引中的素材，并为每个对象生成新的只读预签名 URL。
@@ -2588,7 +2588,7 @@ mod tests {
     ///
     /// 用 `Debug` 中的自定义 UA 作为「同一个客户端」的可读标识。
     #[tokio::test]
-    async fn fake_ip_aware_download_client_keeps_shared_client_unless_hijacked() {
+    async fn fake_ip_aware_streaming_download_client_keeps_shared_client_unless_hijacked() {
         fn marked_client() -> reqwest::Client {
             reqwest::Client::builder()
                 .user_agent("shared-client-marker/1")
@@ -2597,12 +2597,15 @@ mod tests {
         }
 
         // 不可解析：不解析 DNS，直接回退。
-        let client = fake_ip_aware_download_client("不是 URL", marked_client()).await;
+        let client = fake_ip_aware_streaming_download_client("不是 URL", marked_client()).await;
         assert!(format!("{client:?}").contains("shared-client-marker/1"));
 
         // IP 字面量的正常解析：不是 fake-ip，回退到共享客户端。
-        let client =
-            fake_ip_aware_download_client("http://127.0.0.1:8080/a.png", marked_client()).await;
+        let client = fake_ip_aware_streaming_download_client(
+            "http://127.0.0.1:8080/a.png",
+            marked_client(),
+        )
+        .await;
         assert!(format!("{client:?}").contains("shared-client-marker/1"));
     }
 

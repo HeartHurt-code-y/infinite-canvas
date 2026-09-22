@@ -283,6 +283,10 @@ import type {
 } from "./workspaceModel";
 import { settleUnreadyCloudAsset } from "./cloudAssetSettlement";
 import {
+  repairUnavailableCloudAsset,
+  replaceCloudAssetIdInPromptDocument,
+} from "./unavailableAssetRepair";
+import {
   ASSETS,
   ASSET_KIND_LABELS,
   ASSET_NODE_HEIGHT,
@@ -883,6 +887,10 @@ export function WorkspaceApp({
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
   // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点并标记已上传。
   const uploadJobToOutputKeyRef = useRef<Map<string, string>>(new Map());
+  /** 预览替换：上传任务 → 被替换的旧云端素材，入库成功后改写画布引用。 */
+  const previewRepairJobsRef = useRef<
+    Map<string, { readonly oldAssetId: string; readonly providerConnectionId: string }>
+  >(new Map());
   // 从画布菜单发起的上传：任务完成后把素材节点放到落点，并按需自动连线。
   const canvasUploadPlacementsRef = useRef(new Map<string, CanvasUploadPlacement>());
   const placedCanvasUploadJobIdsRef = useRef(new Set<string>());
@@ -2509,10 +2517,36 @@ export function WorkspaceApp({
           );
           uploadJobToOutputKeyRef.current.delete(payload.jobId);
         }
+        const repair = previewRepairJobsRef.current.get(payload.jobId);
+        const newAssetId = payload.job?.assetId;
+        if (repair && newAssetId && newAssetId !== repair.oldAssetId) {
+          patchNodes("asset", (node) =>
+            node.source !== "local" &&
+            node.assetId === repair.oldAssetId &&
+            node.providerConnectionId === repair.providerConnectionId
+              ? {
+                  ...node,
+                  assetId: newAssetId,
+                  previewUrl: null,
+                  videoUrl: node.kind === "video" ? null : node.videoUrl,
+                }
+              : node,
+          );
+          for (const [nodeKey, document] of Object.entries(promptContents.snapshotAll())) {
+            const next = replaceCloudAssetIdInPromptDocument(
+              document,
+              repair.oldAssetId,
+              newAssetId,
+            );
+            if (next) promptContents.restoreDocument(nodeKey, next);
+          }
+          previewRepairJobsRef.current.delete(payload.jobId);
+        }
       } else if (status === "failed" || status === "interrupted") {
         // 上传失败：清理映射，不标记已上传。
         uploadJobToOutputKeyRef.current.delete(payload.jobId);
         canvasUploadPlacementsRef.current.delete(payload.jobId);
+        previewRepairJobsRef.current.delete(payload.jobId);
       }
       placeCanvasUploadRef.current(payload.jobId, payload.job);
       // 成功的上传不用用户再点一次 ×：素材已经入库、绿色小点已经点亮，这一行
@@ -2534,6 +2568,7 @@ export function WorkspaceApp({
     assetProvider,
     applyCloudAssetKindDelta,
     patchNodes,
+    promptContents,
     refreshAssetGroups,
     refreshCloudAssets,
     refreshLocalAssets,
@@ -8207,6 +8242,87 @@ export function WorkspaceApp({
     viewportCenterBoardCoordinates,
   ]);
 
+  // 预览确认失败：先把本机原件重新上传进同一分组，再删除旧的云端记录。
+  const handleUnavailableCloudAsset = useCallback(
+    (asset: AssetItem) => {
+      if (!isDesktopRuntime() || asset.source !== "cloud" || !asset.providerConnectionId) return;
+      void repairUnavailableCloudAsset(
+        asset,
+        {
+          resolveImportedAsset: (assetId) => tosStagingClient.resolveImportedAssetSource(assetId),
+          deleteAsset: (command) => assetLibraryClient.deleteAsset(command),
+          startUpload: (command) => tosStagingClient.startUpload(command),
+        },
+        (jobId) => {
+          previewRepairJobsRef.current.set(jobId, {
+            oldAssetId: asset.id,
+            providerConnectionId: asset.providerConnectionId ?? "",
+          });
+          setAssetUploads((current) => [
+            ...current,
+            {
+              jobId,
+              name: asset.name,
+              kind: asset.kind,
+              assetId: null,
+              status: "validating",
+              bytesUploaded: 0,
+              bytesTotal: null,
+              error: null,
+              lastAdvancedAt: Date.now(),
+              stalled: false,
+              destination: "cloud",
+              adjustment: null,
+            },
+          ]);
+        },
+      ).then((result) => {
+        if (result.status === "skipped") {
+          if (result.reason === "no-local-file") {
+            frontendLog(
+              "info",
+              `[assets] 预览不可用但没有本机原件，保留云端记录: assetId=${asset.id}`,
+            );
+          }
+          return;
+        }
+        if (result.status === "failed") {
+          const formatted = formatRawBackendError(result.error);
+          frontendLog(
+            "error",
+            `[assets] 预览不可用素材未能重新上传: assetId=${asset.id}, 阶段=${result.reason}, 错误: ${formatted}`,
+          );
+          toast.error(`「${asset.name}」预览不可用，重新上传失败`, { description: formatted });
+          return;
+        }
+        if (result.deleted) {
+          setCloudAssets((current) => current.filter((item) => item.id !== asset.id));
+          if (
+            assetProvider &&
+            selectedAssetGroupIdRef.current == null &&
+            asset.providerConnectionId === assetProvider.id &&
+            (asset.kind === "image" || asset.kind === "video" || asset.kind === "audio")
+          ) {
+            applyCloudAssetKindDelta(assetProvider.id, null, asset.kind, -1);
+          }
+          frontendLog(
+            "info",
+            `[assets] 预览不可用素材已删除并重新上传: assetId=${asset.id}, jobId=${result.jobId}`,
+          );
+          toast.success(`「${asset.name}」预览不可用，已删除并重新上传到素材库`);
+          return;
+        }
+        const formatted = formatRawBackendError(result.deleteError);
+        frontendLog(
+          "error",
+          `[assets] 预览不可用素材已重新上传，但删除旧记录失败: assetId=${asset.id}, jobId=${result.jobId}, 错误: ${formatted}`,
+        );
+        toast.error(`「${asset.name}」已重新上传，旧素材删除失败`, { description: formatted });
+      });
+    },
+    [applyCloudAssetKindDelta, assetProvider],
+  );
+
   // 云端素材删除：调用上游 `POST /v1/assets/delete`，成功后重新拉取云端列表。
   // 本地素材不走此路径（没有云端 ID，删除按钮也不渲染）。
   const handleDeleteAsset = useCallback(
@@ -10284,6 +10400,7 @@ export function WorkspaceApp({
           visibleAssets={visibleAssets}
           onPreviewAsset={handlePreviewAsset}
           onDropAssetToCanvas={handleDropAssetToCanvas}
+          onPreviewUnavailable={handleUnavailableCloudAsset}
           multiSelect={assetMultiSelect}
           pickedCount={pickedAssets.length}
           pickOrderByKey={pickOrderByKey}

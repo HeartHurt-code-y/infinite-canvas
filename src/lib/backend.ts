@@ -39,6 +39,7 @@ import {
   realPersonGroupsSchema,
   remoteVideoTaskPageSchema,
   assetImportOutputRecordsSchema,
+  nullableImportedAssetSourceSchema,
   stagingJobRecordSchema,
   stagingStateChangedEventSchema,
   stringSchema,
@@ -537,6 +538,14 @@ export interface AssetImportOutputRecord {
   readonly updatedAt: number;
 }
 
+/** 云端素材导入时留在本机的原件。没有记录或文件已不在时为 null。 */
+export interface ImportedAssetSource {
+  readonly localPath: string;
+  readonly mediaType: MediaType;
+  readonly groupId: string | null;
+  readonly name: string | null;
+}
+
 /** 本机 SQLite 索引中的素材；媒体正文只保存在对象存储。 */ export interface LocalAssetRecord {
   readonly id: string;
   readonly name: string;
@@ -615,6 +624,11 @@ export interface TosStagingClient {
    */
   listAssetImportOutputs(this: void): Promise<readonly AssetImportOutputRecord[]>;
   /**
+   * 按云端素材身份找回导入时的本机原件。
+   * 没有导入记录，或原件已经不在磁盘上时返回 null。调用方不得据此删除云端素材。
+   */
+  resolveImportedAssetSource(this: void, assetId: string): Promise<ImportedAssetSource | null>;
+  /**
    * 分页查询本地素材索引：按类型与文件名子串过滤后返回单页（仅页内条目签发预签名 URL）。
    * 不传查询时返回全量。
    */
@@ -651,6 +665,10 @@ export const tosStagingClient: TosStagingClient = {
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
   listAssetImportOutputs: () =>
     invokeDesktop("list_asset_import_outputs", assetImportOutputRecordsSchema),
+  resolveImportedAssetSource: (assetId) =>
+    invokeDesktop("resolve_imported_asset_source", nullableImportedAssetSourceSchema, {
+      assetId,
+    }),
   listLocalAssets: (query) =>
     invokeDesktop("list_local_assets", localAssetPageSchema, { query: query ?? null }),
   refreshLocalAssetMedia: (command) =>

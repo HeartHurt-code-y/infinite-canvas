@@ -30,6 +30,7 @@ const TOS_STUB: TosStagingClient = {
   startUpload: vi.fn(() => Promise.resolve("job-1")),
   getJob: vi.fn(() => Promise.reject(new Error("unused"))),
   listAssetImportOutputs: vi.fn(() => Promise.resolve([])),
+  resolveImportedAssetSource: vi.fn(() => Promise.resolve(null)),
   listLocalAssets: vi.fn(() =>
     Promise.resolve({
       items: [],

@@ -12,7 +12,7 @@ import type { AssetItem, AssetKind } from "./workspaceModel";
  *
  * 同一素材在一个会话里只补一次：整页卡片各发一次请求会把素材库刷成一串空转请求。
  */
-const missingPreviewUrlAttempts = new Set<string>();
+const missingPreviewUrlAttempts = new Map<string, Promise<string | null>>();
 
 /** 测试与素材库整表刷新时清空补取记账，避免上一条列表的判断泄漏到下一条。 */
 export function resetMissingPreviewUrlAttempts(): void {
@@ -29,8 +29,9 @@ export function useRecoveredPreviewUrl(
   asset: AssetItem,
   kind: AssetKind,
   currentUrl: string | null | undefined,
-): string | null {
+): { readonly url: string | null; readonly settled: boolean } {
   const [recovered, setRecovered] = useState<string | null>(null);
+  const [attemptFinished, setAttemptFinished] = useState(false);
   const { id, source, providerConnectionId } = asset;
   const eligible =
     (currentUrl == null || currentUrl === "") &&
@@ -44,18 +45,23 @@ export function useRecoveredPreviewUrl(
   useEffect(() => {
     if (!eligible) return;
     const key = `${id}:${kind}`;
-    if (missingPreviewUrlAttempts.has(key)) return;
-    missingPreviewUrlAttempts.add(key);
+    // 同一素材共享这一次补取：卡片卸载再挂上时不再发第二轮请求，也等得到同一次结果。
+    let pending = missingPreviewUrlAttempts.get(key);
+    if (pending == null) {
+      pending = refreshMediaUrlWithStagingFallback({ id, source, providerConnectionId }, kind, null)
+        .then((freshUrl) => (freshUrl == null || freshUrl === "" ? null : freshUrl))
+        .catch(() => null);
+      missingPreviewUrlAttempts.set(key, pending);
+    }
     let cancelled = false;
-    void refreshMediaUrlWithStagingFallback({ id, source, providerConnectionId }, kind, null).then(
-      (freshUrl) => {
-        if (cancelled || freshUrl == null || freshUrl === "") return;
-        setRecovered(freshUrl);
-      },
-    );
+    void pending.then((freshUrl) => {
+      if (cancelled) return;
+      if (freshUrl != null) setRecovered(freshUrl);
+      setAttemptFinished(true);
+    });
     return () => {
       cancelled = true;
     };
   }, [eligible, id, kind, source, providerConnectionId]);
-  return recovered;
+  return { url: recovered, settled: !eligible || attemptFinished };
 }

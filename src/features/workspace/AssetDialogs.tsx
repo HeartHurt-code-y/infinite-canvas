@@ -563,7 +563,7 @@ export function AssetSourceDialog({
   const listedMediaUrl =
     asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl) : asset.previewUrl;
   // 列表项没带地址时按素材身份补取一次：直接按「没有地址」渲染会让这类素材永远没有预览。
-  const recoveredMediaUrl = useRecoveredPreviewUrl(asset, asset.kind, listedMediaUrl);
+  const recoveredMediaUrl = useRecoveredPreviewUrl(asset, asset.kind, listedMediaUrl).url;
   const rawMediaUrl = refreshedMediaUrl ?? recoveredMediaUrl ?? listedMediaUrl;
   // 图片正文同样交给原生媒体代理取字节：供应商签名地址在 WebView 里直接请求会被跨域
   // 限制/混合内容策略拦掉，而素材库卡片与画布素材节点一直是走代理的 —— 只给 `<img>`

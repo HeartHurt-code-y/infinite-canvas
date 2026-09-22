@@ -163,6 +163,7 @@ pub fn run() {
             commands::start_staging_upload,
             commands::get_staging_job,
             commands::list_asset_import_outputs,
+            commands::resolve_imported_asset_source,
             commands::list_local_assets,
             commands::refresh_local_asset_media,
             commands::refresh_staging_object_url,

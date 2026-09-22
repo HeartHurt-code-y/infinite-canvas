@@ -692,6 +692,7 @@ export function AssetPanel({
   visibleAssets,
   onPreviewAsset,
   onDropAssetToCanvas,
+  onPreviewUnavailable,
   localPage,
   localTotalPages,
   localTotal,
@@ -758,6 +759,8 @@ export function AssetPanel({
   readonly visibleAssets: readonly AssetItem[];
   readonly onPreviewAsset: (asset: AssetItem) => void;
   readonly onDropAssetToCanvas: (asset: AssetItem, clientX: number, clientY: number) => void;
+  /** 云端素材预览确认失败时替换：删除旧记录并重新上传本机原件。 */
+  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
   readonly localPage: number;
   readonly localTotalPages: number;
   readonly localTotal: number;
@@ -900,6 +903,7 @@ export function AssetPanel({
             onTogglePick={onTogglePickedAsset}
             onPreview={onPreviewAsset}
             onDropToCanvas={onDropAssetToCanvas}
+            onPreviewUnavailable={onPreviewUnavailable}
           />
         ) : (
           <AssetEmptyState

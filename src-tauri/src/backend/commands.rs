@@ -36,12 +36,12 @@ use super::{
         CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
         DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
-        LocalAssetListQuery, LocalAssetPage, ModelDefinition, ObserveAssetStatusCommand,
-        ProviderConnection, ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink,
-        RealPersonGroup, RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
-        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
-        RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ImportedAssetSource,
+        ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, ModelDefinition,
+        ObserveAssetStatusCommand, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
+        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
+        RefreshAssetCoverCommand, RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand,
+        RefreshStagingObjectCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
         SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
@@ -916,6 +916,35 @@ pub fn refresh_staging_object_url(
     command: RefreshStagingObjectCommand,
 ) -> CommandResult<String> {
     state.staging.refresh_staging_object_url(command).command()
+}
+
+/// 按云端素材身份找回导入时的本机原件。没有记录或文件已不在时返回 null。
+#[tauri::command]
+pub fn resolve_imported_asset_source(
+    state: State<'_, BackendState>,
+    asset_id: String,
+) -> CommandResult<Option<ImportedAssetSource>> {
+    let started_at = std::time::Instant::now();
+    match state.staging.imported_asset_source(&asset_id) {
+        Ok(source) => {
+            info!(
+                "[staging] resolve_imported_asset_source 命令成功: assetId={}, 找到原件={}, 耗时 {}ms",
+                asset_id.trim(),
+                source.is_some(),
+                started_at.elapsed().as_millis()
+            );
+            Ok(source)
+        }
+        Err(error) => {
+            let record = error.runtime_record();
+            error!(
+                "[staging] resolve_imported_asset_source 命令失败: assetId={}, 耗时 {}ms, 错误: {record}",
+                asset_id.trim(),
+                started_at.elapsed().as_millis()
+            );
+            Err(error.payload())
+        }
+    }
 }
 
 /// 列出产物上传到云端素材库的入库记录：应用重启后前端据此重建

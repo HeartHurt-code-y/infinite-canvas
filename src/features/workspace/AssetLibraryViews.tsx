@@ -10,6 +10,10 @@ import { assetPickKey } from "./assetGroups";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
 import { useRecoveredPreviewUrl } from "./assetPreviewRecovery";
+import {
+  isCloudPreviewConfirmedDead,
+  useReportConfirmedPreviewUnavailable,
+} from "./unavailableAssetRepair";
 import { assetMediaByteIdentity, useMediaByteSource, type MediaByteSource } from "./mediaByteCache";
 import type { AssetItem, AssetKind, AssetUploadEntry } from "./workspaceModel";
 import {
@@ -75,9 +79,11 @@ function useAssetMediaBytes(
 function AssetCardVideoVisual({
   asset,
   previewing,
+  onPreviewUnavailable,
 }: {
   readonly asset: AssetItem;
   readonly previewing: boolean;
+  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wasPreviewingRef = useRef(false);
@@ -85,11 +91,11 @@ function AssetCardVideoVisual({
   const [refreshedVideoUrl, setRefreshedVideoUrl] = useState<string | null>(null);
   const playbackRefreshAttemptedRef = useRef(false);
   // 列表没给播放地址时按素材身份补取一次（同一素材整个会话只补一次）。
-  const recoveredVideoUrl = useRecoveredPreviewUrl(
-    asset,
-    "video",
-    asset.videoUrl ?? asset.previewUrl,
-  );
+  const recoveredVideo = useRecoveredPreviewUrl(asset, "video", asset.videoUrl ?? asset.previewUrl);
+  const recoveredVideoUrl = recoveredVideo.url;
+  const [coverRefreshPending, setCoverRefreshPending] = useState(false);
+  const [videoRefreshPending, setVideoRefreshPending] = useState(false);
+  const [videoRefreshFinished, setVideoRefreshFinished] = useState(false);
   const candidateVideoUrl =
     refreshedVideoUrl ?? recoveredVideoUrl ?? asset.videoUrl ?? asset.previewUrl ?? null;
   const videoSrc = toMediaProxyUrl(candidateVideoUrl, { assetId: asset.id });
@@ -122,6 +128,19 @@ function AssetCardVideoVisual({
   }`;
   const isRealAsset = asset.source != null;
   const mediaReady = coverLoaded || videoCoverReady;
+  const hasVideoCandidate = candidateVideoUrl != null && candidateVideoUrl !== "";
+  const videoPreviewConfirmed = isCloudPreviewConfirmedDead({
+    source: asset.source,
+    kind: asset.kind,
+    cloudStatus: asset.cloudStatus,
+    mediaReady,
+    fromCache: coverBytes.fromCache,
+    hasCandidateUrl: hasVideoCandidate || effectiveCoverUrl != null,
+    mediaFailed: !mediaReady && effectiveCoverUrl == null && videoFailed,
+    recoverySettled: recoveredVideo.settled && !coverRefreshPending && !videoRefreshPending,
+    refreshSettled: videoRefreshFinished && !coverRefreshPending && !videoRefreshPending,
+  });
+  useReportConfirmedPreviewUnavailable(asset, videoPreviewConfirmed, onPreviewUnavailable);
 
   useEffect(() => {
     if (previewing) {
@@ -169,6 +188,7 @@ function AssetCardVideoVisual({
             // （与画布素材节点一致）。
             if (failedUrl != null && !coverRefreshAttemptedRef.current) {
               coverRefreshAttemptedRef.current = true;
+              setCoverRefreshPending(true);
               void refreshAssetItemCoverUrl(asset)
                 .then((freshUrl) => {
                   if (freshUrl != null && freshUrl !== "" && freshUrl !== failedUrl) {
@@ -176,7 +196,8 @@ function AssetCardVideoVisual({
                     setFailedCoverUrl(null);
                   }
                 })
-                .catch(() => undefined);
+                .catch(() => undefined)
+                .finally(() => setCoverRefreshPending(false));
             }
             const video = videoRef.current;
             if (video != null && video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA) {
@@ -213,15 +234,22 @@ function AssetCardVideoVisual({
             // 续签失败保持置灰，不反复请求。视频正文不落字节缓存，按需播放。
             if (candidateVideoUrl != null && !playbackRefreshAttemptedRef.current) {
               playbackRefreshAttemptedRef.current = true;
+              setVideoRefreshPending(true);
               void refreshMediaUrlWithStagingFallback(asset, "video", candidateVideoUrl)
                 .then((freshUrl) => {
-                  if (freshUrl == null || freshUrl === "") return;
+                  if (freshUrl == null || freshUrl === "") {
+                    setVideoRefreshFinished(true);
+                    return;
+                  }
                   if (freshUrl !== candidateVideoUrl) {
                     setRefreshedVideoUrl(freshUrl);
                   }
                   setFailedVideoSrc(null);
                 })
-                .catch(() => undefined);
+                .catch(() => setVideoRefreshFinished(true))
+                .finally(() => setVideoRefreshPending(false));
+            } else {
+              setVideoRefreshFinished(true);
             }
           }}
           onLoadedMetadata={(event) => {
@@ -252,6 +280,7 @@ function AssetCard({
   multiSelect = false,
   pickOrder = null,
   onTogglePick,
+  onPreviewUnavailable,
 }: {
   readonly asset: AssetItem;
   readonly onPreview: () => void;
@@ -260,6 +289,7 @@ function AssetCard({
   /** 多选时的点选序号，从 1 开始；未选中为 null。 */
   readonly pickOrder?: number | null;
   readonly onTogglePick?: () => void;
+  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
 }) {
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
   const showCloudBadge = asset.cloudStatus != null && asset.cloudStatus !== "ready";
@@ -279,12 +309,14 @@ function AssetCard({
   // 图片预览签名过期时向后端续签一次得到的新地址；每个卡片实例只尝试一次。
   const [refreshedImagePreviewUrl, setRefreshedImagePreviewUrl] = useState<string | null>(null);
   const imageRefreshAttemptedRef = useRef(false);
+  const [imageRefreshSettled, setImageRefreshSettled] = useState(false);
   // 列表没给预览地址时按素材身份补取一次（同一素材整个会话只补一次）。
-  const recoveredImagePreviewUrl = useRecoveredPreviewUrl(
+  const recoveredImage = useRecoveredPreviewUrl(
     asset,
     "image",
     refreshedImagePreviewUrl ?? asset.previewUrl,
   );
+  const recoveredImagePreviewUrl = recoveredImage.url;
   const candidateImagePreviewUrl =
     refreshedImagePreviewUrl ?? recoveredImagePreviewUrl ?? asset.previewUrl;
   // 已下载过的预览字节直接复用：重开面板、切换类型/翻页回来后不再重复下载，
@@ -300,6 +332,21 @@ function AssetCard({
   // 瀑布流布局：媒体加载后量取原始宽高比，覆盖视觉区的 4:3 占位比例。
   const [intrinsicRatio, setIntrinsicRatio] = useState<number | null>(null);
   const visualStyle = intrinsicRatio != null ? { aspectRatio: String(intrinsicRatio) } : undefined;
+  const hasImageCandidate = candidateImagePreviewUrl != null && candidateImagePreviewUrl !== "";
+  const imagePreviewConfirmed =
+    asset.kind === "image" &&
+    isCloudPreviewConfirmedDead({
+      source: asset.source,
+      kind: asset.kind,
+      cloudStatus: asset.cloudStatus,
+      mediaReady: imagePreviewReady,
+      fromCache: imageBytes.fromCache,
+      hasCandidateUrl: hasImageCandidate,
+      mediaFailed: imagePreviewFailed,
+      recoverySettled: recoveredImage.settled,
+      refreshSettled: imageRefreshSettled,
+    });
+  useReportConfirmedPreviewUnavailable(asset, imagePreviewConfirmed, onPreviewUnavailable);
 
   useEffect(() => {
     const finishPointerDrag = (event: PointerEvent, cancelled: boolean) => {
@@ -388,7 +435,11 @@ function AssetCard({
         }}
       >
         {asset.kind === "video" ? (
-          <AssetCardVideoVisual asset={asset} previewing={previewing} />
+          <AssetCardVideoVisual
+            asset={asset}
+            previewing={previewing}
+            onPreviewUnavailable={onPreviewUnavailable}
+          />
         ) : (
           <span
             className={`asset-card__visual asset-card__visual--${asset.visual}`}
@@ -433,7 +484,10 @@ function AssetCard({
                           candidateImagePreviewUrl,
                         )
                           .then((freshUrl) => {
-                            if (freshUrl == null || freshUrl === "") return;
+                            if (freshUrl == null || freshUrl === "") {
+                              setImageRefreshSettled(true);
+                              return;
+                            }
                             if (freshUrl !== candidateImagePreviewUrl) {
                               setRefreshedImagePreviewUrl(freshUrl);
                             }
@@ -442,7 +496,9 @@ function AssetCard({
                             // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
                             imageBytes.reload();
                           })
-                          .catch(() => undefined);
+                          .catch(() => setImageRefreshSettled(true));
+                      } else {
+                        setImageRefreshSettled(true);
                       }
                     }}
                   />
@@ -494,6 +550,7 @@ export const AssetFlow = memo(function AssetFlow({
   multiSelect = false,
   pickOrderByKey = EMPTY_PICK_ORDERS,
   onTogglePick,
+  onPreviewUnavailable,
 }: {
   readonly assets: readonly AssetItem[];
   readonly onPreview: (asset: AssetItem) => void;
@@ -501,6 +558,7 @@ export const AssetFlow = memo(function AssetFlow({
   readonly multiSelect?: boolean;
   readonly pickOrderByKey?: ReadonlyMap<string, number>;
   readonly onTogglePick?: (asset: AssetItem) => void;
+  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
 }) {
   return (
     <div className="asset-flow">
@@ -513,6 +571,7 @@ export const AssetFlow = memo(function AssetFlow({
           onTogglePick={() => onTogglePick?.(asset)}
           onPreview={() => onPreview(asset)}
           onDropToCanvas={(clientX, clientY) => onDropToCanvas(asset, clientX, clientY)}
+          onPreviewUnavailable={onPreviewUnavailable}
         />
       ))}
     </div>
