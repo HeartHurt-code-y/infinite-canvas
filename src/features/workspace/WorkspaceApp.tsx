@@ -10417,86 +10417,88 @@ export function WorkspaceApp({
             ) : null}
           </div>
 
-          <div className="canvas-group-control" role="group" aria-label="素材框选成组">
-            <button
-              type="button"
-              aria-pressed={assetGroupMarquee}
-              aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材成组"}
-              data-tooltip={
-                assetGroupMarquee
-                  ? "拖拽框选素材。从组端口连到生成节点时，按素材库点选顺序输入"
-                  : "框选素材成组"
-              }
-              onClick={() => setAssetGroupMarquee((enabled) => !enabled)}
-            >
-              <Icon name="bounding-box" aria-hidden="true" size="md" />
-            </button>
-          </div>
+          <div className="canvas-viewport-dock">
+            <div className="canvas-group-control" role="group" aria-label="素材框选成组">
+              <button
+                type="button"
+                aria-pressed={assetGroupMarquee}
+                aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材成组"}
+                data-tooltip={
+                  assetGroupMarquee
+                    ? "拖拽框选素材。从组端口连到生成节点时，按素材库点选顺序输入"
+                    : "框选素材成组"
+                }
+                onClick={() => setAssetGroupMarquee((enabled) => !enabled)}
+              >
+                <Icon name="bounding-box" aria-hidden="true" size="md" />
+              </button>
+            </div>
 
-          <div className="canvas-home-control" role="group" aria-label="画布视图归位">
-            <button
-              type="button"
-              aria-label="回到画布起始位置"
-              data-tooltip="回到内容"
-              onClick={resetCanvasViewport}
-            >
-              <Icon name="crosshair-simple" aria-hidden="true" size="md" />
-            </button>
-          </div>
+            <div className="canvas-home-control" role="group" aria-label="画布视图归位">
+              <button
+                type="button"
+                aria-label="回到画布起始位置"
+                data-tooltip="回到内容"
+                onClick={resetCanvasViewport}
+              >
+                <Icon name="crosshair-simple" aria-hidden="true" size="md" />
+              </button>
+            </div>
 
-          <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
-            <button
-              type="button"
-              aria-label="撤销画布操作"
-              aria-keyshortcuts="Control+Z"
-              data-tooltip="撤销 · Ctrl+Z"
-              disabled={pastCount === 0}
-              onClick={undo}
-            >
-              <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
-            </button>
-            <button
-              type="button"
-              aria-label="重做画布操作"
-              aria-keyshortcuts="Control+Shift+Z"
-              data-tooltip="重做 · Ctrl+Shift+Z"
-              disabled={futureCount === 0}
-              onClick={redo}
-            >
-              <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
-            </button>
-          </div>
+            <div className="canvas-history-control" role="group" aria-label="画布撤销与重做">
+              <button
+                type="button"
+                aria-label="撤销画布操作"
+                aria-keyshortcuts="Control+Z"
+                data-tooltip="撤销 · Ctrl+Z"
+                disabled={pastCount === 0}
+                onClick={undo}
+              >
+                <Icon name="arrow-counter-clockwise" aria-hidden="true" size="md" />
+              </button>
+              <button
+                type="button"
+                aria-label="重做画布操作"
+                aria-keyshortcuts="Control+Shift+Z"
+                data-tooltip="重做 · Ctrl+Shift+Z"
+                disabled={futureCount === 0}
+                onClick={redo}
+              >
+                <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
+              </button>
+            </div>
 
-          <div className="zoom-control" role="group" aria-label="画布缩放控制">
-            <button
-              type="button"
-              aria-label="缩小画布"
-              aria-keyshortcuts="-"
-              data-tooltip="缩小画布 · -"
-              onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
-            >
-              <Icon name="minus" aria-hidden="true" size="md" />
-            </button>
-            <button
-              type="button"
-              className="zoom-control__reset"
-              aria-label={`重置画布缩放为 ${DEFAULT_ZOOM}%`}
-              aria-keyshortcuts="0"
-              data-tooltip="重置缩放 · 0"
-              onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
-            >
-              <Icon name="corners-out" aria-hidden="true" size="sm" />
-              <output aria-live="polite">{zoom}%</output>
-            </button>
-            <button
-              type="button"
-              aria-label="放大画布"
-              aria-keyshortcuts="+"
-              data-tooltip="放大画布 · +"
-              onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
-            >
-              <Icon name="plus" aria-hidden="true" size="md" />
-            </button>
+            <div className="zoom-control" role="group" aria-label="画布缩放控制">
+              <button
+                type="button"
+                aria-label="缩小画布"
+                aria-keyshortcuts="-"
+                data-tooltip="缩小画布 · -"
+                onClick={() => zoomAroundViewportCenter(viewRef.current.zoom - ZOOM_STEP)}
+              >
+                <Icon name="minus" aria-hidden="true" size="md" />
+              </button>
+              <button
+                type="button"
+                className="zoom-control__reset"
+                aria-label={`重置画布缩放为 ${DEFAULT_ZOOM}%`}
+                aria-keyshortcuts="0"
+                data-tooltip="重置缩放 · 0"
+                onClick={() => zoomAroundViewportCenter(DEFAULT_ZOOM)}
+              >
+                <Icon name="corners-out" aria-hidden="true" size="sm" />
+                <output aria-live="polite">{zoom}%</output>
+              </button>
+              <button
+                type="button"
+                aria-label="放大画布"
+                aria-keyshortcuts="+"
+                data-tooltip="放大画布 · +"
+                onClick={() => zoomAroundViewportCenter(viewRef.current.zoom + ZOOM_STEP)}
+              >
+                <Icon name="plus" aria-hidden="true" size="md" />
+              </button>
+            </div>
           </div>
         </section>
 

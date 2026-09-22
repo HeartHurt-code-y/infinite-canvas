@@ -4,6 +4,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const appCss = readFileSync(new URL("./App.css", import.meta.url), "utf8");
+const studioShellCss = readFileSync(new URL("./styles/studio-shell.css", import.meta.url), "utf8");
 const tokensCss = readFileSync(new URL("../tokens.css", import.meta.url), "utf8");
 
 function cssRule(selector: string): string {
@@ -142,23 +143,39 @@ describe("画布连线交互", () => {
 });
 
 describe("画布视口控件", () => {
-  it("回到起始位置与前两组控件同一底边、依次左移且互不重叠", () => {
-    const zoom = cssRule(".zoom-control");
-    const history = cssRule(".canvas-history-control");
-    const home = cssRule(".canvas-home-control");
-    // 三组控件共用底边基准，右起依次为：缩放（9rem）→ 撤销/重做（4.5rem）→ 回到起始位置（2.25rem）。
-    expect(zoom).toMatch(/right:\s*var\(--space-md\)/);
-    expect(history).toMatch(
-      /right:\s*calc\(var\(--space-md\) \+ 9rem \+ 2 \* var\(--rule-thin\) \+ var\(--space-2xs\)\)/,
-    );
-    expect(home).toMatch(
-      /right:\s*calc\(var\(--space-md\) \+ 9rem \+ 4\.5rem \+ 4 \* var\(--rule-thin\) \+ 2 \* var\(--space-2xs\)\)/,
-    );
-    for (const rule of [zoom, history, home]) {
-      expect(rule).toMatch(/bottom:\s*var\(--size-zoom-collapsed-offset\)/);
+  it("框选、归位、撤销重做与缩放共用一条工具条，不再各自计算偏移", () => {
+    const dock = cssRule(".canvas-viewport-dock");
+    expect(dock).toMatch(/display:\s*flex/);
+    expect(dock).toMatch(/align-items:\s*stretch/);
+    expect(dock).toMatch(/right:\s*var\(--space-md\)/);
+    expect(dock).toMatch(/bottom:\s*var\(--size-zoom-collapsed-offset\)/);
+    expect(dock).toMatch(/gap:\s*var\(--space-2xs\)/);
+    expect(dock).toMatch(/pointer-events:\s*none/);
+
+    const groups = [
+      ".zoom-control",
+      ".canvas-history-control",
+      ".canvas-home-control",
+      ".canvas-group-control",
+    ].map(cssRule);
+    for (const rule of groups) {
+      expect(rule).not.toMatch(/position:\s*absolute/);
+      expect(rule).not.toMatch(/(?:^|\s)right:/);
+      expect(rule).not.toMatch(/(?:^|\s)bottom:/);
       expect(rule).toMatch(/min-height:\s*2\.25rem/);
     }
-    expect(history).toMatch(/grid-template-columns:\s*2\.25rem 2\.25rem/);
-    expect(home).toMatch(/grid-template-columns:\s*2\.25rem/);
+    expect(groups[0]).toMatch(/grid-template-columns:\s*2\.25rem 4\.5rem 2\.25rem/);
+    expect(groups[1]).toMatch(/grid-template-columns:\s*2\.25rem 2\.25rem/);
+    expect(groups[2]).toMatch(/grid-template-columns:\s*2\.25rem/);
+    expect(groups[3]).toMatch(/grid-template-columns:\s*2\.25rem/);
+  });
+
+  it("Studio 主题只改工具条底边和间距，框选与其余控件同一条", () => {
+    expect(studioShellCss).toMatch(
+      /\.canvas-stage \.canvas-viewport-dock\s*\{[^}]*bottom:\s*var\(--space-lg\)/,
+    );
+    expect(studioShellCss).toMatch(/\.canvas-stage \.canvas-viewport-dock > \*/);
+    expect(studioShellCss).not.toMatch(/\.canvas-stage \.canvas-group-control\s*\{[^}]*bottom:/);
+    expect(studioShellCss).not.toMatch(/\.canvas-(?:history|home|group)-control\s*\{[^}]*right:/);
   });
 });

@@ -525,10 +525,12 @@ button:active:focus-visible,
   line-height: var(--leading-body);
 }
 
-.canvas-stage .zoom-control,
-.canvas-stage .canvas-history-control,
-.canvas-stage .canvas-home-control {
+.canvas-stage .canvas-viewport-dock {
   bottom: var(--space-lg);
+  gap: calc(2 * var(--space-2xs));
+}
+
+.canvas-stage .canvas-viewport-dock > * {
   min-height: var(--size-control);
   padding: var(--space-3xs);
   background: var(--color-dock-wash);
@@ -537,17 +539,7 @@ button:active:focus-visible,
   box-shadow: var(--shadow-raised);
 }
 
-.canvas-stage .canvas-history-control {
-  right: calc(var(--space-md) + 9rem + 2 * var(--rule-thin) + 2 * var(--space-2xs));
-}
-
-.canvas-stage .canvas-home-control {
-  right: calc(var(--space-md) + 13.5rem + 4 * var(--rule-thin) + 4 * var(--space-2xs));
-}
-
-.canvas-stage .zoom-control button,
-.canvas-stage .canvas-history-control button,
-.canvas-stage .canvas-home-control button {
+.canvas-stage .canvas-viewport-dock button:not([aria-pressed="true"]) {
   color: var(--color-text-2);
   border-radius: var(--radius-control);
   transition: none;

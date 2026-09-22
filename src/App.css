@@ -3024,11 +3024,24 @@ svg[data-spin="true"] {
   object-fit: contain;
 }
 
-.zoom-control {
+/* 视口工具条只锚一次。组内顺序即从左到右：框选、归位、撤销重做、缩放。
+   间距用 gap，避免按宽度累加 right 时漏掉一组就把整条错开。 */
+.canvas-viewport-dock {
   position: absolute;
   z-index: var(--z-dropdown);
   right: var(--space-md);
   bottom: var(--size-zoom-collapsed-offset);
+  display: flex;
+  align-items: stretch;
+  gap: var(--space-2xs);
+  pointer-events: none;
+}
+
+.canvas-viewport-dock > * {
+  pointer-events: auto;
+}
+
+.zoom-control {
   display: grid;
   grid-template-columns: 2.25rem 4.5rem 2.25rem;
   min-height: 2.25rem;
@@ -3072,12 +3085,7 @@ svg[data-spin="true"] {
   bottom: calc(100% + var(--space-xs));
 }
 
-/* 撤销/重做控件：与缩放控件同一套 chrome 视觉，置于其左侧（缩放控件总宽 9rem + 2px 边框）。 */
 .canvas-history-control {
-  position: absolute;
-  z-index: var(--z-dropdown);
-  right: calc(var(--space-md) + 9rem + 2 * var(--rule-thin) + var(--space-2xs));
-  bottom: var(--size-zoom-collapsed-offset);
   display: grid;
   grid-template-columns: 2.25rem 2.25rem;
   min-height: 2.25rem;
@@ -3113,13 +3121,7 @@ svg[data-spin="true"] {
   bottom: calc(100% + var(--space-xs));
 }
 
-/* 回到起始位置控件：同样式 chrome，置于撤销/重做控件左侧
-   （偏移 = 边距 + 缩放 9rem + 撤销/重做 4.5rem + 4px 边框 + 两处组间距）。 */
 .canvas-home-control {
-  position: absolute;
-  z-index: var(--z-dropdown);
-  right: calc(var(--space-md) + 9rem + 4.5rem + 4 * var(--rule-thin) + 2 * var(--space-2xs));
-  bottom: var(--size-zoom-collapsed-offset);
   display: grid;
   grid-template-columns: 2.25rem;
   min-height: 2.25rem;
@@ -3150,12 +3152,7 @@ svg[data-spin="true"] {
   bottom: calc(100% + var(--space-xs));
 }
 
-/* 框选成组：在回到起始位置的左侧。 */
 .canvas-group-control {
-  position: absolute;
-  z-index: var(--z-dropdown);
-  right: calc(var(--space-md) + 9rem + 6.75rem + 6 * var(--rule-thin) + 3 * var(--space-2xs));
-  bottom: var(--size-zoom-collapsed-offset);
   display: grid;
   grid-template-columns: 2.25rem;
   min-height: 2.25rem;
