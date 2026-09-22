@@ -31,15 +31,15 @@ use super::{
     },
     types::{
         AssetGroupRecord, AssetImportOutputRecord, AssetKindCountCommand, AssetListCommand,
-        CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetKindTotals, CloudAssetRecord,
-        ConnectivityTestResult, CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand,
-        CredentialStatus, DeleteAssetCommand, DeleteAssetGroupCommand,
-        DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
+        AssetStatusObservation, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetKindTotals,
+        CloudAssetRecord, ConnectivityTestResult, CreateAssetGroupCommand,
+        CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
+        DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ListAssetGroupsCommand,
-        LocalAssetListQuery, LocalAssetPage, ModelDefinition, ProviderConnection,
-        ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
+        LocalAssetListQuery, LocalAssetPage, ModelDefinition, ObserveAssetStatusCommand,
+        ProviderConnection, ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink,
+        RealPersonGroup, RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
         RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
         RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
@@ -666,6 +666,15 @@ pub async fn delete_asset(
     command: DeleteAssetCommand,
 ) -> CommandResult<String> {
     state.assets.delete_asset(command).await.command()
+}
+
+/// 复核素材库里尚未就绪的云端素材。失败结论由前端删除并通知；传输失败不在这里删除。
+#[tauri::command]
+pub async fn observe_asset_status(
+    state: State<'_, BackendState>,
+    command: ObserveAssetStatusCommand,
+) -> CommandResult<AssetStatusObservation> {
+    state.assets.observe_asset_status(command).await.command()
 }
 
 #[tauri::command]

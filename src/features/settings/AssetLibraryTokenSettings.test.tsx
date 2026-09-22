@@ -38,6 +38,16 @@ const ASSETS: CloudAsset[] = [
 function mockLibraryClient(assets: CloudAsset[] = []): AssetLibraryClient {
   return {
     list: vi.fn(() => Promise.resolve(assets)),
+    observeAssetStatus: vi.fn(() =>
+      Promise.resolve({
+        status: "ready" as const,
+        rawStatus: "Active",
+        failureReason: null,
+        missing: false,
+        previewUrl: null,
+        coverUrl: null,
+      }),
+    ),
     deleteAsset: vi.fn(() => Promise.resolve("")),
     listAssetGroups: vi.fn(() => Promise.resolve([])),
     createAssetGroup: vi.fn(() =>

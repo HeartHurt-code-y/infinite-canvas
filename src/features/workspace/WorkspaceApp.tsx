@@ -281,6 +281,7 @@ import type {
   ViralRemixNodeData,
   ViralRemixVideoInput,
 } from "./workspaceModel";
+import { settleUnreadyCloudAsset } from "./cloudAssetSettlement";
 import {
   ASSETS,
   ASSET_KIND_LABELS,
@@ -791,6 +792,10 @@ export function WorkspaceApp({
   const [providerCatalogLoaded, setProviderCatalogLoaded] = useState(() => !isDesktopRuntime());
   const providerCatalogRequestRef = useRef(0);
   const cloudAssetsRequestRef = useRef(0);
+  const purgedCloudAssetIdsRef = useRef(new Set<string>());
+  const applyCloudAssetKindDeltaRef = useRef<
+    (providerConnectionId: string, groupId: string | null, kind: AssetKind, delta: 1 | -1) => void
+  >(() => undefined);
   const settingsAssetRequestRef = useRef<{
     readonly providerConnectionId: string;
     readonly requestId: number;
@@ -1490,6 +1495,54 @@ export function WorkspaceApp({
     };
   }, []);
 
+  const settleListedCloudAssets = useCallback(
+    (assets: readonly CloudAsset[], requestId: number, providerConnectionId: string): void => {
+      const unready = assets.filter((asset) => asset.status !== "ready");
+      if (unready.length === 0) return;
+      void (async () => {
+        for (const asset of unready) {
+          if (requestId !== cloudAssetsRequestRef.current) return;
+          const outcome = await settleUnreadyCloudAsset(asset, assetLibraryClient);
+          if (requestId !== cloudAssetsRequestRef.current) return;
+          if (outcome.kind === "removed") {
+            setCloudAssets((current) => current.filter((item) => item.id !== asset.id));
+            if (
+              selectedAssetGroupIdRef.current == null &&
+              (asset.kind === "image" || asset.kind === "video" || asset.kind === "audio")
+            ) {
+              applyCloudAssetKindDeltaRef.current(providerConnectionId, null, asset.kind, -1);
+            }
+            if (!purgedCloudAssetIdsRef.current.has(asset.id)) {
+              purgedCloudAssetIdsRef.current.add(asset.id);
+              toast.error(`「${asset.name}」已从素材库移除`, { description: outcome.reason });
+            }
+            frontendLog(
+              "info",
+              `[assets] 云端素材处理失败已剔除: providerConnectionId=${providerConnectionId}, assetId=${asset.id}, 原因=${outcome.reason}`,
+            );
+            continue;
+          }
+          if (outcome.kind === "ready") {
+            setCloudAssets((current) =>
+              current.map((item) =>
+                item.id === asset.id
+                  ? {
+                      ...item,
+                      status: "ready",
+                      rawStatus: outcome.rawStatus,
+                      previewUrl: outcome.previewUrl ?? item.previewUrl,
+                      coverUrl: outcome.coverUrl ?? item.coverUrl,
+                    }
+                  : item,
+              ),
+            );
+          }
+        }
+      })();
+    },
+    [],
+  );
+
   const refreshCloudAssets = useCallback(
     (providerConnectionId: string, source: AssetRefreshSource): void => {
       const requestId = ++cloudAssetsRequestRef.current;
@@ -1532,6 +1585,7 @@ export function WorkspaceApp({
               return;
             }
             setCloudAssets(assets);
+            void settleListedCloudAssets(assets, requestId, providerConnectionId);
             // 满页说明可能还有下一页；不足一页即最后一页（上游无过滤总数）。
             setCloudAssetHasMore(assets.length >= ASSET_PAGE_SIZE);
             setAssetsError(null);
@@ -1565,7 +1619,7 @@ export function WorkspaceApp({
           if (requestId === cloudAssetsRequestRef.current) setAssetsLoading(false);
         });
     },
-    [],
+    [settleListedCloudAssets],
   );
 
   /**
@@ -1593,6 +1647,9 @@ export function WorkspaceApp({
     },
     [],
   );
+  useEffect(() => {
+    applyCloudAssetKindDeltaRef.current = applyCloudAssetKindDelta;
+  }, [applyCloudAssetKindDelta]);
 
   /**
    * 扫描云端素材库并按类型计数（驱动类型 Tab 角标）。

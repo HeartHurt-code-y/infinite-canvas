@@ -5,6 +5,7 @@ import type {
   AssetImportOutputRecord,
   CanvasDocumentRecord,
   CanvasDocumentSummary,
+  AssetStatusObservation,
   CloudAsset,
   ConnectivityTestResult,
   GenerationResultReadyEvent,
@@ -258,6 +259,16 @@ export const cloudAssetSchema = v.looseObject({
 }) satisfies v.GenericSchema<CloudAsset>;
 
 export const cloudAssetsSchema = v.array(cloudAssetSchema);
+
+/** 单条云端素材的复核结论：仍在处理、已就绪，或失败/缺失。 */
+export const assetStatusObservationSchema = v.looseObject({
+  status: cloudAssetStatusSchema,
+  rawStatus: v.string(),
+  failureReason: nullableStringSchema,
+  missing: v.boolean(),
+  previewUrl: nullableStringSchema,
+  coverUrl: nullableStringSchema,
+}) satisfies v.GenericSchema<AssetStatusObservation>;
 
 /** 云端素材按类型计数（后端扫描全部页后得到，与本地素材计数同形）。 */
 export const cloudAssetKindTotalsSchema = v.looseObject({

@@ -852,6 +852,28 @@ pub struct DeleteRealPersonAssetCommand {
     pub id: String,
 }
 
+/// 向云端复核一条素材的当前状态，用来区分「仍在处理」和「已经报错、没有可用结果」。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObserveAssetStatusCommand {
+    pub provider_connection_id: String,
+    /// 云端素材 ID（`asset-…`，不带 `asset://` 前缀）。
+    pub id: String,
+}
+
+/// 云端对单条素材的最新结论。`missing` 表示上游明确没有这条记录（HTTP 404/410）。
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AssetStatusObservation {
+    pub status: CloudAssetStatus,
+    pub raw_status: String,
+    /// 失败或缺失时的云端原因；仍在处理或已就绪时为空。
+    pub failure_reason: Option<String>,
+    pub missing: bool,
+    pub preview_url: Option<String>,
+    pub cover_url: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DeleteAssetCommand {

@@ -23,13 +23,13 @@ use super::{
     provider_adapter::ARK_ADAPTER_ID,
     storage::TaskExecutionRecord,
     types::{
-        AssetGroupRecord, AssetKindCountCommand, AssetListCommand, CloudAssetIdentity,
-        CloudAssetKindTotals, CloudAssetRecord, CloudAssetStatus, CreateAssetGroupCommand,
-        CreateRealPersonAuthLinkCommand, DeleteAssetCommand, DeleteAssetGroupCommand,
-        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, ListAssetGroupsCommand,
-        MediaType, RawProviderResponse, RealPersonAuthLink, RealPersonGroup,
-        RealPersonProviderCommand, RefreshAssetCoverCommand, RefreshAssetMediaCommand,
-        RenameAssetCommand, UpdateAssetGroupCommand,
+        AssetGroupRecord, AssetKindCountCommand, AssetListCommand, AssetStatusObservation,
+        CloudAssetIdentity, CloudAssetKindTotals, CloudAssetRecord, CloudAssetStatus,
+        CreateAssetGroupCommand, CreateRealPersonAuthLinkCommand, DeleteAssetCommand,
+        DeleteAssetGroupCommand, DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand,
+        ListAssetGroupsCommand, MediaType, ObserveAssetStatusCommand, RawProviderResponse,
+        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RefreshAssetCoverCommand,
+        RefreshAssetMediaCommand, RenameAssetCommand, UpdateAssetGroupCommand,
     },
 };
 
@@ -2025,6 +2025,92 @@ impl AssetLibrary {
             .map(OverseasPollFetch::Observed)
     }
 
+    /// 复核一条已出现在素材库里的云端素材。
+    ///
+    /// 列表里的 `processing` 只说明当时还在处理。这里再读一次权威记录：
+    /// 仍在处理就原样返回；状态或错误字段表明失败、或上游 404/410 表示没有这条素材，
+    /// 调用方再删除并通知。传输失败和 5xx 返回错误，调用方不得据此删除。
+    pub async fn observe_asset_status(
+        &self,
+        command: ObserveAssetStatusCommand,
+    ) -> BackendResult<AssetStatusObservation> {
+        let provider_connection_id =
+            require_provider_connection_id(&command.provider_connection_id)?;
+        let id = command
+            .id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or_else(|| command.id.trim())
+            .trim();
+        if id.is_empty() {
+            return Err(BackendError::validation(
+                "asset status lookup requires an asset id",
+                json!({ "id": command.id }),
+            ));
+        }
+        if self.dialect(provider_connection_id)? == AssetDialect::VolcengineArk {
+            return self
+                .observe_ark_asset_status(provider_connection_id, id)
+                .await;
+        }
+        self.observe_moyu_asset_status(provider_connection_id, id)
+            .await
+    }
+
+    async fn observe_moyu_asset_status(
+        &self,
+        provider_connection_id: &str,
+        id: &str,
+    ) -> BackendResult<AssetStatusObservation> {
+        let response = self
+            .port
+            .send(RemoteAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                method: Method::POST,
+                path: "/v1/assets/get",
+                body: Some(json!({ "id": asset_lookup_id(id) })),
+            })
+            .await
+            .map_err(|error| match error {
+                BackendError::Transport(error) => BackendError::Transport(error.without_url()),
+                other => other,
+            })?;
+        if matches!(response.status, 404 | 410) {
+            return Ok(missing_asset_observation(&response.body));
+        }
+        require_success("observe asset status", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let data = payload.get("data").unwrap_or(&payload);
+        let asset = parse_asset_entry(provider_connection_id, data, Some(id))
+            .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
+        let reason = asset_failure_reason(data).or_else(|| asset_failure_reason(&payload));
+        Ok(observation_from_parts(asset, reason, false))
+    }
+
+    async fn observe_ark_asset_status(
+        &self,
+        provider_connection_id: &str,
+        id: &str,
+    ) -> BackendResult<AssetStatusObservation> {
+        let response = self
+            .port
+            .send_ark(ArkAssetRequest {
+                provider_connection_id: provider_connection_id.to_string(),
+                action: "GetAsset",
+                body: json!({ "Id": id }),
+            })
+            .await?;
+        if matches!(response.status, 404 | 410) {
+            return Ok(missing_asset_observation(&response.body));
+        }
+        require_success("observe ark asset status", &response)?;
+        let payload: Value = serde_json::from_str(&response.body)?;
+        let asset = parse_ark_asset_entry(provider_connection_id, &payload)
+            .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
+        let reason = asset_failure_reason(&payload);
+        Ok(observation_from_parts(asset, reason, false))
+    }
+
     /// Refresh the authenticated asset record for a local preview, without a generation task.
     /// 返回重新读取的素材记录，供调用方取不同字段（视频正文地址、关键帧封面地址等）。
     async fn refresh_asset_record(
@@ -2857,7 +2943,10 @@ fn parse_asset_entry(
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown")
         .to_string();
-    let status = normalize_asset_status(&raw_status);
+    let status = apply_asset_failure(
+        normalize_asset_status(&raw_status),
+        asset_failure_reason(raw).is_some(),
+    );
     let fallback_name = match kind {
         MediaType::Image => "图片素材",
         MediaType::Video => "视频素材",
@@ -2930,7 +3019,10 @@ fn parse_ark_asset_entry(provider_connection_id: &str, raw: &Value) -> Option<Cl
         .filter(|value| !value.is_empty())
         .unwrap_or("unknown")
         .to_string();
-    let status = normalize_asset_status(&raw_status);
+    let status = apply_asset_failure(
+        normalize_asset_status(&raw_status),
+        asset_failure_reason(raw).is_some(),
+    );
     let group_id = record
         .get("GroupId")
         .and_then(Value::as_str)
@@ -3032,9 +3124,143 @@ fn normalize_asset_status(value: &str) -> CloudAssetStatus {
     match value.trim().to_ascii_lowercase().as_str() {
         "active" | "ready" => CloudAssetStatus::Ready,
         "pending" | "processing" => CloudAssetStatus::Processing,
-        "failed" => CloudAssetStatus::Failed,
-        "deleted" => CloudAssetStatus::Deleted,
+        "failed" | "failure" | "error" | "errored" | "rejected" | "reject" | "review_failed"
+        | "review_rejected" | "audit_failed" | "invalid" | "timeout" | "timed_out" | "expired"
+        | "cancelled" | "canceled" | "aborted" => CloudAssetStatus::Failed,
+        "deleted" | "removed" => CloudAssetStatus::Deleted,
         _ => CloudAssetStatus::Unknown,
+    }
+}
+
+/// 状态字符串还停在处理中，但记录里已经带了失败原因时，按失败处理。
+/// 已就绪的素材即使残留旧错误字段，也不再降级。
+fn apply_asset_failure(status: CloudAssetStatus, has_failure_reason: bool) -> CloudAssetStatus {
+    if has_failure_reason && !matches!(status, CloudAssetStatus::Ready | CloudAssetStatus::Deleted)
+    {
+        CloudAssetStatus::Failed
+    } else {
+        status
+    }
+}
+
+fn clip_reason(text: &str) -> String {
+    text.chars().take(500).collect()
+}
+
+fn nonempty_text(value: &Value) -> Option<String> {
+    let text = value.as_str()?.trim();
+    if text.is_empty() {
+        None
+    } else {
+        Some(clip_reason(text))
+    }
+}
+
+fn error_value_text(value: &Value) -> Option<String> {
+    match value {
+        Value::String(_) => nonempty_text(value),
+        Value::Object(map) => {
+            let code = map
+                .get("Code")
+                .or_else(|| map.get("code"))
+                .and_then(nonempty_text);
+            let message = map
+                .get("Message")
+                .or_else(|| map.get("message"))
+                .or_else(|| map.get("msg"))
+                .and_then(nonempty_text);
+            match (code, message) {
+                (Some(code), Some(message)) => Some(clip_reason(&format!("{code}: {message}"))),
+                (Some(code), None) => Some(code),
+                (None, Some(message)) => Some(message),
+                (None, None) => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// 从素材记录上读取云端已经给出的失败原因。没有这些字段就表示云端还没报错。
+fn asset_failure_reason(value: &Value) -> Option<String> {
+    let record = value.as_object()?;
+    const TEXT_KEYS: &[&str] = &[
+        "review_error_msg",
+        "reviewErrorMsg",
+        "error_message",
+        "errorMessage",
+        "fail_reason",
+        "failReason",
+        "failure_reason",
+        "failureReason",
+    ];
+    for key in TEXT_KEYS {
+        if let Some(text) = record.get(*key).and_then(nonempty_text) {
+            return Some(text);
+        }
+    }
+    record
+        .get("error")
+        .or_else(|| record.get("Error"))
+        .and_then(error_value_text)
+}
+
+fn asset_lookup_id(id: &str) -> Value {
+    if !id.is_empty() && id.bytes().all(|byte| byte.is_ascii_digit()) {
+        if let Ok(number) = id.parse::<u64>() {
+            return json!(number);
+        }
+    }
+    json!(id)
+}
+
+fn missing_asset_observation(body: &str) -> AssetStatusObservation {
+    let reason = serde_json::from_str::<Value>(body)
+        .ok()
+        .as_ref()
+        .and_then(asset_failure_reason)
+        .or_else(|| {
+            serde_json::from_str::<Value>(body)
+                .ok()
+                .as_ref()
+                .and_then(|payload| {
+                    payload
+                        .pointer("/error/message")
+                        .or_else(|| payload.get("message"))
+                        .and_then(nonempty_text)
+                })
+        })
+        .unwrap_or_else(|| "云端没有返回该素材".to_string());
+    AssetStatusObservation {
+        status: CloudAssetStatus::Deleted,
+        raw_status: "missing".to_string(),
+        failure_reason: Some(reason),
+        missing: true,
+        preview_url: None,
+        cover_url: None,
+    }
+}
+
+fn observation_from_parts(
+    asset: CloudAssetRecord,
+    failure_reason: Option<String>,
+    missing: bool,
+) -> AssetStatusObservation {
+    let status = apply_asset_failure(asset.status, failure_reason.is_some());
+    let failure_reason = match status {
+        CloudAssetStatus::Failed | CloudAssetStatus::Deleted => Some(
+            failure_reason
+                .filter(|value| !value.trim().is_empty())
+                .unwrap_or_else(|| format!("云端状态：{}", asset.raw_status)),
+        ),
+        CloudAssetStatus::Processing | CloudAssetStatus::Ready | CloudAssetStatus::Unknown => None,
+    };
+    AssetStatusObservation {
+        status,
+        raw_status: asset.raw_status,
+        failure_reason,
+        missing,
+        preview_url: asset.preview_url,
+        cover_url: asset.cover_url,
     }
 }
 
@@ -3588,6 +3814,104 @@ mod tests {
     }
 
     #[test]
+    fn parse_asset_entry_treats_a_processing_row_with_a_review_error_as_failed() {
+        let asset = parse_asset_entry(
+            "provider",
+            &json!({
+                "id": "asset-1",
+                "name": "封面",
+                "asset_type": "Image",
+                "status": "Processing",
+                "review_error_msg": "FaceMismatch"
+            }),
+            None,
+        )
+        .expect("asset");
+        assert_eq!(asset.status, CloudAssetStatus::Failed);
+        assert_eq!(asset.raw_status, "Processing");
+    }
+
+    #[tokio::test]
+    async fn observe_asset_status_distinguishes_processing_from_cloud_errors() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({
+                    "data": { "id": "asset-ok", "status": "Processing", "asset_type": "Image", "name": "仍在处理" }
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "data": {
+                        "id": "asset-bad",
+                        "status": "Processing",
+                        "asset_type": "Image",
+                        "name": "审核失败",
+                        "review_error_msg": "FaceMismatch"
+                    }
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "data": {
+                        "id": "asset-failed",
+                        "status": "Failed",
+                        "asset_type": "Image",
+                        "name": "导入失败",
+                        "error": { "message": "审核未通过" }
+                    }
+                }),
+            ),
+            response(404, json!({ "message": "素材不存在" })),
+            response(503, json!({ "message": "暂时不可用" })),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+        let command = |id: &str| ObserveAssetStatusCommand {
+            provider_connection_id: "provider".into(),
+            id: id.into(),
+        };
+
+        let processing = library
+            .observe_asset_status(command("asset-ok"))
+            .await
+            .expect("processing");
+        assert_eq!(processing.status, CloudAssetStatus::Processing);
+        assert!(processing.failure_reason.is_none());
+        assert!(!processing.missing);
+
+        let review_error = library
+            .observe_asset_status(command("asset-bad"))
+            .await
+            .expect("review error");
+        assert_eq!(review_error.status, CloudAssetStatus::Failed);
+        assert_eq!(review_error.failure_reason.as_deref(), Some("FaceMismatch"));
+        assert!(!review_error.missing);
+
+        let failed = library
+            .observe_asset_status(command("asset-failed"))
+            .await
+            .expect("failed");
+        assert_eq!(failed.status, CloudAssetStatus::Failed);
+        assert_eq!(failed.failure_reason.as_deref(), Some("审核未通过"));
+
+        let missing = library
+            .observe_asset_status(command("asset-gone"))
+            .await
+            .expect("missing");
+        assert!(missing.missing);
+        assert_eq!(missing.status, CloudAssetStatus::Deleted);
+        assert_eq!(missing.failure_reason.as_deref(), Some("素材不存在"));
+
+        let unavailable = library
+            .observe_asset_status(command("asset-down"))
+            .await
+            .expect_err("transient");
+        assert!(matches!(unavailable, BackendError::Protocol { .. }));
+    }
+
+    #[test]
     fn parse_konjac_list_item_uses_https_preview_when_asset_url_is_opaque() {
         let payload = json!({
             "code": "success",
@@ -3638,7 +3962,9 @@ mod tests {
         assert_eq!(assets.len(), 1);
         assert_eq!(
             assets[0].preview_url.as_deref(),
-            Some("https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead")
+            Some(
+                "https://ssssddd.tos-cn-beijing.volces.com/obj.png?X-Tos-Date=20200101T000000Z&X-Tos-Expires=1&X-Tos-Signature=dead"
+            )
         );
         assert_eq!(count_expired_preview_urls(&assets, SystemTime::now()), 1);
     }

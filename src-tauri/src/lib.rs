@@ -144,6 +144,7 @@ pub fn run() {
             commands::count_assets_by_kind,
             commands::refresh_asset_cover,
             commands::refresh_asset_media,
+            commands::observe_asset_status,
             commands::list_asset_groups,
             commands::create_asset_group,
             commands::rename_asset,

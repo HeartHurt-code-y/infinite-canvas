@@ -8,6 +8,7 @@ import {
   assetGroupsSchema,
   canvasDocumentRecordSchema,
   canvasDocumentSummariesSchema,
+  assetStatusObservationSchema,
   cloudAssetKindTotalsSchema,
   cloudAssetsSchema,
   connectivityTestResultSchema,
@@ -871,6 +872,21 @@ export interface CloudAsset {
   readonly groupId: string | null;
 }
 
+/** 云端对单条素材的最新结论。`missing` 表示上游明确没有这条记录。 */
+export interface AssetStatusObservation {
+  readonly status: CloudAssetStatus;
+  readonly rawStatus: string;
+  readonly failureReason: string | null;
+  readonly missing: boolean;
+  readonly previewUrl: string | null;
+  readonly coverUrl: string | null;
+}
+
+export interface ObserveAssetStatusCommand {
+  readonly providerConnectionId: string;
+  readonly id: string;
+}
+
 export interface AssetListQuery {
   readonly providerConnectionId: string;
   readonly pageNumber?: number;
@@ -1014,6 +1030,13 @@ export interface AssetKindCountClient {
 
 export interface AssetLibraryClient {
   list(this: void, query: AssetListQuery): Promise<CloudAsset[]>;
+  /**
+   * 复核一条未就绪素材的云端结论。传输失败会抛错，调用方不得据此删除素材。
+   */
+  observeAssetStatus(
+    this: void,
+    command: ObserveAssetStatusCommand,
+  ): Promise<AssetStatusObservation>;
   /** 永久删除云端素材（上游 `POST /v1/assets/delete`），返回被删除的素材 ID。 */
   deleteAsset(this: void, command: DeleteAssetCommand): Promise<string>;
   /** 按素材身份重新读取关键帧封面 URL（上游 `POST /v1/assets/get`），续签过期的签名封面。 */
@@ -1048,6 +1071,13 @@ export interface RealPersonAssetLibraryClient {
 export const assetLibraryClient: AssetLibraryClient &
   RealPersonAssetLibraryClient &
   AssetKindCountClient = {
+  observeAssetStatus: (command) =>
+    invokeDesktop("observe_asset_status", assetStatusObservationSchema, {
+      command: {
+        providerConnectionId: command.providerConnectionId,
+        id: command.id,
+      },
+    }),
   list: (query) =>
     invokeDesktop("list_assets", cloudAssetsSchema, {
       command: {
