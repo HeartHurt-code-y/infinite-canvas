@@ -83,7 +83,7 @@ function AssetCardVideoVisual({
 }: {
   readonly asset: AssetItem;
   readonly previewing: boolean;
-  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
+  readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const wasPreviewingRef = useRef(false);
@@ -289,7 +289,7 @@ function AssetCard({
   /** 多选时的点选序号，从 1 开始；未选中为 null。 */
   readonly pickOrder?: number | null;
   readonly onTogglePick?: () => void;
-  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
+  readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
   const showCloudBadge = asset.cloudStatus != null && asset.cloudStatus !== "ready";
@@ -558,7 +558,7 @@ export const AssetFlow = memo(function AssetFlow({
   readonly multiSelect?: boolean;
   readonly pickOrderByKey?: ReadonlyMap<string, number>;
   readonly onTogglePick?: (asset: AssetItem) => void;
-  readonly onPreviewUnavailable?: (asset: AssetItem) => void;
+  readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   return (
     <div className="asset-flow">

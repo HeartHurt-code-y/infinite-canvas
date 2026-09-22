@@ -197,7 +197,7 @@ describe("repairUnavailableCloudAsset", () => {
       resolveImportedAsset: vi.fn(() =>
         Promise.resolve({
           localPath: "C:\\library\\clip.mp4",
-          mediaType: "video",
+          mediaType: "video" as const,
           groupId: null,
           name: null,
         }),
