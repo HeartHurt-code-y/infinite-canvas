@@ -331,6 +331,10 @@ button:active:focus-visible,
   transition: none;
 }
 
+.asset-panel .asset-card.is-picked {
+  outline-color: var(--color-accent);
+}
+
 .asset-panel .asset-card:focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--space-3xs);

@@ -6,6 +6,7 @@ import {
   Background,
   BackgroundVariant,
   ReactFlow,
+  SelectionMode,
   type Connection,
   type EdgeChange,
   type NodeChange,
@@ -153,6 +154,19 @@ import {
   CanvasVideoDownloaderNode,
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
+import { AssetGroupFrame, AssetGroupSelectionReader } from "./AssetGroupFrame";
+import {
+  assetGroupBounds,
+  assetGroupFlowId,
+  assetGroupIdFromFlowId,
+  assetGroupKey,
+  assetGroupsFromNodes,
+  assetPickKey,
+  dissolveAssetGroupNodes,
+  layoutAssetPlacements,
+  nextLibraryPickOrder,
+  regroupAssetNodes,
+} from "./assetGroups";
 import { resolveSeedanceTask, selectSeedanceTask } from "../../lib/seedanceTasks";
 import { prepareGreenScreenGeneration } from "../../lib/greenScreen";
 import { greenScreenPreparationOutputs, greenScreenWorkflowSignature } from "./greenScreenWorkflow";
@@ -603,6 +617,10 @@ export function WorkspaceApp({
   const [workspaceUiHydrated, setWorkspaceUiHydrated] = useState(() => !isDesktopRuntime());
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
+  const [assetMultiSelect, setAssetMultiSelect] = useState(false);
+  const [pickedAssets, setPickedAssets] = useState<readonly AssetItem[]>([]);
+  const [assetGroupMarquee, setAssetGroupMarquee] = useState(false);
+  const [marqueeSelectionEpoch, setMarqueeSelectionEpoch] = useState(0);
   // 搜索防抖提交值：桌面端分页查询把它发给后端过滤，避免每次击键都发起请求。
   const [committedAssetSearch, setCommittedAssetSearch] = useState("");
   // 云端素材分页状态：当前页码与「可能有下一页」（当前页返回满页条数时为 true）。
@@ -4754,6 +4772,7 @@ export function WorkspaceApp({
         name: asset.name,
         previewUrl: asset.previewUrl ?? null,
         videoUrl: asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl ?? null) : null,
+        libraryPickOrder: nextLibraryPickOrder(assetNodes),
         x,
         y,
       };
@@ -4764,7 +4783,7 @@ export function WorkspaceApp({
       );
       return node;
     },
-    [addNode, assetProvider?.id, dropPosition],
+    [addNode, assetNodes, assetProvider?.id, dropPosition],
   );
 
   /** 连线保存节点身份；全部参数通过共享解析器在执行时读取。 */
@@ -4814,6 +4833,21 @@ export function WorkspaceApp({
     ],
   );
 
+  /** 组端口一次连线：按素材库点选顺序，把组内每个素材写进目标节点。 */
+  const connectAssetGroup = useCallback(
+    (groupId: string, toKey: string) => {
+      if (assetGroupIdFromFlowId(toKey) != null) return;
+      const group = assetGroupsFromNodes(assetNodes).find((item) => item.groupId === groupId);
+      if (group == null) return;
+      for (const member of group.members) connectCanvasNodes(member.key, toKey);
+      frontendLog(
+        "info",
+        `[canvas] 素材组连线: group=${groupId}, count=${group.members.length}, target=${toKey}, order=${group.members.map((member) => member.libraryPickOrder ?? "-").join(",")}`,
+      );
+    },
+    [assetNodes, connectCanvasNodes],
+  );
+
   const placeCanvasUploadFromJob = useCallback(
     (jobId: string, job: StagingJobRecord | null | undefined) => {
       const placement = canvasUploadPlacementsRef.current.get(jobId);
@@ -4842,13 +4876,21 @@ export function WorkspaceApp({
         placement.y + stagger,
       );
       if (node == null || placement.connection == null) return;
+      const sourceGroupId =
+        placement.connection.handleType === "source"
+          ? assetGroupIdFromFlowId(placement.connection.nodeKey)
+          : null;
+      if (sourceGroupId != null) {
+        connectAssetGroup(sourceGroupId, node.key);
+        return;
+      }
       const [fromKey, toKey] =
         placement.connection.handleType === "source"
           ? [placement.connection.nodeKey, node.key]
           : [node.key, placement.connection.nodeKey];
       connectCanvasNodes(fromKey, toKey);
     },
-    [addAssetNode, assetProvider?.id, connectCanvasNodes],
+    [addAssetNode, assetProvider?.id, connectAssetGroup, connectCanvasNodes],
   );
   useEffect(() => {
     placeCanvasUploadRef.current = placeCanvasUploadFromJob;
@@ -8013,6 +8055,83 @@ export function WorkspaceApp({
     },
     [addAssetNode, dropClientPointToBoard],
   );
+  const toggleAssetMultiSelect = useCallback(() => {
+    setAssetMultiSelect((enabled) => {
+      if (enabled) setPickedAssets([]);
+      return !enabled;
+    });
+  }, []);
+  const togglePickedAsset = useCallback((asset: AssetItem) => {
+    const key = assetPickKey(asset);
+    setPickedAssets((current) => {
+      const index = current.findIndex((item) => assetPickKey(item) === key);
+      if (index >= 0) return current.filter((_, itemIndex) => itemIndex !== index);
+      return [...current, asset];
+    });
+  }, []);
+  const pickOrderByKey = useMemo(() => {
+    const orders = new Map<string, number>();
+    pickedAssets.forEach((asset, index) => orders.set(assetPickKey(asset), index + 1));
+    return orders;
+  }, [pickedAssets]);
+  const handlePlacePickedAssets = useCallback(() => {
+    if (pickedAssets.length === 0) return;
+    for (const asset of pickedAssets) {
+      const source = asset.source ?? "cloud";
+      const providerConnectionId = asset.providerConnectionId ?? assetProvider?.id ?? "";
+      if (source === "cloud" && providerConnectionId === "") {
+        setAssetsError("拖放素材需要已启用的供应商连接。请先在全局设置中配置。");
+        return;
+      }
+    }
+    const positions = layoutAssetPlacements(
+      pickedAssets.length,
+      viewportCenterBoardCoordinates(),
+      { width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT },
+      occupiedNodeRects,
+    );
+    let libraryPickOrder = nextLibraryPickOrder(assetNodes);
+    const entries: CanvasNodeEntry[] = [];
+    for (let index = 0; index < pickedAssets.length; index += 1) {
+      const asset = pickedAssets[index];
+      const position = positions[index];
+      if (asset == null || position == null) continue;
+      const source = asset.source ?? "cloud";
+      const providerConnectionId = asset.providerConnectionId ?? assetProvider?.id ?? "";
+      entries.push({
+        type: "asset",
+        data: {
+          key: assetNodeKey(),
+          assetId: asset.id,
+          providerConnectionId,
+          source,
+          kind: asset.kind,
+          name: asset.name,
+          previewUrl: asset.previewUrl ?? null,
+          videoUrl: asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl ?? null) : null,
+          libraryPickOrder,
+          x: position.x,
+          y: position.y,
+        },
+      });
+      libraryPickOrder += 1;
+    }
+    if (entries.length === 0) return;
+    insertSubgraph(entries, []);
+    setPickedAssets([]);
+    toast.success(`已将 ${entries.length} 个素材放到画布`);
+    frontendLog(
+      "info",
+      `[canvas] 多选素材已放到画布: count=${entries.length}, order=${entries.map((entry) => (entry.type === "asset" ? entry.data.libraryPickOrder : "")).join(",")}`,
+    );
+  }, [
+    assetNodes,
+    assetProvider?.id,
+    insertSubgraph,
+    occupiedNodeRects,
+    pickedAssets,
+    viewportCenterBoardCoordinates,
+  ]);
 
   // 云端素材删除：调用上游 `POST /v1/assets/delete`，成功后重新拉取云端列表。
   // 本地素材不走此路径（没有云端 ID，删除按钮也不渲染）。
@@ -8102,6 +8221,7 @@ export function WorkspaceApp({
   useHotkeys(
     "esc",
     () => {
+      setAssetGroupMarquee(false);
       setMobilePanel(null);
       selectEdge(null);
       selectNode(null);
@@ -9387,14 +9507,83 @@ export function WorkspaceApp({
   const quickAddEndpointExists =
     connectionQuickAdd != null &&
     (connectionQuickAdd.connection == null ||
-      canvasEntryByKey(connectionQuickAdd.connection.nodeKey) != null);
+      canvasEntryByKey(connectionQuickAdd.connection.nodeKey) != null ||
+      assetGroupIdFromFlowId(connectionQuickAdd.connection.nodeKey) != null);
   useEffect(() => {
     if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
   }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
 
+  const canvasAssetGroups = useMemo(() => assetGroupsFromNodes(assetNodes), [assetNodes]);
+  const dissolveCanvasAssetGroup = useCallback(
+    (groupId: string) => {
+      const next = dissolveAssetGroupNodes(assetNodes, groupId);
+      if (next == null) return;
+      const byKey = new Map(next.map((node) => [node.key, node]));
+      patchNodes("asset", (node) => byKey.get(node.key) ?? node);
+    },
+    [assetNodes, patchNodes],
+  );
+  const assetGroupFlowNodes = useMemo<CanvasFlowNode[]>(
+    () =>
+      canvasAssetGroups.map((group) => {
+        const bounds = assetGroupBounds(group.members);
+        const memberSignature = group.members
+          .map((member) => `${member.key}:${member.name}:${member.libraryPickOrder ?? ""}`)
+          .join("|");
+        return stableCanvasFlowNode(
+          canvasFlowNodeCachesRef.current,
+          "asset-group",
+          group.groupId,
+          [
+            bounds.x,
+            bounds.y,
+            bounds.width,
+            bounds.height,
+            memberSignature,
+            dissolveCanvasAssetGroup,
+          ],
+          () => ({
+            id: assetGroupFlowId(group.groupId),
+            type: "canvas",
+            className: "canvas-asset-group-node",
+            position: { x: bounds.x, y: bounds.y },
+            width: bounds.width,
+            height: bounds.height,
+            style: { width: bounds.width, height: bounds.height },
+            zIndex: 0,
+            selectable: false,
+            draggable: false,
+            focusable: false,
+            connectable: true,
+            data: {
+              hasSourceHandle: true,
+              hasTargetHandle: false,
+              sourceHandleLabel: "连接素材组内的全部素材",
+              content: (
+                <AssetGroupFrame
+                  members={group.members}
+                  onDissolve={() => dissolveCanvasAssetGroup(group.groupId)}
+                />
+              ),
+            },
+          }),
+        );
+      }),
+    [canvasAssetGroups, dissolveCanvasAssetGroup],
+  );
+
   const flowNodes = useMemo<CanvasFlowNode[]>(() => {
+    const connectionGroupId =
+      connectionSourceKey != null ? assetGroupIdFromFlowId(connectionSourceKey) : null;
+    const groupedSource =
+      connectionGroupId == null
+        ? null
+        : canvasAssetGroups.find((group) => group.groupId === connectionGroupId)?.members[0];
     const sourceEntry: CanvasNodeEntry | null =
-      connectionSourceKey != null ? canvasEntryByKey(connectionSourceKey) : null;
+      connectionSourceKey == null
+        ? null
+        : (canvasEntryByKey(connectionSourceKey) ??
+          (groupedSource != null ? { type: "asset", data: groupedSource } : null));
     const baseNodes: CanvasFlowNode[] = [
       ...assetFlowNodes,
       ...outputFlowNodes,
@@ -9408,7 +9597,7 @@ export function WorkspaceApp({
       ...frameExtractorFlowNodes,
       ...resultFlowNodes,
     ];
-    return baseNodes.map((baseNode) => {
+    const projected = baseNodes.map((baseNode) => {
       // 最终层同样做 per-node 引用稳定：baseNode 引用与三个派生值不变时复用整个
       // 节点对象（含 data 引用），memo 化的节点视图因此能跳过未变化节点。
       const incoming = (canvasEdgeIndex.byTarget.get(baseNode.id) ?? []).filter(
@@ -9444,7 +9633,13 @@ export function WorkspaceApp({
         }),
       );
     });
+    // 未成组的框选只改了 React Flow 内部选中态。计数变化时交出新数组，受控同步后高亮会清掉。
+    if (marqueeSelectionEpoch < 0) return [];
+    return [...assetGroupFlowNodes, ...projected];
   }, [
+    marqueeSelectionEpoch,
+    assetGroupFlowNodes,
+    canvasAssetGroups,
     assetFlowNodes,
     outputFlowNodes,
     screenplayFlowNodes,
@@ -9578,6 +9773,8 @@ export function WorkspaceApp({
             measured: change.dimensions,
           });
         } else if (change.type === "select") {
+          // 框选成组时选区只存在于这一次手势里，不写进单选状态，避免中途把外框冲掉。
+          if (assetGroupMarquee) continue;
           persistedChanges.push({
             type: "select",
             key: change.id,
@@ -9587,7 +9784,7 @@ export function WorkspaceApp({
       }
       applyNodeChanges(persistedChanges);
     },
-    [applyNodeChanges],
+    [applyNodeChanges, assetGroupMarquee],
   );
 
   const handleFlowNodeDragStop: OnNodeDrag<CanvasFlowNode> = useCallback(
@@ -9605,6 +9802,7 @@ export function WorkspaceApp({
   );
 
   const handleFlowEdgesChange = (changes: EdgeChange<CanvasFlowEdge>[]) => {
+    if (assetGroupMarquee) return;
     for (const change of changes) {
       if (change.type === "select") {
         selectEdge(change.selected ? change.id : null);
@@ -9640,8 +9838,31 @@ export function WorkspaceApp({
         ? document.elementFromPoint(point.clientX, point.clientY)
         : event.target;
     const droppedKey = canvasNodeKeyFromEventTarget(target);
+    const startGroupId =
+      start.handleType === "source" ? assetGroupIdFromFlowId(start.nodeKey) : null;
+    if (startGroupId != null) {
+      if (droppedKey != null) {
+        if (assetGroupIdFromFlowId(droppedKey) != null) return;
+        connectAssetGroup(startGroupId, droppedKey);
+        return;
+      }
+      if (!(target instanceof Element) || !target.classList.contains("react-flow__pane")) return;
+      const boardPosition = dropClientPointToBoard(point.clientX, point.clientY);
+      if (!boardPosition) return;
+      setConnectionQuickAdd({
+        connection: { nodeKey: start.nodeKey, handleType: "source" },
+        position: { x: point.clientX, y: point.clientY },
+        boardPosition,
+      });
+      return;
+    }
     if (droppedKey != null) {
-      if (droppedKey === start.nodeKey || canvasEntryByKey(start.nodeKey) == null) return;
+      if (
+        droppedKey === start.nodeKey ||
+        canvasEntryByKey(start.nodeKey) == null ||
+        assetGroupIdFromFlowId(droppedKey) != null
+      )
+        return;
       const [fromKey, toKey] =
         start.handleType === "source" ? [start.nodeKey, droppedKey] : [droppedKey, start.nodeKey];
       connectCanvasNodes(fromKey, toKey);
@@ -9671,6 +9892,19 @@ export function WorkspaceApp({
       });
       return;
     }
+    const sourceGroupId =
+      connection?.handleType === "source" ? assetGroupIdFromFlowId(connection.nodeKey) : null;
+    if (sourceGroupId != null) {
+      closeConnectionQuickAdd();
+      const entry = createQuickAddEntry(kind, boardPosition.x, boardPosition.y);
+      insertSubgraph([entry], [], { selectNodeKey: entry.data.key });
+      connectAssetGroup(sourceGroupId, entry.data.key);
+      frontendLog(
+        "info",
+        `[canvas] 菜单创建节点并接入素材组: key=${entry.data.key}, kind=${kind}, group=${sourceGroupId}`,
+      );
+      return;
+    }
     const endpoint = connection ? canvasEntryByKey(connection.nodeKey) : null;
     closeConnectionQuickAdd();
     if (connection && !endpoint) return;
@@ -9694,10 +9928,34 @@ export function WorkspaceApp({
     );
   };
 
-  const handleFlowConnect = (connection: Connection) => {
-    if (connection.source && connection.target) {
-      connectCanvasNodes(connection.source, connection.target);
+  const assetKeySetRef = useRef<ReadonlySet<string>>(new Set());
+  assetKeySetRef.current = new Set(assetNodes.map((node) => node.key));
+  const readGroupSelectionRef = useRef<() => readonly string[]>(() => []);
+  const handleGroupSelectionEnd = useCallback(() => {
+    const keys = readGroupSelectionRef.current();
+    if (keys.length < 2) {
+      setMarqueeSelectionEpoch((epoch) => epoch + 1);
+      return;
     }
+    const next = regroupAssetNodes(assetNodes, keys, assetGroupKey());
+    if (next == null) {
+      setMarqueeSelectionEpoch((epoch) => epoch + 1);
+      return;
+    }
+    const byKey = new Map(next.map((node) => [node.key, node]));
+    patchNodes("asset", (node) => byKey.get(node.key) ?? node);
+    toast.success(`已成组，共 ${keys.length} 个素材`);
+  }, [assetNodes, patchNodes]);
+
+  const handleFlowConnect = (connection: Connection) => {
+    if (!connection.source || !connection.target) return;
+    const groupId = assetGroupIdFromFlowId(connection.source);
+    if (groupId != null) {
+      connectAssetGroup(groupId, connection.target);
+      return;
+    }
+    if (assetGroupIdFromFlowId(connection.target) != null) return;
+    connectCanvasNodes(connection.source, connection.target);
   };
 
   const handleFlowInit = (instance: ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge>) => {
@@ -9952,6 +10210,13 @@ export function WorkspaceApp({
           visibleAssets={visibleAssets}
           onPreviewAsset={handlePreviewAsset}
           onDropAssetToCanvas={handleDropAssetToCanvas}
+          multiSelect={assetMultiSelect}
+          pickedCount={pickedAssets.length}
+          pickOrderByKey={pickOrderByKey}
+          onToggleMultiSelect={toggleAssetMultiSelect}
+          onTogglePickedAsset={togglePickedAsset}
+          onPlacePickedAssets={handlePlacePickedAssets}
+          onClearPickedAssets={() => setPickedAssets([])}
           localPage={localAssetPageNumber}
           localTotalPages={localAssetTotalPages}
           localTotal={localAssetTotal}
@@ -9971,7 +10236,7 @@ export function WorkspaceApp({
         >
           <AppUpdateBanner />
           <div
-            className={`canvas-viewport${isPanning ? " is-panning" : ""}`}
+            className={`canvas-viewport${isPanning ? " is-panning" : ""}${assetGroupMarquee ? " is-grouping" : ""}`}
             ref={canvasViewportRef}
           >
             <LiveCanvasFlow
@@ -9982,7 +10247,10 @@ export function WorkspaceApp({
               edgeTypes={CANVAS_FLOW_EDGE_TYPES}
               minZoom={MIN_ZOOM / 100}
               maxZoom={MAX_ZOOM / 100}
-              panOnDrag={[0, 1]}
+              panOnDrag={assetGroupMarquee ? [1] : [0, 1]}
+              selectionOnDrag={assetGroupMarquee}
+              selectionMode={assetGroupMarquee ? SelectionMode.Partial : SelectionMode.Full}
+              {...(assetGroupMarquee ? { onSelectionEnd: handleGroupSelectionEnd } : {})}
               zoomOnScroll
               zoomOnPinch
               zoomOnDoubleClick={false}
@@ -10028,6 +10296,12 @@ export function WorkspaceApp({
               aria-label="无限画布节点编辑器"
               attributionPosition="bottom-left"
             >
+              {assetGroupMarquee ? (
+                <AssetGroupSelectionReader
+                  assetKeySetRef={assetKeySetRef}
+                  readSelectionRef={readGroupSelectionRef}
+                />
+              ) : null}
               {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
               <Background
                 id="canvas-grid-minor"
@@ -10067,6 +10341,22 @@ export function WorkspaceApp({
                 </span>
               </div>
             ) : null}
+          </div>
+
+          <div className="canvas-group-control" role="group" aria-label="素材框选成组">
+            <button
+              type="button"
+              aria-pressed={assetGroupMarquee}
+              aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材成组"}
+              data-tooltip={
+                assetGroupMarquee
+                  ? "拖拽框选素材。从组端口连到生成节点时，按素材库点选顺序输入"
+                  : "框选素材成组"
+              }
+              onClick={() => setAssetGroupMarquee((enabled) => !enabled)}
+            >
+              <Icon name="bounding-box" aria-hidden="true" size="md" />
+            </button>
           </div>
 
           <div className="canvas-home-control" role="group" aria-label="画布视图归位">

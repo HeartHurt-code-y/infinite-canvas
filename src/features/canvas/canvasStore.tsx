@@ -378,7 +378,9 @@ function sameConnectionData(
       first.kind === second.kind &&
       first.name === second.name &&
       first.previewUrl === second.previewUrl &&
-      first.videoUrl === second.videoUrl
+      first.videoUrl === second.videoUrl &&
+      first.libraryPickOrder === second.libraryPickOrder &&
+      first.assetGroupId === second.assetGroupId
     );
   }
   if (type === "output") {

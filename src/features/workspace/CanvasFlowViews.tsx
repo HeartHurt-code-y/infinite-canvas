@@ -83,7 +83,7 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
           type="source"
           position={Position.Right}
           className="canvas-flow-handle canvas-flow-handle--source"
-          aria-label="节点输出端口"
+          aria-label={data.sourceHandleLabel ?? "节点输出端口"}
         />
       ) : null}
     </div>

@@ -6,6 +6,7 @@ import {
   refreshMediaUrlWithStagingFallback,
 } from "../../lib/backend";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
+import { assetPickKey } from "./assetGroups";
 import { AssetKindIcon } from "./PromptNodeViews";
 import { copyTextToDesktopClipboard } from "./desktopActions";
 import { useRecoveredPreviewUrl } from "./assetPreviewRecovery";
@@ -248,10 +249,17 @@ function AssetCard({
   asset,
   onPreview,
   onDropToCanvas,
+  multiSelect = false,
+  pickOrder = null,
+  onTogglePick,
 }: {
   readonly asset: AssetItem;
   readonly onPreview: () => void;
   readonly onDropToCanvas: (clientX: number, clientY: number) => void;
+  readonly multiSelect?: boolean;
+  /** 多选时的点选序号，从 1 开始；未选中为 null。 */
+  readonly pickOrder?: number | null;
+  readonly onTogglePick?: () => void;
 }) {
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
   const showCloudBadge = asset.cloudStatus != null && asset.cloudStatus !== "ready";
@@ -332,132 +340,167 @@ function AssetCard({
     };
   }, [onDropToCanvas]);
 
+  const picked = pickOrder != null;
   return (
-    <button
-      type="button"
-      className={`asset-card${pointerDragging ? " is-dragging" : ""}`}
-      aria-label={`预览${typeLabel}素材详情：${asset.name}`}
-      onPointerDown={(event) => {
-        if (!event.isPrimary || event.button !== 0) return;
-        pointerDragRef.current = {
-          pointerId: event.pointerId,
-          startX: event.clientX,
-          startY: event.clientY,
-          active: false,
-        };
-      }}
-      onClick={() => {
-        if (dragged.current) {
-          dragged.current = false;
-          return;
+    <div className="asset-card-shell">
+      <button
+        type="button"
+        className={`asset-card${pointerDragging ? " is-dragging" : ""}${picked ? " is-picked" : ""}`}
+        aria-pressed={multiSelect ? picked : undefined}
+        aria-label={
+          multiSelect
+            ? `选择${typeLabel}素材：${asset.name}${picked ? `，顺序 ${pickOrder}` : ""}`
+            : `预览${typeLabel}素材详情：${asset.name}`
         }
-        setHovered(false);
-        onPreview();
-      }}
-      onMouseEnter={() => {
-        if (asset.kind === "video") setHovered(true);
-      }}
-      onMouseLeave={() => {
-        if (asset.kind === "video") setHovered(false);
-      }}
-      onFocus={() => {
-        if (asset.kind === "video") {
-          setFocused(true);
-        }
-      }}
-      onBlur={() => {
-        if (asset.kind === "video") {
-          setFocused(false);
-        }
-      }}
-    >
-      {asset.kind === "video" ? (
-        <AssetCardVideoVisual asset={asset} previewing={previewing} />
-      ) : (
-        <span
-          className={`asset-card__visual asset-card__visual--${asset.visual}`}
-          style={visualStyle}
+        onPointerDown={(event) => {
+          if (!event.isPrimary || event.button !== 0) return;
+          pointerDragRef.current = {
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            active: false,
+          };
+        }}
+        onClick={() => {
+          if (dragged.current) {
+            dragged.current = false;
+            return;
+          }
+          setHovered(false);
+          if (multiSelect) onTogglePick?.();
+          else onPreview();
+        }}
+        onMouseEnter={() => {
+          if (asset.kind === "video") setHovered(true);
+        }}
+        onMouseLeave={() => {
+          if (asset.kind === "video") setHovered(false);
+        }}
+        onFocus={() => {
+          if (asset.kind === "video") {
+            setFocused(true);
+          }
+        }}
+        onBlur={() => {
+          if (asset.kind === "video") {
+            setFocused(false);
+          }
+        }}
+      >
+        {asset.kind === "video" ? (
+          <AssetCardVideoVisual asset={asset} previewing={previewing} />
+        ) : (
+          <span
+            className={`asset-card__visual asset-card__visual--${asset.visual}`}
+            style={visualStyle}
+          >
+            {asset.kind === "image" ? (
+              <>
+                {isRealAsset && !imagePreviewReady ? (
+                  <AssetMediaState
+                    kind="image"
+                    state={imagePreviewFailed && !imageBytes.fromCache ? "unavailable" : "loading"}
+                  />
+                ) : null}
+                {imagePreviewSrc != null && (!imagePreviewFailed || imageBytes.fromCache) ? (
+                  <img
+                    className="asset-card__preview"
+                    src={imagePreviewSrc}
+                    alt=""
+                    loading="lazy"
+                    onLoad={(event) => {
+                      const image = event.currentTarget;
+                      const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
+                      if (ratio != null) setIntrinsicRatio(ratio);
+                      setLoadedImagePreviewUrl(imagePreviewSrc);
+                      setFailedImagePreviewUrl(null);
+                    }}
+                    onError={() => {
+                      setLoadedImagePreviewUrl(null);
+                      setFailedImagePreviewUrl(imagePreviewSrc);
+                      // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
+                      imageBytes.retry();
+                      if (imageBytes.fromCache) return;
+                      // 预览签名过期：每个卡片实例续签一次（云端回读供应商记录、
+                      // 本地重签对象存储地址）。上游把导入时的暂存租约地址当预览地址回放时
+                      // 续签不会换地址，共享入口会继续按对象键重签暂存副本；暂存对象已被清理
+                      // 时由媒体代理用导入时留存的原始文件接管，预览不再永久停在「不可用」。
+                      if (!imageRefreshAttemptedRef.current) {
+                        imageRefreshAttemptedRef.current = true;
+                        void refreshMediaUrlWithStagingFallback(
+                          asset,
+                          "image",
+                          candidateImagePreviewUrl,
+                        )
+                          .then((freshUrl) => {
+                            if (freshUrl == null || freshUrl === "") return;
+                            if (freshUrl !== candidateImagePreviewUrl) {
+                              setRefreshedImagePreviewUrl(freshUrl);
+                            }
+                            setFailedImagePreviewUrl(null);
+                            // 回读会把完整地址登记进原生代理；第一次失败往往发生在登记之前，
+                            // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
+                            imageBytes.reload();
+                          })
+                          .catch(() => undefined);
+                      }
+                    }}
+                  />
+                ) : null}
+              </>
+            ) : asset.kind === "audio" ? (
+              <span className="waveform" aria-hidden="true">
+                {Array.from({ length: 18 }, (_, index) => (
+                  <i key={index} style={{ "--bar": (index % 5) + 2 } as CSSProperties} />
+                ))}
+              </span>
+            ) : null}
+            {showCloudBadge ? (
+              <span className="asset-card__status" data-state={asset.cloudStatus}>
+                {ASSET_CLOUD_STATUS_LABELS[asset.cloudStatus ?? "unknown"]}
+              </span>
+            ) : null}
+          </span>
+        )}
+        {picked ? (
+          <span className="asset-card__order" aria-hidden="true">
+            {pickOrder}
+          </span>
+        ) : null}
+      </button>
+      {multiSelect ? (
+        <button
+          type="button"
+          className="asset-card__peek"
+          aria-label={`预览${typeLabel}素材详情：${asset.name}`}
+          onClick={() => {
+            setHovered(false);
+            onPreview();
+          }}
         >
-          {asset.kind === "image" ? (
-            <>
-              {isRealAsset && !imagePreviewReady ? (
-                <AssetMediaState
-                  kind="image"
-                  state={imagePreviewFailed && !imageBytes.fromCache ? "unavailable" : "loading"}
-                />
-              ) : null}
-              {imagePreviewSrc != null && (!imagePreviewFailed || imageBytes.fromCache) ? (
-                <img
-                  className="asset-card__preview"
-                  src={imagePreviewSrc}
-                  alt=""
-                  loading="lazy"
-                  onLoad={(event) => {
-                    const image = event.currentTarget;
-                    const ratio = measuredAspectRatio(image.naturalWidth, image.naturalHeight);
-                    if (ratio != null) setIntrinsicRatio(ratio);
-                    setLoadedImagePreviewUrl(imagePreviewSrc);
-                    setFailedImagePreviewUrl(null);
-                  }}
-                  onError={() => {
-                    setLoadedImagePreviewUrl(null);
-                    setFailedImagePreviewUrl(imagePreviewSrc);
-                    // 当前地址加载失败：本地副本坏了就重下一次，远端地址失败则先在本地字节里找一次。
-                    imageBytes.retry();
-                    if (imageBytes.fromCache) return;
-                    // 预览签名过期：每个卡片实例续签一次（云端回读供应商记录、
-                    // 本地重签对象存储地址）。上游把导入时的暂存租约地址当预览地址回放时
-                    // 续签不会换地址，共享入口会继续按对象键重签暂存副本；暂存对象已被清理
-                    // 时由媒体代理用导入时留存的原始文件接管，预览不再永久停在「不可用」。
-                    if (!imageRefreshAttemptedRef.current) {
-                      imageRefreshAttemptedRef.current = true;
-                      void refreshMediaUrlWithStagingFallback(
-                        asset,
-                        "image",
-                        candidateImagePreviewUrl,
-                      )
-                        .then((freshUrl) => {
-                          if (freshUrl == null || freshUrl === "") return;
-                          if (freshUrl !== candidateImagePreviewUrl) {
-                            setRefreshedImagePreviewUrl(freshUrl);
-                          }
-                          setFailedImagePreviewUrl(null);
-                          // 回读会把完整地址登记进原生代理；第一次失败往往发生在登记之前，
-                          // 或身份只在被 WebView 丢掉的 query 里。地址字符串没变也要再拉一次。
-                          imageBytes.reload();
-                        })
-                        .catch(() => undefined);
-                    }
-                  }}
-                />
-              ) : null}
-            </>
-          ) : asset.kind === "audio" ? (
-            <span className="waveform" aria-hidden="true">
-              {Array.from({ length: 18 }, (_, index) => (
-                <i key={index} style={{ "--bar": (index % 5) + 2 } as CSSProperties} />
-              ))}
-            </span>
-          ) : null}
-          {showCloudBadge ? (
-            <span className="asset-card__status" data-state={asset.cloudStatus}>
-              {ASSET_CLOUD_STATUS_LABELS[asset.cloudStatus ?? "unknown"]}
-            </span>
-          ) : null}
-        </span>
-      )}
-    </button>
+          预览
+        </button>
+      ) : null}
+    </div>
   );
 }
+
+const EMPTY_PICK_ORDERS = new Map<string, number>();
 
 export const AssetFlow = memo(function AssetFlow({
   assets,
   onPreview,
   onDropToCanvas,
+  multiSelect = false,
+  pickOrderByKey = EMPTY_PICK_ORDERS,
+  onTogglePick,
 }: {
   readonly assets: readonly AssetItem[];
   readonly onPreview: (asset: AssetItem) => void;
   readonly onDropToCanvas: (asset: AssetItem, clientX: number, clientY: number) => void;
+  readonly multiSelect?: boolean;
+  readonly pickOrderByKey?: ReadonlyMap<string, number>;
+  readonly onTogglePick?: (asset: AssetItem) => void;
 }) {
   return (
     <div className="asset-flow">
@@ -465,6 +508,9 @@ export const AssetFlow = memo(function AssetFlow({
         <AssetCard
           key={asset.id}
           asset={asset}
+          multiSelect={multiSelect}
+          pickOrder={pickOrderByKey.get(assetPickKey(asset)) ?? null}
+          onTogglePick={() => onTogglePick?.(asset)}
           onPreview={() => onPreview(asset)}
           onDropToCanvas={(clientX, clientY) => onDropToCanvas(asset, clientX, clientY)}
         />

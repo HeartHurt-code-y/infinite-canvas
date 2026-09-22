@@ -151,6 +151,13 @@ export interface AssetNodeData {
   readonly videoUrl: string | null;
   /** 媒体原始宽高比；加载完成后写入，用于让卡片完整贴合素材而不裁切。 */
   readonly aspectRatio?: number;
+  /**
+   * 素材库点选顺序。越小越先进入生成节点。
+   * 单次拖入按投放先后编号，多选放入按点选先后编号。旧文档没有此字段。
+   */
+  readonly libraryPickOrder?: number;
+  /** 框选成组后的组 id。同一 id 且至少两个素材时，共享组上的一个输出端口。 */
+  readonly assetGroupId?: string;
   readonly x: number;
   readonly y: number;
   /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */
@@ -175,6 +182,7 @@ export interface CanvasFlowNodeData extends Record<string, unknown> {
   readonly inputDetails?: string;
   /** 拖线过程中标记该节点的输入端口为可连接目标，用于高亮提示。 */
   readonly highlightTarget?: boolean;
+  readonly sourceHandleLabel?: string;
 }
 
 export type CanvasFlowNode = ReactFlowNode<CanvasFlowNodeData, "canvas">;
@@ -1448,7 +1456,10 @@ export function parseAssetLibrarySource(value: unknown): AssetLibrarySource | nu
 export function readAssetLibrarySource(): AssetLibrarySource {
   if (typeof window === "undefined") return "cloud";
   try {
-    return parseAssetLibrarySource(window.localStorage.getItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY)) ?? "cloud";
+    return (
+      parseAssetLibrarySource(window.localStorage.getItem(ASSET_LIBRARY_SOURCE_STORAGE_KEY)) ??
+      "cloud"
+    );
   } catch {
     return "cloud";
   }

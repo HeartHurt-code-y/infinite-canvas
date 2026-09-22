@@ -16,13 +16,20 @@ import { AssetKindIcon } from "./PromptNodeViews";
 import type { AssetItem, AssetKind, AssetLibrarySource, AssetUploadEntry } from "./workspaceModel";
 import { ASSET_KIND_LABELS } from "./workspaceModel";
 
+const EMPTY_ASSET_PICK_ORDERS = new Map<string, number>();
+function noopAssetPanelAction() {}
+
 /** 素材面板标题行：面板名 + 上传入口。 */
 export function AssetPanelHeader({
   uploadActionLabel,
   onImport,
+  multiSelect = false,
+  onToggleMultiSelect,
 }: {
   readonly uploadActionLabel: string;
   readonly onImport: () => void;
+  readonly multiSelect?: boolean;
+  readonly onToggleMultiSelect?: () => void;
 }) {
   return (
     <div className="panel-title-row">
@@ -30,15 +37,27 @@ export function AssetPanelHeader({
         <Icon name="stack-simple" aria-hidden="true" size="lg" />
         <h2>素材库</h2>
       </div>
-      <button
-        type="button"
-        className="square-action"
-        aria-label={uploadActionLabel}
-        data-tooltip={uploadActionLabel}
-        onClick={onImport}
-      >
-        <Icon name="upload-simple" aria-hidden="true" size="lg" />
-      </button>
+      <div className="panel-title-row__actions">
+        <button
+          type="button"
+          className={`asset-multi-toggle${multiSelect ? " is-on" : ""}`}
+          aria-pressed={multiSelect}
+          aria-label={multiSelect ? "关闭多选素材" : "开启多选素材"}
+          data-tooltip="按点选顺序多选，再一次放到画布"
+          onClick={onToggleMultiSelect}
+        >
+          多选
+        </button>
+        <button
+          type="button"
+          className="square-action"
+          aria-label={uploadActionLabel}
+          data-tooltip={uploadActionLabel}
+          onClick={onImport}
+        >
+          <Icon name="upload-simple" aria-hidden="true" size="lg" />
+        </button>
+      </div>
     </div>
   );
 }
@@ -682,6 +701,13 @@ export function AssetPanel({
   cloudHasMore,
   onLocalPageChange,
   onCloudPageChange,
+  multiSelect = false,
+  pickedCount = 0,
+  pickOrderByKey = EMPTY_ASSET_PICK_ORDERS,
+  onToggleMultiSelect = noopAssetPanelAction,
+  onTogglePickedAsset = noopAssetPanelAction,
+  onPlacePickedAssets = noopAssetPanelAction,
+  onClearPickedAssets = noopAssetPanelAction,
 }: {
   /** 移动端抽屉是否展开（mobilePanel === "assets"）。 */
   readonly mobileOpen: boolean;
@@ -741,6 +767,13 @@ export function AssetPanel({
   readonly cloudHasMore: boolean;
   readonly onLocalPageChange: (page: number) => void;
   readonly onCloudPageChange: (page: number) => void;
+  readonly multiSelect?: boolean;
+  readonly pickedCount?: number;
+  readonly pickOrderByKey?: ReadonlyMap<string, number>;
+  readonly onToggleMultiSelect?: () => void;
+  readonly onTogglePickedAsset?: (asset: AssetItem) => void;
+  readonly onPlacePickedAssets?: () => void;
+  readonly onClearPickedAssets?: () => void;
 }) {
   return (
     <aside
@@ -758,6 +791,8 @@ export function AssetPanel({
       </button>
       <AssetPanelHeader
         uploadActionLabel={uploadActionLabel}
+        multiSelect={multiSelect}
+        onToggleMultiSelect={onToggleMultiSelect}
         onImport={() => {
           onImportLocalAssets();
         }}
@@ -836,10 +871,33 @@ export function AssetPanel({
         onSearchChange={onSearchChange}
         onRefreshCloud={onRetryCloud}
       />
+      {multiSelect ? (
+        <div className="asset-multi-select" role="region" aria-label="多选素材">
+          <span>
+            {pickedCount > 0
+              ? `已选 ${pickedCount} 个，顺序即生成输入顺序`
+              : "按顺序点选素材，再一次放到画布"}
+          </span>
+          <button
+            type="button"
+            className="is-primary"
+            disabled={pickedCount === 0}
+            onClick={onPlacePickedAssets}
+          >
+            放到画布
+          </button>
+          <button type="button" disabled={pickedCount === 0} onClick={onClearPickedAssets}>
+            清空
+          </button>
+        </div>
+      ) : null}
       <div id="asset-grid" className="asset-grid" aria-busy={assetsLoading || searchPending}>
         {visibleAssets.length > 0 ? (
           <AssetFlow
             assets={visibleAssets}
+            multiSelect={multiSelect}
+            pickOrderByKey={pickOrderByKey}
+            onTogglePick={onTogglePickedAsset}
             onPreview={onPreviewAsset}
             onDropToCanvas={onDropAssetToCanvas}
           />
@@ -880,7 +938,9 @@ export function AssetPanel({
         />
       ) : null}
       <p className="asset-panel__hint">
-        单击素材查看源媒体与完整信息；拖到画布创建节点，连线后可在提示词中 @ 引用。
+        {multiSelect
+          ? "点选顺序会记在素材上。放到画布后，用右下角框选把它们收成一组，再从组的端口连到生成节点。"
+          : "单击素材查看源媒体与完整信息；拖到画布创建节点，连线后可在提示词中 @ 引用。也可开启多选一次放入。"}
       </p>
     </aside>
   );

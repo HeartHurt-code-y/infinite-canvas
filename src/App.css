@@ -899,6 +899,112 @@ h3 {
   transform: translateY(1px);
 }
 
+.asset-card-shell {
+  position: relative;
+  width: 100%;
+  margin-block-end: var(--space-xs);
+  break-inside: avoid;
+}
+
+.asset-card-shell > .asset-card {
+  margin-block-end: 0;
+}
+
+.asset-card.is-picked {
+  box-shadow:
+    inset 0 0 0 var(--rule-active) var(--color-accent),
+    var(--shadow-whisper);
+}
+
+.asset-card__order {
+  position: absolute;
+  z-index: 2;
+  top: var(--space-2xs);
+  left: var(--space-2xs);
+  min-width: 1.25rem;
+  height: 1.25rem;
+  padding-inline: 0.3rem;
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-radius: var(--radius-round);
+  font-size: var(--text-2xs);
+  font-weight: 700;
+  line-height: 1.25rem;
+  text-align: center;
+  pointer-events: none;
+}
+
+.asset-card__peek {
+  position: absolute;
+  z-index: 2;
+  right: var(--space-2xs);
+  bottom: var(--space-2xs);
+  padding: 0.1rem 0.45rem;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.asset-multi-toggle {
+  min-height: 2rem;
+  padding-inline: var(--space-xs);
+  color: var(--color-chrome-ink);
+  background: transparent;
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-xs);
+}
+
+.asset-multi-toggle.is-on {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.panel-title-row__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+}
+
+.asset-multi-select {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  margin-block-end: var(--space-xs);
+  color: var(--color-chrome-ink);
+  font-size: var(--text-2xs);
+}
+
+.asset-multi-select span {
+  min-width: 0;
+  flex: 1;
+}
+
+.asset-multi-select button {
+  padding: 0.15rem 0.45rem;
+  color: inherit;
+  background: var(--color-chrome-3);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+  cursor: pointer;
+}
+
+.asset-multi-select button.is-primary {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+}
+
+.asset-multi-select button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
 .asset-card.is-dragging {
   cursor: grabbing;
   outline: var(--rule-active) solid var(--color-accent);
@@ -3042,6 +3148,113 @@ svg[data-spin="true"] {
 .canvas-home-control [data-tooltip]::after {
   top: auto;
   bottom: calc(100% + var(--space-xs));
+}
+
+/* 框选成组：在回到起始位置的左侧。 */
+.canvas-group-control {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  right: calc(var(--space-md) + 9rem + 6.75rem + 6 * var(--rule-thin) + 3 * var(--space-2xs));
+  bottom: var(--size-zoom-collapsed-offset);
+  display: grid;
+  grid-template-columns: 2.25rem;
+  min-height: 2.25rem;
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-whisper);
+}
+
+.canvas-group-control button {
+  display: grid;
+  padding: 0;
+  color: inherit;
+  background: var(--color-transparent);
+  border: 0;
+  place-items: center;
+}
+
+.canvas-group-control button[aria-pressed="true"] {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .canvas-group-control button:hover {
+    background: var(--color-chrome-3);
+  }
+
+  .canvas-group-control button[aria-pressed="true"]:hover {
+    background: var(--color-accent);
+  }
+}
+
+.canvas-group-control [data-tooltip]::after {
+  top: auto;
+  bottom: calc(100% + var(--space-xs));
+}
+
+.canvas-viewport.is-grouping .react-flow__pane {
+  cursor: crosshair;
+}
+
+.react-flow__node.canvas-asset-group-node {
+  pointer-events: none;
+  background: transparent;
+}
+
+.react-flow__node.canvas-asset-group-node .canvas-flow-node {
+  width: 100%;
+  height: 100%;
+}
+
+.react-flow__node.canvas-asset-group-node .react-flow__handle,
+.react-flow__node.canvas-asset-group-node .canvas-asset-group__bar {
+  pointer-events: auto;
+}
+
+.canvas-asset-group {
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  border: var(--rule-thin) dashed color-mix(in srgb, var(--color-accent) 72%, var(--color-rule));
+  border-radius: var(--radius-card);
+  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+}
+
+.canvas-asset-group__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  height: 2rem;
+  padding-inline: var(--space-xs);
+  color: var(--color-text);
+  font-size: var(--text-2xs);
+}
+
+.canvas-asset-group__title {
+  flex: none;
+  font-weight: 700;
+}
+
+.canvas-asset-group__order {
+  min-width: 0;
+  overflow: hidden;
+  color: color-mix(in srgb, var(--color-text) 68%, transparent);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-asset-group__dissolve {
+  flex: none;
+  margin-inline-start: auto;
+  padding: 0 var(--space-2xs);
+  color: inherit;
+  background: var(--color-surface-1);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  cursor: pointer;
 }
 
 .settings-layer {
@@ -9898,6 +10111,7 @@ button.prompt-mention__recognizable-tag:focus-visible {
   .zoom-control button,
   .canvas-history-control button,
   .canvas-home-control button,
+  .canvas-group-control button,
   .primary-action,
   .asset-search,
   .settings-dialog__close,
