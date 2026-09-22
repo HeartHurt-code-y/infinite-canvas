@@ -7,6 +7,7 @@ import {
   MAX_ZOOM,
   MIN_ZOOM,
   UPLOAD_ABANDONED_MS,
+  canvasHomeViewport,
   clampCanvasZoom,
   isTerminalAssetUpload,
   isTerminalStagingJob,
@@ -289,6 +290,70 @@ describe("canvas zoom bounds", () => {
     expect(clampCanvasZoom(DEFAULT_ZOOM)).toBe(50);
     expect(clampCanvasZoom(DEFAULT_ZOOM - 8)).toBe(42);
     expect(clampCanvasZoom(99.6)).toBe(100);
+  });
+});
+
+describe("canvasHomeViewport", () => {
+  const origin = { x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 };
+
+  it("空画布或无效视口仍回到新建画布的原点", () => {
+    expect(canvasHomeViewport({ viewportWidth: 1280, viewportHeight: 800, nodes: [] })).toEqual(
+      origin,
+    );
+    expect(
+      canvasHomeViewport({
+        viewportWidth: 0,
+        viewportHeight: 800,
+        nodes: [{ x: 10, y: 10, width: 100, height: 100 }],
+      }),
+    ).toEqual(origin);
+    expect(
+      canvasHomeViewport({
+        viewportWidth: 800,
+        viewportHeight: 600,
+        nodes: [{ x: Number.NaN, y: 0, width: 10, height: 10 }],
+      }),
+    ).toEqual(origin);
+  });
+
+  it("把远离原点的整段流居中放进视口，世界原点此时看不到这些节点", () => {
+    const home = canvasHomeViewport({
+      viewportWidth: 1280,
+      viewportHeight: 800,
+      nodes: [
+        { x: 8000, y: 4000, width: 580, height: 900 },
+        { x: 8700, y: 4000, width: 320, height: 180 },
+      ],
+    });
+    const centerX = (8000 + 9020) / 2;
+    const centerY = (4000 + 4900) / 2;
+    expect(home.zoom).toBe(DEFAULT_ZOOM / 100);
+    expect(home.zoom).toBeGreaterThanOrEqual(MIN_ZOOM / 100);
+    expect(home.x + centerX * home.zoom).toBeCloseTo(640, 5);
+    expect(home.y + centerY * home.zoom).toBeCloseTo(400, 5);
+    expect(8000 * (DEFAULT_ZOOM / 100)).toBeGreaterThan(1280);
+  });
+
+  it("超大工作流停在缩放下限，仍然对准内容中心", () => {
+    const home = canvasHomeViewport({
+      viewportWidth: 1000,
+      viewportHeight: 800,
+      nodes: [{ x: -50_000, y: -20_000, width: 200_000, height: 80_000 }],
+    });
+    expect(home.zoom).toBeCloseTo(MIN_ZOOM / 100);
+    expect(home.x + 50_000 * home.zoom).toBeCloseTo(500, 5);
+    expect(home.y + 20_000 * home.zoom).toBeCloseTo(400, 5);
+  });
+
+  it("尚未测量的节点仍按其位置归位", () => {
+    const home = canvasHomeViewport({
+      viewportWidth: 1000,
+      viewportHeight: 800,
+      nodes: [{ x: 5000, y: 3000, width: 0, height: 0 }],
+    });
+    expect(home.x).not.toBe(0);
+    expect(home.y).not.toBe(0);
+    expect(home.zoom).toBe(DEFAULT_ZOOM / 100);
   });
 });
 

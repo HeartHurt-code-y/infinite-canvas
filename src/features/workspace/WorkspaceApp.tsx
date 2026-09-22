@@ -352,6 +352,7 @@ import {
   stagingImportReachedLibrary,
   UPLOAD_AUTO_DISMISS_DELAY_MS,
   clampCanvasZoom,
+  canvasHomeViewport,
   modelDisplayNameForTask,
   nearestAvailableNodePosition,
   nextOutputSlot,
@@ -5737,8 +5738,10 @@ export function WorkspaceApp({
   );
 
   /**
-   * 回到画布起始位置：平移回原点并恢复默认缩放，与新建画布的初始视口一致
-   * （原点在视口左上角、缩放为 DEFAULT_ZOOM）。落点同样由 onMoveEnd 同步回 store。
+   * 回到画布起始位置。空画布与新建画布一样：原点在视口左上角、缩放为 DEFAULT_ZOOM。
+   * 已有节点时不回到世界原点——节点是按当时视口落点的，看着远处的视频生成再归位，
+   * 原点是空白，无限画布上无法再靠平移找回整段流。改为把现有节点框进视口并居中。
+   * 落点同样由 onMoveEnd 同步回 store。只移动镜头，不改节点坐标。
    */
   const resetCanvasViewport = useCallback(() => {
     const instance = flowInstanceRef.current;
@@ -5747,7 +5750,21 @@ export function WorkspaceApp({
       setView({ zoom: DEFAULT_ZOOM, pan: { x: 0, y: 0 } });
       return;
     }
-    void instance.setViewport({ x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 }, { duration: 200 });
+    const rect = canvasViewportRef.current?.getBoundingClientRect();
+    const home =
+      rect != null && rect.width > 0 && rect.height > 0
+        ? canvasHomeViewport({
+            viewportWidth: rect.width,
+            viewportHeight: rect.height,
+            nodes: instance.getNodes().map((node) => ({
+              x: node.position.x,
+              y: node.position.y,
+              width: node.measured?.width ?? node.width ?? 0,
+              height: node.measured?.height ?? node.height ?? 0,
+            })),
+          })
+        : { x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 };
+    void instance.setViewport(home, { duration: 200 });
   }, [setView]);
 
   const queryClient = useQueryClient();
@@ -10363,7 +10380,7 @@ export function WorkspaceApp({
             <button
               type="button"
               aria-label="回到画布起始位置"
-              data-tooltip="回到起始位置"
+              data-tooltip="回到内容"
               onClick={resetCanvasViewport}
             >
               <Icon name="crosshair-simple" aria-hidden="true" size="md" />

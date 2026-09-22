@@ -78,7 +78,7 @@ export interface NodeModelSelection {
 
 export type NodeModelSelections = Record<CanvasGenNodeKind, NodeModelSelection>;
 
-// 新建画布与「重置缩放/回到起始位置」共用的起始缩放：一半比例，
+// 新建画布、空画布「回到起始位置」，以及有内容时框选全貌的放大上限：一半比例，
 // 便于一次看到比旧 74% 更大的画布范围。
 export const DEFAULT_ZOOM = 50;
 // 缩放下限放宽到 10%（桌面与触屏同一读数）：缩小按钮、快捷键、滚轮缩放（RF minZoom）
@@ -820,6 +820,81 @@ export function usesCoarsePointer(): boolean {
  */
 export function clampCanvasZoom(zoom: number): number {
   return Math.round(Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, zoom)));
+}
+
+/** 回到内容时在视口四周留出的屏幕像素，避免节点贴边或被底部控件挡住。 */
+export const CANVAS_HOME_VIEWPORT_PADDING = 72;
+/** 尚未测量的节点按这个尺寸参与取景，避免 0 尺寸把缩放算成无穷大。 */
+const CANVAS_HOME_UNMEASURED_WIDTH = 280;
+const CANVAS_HOME_UNMEASURED_HEIGHT = 160;
+
+export interface CanvasHomeNodeRect {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/** React Flow `setViewport` 使用的视口：平移是屏幕像素，缩放是倍数而不是百分比。 */
+export interface CanvasHomeViewport {
+  readonly x: number;
+  readonly y: number;
+  readonly zoom: number;
+}
+
+const EMPTY_CANVAS_HOME: CanvasHomeViewport = { x: 0, y: 0, zoom: DEFAULT_ZOOM / 100 };
+
+function finiteHomeNode(node: CanvasHomeNodeRect): CanvasHomeNodeRect | null {
+  if (!Number.isFinite(node.x) || !Number.isFinite(node.y)) return null;
+  const width =
+    Number.isFinite(node.width) && node.width > 0 ? node.width : CANVAS_HOME_UNMEASURED_WIDTH;
+  const height =
+    Number.isFinite(node.height) && node.height > 0 ? node.height : CANVAS_HOME_UNMEASURED_HEIGHT;
+  return { x: node.x, y: node.y, width, height };
+}
+
+/**
+ * 「回到起始位置」的目标视口。
+ *
+ * 节点落在当时的视口中心，用户看着远处的视频生成时，世界原点通常已经没有任何节点。
+ * 空画布仍回到新建画布的原点与默认缩放；有内容时把整段流框进当前视口并居中，
+ * 缩放不超过默认值、也不低于缩放下限。只移动镜头，不改节点坐标。
+ */
+export function canvasHomeViewport(input: {
+  readonly viewportWidth: number;
+  readonly viewportHeight: number;
+  readonly nodes: readonly CanvasHomeNodeRect[];
+}): CanvasHomeViewport {
+  if (!(input.viewportWidth > 0) || !(input.viewportHeight > 0)) return EMPTY_CANVAS_HOME;
+  const nodes = input.nodes.flatMap((node) => {
+    const finite = finiteHomeNode(node);
+    return finite == null ? [] : [finite];
+  });
+  if (nodes.length === 0) return EMPTY_CANVAS_HOME;
+
+  let minX = Number.POSITIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const node of nodes) {
+    minX = Math.min(minX, node.x);
+    minY = Math.min(minY, node.y);
+    maxX = Math.max(maxX, node.x + node.width);
+    maxY = Math.max(maxY, node.y + node.height);
+  }
+  const boundsWidth = Math.max(maxX - minX, 1);
+  const boundsHeight = Math.max(maxY - minY, 1);
+  const availableWidth = Math.max(input.viewportWidth - CANVAS_HOME_VIEWPORT_PADDING * 2, 1);
+  const availableHeight = Math.max(input.viewportHeight - CANVAS_HOME_VIEWPORT_PADDING * 2, 1);
+  const fitZoom = Math.min(availableWidth / boundsWidth, availableHeight / boundsHeight);
+  const zoom = Math.min(DEFAULT_ZOOM / 100, Math.max(MIN_ZOOM / 100, fitZoom));
+  const centerX = (minX + maxX) / 2;
+  const centerY = (minY + maxY) / 2;
+  return {
+    x: input.viewportWidth / 2 - centerX * zoom,
+    y: input.viewportHeight / 2 - centerY * zoom,
+    zoom,
+  };
 }
 
 export function genNodeDimensions(kind: CanvasGenNodeKind): { width: number; height: number } {

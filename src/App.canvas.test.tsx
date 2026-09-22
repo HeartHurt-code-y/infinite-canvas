@@ -18,6 +18,7 @@ import { defaultModelOperationSchema } from "./lib/modelCapabilities";
 import type { PromptContentDocumentV1 } from "./lib/promptContent";
 import type { CanvasDocumentV2 } from "./features/canvas/canvasStore";
 import {
+  DEFAULT_ZOOM,
   UPLOAD_ABANDONED_MS,
   UPLOAD_AUTO_DISMISS_DELAY_MS,
 } from "./features/workspace/workspaceModel";
@@ -1226,6 +1227,56 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
+  });
+
+  it("看着远处的视频流时，回到起始位置会把整段流重新放进画面且不挪动节点", async () => {
+    render(<App />);
+    await screen.findByText("画布为空");
+
+    const pane = document.querySelector<HTMLElement>(".react-flow__pane");
+    expect(pane).not.toBeNull();
+    fireCanvasMouse(pane!, "mousedown", { clientX: 4200, clientY: 2200 });
+    fireCanvasMouse(document, "mousemove", { clientX: 200, clientY: 200 });
+    fireCanvasMouse(document, "mouseup", { clientX: 200, clientY: 200 });
+    await waitFor(() => {
+      const transform =
+        document.querySelector<HTMLElement>(".react-flow__viewport")?.style.transform ?? "";
+      const match = transform.match(/translate\((-?[\d.]+)px,\s*(-?[\d.]+)px\)/);
+      expect(match).not.toBeNull();
+      expect(Math.abs(Number.parseFloat(match![1]!))).toBeGreaterThan(2000);
+    });
+
+    createNodeAt("视频生成", 640, 400);
+    const node = document.querySelector<HTMLElement>(".canvas-gen-node--video");
+    expect(node).not.toBeNull();
+    await waitForNodeAccessible(node!);
+    const flowPosition = rfNodeFlowPosition(node!);
+    // 世界原点 + 默认缩放看不到这块流：这就是归位之后「整段都找不到」的原因。
+    expect(flowPosition.x * (DEFAULT_ZOOM / 100)).toBeGreaterThan(1280);
+
+    const viewportBox = {
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1280,
+      bottom: 800,
+      width: 1280,
+      height: 800,
+      toJSON: () => ({}),
+    };
+    vi.spyOn(getCanvasViewport(), "getBoundingClientRect").mockReturnValue(viewportBox);
+    fireEvent.click(screen.getByRole("button", { name: "回到画布起始位置" }));
+
+    await waitFor(() => {
+      const visible = clientFromFlow(flowPosition.x, flowPosition.y);
+      expect(visible.clientX).toBeGreaterThan(0);
+      expect(visible.clientX).toBeLessThan(1280);
+      expect(visible.clientY).toBeGreaterThan(0);
+      expect(visible.clientY).toBeLessThan(800);
+    });
+    expect(rfNodeFlowPosition(node!)).toEqual(flowPosition);
+    expect(document.querySelectorAll(".canvas-gen-node--video")).toHaveLength(1);
   });
 
   it.each(NODE_MENU_CASES)("空白画布菜单可以创建%s并单次撤销", async (name, selector) => {
