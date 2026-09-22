@@ -163,6 +163,7 @@ import {
   assetGroupsFromNodes,
   assetPickKey,
   dissolveAssetGroupNodes,
+  isUploadableOutput,
   layoutAssetPlacements,
   nextLibraryPickOrder,
   regroupAssetNodes,
@@ -2363,23 +2364,32 @@ export function WorkspaceApp({
     [assetLibrarySource, assetProvider],
   );
 
-  /** 产物图片/视频一键上传到云端素材库：直接使用产物的本地 finalPath，跳过文件选择器。 */
-  const handleUploadOutputToCloud = useCallback(
-    async (outputKey: string): Promise<void> => {
-      const output = outputNodes.find((node) => node.key === outputKey);
-      if (
-        output == null ||
-        (output.mediaType !== "image" && output.mediaType !== "video") ||
-        output.finalPath == null
-      ) {
-        toast.error("仅已保存到本地的图片/视频产物支持上传到云端素材库。");
+  /**
+   * 把已保存的图片/视频产物上传到指定素材库。
+   * 单张卡片固定走云端；成组后的一键上传走面板当前打开的素材库。
+   */
+  const uploadOutputsToLibrary = useCallback(
+    async (outputKeys: readonly string[], destination: "cloud" | "local"): Promise<void> => {
+      const wanted = new Set(outputKeys);
+      const saved = outputNodes.flatMap((node) => {
+        if (!wanted.has(node.key)) return [];
+        if (node.mediaType !== "image" && node.mediaType !== "video") return [];
+        if (node.finalPath == null) return [];
+        return [{ node, mediaType: node.mediaType, localPath: node.finalPath }];
+      });
+      if (saved.length === 0) {
+        toast.error(
+          outputKeys.length === 1 && destination === "cloud"
+            ? "仅已保存到本地的图片/视频产物支持上传到云端素材库。"
+            : "组内没有已保存到本地的图片或视频产物，无法上传到当前素材库。",
+        );
         return;
       }
       if (!isDesktopRuntime()) {
         toast.error("上传素材功能仅在桌面应用中使用，浏览器预览模式暂不支持。");
         return;
       }
-      if (!assetProvider) {
+      if (destination === "cloud" && !assetProvider) {
         toast.error("请先在全局设置中配置并启用供应商连接，再上传到云端素材库。");
         return;
       }
@@ -2396,65 +2406,90 @@ export function WorkspaceApp({
         );
         return;
       }
-      const pendingId = `pending-upload-${pendingUploadSeqRef.current++}`;
-      const name =
-        output.name ??
-        output.finalPath.split(/[\\/]/).pop() ??
-        `${output.mediaType === "video" ? "视频" : "图片"}产物`;
-      // 记录 pendingId -> 产物节点 key 映射，上传成功后回查标记绿色小点。
-      uploadJobToOutputKeyRef.current.set(pendingId, outputKey);
-      setAssetUploads((current) => [
-        ...current,
-        {
-          jobId: pendingId,
-          name,
-          kind: output.mediaType as "image" | "video",
-          assetId: null,
-          status: "preparing",
-          bytesUploaded: 0,
-          bytesTotal: null,
-          error: null,
-          lastAdvancedAt: Date.now(),
-          stalled: false,
-          destination: "cloud",
-          adjustment: null,
-        },
-      ]);
-      try {
-        const jobId = await tosStagingClient.startUpload({
-          localPath: output.finalPath,
-          purpose: "asset_import",
-          mediaType: output.mediaType,
-          import: {
-            providerConnectionId: assetProvider.id,
+      const libraryName = destination === "local" ? "本地素材库" : "云端素材库";
+      let started = 0;
+      for (const output of saved) {
+        const pendingId = `pending-upload-${pendingUploadSeqRef.current++}`;
+        const name =
+          output.node.name ??
+          output.localPath.split(/[\\/]/).pop() ??
+          `${output.mediaType === "video" ? "视频" : "图片"}产物`;
+        if (destination === "cloud") uploadJobToOutputKeyRef.current.set(pendingId, output.node.key);
+        setAssetUploads((current) => [
+          ...current,
+          {
+            jobId: pendingId,
             name,
-            // 产物上传同样归入面板当前选中的分组；未选中时由后端决定默认上传分组。
-            groupId: selectedAssetGroupIdRef.current,
+            kind: output.mediaType === "video" ? "video" : "image",
+            assetId: null,
+            status: "preparing",
+            bytesUploaded: 0,
+            bytesTotal: null,
+            error: null,
+            lastAdvancedAt: Date.now(),
+            stalled: false,
+            destination,
+            adjustment: null,
           },
+        ]);
+        try {
+          const jobId = await tosStagingClient.startUpload({
+            localPath: output.localPath,
+            purpose: destination === "local" ? "local_asset" : "asset_import",
+            mediaType: output.mediaType,
+            import:
+              destination === "cloud" && assetProvider
+                ? {
+                    providerConnectionId: assetProvider.id,
+                    name,
+                    groupId: selectedAssetGroupIdRef.current,
+                  }
+                : null,
+          });
+          if (destination === "cloud") {
+            uploadJobToOutputKeyRef.current.delete(pendingId);
+            uploadJobToOutputKeyRef.current.set(jobId, output.node.key);
+          }
+          setAssetUploads((current) =>
+            current.map((entry) =>
+              entry.jobId === pendingId
+                ? { ...entry, jobId, status: "validating", lastAdvancedAt: Date.now() }
+                : entry,
+            ),
+          );
+          started += 1;
+          if (outputKeys.length === 1 && destination === "cloud") {
+            toast.success(`已开始上传「${name}」到云端素材库，可在素材面板查看进度。`);
+          }
+        } catch (error) {
+          setAssetUploads((current) =>
+            current.map((entry) =>
+              entry.jobId === pendingId
+                ? { ...entry, status: "failed", error, lastAdvancedAt: Date.now() }
+                : entry,
+            ),
+          );
+          if (destination === "cloud") uploadJobToOutputKeyRef.current.delete(pendingId);
+          toast.error(`上传失败：${formatRawBackendError(error)}`);
+        }
+      }
+      const skipped = outputKeys.length - saved.length;
+      if (started > 0 && !(outputKeys.length === 1 && destination === "cloud")) {
+        toast.success(`已开始把 ${started} 个产物上传到${libraryName}`, {
+          description:
+            skipped > 0
+              ? `已跳过 ${skipped} 个尚未保存或不是图片/视频的产物。`
+              : "进度可以在素材面板查看。",
         });
-        // pendingId 替换为真实 jobId，保持映射连续。
-        uploadJobToOutputKeyRef.current.delete(pendingId);
-        uploadJobToOutputKeyRef.current.set(jobId, outputKey);
-        setAssetUploads((current) =>
-          current.map((entry) =>
-            entry.jobId === pendingId
-              ? { ...entry, jobId, status: "validating", lastAdvancedAt: Date.now() }
-              : entry,
-          ),
-        );
-        toast.success(`已开始上传「${name}」到云端素材库，可在素材面板查看进度。`);
-      } catch (error) {
-        setAssetUploads((current) =>
-          current.map((entry) =>
-            entry.jobId === pendingId
-              ? { ...entry, status: "failed", error, lastAdvancedAt: Date.now() }
-              : entry,
-          ),
-        );
-        toast.error(`上传失败：${formatRawBackendError(error)}`);
       }
     },
     [assetProvider, outputNodes],
+  );
+  const handleUploadOutputToCloud = useCallback(
+    (outputKey: string) => {
+      void uploadOutputsToLibrary([outputKey], "cloud");
+    },
+    [uploadOutputsToLibrary],
   );
 
   useEffect(() => {
@@ -4930,7 +4965,9 @@ export function WorkspaceApp({
   const connectAssetGroup = useCallback(
     (groupId: string, toKey: string) => {
       if (assetGroupIdFromFlowId(toKey) != null) return;
-      const group = assetGroupsFromNodes(assetNodes).find((item) => item.groupId === groupId);
+      const group = assetGroupsFromNodes([...assetNodes, ...outputNodes]).find(
+        (item) => item.groupId === groupId,
+      );
       if (group == null) return;
       for (const member of group.members) connectCanvasNodes(member.key, toKey);
       frontendLog(
@@ -4938,7 +4975,7 @@ export function WorkspaceApp({
         `[canvas] 素材组连线: group=${groupId}, count=${group.members.length}, target=${toKey}, order=${group.members.map((member) => member.libraryPickOrder ?? "-").join(",")}`,
       );
     },
-    [assetNodes, connectCanvasNodes],
+    [assetNodes, connectCanvasNodes, outputNodes],
   );
 
   const placeCanvasUploadFromJob = useCallback(
@@ -9703,23 +9740,50 @@ export function WorkspaceApp({
     if (connectionQuickAdd && !quickAddEndpointExists) closeConnectionQuickAdd();
   }, [connectionQuickAdd, quickAddEndpointExists, closeConnectionQuickAdd]);
 
-  const canvasAssetGroups = useMemo(() => assetGroupsFromNodes(assetNodes), [assetNodes]);
+  const canvasAssetGroups = useMemo(
+    () => assetGroupsFromNodes([...assetNodes, ...outputNodes]),
+    [assetNodes, outputNodes],
+  );
   const dissolveCanvasAssetGroup = useCallback(
     (groupId: string) => {
-      const next = dissolveAssetGroupNodes(assetNodes, groupId);
-      if (next == null) return;
-      const byKey = new Map(next.map((node) => [node.key, node]));
-      patchNodes("asset", (node) => byKey.get(node.key) ?? node);
+      const nextAssets = dissolveAssetGroupNodes(assetNodes, groupId);
+      const nextOutputs = dissolveAssetGroupNodes(outputNodes, groupId);
+      if (nextAssets == null && nextOutputs == null) return;
+      if (nextAssets != null) {
+        const byKey = new Map(nextAssets.map((node) => [node.key, node]));
+        patchNodes("asset", (node) => byKey.get(node.key) ?? node);
+      }
+      if (nextOutputs != null) {
+        const byKey = new Map(nextOutputs.map((node) => [node.key, node]));
+        patchNodes("output", (node) => byKey.get(node.key) ?? node);
+      }
     },
-    [assetNodes, patchNodes],
+    [assetNodes, outputNodes, patchNodes],
+  );
+  const uploadCanvasGroupToLibrary = useCallback(
+    (groupId: string) => {
+      const group = canvasAssetGroups.find((item) => item.groupId === groupId);
+      if (group == null) return;
+      void uploadOutputsToLibrary(
+        group.members.filter(isUploadableOutput).map((member) => member.key),
+        assetLibrarySource,
+      );
+    },
+    [assetLibrarySource, canvasAssetGroups, uploadOutputsToLibrary],
   );
   const assetGroupFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
       canvasAssetGroups.map((group) => {
         const bounds = assetGroupBounds(group.members);
         const memberSignature = group.members
-          .map((member) => `${member.key}:${member.name}:${member.libraryPickOrder ?? ""}`)
+          .map(
+            (member) =>
+              `${member.key}:${member.name ?? ""}:${member.libraryPickOrder ?? ""}:${"finalPath" in member ? (member.finalPath ?? "") : ""}`,
+          )
           .join("|");
+        const uploadLabel =
+          assetLibrarySource === "local" ? "上传到本地素材库" : "上传到云端素材库";
+        const canUpload = group.members.some(isUploadableOutput);
         return stableCanvasFlowNode(
           canvasFlowNodeCachesRef.current,
           "asset-group",
@@ -9731,6 +9795,9 @@ export function WorkspaceApp({
             bounds.height,
             memberSignature,
             dissolveCanvasAssetGroup,
+            canUpload,
+            uploadLabel,
+            uploadCanvasGroupToLibrary,
           ],
           () => ({
             id: assetGroupFlowId(group.groupId),
@@ -9753,27 +9820,34 @@ export function WorkspaceApp({
                 <AssetGroupFrame
                   members={group.members}
                   onDissolve={() => dissolveCanvasAssetGroup(group.groupId)}
+                  {...(canUpload
+                    ? {
+                        onUpload: () => uploadCanvasGroupToLibrary(group.groupId),
+                        uploadLabel,
+                      }
+                    : {})}
                 />
               ),
             },
           }),
         );
       }),
-    [canvasAssetGroups, dissolveCanvasAssetGroup],
+    [assetLibrarySource, canvasAssetGroups, dissolveCanvasAssetGroup, uploadCanvasGroupToLibrary],
   );
 
   const flowNodes = useMemo<CanvasFlowNode[]>(() => {
     const connectionGroupId =
       connectionSourceKey != null ? assetGroupIdFromFlowId(connectionSourceKey) : null;
-    const groupedSource =
+    const groupedMember =
       connectionGroupId == null
         ? null
-        : canvasAssetGroups.find((group) => group.groupId === connectionGroupId)?.members[0];
+        : (canvasAssetGroups.find((group) => group.groupId === connectionGroupId)?.members[0] ??
+          null);
     const sourceEntry: CanvasNodeEntry | null =
       connectionSourceKey == null
         ? null
         : (canvasEntryByKey(connectionSourceKey) ??
-          (groupedSource != null ? { type: "asset", data: groupedSource } : null));
+          (groupedMember != null ? canvasEntryByKey(groupedMember.key) : null));
     const baseNodes: CanvasFlowNode[] = [
       ...assetFlowNodes,
       ...outputFlowNodes,
@@ -10119,23 +10193,43 @@ export function WorkspaceApp({
   };
 
   const assetKeySetRef = useRef<ReadonlySet<string>>(new Set());
-  assetKeySetRef.current = new Set(assetNodes.map((node) => node.key));
+  assetKeySetRef.current = new Set([
+    ...assetNodes.map((node) => node.key),
+    ...outputNodes.map((node) => node.key),
+  ]);
   const readGroupSelectionRef = useRef<() => readonly string[]>(() => []);
   const handleGroupSelectionEnd = useCallback(() => {
     const keys = readGroupSelectionRef.current();
+    setAssetGroupMarquee(false);
     if (keys.length < 2) {
       setMarqueeSelectionEpoch((epoch) => epoch + 1);
       return;
     }
-    const next = regroupAssetNodes(assetNodes, keys, assetGroupKey());
+    const next = regroupAssetNodes([...assetNodes, ...outputNodes], keys, assetGroupKey());
     if (next == null) {
       setMarqueeSelectionEpoch((epoch) => epoch + 1);
       return;
     }
     const byKey = new Map(next.map((node) => [node.key, node]));
-    patchNodes("asset", (node) => byKey.get(node.key) ?? node);
-    toast.success(`已成组，共 ${keys.length} 个素材`);
-  }, [assetNodes, patchNodes]);
+    patchNodes("asset", (node) => {
+      const updated = byKey.get(node.key);
+      return updated != null && "assetId" in updated ? updated : node;
+    });
+    patchNodes("output", (node) => {
+      const updated = byKey.get(node.key);
+      return updated != null && !("assetId" in updated) ? updated : node;
+    });
+    const assetKeySet = new Set(assetNodes.map((node) => node.key));
+    const assetCount = keys.filter((key) => assetKeySet.has(key)).length;
+    const outputCount = keys.length - assetCount;
+    toast.success(
+      outputCount === 0
+        ? `已成组，共 ${assetCount} 个素材`
+        : assetCount === 0
+          ? `已成组，共 ${outputCount} 个产物`
+          : `已成组，共 ${assetCount} 个素材、${outputCount} 个产物`,
+    );
+  }, [assetNodes, outputNodes, patchNodes]);
 
   const handleFlowConnect = (connection: Connection) => {
     if (!connection.source || !connection.target) return;
@@ -10535,15 +10629,15 @@ export function WorkspaceApp({
           </div>
 
           <div className="canvas-viewport-dock">
-            <div className="canvas-group-control" role="group" aria-label="素材框选成组">
+            <div className="canvas-group-control" role="group" aria-label="框选成组">
               <button
                 type="button"
                 aria-pressed={assetGroupMarquee}
-                aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材成组"}
+                aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材或产物成组"}
                 data-tooltip={
                   assetGroupMarquee
-                    ? "拖拽框选素材。从组端口连到生成节点时，按素材库点选顺序输入"
-                    : "框选素材成组"
+                    ? "拖拽框选素材或产物。从组端口连到生成节点时，按点选顺序输入"
+                    : "框选素材或产物成组"
                 }
                 onClick={() => setAssetGroupMarquee((enabled) => !enabled)}
               >

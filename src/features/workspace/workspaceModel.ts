@@ -984,6 +984,12 @@ export interface OutputNodeData {
   readonly layer?: OutputLayerInfo;
   /** 该产物已成功上传到云端素材库（随画布文档持久化，重启后保留）。 */
   readonly uploadedToCloud?: boolean;
+  /**
+   * 框选成组后的组 id。与素材节点共用同一套组。
+   * 没有点选序号的产物按从上到下、从左到右排在有序号的素材之后。
+   */
+  readonly assetGroupId?: string;
+  readonly libraryPickOrder?: number;
   readonly x: number;
   readonly y: number;
   /** React Flow 实测尺寸（受控模式下需回存，避免节点对象重建后 handleBounds 被重置、节点闪烁隐藏）。 */

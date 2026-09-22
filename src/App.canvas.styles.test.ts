@@ -178,4 +178,25 @@ describe("画布视口控件", () => {
     expect(studioShellCss).not.toMatch(/\.canvas-stage \.canvas-group-control\s*\{[^}]*bottom:/);
     expect(studioShellCss).not.toMatch(/\.canvas-(?:history|home|group)-control\s*\{[^}]*right:/);
   });
+
+  it("框选范围用红框，被框住的素材卡片用绿边", () => {
+    const marquee = cssRule(".canvas-viewport.is-grouping .react-flow__selection");
+    expect(marquee).toMatch(/var\(--color-error\)/);
+    expect(marquee).toMatch(/border:\s*var\(--rule-active\)\s+solid\s+var\(--color-error\)/);
+    const picked = cssRule(
+      ".canvas-viewport.is-grouping .react-flow__node.selected .canvas-asset-node",
+    );
+    expect(picked).toMatch(/border-color:\s*var\(--color-success\)/);
+    expect(picked).toMatch(/outline:\s*var\(--rule-active\)\s+solid\s+var\(--color-success\)/);
+  });
+
+  it("成组后外框保持红色，组内素材卡片保持绿色边缘", () => {
+    const frame = cssRule(".canvas-asset-group");
+    expect(frame).toMatch(/border:\s*var\(--rule-active\)\s+solid\s+var\(--color-error\)/);
+    const member = cssRule(
+      ".react-flow__node.selected .canvas-flow-node > .canvas-asset-node.is-grouped",
+    );
+    expect(member).toMatch(/border-color:\s*var\(--color-success\)/);
+    expect(member).toMatch(/outline:\s*var\(--rule-active\)\s+solid\s+var\(--color-success\)/);
+  });
 });

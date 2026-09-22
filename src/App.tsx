@@ -36,6 +36,7 @@ function App() {
         richColors
         theme="dark"
         visibleToasts={4}
+        duration={4000}
         toastOptions={{ closeButtonAriaLabel: "关闭通知", duration: 4000 }}
       />
     </QueryClientProvider>

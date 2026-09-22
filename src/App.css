@@ -44,10 +44,16 @@ body {
   --normal-text: var(--color-ink);
   z-index: var(--z-toast);
   font-family: var(--font-body);
+  pointer-events: none;
 }
 
 [data-sonner-toaster].app-toaster [data-sonner-toast] {
   box-shadow: var(--shadow-raised);
+  pointer-events: none;
+}
+
+[data-sonner-toaster].app-toaster [data-sonner-toast] :is(button, a) {
+  pointer-events: auto;
 }
 
 button,
@@ -3196,6 +3202,17 @@ svg[data-spin="true"] {
   cursor: crosshair;
 }
 
+.canvas-viewport.is-grouping .react-flow__selection {
+  background: color-mix(in srgb, var(--color-error) 22%, transparent);
+  border: var(--rule-active) solid var(--color-error);
+}
+
+.canvas-viewport.is-grouping .react-flow__node.selected .canvas-asset-node {
+  border-color: var(--color-success);
+  outline: var(--rule-active) solid var(--color-success);
+  outline-offset: var(--rule-active);
+}
+
 .react-flow__node.canvas-asset-group-node {
   pointer-events: none;
   background: transparent;
@@ -3215,9 +3232,16 @@ svg[data-spin="true"] {
   box-sizing: border-box;
   width: 100%;
   height: 100%;
-  border: var(--rule-thin) dashed color-mix(in srgb, var(--color-accent) 72%, var(--color-rule));
+  border: var(--rule-active) solid var(--color-error);
   border-radius: var(--radius-card);
-  background: color-mix(in srgb, var(--color-accent) 7%, transparent);
+  background: color-mix(in srgb, var(--color-error) 14%, transparent);
+}
+
+.react-flow__node .canvas-flow-node > .canvas-asset-node.is-grouped,
+.react-flow__node.selected .canvas-flow-node > .canvas-asset-node.is-grouped {
+  border-color: var(--color-success);
+  outline: var(--rule-active) solid var(--color-success);
+  outline-offset: var(--rule-active);
 }
 
 .canvas-asset-group__bar {
@@ -3243,15 +3267,19 @@ svg[data-spin="true"] {
   white-space: nowrap;
 }
 
+.canvas-asset-group__upload,
 .canvas-asset-group__dissolve {
   flex: none;
-  margin-inline-start: auto;
   padding: 0 var(--space-2xs);
   color: inherit;
   background: var(--color-surface-1);
   border: var(--rule-thin) solid var(--color-rule);
   border-radius: var(--radius-control);
   cursor: pointer;
+}
+
+.canvas-asset-group__bar > button:first-of-type {
+  margin-inline-start: auto;
 }
 
 .settings-layer {

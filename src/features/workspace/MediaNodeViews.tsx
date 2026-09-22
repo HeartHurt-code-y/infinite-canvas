@@ -1582,7 +1582,7 @@ export function CanvasAssetNode({
   );
   return (
     <div
-      className={`canvas-asset-node${node.kind === "image" || node.kind === "video" ? " canvas-asset-node--media" : ""}${dragging ? " is-dragging" : ""}`}
+      className={`canvas-asset-node${node.kind === "image" || node.kind === "video" ? " canvas-asset-node--media" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       data-connection-target={node.key}
       onMouseDown={(event) =>
@@ -2123,7 +2123,7 @@ export function CanvasOutputNode({
 
   return (
     <div
-      className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${dragging ? " is-dragging" : ""}`}
+      className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
       style={{ ...dimensions }}
       aria-busy={
         !(isTextResult && node.textContent != null) && (isRunning || isSaving || showSaveOverlay)

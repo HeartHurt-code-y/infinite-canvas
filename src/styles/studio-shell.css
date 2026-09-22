@@ -575,12 +575,18 @@ button:active:focus-visible,
   --warning-bg: var(--color-warning-soft);
   --warning-border: var(--color-warning);
   --warning-text: var(--color-text);
+  pointer-events: none;
 }
 
 [data-sonner-toaster].app-toaster [data-sonner-toast] {
   padding: var(--space-md);
   font-size: var(--text-sm);
   line-height: var(--leading-body);
+  pointer-events: none;
+}
+
+[data-sonner-toaster].app-toaster [data-sonner-toast] :is(button, a) {
+  pointer-events: auto;
 }
 
 @media (hover: hover) and (pointer: fine) {

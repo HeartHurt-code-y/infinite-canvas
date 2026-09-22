@@ -1,10 +1,25 @@
 import {
   assetNodeDimensions,
   nearestAvailableNodePosition,
+  outputNodeDimensions,
   type AssetItem,
   type AssetNodeData,
   type CanvasNodeRect,
+  type OutputNodeData,
 } from "./workspaceModel";
+
+/** 可以框进同一组的画布卡片：素材或已落下的产物。 */
+export type CanvasGroupMember = AssetNodeData | OutputNodeData;
+
+interface GroupableNode {
+  readonly key: string;
+  readonly x: number;
+  readonly y: number;
+  readonly name: string | null;
+  readonly libraryPickOrder?: number;
+  readonly assetGroupId?: string;
+  readonly measured?: { readonly width: number; readonly height: number };
+}
 
 /** 画布上素材组节点的 id 前缀。组本身不是持久化节点，只是成员外框和统一输出端口。 */
 export const ASSET_GROUP_FLOW_PREFIX = "asset-group:";
@@ -16,9 +31,9 @@ const GROUP_GUTTER = 28;
 
 export const ASSET_PLACE_GAP = 36;
 
-export interface AssetGroupMembership {
+export interface AssetGroupMembership<T extends GroupableNode = CanvasGroupMember> {
   readonly groupId: string;
-  readonly members: readonly AssetNodeData[];
+  readonly members: readonly T[];
 }
 
 export function assetGroupKey(): string {
@@ -42,13 +57,21 @@ export function assetPickKey(
   return `${asset.source ?? "cloud"}\u0000${asset.providerConnectionId ?? ""}\u0000${asset.id}`;
 }
 
-function withoutAssetGroup(node: AssetNodeData): AssetNodeData {
+function withoutAssetGroup<T extends GroupableNode>(node: T): T {
   const { assetGroupId, ...rest } = node;
   void assetGroupId;
-  return rest;
+  return rest as T;
 }
 
-function finitePickOrder(node: AssetNodeData): number | null {
+export function isUploadableOutput(node: CanvasGroupMember): node is OutputNodeData {
+  return (
+    !("assetId" in node) &&
+    (node.mediaType === "image" || node.mediaType === "video") &&
+    node.finalPath != null
+  );
+}
+
+function finitePickOrder(node: GroupableNode): number | null {
   const value = node.libraryPickOrder;
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -56,7 +79,7 @@ function finitePickOrder(node: AssetNodeData): number | null {
 /**
  * 生成输入顺序：先按素材库点选序号，没有序号的旧节点再按从上到下、从左到右。
  */
-export function compareLibraryPickOrder(left: AssetNodeData, right: AssetNodeData): number {
+export function compareLibraryPickOrder(left: GroupableNode, right: GroupableNode): number {
   const leftOrder = finitePickOrder(left);
   const rightOrder = finitePickOrder(right);
   if (leftOrder != null && rightOrder != null && leftOrder !== rightOrder) {
@@ -72,7 +95,7 @@ export function compareLibraryPickOrder(left: AssetNodeData, right: AssetNodeDat
 }
 
 /** 下一次投放使用的点选序号，接在画布上已有序号之后。 */
-export function nextLibraryPickOrder(nodes: readonly AssetNodeData[]): number {
+export function nextLibraryPickOrder(nodes: readonly GroupableNode[]): number {
   let max = 0;
   for (const node of nodes) {
     const order = finitePickOrder(node);
@@ -82,10 +105,10 @@ export function nextLibraryPickOrder(nodes: readonly AssetNodeData[]): number {
 }
 
 /** 至少两个成员才构成可连线的组，成员按点选顺序排列。 */
-export function assetGroupsFromNodes(
-  nodes: readonly AssetNodeData[],
-): readonly AssetGroupMembership[] {
-  const buckets = new Map<string, AssetNodeData[]>();
+export function assetGroupsFromNodes<T extends GroupableNode>(
+  nodes: readonly T[],
+): readonly AssetGroupMembership<T>[] {
+  const buckets = new Map<string, T[]>();
   for (const node of nodes) {
     const groupId = node.assetGroupId;
     if (typeof groupId !== "string" || groupId === "") continue;
@@ -93,7 +116,7 @@ export function assetGroupsFromNodes(
     if (bucket == null) buckets.set(groupId, [node]);
     else bucket.push(node);
   }
-  const groups: AssetGroupMembership[] = [];
+  const groups: AssetGroupMembership<T>[] = [];
   for (const [groupId, members] of buckets) {
     if (members.length < 2) continue;
     groups.push({ groupId, members: [...members].sort(compareLibraryPickOrder) });
@@ -105,11 +128,11 @@ export function assetGroupsFromNodes(
  * 把框选到的素材收成一个新组。
  * 已经是同一整组时不改数据。被拆散后只剩一个成员的旧组会解散。
  */
-export function regroupAssetNodes(
-  nodes: readonly AssetNodeData[],
+export function regroupAssetNodes<T extends GroupableNode>(
+  nodes: readonly T[],
   memberKeys: readonly string[],
   newGroupId: string,
-): readonly AssetNodeData[] | null {
+): readonly T[] | null {
   const selected = new Set(memberKeys);
   const selectedNodes = nodes.filter((node) => selected.has(node.key));
   if (selectedNodes.length < 2) return null;
@@ -158,10 +181,10 @@ export function regroupAssetNodes(
   return changed ? next : null;
 }
 
-export function dissolveAssetGroupNodes(
-  nodes: readonly AssetNodeData[],
+export function dissolveAssetGroupNodes<T extends GroupableNode>(
+  nodes: readonly T[],
   groupId: string,
-): readonly AssetNodeData[] | null {
+): readonly T[] | null {
   let changed = false;
   const next = nodes.map((node) => {
     if (node.assetGroupId !== groupId) return node;
@@ -171,14 +194,14 @@ export function dissolveAssetGroupNodes(
   return changed ? next : null;
 }
 
-function memberSize(node: AssetNodeData): { readonly width: number; readonly height: number } {
+function memberSize(node: CanvasGroupMember): { readonly width: number; readonly height: number } {
   const measured = node.measured;
   if (measured != null && measured.width > 0 && measured.height > 0) return measured;
-  return assetNodeDimensions(node);
+  return "assetId" in node ? assetNodeDimensions(node) : outputNodeDimensions(node);
 }
 
 /** 包住全部成员，并在上方留标题栏、右侧留输出端口。 */
-export function assetGroupBounds(members: readonly AssetNodeData[]): CanvasNodeRect {
+export function assetGroupBounds(members: readonly CanvasGroupMember[]): CanvasNodeRect {
   if (members.length === 0) return { x: 0, y: 0, width: 0, height: 0 };
   let minX = Number.POSITIVE_INFINITY;
   let minY = Number.POSITIVE_INFINITY;

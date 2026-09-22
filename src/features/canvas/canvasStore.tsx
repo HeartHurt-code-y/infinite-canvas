@@ -395,7 +395,9 @@ function sameConnectionData(
       first.finalPath === second.finalPath &&
       first.previewSrc === second.previewSrc &&
       first.name === second.name &&
-      first.textContent === second.textContent
+      first.textContent === second.textContent &&
+      first.libraryPickOrder === second.libraryPickOrder &&
+      first.assetGroupId === second.assetGroupId
     );
   }
   if (type === "gen") {

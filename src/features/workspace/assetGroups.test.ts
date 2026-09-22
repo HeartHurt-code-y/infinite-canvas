@@ -3,11 +3,28 @@ import {
   assetGroupBounds,
   assetGroupsFromNodes,
   compareLibraryPickOrder,
+  isUploadableOutput,
   layoutAssetPlacements,
   nextLibraryPickOrder,
   regroupAssetNodes,
 } from "./assetGroups";
-import type { AssetNodeData } from "./workspaceModel";
+import type { AssetNodeData, OutputNodeData } from "./workspaceModel";
+
+function output(
+  overrides: Partial<OutputNodeData> & Pick<OutputNodeData, "key">,
+): OutputNodeData {
+  return {
+    resultKey: `${overrides.key}#0`,
+    sourceNodeId: "gen",
+    taskId: "task",
+    mediaType: "image",
+    finalPath: `C:/outputs/${overrides.key}.png`,
+    name: overrides.key,
+    x: 0,
+    y: 0,
+    ...overrides,
+  };
+}
 
 function asset(overrides: Partial<AssetNodeData> & Pick<AssetNodeData, "key">): AssetNodeData {
   return {
@@ -50,6 +67,27 @@ describe("素材组与点选顺序", () => {
     const groups = assetGroupsFromNodes(next ?? []);
     expect(groups).toHaveLength(1);
     expect(groups[0]?.members.map((node) => node.key)).toEqual(["a", "c"]);
+  });
+
+  it("框选可以把产物和素材收进同一组，产物排在有序号的素材之后", () => {
+    const nodes = [
+      output({ key: "out", x: 0, y: 0 }),
+      asset({ key: "asset", libraryPickOrder: 2, x: 400, y: 40 }),
+    ];
+    const next = regroupAssetNodes(nodes, ["out", "asset"], "mix");
+    expect(next?.every((node) => node.assetGroupId === "mix")).toBe(true);
+    const groups = assetGroupsFromNodes(next ?? []);
+    expect(groups[0]?.members.map((member) => member.key)).toEqual(["asset", "out"]);
+    expect(groups[0]?.members.filter(isUploadableOutput).map((member) => member.key)).toEqual([
+      "out",
+    ]);
+  });
+
+  it("没有点选序号的产物按从上到下成组", () => {
+    const nodes = [output({ key: "lower", y: 80 }), output({ key: "upper", y: 0 })];
+    const next = regroupAssetNodes(nodes, ["lower", "upper"], "outs");
+    const groups = assetGroupsFromNodes(next ?? []);
+    expect(groups[0]?.members.map((member) => member.key)).toEqual(["upper", "lower"]);
   });
 
   it("再次框选同一整组不会改写节点", () => {
