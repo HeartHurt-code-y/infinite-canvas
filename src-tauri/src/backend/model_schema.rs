@@ -268,9 +268,26 @@ fn apply_bailian_wan_video_dialect(schema: &mut Value, identity: &str) -> bool {
     changed
 }
 
-/// 文生图：网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
+/// 文生图与图生图共用同一对图片端点：
+/// 网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
 fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
-    let Some(request) = request_object_mut(schema, GenerationOperation::TextToImage) else {
+    let mut changed = false;
+    for operation in [
+        GenerationOperation::TextToImage,
+        GenerationOperation::ImageToImage,
+    ] {
+        changed |= apply_image_operation_dialect(schema, identity, dialect, operation);
+    }
+    changed
+}
+
+fn apply_image_operation_dialect(
+    schema: &mut Value,
+    identity: &str,
+    dialect: RequestDialect,
+    operation: GenerationOperation,
+) -> bool {
+    let Some(request) = request_object_mut(schema, operation) else {
         return false;
     };
     let path = current_request_path(request).to_string();
@@ -2809,6 +2826,49 @@ mod tests {
         assert_eq!(
             vidu["video_generation"]["request"]["path"],
             "/v1/video/generations"
+        );
+    }
+
+    #[test]
+    fn image_dialect_rewrites_seedream_text_to_image_and_image_to_image() {
+        let mut schema = default_model_schema(
+            "doubao-seedream-4-5-251128",
+            &[
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ],
+        );
+        assert!(apply_request_dialect(
+            &mut schema,
+            "doubao-seedream-4-5-251128",
+            RequestDialect::VolcengineArk
+        ));
+        assert_eq!(
+            schema["text_to_image"]["request"]["path"],
+            "/images/generations"
+        );
+        assert_eq!(
+            schema["image_to_image"]["request"]["path"],
+            "/images/generations"
+        );
+        assert_eq!(schema["image_to_image"]["request"]["mediaField"], "image");
+
+        assert!(apply_request_dialect(
+            &mut schema,
+            "doubao-seedream-4-5-251128",
+            RequestDialect::OpenAiCompatible
+        ));
+        assert_eq!(
+            schema["text_to_image"]["request"]["path"],
+            "/v1/images/generations"
+        );
+        assert_eq!(
+            schema["image_to_image"]["request"]["path"],
+            "/v1/images/generations"
+        );
+        assert_eq!(
+            schema["image_to_image"]["request"]["mediaEncoding"],
+            "seedream_image_urls"
         );
     }
 

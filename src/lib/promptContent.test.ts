@@ -876,6 +876,16 @@ describe("cleanGeneratedPrompt", () => {
   it("空字符串返回空字符串", () => {
     expect(cleanGeneratedPrompt("")).toBe("");
   });
+
+  it("单段正文命中附加说明前缀时仍保留，避免提示词被清空", () => {
+    const input = "根据参考图，一位女孩站在雨夜里，电影感侧光。";
+    expect(cleanGeneratedPrompt(input)).toBe(input);
+  });
+
+  it("多段附加说明剥到只剩一段时停止，结果不为空", () => {
+    const input = ["无需额外补问。", "", "希望对你有帮助。"].join("\n\n");
+    expect(cleanGeneratedPrompt(input)).toBe("无需额外补问。");
+  });
 });
 
 describe("prompt content annotation references", () => {

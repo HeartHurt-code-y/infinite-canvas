@@ -570,7 +570,7 @@ impl VideoDownloadService {
                 quality.hint
             );
         }
-        let ffmpeg_location = resolve_ffmpeg_location(&self.inner.composer).await;
+        let ffmpeg = resolve_ffmpeg_for_download(&self.inner.composer).await;
         let directory = self.inner.downloads_dir.join("无限画布");
         if let Err(error) = tokio::fs::create_dir_all(&directory).await {
             self.fail_job(&job_id, format!("下载目录创建失败：{error}"));
@@ -590,41 +590,11 @@ impl VideoDownloadService {
             output_template.to_string_lossy().into_owned(),
         ];
         // 画质路由对应的格式选择器：Sd480 一律封顶 480P，其余走最佳画质；
-        // 有 ffmpeg 时分离音视频合并封装 MP4，并显式指定 ffmpeg 位置。
+        // 有 ffmpeg 时分离音视频合并封装 MP4。ffmpeg 不在 PATH 上时才显式指定位置。
         let cap_480p = quality
             .as_ref()
             .is_some_and(|q| q.mode == VideoDownloadQualityMode::Sd480);
-        let append_ffmpeg_args = |args: &mut Vec<String>| {
-            if let Some(location) = &ffmpeg_location {
-                args.extend([
-                    "--ffmpeg-location".into(),
-                    location.to_string_lossy().into_owned(),
-                ]);
-            }
-        };
-        if cap_480p {
-            if ffmpeg_location.is_some() {
-                args.extend([
-                    "-f".into(),
-                    "bv*[height<=480]+ba/b[height<=480]/b".into(),
-                    "--merge-output-format".into(),
-                    "mp4".into(),
-                ]);
-                append_ffmpeg_args(&mut args);
-            } else {
-                args.extend(["-f".into(), "b[height<=480]/b".into()]);
-            }
-        } else if ffmpeg_location.is_some() {
-            args.extend([
-                "-f".into(),
-                "bv*+ba/b".into(),
-                "--merge-output-format".into(),
-                "mp4".into(),
-            ]);
-            append_ffmpeg_args(&mut args);
-        } else {
-            args.extend(["-f".into(), "b".into()]);
-        }
+        append_download_format_args(&mut args, cap_480p, &ffmpeg);
         if cookies_path.is_file() {
             args.extend([
                 "--cookies".into(),
@@ -926,23 +896,82 @@ async fn wait_for_cancel(flag: Arc<AtomicBool>) {
     }
 }
 
-/// 解析本次下载可用的 ffmpeg 位置：
-/// - 系统 ffmpeg 命中 PATH → 返回 `None`（yt-dlp 继承同一 PATH，自己能找到）；
+/// 下载时 ffmpeg 是否可用，以及要不要把目录显式传给 yt-dlp。
+///
+/// 系统 ffmpeg 命中 PATH 时 `location` 为空：yt-dlp 继承同一 PATH，自己能找到。
+/// 这时仍然 `available`，格式选择必须走音视频分离合并，不能因为没有显式目录
+/// 就退回单文件 `-f b`。
+struct FfmpegForDownload {
+    available: bool,
+    location: Option<PathBuf>,
+}
+
+/// 按画质上限和 ffmpeg 是否可用追加 yt-dlp 格式参数。
+/// 有 ffmpeg 时分离音视频再封装 MP4；只有不在 PATH 上的 ffmpeg 才追加
+/// `--ffmpeg-location`。
+fn append_download_format_args(args: &mut Vec<String>, cap_480p: bool, ffmpeg: &FfmpegForDownload) {
+    let append_location = |args: &mut Vec<String>| {
+        if let Some(location) = &ffmpeg.location {
+            args.extend([
+                "--ffmpeg-location".into(),
+                location.to_string_lossy().into_owned(),
+            ]);
+        }
+    };
+    if ffmpeg.available && cap_480p {
+        args.extend([
+            "-f".into(),
+            "bv*[height<=480]+ba/b[height<=480]/b".into(),
+            "--merge-output-format".into(),
+            "mp4".into(),
+        ]);
+        append_location(args);
+    } else if ffmpeg.available {
+        args.extend([
+            "-f".into(),
+            "bv*+ba/b".into(),
+            "--merge-output-format".into(),
+            "mp4".into(),
+        ]);
+        append_location(args);
+    } else if cap_480p {
+        args.extend(["-f".into(), "b[height<=480]/b".into()]);
+    } else {
+        args.extend(["-f".into(), "b".into()]);
+    }
+}
+
+/// 解析本次下载可用的 ffmpeg：
+/// - 系统 ffmpeg 命中 PATH → 可用，不传位置；
 /// - 系统 ffmpeg 只命中平台兜底目录（macOS 上 Homebrew 的 `/opt/homebrew/bin` 等，
-///   从 Finder 启动的 .app 不在 PATH 里）→ 返回其所在目录，交给 `--ffmpeg-location`；
-/// - 否则复用视频合成服务自带的 ffmpeg 引擎（缺则按需下载一次），返回其
-///   所在目录；下载失败返回 `None`。
-async fn resolve_ffmpeg_location(composer: &VideoCompositionService) -> Option<PathBuf> {
+///   从 Finder 启动的 .app 不在 PATH 里）→ 可用，并把所在目录交给 `--ffmpeg-location`；
+/// - 否则复用视频合成服务自带的 ffmpeg 引擎（缺则按需下载一次）；下载失败则不可用。
+async fn resolve_ffmpeg_for_download(composer: &VideoCompositionService) -> FfmpegForDownload {
     match super::system_ffmpeg::resolve().await {
-        Some(system) if system.on_path => return None,
-        Some(system) => return system.path.parent().map(Path::to_path_buf),
+        Some(system) if system.on_path => {
+            return FfmpegForDownload {
+                available: true,
+                location: None,
+            };
+        }
+        Some(system) => {
+            let location = system.path.parent().map(Path::to_path_buf);
+            return FfmpegForDownload {
+                available: location.is_some(),
+                location,
+            };
+        }
         None => {}
     }
-    composer
+    let location = composer
         .ensure_ffmpeg()
         .await
         .ok()
-        .and_then(|binary| binary.parent().map(Path::to_path_buf))
+        .and_then(|binary| binary.parent().map(Path::to_path_buf));
+    FfmpegForDownload {
+        available: location.is_some(),
+        location,
+    }
 }
 
 // ---------- B 站去水印后处理 ----------
@@ -1203,6 +1232,66 @@ fn checksum_line_for(content: &str, artifact: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn download_format_uses_merge_when_ffmpeg_is_on_path_without_a_location() {
+        let ffmpeg = FfmpegForDownload {
+            available: true,
+            location: None,
+        };
+        let mut args = Vec::new();
+        append_download_format_args(&mut args, false, &ffmpeg);
+        assert_eq!(
+            args,
+            vec![
+                "-f".to_string(),
+                "bv*+ba/b".to_string(),
+                "--merge-output-format".to_string(),
+                "mp4".to_string(),
+            ]
+        );
+
+        let mut capped = Vec::new();
+        append_download_format_args(&mut capped, true, &ffmpeg);
+        assert!(
+            capped
+                .windows(2)
+                .any(|pair| pair == ["-f", "bv*[height<=480]+ba/b[height<=480]/b"])
+        );
+        assert!(!capped.iter().any(|arg| arg == "--ffmpeg-location"));
+    }
+
+    #[test]
+    fn download_format_passes_ffmpeg_location_only_when_it_is_explicit() {
+        let ffmpeg = FfmpegForDownload {
+            available: true,
+            location: Some(PathBuf::from("/opt/homebrew/bin")),
+        };
+        let mut args = Vec::new();
+        append_download_format_args(&mut args, false, &ffmpeg);
+        assert_eq!(
+            args.iter().position(|arg| arg == "--ffmpeg-location"),
+            Some(4)
+        );
+        assert_eq!(args[5], "/opt/homebrew/bin");
+    }
+
+    #[test]
+    fn download_format_falls_back_to_single_file_without_ffmpeg() {
+        let ffmpeg = FfmpegForDownload {
+            available: false,
+            location: None,
+        };
+        let mut args = Vec::new();
+        append_download_format_args(&mut args, false, &ffmpeg);
+        assert_eq!(args, vec!["-f".to_string(), "b".to_string()]);
+        let mut capped = Vec::new();
+        append_download_format_args(&mut capped, true, &ffmpeg);
+        assert_eq!(
+            capped,
+            vec!["-f".to_string(), "b[height<=480]/b".to_string()]
+        );
+    }
 
     #[test]
     fn parse_progress_percent_extracts_download_percentage() {

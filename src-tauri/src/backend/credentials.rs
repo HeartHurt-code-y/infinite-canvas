@@ -250,17 +250,75 @@ fn write_map(path: &Path, map: &Map<String, Value>) -> BackendResult<()> {
     let body = serde_json::to_string_pretty(&sorted)?;
 
     let temp_path = path.with_extension("json.tmp");
-    std::fs::write(&temp_path, &body)?;
-
-    // 密钥明文落盘，权限收窄到仅本用户可读写（Unix）。
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(0o600))?;
-    }
+    // 先收紧权限再写入密钥，避免创建瞬间按默认权限把明文暴露出去。
+    write_private_file(&temp_path, &body)?;
 
     std::fs::rename(&temp_path, path)?;
     Ok(())
+}
+
+/// 把明文写到仅当前用户可读写的文件。
+///
+/// 已存在的文件先收紧权限再截断，避免沿用旧的宽松 ACL。Unix 用 `0o600`；
+/// Windows 去掉继承并只授予当前用户读写。
+fn write_private_file(path: &Path, body: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        if path.exists() {
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)?;
+        file.write_all(body.as_bytes())?;
+        return Ok(());
+    }
+
+    #[cfg(windows)]
+    {
+        use std::io::Write;
+        use std::os::windows::process::CommandExt;
+        if !path.exists() {
+            std::fs::File::create(path)?;
+        }
+        let user = std::env::var("USERNAME").map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "USERNAME is unset, cannot restrict credential file",
+            )
+        })?;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let output = std::process::Command::new("icacls")
+            .arg(path)
+            .arg("/inheritance:r")
+            .arg("/grant:r")
+            .arg(format!("{user}:(R,W)"))
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()?;
+        if !output.status.success() {
+            let detail = String::from_utf8_lossy(&output.stderr);
+            let detail = detail.trim();
+            return Err(std::io::Error::other(format!(
+                "failed to restrict credential file permissions: {detail}"
+            )));
+        }
+        let mut file = std::fs::OpenOptions::new()
+            .write(true)
+            .truncate(true)
+            .open(path)?;
+        file.write_all(body.as_bytes())?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(unix, windows)))]
+    {
+        std::fs::write(path, body)
+    }
 }
 
 fn file_set(path: &Path, credential_ref: &str, secret: &str) -> BackendResult<()> {
@@ -584,6 +642,30 @@ mod tests {
 
         let reopened = CredentialStore::file(dir.path().join(FILE_NAME));
         assert_eq!(reopened.get("ref").unwrap(), "persisted");
+    }
+
+    /// 密钥明文落盘，文件权限必须是仅本用户可读写。
+    #[cfg(windows)]
+    #[test]
+    fn file_backend_restricts_permissions_to_current_user() {
+        let (dir, store) = temp_store();
+        store.set("ref", "secret").unwrap();
+        let path = dir.path().join(FILE_NAME);
+        let output = std::process::Command::new("icacls")
+            .arg(&path)
+            .output()
+            .expect("icacls");
+        assert!(output.status.success(), "icacls failed");
+        let text = String::from_utf8_lossy(&output.stdout);
+        let lowered = text.to_ascii_lowercase();
+        let user = std::env::var("USERNAME").expect("USERNAME");
+        assert!(
+            lowered.contains(&user.to_ascii_lowercase()),
+            "current user missing from ACL: {text}"
+        );
+        assert!(!lowered.contains("everyone"), "{text}");
+        assert!(!lowered.contains("所有人"), "{text}");
+        assert!(!lowered.contains("\\users:"), "{text}");
     }
 
     /// 密钥明文落盘，文件权限必须是仅本用户可读写（0600）。

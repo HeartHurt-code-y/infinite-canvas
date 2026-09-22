@@ -726,6 +726,9 @@ export class WhiteModelViewportController {
   private updatePath(visual: ActorVisual, actor: WhiteModelObject, selected: boolean): void {
     (visual.path.material as THREE.LineBasicMaterial).opacity = selected ? 1 : 0.45;
     visual.waypointGroup.visible = selected;
+    // 截站位图会先把路径藏起来。关键帧数组引用没变时下面会提前返回，
+    // 可见性必须在返回前按关键帧数量恢复，否则路径会一直消失。
+    visual.path.visible = actor.keyframes.length > 1;
     if (visual.pathKeyframes === actor.keyframes) return;
     visual.pathKeyframes = actor.keyframes;
     const points = actor.keyframes.map((frame) =>
@@ -733,7 +736,6 @@ export class WhiteModelViewportController {
     );
     visual.path.geometry.dispose();
     visual.path.geometry = new THREE.BufferGeometry().setFromPoints(points);
-    visual.path.visible = points.length > 1;
     visual.waypoints.forEach((disc, index) => {
       const frame = actor.keyframes[index];
       if (!frame) return;

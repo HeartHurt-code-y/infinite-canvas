@@ -1576,7 +1576,8 @@ export function cleanGeneratedPrompt(text: string): string {
 
   const paragraphs = text.split(/\n{2,}/);
   // 从末尾向前移除附加说明段落，遇到非附加说明段落即停止。
-  while (paragraphs.length > 0 && isTrailingMeta(paragraphs[paragraphs.length - 1]!)) {
+  // 至少保留一段：整段提示词若恰好命中前缀（如「根据参考图…」），不能被清成空字符串。
+  while (paragraphs.length > 1 && isTrailingMeta(paragraphs[paragraphs.length - 1]!)) {
     paragraphs.pop();
   }
   let result = paragraphs.join("\n\n");
