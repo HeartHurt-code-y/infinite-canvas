@@ -323,7 +323,31 @@ function seedreamVersionParameters(
   return parameters;
 }
 
+/** gpt-image-2.5（sunburst / flare）走异步任务接口：画幅和分辨率，而不是 size / quality。 */
+export function isAsyncImageTaskModel(modelId: string): boolean {
+  const normalized = modelId.toLocaleLowerCase();
+  return normalized.includes("gpt-image-2.5") || normalized.includes("gpt-image-2-5");
+}
+
 function textToImageParameters(modelId: string): Record<string, unknown> {
+  if (isAsyncImageTaskModel(modelId)) {
+    return {
+      aspect_ratio: {
+        type: "string",
+        label: "画幅",
+        default: "1:1",
+        enum: ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"],
+        order: 1,
+      },
+      resolution: {
+        type: "string",
+        label: "分辨率",
+        default: "2k",
+        enum: ["1k", "2k", "4k"],
+        order: 2,
+      },
+    };
+  }
   // Doubao Seedream 契约：2K 尺寸 / standard-hd 质量 / 水印 + 版本高级参数。
   if (isSeedreamImageModel(modelId)) {
     const version = seedreamImageVersion(modelId) ?? "generic";

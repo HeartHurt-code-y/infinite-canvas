@@ -727,6 +727,7 @@ pub fn schema_for_enabled_operations(
     refresh_vidu_video_defaults(&mut schema, model_id);
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
     refresh_seedream_image_parameter_defaults(&mut schema, model_id);
+    refresh_async_image_task_defaults(&mut schema, model_id);
     // 端点属于供应商连接：上面按模型名推导出的契约（以及供应商下发的自定义契约）
     // 统一改写到本连接的方言上。方舟连接因此保留原生路径，网关连接一定拿到
     // `/v1/...` 端点。
@@ -1115,6 +1116,34 @@ fn seedream_append_version_parameters(
     }
 }
 
+/// `gpt-image-2.5`（sunburst / flare）走异步任务接口：
+/// `POST /v1/images/generations` 只换回任务号，结果再查
+/// `GET /v1/images/tasks/{id}`。请求体是 `aspect_ratio` + `resolution`，
+/// 不是上一代 gpt-image 的 `size` / `quality`。
+fn is_async_image_task_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    identity.contains("gpt-image-2.5") || identity.contains("gpt-image-2-5")
+}
+
+fn async_image_task_parameters() -> Value {
+    json!({
+        "aspect_ratio": {
+            "type": "string",
+            "label": "画幅",
+            "default": "1:1",
+            "enum": ["1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3", "21:9"],
+            "order": 1
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "default": "2k",
+            "enum": ["1k", "2k", "4k"],
+            "order": 2
+        }
+    })
+}
+
 /// GPT-Image 契约的尺寸参数：接口文档规定只接受 `auto` 与三种标准尺寸。
 fn gpt_image_size_parameter() -> Value {
     json!({
@@ -1227,6 +1256,20 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
         GenerationOperation::TextToImage => {
+            if is_async_image_task_model(model_id) {
+                return json!({
+                    "resultType": "image",
+                    "requestProfileId": "openai_image_tasks_v1",
+                    "profileVersion": 1,
+                    "request": {
+                        "path": "/v1/images/generations",
+                        "encoding": "json",
+                        "parameterContainer": "root",
+                        "observePath": "/v1/images/tasks/{task_id}"
+                    },
+                    "parameters": async_image_task_parameters()
+                });
+            }
             // Doubao Seedream 契约（moyu 聚合平台）：`size` 只接受 `2K` 及 ≥2K 的
             // 像素尺寸（低于 3686400 像素会被上游拒绝），`quality` 仅 standard/hd，
             // 并支持 watermark 与按版本区分的组图/提示词优化/联网搜索/输出格式参数。
@@ -2216,6 +2259,72 @@ pub fn refresh_minimax_h3_video_defaults(schema: &mut Value, model_id: &str) -> 
     *operation = replacement;
     true
 }
+/// 已保存的 gpt-image-2.5 若仍是上一代 `size` / `quality` 契约，改写成异步任务契约。
+/// 供应商另外声明的参数保留；`size` / `quality` / `n` / `response_format` 不再发送。
+fn refresh_async_image_task_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_async_image_task_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut("text_to_image")
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    let profile = operation.get("requestProfileId").and_then(Value::as_str);
+    let observe = operation
+        .get("request")
+        .and_then(|request| request.get("observePath"))
+        .and_then(Value::as_str);
+    let parameters = operation.get("parameters");
+    let ready = profile == Some("openai_image_tasks_v1")
+        && observe == Some("/v1/images/tasks/{task_id}")
+        && parameters
+            .and_then(|parameters| parameters.get("aspect_ratio"))
+            .is_some()
+        && parameters
+            .and_then(|parameters| parameters.get("resolution"))
+            .is_some();
+    if ready {
+        return false;
+    }
+    if !matches!(
+        profile,
+        None | Some("openai_images_v1") | Some("openai_image_tasks_v1")
+    ) {
+        return false;
+    }
+
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::TextToImage)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    if let Some(provided_parameters) = operation.get("parameters").and_then(Value::as_object)
+        && let Some(target_parameters) = replacement
+            .get_mut("parameters")
+            .and_then(Value::as_object_mut)
+    {
+        for (key, value) in provided_parameters {
+            if matches!(key.as_str(), "size" | "quality" | "n" | "response_format") {
+                continue;
+            }
+            target_parameters
+                .entry(key.clone())
+                .or_insert_with(|| value.clone());
+        }
+    }
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
 /// 历史版本写入的文生图默认参数（dall-e 契约）。gpt-image 系列的供应商会以
 /// HTTP 400 拒绝其中的 `standard`/`hd` 质量与 dall-e 尺寸，需要迁移。
 fn legacy_text_to_image_parameters() -> Value {
@@ -4069,6 +4178,60 @@ mod tests {
                 "model {model_id}"
             );
         }
+    }
+
+    #[test]
+    fn async_image_task_models_use_aspect_ratio_resolution_and_task_polling() {
+        let fresh = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-sunburst",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::OpenAiCompatible,
+        );
+        let definition = &fresh["text_to_image"];
+        assert_eq!(definition["requestProfileId"], "openai_image_tasks_v1");
+        assert_eq!(definition["request"]["path"], "/v1/images/generations");
+        assert_eq!(
+            definition["request"]["observePath"],
+            "/v1/images/tasks/{task_id}"
+        );
+        assert_eq!(definition["parameters"]["aspect_ratio"]["default"], "1:1");
+        assert_eq!(definition["parameters"]["resolution"]["default"], "2k");
+        assert!(definition["parameters"].get("size").is_none());
+        assert!(definition["parameters"].get("quality").is_none());
+
+        let classic = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::OpenAiCompatible,
+        );
+        assert_eq!(
+            classic["text_to_image"]["requestProfileId"],
+            "openai_images_v1"
+        );
+        assert!(
+            classic["text_to_image"]["request"]
+                .get("observePath")
+                .is_none()
+        );
+
+        let saved = schema_for_enabled_operations(
+            &classic,
+            "gpt-image-2.5-flare",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::OpenAiCompatible,
+        );
+        assert_eq!(
+            saved["text_to_image"]["request"]["observePath"],
+            "/v1/images/tasks/{task_id}"
+        );
+        assert!(
+            saved["text_to_image"]["parameters"]
+                .get("aspect_ratio")
+                .is_some()
+        );
+        assert!(saved["text_to_image"]["parameters"].get("size").is_none());
     }
 
     #[test]

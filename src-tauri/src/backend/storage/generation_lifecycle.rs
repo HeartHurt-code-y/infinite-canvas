@@ -1315,11 +1315,11 @@ fn decide_transition(
                 ],
                 "accept remote video task",
             )?;
-            if current.operation != GenerationOperation::VideoGeneration {
+            if !polls_remote_generation(current.operation) {
                 return Err(illegal_transition(
                     task_id,
                     current.status,
-                    "accept remote task for a non-video operation",
+                    "accept remote task for an operation that does not poll",
                 ));
             }
             let remote_task_id = remote_task_id.trim();
@@ -1524,15 +1524,23 @@ fn require_remote_observation(task_id: &str, current: &CurrentTaskState) -> Back
         &[GenerationTaskStatus::Queued, GenerationTaskStatus::Running],
         "record remote observation",
     )?;
-    if current.operation != GenerationOperation::VideoGeneration || current.remote_task_id.is_none()
-    {
+    if !polls_remote_generation(current.operation) || current.remote_task_id.is_none() {
         return Err(illegal_transition(
             task_id,
             current.status,
-            "record remote observation without a video remote identity",
+            "record remote observation without a remote task identity",
         ));
     }
     Ok(())
+}
+
+fn polls_remote_generation(operation: GenerationOperation) -> bool {
+    matches!(
+        operation,
+        GenerationOperation::VideoGeneration
+            | GenerationOperation::TextToImage
+            | GenerationOperation::ImageToImage
+    )
 }
 
 fn merge_progress(

@@ -267,9 +267,17 @@ impl GenerationTaskService {
             failed_to_recover: Vec::new(),
         };
         for task in tasks {
-            if task.operation == GenerationOperation::VideoGeneration
-                && task.remote_task_id.is_some()
-            {
+            let resumable = task
+                .remote_task_id
+                .as_deref()
+                .is_some_and(|id| !id.trim().is_empty())
+                && matches!(
+                    task.operation,
+                    GenerationOperation::VideoGeneration
+                        | GenerationOperation::TextToImage
+                        | GenerationOperation::ImageToImage
+                );
+            if resumable {
                 if matches!(
                     task.status,
                     GenerationTaskStatus::Created
@@ -292,8 +300,13 @@ impl GenerationTaskService {
                     }
                 }
                 report.recovered_video_tasks += 1;
+                let kind = if task.operation == GenerationOperation::VideoGeneration {
+                    "视频"
+                } else {
+                    "图片"
+                };
                 info!(
-                    "[generation] 启动恢复: 恢复视频任务轮询: taskId={}, remoteTaskId={}",
+                    "[generation] 启动恢复: 恢复{kind}任务轮询: taskId={}, remoteTaskId={}",
                     task.id,
                     task.remote_task_id.as_deref().unwrap_or("<缺失>")
                 );
@@ -405,7 +418,7 @@ impl GenerationTaskService {
             });
         }
         info!(
-            "[generation] 启动恢复完成: 恢复视频任务 {} 个, 标记中断任务 {} 个, 恢复本地保存 {} 个, 恢复失败 {} 个{}",
+            "[generation] 启动恢复完成: 恢复远程任务 {} 个, 标记中断任务 {} 个, 恢复本地保存 {} 个, 恢复失败 {} 个{}",
             report.recovered_video_tasks,
             report.interrupted_image_tasks,
             report.resumed_local_saves,
@@ -422,7 +435,13 @@ impl GenerationTaskService {
     pub fn query_remote_now(&self, task_id: &str) -> BackendResult<()> {
         info!("[generation] 用户手动触发视频任务状态查询: taskId={task_id}");
         let task = self.storage.get_task_execution(task_id)?;
-        if task.operation != GenerationOperation::VideoGeneration
+        let pollable = matches!(
+            task.operation,
+            GenerationOperation::VideoGeneration
+                | GenerationOperation::TextToImage
+                | GenerationOperation::ImageToImage
+        );
+        if !pollable
             || task
                 .remote_task_id
                 .as_deref()
@@ -433,7 +452,7 @@ impl GenerationTaskService {
             )
         {
             return Err(BackendError::validation(
-                "only a queued or running video task with a remote task id can resume polling",
+                "only a queued or running remote generation task with a remote task id can resume polling",
                 json!({ "taskId": task_id, "status": task.status }),
             ));
         }
@@ -568,7 +587,10 @@ impl GenerationTaskService {
                 }
                 Ok(())
             }
-            GenerationSubmission::RemoteVideoTask {
+            GenerationSubmission::RemoteImageTask {
+                task_id: remote_task_id,
+            }
+            | GenerationSubmission::RemoteVideoTask {
                 task_id: remote_task_id,
             } => {
                 self.commit_fact(
@@ -580,8 +602,13 @@ impl GenerationTaskService {
                         remote_task_id: remote_task_id.clone(),
                     },
                 )?;
+                let kind = if task.operation == GenerationOperation::VideoGeneration {
+                    "视频"
+                } else {
+                    "图片"
+                };
                 info!(
-                    "[generation] 视频任务已提交成功，获得远程任务 ID，进入轮询阶段: taskId={task_id}, remoteTaskId={remote_task_id}"
+                    "[generation] {kind}任务已提交成功，获得远程任务 ID，进入轮询阶段: taskId={task_id}, remoteTaskId={remote_task_id}"
                 );
                 self.poll_video_with_leases(task_id, bundle.staging_leases)
                     .await
@@ -627,11 +654,14 @@ impl GenerationTaskService {
                                 images.len()
                             );
                         }
-                        GenerationSubmission::RemoteVideoTask {
+                        GenerationSubmission::RemoteImageTask {
+                            task_id: remote_task_id,
+                        }
+                        | GenerationSubmission::RemoteVideoTask {
                             task_id: remote_task_id,
                         } => {
                             info!(
-                                "[generation] 提交尝试成功: taskId={}, attemptId={}, 返回远程视频任务 {remote_task_id}",
+                                "[generation] 提交尝试成功: taskId={}, attemptId={}, 返回远程任务 {remote_task_id}",
                                 task.id, attempt_id
                             );
                         }
@@ -693,6 +723,110 @@ impl GenerationTaskService {
             "submission retry loop exited without a result",
             json!({ "taskId": task.id }),
         ))
+    }
+
+    async fn finish_remote_images(
+        &self,
+        task_id: &str,
+        observed: SuccessfulObservation,
+        staging_leases: &[super::staging::StagingLease],
+    ) -> BackendResult<()> {
+        let SuccessfulObservation {
+            attempt_id,
+            call_id,
+            observation,
+            tokens,
+        } = observed;
+        let remote_status = observation.remote_status;
+        let images = observation.images;
+        if images.is_empty() {
+            error!(
+                "[generation] 远端图片任务已结束但没有图片: taskId={task_id}, 远端状态={remote_status}"
+            );
+            let failure = json!({
+                "kind": "remote_generation_failure",
+                "message": "image task completed without an image payload",
+                "remoteStatus": remote_status
+            });
+            self.commit_fact(
+                task_id,
+                GenerationLifecycleFact::ObservationApplied {
+                    attempt_id,
+                    call_id,
+                    tokens,
+                    observation: GenerationRemoteObservation::Failed {
+                        progress: None,
+                        error: failure,
+                    },
+                },
+            )?;
+            self.cleanup_staging_leases(task_id, staging_leases).await;
+            return Ok(());
+        }
+
+        info!(
+            "[generation] 供应商返回图片结果 {} 个，开始本地保存: taskId={task_id}",
+            images.len()
+        );
+        let Some(first) = self
+            .local_results
+            .pending_image_results(task_id, &images)
+            .into_iter()
+            .next()
+        else {
+            return Err(BackendError::protocol(
+                "image task completed without an image payload",
+                json!({ "taskId": task_id, "remoteStatus": remote_status }),
+            ));
+        };
+        self.commit_fact(
+            task_id,
+            GenerationLifecycleFact::ObservationApplied {
+                attempt_id,
+                call_id,
+                tokens,
+                observation: GenerationRemoteObservation::Succeeded { result: first },
+            },
+        )?;
+        let event_service = self.clone();
+        let progress_service = self.clone();
+        let progress_task_id = task_id.to_string();
+        let results = self
+            .local_results
+            .save_images(
+                task_id,
+                images,
+                move |record, preview_src| {
+                    event_service.emit_result_ready(record, preview_src);
+                },
+                move |result_index, progress| {
+                    progress_service.emit_save_progress(&progress_task_id, result_index, progress);
+                },
+            )
+            .await?;
+        for result in results {
+            let error_suffix = result
+                .error
+                .as_ref()
+                .map(|error| format!("，错误: {error}"))
+                .unwrap_or_default();
+            info!(
+                "[generation] 图片结果处理完成: taskId={task_id}, resultIndex={}, 保存状态={}, 最终路径={:?}, 大小={} 字节{error_suffix}",
+                result.result_index,
+                result.save_status.as_str(),
+                result.final_path,
+                result
+                    .byte_size
+                    .map(|size| size.to_string())
+                    .unwrap_or_default(),
+            );
+            self.emit(
+                "generation:result-saved",
+                &json!({ "taskId": task_id, "result": result }),
+            );
+        }
+        self.cleanup_staging_leases(task_id, staging_leases).await;
+        Ok(())
     }
 
     async fn poll_video(&self, task_id: &str) -> BackendResult<()> {
@@ -831,10 +965,15 @@ impl GenerationTaskService {
                 observation,
                 tokens,
             } = successful_observation;
+            let image_task = matches!(
+                self.storage.get_task_execution(task_id)?.operation,
+                GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+            );
+            let kind = if image_task { "图片" } else { "视频" };
             match observation.remote_status.to_ascii_uppercase().as_str() {
                 "NOT_START" | "SUBMITTED" | "QUEUED" | "PENDING" => {
                     info!(
-                        "[generation] 视频任务远端排队中: taskId={}, 远端状态={}, 进度={:?}",
+                        "[generation] {kind}任务远端排队中: taskId={}, 远端状态={}, 进度={:?}",
                         task_id, observation.remote_status, observation.progress
                     );
                     self.commit_fact(
@@ -851,7 +990,7 @@ impl GenerationTaskService {
                 }
                 "IN_PROGRESS" | "PROCESSING" | "RUNNING" => {
                     info!(
-                        "[generation] 视频任务远端生成中: taskId={}, 远端状态={}, 进度={:?}",
+                        "[generation] {kind}任务远端生成中: taskId={}, 远端状态={}, 进度={:?}",
                         task_id, observation.remote_status, observation.progress
                     );
                     self.commit_fact(
@@ -867,6 +1006,20 @@ impl GenerationTaskService {
                     )?;
                 }
                 "SUCCESS" | "SUCCEEDED" | "COMPLETED" => {
+                    if image_task {
+                        return self
+                            .finish_remote_images(
+                                task_id,
+                                SuccessfulObservation {
+                                    attempt_id,
+                                    call_id,
+                                    observation,
+                                    tokens,
+                                },
+                                &staging_leases,
+                            )
+                            .await;
+                    }
                     let task = self.storage.get_task_execution(task_id)?;
                     let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
                         BackendError::protocol(
@@ -1069,6 +1222,20 @@ impl GenerationTaskService {
                     return Ok(());
                 }
                 other => {
+                    if image_task && !observation.images.is_empty() {
+                        return self
+                            .finish_remote_images(
+                                task_id,
+                                SuccessfulObservation {
+                                    attempt_id,
+                                    call_id,
+                                    observation,
+                                    tokens,
+                                },
+                                &staging_leases,
+                            )
+                            .await;
+                    }
                     let error = json!({
                         "kind": "unknown_remote_status",
                         "message": format!("unknown remote video status: {other}"),

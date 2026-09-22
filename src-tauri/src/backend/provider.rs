@@ -346,7 +346,13 @@ fn media_kind_rank(media_type: MediaType) -> u8 {
 #[derive(Debug, Clone)]
 pub enum GenerationSubmission {
     Images(Vec<ImageSource>),
-    RemoteVideoTask { task_id: String },
+    /// `POST /v1/images/generations` 返回 202 和任务号，图片还要再查。
+    RemoteImageTask {
+        task_id: String,
+    },
+    RemoteVideoTask {
+        task_id: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -357,6 +363,8 @@ pub struct GenerationObservation {
     /// Context-IR（h3_context_ir）任务产出的是扩写文本，位于查询响应的
     /// `data.data.task.content.prompt`；视频任务此字段为 None。
     pub text_content: Option<String>,
+    /// 异步图片任务完成时的产物。视频观察此字段为空。
+    pub images: Vec<ImageSource>,
     pub failure: Option<Value>,
 }
 
@@ -1472,12 +1480,20 @@ impl ProviderRuntime {
     ) -> BackendResult<(GenerationObservation, CapturedHttpResponse)> {
         let _ = task.remote_task_id.as_deref().ok_or_else(|| {
             BackendError::validation(
-                "video task has no remote task id",
+                "remote generation task has no remote task id",
                 json!({ "taskId": task.id }),
             )
         })?;
         let context = self.resolve_frozen(task)?;
-        let path = video_observe_path(&self.storage, task)?;
+        let image_task = matches!(
+            task.operation,
+            GenerationOperation::TextToImage | GenerationOperation::ImageToImage
+        );
+        let path = if image_task {
+            image_observe_path(&self.storage, task)?
+        } else {
+            video_observe_path(&self.storage, task)?
+        };
         let empty_body = Value::Null;
         let response = self
             .captured_json(
@@ -1492,7 +1508,11 @@ impl ProviderRuntime {
                 },
             )
             .await?;
-        let observation = parse_video_observation(&response)?;
+        let observation = if image_task {
+            parse_image_observation(&response)?
+        } else {
+            parse_video_observation(&response)?
+        };
         Ok((observation, response))
     }
 
@@ -3341,6 +3361,34 @@ fn video_observe_path_from_schema(
         Some(template) => template.replace("{task_id}", remote_task_id),
         None => format!("/v1/video/generations/{remote_task_id}"),
     };
+    checked_observe_path(path)
+}
+
+const IMAGE_TASK_OBSERVE_TEMPLATE: &str = "/v1/images/tasks/{task_id}";
+
+/// 异步图片任务的默认轮询路径是 `GET /v1/images/tasks/{id}`。
+/// 模型可以在对应操作的 `request.observePath` 里改掉它。
+fn image_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
+    let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
+    let operations = storage
+        .list_model_definitions()?
+        .into_iter()
+        .find(|definition| definition.id == task.model_definition_id)
+        .map(|definition| definition.operations);
+    let pointer = format!("/{}/request/observePath", task.operation.as_str());
+    let template = operations.as_ref().and_then(|schema| {
+        schema
+            .pointer(&pointer)
+            .or_else(|| schema.pointer("/request/observePath"))
+            .and_then(Value::as_str)
+    });
+    let path = template
+        .unwrap_or(IMAGE_TASK_OBSERVE_TEMPLATE)
+        .replace("{task_id}", remote_task_id);
+    checked_observe_path(path)
+}
+
+fn checked_observe_path(path: String) -> BackendResult<String> {
     if !path.starts_with('/')
         || path.starts_with("//")
         || path.contains('?')
@@ -4371,6 +4419,76 @@ fn parse_image_submission(
 ) -> BackendResult<GenerationSubmission> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
+    let sources = extract_image_sources(&value, require_base64);
+    if !sources.is_empty() {
+        return Ok(GenerationSubmission::Images(sources));
+    }
+    // 同步接口直接带图。没有图、但有任务号和排队状态（常见是 HTTP 202）时，
+    // 这是异步任务单，结果要再查 `GET /v1/images/tasks/{id}`。
+    if let Some(task_id) = image_task_ticket(&value, response.status) {
+        return Ok(GenerationSubmission::RemoteImageTask { task_id });
+    }
+    if let Some(message) = image_task_failure_message(&value) {
+        return Err(BackendError::protocol(
+            format!("image task failed: {message}"),
+            json!({ "httpStatus": response.status, "rawResponse": response.body }),
+        ));
+    }
+    Err(BackendError::protocol(
+        "image response did not contain a valid result",
+        json!({ "httpStatus": response.status, "rawResponse": response.body }),
+    ))
+}
+
+fn parse_image_observation(
+    response: &CapturedHttpResponse,
+) -> BackendResult<GenerationObservation> {
+    require_success(response)?;
+    let value: Value = serde_json::from_str(&response.body)?;
+    let images = extract_image_sources(&value, false);
+    let remote_status = value
+        .pointer("/output/task_status")
+        .or_else(|| value.pointer("/data/status"))
+        .or_else(|| value.get("status"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|status| !status.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| (!images.is_empty()).then(|| "succeeded".to_string()))
+        .ok_or_else(|| {
+            BackendError::protocol(
+                "image observation did not return status",
+                json!({ "httpStatus": response.status, "rawResponse": response.body }),
+            )
+        })?;
+    let progress = value
+        .pointer("/data/progress")
+        .or_else(|| value.get("progress"))
+        .and_then(parse_progress);
+    let fail_reason = value
+        .get("error")
+        .cloned()
+        .or_else(|| value.get("message").cloned());
+    let remote_failed = matches!(
+        remote_status.to_ascii_lowercase().as_str(),
+        "failure" | "failed" | "canceled" | "cancelled" | "error"
+    );
+    let failure = if remote_failed {
+        Some(json!({ "failReason": fail_reason }))
+    } else {
+        None
+    };
+    Ok(GenerationObservation {
+        remote_status,
+        progress,
+        video_url: None,
+        text_content: None,
+        images,
+        failure,
+    })
+}
+
+fn extract_image_sources(value: &Value, require_base64: bool) -> Vec<ImageSource> {
     let mut sources = Vec::new();
     if let Some(items) = value.get("data").and_then(Value::as_array) {
         for item in items {
@@ -4418,24 +4536,150 @@ fn parse_image_submission(
     }
     if !require_base64 {
         if let Some(urls) = value.pointer("/data/image_urls").and_then(Value::as_array) {
-            sources.extend(
-                urls.iter()
-                    .filter_map(Value::as_str)
-                    .filter(|url| !url.is_empty())
-                    .map(|url| ImageSource::Url {
-                        url: url.to_string(),
-                        layer: None,
-                    }),
-            );
+            for url in urls.iter().filter_map(Value::as_str) {
+                push_unique_image_url(&mut sources, url);
+            }
+        }
+        collect_additional_image_sources(value, &mut sources);
+    }
+    sources
+}
+
+fn collect_additional_image_sources(value: &Value, sources: &mut Vec<ImageSource>) {
+    const URL_ARRAYS: &[&str] = &[
+        "/output/image_urls",
+        "/result/image_urls",
+        "/image_urls",
+        "/images",
+    ];
+    const URLS: &[&str] = &[
+        "/output/url",
+        "/output/image_url",
+        "/result/url",
+        "/result/image_url",
+        "/image_url",
+        "/url",
+    ];
+    const BASE64S: &[&str] = &["/output/b64_json", "/result/b64_json", "/b64_json"];
+    for path in URL_ARRAYS {
+        let Some(items) = value.pointer(path).and_then(Value::as_array) else {
+            continue;
+        };
+        for item in items {
+            if let Some(url) = item.as_str() {
+                push_unique_image_url(sources, url);
+            } else if let Some(url) = item.get("url").and_then(Value::as_str) {
+                push_unique_image_url(sources, url);
+            } else if let Some(data) = item.get("b64_json").and_then(Value::as_str) {
+                push_unique_image_base64(sources, data);
+            }
         }
     }
-    if sources.is_empty() {
-        return Err(BackendError::protocol(
-            "image response did not contain a valid result",
-            json!({ "httpStatus": response.status, "rawResponse": response.body }),
-        ));
+    for path in URLS {
+        if let Some(url) = value.pointer(path).and_then(Value::as_str) {
+            push_unique_image_url(sources, url);
+        }
     }
-    Ok(GenerationSubmission::Images(sources))
+    for path in BASE64S {
+        if let Some(data) = value.pointer(path).and_then(Value::as_str) {
+            push_unique_image_base64(sources, data);
+        }
+    }
+}
+
+fn push_unique_image_url(sources: &mut Vec<ImageSource>, url: &str) {
+    let url = url.trim();
+    if url.is_empty()
+        || !(url.starts_with("https://") || url.starts_with("http://") || url.starts_with("data:"))
+    {
+        return;
+    }
+    if sources
+        .iter()
+        .any(|source| matches!(source, ImageSource::Url { url: existing, .. } if existing == url))
+    {
+        return;
+    }
+    sources.push(ImageSource::Url {
+        url: url.to_string(),
+        layer: None,
+    });
+}
+
+fn push_unique_image_base64(sources: &mut Vec<ImageSource>, data: &str) {
+    let data = data.trim();
+    if data.is_empty() {
+        return;
+    }
+    if sources.iter().any(
+        |source| matches!(source, ImageSource::Base64 { data: existing, .. } if existing == data),
+    ) {
+        return;
+    }
+    sources.push(ImageSource::Base64 {
+        data: data.to_string(),
+        layer: None,
+    });
+}
+
+/// 提交响应里没有图片、但带了任务号，并且状态还在排队或生成中。
+/// HTTP 202 即使没写 status，也按任务单处理。
+fn image_task_ticket(value: &Value, http_status: u16) -> Option<String> {
+    let task_id = value
+        .get("id")
+        .or_else(|| value.get("task_id"))
+        .or_else(|| value.pointer("/data/id"))
+        .or_else(|| value.pointer("/data/task_id"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|task_id| !task_id.is_empty())?;
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/data/status"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    let in_progress = matches!(
+        status.as_str(),
+        "queued"
+            | "pending"
+            | "submitted"
+            | "not_start"
+            | "created"
+            | "running"
+            | "processing"
+            | "in_progress"
+    );
+    (http_status == 202 || in_progress).then(|| task_id.to_string())
+}
+
+fn image_task_failure_message(value: &Value) -> Option<String> {
+    let status = value
+        .get("status")
+        .or_else(|| value.pointer("/data/status"))
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .trim()
+        .to_ascii_lowercase();
+    if !matches!(
+        status.as_str(),
+        "failed" | "failure" | "canceled" | "cancelled" | "error"
+    ) {
+        return None;
+    }
+    value
+        .get("error")
+        .and_then(|error| {
+            error
+                .as_str()
+                .or_else(|| error.get("message").and_then(Value::as_str))
+        })
+        .or_else(|| value.get("message").and_then(Value::as_str))
+        .map(str::trim)
+        .filter(|message| !message.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| Some("image task failed".to_string()))
 }
 
 fn parse_video_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
@@ -4533,6 +4777,7 @@ fn parse_video_observation(
         progress,
         video_url,
         text_content,
+        images: Vec::new(),
         failure,
     })
 }
@@ -8499,6 +8744,102 @@ mod tests {
         };
         assert!(matches!(images[0], ImageSource::Url { .. }));
         assert!(matches!(images[1], ImageSource::Base64 { .. }));
+    }
+
+    #[test]
+    fn async_image_task_submission_returns_the_task_id() {
+        let accepted = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 202,
+            headers: json!({}),
+            body: json!({
+                "id": "task-9",
+                "status": "queued",
+                "reservedMicros": 250000
+            })
+            .to_string(),
+        };
+        let GenerationSubmission::RemoteImageTask { task_id } =
+            parse_image_submission(&accepted, false).expect("task ticket")
+        else {
+            panic!("expected a remote image task");
+        };
+        assert_eq!(task_id, "task-9");
+
+        // 同步响应即使带了 id，只要已经有图，就直接收下，不再去轮询。
+        let immediate = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "id": "resp-1",
+                "data": [{ "url": "https://example.com/a.png" }]
+            })
+            .to_string(),
+        };
+        let GenerationSubmission::Images(images) =
+            parse_image_submission(&immediate, false).expect("images")
+        else {
+            panic!("expected images");
+        };
+        assert_eq!(images.len(), 1);
+
+        let failed = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({ "id": "task-9", "status": "failed", "error": "content policy" })
+                .to_string(),
+        };
+        let error = parse_image_submission(&failed, false).expect_err("failed task");
+        assert!(error.to_string().contains("content policy"));
+    }
+
+    #[test]
+    fn async_image_task_observation_reads_result_images() {
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "id": "task-9",
+                "status": "succeeded",
+                "output": { "image_urls": ["https://cdn.example/cat.png"] }
+            })
+            .to_string(),
+        };
+        let observation = parse_image_observation(&response).expect("observation");
+        assert_eq!(observation.remote_status, "succeeded");
+        match observation.images.as_slice() {
+            [ImageSource::Url { url, .. }] => assert_eq!(url, "https://cdn.example/cat.png"),
+            other => panic!("expected one image url, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn async_image_task_request_body_uses_aspect_ratio_and_resolution() {
+        let schema = super::super::model_schema::schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-sunburst",
+            &[GenerationOperation::TextToImage],
+            super::super::model_schema::RequestDialect::OpenAiCompatible,
+        );
+        let mut record = task(GenerationOperation::TextToImage);
+        record.remote_model_id_snapshot = Some("gpt-image-2.5-sunburst".into());
+        let body = build_text_to_image_body(
+            &record,
+            &resolved(
+                schema["text_to_image"].clone(),
+                json!({ "aspect_ratio": "16:9", "resolution": "2k" }),
+            ),
+        )
+        .expect("body");
+        assert_eq!(body["model"], "gpt-image-2.5-sunburst");
+        assert_eq!(body["aspect_ratio"], "16:9");
+        assert_eq!(body["resolution"], "2k");
+        assert!(body.get("size").is_none());
+        assert!(body.get("quality").is_none());
+        assert!(body.get("n").is_none());
     }
 
     #[test]

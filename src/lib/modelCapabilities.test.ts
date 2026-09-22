@@ -224,6 +224,19 @@ describe("model capabilities", () => {
     // HTTP 400 unknown_parameter 拒绝该键，结果恒为内联 Base64。
     expect(gptImage.some((capability) => capability.key === "response_format")).toBe(false);
 
+    const asyncImage = modelParameterCapabilities(
+      defaultModelOperationSchema("gpt-image-2.5-sunburst", ["text_to_image"]),
+      "text_to_image",
+      "gpt-image-2.5-sunburst",
+    );
+    expect(asyncImage.map((capability) => capability.key)).toEqual(["aspect_ratio", "resolution"]);
+    expect(asyncImage.find((capability) => capability.key === "aspect_ratio")?.options).toEqual(
+      expect.arrayContaining([expect.objectContaining({ value: "16:9" })]),
+    );
+    expect(asyncImage.find((capability) => capability.key === "resolution")?.defaultValue).toBe(
+      "2k",
+    );
+
     // 图生图（图片编辑 multipart 接口）同样声明 n/size/quality。
     const gptImageEdit = modelParameterCapabilities(
       defaultModelOperationSchema("gpt-image-2", ["image_to_image"]),
