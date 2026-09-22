@@ -94,6 +94,8 @@ export const CANVAS_CONNECTION_RADIUS = 48;
 
 export interface AssetItem {
   readonly id: string;
+  /** 素材审核任务号。只在详情里单独一行展示，不占用素材 ID。 */
+  readonly reviewTaskId?: string | null;
   readonly kind: AssetKind;
   readonly name: string;
   readonly meta: string;
@@ -2335,12 +2337,37 @@ export function formatTaskRawResponse(detail: {
   return null;
 }
 
+/** 审核任务号（`task-…`）。素材 ID 行不展示它。 */
+export function isReviewTaskId(id: string): boolean {
+  return id.length > "task-".length && id.slice(0, "task-".length).toLowerCase() === "task-";
+}
+
+/**
+ * 详情里的两行身份：素材 ID 只放真正的 asset id；任务号单独返回。
+ * 审核还没给出素材 ID 时，素材 ID 行写「尚未返回」。
+ */
+export function assetDetailIdentity(asset: {
+  readonly id: string;
+  readonly reviewTaskId?: string | null;
+}): { readonly assetId: string; readonly reviewTaskId: string | null } {
+  const fromField = asset.reviewTaskId?.trim() ?? "";
+  let reviewTaskId: string | null = null;
+  if (fromField !== "") reviewTaskId = fromField;
+  else if (isReviewTaskId(asset.id)) reviewTaskId = asset.id;
+  const assetId =
+    reviewTaskId != null && (asset.id === reviewTaskId || isReviewTaskId(asset.id))
+      ? "尚未返回"
+      : asset.id;
+  return { assetId, reviewTaskId };
+}
+
 export function cloudAssetToItem(asset: CloudAsset): AssetItem {
   const statusLabel = ASSET_CLOUD_STATUS_LABELS[asset.status];
   const meta =
     asset.status === "ready" ? (asset.assetUrl ?? asset.id) : `${statusLabel} · ${asset.rawStatus}`;
   return {
     id: asset.id,
+    reviewTaskId: asset.reviewTaskId ?? null,
     kind: asset.kind,
     name: asset.name,
     meta,

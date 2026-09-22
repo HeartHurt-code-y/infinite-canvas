@@ -1921,12 +1921,16 @@ impl AssetLibrary {
                 })?;
             match status.trim().to_ascii_lowercase().as_str() {
                 "active" | "ready" => {
-                    let asset_id = entry.get("id").and_then(asset_id_string).ok_or_else(|| {
-                        BackendError::protocol(
-                            "asset upload became active but returned no asset id",
-                            json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
-                        )
-                    })?;
+                    let asset_id = entry
+                        .as_object()
+                        .and_then(|record| canonical_asset_id(record, None))
+                        .filter(|value| !value.is_empty())
+                        .ok_or_else(|| {
+                            BackendError::protocol(
+                                "asset upload became active but returned no asset id",
+                                json!({ "dbId": placeholder_db_id, "rawResponse": response.body }),
+                            )
+                        })?;
                     if let Some(asset) =
                         parse_asset_entry(provider_connection_id, entry, Some(&asset_id))
                     {
@@ -2148,13 +2152,19 @@ impl AssetLibrary {
             ));
         }
         let payload: Value = serde_json::from_str(&response.body)?;
+        let data = payload.get("data").unwrap_or(&payload);
         let asset = parse_asset_entry(
             &identity.provider_connection_id,
-            payload.get("data").unwrap_or(&payload),
+            data,
             Some(&identity.asset_id),
         )
         .ok_or_else(|| BackendError::protocol("云素材没有返回可读取的记录。", json!({})))?;
-        if asset.id != identity.asset_id {
+        // 审核完成后 `id` 可能仍是任务号，规范身份已换成 asset_id。用任务号来续签时，
+        // 原始 `id` 对得上即可，不能把已经就绪的素材判成另一条。
+        if asset.id != identity.asset_id
+            && data.get("id").and_then(asset_id_string).as_deref()
+                != Some(identity.asset_id.as_str())
+        {
             return Err(BackendError::validation(
                 "云素材返回的身份与所选视频不一致，请重新选择素材。",
                 json!({}),
@@ -2475,9 +2485,12 @@ impl AssetLibrary {
             }
             let payload: Value = serde_json::from_str(&response.body)?;
             let item = payload.get("data").unwrap_or(&payload);
-            // 异步契约下轮询用的可能是任务/占位 ID，素材完成时真实素材 ID 会写回 `id` 字段
-            // （可能与轮询 ID 不同），因此不要求二者相等；Active 时优先采用返回的真实 ID。
-            let returned_asset_id = item.get("id").and_then(asset_id_string);
+            // 异步契约下轮询用的可能是审核任务 ID。完成后真实素材 ID 会写回 `id`，
+            // 也可能留在 `id` 里的仍是 `task-…`，真正的素材 ID 在 `asset_id`。
+            // 不要求返回 ID 与轮询 ID 相等；Active 时采用规范素材 ID。
+            let returned_asset_id = item
+                .as_object()
+                .and_then(|record| canonical_asset_id(record, None));
             consecutive_failures = 0;
             let status = item
                 .get("status")
@@ -2533,6 +2546,94 @@ fn asset_id_string(value: &Value) -> Option<String> {
         .filter(|id| !id.is_empty())
         .map(str::to_string)
         .or_else(|| value.as_u64().map(|id| id.to_string()))
+}
+
+/// 素材审核任务 ID。处理过程中它会占着 `id`，完成后真正的素材 ID 在 `asset_id`。
+fn is_review_task_id(id: &str) -> bool {
+    id.trim().len() > "task-".len()
+        && id
+            .trim()
+            .get(..5)
+            .is_some_and(|prefix| prefix.eq_ignore_ascii_case("task-"))
+}
+
+fn asset_scheme_identity(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    let rest = trimmed
+        .get(..8)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("asset://"))
+        .map(|_| &trimmed["asset://".len()..])?;
+    let id = rest.trim().trim_start_matches('/');
+    if id.is_empty() {
+        None
+    } else {
+        Some(id.to_string())
+    }
+}
+
+/// 素材库要展示和继续使用的身份。
+///
+/// `id` 在审核完成前是任务号（`task-…`）。完成后若另有 `asset_id`（或 `asset://` 引用），
+/// 用那个素材 ID；`id` 本身已经是素材 ID 时保持不动。还没有素材 ID 时才退回任务号。
+fn canonical_asset_id(record: &Map<String, Value>, fallback_id: Option<&str>) -> Option<String> {
+    let explicit = ["asset_id", "assetId", "AssetId"]
+        .into_iter()
+        .find_map(|key| record.get(key).and_then(asset_id_string))
+        .filter(|id| !is_review_task_id(id));
+    if explicit.is_some() {
+        return explicit;
+    }
+    let primary = record.get("id").and_then(asset_id_string);
+    if primary.as_ref().is_some_and(|id| !is_review_task_id(id)) {
+        return primary;
+    }
+    let from_url = ["asset_url", "assetUrl"]
+        .into_iter()
+        .find_map(|key| {
+            record
+                .get(key)
+                .and_then(Value::as_str)
+                .and_then(asset_scheme_identity)
+        })
+        .filter(|id| !is_review_task_id(id));
+    if from_url.is_some() {
+        return from_url;
+    }
+    let fallback = fallback_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty() && !is_review_task_id(id))
+        .map(str::to_string);
+    if fallback.is_some() {
+        return fallback;
+    }
+    primary.filter(|id| !id.is_empty()).or_else(|| {
+        fallback_id
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+            .map(str::to_string)
+    })
+}
+
+/// 审核任务号，只用于展示。不拿它充当素材 ID。
+fn review_task_id(record: &Map<String, Value>, fallback_id: Option<&str>) -> Option<String> {
+    let explicit = ["task_id", "taskId", "review_task_id", "reviewTaskId"]
+        .into_iter()
+        .find_map(|key| record.get(key).and_then(asset_id_string))
+        .filter(|id| is_review_task_id(id));
+    if explicit.is_some() {
+        return explicit;
+    }
+    let from_id = record
+        .get("id")
+        .and_then(asset_id_string)
+        .filter(|id| is_review_task_id(id));
+    if from_id.is_some() {
+        return from_id;
+    }
+    fallback_id
+        .map(str::trim)
+        .filter(|id| is_review_task_id(id))
+        .map(str::to_string)
 }
 
 /// 判断素材提交响应状态码是否属于可安全重试的瞬时网关故障。
@@ -2891,16 +2992,7 @@ fn parse_asset_entry(
     fallback_id: Option<&str>,
 ) -> Option<CloudAssetRecord> {
     let record = raw.as_object()?;
-    let id = record
-        .get("id")
-        .and_then(asset_id_string)
-        .or_else(|| {
-            fallback_id
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .map(str::to_string)
-        })
-        .filter(|value| !value.is_empty())?;
+    let id = canonical_asset_id(record, fallback_id).filter(|value| !value.is_empty())?;
     let raw_name = string_field(record, &["name"]).unwrap_or_default();
     let preview_url = http_url_field(
         record,
@@ -2956,6 +3048,7 @@ fn parse_asset_entry(
     Some(CloudAssetRecord {
         provider_connection_id: provider_connection_id.to_string(),
         id,
+        review_task_id: review_task_id(record, fallback_id),
         name: if raw_name.trim().is_empty() {
             fallback_name.to_string()
         } else {
@@ -3038,6 +3131,7 @@ fn parse_ark_asset_entry(provider_connection_id: &str, raw: &Value) -> Option<Cl
     Some(CloudAssetRecord {
         provider_connection_id: provider_connection_id.to_string(),
         id: id.to_string(),
+        review_task_id: is_review_task_id(id).then(|| id.to_string()),
         name: if raw_name.trim().is_empty() {
             fallback_name.to_string()
         } else {
@@ -3829,6 +3923,61 @@ mod tests {
         .expect("asset");
         assert_eq!(asset.status, CloudAssetStatus::Failed);
         assert_eq!(asset.raw_status, "Processing");
+    }
+
+    #[test]
+    fn parse_asset_entry_uses_asset_id_after_review_instead_of_the_task_id() {
+        let ready = parse_asset_entry(
+            "provider",
+            &json!({
+                "id": "task-20260922091628-d59f46b5",
+                "asset_id": "asset-20260922091640-real",
+                "name": "微信图片.png",
+                "asset_type": "Image",
+                "status": "Active"
+            }),
+            None,
+        )
+        .expect("ready asset");
+        assert_eq!(ready.id, "asset-20260922091640-real");
+        assert_eq!(
+            ready.review_task_id.as_deref(),
+            Some("task-20260922091628-d59f46b5")
+        );
+
+        let from_reference = parse_asset_entry(
+            "provider",
+            &json!({
+                "id": "task-20260922091628-d59f46b5",
+                "asset_url": "Asset://asset-20260922091640-real",
+                "asset_type": "Image",
+                "status": "Active"
+            }),
+            None,
+        )
+        .expect("asset url");
+        assert_eq!(from_reference.id, "asset-20260922091640-real");
+        assert_eq!(
+            from_reference.review_task_id.as_deref(),
+            Some("task-20260922091628-d59f46b5")
+        );
+
+        // 审核还没给出素材 ID 时，任务号仍是这条记录的唯一身份。
+        let pending = parse_asset_entry(
+            "provider",
+            &json!({
+                "id": "task-20260922091628-d59f46b5",
+                "asset_type": "Image",
+                "status": "Processing"
+            }),
+            None,
+        )
+        .expect("pending asset");
+        assert_eq!(pending.id, "task-20260922091628-d59f46b5");
+        assert_eq!(
+            pending.review_task_id.as_deref(),
+            Some("task-20260922091628-d59f46b5")
+        );
     }
 
     #[tokio::test]
@@ -5052,6 +5201,51 @@ mod tests {
 
         // 最终身份采用 Active 响应里返回的真实素材 ID，而不是轮询用的任务 ID。
         assert_eq!(identity.asset_id, "asset-20260902000001-xyz");
+    }
+
+    #[tokio::test]
+    async fn import_staged_adopts_asset_id_when_the_task_id_stays_in_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": { "id": "task-20260922091628-d59f46b5", "status": "Processing" },
+                    "success": true
+                }),
+            ),
+            response(
+                200,
+                json!({
+                    "code": "success",
+                    "data": {
+                        "id": "task-20260922091628-d59f46b5",
+                        "asset_id": "asset-20260922091640-real",
+                        "asset_type": "Image",
+                        "status": "Active"
+                    },
+                    "success": true
+                }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect("import");
+
+        assert_eq!(identity.asset_id, "asset-20260922091640-real");
     }
 
     #[tokio::test]

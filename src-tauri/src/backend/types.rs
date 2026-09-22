@@ -749,6 +749,9 @@ pub struct CloudAssetIdentity {
 pub struct CloudAssetRecord {
     pub provider_connection_id: String,
     pub id: String,
+    /// 素材审核任务号（`task-…`）。和素材 ID 分开：列表里的 `id` 在审核完成前经常就是任务号。
+    #[serde(default)]
+    pub review_task_id: Option<String>,
     pub name: String,
     pub kind: MediaType,
     pub status: CloudAssetStatus,

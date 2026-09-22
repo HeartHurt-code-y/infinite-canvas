@@ -878,6 +878,8 @@ export type CloudAssetStatus = "processing" | "ready" | "failed" | "deleted" | "
 export interface CloudAsset {
   readonly providerConnectionId: string;
   readonly id: string;
+  /** 素材审核任务号。有则单独展示，不写入素材 ID。 */
+  readonly reviewTaskId?: string | null;
   readonly name: string;
   readonly kind: MediaType;
   readonly status: CloudAssetStatus;

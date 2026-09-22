@@ -257,6 +257,7 @@ const cloudAssetStatusSchema = v.picklist(["processing", "ready", "failed", "del
 export const cloudAssetSchema = v.looseObject({
   providerConnectionId: v.string(),
   id: v.string(),
+  reviewTaskId: v.optional(nullableStringSchema),
   name: v.string(),
   kind: mediaTypeSchema,
   status: cloudAssetStatusSchema,

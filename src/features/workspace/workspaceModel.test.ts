@@ -16,6 +16,7 @@ import {
   parseAssetLibrarySource,
   readAssetLibrarySource,
   shouldAutoDismissUpload,
+  assetDetailIdentity,
   stagingImportReachedLibrary,
   type AssetUploadEntry,
   textResultFromSource,
@@ -372,5 +373,27 @@ describe("asset library source persistence", () => {
     expect(parseAssetLibrarySource("local")).toBe("local");
     expect(parseAssetLibrarySource("cloud")).toBe("cloud");
     expect(parseAssetLibrarySource("not-a-source")).toBeNull();
+  });
+});
+
+describe("assetDetailIdentity", () => {
+  it("任务号单独成行，素材 ID 不显示任务号", () => {
+    expect(
+      assetDetailIdentity({
+        id: "asset-20260922091640-real",
+        reviewTaskId: "task-20260922091628-d59f46b5",
+      }),
+    ).toEqual({
+      assetId: "asset-20260922091640-real",
+      reviewTaskId: "task-20260922091628-d59f46b5",
+    });
+    expect(assetDetailIdentity({ id: "task-20260922091628-d59f46b5" })).toEqual({
+      assetId: "尚未返回",
+      reviewTaskId: "task-20260922091628-d59f46b5",
+    });
+    expect(assetDetailIdentity({ id: "asset-plain" })).toEqual({
+      assetId: "asset-plain",
+      reviewTaskId: null,
+    });
   });
 });

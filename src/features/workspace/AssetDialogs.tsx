@@ -18,6 +18,7 @@ import type { AssetItem } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
   ASSET_KIND_LABELS,
+  assetDetailIdentity,
   assetErrorPresentation,
 } from "./workspaceModel";
 
@@ -557,6 +558,7 @@ export function AssetSourceDialog({
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
+  const detailIdentity = assetDetailIdentity(asset);
   // 云端素材签名地址过期时续签一次：图片预览与视频播放共用新预览地址。
   const [refreshedMediaUrl, setRefreshedMediaUrl] = useState<string | null>(null);
   const mediaRefreshAttemptedRef = useRef(false);
@@ -785,8 +787,14 @@ export function AssetSourceDialog({
             </div>
             <div>
               <dt>素材 ID</dt>
-              <dd className="mono">{asset.id}</dd>
+              <dd className="mono">{detailIdentity.assetId}</dd>
             </div>
+            {detailIdentity.reviewTaskId ? (
+              <div>
+                <dt>任务号</dt>
+                <dd className="mono">{detailIdentity.reviewTaskId}</dd>
+              </div>
+            ) : null}
             <div>
               <dt>类型</dt>
               <dd>{typeLabel}</dd>
