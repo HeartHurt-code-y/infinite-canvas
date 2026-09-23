@@ -19,6 +19,7 @@ import type { AssetItem, AssetKind, AssetUploadEntry } from "./workspaceModel";
 import {
   ASSET_CLOUD_STATUS_LABELS,
   ASSET_KIND_LABELS,
+  cloudAssetAwaitingId,
   STAGING_STATUS_LABELS,
   UPLOAD_ABANDONED_TICK_MS,
   UPLOAD_PHASE_NAMES,
@@ -292,7 +293,10 @@ function AssetCard({
   readonly onPreviewUnavailable?: ((asset: AssetItem) => void) | undefined;
 }) {
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
-  const showCloudBadge = asset.cloudStatus != null && asset.cloudStatus !== "ready";
+  const awaitingCloudId = cloudAssetAwaitingId(asset);
+  const showCloudBadge =
+    awaitingCloudId || (asset.cloudStatus != null && asset.cloudStatus !== "ready");
+  const cloudStatusState = awaitingCloudId ? "processing" : (asset.cloudStatus ?? "unknown");
   const dragged = useRef(false);
   const pointerDragRef = useRef<{
     pointerId: number;
@@ -393,13 +397,18 @@ function AssetCard({
       <button
         type="button"
         className={`asset-card${pointerDragging ? " is-dragging" : ""}${picked ? " is-picked" : ""}`}
+        disabled={awaitingCloudId}
+        title={awaitingCloudId ? "云端处理中，素材 ID 尚未返回" : undefined}
         aria-pressed={multiSelect ? picked : undefined}
         aria-label={
-          multiSelect
-            ? `选择${typeLabel}素材：${asset.name}${picked ? `，顺序 ${pickOrder}` : ""}`
-            : `预览${typeLabel}素材详情：${asset.name}`
+          awaitingCloudId
+            ? `云端处理中，暂不可用：${asset.name}`
+            : multiSelect
+              ? `选择${typeLabel}素材：${asset.name}${picked ? `，顺序 ${pickOrder}` : ""}`
+              : `预览${typeLabel}素材详情：${asset.name}`
         }
         onPointerDown={(event) => {
+          if (awaitingCloudId) return;
           if (!event.isPrimary || event.button !== 0) return;
           pointerDragRef.current = {
             pointerId: event.pointerId,
@@ -511,20 +520,20 @@ function AssetCard({
                 ))}
               </span>
             ) : null}
-            {showCloudBadge ? (
-              <span className="asset-card__status" data-state={asset.cloudStatus}>
-                {ASSET_CLOUD_STATUS_LABELS[asset.cloudStatus ?? "unknown"]}
-              </span>
-            ) : null}
           </span>
         )}
+        {showCloudBadge ? (
+          <span className="asset-card__status" data-state={cloudStatusState}>
+            {ASSET_CLOUD_STATUS_LABELS[cloudStatusState]}
+          </span>
+        ) : null}
         {picked ? (
           <span className="asset-card__order" aria-hidden="true">
             {pickOrder}
           </span>
         ) : null}
       </button>
-      {multiSelect ? (
+      {multiSelect && !awaitingCloudId ? (
         <button
           type="button"
           className="asset-card__peek"

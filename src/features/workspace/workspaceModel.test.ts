@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from "vitest";
-import type { StagingJobRecord, StagingStatus } from "../../lib/backend";
+import type { CloudAsset, StagingJobRecord, StagingStatus } from "../../lib/backend";
 import {
   ASSET_LIBRARY_SOURCE_STORAGE_KEY,
   DEFAULT_ZOOM,
@@ -17,6 +17,8 @@ import {
   readAssetLibrarySource,
   shouldAutoDismissUpload,
   assetDetailIdentity,
+  cloudAssetAwaitingId,
+  cloudAssetToItem,
   stagingImportReachedLibrary,
   type AssetUploadEntry,
   textResultFromSource,
@@ -395,5 +397,74 @@ describe("assetDetailIdentity", () => {
       assetId: "asset-plain",
       reviewTaskId: null,
     });
+  });
+});
+
+function cloudAsset(overrides: Partial<CloudAsset> = {}): CloudAsset {
+  return {
+    providerConnectionId: "provider",
+    id: "asset-1",
+    name: "封面",
+    kind: "image",
+    status: "ready",
+    rawStatus: "Active",
+    previewUrl: null,
+    assetUrl: null,
+    coverUrl: null,
+    groupId: null,
+    ...overrides,
+  };
+}
+
+describe("cloudAssetAwaitingId", () => {
+  it("素材 ID 还没返回时视为云端处理中，已有素材 ID 或导入失败则不是", () => {
+    const pending = cloudAsset({
+      id: "task-20260922091628-d59f46b5",
+      reviewTaskId: "task-20260922091628-d59f46b5",
+      status: "processing",
+      rawStatus: "Processing",
+    });
+    expect(cloudAssetAwaitingId({ ...pending, source: "cloud", cloudStatus: pending.status })).toBe(
+      true,
+    );
+    expect(cloudAssetToItem(pending).cloudStatus).toBe("processing");
+
+    const activeButNoAssetId = cloudAsset({
+      id: "task-20260922091628-d59f46b5",
+      status: "ready",
+      rawStatus: "Active",
+    });
+    expect(cloudAssetToItem(activeButNoAssetId).cloudStatus).toBe("processing");
+
+    const ready = cloudAsset({
+      id: "asset-20260922091640-real",
+      reviewTaskId: "task-20260922091628-d59f46b5",
+      status: "ready",
+    });
+    expect(cloudAssetAwaitingId({ ...ready, source: "cloud", cloudStatus: ready.status })).toBe(
+      false,
+    );
+    expect(cloudAssetToItem(ready).cloudStatus).toBe("ready");
+
+    const stillProcessingWithId = cloudAsset({
+      id: "asset-20260922091640-real",
+      status: "processing",
+      rawStatus: "Processing",
+    });
+    expect(
+      cloudAssetAwaitingId({
+        ...stillProcessingWithId,
+        source: "cloud",
+        cloudStatus: stillProcessingWithId.status,
+      }),
+    ).toBe(false);
+
+    const failed = cloudAsset({
+      id: "task-20260922091628-d59f46b5",
+      status: "failed",
+      rawStatus: "Failed",
+    });
+    expect(cloudAssetToItem(failed).cloudStatus).toBe("failed");
+    expect(cloudAssetAwaitingId({ id: "task-1", source: "local" })).toBe(false);
   });
 });

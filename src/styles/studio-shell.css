@@ -600,13 +600,13 @@ button:active:focus-visible,
     background: var(--color-surface-3);
   }
 
-  .asset-panel .asset-card:hover {
+  .asset-panel .asset-card:hover:not(:disabled) {
     outline-color: var(--color-rule-strong);
     box-shadow: none;
     transform: none;
   }
 
-  .asset-panel .asset-card:hover .asset-card__visual {
+  .asset-panel .asset-card:hover:not(:disabled) .asset-card__visual {
     filter: none;
     transform: none;
   }

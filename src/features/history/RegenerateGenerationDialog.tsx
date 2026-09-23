@@ -10,6 +10,7 @@ import {
 } from "react";
 
 import { ImeInput } from "../../components/ImeTextField";
+import { cloudAssetAwaitingId } from "../workspace/workspaceModel";
 import {
   assetLibraryClient,
   formatRawBackendError,
@@ -849,40 +850,52 @@ export function RegenerateGenerationDialog({
                     <p className="regenerate-add__empty">云端素材库为空。</p>
                   ) : (
                     <ul className="regenerate-add__list">
-                      {cloudAssets.map((asset) => (
-                        <li key={asset.id}>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              addMaterial({
-                                id: newMaterialId(),
-                                target: {
-                                  kind: "asset",
-                                  providerConnectionId: frozen?.providerConnectionId ?? "",
-                                  assetId: asset.id,
-                                  mediaType: asset.kind,
-                                },
-                                role: "",
-                                displayName: asset.name,
-                              })
-                            }
-                          >
-                            <AddListThumb
-                              previewUrl={asset.previewUrl ?? asset.coverUrl}
-                              kind={asset.kind}
-                              renewIdentity={{
-                                providerConnectionId: asset.providerConnectionId,
-                                assetId: asset.id,
+                      {cloudAssets.map((asset) => {
+                        const awaitingId = cloudAssetAwaitingId({
+                          id: asset.id,
+                          reviewTaskId: asset.reviewTaskId,
+                          source: "cloud",
+                          cloudStatus: asset.status,
+                        });
+                        return (
+                          <li key={asset.id}>
+                            <button
+                              type="button"
+                              disabled={busy || awaitingId}
+                              title={awaitingId ? "云端处理中，素材 ID 尚未返回" : undefined}
+                              onClick={() => {
+                                if (awaitingId) return;
+                                addMaterial({
+                                  id: newMaterialId(),
+                                  target: {
+                                    kind: "asset",
+                                    providerConnectionId: frozen?.providerConnectionId ?? "",
+                                    assetId: asset.id,
+                                    mediaType: asset.kind,
+                                  },
+                                  role: "",
+                                  displayName: asset.name,
+                                });
                               }}
-                            />
-                            <span>{asset.name}</span>
-                            <span className="regenerate-add__kind">
-                              {MEDIA_TYPE_LABELS[asset.kind] ?? asset.kind}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
+                            >
+                              <AddListThumb
+                                previewUrl={asset.previewUrl ?? asset.coverUrl}
+                                kind={asset.kind}
+                                renewIdentity={{
+                                  providerConnectionId: asset.providerConnectionId,
+                                  assetId: asset.id,
+                                }}
+                              />
+                              <span>{asset.name}</span>
+                              <span className="regenerate-add__kind">
+                                {awaitingId
+                                  ? "云端处理中"
+                                  : (MEDIA_TYPE_LABELS[asset.kind] ?? asset.kind)}
+                              </span>
+                            </button>
+                          </li>
+                        );
+                      })}
                     </ul>
                   )
                 ) : null}

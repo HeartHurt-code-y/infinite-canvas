@@ -337,7 +337,7 @@
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .regenerate-add__list button:hover {
+  .regenerate-add__list button:hover:not(:disabled) {
     background: var(--color-accent-soft);
   }
 }

@@ -2349,6 +2349,33 @@ export function isReviewTaskId(id: string): boolean {
 }
 
 /**
+ * 列表上的这条记录还没有可引用的素材 ID：身份仍是审核任务号。
+ *
+ * 有独立的 `reviewTaskId`、而 `id` 已经是素材 ID 时不算。失败和已删除的记录
+ * 也不走这条：它们要显示自己的终态，而不是「还在处理」。
+ */
+export function cloudAssetAwaitingId(asset: {
+  readonly id: string;
+  readonly reviewTaskId?: string | null | undefined;
+  readonly source?: AssetLibrarySource;
+  readonly cloudStatus?: CloudAssetStatus;
+}): boolean {
+  if (asset.source === "local") return false;
+  if (asset.cloudStatus === "failed" || asset.cloudStatus === "deleted") return false;
+  return listedIdentityIsReviewTask(asset);
+}
+
+function listedIdentityIsReviewTask(asset: {
+  readonly id: string;
+  readonly reviewTaskId?: string | null | undefined;
+}): boolean {
+  const fromField = asset.reviewTaskId?.trim() ?? "";
+  const reviewTaskId = fromField !== "" ? fromField : isReviewTaskId(asset.id) ? asset.id : null;
+  if (reviewTaskId == null) return false;
+  return asset.id === reviewTaskId || isReviewTaskId(asset.id);
+}
+
+/**
  * 详情里的两行身份：素材 ID 只放真正的 asset id；任务号单独返回。
  * 审核还没给出素材 ID 时，素材 ID 行写「尚未返回」。
  */
@@ -2360,17 +2387,23 @@ export function assetDetailIdentity(asset: {
   let reviewTaskId: string | null = null;
   if (fromField !== "") reviewTaskId = fromField;
   else if (isReviewTaskId(asset.id)) reviewTaskId = asset.id;
-  const assetId =
-    reviewTaskId != null && (asset.id === reviewTaskId || isReviewTaskId(asset.id))
-      ? "尚未返回"
-      : asset.id;
+  const assetId = listedIdentityIsReviewTask(asset) ? "尚未返回" : asset.id;
   return { assetId, reviewTaskId };
 }
 
 export function cloudAssetToItem(asset: CloudAsset): AssetItem {
-  const statusLabel = ASSET_CLOUD_STATUS_LABELS[asset.status];
+  // 审核任务号还占着身份时，上游有时已经标成 Active。对用户来说素材 ID 没回来，
+  // 就不能当已就绪素材用，卡片统一显示「云端处理中」。
+  const awaitingId = cloudAssetAwaitingId({
+    id: asset.id,
+    reviewTaskId: asset.reviewTaskId,
+    source: "cloud",
+    cloudStatus: asset.status,
+  });
+  const status: CloudAssetStatus = awaitingId ? "processing" : asset.status;
+  const statusLabel = ASSET_CLOUD_STATUS_LABELS[status];
   const meta =
-    asset.status === "ready" ? (asset.assetUrl ?? asset.id) : `${statusLabel} · ${asset.rawStatus}`;
+    status === "ready" ? (asset.assetUrl ?? asset.id) : `${statusLabel} · ${asset.rawStatus}`;
   return {
     id: asset.id,
     reviewTaskId: asset.reviewTaskId ?? null,
@@ -2382,7 +2415,7 @@ export function cloudAssetToItem(asset: CloudAsset): AssetItem {
     coverUrl: asset.coverUrl,
     // assetUrl may be an opaque asset:// reference; only the signed preview URL is playable.
     videoUrl: asset.kind === "video" ? asset.previewUrl : null,
-    cloudStatus: asset.status,
+    cloudStatus: status,
     groupId: asset.groupId,
     source: "cloud",
     providerConnectionId: asset.providerConnectionId,

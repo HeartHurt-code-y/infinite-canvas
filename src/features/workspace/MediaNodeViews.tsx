@@ -70,6 +70,7 @@ import {
   fileBaseName,
   fileNameFromPath,
   formatTaskClock,
+  isReviewTaskId,
   isRunningTaskStatus,
   measuredAspectRatio,
   outputNodeDimensions,
@@ -1517,6 +1518,7 @@ export function CanvasAssetNode({
   readonly onPreview?: (key: string) => void;
 }) {
   const typeLabel = ASSET_KIND_LABELS[node.kind];
+  const awaitingCloudId = node.source !== "local" && isReviewTaskId(node.assetId);
   const isVideo = node.kind === "video";
   const [previewing, setPreviewing] = useState(false);
   const [loadedImageUrl, setLoadedImageUrl] = useState<string | null>(null);
@@ -1674,13 +1676,16 @@ export function CanvasAssetNode({
         {node.source !== "local" ? (
           <span
             className="canvas-asset-node__cloud-badge"
-            title="已在云端素材库"
-            aria-label="已在云端素材库"
+            data-state={awaitingCloudId ? "processing" : "ready"}
+            title={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
+            aria-label={awaitingCloudId ? "云端处理中" : "已在云端素材库"}
           />
         ) : null}
       </span>
       <span className="canvas-asset-node__meta">
-        {typeLabel} · {edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}
+        {awaitingCloudId
+          ? `${typeLabel} · 云端处理中`
+          : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
       </span>
       <button
         type="button"
@@ -1697,11 +1702,17 @@ export function CanvasAssetNode({
       <button
         type="button"
         className="canvas-asset-node__port"
-        aria-label={`从 ${node.name} 拖出连线`}
-        title="拖到生成节点或其他素材节点建立连线"
+        disabled={awaitingCloudId}
+        aria-label={
+          awaitingCloudId ? `云端处理中，暂不可连线：${node.name}` : `从 ${node.name} 拖出连线`
+        }
+        title={
+          awaitingCloudId ? "云端处理中，素材 ID 尚未返回" : "拖到生成节点或其他素材节点建立连线"
+        }
         onMouseDown={(event) => {
           event.preventDefault();
           event.stopPropagation();
+          if (awaitingCloudId) return;
           onConnectionStart(node.key);
         }}
       />

@@ -329,6 +329,7 @@ import {
   assetNodeDimensions,
   assetNodeKey,
   abandonedUploadError,
+  cloudAssetAwaitingId,
   cloudAssetToItem,
   createImageNodeConfig,
   createPromptNodeConfig,
@@ -4885,6 +4886,7 @@ export function WorkspaceApp({
       rawY: number,
     ) => {
       const source = asset.source ?? "cloud";
+      if (cloudAssetAwaitingId({ ...asset, source })) return null;
       const providerConnectionId = asset.providerConnectionId ?? assetProvider?.id ?? "";
       if (source === "cloud" && !providerConnectionId) {
         setAssetsError("拖放素材需要已启用的供应商连接。请先在全局设置中配置。");
@@ -4988,6 +4990,8 @@ export function WorkspaceApp({
       const assetId = stagingJobAssetIdForCanvas(job, destination);
       const kind = job?.mediaType ?? entry?.kind;
       if (assetId == null || (kind !== "image" && kind !== "video" && kind !== "audio")) return;
+      // 审核任务号还不能当素材用。先留着落点，等真正的素材 ID 到了再放到画布。
+      if (cloudAssetAwaitingId({ id: assetId, source: destination })) return;
       placedCanvasUploadJobIdsRef.current.add(jobId);
       canvasUploadPlacementsRef.current.delete(jobId);
       const name = entry?.name ?? job?.localPath.split(/[\\/]/).pop() ?? "素材";
@@ -8195,6 +8199,7 @@ export function WorkspaceApp({
   const handlePreviewAsset = useCallback((asset: AssetItem) => setPreviewAsset(asset), []);
   const handleDropAssetToCanvas = useCallback(
     (asset: AssetItem, clientX: number, clientY: number) => {
+      if (cloudAssetAwaitingId(asset)) return;
       const point = dropClientPointToBoard(clientX, clientY);
       if (point == null) return;
       addAssetNode(asset, point.x, point.y);
@@ -8208,6 +8213,7 @@ export function WorkspaceApp({
     });
   }, []);
   const togglePickedAsset = useCallback((asset: AssetItem) => {
+    if (cloudAssetAwaitingId(asset)) return;
     const key = assetPickKey(asset);
     setPickedAssets((current) => {
       const index = current.findIndex((item) => assetPickKey(item) === key);
@@ -8221,8 +8227,12 @@ export function WorkspaceApp({
     return orders;
   }, [pickedAssets]);
   const handlePlacePickedAssets = useCallback(() => {
-    if (pickedAssets.length === 0) return;
-    for (const asset of pickedAssets) {
+    const placeable = pickedAssets.filter((asset) => !cloudAssetAwaitingId(asset));
+    if (placeable.length === 0) {
+      if (pickedAssets.length > 0) setPickedAssets([]);
+      return;
+    }
+    for (const asset of placeable) {
       const source = asset.source ?? "cloud";
       const providerConnectionId = asset.providerConnectionId ?? assetProvider?.id ?? "";
       if (source === "cloud" && providerConnectionId === "") {
@@ -8231,15 +8241,15 @@ export function WorkspaceApp({
       }
     }
     const positions = layoutAssetPlacements(
-      pickedAssets.length,
+      placeable.length,
       viewportCenterBoardCoordinates(),
       { width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT },
       occupiedNodeRects,
     );
     let libraryPickOrder = nextLibraryPickOrder(assetNodes);
     const entries: CanvasNodeEntry[] = [];
-    for (let index = 0; index < pickedAssets.length; index += 1) {
-      const asset = pickedAssets[index];
+    for (let index = 0; index < placeable.length; index += 1) {
+      const asset = placeable[index];
       const position = positions[index];
       if (asset == null || position == null) continue;
       const source = asset.source ?? "cloud";

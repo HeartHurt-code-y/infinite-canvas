@@ -900,9 +900,19 @@ h3 {
   outline-offset: var(--space-3xs);
 }
 
-.asset-card:active {
+.asset-card:active:not(:disabled) {
   cursor: grabbing;
   transform: translateY(1px);
+}
+
+.asset-card:disabled {
+  cursor: not-allowed;
+  opacity: 1;
+}
+
+.asset-card:disabled .asset-card__visual {
+  opacity: 0.55;
+  filter: grayscale(0.35);
 }
 
 .asset-card-shell {
@@ -1034,12 +1044,12 @@ h3 {
 }
 
 @media (hover: hover) and (pointer: fine) {
-  .asset-card:hover {
+  .asset-card:hover:not(:disabled) {
     box-shadow: var(--shadow-raised);
     transform: translateY(-1px);
   }
 
-  .asset-card:hover .asset-card__visual {
+  .asset-card:hover:not(:disabled) .asset-card__visual {
     filter: saturate(1.04) brightness(1.03);
     transform: scale(1.025);
   }
@@ -2509,6 +2519,11 @@ svg[data-spin="true"] {
   box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-success) 22%, transparent);
 }
 
+.canvas-asset-node__cloud-badge[data-state="processing"] {
+  background: var(--color-accent);
+  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-accent) 22%, transparent);
+}
+
 .canvas-asset-node__meta {
   color: var(--color-muted);
   font-size: var(--text-2xs);
@@ -2600,6 +2615,13 @@ svg[data-spin="true"] {
   border: none;
   border-radius: var(--radius-round);
   place-items: center;
+  transform: translateY(-50%);
+}
+
+.canvas-asset-node__port:disabled,
+.canvas-asset-node__port:disabled:active {
+  cursor: not-allowed;
+  opacity: 0.4;
   transform: translateY(-50%);
 }
 
