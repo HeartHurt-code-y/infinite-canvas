@@ -1,6 +1,6 @@
 [package]
 name = "infinite-canvas"
-version = "0.1.6"
+version = "0.1.7"
 description = "A Tauri desktop application for an infinite canvas"
 edition = "2024"
 rust-version = "1.85"
