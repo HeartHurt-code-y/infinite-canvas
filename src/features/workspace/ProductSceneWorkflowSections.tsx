@@ -400,6 +400,26 @@ export function ProductSceneConfiguration({
           />
         </label>
         <label>
+          同时生成张数上限
+          <input
+            aria-label="同时生成张数上限"
+            type="number"
+            min={1}
+            max={50}
+            value={options.maxConcurrency ?? 10}
+            onChange={(event) =>
+              onChange({
+                ...options,
+                maxConcurrency: Math.min(50, Math.max(1, Number(event.target.value) || 1)),
+              })
+            }
+          />
+          <small>
+            每批同时提交最多 {Math.min(options.batchSize, options.maxConcurrency ?? 10)}{" "}
+            张；受模型服务的并发额度限制。
+          </small>
+        </label>
+        <label>
           场景倾向
           <select
             aria-label="场景倾向"

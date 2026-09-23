@@ -2,13 +2,13 @@ import { Icon } from "../../components/Icon";
 import { useEffect } from "react";
 import { isDesktopRuntime } from "../../lib/backend";
 import {
-  checkForAppUpdate,
   dismissAvailableAppUpdate,
   downloadPercent,
   formatDownloadProgress,
   installAvailableAppUpdate,
   relaunchAfterAppUpdate,
   shouldShowUpdateBanner,
+  startAutomaticAppUpdateChecks,
   useAppUpdate,
   type AppUpdateState,
 } from "../../lib/appUpdate";
@@ -18,7 +18,7 @@ export function AppUpdateBanner() {
 
   useEffect(() => {
     if (!import.meta.env.PROD || !isDesktopRuntime()) return;
-    void checkForAppUpdate({ quiet: true });
+    return startAutomaticAppUpdateChecks();
   }, []);
 
   if (!shouldShowUpdateBanner(snapshot)) return null;

@@ -851,7 +851,7 @@
   border-color: color-mix(in srgb, var(--color-warning) 32%, var(--color-rule));
 }
 
-/* Workflow configuration reads down the page, with roomy paired selectors. */
+/* Workflow settings remain readable at narrow node widths. */
 .react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__header {
   min-height: 0;
   align-items: start;
@@ -930,6 +930,12 @@
   gap: var(--space-md);
   padding: var(--space-xs) 0 var(--space-sm);
   border-top: 0;
+}
+
+@container (min-width: 800px) {
+  .react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__model-grid {
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+  }
 }
 
 .react-flow__node .canvas-knowledge-workflow .canvas-knowledge-workflow__model-slot {

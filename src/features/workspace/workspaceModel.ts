@@ -362,9 +362,16 @@ export const VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT = 470;
 export const VIRAL_REMIX_NODE_WIDTH = 620;
 export const VIRAL_REMIX_NODE_HEIGHT = 780;
 export const VIRAL_REMIX_NODE_COARSE_HEIGHT = 920;
-export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH = 620;
+export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH = 960;
 export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT = 390;
 export const KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT = 450;
+
+/** Match the workflow card's viewport-width cap before its DOM size is measured. */
+export function knowledgeVideoWorkflowNodeWidth(viewportWidth?: number): number {
+  return viewportWidth != null && Number.isFinite(viewportWidth) && viewportWidth > 0
+    ? Math.min(KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH, Math.max(1, viewportWidth - 32))
+    : KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH;
+}
 
 // 结果展示节点固定尺寸。
 export const RESULT_NODE_WIDTH = 250;
@@ -430,7 +437,7 @@ export function nearestAvailableNodePosition(
   return best ?? { x: desired.x, y: desired.y };
 }
 
-// 产物卡片自动落点：来源生成节点右侧的水平间距，以及同节点多张卡片的垂直堆叠间距。
+// 产物卡片自动落点：与来源节点的水平间距，以及可见第二行的行距。
 export const OUTPUT_NODE_GAP_X = 96;
 export const OUTPUT_NODE_GAP_Y = 32;
 
@@ -1078,53 +1085,149 @@ export function markdownDocumentExportName(
   return `${base || `${fallbackLabel}-${nodeKey.slice(-6)}`}.md`;
 }
 
+export interface OutputPlacementOptions {
+  /** All other canvas nodes at their current positions. Existing outputs are included separately. */
+  readonly occupied?: readonly CanvasNodeRect[];
+  /** Available flow-coordinate height from the source top to the current viewport bottom. */
+  readonly visibleHeight?: number;
+}
+
+const OUTPUT_COLUMN_GAP = OUTPUT_NODE_GAP_Y;
+const OUTPUT_COLUMNS_PER_BAND = 3;
+
+interface BlockedOutputXInterval {
+  readonly left: number;
+  readonly right: number;
+}
+
+function blockedOutputXIntervals(
+  y: number,
+  occupied: readonly CanvasNodeRect[],
+): readonly BlockedOutputXInterval[] {
+  const intervals = occupied
+    .filter(
+      (node) =>
+        y + OUTPUT_NODE_HEIGHT + NEW_NODE_GAP > node.y && y < node.y + node.height + NEW_NODE_GAP,
+    )
+    .map((node) => ({
+      left: node.x - OUTPUT_NODE_WIDTH - NEW_NODE_GAP,
+      right: node.x + node.width + NEW_NODE_GAP,
+    }))
+    .sort((a, b) => a.left - b.left);
+  const merged: { left: number; right: number }[] = [];
+  for (const interval of intervals) {
+    const previous = merged[merged.length - 1];
+    if (previous != null && interval.left < previous.right) {
+      previous.right = Math.max(previous.right, interval.right);
+    } else {
+      merged.push({ ...interval });
+    }
+  }
+  return merged;
+}
+
+function firstAvailableOutputX(
+  start: number,
+  intervals: readonly BlockedOutputXInterval[],
+): number {
+  let low = 0;
+  let high = intervals.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (intervals[middle]!.right <= start) low = middle + 1;
+    else high = middle;
+  }
+  const blocked = intervals[low];
+  return blocked != null && start > blocked.left ? blocked.right : start;
+}
+
 /**
- * 计算产物卡片在来源生成节点右侧的落点：
- * 同一节点的多张卡片（多次生成）按现有数量垂直堆叠。
+ * Pack outputs to the right of their source. Fill a horizontal band before using
+ * a second visible row, then extend the next band to the right. Checking the
+ * actual rectangles instead of the output count reuses vacated positions and
+ * leaves manually moved cards where the user put them.
  */
+function nextOutputPosition(
+  source: CanvasNodeRect,
+  current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
+): { x: number; y: number } {
+  const firstX = source.x + source.width + OUTPUT_NODE_GAP_X;
+  const firstY = source.y;
+  const rowHeight = OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y;
+  const rows =
+    options.visibleHeight != null &&
+    Number.isFinite(options.visibleHeight) &&
+    options.visibleHeight >= OUTPUT_NODE_HEIGHT * 2 + OUTPUT_NODE_GAP_Y
+      ? 2
+      : 1;
+  const occupied = [
+    ...(options.occupied ?? []),
+    ...current.map((node) => ({ x: node.x, y: node.y, ...outputNodeDimensions(node) })),
+  ];
+  const bandWidth = OUTPUT_COLUMNS_PER_BAND * (OUTPUT_NODE_WIDTH + OUTPUT_COLUMN_GAP);
+  const blockedRows = Array.from({ length: rows }, (_, row) =>
+    blockedOutputXIntervals(firstY + row * rowHeight, occupied),
+  );
+
+  // Each row is indexed once. A blocked band jumps directly toward its first
+  // available x, so a wide node does not trigger thousands of empty probes.
+  let band = 0;
+  for (let step = 0; step <= occupied.length + 1; step += 1) {
+    const bandStart = firstX + band * bandWidth;
+    const bandEnd = bandStart + bandWidth;
+    let nextBand = Number.POSITIVE_INFINITY;
+    for (let row = 0; row < rows; row += 1) {
+      const y = firstY + row * rowHeight;
+      const x = firstAvailableOutputX(bandStart, blockedRows[row]!);
+      if (x + OUTPUT_NODE_WIDTH <= bandEnd) return { x, y };
+      nextBand = Math.min(nextBand, Math.max(band + 1, Math.floor((x - firstX) / bandWidth)));
+    }
+    band = nextBand;
+  }
+
+  const rightEdge = occupied.reduce(
+    (right, node) => Math.max(right, node.x + node.width + NEW_NODE_GAP),
+    firstX,
+  );
+  return { x: rightEdge, y: firstY };
+}
+
+/** Place a generation result to the right of its source node. */
 export function nextOutputSlot(
   genNode: GenNodeData,
   current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
 ): { x: number; y: number } {
-  const { width } = genNodeDimensions(genNode.kind);
-  const stackIndex = current.filter((node) => node.sourceNodeId === genNode.key).length;
-  return {
-    x: genNode.x + width + OUTPUT_NODE_GAP_X,
-    y: genNode.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
-  };
+  const width = genNode.measured?.width ?? genNodeDimensions(genNode.kind).width;
+  return nextOutputPosition({ x: genNode.x, y: genNode.y, width, height: 0 }, current, options);
 }
 
 export function nextVideoComposerOutputSlot(
   node: VideoComposerNodeData,
   current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
 ): { x: number; y: number } {
-  const stackIndex = current.filter((output) => output.sourceNodeId === node.key).length;
-  return {
-    x: node.x + VIDEO_COMPOSER_NODE_WIDTH + OUTPUT_NODE_GAP_X,
-    y: node.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
-  };
+  const width = node.measured?.width ?? VIDEO_COMPOSER_NODE_WIDTH;
+  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
 }
 
 export function nextVideoDownloaderOutputSlot(
   node: VideoDownloaderNodeData,
   current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
 ): { x: number; y: number } {
-  const stackIndex = current.filter((output) => output.sourceNodeId === node.key).length;
-  return {
-    x: node.x + VIDEO_DOWNLOADER_NODE_WIDTH + OUTPUT_NODE_GAP_X,
-    y: node.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
-  };
+  const width = node.measured?.width ?? VIDEO_DOWNLOADER_NODE_WIDTH;
+  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
 }
 
 export function nextFrameExtractorOutputSlot(
   node: VideoFrameExtractorNodeData,
   current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
 ): { x: number; y: number } {
-  const stackIndex = current.filter((output) => output.sourceNodeId === node.key).length;
-  return {
-    x: node.x + VIDEO_FRAME_EXTRACTOR_NODE_WIDTH + OUTPUT_NODE_GAP_X,
-    y: node.y + stackIndex * (OUTPUT_NODE_HEIGHT + OUTPUT_NODE_GAP_Y),
-  };
+  const width = node.measured?.width ?? VIDEO_FRAME_EXTRACTOR_NODE_WIDTH;
+  return nextOutputPosition({ x: node.x, y: node.y, width, height: 0 }, current, options);
 }
 
 /** 从产物绝对路径提取文件名（兼容 Windows 反斜杠分隔符）。 */

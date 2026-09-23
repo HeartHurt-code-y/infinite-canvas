@@ -42,6 +42,8 @@ export interface ProductSceneWorkflowOptions {
   readonly productName: string;
   readonly totalCount: number;
   readonly batchSize: number;
+  /** Maximum parallel image requests in a batch. Missing on saved plans defaults to 10. */
+  readonly maxConcurrency?: number;
   readonly sceneBias: "mixed" | "geek" | "office" | "unboxing";
   readonly aspectRatio: "3:4" | "9:16";
   readonly depthStrength: number;
@@ -103,6 +105,7 @@ export function createProductSceneOptions(): ProductSceneWorkflowOptions {
     productName: "魔芋 Ai 网关",
     totalCount: 500,
     batchSize: 10,
+    maxConcurrency: 10,
     sceneBias: "mixed",
     aspectRatio: "3:4",
     depthStrength: 0.2,
@@ -140,6 +143,9 @@ export function productSceneInputReady(options: ProductSceneWorkflowOptions): bo
     Number.isInteger(options.batchSize) &&
     options.batchSize >= 1 &&
     options.batchSize <= 50 &&
+    Number.isInteger(options.maxConcurrency ?? 10) &&
+    (options.maxConcurrency ?? 10) >= 1 &&
+    (options.maxConcurrency ?? 10) <= 50 &&
     ["mixed", "geek", "office", "unboxing"].includes(options.sceneBias) &&
     ["3:4", "9:16"].includes(options.aspectRatio) &&
     Number.isFinite(options.depthStrength) &&

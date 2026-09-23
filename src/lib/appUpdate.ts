@@ -2,6 +2,8 @@ import { useSyncExternalStore } from "react";
 import { formatRawBackendError, frontendLog, isDesktopRuntime } from "./backend";
 
 export const SKIPPED_UPDATE_STORAGE_KEY = "infinite-canvas:skipped-app-update-version";
+export const APP_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
+export const APP_UPDATE_FOCUS_THROTTLE_MS = 30 * 1000;
 
 export type AppUpdateStatus =
   "idle" | "checking" | "current" | "available" | "downloading" | "ready" | "restarting" | "error";
@@ -55,6 +57,13 @@ let client: AppUpdateClient = createDesktopAppUpdateClient();
 let checkGeneration = 0;
 let downloadGeneration = 0;
 let pendingDownload: AppUpdateCheckResult["downloadAndInstall"];
+let checkInFlight: Promise<void> | null = null;
+
+function isInstallingUpdate(): boolean {
+  return (
+    state.status === "downloading" || state.status === "ready" || state.status === "restarting"
+  );
+}
 
 function emit(): void {
   for (const listener of listeners) listener();
@@ -87,6 +96,7 @@ export function setAppUpdateClientForTests(next: AppUpdateClient | null): void {
 export function resetAppUpdateStateForTests(): void {
   checkGeneration += 1;
   downloadGeneration += 1;
+  checkInFlight = null;
   pendingDownload = undefined;
   state = INITIAL_STATE;
   emit();
@@ -105,15 +115,30 @@ export async function loadCurrentAppVersion(): Promise<string> {
   }
 }
 
-export async function checkForAppUpdate(options?: {
+export function checkForAppUpdate(options?: {
+  readonly quiet?: boolean | undefined;
+}): Promise<void> {
+  if (isInstallingUpdate()) return Promise.resolve();
+  if (checkInFlight) return checkInFlight;
+  const check = performAppUpdateCheck(options);
+  checkInFlight = check;
+  void check.then(
+    () => {
+      if (checkInFlight === check) checkInFlight = null;
+    },
+    () => {
+      if (checkInFlight === check) checkInFlight = null;
+    },
+  );
+  return check;
+}
+
+async function performAppUpdateCheck(options?: {
   readonly quiet?: boolean | undefined;
 }): Promise<void> {
   const quiet = options?.quiet === true;
   const generation = ++checkGeneration;
-  patch({
-    status: "checking",
-    error: null,
-  });
+  if (!quiet) patch({ status: "checking", error: null });
   try {
     const currentVersion = state.currentVersion || (await client.getCurrentVersion());
     const result = await client.check();
@@ -150,14 +175,34 @@ export async function checkForAppUpdate(options?: {
     const message = describeUpdateError(error);
     if (quiet) {
       frontendLog("warn", `[app-update] 自动检查更新失败：${message}`);
-      patch({
-        status: state.availableVersion ? "available" : "idle",
-        error: null,
-      });
       return;
     }
     patch({ status: "error", error: message });
   }
+}
+
+/** Keep a running desktop session aware of releases without downloading large installers. */
+export function startAutomaticAppUpdateChecks(): () => void {
+  let lastAttemptAt = Number.NEGATIVE_INFINITY;
+  const checkWhenActive = () => {
+    if (document.visibilityState === "hidden" || !navigator.onLine || isInstallingUpdate()) return;
+    const now = Date.now();
+    if (now - lastAttemptAt < APP_UPDATE_FOCUS_THROTTLE_MS) return;
+    lastAttemptAt = now;
+    void checkForAppUpdate({ quiet: true });
+  };
+
+  checkWhenActive();
+  const timer = window.setInterval(checkWhenActive, APP_UPDATE_CHECK_INTERVAL_MS);
+  window.addEventListener("focus", checkWhenActive);
+  window.addEventListener("online", checkWhenActive);
+  document.addEventListener("visibilitychange", checkWhenActive);
+  return () => {
+    window.clearInterval(timer);
+    window.removeEventListener("focus", checkWhenActive);
+    window.removeEventListener("online", checkWhenActive);
+    document.removeEventListener("visibilitychange", checkWhenActive);
+  };
 }
 
 export async function installAvailableAppUpdate(): Promise<void> {
@@ -167,6 +212,7 @@ export async function installAvailableAppUpdate(): Promise<void> {
     return;
   }
   if (state.status === "downloading" || state.status === "restarting") return;
+  checkGeneration += 1;
   const generation = ++downloadGeneration;
   patch({
     status: "downloading",

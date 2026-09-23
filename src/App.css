@@ -4326,7 +4326,7 @@ svg[data-spin="true"] {
   position: relative;
   z-index: var(--z-base);
   display: flex;
-  width: 620px;
+  width: min(960px, max(1px, calc(100vw - 2rem)));
   min-height: 390px;
   flex-direction: column;
   overflow: hidden;
@@ -4465,6 +4465,75 @@ svg[data-spin="true"] {
   display: grid;
   gap: var(--space-sm);
   padding: var(--space-sm);
+}
+
+.canvas-knowledge-workflow > .canvas-knowledge-workflow__body {
+  min-width: 0;
+  container-type: inline-size;
+}
+
+.canvas-knowledge-workflow > .canvas-knowledge-workflow__body > * {
+  min-width: 0;
+}
+
+.canvas-knowledge-workflow__inputs {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: start;
+  gap: var(--space-sm);
+  min-width: 0;
+}
+
+.canvas-knowledge-workflow__inputs > [role="alert"] {
+  grid-column: 1 / -1;
+}
+
+@container (min-width: 800px) {
+  .canvas-knowledge-workflow__inputs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-knowledge-workflow__inputs > :only-child,
+  .canvas-knowledge-workflow__inputs > [role="alert"] + .canvas-workflow-references {
+    grid-column: 1 / -1;
+  }
+
+  .canvas-knowledge-workflow__shots ol,
+  .canvas-reverse-video__sheets,
+  .canvas-commerce-workflow__facts,
+  .canvas-remotion-workflow__media {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-knowledge-workflow__shots li:has(.canvas-knowledge-workflow__shot-editor) {
+    grid-column: 1 / -1;
+  }
+
+  .canvas-knowledge-workflow__shots
+    li:last-child:nth-child(odd):not(:has(.canvas-knowledge-workflow__shot-editor)),
+  .canvas-comic-drama-workflow__episode:only-of-type {
+    grid-column: 1 / -1;
+  }
+
+  .canvas-xhs-cover__configuration,
+  .canvas-comic-drama-workflow__settings {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-xhs-cover__configuration > :not(.canvas-xhs-cover__references),
+  .canvas-comic-drama-workflow__settings > :not(.canvas-comic-drama-workflow__episode) {
+    grid-column: 1 / -1;
+  }
+
+  .canvas-ai-film-workflow__scope > .canvas-knowledge-workflow__body {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-ai-film-workflow__scope
+    > .canvas-knowledge-workflow__body
+    > :is(.canvas-knowledge-workflow__brief, p) {
+    grid-column: 1 / -1;
+  }
 }
 
 .canvas-knowledge-workflow__brief {
@@ -5233,10 +5302,6 @@ svg[data-spin="true"] {
 }
 
 @media (max-width: 42rem) {
-  .canvas-knowledge-workflow {
-    width: min(620px, calc(100vw - 2rem));
-  }
-
   .canvas-knowledge-workflow__model-summary span:nth-child(2) {
     display: none;
   }

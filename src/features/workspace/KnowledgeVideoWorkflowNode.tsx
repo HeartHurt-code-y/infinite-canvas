@@ -681,68 +681,69 @@ export function KnowledgeVideoWorkflowNode({
             版本历史
           </button>
         </div>
-        {!isProductScene && !isReverse && !isCommerce && !isComicDrama ? (
-          <label className="canvas-knowledge-workflow__brief">
-            <span>这次要制作什么？</span>
-            <ImeTextarea
-              aria-label={
-                isMusicVideo
-                  ? "MV 制作要求"
-                  : isCover
-                    ? "封面内容"
-                    : isRemotion
-                      ? "动画制作要求"
-                      : isFilm
-                        ? "影视制作要求"
-                        : "知识视频制作要求"
-              }
-              rows={4}
-              value={node.config.brief}
-              disabled={configurationLocked || phase === "awaiting_approval"}
-              placeholder={
-                isMusicVideo
-                  ? "描述故事、情绪、演唱风格或画面要求；也可留空，由歌曲与歌词确定方向。"
-                  : isCover
-                    ? "粘贴选题、文章或视频脚本，例如：面向新手介绍如何搭建自己的 AI 工作流。"
-                    : isRemotion
-                      ? "例如：用循环流程图展示“提出问题 → 尝试解决 → 收集反馈 → 改进”，清晰呈现每一步的关系。也可以直接粘贴 ASCII 草图。"
-                      : isFilm
-                        ? "例如：制作一部 60 秒温暖现实主义短片，讲述一位修表匠和女儿的和解。也可以写：只做视频提示词，以已有剧本为准。"
-                        : "例如：为第一次接触大模型的销售团队，制作一条 60 秒竖屏视频，解释 RAG 为什么能减少知识问答幻觉。"
-              }
-              onValueChange={(brief) => onChange({ ...node.config, brief })}
-            />
-          </label>
-        ) : null}
-
-        {unsupportedProductReferences ? (
-          <p role="alert">
-            产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再确认产品抠图。
-          </p>
-        ) : null}
         {!isProductScene || unsupportedProductReferences ? (
-          <WorkflowReferenceMaterials
-            materials={node.config.materials ?? []}
-            allMaterials={allMaterials}
-            totalCount={materialQuota.count}
-            connectedInputs={connectedInputs}
-            connectedTexts={connectedTexts}
-            historicalTexts={node.config.connectedTexts ?? []}
-            onRemoveHistoricalText={(key) =>
-              onChange(removeWorkflowHistoricalText(node.config, key))
-            }
-            historicalReferences={node.config.connectedMaterials ?? []}
-            {...(onUnlink ? { onUnlink } : {})}
-            {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
-            disabled={configurationLocked || phase === "awaiting_approval"}
-            picking={pickingMaterials}
-            {...(onPickMaterials
-              ? { onPick: () => pickReferenceMaterials(() => onPickMaterials(node.key)) }
-              : {})}
-            {...(onRemoveMaterial
-              ? { onRemove: (localPath: string) => onRemoveMaterial(node.key, localPath) }
-              : {})}
-          />
+          <div className="canvas-knowledge-workflow__inputs">
+            {!isReverse && !isCommerce && !isComicDrama && !isProductScene ? (
+              <label className="canvas-knowledge-workflow__brief">
+                <span>这次要制作什么？</span>
+                <ImeTextarea
+                  aria-label={
+                    isMusicVideo
+                      ? "MV 制作要求"
+                      : isCover
+                        ? "封面内容"
+                        : isRemotion
+                          ? "动画制作要求"
+                          : isFilm
+                            ? "影视制作要求"
+                            : "知识视频制作要求"
+                  }
+                  rows={4}
+                  value={node.config.brief}
+                  disabled={configurationLocked || phase === "awaiting_approval"}
+                  placeholder={
+                    isMusicVideo
+                      ? "描述故事、情绪、演唱风格或画面要求；也可留空，由歌曲与歌词确定方向。"
+                      : isCover
+                        ? "粘贴选题、文章或视频脚本，例如：面向新手介绍如何搭建自己的 AI 工作流。"
+                        : isRemotion
+                          ? "例如：用循环流程图展示“提出问题 → 尝试解决 → 收集反馈 → 改进”，清晰呈现每一步的关系。也可以直接粘贴 ASCII 草图。"
+                          : isFilm
+                            ? "例如：制作一部 60 秒温暖现实主义短片，讲述一位修表匠和女儿的和解。也可以写：只做视频提示词，以已有剧本为准。"
+                            : "例如：为第一次接触大模型的销售团队，制作一条 60 秒竖屏视频，解释 RAG 为什么能减少知识问答幻觉。"
+                  }
+                  onValueChange={(brief) => onChange({ ...node.config, brief })}
+                />
+              </label>
+            ) : null}
+            {unsupportedProductReferences ? (
+              <p role="alert">
+                产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再确认产品抠图。
+              </p>
+            ) : null}
+            <WorkflowReferenceMaterials
+              materials={node.config.materials ?? []}
+              allMaterials={allMaterials}
+              totalCount={materialQuota.count}
+              connectedInputs={connectedInputs}
+              connectedTexts={connectedTexts}
+              historicalTexts={node.config.connectedTexts ?? []}
+              onRemoveHistoricalText={(key) =>
+                onChange(removeWorkflowHistoricalText(node.config, key))
+              }
+              historicalReferences={node.config.connectedMaterials ?? []}
+              {...(onUnlink ? { onUnlink } : {})}
+              {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
+              disabled={configurationLocked || phase === "awaiting_approval"}
+              picking={pickingMaterials}
+              {...(onPickMaterials
+                ? { onPick: () => pickReferenceMaterials(() => onPickMaterials(node.key)) }
+                : {})}
+              {...(onRemoveMaterial
+                ? { onRemove: (localPath: string) => onRemoveMaterial(node.key, localPath) }
+                : {})}
+            />
+          </div>
         ) : null}
 
         {isProductScene && productSceneOptions ? (

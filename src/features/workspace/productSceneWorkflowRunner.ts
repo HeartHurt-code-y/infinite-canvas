@@ -66,6 +66,8 @@ const sleep: Dependencies["sleep"] = (milliseconds, signal) =>
     else signal.addEventListener("abort", abort, { once: true });
   });
 
+class ProductSceneSourceChangedError extends Error {}
+
 function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? (value as Record<string, unknown>)
@@ -167,7 +169,6 @@ export function createProductSceneWorkflowRunner(
       const flush = async () => {
         await request.beforeSideEffect?.();
       };
-      let activeRowId: string | null = null;
       try {
         abort();
         const options = node.config.productScene;
@@ -193,7 +194,7 @@ export function createProductSceneWorkflowRunner(
             error: null,
             decision: null,
             productScene: { ...createProductSceneCheckpoint(), inputSignature: signature, rows },
-            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；每批 ${options.batchSize} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}逐张选用后才能导出。`,
+            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；每批 ${options.batchSize} 张，并发最多 ${Math.min(options.batchSize, options.maxConcurrency ?? 10)} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}逐张选用后才能导出。`,
           });
           progress("本地场景计划已生成，尚未调用图片模型。请确认首批后开始。");
           return checkpoint;
@@ -275,6 +276,7 @@ export function createProductSceneWorkflowRunner(
         )
           throw new Error("前一批尚有图片未人工选用或淘汰，请完成审核后再开始下一批。");
         commit({ phase: "generating", lastActivePhase: "generating", error: null, decision: null });
+        let fatalError: ProductSceneSourceChangedError | null = null;
         const inspectRow = async (rowId: string) => {
           if (!qualityEnabled) return;
           const current = () => state().rows.find((entry) => entry.id === rowId)!;
@@ -375,7 +377,6 @@ export function createProductSceneWorkflowRunner(
               return;
             }
             let outputPath = quality().basePath;
-            let imageHash: string | undefined;
             let appliedLogoHash: string | undefined;
             if (logo && inspection.logo.status === "place") {
               await dependencies.imageClient.validateLogo({
@@ -399,7 +400,6 @@ export function createProductSceneWorkflowRunner(
               )
                 throw new Error("Logo 贴回的素材签名或画幅不匹配，已阻止选用。");
               outputPath = applied.path;
-              imageHash = applied.imageHash;
               appliedLogoHash = applied.logoHash;
             }
             const notes = [
@@ -421,7 +421,6 @@ export function createProductSceneWorkflowRunner(
             updateRow(rowId, {
               status: "needs_review",
               outputPath,
-              ...(imageHash ? { backgroundHash: imageHash } : {}),
               quality: {
                 ...quality(),
                 status: "passed",
@@ -448,9 +447,8 @@ export function createProductSceneWorkflowRunner(
             await flush();
           }
         };
-        for (const plannedRow of pending) {
+        const processRow = async (plannedRow: ProductSceneRow) => {
           abort();
-          activeRowId = plannedRow.id;
           const row = () => state().rows.find((value) => value.id === plannedRow.id)!;
           const view = options.views.find((value) => value.id === row().recipe.viewId);
           if (!view) throw new Error("计划引用的产品视角已移除，请重新生成计划。");
@@ -465,14 +463,19 @@ export function createProductSceneWorkflowRunner(
           );
           if (!row().outputPath) {
             if (!row().taskId) {
-              await dependencies.imageClient.validateViews({
-                views: options.views.map((reference) => ({
-                  path: reference.preparedPath,
-                  contentHash: reference.contentHash,
-                })),
-              });
+              try {
+                await dependencies.imageClient.validateViews({
+                  views: options.views.map((reference) => ({
+                    path: reference.preparedPath,
+                    contentHash: reference.contentHash,
+                  })),
+                });
+              } catch (error) {
+                throw new ProductSceneSourceChangedError(formatWorkflowError(error));
+              }
               await flush();
               abort();
+              if (fatalError) throw fatalError;
               const taskId = await dependencies.generationClient.start({
                 canvasId: CANVAS_ID,
                 sourceNodeId: node.key,
@@ -628,25 +631,80 @@ export function createProductSceneWorkflowRunner(
             await flush();
             abort();
           }
-          await inspectRow(plannedRow.id);
-          if (row().status === "running") updateRow(plannedRow.id, { status: "needs_review" });
-        }
-        activeRowId = null;
+        };
+        // Generate the full approved batch before vision QA. Slow QA must not
+        // occupy an image slot and make a parallel batch behave serially.
+        const failedRows: number[] = [];
+        const runParallel = async (
+          rows: readonly ProductSceneRow[],
+          process: (row: ProductSceneRow) => Promise<void>,
+        ) => {
+          let nextRow = 0;
+          const worker = async () => {
+            while (nextRow < rows.length && !fatalError) {
+              abort();
+              const plannedRow = rows[nextRow++]!;
+              try {
+                await process(plannedRow);
+              } catch (error) {
+                if (signal.aborted || (error instanceof Error && error.name === "AbortError"))
+                  throw error;
+                if (error instanceof ProductSceneSourceChangedError) fatalError ??= error;
+                const message = formatWorkflowError(error);
+                updateRow(plannedRow.id, { status: "error", error: message });
+                failedRows.push(plannedRow.index);
+                progress(
+                  fatalError
+                    ? `第 ${plannedRow.index} 张参考图校验失败，停止提交剩余任务。`
+                    : `第 ${plannedRow.index} 张处理失败，其他并发任务继续。`,
+                );
+                await flush();
+              }
+            }
+          };
+          const concurrency = Math.min(rows.length, options.maxConcurrency ?? 10);
+          const outcomes = await Promise.allSettled(Array.from({ length: concurrency }, worker));
+          const rejected = outcomes.find((outcome) => outcome.status === "rejected");
+          if (rejected?.status === "rejected")
+            throw rejected.reason instanceof Error
+              ? rejected.reason
+              : new Error(formatWorkflowError(rejected.reason));
+          if (fatalError) throw new Error(formatWorkflowError(fatalError));
+          abort();
+        };
+        await runParallel(
+          pending.filter((row) => !row.outputPath),
+          processRow,
+        );
+        if (qualityEnabled)
+          await runParallel(
+            pending.filter((plannedRow) => {
+              const row = state().rows.find((value) => value.id === plannedRow.id)!;
+              return Boolean(row.outputPath) && (!row.quality || row.quality.status === "pending");
+            }),
+            async (plannedRow) => {
+              updateRow(plannedRow.id, { status: "running" });
+              await inspectRow(plannedRow.id);
+              const row = state().rows.find((value) => value.id === plannedRow.id)!;
+              if (row.status === "running") updateRow(plannedRow.id, { status: "needs_review" });
+            },
+          );
         const allGenerated = state().rows.every(
           (row) => Boolean(row.outputPath) || row.status === "rejected",
         );
         update({ batchReviewPending: true });
         commit({ phase: "awaiting_approval", error: null, decision: null });
         progress(
-          allGenerated
-            ? "计划内图片已生成，仍须逐张人工选用；生成完成不代表验收或全部交付。"
-            : "本批已生成并暂停，请逐张审核，再明确开始下一批。",
+          failedRows.length
+            ? `本批有 ${failedRows.length} 张失败（第 ${failedRows.sort((a, b) => a - b).join("、")} 张）；其他图片已保留，请查看失败项并重做或拒绝。`
+            : allGenerated
+              ? "计划内图片已生成，仍须逐张人工选用；生成完成不代表验收或全部交付。"
+              : "本批已生成并暂停，请逐张审核，再明确开始下一批。",
         );
         return checkpoint;
       } catch (error) {
         const paused = signal.aborted || (error instanceof Error && error.name === "AbortError");
         const message = formatWorkflowError(error);
-        if (activeRowId && !paused) updateRow(activeRowId, { status: "error", error: message });
         commit({ phase: paused ? "paused" : "failed", error: paused ? null : message });
         progress(paused ? "已暂停。已保存的生成任务与本地图片将在继续时复用。" : message);
         return checkpoint;

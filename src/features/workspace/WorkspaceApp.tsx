@@ -106,6 +106,9 @@ import {
   type CanvasDocument,
   type CanvasDocumentV2,
   type CanvasNodeEntry,
+  type CanvasNodeType,
+  type CanvasNodesById,
+  type CanvasNodesByType,
   type CanvasStoreNodeChange,
 } from "../canvas/canvasStore";
 import {
@@ -324,7 +327,6 @@ import {
   VIRAL_REMIX_NODE_WIDTH,
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT,
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-  KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
   ZOOM_STEP,
   assetNodeDimensions,
   assetNodeKey,
@@ -365,6 +367,7 @@ import {
   nextOutputSlot,
   nextVideoComposerOutputSlot,
   nextVideoDownloaderOutputSlot,
+  knowledgeVideoWorkflowNodeWidth,
   normalizeLocalPathKey,
   outputNodeDimensions,
   outputNodeKey,
@@ -577,6 +580,70 @@ function canvasNodeLabel(entry: CanvasNodeEntry | null): string {
     case "result":
       return "结果节点";
   }
+}
+
+function liveCanvasNodeRect(entry: CanvasNodeEntry, viewportWidth: number): CanvasNodeRect {
+  const { data } = entry;
+  let fallback: CanvasNodeDimensions;
+  switch (entry.type) {
+    case "asset":
+      fallback = assetNodeDimensions(entry.data);
+      break;
+    case "gen":
+      fallback = genNodeDimensions(entry.data.kind);
+      break;
+    case "screenplay":
+    case "storyboard":
+      fallback = {
+        width: SCREENPLAY_NODE_WIDTH,
+        height: usesCoarsePointer() ? SCREENPLAY_NODE_COARSE_HEIGHT : SCREENPLAY_NODE_HEIGHT,
+      };
+      break;
+    case "knowledgeVideoWorkflow":
+      fallback = {
+        width: knowledgeVideoWorkflowNodeWidth(viewportWidth),
+        height: usesCoarsePointer()
+          ? KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT
+          : KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
+      };
+      break;
+    case "viralRemix":
+      fallback = {
+        width: VIRAL_REMIX_NODE_WIDTH,
+        height: usesCoarsePointer() ? VIRAL_REMIX_NODE_COARSE_HEIGHT : VIRAL_REMIX_NODE_HEIGHT,
+      };
+      break;
+    case "videoComposer":
+      fallback = { width: VIDEO_COMPOSER_NODE_WIDTH, height: VIDEO_COMPOSER_NODE_HEIGHT };
+      break;
+    case "videoDownloader":
+      fallback = { width: VIDEO_DOWNLOADER_NODE_WIDTH, height: VIDEO_DOWNLOADER_NODE_HEIGHT };
+      break;
+    case "frameExtractor":
+      fallback = {
+        width: VIDEO_FRAME_EXTRACTOR_NODE_WIDTH,
+        height: VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT,
+      };
+      break;
+    case "result":
+      fallback = { width: RESULT_NODE_WIDTH, height: RESULT_NODE_HEIGHT };
+      break;
+    case "output":
+      fallback = outputNodeDimensions(entry.data);
+      break;
+  }
+  const measured = data.measured;
+  const size = measured && measured.width > 0 && measured.height > 0 ? measured : fallback;
+  return { x: data.x, y: data.y, width: size.width, height: size.height };
+}
+
+function currentOutputSource<K extends CanvasNodeType>(
+  nodesById: CanvasNodesById,
+  type: K,
+  fallback: CanvasNodesByType[K],
+): CanvasNodesByType[K] {
+  const entry = nodesById[fallback.key];
+  return entry?.type === type ? (entry.data as CanvasNodesByType[K]) : fallback;
 }
 
 function screenplayMultimodalInputs(
@@ -1065,7 +1132,7 @@ export function WorkspaceApp({
         x: node.x,
         y: node.y,
         ...(genNodeSizes[node.key] ?? {
-          width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+          width: knowledgeVideoWorkflowNodeWidth(window.innerWidth),
           height: usesCoarsePointer()
             ? KNOWLEDGE_VIDEO_WORKFLOW_NODE_COARSE_HEIGHT
             : KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
@@ -1135,6 +1202,27 @@ export function WorkspaceApp({
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
   // React Flow 实例引用：命令式视口操作（恢复视图/锚点缩放/坐标换算）的唯一入口。
   const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
+  const outputPlacementOptionsFor = useCallback(
+    (nodesById: CanvasNodesById, sourceKey: string) => {
+      const viewport = flowInstanceRef.current?.getViewport();
+      const scale = viewport?.zoom ?? zoom / 100;
+      const canvasHeight = canvasViewportRef.current?.getBoundingClientRect().height ?? 0;
+      const sourceY = nodesById[sourceKey]?.data.y ?? 0;
+      const visibleHeight =
+        viewport && scale > 0
+          ? Math.max(0, (canvasHeight - viewport.y) / scale - sourceY)
+          : scale > 0
+            ? canvasHeight / scale
+            : 0;
+      return {
+        visibleHeight,
+        occupied: Object.values(nodesById)
+          .filter((entry) => entry.type !== "output")
+          .map((entry) => liveCanvasNodeRect(entry, window.innerWidth)),
+      };
+    },
+    [zoom],
+  );
   const mobilePanelTriggerRef = useRef<HTMLButtonElement | null>(null);
   const settingsTriggerRef = useRef<HTMLButtonElement | null>(null);
   // 「清空画布」确认弹窗的原生 <dialog> 引用——HTMLDialogElement 自带
@@ -3001,6 +3089,7 @@ export function WorkspaceApp({
         const workflow = createWorkflow({
           anchor: { x: anchor.x, y: anchor.y + topInset },
           occupied: occupiedNodeRects,
+          viewportWidth: window.innerWidth,
           nodeModelSelections,
           providerCatalog,
           providerCatalogLoaded,
@@ -3408,7 +3497,9 @@ export function WorkspaceApp({
         if (activeNode && action === "locate") {
           selectNode(activeNode.key);
           void flowInstanceRef.current?.setCenter(
-            activeNode.x + KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+            activeNode.x +
+              (activeNode.measured?.width ?? knowledgeVideoWorkflowNodeWidth(window.innerWidth)) /
+                2,
             activeNode.y + 100,
             { zoom: zoom / 100, duration: 200 },
           );
@@ -3442,9 +3533,9 @@ export function WorkspaceApp({
             newKey: `workflow-restored-${crypto.randomUUID()}`,
             position: nearestAvailableNodePosition(
               {
-                x: anchor.x - KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+                x: anchor.x - knowledgeVideoWorkflowNodeWidth(window.innerWidth) / 2,
                 y: anchor.y - 180,
-                width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+                width: knowledgeVideoWorkflowNodeWidth(window.innerWidth),
                 height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
               },
               occupiedNodeRects,
@@ -3462,7 +3553,9 @@ export function WorkspaceApp({
         } else addNode("knowledgeVideoWorkflow", restored.node, { select: true });
         selectNode(restored.node.key);
         void flowInstanceRef.current?.setCenter(
-          restored.node.x + KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+          restored.node.x +
+            (restored.node.measured?.width ?? knowledgeVideoWorkflowNodeWidth(window.innerWidth)) /
+              2,
           restored.node.y + 180,
           { zoom: zoom / 100, duration: 200 },
         );
@@ -6300,7 +6393,7 @@ export function WorkspaceApp({
         if (sourceNodeId) {
           const genNode = genNodes.find((node) => node.key === sourceNodeId);
           if (genNode) {
-            addOutput((current) => ({
+            addOutput((current, nodesById) => ({
               key: outputNodeKey(),
               resultKey,
               sourceNodeId,
@@ -6312,7 +6405,11 @@ export function WorkspaceApp({
               name,
               ...(textContent != null ? { textContent } : {}),
               ...(layer != null ? { layer } : {}),
-              ...nextOutputSlot(genNode, current),
+              ...nextOutputSlot(
+                currentOutputSource(nodesById, "gen", genNode),
+                current,
+                outputPlacementOptionsFor(nodesById, genNode.key),
+              ),
             }));
             matched = true;
           }
@@ -6327,7 +6424,7 @@ export function WorkspaceApp({
       }
       return matched;
     },
-    [patchNodes, addOutput, genNodes, outputNodes],
+    [patchNodes, addOutput, genNodes, outputNodes, outputPlacementOptionsFor],
   );
 
   const handleGenerationEvent = useCallback(
@@ -6858,7 +6955,7 @@ export function WorkspaceApp({
             const placeholderCount = supportsBatchCount ? generationCount : 1;
             for (let resultIndex = 1; resultIndex <= placeholderCount; resultIndex += 1) {
               const key = outputNodeKey();
-              addOutput((current) => ({
+              addOutput((current, nodesById) => ({
                 key,
                 resultKey: supportsBatchCount ? `${taskId}#${resultIndex}` : null,
                 sourceNodeId: genNode.key,
@@ -6867,7 +6964,11 @@ export function WorkspaceApp({
                 finalPath: null,
                 previewSrc: null,
                 name: null,
-                ...nextOutputSlot(genNode, current),
+                ...nextOutputSlot(
+                  currentOutputSource(nodesById, "gen", genNode),
+                  current,
+                  outputPlacementOptionsFor(nodesById, genNode.key),
+                ),
               }));
             }
             frontendLog(
@@ -6893,6 +6994,7 @@ export function WorkspaceApp({
       setNodeStartError,
       startingNodeKeys,
       addOutput,
+      outputPlacementOptionsFor,
     ],
   );
 
@@ -6924,7 +7026,7 @@ export function WorkspaceApp({
             );
             for (let resultIndex = 1; resultIndex <= batchCount; resultIndex += 1) {
               const key = outputNodeKey();
-              addOutput((current) => ({
+              addOutput((current, nodesById) => ({
                 key,
                 resultKey: `${taskId}#${resultIndex}`,
                 sourceNodeId: genNode.key,
@@ -6933,7 +7035,11 @@ export function WorkspaceApp({
                 finalPath: null,
                 previewSrc: null,
                 name: null,
-                ...nextOutputSlot(genNode, current),
+                ...nextOutputSlot(
+                  currentOutputSource(nodesById, "gen", genNode),
+                  current,
+                  outputPlacementOptionsFor(nodesById, genNode.key),
+                ),
               }));
             }
             frontendLog(
@@ -6943,7 +7049,7 @@ export function WorkspaceApp({
           } else {
             // 多任务：每个任务一个占位卡片
             const key = outputNodeKey();
-            addOutput((current) => ({
+            addOutput((current, nodesById) => ({
               key,
               resultKey: null,
               sourceNodeId: genNode.key,
@@ -6952,7 +7058,11 @@ export function WorkspaceApp({
               finalPath: null,
               previewSrc: null,
               name: null,
-              ...nextOutputSlot(genNode, current),
+              ...nextOutputSlot(
+                currentOutputSource(nodesById, "gen", genNode),
+                current,
+                outputPlacementOptionsFor(nodesById, genNode.key),
+              ),
             }));
             frontendLog(
               "info",
@@ -6969,7 +7079,7 @@ export function WorkspaceApp({
       refreshTasks();
       return firstTaskId;
     },
-    [canvasId, addOutput, genNodes, refreshTasks],
+    [canvasId, addOutput, genNodes, refreshTasks, outputPlacementOptionsFor],
   );
 
   // 各生成节点的活动任务与最近成功结果（按 sourceNodeId = 节点 key 关联）。
@@ -7235,9 +7345,13 @@ export function WorkspaceApp({
           name: fileName,
           aspectRatio,
         };
-        addOutput((current) => ({
+        addOutput((current, nodesById) => ({
           ...outputBase,
-          ...nextVideoComposerOutputSlot(node, current),
+          ...nextVideoComposerOutputSlot(
+            currentOutputSource(nodesById, "videoComposer", node),
+            current,
+            outputPlacementOptionsFor(nodesById, node.key),
+          ),
         }));
         setVideoComposerRuns((current) => ({
           ...current,
@@ -7251,7 +7365,7 @@ export function WorkspaceApp({
         abortController.signal.removeEventListener("abort", handleAbort);
       }
     },
-    [addOutput, setVideoComposerRuns],
+    [addOutput, setVideoComposerRuns, outputPlacementOptionsFor],
   );
 
   const handleComposeVideos = useCallback(
@@ -7347,9 +7461,13 @@ export function WorkspaceApp({
             name: savedFileName,
             aspectRatio: result.width / result.height,
           };
-          addOutput((current) => ({
+          addOutput((current, nodesById) => ({
             ...outputBase,
-            ...nextVideoComposerOutputSlot(node, current),
+            ...nextVideoComposerOutputSlot(
+              currentOutputSource(nodesById, "videoComposer", node),
+              current,
+              outputPlacementOptionsFor(nodesById, node.key),
+            ),
           }));
           setVideoComposerRuns((current) => ({
             ...current,
@@ -7386,6 +7504,7 @@ export function WorkspaceApp({
       videoComposerRuns,
       runFfmpegComposition,
       addOutput,
+      outputPlacementOptionsFor,
     ],
   );
 
@@ -7666,7 +7785,7 @@ export function WorkspaceApp({
             // 会话内快照与运行状态总是成对创建；此分支仅防御性兜底。
             frontendLog("error", `[downloader] 下载完成但节点快照缺失，跳过落卡: node=${nodeKey}`);
           } else {
-            addOutput((current) => ({
+            addOutput((current, nodesById) => ({
               key: outputKey,
               resultKey: null,
               sourceNodeId: nodeKey,
@@ -7676,7 +7795,11 @@ export function WorkspaceApp({
               finalPath: job.finalPath,
               previewSrc: null,
               name: fileName,
-              ...nextVideoDownloaderOutputSlot(startNode, current),
+              ...nextVideoDownloaderOutputSlot(
+                currentOutputSource(nodesById, "videoDownloader", startNode),
+                current,
+                outputPlacementOptionsFor(nodesById, startNode.key),
+              ),
             }));
           }
           if (queue.sources.length > 0) {
@@ -7747,7 +7870,13 @@ export function WorkspaceApp({
         frontendLog("error", `[downloader] 视频下载失败: node=${nodeKey}, ${message}`);
       }
     });
-  }, [addOutput, queryClient, videoDownloaderNodes, submitNextVideoDownload]);
+  }, [
+    addOutput,
+    queryClient,
+    videoDownloaderNodes,
+    submitNextVideoDownload,
+    outputPlacementOptionsFor,
+  ]);
 
   const handleStartVideoDownload = useCallback(
     (nodeKey: string) => {
@@ -7968,7 +8097,7 @@ export function WorkspaceApp({
             );
           } else {
             for (const frame of job.frames) {
-              addOutput((current) => ({
+              addOutput((current, nodesById) => ({
                 key: outputNodeKey(),
                 resultKey: null,
                 sourceNodeId: nodeKey,
@@ -7978,7 +8107,11 @@ export function WorkspaceApp({
                 finalPath: frame.path,
                 previewSrc: null,
                 name: fileNameFromPath(frame.path),
-                ...nextFrameExtractorOutputSlot(startNode, current),
+                ...nextFrameExtractorOutputSlot(
+                  currentOutputSource(nodesById, "frameExtractor", startNode),
+                  current,
+                  outputPlacementOptionsFor(nodesById, startNode.key),
+                ),
               }));
             }
           }
@@ -8047,7 +8180,13 @@ export function WorkspaceApp({
         frontendLog("error", `[frame-extractor] 视频抽帧失败: node=${nodeKey}, ${message}`);
       }
     });
-  }, [addOutput, queryClient, frameExtractorNodes, submitNextFrameExtraction]);
+  }, [
+    addOutput,
+    queryClient,
+    frameExtractorNodes,
+    submitNextFrameExtraction,
+    outputPlacementOptionsFor,
+  ]);
 
   /** 每个上游视频依次抽帧；同一批次保留所有来源的完整帧产物。 */
   const handleStartFrameExtraction = useCallback(

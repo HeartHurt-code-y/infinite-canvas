@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  APP_UPDATE_CHECK_INTERVAL_MS,
+  APP_UPDATE_FOCUS_THROTTLE_MS,
   checkForAppUpdate,
   describeUpdateError,
   dismissAvailableAppUpdate,
@@ -15,6 +17,7 @@ import {
   setAppUpdateClientForTests,
   shouldShowUpdateBanner,
   SKIPPED_UPDATE_STORAGE_KEY,
+  startAutomaticAppUpdateChecks,
   type AppUpdateClient,
   type AppUpdateProgressEvent,
 } from "./appUpdate";
@@ -41,6 +44,8 @@ function completeDownload(
 }
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   resetAppUpdateStateForTests();
   setAppUpdateClientForTests(null);
   window.localStorage.removeItem(SKIPPED_UPDATE_STORAGE_KEY);
@@ -208,5 +213,96 @@ describe("appUpdate store", () => {
 
     await checkForAppUpdate({ quiet: true });
     expect(getAppUpdateState()).toMatchObject({ status: "idle", error: null });
+  });
+
+  it("finds a new version while the app stays open and stops checking after cleanup", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+    let latestAvailable = false;
+    const check = vi.fn(() =>
+      Promise.resolve(
+        latestAvailable
+          ? { available: true, version: "0.1.8", downloadAndInstall: vi.fn() }
+          : { available: false },
+      ),
+    );
+    setAppUpdateClientForTests(mockClient({ check }));
+
+    const stop = startAutomaticAppUpdateChecks();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(getAppUpdateState().status).toBe("current");
+
+    latestAvailable = true;
+    await vi.advanceTimersByTimeAsync(APP_UPDATE_CHECK_INTERVAL_MS);
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(getAppUpdateState()).toMatchObject({
+      status: "available",
+      availableVersion: "0.1.8",
+    });
+
+    stop();
+    await vi.advanceTimersByTimeAsync(APP_UPDATE_CHECK_INTERVAL_MS);
+    expect(check).toHaveBeenCalledTimes(2);
+  });
+
+  it("checks on foreground return and network recovery without rapid duplicate requests", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-23T12:00:00Z"));
+    const visibility = vi.spyOn(document, "visibilityState", "get").mockReturnValue("hidden");
+    const online = vi.spyOn(navigator, "onLine", "get").mockReturnValue(true);
+    const check = vi.fn(() => Promise.resolve({ available: false }));
+    setAppUpdateClientForTests(mockClient({ check }));
+
+    const stop = startAutomaticAppUpdateChecks();
+    await vi.advanceTimersByTimeAsync(APP_UPDATE_CHECK_INTERVAL_MS);
+    expect(check).not.toHaveBeenCalled();
+
+    visibility.mockReturnValue("visible");
+    document.dispatchEvent(new Event("visibilitychange"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("focus"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(1);
+
+    online.mockReturnValue(false);
+    await vi.advanceTimersByTimeAsync(APP_UPDATE_FOCUS_THROTTLE_MS);
+    window.dispatchEvent(new Event("focus"));
+    expect(check).toHaveBeenCalledTimes(1);
+    online.mockReturnValue(true);
+    window.dispatchEvent(new Event("online"));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(check).toHaveBeenCalledTimes(2);
+    stop();
+  });
+
+  it("keeps an active install intact when an earlier quiet check finishes", async () => {
+    let resolveRefresh: ((value: { available: boolean }) => void) | undefined;
+    const refresh = new Promise<{ available: boolean }>((resolve) => {
+      resolveRefresh = resolve;
+    });
+    const check = vi
+      .fn()
+      .mockResolvedValueOnce({
+        available: true,
+        version: "0.1.8",
+        downloadAndInstall: vi.fn(() => Promise.resolve()),
+      })
+      .mockReturnValueOnce(refresh);
+    setAppUpdateClientForTests(mockClient({ check }));
+
+    await checkForAppUpdate();
+    const pendingRefresh = checkForAppUpdate({ quiet: true });
+    expect(checkForAppUpdate({ quiet: true })).toBe(pendingRefresh);
+    expect(getAppUpdateState().status).toBe("available");
+
+    await installAvailableAppUpdate();
+    expect(getAppUpdateState().status).toBe("ready");
+    resolveRefresh?.({ available: false });
+    await pendingRefresh;
+    await checkForAppUpdate({ quiet: true });
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(getAppUpdateState().status).toBe("ready");
   });
 });

@@ -1,3 +1,7 @@
+.canvas-music-video__settings {
+  container-type: inline-size;
+}
+
 .canvas-music-video__settings > fieldset,
 .canvas-music-video__editor,
 .canvas-music-video__editor fieldset {
@@ -86,4 +90,16 @@
 .canvas-music-video__editor fieldset {
   border: var(--rule-thin) solid var(--color-rule-2);
   border-radius: var(--radius-control);
+}
+
+@container (min-width: 700px) {
+  .canvas-music-video__settings > fieldset {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .canvas-music-video__settings
+    > fieldset
+    > :is(.canvas-music-video__file, p, small, .canvas-music-video__row) {
+    grid-column: 1 / -1;
+  }
 }

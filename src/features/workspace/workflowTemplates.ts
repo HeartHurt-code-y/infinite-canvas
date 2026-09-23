@@ -16,8 +16,8 @@ import {
 } from "./reverseVideoWorkflowModel";
 import {
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
-  KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
   createKnowledgeVideoWorkflowConfig,
+  knowledgeVideoWorkflowNodeWidth,
   knowledgeVideoWorkflowNodeKey,
   nearestAvailableNodePosition,
   reconcileNodeModelSelection,
@@ -46,6 +46,7 @@ export interface WorkflowTemplateAnchor {
 export interface CreateKnowledgeVideoDirectorWorkflowOptions {
   readonly anchor: WorkflowTemplateAnchor;
   readonly occupied: readonly CanvasNodeRect[];
+  readonly viewportWidth?: number;
   readonly nodeModelSelections: NodeModelSelections;
   readonly providerCatalog: readonly ProviderCatalogEntry[];
   readonly providerCatalogLoaded: boolean;
@@ -65,10 +66,11 @@ export interface WorkflowTemplateSubgraph {
 export function createKnowledgeVideoDirectorWorkflow(
   options: CreateKnowledgeVideoDirectorWorkflowOptions,
 ): WorkflowTemplateSubgraph {
+  const width = knowledgeVideoWorkflowNodeWidth(options.viewportWidth);
   const desiredBounds: CanvasNodeRect = {
-    x: options.anchor.x - KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH / 2,
+    x: options.anchor.x - width / 2,
     y: options.anchor.y - KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT / 2,
-    width: KNOWLEDGE_VIDEO_WORKFLOW_NODE_WIDTH,
+    width,
     height: KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
   };
   const position = nearestAvailableNodePosition(desiredBounds, options.occupied);

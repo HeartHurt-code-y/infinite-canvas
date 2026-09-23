@@ -581,6 +581,7 @@ describe("recoverable product scene batches", () => {
       generationMode: "reference",
       totalCount: 2,
       batchSize: 2,
+      maxConcurrency: 1,
     });
     const plan = await runner.run(request);
     vi.mocked(imageClient.validateViews)
@@ -593,6 +594,174 @@ describe("recoverable product scene batches", () => {
     expect(stopped.productScene?.rows[0]?.status).toBe("needs_review");
     expect(stopped.productScene?.rows[1]?.taskId).toBeNull();
     expect(stopped.error).toContain("签名已改变");
+  });
+
+  it("starts multiple image requests before waiting for a result and never exceeds the configured limit", async () => {
+    const { runner, request, resume, generation } = setup({
+      ...options,
+      totalCount: 5,
+      batchSize: 5,
+      maxConcurrency: 2,
+    });
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let peak = 0;
+    vi.mocked(generation.start).mockImplementation(() => {
+      const taskId = `image-${releases.length + 1}`;
+      active += 1;
+      peak = Math.max(peak, active);
+      return new Promise<string>((resolve) => {
+        releases.push(() => {
+          active -= 1;
+          resolve(taskId);
+        });
+      });
+    });
+    const plan = await runner.run(request);
+    const batchPromise = runner.run(resume(plan, 5));
+    await vi.waitFor(() => expect(generation.start).toHaveBeenCalledTimes(2));
+    expect(peak).toBe(2);
+    releases[0]!();
+    await vi.waitFor(() => expect(generation.start).toHaveBeenCalledTimes(3));
+    releases[1]!();
+    await vi.waitFor(() => expect(generation.start).toHaveBeenCalledTimes(4));
+    releases[2]!();
+    await vi.waitFor(() => expect(generation.start).toHaveBeenCalledTimes(5));
+    releases[3]!();
+    releases[4]!();
+    const result = await batchPromise;
+    expect(peak).toBe(2);
+    expect(result.productScene?.rows.map((row) => row.taskId)).toEqual([
+      "image-1",
+      "image-2",
+      "image-3",
+      "image-4",
+      "image-5",
+    ]);
+    expect(result.productScene?.rows.every((row) => row.status === "needs_review")).toBe(true);
+    expect(result.productScene?.batchReviewPending).toBe(true);
+  });
+
+  it("isolates a failed submission while preserving other concurrent results for review", async () => {
+    const { runner, request, resume, generation } = setup({
+      ...options,
+      totalCount: 3,
+      batchSize: 3,
+      maxConcurrency: 3,
+    });
+    vi.mocked(generation.start).mockRejectedValueOnce(new Error("provider rate limit"));
+    const plan = await runner.run(request);
+    const batch = await runner.run(resume(plan, 3));
+    expect(generation.start).toHaveBeenCalledTimes(3);
+    expect(batch.phase).toBe("awaiting_approval");
+    expect(batch.productScene?.rows.map((row) => row.status)).toEqual([
+      "error",
+      "needs_review",
+      "needs_review",
+    ]);
+    expect(batch.productScene?.rows[0]?.error).toContain("provider rate limit");
+    expect(batch.productScene?.rows[1]?.outputPath).toBeTruthy();
+    expect(batch.productScene?.rows[2]?.outputPath).toBeTruthy();
+  });
+
+  it("stops queued submissions when a concurrent reference check fails", async () => {
+    const { runner, request, resume, generation, imageClient } = setup({
+      ...options,
+      generationMode: "reference",
+      totalCount: 3,
+      batchSize: 3,
+      maxConcurrency: 2,
+    });
+    let releaseFirst: (() => void) | undefined;
+    vi.mocked(imageClient.validateViews)
+      .mockResolvedValueOnce()
+      .mockImplementationOnce(
+        () =>
+          new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockRejectedValueOnce(new Error("产品参考图已更改"));
+    const plan = await runner.run(request);
+    const batchPromise = runner.run(resume(plan, 3));
+    await vi.waitFor(() =>
+      expect(
+        vi
+          .mocked(request.onProgress)
+          .mock.calls.some(([value]) =>
+            (value as { message: string }).message.includes("停止提交剩余任务"),
+          ),
+      ).toBe(true),
+    );
+    releaseFirst!();
+    const stopped = await batchPromise;
+    expect(stopped.phase).toBe("failed");
+    expect(stopped.error).toContain("产品参考图已更改");
+    expect(generation.start).not.toHaveBeenCalled();
+    expect(stopped.productScene?.rows[2]?.taskId).toBeNull();
+  });
+
+  it("resumes an interrupted concurrent batch using its saved task identities", async () => {
+    const { runner, request, resume, generation } = setup({
+      ...options,
+      totalCount: 2,
+      batchSize: 2,
+      maxConcurrency: 2,
+    });
+    const releaseGets: Array<() => void> = [];
+    vi.mocked(generation.get)
+      .mockImplementationOnce(
+        (taskId) =>
+          new Promise((resolve) => {
+            releaseGets.push(() => resolve(completedTask(taskId)));
+          }),
+      )
+      .mockImplementationOnce(
+        (taskId) =>
+          new Promise((resolve) => {
+            releaseGets.push(() => resolve(completedTask(taskId)));
+          }),
+      );
+    const plan = await runner.run(request);
+    const controller = new AbortController();
+    const running = runner.run({ ...resume(plan, 2), signal: controller.signal });
+    await vi.waitFor(() => expect(generation.get).toHaveBeenCalledTimes(2));
+    controller.abort();
+    releaseGets.forEach((release) => release());
+    const paused = await running;
+    expect(paused.phase).toBe("paused");
+    expect(paused.productScene?.rows.map((row) => row.taskId)).toEqual(["image-1", "image-2"]);
+    const continued = await runner.run(resume(paused));
+    expect(generation.start).toHaveBeenCalledTimes(2);
+    expect(continued.productScene?.rows.every((row) => row.status === "needs_review")).toBe(true);
+  });
+
+  it("starts every image in the approved batch before slow visual checks occupy workers", async () => {
+    const { runner, request, resume, generation, promptClient } = setup({
+      ...options,
+      totalCount: 3,
+      batchSize: 3,
+      maxConcurrency: 2,
+      quality: { inspectPorts: true, portSpecification: "参考图中一个网络接口" },
+    });
+    const imageCountsWhenChecking: number[] = [];
+    vi.mocked(promptClient.run).mockImplementation(() => {
+      imageCountsWhenChecking.push(vi.mocked(generation.start).mock.calls.length);
+      return inspectionResponse({
+        ...clearInspection,
+        logo: {
+          status: "not_visible",
+          confidence: 0,
+          surfaceClear: false,
+          quad: null,
+          evidence: "未启用Logo贴回",
+        },
+      });
+    });
+    const plan = await runner.run(request);
+    const batch = await runner.run(resume(plan, 3));
+    expect(imageCountsWhenChecking).toEqual([3, 3, 3]);
+    expect(batch.productScene?.rows.every((row) => row.quality?.status === "passed")).toBe(true);
   });
 
   it("creates a free local plan and pauses after the explicitly approved batch for manual review", async () => {

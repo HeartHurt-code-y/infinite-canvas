@@ -61,10 +61,12 @@ const staleSelections: NodeModelSelections = {
 
 function createWorkflow(
   occupied: Parameters<typeof createKnowledgeVideoDirectorWorkflow>[0]["occupied"] = [],
+  viewportWidth?: number,
 ) {
   return createKnowledgeVideoDirectorWorkflow({
     anchor: { x: 1250, y: 945 },
     occupied,
+    ...(viewportWidth == null ? {} : { viewportWidth }),
     nodeModelSelections: staleSelections,
     providerCatalog: catalog,
     providerCatalogLoaded: true,
@@ -343,5 +345,11 @@ describe("createKnowledgeVideoDirectorWorkflow", () => {
     expect(isNodeRectAvailable(moved.bounds, occupied)).toBe(true);
     expect(moved.bounds).not.toEqual(initial.bounds);
     expect(moved.nodes[0]?.data).toMatchObject({ x: moved.bounds.x, y: moved.bounds.y });
+  });
+
+  it("uses the viewport-capped width when inserting a workflow", () => {
+    const narrow = createWorkflow([], 660);
+    expect(narrow.bounds.width).toBe(628);
+    expect(narrow.bounds.x).toBe(1250 - 628 / 2);
   });
 });

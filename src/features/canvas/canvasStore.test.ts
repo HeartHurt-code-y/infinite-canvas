@@ -11,6 +11,7 @@ import type {
 import {
   createKnowledgeVideoWorkflowConfig,
   createPromptNodeConfig,
+  nextOutputSlot,
   type KnowledgeVideoWorkflowNodeData,
 } from "../workspace/workspaceModel";
 import { createCanvasState, type CanvasDocumentV1, type CanvasNodeEntry } from "./canvasStore";
@@ -308,6 +309,27 @@ describe("canvas state interface", () => {
     ]);
     expect(state.graph.countByNode.get("gen-1")).toBe(1);
     expect(state.graph.byTarget.get("output-1")).toHaveLength(1);
+  });
+
+  it("places an output using the source's current canvas position", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("gen", genNode);
+    const originalSource = canvas.getSnapshot().nodes.gen[0]!;
+    canvas.commands.patchNode("gen", genNode.key, (source) => ({ ...source, x: 700 }));
+
+    const added = canvas.commands.addOutput((outputs, nodesById) => {
+      const source = nodesById[genNode.key];
+      if (source?.type !== "gen") throw new Error("current generation source is missing");
+      expect(outputs).toHaveLength(0);
+      return {
+        ...outputNode,
+        ...nextOutputSlot(source.data, outputs),
+      };
+    });
+
+    expect(added.x).toBeGreaterThan(700);
+    expect(added.x).toBeGreaterThan(nextOutputSlot(originalSource, []).x);
+    expect(canvas.getSnapshot().graph.byTarget.get(added.key)).toHaveLength(1);
   });
 
   it("retains every prompt, document and video connection without replacing previous inputs", () => {

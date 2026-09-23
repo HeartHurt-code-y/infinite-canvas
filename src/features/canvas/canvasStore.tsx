@@ -234,7 +234,9 @@ export interface CanvasCommands {
     options?: { readonly select?: boolean },
   ) => CanvasNodesByType[K];
   readonly addOutput: (
-    node: OutputNodeData | ((outputs: readonly OutputNodeData[]) => OutputNodeData),
+    node:
+      | OutputNodeData
+      | ((outputs: readonly OutputNodeData[], nodesById: CanvasNodesById) => OutputNodeData),
   ) => OutputNodeData;
   readonly patchNode: <K extends CanvasNodeType>(
     type: K,
@@ -296,7 +298,9 @@ interface CanvasStoreState {
     options?: { readonly select?: boolean },
   ) => CanvasNodesByType[K];
   readonly addOutput: (
-    node: OutputNodeData | ((outputs: readonly OutputNodeData[]) => OutputNodeData),
+    node:
+      | OutputNodeData
+      | ((outputs: readonly OutputNodeData[], nodesById: CanvasNodesById) => OutputNodeData),
   ) => OutputNodeData;
   readonly patchNode: <K extends CanvasNodeType>(
     type: K,
@@ -1048,7 +1052,9 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
             set((state) => {
               const outputs = typeNodes(state.nodesById, "output");
               const node =
-                typeof nodeOrFactory === "function" ? nodeOrFactory(outputs) : nodeOrFactory;
+                typeof nodeOrFactory === "function"
+                  ? nodeOrFactory(outputs, state.nodesById)
+                  : nodeOrFactory;
               if (state.nodesById[node.key] != null) {
                 throw new Error("Canvas node key already exists: " + node.key);
               }

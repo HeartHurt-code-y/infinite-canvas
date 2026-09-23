@@ -255,7 +255,7 @@ export function createWorkflowExecutionPlan(
     ? productSceneGenerationMode(config.productScene) === "reference"
       ? [
           `使用已确认产品参考图，规划 ${config.productScene.totalCount} 张不同目标机位与场景`,
-          `逐批确认后调用参考图生成，每批最多 ${config.productScene.batchSize} 张`,
+          `逐批确认后调用参考图生成，每批最多 ${config.productScene.batchSize} 张，同时运行最多 ${Math.min(config.productScene.batchSize, config.productScene.maxConcurrency ?? 10)} 个生成任务`,
           "按目标机位生成完整画面，统一尺寸并辅助检查画面相似度",
           ...(productSceneQualityEnabled(config.productScene)
             ? [
@@ -269,7 +269,7 @@ export function createWorkflowExecutionPlan(
         ]
       : [
           `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
-          `逐批确认后生成空背景，每批最多 ${config.productScene.batchSize} 张`,
+          `逐批确认后生成空背景，每批最多 ${config.productScene.batchSize} 张，同时运行最多 ${Math.min(config.productScene.batchSize, config.productScene.maxConcurrency ?? 10)} 个生成任务`,
           "本地回贴产品原图并检查背景相似度",
           ...(productSceneQualityEnabled(config.productScene)
             ? ["逐张调用视觉文本模型，检查可见接口"]

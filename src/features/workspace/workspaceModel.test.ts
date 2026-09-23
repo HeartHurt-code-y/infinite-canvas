@@ -6,12 +6,21 @@ import {
   DEFAULT_ZOOM,
   MAX_ZOOM,
   MIN_ZOOM,
+  OUTPUT_NODE_HEIGHT,
+  OUTPUT_NODE_WIDTH,
   UPLOAD_ABANDONED_MS,
   canvasHomeViewport,
   clampCanvasZoom,
   isTerminalAssetUpload,
   isTerminalStagingJob,
+  isNodeRectAvailable,
+  knowledgeVideoWorkflowNodeWidth,
   mergeStagingJobsIntoUploads,
+  nextFrameExtractorOutputSlot,
+  nextOutputSlot,
+  nextVideoComposerOutputSlot,
+  nextVideoDownloaderOutputSlot,
+  outputNodeDimensions,
   persistAssetLibrarySource,
   parseAssetLibrarySource,
   readAssetLibrarySource,
@@ -21,8 +30,154 @@ import {
   cloudAssetToItem,
   stagingImportReachedLibrary,
   type AssetUploadEntry,
+  type GenNodeData,
+  type OutputNodeData,
   textResultFromSource,
 } from "./workspaceModel";
+
+const outputSource = { key: "source", kind: "image", x: 0, y: 0, config: {} } as GenNodeData;
+
+function placedOutput(key: string, x: number, y: number, aspectRatio?: number): OutputNodeData {
+  return {
+    key,
+    resultKey: null,
+    sourceNodeId: outputSource.key,
+    taskId: key,
+    mediaType: "image",
+    finalPath: aspectRatio == null ? null : `C:\\output\\${key}.png`,
+    name: key,
+    x,
+    y,
+    ...(aspectRatio == null ? {} : { aspectRatio }),
+  };
+}
+
+describe("output card placement", () => {
+  it("caps the workflow node's initial width to the current viewport", () => {
+    expect(knowledgeVideoWorkflowNodeWidth()).toBe(960);
+    expect(knowledgeVideoWorkflowNodeWidth(1200)).toBe(960);
+    expect(knowledgeVideoWorkflowNodeWidth(900)).toBe(868);
+    expect(knowledgeVideoWorkflowNodeWidth(660)).toBe(628);
+    expect(knowledgeVideoWorkflowNodeWidth(20)).toBe(1);
+  });
+
+  it("fills horizontally and uses only one row when the visible height is short", () => {
+    const outputs: OutputNodeData[] = [];
+    for (let index = 0; index < 5; index += 1) {
+      const position = nextOutputSlot(outputSource, outputs, { visibleHeight: 700 });
+      outputs.push(placedOutput(`output-${index}`, position.x, position.y));
+    }
+    expect(outputs.map(({ x, y }) => [x, y])).toEqual([
+      [676, 0],
+      [1200, 0],
+      [1724, 0],
+      [2272, 0],
+      [2796, 0],
+    ]);
+  });
+
+  it("uses a second visible row, then extends horizontally", () => {
+    const outputs: OutputNodeData[] = [];
+    for (let index = 0; index < 7; index += 1) {
+      const position = nextOutputSlot(outputSource, outputs, { visibleHeight: 1000 });
+      outputs.push(placedOutput(`output-${index}`, position.x, position.y));
+    }
+    expect(outputs.map(({ x, y }) => [x, y])).toEqual([
+      [676, 0],
+      [1200, 0],
+      [1724, 0],
+      [676, OUTPUT_NODE_HEIGHT + 32],
+      [1200, OUTPUT_NODE_HEIGHT + 32],
+      [1724, OUTPUT_NODE_HEIGHT + 32],
+      [2272, 0],
+    ]);
+  });
+
+  it("reuses gaps left by deletion or dragging and respects media sizes", () => {
+    const first = placedOutput("first", 676, 0);
+    const third = placedOutput("third", 1724, 0);
+    expect(nextOutputSlot(outputSource, [first, third], { visibleHeight: 700 })).toEqual({
+      x: 1200,
+      y: 0,
+    });
+    expect(nextOutputSlot(outputSource, [placedOutput("moved", 3000, 0)])).toEqual({
+      x: 676,
+      y: 0,
+    });
+    const narrow = placedOutput("narrow", 676, 0, 0.2);
+    expect(nextOutputSlot(outputSource, [narrow])).toEqual({ x: 787.5, y: 0 });
+  });
+
+  it("avoids unrelated canvas nodes and falls back beyond a very wide obstacle", () => {
+    const obstacle = { x: 676, y: 0, width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT };
+    expect(nextOutputSlot(outputSource, [], { occupied: [obstacle] })).toEqual({
+      x: 1200,
+      y: 0,
+    });
+    const wide = { x: 676, y: 0, width: 100_000, height: 1000 };
+    expect(nextOutputSlot(outputSource, [], { occupied: [wide], visibleHeight: 1000 })).toEqual({
+      x: 100_700,
+      y: 0,
+    });
+  });
+
+  it("shares the placement policy across all four output sources", () => {
+    const common = { key: "source", x: 0, y: 0 };
+    expect(
+      nextVideoComposerOutputSlot(
+        { ...common, kind: "video_composer", config: { outputName: "", inputOrder: [] } },
+        [],
+      ),
+    ).toEqual({ x: 676, y: 0 });
+    expect(
+      nextVideoDownloaderOutputSlot(
+        { ...common, kind: "video_downloader", config: { url: "" } },
+        [],
+      ),
+    ).toEqual({ x: 676, y: 0 });
+    expect(
+      nextFrameExtractorOutputSlot(
+        { ...common, kind: "frame_extractor", config: { timestamps: [], videoPath: "" } },
+        [],
+      ),
+    ).toEqual({ x: 676, y: 0 });
+  });
+
+  it("keeps a large batch of mixed-size frame outputs collision-free within two rows", () => {
+    const source = {
+      key: "source",
+      kind: "frame_extractor" as const,
+      x: 0,
+      y: 0,
+      config: { timestamps: [], videoPath: "" },
+    };
+    const occupied = [
+      { x: 1200, y: 0, width: 300, height: 900 },
+      { x: 3600, y: OUTPUT_NODE_HEIGHT + 32, width: 300, height: OUTPUT_NODE_HEIGHT },
+    ];
+    const outputs: OutputNodeData[] = [];
+    for (let index = 0; index < 120; index += 1) {
+      const { x, y } = nextFrameExtractorOutputSlot(source, outputs, {
+        occupied,
+        visibleHeight: 1000,
+      });
+      const existing = outputs.map((node) => ({
+        x: node.x,
+        y: node.y,
+        ...outputNodeDimensions(node),
+      }));
+      expect(
+        isNodeRectAvailable({ x, y, width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT }, [
+          ...occupied,
+          ...existing,
+        ]),
+      ).toBe(true);
+      outputs.push(placedOutput(`frame-${index}`, x, y, index % 3 === 0 ? 0.2 : 3));
+    }
+    expect(new Set(outputs.map((node) => node.y))).toEqual(new Set([0, OUTPUT_NODE_HEIGHT + 32]));
+    expect(outputs.at(-1)!.x).toBeGreaterThan(10_000);
+  });
+});
 
 function uploadEntry(overrides: Partial<AssetUploadEntry> = {}): AssetUploadEntry {
   return {
