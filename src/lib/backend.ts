@@ -1721,6 +1721,7 @@ export type TextSkillMode =
   | "remotion_review"
   | "xhs_cover_plan"
   | "xhs_cover_qc"
+  | "product_scene_inspect"
   | "reverse_video_analysis"
   | "reverse_video_review"
   | "viral_remix";

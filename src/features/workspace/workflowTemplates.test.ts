@@ -10,6 +10,7 @@ import {
   createRemotionWorkflow,
   createXhsCoverWorkflow,
   createReverseVideoWorkflow,
+  createProductSceneWorkflow,
   REVERSE_VIDEO_WORKFLOW_TEMPLATE_ID,
   REMOTION_WORKFLOW_TEMPLATE_ID,
 } from "./workflowTemplates";
@@ -71,6 +72,35 @@ function createWorkflow(
 }
 
 describe("createKnowledgeVideoDirectorWorkflow", () => {
+  it("creates AI product camera generation and selects a reference-image model", () => {
+    const workflow = createProductSceneWorkflow({
+      anchor: { x: 500, y: 500 },
+      occupied: [],
+      nodeModelSelections: staleSelections,
+      providerCatalogLoaded: true,
+      providerCatalog: [
+        {
+          ...catalog[0]!,
+          models: [
+            ...catalog[0]!.models,
+            {
+              definitionId: "reference-image",
+              remoteModelId: "reference-image",
+              displayName: "参考图模型",
+              operations: ["image_to_image"],
+              operationSchema: defaultModelOperationSchema("reference-image", ["image_to_image"]),
+            },
+          ],
+        },
+      ],
+    });
+    const entry = workflow.nodes[0];
+    if (entry?.type !== "knowledgeVideoWorkflow") throw new Error("Missing product scene node");
+    expect(entry.data.config.productScene?.generationMode).toBe("reference");
+    expect(entry.data.config.models.image.modelDefinitionId).toBe("reference-image");
+    expect(entry.data.config.models.text.modelDefinitionId).toBe("");
+    expect(entry.data.config.models.video.modelDefinitionId).toBe("");
+  });
   it("creates one reverse-video node using only the project text model and empty resumable inputs", () => {
     const workflow = createReverseVideoWorkflow({
       anchor: { x: 500, y: 500 },

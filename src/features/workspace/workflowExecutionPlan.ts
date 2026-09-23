@@ -1,6 +1,10 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import { workflowMaterialsSignature } from "./workflowMaterials";
 import { comicDramaStageDependencies, COMIC_DRAMA_STAGE_LABELS } from "./comicDramaWorkflowModel";
+import {
+  productSceneGenerationMode,
+  productSceneQualityEnabled,
+} from "./productSceneWorkflowModel";
 import type {
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowNodeData,
@@ -247,59 +251,84 @@ export function createWorkflowExecutionPlan(
   executionIntent: "restart" | "resume" = "restart",
 ): WorkflowExecutionPlan {
   const config = node.config;
-  const titles = config.reverseVideo
-    ? ["获取原片与真实抽帧", "视频反推分析", "独立复核与必要修订", "导出文档并保存案例"]
-    : config.xhsCover
-      ? ["制定封面与标题方案", "生成封面或交付提示词", "人物与文字检查", "保存交付结果"]
-      : config.remotion
-        ? ["检查本地渲染环境", "生成声明式动画计划", "检查内容与动画时序", "本地渲染与交付"]
-        : config.comicDrama
-          ? [
-              "逐集剧本共创与审核",
-              "风格锁定与审核",
-              "服化道与跨集资产设计",
-              "导演分镜与双审",
-              "执行提示词与双审",
-              "确认实际分镜执行计划",
-              ...(config.comicDrama.deliverable === "documents"
-                ? ["导出制作文档"]
-                : ["资产及镜头生成", "逐镜质检与必要返工", "合成并保存成片"]),
-            ]
-          : config.film
+  const titles = config.productScene
+    ? productSceneGenerationMode(config.productScene) === "reference"
+      ? [
+          `使用已确认产品参考图，规划 ${config.productScene.totalCount} 张不同目标机位与场景`,
+          `逐批确认后调用参考图生成，每批最多 ${config.productScene.batchSize} 张`,
+          "按目标机位生成完整画面，统一尺寸并辅助检查画面相似度",
+          ...(productSceneQualityEnabled(config.productScene)
             ? [
-                "概念、角色与世界观规划",
-                "剧本、资产与表演设计",
-                "视频提示词与分镜",
-                ...(config.film.deliverable === "documents"
-                  ? ["导出制作文档"]
-                  : [
-                      "确认实际分镜执行计划",
-                      "资产及镜头生成",
-                      "逐镜质检与必要返工",
-                      "合成并保存成片",
-                    ]),
+                "逐张调用视觉文本模型，检查可见接口与 Logo 所在平面",
+                ...(config.productScene.quality?.logo
+                  ? ["定位可靠且表面清晰时按透视贴回已确认 Logo"]
+                  : []),
               ]
-            : config.commerce
+            : []),
+          "逐张审核产品形体、接口、Logo 与机位，导出已选用图片及清单",
+        ]
+      : [
+          `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
+          `逐批确认后生成空背景，每批最多 ${config.productScene.batchSize} 张`,
+          "本地回贴产品原图并检查背景相似度",
+          ...(productSceneQualityEnabled(config.productScene)
+            ? ["逐张调用视觉文本模型，检查可见接口"]
+            : []),
+          "逐张审核、拒绝或重做，导出已选用图片与清单",
+        ]
+    : config.reverseVideo
+      ? ["获取原片与真实抽帧", "视频反推分析", "独立复核与必要修订", "导出文档并保存案例"]
+      : config.xhsCover
+        ? ["制定封面与标题方案", "生成封面或交付提示词", "人物与文字检查", "保存交付结果"]
+        : config.remotion
+          ? ["检查本地渲染环境", "生成声明式动画计划", "检查内容与动画时序", "本地渲染与交付"]
+          : config.comicDrama
+            ? [
+                "逐集剧本共创与审核",
+                "风格锁定与审核",
+                "服化道与跨集资产设计",
+                "导演分镜与双审",
+                "执行提示词与双审",
+                "确认实际分镜执行计划",
+                ...(config.comicDrama.deliverable === "documents"
+                  ? ["导出制作文档"]
+                  : ["资产及镜头生成", "逐镜质检与必要返工", "合成并保存成片"]),
+              ]
+            : config.film
               ? [
-                  "产品资料核对",
-                  "剧情创意与分镜设计",
-                  ...(config.commerce.deliverable === "documents"
+                  "概念、角色与世界观规划",
+                  "剧本、资产与表演设计",
+                  "视频提示词与分镜",
+                  ...(config.film.deliverable === "documents"
                     ? ["导出制作文档"]
                     : [
                         "确认实际分镜执行计划",
-                        "一致性资产与镜头生成",
-                        "产品保真与视觉质检",
+                        "资产及镜头生成",
+                        "逐镜质检与必要返工",
                         "合成并保存成片",
                       ]),
                 ]
-              : [
-                  "内容诊断与六段式教学规划",
-                  "生成脚本与分镜",
-                  "确认实际分镜执行计划",
-                  "生成封面与镜头",
-                  "逐镜视觉质检与必要返工",
-                  "合成并保存成片",
-                ];
+              : config.commerce
+                ? [
+                    "产品资料核对",
+                    "剧情创意与分镜设计",
+                    ...(config.commerce.deliverable === "documents"
+                      ? ["导出制作文档"]
+                      : [
+                          "确认实际分镜执行计划",
+                          "一致性资产与镜头生成",
+                          "产品保真与视觉质检",
+                          "合成并保存成片",
+                        ]),
+                  ]
+                : [
+                    "内容诊断与六段式教学规划",
+                    "生成脚本与分镜",
+                    "确认实际分镜执行计划",
+                    "生成封面与镜头",
+                    "逐镜视觉质检与必要返工",
+                    "合成并保存成片",
+                  ];
   let steps = serialSteps(titles);
   if (config.musicVideo) {
     steps = serialSteps([

@@ -2415,7 +2415,8 @@ export function WorkspaceApp({
           output.node.name ??
           output.localPath.split(/[\\/]/).pop() ??
           `${output.mediaType === "video" ? "视频" : "图片"}产物`;
-        if (destination === "cloud") uploadJobToOutputKeyRef.current.set(pendingId, output.node.key);
+        if (destination === "cloud")
+          uploadJobToOutputKeyRef.current.set(pendingId, output.node.key);
         setAssetUploads((current) => [
           ...current,
           {
@@ -2960,6 +2961,7 @@ export function WorkspaceApp({
         | "commerce"
         | "remotion"
         | "xhsCover"
+        | "productScene"
         | "reverseVideo",
     ) => {
       try {
@@ -2981,6 +2983,7 @@ export function WorkspaceApp({
           commerce: templateModule.createCommerceWorkflow,
           remotion: templateModule.createRemotionWorkflow,
           xhsCover: templateModule.createXhsCoverWorkflow,
+          productScene: templateModule.createProductSceneWorkflow,
           reverseVideo: templateModule.createReverseVideoWorkflow,
         }[kind];
         const title = {
@@ -2991,6 +2994,7 @@ export function WorkspaceApp({
           commerce: "剧情带货",
           remotion: "动画逻辑图",
           xhsCover: "小红书封面",
+          productScene: "产品场景图",
           reverseVideo: "短视频反推",
         }[kind];
         const workflow = createWorkflow({
@@ -3010,19 +3014,21 @@ export function WorkspaceApp({
         );
         toast.success(`${title}工作流已放入画布`, {
           description:
-            kind === "musicVideo"
-              ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
-              : kind === "reverseVideo"
-                ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
-                : kind === "xhsCover"
-                  ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
-                  : kind === "remotion"
-                    ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
-                    : kind === "commerce"
-                      ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
-                      : kind === "comicDrama"
-                        ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
-                        : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+            kind === "productScene"
+              ? "添加同一版本的产品参考图，使用 AI 多机位分批制作 3:4 或 9:16 场景图，并逐张审核。"
+              : kind === "musicVideo"
+                ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
+                : kind === "reverseVideo"
+                  ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
+                  : kind === "xhsCover"
+                    ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
+                    : kind === "remotion"
+                      ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
+                      : kind === "commerce"
+                        ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
+                        : kind === "comicDrama"
+                          ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
+                          : "填写制作要求并点击开始，其余步骤由节点自动完成。",
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -3058,6 +3064,9 @@ export function WorkspaceApp({
   const insertXhsCoverWorkflow = useCallback(() => {
     void insertWorkflow("xhsCover");
   }, [insertWorkflow]);
+  const insertProductSceneWorkflow = useCallback(() => {
+    void insertWorkflow("productScene");
+  }, [insertWorkflow]);
   const insertReverseVideoWorkflow = useCallback(() => {
     void insertWorkflow("reverseVideo");
   }, [insertWorkflow]);
@@ -3069,18 +3078,67 @@ export function WorkspaceApp({
     [],
   );
 
+  const productSceneHistoryEditsRef = useRef(new Map<string, Promise<void>>());
   const updateKnowledgeVideoWorkflowConfig = useCallback(
     (key: string, config: KnowledgeVideoWorkflowConfig) => {
+      const previousNode = config.productScene
+        ? snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key)
+        : undefined;
+      if (
+        previousNode &&
+        workflowExecutionInputSignature(previousNode) !==
+          workflowExecutionInputSignature({ ...previousNode, config })
+      ) {
+        // Edited product inputs begin a new production run. The previous paid run
+        // keeps its original product/model association in the durable archive.
+        const next = { ...config };
+        delete next.historyRunId;
+        config = next;
+      }
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
-      if (config.musicVideo && !knowledgeVideoWorkflowAbortControllersRef.current.has(key)) {
+      if (
+        (config.musicVideo || config.productScene) &&
+        !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
+      ) {
         setKnowledgeVideoWorkflowRuns((current) => {
           const next = { ...current };
           delete next[key];
           return next;
         });
       }
+      if (
+        config.productScene &&
+        config.historyRunId &&
+        previousNode &&
+        workflowExecutionInputSignature(previousNode) ===
+          workflowExecutionInputSignature({ ...previousNode, config }) &&
+        !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
+      ) {
+        const node = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
+        if (node) {
+          const previous = productSceneHistoryEditsRef.current.get(key) ?? Promise.resolve();
+          const save = previous
+            .catch(() => undefined)
+            .then(async () => {
+              const { record } = await workflowHistoryClient.get(config.historyRunId!);
+              await workflowHistoryClient.save({
+                record: {
+                  ...record,
+                  nodeSnapshot: node,
+                  status: node.config.checkpoint.phase,
+                  message: `产品场景图审核 · 已选用 ${node.config.checkpoint.productScene?.rows.filter((row) => row.status === "accepted").length ?? 0} 张`,
+                  updatedAt: Date.now(),
+                },
+              });
+            });
+          productSceneHistoryEditsRef.current.set(key, save);
+          void save.catch((error: unknown) =>
+            toast.error("产品场景图审核历史保存失败", { description: formatWorkflowError(error) }),
+          );
+        }
+      }
     },
-    [patchNode],
+    [patchNode, snapshotV2],
   );
 
   const navigateWorkflowVersion = useCallback(
@@ -3246,6 +3304,7 @@ export function WorkspaceApp({
         },
       }));
       void recoverWorkflowHistory()
+        .then(() => productSceneHistoryEditsRef.current.get(key)?.catch(() => undefined))
         .then(() =>
           recordedWorkflowRunner.run({
             node,
@@ -3273,27 +3332,31 @@ export function WorkspaceApp({
         .then((checkpoint) => {
           if (checkpoint.phase === "done") {
             toast.success(
-              node.config.musicVideo
-                ? "音乐 MV 制作完成"
-                : node.config.xhsCover
-                  ? "小红书封面制作完成"
-                  : node.config.remotion
-                    ? "动画逻辑图制作完成"
-                    : node.config.commerce
-                      ? "剧情带货制作完成"
-                      : node.config.comicDrama
-                        ? "漫剧制作完成"
-                        : node.config.film
-                          ? "影视制作完成"
-                          : "知识视频制作完成",
+              node.config.productScene
+                ? "产品场景图审核完成"
+                : node.config.musicVideo
+                  ? "音乐 MV 制作完成"
+                  : node.config.xhsCover
+                    ? "小红书封面制作完成"
+                    : node.config.remotion
+                      ? "动画逻辑图制作完成"
+                      : node.config.commerce
+                        ? "剧情带货制作完成"
+                        : node.config.comicDrama
+                          ? "漫剧制作完成"
+                          : node.config.film
+                            ? "影视制作完成"
+                            : "知识视频制作完成",
               {
-                description: node.config.xhsCover
-                  ? "封面方案、提示词与交付物已保存在工作流节点中。"
-                  : node.config.remotion
-                    ? "动画、预览图和可编辑工程已保存在工作流节点中。"
-                    : checkpoint.documentsOnly
-                      ? "制作文档与提示词已保存在工作流节点中。"
-                      : "完整成片与过程文档已保存在工作流节点中。",
+                description: node.config.productScene
+                  ? "逐张审核记录已保存，可从节点导出已选用图片。"
+                  : node.config.xhsCover
+                    ? "封面方案、提示词与交付物已保存在工作流节点中。"
+                    : node.config.remotion
+                      ? "动画、预览图和可编辑工程已保存在工作流节点中。"
+                      : checkpoint.documentsOnly
+                        ? "制作文档与提示词已保存在工作流节点中。"
+                        : "完整成片与过程文档已保存在工作流节点中。",
               },
             );
           } else if (checkpoint.phase === "awaiting_approval") {
@@ -8973,7 +9036,7 @@ export function WorkspaceApp({
             selected: selectedNodeKey === node.key,
             data: {
               hasSourceHandle: true,
-              hasTargetHandle: true,
+              hasTargetHandle: !node.config.productScene,
               content: (
                 <KnowledgeVideoWorkflowNode
                   key={node.key}
@@ -10343,6 +10406,7 @@ export function WorkspaceApp({
               onInsertCommerceWorkflow={insertCommerceWorkflow}
               onInsertRemotionWorkflow={insertRemotionWorkflow}
               onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
+              onInsertProductSceneWorkflow={insertProductSceneWorkflow}
               onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
               onInsertMusicVideoWorkflow={insertMusicVideoWorkflow}
             />

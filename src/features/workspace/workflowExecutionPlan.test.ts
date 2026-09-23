@@ -17,6 +17,7 @@ import {
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
+import { createProductSceneOptions } from "./productSceneWorkflowModel";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 
 function approve(source: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflowNodeData {
@@ -33,6 +34,37 @@ function approve(source: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflow
 }
 
 describe("workflow dependency plans and human review", () => {
+  it("discloses per-image inspection and Logo placement, and invalidates prior approval on enablement", () => {
+    const original = node();
+    const source = approve({
+      ...original,
+      config: { ...original.config, productScene: createProductSceneOptions() },
+    });
+    const changed = {
+      ...source,
+      config: {
+        ...source.config,
+        productScene: {
+          ...source.config.productScene!,
+          quality: {
+            inspectPorts: true,
+            portSpecification: "1 个 HDMI",
+            logo: {
+              path: "C:/logo.png",
+              contentHash: "b".repeat(64),
+              width: 200,
+              height: 60,
+              approved: true,
+            },
+          },
+        },
+      },
+    };
+    expect(isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(source), changed)).toBe(false);
+    const titles = createWorkflowExecutionPlan(changed).steps.map((step) => step.title);
+    expect(titles).toContain("逐张调用视觉文本模型，检查可见接口与 Logo 所在平面");
+    expect(titles).toContain("定位可靠且表面清晰时按透视贴回已确认 Logo");
+  });
   it("uses Kahn order on an unsorted diamond and rejects cycles/missing dependencies before execution", async () => {
     const steps = [
       { id: "finish", title: "完成", dependsOn: ["left", "right"] },

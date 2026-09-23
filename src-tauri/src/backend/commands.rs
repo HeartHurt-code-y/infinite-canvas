@@ -15,6 +15,12 @@ use super::{
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
+    product_scene_images::{
+        ApplyProductSceneLogoCommand, ComposeProductSceneCommand, ExportProductScenesCommand,
+        NormalizeProductSceneImageCommand, PrepareProductViewCommand, PreparedProductView,
+        ProductSceneComposite, ProductSceneExport, ProductSceneGeneratedImage,
+        ProductSceneLogoComposite, ProductViewIdentity, ValidateProductViewsCommand,
+    },
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider_adapter::ProviderAdapterKind,
     remotion_renderer::{
@@ -129,6 +135,110 @@ pub async fn normalize_cover_image(
     command: NormalizeCoverImageCommand,
 ) -> CommandResult<NormalizedCoverImage> {
     state.cover_images.normalize(command).await.command()
+}
+
+#[tauri::command]
+pub async fn prepare_product_scene_view(
+    state: State<'_, BackendState>,
+    command: PrepareProductViewCommand,
+) -> CommandResult<PreparedProductView> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.prepare(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("产品母版准备失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn validate_product_scene_views(
+    state: State<'_, BackendState>,
+    command: ValidateProductViewsCommand,
+) -> CommandResult<()> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.validate_views(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("产品母版检查失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn prepare_product_scene_logo(
+    state: State<'_, BackendState>,
+    command: PrepareProductViewCommand,
+) -> CommandResult<PreparedProductView> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.prepare_logo(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("Logo 准备失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn validate_product_scene_logo(
+    state: State<'_, BackendState>,
+    command: ProductViewIdentity,
+) -> CommandResult<()> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.validate_logo(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("Logo 检查失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn apply_product_scene_logo(
+    state: State<'_, BackendState>,
+    command: ApplyProductSceneLogoCommand,
+) -> CommandResult<ProductSceneLogoComposite> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.apply_logo(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("Logo 贴回失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn compose_product_scene(
+    state: State<'_, BackendState>,
+    command: ComposeProductSceneCommand,
+) -> CommandResult<ProductSceneComposite> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.compose(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("产品场景合成失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn export_product_scenes(
+    state: State<'_, BackendState>,
+    command: ExportProductScenesCommand,
+) -> CommandResult<ProductSceneExport> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.export(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("产品场景导出失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn normalize_product_scene_image(
+    state: State<'_, BackendState>,
+    command: NormalizeProductSceneImageCommand,
+) -> CommandResult<ProductSceneGeneratedImage> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.normalize_generated(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("AI 产品场景图片处理失败：{error}")))
+        .and_then(|result| result)
+        .command()
 }
 
 #[tauri::command]

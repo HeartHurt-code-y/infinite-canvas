@@ -22,6 +22,16 @@ import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowS
 import { XhsCoverConfiguration, XhsCoverDeliverables } from "./XhsCoverWorkflowSections";
 import { xhsCoverInputReady } from "./xhsCoverWorkflowModel";
 import {
+  ProductSceneConfiguration,
+  ProductSceneDeliverables,
+} from "./ProductSceneWorkflowSections";
+import {
+  productSceneGenerationMode,
+  productSceneInputReady,
+  productSceneInputSignature,
+  productSceneQualityEnabled,
+} from "./productSceneWorkflowModel";
+import {
   ReverseVideoConfiguration,
   ReverseVideoDeliverables,
 } from "./ReverseVideoWorkflowSections";
@@ -331,6 +341,12 @@ export function KnowledgeVideoWorkflowNode({
   const commerceOptions = node.config.commerce;
   const remotionOptions = node.config.remotion;
   const coverOptions = node.config.xhsCover;
+  const productSceneOptions = node.config.productScene;
+  const isProductScene = productSceneOptions != null;
+  const productSceneQuality =
+    productSceneOptions != null && productSceneQualityEnabled(productSceneOptions);
+  const isProductReference =
+    productSceneOptions != null && productSceneGenerationMode(productSceneOptions) === "reference";
   const reverseOptions = node.config.reverseVideo;
   const isReverse = !isMusicVideo && reverseOptions != null;
   const isCover = !isReverse && coverOptions != null;
@@ -346,21 +362,23 @@ export function KnowledgeVideoWorkflowNode({
     !isCommerce &&
     !isComicDrama &&
     filmOptions != null;
-  const workflowTitle = isMusicVideo
-    ? "音乐 MV 工作流 V1.0.6"
-    : isReverse
-      ? "短视频反推工作流"
-      : isCover
-        ? "小红书封面工作流"
-        : isRemotion
-          ? "动画逻辑图工作流"
-          : isCommerce
-            ? "剧情带货工作流"
-            : isComicDrama
-              ? "动漫短剧工作流 V2.3"
-              : isFilm
-                ? "AI影视工作流"
-                : "知识视频工作流";
+  const workflowTitle = isProductScene
+    ? "产品场景图工作流"
+    : isMusicVideo
+      ? "音乐 MV 工作流 V1.0.6"
+      : isReverse
+        ? "短视频反推工作流"
+        : isCover
+          ? "小红书封面工作流"
+          : isRemotion
+            ? "动画逻辑图工作流"
+            : isCommerce
+              ? "剧情带货工作流"
+              : isComicDrama
+                ? "动漫短剧工作流 V2.3"
+                : isFilm
+                  ? "AI影视工作流"
+                  : "知识视频工作流";
   const phase = runState?.phase ?? node.config.checkpoint.phase;
   const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
@@ -386,13 +404,20 @@ export function KnowledgeVideoWorkflowNode({
   const decisionResolution = decisionDraft.key === decisionKey ? decisionDraft.value : "";
   const finalPath = node.config.checkpoint.finalPath;
   const checkpoint = node.config.checkpoint;
-  const workflowStages = isReverse
-    ? REVERSE_VIDEO_WORKFLOW_STAGES
-    : isCover
-      ? COVER_WORKFLOW_STAGES
-      : isRemotion
-        ? ANIMATION_WORKFLOW_STAGES
-        : WORKFLOW_STAGES;
+  const workflowStages = isProductScene
+    ? [
+        { phase: "planning", label: "场景规划" },
+        { phase: "generating", label: "分批制作" },
+        { phase: "qc", label: "逐张审核" },
+        { phase: "done", label: "导出选用图片" },
+      ]
+    : isReverse
+      ? REVERSE_VIDEO_WORKFLOW_STAGES
+      : isCover
+        ? COVER_WORKFLOW_STAGES
+        : isRemotion
+          ? ANIMATION_WORKFLOW_STAGES
+          : WORKFLOW_STAGES;
   const activeStageIndex = isReverse
     ? phase === "idle"
       ? -1
@@ -431,54 +456,78 @@ export function KnowledgeVideoWorkflowNode({
       image: configuredModelLabel(
         node.config.models.image,
         providerCatalog,
-        isCover ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER,
+        isCover || isProductReference ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER,
       ),
       video: configuredModelLabel(node.config.models.video, providerCatalog, VIDEO_MODEL_FILTER),
     }),
-    [node.config.models, providerCatalog, isCover],
+    [node.config.models, providerCatalog, isCover, isProductReference],
   );
   const documentsOnly =
     (musicVideoOptions ?? commerceOptions ?? comicDramaOptions ?? filmOptions)?.deliverable ===
     "documents";
-  const modelsReady = isCover
-    ? configuredModels.text !== "待配置" &&
-      (coverOptions.deliverable === "prompt" || configuredModels.image !== "待配置")
-    : isReverse || isRemotion || documentsOnly
-      ? configuredModels.text !== "待配置"
-      : Object.values(configuredModels).every((label) => label !== "待配置");
+  const modelsReady = isProductScene
+    ? configuredModels.image !== "待配置" &&
+      (!productSceneQuality || configuredModels.text !== "待配置")
+    : isCover
+      ? configuredModels.text !== "待配置" &&
+        (coverOptions.deliverable === "prompt" || configuredModels.image !== "待配置")
+      : isReverse || isRemotion || documentsOnly
+        ? configuredModels.text !== "待配置"
+        : Object.values(configuredModels).every((label) => label !== "待配置");
   const effectiveConfig = withCanvasWorkflowMaterials(node, {
     media: connectedInputs,
     texts: connectedTexts,
   }).config;
-  const inputReady = isMusicVideo
-    ? !!musicVideoOptions.songPath.trim() &&
-      (musicVideoOptions.characterMode !== "reference" ||
-        musicVideoOptions.characterReferences.length > 0)
-    : isReverse
-      ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
-      : isCover
-        ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
-        : isRemotion
-          ? Boolean(effectiveConfig.brief.trim())
-          : commerceOptions
-            ? commerceInputReady(commerceOptions)
-            : comicDramaOptions
-              ? comicDramaOptions.episodes.length > 0 &&
-                comicDramaOptions.episodes.length <= 10 &&
-                comicDramaOptions.episodes.every(
-                  (episode) => episode.title.trim() && episode.script.trim(),
-                )
-              : Boolean(effectiveConfig.brief.trim());
+  const unsupportedProductReferences =
+    isProductScene &&
+    [
+      connectedInputs.length,
+      connectedTexts.length,
+      node.config.materials?.length ?? 0,
+      node.config.connectedMaterials?.length ?? 0,
+      node.config.connectedTexts?.length ?? 0,
+    ].some((count) => count > 0);
+  const inputReady = isProductScene
+    ? productSceneInputReady(productSceneOptions)
+    : isMusicVideo
+      ? !!musicVideoOptions.songPath.trim() &&
+        (musicVideoOptions.characterMode !== "reference" ||
+          musicVideoOptions.characterReferences.length > 0)
+      : isReverse
+        ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
+        : isCover
+          ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
+          : isRemotion
+            ? Boolean(effectiveConfig.brief.trim())
+            : commerceOptions
+              ? commerceInputReady(commerceOptions)
+              : comicDramaOptions
+                ? comicDramaOptions.episodes.length > 0 &&
+                  comicDramaOptions.episodes.length <= 10 &&
+                  comicDramaOptions.episodes.every(
+                    (episode) => episode.title.trim() && episode.script.trim(),
+                  )
+                : Boolean(effectiveConfig.brief.trim());
   const allMaterials = workflowReferenceMaterials(effectiveConfig);
   const materialQuota = workflowMaterialQuota(effectiveConfig);
   const materialsValid = allMaterials.every(
     (material) => Number.isFinite(material.byteSize) && material.byteSize > 0,
   );
-  const readyToExecute = inputReady && modelsReady && materialsValid && !pickingMaterials;
+  const readyToExecute =
+    inputReady &&
+    modelsReady &&
+    materialsValid &&
+    !pickingMaterials &&
+    !unsupportedProductReferences;
   const effectiveNode = { ...node, config: effectiveConfig };
   const executionPlan = getWorkflowExecutionPlan(effectiveNode);
   const awaitingPlan =
     executionPlan != null && !isWorkflowExecutionPlanApproved(executionPlan, effectiveNode);
+  const productSceneStale = Boolean(
+    isProductScene &&
+    checkpoint.productScene?.rows.length &&
+    checkpoint.productScene.inputSignature !== productSceneInputSignature(node.config),
+  );
 
   async function pickReferenceMaterials(pick: () => Promise<void> | void) {
     if (pickingMaterialsRef.current || configurationLocked || phase === "awaiting_approval") return;
@@ -545,21 +594,25 @@ export function KnowledgeVideoWorkflowNode({
           <span>
             <strong>{workflowTitle}</strong>
             <small>
-              {isMusicVideo
-                ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
-                : isReverse
-                  ? "原片自动转为反推提示词、二创路线与可复用案例"
-                  : isCover
-                    ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
-                    : isRemotion
-                      ? "描述或草图自动转为动图、视频与可编辑工程"
-                      : isCommerce
-                        ? "商品资料自动转为剧情、镜头与成片交付"
-                        : isComicDrama
-                          ? "从剧本共创到成片，逐阶段审核并保留制作版本"
-                          : isFilm
-                            ? "八个制作阶段封装执行，支持已有资料接力"
-                            : "一个节点自动完成策划、生成、质检与交付"}
+              {isProductScene
+                ? isProductReference
+                  ? "以产品图片为参考，生成不同机位与场景并逐张审核"
+                  : "以产品原图合成已有角度，分批制作并逐张审核"
+                : isMusicVideo
+                  ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
+                  : isReverse
+                    ? "原片自动转为反推提示词、二创路线与可复用案例"
+                    : isCover
+                      ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
+                      : isRemotion
+                        ? "描述或草图自动转为动图、视频与可编辑工程"
+                        : isCommerce
+                          ? "商品资料自动转为剧情、镜头与成片交付"
+                          : isComicDrama
+                            ? "从剧本共创到成片，逐阶段审核并保留制作版本"
+                            : isFilm
+                              ? "八个制作阶段封装执行，支持已有资料接力"
+                              : "一个节点自动完成策划、生成、质检与交付"}
             </small>
           </span>
         </span>
@@ -628,7 +681,7 @@ export function KnowledgeVideoWorkflowNode({
             版本历史
           </button>
         </div>
-        {!isReverse && !isCommerce && !isComicDrama ? (
+        {!isProductScene && !isReverse && !isCommerce && !isComicDrama ? (
           <label className="canvas-knowledge-workflow__brief">
             <span>这次要制作什么？</span>
             <ImeTextarea
@@ -662,26 +715,44 @@ export function KnowledgeVideoWorkflowNode({
           </label>
         ) : null}
 
-        <WorkflowReferenceMaterials
-          materials={node.config.materials ?? []}
-          allMaterials={allMaterials}
-          totalCount={materialQuota.count}
-          connectedInputs={connectedInputs}
-          connectedTexts={connectedTexts}
-          historicalTexts={node.config.connectedTexts ?? []}
-          onRemoveHistoricalText={(key) => onChange(removeWorkflowHistoricalText(node.config, key))}
-          historicalReferences={node.config.connectedMaterials ?? []}
-          {...(onUnlink ? { onUnlink } : {})}
-          {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
-          disabled={configurationLocked || phase === "awaiting_approval"}
-          picking={pickingMaterials}
-          {...(onPickMaterials
-            ? { onPick: () => pickReferenceMaterials(() => onPickMaterials(node.key)) }
-            : {})}
-          {...(onRemoveMaterial
-            ? { onRemove: (localPath: string) => onRemoveMaterial(node.key, localPath) }
-            : {})}
-        />
+        {unsupportedProductReferences ? (
+          <p role="alert">
+            产品场景图只使用下方专用产品原图。请先移除这些通用参考与连线，再确认产品抠图。
+          </p>
+        ) : null}
+        {!isProductScene || unsupportedProductReferences ? (
+          <WorkflowReferenceMaterials
+            materials={node.config.materials ?? []}
+            allMaterials={allMaterials}
+            totalCount={materialQuota.count}
+            connectedInputs={connectedInputs}
+            connectedTexts={connectedTexts}
+            historicalTexts={node.config.connectedTexts ?? []}
+            onRemoveHistoricalText={(key) =>
+              onChange(removeWorkflowHistoricalText(node.config, key))
+            }
+            historicalReferences={node.config.connectedMaterials ?? []}
+            {...(onUnlink ? { onUnlink } : {})}
+            {...(onRemoveHistoricalReference ? { onRemoveHistoricalReference } : {})}
+            disabled={configurationLocked || phase === "awaiting_approval"}
+            picking={pickingMaterials}
+            {...(onPickMaterials
+              ? { onPick: () => pickReferenceMaterials(() => onPickMaterials(node.key)) }
+              : {})}
+            {...(onRemoveMaterial
+              ? { onRemove: (localPath: string) => onRemoveMaterial(node.key, localPath) }
+              : {})}
+          />
+        ) : null}
+
+        {isProductScene && productSceneOptions ? (
+          <ProductSceneConfiguration
+            options={productSceneOptions}
+            disabled={configurationLocked || phase === "awaiting_approval"}
+            onChange={(productScene) => onChange({ ...node.config, productScene })}
+            onBusyChange={setPickingMaterials}
+          />
+        ) : null}
 
         {isMusicVideo && musicVideoOptions ? (
           <MusicVideoConfiguration
@@ -857,38 +928,49 @@ export function KnowledgeVideoWorkflowNode({
               模型配置
             </span>
             <span className="canvas-knowledge-workflow__model-summary" aria-label="已选模型">
-              <span>
-                {isReverse ? "视觉反推" : "策划"} · {configuredModels.text}
-              </span>
+              {!isProductScene || productSceneQuality ? (
+                <span>
+                  {isProductScene ? "视觉检查" : isReverse ? "视觉反推" : "策划"} ·{" "}
+                  {configuredModels.text}
+                </span>
+              ) : null}
               {!isReverse && !isRemotion ? (
                 <>
                   <span>图片 · {configuredModels.image}</span>
-                  {!isCover ? <span>视频 · {configuredModels.video}</span> : null}
+                  {!isCover && !isProductScene ? (
+                    <span>视频 · {configuredModels.video}</span>
+                  ) : null}
                 </>
               ) : null}
             </span>
             <Icon name="caret-down" aria-hidden="true" size="md" />
           </summary>
           <div className="canvas-knowledge-workflow__model-grid">
-            <ModelSlot
-              label={isReverse ? "视觉反推与审核" : "策划与审核"}
-              selection={node.config.models.text}
-              providerCatalog={providerCatalog}
-              filter={TEXT_MODEL_FILTER}
-              disabled={configurationLocked}
-              onChange={(selection) => patchModels("text", selection)}
-            />
+            {!isProductScene || productSceneQuality ? (
+              <ModelSlot
+                label={
+                  isProductScene ? "产品视觉检查" : isReverse ? "视觉反推与审核" : "策划与审核"
+                }
+                selection={node.config.models.text}
+                providerCatalog={providerCatalog}
+                filter={TEXT_MODEL_FILTER}
+                disabled={configurationLocked}
+                onChange={(selection) => patchModels("text", selection)}
+              />
+            ) : null}
             {!isReverse && !isRemotion ? (
               <>
                 <ModelSlot
                   label="图片生成"
                   selection={node.config.models.image}
                   providerCatalog={providerCatalog}
-                  filter={isCover ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER}
+                  filter={
+                    isCover || isProductReference ? COVER_IMAGE_MODEL_FILTER : IMAGE_MODEL_FILTER
+                  }
                   disabled={configurationLocked}
                   onChange={(selection) => patchModels("image", selection)}
                 />
-                {!isCover ? (
+                {!isCover && !isProductScene ? (
                   <ModelSlot
                     label="视频生成"
                     selection={node.config.models.video}
@@ -902,6 +984,19 @@ export function KnowledgeVideoWorkflowNode({
             ) : null}
           </div>
           <p>这里仅显示当前项目中已启用的供应商和模型。</p>
+          {productSceneQuality ? (
+            <p>
+              自动接口检测和 Logo
+              定位需要可看图的文本模型，实际输入能力会在请求前校验。每张额外调用视觉检查，失败或不确定的图片不能选用。
+            </p>
+          ) : null}
+          {isProductScene ? (
+            <p>
+              {isProductReference
+                ? "AI 多机位需要支持参考图片的图片模型；参考图用于约束产品身份，目标机位由工作流单独安排。"
+                : "原图保真合成需要支持文字生图的图片模型；模型生成空背景，本地回贴已确认产品原图。"}
+            </p>
+          ) : null}
           {isReverse ? <p>请选择能识别图片的文本模型，用于分析带时间戳的真实视频联系表。</p> : null}
           {isCover ? (
             <p>策划与审核请选择能识别图片的文本模型，图片生成请选择支持参考图的模型。</p>
@@ -967,7 +1062,7 @@ export function KnowledgeVideoWorkflowNode({
           onApprove={() => onApprovePlan?.(node.key)}
         />
 
-        {phase === "awaiting_approval" && !awaitingPlan ? (
+        {phase === "awaiting_approval" && !awaitingPlan && !isProductScene ? (
           <section
             className="canvas-knowledge-workflow__decision"
             aria-label="需要确认"
@@ -1065,6 +1160,16 @@ export function KnowledgeVideoWorkflowNode({
           />
         ) : null}
         {isReverse ? <ReverseVideoDeliverables checkpoint={node.config.checkpoint} /> : null}
+
+        {isProductScene && productSceneOptions ? (
+          <ProductSceneDeliverables
+            options={productSceneOptions}
+            checkpoint={checkpoint}
+            disabled={isActivePhase(phase) || pickingMaterials || awaitingPlan || productSceneStale}
+            onChange={(next) => onChange({ ...node.config, checkpoint: next })}
+            onContinue={() => onContinue(node.key)}
+          />
+        ) : null}
 
         {isCover ? (
           <XhsCoverDeliverables
@@ -1167,7 +1272,12 @@ export function KnowledgeVideoWorkflowNode({
           </section>
         ) : null}
 
-        {!isReverse && !isCover && !isRemotion && phase === "done" && finalPath ? (
+        {!isProductScene &&
+        !isReverse &&
+        !isCover &&
+        !isRemotion &&
+        phase === "done" &&
+        finalPath ? (
           <section className="canvas-knowledge-workflow__result" aria-label="最终交付物">
             {node.config.checkpoint.coverImagePath ? (
               <img
@@ -1440,36 +1550,58 @@ export function KnowledgeVideoWorkflowNode({
         ) : null}
 
         <footer className="canvas-knowledge-workflow__actions">
-          {phase === "idle" ? (
+          {productSceneStale ? (
+            <>
+              <span>
+                产品素材、参数或图片模型已改变，旧图仅保留供查看。请创建新计划后制作与导出。
+              </span>
+              <button
+                type="button"
+                className="canvas-knowledge-workflow__primary"
+                disabled={!readyToExecute || isActivePhase(phase)}
+                onClick={() => onExecute(node.key)}
+              >
+                按当前输入重新创建计划
+              </button>
+            </>
+          ) : phase === "idle" ? (
             <>
               <span>
                 {pickingMaterials
                   ? "参考素材选择完成后即可开始"
                   : !inputReady
-                    ? isMusicVideo
-                      ? musicVideoOptions?.songPath
-                        ? "请添加人物参考图后开始制作"
-                        : "请先选择一首完整歌曲"
-                      : isReverse
-                        ? "请粘贴一条有效视频分享链接，或选择本地视频"
-                        : isCover
-                          ? "请填写封面内容并添加 1–3 张人物参考图"
-                          : isCommerce
-                            ? commerceOptions?.deliverable === "video" &&
-                              !commerceOptions.materials.some(
-                                (material) => material.kind === "image",
-                              )
-                              ? "请添加真实商品图后开始制作"
-                              : "请填写商品资料后开始制作"
-                            : isComicDrama
-                              ? "请填写每集剧本，至少添加一集"
-                              : "填写制作要求后即可开始"
+                    ? isProductScene
+                      ? "请添加同一产品的参考原图，并逐张确认身份与原始角度"
+                      : isMusicVideo
+                        ? musicVideoOptions?.songPath
+                          ? "请添加人物参考图后开始制作"
+                          : "请先选择一首完整歌曲"
+                        : isReverse
+                          ? "请粘贴一条有效视频分享链接，或选择本地视频"
+                          : isCover
+                            ? "请填写封面内容并添加 1–3 张人物参考图"
+                            : isCommerce
+                              ? commerceOptions?.deliverable === "video" &&
+                                !commerceOptions.materials.some(
+                                  (material) => material.kind === "image",
+                                )
+                                ? "请添加真实商品图后开始制作"
+                                : "请填写商品资料后开始制作"
+                              : isComicDrama
+                                ? "请填写每集剧本，至少添加一集"
+                                : "填写制作要求后即可开始"
                     : !modelsReady
-                      ? isCover
-                        ? "请配置文本模型与支持参考图的图片模型"
-                        : isReverse || isRemotion || documentsOnly
-                          ? "请先配置文本模型"
-                          : "请先完成三个模型配置"
+                      ? isProductScene
+                        ? productSceneQuality && configuredModels.text === "待配置"
+                          ? "请为自动检查配置可看图的文本模型"
+                          : isProductReference
+                            ? "请配置支持参考图片的图片模型"
+                            : "请配置支持文字生图的图片模型"
+                        : isCover
+                          ? "请配置文本模型与支持参考图的图片模型"
+                          : isReverse || isRemotion || documentsOnly
+                            ? "请先配置文本模型"
+                            : "请先完成三个模型配置"
                       : "先查看执行计划，确认后开始"}
               </span>
               <button
@@ -1526,7 +1658,7 @@ export function KnowledgeVideoWorkflowNode({
           ) : phase === "awaiting_approval" ? (
             <>
               <span>确认后会从当前步骤继续</span>
-              {isMusicVideo ? (
+              {isMusicVideo || isProductScene ? (
                 <button
                   type="button"
                   className="canvas-knowledge-workflow__secondary"

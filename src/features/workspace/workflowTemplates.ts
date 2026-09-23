@@ -7,6 +7,10 @@ import { createCommerceCheckpoint, createCommerceOptions } from "./commerceWorkf
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import { createXhsCoverCheckpoint, createXhsCoverOptions } from "./xhsCoverWorkflowModel";
 import {
+  createProductSceneCheckpoint,
+  createProductSceneOptions,
+} from "./productSceneWorkflowModel";
+import {
   createReverseVideoCheckpoint,
   createReverseVideoOptions,
 } from "./reverseVideoWorkflowModel";
@@ -243,6 +247,43 @@ export function createXhsCoverWorkflow(
                 checkpoint: {
                   ...entry.data.config.checkpoint,
                   xhsCover: createXhsCoverCheckpoint(),
+                },
+              },
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
+export function createProductSceneWorkflow(
+  options: CreateKnowledgeVideoDirectorWorkflowOptions,
+): WorkflowTemplateSubgraph {
+  const template = createKnowledgeVideoDirectorWorkflow(options);
+  return {
+    ...template,
+    nodes: template.nodes.map((entry) =>
+      entry.type === "knowledgeVideoWorkflow"
+        ? {
+            ...entry,
+            data: {
+              ...entry.data,
+              config: {
+                ...entry.data.config,
+                models: {
+                  text: { providerId: "", modelDefinitionId: "" },
+                  image: reconcileNodeModelSelection(
+                    "image",
+                    options.nodeModelSelections.image,
+                    options.providerCatalog,
+                    "image_to_image",
+                  ),
+                  video: { providerId: "", modelDefinitionId: "" },
+                },
+                productScene: createProductSceneOptions(),
+                checkpoint: {
+                  ...entry.data.config.checkpoint,
+                  productScene: createProductSceneCheckpoint(),
                 },
               },
             },

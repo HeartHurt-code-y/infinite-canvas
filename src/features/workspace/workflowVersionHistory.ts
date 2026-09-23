@@ -105,6 +105,12 @@ function authoredPlan(value: unknown): unknown {
 function authoredCheckpoint(value: unknown, includePlan = true): unknown {
   if (Array.isArray(value)) return value.map((child) => authoredCheckpoint(child, includePlan));
   if (!isRecord(value)) return value;
+  // Batch progress is runtime state. A 500-image job must not copy its complete plan
+  // into a new authored version for every task update or image-review click.
+  if (Array.isArray(value["rows"]) && "approvedThrough" in value)
+    return { rows: authoredCheckpoint(value["rows"], includePlan) };
+  if ("recipe" in value && "attempts" in value && "reviewNotes" in value)
+    return { id: value["id"], index: value["index"], recipe: value["recipe"] };
   return Object.fromEntries(
     Object.entries(value)
       .filter(
@@ -145,6 +151,8 @@ function checkpointForRestore(archived: unknown, current: unknown, parentMatches
   const latest = isRecord(current) ? current : {};
   const matches =
     parentMatches && checkpointContentSignature(archived) === checkpointContentSignature(latest);
+  if (matches && "recipe" in archived && "attempts" in archived && "reviewNotes" in archived)
+    return clone(latest);
   const result: Record<string, unknown> = {};
   for (const [field, value] of Object.entries(archived)) {
     result[field] =
@@ -195,6 +203,10 @@ function checkpointForRestore(archived: unknown, current: unknown, parentMatches
   if ("mediaApprovals" in result) result["mediaApprovals"] = {};
   if ("approvedPlanRevision" in result) result["approvedPlanRevision"] = null;
   if ("approvedVersion" in result) delete result["approvedVersion"];
+  if (Array.isArray(result["rows"]) && "approvedThrough" in result) {
+    result["approvedThrough"] = 0;
+    result["batchReviewPending"] = true;
+  }
   return result;
 }
 

@@ -13,6 +13,7 @@ export interface WorkflowRepositoryProps {
   readonly onInsertCommerceWorkflow?: () => void;
   readonly onInsertRemotionWorkflow?: () => void;
   readonly onInsertXhsCoverWorkflow?: () => void;
+  readonly onInsertProductSceneWorkflow?: () => void;
   readonly onInsertReverseVideoWorkflow?: () => void;
 }
 
@@ -26,6 +27,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
   onInsertCommerceWorkflow,
   onInsertRemotionWorkflow,
   onInsertXhsCoverWorkflow,
+  onInsertProductSceneWorkflow,
   onInsertReverseVideoWorkflow,
 }: WorkflowRepositoryProps) {
   const contentId = useId();
@@ -116,7 +118,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
         hidden={!expanded}
       >
         <div className="workflow-repository__content-heading">
-          <span className="workflow-repository__count">8 个自动工作流</span>
+          <span className="workflow-repository__count">9 个自动工作流</span>
           <button
             type="button"
             className="workflow-repository__close"
@@ -126,6 +128,38 @@ export const WorkflowRepository = memo(function WorkflowRepository({
             <Icon name="x" size="lg" aria-hidden="true" />
           </button>
         </div>
+        <article className="workflow-repository__card">
+          <div className="workflow-repository__card-mark" aria-hidden="true">
+            <Icon name="stack-simple" size="2xl" />
+          </div>
+          <div className="workflow-repository__card-body">
+            <div className="workflow-repository__card-heading">
+              <span className="workflow-repository__badge">单节点</span>
+              <h2 className="workflow-repository__card-title">产品场景图工作流</h2>
+            </div>
+            <p className="workflow-repository__description">
+              上传同一产品参考图，以 AI
+              多机位组合拍摄角度与场景；也可选择原图保真合成。分批制作、逐张审核后导出。
+            </p>
+            <ol className="workflow-repository__stages" aria-label="产品场景图工作流能力">
+              {["产品确认", "分批制作", "逐张审核", "图片导出"].map((label) => (
+                <li key={label} className="workflow-repository__stage">
+                  <span className="workflow-repository__stage-name">{label}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <button
+            type="button"
+            className="workflow-repository__insert"
+            onClick={onInsertProductSceneWorkflow}
+            disabled={!onInsertProductSceneWorkflow}
+            aria-label="添加产品场景图工作流节点"
+          >
+            <Icon name="plus" aria-hidden="true" size="lg" />
+            添加产品场景图
+          </button>
+        </article>
         <article className="workflow-repository__card">
           <div className="workflow-repository__card-mark" aria-hidden="true">
             <Icon name="film-slate" size="2xl" />

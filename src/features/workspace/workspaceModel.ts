@@ -47,6 +47,10 @@ import type { CommerceWorkflowCheckpoint, CommerceWorkflowOptions } from "./comm
 import type { RemotionWorkflowCheckpoint, RemotionWorkflowOptions } from "./remotionWorkflowModel";
 import type { XhsCoverWorkflowCheckpoint, XhsCoverWorkflowOptions } from "./xhsCoverWorkflowModel";
 import type {
+  ProductSceneWorkflowCheckpoint,
+  ProductSceneWorkflowOptions,
+} from "./productSceneWorkflowModel";
+import type {
   ReverseVideoWorkflowCheckpoint,
   ReverseVideoWorkflowOptions,
 } from "./reverseVideoWorkflowModel";
@@ -721,6 +725,7 @@ export interface KnowledgeVideoWorkflowCheckpoint {
   readonly commerce?: CommerceWorkflowCheckpoint;
   readonly remotion?: RemotionWorkflowCheckpoint;
   readonly xhsCover?: XhsCoverWorkflowCheckpoint;
+  readonly productScene?: ProductSceneWorkflowCheckpoint;
   readonly reverseVideo?: ReverseVideoWorkflowCheckpoint;
   readonly documentsOnly?: boolean;
   readonly version: 1;
@@ -777,6 +782,7 @@ export interface KnowledgeVideoWorkflowConfig {
   readonly commerce?: CommerceWorkflowOptions;
   readonly remotion?: RemotionWorkflowOptions;
   readonly xhsCover?: XhsCoverWorkflowOptions;
+  readonly productScene?: ProductSceneWorkflowOptions;
   readonly reverseVideo?: ReverseVideoWorkflowOptions;
   readonly brief: string;
   /** 所有工作流共用的本地参考素材，仅保存路径和元数据。 */
@@ -2733,7 +2739,9 @@ export function resolvePendingKnowledgeVideoWorkflowConfig(
           "image",
           node.config.models.image,
           providerCatalog,
-          "text_to_image",
+          node.config.productScene?.generationMode === "reference"
+            ? "image_to_image"
+            : "text_to_image",
         ),
         video: reconcileNodeModelSelection(
           "video",

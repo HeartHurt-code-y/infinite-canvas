@@ -925,8 +925,9 @@ function normalizeCanvasDocument(
   return { ok: true, document: { nodesById, edges, view, promptContents, warnings } };
 }
 
-/** 节点类型不限制连线；媒体能力由实际执行入口验证，未完成来源可以先连线。 */
+/** Generic nodes accept deferred inputs; product scenes require explicitly prepared originals. */
 export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNodeEntry): boolean {
+  if (target.type === "knowledgeVideoWorkflow" && target.data.config.productScene) return false;
   return source.data.key !== target.data.key;
 }
 

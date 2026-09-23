@@ -14,6 +14,7 @@ export type WorkflowHistoryKind =
   | "commerce"
   | "remotion"
   | "xhsCover"
+  | "productScene"
   | "reverseVideo";
 
 export interface WorkflowHistoryModelSnapshot {
@@ -122,6 +123,7 @@ const recordSchema = v.object({
     "commerce",
     "remotion",
     "xhsCover",
+    "productScene",
     "reverseVideo",
   ]),
   title: v.string(),

@@ -43,6 +43,7 @@ const ALL_MODES: &[PromptOptimizationMode] = &[
     PromptOptimizationMode::RemotionReview,
     PromptOptimizationMode::XhsCoverPlan,
     PromptOptimizationMode::XhsCoverQc,
+    PromptOptimizationMode::ProductSceneInspect,
     PromptOptimizationMode::ReverseVideoAnalysis,
     PromptOptimizationMode::ReverseVideoReview,
     PromptOptimizationMode::ViralRemix,

@@ -8,6 +8,11 @@ import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import { createAiFilmCheckpoint, createAiFilmWorkflowOptions } from "./aiFilmWorkflowModel";
 import { createRemotionCheckpoint, createRemotionOptions } from "./remotionWorkflowModel";
 import {
+  createProductSceneOptions,
+  generateProductScenePlan,
+  productSceneInputSignature,
+} from "./productSceneWorkflowModel";
+import {
   createKnowledgeVideoWorkflowConfig,
   type KnowledgeVideoWorkflowCheckpoint,
   type KnowledgeVideoWorkflowConfig,
@@ -91,6 +96,185 @@ function commonProps(node: KnowledgeVideoWorkflowNodeData) {
 }
 
 describe("KnowledgeVideoWorkflowNode", () => {
+  it("requires a text model when product port or Logo inspection is enabled", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const productNode = createNode({
+      ...base,
+      productScene: {
+        ...createProductSceneOptions(),
+        quality: { inspectPorts: true, portSpecification: "1 个 HDMI" },
+        views: [
+          {
+            id: "front",
+            label: "产品原图",
+            angle: "front45",
+            sourcePath: "C:/original.png",
+            preparedPath: "C:/prepared.png",
+            contentHash: "a".repeat(64),
+            approved: true,
+          },
+        ],
+      },
+      models: {
+        text: { providerId: "", modelDefinitionId: "" },
+        image: { providerId: "project-provider", modelDefinitionId: "project-image-edit-only" },
+        video: { providerId: "", modelDefinitionId: "" },
+      },
+    });
+    const props = commonProps(productNode);
+    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByLabelText("产品视觉检查模型")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
+    rerender(
+      <KnowledgeVideoWorkflowNode
+        {...props}
+        node={{
+          ...productNode,
+          config: {
+            ...productNode.config,
+            models: { ...productNode.config.models, text: base.models.text },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+  });
+  it("blocks old product delivery after changing generation mode and exposes explicit replanning", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const original = {
+      ...base,
+      productScene: {
+        ...createProductSceneOptions(),
+        generationMode: "composite" as const,
+        totalCount: 1,
+        views: [
+          {
+            id: "product-front",
+            label: "产品正面",
+            angle: "front45" as const,
+            sourcePath: "C:/original.png",
+            preparedPath: "C:/prepared.png",
+            contentHash: "a".repeat(64),
+            approved: true,
+          },
+        ],
+      },
+    };
+    const productNode = createNode({
+      ...original,
+      productScene: { ...original.productScene, generationMode: "reference" },
+      models: {
+        ...original.models,
+        image: { providerId: "project-provider", modelDefinitionId: "project-image-edit-only" },
+      },
+      checkpoint: {
+        ...base.checkpoint,
+        phase: "done",
+        productScene: {
+          inputSignature: productSceneInputSignature(original),
+          approvedThrough: 1,
+          batchReviewPending: true,
+          rows: generateProductScenePlan(original.productScene).map((row) => ({
+            ...row,
+            status: "accepted",
+            outputPath: "C:/old-output.png",
+          })),
+        },
+      },
+    });
+    const props = commonProps(productNode);
+    render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByRole("button", { name: "导出已选用 1 张" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "重做第 1 张" })).toBeDisabled();
+    fireEvent.click(screen.getByRole("button", { name: "按当前输入重新创建计划" }));
+    expect(props.onExecute).toHaveBeenCalledWith(productNode.key);
+  });
+  it("keeps old product-scene saves without a mode on the text-to-image composite path", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const oldOptions = { ...createProductSceneOptions() };
+    delete oldOptions.generationMode;
+    const productNode = createNode({
+      ...base,
+      productScene: {
+        ...oldOptions,
+        views: [
+          {
+            id: "product-front",
+            label: "产品正面",
+            angle: "front45",
+            sourcePath: "C:/original.png",
+            preparedPath: "C:/prepared.png",
+            contentHash: "a".repeat(64),
+            approved: true,
+          },
+        ],
+      },
+      models: {
+        text: { providerId: "", modelDefinitionId: "" },
+        image: base.models.image,
+        video: { providerId: "", modelDefinitionId: "" },
+      },
+    });
+    const props = commonProps(productNode);
+    render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByText("产品场景图工作流")).toBeInTheDocument();
+    expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("composite");
+    expect(screen.queryByLabelText("策划与审核模型")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "查看执行计划" }));
+    expect(props.onExecute).toHaveBeenCalledWith(productNode.key);
+  });
+  it("requires an image-reference model for new AI camera generation without text or video models", () => {
+    const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const productNode = createNode({
+      ...base,
+      productScene: {
+        ...createProductSceneOptions(),
+        views: [
+          {
+            id: "front",
+            label: "正面参考",
+            angle: "front45",
+            sourcePath: "C:/original.png",
+            preparedPath: "C:/prepared.png",
+            contentHash: "a".repeat(64),
+            approved: true,
+          },
+        ],
+      },
+      models: {
+        text: { providerId: "", modelDefinitionId: "" },
+        image: base.models.image,
+        video: { providerId: "", modelDefinitionId: "" },
+      },
+    });
+    const props = commonProps(productNode);
+    const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
+    expect(screen.getByRole("combobox", { name: "产品场景生成方式" })).toHaveValue("reference");
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeDisabled();
+    rerender(
+      <KnowledgeVideoWorkflowNode
+        {...props}
+        node={{
+          ...productNode,
+          config: {
+            ...productNode.config,
+            models: {
+              ...productNode.config.models,
+              image: {
+                providerId: "project-provider",
+                modelDefinitionId: "project-image-edit-only",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.queryByLabelText("策划与审核模型")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("视频生成模型")).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看执行计划" })).toBeEnabled();
+  });
   it("runs animation with only a text model and no film configuration or video generation stages", () => {
     const base = createKnowledgeVideoWorkflowConfig(selections, true);
     const animationNode = createNode({

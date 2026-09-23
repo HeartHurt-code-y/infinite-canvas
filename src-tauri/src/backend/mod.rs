@@ -17,6 +17,7 @@ pub mod media_proxy;
 pub mod model_schema;
 pub mod mv_media;
 pub(crate) mod process_tree;
+pub mod product_scene_images;
 pub mod prompt_optimize;
 pub mod provider;
 pub mod provider_adapter;
@@ -47,6 +48,7 @@ use error::BackendResult;
 use frame_extractor::VideoFrameExtractionService;
 use local_results::LocalResultService;
 use media::MediaResolver;
+use product_scene_images::ProductSceneImageService;
 use provider::ProviderRuntime;
 use remotion_renderer::RemotionRenderService;
 use reverse_video::ReverseVideoService;
@@ -68,6 +70,7 @@ pub struct BackendState {
     pub downloader: VideoDownloadService,
     pub composer: VideoCompositionService,
     pub cover_images: CoverImageService,
+    pub product_scene_images: ProductSceneImageService,
     pub frame_extractor: VideoFrameExtractionService,
     pub remotion_renderer: RemotionRenderService,
     pub blender: BlenderRenderService,
@@ -168,6 +171,7 @@ impl BackendState {
         let frame_extractor =
             VideoFrameExtractionService::new(downloads_directory.clone(), composer.clone());
         let cover_images = CoverImageService::new(downloads_directory.clone(), composer.clone());
+        let product_scene_images = ProductSceneImageService::new(downloads_directory.clone());
         let reverse_video =
             ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
         let blender = BlenderRenderService::new(
@@ -190,6 +194,7 @@ impl BackendState {
             downloader,
             composer,
             cover_images,
+            product_scene_images,
             frame_extractor,
             remotion_renderer,
             blender,

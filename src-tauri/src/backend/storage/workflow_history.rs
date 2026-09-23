@@ -57,6 +57,7 @@ pub enum WorkflowKind {
     Commerce,
     Remotion,
     XhsCover,
+    ProductScene,
     ReverseVideo,
 }
 
@@ -70,6 +71,7 @@ impl WorkflowKind {
             Self::Commerce => "commerce",
             Self::Remotion => "remotion",
             Self::XhsCover => "xhsCover",
+            Self::ProductScene => "productScene",
             Self::ReverseVideo => "reverseVideo",
         }
     }
@@ -603,6 +605,7 @@ mod tests {
             WorkflowKind::Commerce,
             WorkflowKind::Remotion,
             WorkflowKind::XhsCover,
+            WorkflowKind::ProductScene,
             WorkflowKind::ReverseVideo,
         ]
         .into_iter()
@@ -627,7 +630,7 @@ mod tests {
         let page = reopened
             .list_workflow_history(WorkflowHistoryQuery::default())
             .unwrap();
-        assert_eq!(page.items.len(), 7);
+        assert_eq!(page.items.len(), 8);
         for item in page.items {
             let detail = reopened.get_workflow_history(&item.id).unwrap();
             assert_eq!(

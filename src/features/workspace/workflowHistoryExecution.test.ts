@@ -17,6 +17,7 @@ import { createCommerceOptions } from "./commerceWorkflowModel";
 import { createRemotionOptions } from "./remotionWorkflowModel";
 import { createReverseVideoOptions } from "./reverseVideoWorkflowModel";
 import { createXhsCoverOptions } from "./xhsCoverWorkflowModel";
+import { createProductSceneOptions } from "./productSceneWorkflowModel";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import { restoreWorkflowVersion } from "./workflowVersionHistory";
@@ -181,6 +182,28 @@ function setup(canvasId = CANVAS_ID) {
 }
 
 describe("recorded workflow execution", () => {
+  it.each([false, true])(
+    "archives the visual text model only when product quality checks are enabled: %s",
+    async (inspectPorts) => {
+      const { runner, request, records } = setup();
+      await runner.run({
+        ...request,
+        node: {
+          ...request.node,
+          config: {
+            ...request.node.config,
+            productScene: {
+              ...createProductSceneOptions(),
+              quality: { inspectPorts, portSpecification: "" },
+            },
+          },
+        },
+      });
+      expect(records.get("history-1")?.models.map((model) => model.role)).toEqual(
+        inspectPorts ? ["text", "image"] : ["image"],
+      );
+    },
+  );
   it.each([
     ["knowledge", {}],
     ["film", { film: createAiFilmWorkflowOptions() }],

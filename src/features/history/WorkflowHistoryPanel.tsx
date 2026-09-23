@@ -21,6 +21,7 @@ import type {
   KnowledgeVideoWorkflowPhase,
 } from "../workspace/workspaceModel";
 import { xhsCoverDeliveryMarkdown } from "../workspace/xhsCoverWorkflowModel";
+import { productSceneDeliveryMarkdown } from "../workspace/productSceneWorkflowModel";
 import { reverseVideoDeliveryMarkdown } from "../workspace/reverseVideoWorkflowModel";
 import "./WorkflowHistoryPanel.css";
 import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
@@ -45,6 +46,7 @@ const KIND_LABELS: Record<string, string> = {
   commerce: "剧情带货",
   remotion: "动画逻辑图",
   xhsCover: "小红书封面",
+  productScene: "产品场景图",
   reverseVideo: "短视频反推",
 };
 const ACTIVE_PHASES: readonly KnowledgeVideoWorkflowPhase[] = [
@@ -110,6 +112,7 @@ function DeferredSection({
 }
 
 function deliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
+  if (checkpoint.productScene) return productSceneDeliveryMarkdown(checkpoint);
   if (checkpoint.musicVideo) return musicVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.reverseVideo) return reverseVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.xhsCover) return xhsCoverDeliveryMarkdown(checkpoint);
@@ -132,6 +135,13 @@ function retainedMedia(checkpoint: KnowledgeVideoWorkflowCheckpoint) {
     if (path && !media.has(path)) media.set(path, { path, label, kind });
   };
   add(checkpoint.xhsCover?.finalPath ?? checkpoint.xhsCover?.imagePath, "封面图片", "image");
+  for (const row of checkpoint.productScene?.rows ?? []) {
+    add(
+      row.outputPath,
+      `产品场景 ${row.index} · ${row.status === "accepted" ? "已选用" : row.status === "rejected" ? "已拒绝" : "待审核"}`,
+      "image",
+    );
+  }
   add(
     checkpoint.finalPath,
     checkpoint.reverseVideo ? "原视频" : checkpoint.xhsCover ? "最终封面" : "最终成片",

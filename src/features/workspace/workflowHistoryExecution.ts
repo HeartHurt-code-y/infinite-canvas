@@ -42,6 +42,8 @@ import {
 } from "./knowledgeVideoWorkflowRunner";
 import { createRemotionWorkflowRunner } from "./remotionWorkflowRunner";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
+import { createProductSceneWorkflowRunner } from "./productSceneWorkflowRunner";
+import { productSceneQualityEnabled } from "./productSceneWorkflowModel";
 import { createReverseVideoWorkflowRunner } from "./reverseVideoWorkflowRunner";
 import {
   CANVAS_ID,
@@ -82,6 +84,7 @@ export interface RecordedWorkflowDependencies extends RecordedClients {
 }
 
 export function workflowKindForNode(node: KnowledgeVideoWorkflowNodeData): WorkflowHistoryKind {
+  if (node.config.productScene) return "productScene";
   if (node.config.musicVideo) return "musicVideo";
   if (node.config.reverseVideo) return "reverseVideo";
   if (node.config.xhsCover) return "xhsCover";
@@ -100,6 +103,7 @@ const TITLES: Record<WorkflowHistoryKind, string> = {
   commerce: "带货创作",
   remotion: "动画制作",
   xhsCover: "小红书封面",
+  productScene: "产品场景图",
   reverseVideo: "短视频反推",
 };
 
@@ -108,6 +112,8 @@ function defaultRunnerFactory(
   clients: RecordedClients,
 ): KnowledgeVideoWorkflowRunner {
   switch (kind) {
+    case "productScene":
+      return createProductSceneWorkflowRunner(clients);
     case "musicVideo":
       return createMusicVideoWorkflowRunner(clients);
     case "film":
@@ -195,14 +201,19 @@ function modelSnapshots(
   kind: WorkflowHistoryKind,
 ): WorkflowHistoryRecord["models"] {
   const roles =
-    kind === "remotion" ||
-    kind === "reverseVideo" ||
-    (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
-    (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
-      ? (["text"] as const)
-      : kind === "xhsCover"
+    kind === "productScene"
+      ? request.node.config.productScene &&
+        productSceneQualityEnabled(request.node.config.productScene)
         ? (["text", "image"] as const)
-        : (["text", "image", "video"] as const);
+        : (["image"] as const)
+      : kind === "remotion" ||
+          kind === "reverseVideo" ||
+          (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
+          (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
+        ? (["text"] as const)
+        : kind === "xhsCover"
+          ? (["text", "image"] as const)
+          : (["text", "image", "video"] as const);
   return roles.map((role) => {
     const selected = request.node.config.models[role];
     const provider = request.providerCatalog.find(
@@ -469,7 +480,8 @@ export function createRecordedWorkflowRunner(
               !task.results.some((result) => result.finalPath && referenced.has(result.finalPath)),
           );
         } else {
-          const suppliedTitle = request.node.config.xhsCover?.title;
+          const suppliedTitle =
+            request.node.config.productScene?.productName ?? request.node.config.xhsCover?.title;
           const title = (suppliedTitle ? suppliedTitle : request.node.config.brief)
             .trim()
             .slice(0, 48);
