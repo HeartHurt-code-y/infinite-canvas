@@ -4547,6 +4547,7 @@ fn extract_image_sources(value: &Value, require_base64: bool) -> Vec<ImageSource
 
 fn collect_additional_image_sources(value: &Value, sources: &mut Vec<ImageSource>) {
     const URL_ARRAYS: &[&str] = &[
+        "/results",
         "/output/image_urls",
         "/result/image_urls",
         "/image_urls",
@@ -8814,6 +8815,42 @@ mod tests {
             [ImageSource::Url { url, .. }] => assert_eq!(url, "https://cdn.example/cat.png"),
             other => panic!("expected one image url, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn async_image_task_reads_success_results_url() {
+        // 任务查询完成体：status=success，图片在 results[].url，而不是 data[]。
+        let body = json!({
+            "id": "0b13356c-a69f-4e7b-a340-5a1f65fa2d97",
+            "model": "gpt-image-2.5-sunburst",
+            "status": "success",
+            "results": [{
+                "url": "https://cdn.example/cat.png",
+                "outputType": "png",
+                "nodeId": ""
+            }],
+            "imageCount": 1,
+            "reservedMicros": 74478,
+            "errorCode": null
+        });
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: body.to_string(),
+        };
+        let GenerationSubmission::Images(images) =
+            parse_image_submission(&response, false).expect("completed submission")
+        else {
+            panic!("a success payload with results must be images, not a failure");
+        };
+        match images.as_slice() {
+            [ImageSource::Url { url, .. }] => assert_eq!(url, "https://cdn.example/cat.png"),
+            other => panic!("expected one image url, got {other:?}"),
+        }
+        let observation = parse_image_observation(&response).expect("completed observation");
+        assert_eq!(observation.remote_status, "success");
+        assert_eq!(observation.images.len(), 1);
     }
 
     #[test]
