@@ -2601,11 +2601,9 @@ mod tests {
         assert!(format!("{client:?}").contains("shared-client-marker/1"));
 
         // IP 字面量的正常解析：不是 fake-ip，回退到共享客户端。
-        let client = fake_ip_aware_streaming_download_client(
-            "http://127.0.0.1:8080/a.png",
-            marked_client(),
-        )
-        .await;
+        let client =
+            fake_ip_aware_streaming_download_client("http://127.0.0.1:8080/a.png", marked_client())
+                .await;
         assert!(format!("{client:?}").contains("shared-client-marker/1"));
     }
 
