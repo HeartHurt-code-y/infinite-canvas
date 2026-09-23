@@ -81,6 +81,42 @@ export function adoptMissingGenerationInputSlots(
   return next;
 }
 
+/**
+ * 把一个已连的直连素材移到另一个素材原来的序号，中间素材依次让位。
+ * null 空位仍留在原槽位，后续新连线继续按原规则填回空位。
+ */
+export function reorderGenerationInputSlots(
+  slots: readonly (string | null)[],
+  connectedKeysInOrder: readonly string[],
+  sourceKey: string,
+  targetKey: string,
+): readonly (string | null)[] {
+  if (sourceKey === targetKey) return slots;
+  const connected = new Set(connectedKeysInOrder);
+  if (!connected.has(sourceKey) || !connected.has(targetKey)) return slots;
+  const healed = adoptMissingGenerationInputSlots(slots, connectedKeysInOrder);
+  const seen = new Set<string>();
+  const normalized = healed.map((slot) => {
+    if (slot === null || !connected.has(slot) || seen.has(slot)) return null;
+    seen.add(slot);
+    return slot;
+  });
+  const occupied = normalized.flatMap((slot, index) => (slot === null ? [] : [index]));
+  const order = occupied.map((index) => normalized[index]!);
+  const from = order.indexOf(sourceKey);
+  const to = order.indexOf(targetKey);
+  if (from < 0 || to < 0) return slots;
+  order.splice(from, 1);
+  order.splice(to, 0, sourceKey);
+  const next = [...normalized];
+  occupied.forEach((index, position) => {
+    next[index] = order[position]!;
+  });
+  return next.every((key, index) => key === slots[index]) && next.length === slots.length
+    ? slots
+    : next;
+}
+
 export function withGenerationInputSlots(
   entry: CanvasNodeEntry,
   slots: readonly (string | null)[],

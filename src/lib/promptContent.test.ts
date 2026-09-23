@@ -668,6 +668,66 @@ describe("prompt content interface", () => {
     host.remove();
   });
 
+  it("重排只刷新已连接 @ 引用的位置；后续换图按新位置匹配", () => {
+    const first = { ...assetCandidate("asset-first", "第一张.png", "asset-first"), slotIndex: 0 };
+    const second = {
+      ...assetCandidate("asset-second", "第二张.png", "asset-second"),
+      slotIndex: 1,
+    };
+    const third = { ...assetCandidate("asset-third", "第三张.png", "asset-third"), slotIndex: 2 };
+    const session = createPromptContentEditorSession([first, second, third]);
+    const host = document.createElement("div");
+    document.body.append(host);
+    session.attach(host);
+    session.insertReference(first);
+    session.pastePlainText(" 的姿态");
+    const original = session.snapshot().items[0];
+    if (original?.kind !== "media_reference") throw new Error("引用未插入");
+    const paragraph = host.querySelector(".ProseMirror p");
+    const textNode = paragraph?.lastChild;
+    const reordered = [
+      { ...second, slotIndex: 0 },
+      { ...third, slotIndex: 1 },
+      { ...first, slotIndex: 2 },
+    ];
+
+    expect(
+      session.updateConnections(reordered, {
+        aliveCanvasNodeKeys: new Set(["asset-first", "asset-second", "asset-third"]),
+      }),
+    ).toEqual([]);
+    expect(session.snapshot().items[0]).toMatchObject({
+      mentionId: original.mentionId,
+      canvasNodeKey: original.canvasNodeKey,
+      target: original.target,
+      slotSnapshot: 2,
+      aliasSnapshot: "图片3",
+    });
+    expect(host.querySelector(".ProseMirror p")).toBe(paragraph);
+    expect(paragraph?.lastChild).toBe(textNode);
+    const chip = host.querySelector(`[data-mention-id="${original.mentionId}"]`);
+    session.updateConnections(reordered);
+    expect(host.querySelector(`[data-mention-id="${original.mentionId}"]`)).toBe(chip);
+
+    const replacement = {
+      ...assetCandidate("asset-new", "新图.png", "asset-new"),
+      slotIndex: 2,
+    };
+    expect(
+      session.updateConnections([reordered[0]!, reordered[1]!, replacement], {
+        aliveCanvasNodeKeys: new Set(["asset-first", "asset-second", "asset-third", "asset-new"]),
+      }),
+    ).toMatchObject([{ canvasNodeKey: "asset-new", matchedBy: "slot" }]);
+    expect(session.snapshot().items[0]).toMatchObject({
+      mentionId: original.mentionId,
+      canvasNodeKey: "asset-new",
+      target: targetFor(replacement),
+      slotSnapshot: 2,
+    });
+    session.attach(null);
+    host.remove();
+  });
+
   it("只是解除连线时保持灰化，不按同名素材改绑", () => {
     const first = assetCandidate("asset-node-1");
     const second = assetCandidate("asset-node-2");

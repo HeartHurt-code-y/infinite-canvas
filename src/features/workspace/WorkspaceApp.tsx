@@ -743,6 +743,7 @@ export function WorkspaceApp({
     removeNode: removeCanvasNode,
     connect: connectCanvasStateNodes,
     disconnect: disconnectCanvasEdge,
+    reorderGenerationInput,
     applyNodeChanges,
     setView,
     selectNode,
@@ -9301,6 +9302,7 @@ export function WorkspaceApp({
             ignoreLegacyNodeDrag,
             removeGenNode,
             removeAssetEdge,
+            reorderGenerationInput,
             ignoreLegacyConnectionStart,
             handleGenNodeSizeChange,
             updatePromptNodeConfig,
@@ -9385,6 +9387,7 @@ export function WorkspaceApp({
                   onNodeDragStart={ignoreLegacyNodeDrag}
                   onRemove={removeGenNode}
                   onUnlink={removeAssetEdge}
+                  onReorderInput={reorderGenerationInput}
                   onSizeChange={handleGenNodeSizeChange}
                   onImageConfigChange={updateImageNodeConfig}
                   onVideoConfigChange={updateVideoNodeConfig}
@@ -9430,6 +9433,7 @@ export function WorkspaceApp({
       ignoreLegacyNodeDrag,
       removeGenNode,
       removeAssetEdge,
+      reorderGenerationInput,
       ignoreLegacyConnectionStart,
       handleGenNodeSizeChange,
       updatePromptNodeConfig,

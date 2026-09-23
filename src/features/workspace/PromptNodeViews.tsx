@@ -371,6 +371,7 @@ export function PromptMentionInput({
       candidate.resultIndex,
       candidate.kind,
       candidate.name,
+      candidate.slotIndex,
     ]),
   );
   const latestCandidatesRef = useRef(candidates);

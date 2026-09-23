@@ -43,8 +43,7 @@ export function AssetGroupFrame({
   readonly uploadLabel?: string;
 }) {
   const outputCount = members.filter((member) => !("assetId" in member)).length;
-  const title =
-    outputCount === 0 ? "素材组" : outputCount === members.length ? "产物组" : "成组";
+  const title = outputCount === 0 ? "素材组" : outputCount === members.length ? "产物组" : "成组";
   const orderLabel = members
     .map((member, index) => `${index + 1}. ${member.name ?? "未命名"}`)
     .join("  ");
@@ -52,13 +51,16 @@ export function AssetGroupFrame({
     <div
       className="canvas-asset-group"
       role="group"
-      aria-label={`${title}，${members.length} 个，输入顺序 ${orderLabel}`}
+      aria-label={`${title}，${members.length} 个，组端口默认连线顺序 ${orderLabel}`}
     >
       <div className="canvas-asset-group__bar">
         <span className="canvas-asset-group__title">
           {title} · {members.length}
         </span>
-        <span className="canvas-asset-group__order" title={orderLabel}>
+        <span
+          className="canvas-asset-group__order"
+          title={`${orderLabel}。连入生成节点后可在节点内调整顺序`}
+        >
           {orderLabel}
         </span>
         {onUpload != null && uploadLabel != null ? (

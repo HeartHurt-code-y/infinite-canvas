@@ -8,6 +8,7 @@ import {
   createPromptReference,
   normalizePromptReferenceText,
   rebindDanglingPromptReferences,
+  refreshConnectedPromptReferencePositions,
   referenceCandidateFromTarget,
   referenceQueryInText,
   resolvePromptReferences,
@@ -517,6 +518,67 @@ describe("换图：引用跟随填回原位置的素材", () => {
       canvasNodeKey: "asset-old",
       displayNameSnapshot: "新图.png",
       target: { assetId: "asset-replaced" },
+    });
+  });
+});
+
+describe("连线重排后的引用位置快照", () => {
+  it("只更新同实例同来源的已连接引用，保留身份和断开引用的旧位置", () => {
+    const first = candidate("first", "第一张.png", { slotIndex: 0 });
+    const second = candidate("second", "第二张.png", { slotIndex: 1 });
+    const disconnected = candidate("gone", "已断开.png", { slotIndex: 2 });
+    const firstReference = createPromptReference(first, { alias: "图片1" });
+    const secondReference = createPromptReference(second, { alias: "图片2" });
+    const disconnectedReference = createPromptReference(disconnected, { alias: "图片3" });
+    const source: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [firstReference, secondReference, disconnectedReference],
+    };
+    const reordered = refreshConnectedPromptReferencePositions(source, [
+      { ...second, slotIndex: 0 },
+      { ...first, slotIndex: 1 },
+      // 相同实例但来源已变，不能刷新原引用的位置，也不能更换 target。
+      candidate("gone", "新来源.png", { assetId: "different", slotIndex: 2 }),
+    ]);
+    expect(reordered.items[0]).toMatchObject({
+      mentionId: firstReference.mentionId,
+      canvasNodeKey: firstReference.canvasNodeKey,
+      target: firstReference.target,
+      slotSnapshot: 1,
+      aliasSnapshot: "图片2",
+    });
+    expect(reordered.items[1]).toMatchObject({
+      mentionId: secondReference.mentionId,
+      target: secondReference.target,
+      slotSnapshot: 0,
+      aliasSnapshot: "图片1",
+    });
+    expect(reordered.items[2]).toBe(disconnectedReference);
+    expect(
+      refreshConnectedPromptReferencePositions(reordered, [
+        { ...second, slotIndex: 0 },
+        { ...first, slotIndex: 1 },
+        candidate("gone", "新来源.png", { assetId: "different", slotIndex: 2 }),
+      ]),
+    ).toBe(reordered);
+  });
+
+  it("来源仍连接但没有媒体槽位时清掉过期位置", () => {
+    const first = candidate("first", "第一张.png", { slotIndex: 0 });
+    const reference = createPromptReference(first);
+    const source: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [reference],
+    };
+    const refreshed = refreshConnectedPromptReferencePositions(source, [
+      candidate("first", "第一张.png"),
+    ]);
+    expect(refreshed.items[0]).not.toHaveProperty("slotSnapshot");
+    expect(refreshed.items[0]).toMatchObject({
+      mentionId: reference.mentionId,
+      target: reference.target,
     });
   });
 });

@@ -15,16 +15,14 @@ import {
   createPromptReference,
   normalizePromptReferenceText,
   rebindDanglingPromptReferences,
+  refreshConnectedPromptReferencePositions,
   resolvePromptReferences,
   referenceQueryInText,
   referenceCandidateFromTarget,
   type PromptReferenceCandidate,
   type PromptReferenceRebind,
 } from "./promptReferences";
-import {
-  resolveOrdinalMentions,
-  type PromptUnboundMention,
-} from "./promptOrdinalMentions";
+import { resolveOrdinalMentions, type PromptUnboundMention } from "./promptOrdinalMentions";
 import { decodeMediaReferenceTarget, sameMediaReferenceTarget } from "./promptReferenceTarget";
 import {
   createPromptTiptapExtensions,
@@ -889,7 +887,12 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
     const ordinal =
       mode === "names"
         ? resolveOrdinalMentions(result.document, this.candidates)
-        : { document: result.document, freshMentionIds: [] as readonly string[], converted: 0, unbound: NO_UNBOUND };
+        : {
+            document: result.document,
+            freshMentionIds: [] as readonly string[],
+            converted: 0,
+            unbound: NO_UNBOUND,
+          };
     if (fresh) this.rememberFreshMentions(ordinal.freshMentionIds);
     const changed = !promptDocumentsEqual(ordinal.document, this.document);
     this.document = ordinal.document;
@@ -1093,6 +1096,9 @@ class PromptContentEditorSessionImplementation implements PromptContentEditorSes
       return 0;
     }
     this.syncFromEditor();
+    // 顺序调整只改有效引用的位置快照；按实例与来源身份匹配，不触发换绑。
+    // 下方逐个更新 ProseMirror atom 属性，不重建正文，也不写入编辑器撤销历史。
+    this.document = refreshConnectedPromptReferencePositions(this.document, this.candidates);
     // Presentation updates only touch atoms and never enter the user's undo history.
     if (this.editor != null) {
       const presentation = this.presentation();

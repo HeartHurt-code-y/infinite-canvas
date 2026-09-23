@@ -100,6 +100,7 @@ export function CanvasGenNode({
   onNodeDragStart,
   onRemove,
   onUnlink,
+  onReorderInput,
   onSizeChange,
   onImageConfigChange,
   onVideoConfigChange,
@@ -141,6 +142,7 @@ export function CanvasGenNode({
   ) => void;
   readonly onRemove: (key: string) => void;
   readonly onUnlink: (edgeId: string) => void;
+  readonly onReorderInput: (nodeKey: string, sourceKey: string, targetKey: string) => void;
   readonly onSizeChange: (key: string, dimensions: CanvasNodeDimensions) => void;
   readonly onImageConfigChange: (key: string, config: ImageNodeConfig) => void;
   readonly onVideoConfigChange: (key: string, config: VideoNodeConfig) => void;
@@ -157,6 +159,11 @@ export function CanvasGenNode({
   const isVideo = node.kind === "video";
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const effectiveInputs = [...connectedInputs, ...inheritedInputs];
+  const reorderableKeys = new Set(
+    connectedInputs
+      .filter((input) => input.edgeId === `${input.key}->${node.key}`)
+      .map((input) => input.key),
+  );
   const referenceInputCount = effectiveInputs.length;
   const promptLabelId = `${node.kind}-prompt-label-${node.key}`;
   const promptHintId = `${node.kind}-prompt-hint-${node.key}`;
@@ -269,6 +276,8 @@ export function CanvasGenNode({
           inputs={effectiveInputs}
           {...(inputSlotPositions ? { positions: inputSlotPositions } : {})}
           onUnlink={onUnlink}
+          reorderableKeys={reorderableKeys}
+          onReorder={(sourceKey, targetKey) => onReorderInput(node.key, sourceKey, targetKey)}
         />
       </div>
 
@@ -2698,19 +2707,28 @@ function referenceAssetIdentity(
  * 生成节点的有效参考素材列表：直连素材可解绑，随提示词继承的素材标明来源。
  *
  * 清单按槽位位置逐行展开：某个位置上的素材被解绑或删除后，其余素材不整体上移，
- * 该位置留一行「空位」，新素材连进来就填回这个空位，位置与前后关系都不再变化。
+ * 该位置留一行「空位」，新素材连进来就填回这个空位；用户仍可主动调整直连素材顺序。
  * 每行的编号是该素材实际被提交的序号（即请求体里的「图片N」）；空位没有素材，用「—」占位。
  */
 export function GenerationInputChips({
   inputs,
   positions,
   onUnlink,
+  reorderableKeys,
+  onReorder,
 }: {
   readonly inputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
   readonly positions?: ReadonlyMap<string, number>;
   readonly onUnlink: (edgeId: string) => void;
+  readonly reorderableKeys?: ReadonlySet<string>;
+  readonly onReorder?: (sourceKey: string, targetKey: string) => void;
 }) {
+  const [dragSourceKey, setDragSourceKey] = useState<string | null>(null);
+  const [dropTargetKey, setDropTargetKey] = useState<string | null>(null);
   if (inputs.length === 0) return null;
+  const reorderableOrder = inputs
+    .filter((input) => !("promptNodeKey" in input) && (reorderableKeys?.has(input.key) ?? true))
+    .map((input) => input.key);
   // 每个素材落在哪一行：直连素材按槽位位置落座——被解绑/删除的素材留下空槽，位置留着，
   // 其余素材不顶上来，新连线填回空槽后拿回原来的位置。没有槽位记录的素材（随提示词继承、
   // 旧文档残留连线）接在最后一行之后，不会插进前面的空槽（那会让它的编号小于后面的素材）。
@@ -2765,6 +2783,10 @@ export function GenerationInputChips({
         const inherited = "promptNodeKey" in input;
         const isOutput = !inherited && input.sourceLabel === "产物";
         const orderNumber = orderByIndex.get(input.key)!;
+        const reorderIndex = reorderableOrder.indexOf(input.key);
+        const canReorder = onReorder != null && reorderIndex >= 0 && reorderableOrder.length > 1;
+        const previousKey = reorderIndex > 0 ? reorderableOrder[reorderIndex - 1] : null;
+        const nextKey = reorderIndex >= 0 ? (reorderableOrder[reorderIndex + 1] ?? null) : null;
         const identity = referenceAssetIdentity(input.target);
         // 云端素材回读供应商记录、本地素材按 staging job id 重签；产物与本地文件不依赖签名。
         const target = input.target;
@@ -2781,8 +2803,81 @@ export function GenerationInputChips({
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}
-            className={`node-media-chip${inherited ? " is-inherited" : ""}${isOutput ? " is-output" : ""}`}
+            className={`node-media-chip${inherited ? " is-inherited" : ""}${isOutput ? " is-output" : ""}${canReorder ? " is-reorderable nodrag nopan" : ""}${dragSourceKey === input.key ? " is-dragging" : ""}${dropTargetKey === input.key ? " is-drop-target" : ""}`}
+            draggable={canReorder}
+            onPointerDown={canReorder ? (event) => event.stopPropagation() : undefined}
+            onMouseDown={canReorder ? (event) => event.stopPropagation() : undefined}
+            onDragStart={
+              canReorder
+                ? (event) => {
+                    event.stopPropagation();
+                    if (event.dataTransfer) {
+                      event.dataTransfer.effectAllowed = "move";
+                      event.dataTransfer.setData("application/x-infinite-canvas-input", input.key);
+                    }
+                    setDragSourceKey(input.key);
+                    setDropTargetKey(null);
+                  }
+                : undefined
+            }
+            onDragOver={
+              canReorder
+                ? (event) => {
+                    if (dragSourceKey == null || dragSourceKey === input.key) return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+                    setDropTargetKey(input.key);
+                  }
+                : undefined
+            }
+            onDragLeave={
+              canReorder
+                ? (event) => {
+                    if (
+                      event.relatedTarget instanceof Node &&
+                      event.currentTarget.contains(event.relatedTarget)
+                    )
+                      return;
+                    if (dropTargetKey === input.key) setDropTargetKey(null);
+                  }
+                : undefined
+            }
+            onDrop={
+              canReorder
+                ? (event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    if (
+                      dragSourceKey != null &&
+                      dragSourceKey !== input.key &&
+                      reorderableOrder.includes(dragSourceKey)
+                    ) {
+                      onReorder?.(dragSourceKey, input.key);
+                    }
+                    setDragSourceKey(null);
+                    setDropTargetKey(null);
+                  }
+                : undefined
+            }
+            onDragEnd={
+              canReorder
+                ? () => {
+                    setDragSourceKey(null);
+                    setDropTargetKey(null);
+                  }
+                : undefined
+            }
           >
+            {canReorder ? (
+              <span
+                className="node-media-chip__drag-handle"
+                aria-hidden="true"
+                title="拖到其他素材行调整顺序"
+              >
+                ⋮⋮
+              </span>
+            ) : null}
             <span
               className="node-media-chip__order"
               aria-label={`参考素材传入顺序 ${orderNumber}`}
@@ -2802,6 +2897,36 @@ export function GenerationInputChips({
             <span className="node-media-chip__name" title={input.name}>
               {input.name}
             </span>
+            {canReorder ? (
+              <span className="node-media-chip__reorder nodrag nopan">
+                <button
+                  type="button"
+                  aria-label={`上移参考素材：${input.name}`}
+                  title="上移一位"
+                  disabled={previousKey == null}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (previousKey != null) onReorder?.(input.key, previousKey);
+                  }}
+                >
+                  <Icon name="arrow-up" aria-hidden="true" size="2xs" />
+                </button>
+                <button
+                  type="button"
+                  aria-label={`下移参考素材：${input.name}`}
+                  title="下移一位"
+                  disabled={nextKey == null}
+                  onMouseDown={(event) => event.stopPropagation()}
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    if (nextKey != null) onReorder?.(input.key, nextKey);
+                  }}
+                >
+                  <Icon name="arrow-down" aria-hidden="true" size="2xs" />
+                </button>
+              </span>
+            ) : null}
             {inherited ? (
               <span
                 className="node-media-chip__origin"

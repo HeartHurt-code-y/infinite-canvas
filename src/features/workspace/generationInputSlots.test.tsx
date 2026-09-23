@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createCanvasState, type CanvasNodeEntry } from "../canvas/canvasStore";
 import { canvasInputEdgeOrder, createCanvasInputResolver, canvasNodeIndex } from "./canvasInputs";
@@ -94,6 +94,47 @@ function referenceRows(container: HTMLElement): { order: string; label: string }
 }
 
 describe("生成节点参考素材的传入顺序编号", () => {
+  it("上移、下移与拖放按素材实例回调目标位置", () => {
+    const onReorder = vi.fn();
+    const inputs = ["a", "b", "c"].map((name) => ({
+      key: `asset-${name}`,
+      name: name.toUpperCase(),
+      kind: "image" as const,
+      edgeId: `asset-${name}->gen`,
+      sourceLabel: "素材" as const,
+      previewUrl: null,
+    }));
+    render(
+      <GenerationInputChips
+        inputs={inputs}
+        onUnlink={vi.fn()}
+        reorderableKeys={new Set(inputs.map((input) => input.key))}
+        onReorder={onReorder}
+      />,
+    );
+
+    const list = screen.getByRole("list", { name: "生成参考素材，按传入顺序排列" });
+    const rows = within(list).getAllByRole("listitem");
+    fireEvent.click(within(rows[0]!).getByRole("button", { name: /下移/ }));
+    expect(onReorder).toHaveBeenLastCalledWith("asset-a", "asset-b");
+    fireEvent.click(within(rows[2]!).getByRole("button", { name: /上移/ }));
+    expect(onReorder).toHaveBeenLastCalledWith("asset-c", "asset-b");
+
+    const dataTransfer = {
+      effectAllowed: "move",
+      dropEffect: "move",
+      setData: vi.fn(),
+      getData: vi.fn(() => "asset-c"),
+    };
+    const dragSource = rows[2]!.querySelector<HTMLElement>("[draggable='true']") ?? rows[2]!;
+    const dropTarget = rows[0]!.querySelector<HTMLElement>("[draggable='true']") ?? rows[0]!;
+    fireEvent.dragStart(dragSource, { dataTransfer });
+    fireEvent.dragOver(dropTarget, { dataTransfer });
+    fireEvent.drop(dropTarget, { dataTransfer });
+    fireEvent.dragEnd(dragSource, { dataTransfer });
+    expect(onReorder).toHaveBeenLastCalledWith("asset-c", "asset-a");
+  });
+
   it("编号连续对应渲染顺序，不因槽位表残留空位而跳号或重号", () => {
     // 真实画布上出现过的形态：素材 A 占槽位 0，槽位 1 残留着已删除/已解绑的 key，
     // 素材 C 占槽位 2，再后来连入的 D 没有槽位。编号按清单里实际存在的素材连续排，
@@ -368,6 +409,102 @@ describe("参考素材清单的缩略图字节复用", () => {
 });
 
 describe("inputSlots 槽位账本", () => {
+  it("普通连线重排后解析、连线序号同步，空槽位置在重排和恢复后保持不变", () => {
+    const canvas = createCanvasState();
+    canvas.commands.insertSubgraph(
+      [
+        { type: "gen", data: imageGenerator("gen") },
+        { type: "asset", data: imageNode("asset-a") },
+        { type: "asset", data: imageNode("asset-b") },
+        { type: "asset", data: imageNode("asset-c") },
+      ],
+      [],
+    );
+    for (const key of ["asset-a", "asset-b", "asset-c"]) {
+      expect(canvas.commands.connect(key, "gen")).toMatchObject({ status: "connected" });
+    }
+
+    expect(canvas.commands.reorderGenerationInput("gen", "asset-c", "asset-a")).toBe("applied");
+    expect(canvas.getSnapshot().nodeByKey.gen.get("gen")).toMatchObject({
+      config: { inputSlots: ["asset-c", "asset-a", "asset-b"] },
+    });
+    // 素材顺序属于生成节点配置，不借删除、重建连线来实现。
+    expect(canvas.getSnapshot().graph.edges.map((item) => item.id)).toEqual([
+      "asset-a->gen",
+      "asset-b->gen",
+      "asset-c->gen",
+    ]);
+
+    canvas.commands.disconnect("asset-a->gen");
+    expect(canvas.getSnapshot().nodeByKey.gen.get("gen")).toMatchObject({
+      config: { inputSlots: ["asset-c", null, "asset-b"] },
+    });
+    expect(canvas.commands.reorderGenerationInput("gen", "asset-b", "asset-c")).toBe("applied");
+    expect(canvas.getSnapshot().nodeByKey.gen.get("gen")).toMatchObject({
+      config: { inputSlots: ["asset-b", null, "asset-c"] },
+    });
+
+    const document: unknown = JSON.parse(JSON.stringify(canvas.commands.snapshotV2({})));
+    const restored = createCanvasState();
+    expect(restored.commands.restoreDocument(document)).toMatchObject({ ok: true });
+    const snapshot = restored.getSnapshot();
+    expect(snapshot.nodeByKey.gen.get("gen")).toMatchObject({
+      config: { inputSlots: ["asset-b", null, "asset-c"] },
+    });
+    const resolved = createCanvasInputResolver(snapshot.nodeByKey, snapshot.graph.edges)("gen");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-b", "asset-c"]);
+    expect(resolved.mediaPosition.get("asset-b")).toBe(0);
+    expect(resolved.mediaPosition.get("asset-c")).toBe(2);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        snapshot.graph.edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-b->gen", "asset-c->gen"]);
+  });
+
+  it("素材组批量连入后可重排已有连线，重复或无效操作不改写顺序", () => {
+    const canvas = createCanvasState();
+    canvas.commands.insertSubgraph(
+      [
+        { type: "gen", data: videoGenerator("video") },
+        { type: "asset", data: imageNode("asset-a") },
+        { type: "asset", data: imageNode("asset-b") },
+        { type: "asset", data: imageNode("asset-c") },
+        { type: "asset", data: imageNode("not-connected") },
+      ],
+      [],
+    );
+    // 组端口逐个建立真实素材边；连入顺序由组成员顺序决定，随后可针对目标生成节点再调整。
+    for (const key of ["asset-c", "asset-a", "asset-b"]) {
+      expect(canvas.commands.connect(key, "video")).toMatchObject({ status: "connected" });
+    }
+    expect(canvas.getSnapshot().nodeByKey.gen.get("video")).toMatchObject({
+      config: { inputSlots: ["asset-c", "asset-a", "asset-b"] },
+    });
+    expect(canvas.commands.reorderGenerationInput("video", "asset-a", "asset-b")).toBe("applied");
+    expect(canvas.getSnapshot().nodeByKey.gen.get("video")).toMatchObject({
+      config: { inputSlots: ["asset-c", "asset-b", "asset-a"] },
+    });
+    expect(canvas.commands.reorderGenerationInput("video", "asset-b", "asset-c")).toBe("applied");
+    expect(canvas.getSnapshot().nodeByKey.gen.get("video")).toMatchObject({
+      config: { inputSlots: ["asset-b", "asset-c", "asset-a"] },
+    });
+    expect(canvas.commands.reorderGenerationInput("video", "asset-b", "asset-b")).toBe("unchanged");
+    expect(canvas.commands.reorderGenerationInput("video", "not-connected", "asset-a")).toBe(
+      "missing",
+    );
+    const snapshot = canvas.getSnapshot();
+    const resolved = createCanvasInputResolver(snapshot.nodeByKey, snapshot.graph.edges)("video");
+    expect(resolved.media.map((input) => input.key)).toEqual(["asset-b", "asset-c", "asset-a"]);
+    expect(
+      canvasInputEdgeOrder(
+        resolved,
+        snapshot.graph.edges.map((item) => item.id),
+      ),
+    ).toEqual(["asset-b->video", "asset-c->video", "asset-a->video"]);
+  });
+
   it("删除素材节点后把它的槽位清成空槽，其余素材顺序与连线保持不变", () => {
     const canvas = createCanvasState();
     canvas.commands.insertSubgraph(

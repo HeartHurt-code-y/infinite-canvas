@@ -15,6 +15,7 @@ import {
   generationSourceOccupiesInputSlot,
   isGenerationMediaConsumer,
   occupyingGenerationInputKeys,
+  reorderGenerationInputSlots,
   withGenerationInputSlots,
 } from "./generationInputSlots";
 import type {
@@ -247,6 +248,11 @@ export interface CanvasCommands {
   readonly removeNode: (key: string) => CanvasNodeEntry | null;
   readonly connect: (fromKey: string, toKey: string) => CanvasConnectResult;
   readonly disconnect: (edgeId: string) => CanvasWriteResult;
+  readonly reorderGenerationInput: (
+    nodeKey: string,
+    sourceKey: string,
+    targetKey: string,
+  ) => CanvasWriteResult;
   readonly applyNodeChanges: (changes: readonly CanvasStoreNodeChange[]) => CanvasWriteResult;
   readonly setView: (view: {
     readonly zoom?: number;
@@ -304,6 +310,11 @@ interface CanvasStoreState {
   readonly removeNode: (key: string) => CanvasNodeEntry | null;
   readonly connect: (fromKey: string, toKey: string) => CanvasConnectResult;
   readonly disconnect: (edgeId: string) => CanvasWriteResult;
+  readonly reorderGenerationInput: (
+    nodeKey: string,
+    sourceKey: string,
+    targetKey: string,
+  ) => CanvasWriteResult;
   readonly clear: () => readonly CanvasNodeEntry[];
   /** 一次 Zustand transaction 应用一批 React Flow 位置、尺寸与选择变化。 */
   readonly applyNodeChanges: (changes: readonly CanvasStoreNodeChange[]) => CanvasWriteResult;
@@ -1249,6 +1260,39 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
             });
             return result;
           },
+          reorderGenerationInput: (nodeKey, sourceKey, targetKey) => {
+            let result: CanvasWriteResult = "missing";
+            set((state) => {
+              const target = state.nodesById[nodeKey];
+              if (!target || !isGenerationMediaConsumer(target)) return state;
+              const connectedKeys = occupyingGenerationInputKeys(
+                state.assetEdges.filter((edge) => edge.toKey === nodeKey),
+                (key) => state.nodesById[key],
+              );
+              if (!connectedKeys.includes(sourceKey) || !connectedKeys.includes(targetKey)) {
+                return state;
+              }
+              const currentSlots = target.data.config.inputSlots ?? [];
+              const nextSlots = reorderGenerationInputSlots(
+                currentSlots,
+                connectedKeys,
+                sourceKey,
+                targetKey,
+              );
+              if (nextSlots === currentSlots) {
+                result = "unchanged";
+                return state;
+              }
+              result = "applied";
+              return {
+                nodesById: {
+                  ...state.nodesById,
+                  [nodeKey]: withGenerationInputSlots(target, nextSlots),
+                },
+              };
+            });
+            return result;
+          },
           clear: () => {
             let removed: readonly CanvasNodeEntry[] = [];
             set((state) => {
@@ -1520,6 +1564,8 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
     removeNode: (key) => store.getState().removeNode(key),
     connect: (fromKey, toKey) => store.getState().connect(fromKey, toKey),
     disconnect: (edgeId) => store.getState().disconnect(edgeId),
+    reorderGenerationInput: (nodeKey, sourceKey, targetKey) =>
+      store.getState().reorderGenerationInput(nodeKey, sourceKey, targetKey),
     applyNodeChanges: (changes) => store.getState().applyNodeChanges(changes),
     setView: (view) => store.getState().setView(view),
     selectNode: (key) => store.getState().selectNode(key),

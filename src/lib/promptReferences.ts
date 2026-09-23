@@ -253,6 +253,44 @@ export function createPromptReference(
   };
 }
 
+/**
+ * 连线顺序变化时，只刷新仍指向同一画布实例、同一媒体身份的引用位置。
+ * 断开的引用保留最后一次有效位置，供该位置后来换图时识别；顺序变化本身绝不换绑。
+ */
+export function refreshConnectedPromptReferencePositions(
+  document: PromptContentDocumentV1,
+  candidates: readonly PromptReferenceCandidate[],
+): PromptContentDocumentV1 {
+  const aliases = buildReferenceCatalog(candidates).aliases;
+  const byNodeKey = new Map<string, { candidate: PromptReferenceCandidate; alias: string }[]>();
+  candidates.forEach((candidate, index) => {
+    const entries = byNodeKey.get(candidate.canvasNodeKey) ?? [];
+    entries.push({ candidate, alias: aliases[index]!.label });
+    byNodeKey.set(candidate.canvasNodeKey, entries);
+  });
+  let changed = false;
+  const items = document.items.map((item) => {
+    if (item.kind !== "media_reference") return item;
+    const connected = byNodeKey
+      .get(item.canvasNodeKey)
+      ?.find(({ candidate }) => sameMediaReferenceTarget(candidateTarget(candidate), item.target));
+    if (connected == null) return item;
+    const nextSlot = connected.candidate.slotIndex;
+    const nextAlias = item.aliasSnapshot === undefined ? undefined : connected.alias;
+    if (item.slotSnapshot === nextSlot && item.aliasSnapshot === nextAlias) return item;
+    changed = true;
+    const { slotSnapshot, aliasSnapshot, ...rest } = item;
+    void slotSnapshot;
+    void aliasSnapshot;
+    return {
+      ...rest,
+      ...(nextAlias === undefined ? {} : { aliasSnapshot: nextAlias }),
+      ...(nextSlot === undefined ? {} : { slotSnapshot: nextSlot }),
+    };
+  });
+  return changed ? { ...document, items } : document;
+}
+
 function appendText(items: PromptContentItem[], text: string): void {
   if (!text) return;
   const previous = items.at(-1);

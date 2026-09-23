@@ -1270,10 +1270,10 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     await waitFor(() => {
       const visible = clientFromFlow(flowPosition.x, flowPosition.y);
-      expect(visible.clientX).toBeGreaterThan(0);
-      expect(visible.clientX).toBeLessThan(1280);
-      expect(visible.clientY).toBeGreaterThan(0);
-      expect(visible.clientY).toBeLessThan(800);
+      expect({
+        xInsideViewport: visible.clientX > 0 && visible.clientX < 1280,
+        yInsideViewport: visible.clientY > 0 && visible.clientY < 800,
+      }).toEqual({ xInsideViewport: true, yInsideViewport: true });
     });
     expect(rfNodeFlowPosition(node!)).toEqual(flowPosition);
     expect(document.querySelectorAll(".canvas-gen-node--video")).toHaveLength(1);
@@ -5050,10 +5050,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       return found!;
     });
     const image = node.querySelector("img");
-    expect(image).toHaveAttribute(
-      "src",
-      toMediaProxyUrl(staleUrl, { assetId: "image-asset-1" }),
-    );
+    expect(image).toHaveAttribute("src", toMediaProxyUrl(staleUrl, { assetId: "image-asset-1" }));
 
     // 旧签名过期：加载失败后按素材身份向后端续签一次，节点数据回写新地址。
     fireEvent.error(image!);
@@ -7877,6 +7874,104 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const orderByEdgeId = new Map(edgeIds.map((edgeId, index) => [edgeId, badges[index]]));
     expect(orderByEdgeId.get(`${referenceKey}->${targetKey}`)).toBe("1");
     expect(orderByEdgeId.get(`${cleanKey}->${targetKey}`)).toBe("2");
+  });
+
+  it("生成节点重排参考图后清单、连线编号与提交媒体顺序同步", async () => {
+    const secondImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-reorder-second",
+      name: "站台干净底图",
+      previewUrl: "https://cdn.example.com/station-clean.jpg",
+      assetUrl: "https://cdn.example.com/station-clean.jpg",
+    };
+    const thirdImage: CloudAsset = {
+      ...CLOUD_ASSETS[0]!,
+      id: "asset-image-reorder-third",
+      name: "站台远景图",
+      previewUrl: "https://cdn.example.com/station-wide.jpg",
+      assetUrl: "https://cdn.example.com/station-wide.jpg",
+    };
+    invokeMock.mockImplementation((command) =>
+      command === "list_assets"
+        ? Promise.resolve([...CLOUD_ASSETS, secondImage, thirdImage])
+        : baseInvokeImplementation(command),
+    );
+
+    render(<App />);
+    const videoGeneration = await addGenerationNode("视频", 518, 222);
+    const first = await addAssetNode("图片", "站台参考图", 148, 148);
+    const second = await addAssetNode("图片", secondImage.name, 148, 333);
+    const third = await addAssetNode("图片", thirdImage.name, 148, 518);
+    for (const asset of [first, second, third]) connectAssetToGeneration(asset, videoGeneration);
+    await within(videoGeneration).findByRole("button", { name: "解除连线：站台远景图" });
+
+    const rows = () =>
+      within(videoGeneration)
+        .getByRole("list", { name: "生成参考素材，按传入顺序排列" })
+        .querySelectorAll("li");
+    const names = () =>
+      Array.from(rows()).map((item) => item.querySelector(".node-media-chip__name")?.textContent);
+    expect(names()).toEqual(["站台参考图", "站台干净底图", "站台远景图"]);
+    const promptInput = within(videoGeneration).getByRole("textbox", {
+      name: "提示词输入框，输入 @ 引用素材",
+    });
+    setPromptText(promptInput, "按 ");
+    await insertMention(videoGeneration, "站台参考图");
+    appendPromptText(promptInput, " 生成站台镜头");
+    fireEvent.click(within(rows()[2]!).getByRole("button", { name: /上移/ }));
+    await waitFor(() => expect(names()).toEqual(["站台参考图", "站台远景图", "站台干净底图"]));
+    fireEvent.click(within(rows()[0]!).getByRole("button", { name: /下移/ }));
+    await waitFor(() => expect(names()).toEqual(["站台远景图", "站台参考图", "站台干净底图"]));
+
+    expect(
+      Array.from(rows()).map((item) => item.querySelector(".node-media-chip__order")?.textContent),
+    ).toEqual(["1", "2", "3"]);
+    const targetKey = videoGeneration.dataset["connectionTarget"]!;
+    const edgeIds = Array.from(document.querySelectorAll(".react-flow__edge")).map((edge) =>
+      edge.getAttribute("data-id"),
+    );
+    const badges = Array.from(document.querySelectorAll(".canvas-flow-edge__order")).map(
+      (marker) => marker.textContent,
+    );
+    const orderByEdgeId = new Map(edgeIds.map((edgeId, index) => [edgeId, badges[index]]));
+    expect(orderByEdgeId.get(`${third.dataset["connectionTarget"]}->${targetKey}`)).toBe("1");
+    expect(orderByEdgeId.get(`${first.dataset["connectionTarget"]}->${targetKey}`)).toBe("2");
+    expect(orderByEdgeId.get(`${second.dataset["connectionTarget"]}->${targetKey}`)).toBe("3");
+    const mention = promptInput.querySelector<HTMLElement>(".mention-chip");
+    expect(mention).toHaveAttribute("data-canvas-node-key", first.dataset["connectionTarget"]);
+    expect(mention).not.toHaveClass("is-stale");
+    fireEvent.click(within(videoGeneration).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("start_generation", expect.anything()),
+    );
+    expect(submittedGenerationCommand()["explicitMedia"]).toMatchObject([
+      {
+        target: { canvasNodeKey: third.dataset["connectionTarget"] },
+        typePosition: 1,
+        contentIndex: 1,
+      },
+      {
+        target: { canvasNodeKey: first.dataset["connectionTarget"] },
+        typePosition: 2,
+        contentIndex: 2,
+      },
+      {
+        target: { canvasNodeKey: second.dataset["connectionTarget"] },
+        typePosition: 3,
+        contentIndex: 3,
+      },
+    ]);
+    const promptSegments = submittedGenerationCommand()["prompt"] as readonly {
+      kind: string;
+      target?: { canvasNodeKey?: string };
+      typePosition?: number;
+      contentIndex?: number;
+    }[];
+    expect(promptSegments.find((segment) => segment.kind === "media_reference")).toMatchObject({
+      target: { canvasNodeKey: first.dataset["connectionTarget"] },
+      typePosition: 2,
+      contentIndex: 2,
+    });
   });
 
   it("解绑中间第 2 条参考素材后，第 3 条保持原位并把原位置留成空位", async () => {
