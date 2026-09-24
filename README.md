@@ -130,7 +130,7 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-CI 侧全部配在 `.github/workflows/macos-package.yml` 的 job 级环境变量里；配齐后流水线会自动签名 → 公证 → 装订票据（stapler）。没配齐时 run summary 会明确写出缺哪一项、以及用户需要手动做什么。
+当前 macOS 构建使用 `codemagic.yaml` 的 `macos-package` 工作流。将 updater 私钥、Developer ID 证书与公证凭据放在 Codemagic 的 `updater_signing` 环境组；工作流构建并暂存签名包，**不会自动发布更新清单**。发布前须核对签名、公证和同版 Windows 包。GitHub Actions 的手动工作流保留作备用入口。
 
 ### 自检
 
@@ -139,7 +139,7 @@ CI 侧全部配在 `.github/workflows/macos-package.yml` 的 job 级环境变量
   它会跑 `spctl -a -t exec`（Finder 双击时 Gatekeeper 走的同一判定）与 `stapler validate`，
   所以**它就是「所有人能不能打开」的答案**；同时检查内置 FFmpeg / Blender 的签名。
 - 方案 A 的参数自检：`bash scripts/install-macos.sh <dmg> --dry-run`（只解析参数、不做任何改动，任意平台可跑）。
-- macOS 14 是本项目 CI 的构建机版本；产物要求 macOS 11.0+（见 `tauri.conf.json` 的 `minimumSystemVersion`）。
+- 当前 Codemagic 构建机为 `mac_mini_m2`；产物要求 macOS 11.0+（见 `tauri.conf.json` 的 `minimumSystemVersion`）。
 
 ## 应用内升级
 

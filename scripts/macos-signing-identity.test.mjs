@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -13,6 +13,7 @@ import {
   LOCAL_PREFIX,
   parseSecurityFindIdentityOutput,
   planSigningIdentity,
+  publishEnvironment,
   selectSigningIdentity,
 } from "./macos-signing-identity.mjs";
 
@@ -33,6 +34,21 @@ const APPLE_DEVELOPMENT = {
   hash: "CCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCCC",
   name: `${APPLE_DEVELOPMENT_PREFIX} dev@example.com (TEAM123456)`,
 };
+
+test("publishes the selected identity to Codemagic's later steps", async () => {
+  const directory = mkdtempSync(path.join(os.tmpdir(), "canvas-codemagic-env-"));
+  try {
+    const cmEnv = path.join(directory, "cm.env");
+    assert.equal(
+      await publishEnvironment({ APPLE_SIGNING_IDENTITY: DEVELOPER_ID.name }, { CM_ENV: cmEnv }),
+      true,
+    );
+    assert.equal(readFileSync(cmEnv, "utf8"), `APPLE_SIGNING_IDENTITY=${DEVELOPER_ID.name}\n`);
+  } finally {
+    assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
 
 test("parses identities and ignores the trailing summary line", () => {
   const output = [
@@ -274,6 +290,7 @@ spctl() { return 1; }
       assert.equal(run("unsigned").status, 1);
       assert.equal(run("invalid").status, 1);
     } finally {
+      assert.equal(path.dirname(path.resolve(directory)), path.resolve(os.tmpdir()));
       rmSync(directory, { recursive: true, force: true });
     }
   },

@@ -14,7 +14,7 @@ Tauri 2 在 Windows 上把完整 NSIS/MSI 安装器作为 updater 产物，因�
 ## 构建和发布顺序
 
 1. 将 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 升到相同的新版本。备齐原 updater 签名私钥；不能更换已经发给客户的公钥。
-2. Windows 上运行 `pnpm tauri:build`，保留同版签名 NSIS、MSI。对构建时准备的稳定资源运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，把含完整包及签名哈希的基线与安装包一同归档。将同版提交推送到默认分支并确认 macOS CI 的 updater 私钥、Developer ID 与公证凭据后，手动触发 `macos-package.yml`；它只生成并暂存带版本号的签名包，不自动更改公开清单。
+2. Windows 上运行 `pnpm tauri:build`，保留同版签名 NSIS、MSI。对构建时准备的稳定资源运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，把含完整包及签名哈希的基线与安装包一同归档。将同版提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥、Developer ID 与公证凭据后，运行 `codemagic.yaml` 的 `macos-package`；它只生成并暂存带版本号的签名包，不自动更改公开清单。旧 `.github/workflows/macos-package.yml` 可作为手动备用构建入口。
 3. 分别用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <windows-full-dir> --full-bundle-dir <windows-full-dir> --version <version>` 与 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --version <version>` 初始化新平台地址。发布脚本要求显式指定只含本版产物的目录，并将 `latest.json` 最后上传。
 4. 汇集同版 Windows 与 macOS 签名包到一个独立暂存目录，使用 `pnpm update:publish -- --channel legacy --bundle-dir <mixed-full-dir> --version <version>` 最后切换旧共享地址。未齐备两个平台时不得切换。
 5. **仅在过渡版的迁移与升级路径通过验证后**，下次常规 Windows 发版先构建完整离线安装包，再运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。检查暂存的完整包和小包大小、签名及生成的 NSIS 资源表，然后用 `--channel windows-x86_64 --bundle-dir <slim-dir> --full-bundle-dir <full-dir> --version <version>` 发布小包与独立完整安装包。

@@ -24,7 +24,7 @@
 // 钥匙串不再弹窗。
 //
 // 因此本脚本在打包前把身份定下来：解析得出唯一确定的 identity 写进
-// GITHUB_ENV / 标准输出，让 `tauri build` 通过 APPLE_SIGNING_IDENTITY 沿用
+// GITHUB_ENV / CM_ENV，让 `tauri build` 通过 APPLE_SIGNING_IDENTITY 沿用
 // （Tauri CLI 2.11.4 读取该环境变量，已核实其二进制内字符串）。
 // `--require` 下拿不到身份就直接失败——让 CI 红，而不是把「会弹密码框」的包
 // 发给用户。
@@ -176,11 +176,15 @@ function listCodesigningIdentities() {
   return identities;
 }
 
-async function publishEnvironment(values) {
-  const githubEnv = process.env.GITHUB_ENV;
-  if (typeof githubEnv !== "string" || githubEnv.length === 0) return false;
+export async function publishEnvironment(values, environment = process.env) {
+  const destinations = [environment.GITHUB_ENV, environment.CM_ENV].filter(
+    (value) => typeof value === "string" && value.length > 0,
+  );
+  if (destinations.length === 0) return false;
   const lines = Object.entries(values).map(([key, value]) => `${key}=${value}`);
-  await appendFile(githubEnv, `${lines.join("\n")}\n`, "utf8");
+  for (const destination of new Set(destinations)) {
+    await appendFile(destination, `${lines.join("\n")}\n`, "utf8");
+  }
   return true;
 }
 
@@ -238,7 +242,7 @@ async function main() {
     "",
     "  修复方式（任选其一）：",
     "    1. 分发用（推荐）：Apple Developer Program 的 “Developer ID Application” 证书，",
-    "       用 security import 装进构建机的钥匙串（CI 见 .github/workflows/macos-package.yml）。",
+    "       用 security import 装进构建机的钥匙串（当前 CI 见 codemagic.yaml）。",
     "    2. 仅本机开发：Xcode 用任意 Apple ID 登录一次并生成 “Apple Development” 证书，",
     "       钥匙串弹窗在同一台机器上同样会消失（但该证书不能分发给别人）。",
     "",

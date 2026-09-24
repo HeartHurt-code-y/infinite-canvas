@@ -18,33 +18,128 @@ workflows:
     scripts:
       - name: Set up pnpm
         script: |
-          if command -v corepack >/dev/null 2>&1; then
-            corepack enable
-            corepack prepare pnpm@12.5.1 --activate
-          else
-            npm install -g pnpm@12.5.1
-          fi
+          set -euo pipefail
+          corepack enable
+          corepack prepare pnpm@12.5.1 --activate
           pnpm config set store-dir "$HOME/.pnpm-store"
       - name: Set up Rust
         script: |
+          set -euo pipefail
           curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --profile minimal
           echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$CM_ENV"
       - name: Install dependencies
         script: pnpm install --frozen-lockfile
+      - name: Check bridge release inputs
+        script: |
+          set -euo pipefail
+          if [ "$(node -p 'process.arch')" != "arm64" ]; then
+            echo "macOS updater 必须在 arm64 Node 环境构建" >&2
+            exit 1
+          fi
+          if [ -z "${TAURI_SIGNING_PRIVATE_KEY:-}" ]; then
+            echo "缺少 TAURI_SIGNING_PRIVATE_KEY，不能生成已签名的 updater 包" >&2
+            exit 1
+          fi
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          const packageVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
+          const tauriVersion = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8')).version;
+          const cargo = readFileSync('src-tauri/Cargo.toml', 'utf8');
+          const packageSection = cargo.split(/^\[package\]\s*$/m)[1]?.split(/^\[/m)[0];
+          const cargoVersion = packageSection?.match(/^version\s*=\s*"([^"]+)"/m)?.[1];
+          if (!packageVersion || packageVersion !== tauriVersion || packageVersion !== cargoVersion) {
+            throw new Error(`构建版本不一致：package=${packageVersion}, Tauri=${tauriVersion}, Cargo=${cargoVersion}`);
+          }
+          console.log(`macOS 桥接包版本：${packageVersion}`);
+          NODE
+      - name: Clear cached macOS bundle outputs
+        script: |
+          set -euo pipefail
+          repo_root="$(pwd -P)"
+          build_root="$(cd "$CM_BUILD_DIR" && pwd -P)"
+          if [ "$repo_root" != "$build_root" ]; then
+            echo "当前目录不是 Codemagic 仓库根目录，拒绝清理旧产物" >&2
+            exit 1
+          fi
+          bundle_root="$repo_root/src-tauri/target/release/bundle"
+          rm -rf "$bundle_root/macos" "$bundle_root/dmg" "$bundle_root/release-staging"
+      - name: Import optional Developer ID certificate
+        script: |
+          set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            umask 077
+            temp_dir="$(mktemp -d)"
+            trap 'rm -f "$temp_dir/certificate.p12"; rmdir "$temp_dir"' EXIT
+            printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$temp_dir/certificate.p12"
+            keychain initialize
+            if [ -n "${APPLE_CERTIFICATE_PASSWORD+x}" ]; then
+              keychain add-certificates --certificate "$temp_dir/certificate.p12" --certificate-password "$APPLE_CERTIFICATE_PASSWORD"
+            else
+              keychain add-certificates --certificate "$temp_dir/certificate.p12"
+            fi
+          fi
+      - name: Resolve macOS signing identity
+        script: |
+          set -euo pipefail
+          if [ -n "${APPLE_CERTIFICATE:-}" ]; then
+            node scripts/macos-signing-identity.mjs --require-distribution
+          else
+            node scripts/macos-signing-identity.mjs
+            echo "未提供 Developer ID 证书时只生成本机测试包，不得发布给客户。"
+          fi
       - name: Build macOS installer
         script: |
+          set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
           pnpm tauri:build
+      - name: Verify signed macOS bundle
+        script: |
+          set -euo pipefail
+          app_path="src-tauri/target/release/bundle/macos/无限画布.app"
+          if [ ! -d "$app_path" ]; then
+            echo "未找到 macOS .app 构建产物" >&2
+            exit 1
+          fi
+          bash scripts/verify-macos-bundle.sh "$app_path"
+          if [ "${INFINITE_CANVAS_SIGNING_IDENTITY_SOURCE:-}" = "developer-id" ]; then
+            spctl -a -t exec -vv "$app_path"
+            xcrun stapler validate "$app_path"
+          fi
       - name: Stage unsigned-install helper
         script: |
+          set -euo pipefail
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
-      - name: Publish updater artifacts to TOS
+      - name: Stage versioned updater archive
         script: |
-          export PATH="$HOME/.cargo/bin:$PATH"
-          pnpm update:publish
+          set -euo pipefail
+          pnpm update:stage:macos
+      - name: Verify staged updater signature and manifest
+        script: |
+          set -euo pipefail
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          import { readFileSync, readdirSync } from 'node:fs';
+          import path from 'node:path';
+          import { verifyUpdaterSignature } from './scripts/verify-updater-signature.mjs';
+          const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const staged = path.join('src-tauri/target/release/bundle/release-staging', config.version, 'darwin-aarch64/full');
+          const archives = readdirSync(staged).filter((name) => name.endsWith('.app.tar.gz'));
+          assert.equal(archives.length, 1, '暂存目录必须恰好有一个 macOS updater 包');
+          const archive = path.join(staged, archives[0]);
+          await verifyUpdaterSignature(archive, `${archive}.sig`, config.plugins.updater.pubkey);
+          const manifest = JSON.parse(readFileSync(path.join(staged, 'latest.json'), 'utf8'));
+          assert.equal(manifest.version, config.version);
+          assert.deepEqual(Object.keys(manifest.platforms), ['darwin-aarch64']);
+          assert.equal(new URL(manifest.platforms['darwin-aarch64'].url).pathname.split('/').at(-1), encodeURIComponent(archives[0]));
+          assert.equal(manifest.platforms['darwin-aarch64'].signature, readFileSync(`${archive}.sig`, 'utf8').trim());
+          console.log(`已验签并暂存 macOS ${config.version} arm64 updater；公开更新频道未变更。`);
+          NODE
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz
       - src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+      - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/*.app.tar.gz
+      - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/*.app.tar.gz.sig
+      - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/latest.json
       - src-tauri/target/release/bundle/helper/install-macos.sh
