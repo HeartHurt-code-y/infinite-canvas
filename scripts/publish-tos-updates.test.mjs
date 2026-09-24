@@ -18,6 +18,7 @@ import {
   compareReleaseVersions,
   checkChannelManifest,
   checkLegacyPlatformFeeds,
+  collectLegacyChannelPlatforms,
   immutableObjectMatches,
   tosFetch,
 } from "./publish-tos-updates.mjs";
@@ -159,6 +160,64 @@ test("promotion requires matching platform feeds and never rolls a channel back"
     pubDate: undefined,
   });
   assert.equal(compareReleaseVersions("0.1.10", "0.1.9"), 1);
+});
+
+test("legacy manifest promotion only references full same-version artifacts from this bucket", () => {
+  const base = "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates";
+  const windows = {
+    url: `${base}/windows-x86_64/${encodeURIComponent("无限画布_0.1.8_x64-setup.exe")}`,
+    signature: "win-sig",
+  };
+  const mac = {
+    url: `${base}/darwin-aarch64/${encodeURIComponent("无限画布_0.1.8_aarch64-full.app.tar.gz")}`,
+    signature: "mac-sig",
+  };
+  const feeds = {
+    "windows-x86_64": { version: "0.1.8", platforms: { "windows-x86_64": windows } },
+    "darwin-aarch64": { version: "0.1.8", platforms: { "darwin-aarch64": mac } },
+  };
+  assert.deepEqual(collectLegacyChannelPlatforms("0.1.8", feeds, base), {
+    "windows-x86_64": windows,
+    "darwin-aarch64": mac,
+  });
+  assert.throws(
+    () => collectLegacyChannelPlatforms("0.1.8", { ...feeds, "darwin-aarch64": null }, base),
+    /darwin-aarch64/,
+  );
+  assert.throws(
+    () =>
+      collectLegacyChannelPlatforms(
+        "0.1.8",
+        {
+          ...feeds,
+          "windows-x86_64": {
+            ...feeds["windows-x86_64"],
+            platforms: {
+              "windows-x86_64": { ...windows, url: windows.url.replace("setup", "slim-setup") },
+            },
+          },
+        },
+        base,
+      ),
+    /完整 windows-x86_64/,
+  );
+  assert.throws(
+    () =>
+      collectLegacyChannelPlatforms(
+        "0.1.8",
+        {
+          ...feeds,
+          "darwin-aarch64": {
+            ...feeds["darwin-aarch64"],
+            platforms: {
+              "darwin-aarch64": { ...mac, url: mac.url.replace(base, "https://other.example") },
+            },
+          },
+        },
+        base,
+      ),
+    /预期 TOS 前缀/,
+  );
 });
 
 test("immutable versioned objects require matching SHA-256 metadata and length", () => {

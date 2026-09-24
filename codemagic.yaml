@@ -85,7 +85,7 @@ workflows:
             node scripts/macos-signing-identity.mjs --require-distribution
           else
             node scripts/macos-signing-identity.mjs
-            echo "未提供 Developer ID 证书时只生成本机测试包，不得发布给客户。"
+            echo "未提供 Developer ID 证书，使用 ad-hoc 签名；首次安装可能需要手动处理 Gatekeeper。"
           fi
       - name: Build macOS installer
         script: |
@@ -135,6 +135,16 @@ workflows:
           assert.equal(manifest.platforms['darwin-aarch64'].signature, readFileSync(`${archive}.sig`, 'utf8').trim());
           console.log(`已验签并暂存 macOS ${config.version} arm64 updater；公开更新频道未变更。`);
           NODE
+      - name: Publish macOS updater
+        script: |
+          set -euo pipefail
+          release_version="$(node -p "require('./package.json').version")"
+          pnpm update:publish -- --channel darwin-aarch64 --bundle-dir "src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full" --version "$release_version"
+      - name: Enable in-app upgrade from the shared channel
+        script: |
+          set -euo pipefail
+          release_version="$(node -p "require('./package.json').version")"
+          pnpm update:publish -- --promote-legacy --version "$release_version" --notes "升级到 $release_version。"
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz

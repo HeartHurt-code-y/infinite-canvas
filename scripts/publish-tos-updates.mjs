@@ -16,6 +16,7 @@ import https from "node:https";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  buildLatestManifest,
   collectUpdaterPlatforms,
   listFilesRecursive,
   parseArgs,
@@ -750,6 +751,37 @@ export function checkLegacyPlatformFeeds(version, platforms, feeds) {
   }
 }
 
+export function collectLegacyChannelPlatforms(version, feeds, publicBase) {
+  const platforms = {};
+  for (const platform of ["windows-x86_64", "darwin-aarch64"]) {
+    const feed = feeds[platform];
+    const entry = feed?.platforms?.[platform];
+    if (
+      feed?.version !== version ||
+      Object.keys(feed.platforms ?? {}).length !== 1 ||
+      typeof entry?.url !== "string" ||
+      typeof entry?.signature !== "string" ||
+      entry.signature.trim() === ""
+    ) {
+      throw new Error(`旧版频道发布前必须初始化同版 ${platform} 平台频道`);
+    }
+    const fileName = artifactName(entry.url);
+    const expectedName =
+      platform === "windows-x86_64"
+        ? `无限画布_${version}_x64-setup.exe`
+        : `无限画布_${version}_aarch64-full.app.tar.gz`;
+    if (fileName !== expectedName) {
+      throw new Error(`旧版频道只能引用本版完整 ${platform} 更新包`);
+    }
+    const expectedUrl = `${publicBase}/${platform}/${encodeURIComponent(fileName)}`;
+    if (entry.url !== expectedUrl) {
+      throw new Error(`旧版频道 ${platform} 的下载地址不在预期 TOS 前缀`);
+    }
+    platforms[platform] = { url: entry.url, signature: entry.signature };
+  }
+  return platforms;
+}
+
 async function readPublicManifest(config, objectKey) {
   const result = await getAnonymousObject(config, objectKey);
   if (result.status === 404) return null;
@@ -761,6 +793,76 @@ async function readPublicManifest(config, objectKey) {
   } catch {
     throw new Error(`频道清单不是有效 JSON：${objectKey}`);
   }
+}
+
+export async function promoteLegacyFromPlatformFeeds(options = {}) {
+  const version = typeof options.version === "string" ? options.version : readAppVersion();
+  const envConfig = readTosPublishEnv(options.env ?? process.env);
+  const secretKey = await findWorkingSecretKey(envConfig);
+  const config = { ...envConfig, secretKey };
+  const publicBase = tosUpdatesPublicBaseUrl(config);
+  const feeds = {};
+  for (const platform of ["windows-x86_64", "darwin-aarch64"]) {
+    feeds[platform] = await readPublicManifest(
+      config,
+      tosUpdatesObjectKey("latest.json", `${config.prefix}/${platform}`),
+    );
+  }
+  const platforms = collectLegacyChannelPlatforms(version, feeds, publicBase);
+  checkLegacyPlatformFeeds(version, platforms, feeds);
+  for (const [platform, entry] of Object.entries(platforms)) {
+    const fileName = artifactName(entry.url);
+    const objectKey = tosUpdatesObjectKey(fileName, `${config.prefix}/${platform}`);
+    const artifact = await tosFetch({
+      method: "HEAD",
+      host: tosUpdatesHost(config.bucket, config.endpoint),
+      objectKey,
+      region: config.region,
+      accessKey: config.accessKey,
+      secretKey: config.secretKey,
+      anonymous: true,
+    });
+    if (
+      artifact.status !== 200 ||
+      !Number.isSafeInteger(Number(artifact.headers?.["content-length"])) ||
+      Number(artifact.headers?.["content-length"]) <= 0 ||
+      !/^[a-f0-9]{64}$/i.test(artifact.headers?.["x-tos-meta-sha256"] ?? "")
+    ) {
+      throw new Error(`旧版频道发布前 ${platform} 更新包未通过公开对象校验`);
+    }
+    const signature = await getAnonymousObject(config, `${objectKey}.sig`);
+    if (signature.status !== 200 || signature.text.trim() !== entry.signature.trim()) {
+      throw new Error(`旧版频道发布前 ${platform} 更新签名不匹配`);
+    }
+  }
+  const manifest = buildLatestManifest({
+    version,
+    notes: typeof options.notes === "string" ? options.notes : "",
+    platforms,
+  });
+  const objectKey = tosUpdatesObjectKey("latest.json", config.prefix);
+  const current = await readPublicManifest(config, objectKey);
+  const previous = checkChannelManifest(current, manifest);
+  if (previous.sameVersion) {
+    return { latestJsonUrl: tosUpdatesLatestJsonUrl(config), uploadedKeys: [], version };
+  }
+  const body = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`, "utf8");
+  await putPublicObject(
+    config,
+    objectKey,
+    body,
+    "latest.json",
+    createHash("sha256").update(body).digest("hex"),
+  );
+  const published = await readPublicManifest(config, objectKey);
+  if (JSON.stringify(published) !== JSON.stringify(manifest)) {
+    throw new Error("旧版共用更新清单发布后读取内容不一致");
+  }
+  return {
+    latestJsonUrl: tosUpdatesLatestJsonUrl(config),
+    uploadedKeys: [objectKey],
+    version,
+  };
 }
 
 export function collectFullOfflineFiles(directory, version) {
@@ -908,6 +1010,12 @@ export async function publishUpdaterArtifacts(options) {
 
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
+  if (parsed["promote-legacy"] === true) {
+    const result = await promoteLegacyFromPlatformFeeds(parsed);
+    console.log(`[tos-publish] 已发布 ${result.uploadedKeys.length} 个对象`);
+    console.log(`[tos-publish] latest.json ${result.latestJsonUrl}`);
+    return;
+  }
   const envConfig = readTosPublishEnv();
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey };

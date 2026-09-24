@@ -39,6 +39,10 @@ export function stageMacosRelease({
     path.join(sourceDir, `${archives[0]}.sig`),
     path.join(outputDir, `${outputName}.sig`),
   );
+  copyFileSync(
+    path.join(REPO_ROOT, "scripts", "install-macos.sh"),
+    path.join(outputDir, "install-macos.sh"),
+  );
   writeLatestJson({
     "bundle-dir": outputDir,
     "base-url": `${tosUpdatesPublicBaseUrl()}/${platform}`,

@@ -15,6 +15,10 @@ test("macOS staging adds an immutable versioned name and never publishes", () =>
     const staged = stageMacosRelease({ bundleRoot, version: "0.1.8", arch: "arm64" });
     assert.equal(staged.outputName, "无限画布_0.1.8_aarch64-full.app.tar.gz");
     assert.equal(readFileSync(path.join(staged.outputDir, staged.outputName), "utf8"), "archive");
+    assert.match(
+      readFileSync(path.join(staged.outputDir, "install-macos.sh"), "utf8"),
+      /install-macos/,
+    );
     const manifest = JSON.parse(readFileSync(path.join(staged.outputDir, "latest.json"), "utf8"));
     assert.equal(manifest.version, "0.1.8");
     assert.equal(manifest.platforms["darwin-aarch64"].signature, "signature");
