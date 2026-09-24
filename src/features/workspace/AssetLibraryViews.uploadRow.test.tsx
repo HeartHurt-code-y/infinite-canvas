@@ -1,8 +1,8 @@
-import { render, screen, within } from "@testing-library/react";
+import { fireEvent, render, screen, within } from "@testing-library/react";
 import { describe, expect, it } from "vitest";
 
 import { AssetUploadRow } from "./AssetLibraryViews";
-import type { AssetUploadEntry } from "./workspaceModel";
+import { stagingErrorFullText, type AssetUploadEntry } from "./workspaceModel";
 
 function buildEntry(overrides: Partial<AssetUploadEntry> = {}): AssetUploadEntry {
   return {
@@ -94,5 +94,42 @@ describe("上传行的素材库导入结论", () => {
     expect(uploadRow()).toHaveAttribute("data-state", "cleaning");
     expect(within(assetImportPhase()).getByText("等待中")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /移除上传记录/ })).not.toBeInTheDocument();
+  });
+});
+
+describe("上传失败提示", () => {
+  it("连接超时给出可操作摘要，展开后保留完整原始错误", () => {
+    const signedUrl =
+      "https://bucket.tos-cn-beijing.volces.com/staging/example.png?X-Tos-Credential=private-key&X-Tos-Signature=secret-marker";
+    const originalError = {
+      kind: "transport",
+      message: `HTTP transport error: error sending request for url (${signedUrl})`,
+      details: {
+        isConnect: true,
+        isTimeout: true,
+        source: `error sending request for url (${signedUrl})`,
+        rawDebug: `reqwest::Error { url: ${signedUrl}, source: ConnectError }`,
+        causes: ["connection refused by proxy"],
+      },
+    };
+    render(
+      <AssetUploadRow
+        entry={buildEntry({
+          status: "failed",
+          bytesUploaded: 0,
+          error: originalError,
+        })}
+        onDismiss={() => undefined}
+      />,
+    );
+
+    expect(screen.getByRole("alert")).toHaveTextContent("网络连接超时，请检查网络或代理后重试。");
+    expect(stagingErrorFullText(originalError)).toBe(JSON.stringify(originalError, null, 2));
+    fireEvent.click(screen.getByRole("button", { name: "展开完整报错" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("secret-marker");
+    expect(screen.getByRole("alert")).toHaveTextContent("private-key");
+    expect(screen.getByRole("alert")).toHaveTextContent('"isTimeout": true');
+    expect(screen.getByRole("alert")).toHaveTextContent("connection refused by proxy");
+    expect(screen.getByRole("alert")).toHaveTextContent("ConnectError");
   });
 });

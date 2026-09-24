@@ -430,20 +430,40 @@ impl std::error::Error for UploadAttemptError {}
 /// `UPLOAD_RETRY_BASE_DELAY_MS * 2^(attempt)` 毫秒；
 /// `send` 每次重试都会重新调用，调用方据此重建请求体（重新打开文件流）。
 async fn send_upload_with_retry<F, Fut>(
+    primary_client: &reqwest::Client,
+    fallback_client: Option<&reqwest::Client>,
     send: &mut F,
 ) -> Result<reqwest::Response, UploadAttemptError>
 where
-    F: FnMut() -> Fut,
+    F: FnMut(reqwest::Client) -> Fut,
     Fut: std::future::Future<Output = Result<reqwest::Response, UploadAttemptError>>,
 {
     let mut attempt: u32 = 0;
+    let mut use_fallback = false;
     loop {
-        match send().await {
+        let client = if use_fallback {
+            fallback_client.unwrap_or(primary_client)
+        } else {
+            primary_client
+        };
+        match send(client.clone()).await {
             Ok(response) => return Ok(response),
             Err(error) if attempt < UPLOAD_MAX_RETRIES && error.is_retryable() => {
+                if fallback_client.is_some()
+                    && matches!(&error, UploadAttemptError::Http(error) if error.is_connect() || error.is_timeout())
+                {
+                    use_fallback = !use_fallback;
+                }
+                let next_route = if use_fallback {
+                    "system-dns-proxy"
+                } else if fallback_client.is_some() {
+                    "pinned-ip"
+                } else {
+                    "default"
+                };
                 let delay_ms = UPLOAD_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
                 warn!(
-                    "[staging] 对象存储上传网络失败，{delay_ms}ms 后重试 ({}/{})：{error}",
+                    "[staging] 对象存储上传网络失败，{delay_ms}ms 后重试 ({}/{}), 下次路径={next_route}：{error}",
                     attempt + 1,
                     UPLOAD_MAX_RETRIES
                 );
@@ -465,21 +485,38 @@ where
 /// 每次重试前等待 `PROBE_RETRY_BASE_DELAY_MS * 2^(attempt)` 毫秒；presign 等生成 URL 的
 /// 错误直接传播（重试无意义），最后一次网络错误包装为 `BackendError::Transport`。
 async fn send_probe_with_retry<F>(
-    client: &reqwest::Client,
+    primary_client: &reqwest::Client,
+    fallback_client: Option<&reqwest::Client>,
     make_url: F,
 ) -> BackendResult<reqwest::Response>
 where
     F: Fn() -> BackendResult<String>,
 {
     let mut attempt: u32 = 0;
+    let mut use_fallback = false;
     loop {
         let url = make_url()?;
+        let client = if use_fallback {
+            fallback_client.unwrap_or(primary_client)
+        } else {
+            primary_client
+        };
         match client.get(&url).send().await {
             Ok(response) => return Ok(response),
             Err(error) if attempt < PROBE_MAX_RETRIES => {
+                if fallback_client.is_some() && (error.is_connect() || error.is_timeout()) {
+                    use_fallback = !use_fallback;
+                }
+                let next_route = if use_fallback {
+                    "system-dns-proxy"
+                } else if fallback_client.is_some() {
+                    "pinned-ip"
+                } else {
+                    "default"
+                };
                 let delay_ms = PROBE_RETRY_BASE_DELAY_MS * 2u64.pow(attempt);
                 warn!(
-                    "[staging] 连通性测试网络请求失败，{delay_ms}ms 后重试 ({}/{})：{error}",
+                    "[staging] 连通性测试网络请求失败，{delay_ms}ms 后重试 ({}/{}), 下次路径={next_route}：{error}",
                     attempt + 1,
                     PROBE_MAX_RETRIES
                 );
@@ -590,7 +627,8 @@ impl StagingService {
         };
         // 网络层失败按指数退避重试（最多 PROBE_MAX_RETRIES 次）；每次重试重新生成
         // 预签名 URL，避免退避等待或单次连接超时（最长 30s）累计超过探针 URL 的 60s 有效期。
-        let response = match send_probe_with_retry(&probe_client, || {
+        let fallback_client = (!real_ips.is_empty()).then_some(&self.client);
+        let response = match send_probe_with_retry(&probe_client, fallback_client, || {
             presign_url(&PresignParams {
                 method: "GET",
                 host: &host,
@@ -1464,7 +1502,7 @@ impl StagingService {
         let put_url_owned = put_url.clone();
         let mime_owned = mime_type.clone();
         // 重试闭包：每次重试重新打开文件、重建流并重置进度，保证从头上传。
-        let mut send_once = move || {
+        let mut send_once = move |upload_client: reqwest::Client| {
             let progress_counter = Arc::clone(&uploaded);
             let log_counter = Arc::clone(&last_logged_bytes);
             let storage = Arc::clone(&storage);
@@ -1472,7 +1510,6 @@ impl StagingService {
             let upload_path = upload_path_owned.clone();
             let put_url = put_url_owned.clone();
             let mime_type = mime_owned.clone();
-            let upload_client = upload_client.clone();
             let upload_started = upload_started;
             let total_bytes = total_bytes;
             async move {
@@ -1520,11 +1557,13 @@ impl StagingService {
                     .map_err(UploadAttemptError::Http)
             }
         };
-        let response = match send_upload_with_retry(&mut send_once).await {
-            Ok(response) => response,
-            Err(UploadAttemptError::Io(error)) => return Err(BackendError::from(error)),
-            Err(UploadAttemptError::Http(error)) => return Err(BackendError::from(error)),
-        };
+        let fallback_client = (!real_ips.is_empty()).then_some(&self.client);
+        let response =
+            match send_upload_with_retry(&upload_client, fallback_client, &mut send_once).await {
+                Ok(response) => response,
+                Err(UploadAttemptError::Io(error)) => return Err(BackendError::from(error)),
+                Err(UploadAttemptError::Http(error)) => return Err(BackendError::from(error)),
+            };
         info!(
             "[staging] 对象存储上传请求完成: jobId={}, HTTP {}, 耗时 {}ms",
             job.id,
@@ -2453,7 +2492,7 @@ mod tests {
         let client = build_presign_http_client().unwrap();
         // 本地回归测试用 http 直连，绕过 presign_url 固定生成的 https scheme。
         let url = format!("http://{addr}/probe");
-        let response = send_probe_with_retry(&client, || Ok(url.clone()))
+        let response = send_probe_with_retry(&client, None, || Ok(url.clone()))
             .await
             .expect("probe should recover after transient failures");
         assert_eq!(response.status().as_u16(), 200);
@@ -2492,11 +2531,18 @@ mod tests {
         });
 
         let client = build_presign_http_client().unwrap();
-        let url = format!("http://{addr}/probe");
-        let result = send_probe_with_retry(&client, || Ok(url.clone())).await;
+        let url = format!("http://{addr}/probe?X-Tos-Signature=probe-secret");
+        let result = send_probe_with_retry(&client, None, || Ok(url.clone())).await;
         assert!(
-            matches!(result, Err(BackendError::Transport(_))),
+            matches!(&result, Err(BackendError::Transport(_))),
             "probe must give up with a transport error after exhausting retries"
+        );
+        assert!(
+            result
+                .unwrap_err()
+                .runtime_record()
+                .to_string()
+                .contains("probe-secret")
         );
 
         server.join().unwrap();
@@ -2635,8 +2681,7 @@ mod tests {
         let client = build_presign_http_client().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let call_counter = Arc::clone(&calls);
-        let mut send = move || {
-            let client = client.clone();
+        let mut send = move |client: reqwest::Client| {
             let call_counter = Arc::clone(&call_counter);
             async move {
                 let n = call_counter.fetch_add(1, Ordering::SeqCst) + 1;
@@ -2653,7 +2698,7 @@ mod tests {
                     .map_err(UploadAttemptError::Http)
             }
         };
-        let response = send_upload_with_retry(&mut send)
+        let response = send_upload_with_retry(&client, None, &mut send)
             .await
             .expect("upload should recover after transient connection failure");
         assert_eq!(response.status().as_u16(), 200);
@@ -2667,6 +2712,57 @@ mod tests {
         assert_eq!(connections.load(Ordering::SeqCst), 1);
     }
 
+    /// A pinned real-IP route can be blocked while the ordinary DNS/proxy route works.
+    /// Both upload and the settings probe must retry the same signed host on that route.
+    #[tokio::test]
+    async fn tos_requests_fall_back_from_unreachable_pinned_route() {
+        use std::io::{Read, Write};
+        use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener};
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = stream.read(&mut [0u8; 4096]);
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .unwrap();
+            }
+        });
+        let blocked_ip = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2)), port);
+        let pinned = reqwest::Client::builder()
+            .no_proxy()
+            .resolve_to_addrs("localhost", &[blocked_ip])
+            .connect_timeout(std::time::Duration::from_millis(250))
+            .build()
+            .unwrap();
+        let system_route = reqwest::Client::builder().no_proxy().build().unwrap();
+        let upload_url = format!("http://localhost:{port}/upload?X-Tos-Signature=test");
+        let mut send = move |client: reqwest::Client| {
+            let url = upload_url.clone();
+            async move {
+                client
+                    .put(url)
+                    .body("payload")
+                    .send()
+                    .await
+                    .map_err(UploadAttemptError::Http)
+            }
+        };
+        let upload = send_upload_with_retry(&pinned, Some(&system_route), &mut send)
+            .await
+            .expect("upload should use the ordinary route after the pinned route fails");
+        assert_eq!(upload.status().as_u16(), 200);
+
+        let probe_url = format!("http://localhost:{port}/probe?X-Tos-Signature=test");
+        let probe = send_probe_with_retry(&pinned, Some(&system_route), || Ok(probe_url.clone()))
+            .await
+            .expect("connectivity probe should use the same fallback route");
+        assert_eq!(probe.status().as_u16(), 200);
+        server.join().unwrap();
+    }
+
     /// 回归测试：持续连接失败时，重试次数严格受 `UPLOAD_MAX_RETRIES` 限制并最终放弃。
     #[tokio::test]
     async fn upload_retry_gives_up_after_max_retries() {
@@ -2675,26 +2771,37 @@ mod tests {
         let client = build_presign_http_client().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let call_counter = Arc::clone(&calls);
-        let mut send = move || {
-            let client = client.clone();
+        let mut send = move |client: reqwest::Client| {
             let call_counter = Arc::clone(&call_counter);
             async move {
                 let _ = call_counter.fetch_add(1, Ordering::SeqCst);
                 client
-                    .put("http://127.0.0.1:1/")
+                    .put("http://127.0.0.1:1/?X-Tos-Signature=secret-marker")
                     .body("payload")
                     .send()
                     .await
                     .map_err(UploadAttemptError::Http)
             }
         };
-        let error = send_upload_with_retry(&mut send)
+        let error = send_upload_with_retry(&client, None, &mut send)
             .await
             .expect_err("upload must give up after exhausting retries");
         assert!(
             matches!(error, UploadAttemptError::Http(ref e) if e.is_connect()),
             "expected connect error, got {error}"
         );
+        assert!(
+            error.to_string().contains("secret-marker"),
+            "persisted upload error must retain the original request URL"
+        );
+        if let UploadAttemptError::Http(error) = error {
+            assert!(
+                BackendError::from(error)
+                    .runtime_record()
+                    .to_string()
+                    .contains("secret-marker")
+            );
+        }
         assert_eq!(
             calls.load(Ordering::SeqCst),
             (UPLOAD_MAX_RETRIES + 1) as usize,
@@ -2723,8 +2830,7 @@ mod tests {
         let client = build_presign_http_client().unwrap();
         let calls = Arc::new(AtomicUsize::new(0));
         let call_counter = Arc::clone(&calls);
-        let mut send = move || {
-            let client = client.clone();
+        let mut send = move |client: reqwest::Client| {
             let call_counter = Arc::clone(&call_counter);
             async move {
                 let _ = call_counter.fetch_add(1, Ordering::SeqCst);
@@ -2736,7 +2842,7 @@ mod tests {
                     .map_err(UploadAttemptError::Http)
             }
         };
-        let response = send_upload_with_retry(&mut send)
+        let response = send_upload_with_retry(&client, None, &mut send)
             .await
             .expect("HTTP error must surface as a response");
         assert_eq!(response.status().as_u16(), 500);

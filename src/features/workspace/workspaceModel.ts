@@ -1681,6 +1681,16 @@ export function stagingErrorSummary(error: unknown): string | null {
     const record = error as Record<string, unknown>;
     const message = typeof record["message"] === "string" ? record["message"] : null;
     const kind = typeof record["kind"] === "string" ? record["kind"] : null;
+    const transportDetails = record["details"];
+    if (kind === "transport" && transportDetails != null && typeof transportDetails === "object") {
+      const flags = transportDetails as Record<string, unknown>;
+      if (flags["isConnect"] === true && flags["isTimeout"] === true) {
+        return "网络连接超时，请检查网络或代理后重试。";
+      }
+      if (flags["isConnect"] === true) {
+        return "网络连接失败，请检查网络或代理后重试。";
+      }
+    }
     // 后端 BackendErrorPayload 的 details 中包含供应商返回的 itemError，
     // 比通用的 "reached terminal status Failed" 更有诊断价值。
     const details = record["details"];

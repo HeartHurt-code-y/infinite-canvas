@@ -1,4 +1,5 @@
 use std::backtrace::Backtrace;
+use std::error::Error as _;
 
 use serde_json::{Value, json};
 use thiserror::Error;
@@ -51,15 +52,25 @@ impl BackendError {
             Self::Validation { details, .. } => ("validation", details.clone()),
             Self::Database(error) => ("database", json!({ "source": error.to_string() })),
             Self::Credential(error) => ("credential", json!({ "source": error })),
-            Self::Transport(error) => (
-                "transport",
-                json!({
-                    "source": error.to_string(),
-                    "isTimeout": error.is_timeout(),
-                    "isConnect": error.is_connect(),
-                    "url": error.url().map(|url| url.origin().ascii_serialization()),
-                }),
-            ),
+            Self::Transport(error) => {
+                let mut causes = Vec::new();
+                let mut current = error.source();
+                while let Some(cause) = current {
+                    causes.push(cause.to_string());
+                    current = cause.source();
+                }
+                (
+                    "transport",
+                    json!({
+                        "source": error.to_string(),
+                        "rawDebug": format!("{error:#?}"),
+                        "causes": causes,
+                        "isTimeout": error.is_timeout(),
+                        "isConnect": error.is_connect(),
+                        "url": error.url().map(|url| url.origin().ascii_serialization()),
+                    }),
+                )
+            }
             Self::Io(error) => (
                 "io",
                 json!({ "source": error.to_string(), "osError": error.raw_os_error() }),
@@ -103,5 +114,35 @@ pub trait IntoCommandResult<T> {
 impl<T> IntoCommandResult<T> for BackendResult<T> {
     fn command(self) -> CommandResult<T> {
         self.map_err(|error| error.payload())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BackendError;
+
+    #[tokio::test]
+    async fn transport_payload_keeps_raw_debug_and_underlying_causes() {
+        let client = reqwest::Client::builder().no_proxy().build().unwrap();
+        let error = client
+            .get("http://127.0.0.1:1/?X-Tos-Signature=raw-marker")
+            .send()
+            .await
+            .unwrap_err();
+        let payload = BackendError::Transport(error).payload();
+        assert_eq!(payload.kind, "transport");
+        assert!(
+            payload.details["source"]
+                .as_str()
+                .unwrap()
+                .contains("raw-marker")
+        );
+        assert!(
+            payload.details["rawDebug"]
+                .as_str()
+                .unwrap()
+                .contains("raw-marker")
+        );
+        assert!(!payload.details["causes"].as_array().unwrap().is_empty());
     }
 }
