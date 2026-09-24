@@ -153,3 +153,16 @@ workflows:
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/*.app.tar.gz.sig
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/latest.json
       - src-tauri/target/release/bundle/helper/install-macos.sh
+  promote-legacy-update:
+    name: Promote 0.1.8 shared update
+    instance_type: mac_mini_m2
+    max_build_duration: 10
+    environment:
+      groups:
+        - updater_signing
+      node: 24
+    scripts:
+      - name: Verify both public packages and publish shared manifest
+        script: |
+          set -euo pipefail
+          node scripts/publish-tos-updates.mjs --promote-legacy --version 0.1.8
