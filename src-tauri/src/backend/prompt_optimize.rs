@@ -3228,7 +3228,10 @@ async fn execute_recorded_text_call(
     // Build the user's inventory first so internal examples are never described
     // as user-supplied evidence or included in the visible reference count.
     let style_reference_evidence = if command.mode == PromptOptimizationMode::GptImage2Style {
-        let root = gpt_image_style_library::bundle_root(&deps.app.path().resource_dir()?)?;
+        let root = gpt_image_style_library::bundle_root(
+            &deps.app.path().resource_dir()?,
+            &deps.app.path().app_local_data_dir()?,
+        )?;
         Some(append_gpt_image_style_references(command, &root, &mut multimodal_inputs).await?)
     } else {
         None

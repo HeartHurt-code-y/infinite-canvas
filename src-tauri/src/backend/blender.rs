@@ -16,6 +16,7 @@ use uuid::Uuid;
 use super::composer::VideoCompositionService;
 use super::error::{BackendError, BackendResult};
 use super::process_tree::ProcessTree;
+use super::runtime_components::RuntimeComponent;
 use super::storage::now_ms;
 
 const SCRIPT: &str = include_str!("../../../tools/blender/white_model.py");
@@ -185,6 +186,7 @@ struct Inner {
     jobs_dir: PathBuf,
     composer: VideoCompositionService,
     bundled_roots: Vec<PathBuf>,
+    persistent_component: Option<RuntimeComponent>,
 }
 
 #[derive(Clone)]
@@ -455,6 +457,10 @@ fn bundled_executable(root: &Path) -> BackendResult<PathBuf> {
     Ok(executable)
 }
 
+pub(crate) fn blender_runtime_ready(root: &Path) -> bool {
+    bundled_executable(root).is_ok()
+}
+
 fn engine_candidates(explicit: Option<&str>, bundled_roots: &[PathBuf]) -> Vec<PathBuf> {
     if let Some(path) = explicit.filter(|value| !value.trim().is_empty()) {
         // An external executable is an explicit advanced override, never an automatic dependency.
@@ -557,6 +563,15 @@ impl BlenderRenderService {
         composer: VideoCompositionService,
         bundled_root: Option<PathBuf>,
     ) -> Self {
+        Self::new_with_runtime_store(downloads_dir, composer, bundled_root, None)
+    }
+
+    pub fn new_with_runtime_store(
+        downloads_dir: PathBuf,
+        composer: VideoCompositionService,
+        bundled_root: Option<PathBuf>,
+        persistent_component: Option<RuntimeComponent>,
+    ) -> Self {
         let mut bundled_roots: Vec<_> = bundled_root.into_iter().collect();
         if cfg!(debug_assertions) {
             let development = Path::new(env!("CARGO_MANIFEST_DIR")).join("resources/blender");
@@ -570,12 +585,29 @@ impl BlenderRenderService {
                 jobs_dir: downloads_dir.join("无限画布").join("白模"),
                 composer,
                 bundled_roots,
+                persistent_component,
             }),
         }
     }
 
     pub async fn detect_engine(&self, explicit: Option<&str>) -> BlenderEngineStatus {
-        detect_engine(explicit, &self.inner.bundled_roots).await
+        let roots = if let Some(component) = &self.inner.persistent_component {
+            let mut roots: Vec<_> = component
+                .resolve(blender_runtime_ready)
+                .into_iter()
+                .collect();
+            if cfg!(debug_assertions) {
+                for root in &self.inner.bundled_roots {
+                    if !roots.contains(root) {
+                        roots.push(root.clone());
+                    }
+                }
+            }
+            roots
+        } else {
+            self.inner.bundled_roots.clone()
+        };
+        detect_engine(explicit, &roots).await
     }
 
     pub async fn start(

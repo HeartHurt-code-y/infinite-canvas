@@ -4,6 +4,14 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { createHash } from "node:crypto";
 import { spawn } from "node:child_process";
+import {
+  hashRemotionCriticalFiles,
+  remotionCriticalFilesMatch,
+  remotionInventoryFilesMatch,
+  remotionTreeIsMaterialized,
+  materializeRemotionRuntime,
+  writeRemotionFileInventory,
+} from "./remotion-runtime-integrity.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.join(root, "tools", "remotion-runtime");
@@ -82,6 +90,7 @@ const fileNames = [
 const hash = createHash("sha256");
 for (const name of fileNames) hash.update(await readFile(path.join(source, name)));
 hash.update(await readFile(fileURLToPath(import.meta.url)));
+hash.update(await readFile(path.join(root, "scripts", "remotion-runtime-integrity.mjs")));
 hash.update(process.version + process.platform + process.arch);
 const fingerprint = hash.digest("hex");
 const manifestPath = path.join(destination, "runtime-manifest.json");
@@ -103,7 +112,15 @@ const readyPaths = [
 ];
 if (
   oldManifest?.fingerprint === fingerprint &&
-  readyPaths.every((file) => existsSync(path.join(destination, file)))
+  readyPaths.every((file) => existsSync(path.join(destination, file))) &&
+  (await remotionCriticalFilesMatch(
+    destination,
+    nodeName,
+    oldManifest.browserExecutable,
+    oldManifest.criticalSha256,
+  )) &&
+  (await remotionInventoryFilesMatch(destination, oldManifest.inventory)) &&
+  (await remotionTreeIsMaterialized(destination))
 ) {
   console.log("动画渲染运行时已就绪");
   process.exit(0);
@@ -206,6 +223,8 @@ try {
         nodeVersion: process.version,
         remotionVersion: packageJson.dependencies.remotion,
         browserExecutable,
+        criticalSha256: await hashRemotionCriticalFiles(destination, nodeName, browserExecutable),
+        inventory: await writeRemotionFileInventory(destination),
       },
       null,
       2,
@@ -215,3 +234,5 @@ try {
 } finally {
   process.chdir(originalWorkingDirectory);
 }
+const preparedManifest = JSON.parse(await readFile(manifestPath, "utf8"));
+await materializeRemotionRuntime(destination, preparedManifest.inventory);

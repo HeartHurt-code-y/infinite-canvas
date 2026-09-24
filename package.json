@@ -42,7 +42,7 @@
     "ffmpeg:prepare": "node scripts/prepare-ffmpeg.mjs",
     "blender:prepare": "node scripts/prepare-blender-runtime.mjs",
     "pose:prepare": "node scripts/prepare-pose-runtime.mjs",
-    "remotion:test": "node --test tools/remotion-runtime/plan.test.mjs",
+    "remotion:test": "node --test tools/remotion-runtime/plan.test.mjs scripts/remotion-runtime-integrity.test.mjs",
     "blender:test": "node --test scripts/prepare-blender-runtime.test.mjs",
     "macos:signing-test": "node --test scripts/macos-signing-identity.test.mjs",
     "macos:install-test": "node --test scripts/install-macos.test.mjs",
@@ -50,9 +50,12 @@
     "macos:verify-bundle": "bash scripts/verify-macos-bundle.sh",
     "update:manifest": "node scripts/write-latest-json.mjs",
     "update:publish": "node scripts/publish-tos-updates.mjs",
-    "update:manifest-test": "node --test scripts/write-latest-json.test.mjs scripts/tauri-build.test.mjs scripts/tos-v4.test.mjs scripts/publish-tos-updates.test.mjs",
+    "update:stage:macos": "node scripts/stage-macos-release.mjs",
+    "update:baseline": "node scripts/runtime-resource-baseline.mjs",
+    "update:manifest-test": "node --test scripts/write-latest-json.test.mjs scripts/tauri-build.test.mjs scripts/tauri-bundle-slim.test.mjs scripts/stage-macos-release.test.mjs scripts/runtime-resource-baseline.test.mjs scripts/remotion-runtime-integrity.test.mjs scripts/verify-nsis-remotion-resources.test.mjs scripts/verify-updater-signature.test.mjs scripts/tos-v4.test.mjs scripts/publish-tos-updates.test.mjs",
     "tauri:dev": "tauri dev",
-    "tauri:build": "node scripts/tauri-build.mjs"
+    "tauri:build": "node scripts/tauri-build.mjs",
+    "tauri:bundle:slim": "node scripts/tauri-bundle-slim.mjs"
   },
   "dependencies": {
     "@fontsource-variable/ibm-plex-sans": "5.3.0",

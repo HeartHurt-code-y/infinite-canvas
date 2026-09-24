@@ -7,6 +7,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { verifyGeneratedNsisRemotionResources } from "./verify-nsis-remotion-resources.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -55,7 +56,7 @@ export function resolveUpdaterSigningEnv(env, defaultKeyPath) {
   const hasPath =
     typeof next.TAURI_SIGNING_PRIVATE_KEY_PATH === "string" &&
     next.TAURI_SIGNING_PRIVATE_KEY_PATH.trim() !== "";
-  if (!hasPath && existsSync(defaultKeyPath)) {
+  if (!hasInlineKey && !hasPath && existsSync(defaultKeyPath)) {
     next.TAURI_SIGNING_PRIVATE_KEY_PATH = defaultKeyPath;
   }
   const keyPath =
@@ -66,6 +67,11 @@ export function resolveUpdaterSigningEnv(env, defaultKeyPath) {
   // PATH 变量只对 `tauri signer sign` 生效。本地有密钥文件时把正文灌进去。
   if (!hasInlineKey && keyPath !== "" && existsSync(keyPath)) {
     next.TAURI_SIGNING_PRIVATE_KEY = readFileSync(keyPath, "utf8").trim();
+  }
+  if (keyPath === defaultKeyPath && next.TAURI_SIGNING_PRIVATE_KEY_PASSWORD === undefined) {
+    // This repository's local encrypted key uses an empty password. Pass the
+    // empty value only to the child process so unattended builds never prompt.
+    next.TAURI_SIGNING_PRIVATE_KEY_PASSWORD = "";
   }
   return next;
 }
@@ -96,11 +102,22 @@ async function main() {
       "[tauri-build] 未找到升级签名私钥，本次只打安装包，不生成 in-app 更新产物。请把 src-tauri/.updater-key 放到构建机，或设置 TAURI_SIGNING_PRIVATE_KEY。",
     );
   }
-  const code = await runTauri(
-    buildTauriCliArgs({ enableUpdaterArtifacts, passthrough: process.argv.slice(2) }),
-    env,
-  );
-  process.exit(code);
+  const passthrough = process.argv.slice(2);
+  const code = await runTauri(buildTauriCliArgs({ enableUpdaterArtifacts, passthrough }), env);
+  if (code !== 0) {
+    process.exitCode = code;
+    return;
+  }
+  const bundlesIndex = passthrough.indexOf("--bundles");
+  const bundles = bundlesIndex >= 0 ? (passthrough[bundlesIndex + 1] ?? "") : "all";
+  if (
+    process.platform === "win32" &&
+    !passthrough.includes("--no-bundle") &&
+    (bundles === "all" || bundles.split(",").includes("nsis"))
+  ) {
+    const count = verifyGeneratedNsisRemotionResources();
+    console.log(`[tauri-build] 完整 NSIS 已包含 ${count} 个 Remotion 资源文件`);
+  }
 }
 
 const invokedDirectly =
@@ -108,5 +125,10 @@ const invokedDirectly =
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 
 if (invokedDirectly) {
-  await main();
+  try {
+    await main();
+  } catch (error) {
+    console.error(`[tauri-build] ${error instanceof Error ? error.message : String(error)}`);
+    process.exitCode = 1;
+  }
 }

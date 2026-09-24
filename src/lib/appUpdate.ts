@@ -6,7 +6,25 @@ export const APP_UPDATE_CHECK_INTERVAL_MS = 2 * 60 * 1000;
 export const APP_UPDATE_FOCUS_THROTTLE_MS = 30 * 1000;
 
 export type AppUpdateStatus =
-  "idle" | "checking" | "current" | "available" | "downloading" | "ready" | "restarting" | "error";
+  | "idle"
+  | "checking"
+  | "current"
+  | "available"
+  | "preparing"
+  | "downloading"
+  | "ready"
+  | "restarting"
+  | "error";
+
+export interface RuntimeComponentMigrationStatus {
+  readonly ready: boolean;
+  readonly preparing: boolean;
+  readonly error: string | null;
+  readonly completedBytes: number;
+  readonly totalBytes: number;
+  readonly completedComponents: number;
+  readonly totalComponents: number;
+}
 
 export interface AppUpdateProgressEvent {
   readonly event: "Started" | "Progress" | "Finished";
@@ -27,6 +45,9 @@ export interface AppUpdateCheckResult {
 export interface AppUpdateClient {
   getCurrentVersion(): Promise<string>;
   check(): Promise<AppUpdateCheckResult>;
+  waitForRuntimeComponents?(
+    onProgress: (status: RuntimeComponentMigrationStatus) => void,
+  ): Promise<void>;
   relaunch(): Promise<void>;
   needsManualRelaunch(): Promise<boolean>;
 }
@@ -38,6 +59,8 @@ export interface AppUpdateState {
   readonly notes: string | null;
   readonly downloadedBytes: number;
   readonly totalBytes: number;
+  readonly preparedBytes: number;
+  readonly totalPreparationBytes: number;
   readonly error: string | null;
 }
 
@@ -48,6 +71,8 @@ const INITIAL_STATE: AppUpdateState = {
   notes: null,
   downloadedBytes: 0,
   totalBytes: 0,
+  preparedBytes: 0,
+  totalPreparationBytes: 0,
   error: null,
 };
 
@@ -61,7 +86,10 @@ let checkInFlight: Promise<void> | null = null;
 
 function isInstallingUpdate(): boolean {
   return (
-    state.status === "downloading" || state.status === "ready" || state.status === "restarting"
+    state.status === "preparing" ||
+    state.status === "downloading" ||
+    state.status === "ready" ||
+    state.status === "restarting"
   );
 }
 
@@ -211,18 +239,25 @@ export async function installAvailableAppUpdate(): Promise<void> {
     patch({ status: "error", error: "没有可安装的更新，请先检查更新。" });
     return;
   }
-  if (state.status === "downloading" || state.status === "restarting") return;
+  if (isInstallingUpdate()) return;
   checkGeneration += 1;
   const generation = ++downloadGeneration;
-  patch({
-    status: "downloading",
-    downloadedBytes: 0,
-    totalBytes: 0,
-    error: null,
-  });
   let downloadedBytes = 0;
   let totalBytes = 0;
   try {
+    if (client.waitForRuntimeComponents) {
+      patch({ status: "preparing", preparedBytes: 0, totalPreparationBytes: 0, error: null });
+      await client.waitForRuntimeComponents((progress) => {
+        if (generation !== downloadGeneration) return;
+        patch({
+          status: "preparing",
+          preparedBytes: progress.completedBytes,
+          totalPreparationBytes: progress.totalBytes,
+        });
+      });
+      if (generation !== downloadGeneration) return;
+    }
+    patch({ status: "downloading", downloadedBytes: 0, totalBytes: 0, error: null });
     await download((event) => {
       if (generation !== downloadGeneration) return;
       if (event.event === "Started") {
@@ -292,11 +327,15 @@ export function shouldShowUpdateBanner(
   skippedVersion: string | null = readSkippedVersion(),
 ): boolean {
   if (
+    snapshot.status === "preparing" ||
     snapshot.status === "downloading" ||
     snapshot.status === "ready" ||
     snapshot.status === "restarting"
   ) {
     return true;
+  }
+  if (snapshot.status === "error" && snapshot.error != null) {
+    return snapshot.availableVersion != null;
   }
   if (snapshot.status !== "available") return false;
   return snapshot.availableVersion != null && snapshot.availableVersion !== skippedVersion;
@@ -394,6 +433,20 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
           });
         },
       };
+    },
+    async waitForRuntimeComponents(onProgress) {
+      if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
+      const { invoke } = await import("@tauri-apps/api/core");
+      for (;;) {
+        const status = await invoke<RuntimeComponentMigrationStatus>(
+          "get_runtime_component_migration_status",
+        );
+        onProgress(status);
+        if (status.ready) return;
+        if (status.error) throw new Error(`本地运行组件准备失败：${status.error}`);
+        if (!status.preparing) throw new Error("本地运行组件尚未准备好，请重启应用后重试更新。");
+        await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+      }
     },
     async relaunch() {
       if (!isDesktopRuntime()) {

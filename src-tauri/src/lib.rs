@@ -3,6 +3,37 @@ mod backend;
 use backend::commands;
 use tauri::Manager as _;
 
+/// The slim NSIS installer runs this before it can remove an older MSI/NSIS install.
+/// It must work without starting WebView, backend services, or a migration thread.
+fn run_runtime_component_check_if_requested() -> bool {
+    if !std::env::args().any(|arg| arg == "--check-runtime-components") {
+        return false;
+    }
+    // Packaging probes this marker before shipping a slim installer. An older
+    // executable must never be mistaken for a compatible component verifier.
+    println!("IC_RUNTIME_COMPONENT_CHECK_V1");
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    #[cfg(windows)]
+    let result = dirs::data_local_dir()
+        .ok_or_else(|| "无法定位 Windows 本地应用数据目录".to_string())
+        .and_then(|base| {
+            backend::runtime_components::check_persistent_components(
+                &base.join("com.infinitecanvas.desktop"),
+            )
+        });
+    #[cfg(not(windows))]
+    let result: Result<(), String> = Err("组件自检仅供 Windows 安装程序使用".into());
+    let success = result.is_ok();
+    match result {
+        Ok(()) => println!("runtime components ready"),
+        Err(error) => eprintln!("runtime components unavailable: {error}"),
+    }
+    let _ = std::io::stdout().flush();
+    let _ = std::io::stderr().flush();
+    std::process::exit(if success { 0 } else { 1 });
+}
+
 /// 处理 `--keychain-access-self-test=<ref>`：返回 true 表示已完成自检、调用方应跳过启动。
 ///
 /// 用途：一条命令回答「这个构建产物能不能正常存取凭据」。它走与线上完全相同的
@@ -35,6 +66,9 @@ fn run_keychain_access_self_test_if_requested() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if run_runtime_component_check_if_requested() {
+        return;
+    }
     if run_keychain_access_self_test_if_requested() {
         return;
     }
@@ -135,6 +169,7 @@ pub fn run() {
             commands::resume_cover_image_result,
             commands::resume_generation_result,
             commands::remotion_renderer_preflight,
+            commands::get_runtime_component_migration_status,
             commands::start_remotion_render,
             commands::get_remotion_render,
             commands::cancel_remotion_render,

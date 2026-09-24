@@ -2230,6 +2230,7 @@ version = "0.1.7"
 dependencies = [
  "base64 0.22.1",
  "chrono",
+ "dirs",
  "ffmpeg-sidecar",
  "fs2",
  "futures-util",

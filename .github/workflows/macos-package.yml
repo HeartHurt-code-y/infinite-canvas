@@ -34,9 +34,6 @@ jobs:
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
       # --- 应用内热更新签名（minisign）---
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-      # --- 公开 TOS 分发桶 ---
-      TOS_ACCESS_KEY: ${{ secrets.TOS_ACCESS_KEY }}
-      TOS_SECRET_KEY: ${{ secrets.TOS_SECRET_KEY }}
 
     steps:
       - name: Checkout
@@ -177,8 +174,10 @@ jobs:
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
 
-      - name: Publish updater artifacts to TOS
-        run: pnpm update:publish
+      # Signing and notarization finish here. Keep this artifact pending until the
+      # matching Windows bridge package is ready for one explicit shared-feed promotion.
+      - name: Stage versioned updater archive
+        run: pnpm update:stage:macos
 
       - name: Upload installer artifacts
         id: upload-artifacts
@@ -189,6 +188,9 @@ jobs:
             src-tauri/target/release/bundle/dmg/*.dmg
             src-tauri/target/release/bundle/macos/*.app.tar.gz
             src-tauri/target/release/bundle/macos/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/release-staging/*/darwin-*/full/*.app.tar.gz
+            src-tauri/target/release/bundle/release-staging/*/darwin-*/full/*.app.tar.gz.sig
+            src-tauri/target/release/bundle/release-staging/*/darwin-*/full/latest.json
             src-tauri/target/release/bundle/helper/install-macos.sh
           if-no-files-found: error
           retention-days: 30

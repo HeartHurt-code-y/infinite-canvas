@@ -34,10 +34,10 @@ test("encodes CJK installer names in download URLs", () => {
   );
 });
 
-test("merges a new platform into an existing latest.json without dropping others", () => {
+test("merges platforms only when their release versions match", () => {
   const merged = mergeLatestManifest(
     {
-      version: "0.1.0",
+      version: "0.1.1",
       platforms: {
         "darwin-aarch64": { url: "https://old/mac", signature: "old-sig" },
       },
@@ -45,9 +45,18 @@ test("merges a new platform into an existing latest.json without dropping others
     {
       "windows-x86_64": { url: "https://new/win", signature: "new-sig" },
     },
+    "0.1.1",
   );
   assert.deepEqual(merged.platforms, {
     "darwin-aarch64": { url: "https://old/mac", signature: "old-sig" },
+    "windows-x86_64": { url: "https://new/win", signature: "new-sig" },
+  });
+  const bumped = mergeLatestManifest(
+    { version: "0.1.0", platforms: merged.platforms },
+    { "windows-x86_64": { url: "https://new/win", signature: "new-sig" } },
+    "0.1.1",
+  );
+  assert.deepEqual(bumped.platforms, {
     "windows-x86_64": { url: "https://new/win", signature: "new-sig" },
   });
 });
@@ -100,6 +109,43 @@ test("defaults the download directory to the public TOS prefix", () => {
     assert.equal(
       result.manifest.platforms["windows-x86_64"].url,
       `${tosUpdatesPublicBaseUrl()}/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83_0.1.1_x64-setup.exe`,
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("rejects old and duplicate Windows artifacts in a release staging directory", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-stale-"));
+  try {
+    const nsisDir = path.join(dir, "nsis");
+    mkdirSync(nsisDir);
+    writeFileSync(path.join(nsisDir, "无限画布_0.1.7_x64-setup.exe"), "old");
+    writeFileSync(path.join(nsisDir, "无限画布_0.1.7_x64-setup.exe.sig"), "old-sig");
+    assert.throws(
+      () =>
+        writeLatestJson({
+          "bundle-dir": dir,
+          version: "0.1.8",
+          out: path.join(dir, "latest.json"),
+        }),
+      /非本版 updater/,
+    );
+    rmSync(path.join(nsisDir, "无限画布_0.1.7_x64-setup.exe"));
+    rmSync(path.join(nsisDir, "无限画布_0.1.7_x64-setup.exe.sig"));
+    for (const suffix of ["", "-slim"]) {
+      const name = `无限画布_0.1.8_x64${suffix}-setup.exe`;
+      writeFileSync(path.join(nsisDir, name), suffix);
+      writeFileSync(path.join(nsisDir, `${name}.sig`), "sig");
+    }
+    assert.throws(
+      () =>
+        writeLatestJson({
+          "bundle-dir": dir,
+          version: "0.1.8",
+          out: path.join(dir, "latest.json"),
+        }),
+      /多个 updater 产物/,
     );
   } finally {
     rmSync(dir, { recursive: true, force: true });

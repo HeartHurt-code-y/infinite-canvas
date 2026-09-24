@@ -25,6 +25,7 @@ pub mod remote_video_tasks;
 pub mod remotion_renderer;
 pub mod result_transfer;
 pub mod reverse_video;
+pub mod runtime_components;
 pub mod staging;
 pub mod storage;
 pub mod system_ffmpeg;
@@ -52,6 +53,7 @@ use product_scene_images::ProductSceneImageService;
 use provider::ProviderRuntime;
 use remotion_renderer::RemotionRenderService;
 use reverse_video::ReverseVideoService;
+use runtime_components::{ComponentPlan, RuntimeComponent, RuntimeComponentMigration};
 use staging::StagingService;
 use storage::{GenerationTaskLifecycle, Storage};
 use tasks::GenerationTaskService;
@@ -59,6 +61,7 @@ use tauri::{AppHandle, Manager as _};
 use video_edit_source::VideoEditSourceService;
 
 pub struct BackendState {
+    pub runtime_migration: Arc<RuntimeComponentMigration>,
     pub storage: Arc<Storage>,
     pub lifecycle: GenerationTaskLifecycle,
     pub credentials: CredentialStore,
@@ -81,6 +84,8 @@ pub struct BackendState {
 impl BackendState {
     pub fn initialize(app: &AppHandle) -> BackendResult<Self> {
         let data_directory = app.path().app_local_data_dir()?;
+        let resource_directory = app.path().resource_dir()?;
+        let runtime_store = data_directory.join("runtime-components");
         let database_path = data_directory.join("infinite-canvas.sqlite3");
         let downloads_directory = app.path().download_dir()?;
         let sqlite_existed = database_path.exists();
@@ -127,10 +132,11 @@ impl BackendState {
         // 回退到应用数据目录并自动下载。合成产物与下载产物同目录。
         // 需在 StagingService 之前创建：素材导入遇到不支持格式（如 avif）时
         // 复用同一套 FFmpeg 引擎做本地转码。
-        let composer = VideoCompositionService::new(
+        let composer = VideoCompositionService::new_with_runtime_store(
             downloads_directory.clone(),
-            app.path().app_local_data_dir()?.join("ffmpeg-engine"),
-            app.path().resource_dir()?,
+            data_directory.join("ffmpeg-engine"),
+            resource_directory.clone(),
+            runtime_store.clone(),
         )?;
         let staging = StagingService::new(
             Arc::clone(&storage),
@@ -174,15 +180,67 @@ impl BackendState {
         let product_scene_images = ProductSceneImageService::new(downloads_directory.clone());
         let reverse_video =
             ReverseVideoService::new(downloads_directory.clone(), Arc::clone(&storage));
-        let blender = BlenderRenderService::new(
+        let blender_component = RuntimeComponent::new(
+            runtime_store.clone(),
+            resource_directory.join("blender"),
+            "blender",
+            "manifest.json",
+        );
+        let remotion_component = RuntimeComponent::new(
+            runtime_store.clone(),
+            resource_directory.join("remotion-runtime"),
+            "remotion-runtime",
+            "runtime-manifest.json",
+        );
+        let blender = BlenderRenderService::new_with_runtime_store(
             downloads_directory.clone(),
             composer.clone(),
-            Some(app.path().resource_dir()?.join("blender")),
+            Some(resource_directory.join("blender")),
+            Some(blender_component.clone()),
         );
-        let remotion_renderer =
-            RemotionRenderService::new(downloads_directory, app.path().resource_dir()?);
+        let remotion_renderer = RemotionRenderService::new_with_runtime_store(
+            downloads_directory,
+            resource_directory.clone(),
+            Some(remotion_component.clone()),
+        );
+        let migration_plans = vec![
+            ComponentPlan {
+                component: blender_component,
+                ready: blender::blender_runtime_ready,
+            },
+            ComponentPlan {
+                component: remotion_component,
+                ready: remotion_renderer::runtime_ready,
+            },
+            ComponentPlan {
+                component: RuntimeComponent::new(
+                    runtime_store.clone(),
+                    resource_directory.join("ffmpeg"),
+                    "ffmpeg",
+                    "manifest.json",
+                ),
+                ready: composer::engine_ready_in,
+            },
+            ComponentPlan {
+                component: RuntimeComponent::new(
+                    runtime_store,
+                    resource_directory.join("skills/gpt-image-2-style-library"),
+                    "gpt-image-2-style-library",
+                    "data/manifest.json",
+                ),
+                ready: gpt_image_style_library::style_component_ready,
+            },
+        ];
+        // `tauri dev` uses build-tree resources directly. Copying ~1.7 GB is only
+        // needed by packaged bridge releases before they can offer slim updates.
+        let runtime_migration = RuntimeComponentMigration::start(if cfg!(debug_assertions) {
+            Vec::new()
+        } else {
+            migration_plans
+        });
 
         Ok(Self {
+            runtime_migration,
             storage,
             lifecycle,
             credentials,

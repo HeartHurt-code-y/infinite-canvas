@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use uuid::Uuid;
 
 use super::error::{BackendError, BackendResult};
+use super::runtime_components::RuntimeComponent;
 use super::storage::now_ms;
 
 const RENDER_TIMEOUT: Duration = Duration::from_secs(15 * 60);
@@ -96,6 +97,7 @@ struct Inner {
     jobs: std::sync::Mutex<HashMap<String, JobEntry>>,
     jobs_dir: PathBuf,
     runtime_candidates: Vec<PathBuf>,
+    persistent_component: Option<RuntimeComponent>,
 }
 
 #[derive(Clone)]
@@ -105,6 +107,14 @@ pub struct RemotionRenderService {
 
 impl RemotionRenderService {
     pub fn new(downloads_dir: PathBuf, resource_dir: PathBuf) -> Self {
+        Self::new_with_runtime_store(downloads_dir, resource_dir, None)
+    }
+
+    pub fn new_with_runtime_store(
+        downloads_dir: PathBuf,
+        resource_dir: PathBuf,
+        persistent_component: Option<RuntimeComponent>,
+    ) -> Self {
         let mut runtime_candidates = vec![resource_dir.join("remotion-runtime")];
         if cfg!(debug_assertions) {
             runtime_candidates
@@ -117,11 +127,20 @@ impl RemotionRenderService {
                 jobs: std::sync::Mutex::new(HashMap::new()),
                 jobs_dir: downloads_dir.join("无限画布").join("动画逻辑图"),
                 runtime_candidates,
+                persistent_component,
             }),
         }
     }
 
     fn runtime_dir(&self) -> Option<PathBuf> {
+        if let Some(component) = &self.inner.persistent_component {
+            if let Some(root) = component.resolve(runtime_ready) {
+                return Some(root);
+            }
+            if !cfg!(debug_assertions) {
+                return None;
+            }
+        }
         self.inner
             .runtime_candidates
             .iter()
@@ -424,7 +443,7 @@ impl RemotionRenderService {
     }
 }
 
-fn runtime_ready(directory: &Path) -> bool {
+pub(crate) fn runtime_ready(directory: &Path) -> bool {
     let (node_binary, browser_binary) = runtime_paths(std::env::consts::OS);
     [
         node_binary,
@@ -986,6 +1005,7 @@ mod tests {
                 jobs: std::sync::Mutex::new(HashMap::new()),
                 jobs_dir: directory.path().join("jobs"),
                 runtime_candidates: vec![directory.path().join("missing")],
+                persistent_component: None,
             }),
         };
         assert!(!service.preflight().ready);

@@ -34,8 +34,9 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 | `pnpm dev:daemon`          | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）                    |
 | `pnpm tauri:dev`           | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）                             |
 | `pnpm build`               | 类型检查并构建前端                                                                   |
-| `pnpm tauri:build`         | 构建桌面安装包（内置 FFmpeg 与 Blender，离线可用；有升级私钥时同时生成可热更新产物） |
-| `pnpm update:manifest`     | 根据本次 updater 产物生成 `latest.json`                                              |
+| `pnpm tauri:build`         | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物                  |
+| `pnpm tauri:bundle:slim`   | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线               |
+| `pnpm update:manifest`     | 根据指定版本的 updater 产物生成 `latest.json`                                      |
 | `pnpm test`                | 运行前端测试                                                                         |
 | `pnpm lint`                | 执行类型感知 ESLint 检查                                                             |
 | `pnpm format`              | 使用 Prettier 格式化工程文件                                                         |
@@ -149,24 +150,15 @@ CI 侧全部配在 `.github/workflows/macos-package.yml` 的 job 级环境变量
 | Windows | 直接运行新的安装包即可覆盖。NSIS（`.exe`）是自动更新用的包；WiX（`.msi`）靠固定 `upgradeCode` + **升高版本号** 做覆盖安装。 |
 | macOS   | 把新 `.app` 覆盖到 `/Applications`（现有安装命令已经是覆盖）。之后即可走应用内更新。                                        |
 
-应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本时画布上方出现提示，设置页「应用升级」也可手动检查。下载完成后点「立即重启」即完成。安装包含内置引擎，体积较大，因此**不会在后台偷偷下完整包**，必须用户确认。
+应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本时画布上方出现提示，设置页「应用升级」也可手动检查。下载须由用户确认，完成后按提示重启。
+
+当前 `0.1.7` 仍使用完整 NSIS 更新包。下一次迁移版需要完整安装包，把内置引擎与风格图片安全转存到用户数据目录；迁移完成后，常规 Windows 更新可只分发较小的程序安装包。Tauri 的 Windows updater 仍下载所选安装包，并非二进制差分。详细发版顺序和验证边界见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
 当前已装的 `0.1.0` **还没有更新器**，需要装一次 `0.1.1`。从 `0.1.1` 起就可以在应用里直接升。
 
 ### 发版时开发者要做的
 
-1. **升高版本号**（`package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 三处保持一致）。Windows MSI 版本不变会被系统当成「已安装」，拒绝覆盖。
-2. 构建机提供升级签名私钥：本机是 gitignored 的 `src-tauri/.updater-key`；CI 用环境变量 `TAURI_SIGNING_PRIVATE_KEY`（文件原文）。公钥已写入 `tauri.conf.json`，**私钥丢失则所有已发布安装包都无法再被热更新**。
-3. `pnpm tauri:build` 会在有私钥时额外产出 `.app.tar.gz` / NSIS `-setup.exe` 及其 `.sig`。
-4. 把这些文件和 `latest.json` 发到火山引擎 TOS 公开前缀 `infinite-canvas/updates/`（桶 `sd20-zq` / `cn-beijing`）：
-
-```sh
-pnpm update:publish -- --notes "修复说明"
-```
-
-应用内检查地址是 `https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/latest.json`。上传凭据用环境变量 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`，不要写进仓库。CI 构建成功后会自动执行 `pnpm update:publish`。
-
-Windows 用户请优先分发 NSIS `.exe`：应用内更新走的就是它。已用 MSI 安装的用户，用更高版本号的 MSI 覆盖一次即可；之后的自动更新会改走 NSIS。
+每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。当前 macOS CI 仅暂存签名包；公开更新清单由开发者核对同版产物后显式发布。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
 ## 系统访问能力
 

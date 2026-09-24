@@ -21,6 +21,10 @@ export function tosUpdatesLatestJsonUrl(options) {
   return `${tosUpdatesPublicBaseUrl(options)}/latest.json`;
 }
 
+export function tosPlatformLatestJsonUrl(platform = "{{target}}-{{arch}}", options) {
+  return `${tosUpdatesPublicBaseUrl(options)}/${platform}/latest.json`;
+}
+
 export function tosUpdatesObjectKey(fileName, prefix = TOS_UPDATES_PREFIX) {
   return `${prefix.replace(/^\/+|\/+$/g, "")}/${fileName}`;
 }

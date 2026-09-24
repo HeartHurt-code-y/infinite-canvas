@@ -1,9 +1,8 @@
 //! 画布视频合成：内置 FFmpeg 引擎的确定性合成服务。
 //!
-//! 引擎策略分两级：安装包内置构建优先（构建期由 `scripts/prepare-ffmpeg.mjs`
-//! 下载官方 Windows 构建到 `resources/ffmpeg/` 并随包分发，只读）；资源目录
-//! 缺失或不完整时，回退到与 yt-dlp 下载器一致的策略——首次使用（或用户手动
-//! 触发）时把官方独立构建的 FFmpeg 下载到应用数据目录。下载与解包复用
+//! 引擎策略：安装包内置构建优先；精简更新包没有内置资源时，从应用数据目录
+//! 的已校验版本化组件仓库加载；两者均不可用时沿用原有的下载目录，首次使用
+//! （或用户手动触发）时把官方独立构建的 FFmpeg 下载到应用数据目录。下载与解包复用
 //! `ffmpeg-sidecar` crate（它会按平台选择官方构建源），但安装位置由本服务
 //! 指定为应用数据目录——crate 默认安装到可执行文件同目录，打包安装后会落在
 //! 不可写的 Program Files。合成产物与下载产物、生成结果一致，落在系统下载
@@ -30,6 +29,7 @@ use uuid::Uuid;
 
 use super::error::{BackendError, BackendResult};
 use super::mv_media::{self, StartMvCompositionCommand};
+use super::runtime_components::RuntimeComponent;
 use super::types::StartVideoCompositionCommand;
 
 /// Windows 下隐藏子进程控制台窗口。
@@ -113,6 +113,8 @@ struct Inner {
     engine_dir: PathBuf,
     /// 安装包资源目录（只读）。其 `ffmpeg/` 子目录为构建期预置的内置引擎。
     resource_dir: PathBuf,
+    /// 精简更新包复用的版本化组件。启动迁移可能在后台完成，因此使用时重新解析。
+    runtime_component: Option<RuntimeComponent>,
 }
 
 /// ffprobe 是否为本平台的必备引擎文件。
@@ -125,7 +127,7 @@ struct Inner {
 const FFPROBE_REQUIRED: bool = !cfg!(target_os = "macos");
 
 /// 引擎目录是否可用：必须有 ffmpeg，ffprobe 按平台要求。
-fn engine_ready_in(directory: &Path) -> bool {
+pub(crate) fn engine_ready_in(directory: &Path) -> bool {
     let ffmpeg = directory.join(VideoCompositionService::ffmpeg_binary_name());
     if !ffmpeg.is_file() {
         return false;
@@ -174,6 +176,35 @@ impl VideoCompositionService {
         engine_dir: PathBuf,
         resource_dir: PathBuf,
     ) -> BackendResult<Self> {
+        Self::new_inner(downloads_dir, engine_dir, resource_dir, None)
+    }
+
+    pub fn new_with_runtime_store(
+        downloads_dir: PathBuf,
+        engine_dir: PathBuf,
+        resource_dir: PathBuf,
+        store_base: PathBuf,
+    ) -> BackendResult<Self> {
+        let runtime_component = RuntimeComponent::new(
+            store_base,
+            resource_dir.join("ffmpeg"),
+            "ffmpeg",
+            "manifest.json",
+        );
+        Self::new_inner(
+            downloads_dir,
+            engine_dir,
+            resource_dir,
+            Some(runtime_component),
+        )
+    }
+
+    fn new_inner(
+        downloads_dir: PathBuf,
+        engine_dir: PathBuf,
+        resource_dir: PathBuf,
+        runtime_component: Option<RuntimeComponent>,
+    ) -> BackendResult<Self> {
         Ok(Self {
             inner: Arc::new(Inner {
                 jobs: std::sync::Mutex::new(HashMap::new()),
@@ -185,6 +216,7 @@ impl VideoCompositionService {
                 downloads_dir,
                 engine_dir,
                 resource_dir,
+                runtime_component,
             }),
         })
     }
@@ -217,13 +249,16 @@ impl VideoCompositionService {
         engine_ready_in(&self.builtin_engine_dir())
     }
 
-    /// 生效引擎目录：内置构建完整时优先使用只读资源目录，否则回退到应用数据目录。
+    /// 生效引擎目录：内置构建、已校验持久化组件、原有下载目录依次回退。
     fn active_engine_dir(&self) -> PathBuf {
-        if self.has_builtin_engine() {
-            self.builtin_engine_dir()
-        } else {
-            self.inner.engine_dir.clone()
+        if let Some(component) = &self.inner.runtime_component {
+            if let Some(component_dir) = component.resolve(engine_ready_in) {
+                return component_dir;
+            }
+        } else if self.has_builtin_engine() {
+            return self.builtin_engine_dir();
         }
+        self.inner.engine_dir.clone()
     }
 
     fn ffmpeg_binary(&self) -> PathBuf {
@@ -234,13 +269,35 @@ impl VideoCompositionService {
         self.active_engine_dir().join(Self::ffprobe_binary_name())
     }
 
-    /// 生效引擎版本记录。version.txt 始终写在可写的应用数据目录
-    /// （资源目录只读不可写），内置与下载引擎共用同一记录位置。
+    /// 版本记录写在可写的旧引擎目录。非下载引擎还需匹配二进制的路径、
+    /// 大小和修改时间，防止切换到持久化组件后沿用上一个引擎的版本。
     fn installed_version(&self) -> Option<String> {
+        let binary = self.ffmpeg_binary();
+        let recorded = std::fs::read_to_string(self.inner.engine_dir.join("version-source.txt"));
+        match recorded {
+            Ok(recorded) if recorded.trim() != Self::binary_fingerprint(&binary)? => return None,
+            Err(_) if binary.parent()? != self.inner.engine_dir => return None,
+            _ => {}
+        }
         std::fs::read_to_string(self.inner.engine_dir.join("version.txt"))
             .ok()
             .map(|text| text.trim().to_string())
             .filter(|text| !text.is_empty())
+    }
+
+    fn binary_fingerprint(binary: &Path) -> Option<String> {
+        let metadata = std::fs::metadata(binary).ok()?;
+        let modified = metadata
+            .modified()
+            .ok()?
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()?
+            .as_nanos();
+        Some(format!(
+            "{}:{}:{modified}",
+            binary.display(),
+            metadata.len()
+        ))
     }
 
     /// 汇总当前引擎状态。版本以 version.txt 为准，不在这里探测（命令线程禁止阻塞）。
@@ -405,8 +462,16 @@ impl VideoCompositionService {
     /// 完整性之外还要求引擎能真实执行（拦截杀毒软件隔离、平台不匹配等）。
     /// 探测对象是当前生效二进制（内置或下载回退），版本记录写入可写目录。
     async fn probe_and_record_version(&self) -> BackendResult<String> {
-        let reported = self.probe_binary_version(&self.ffmpeg_binary()).await?;
+        let binary = self.ffmpeg_binary();
+        let reported = self.probe_binary_version(&binary).await?;
         tokio::fs::write(self.inner.engine_dir.join("version.txt"), &reported).await?;
+        if let Some(fingerprint) = Self::binary_fingerprint(&binary) {
+            tokio::fs::write(
+                self.inner.engine_dir.join("version-source.txt"),
+                fingerprint,
+            )
+            .await?;
+        }
         tauri_plugin_log::log::info!("[composer] FFmpeg 引擎就绪: version={reported}");
         Ok(reported)
     }
@@ -1551,6 +1616,86 @@ At least one output file must be specified
                     .into_owned()
             )
         );
+    }
+
+    #[test]
+    fn bundled_engine_does_not_reuse_legacy_version_record() {
+        let resource = tempfile::tempdir().unwrap();
+        let builtin = resource.path().join("ffmpeg");
+        std::fs::create_dir_all(&builtin).unwrap();
+        std::fs::write(
+            builtin.join(VideoCompositionService::ffmpeg_binary_name()),
+            b"fixture",
+        )
+        .unwrap();
+        std::fs::write(
+            builtin.join(VideoCompositionService::ffprobe_binary_name()),
+            b"fixture",
+        )
+        .unwrap();
+        let download = tempfile::tempdir().unwrap();
+        std::fs::write(download.path().join("version.txt"), "old-version").unwrap();
+        let service = VideoCompositionService::new(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            download.path().to_path_buf(),
+            resource.path().to_path_buf(),
+        )
+        .unwrap();
+        assert_eq!(service.installed_version(), None);
+
+        let fingerprint =
+            VideoCompositionService::binary_fingerprint(&service.ffmpeg_binary()).unwrap();
+        std::fs::write(download.path().join("version-source.txt"), fingerprint).unwrap();
+        assert_eq!(service.installed_version().as_deref(), Some("old-version"));
+    }
+
+    #[test]
+    fn persisted_engine_becomes_active_when_untrusted_bundled_files_remain() {
+        let resource = tempfile::tempdir().unwrap();
+        let bundled = resource.path().join("ffmpeg");
+        std::fs::create_dir_all(&bundled).unwrap();
+        std::fs::write(bundled.join("manifest.json"), b"test-manifest").unwrap();
+        std::fs::write(
+            bundled.join(VideoCompositionService::ffmpeg_binary_name()),
+            b"ffmpeg-fixture",
+        )
+        .unwrap();
+        std::fs::write(
+            bundled.join(VideoCompositionService::ffprobe_binary_name()),
+            b"ffprobe-fixture",
+        )
+        .unwrap();
+        let download = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        let component = RuntimeComponent::new(
+            store.path().to_path_buf(),
+            bundled.clone(),
+            "test-component",
+            "manifest.json",
+        );
+        let service = VideoCompositionService::new_inner(
+            tempfile::tempdir().unwrap().path().to_path_buf(),
+            download.path().to_path_buf(),
+            resource.path().to_path_buf(),
+            Some(component.clone()),
+        )
+        .unwrap();
+        assert_eq!(service.active_engine_dir(), bundled);
+
+        component.migrate(engine_ready_in, |_, _| {}).unwrap();
+        // NSIS may leave old binaries behind; the missing trusted manifest must make
+        // the service choose the verified persistent copy instead.
+        std::fs::remove_file(bundled.join("manifest.json")).unwrap();
+        assert!(engine_ready_in(&bundled));
+        let active = service.active_engine_dir();
+        assert!(active.starts_with(store.path().join("test-component")));
+        assert!(engine_ready_in(&active));
+        assert_eq!(
+            service.ffmpeg_binary(),
+            active.join(VideoCompositionService::ffmpeg_binary_name())
+        );
+        std::fs::write(active.join("manifest.json"), b"tampered").unwrap();
+        assert_eq!(service.active_engine_dir(), download.path());
     }
 
     #[test]

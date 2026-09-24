@@ -78,6 +78,8 @@ describe("appUpdate helpers", () => {
           notes: null,
           downloadedBytes: 0,
           totalBytes: 0,
+          preparedBytes: 0,
+          totalPreparationBytes: 0,
           error: null,
         },
         "0.1.2",
@@ -92,6 +94,8 @@ describe("appUpdate helpers", () => {
           notes: null,
           downloadedBytes: 10,
           totalBytes: 20,
+          preparedBytes: 0,
+          totalPreparationBytes: 0,
           error: null,
         },
         "0.1.2",
@@ -176,6 +180,84 @@ describe("appUpdate store", () => {
     await checkForAppUpdate();
     await installAvailableAppUpdate();
     expect(getAppUpdateState().status).toBe("restarting");
+  });
+
+  it("waits for persistent runtimes before downloading a small installer", async () => {
+    let finishMigration: (() => void) | undefined;
+    const migration = new Promise<void>((resolve) => {
+      finishMigration = resolve;
+    });
+    const downloadAndInstall = vi.fn(() => Promise.resolve());
+    const waitForRuntimeComponents = vi.fn(
+      async (onProgress: (status: {
+        ready: boolean;
+        preparing: boolean;
+        error: string | null;
+        completedBytes: number;
+        totalBytes: number;
+        completedComponents: number;
+        totalComponents: number;
+      }) => void) => {
+        onProgress({
+          ready: false,
+          preparing: true,
+          error: null,
+          completedBytes: 2,
+          totalBytes: 4,
+          completedComponents: 0,
+          totalComponents: 4,
+        });
+        await migration;
+        onProgress({
+          ready: true,
+          preparing: false,
+          error: null,
+          completedBytes: 4,
+          totalBytes: 4,
+          completedComponents: 4,
+          totalComponents: 4,
+        });
+      },
+    );
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({ available: true, version: "0.1.9", downloadAndInstall }),
+        ),
+        waitForRuntimeComponents,
+      }),
+    );
+
+    await checkForAppUpdate();
+    const install = installAvailableAppUpdate();
+    expect(getAppUpdateState()).toMatchObject({
+      status: "preparing",
+      preparedBytes: 2,
+      totalPreparationBytes: 4,
+    });
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+    finishMigration?.();
+    await install;
+    expect(waitForRuntimeComponents).toHaveBeenCalledTimes(1);
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the existing install when runtime migration fails", async () => {
+    const downloadAndInstall = vi.fn(() => Promise.resolve());
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({ available: true, version: "0.1.9", downloadAndInstall }),
+        ),
+        waitForRuntimeComponents: vi.fn(() => Promise.reject(new Error("磁盘空间不足"))),
+      }),
+    );
+
+    await checkForAppUpdate();
+    await installAvailableAppUpdate();
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(getAppUpdateState()).toMatchObject({ status: "error", error: "磁盘空间不足" });
+    expect(shouldShowUpdateBanner(getAppUpdateState())).toBe(true);
   });
 
   it("remembers a skipped version so the banner can stay quiet", async () => {

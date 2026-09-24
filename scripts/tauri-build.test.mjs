@@ -38,7 +38,17 @@ test("loads the updater private key file into TAURI_SIGNING_PRIVATE_KEY for taur
     const env = resolveUpdaterSigningEnv({}, keyPath);
     assert.equal(env.TAURI_SIGNING_PRIVATE_KEY, "minisign-secret");
     assert.equal(env.TAURI_SIGNING_PRIVATE_KEY_PATH, keyPath);
-    assert.equal(env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, undefined);
+    assert.equal(env.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, "");
+    assert.equal(
+      resolveUpdaterSigningEnv({ TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "protected" }, keyPath)
+        .TAURI_SIGNING_PRIVATE_KEY_PASSWORD,
+      "protected",
+    );
+    assert.equal(
+      resolveUpdaterSigningEnv({ TAURI_SIGNING_PRIVATE_KEY: "inline" }, keyPath)
+        .TAURI_SIGNING_PRIVATE_KEY_PATH,
+      undefined,
+    );
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -1,0 +1,11 @@
+{
+  "bundle": {
+    "resources": [],
+    "windows": {
+      "nsis": {
+        "template": "windows/slim-installer.nsi",
+        "installerHooks": "windows/slim-installer-hooks.nsh"
+      }
+    }
+  }
+}

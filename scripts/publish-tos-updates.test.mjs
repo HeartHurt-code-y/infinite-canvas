@@ -13,9 +13,15 @@ import {
   normalizeTosEtag,
   buildCompleteMultipartJson,
   readTosPublishEnv,
+  resolvePublishChannel,
+  collectFullOfflineFiles,
+  compareReleaseVersions,
+  checkChannelManifest,
+  checkLegacyPlatformFeeds,
+  immutableObjectMatches,
   tosFetch,
 } from "./publish-tos-updates.mjs";
-import { tosUpdatesLatestJsonUrl } from "./tos-updates-config.mjs";
+import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -66,11 +72,135 @@ test("TOS credentials are required from the environment and never defaulted", ()
   assert.equal(parsed.region, "cn-beijing");
 });
 
-test("tauri updater endpoint points at the public TOS latest.json", () => {
+test("bridge and later apps use the per-platform TOS manifest", () => {
   const conf = JSON.parse(
     readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
   );
-  assert.deepEqual(conf.plugins.updater.endpoints, [tosUpdatesLatestJsonUrl()]);
+  assert.deepEqual(conf.plugins.updater.endpoints, [tosPlatformLatestJsonUrl()]);
+});
+
+test("legacy promotion requires both signed platforms, while new feeds are isolated", () => {
+  const windows = {
+    "windows-x86_64": {
+      url: "https://cdn.example/无限画布_0.1.8_x64-setup.exe",
+      signature: "win-sig",
+    },
+  };
+  const mac = {
+    "darwin-aarch64": {
+      url: "https://cdn.example/无限画布_0.1.8_aarch64-full.app.tar.gz",
+      signature: "mac-sig",
+    },
+  };
+  assert.throws(
+    () => resolvePublishChannel("legacy", windows, undefined, "0.1.8"),
+    /Windows x64.*macOS arm64/,
+  );
+  assert.equal(
+    resolvePublishChannel("legacy", { ...windows, ...mac }, undefined, "0.1.8"),
+    "infinite-canvas/updates",
+  );
+  assert.throws(
+    () =>
+      resolvePublishChannel(
+        "legacy",
+        {
+          ...windows,
+          ...mac,
+          "windows-x86_64": {
+            ...windows["windows-x86_64"],
+            url: "https://cdn.example/无限画布_0.1.8_x64-slim-setup.exe",
+          },
+        },
+        undefined,
+        "0.1.8",
+      ),
+    /禁止瘦包/,
+  );
+  assert.equal(
+    resolvePublishChannel("windows-x86_64", windows),
+    "infinite-canvas/updates/windows-x86_64",
+  );
+  assert.throws(() => resolvePublishChannel("windows-x86_64", { ...windows, ...mac }), /只能发布/);
+});
+
+test("promotion requires matching platform feeds and never rolls a channel back", () => {
+  const windows = { url: "https://cdn.example/无限画布_0.1.8_x64-setup.exe", signature: "win-sig" };
+  const mac = {
+    url: "https://cdn.example/无限画布_0.1.8_aarch64-full.app.tar.gz",
+    signature: "mac-sig",
+  };
+  const platforms = { "windows-x86_64": windows, "darwin-aarch64": mac };
+  const feeds = {
+    "windows-x86_64": { version: "0.1.8", platforms: { "windows-x86_64": windows } },
+    "darwin-aarch64": { version: "0.1.8", platforms: { "darwin-aarch64": mac } },
+  };
+  assert.doesNotThrow(() => checkLegacyPlatformFeeds("0.1.8", platforms, feeds));
+  assert.throws(
+    () => checkLegacyPlatformFeeds("0.1.8", platforms, { ...feeds, "darwin-aarch64": null }),
+    /初始化同版/,
+  );
+  const latest = { version: "0.1.8", notes: "", pub_date: "2026-09-24T00:00:00Z", platforms };
+  assert.deepEqual(checkChannelManifest(latest, latest), {
+    sameVersion: true,
+    pubDate: latest.pub_date,
+  });
+  assert.throws(() => checkChannelManifest(latest, { ...latest, version: "0.1.7" }), /拒绝回退/);
+  assert.throws(
+    () =>
+      checkChannelManifest(latest, {
+        ...latest,
+        platforms: { ...platforms, "windows-x86_64": { ...windows, signature: "different" } },
+      }),
+    /同版覆盖/,
+  );
+  assert.deepEqual(checkChannelManifest(latest, { ...latest, version: "0.1.9" }), {
+    sameVersion: false,
+    pubDate: undefined,
+  });
+  assert.equal(compareReleaseVersions("0.1.10", "0.1.9"), 1);
+});
+
+test("immutable versioned objects require matching SHA-256 metadata and length", () => {
+  const digest = "a".repeat(64);
+  assert.equal(
+    immutableObjectMatches(
+      { status: 200, headers: { "x-tos-meta-sha256": digest, "content-length": "42" } },
+      digest,
+      42,
+    ),
+    true,
+  );
+  assert.equal(
+    immutableObjectMatches({ status: 200, headers: { "content-length": "42" } }, digest, 42),
+    false,
+  );
+  assert.equal(
+    immutableObjectMatches(
+      { status: 200, headers: { "x-tos-meta-sha256": digest, "content-length": "41" } },
+      digest,
+      42,
+    ),
+    false,
+  );
+});
+
+test("offline staging selects only same-version full NSIS and MSI", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-offline-"));
+  try {
+    const full = path.join(dir, "无限画布_0.1.8_x64-setup.exe");
+    const msi = path.join(dir, "无限画布_0.1.8_x64_zh-CN.msi");
+    writeFileSync(full, "full");
+    writeFileSync(`${full}.sig`, "sig");
+    writeFileSync(msi, "msi");
+    writeFileSync(path.join(dir, "无限画布_0.1.7_x64-setup.exe"), "old");
+    assert.deepEqual(
+      new Set(collectFullOfflineFiles(dir, "0.1.8")),
+      new Set([full, `${full}.sig`, msi]),
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 function headersTimeoutError() {

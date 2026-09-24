@@ -82,7 +82,7 @@ export function listFilesRecursive(dir) {
 
 /**
  * @param {string} bundleDir
- * @param {{ fallbackPlatform?: string, baseUrl: string }} options
+ * @param {{ fallbackPlatform?: string, baseUrl: string, version?: string }} options
  */
 export function collectUpdaterPlatforms(bundleDir, options) {
   /** @type {Record<string, { url: string, signature: string }>} */
@@ -93,6 +93,12 @@ export function collectUpdaterPlatforms(bundleDir, options) {
     if (fileName.endsWith(".sig")) continue;
     const platform = detectPlatformFromArtifact(fileName, options.fallbackPlatform);
     if (platform === null) continue;
+    if (options.version && !fileName.includes(`_${options.version}_`)) {
+      throw new Error(`发现无版本号或非本版 updater 产物：${filePath}`);
+    }
+    if (platforms[platform]) {
+      throw new Error(`同一平台存在多个 updater 产物（${platform}）：请只传入本次发布的产物目录`);
+    }
     const signaturePath = `${filePath}.sig`;
     if (!existsSync(signaturePath)) {
       throw new Error(`缺少签名文件：${signaturePath}`);
@@ -119,14 +125,18 @@ export function joinDownloadUrl(baseUrl, fileName) {
 /**
  * @param {unknown} existing
  * @param {Record<string, { url: string, signature: string }>} incoming
+ * @param {string} version
  */
-export function mergeLatestManifest(existing, incoming) {
+export function mergeLatestManifest(existing, incoming, version) {
   const current =
     existing && typeof existing === "object" && !Array.isArray(existing)
       ? /** @type {Record<string, unknown>} */ (existing)
       : {};
   const currentPlatforms =
-    current.platforms && typeof current.platforms === "object" && !Array.isArray(current.platforms)
+    current.version === version &&
+    current.platforms &&
+    typeof current.platforms === "object" &&
+    !Array.isArray(current.platforms)
       ? /** @type {Record<string, unknown>} */ (current.platforms)
       : {};
   return {
@@ -198,14 +208,17 @@ export function writeLatestJson(options) {
   const notes = typeof options.notes === "string" ? options.notes : "";
   const fallbackPlatform =
     typeof options.platform === "string" ? options.platform : defaultPlatform();
-  const incoming = collectUpdaterPlatforms(bundleDir, { baseUrl, fallbackPlatform });
+  const incoming = collectUpdaterPlatforms(bundleDir, { baseUrl, fallbackPlatform, version });
   if (Object.keys(incoming).length === 0) {
     throw new Error(
       `在 ${bundleDir} 里没有找到 updater 产物（.app.tar.gz / NSIS -setup.exe / AppImage）`,
     );
   }
-  const existing = existsSync(out) ? JSON.parse(readFileSync(out, "utf8")) : {};
-  const merged = mergeLatestManifest(existing, incoming);
+  const existing =
+    options["merge-same-version"] === true && existsSync(out)
+      ? JSON.parse(readFileSync(out, "utf8"))
+      : {};
+  const merged = mergeLatestManifest(existing, incoming, version);
   const manifest = buildLatestManifest({
     version,
     notes,

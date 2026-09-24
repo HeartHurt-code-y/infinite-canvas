@@ -29,14 +29,20 @@ export function AppUpdateBanner() {
         name={
           snapshot.status === "ready"
             ? "check-circle"
-            : snapshot.status === "downloading" || snapshot.status === "restarting"
+            : snapshot.status === "preparing" ||
+                snapshot.status === "downloading" ||
+                snapshot.status === "restarting"
               ? "circle-notch"
               : "cloud-arrow-down"
         }
         aria-hidden="true"
         size="md"
         data-spin={
-          snapshot.status === "downloading" || snapshot.status === "restarting" ? "true" : undefined
+          snapshot.status === "preparing" ||
+          snapshot.status === "downloading" ||
+          snapshot.status === "restarting"
+            ? "true"
+            : undefined
         }
       />
       <div className="app-update-banner__copy">
@@ -49,6 +55,8 @@ export function AppUpdateBanner() {
 }
 
 function bannerTitle(status: AppUpdateState["status"], availableVersion: string | null): string {
+  if (status === "error") return "更新失败";
+  if (status === "preparing") return "正在准备本地运行组件";
   if (status === "downloading") return "正在下载更新";
   if (status === "ready") return "更新已就绪";
   if (status === "restarting") return "正在完成安装";
@@ -56,6 +64,12 @@ function bannerTitle(status: AppUpdateState["status"], availableVersion: string 
 }
 
 function bannerDetail(snapshot: AppUpdateState): string {
+  if (snapshot.status === "error" && snapshot.error) return snapshot.error;
+  if (snapshot.status === "preparing") {
+    return snapshot.totalPreparationBytes > 0
+      ? `${formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)}；完成后开始下载更新。`
+      : "正在保留已安装的运行组件，完成后开始下载更新。";
+  }
   if (snapshot.status === "downloading") {
     return formatDownloadProgress(snapshot.downloadedBytes, snapshot.totalBytes);
   }
@@ -65,6 +79,19 @@ function bannerDetail(snapshot: AppUpdateState): string {
 }
 
 function bannerActions(snapshot: AppUpdateState) {
+  if (snapshot.status === "preparing") {
+    return snapshot.totalPreparationBytes > 0 ? (
+      <progress
+        max={snapshot.totalPreparationBytes}
+        value={snapshot.preparedBytes}
+        aria-label="本地运行组件准备进度"
+      />
+    ) : (
+      <button type="button" disabled>
+        正在准备…
+      </button>
+    );
+  }
   if (snapshot.status === "downloading") {
     return (
       <progress
@@ -101,7 +128,7 @@ function bannerActions(snapshot: AppUpdateState) {
           void installAvailableAppUpdate();
         }}
       >
-        立即更新
+        {snapshot.status === "error" ? "重试更新" : "立即更新"}
       </button>
       <button
         type="button"

@@ -1,15 +1,16 @@
 //! Offline retrieval for the image-prompt skill. Example material stays in the
 //! text-model request; it never becomes a canvas reference or a user's identity.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
-use std::sync::LazyLock;
+use std::sync::{LazyLock, Mutex};
 
 use serde::Deserialize;
 use serde_json::json;
 
 use super::error::{BackendError, BackendResult};
 use super::prompt_optimize::OptimizeVideoPromptCommand;
+use super::runtime_components::RuntimeComponent;
 
 const MAX_CASES: usize = 2;
 const MAX_IMAGES: usize = 2;
@@ -93,20 +94,49 @@ fn catalog_error(message: &str) -> BackendError {
     )
 }
 
-pub(super) fn bundle_root(resource_dir: &Path) -> BackendResult<PathBuf> {
-    let installed = resource_dir.join("skills/gpt-image-2-style-library");
-    if installed.join("assets/images").is_dir() {
-        return Ok(installed);
+pub(crate) fn style_component_ready(root: &Path) -> bool {
+    root.join("assets/images").is_dir()
+        && root.join("data/manifest.json").is_file()
+        && root.join("data/cases.json").is_file()
+        && root.join("data/templates.json").is_file()
+}
+
+pub(super) fn bundle_root(
+    resource_dir: &Path,
+    app_local_data_dir: &Path,
+) -> BackendResult<PathBuf> {
+    // The catalog is used on every style prompt. Reuse the verified file-stamp
+    // cache instead of hashing the full image library for every request.
+    static COMPONENTS: LazyLock<Mutex<HashMap<(PathBuf, PathBuf), RuntimeComponent>>> =
+        LazyLock::new(|| Mutex::new(HashMap::new()));
+    let key = (resource_dir.to_path_buf(), app_local_data_dir.to_path_buf());
+    let component = COMPONENTS
+        .lock()
+        .expect("style component cache poisoned")
+        .entry(key)
+        .or_insert_with(|| {
+            RuntimeComponent::new(
+                app_local_data_dir.join("runtime-components"),
+                resource_dir.join("skills/gpt-image-2-style-library"),
+                "gpt-image-2-style-library",
+                "data/manifest.json",
+            )
+        })
+        .clone();
+    if let Some(root) = component.resolve(style_component_ready) {
+        return Ok(root);
     }
     #[cfg(debug_assertions)]
     {
         let development =
             Path::new(env!("CARGO_MANIFEST_DIR")).join("skills/gpt-image-2-style-library");
-        if development.join("assets/images").is_dir() {
+        if style_component_ready(&development) {
             return Ok(development);
         }
     }
-    Err(catalog_error("bundled case images are missing"))
+    Err(catalog_error(
+        "style reference images are missing from installed components",
+    ))
 }
 
 fn local_image_path(root: &Path, relative: &str) -> BackendResult<PathBuf> {

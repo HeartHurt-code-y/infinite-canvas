@@ -30,6 +30,7 @@ use super::{
         DeliverReverseVideoCommand, ReverseVideoDelivery, ReverseVideoEvidence,
         ReverseVideoLearning, SaveReverseVideoEvidenceCommand,
     },
+    runtime_components::RuntimeComponentMigrationStatus,
     storage::now_ms,
     storage::workflow_history::{
         SaveWorkflowHistoryCommand, WorkflowHistoryDetail, WorkflowHistoryPage,
@@ -56,6 +57,13 @@ use super::{
         WorkspaceUiPrefs,
     },
 };
+
+#[tauri::command]
+pub fn get_runtime_component_migration_status(
+    state: State<'_, BackendState>,
+) -> RuntimeComponentMigrationStatus {
+    state.runtime_migration.status()
+}
 
 #[tauri::command]
 pub async fn save_reverse_video_evidence(
