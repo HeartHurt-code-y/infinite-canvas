@@ -34,6 +34,7 @@ jobs:
       APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
       # --- 应用内热更新签名（minisign）---
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
 
     steps:
       - name: Checkout
