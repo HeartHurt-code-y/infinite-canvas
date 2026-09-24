@@ -144,7 +144,7 @@ workflows:
         script: |
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
-          pnpm update:publish -- --promote-legacy --version "$release_version" --notes "升级到 $release_version。"
+          pnpm update:publish -- --promote-legacy --version "$release_version"
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz

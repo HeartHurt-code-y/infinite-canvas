@@ -837,7 +837,7 @@ export async function promoteLegacyFromPlatformFeeds(options = {}) {
   }
   const manifest = buildLatestManifest({
     version,
-    notes: typeof options.notes === "string" ? options.notes : "",
+    notes: typeof options.notes === "string" ? options.notes : `升级到 ${version}。`,
     platforms,
   });
   const objectKey = tosUpdatesObjectKey("latest.json", config.prefix);
