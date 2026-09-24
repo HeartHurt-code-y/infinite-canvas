@@ -30,13 +30,8 @@ export function assertPinnedTauriCli(actual) {
 }
 
 export async function assertPreflightExecutable(executable) {
-  const bytes = readFileSync(executable);
-  if (
-    !bytes.includes(Buffer.from(PREFLIGHT_FLAG)) ||
-    !bytes.includes(Buffer.from(PREFLIGHT_MARKER))
-  ) {
-    throw new Error("release exe 不含资源自检命令；请先重新构建完整过渡版");
-  }
+  // Release optimization can split or fold string literals. Verify the actual
+  // command behavior instead of searching for its argument bytes in the exe.
   await new Promise((resolve, reject) => {
     const child = spawn(executable, [PREFLIGHT_FLAG], {
       cwd: REPO_ROOT,
