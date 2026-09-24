@@ -42,24 +42,34 @@ app_path="${1:-}"
 #
 # ad-hoc 本身**不是**失败：它是本项目的合法基线（没有 Apple 证书时的默认），
 # 只影响别人首次打开需要清一次隔离属性，不影响 app 自身能否运行。
-signature_info="$(codesign -dv --verbose=4 "$app_path" 2>&1 || true)"
-if ! grep -q '^Authority=' <<<"$signature_info"; then
+if ! signature_info="$(codesign -dv --verbose=4 "$app_path" 2>&1)"; then
   fail "该 bundle 完全没有签名（未签名 bundle 在 macOS 上会被报成「已损坏，无法打开」）。
 检查 tauri.conf.json 的 bundle.macOS.signingIdentity 是否为 \"-\"，以及构建日志里是否有签名相关报错：
 $signature_info"
 fi
+if ! codesign --verify --strict "$app_path" >/dev/null 2>&1; then
+  fail "该 bundle 的签名校验失败。"
+fi
 
-authority="$(grep -m1 '^Authority=' <<<"$signature_info" | cut -d= -f2-)"
+signature_kind="certificate"
+if grep -q '^Signature=adhoc$' <<<"$signature_info"; then
+  signature_kind="ad-hoc"
+  authority="-"
+elif grep -q '^Authority=' <<<"$signature_info"; then
+  authority="$(grep -m1 '^Authority=' <<<"$signature_info" | cut -d= -f2-)"
+else
+  fail "codesign 未报告 ad-hoc 签名或证书身份：$signature_info"
+fi
 team_id="$(grep -m1 '^TeamIdentifier=' <<<"$signature_info" | cut -d= -f2- || true)"
 log "签名 Authority：$authority"
 log "TeamIdentifier：${team_id:-<无>}"
 
-case "$authority" in
-  "-")
+case "$signature_kind:$authority" in
+  "ad-hoc:-")
     log "身份等级：ad-hoc（合法基线）。bundle 签名自洽，app 可以运行；"
     log "      其他用户首次打开需清一次隔离属性：sudo bash scripts/install-macos.sh <dmg>"
     ;;
-  "Developer ID Application:"*)
+  "certificate:Developer ID Application:"*)
     log "身份等级：Developer ID（可对外分发）。"
     ;;
   *)
@@ -67,18 +77,25 @@ case "$authority" in
     ;;
 esac
 
-# ---- 2. designated requirement 必须锚定证书，而不是 cdhash ---------------------
+# ---- 2. 证书签名的 designated requirement 必须锚定证书 ------------------------
 #
-# 「稳定」的可执行定义：requirement 里出现 cdhash 就意味着身份随代码变化。
+# 证书签名的 requirement 若含 cdhash，身份会随代码变化；ad-hoc 签名没有证书，
+# 它的 requirement 绑定 cdhash 是预期行为，仅适合作为本机安装基线。
 # 注意：本项与钥匙串无关——凭据已不走钥匙串，这里只是确认签名本身可跨版本识别。
 requirement="$(codesign -d -r- "$app_path" 2>&1 | sed -n 's/^designated => //p' || true)"
 if [ -n "$requirement" ]; then
   log "designated requirement：$requirement"
   if grep -q 'cdhash' <<<"$requirement"; then
-    fail "designated requirement 里含 cdhash，说明身份绑定到代码哈希而非证书：
+    if [ "$signature_kind" = "ad-hoc" ]; then
+      log "ad-hoc 的 requirement 绑定代码哈希（预期行为，升级后身份不稳定）。"
+    else
+      fail "designated requirement 里含 cdhash，说明身份绑定到代码哈希而非证书：
 $requirement"
+    fi
   fi
-  if grep -q 'anchor apple' <<<"$requirement"; then
+  if [ "$signature_kind" = "ad-hoc" ]; then
+    : # ad-hoc 没有证书链，因此不会有证书锚点。
+  elif grep -q 'anchor apple' <<<"$requirement"; then
     log "requirement 锚定 Apple 证书链。"
   elif grep -qE 'certificate (root|leaf)' <<<"$requirement"; then
     # 非 Apple 签发的证书（自签/企业 CA）会走这条：requirement 里是证书哈希。

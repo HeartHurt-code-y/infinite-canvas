@@ -1,5 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import {
   APPLE_DEVELOPMENT_PREFIX,
   decideSigningOutcome,
@@ -201,3 +206,75 @@ test("a real Developer ID outranks a local self-signed identity on a dev machine
   );
   assert.equal(selected.name, DEVELOPER_ID.name);
 });
+
+test(
+  "bundle verifier accepts ad-hoc and Developer ID, but rejects unsigned or invalid signatures",
+  {
+    skip: !["bash", "/bin/bash", "C:/Git/bin/bash.exe"].some((candidate) => {
+      const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+      return !probe.error && probe.status === 0;
+    })
+      ? "bash is unavailable"
+      : false,
+  },
+  () => {
+    const bash = ["bash", "/bin/bash", "C:/Git/bin/bash.exe"].find((candidate) => {
+      const probe = spawnSync(candidate, ["--version"], { encoding: "utf8" });
+      return !probe.error && probe.status === 0;
+    });
+    const directory = mkdtempSync(path.join(os.tmpdir(), "canvas-signing-test-"));
+    try {
+      const app = path.join(directory, "Fixture.app");
+      const mock = path.join(directory, "mock-macos-tools.sh");
+      mkdirSync(app);
+      writeFileSync(
+        mock,
+        `
+uname() { printf 'Darwin\\n'; }
+codesign() {
+  case "$1" in
+    -dv)
+      case "$IC_TEST_SIGNING_MODE" in
+        adhoc|invalid) printf 'Signature=adhoc\\nTeamIdentifier=not set\\n' ;;
+        developer|developer-cdhash) printf 'Signature=size(1234)\\nAuthority=Developer ID Application: Test (TEAM123456)\\nTeamIdentifier=TEAM123456\\n' ;;
+        unsigned) printf 'code object is not signed at all\\n' >&2; return 1 ;;
+      esac
+      ;;
+    --verify) [ "$IC_TEST_SIGNING_MODE" != invalid ] ;;
+    -d)
+      if [ "$IC_TEST_SIGNING_MODE" = developer ]; then
+        printf 'designated => identifier "com.infinitecanvas.desktop" and anchor apple generic\\n'
+      else
+        printf 'designated => identifier "com.infinitecanvas.desktop" and cdhash H"012345"\\n'
+      fi
+      ;;
+    *) return 1 ;;
+  esac
+}
+spctl() { return 1; }
+`,
+        "utf8",
+      );
+      const script = path.resolve(
+        path.dirname(fileURLToPath(import.meta.url)),
+        "verify-macos-bundle.sh",
+      );
+      const run = (mode) =>
+        spawnSync(bash, [script, app], {
+          encoding: "utf8",
+          env: { ...process.env, BASH_ENV: mock, IC_TEST_SIGNING_MODE: mode },
+        });
+      const adhoc = run("adhoc");
+      assert.equal(adhoc.status, 0, adhoc.stderr);
+      assert.match(adhoc.stdout, /身份等级：ad-hoc/);
+      const developer = run("developer");
+      assert.equal(developer.status, 0, developer.stderr);
+      assert.match(developer.stdout, /身份等级：Developer ID/);
+      assert.equal(run("developer-cdhash").status, 1);
+      assert.equal(run("unsigned").status, 1);
+      assert.equal(run("invalid").status, 1);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  },
+);

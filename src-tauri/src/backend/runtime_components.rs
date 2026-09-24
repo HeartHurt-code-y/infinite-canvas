@@ -474,17 +474,15 @@ impl RuntimeComponent {
         if self.name != "ffmpeg" {
             return true;
         }
-        for (field, expected) in [
-            ("ffmpegSha256", env!("IC_FFMPEG_SHA256")),
-            ("ffprobeSha256", env!("IC_FFPROBE_SHA256")),
-        ] {
-            if (expected.is_empty() && !cfg!(debug_assertions))
-                || (!expected.is_empty() && value[field].as_str() != Some(expected))
-            {
-                return false;
-            }
+        let ffmpeg_pin = env!("IC_FFMPEG_SHA256");
+        if (ffmpeg_pin.is_empty() && !cfg!(debug_assertions))
+            || (!ffmpeg_pin.is_empty() && value["ffmpegSha256"].as_str() != Some(ffmpeg_pin))
+        {
+            return false;
         }
-        true
+        let ffprobe_pin = env!("IC_FFPROBE_SHA256");
+        ffprobe_pin_matches(&value, ffprobe_pin, cfg!(target_os = "macos"))
+            || (cfg!(debug_assertions) && ffprobe_pin.is_empty())
     }
 
     fn critical_files_ready(&self, root: &Path) -> bool {
@@ -578,19 +576,7 @@ impl RuntimeComponent {
         let bytes = fs::read(root.join(self.manifest_relative)).ok()?;
         let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         let targets = match self.name {
-            "ffmpeg" => {
-                let suffix = if cfg!(windows) { ".exe" } else { "" };
-                ["ffmpeg", "ffprobe"]
-                    .into_iter()
-                    .map(|name| {
-                        let key = format!("{name}Sha256");
-                        Some((
-                            PathBuf::from(format!("{name}{suffix}")),
-                            manifest[key.as_str()].as_str()?.to_owned(),
-                        ))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-            }
+            "ffmpeg" => ffmpeg_targets(root, &manifest, cfg!(target_os = "macos"))?,
             "blender" => inventory_targets(root, &manifest)?,
             "remotion-runtime" => {
                 if manifest["inventory"].is_object() {
@@ -670,6 +656,38 @@ fn pinned_text(expected: &str, actual: Option<&str>) -> bool {
     } else {
         actual == Some(expected)
     }
+}
+
+fn ffprobe_pin_matches(manifest: &serde_json::Value, expected: &str, optional: bool) -> bool {
+    if !expected.is_empty() {
+        manifest["ffprobeSha256"].as_str() == Some(expected)
+    } else {
+        optional
+            && manifest.get("ffprobeSha256") == Some(&serde_json::Value::Null)
+            && manifest["ffprobeUnavailable"] == true
+    }
+}
+
+fn ffmpeg_targets(
+    root: &Path,
+    manifest: &serde_json::Value,
+    ffprobe_optional: bool,
+) -> Option<Vec<(PathBuf, String)>> {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    let mut targets = vec![(
+        PathBuf::from(format!("ffmpeg{suffix}")),
+        manifest["ffmpegSha256"].as_str()?.to_owned(),
+    )];
+    if let Some(hash) = manifest["ffprobeSha256"].as_str() {
+        targets.push((PathBuf::from(format!("ffprobe{suffix}")), hash.to_owned()));
+    } else if !ffprobe_optional
+        || manifest.get("ffprobeSha256") != Some(&serde_json::Value::Null)
+        || manifest["ffprobeUnavailable"] != true
+        || root.join(format!("ffprobe{suffix}")).exists()
+    {
+        return None;
+    }
+    Some(targets)
 }
 
 fn inventory_targets(root: &Path, manifest: &serde_json::Value) -> Option<Vec<(PathBuf, String)>> {
@@ -848,6 +866,35 @@ mod tests {
         assert_eq!(
             component.resolve(super::super::composer::engine_ready_in),
             None
+        );
+    }
+
+    #[test]
+    fn optional_macos_ffprobe_requires_a_matching_manifest_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let suffix = if cfg!(windows) { ".exe" } else { "" };
+        let mut manifest = serde_json::json!({
+            "ffmpegSha256": "a".repeat(64),
+            "ffprobeSha256": null,
+            "ffprobeUnavailable": true,
+        });
+        assert!(ffprobe_pin_matches(&manifest, "", true));
+        assert!(!ffprobe_pin_matches(&manifest, "", false));
+        assert_eq!(
+            ffmpeg_targets(temp.path(), &manifest, true).unwrap().len(),
+            1
+        );
+        assert!(ffmpeg_targets(temp.path(), &manifest, false).is_none());
+
+        fs::write(temp.path().join(format!("ffprobe{suffix}")), b"probe").unwrap();
+        assert!(ffmpeg_targets(temp.path(), &manifest, true).is_none());
+
+        manifest["ffprobeSha256"] = serde_json::json!("b".repeat(64));
+        manifest["ffprobeUnavailable"] = serde_json::json!(false);
+        assert!(ffprobe_pin_matches(&manifest, &"b".repeat(64), true));
+        assert_eq!(
+            ffmpeg_targets(temp.path(), &manifest, true).unwrap().len(),
+            2
         );
     }
 

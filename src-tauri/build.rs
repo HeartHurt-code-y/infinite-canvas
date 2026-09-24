@@ -58,6 +58,7 @@ fn main() {
         .as_ref()
         .map(|(bytes, _)| hex::encode(Sha256::digest(bytes)));
     emit("IC_STYLE_MANIFEST_SHA256", style_hash.as_deref());
+    let macos_target = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     if std::env::var("PROFILE").as_deref() == Ok("release")
         && (blender_inventory.is_none()
             || remotion_inventory.is_none()
@@ -70,7 +71,10 @@ fn main() {
             || style_hash.is_none()
             || ffmpeg.as_ref().map_or(true, |(_, value)| {
                 value["ffmpegSha256"].as_str().is_none()
-                    || value["ffprobeSha256"].as_str().is_none()
+                    || (value["ffprobeSha256"].as_str().is_none()
+                        && !(macos_target
+                            && value.get("ffprobeSha256") == Some(&serde_json::Value::Null)
+                            && value["ffprobeUnavailable"] == true))
             }))
     {
         panic!(
