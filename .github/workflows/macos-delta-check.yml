@@ -35,13 +35,10 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v5
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 12.5.1
-          run_install: false
       - uses: actions/setup-node@v5
         with:
           node-version: 24
+          package-manager-cache: false
       - uses: dtolnay/rust-toolchain@stable
       - name: Prepare build-script resource directories
         run: mkdir -p src-tauri/resources/ffmpeg src-tauri/resources/remotion-runtime src-tauri/resources/blender
