@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { formatRawBackendError, isDesktopRuntime } from "../../lib/backend";
+import {
+  registerAppUpdateBeforeInstallFlush,
+  startAutomaticAppUpdateChecks,
+} from "../../lib/appUpdate";
 import { workflowHistoryClient } from "../../lib/workflowHistory";
 import {
   canvasDocumentRepository,
@@ -138,6 +142,23 @@ export function CanvasWorkspace() {
     const failed = results.find((result) => result.status === "rejected");
     if (failed?.status === "rejected") throw failed.reason;
   }, []);
+
+  useEffect(() => {
+    const unregister = registerAppUpdateBeforeInstallFlush(async () => {
+      const activeSession = sessions.current.get(activeId.current);
+      if (!activeSession?.isReady()) throw new Error("当前画布尚未加载完成，已暂停安装更新。");
+      await flushAll();
+    });
+    return () => {
+      unregister();
+    };
+  }, [flushAll]);
+
+  const activeCanvasReady = readyIds.has(activeCanvasId);
+  useEffect(() => {
+    if (!activeCanvasReady || !import.meta.env.PROD || !isDesktopRuntime()) return;
+    return startAutomaticAppUpdateChecks();
+  }, [activeCanvasReady]);
 
   useEffect(() => {
     const flush = () => {

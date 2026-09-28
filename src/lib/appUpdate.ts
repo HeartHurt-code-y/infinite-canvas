@@ -54,9 +54,17 @@ export interface AppUpdateCheckResult {
   readonly download?:
     ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
   readonly install?:
-    ((onProgress?: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
+    | ((
+        onProgress?: (event: AppUpdateProgressEvent) => void,
+        beforeInstall?: () => Promise<void>,
+      ) => Promise<void>)
+    | undefined;
   readonly downloadAndInstall?:
-    ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
+    | ((
+        onProgress: (event: AppUpdateProgressEvent) => void,
+        beforeInstall?: () => Promise<void>,
+      ) => Promise<void>)
+    | undefined;
 }
 
 export interface ResourceUpdateManifest {
@@ -94,6 +102,7 @@ export interface AppUpdateState {
   readonly reusedResourceBytes: number;
   readonly downloadedResourceBytes: number;
   readonly error: string | null;
+  readonly recoveryAction?: "retry-install" | "restart-only" | "restart-to-recheck" | null;
 }
 
 const INITIAL_STATE: AppUpdateState = {
@@ -108,6 +117,7 @@ const INITIAL_STATE: AppUpdateState = {
   reusedResourceBytes: 0,
   downloadedResourceBytes: 0,
   error: null,
+  recoveryAction: null,
 };
 
 const listeners = new Set<() => void>();
@@ -121,6 +131,35 @@ let pendingInstall: AppUpdateCheckResult["install"];
 let pendingUpdateRequiresRuntimeComponents = false;
 let pendingResourceManifest: PrepareRuntimeResourcesRequest | null = null;
 let checkInFlight: Promise<void> | null = null;
+let automaticallyAttemptedVersion: string | null = null;
+let beforeInstallFlush: (() => Promise<void>) | null = null;
+let blockedWorkspace: HTMLElement | null = null;
+
+export function registerAppUpdateBeforeInstallFlush(flush: () => Promise<void>): () => void {
+  beforeInstallFlush = flush;
+  return () => {
+    if (beforeInstallFlush === flush) beforeInstallFlush = null;
+  };
+}
+
+async function flushBeforeInstallingUpdate(): Promise<void> {
+  if (!beforeInstallFlush) throw new Error("画布保存入口尚未准备好，已取消自动安装。请稍后重试。");
+  if (!blockedWorkspace && typeof document !== "undefined") {
+    // The root does not have a React-controlled inert prop, so subsequent
+    // workspace renders cannot clear this lock while an installer is running.
+    const panel = document.querySelector<HTMLElement>(".multi-canvas-workspace");
+    if (panel && !panel.hasAttribute("inert")) {
+      panel.setAttribute("inert", "");
+      blockedWorkspace = panel;
+    }
+  }
+  await beforeInstallFlush();
+}
+
+function unblockWorkspaceAfterInstallFailure(): void {
+  blockedWorkspace?.removeAttribute("inert");
+  blockedWorkspace = null;
+}
 
 /** The slim NSIS package depends on resources copied by a previous full install. */
 export function windowsUpdatePackageKind(
@@ -178,7 +217,7 @@ function isInstallingUpdate(): boolean {
   return (
     state.status === "preparing" ||
     state.status === "downloading" ||
-    state.status === "ready" ||
+    (state.status === "ready" && state.error === null) ||
     state.status === "restarting"
   );
 }
@@ -220,6 +259,9 @@ export function resetAppUpdateStateForTests(): void {
   pendingInstall = undefined;
   pendingUpdateRequiresRuntimeComponents = false;
   pendingResourceManifest = null;
+  automaticallyAttemptedVersion = null;
+  beforeInstallFlush = null;
+  unblockWorkspaceAfterInstallFailure();
   state = INITIAL_STATE;
   emit();
 }
@@ -227,7 +269,7 @@ export function resetAppUpdateStateForTests(): void {
 export async function loadCurrentAppVersion(): Promise<string> {
   try {
     const version = await client.getCurrentVersion();
-    patch({ currentVersion: version, error: state.status === "error" ? state.error : null });
+    patch({ currentVersion: version });
     return version;
   } catch (error) {
     const message = describeUpdateError(error);
@@ -286,6 +328,9 @@ async function performAppUpdateCheck(options?: {
     if (availableVersion === "") {
       throw new Error("更新源返回了空版本号。");
     }
+    // A failed automatic attempt needs visible feedback and a deliberate retry.
+    // Periodic checks may still discover a later release without looping the installer.
+    if (automaticallyAttemptedVersion === availableVersion && state.error !== null) return;
     pendingDownload = result.downloadAndInstall ?? undefined;
     pendingDownloadOnly = result.download ?? undefined;
     pendingInstall = result.install ?? undefined;
@@ -301,9 +346,10 @@ async function performAppUpdateCheck(options?: {
       downloadedBytes: 0,
       totalBytes: 0,
       error: null,
+      recoveryAction: null,
     });
-    if (pendingDownloadOnly && pendingInstall && readSkippedVersion() !== availableVersion) {
-      // Download in the background; installation waits for the user's restart.
+    if (automaticallyAttemptedVersion !== availableVersion) {
+      automaticallyAttemptedVersion = availableVersion;
       void installAvailableAppUpdate();
     }
   } catch (error) {
@@ -353,6 +399,8 @@ export async function installAvailableAppUpdate(): Promise<void> {
   const generation = ++downloadGeneration;
   let downloadedBytes = 0;
   let totalBytes = 0;
+  let combinedInstallStarted = false;
+  let combinedInstallSucceeded = false;
   try {
     if (pendingUpdateRequiresRuntimeComponents) {
       patch({
@@ -386,8 +434,14 @@ export async function installAvailableAppUpdate(): Promise<void> {
       }
       if (generation !== downloadGeneration) return;
     }
-    patch({ status: "downloading", downloadedBytes: 0, totalBytes: 0, error: null });
-    await download((event) => {
+    patch({
+      status: "downloading",
+      downloadedBytes: 0,
+      totalBytes: 0,
+      error: null,
+      recoveryAction: null,
+    });
+    const onDownloadProgress = (event: AppUpdateProgressEvent) => {
       if (generation !== downloadGeneration) return;
       if (event.event === "Started") {
         totalBytes = event.data?.contentLength ?? 0;
@@ -401,7 +455,18 @@ export async function installAvailableAppUpdate(): Promise<void> {
         return;
       }
       patch({ status: "downloading", downloadedBytes, totalBytes });
-    });
+    };
+    if (splitDownload) {
+      await splitDownload(onDownloadProgress);
+    } else {
+      // Legacy combined clients can enter the installer inside this call.
+      // Block editing before it starts and ask the client to flush again
+      // immediately before its native install operation.
+      await flushBeforeInstallingUpdate();
+      combinedInstallStarted = true;
+      await download(onDownloadProgress, flushBeforeInstallingUpdate);
+      combinedInstallSucceeded = true;
+    }
     if (generation !== downloadGeneration) return;
     if (splitDownload) {
       patch({
@@ -410,6 +475,7 @@ export async function installAvailableAppUpdate(): Promise<void> {
         totalBytes,
         error: null,
       });
+      await relaunchAfterAppUpdate();
       return;
     }
     const needsManualRelaunch = await client.needsManualRelaunch();
@@ -420,38 +486,98 @@ export async function installAvailableAppUpdate(): Promise<void> {
       totalBytes,
       error: null,
     });
+    if (needsManualRelaunch) await relaunchAfterAppUpdate();
   } catch (error) {
     if (generation !== downloadGeneration) return;
-    patch({ status: "error", error: describeUpdateError(error) });
+    unblockWorkspaceAfterInstallFailure();
+    if (combinedInstallSucceeded) {
+      pendingDownload = undefined;
+      patch({ status: "ready", error: describeUpdateError(error), recoveryAction: "restart-only" });
+    } else if (combinedInstallStarted) {
+      pendingDownload = undefined;
+      pendingDownloadOnly = undefined;
+      pendingInstall = undefined;
+      patch({
+        status: "error",
+        error: `安装结果尚不确定，请重启应用后重新检查更新：${describeUpdateError(error)}`,
+        recoveryAction: "restart-to-recheck",
+      });
+    } else {
+      patch({
+        status: "error",
+        error: describeUpdateError(error),
+        recoveryAction: "retry-install",
+      });
+    }
   }
 }
 
 export async function relaunchAfterAppUpdate(): Promise<void> {
-  if (state.status !== "ready") return;
+  if (
+    state.status !== "ready" &&
+    !(state.status === "error" && state.recoveryAction === "restart-to-recheck")
+  )
+    return;
+  const hasInstaller = pendingInstall != null;
+  const recoveryAction = state.recoveryAction;
+  let flushFailed = false;
+  let installSucceeded = false;
+  const flush = async () => {
+    try {
+      await flushBeforeInstallingUpdate();
+    } catch (error) {
+      flushFailed = true;
+      throw error;
+    }
+  };
   patch({ status: "restarting", error: null });
   try {
     if (pendingInstall) {
       let fallbackDownloadedBytes = 0;
+      await flush();
       await pendingInstall((event) => {
         if (event.event === "Started") {
           fallbackDownloadedBytes = 0;
           patch({
-            status: "downloading",
+            status: "restarting",
             downloadedBytes: 0,
             totalBytes: event.data?.contentLength ?? 0,
           });
         } else if (event.event === "Progress") {
           fallbackDownloadedBytes += event.data?.chunkLength ?? 0;
-          patch({ status: "downloading", downloadedBytes: fallbackDownloadedBytes });
+          patch({ status: "restarting", downloadedBytes: fallbackDownloadedBytes });
         } else {
           patch({ status: "restarting" });
         }
-      });
+      }, flush);
+      installSucceeded = true;
+      pendingInstall = undefined;
+      pendingDownload = undefined;
+      pendingDownloadOnly = undefined;
       if (!(await client.needsManualRelaunch())) return;
     }
+    if (!hasInstaller) await flush();
     await client.relaunch();
   } catch (error) {
-    patch({ status: "ready", error: describeUpdateError(error) });
+    unblockWorkspaceAfterInstallFailure();
+    if (hasInstaller && !installSucceeded && !flushFailed) {
+      pendingInstall = undefined;
+      pendingDownload = undefined;
+      pendingDownloadOnly = undefined;
+      patch({
+        status: "error",
+        error: `安装结果尚不确定，请重启应用后重新检查更新：${describeUpdateError(error)}`,
+        recoveryAction: "restart-to-recheck",
+      });
+    } else if (!hasInstaller && recoveryAction === "restart-to-recheck") {
+      patch({ status: "error", error: describeUpdateError(error), recoveryAction });
+    } else {
+      patch({
+        status: "ready",
+        error: describeUpdateError(error),
+        recoveryAction: installSucceeded || !hasInstaller ? "restart-only" : "retry-install",
+      });
+    }
   }
 }
 
@@ -667,10 +793,11 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
           await update.download(reportDownload(onProgress));
           fullDownloaded = true;
         },
-        install: async (onProgress) => {
+        install: async (onProgress, beforeInstall) => {
           if (macDeltaPrepared) {
             const { invoke } = await import("@tauri-apps/api/core");
             try {
+              await beforeInstall?.();
               await invoke("install_prepared_macos_delta_update", { version: update.version });
               return;
             } catch (error) {
@@ -687,10 +814,13 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
             await update.download(reportDownload(onProgress ?? (() => undefined)));
             fullDownloaded = true;
           }
+          await beforeInstall?.();
           await update.install();
         },
-        downloadAndInstall: async (onProgress) => {
-          await update.downloadAndInstall(reportDownload(onProgress));
+        downloadAndInstall: async (onProgress, beforeInstall) => {
+          await update.download(reportDownload(onProgress));
+          await beforeInstall?.();
+          await update.install();
         },
       };
     },

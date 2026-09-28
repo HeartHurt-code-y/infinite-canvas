@@ -1,6 +1,4 @@
 import { Icon } from "../../components/Icon";
-import { useEffect } from "react";
-import { isDesktopRuntime } from "../../lib/backend";
 import {
   dismissAvailableAppUpdate,
   downloadPercent,
@@ -9,18 +7,12 @@ import {
   installAvailableAppUpdate,
   relaunchAfterAppUpdate,
   shouldShowUpdateBanner,
-  startAutomaticAppUpdateChecks,
   useAppUpdate,
   type AppUpdateState,
 } from "../../lib/appUpdate";
 
 export function AppUpdateBanner() {
   const snapshot = useAppUpdate();
-
-  useEffect(() => {
-    if (!import.meta.env.PROD || !isDesktopRuntime()) return;
-    return startAutomaticAppUpdateChecks();
-  }, []);
 
   if (!shouldShowUpdateBanner(snapshot)) return null;
 
@@ -47,7 +39,7 @@ export function AppUpdateBanner() {
         }
       />
       <div className="app-update-banner__copy">
-        <strong>{bannerTitle(snapshot.status, snapshot.availableVersion)}</strong>
+        <strong>{bannerTitle(snapshot.status, snapshot.availableVersion, snapshot.error)}</strong>
         <span>{bannerDetail(snapshot)}</span>
       </div>
       {bannerActions(snapshot)}
@@ -55,17 +47,21 @@ export function AppUpdateBanner() {
   );
 }
 
-function bannerTitle(status: AppUpdateState["status"], availableVersion: string | null): string {
-  if (status === "error") return "更新失败";
+function bannerTitle(
+  status: AppUpdateState["status"],
+  availableVersion: string | null,
+  error: string | null,
+): string {
+  if (error || status === "error") return "更新失败";
   if (status === "preparing") return "正在校验并准备运行资源";
   if (status === "downloading") return "正在下载更新";
-  if (status === "ready") return "更新已下载完成";
+  if (status === "ready") return "更新等待安装";
   if (status === "restarting") return "正在完成安装";
   return availableVersion ? `发现新版本 ${availableVersion}` : "发现新版本";
 }
 
 function bannerDetail(snapshot: AppUpdateState): string {
-  if (snapshot.status === "error" && snapshot.error) return snapshot.error;
+  if (snapshot.error) return snapshot.error;
   if (snapshot.status === "preparing") {
     return snapshot.totalPreparationBytes > 0
       ? `${formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)}；复用 ${formatByteSize(snapshot.reusedResourceBytes)}，下载 ${formatByteSize(snapshot.downloadedResourceBytes)}。`
@@ -74,7 +70,7 @@ function bannerDetail(snapshot: AppUpdateState): string {
   if (snapshot.status === "downloading") {
     return formatDownloadProgress(snapshot.downloadedBytes, snapshot.totalBytes);
   }
-  if (snapshot.status === "ready") return "更新已准备好，点击安装并重启后使用新版本。";
+  if (snapshot.status === "ready") return "更新已下载完成，正在安装并重启应用。";
   if (snapshot.status === "restarting") return "安装程序会自动重启应用。";
   return "直接升级，不必卸载重装。";
 }
@@ -110,7 +106,7 @@ function bannerActions(snapshot: AppUpdateState) {
           void relaunchAfterAppUpdate();
         }}
       >
-        安装并重启
+        {snapshot.recoveryAction === "restart-only" ? "仅重启" : "重试安装并重启"}
       </button>
     );
   }
@@ -118,6 +114,13 @@ function bannerActions(snapshot: AppUpdateState) {
     return (
       <button type="button" disabled>
         正在重启…
+      </button>
+    );
+  }
+  if (snapshot.status === "error" && snapshot.recoveryAction === "restart-to-recheck") {
+    return (
+      <button type="button" onClick={() => void relaunchAfterAppUpdate()}>
+        重启应用后检查
       </button>
     );
   }

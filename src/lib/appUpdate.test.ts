@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   APP_UPDATE_CHECK_INTERVAL_MS,
   APP_UPDATE_FOCUS_THROTTLE_MS,
@@ -13,6 +13,7 @@ import {
   installAvailableAppUpdate,
   loadCurrentAppVersion,
   readResourceUpdateManifest,
+  registerAppUpdateBeforeInstallFlush,
   relaunchAfterAppUpdate,
   resetAppUpdateStateForTests,
   setAppUpdateClientForTests,
@@ -46,6 +47,10 @@ function completeDownload(
   onProgress({ event: "Finished" });
   return Promise.resolve();
 }
+
+beforeEach(() => {
+  registerAppUpdateBeforeInstallFlush(() => Promise.resolve());
+});
 
 afterEach(() => {
   vi.useRealTimers();
@@ -185,7 +190,7 @@ describe("appUpdate store", () => {
     });
   });
 
-  it("downloads an available update then relaunches", async () => {
+  it("automatically downloads an available update and relaunches", async () => {
     const downloadAndInstall = vi.fn((onProgress: (event: AppUpdateProgressEvent) => void) =>
       completeDownload(onProgress),
     );
@@ -205,25 +210,19 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate();
-    expect(getAppUpdateState()).toMatchObject({
-      status: "available",
-      availableVersion: "0.1.2",
-      notes: "修复升级",
-    });
-
-    await installAvailableAppUpdate();
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("restarting"));
     expect(downloadAndInstall).toHaveBeenCalledTimes(1);
     expect(getAppUpdateState()).toMatchObject({
-      status: "ready",
+      status: "restarting",
+      availableVersion: "0.1.2",
+      notes: "修复升级",
       downloadedBytes: 100,
       totalBytes: 100,
     });
-
-    await relaunchAfterAppUpdate();
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
-  it("quietly downloads changed resources and the installer but waits to install until restart", async () => {
+  it("quietly downloads changed resources, installs, and lets Windows restart the app", async () => {
     const order: string[] = [];
     const prepareRuntimeComponents = vi.fn(() => {
       order.push("resources");
@@ -257,15 +256,182 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate({ quiet: true });
-    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("ready"));
-    expect(order).toEqual(["resources", "download"]);
-    expect(install).not.toHaveBeenCalled();
-    await relaunchAfterAppUpdate();
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("restarting"));
     expect(order).toEqual(["resources", "download", "install"]);
     expect(relaunch).not.toHaveBeenCalled();
   });
 
-  it("does not prefetch a version the user skipped", async () => {
+  it("automatically installs a split macOS update and relaunches once", async () => {
+    const order: string[] = [];
+    const download = vi.fn(async (onProgress: (event: AppUpdateProgressEvent) => void) => {
+      order.push("download");
+      await completeDownload(onProgress);
+    });
+    const install = vi.fn(() => {
+      order.push("install");
+      return Promise.resolve();
+    });
+    const relaunch = vi.fn(() => {
+      order.push("relaunch");
+      return Promise.resolve();
+    });
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({ available: true, version: "0.1.11", download, install }),
+        ),
+        relaunch,
+      }),
+    );
+
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["download", "install", "relaunch"]);
+    expect(getAppUpdateState().status).toBe("restarting");
+    await checkForAppUpdate({ quiet: true });
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(install).toHaveBeenCalledTimes(1);
+  });
+
+  it("flushes the canvas after download and immediately before native install", async () => {
+    const order: string[] = [];
+    registerAppUpdateBeforeInstallFlush(async () => {
+      order.push("flush");
+    });
+    const relaunch = vi.fn(() => {
+      order.push("relaunch");
+      return Promise.resolve();
+    });
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.11",
+            download: async () => {
+              order.push("download");
+            },
+            install: async (
+              _progress?: (event: AppUpdateProgressEvent) => void,
+              beforeInstall?: () => Promise<void>,
+            ) => {
+              await beforeInstall?.();
+              order.push("install");
+            },
+          }),
+        ),
+        relaunch,
+      }),
+    );
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(relaunch).toHaveBeenCalledTimes(1));
+    expect(order).toEqual(["download", "flush", "flush", "install", "relaunch"]);
+  });
+
+  it("aborts installation and restart when the canvas flush fails", async () => {
+    registerAppUpdateBeforeInstallFlush(() => Promise.reject(new Error("画布保存失败")));
+    const install = vi.fn(() => Promise.resolve());
+    const relaunch = vi.fn(() => Promise.resolve());
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.11",
+            download: vi.fn(() => Promise.resolve()),
+            install,
+          }),
+        ),
+        relaunch,
+      }),
+    );
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().error).toBe("画布保存失败"));
+    expect(getAppUpdateState()).toMatchObject({ status: "ready", recoveryAction: "retry-install" });
+    expect(install).not.toHaveBeenCalled();
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("never enters a combined Windows installer when the canvas flush fails", async () => {
+    registerAppUpdateBeforeInstallFlush(() => Promise.reject(new Error("画布保存失败")));
+    const downloadAndInstall = vi.fn(() => Promise.resolve());
+    const relaunch = vi.fn(() => Promise.resolve());
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({ available: true, version: "0.1.11", downloadAndInstall }),
+        ),
+        relaunch,
+      }),
+    );
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().error).toBe("画布保存失败"));
+    expect(downloadAndInstall).not.toHaveBeenCalled();
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("retries only relaunch after installation succeeds", async () => {
+    const install = vi.fn(() => Promise.resolve());
+    const relaunch = vi
+      .fn()
+      .mockRejectedValueOnce(new Error("重启失败"))
+      .mockResolvedValueOnce(undefined);
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.11",
+            download: vi.fn(() => Promise.resolve()),
+            install,
+          }),
+        ),
+        relaunch,
+      }),
+    );
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().error).toBe("重启失败"));
+    expect(getAppUpdateState().recoveryAction).toBe("restart-only");
+    await loadCurrentAppVersion();
+    expect(getAppUpdateState().error).toBe("重启失败");
+    registerAppUpdateBeforeInstallFlush(() => Promise.reject(new Error("二次保存失败")));
+    await relaunchAfterAppUpdate();
+    expect(getAppUpdateState().error).toBe("二次保存失败");
+    expect(relaunch).toHaveBeenCalledTimes(1);
+    registerAppUpdateBeforeInstallFlush(() => Promise.resolve());
+    await relaunchAfterAppUpdate();
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(relaunch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not repeat an uncertain split installer on the next quiet check", async () => {
+    const install = vi.fn(() => Promise.reject(new Error("MAC_DELTA_INSTALL: 安装器返回错误")));
+    const relaunch = vi.fn(() => Promise.resolve());
+    const check = vi.fn(() =>
+      Promise.resolve({
+        available: true,
+        version: "0.1.11",
+        download: vi.fn(() => Promise.resolve()),
+        install,
+      }),
+    );
+    setAppUpdateClientForTests(mockClient({ check, relaunch }));
+
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("error"));
+    expect(getAppUpdateState().error).toContain("安装结果尚不确定");
+    expect(getAppUpdateState().recoveryAction).toBe("restart-to-recheck");
+    await checkForAppUpdate({ quiet: true });
+    expect(check).toHaveBeenCalledTimes(2);
+    expect(install).toHaveBeenCalledTimes(1);
+    expect(getAppUpdateState().error).toContain("安装结果尚不确定");
+    registerAppUpdateBeforeInstallFlush(() => Promise.reject(new Error("二次保存失败")));
+    await relaunchAfterAppUpdate();
+    expect(relaunch).not.toHaveBeenCalled();
+    expect(getAppUpdateState().recoveryAction).toBe("restart-to-recheck");
+  });
+
+  it("automatically updates even if the same version was previously postponed", async () => {
     window.localStorage.setItem(SKIPPED_UPDATE_STORAGE_KEY, "0.1.10");
     const download = vi.fn(() => Promise.resolve());
     setAppUpdateClientForTests(
@@ -276,8 +442,8 @@ describe("appUpdate store", () => {
       }),
     );
     await checkForAppUpdate({ quiet: true });
-    expect(download).not.toHaveBeenCalled();
-    expect(getAppUpdateState().status).toBe("available");
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("restarting"));
+    expect(download).toHaveBeenCalledTimes(1);
   });
 
   it("lets the Windows installer restart the app without a second relaunch", async () => {
@@ -295,8 +461,7 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate();
-    await installAvailableAppUpdate();
-    expect(getAppUpdateState().status).toBe("restarting");
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("restarting"));
   });
 
   it("waits for persistent runtimes before downloading a small installer", async () => {
@@ -353,7 +518,6 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate();
-    const install = installAvailableAppUpdate();
     expect(getAppUpdateState()).toMatchObject({
       status: "preparing",
       preparedBytes: 2,
@@ -361,9 +525,8 @@ describe("appUpdate store", () => {
     });
     expect(downloadAndInstall).not.toHaveBeenCalled();
     finishMigration?.();
-    await install;
+    await vi.waitFor(() => expect(downloadAndInstall).toHaveBeenCalledTimes(1));
     expect(waitForRuntimeComponents).toHaveBeenCalledTimes(1);
-    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
   });
 
   it("keeps the existing install when runtime migration fails", async () => {
@@ -383,7 +546,7 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate();
-    await installAvailableAppUpdate();
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("error"));
     expect(downloadAndInstall).not.toHaveBeenCalled();
     expect(getAppUpdateState()).toMatchObject({ status: "error", error: "磁盘空间不足" });
     expect(shouldShowUpdateBanner(getAppUpdateState())).toBe(true);
@@ -407,10 +570,10 @@ describe("appUpdate store", () => {
     );
 
     await checkForAppUpdate();
-    await installAvailableAppUpdate();
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("restarting"));
     expect(waitForRuntimeComponents).not.toHaveBeenCalled();
     expect(downloadAndInstall).toHaveBeenCalledTimes(1);
-    expect(getAppUpdateState().status).toBe("ready");
+    expect(getAppUpdateState().status).toBe("restarting");
   });
 
   it("prepares signed changed resources before downloading the small installer", async () => {
@@ -459,7 +622,7 @@ describe("appUpdate store", () => {
       }),
     );
     await checkForAppUpdate();
-    await installAvailableAppUpdate();
+    await vi.waitFor(() => expect(order).toEqual(["resources", "installer"]));
     expect(prepareRuntimeComponents).toHaveBeenCalledWith(
       {
         version: "0.1.10",
@@ -537,7 +700,7 @@ describe("appUpdate store", () => {
     await vi.advanceTimersByTimeAsync(APP_UPDATE_CHECK_INTERVAL_MS);
     expect(check).toHaveBeenCalledTimes(2);
     expect(getAppUpdateState()).toMatchObject({
-      status: "available",
+      status: "restarting",
       availableVersion: "0.1.8",
     });
 
@@ -577,32 +740,26 @@ describe("appUpdate store", () => {
     stop();
   });
 
-  it("keeps an active install intact when an earlier quiet check finishes", async () => {
-    let resolveRefresh: ((value: { available: boolean }) => void) | undefined;
-    const refresh = new Promise<{ available: boolean }>((resolve) => {
-      resolveRefresh = resolve;
-    });
-    const check = vi
+  it("does not loop an automatic install after failure but allows a manual retry", async () => {
+    const download = vi
       .fn()
-      .mockResolvedValueOnce({
-        available: true,
-        version: "0.1.8",
-        downloadAndInstall: vi.fn(() => Promise.resolve()),
-      })
-      .mockReturnValueOnce(refresh);
+      .mockRejectedValueOnce(new Error("网络中断"))
+      .mockResolvedValueOnce(undefined);
+    const check = vi.fn(() =>
+      Promise.resolve({ available: true, version: "0.1.8", download, install: vi.fn() }),
+    );
     setAppUpdateClientForTests(mockClient({ check }));
 
-    await checkForAppUpdate();
-    const pendingRefresh = checkForAppUpdate({ quiet: true });
-    expect(checkForAppUpdate({ quiet: true })).toBe(pendingRefresh);
-    expect(getAppUpdateState().status).toBe("available");
-
-    await installAvailableAppUpdate();
-    expect(getAppUpdateState().status).toBe("ready");
-    resolveRefresh?.({ available: false });
-    await pendingRefresh;
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("error"));
+    expect(getAppUpdateState().error).toBe("网络中断");
     await checkForAppUpdate({ quiet: true });
     expect(check).toHaveBeenCalledTimes(2);
-    expect(getAppUpdateState().status).toBe("ready");
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(getAppUpdateState().error).toBe("网络中断");
+
+    await installAvailableAppUpdate();
+    expect(download).toHaveBeenCalledTimes(2);
+    expect(getAppUpdateState().status).toBe("restarting");
   });
 });

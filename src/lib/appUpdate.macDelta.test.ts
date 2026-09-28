@@ -127,9 +127,11 @@ describe("macOS delta update client", () => {
     });
     const result = await createDesktopAppUpdateClient().check();
     await result.download?.(() => undefined);
-    await result.install?.(() => undefined);
+    const beforeInstall = vi.fn(() => Promise.resolve());
+    await result.install?.(() => undefined, beforeInstall);
     expect(full.download).toHaveBeenCalledTimes(1);
     expect(full.install).toHaveBeenCalledTimes(1);
+    expect(beforeInstall).toHaveBeenCalledTimes(2);
   });
 
   it("does not start a second installer after an unknown native install failure", async () => {

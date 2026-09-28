@@ -91,13 +91,16 @@ workflows:
           if [ -n "${APPLE_CERTIFICATE:-}" ]; then
             node scripts/macos-signing-identity.mjs --require-distribution
           else
-            node scripts/macos-signing-identity.mjs
+            printf 'APPLE_SIGNING_IDENTITY=-\nINFINITE_CANVAS_SIGNING_IDENTITY_SOURCE=ad-hoc\n' >> "$CM_ENV"
             echo "未提供 Developer ID 证书，使用 ad-hoc 签名；首次安装可能需要手动处理 Gatekeeper。"
           fi
       - name: Build macOS installer
         script: |
           set -euo pipefail
           export PATH="$HOME/.cargo/bin:$PATH"
+          if [ -z "${APPLE_CERTIFICATE:-}" ]; then
+            export APPLE_SIGNING_IDENTITY="-"
+          fi
           pnpm tauri:build
       - name: Verify signed macOS bundle
         script: |

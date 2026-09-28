@@ -32,7 +32,7 @@ export function AppUpdateSettings() {
           <strong id="app-update-settings-title">应用升级</strong>
           <p>
             新版本可以直接安装，不必手动卸载。画布、密钥和素材库在用户数据目录，升级不会清掉。
-            首次安装包含完整本地引擎；后续更新会在后台复用已有资源，只下载变化的文件和较小的程序包，准备好后提示安装并重启。
+            首次安装包含完整本地引擎；后续更新会在后台复用已有资源，只下载变化的文件和较小的程序包，检测到新版本后自动安装并重启应用。
           </p>
         </div>
         <span className="tos-status-badge" data-state={badge.state}>
@@ -105,8 +105,9 @@ function statusBadge(
             : "正在下载",
     };
   }
+  if (snapshot.error) return { state: "unconfigured", text: "更新失败" };
   if (snapshot.status === "ready" || snapshot.status === "restarting") {
-    return { state: "enabled", text: "待安装" };
+    return { state: "enabled", text: snapshot.status === "restarting" ? "正在安装" : "待安装" };
   }
   if (snapshot.status === "available") return { state: "enabled", text: "有新版本" };
   if (snapshot.status === "current") return { state: "enabled", text: "已是最新" };
@@ -145,7 +146,23 @@ function actionButtons(snapshot: AppUpdateState, desktop: boolean) {
         ) : (
           <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
         )}
-        {snapshot.status === "restarting" ? "正在安装…" : "安装并重启"}
+        {snapshot.status === "restarting"
+          ? "正在安装…"
+          : snapshot.recoveryAction === "restart-only"
+            ? "仅重启应用"
+            : "重试安装并重启"}
+      </button>
+    );
+  }
+  if (snapshot.status === "error" && snapshot.recoveryAction === "restart-to-recheck") {
+    return (
+      <button
+        type="button"
+        className="provider-fetch-action"
+        onClick={() => void relaunchAfterAppUpdate()}
+      >
+        <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
+        重启应用后检查
       </button>
     );
   }
