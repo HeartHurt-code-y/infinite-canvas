@@ -16,6 +16,8 @@ coverage
 .firecrawl/
 *.tsbuildinfo
 *.local
+__pycache__/
+*.pyc
 
 # Editor directories and files
 .vscode/*

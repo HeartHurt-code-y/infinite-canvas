@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -22,6 +23,10 @@ import {
   collectLegacyChannelPlatforms,
   immutableObjectMatches,
   collectRuntimeResourceObjects,
+  collectMacDeltaObjects,
+  macDeltaTransferIsSmaller,
+  assertMacDeltaMatchesFullArchive,
+  inventoryMacFullArchive,
   tosFetch,
 } from "./publish-tos-updates.mjs";
 import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
@@ -42,6 +47,7 @@ test("publish file picker keeps updater artifacts, signatures and first-install 
     mkdirSync(path.join(dir, "helper"));
     mkdirSync(path.join(dir, "dmg"));
     mkdirSync(path.join(dir, "resources", "0.1.1", "windows-x86_64"), { recursive: true });
+    mkdirSync(path.join(dir, "mac-delta", "objects"), { recursive: true });
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz"), "pkg");
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz.sig"), "sig");
     writeFileSync(path.join(dir, "nsis", "无限画布_0.1.1_x64-setup.exe"), "exe");
@@ -53,6 +59,8 @@ test("publish file picker keeps updater artifacts, signatures and first-install 
       path.join(dir, "resources", "0.1.1", "windows-x86_64", "manifest.json.sig"),
       "resource-sig",
     );
+    writeFileSync(path.join(dir, "mac-delta", "manifest.json.sig"), "delta-sig");
+    writeFileSync(path.join(dir, "mac-delta", "objects", "a".repeat(64)), "object");
     const picked = collectPublishFilePaths(dir).map((filePath) => path.basename(filePath));
     assert.deepEqual(
       new Set(picked),
@@ -166,6 +174,17 @@ test("promotion requires matching platform feeds and never rolls a channel back"
     () =>
       checkChannelManifest(latest, {
         ...latest,
+        macDeltaManifest: {
+          url: "https://cdn.example/mac-delta/manifest.json",
+          signature: "signed",
+        },
+      }),
+    /同版覆盖/,
+  );
+  assert.throws(
+    () =>
+      checkChannelManifest(latest, {
+        ...latest,
         resourceManifest: {
           url: "https://cdn.example/resources/manifest.json",
           signature: "signed",
@@ -178,6 +197,126 @@ test("promotion requires matching platform feeds and never rolls a channel back"
     pubDate: undefined,
   });
   assert.equal(compareReleaseVersions("0.1.10", "0.1.9"), 1);
+});
+
+test("macOS delta publication accepts only a signed-version target tree and changed objects", () => {
+  const url =
+    "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/mac-delta/objects/";
+  const digest = "a".repeat(64);
+  const manifest = {
+    schemaVersion: 1,
+    baseVersion: "0.1.10",
+    version: "0.1.11",
+    platform: "darwin-aarch64",
+    appName: "无限画布.app",
+    objectBaseUrl: url,
+    files: [
+      { path: "Contents", kind: "dir", mode: 0o755 },
+      { path: "Contents/MacOS", kind: "dir", mode: 0o755 },
+      {
+        path: "Contents/MacOS/无限画布",
+        kind: "file",
+        size: 3,
+        sha256: digest,
+        mode: 0o755,
+        source: "object",
+      },
+    ],
+  };
+  assert.deepEqual(collectMacDeltaObjects(manifest, "0.1.11", url), [{ sha256: digest, size: 3 }]);
+  assert.throws(() => collectMacDeltaObjects(manifest, "0.1.12", url), /版本/);
+  assert.throws(() => collectMacDeltaObjects(manifest, "0.1.11", `${url}wrong/`), /地址/);
+  assert.throws(
+    () =>
+      collectMacDeltaObjects(
+        { ...manifest, files: [...manifest.files, { ...manifest.files[2], path: "../escape" }] },
+        "0.1.11",
+        url,
+      ),
+    /路径/,
+  );
+});
+
+test("macOS delta sidecar is omitted when changed objects cost at least a full archive", () => {
+  const changed = [{ size: 90 }, { size: 5 }];
+  assert.equal(macDeltaTransferIsSmaller(changed, 3, 1, 100), true);
+  assert.equal(macDeltaTransferIsSmaller(changed, 4, 1, 100), false);
+  assert.equal(macDeltaTransferIsSmaller(changed, 4, 2, 100), false);
+});
+
+test("macOS delta target tree must exactly match the independently built full archive", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "mac-delta-full-bind-"));
+  try {
+    const app = path.join(root, "无限画布.app");
+    mkdirSync(path.join(app, "Contents", "MacOS"), { recursive: true });
+    const executable = path.join(app, "Contents", "MacOS", "无限画布");
+    writeFileSync(executable, "release-A");
+    const archive = path.join(root, "full.app.tar.gz");
+    const python = process.platform === "win32" ? "python" : "python3";
+    const create = spawnSync(
+      python,
+      [
+        "-c",
+        "import tarfile,sys\nwith tarfile.open(sys.argv[2], 'w:gz') as archive:\n    archive.add(sys.argv[1], arcname='无限画布.app')\n",
+        app,
+        archive,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(create.status, 0, create.stderr);
+    const files = (await inventoryMacFullArchive(archive, "无限画布.app")).map((entry) =>
+      entry.kind === "file" ? { ...entry, source: "object" } : entry,
+    );
+    await assert.doesNotReject(
+      assertMacDeltaMatchesFullArchive(archive, { appName: "无限画布.app", files }),
+    );
+    writeFileSync(executable, "release-B");
+    const changedArchive = path.join(root, "changed.app.tar.gz");
+    const changed = spawnSync(
+      python,
+      [
+        "-c",
+        "import tarfile,sys\nwith tarfile.open(sys.argv[2], 'w:gz') as archive:\n    archive.add(sys.argv[1], arcname='无限画布.app')\n",
+        app,
+        changedArchive,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(changed.status, 0, changed.stderr);
+    await assert.rejects(
+      assertMacDeltaMatchesFullArchive(changedArchive, { appName: "无限画布.app", files }),
+      /目标文件树与完整 updater 包不一致/,
+    );
+    const extraArchive = path.join(root, "extra.app.tar.gz");
+    const extra = spawnSync(
+      python,
+      [
+        "-c",
+        "import tarfile,sys\nwith tarfile.open(sys.argv[2], 'w:gz') as archive:\n    archive.add(sys.argv[1], arcname='无限画布.app')\n    archive.add(sys.argv[3], arcname='other.app/escape')\n",
+        app,
+        extraArchive,
+        executable,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(extra.status, 0, extra.stderr);
+    await assert.rejects(inventoryMacFullArchive(extraArchive, "无限画布.app"), /意外顶层路径/);
+    const privilegedArchive = path.join(root, "privileged.app.tar.gz");
+    const privileged = spawnSync(
+      python,
+      [
+        "-c",
+        "import tarfile,sys\ndef mark(info):\n    if info.name.endswith('/Contents/MacOS/无限画布'): info.mode |= 0o4000\n    return info\nwith tarfile.open(sys.argv[2], 'w:gz') as archive:\n    archive.add(sys.argv[1], arcname='无限画布.app', filter=mark)\n",
+        app,
+        privilegedArchive,
+      ],
+      { encoding: "utf8" },
+    );
+    assert.equal(privileged.status, 0, privileged.stderr);
+    await assert.rejects(inventoryMacFullArchive(privilegedArchive, "无限画布.app"), /特权权限位/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("content-addressed objects deduplicate identical bytes without losing component paths", () => {

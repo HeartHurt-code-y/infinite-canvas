@@ -13,6 +13,7 @@ mod gpt_image_style_library;
 pub mod image_normalize;
 pub mod local_results;
 pub mod local_base64_assets;
+pub mod mac_delta_update;
 pub mod material_transfer;
 pub mod media;
 pub mod media_cache;

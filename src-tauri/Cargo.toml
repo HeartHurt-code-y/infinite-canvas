@@ -68,6 +68,8 @@ ffmpeg-sidecar = "2.5.2"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 # 凭据自检需要在系统临时目录建一个一次性凭据文件（不碰用户数据）。
 tempfile = "3"
+tar = "0.4"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }
