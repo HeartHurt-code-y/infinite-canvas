@@ -1,0 +1,147 @@
+.reelbench__configuration,
+.reelbench__deliverables {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.reelbench__configuration > label,
+.reelbench__settings > label,
+.reelbench__shot-editor > label,
+.reelbench__recut > label {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.reelbench__configuration input,
+.reelbench__configuration select,
+.reelbench__shot-editor input,
+.reelbench__shot-editor select,
+.reelbench__shot-editor textarea,
+.reelbench__recut input,
+.reelbench__recut select {
+  min-width: 0;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.reelbench__source,
+.reelbench__actions,
+.reelbench__summary,
+.reelbench__pagination {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.reelbench__summary {
+  justify-content: space-between;
+}
+
+.reelbench__settings {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(145px, 1fr));
+  gap: 10px;
+}
+
+.reelbench__checkbox {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+}
+
+.reelbench__checkbox input {
+  width: auto;
+}
+
+.reelbench__deliverables video {
+  display: block;
+  width: min(100%, 620px);
+  margin-top: 8px;
+}
+
+.reelbench__recut {
+  display: grid;
+  grid-template-columns: minmax(120px, 1fr) auto minmax(120px, 1fr) auto;
+  align-items: end;
+  gap: 8px;
+}
+
+.reelbench__quality {
+  border: 1px solid var(--border-color, #444);
+  border-radius: 10px;
+  padding: 12px;
+}
+
+.reelbench__quality p {
+  margin: 5px 0;
+}
+
+.reelbench__shots {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr));
+  gap: 12px;
+  padding: 0;
+  margin: 0;
+}
+
+.reelbench__shots > li {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--border-color, #444);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.reelbench__shot-head {
+  display: flex;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.reelbench__frames {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.reelbench__frames img {
+  display: block;
+  width: 100%;
+  height: 145px;
+  object-fit: contain;
+  background: #111;
+  border-radius: 6px;
+}
+
+.reelbench__shot-editor {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  gap: 8px;
+}
+
+.reelbench__shot-editor > label:has(textarea),
+.reelbench__shot-editor > .reelbench__actions {
+  grid-column: 1 / -1;
+}
+
+.reelbench__pagination {
+  justify-content: center;
+}
+
+.reelbench__delivery {
+  display: grid;
+  gap: 8px;
+}
+
+@container (max-width: 650px) {
+  .reelbench__recut {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+}

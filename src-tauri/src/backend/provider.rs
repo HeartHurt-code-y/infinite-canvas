@@ -16,8 +16,9 @@ use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     model_schema::{
-        RequestDialect, apply_request_dialect, infer_catalog_schema, is_seedance_25_video_model,
-        operations_from_schema, provider_scoped_model_definition_id,
+        RequestDialect, apply_request_dialect, default_model_schema, infer_catalog_schema,
+        is_seedance_25_video_model, is_sp25_per_use_video_model, operations_from_schema,
+        provider_scoped_model_definition_id, sp25_per_use_limits,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
@@ -122,7 +123,7 @@ pub struct ResolvedProviderContext {
     pub adapter_id: String,
     pub base_url: String,
     pub api_key_ref: String,
-    api_key: String,
+    pub(crate) api_key: String,
 }
 
 /// 生成结果「直链二次下载」的鉴权与来源上下文。
@@ -1451,26 +1452,202 @@ impl ProviderRuntime {
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
-                let body = finalize_video_body(
-                    &context.adapter_id,
-                    &resolved.operation_schema,
-                    build_video_body(task, resolved)?,
-                );
+                let sp25_per_use =
+                    resolved.operation_schema["requestProfileId"] == "sp25_per_use_video_v1";
+                let body = if sp25_per_use {
+                    self.prepare_sp25_video_body(task, attempt_id, &context, resolved)
+                        .await?
+                } else {
+                    finalize_video_body(
+                        &context.adapter_id,
+                        &resolved.operation_schema,
+                        build_video_body(task, resolved)?,
+                    )
+                };
                 let path = request_path(&resolved.operation_schema, "/v1/video/generations")?;
-                let response = self
-                    .send_submission_json(task, attempt_id, &context, "submit", &path, body)
-                    .await?;
-                let task_id = parse_video_task_id(&response)?;
+                let response = if sp25_per_use {
+                    // 该系列只有文档字段；通用网关的「不认识字段就剥离重发」
+                    // 不得改变一次付费提交的请求体。
+                    self.captured_json(
+                        task,
+                        attempt_id,
+                        &context,
+                        CapturedJsonRequest {
+                            phase: "submit",
+                            method: Method::POST,
+                            path: &path,
+                            body: &body,
+                        },
+                    )
+                    .await
+                    .map_err(sp25_ambiguous_submission_error)?
+                } else {
+                    self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
+                        .await?
+                };
+                let task_id = if sp25_per_use {
+                    parse_sp25_video_task_id(&response)?
+                } else {
+                    parse_video_task_id(&response)?
+                };
                 Ok((GenerationSubmission::RemoteVideoTask { task_id }, response))
             }
             // 文本模型不通过生成任务管线提交：提示词优化等功能按各自流程直接调用
             // 文本接口适配层，不会构造 TextGeneration 的生成任务。此分支防御性拦截
             // 意外流入的任务，避免走到图片/视频的请求构造导致格式不匹配。
-            GenerationOperation::TextGeneration => Err(BackendError::validation(
-                "text generation is not a canvas generation task; it is invoked directly by text-model features",
-                json!({ "operation": task.operation.as_str(), "taskId": task.id }),
-            )),
+            GenerationOperation::TextGeneration | GenerationOperation::SpeechGeneration => {
+                Err(BackendError::validation(
+                    "text generation is not a canvas generation task; it is invoked directly by text-model features",
+                    json!({ "operation": task.operation.as_str(), "taskId": task.id }),
+                ))
+            }
         }
+    }
+
+    /// 按次系列的本地参考素材直接上传到生成平台。上传沿用任务冻结的连接和令牌；
+    /// URL 素材则原样透传。先完成所有不收费的校验，再发任何上传或生成请求。
+    async fn prepare_sp25_video_body(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        resolved: &ResolvedGeneration,
+    ) -> BackendResult<Value> {
+        let model = task.remote_model_id_snapshot.as_deref().ok_or_else(|| {
+            BackendError::validation("按次视频任务缺少模型 ID", json!({ "taskId": task.id }))
+        })?;
+        validate_sp25_video_request(model, resolved)?;
+        let mut images = Vec::with_capacity(resolved.images.len());
+        let mut audios = Vec::with_capacity(resolved.audios.len());
+        for media in &resolved.images {
+            images.push(
+                self.sp25_reference_url(task, attempt_id, context, media)
+                    .await?,
+            );
+        }
+        for media in &resolved.audios {
+            audios.push(
+                self.sp25_reference_url(task, attempt_id, context, media)
+                    .await?,
+            );
+        }
+        build_sp25_video_body(model, resolved, &images, &audios)
+    }
+
+    async fn sp25_reference_url(
+        &self,
+        task: &TaskExecutionRecord,
+        attempt_id: &str,
+        context: &ResolvedProviderContext,
+        media: &ResolvedMedia,
+    ) -> BackendResult<String> {
+        if let Some(bytes) = media.bytes.as_ref() {
+            let path = "/v1/assets/uploads";
+            let url = endpoint(&context.base_url, path)?;
+            let call_id = Uuid::new_v4().to_string();
+            self.lifecycle.commit(
+                &task.id,
+                GenerationLifecycleFact::ProviderCallPrepared {
+                    call_id: call_id.clone(),
+                    attempt_id: attempt_id.to_string(),
+                    phase: "upload".to_string(),
+                    request: json!({
+                        "providerConnectionId": context.provider_connection_id,
+                        "adapterId": context.adapter_id,
+                        "credentialReference": context.api_key_ref,
+                        "method": "POST",
+                        "url": sanitize_url(&url),
+                        "bodyType": "multipart",
+                        "file": {
+                            "field": "file",
+                            "fileName": media.file_name,
+                            "mimeType": media.mime_type,
+                            "byteSize": media.byte_size,
+                            "sha256": media.sha256,
+                            "stableIdentity": media.stable_identity,
+                        }
+                    }),
+                },
+            )?;
+            let part = multipart::Part::bytes(bytes.clone())
+                .file_name(media.file_name.clone())
+                .mime_str(&media.mime_type)
+                .map_err(BackendError::Transport)?;
+            let request = self
+                .client
+                .post(url)
+                .bearer_auth(&context.api_key)
+                .multipart(multipart::Form::new().part("file", part));
+            let response = self
+                .send_captured(
+                    &task.id,
+                    &call_id,
+                    &format!("POST / phase=upload / taskId={}", task.id),
+                    request,
+                )
+                .await?;
+            return parse_sp25_upload_url(&response);
+        }
+        let reference = media.remote_reference.as_deref().ok_or_else(|| {
+            BackendError::validation("按次视频参考素材缺少可上传字节或公网 URL", media.archive())
+        })?;
+        require_sp25_public_url(reference, media)?;
+        Ok(reference.to_string())
+    }
+
+    /// 已成功任务的签名下载 URL 可过期；只重查冻结任务，不重新提交收费请求。
+    pub(crate) async fn refresh_sp25_video_url(
+        &self,
+        task: &TaskExecutionRecord,
+    ) -> BackendResult<String> {
+        if !task
+            .remote_model_id_snapshot
+            .as_deref()
+            .is_some_and(is_sp25_per_use_video_model)
+        {
+            return Err(BackendError::validation(
+                "仅按次系列任务支持重新签发下载链接",
+                json!({ "taskId": task.id }),
+            ));
+        }
+        let remote_task_id = task.remote_task_id.as_deref().ok_or_else(|| {
+            BackendError::validation("远程任务 ID 缺失", json!({ "taskId": task.id }))
+        })?;
+        if !valid_sp25_task_id(remote_task_id) {
+            return Err(BackendError::validation(
+                "按次视频远程任务 ID 格式无效",
+                json!({ "taskId": task.id }),
+            ));
+        }
+        let context = self.resolve_frozen(task)?;
+        let path = checked_observe_path(format!("/v1/video/generations/{remote_task_id}"))?;
+        let response = self
+            .send_raw_json_request(&context, Method::GET, &path, &[], None, &[])
+            .await?;
+        if !(200..300).contains(&response.status) {
+            return Err(sp25_response_error(
+                response.status,
+                &response.body,
+                "查询按次视频任务失败",
+            ));
+        }
+        let payload: Value = serde_json::from_str(&response.body)?;
+        if payload.get("task_id").and_then(Value::as_str) != Some(remote_task_id)
+            || payload.get("status").and_then(Value::as_str) != Some("succeeded")
+        {
+            return Err(BackendError::protocol(
+                "按次视频任务尚未成功或返回了不匹配的任务身份",
+                json!({ "taskId": task.id, "remoteTaskId": remote_task_id, "response": redact_request_value(&payload) }),
+            ));
+        }
+        let fresh_url = extract_video_url(&payload).ok_or_else(|| {
+            BackendError::protocol(
+                "按次视频任务成功响应缺少下载链接",
+                json!({ "taskId": task.id, "remoteTaskId": remote_task_id }),
+            )
+        })?;
+        require_sp25_public_url_value(&fresh_url)?;
+        Ok(fresh_url)
     }
 
     pub async fn observe(
@@ -2722,6 +2899,24 @@ impl ProviderRuntime {
             .map(|provider| provider.adapter_id)
             .unwrap_or_default();
         let kind = ProviderAdapterKind::parse(&adapter_id);
+        if kind == Some(ProviderAdapterKind::DoubaoVoice) {
+            // OpenSpeech has no read-only model catalog/probe. A paid TTS request must not
+            // be sent just to test credentials; the first real synthesis validates them.
+            let credential = self.resolve_token_group(provider_connection_id, token_group);
+            return Ok(ConnectivityTestResult {
+                ok: false,
+                http_status: None,
+                elapsed_ms: elapsed_ms(),
+                reason: Some("generation-only-api".into()),
+                detail: Some(match credential {
+                    Ok(_) => {
+                        "豆包语音凭据已配置；官方语音接口没有免计费的连接探测，首次真实配音时验证。"
+                            .into()
+                    }
+                    Err(error) => error.to_string(),
+                }),
+            });
+        }
         let probe_query = kind
             .map(ProviderAdapterKind::catalog_probe_query)
             .unwrap_or_default();
@@ -2769,7 +2964,27 @@ impl ProviderRuntime {
             .unwrap_or_default();
         let dialect = RequestDialect::for_adapter(&adapter_id);
         let kind = ProviderAdapterKind::parse(&adapter_id);
-        let mut models = if let Some(kind) = kind.filter(|kind| kind.paginates_catalog()) {
+        let mut models = if kind == Some(ProviderAdapterKind::DoubaoVoice) {
+            // Resource ID is the official service identity, not an invented /models reply.
+            self.resolve_token_group(provider_connection_id, token_group)?;
+            vec![RemoteModelOption {
+                id: "seed-tts-2.0".into(),
+                model_definition_id: provider_scoped_model_definition_id(
+                    provider_connection_id,
+                    "seed-tts-2.0",
+                ),
+                display_name: "豆包语音 Seed-TTS 2.0".into(),
+                owned_by: Some("火山引擎豆包语音".into()),
+                has_configured_binding: false,
+                configured_operations: vec![],
+                suggested_operations: vec![GenerationOperation::SpeechGeneration],
+                operation_schema: default_model_schema(
+                    "seed-tts-2.0",
+                    &[GenerationOperation::SpeechGeneration],
+                ),
+                token_group: token_group.map(ToOwned::to_owned),
+            }]
+        } else if let Some(kind) = kind.filter(|kind| kind.paginates_catalog()) {
             self.list_paginated_models(provider_connection_id, token_group, kind, dialect)
                 .await?
         } else {
@@ -3403,6 +3618,242 @@ fn checked_observe_path(path: String) -> BackendResult<String> {
     Ok(path)
 }
 
+fn require_sp25_public_url_value(reference: &str) -> BackendResult<()> {
+    let valid = Url::parse(reference)
+        .ok()
+        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some());
+    if valid {
+        Ok(())
+    } else {
+        Err(BackendError::validation(
+            "按次视频参考素材必须是公网 http(s) URL",
+            json!({ "url": redact_url_string(reference) }),
+        ))
+    }
+}
+
+fn require_sp25_public_reference_url_value(reference: &str) -> BackendResult<()> {
+    require_sp25_public_url_value(reference)?;
+    let url = Url::parse(reference)?;
+    let private_host = match url.host() {
+        Some(url::Host::Domain(host)) => {
+            let host = host.trim_end_matches('.').to_ascii_lowercase();
+            host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local")
+        }
+        Some(url::Host::Ipv4(ip)) => {
+            ip.is_private()
+                || ip.is_loopback()
+                || ip.is_link_local()
+                || ip.is_unspecified()
+                || ip.is_broadcast()
+                || ip.is_multicast()
+        }
+        Some(url::Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+                || ip.is_unspecified()
+                || ip.is_multicast()
+        }
+        None => true,
+    };
+    if private_host || !url.username().is_empty() || url.password().is_some() {
+        return Err(BackendError::validation(
+            "按次视频参考素材须为无需账号密码的公网 http(s) URL",
+            json!({ "url": redact_url_string(reference) }),
+        ));
+    }
+    Ok(())
+}
+
+fn require_sp25_public_url(reference: &str, media: &ResolvedMedia) -> BackendResult<()> {
+    require_sp25_public_reference_url_value(reference).map_err(|_| {
+        BackendError::validation("按次视频参考素材必须是公网 http(s) URL", media.archive())
+    })
+}
+
+fn sp25_existing_reference_url(media: &ResolvedMedia) -> BackendResult<String> {
+    let reference = media.remote_reference.as_deref().ok_or_else(|| {
+        BackendError::validation(
+            "按次视频参考素材缺少远端 URL；本地文件须先上传",
+            media.archive(),
+        )
+    })?;
+    require_sp25_public_url(reference, media)?;
+    Ok(reference.to_string())
+}
+
+fn validate_sp25_video_request(model: &str, resolved: &ResolvedGeneration) -> BackendResult<()> {
+    let (min_duration, max_duration, max_images, max_audios) = sp25_per_use_limits(model)
+        .ok_or_else(|| {
+            BackendError::validation("不支持的按次视频模型 ID", json!({ "model": model }))
+        })?;
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    if resolved.video_task_type.is_some() || !resolved.videos.is_empty() {
+        return Err(BackendError::validation(
+            "按次系列仅支持参考图和指定型号的参考音频，不支持参考视频或视频编辑/延长任务",
+            json!({ "model": model, "videos": resolved.videos.len() }),
+        ));
+    }
+    if resolved.images.len() > max_images as usize || resolved.audios.len() > max_audios as usize {
+        return Err(BackendError::validation(
+            "按次视频参考素材数量超出所选型号上限",
+            json!({ "model": model, "images": resolved.images.len(), "maxImages": max_images,
+                "referenceAudios": resolved.audios.len(), "maxReferenceAudios": max_audios }),
+        ));
+    }
+    let parameters = resolved.parameters.as_object().ok_or_else(|| {
+        BackendError::validation("按次视频参数必须是对象", json!({ "model": model }))
+    })?;
+    for key in parameters.keys() {
+        if !matches!(key.as_str(), "ratio" | "duration" | "resolution") {
+            return Err(BackendError::validation(
+                "按次视频型号不支持该参数",
+                json!({ "model": model, "parameter": key }),
+            ));
+        }
+    }
+    if let Some(ratio) = parameters.get("ratio") {
+        if !matches!(
+            ratio.as_str(),
+            Some("16:9" | "9:16" | "1:1" | "4:3" | "3:4" | "21:9")
+        ) {
+            return Err(BackendError::validation(
+                "按次视频画幅不受支持",
+                json!({ "model": model, "ratio": ratio }),
+            ));
+        }
+    }
+    if let Some(duration) = parameters.get("duration") {
+        let valid = duration.as_u64().is_some_and(|seconds| {
+            seconds >= u64::from(min_duration) && seconds <= u64::from(max_duration)
+        });
+        if !valid {
+            return Err(BackendError::validation(
+                "按次视频时长超出所选型号范围",
+                json!({ "model": model, "duration": duration,
+                    "minimum": min_duration, "maximum": max_duration }),
+            ));
+        }
+    }
+    if let Some(resolution) = parameters.get("resolution")
+        && resolution.as_str() != Some("720P")
+    {
+        return Err(BackendError::validation(
+            "按次视频分辨率由型号固定为 720P",
+            json!({ "model": model, "resolution": resolution }),
+        ));
+    }
+    let prompt = video_prompt(resolved);
+    if prompt.trim().is_empty() && resolved.rendered_prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "按次视频提示词不能为空",
+            json!({ "model": model }),
+        ));
+    }
+    for media in &resolved.images {
+        if media.role != "reference_image" {
+            return Err(BackendError::validation(
+                "按次视频仅支持参考图，不支持首尾帧角色",
+                media.archive(),
+            ));
+        }
+        if let Some(bytes) = &media.bytes {
+            if bytes.is_empty()
+                || bytes.len() > 10_000_000
+                || !matches!(
+                    media.mime_type.as_str(),
+                    "image/jpeg" | "image/png" | "image/webp"
+                )
+            {
+                return Err(BackendError::validation(
+                    "按次视频参考图须为不超过 10 MB 的 JPG、PNG 或 WebP",
+                    media.archive(),
+                ));
+            }
+        } else {
+            sp25_existing_reference_url(media)?;
+        }
+    }
+    for media in &resolved.audios {
+        if media.role != "reference_audio" {
+            return Err(BackendError::validation(
+                "按次视频音频输入必须为参考音频",
+                media.archive(),
+            ));
+        }
+        if let Some(bytes) = &media.bytes {
+            if bytes.is_empty()
+                || bytes.len() > 50_000_000
+                || !matches!(
+                    media.mime_type.as_str(),
+                    "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/x-wav" | "audio/wave"
+                )
+            {
+                return Err(BackendError::validation(
+                    "按次视频参考音频须为不超过 50 MB 的 MP3 或 WAV",
+                    media.archive(),
+                ));
+            }
+        } else {
+            sp25_existing_reference_url(media)?;
+        }
+    }
+    Ok(())
+}
+
+fn build_sp25_video_body(
+    model: &str,
+    resolved: &ResolvedGeneration,
+    images: &[String],
+    audios: &[String],
+) -> BackendResult<Value> {
+    validate_sp25_video_request(model, resolved)?;
+    if images.len() != resolved.images.len() || audios.len() != resolved.audios.len() {
+        return Err(BackendError::protocol(
+            "按次视频素材上传结果与输入数量不一致",
+            json!({ "images": images.len(), "referenceAudios": audios.len() }),
+        ));
+    }
+    for reference in images.iter().chain(audios) {
+        require_sp25_public_reference_url_value(reference)?;
+    }
+    let prompt = video_prompt(resolved);
+    let prompt = if prompt.trim().is_empty() {
+        resolved.rendered_prompt.clone()
+    } else {
+        prompt
+    };
+    let mut body = Map::new();
+    body.insert("model".into(), json!(model));
+    body.insert("prompt".into(), json!(prompt));
+    let parameters = resolved
+        .parameters
+        .as_object()
+        .expect("validated parameters");
+    body.insert(
+        "ratio".into(),
+        parameters
+            .get("ratio")
+            .cloned()
+            .unwrap_or_else(|| json!("16:9")),
+    );
+    if let Some(duration) = parameters.get("duration") {
+        body.insert("duration".into(), duration.clone());
+    }
+    // 型号 ID 已确定 720P。兼容旧快照显式的合法值，但新档案无需传此字段。
+    if let Some(resolution) = parameters.get("resolution") {
+        body.insert("resolution".into(), resolution.clone());
+    }
+    if !images.is_empty() {
+        body.insert("images".into(), json!(images));
+    }
+    if !audios.is_empty() {
+        body.insert("reference_audios".into(), json!(audios));
+    }
+    Ok(Value::Object(body))
+}
+
 fn build_video_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
@@ -3442,6 +3893,20 @@ fn build_video_body(
         Some("veo_image_urls") => return build_veo_video_body(model, resolved),
         Some("vidu_image_urls") => return build_vidu_video_body(model, resolved),
         Some("minimax_h3_media") => return build_minimax_h3_video_body(model, resolved),
+        Some("sp25_per_use_urls") => {
+            validate_sp25_video_request(model, resolved)?;
+            let images = resolved
+                .images
+                .iter()
+                .map(sp25_existing_reference_url)
+                .collect::<BackendResult<Vec<_>>>()?;
+            let audios = resolved
+                .audios
+                .iter()
+                .map(sp25_existing_reference_url)
+                .collect::<BackendResult<Vec<_>>>()?;
+            return build_sp25_video_body(model, resolved, &images, &audios);
+        }
         Some(unsupported) => {
             return Err(BackendError::validation(
                 "video request uses an unsupported media encoding",
@@ -4683,6 +5148,130 @@ fn image_task_failure_message(value: &Value) -> Option<String> {
         .or_else(|| Some("image task failed".to_string()))
 }
 
+fn sp25_response_error(status: u16, raw: &str, fallback: &str) -> BackendError {
+    let payload: Value = serde_json::from_str(raw).unwrap_or(Value::Null);
+    let error = payload.get("error").unwrap_or(&payload);
+    let message = error
+        .get("message")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or(fallback);
+    let code = error
+        .get("code")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    BackendError::protocol(
+        if code.is_empty() {
+            format!("{message} (HTTP {status})")
+        } else {
+            format!("{message} ({code}, HTTP {status})")
+        },
+        json!({ "httpStatus": status, "error": redact_request_value(error) }),
+    )
+}
+
+fn sp25_ambiguous_submission_error(error: BackendError) -> BackendError {
+    // The HTTP request may already have reached the paid endpoint when a read or
+    // lifecycle write fails. Only URL/validation errors are known to occur before send.
+    if matches!(
+        error,
+        BackendError::Validation { .. } | BackendError::Url(_)
+    ) {
+        return error;
+    }
+    BackendError::protocol(
+        "按次视频提交结果无法确认，平台可能已受理；请先核对远程任务，避免重复扣费",
+        json!({ "ambiguousPaidSubmission": true, "source": error.runtime_record() }),
+    )
+}
+
+fn sp25_submission_unknown(message: &str, details: Value) -> BackendError {
+    BackendError::protocol(
+        message,
+        json!({ "ambiguousPaidSubmission": true, "details": redact_request_value(&details) }),
+    )
+}
+
+fn parse_sp25_upload_url(response: &CapturedHttpResponse) -> BackendResult<String> {
+    if !response.is_success() {
+        return Err(sp25_response_error(
+            response.status,
+            &response.body,
+            "按次视频参考素材上传失败",
+        ));
+    }
+    let payload: Value = serde_json::from_str(&response.body)?;
+    let reference = payload.get("url").and_then(Value::as_str).ok_or_else(|| {
+        BackendError::protocol(
+            "按次视频素材上传响应缺少顶层 url",
+            json!({ "httpStatus": response.status, "response": redact_request_value(&payload) }),
+        )
+    })?;
+    require_sp25_public_reference_url_value(reference)?;
+    Ok(reference.to_string())
+}
+
+fn parse_sp25_video_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
+    if !response.is_success() {
+        let mut error =
+            sp25_response_error(response.status, &response.body, "按次视频任务提交失败");
+        if let BackendError::Protocol { details, .. } = &mut error {
+            let no_charge = response.status < 500
+                || details.pointer("/error/code").and_then(Value::as_str)
+                    == Some("get_channel_failed");
+            if let Some(details) = details.as_object_mut() {
+                details.insert(
+                    if no_charge {
+                        "noChargeTerminal"
+                    } else {
+                        "ambiguousPaidSubmission"
+                    }
+                    .into(),
+                    json!(true),
+                );
+            }
+        }
+        return Err(error);
+    }
+    let payload: Value = serde_json::from_str(&response.body).map_err(|error| {
+        sp25_submission_unknown(
+            "按次视频提交已返回成功状态，但响应不是有效 JSON；请先核对远程任务，避免重复扣费",
+            json!({ "httpStatus": response.status, "parseError": error.to_string() }),
+        )
+    })?;
+    let task_id = payload
+        .get("task_id")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .ok_or_else(|| {
+            sp25_submission_unknown(
+                "按次视频提交响应缺少 task_id；请先核对远程任务，避免重复扣费",
+                json!({ "httpStatus": response.status, "response": payload }),
+            )
+        })?;
+    if !valid_sp25_task_id(task_id) {
+        return Err(sp25_submission_unknown(
+            "按次视频提交响应 task_id 格式无效；请先核对远程任务，避免重复扣费",
+            json!({ "httpStatus": response.status }),
+        ));
+    }
+    if payload.get("status").and_then(Value::as_str) != Some("queued") {
+        return Err(sp25_submission_unknown(
+            "按次视频提交响应状态不是 queued；请先核对远程任务，避免重复扣费",
+            json!({ "taskId": task_id, "status": payload.get("status") }),
+        ));
+    }
+    Ok(task_id.to_string())
+}
+
+fn valid_sp25_task_id(task_id: &str) -> bool {
+    !task_id.is_empty()
+        && task_id.len() <= 128
+        && task_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
 fn parse_video_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
@@ -4749,10 +5338,12 @@ fn parse_video_observation(
     let fail_reason = value
         .pointer("/data/fail_reason")
         .or_else(|| value.pointer("/output/message"))
+        .or_else(|| value.pointer("/error/message"))
         .or_else(|| value.get("message"))
         .cloned();
     let upstream_error = value
-        .pointer("/data/data/data/data/error")
+        .get("error")
+        .or_else(|| value.pointer("/data/data/data/data/error"))
         .or_else(|| value.pointer("/data/data/data/error"))
         .or_else(|| value.pointer("/data/data/error"))
         .cloned();
@@ -4794,6 +5385,8 @@ fn parse_video_observation(
 ///   `metadata.url` 等。
 fn extract_video_url(value: &Value) -> Option<String> {
     const PROBED_PATHS: &[&str] = &[
+        "/result_url",
+        "/url",
         "/output/video_url",
         "/data/result_url",
         "/data/data/result_url",
@@ -5389,6 +5982,7 @@ fn response_headers(headers: &reqwest::header::HeaderMap) -> Value {
 mod tests {
     // 适配器 id 常量只被用例消费（生产代码走 catalog_path_for_adapter / finalize_video_body）。
     use super::super::provider_adapter::{BAILIAN_ADAPTER_ID, MOYU_ADAPTER_ID};
+    use super::super::{storage::NewTask, types::UpsertProviderConnectionCommand};
     use super::*;
 
     /// 按原始 SSE 文本投喂解析器，块边界由 `chunk_size` 决定（模拟真实网络分块）。
@@ -9194,6 +9788,391 @@ mod tests {
                 "failReason": "content policy rejection",
                 "upstreamError": null
             }))
+        );
+    }
+
+    #[test]
+    fn sp25_per_use_body_has_only_documented_fields_and_enforces_media_limits() {
+        let schema = default_model_schema(
+            "sp2.5-720p-30s-ch5",
+            &[GenerationOperation::VideoGeneration],
+        )["video_generation"]
+            .clone();
+        let mut request = resolved(schema, json!({ "ratio": "21:9" }));
+        request.images = (1..=10)
+            .map(|index| {
+                resolved_media(
+                    MediaType::Image,
+                    index,
+                    "reference_image",
+                    &format!("https://example.com/{index}.png"),
+                    None,
+                )
+            })
+            .collect();
+        request.audios = (1..=10)
+            .map(|index| {
+                resolved_media(
+                    MediaType::Audio,
+                    index,
+                    "reference_audio",
+                    &format!("https://example.com/{index}.mp3"),
+                    None,
+                )
+            })
+            .collect();
+        let mut task = task(GenerationOperation::VideoGeneration);
+        task.remote_model_id_snapshot = Some("sp2.5-720p-30s-ch5".into());
+        let body = build_video_body(&task, &request).expect("documented maximum is valid");
+        assert_eq!(body["model"], "sp2.5-720p-30s-ch5");
+        assert_eq!(body["ratio"], "21:9");
+        assert_eq!(body["images"].as_array().unwrap().len(), 10);
+        assert_eq!(body["reference_audios"].as_array().unwrap().len(), 10);
+        assert_eq!(body.as_object().unwrap().len(), 5);
+        assert!(body.get("duration").is_none());
+        assert!(body.get("metadata").is_none());
+        assert!(body.get("n").is_none());
+
+        request.images.push(resolved_media(
+            MediaType::Image,
+            11,
+            "reference_image",
+            "https://example.com/11.png",
+            None,
+        ));
+        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        request.images.pop();
+        request.videos.push(resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://example.com/video.mp4",
+            None,
+        ));
+        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        request.videos.clear();
+        request.parameters = json!({ "ratio": "16:9", "generate_audio": false });
+        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        request.parameters = json!({ "ratio": "16:9" });
+        request.images[0].remote_reference = Some("asset://private-id".into());
+        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        request.images[0].remote_reference = Some("http://127.0.0.1/private.png".into());
+        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+    }
+
+    #[test]
+    fn sp25_per_use_duration_and_upload_response_follow_contract() {
+        let schema = default_model_schema(
+            "sp2.5-720p-16-30s",
+            &[GenerationOperation::VideoGeneration],
+        )["video_generation"]
+            .clone();
+        let mut request = resolved(schema, json!({ "ratio": "16:9", "duration": 16 }));
+        assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_ok());
+        request.parameters["duration"] = json!(15);
+        assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_err());
+        request.parameters["duration"] = json!(30);
+        assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_ok());
+
+        let upload = CapturedHttpResponse {
+            call_id: "upload-1".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({ "object": "reference_asset", "url": "https://assets.example.com/ref.png?signature=x", "data": { "kind": "image" } }).to_string(),
+        };
+        assert_eq!(
+            parse_sp25_upload_url(&upload).unwrap(),
+            "https://assets.example.com/ref.png?signature=x"
+        );
+        let rejected = CapturedHttpResponse {
+            status: 413,
+            body: json!({ "error": { "type": "video_asset_upload_error", "code": "file_too_large", "message": "Uploaded image exceeds 10 MB" } }).to_string(),
+            ..upload
+        };
+        let error = parse_sp25_upload_url(&rejected).unwrap_err();
+        assert!(error.to_string().contains("file_too_large"));
+    }
+
+    #[test]
+    fn sp25_per_use_top_level_task_and_result_responses_are_preserved() {
+        let accepted = CapturedHttpResponse {
+            call_id: "submit-1".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({ "task_id": "task_abc", "status": "queued", "progress": 0 }).to_string(),
+        };
+        assert_eq!(parse_sp25_video_task_id(&accepted).unwrap(), "task_abc");
+        let success = CapturedHttpResponse {
+            body: json!({ "task_id": "task_abc", "status": "succeeded", "progress": 100,
+                "result_url": "http://example.com/v1/videos/task_abc/content?signature=abc",
+                "url": "http://example.com/v1/videos/task_abc/content?signature=abc" })
+            .to_string(),
+            ..accepted
+        };
+        let observation = parse_video_observation(&success).unwrap();
+        assert_eq!(observation.remote_status, "succeeded");
+        assert_eq!(observation.progress, Some(100.0));
+        assert_eq!(
+            observation.video_url.as_deref(),
+            Some("http://example.com/v1/videos/task_abc/content?signature=abc")
+        );
+        let failed = CapturedHttpResponse {
+            body: json!({ "task_id": "task_abc", "status": "failed", "progress": 100,
+                "error": { "message": "SCHEDULER_SUBMIT_FAILED", "type": "video_generation_error", "code": "video_generation_failed" } }).to_string(),
+            ..success
+        };
+        let observation = parse_video_observation(&failed).unwrap();
+        assert_eq!(
+            observation.failure.as_ref().unwrap()["upstreamError"]["code"],
+            "video_generation_failed"
+        );
+        assert_eq!(
+            observation.failure.as_ref().unwrap()["failReason"],
+            "SCHEDULER_SUBMIT_FAILED"
+        );
+
+        let no_channel = CapturedHttpResponse {
+            status: 500,
+            body: json!({ "error": { "type": "invalid_request_error", "code": "get_channel_failed", "message": "no available channel" } }).to_string(),
+            ..failed
+        };
+        let error = parse_sp25_video_task_id(&no_channel).unwrap_err();
+        assert_eq!(error.runtime_record()["details"]["noChargeTerminal"], true);
+        let uncertain = CapturedHttpResponse {
+            status: 200,
+            body: "not json".into(),
+            ..no_channel
+        };
+        let error = parse_sp25_video_task_id(&uncertain).unwrap_err();
+        assert_eq!(
+            error.runtime_record()["details"]["ambiguousPaidSubmission"],
+            true
+        );
+        let persistence_error =
+            sp25_ambiguous_submission_error(BackendError::Conflict("response not recorded".into()));
+        assert_eq!(
+            persistence_error.runtime_record()["details"]["ambiguousPaidSubmission"],
+            true
+        );
+    }
+
+    #[tokio::test]
+    async fn sp25_local_media_uploads_flow_into_one_paid_submission() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        fn receive_request(stream: &mut std::net::TcpStream) -> (String, Vec<u8>) {
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut bytes = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            let header_end = loop {
+                let read = stream.read(&mut chunk).expect("read request");
+                assert!(read > 0, "request closed before headers");
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).expect("HTTP headers");
+            let content_length = headers
+                .lines()
+                .filter_map(|line| line.split_once(':'))
+                .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                .expect("known multipart and JSON body length");
+            while bytes.len() - header_end < content_length {
+                let read = stream.read(&mut chunk).expect("read request body");
+                assert!(read > 0, "request closed before body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            (
+                headers,
+                bytes[header_end..header_end + content_length].to_vec(),
+            )
+        }
+
+        const IMAGE: &[u8] = b"\x89PNG\r\n\x1a\nmock-image";
+        const AUDIO: &[u8] = b"ID3mock-audio";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        let port = listener.local_addr().expect("mock address").port();
+        listener.set_nonblocking(true).expect("nonblocking mock");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut captured = Vec::new();
+            for index in 0..3 {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(Instant::now() < deadline, "expected three HTTP requests");
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept mock request: {error}"),
+                    }
+                };
+                stream
+                    .set_nonblocking(false)
+                    .expect("blocking client stream");
+                let request = receive_request(&mut stream);
+                let payload = match index {
+                    0 => json!({ "object": "reference_asset", "url": "https://assets.example.test/frame.png?signature=image" }),
+                    1 => json!({ "object": "reference_asset", "url": "https://assets.example.test/voice.mp3?signature=audio" }),
+                    _ => json!({ "task_id": "remote_sp25_1", "status": "queued", "progress": 0 }),
+                }
+                .to_string();
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                );
+                stream.write_all(head.as_bytes()).expect("write headers");
+                stream.write_all(payload.as_bytes()).expect("write JSON");
+                captured.push(request);
+            }
+            captured
+        });
+
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage =
+            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "sp25-local-upload".into(),
+                display_name: "按次本地上传测试".into(),
+                adapter_id: MOYU_ADAPTER_ID.into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .expect("provider");
+        let frozen_credential_ref = "provider:sp25-local-upload:group:frozen";
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-current-not-used")
+            .expect("current credential");
+        credentials
+            .set(frozen_credential_ref, "sk-frozen")
+            .expect("frozen credential");
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        lifecycle
+            .create(NewTask {
+                id: "task-sp25-local-upload",
+                canvas_id: "canvas-1",
+                source_node_id: "video-1",
+                operation: GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: frozen_credential_ref,
+                model_definition_id: "sp25-test-model",
+                remote_model_id: Some("sp2.5-720p-30s-ch5"),
+                logical_request: &json!({ "prompt": "test" }),
+            })
+            .expect("create task");
+        lifecycle
+            .commit(
+                "task-sp25-local-upload",
+                GenerationLifecycleFact::BeginResolution {
+                    attempt_id: "resolve-1".into(),
+                },
+            )
+            .expect("begin resolution");
+        lifecycle
+            .commit(
+                "task-sp25-local-upload",
+                GenerationLifecycleFact::ResolutionSucceeded {
+                    attempt_id: "resolve-1".into(),
+                    resolved_request: json!({ "prompt": "test" }),
+                },
+            )
+            .expect("resolve");
+        lifecycle
+            .commit(
+                "task-sp25-local-upload",
+                GenerationLifecycleFact::BeginSubmission {
+                    attempt_id: "submit-1".into(),
+                    backoff_ms: None,
+                },
+            )
+            .expect("begin submission");
+        let task = storage
+            .get_task_execution("task-sp25-local-upload")
+            .expect("frozen task");
+        assert_eq!(task.api_key_ref_snapshot, frozen_credential_ref);
+        let schema = default_model_schema(
+            "sp2.5-720p-30s-ch5",
+            &[GenerationOperation::VideoGeneration],
+        )["video_generation"]
+            .clone();
+        let mut request = resolved(schema, json!({ "ratio": "16:9" }));
+        let mut image = resolved_media(MediaType::Image, 1, "reference_image", "", None);
+        image.bytes = Some(IMAGE.to_vec());
+        image.remote_reference = None;
+        image.byte_size = IMAGE.len() as u64;
+        image.file_name = "frame.png".into();
+        let mut audio = resolved_media(MediaType::Audio, 1, "reference_audio", "", None);
+        audio.bytes = Some(AUDIO.to_vec());
+        audio.remote_reference = None;
+        audio.byte_size = AUDIO.len() as u64;
+        audio.file_name = "voice.mp3".into();
+        request.images.push(image);
+        request.audios.push(audio);
+        let runtime = ProviderRuntime::new(Arc::clone(&storage), lifecycle, credentials)
+            .expect("provider runtime");
+        let (submission, response) = runtime
+            .submit(&task, "submit-1", &request)
+            .await
+            .expect("upload and submit");
+        assert!(matches!(
+            submission,
+            GenerationSubmission::RemoteVideoTask { task_id } if task_id == "remote_sp25_1"
+        ));
+        assert_eq!(response.status, 200);
+
+        let captured = server.join().expect("mock server");
+        assert_eq!(captured.len(), 3);
+        for (headers, _) in &captured {
+            let lower = headers.to_ascii_lowercase();
+            assert!(lower.starts_with("post "));
+            assert!(lower.contains("authorization: bearer sk-frozen\r\n"));
+            assert!(!lower.contains("sk-current-not-used"));
+        }
+        for ((headers, body), (file_name, mime, bytes)) in captured[..2].iter().zip([
+            ("frame.png", "image/png", IMAGE),
+            ("voice.mp3", "audio/mpeg", AUDIO),
+        ]) {
+            assert!(headers.starts_with("POST /v1/assets/uploads HTTP/1.1"));
+            assert!(headers.to_ascii_lowercase().contains("multipart/form-data"));
+            let text = String::from_utf8_lossy(body);
+            assert!(text.contains(format!("name=\"file\"; filename=\"{file_name}\"").as_str()));
+            assert!(
+                text.to_ascii_lowercase()
+                    .contains(format!("content-type: {mime}").as_str())
+            );
+            assert!(body.windows(bytes.len()).any(|part| part == bytes));
+        }
+        let (headers, body) = &captured[2];
+        assert!(headers.starts_with("POST /v1/video/generations HTTP/1.1"));
+        let body: Value = serde_json::from_slice(body).expect("paid JSON request");
+        assert_eq!(body["model"], "sp2.5-720p-30s-ch5");
+        assert_eq!(
+            body["images"],
+            json!(["https://assets.example.test/frame.png?signature=image"])
+        );
+        assert_eq!(
+            body["reference_audios"],
+            json!(["https://assets.example.test/voice.mp3?signature=audio"])
+        );
+        assert_eq!(body.as_object().expect("top-level body").len(), 5);
+        let calls = storage
+            .get_task_detail("task-sp25-local-upload")
+            .expect("task detail")
+            .calls;
+        assert_eq!(
+            calls
+                .iter()
+                .map(|call| call.phase.as_str())
+                .collect::<Vec<_>>(),
+            ["upload", "upload", "submit"]
         );
     }
 }

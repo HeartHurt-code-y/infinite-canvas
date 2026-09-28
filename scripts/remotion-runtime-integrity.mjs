@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { createReadStream } from "node:fs";
+import { createReadStream, existsSync } from "node:fs";
 import {
   copyFile,
   mkdir,
@@ -15,7 +15,21 @@ import {
 import path from "node:path";
 
 export function remotionCriticalPaths(nodeName, browserExecutable) {
-  return [nodeName, browserExecutable, "render.mjs", "plan.mjs", "bundle/index.html"];
+  return [
+    nodeName,
+    browserExecutable,
+    "render.mjs",
+    "plan.mjs",
+    "resolve-douyin.mjs",
+    "resolve-rednote.mjs",
+    "bundle/index.html",
+  ];
+}
+
+export function remotionPackagesPresent(root, packageNames) {
+  return packageNames.every((name) =>
+    existsSync(path.join(root, "node_modules", ...name.split("/"), "package.json")),
+  );
 }
 
 async function sha256File(filePath) {

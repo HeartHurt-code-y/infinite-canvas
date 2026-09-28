@@ -75,6 +75,11 @@ export function toMediaProxyUrl(
   if (parsed.hostname === "asset.localhost") {
     return withAssetId(url, assetId);
   }
+  // Local Base64 assets are already served by the native protocol. Sending them
+  // through the network media proxy would turn an offline file into a failed fetch.
+  if (parsed.protocol === "localbase64:" || parsed.hostname === "localbase64.localhost") {
+    return url;
+  }
   if (parsed.hostname === `${MEDIA_PROXY_SCHEME}.localhost`) {
     if (assetId !== "") {
       return nativeProxyUrl(parsed.searchParams.get("src"), assetId);

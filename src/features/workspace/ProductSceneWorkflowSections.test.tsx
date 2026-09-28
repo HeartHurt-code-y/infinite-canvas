@@ -321,6 +321,196 @@ describe("ProductSceneWorkflowSections", () => {
     expect(proceed).toHaveBeenCalledOnce();
   });
 
+  it("accepts the whole approved batch across pages with one checkpoint update", () => {
+    const batchOptions = { ...options(), totalCount: 14, batchSize: 14 };
+    const base = checkpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      productScene: {
+        ...base.productScene!,
+        rows: generateProductScenePlan(batchOptions).map((row) => ({
+          ...row,
+          status: "needs_review" as const,
+          outputPath: `C:/out/${row.index}.png`,
+        })),
+        approvedThrough: 14,
+      },
+    };
+    const change = vi.fn();
+    render(
+      <ProductSceneDeliverables
+        options={batchOptions}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={vi.fn()}
+      />,
+    );
+    expect(screen.getByText("1 / 2")).toBeVisible();
+    fireEvent.click(screen.getByRole("button", { name: "选用本批全部合格图（14 张）" }));
+    expect(change).toHaveBeenCalledOnce();
+    const next = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(next.phase).toBe("done");
+    expect(next.productScene!.rows).toHaveLength(14);
+    expect(next.productScene!.rows.every((row) => row.status === "accepted")).toBe(true);
+    expect(next.productScene!.rows[13]!.outputPath).toBe("C:/out/14.png");
+  });
+
+  it("keeps page selection within the visible page and leaves later pages for review", () => {
+    const batchOptions = { ...options(), totalCount: 14, batchSize: 14 };
+    const base = checkpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      productScene: {
+        ...base.productScene!,
+        rows: generateProductScenePlan(batchOptions).map((row) => ({
+          ...row,
+          status: "needs_review" as const,
+          outputPath: `C:/out/${row.index}.png`,
+        })),
+        approvedThrough: 14,
+      },
+    };
+    const change = vi.fn();
+    render(
+      <ProductSceneDeliverables
+        options={batchOptions}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "选择本页合格图（12 张）" }));
+    expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "选用所选 12 张" }));
+    expect(change).toHaveBeenCalledOnce();
+    const next = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(next.phase).toBe("awaiting_approval");
+    expect(next.productScene!.rows.slice(0, 12).every((row) => row.status === "accepted")).toBe(
+      true,
+    );
+    expect(next.productScene!.rows.slice(12).every((row) => row.status === "needs_review")).toBe(
+      true,
+    );
+  });
+
+  it("clears selected row IDs when the run, input, or approved batch changes", () => {
+    const base = checkpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      runId: "run-one",
+      productScene: {
+        ...base.productScene!,
+        inputSignature: "input-one",
+        rows: base.productScene!.rows.map((row, index) =>
+          index < 2
+            ? { ...row, status: "needs_review", outputPath: `C:/out/${row.index}.png` }
+            : row,
+        ),
+      },
+    };
+    const renderReview = (value: KnowledgeVideoWorkflowCheckpoint) => (
+      <ProductSceneDeliverables
+        options={options()}
+        checkpoint={value}
+        disabled={false}
+        onChange={vi.fn()}
+        onContinue={vi.fn()}
+      />
+    );
+    const { rerender } = render(renderReview(initial));
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择第 1 张" }));
+    expect(screen.getByRole("button", { name: "选用所选 1 张" })).toBeEnabled();
+
+    const anotherRun = { ...initial, runId: "run-two" };
+    rerender(renderReview(anotherRun));
+    expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择第 1 张" }));
+
+    const anotherInput = {
+      ...anotherRun,
+      productScene: { ...anotherRun.productScene!, inputSignature: "input-two" },
+    };
+    rerender(renderReview(anotherInput));
+    expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择第 1 张" }));
+
+    const nextBatch = {
+      ...anotherInput,
+      productScene: { ...anotherInput.productScene, approvedThrough: 2 },
+    };
+    rerender(renderReview(nextBatch));
+    expect(screen.getByRole("checkbox", { name: "选择第 2 张" })).not.toBeChecked();
+    fireEvent.click(screen.getByRole("checkbox", { name: "选择第 2 张" }));
+    rerender(renderReview(anotherInput));
+    expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).not.toBeChecked();
+    expect(screen.getByRole("button", { name: "选用所选 0 张" })).toBeDisabled();
+  });
+
+  it("excludes blocked quality and unapproved future rows from batch acceptance", () => {
+    const batchOptions = {
+      ...options(),
+      totalCount: 4,
+      batchSize: 2,
+      quality: { inspectPorts: true, portSpecification: "" },
+    };
+    const inspection: ProductSceneInspection = {
+      version: 1,
+      ports: { status: "not_visible", evidence: "当前机位不展示接口", items: [] },
+      logo: {
+        status: "not_visible",
+        confidence: 1,
+        surfaceClear: false,
+        quad: null,
+        evidence: "当前机位不展示标志面",
+      },
+    };
+    const base = checkpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      productScene: {
+        ...base.productScene!,
+        rows: generateProductScenePlan(batchOptions).map((row) => ({
+          ...row,
+          status: "needs_review" as const,
+          outputPath: `C:/out/${row.index}.png`,
+          quality: {
+            status: row.index === 2 ? ("blocked" as const) : ("passed" as const),
+            basePath: `C:/out/${row.index}.png`,
+            outputPath: `C:/out/${row.index}.png`,
+            inspection,
+            attempt: 0,
+            error: null,
+          },
+        })),
+        approvedThrough: 2,
+      },
+    };
+    const change = vi.fn();
+    render(
+      <ProductSceneDeliverables
+        options={batchOptions}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={vi.fn()}
+      />,
+    );
+    expect(screen.getByText(/另有 1 张尚不符合选用条件/)).toBeVisible();
+    expect(screen.queryByRole("checkbox", { name: "选择第 2 张" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "选用本批全部合格图（1 张）" }));
+    expect(change).toHaveBeenCalledOnce();
+    const next = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(next.productScene!.rows.map((row) => row.status)).toEqual([
+      "accepted",
+      "needs_review",
+      "needs_review",
+      "needs_review",
+    ]);
+    expect(next.phase).toBe("awaiting_approval");
+  });
+
   it("retains paid task and image identity when a reviewed image is explicitly redone", () => {
     const base = checkpoint();
     const initial: KnowledgeVideoWorkflowCheckpoint = {

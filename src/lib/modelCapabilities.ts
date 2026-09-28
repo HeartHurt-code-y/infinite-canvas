@@ -1,4 +1,5 @@
 import type { GenerationOperation, ModelOperationSchema } from "./backend";
+import { perTaskVideoProfile } from "./perTaskVideo";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -641,6 +642,32 @@ function panquVideoParameters(): Record<string, unknown> {
 
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
+  const perTask = perTaskVideoProfile(modelId);
+  if (perTask) {
+    return {
+      ratio: {
+        type: "string",
+        label: "画幅",
+        default: "16:9",
+        enum: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+        order: 0,
+      },
+      ...(perTask.minimumDuration === perTask.maximumDuration
+        ? {}
+        : {
+            duration: {
+              type: "integer",
+              label: "时长",
+              default: perTask.minimumDuration,
+              enum: Array.from(
+                { length: perTask.maximumDuration - perTask.minimumDuration + 1 },
+                (_, index) => perTask.minimumDuration + index,
+              ),
+              order: 1,
+            },
+          }),
+    };
+  }
   const panqu = isPanquVideoModel(normalized);
   if (panqu) {
     return panquVideoParameters();
@@ -1014,7 +1041,7 @@ export function modelParameterCapabilities(
   const operationDefinition = isRecord(operationValue) ? operationValue : null;
   const declaredParameters = operationDefinition?.["parameters"];
   if (!isRecord(declaredParameters)) {
-    if (operationDefinition) return [];
+    if (operationDefinition && !perTaskVideoProfile(modelId)) return [];
     const fallback = fallbackParameters(modelId, operation);
     return Object.entries(fallback)
       .flatMap(([key, value], index) => parameterCapability(key, value, undefined, index) ?? [])
@@ -1022,19 +1049,21 @@ export function modelParameterCapabilities(
   }
 
   const fallback = fallbackParameters(modelId, operation);
-  // 升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
+  // 按次 SP 2.5 型号仅使用本地已核对的参数白名单，避免供应商返回的旧 Seedance
+  // 字段进入付费请求。升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
   // 定义带有显式 `parameters: {}`；通用模型仍把空对象视为权威声明，但这些已知契约
   // 需要立即回退到当前档案，避免节点参数区空白。
-  const effectiveParameters =
-    (isWan30VideoModel(modelId) ||
-      isVeoVideoModel(modelId) ||
-      isViduVideoModel(modelId) ||
-      isMinimaxH3VideoModel(modelId) ||
-      isGptImageModel(modelId) ||
-      isGeminiImageModel(modelId) ||
-      isSeedreamImageModel(modelId) ||
-      (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
-    Object.keys(declaredParameters).length === 0
+  const effectiveParameters = perTaskVideoProfile(modelId)
+    ? fallback
+    : (isWan30VideoModel(modelId) ||
+          isVeoVideoModel(modelId) ||
+          isViduVideoModel(modelId) ||
+          isMinimaxH3VideoModel(modelId) ||
+          isGptImageModel(modelId) ||
+          isGeminiImageModel(modelId) ||
+          isSeedreamImageModel(modelId) ||
+          (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
+        Object.keys(declaredParameters).length === 0
       ? fallback
       : declaredParameters;
   return Object.entries(effectiveParameters)

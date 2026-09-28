@@ -59,6 +59,7 @@ pub enum WorkflowKind {
     XhsCover,
     ProductScene,
     ReverseVideo,
+    Reelbench,
 }
 
 impl WorkflowKind {
@@ -73,6 +74,7 @@ impl WorkflowKind {
             Self::XhsCover => "xhsCover",
             Self::ProductScene => "productScene",
             Self::ReverseVideo => "reverseVideo",
+            Self::Reelbench => "reelbench",
         }
     }
 }
@@ -607,6 +609,7 @@ mod tests {
             WorkflowKind::XhsCover,
             WorkflowKind::ProductScene,
             WorkflowKind::ReverseVideo,
+            WorkflowKind::Reelbench,
         ]
         .into_iter()
         .enumerate()

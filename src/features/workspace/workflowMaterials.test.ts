@@ -356,4 +356,35 @@ describe("workflow reference materials", () => {
     expect(workflowMaterialsSignature(config)).not.toContain("canvasNodeKey");
     expect(workflowMaterialsSignature(config)).not.toContain("displayName");
   });
+
+  it("invalidates workflow approval when a local Base64 reference changes", () => {
+    const config = {
+      ...node().config,
+      connectedMaterials: [
+        {
+          displayName: "本机图片",
+          target: { kind: "local_base64_asset" as const, assetId: "local-b64-one", mediaType: "image" as const },
+        },
+      ],
+    };
+    const checkpoint = {
+      ...config.checkpoint,
+      materialsSignature: workflowMaterialsSignature(config),
+    };
+    expect(() => validateWorkflowMaterialsResume(config, checkpoint)).not.toThrow();
+    expect(() =>
+      validateWorkflowMaterialsResume(
+        {
+          ...config,
+          connectedMaterials: [
+            {
+              displayName: "本机图片",
+              target: { kind: "local_base64_asset", assetId: "local-b64-two", mediaType: "image" },
+            },
+          ],
+        },
+        checkpoint,
+      ),
+    ).toThrow("参考素材已修改");
+  });
 });

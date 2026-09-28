@@ -3,19 +3,19 @@ import { useLayoutEffect } from "react";
 import type { CanvasGroupMember } from "./assetGroups";
 
 /**
- * 框选结束的回调早于选区订阅。这里在 React Flow 内部同步读当前选中的素材节点。
+ * 框选结束的回调早于选区订阅。在 React Flow 内部同步读当前选中的真实节点。
  */
-export function AssetGroupSelectionReader({
-  assetKeySetRef,
+export function CanvasMarqueeSelectionReader({
+  selectableKeysRef,
   readSelectionRef,
 }: {
-  readonly assetKeySetRef: { readonly current: ReadonlySet<string> };
+  readonly selectableKeysRef: { readonly current: ReadonlySet<string> };
   readonly readSelectionRef: { current: () => readonly string[] };
 }) {
   const store = useStoreApi();
   useLayoutEffect(() => {
     readSelectionRef.current = () => {
-      const keys = assetKeySetRef.current;
+      const keys = selectableKeysRef.current;
       const selected: string[] = [];
       // 框选在松手前就把选中写进节点查找表；受控 nodes 要等下一帧才会跟上。
       for (const node of store.getState().nodeLookup.values()) {
@@ -26,7 +26,7 @@ export function AssetGroupSelectionReader({
     return () => {
       readSelectionRef.current = () => [];
     };
-  }, [assetKeySetRef, readSelectionRef, store]);
+  }, [selectableKeysRef, readSelectionRef, store]);
   return null;
 }
 

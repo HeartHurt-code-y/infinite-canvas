@@ -17,6 +17,7 @@ import { reverseVideoClient, type ReverseVideoClient } from "../../lib/reverseVi
 import type { buildVideoContactSheets } from "../../lib/videoFrameSampler";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
+import { downloadFailureSummary } from "./downloadFailureSummary";
 import type {
   KnowledgeVideoWorkflowRunRequest,
   KnowledgeVideoWorkflowRunner,
@@ -392,7 +393,9 @@ export function createReverseVideoWorkflowRunner(
             // Only a confirmed failure/cancellation from a previous attempt permits another download.
             if (job && (job.status === "failed" || job.status === "cancelled")) {
               if (!request.resume)
-                throw new Error(job.error ?? "视频下载已失败，请处理下载器设置后重试。");
+                throw new Error(
+                  downloadFailureSummary(job, "视频下载已失败，请处理下载器设置后重试。"),
+                );
               job = null;
             }
             if (!job) {
@@ -423,7 +426,7 @@ export function createReverseVideoWorkflowRunner(
               abort();
               if (job.status === "failed" || job.status === "cancelled")
                 throw new Error(
-                  `项目下载器${job.status === "cancelled" ? "已取消" : "执行失败"}，可在下载器设置中处理登录状态或网络后重试。\n${job.error ?? "原任务身份已保留。"}`,
+                  `项目下载器${job.status === "cancelled" ? "已取消" : "执行失败"}。\n${downloadFailureSummary(job, "原任务身份已保留。")}`,
                 );
               if (job.status !== "downloading" && job.status !== "preparing_engine")
                 throw new Error("下载任务状态未确认；请稍后续跑查询原任务，当前不会重新下载。");

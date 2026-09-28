@@ -276,63 +276,78 @@ export function createWorkflowExecutionPlan(
             : []),
           "逐张审核、拒绝或重做，导出已选用图片与清单",
         ]
-    : config.reverseVideo
-      ? ["获取原片与真实抽帧", "视频反推分析", "独立复核与必要修订", "导出文档并保存案例"]
-      : config.xhsCover
-        ? ["制定封面与标题方案", "生成封面或交付提示词", "人物与文字检查", "保存交付结果"]
-        : config.remotion
-          ? ["检查本地渲染环境", "生成声明式动画计划", "检查内容与动画时序", "本地渲染与交付"]
-          : config.comicDrama
-            ? [
-                "逐集剧本共创与审核",
-                "风格锁定与审核",
-                "服化道与跨集资产设计",
-                "导演分镜与双审",
-                "执行提示词与双审",
-                "确认实际分镜执行计划",
-                ...(config.comicDrama.deliverable === "documents"
-                  ? ["导出制作文档"]
-                  : ["资产及镜头生成", "逐镜质检与必要返工", "合成并保存成片"]),
-              ]
-            : config.film
+    : config.reelbench
+      ? [
+          "读取原片并测量时长、帧率、场景切点与镜头运动",
+          "抽取每镜首尾关键帧并生成联系表",
+          "由项目视觉文本模型逐镜标注画面、类别与运镜",
+          "按机器证据检查镜头表，人工修订切点与标注并确认当前版本",
+          "导出镜头表、质检记录与本地报告",
+          ...(config.reelbench.includeSyncVideo ? ["用项目内媒体引擎合成同步分镜信息视频"] : []),
+        ]
+      : config.reverseVideo
+        ? ["获取原片与真实抽帧", "视频反推分析", "独立复核与必要修订", "导出文档并保存案例"]
+        : config.xhsCover
+          ? ["制定封面与标题方案", "生成封面或交付提示词", "人物与文字检查", "保存交付结果"]
+          : config.remotion
+            ? ["检查本地渲染环境", "生成声明式动画计划", "检查内容与动画时序", "本地渲染与交付"]
+            : config.comicDrama
               ? [
-                  "概念、角色与世界观规划",
-                  "剧本、资产与表演设计",
-                  "视频提示词与分镜",
-                  ...(config.film.deliverable === "documents"
+                  "逐集剧本共创与审核",
+                  "风格锁定与审核",
+                  "服化道与跨集资产设计",
+                  "导演分镜与双审",
+                  "执行提示词与双审",
+                  "确认实际分镜执行计划",
+                  ...(config.comicDrama.deliverable === "documents"
                     ? ["导出制作文档"]
                     : [
-                        "确认实际分镜执行计划",
+                        "为已确认角色绑定真实语音音色",
                         "资产及镜头生成",
                         "逐镜质检与必要返工",
-                        "合成并保存成片",
+                        "按逐句对白生成配音并配入已选镜头",
+                        "逐镜人工验收口型，确认后保存成片",
                       ]),
                 ]
-              : config.commerce
+              : config.film
                 ? [
-                    "产品资料核对",
-                    "剧情创意与分镜设计",
-                    ...(config.commerce.deliverable === "documents"
+                    "概念、角色与世界观规划",
+                    "剧本、资产与表演设计",
+                    "视频提示词与分镜",
+                    ...(config.film.deliverable === "documents"
                       ? ["导出制作文档"]
                       : [
                           "确认实际分镜执行计划",
-                          "一致性资产与镜头生成",
-                          "产品保真与视觉质检",
+                          "资产及镜头生成",
+                          "逐镜质检与必要返工",
                           "合成并保存成片",
                         ]),
                   ]
-                : [
-                    "内容诊断与六段式教学规划",
-                    "生成脚本与分镜",
-                    "确认实际分镜执行计划",
-                    "生成封面与镜头",
-                    "逐镜视觉质检与必要返工",
-                    "合成并保存成片",
-                  ];
+                : config.commerce
+                  ? [
+                      "产品资料核对",
+                      "剧情创意与分镜设计",
+                      ...(config.commerce.deliverable === "documents"
+                        ? ["导出制作文档"]
+                        : [
+                            "确认实际分镜执行计划",
+                            "一致性资产与镜头生成",
+                            "产品保真与视觉质检",
+                            "合成并保存成片",
+                          ]),
+                    ]
+                  : [
+                      "内容诊断与六段式教学规划",
+                      "生成脚本与分镜",
+                      "确认实际分镜执行计划",
+                      "生成封面与镜头",
+                      "逐镜视觉质检与必要返工",
+                      "合成并保存成片",
+                    ];
   let steps = serialSteps(titles);
   if (config.musicVideo) {
     steps = serialSteps([
-      "读取原曲并审核完整歌词时间线",
+      "读取原曲并执行专用语音识别、歌词强制对齐与时间线审核",
       "确认视觉风格与人物设定",
       "确认逐段分镜与音乐窗口",
       "审核视频提示词与唱词、嘴型策略",
@@ -344,7 +359,8 @@ export function createWorkflowExecutionPlan(
             "首镜试产并人工审核",
             "按依赖生成并逐段检查",
             "选用片段并按原曲窗口合成",
-            "检查音视频时长并预览确认成片",
+            "播放原曲窗口与对口型镜头，逐镜人工验收并返工未通过片段",
+            "检查音视频流时长并预览确认成片",
           ]),
     ]);
   }
@@ -360,10 +376,12 @@ export function createWorkflowExecutionPlan(
         ? ["导出制作文档"]
         : [
             "确认实际分镜依赖与执行计划",
+            "绑定角色音色并确认对白与语音供应商",
             "生成并审核角色、场景和道具资产",
             "首镜试产并人工审核",
             "按依赖批量生成与逐镜质检",
-            "人工选用片段后合成",
+            "人工选用片段后逐句生成并配入角色语音",
+            "逐镜人工验收口型，未确认的片段不进入成片",
             "预览并确认最终成片",
           ];
     steps = [
@@ -410,7 +428,7 @@ export function createVideoWorkflowExecutionSteps(
     { id: "cover", title: "生成封面与首帧参考图", dependsOn: ["assets"], action: "cover" },
     ...checkpoint.shots.map((shot) => ({
       id: `video:${shot.id}`,
-      title: `镜头 ${shot.sequence} · ${shot.title}（${shot.durationSeconds} 秒）`,
+      title: `生成镜头 ${shot.sequence} · ${shot.title}（${shot.durationSeconds} 秒）`,
       dependsOn: [
         ...new Set([
           "cover",
@@ -435,7 +453,11 @@ export function createVideoWorkflowExecutionSteps(
     })),
     {
       id: "compose",
-      title: "按分镜顺序合成并保存成片",
+      title: checkpoint.comicDrama
+        ? "逐句生成并配入角色语音，逐镜人工验收口型后合成"
+        : checkpoint.musicVideo
+          ? "按原曲窗口合成，逐镜人工验收口型后保存成片"
+          : "按分镜顺序合成并保存成片",
       dependsOn: qcIds.length ? qcIds : ["cover"],
       action: "compose",
     },

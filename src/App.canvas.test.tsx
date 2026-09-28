@@ -1212,7 +1212,7 @@ afterEach(async () => {
 });
 
 describe("画布素材拖拽与连线（桌面运行时）", () => {
-  it("初始画布为空，通过添加节点菜单展示上传素材和全部九种节点", async () => {
+  it("初始画布为空，添加节点菜单只展示九种节点", async () => {
     render(<App />);
 
     expect(await screen.findByText("画布为空")).toBeInTheDocument();
@@ -1222,11 +1222,50 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(screen.queryByRole("complementary", { name: "节点仓库" })).not.toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
     const menu = screen.getByRole("menu", { name: "添加节点" });
-    expect(within(menu).getAllByRole("menuitem")).toHaveLength(10);
-    expect(within(menu).getByRole("menuitem", { name: "上传素材" })).toBeInTheDocument();
+    expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+    expect(within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
     expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
+  });
+
+  it("画布素材卡片按稳定身份保存到本地库，已有内容不会重复入库", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "save_existing_asset_to_library") {
+        return Promise.resolve({
+          destination: "local",
+          assetId: "local-b64-existing",
+          reused: true,
+        });
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const card = await addAssetNode("图片", "站台参考图", 180, 180);
+    fireEvent.click(within(card).getByRole("button", { name: "保存素材：站台参考图" }));
+    const choices = within(card).getByRole("group", { name: "保存素材：站台参考图" });
+    fireEvent.click(within(choices).getByRole("button", { name: "保存到本地素材库" }));
+
+    await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command]) => command === "save_existing_asset_to_library",
+      );
+      expect(call?.[1]).toEqual({
+        command: {
+          source: {
+            kind: "cloud",
+            assetId: "asset-image-1",
+            providerConnectionId: PROVIDER.id,
+            mediaType: "image",
+          },
+          destination: "local",
+          targetProviderConnectionId: null,
+          groupId: null,
+          name: "站台参考图",
+        },
+      });
+    });
+    expect(await screen.findByText("「站台参考图」已在本地素材库，未重复保存")).toBeInTheDocument();
   });
 
   it("看着远处的视频流时，回到起始位置会把整段流重新放进画面且不挪动节点", async () => {
@@ -1361,8 +1400,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       dropConnectionFromHandle(asset, "source", pane, dropPoint);
 
       const menu = await screen.findByRole("menu", { name: "添加节点" });
-      expect(within(menu).getAllByRole("menuitem")).toHaveLength(10);
-      expect(within(menu).getByRole("menuitem", { name: "上传素材" })).toBeEnabled();
+      expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
+      expect(within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
       for (const name of ["图片生成", "视频生成", "提示词生成与优化"]) {
         expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
       }
@@ -1482,82 +1521,6 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     await waitFor(() =>
       expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1),
     );
-  });
-
-  it("画布菜单上传素材后直接落到画布", async () => {
-    dialogOpenMock.mockResolvedValue(["C:\\media\\canvas-upload.png"]);
-    invokeMock.mockImplementation((command, args) => {
-      if (command === "get_tos_staging_config") {
-        return Promise.resolve({
-          region: "cn-beijing",
-          endpoint: "tos-cn-beijing.volces.com",
-          bucket: "test-staging-bucket",
-          credentialRef: "tos-ak-sk",
-          objectPrefix: "staging",
-          enabled: true,
-        });
-      }
-      if (command === "start_staging_upload") return Promise.resolve("canvas-upload-job-1");
-      return baseInvokeImplementation(command, args);
-    });
-    render(<App />);
-    await screen.findByText("画布为空");
-    createNodeAt("上传素材", 680, 400);
-
-    await waitFor(() => {
-      expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
-        true,
-      );
-    });
-
-    const stagingListener = await waitFor(() => {
-      const call = invokeMock.mock.calls.find(
-        ([command, args]) =>
-          command === "plugin:event|listen" && args?.["event"] === "staging:state-changed",
-      );
-      expect(call).toBeDefined();
-      return call!;
-    });
-    const stagingHandler = tauriCallbacks.get(stagingListener[1]?.["handler"] as number);
-    expect(stagingHandler).toBeDefined();
-    act(() => {
-      stagingHandler!({
-        event: "staging:state-changed",
-        id: 1,
-        payload: {
-          jobId: "canvas-upload-job-1",
-          job: {
-            id: "canvas-upload-job-1",
-            localPath: "C:\\media\\canvas-upload.png",
-            purpose: "asset_import",
-            mediaType: "image",
-            objectKey: "staging/canvas-upload.png",
-            status: "active",
-            bytesTotal: 2048,
-            bytesUploaded: 2048,
-            assetId: "asset-canvas-upload-1",
-            importTarget: {
-              providerConnectionId: PROVIDER.id,
-              name: "canvas-upload.png",
-              groupId: null,
-            },
-            adjustment: null,
-            error: null,
-            createdAt: 0,
-            updatedAt: 2,
-          },
-        },
-      });
-    });
-
-    const uploaded = await waitFor(() => {
-      const node = document.querySelector<HTMLElement>(
-        ".canvas-asset-node:not(.canvas-asset-node--output)",
-      );
-      expect(node).not.toBeNull();
-      return node!;
-    });
-    expect(uploaded).toHaveTextContent("canvas-upload.png");
   });
 
   it.each([
@@ -2100,6 +2063,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.change(input, { target: { value: "https://v.douyin.com/iAbCdEf/" } });
     expect(within(node).queryByText(/未登录 B 站/)).not.toBeInTheDocument();
 
+    fireEvent.change(input, { target: { value: "https://evil.example/watch?next=bilibili.com" } });
+    expect(within(node).queryByText(/未登录 B 站/)).not.toBeInTheDocument();
+
     // B 站未登录：提示自动 480P。
     fireEvent.change(input, {
       target: { value: "https://www.bilibili.com/video/BV1YE6gBHEoN/" },
@@ -2112,7 +2078,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     ).not.toBeNull();
   });
 
-  it("B 站已登录时画质路由提醒为最高画质", async () => {
+  it("B 站 Cookies 文件提示登录凭据待实际下载验证", async () => {
     invokeMock.mockImplementation((command: string) => {
       if (command === "get_video_downloader_engine") {
         return Promise.resolve({
@@ -2133,9 +2099,58 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       target: { value: "https://b23.tv/AbCdEf" },
     });
     await waitFor(() =>
-      expect(within(node).getByText(/已登录 B 站.*最高画质/)).toBeInTheDocument(),
+      expect(within(node).getByText(/文件含 B 站登录凭据.*以下载结果为准/)).toBeInTheDocument(),
     );
     expect(within(node).queryByText(/未登录 B 站/)).not.toBeInTheDocument();
+  });
+
+  it("B 站浏览器来源可切换，且不把静态文件标记当作浏览器登录验证", async () => {
+    let browser = "chrome";
+    invokeMock.mockImplementation((command: string, args?: Record<string, unknown>) => {
+      if (
+        command === "get_video_downloader_engine" ||
+        command === "set_downloader_cookie_browser"
+      ) {
+        if (command === "set_downloader_cookie_browser") browser = String(args?.["browser"]);
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookieBrowser: browser,
+          cookiesInstalled: true,
+          bilibiliLoggedIn: true,
+          lastError: null,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    fireEvent.change(within(node).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: "https://www.bilibili.com/video/BV1YE6gBHEoN/" },
+    });
+    expect(within(node).getByText(/下载时尝试读取浏览器 Cookies/)).toBeInTheDocument();
+    expect(within(node).queryByText(/文件含 B 站登录凭据/)).not.toBeInTheDocument();
+
+    fireEvent.change(within(node).getByRole("combobox", { name: "下载 Cookies 来源" }), {
+      target: { value: "edge" },
+    });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_downloader_cookie_browser", { browser: "edge" }),
+    );
+    await waitFor(() =>
+      expect(within(node).getByText(/尝试读取 Edge Cookies/)).toBeInTheDocument(),
+    );
+    fireEvent.change(within(node).getByRole("combobox", { name: "下载 Cookies 来源" }), {
+      target: { value: "auto" },
+    });
+    await waitFor(() =>
+      expect(invokeMock).toHaveBeenCalledWith("set_downloader_cookie_browser", { browser: "auto" }),
+    );
+    await waitFor(() =>
+      expect(within(node).getByText(/下载时自动逐源预检 · 已导入文件可作后备/)).toBeInTheDocument(),
+    );
   });
 
   it("B 站下载完成后展示已自动去除水印提示", async () => {
@@ -2167,6 +2182,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           qualityMode: "best",
           qualityHint: "已登录 B 站：将下载当前账号可用的最高画质。",
           watermarkRemoved: true,
+          credentialSource: "manual",
           error: null,
           createdAt: 1,
           updatedAt: 2,
@@ -2196,6 +2212,109 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       () => expect(within(node).getByText(/已自动去除 B 站右上角水印/)).toBeInTheDocument(),
       { timeout: 4000 },
     );
+    expect(within(node).getByText(/本次下载使用：已导入的 cookies.txt/)).toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      source: "none" as const,
+      expected: /本次下载使用：公开访问（未使用 Cookies） · 不代表已登录/,
+    },
+    {
+      source: "site_session" as const,
+      expected: /本次下载使用：站点会话 · 不代表已登录/,
+    },
+  ])("自动模式 $source 下载完成后显示真实来源，不称为登录验证", async ({ source, expected }) => {
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_video_downloader_engine") {
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookieBrowser: "auto",
+          cookiesInstalled: false,
+          bilibiliLoggedIn: false,
+          lastError: null,
+        });
+      }
+      if (command === "start_video_download" || command === "get_video_download_job") {
+        const completed = command === "get_video_download_job";
+        return Promise.resolve({
+          jobId: "download-public-1",
+          url: "https://v.douyin.com/public/",
+          status: completed ? "completed" : "downloading",
+          progress: completed ? 100 : 10,
+          finalPath: completed ? "C:/downloads/public.mp4" : null,
+          fileName: completed ? "public.mp4" : null,
+          qualityMode: null,
+          qualityHint: null,
+          watermarkRemoved: false,
+          credentialSource: completed ? source : null,
+          error: null,
+          createdAt: 1,
+          updatedAt: completed ? 2 : 1,
+        });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    fireEvent.change(within(node).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: "https://v.douyin.com/public/" },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "开始下载视频" }));
+    await waitFor(() => expect(within(node).getByText(expected)).toBeInTheDocument());
+  });
+
+  it("自动模式显示后端当前候选预检状态，预检期间不显示下载进度", async () => {
+    const probingJob = {
+      jobId: "download-probing-1",
+      url: "https://v.douyin.com/probing/",
+      status: "downloading",
+      progress: null,
+      finalPath: null,
+      fileName: null,
+      qualityMode: null,
+      qualityHint: null,
+      watermarkRemoved: false,
+      credentialSource: null,
+      probeStatus: "自动预检 1/5：Chrome",
+      error: null,
+      createdAt: 1,
+      updatedAt: 2,
+    };
+    invokeMock.mockImplementation((command: string) => {
+      if (command === "get_video_downloader_engine") {
+        return Promise.resolve({
+          state: "ready",
+          version: "2026.08.19",
+          binaryPath: "C:/engine/yt-dlp.exe",
+          cookieBrowser: "auto",
+          cookiesInstalled: false,
+          bilibiliLoggedIn: false,
+          lastError: null,
+        });
+      }
+      if (command === "start_video_download" || command === "get_video_download_job") {
+        return Promise.resolve(probingJob);
+      }
+      if (command === "cancel_video_download")
+        return Promise.resolve({ ...probingJob, status: "cancelled" });
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const node = await addVideoDownloaderNode(920, 160);
+    fireEvent.change(within(node).getByRole("textbox", { name: "视频链接" }), {
+      target: { value: probingJob.url },
+    });
+    fireEvent.click(within(node).getByRole("button", { name: "开始下载视频" }));
+    await waitFor(() => expect(within(node).getByText("自动预检 1/5：Chrome")).toBeInTheDocument());
+    expect(
+      within(node).queryByRole("progressbar", { name: "视频下载进度" }),
+    ).not.toBeInTheDocument();
+    expect(within(node).queryByText(/下载完成 · 产物/)).not.toBeInTheDocument();
   });
 
   it("爆款视频复刻节点可直连下载节点，并在下载完成后自动就绪", async () => {
@@ -3020,6 +3139,153 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(submittedGenerationCommands().at(-1)?.["prompt"]).toEqual([
       { kind: "text", text: optimizedPrompt },
     ]);
+  });
+
+  it("电影对白先澄清再只把纯提示词下发给视频节点", async () => {
+    const videoPrompt = "雨夜站台，甲说：‘别走。’乙停顿后回答：‘我会回来。’镜头保持空间连续。";
+    const replies = [
+      JSON.stringify({ status: "needs_input", message: "台词能否改编？目标时长是多少？" }),
+      JSON.stringify({
+        status: "ready",
+        videoPrompt,
+        target: "当前已连接的视频模型 · 15 秒",
+        turnPlan: "甲起手，乙听完后接话。",
+        budget: "两句台词约占 5 秒，留出停顿与反应。",
+        reviewChecklist: "- [ ] 台词与人物对应\n- [ ] 听完后再反应",
+        adaptationNotes: "台词逐字保留。",
+        timing: {
+          beats: [
+            {
+              startMs: 0,
+              endMs: 15000,
+              utterances: [
+                { speaker: "甲", text: "别走。", startMs: 1000, endMs: 2500 },
+                { speaker: "乙", text: "我会回来。", startMs: 6000, endMs: 8500 },
+              ],
+            },
+          ],
+        },
+      }),
+      '{"status":"ready","videoPrompt":',
+      JSON.stringify({
+        status: "ready",
+        videoPrompt,
+        target: "当前已连接的视频模型 · 15 秒",
+        turnPlan: "甲起手，乙接话。",
+        budget: "15 秒。",
+        reviewChecklist: "检查台词。",
+        timing: { beats: [{ startMs: 0, endMs: 14000, utterances: [] }] },
+      }),
+      JSON.stringify({ status: "needs_input", message: "请确认本轮目标视频模型。" }),
+    ];
+    let runCount = 0;
+    invokeMock.mockImplementation((command) => {
+      if (command === "run_prompt_node") {
+        const reply = replies[runCount++]!;
+        return Promise.resolve({ optimizedPrompt: reply, rawModelOutput: reply });
+      }
+      return baseInvokeImplementation(command);
+    });
+
+    render(<App />);
+    const promptNode = await addPromptNode(260, 180);
+    await waitFor(() =>
+      expect(within(promptNode).getByLabelText("提示词文本模型")).toHaveValue(TEXT_MODEL.id),
+    );
+    fireEvent.change(within(promptNode).getByLabelText("提示词技能模式"), {
+      target: { value: "cinematic_dialogue" },
+    });
+    expect(within(promptNode).getByLabelText("提示词技能模式")).toHaveDisplayValue("电影对白表演");
+    const videoNode = await addGenerationNode("视频", 920, 180);
+    connectPromptToGeneration(promptNode, videoNode);
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "甲和乙在雨夜站台告别。甲：别走。乙：我会回来。" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    const output = getPromptOutputEditor(promptNode);
+    await waitFor(() =>
+      expect(within(promptNode).getByRole("log", { name: "提示词多轮对话" })).toHaveTextContent(
+        "台词能否改编？目标时长是多少？",
+      ),
+    );
+    expect(output).not.toHaveTextContent("台词能否改编");
+    const firstCommand = invokeMock.mock.calls.find(
+      ([command]) => command === "run_prompt_node",
+    )?.[1] as {
+      command: Record<string, unknown>;
+    };
+    expect(firstCommand.command).toMatchObject({ mode: "cinematic_dialogue", task: "generate" });
+    expect(firstCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ role: "项目当前启用的视频模型候选" }),
+        expect.objectContaining({ role: "当前已连接的下游视频模型" }),
+      ]),
+    );
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "台词逐字保留，15 秒。" },
+    });
+    fireEvent.change(within(promptNode).getByLabelText("对白目标时长（秒）"), {
+      target: { value: "15" },
+    });
+    fireEvent.change(within(promptNode).getByLabelText("锁定原台词"), {
+      target: { value: "甲：别走。\n乙：我会回来。" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() => expect(output).toHaveTextContent(noNewlines(videoPrompt)));
+    const secondCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[1]?.[1] as { command: Record<string, unknown> };
+    expect(secondCommand.command["contextHistory"]).toEqual(
+      expect.arrayContaining([
+        { role: "user", content: "甲和乙在雨夜站台告别。甲：别走。乙：我会回来。" },
+        { role: "assistant", content: "台词能否改编？目标时长是多少？" },
+      ]),
+    );
+    const conversation = within(promptNode).getByRole("log", { name: "提示词多轮对话" });
+    expect(conversation).toHaveTextContent("话轮安排");
+    expect(conversation).toHaveTextContent("台词预算");
+    expect(conversation).toHaveTextContent("项目校验");
+    expect(conversation).toHaveTextContent("生成后验收");
+    expect(output).not.toHaveTextContent("台词预算");
+    expect(promptNode).toHaveTextContent("当前输出与最近一次通过校验的模型结果一致");
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "只把乙的停顿延长一点。" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    expect(await within(promptNode).findByRole("alert")).toHaveTextContent("JSON 无效或不完整");
+    expect(output).toHaveTextContent(noNewlines(videoPrompt));
+
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(within(promptNode).getByRole("alert")).toHaveTextContent("必须等于目标时长"),
+    );
+    expect(output).toHaveTextContent(noNewlines(videoPrompt));
+
+    fireEvent.click(within(videoNode).getByRole("button", { name: "开始视频生成" }));
+    await waitFor(() => expect(submittedGenerationCommands()).toHaveLength(1));
+    expect(submittedGenerationCommand()["prompt"]).toEqual([{ kind: "text", text: videoPrompt }]);
+
+    fireEvent.change(within(promptNode).getByLabelText("对白目标时长（秒）"), {
+      target: { value: "16" },
+    });
+    await waitFor(() => expect(output).not.toHaveTextContent(noNewlines(videoPrompt)));
+
+    fireEvent.change(within(promptNode).getByRole("textbox", { name: "创意或需求" }), {
+      target: { value: "" },
+    });
+    fireEvent.click(within(promptNode).getByRole("button", { name: "生成提示词" }));
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "run_prompt_node"),
+      ).toHaveLength(5),
+    );
+    const lockedOnlyCommand = invokeMock.mock.calls.filter(
+      ([command]) => command === "run_prompt_node",
+    )[4]?.[1] as { command: Record<string, unknown> };
+    expect(lockedOnlyCommand.command["userPrompt"]).toContain("节点锁定原台词");
   });
 
   it("GPT Image 2 风格库清洗模板元信息，保留真实参考与手改并传入图片节点", async () => {
@@ -5244,6 +5510,69 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     );
   });
 
+  it("本机 Base64 素材预览失败时按素材 ID 回读本机媒体，不续签对象存储", async () => {
+    const assetId = "local-b64-11111111-1111-4111-8111-111111111111";
+    const previewUrl = `http://localbase64.localhost/${assetId}`;
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "get_canvas_document")
+        return Promise.resolve({
+          id: "canvas-scene-local-b64",
+          title: "未命名画布",
+          revision: 1,
+          createdAt: 0,
+          updatedAt: 0,
+          document: {
+            version: 1,
+            assetNodes: [
+              {
+                key: "base64-image-node",
+                assetId,
+                providerConnectionId: "",
+                source: "local",
+                kind: "image",
+                name: "本机素材图片",
+                previewUrl,
+                videoUrl: null,
+                x: 40,
+                y: 180,
+              },
+            ],
+            outputNodes: [],
+            genNodes: [],
+            resultNodes: [],
+            assetEdges: [],
+            view: { zoom: 74, pan: { x: 0, y: 0 } },
+            prompts: {},
+          },
+        });
+      if (command === "refresh_local_base64_asset_media") return Promise.resolve(previewUrl);
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    const node = await waitFor(() => {
+      const found = document.querySelector<HTMLElement>(
+        '[data-connection-target="base64-image-node"]',
+      );
+      expect(found).not.toBeNull();
+      return found!;
+    });
+    const image = node.querySelector("img");
+    expect(image).not.toBeNull();
+    fireEvent.error(image!);
+    await waitFor(() => {
+      const refreshCall = invokeMock.mock.calls.find(
+        ([command]) => command === "refresh_local_base64_asset_media",
+      );
+      expect(refreshCall?.[1]).toEqual({ assetId, mediaType: "image" });
+    });
+    expect(invokeMock.mock.calls.some(([command]) => command === "refresh_local_asset_media")).toBe(
+      false,
+    );
+    expect(
+      invokeMock.mock.calls.some(([command]) => command === "refresh_staging_object_url"),
+    ).toBe(false);
+  });
+
   it("画布水合后批量重签本地素材预览地址：过期签名在首次渲染前就被换掉", async () => {
     // 本地素材签名只活 1 小时，而节点数据随画布文档持久化：重启后打开画布必然拿到过期签名，
     // 这里验证不会再看到一屏「预览不可用」，而是水合后直接换上新签名。
@@ -5511,9 +5840,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const frameCard = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
     expect(frameCard).not.toBeNull();
     expect(frameCard!.querySelector(".canvas-asset-node__cloud-badge")).not.toBeNull();
-    expect(
-      within(frameCard!).getByRole("button", { name: /^已上传到云端素材库/ }),
-    ).toBeInTheDocument();
+    fireEvent.click(within(frameCard!).getByRole("button", { name: /^保存产物：/ }));
+    expect(within(frameCard!).getByRole("button", { name: "保存到云端素材库" })).toBeEnabled();
   });
 
   it("恢复含上游提示词的局部编辑画布时保留编辑指令与原视频标注图稳定引用", async () => {
@@ -5890,6 +6218,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   /** 恢复一张已落卡（含产物文件）的图片产物卡片；可追加覆盖命令（覆盖优先）。 */
   function restoreCompletedImageOutputCard(
     handleCommand?: (command: string, args?: Record<string, unknown>) => Promise<unknown> | null,
+    groupedSecondOutput = false,
   ): void {
     invokeMock.mockImplementation((command, args) => {
       const overridden = handleCommand?.(command, args);
@@ -5913,9 +6242,27 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
                 finalPath: "C:\\generated\\night-train.png",
                 name: "night-train.png",
                 aspectRatio: 16 / 9,
+                ...(groupedSecondOutput ? { assetGroupId: "saved-output-group" } : {}),
                 x: 320,
                 y: 180,
               },
+              ...(groupedSecondOutput
+                ? [
+                    {
+                      key: "output-task-2",
+                      resultKey: "task-2#0",
+                      sourceNodeId: "gen-node-2",
+                      taskId: "task-2",
+                      mediaType: "image",
+                      finalPath: "C:\\generated\\night-train-second.png",
+                      name: "night-train-second.png",
+                      aspectRatio: 16 / 9,
+                      assetGroupId: "saved-output-group",
+                      x: 640,
+                      y: 180,
+                    },
+                  ]
+                : []),
             ],
             assetEdges: [],
             // zoom 状态存的是百分比：100 表示不缩放，board 坐标与 client 坐标一致。
@@ -5948,6 +6295,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   /** 上传行元素本身（用于断言行状态与行内报错）。 */
   function uploadRowFor(name: string): HTMLElement | null {
     return uploadRowText(name)?.closest<HTMLElement>(".asset-upload") ?? null;
+  }
+
+  function outputSaveChoices(card: HTMLElement): HTMLElement {
+    fireEvent.click(within(card).getByRole("button", { name: /^保存产物：/ }));
+    return within(card).getByRole("group", { name: /^保存素材：/ });
+  }
+
+  function saveOutputTo(card: HTMLElement, label: string): void {
+    fireEvent.click(within(outputSaveChoices(card)).getByRole("button", { name: label }));
   }
 
   it("已落卡的产物节点可通过拖拽把手自由移动，位移足够时不触发全屏预览", async () => {
@@ -6017,8 +6373,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(node).not.toBeNull();
       return node!;
     });
-    // 产物卡片右上角的上传按钮：点击即用本地 finalPath 直接入库，不再走文件选择器。
-    fireEvent.click(within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }));
+    // 从产物卡片选择目标，直接用本地 finalPath 入库，不再走文件选择器。
+    saveOutputTo(card, "保存到云端素材库");
 
     await waitFor(() => {
       const uploadCall = invokeMock.mock.calls.find(
@@ -6073,11 +6429,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       });
     });
 
-    const uploadedButton = await within(card).findByRole("button", {
-      name: /^已上传到云端素材库/,
+    await waitFor(() => {
+      expect(within(card).getByLabelText("已在云端素材库")).toBeInTheDocument();
     });
-    expect(uploadedButton).toHaveClass("is-uploaded");
-    expect(uploadedButton.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
+    expect(
+      within(outputSaveChoices(card)).getByRole("button", { name: "保存到云端素材库" }),
+    ).toBeEnabled();
 
     // 已上传状态随画布文档落盘：重启后绿色小点仍在，而不是只活在本进程内存里。
     await waitFor(
@@ -6097,6 +6454,215 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       );
     });
     expect(uploadRowText("night-train.png")).toBeNull();
+  });
+
+  it("产物上传到本地素材库成功后显示标记并保存上传状态", async () => {
+    let savedDocument: { outputNodes?: Array<Record<string, unknown>> } | null = null;
+    restoreCompletedImageOutputCard((command, args) => {
+      if (command === "import_local_base64_asset") {
+        return Promise.resolve({
+          id: "local-b64-output-1",
+          name: "night-train.png",
+          mediaType: "image",
+          mimeType: "image/png",
+          previewUrl: "http://localbase64.localhost/local-b64-output-1",
+          byteSize: 4,
+          createdAt: 1,
+        });
+      }
+      if (command === "save_canvas_document") {
+        const saveCommand = args?.["command"] as { document: typeof savedDocument };
+        savedDocument = saveCommand.document;
+        return Promise.resolve({ ...saveCommand, revision: 1, createdAt: 1, updatedAt: 1 });
+      }
+      return null;
+    });
+    render(<App />);
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    saveOutputTo(card, "保存到本地素材库");
+
+    await waitFor(() => {
+      const uploadCall = invokeMock.mock.calls.find(
+        ([command]) => command === "import_local_base64_asset",
+      );
+      expect(uploadCall?.[1]).toEqual({
+        command: { localPath: "C:\\generated\\night-train.png", name: "night-train.png" },
+      });
+    });
+    expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+      false,
+    );
+
+    await waitFor(() => {
+      expect(within(card).getByLabelText("已在本地素材库")).toBeInTheDocument();
+    });
+    expect(
+      within(outputSaveChoices(card)).getByRole("button", { name: "保存到本地素材库" }),
+    ).toBeEnabled();
+    await waitFor(() => {
+      const uploaded = savedDocument?.outputNodes?.find((node) => node["key"] === "output-task-1");
+      expect(uploaded?.["uploadedToLocal"]).toBe(true);
+    });
+  });
+
+  it("单张产物可仅上传到对象存储，staged 后保存独立状态", async () => {
+    let savedDocument: { outputNodes?: Array<Record<string, unknown>> } | null = null;
+    restoreCompletedImageOutputCard((command, args) => {
+      if (command === "get_tos_staging_config") {
+        return Promise.resolve({
+          region: "cn-beijing",
+          endpoint: "tos-cn-beijing.volces.com",
+          bucket: "canvas-test",
+          credentialRef: "tos:default",
+          objectPrefix: "staging",
+          enabled: true,
+        });
+      }
+      if (command === "start_staging_upload") return Promise.resolve("tos-output-1");
+      if (command === "save_canvas_document") {
+        const saveCommand = args?.["command"] as { document: typeof savedDocument };
+        savedDocument = saveCommand.document;
+        return Promise.resolve({ ...saveCommand, revision: 1, createdAt: 1, updatedAt: 1 });
+      }
+      return null;
+    });
+    render(<App />);
+    const card = await waitFor(() => {
+      const node = document.querySelector<HTMLElement>(".canvas-asset-node--output--image");
+      expect(node).not.toBeNull();
+      return node!;
+    });
+    const choices = outputSaveChoices(card);
+    expect(within(choices).getByRole("button", { name: "保存到本地素材库" })).toBeEnabled();
+    expect(within(choices).getByRole("button", { name: "保存到云端素材库" })).toBeEnabled();
+    fireEvent.click(within(choices).getByRole("button", { name: "保存到对象存储" }));
+
+    await waitFor(() => {
+      const uploadCall = invokeMock.mock.calls.find(
+        ([command]) => command === "start_staging_upload",
+      );
+      expect(uploadCall?.[1]).toEqual({
+        command: {
+          localPath: "C:\\generated\\night-train.png",
+          purpose: "local_asset",
+          mediaType: "image",
+          import: null,
+        },
+      });
+    });
+    expect(invokeMock.mock.calls.some(([command]) => command === "import_local_base64_asset")).toBe(
+      false,
+    );
+
+    const stagingListener = await waitFor(() => {
+      const call = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "staging:state-changed",
+      );
+      expect(call).toBeDefined();
+      return call!;
+    });
+    const stagingHandler = tauriCallbacks.get(stagingListener[1]?.["handler"] as number);
+    expect(stagingHandler).toBeDefined();
+    act(() => {
+      stagingHandler!({
+        event: "staging:state-changed",
+        id: 1,
+        payload: {
+          jobId: "tos-output-1",
+          job: {
+            id: "tos-output-1",
+            localPath: "C:\\generated\\night-train.png",
+            purpose: "local_asset",
+            mediaType: "image",
+            objectKey: "staging/night-train.png",
+            status: "staged",
+            bytesTotal: 2048,
+            bytesUploaded: 2048,
+            assetId: null,
+            importTarget: null,
+            adjustment: null,
+            error: null,
+            createdAt: 0,
+            updatedAt: 2,
+          },
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(within(card).getByLabelText("已在对象存储")).toBeInTheDocument();
+    });
+    expect(
+      within(outputSaveChoices(card)).getByRole("button", { name: "保存到对象存储" }),
+    ).toBeEnabled();
+    await waitFor(() => {
+      const uploaded = savedDocument?.outputNodes?.find((node) => node["key"] === "output-task-1");
+      expect(uploaded?.["uploadedToObjectStorage"]).toBe(true);
+      expect(uploaded?.["uploadedToCloud"]).not.toBe(true);
+      expect(uploaded?.["uploadedToLocal"]).not.toBe(true);
+    });
+  });
+
+  it("对象存储子目录中的成组产物只直传 TOS，不导入两套素材库", async () => {
+    let uploadIndex = 0;
+    restoreCompletedImageOutputCard((command) => {
+      if (command === "get_tos_staging_config") {
+        return Promise.resolve({
+          region: "cn-beijing",
+          endpoint: "tos-cn-beijing.volces.com",
+          bucket: "canvas-test",
+          credentialRef: "tos:default",
+          objectPrefix: "staging",
+          enabled: true,
+        });
+      }
+      if (command === "list_local_assets") {
+        return Promise.resolve({
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 40,
+          kindTotals: { image: 0, video: 0, audio: 0 },
+        });
+      }
+      if (command === "start_staging_upload") return Promise.resolve(`tos-group-${++uploadIndex}`);
+      return null;
+    }, true);
+    render(<App />);
+    const group = await screen.findByRole("group", { name: /产物组，2 个/ });
+    fireEvent.click(screen.getByRole("tab", { name: "对象存储" }));
+    fireEvent.click(within(group).getByRole("button", { name: "上传到对象存储" }));
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "start_staging_upload"),
+      ).toHaveLength(2);
+    });
+    const uploads = invokeMock.mock.calls
+      .filter(([command]) => command === "start_staging_upload")
+      .map(([, args]) => (args as { command: Record<string, unknown> }).command);
+    expect(uploads).toEqual([
+      {
+        localPath: "C:\\generated\\night-train.png",
+        purpose: "local_asset",
+        mediaType: "image",
+        import: null,
+      },
+      {
+        localPath: "C:\\generated\\night-train-second.png",
+        purpose: "local_asset",
+        mediaType: "image",
+        import: null,
+      },
+    ]);
+    expect(invokeMock.mock.calls.some(([command]) => command === "import_local_base64_asset")).toBe(
+      false,
+    );
   });
 
   it("上传失败的行保留在面板里，不自动收起（用户要看原因并重试）", async () => {
@@ -6121,7 +6687,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(node).not.toBeNull();
       return node!;
     });
-    fireEvent.click(within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }));
+    saveOutputTo(card, "保存到云端素材库");
     await waitFor(() => {
       expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
         true,
@@ -6182,8 +6748,8 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(failedRow).getByRole("alert")).toHaveTextContent("连接中断");
     // 产物卡片不会被标记成已上传。
     expect(
-      within(card).getByRole("button", { name: /^上传图片产物到云端素材库/ }),
-    ).toBeInTheDocument();
+      within(outputSaveChoices(card)).getByRole("button", { name: "保存到云端素材库" }),
+    ).toBeEnabled();
   });
 
   it("重启后按本地路径接回入库上传：已入库的点亮绿色小点，未完成的恢复为在途行", async () => {
@@ -6250,11 +6816,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(node).not.toBeNull();
       return node!;
     });
-    const uploadedButton = await within(card).findByRole("button", {
-      name: /^已上传到云端素材库/,
+    await waitFor(() => {
+      expect(within(card).getByLabelText("已在云端素材库")).toBeInTheDocument();
     });
-    expect(uploadedButton).toHaveClass("is-uploaded");
-    expect(uploadedButton.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
+    expect(
+      within(outputSaveChoices(card)).getByRole("button", { name: "保存到云端素材库" }),
+    ).toBeEnabled();
 
     // 未完成的上传恢复成面板在途行，并说明已被接管（后台仍在推进，用户不必重传）。
     const restoredRow = await waitFor(() => {
@@ -7569,6 +8136,115 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(rfWrapperOf(assetNode)).toHaveClass("selected");
     fireEvent.keyDown(document, { key: "Delete" });
     await waitFor(() => expect(document.querySelector(".canvas-asset-node")).toBeNull());
+  });
+
+  it("统一框选后按操作选择成组，混入其他节点时不能成组", async () => {
+    render(<App />);
+    const generation = await addGenerationNode("图片", 650, 270);
+    const first = await addAssetNode("图片", "站台参考图", 170, 270);
+    const second = await addAssetNode("图片", "站台参考图", 370, 270);
+
+    fireEvent.click(screen.getByRole("button", { name: "框选节点" }));
+    fireEvent.click(first.querySelector(".canvas-asset-node__identity")!);
+    fireEvent.click(second.querySelector(".canvas-asset-node__identity")!, { ctrlKey: true });
+    expect(document.querySelector(".canvas-asset-group")).toBeNull();
+    expect(screen.getByRole("button", { name: "将选中素材或产物成组，当前 2 个" })).toBeEnabled();
+
+    fireEvent.click(generation.querySelector(".canvas-gen-node__type-copy")!, { ctrlKey: true });
+    expect(screen.getByRole("button", { name: "将选中素材或产物成组，当前 3 个" })).toBeDisabled();
+    fireEvent.click(generation.querySelector(".canvas-gen-node__type-copy")!, { ctrlKey: true });
+    fireEvent.click(screen.getByRole("button", { name: "将选中素材或产物成组，当前 2 个" }));
+
+    expect(await screen.findByRole("group", { name: /素材组，2 个/ })).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "框选素材或产物成组" })).not.toBeInTheDocument();
+  });
+
+  it("先复制才可粘贴，复制按钮本身不生成节点", async () => {
+    render(<App />);
+    const paste = screen.getByRole("button", { name: "粘贴已复制节点" });
+    expect(paste).toBeDisabled();
+    expect(screen.getByRole("button", { name: "复制选中节点到剪贴板，当前 0 个" })).toBeDisabled();
+    const assetNode = await addAssetNode("图片", "站台参考图", 170, 270);
+    fireEvent.click(assetNode.querySelector(".canvas-asset-node__identity")!);
+    const copy = screen.getByRole("button", { name: "复制选中节点到剪贴板，当前 1 个" });
+    expect(copy).toBeEnabled();
+    fireEvent.click(copy);
+    expect(paste).toBeEnabled();
+    expect(
+      document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+    ).toHaveLength(1);
+    expect(assetNode).toBeInTheDocument();
+
+    fireEvent.click(paste);
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(2),
+    );
+  });
+
+  it("多选复制只重建选中节点之间的连线，批量删除可一次撤销", async () => {
+    render(<App />);
+    const generation = await addGenerationNode("图片", 620, 250);
+    const assetNode = await addAssetNode("图片", "站台参考图", 170, 270);
+    connectAssetToGeneration(assetNode, generation);
+    await within(generation).findByRole("button", { name: "解除连线：站台参考图" });
+    setPromptText(
+      within(generation).getByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      "复制与撤销保留正文",
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "框选节点" }));
+    fireEvent.click(assetNode.querySelector(".canvas-asset-node__identity")!);
+    fireEvent.click(generation.querySelector(".canvas-gen-node__type-copy")!, { ctrlKey: true });
+    const copy = screen.getByRole("button", { name: "复制选中节点到剪贴板，当前 2 个" });
+    expect(copy).toBeEnabled();
+    fireEvent.click(copy);
+    fireEvent.click(screen.getByRole("button", { name: "粘贴已复制节点" }));
+
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(2);
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(2);
+      expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(2);
+      expect(
+        screen.getAllByRole("textbox", { name: "提示词输入框，输入 @ 引用素材" }),
+      ).toHaveLength(2);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "删除选中节点，当前 2 个" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(1);
+      expect(document.querySelectorAll(".edge--asset-generation")).toHaveLength(1);
+    });
+    fireEvent.click(screen.getByRole("button", { name: "撤销画布操作" }));
+    await waitFor(() => {
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(2);
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(2);
+      for (const prompt of screen.getAllByRole("textbox", {
+        name: "提示词输入框，输入 @ 引用素材",
+      }))
+        expect(prompt).toHaveTextContent("复制与撤销保留正文");
+    });
+  });
+
+  it("Ctrl+C 与 Ctrl+V 复制已选中的素材实例", async () => {
+    render(<App />);
+    const assetNode = await addAssetNode("图片", "站台参考图", 170, 270);
+    fireEvent.click(assetNode.querySelector(".canvas-asset-node__identity")!);
+    if (document.activeElement instanceof HTMLElement) document.activeElement.blur();
+    fireEvent.keyDown(document, { key: "c", code: "KeyC", ctrlKey: true });
+    fireEvent.keyDown(document, { key: "v", code: "KeyV", ctrlKey: true });
+    await waitFor(() =>
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(2),
+    );
   });
 
   it("提示词输入框内按 Delete 不会删掉节点", async () => {

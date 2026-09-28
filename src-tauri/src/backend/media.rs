@@ -11,6 +11,7 @@ use super::{
     composer::VideoCompositionService,
     error::{BackendError, BackendResult},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
+    local_base64_assets::{LocalBase64Library, extension_for_mime},
     model_schema::{is_seedance_25_video_model, is_seedream_image_model},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
@@ -40,6 +41,7 @@ pub struct MediaResolver {
     assets: AssetLibrary,
     local_results: LocalResultService,
     staging: StagingService,
+    local_base64_assets: LocalBase64Library,
     composer: VideoCompositionService,
 }
 
@@ -256,6 +258,7 @@ impl MediaResolver {
         local_results: LocalResultService,
         staging: StagingService,
         composer: VideoCompositionService,
+        local_base64_assets: LocalBase64Library,
     ) -> Self {
         Self {
             providers,
@@ -263,6 +266,7 @@ impl MediaResolver {
             local_results,
             staging,
             composer,
+            local_base64_assets,
         }
     }
 
@@ -332,11 +336,15 @@ impl MediaResolver {
             .model_operation_schema_snapshot
             .clone()
             .unwrap_or_else(|| json!({}));
-        let needs_local_bytes = image_edit_needs_local_bytes(
-            task.operation,
-            task.remote_model_id_snapshot.as_deref(),
-            &operation_schema,
-        );
+        let needs_local_bytes = operation_schema
+            .get("requestProfileId")
+            .and_then(Value::as_str)
+            == Some("sp25_per_use_video_v1")
+            || image_edit_needs_local_bytes(
+                task.operation,
+                task.remote_model_id_snapshot.as_deref(),
+                &operation_schema,
+            );
         let task_type = seedance_video_task_type(command.video_task_type, &command.parameters);
         let probe_task_videos = task.operation == GenerationOperation::VideoGeneration
             && task
@@ -489,6 +497,16 @@ impl MediaResolver {
                 };
                 self.composer.probe_video_bytes_duration(&bytes).await
             }
+            MediaReferenceTarget::LocalBase64Asset { asset_id, .. } => {
+                if let Some(bytes) = media.bytes.as_deref() {
+                    self.composer.probe_video_bytes_duration(bytes).await
+                } else {
+                    let path = self.local_base64_assets.decoded_path(asset_id, MediaType::Video)?;
+                    let probe = self.composer.probe_video_duration(path.to_string_lossy().as_ref()).await;
+                    let _ = std::fs::remove_file(path);
+                    probe
+                }
+            }
             MediaReferenceTarget::LocalAsset { .. } | MediaReferenceTarget::Url { .. } => {
                 let source = media.remote_reference.as_deref().ok_or_else(|| {
                     BackendError::validation("视频没有可读取的来源", media.archive())
@@ -628,6 +646,65 @@ impl MediaResolver {
                     },
                     None,
                 ))
+            }
+            MediaReferenceTarget::LocalBase64Asset {
+                asset_id,
+                media_type,
+                canvas_node_key,
+            } => {
+                let record = self.local_base64_assets.get(asset_id, *media_type)?;
+                // 仅在本次模型协议要求公网 URL 时临时中转。该分支全程按文件流处理，
+                // 大视频不会先把 Base64 解码成完整 Vec 再复制一份到磁盘。
+                let (bytes, hash, remote_reference, lease) = if needs_local_bytes {
+                    let (_, bytes) = self.local_base64_assets.read_bytes(asset_id, *media_type)?;
+                    if let Some(detected) = infer::get(&bytes) {
+                        validate_detected_type(*media_type, detected.mime_type())?;
+                    }
+                    let hash = sha256_bytes(&bytes);
+                    (Some(bytes), hash, None, None)
+                } else {
+                    let path = self.local_base64_assets.decoded_path(asset_id, *media_type)?;
+                    let hash_result = LocalBase64Library::sha256_path(&path);
+                    if hash_result.is_err() {
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    let hash = hash_result?;
+                    let stage_result = self.staging.stage_for_remote_input(
+                        path.to_string_lossy().as_ref(), *media_type,
+                    ).await;
+                    let _ = std::fs::remove_file(&path);
+                    let lease = stage_result.map_err(|error| match error {
+                        BackendError::Validation { message, .. } if message.starts_with("TOS staging") => {
+                            BackendError::validation(
+                                "当前模型要求公网素材 URL；本地 Base64 素材已保存在本机，生成时需配置临时对象存储中转",
+                                json!({ "assetId": asset_id, "cause": message }),
+                            )
+                        }
+                        other => other,
+                    })?;
+                    (None, hash, Some(lease.get_url.clone()), Some(lease))
+                };
+                let file_name = media_file_name(display_name, extension_for_mime(&record.mime_type));
+                Ok((ResolvedMedia {
+                    media_type: *media_type,
+                    type_position,
+                    role: role.to_string(),
+                    display_name: display_name.to_string(),
+                    stable_identity: json!({
+                        "kind": "local_base64_asset",
+                        "assetId": asset_id,
+                        "canvasNodeKey": canvas_node_key,
+                    }),
+                    mime_type: record.mime_type,
+                    duration_seconds: None,
+                    byte_size: record.byte_size,
+                    sha256: hash,
+                    file_name,
+                    bytes,
+                    remote_reference,
+                    prompt_segment_index,
+                    content_index,
+                }, lease))
             }
             MediaReferenceTarget::LocalResult {
                 generation_task_id,

@@ -26,16 +26,58 @@ import {
   readAssetLibrarySource,
   shouldAutoDismissUpload,
   assetDetailIdentity,
+  assetNodeReferenceTarget,
   cloudAssetAwaitingId,
   cloudAssetToItem,
+  localAssetToItem,
   stagingImportReachedLibrary,
   type AssetUploadEntry,
+  type AssetNodeData,
   type GenNodeData,
   type OutputNodeData,
   textResultFromSource,
 } from "./workspaceModel";
 
 const outputSource = { key: "source", kind: "image", x: 0, y: 0, config: {} } as GenNodeData;
+
+describe("local Base64 media identity", () => {
+  it("keeps a stable local ID in canvas references and labels the local body", () => {
+    const item = localAssetToItem({
+      id: "local-b64-4e7a1e5a-16cf-4b94-8658-c134cd8b7eb0",
+      name: "reference.png",
+      mediaType: "image",
+      mimeType: "image/png",
+      previewUrl: "http://localbase64.localhost/local-b64-4e7a1e5a-16cf-4b94-8658-c134cd8b7eb0",
+      byteSize: 1024,
+      createdAt: 1,
+    });
+    expect(item.meta).toContain("本机 Base64");
+    const node = {
+      key: "asset-node-1",
+      assetId: item.id,
+      providerConnectionId: "",
+      source: "local",
+      kind: item.kind,
+      name: item.name,
+      previewUrl: item.previewUrl ?? null,
+      videoUrl: null,
+      x: 0,
+      y: 0,
+    } satisfies AssetNodeData;
+    expect(assetNodeReferenceTarget(node)).toEqual({
+      kind: "local_base64_asset",
+      assetId: item.id,
+      canvasNodeKey: node.key,
+      mediaType: "image",
+    });
+    expect(assetNodeReferenceTarget({ ...node, assetId: "legacy-staging-job" })).toEqual({
+      kind: "local_asset",
+      stagingJobId: "legacy-staging-job",
+      canvasNodeKey: node.key,
+      mediaType: "image",
+    });
+  });
+});
 
 function placedOutput(key: string, x: number, y: number, aspectRatio?: number): OutputNodeData {
   return {
@@ -291,6 +333,20 @@ describe("mergeStagingJobsIntoUploads", () => {
     expect(merged![0]!.error).toEqual({ kind: "transport", message: "连接中断" });
   });
 
+  it("对象存储的 staged 即使很久未推进也不被误判为中断", () => {
+    const entry = uploadEntry({
+      destination: "object_storage",
+      status: "uploading",
+      lastAdvancedAt: 0,
+    });
+    const merged = mergeStagingJobsIntoUploads(
+      [entry],
+      [stagingJob({ status: "staged", assetId: null, updatedAt: 1 })],
+      600_000,
+    );
+    expect(merged?.[0]).toMatchObject({ destination: "object_storage", status: "staged" });
+  });
+
   it("已经拿到素材身份的 cleaning 记录不会被判成僵尸，并把素材身份写回行上", () => {
     // 真实场景：素材已经入库，后端随后清理暂存对象时请求失败（或进程在清理途中退出），
     // 记录永久停在 cleaning。它长时间不会有任何推进，但它是成功，不是「执行者已经没了」。
@@ -361,6 +417,17 @@ describe("mergeStagingJobsIntoUploads", () => {
 });
 
 describe("shouldAutoDismissUpload", () => {
+  it("对象存储独立上传到 staged 即成功，云端素材库仍需素材身份", () => {
+    const staged = { status: "staged" as const, assetId: null };
+    expect(shouldAutoDismissUpload(staged, "object_storage")).toBe(true);
+    expect(shouldAutoDismissUpload(staged, "cloud")).toBe(false);
+    expect(isTerminalStagingJob(staged, "object_storage")).toBe(true);
+    expect(isTerminalStagingJob(staged, "cloud")).toBe(false);
+    expect(
+      isTerminalAssetUpload(uploadEntry({ destination: "object_storage", status: "staged" })),
+    ).toBe(true);
+  });
+
   it("只有成功收尾的上传自动收起", () => {
     // 成功：素材库已给出素材身份。
     expect(shouldAutoDismissUpload({ status: "active", assetId: "asset-42" })).toBe(true);

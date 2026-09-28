@@ -1,6 +1,8 @@
 use std::{
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
+    time::Duration,
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -13,9 +15,11 @@ use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
+    model_schema::is_sp25_per_use_video_model,
     provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
     result_transfer::{
-        self, TransferProgress, download_result, is_retryable_transfer, production_policy,
+        self, TransferPolicy, TransferProgress, download_result, is_retryable_transfer,
+        production_policy,
     },
     staging::fake_ip_aware_streaming_download_client,
     storage::{GenerationLifecycleFact, GenerationTaskLifecycle, Storage, now_ms},
@@ -70,16 +74,68 @@ fn base64_from_provider_response(raw: &str, result_index: u32) -> Option<String>
         .map(ToOwned::to_owned)
 }
 
+fn signed_video_url_expired(error: &BackendError) -> bool {
+    matches!(error, BackendError::Protocol { details, .. } if details
+        .get("httpStatus")
+        .and_then(Value::as_u64)
+        .is_some_and(|status| matches!(status, 401 | 403 | 410)))
+}
+
+/// One reservation corresponds to one GET, including a resumed Range GET.
+/// Clones of the service share this limiter across concurrent saves.
+struct PerUseDownloadLimiter {
+    requests: tokio::sync::Mutex<HashMap<String, VecDeque<tokio::time::Instant>>>,
+    limit: usize,
+    window: Duration,
+}
+
+impl PerUseDownloadLimiter {
+    fn new(limit: usize, window: Duration) -> Self {
+        Self {
+            requests: tokio::sync::Mutex::new(HashMap::new()),
+            limit,
+            window,
+        }
+    }
+
+    async fn acquire(&self, source: &str) {
+        loop {
+            let wait = {
+                let mut all_requests = self.requests.lock().await;
+                let requests = all_requests.entry(source.to_string()).or_default();
+                let now = tokio::time::Instant::now();
+                while requests
+                    .front()
+                    .is_some_and(|oldest| now.duration_since(*oldest) >= self.window)
+                {
+                    requests.pop_front();
+                }
+                if requests.len() < self.limit {
+                    requests.push_back(now);
+                    return;
+                }
+                requests
+                    .front()
+                    .copied()
+                    .expect("full window has an oldest request")
+                    + self.window
+                    - now
+            };
+            tokio::time::sleep(wait).await;
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct LocalResultService {
     storage: Arc<Storage>,
     lifecycle: GenerationTaskLifecycle,
     client: reqwest::Client,
     downloads_directory: PathBuf,
-    /// 结果直链下载需要复用生成请求的身份（Bearer / Referer）。这里持有供应商运行时
-    /// 而不是让每个调用方传参：保存、恢复、命令入口三条路径都要按 `taskId` 反查
-    /// 冻结连接快照，集中在这里解析可以保证三条路径行为一致。
+    /// 普通结果直链下载复用生成请求的身份；按次系列使用无 Key 的签名直链。
+    /// 这里持有供应商运行时，以便按冻结任务身份续签过期直链。
     providers: ProviderRuntime,
+    sp25_download_limiter: Arc<PerUseDownloadLimiter>,
 }
 
 impl LocalResultService {
@@ -96,6 +152,10 @@ impl LocalResultService {
             client,
             downloads_directory,
             providers,
+            sp25_download_limiter: Arc::new(PerUseDownloadLimiter::new(
+                10,
+                Duration::from_secs(60),
+            )),
         }
     }
 
@@ -110,6 +170,39 @@ impl LocalResultService {
             .and_then(|task| self.providers.resolve_frozen(&task).ok())
             .map(|context| ResultDownloadAuth::from_context(&context))
             .unwrap_or_default()
+    }
+
+    fn is_sp25_video_result(&self, task_id: &str) -> BackendResult<bool> {
+        Ok(self
+            .storage
+            .get_task_execution(task_id)?
+            .remote_model_id_snapshot
+            .as_deref()
+            .is_some_and(is_sp25_per_use_video_model))
+    }
+
+    fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {
+        let task = self.storage.get_task_execution(task_id)?;
+        Ok(url::Url::parse(&task.base_url_snapshot)
+            .map(|url| url.origin().ascii_serialization())
+            .unwrap_or(task.provider_connection_id))
+    }
+
+    async fn refresh_sp25_result_url(
+        &self,
+        record: &mut GenerationResultRecord,
+    ) -> BackendResult<String> {
+        if record.source.get("kind").and_then(Value::as_str) != Some("url") {
+            return Err(BackendError::validation(
+                "按次视频结果缺少可续签的 URL 来源",
+                json!({ "taskId": record.task_id, "resultIndex": record.result_index }),
+            ));
+        }
+        let task = self.storage.get_task_execution(&record.task_id)?;
+        let fresh_url = self.providers.refresh_sp25_video_url(&task).await?;
+        record.source["url"] = Value::String(fresh_url.clone());
+        self.persist_result(record)?;
+        Ok(fresh_url)
     }
 
     fn persist_result(&self, result: &GenerationResultRecord) -> BackendResult<()> {
@@ -361,15 +454,23 @@ impl LocalResultService {
         self.persist_result(&record)?;
         on_ready(&record, Some(video_url.to_string()));
 
-        let result = self
-            .download_with_retry(
-                video_url,
-                &self.download_auth(task_id),
-                &self.download_part_path(task_id, 1),
-                on_progress,
-            )
-            .await
-            .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Video));
+        let result = match self.is_sp25_video_result(task_id) {
+            Ok(true) => {
+                self.download_sp25_video_with_refresh(&mut record, video_url, false, on_progress)
+                    .await
+            }
+            Ok(false) => {
+                self.download_with_retry(
+                    video_url,
+                    &self.download_auth(task_id),
+                    &self.download_part_path(task_id, 1),
+                    on_progress,
+                )
+                .await
+            }
+            Err(error) => Err(error),
+        }
+        .and_then(|bytes| self.prepare_bytes(bytes, MediaType::Video));
         match result {
             Ok(prepared) => match self
                 .commit_prepared(task_id, 1, Some(remote_task_id), prepared)
@@ -719,15 +820,29 @@ impl LocalResultService {
         let media_type = record.media_type;
         let outcome = match source {
             Ok(ImageSource::Url { url, .. }) => {
-                match self
-                    .download_with_retry(
+                let sp25_video = if media_type == MediaType::Video {
+                    self.is_sp25_video_result(&record.task_id)
+                } else {
+                    Ok(false)
+                };
+                let downloaded = if sp25_video.as_ref().is_ok_and(|value| *value) {
+                    // The archived URL is a short-lived signed link. Re-observe the
+                    // existing paid task before an interrupted save, then persist the
+                    // fresh link so another restart can recover the same result.
+                    self.download_sp25_video_with_refresh(&mut record, &url, true, on_progress)
+                        .await
+                } else if let Err(error) = sp25_video {
+                    Err(error)
+                } else {
+                    self.download_with_retry(
                         &url,
                         &auth,
                         &self.download_part_path(&record.task_id, record.result_index),
                         on_progress,
                     )
                     .await
-                {
+                };
+                match downloaded {
                     Ok(bytes) => Ok(bytes),
                     // 只有图片结果才有内联 Base64 兜底（视频接口不返回 Base64）。
                     Err(error) if media_type == MediaType::Image => {
@@ -827,6 +942,61 @@ impl LocalResultService {
         Ok(record)
     }
 
+    /// 按次视频的签名 URL 无需 API Key；一次传输只发一条流，避免触发下载次数限制。
+    /// 首次保存使用刚从轮询得到的 URL。中断恢复时先查询原任务获取新 URL；若下载
+    /// 仍返回过期类状态，只再查询一次。查询只读取原任务，不会重新提交生成。
+    async fn download_sp25_video_with_refresh(
+        &self,
+        record: &mut GenerationResultRecord,
+        initial_url: &str,
+        refresh_before_first: bool,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    ) -> BackendResult<Vec<u8>> {
+        let progress = Arc::new(Mutex::new(on_progress));
+        let part_path = self.download_part_path(&record.task_id, record.result_index);
+        let auth = ResultDownloadAuth::default();
+        let policy = TransferPolicy {
+            max_parts: 1,
+            ..production_policy()
+        };
+        let download_source = self.sp25_download_source(&record.task_id)?;
+        let mut url = if refresh_before_first {
+            self.refresh_sp25_result_url(record).await?
+        } else {
+            initial_url.to_string()
+        };
+        for retry in 0..=1 {
+            let current_progress = Arc::clone(&progress);
+            let result = self
+                .download_with_retry_policy(
+                    &url,
+                    &auth,
+                    &part_path,
+                    policy,
+                    Some(&download_source),
+                    move |update| {
+                        (current_progress
+                            .lock()
+                            .unwrap_or_else(|poisoned| poisoned.into_inner()))(
+                            update
+                        );
+                    },
+                )
+                .await;
+            match result {
+                Err(error) if retry == 0 && signed_video_url_expired(&error) => {
+                    warn!(
+                        "[save] 按次视频签名直链失效，查询原任务获取新链接: taskId={}, resultIndex={}",
+                        record.task_id, record.result_index
+                    );
+                    url = self.refresh_sp25_result_url(record).await?;
+                }
+                other => return other,
+            }
+        }
+        unreachable!("signed video URL renewal has a bounded retry")
+    }
+
     /// 下载远程结果字节：卡住才失败、临时文件断点续传、大文件多路 Range。
     ///
     /// 重试策略：共 6 次尝试（1 次首次 + 5 次重试），仅对传输层错误、卡住、
@@ -838,6 +1008,26 @@ impl LocalResultService {
         url: &str,
         auth: &ResultDownloadAuth,
         part_path: &Path,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    ) -> BackendResult<Vec<u8>> {
+        self.download_with_retry_policy(
+            url,
+            auth,
+            part_path,
+            production_policy(),
+            None,
+            on_progress,
+        )
+        .await
+    }
+
+    async fn download_with_retry_policy(
+        &self,
+        url: &str,
+        auth: &ResultDownloadAuth,
+        part_path: &Path,
+        policy: TransferPolicy,
+        per_use_source: Option<&str>,
         on_progress: impl FnMut(TransferProgress) + Send + 'static,
     ) -> BackendResult<Vec<u8>> {
         let redacted_url = redact_url_string(url);
@@ -868,20 +1058,14 @@ impl LocalResultService {
                 result_transfer::streaming_client().unwrap_or_else(|_| self.client.clone()),
             )
             .await;
-            match download_result(
-                client,
-                url,
-                auth,
-                part_path,
-                production_policy(),
-                move |update| {
-                    (progress
-                        .lock()
-                        .unwrap_or_else(|poisoned| poisoned.into_inner()))(
-                        update
-                    );
-                },
-            )
+            if let Some(source) = per_use_source {
+                self.sp25_download_limiter.acquire(source).await;
+            }
+            match download_result(client, url, auth, part_path, policy, move |update| {
+                (progress
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()))(update);
+            })
             .await
             {
                 Ok(bytes) => {
@@ -1263,6 +1447,11 @@ pub fn safe_file_stem(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::backend::{
+        credentials::CredentialStore,
+        storage::{GenerationRemoteObservation, NewTask},
+        types::{GenerationOperation, UpsertProviderConnectionCommand},
+    };
 
     fn test_service(storage: &Arc<Storage>) -> LocalResultService {
         let lifecycle = crate::backend::storage::GenerationTaskLifecycle::new(Arc::clone(storage));
@@ -1284,6 +1473,340 @@ mod tests {
             std::env::temp_dir(),
             providers,
         )
+    }
+
+    async fn sp25_signed_download_case(
+        refresh_before_first: bool,
+        resume_status: Option<SaveStatus>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let captured = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured_server = Arc::clone(&captured);
+        let expected_requests = if refresh_before_first { 2 } else { 3 };
+        const MOCK_MP4: &[u8] = b"\0\0\0\x18ftypisom\0\0\0\0isom";
+        let server = std::thread::spawn(move || {
+            for _ in 0..expected_requests {
+                let (mut stream, _) = listener.accept().expect("accept");
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).expect("read request");
+                let request = String::from_utf8_lossy(&buffer[..read]).into_owned();
+                let path = request.lines().next().unwrap_or_default().to_string();
+                captured_server.lock().expect("capture lock").push(request);
+                if path.starts_with("GET /old.mp4?signature=old ") {
+                    stream
+                        .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                        .expect("old link expired");
+                } else if path.starts_with("GET /v1/video/generations/remote-video ") {
+                    let body = json!({
+                        "task_id": "remote-video",
+                        "status": "succeeded",
+                        "progress": 100,
+                        "result_url": format!("http://127.0.0.1:{port}/fresh.mp4?signature=new")
+                    })
+                    .to_string();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    stream.write_all(head.as_bytes()).expect("query headers");
+                    stream.write_all(body.as_bytes()).expect("query response");
+                } else if path.starts_with("GET /fresh.mp4?signature=new ") {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        MOCK_MP4.len()
+                    );
+                    stream.write_all(head.as_bytes()).expect("fresh headers");
+                    stream.write_all(MOCK_MP4).expect("fresh video");
+                } else {
+                    panic!("unexpected request: {path}");
+                }
+            }
+        });
+
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage =
+            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "sp25-test".into(),
+                display_name: "按次测试".into(),
+                adapter_id: "moyu_v1".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .expect("provider");
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-test")
+            .expect("credential");
+        lifecycle
+            .create(NewTask {
+                id: "task-sp25-download",
+                canvas_id: "canvas-1",
+                source_node_id: "video-1",
+                operation: GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "sp25-test-model",
+                remote_model_id: Some("sp2.5-720p-30s-ch5"),
+                logical_request: &json!({ "prompt": "test" }),
+            })
+            .expect("create task");
+        lifecycle
+            .commit(
+                "task-sp25-download",
+                GenerationLifecycleFact::BeginResolution {
+                    attempt_id: "resolve-1".into(),
+                },
+            )
+            .expect("begin resolution");
+        lifecycle
+            .commit(
+                "task-sp25-download",
+                GenerationLifecycleFact::ResolutionSucceeded {
+                    attempt_id: "resolve-1".into(),
+                    resolved_request: json!({ "prompt": "test" }),
+                },
+            )
+            .expect("resolve");
+        lifecycle
+            .commit(
+                "task-sp25-download",
+                GenerationLifecycleFact::BeginSubmission {
+                    attempt_id: "submit-1".into(),
+                    backoff_ms: None,
+                },
+            )
+            .expect("begin submission");
+        for (call_id, attempt_id, phase) in [
+            ("submit-call", "submit-1", "submit"),
+            ("observe-call", "observe-1", "observe"),
+        ] {
+            if phase == "observe" {
+                lifecycle
+                    .commit(
+                        "task-sp25-download",
+                        GenerationLifecycleFact::SubmissionRemoteAccepted {
+                            attempt_id: "submit-1".into(),
+                            call_id: "submit-call".into(),
+                            tokens: None,
+                            remote_task_id: "remote-video".into(),
+                        },
+                    )
+                    .expect("accepted remote task");
+                lifecycle
+                    .commit(
+                        "task-sp25-download",
+                        GenerationLifecycleFact::BeginObservation {
+                            attempt_id: "observe-1".into(),
+                            backoff_ms: None,
+                        },
+                    )
+                    .expect("begin observation");
+            }
+            lifecycle
+                .commit(
+                    "task-sp25-download",
+                    GenerationLifecycleFact::ProviderCallPrepared {
+                        call_id: call_id.into(),
+                        attempt_id: attempt_id.into(),
+                        phase: phase.into(),
+                        request: json!({ "method": "GET" }),
+                    },
+                )
+                .expect("prepare call");
+            lifecycle
+                .commit(
+                    "task-sp25-download",
+                    GenerationLifecycleFact::ProviderCallSent {
+                        call_id: call_id.into(),
+                        sent_at: 1,
+                    },
+                )
+                .expect("send call");
+            lifecycle
+                .commit(
+                    "task-sp25-download",
+                    GenerationLifecycleFact::ProviderCallResponded {
+                        call_id: call_id.into(),
+                        sent_at: 1,
+                        status: 200,
+                        headers: json!({}),
+                        raw_response: "{}".into(),
+                    },
+                )
+                .expect("finish call");
+        }
+        let providers = ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials)
+            .expect("provider runtime");
+        let service = LocalResultService::new(
+            Arc::clone(&storage),
+            lifecycle.clone(),
+            reqwest::Client::builder()
+                .no_proxy()
+                .build()
+                .expect("client"),
+            directory.path().to_path_buf(),
+            providers,
+        );
+        let old_url = format!("http://127.0.0.1:{port}/old.mp4?signature=old");
+        let mut result =
+            service.pending_video_result("task-sp25-download", "remote-video", &old_url);
+        lifecycle
+            .commit(
+                "task-sp25-download",
+                GenerationLifecycleFact::ObservationApplied {
+                    attempt_id: "observe-1".into(),
+                    call_id: "observe-call".into(),
+                    tokens: None,
+                    observation: GenerationRemoteObservation::Succeeded {
+                        result: result.clone(),
+                    },
+                },
+            )
+            .expect("register result");
+        result.save_status = SaveStatus::Writing;
+        service.persist_result(&result).expect("begin save");
+        let bytes = if let Some(status) = resume_status {
+            if status == SaveStatus::LocalMissing {
+                result.save_status = SaveStatus::Succeeded;
+                service.persist_result(&result).expect("mark saved");
+            }
+            result.save_status = status;
+            service.persist_result(&result).expect("mark resumable");
+            let saved = service
+                .resume_interrupted_result(result, |_| {})
+                .await
+                .expect("resume the real save path");
+            assert_eq!(saved.save_status, SaveStatus::Succeeded);
+            tokio::fs::read(saved.final_path.expect("final path"))
+                .await
+                .expect("read final video")
+        } else {
+            service
+                .download_sp25_video_with_refresh(
+                    &mut result,
+                    &old_url,
+                    refresh_before_first,
+                    |_| {},
+                )
+                .await
+                .expect("download after renewal")
+        };
+        server.join().expect("server joins");
+        assert_eq!(bytes, MOCK_MP4);
+        assert_eq!(
+            storage
+                .get_result("task-sp25-download", 1)
+                .expect("persisted result")
+                .source["url"],
+            format!("http://127.0.0.1:{port}/fresh.mp4?signature=new")
+        );
+        let requests = captured.lock().expect("capture lock");
+        assert_eq!(requests.len(), expected_requests);
+        assert!(requests.iter().all(|request| request.starts_with("GET ")));
+        let downloads = requests
+            .iter()
+            .filter(|request| request.contains("/old.mp4") || request.contains("/fresh.mp4"))
+            .collect::<Vec<_>>();
+        assert!(downloads.iter().all(|request| {
+            let lower = request.to_ascii_lowercase();
+            !lower.contains("authorization:") && !lower.contains("range:")
+        }));
+        assert!(requests.iter().any(|request| {
+            request.contains("/v1/video/generations/remote-video")
+                && request
+                    .to_ascii_lowercase()
+                    .contains("authorization: bearer sk-test")
+        }));
+    }
+
+    #[tokio::test]
+    async fn expired_sp25_video_link_is_refreshed_without_resubmitting() {
+        sp25_signed_download_case(false, None).await;
+    }
+
+    #[tokio::test]
+    async fn failed_sp25_video_saves_resume_with_a_fresh_url() {
+        for status in [
+            SaveStatus::Failed,
+            SaveStatus::Interrupted,
+            SaveStatus::LocalMissing,
+            SaveStatus::Conflict,
+        ] {
+            sp25_signed_download_case(true, Some(status)).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn concurrent_sp25_downloads_share_the_same_source_window() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let arrivals = Arc::new(Mutex::new(Vec::<std::time::Instant>::new()));
+        let server_arrivals = Arc::clone(&arrivals);
+        let server = std::thread::spawn(move || {
+            for _ in 0..2 {
+                let (mut stream, _) = listener.accept().expect("accept");
+                server_arrivals
+                    .lock()
+                    .expect("arrivals lock")
+                    .push(std::time::Instant::now());
+                let mut request = [0_u8; 1024];
+                stream.read(&mut request).expect("request");
+                stream
+                    .write_all(
+                        b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nvideo",
+                    )
+                    .expect("response");
+            }
+        });
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage =
+            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
+        let mut service = test_service(&storage);
+        service.sp25_download_limiter =
+            Arc::new(PerUseDownloadLimiter::new(1, Duration::from_millis(80)));
+        let other = service.clone();
+        let url = format!("http://127.0.0.1:{port}/video.mp4");
+        let policy = TransferPolicy {
+            max_parts: 1,
+            ..production_policy()
+        };
+        let auth = ResultDownloadAuth::default();
+        let first_part = directory.path().join("first.download");
+        let second_part = directory.path().join("second.download");
+        let (first, second) = tokio::join!(
+            service.download_with_retry_policy(
+                &url,
+                &auth,
+                &first_part,
+                policy,
+                Some("same-provider"),
+                |_| {},
+            ),
+            other.download_with_retry_policy(
+                &url,
+                &auth,
+                &second_part,
+                policy,
+                Some("same-provider"),
+                |_| {},
+            ),
+        );
+        assert_eq!(first.expect("first GET"), b"video");
+        assert_eq!(second.expect("second GET"), b"video");
+        server.join().expect("server joins");
+        let arrivals = arrivals.lock().expect("arrivals lock");
+        assert_eq!(arrivals.len(), 2);
+        assert!(arrivals[1].duration_since(arrivals[0]) >= Duration::from_millis(60));
     }
 
     /// URL 直链下载失败后的兜底依赖「按 1 起的结果索引取回 `b64_json`」。

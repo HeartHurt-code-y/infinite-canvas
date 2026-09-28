@@ -13,6 +13,10 @@ fn main() {
     }
 
     let blender = manifest("resources/blender/manifest.json");
+    let blender_hash = blender
+        .as_ref()
+        .map(|(bytes, _)| hex::encode(Sha256::digest(bytes)));
+    emit("IC_BLENDER_MANIFEST_SHA256", blender_hash.as_deref());
     let blender_inventory = blender
         .as_ref()
         .and_then(|(_, value)| value["inventory"]["sha256"].as_str());
@@ -24,6 +28,10 @@ fn main() {
             .and_then(|(_, value)| value["executable"].as_str()),
     );
     let remotion = manifest("resources/remotion-runtime/runtime-manifest.json");
+    let remotion_hash = remotion
+        .as_ref()
+        .map(|(bytes, _)| hex::encode(Sha256::digest(bytes)));
+    emit("IC_REMOTION_MANIFEST_SHA256", remotion_hash.as_deref());
     let remotion_inventory = remotion
         .as_ref()
         .and_then(|(_, value)| value["inventory"]["sha256"].as_str());
@@ -41,6 +49,10 @@ fn main() {
             .is_some_and(|bytes| expected == Some(hex::encode(Sha256::digest(bytes)).as_str()))
     });
     let ffmpeg = manifest("resources/ffmpeg/manifest.json");
+    let ffmpeg_hash = ffmpeg
+        .as_ref()
+        .map(|(bytes, _)| hex::encode(Sha256::digest(bytes)));
+    emit("IC_FFMPEG_MANIFEST_SHA256", ffmpeg_hash.as_deref());
     emit(
         "IC_FFMPEG_SHA256",
         ffmpeg
@@ -60,7 +72,10 @@ fn main() {
     emit("IC_STYLE_MANIFEST_SHA256", style_hash.as_deref());
     let macos_target = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
     if std::env::var("PROFILE").as_deref() == Ok("release")
-        && (blender_inventory.is_none()
+        && (blender_hash.is_none()
+            || remotion_hash.is_none()
+            || ffmpeg_hash.is_none()
+            || blender_inventory.is_none()
             || remotion_inventory.is_none()
             || !remotion_inventory_ready
             || remotion.as_ref().map_or(true, |(_, value)| {

@@ -45,6 +45,7 @@ import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { createProductSceneWorkflowRunner } from "./productSceneWorkflowRunner";
 import { productSceneQualityEnabled } from "./productSceneWorkflowModel";
 import { createReverseVideoWorkflowRunner } from "./reverseVideoWorkflowRunner";
+import { createReelbenchWorkflowRunner } from "./reelbenchWorkflowRunner";
 import {
   CANVAS_ID,
   createKnowledgeVideoWorkflowConfig,
@@ -87,6 +88,7 @@ export function workflowKindForNode(node: KnowledgeVideoWorkflowNodeData): Workf
   if (node.config.productScene) return "productScene";
   if (node.config.musicVideo) return "musicVideo";
   if (node.config.reverseVideo) return "reverseVideo";
+  if (node.config.reelbench) return "reelbench";
   if (node.config.xhsCover) return "xhsCover";
   if (node.config.remotion) return "remotion";
   if (node.config.commerce) return "commerce";
@@ -105,6 +107,7 @@ const TITLES: Record<WorkflowHistoryKind, string> = {
   xhsCover: "小红书封面",
   productScene: "产品场景图",
   reverseVideo: "短视频反推",
+  reelbench: "视频拉片与分镜合成",
 };
 
 function defaultRunnerFactory(
@@ -128,6 +131,8 @@ function defaultRunnerFactory(
       return createXhsCoverWorkflowRunner(clients);
     case "reverseVideo":
       return createReverseVideoWorkflowRunner({ promptClient: clients.promptClient });
+    case "reelbench":
+      return createReelbenchWorkflowRunner({ promptClient: clients.promptClient });
     case "knowledge":
       return createKnowledgeVideoWorkflowRunner(clients);
   }
@@ -208,6 +213,7 @@ function modelSnapshots(
         : (["image"] as const)
       : kind === "remotion" ||
           kind === "reverseVideo" ||
+          kind === "reelbench" ||
           (kind === "musicVideo" && request.node.config.musicVideo?.deliverable === "documents") ||
           (kind === "xhsCover" && request.node.config.xhsCover?.deliverable === "prompt")
         ? (["text"] as const)

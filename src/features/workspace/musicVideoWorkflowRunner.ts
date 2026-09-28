@@ -4,7 +4,13 @@ import {
   modelParameterCapabilities,
   type ModelParameterCapability,
 } from "../../lib/modelCapabilities";
-import { mvMediaClient, type MvMediaClient, type MvSongProbe } from "../../lib/mvMedia";
+import {
+  mvMediaClient,
+  type MvAsrTranscript,
+  type MvLyricsAlignment,
+  type MvMediaClient,
+  type MvSongProbe,
+} from "../../lib/mvMedia";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import { createAiFilmCheckpoint, type AiFilmAsset } from "./aiFilmWorkflowModel";
 import { parseComicDramaReview } from "./comicDramaWorkflowRunner";
@@ -32,6 +38,8 @@ import {
   MUSIC_VIDEO_STAGES,
   MUSIC_VIDEO_STAGE_LABELS,
   musicVideoDeliveryMarkdown,
+  musicVideoLipReviewSignature,
+  musicVideoSpeechAnalysisMode,
   type MusicVideoArtifact,
   type MusicVideoStage,
   type MusicVideoStageRun,
@@ -90,6 +98,109 @@ export function musicVideoGenerationDuration(
 function lyricsText(text: string): string {
   return text.replace(/[\s\p{P}\p{S}]/gu, "");
 }
+
+function assertMvAsr(asr: MvAsrTranscript, song: MvSongProbe, hasLyrics: boolean): void {
+  if (asr.sourceSignature !== song.sourceSignature)
+    throw new Error("专用 ASR 返回的歌曲签名与当前原曲不一致。");
+  if (!asr.engine.trim() || !asr.modelVersion.trim())
+    throw new Error("专用 ASR 未提供可追溯的引擎和模型版本。");
+  for (const segment of asr.segments) {
+    if (
+      !Number.isFinite(segment.startSeconds) ||
+      !Number.isFinite(segment.endSeconds) ||
+      segment.startSeconds < 0 ||
+      segment.endSeconds <= segment.startSeconds ||
+      segment.endSeconds > song.durationSeconds + EPSILON
+    )
+      throw new Error("专用 ASR 返回了无效或超出原曲的声学时间戳。");
+  }
+  if (hasLyrics && !lyricsText(asr.transcript) && !asr.segments.some((item) => lyricsText(item.text)))
+    throw new Error("专用 ASR 没有从原曲检测到可用唱词，无法自动验收歌词对齐。");
+}
+
+function lyricLines(text: string): string[] {
+  return text.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+}
+
+function assertMvForcedAlignment(
+  alignment: MvLyricsAlignment,
+  song: MvSongProbe,
+  lyrics: string,
+): void {
+  if (alignment.sourceSignature !== song.sourceSignature)
+    throw new Error("强制对齐返回的歌曲签名与当前原曲不一致。");
+  if (!alignment.engine.trim() || !alignment.modelVersion.trim())
+    throw new Error("强制对齐未提供可追溯的引擎和模型版本。");
+  const expected = lyricLines(lyrics);
+  if (
+    lyricsText(alignment.lyrics) !== lyricsText(lyrics) ||
+    alignment.unmatchedLyrics.length ||
+    alignment.lines.length !== expected.length
+  )
+    throw new Error("强制对齐未覆盖全部已提供歌词，不能制作经过验证的时间线。");
+  let previousEnd = 0;
+  alignment.lines.forEach((line, index) => {
+    if (
+      lyricsText(line.text) !== lyricsText(expected[index]!) ||
+      !Number.isFinite(line.startSeconds) ||
+      !Number.isFinite(line.endSeconds) ||
+      line.startSeconds < previousEnd - EPSILON ||
+      line.endSeconds <= line.startSeconds ||
+      line.endSeconds > song.durationSeconds + EPSILON
+    )
+      throw new Error(`强制对齐第 ${index + 1} 行与歌词或真实音频时轴不一致。`);
+    previousEnd = line.endSeconds;
+  });
+}
+
+/** Build full-song windows from measured vocal boundaries, preserving complete lyric lines. */
+export function musicVideoTimelineFromAlignment(
+  song: MvSongProbe,
+  alignment: MvLyricsAlignment,
+): readonly MusicVideoTimelineSegment[] {
+  const segments: MusicVideoTimelineSegment[] = [];
+  const frame = 1 / 30;
+  let cursor = 0;
+  for (const [index, line] of alignment.lines.entries()) {
+    if (line.startSeconds - cursor > frame) {
+      segments.push({
+        id: `segment-${segments.length + 1}`,
+        startSeconds: cursor,
+        endSeconds: line.startSeconds,
+        kind: "instrumental",
+        text: "",
+        section: "器乐段",
+      });
+      cursor = line.startSeconds;
+    }
+    const nextStart = alignment.lines[index + 1]?.startSeconds ?? song.durationSeconds;
+    const end = nextStart - line.endSeconds <= frame ? nextStart : line.endSeconds;
+    segments.push({
+      id: `segment-${segments.length + 1}`,
+      startSeconds: cursor,
+      endSeconds: end,
+      kind: "vocal",
+      text: line.text,
+      section: "声学对齐唱词",
+    });
+    cursor = end;
+  }
+  if (song.durationSeconds - cursor > frame || !segments.length)
+    segments.push({
+      id: `segment-${segments.length + 1}`,
+      startSeconds: cursor,
+      endSeconds: song.durationSeconds,
+      kind: "instrumental",
+      text: "",
+      section: "器乐段",
+    });
+  else if (cursor < song.durationSeconds) {
+    const last = segments.at(-1)!;
+    segments[segments.length - 1] = { ...last, endSeconds: song.durationSeconds };
+  }
+  return segments;
+}
+
 export function validateMusicVideoTimeline(
   timeline: readonly MusicVideoTimelineSegment[],
   song: MvSongProbe,
@@ -442,9 +553,9 @@ function toPlan(
         visual: shot.visual,
         narration: segment?.text ?? "",
         referenceAssetIds: shot.referenceAssetIds,
-        videoPrompt: `${shot.videoPrompt}\n【原曲音乐窗口】${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)} 秒；所附音频从该窗口起点开始。画面覆盖完整窗口，额外生成尾部留给本地裁剪；禁止另换歌曲。\n【完整歌词】${segment?.text || "器乐段，不唱词"}\n【嘴型策略】${shot.lipSync === "sync" ? "在近景或中景中根据真实音频引导演唱；不承诺专用口型同步，交付前必须人工试听核对" : shot.lipSync === "offscreen" ? "歌词保留画外，不展示人物唱词嘴型" : "不安排唱词口型"}\n${options.characterMode === "none" ? "无人物模式，不生成人物面孔或演唱者。" : "保持已确认的人物身份。"}`,
+        videoPrompt: `${shot.videoPrompt}\n【原曲音乐窗口】${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)} 秒；所附音频从该窗口起点开始。画面覆盖完整窗口，额外生成尾部留给本地裁剪；禁止另换歌曲。\n【完整歌词】${segment?.text || "器乐段，不唱词"}\n【嘴型策略】${shot.lipSync === "sync" ? "在近景或中景中根据真实音频引导演唱；成片前须逐镜人工试听验收" : shot.lipSync === "offscreen" ? "歌词保留画外，不展示人物唱词嘴型" : "不安排唱词口型"}\n${options.characterMode === "none" ? "无人物模式，不生成人物面孔或演唱者。" : "保持已确认的人物身份。"}`,
         acceptance:
-          "画面与已审核分镜一致；实际节拍、歌词与嘴型需要人工试听验收，静帧质检不能证明口型同步。",
+          "画面与已审核分镜一致；正面演唱镜头须逐镜播放原曲窗口和片段并由用户人工选用，自动口型偏移检测尚未接入。",
       };
     },
   );
@@ -472,6 +583,25 @@ export function createMusicVideoWorkflowRunner(
   overrides: Partial<MusicVideoWorkflowRunnerDependencies> = {},
 ) {
   const media = overrides.mvMediaClient ?? mvMediaClient;
+  const requireHumanLipReviews = async (context: WorkflowPlanningContext) => {
+    const checkpoint = context.checkpoint();
+    const state = checkpoint.musicVideo;
+    for (const shot of state?.stages.prompts?.artifact?.shots ?? []) {
+      if (shot.lipSync !== "sync") continue;
+      const review = state?.lipReviews?.[shot.id];
+      if (!review || review.decision !== "approved")
+        throw new Error(`镜头 ${shot.id} 尚未人工选用口型与唱词；请在 MV 成果区逐镜试听预览并确认，驳回镜头需返工。`);
+      const clipPath = checkpoint.shotRuns[shot.id]?.clipPath;
+      if (!clipPath) throw new Error(`镜头 ${shot.id} 缺少真实片段，人工口型审核无效。`);
+      const currentSignature = await media.clipSignature(clipPath);
+      if (context.request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+      if (
+        currentSignature !== review.clipSignature ||
+        musicVideoLipReviewSignature(checkpoint, shot.id, currentSignature) !== review.signature
+      )
+        throw new Error(`镜头 ${shot.id} 的片段正文、原曲或分镜已改变，请重新试听并人工验收口型。`);
+    }
+  };
   const plan = async (context: WorkflowPlanningContext): Promise<WorkflowPlan> => {
     const { request, dependencies } = context;
     const options = request.node.config.musicVideo;
@@ -489,12 +619,65 @@ export function createMusicVideoWorkflowRunner(
         options.characterReferences.some((item) => item.kind !== "image" || !item.localPath.trim()))
     )
       throw new Error("参考人物模式必须选择真实人物参考图片。");
+    const analysisMode = musicVideoSpeechAnalysisMode(options);
+    const voiceConnectionId = options.speechProviderConnectionId?.trim() ?? "";
+    if (
+      analysisMode === "automatic" &&
+      !request.providerCatalog.some(
+        (entry) =>
+          entry.provider.id === voiceConnectionId &&
+          entry.provider.enabled &&
+          entry.provider.adapterId === "doubao_voice_v1",
+      )
+    )
+      throw new Error("请先在项目供应商设置中配置并选择已启用的豆包语音连接，再执行专用 ASR 与歌词对齐。");
     const read = () => context.checkpoint().musicVideo ?? createMusicVideoCheckpoint();
     const update = (patch: Partial<MusicVideoWorkflowCheckpoint>) =>
       context.commit((current) => ({ ...current, musicVideo: { ...read(), ...patch } }));
     if (!read().song)
       update({ song: await media.probeSong(options.songPath), inputSignature: signature(request) });
     const song = read().song!;
+    if (analysisMode === "automatic") {
+      let asr = read().speech?.asr;
+      if (!asr) {
+        await request.beforeSideEffect?.();
+        if (request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+        asr = await media.transcribeSong(song.sourcePath, song.sourceSignature, voiceConnectionId);
+        if (request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+        assertMvAsr(asr, song, Boolean(options.officialLyrics.trim() || options.lrc.trim()));
+        update({ speech: { ...read().speech, asr } });
+      } else assertMvAsr(asr, song, Boolean(options.officialLyrics.trim() || options.lrc.trim()));
+
+      const lrcLyrics = options.lrc.trim()
+        ? parseMusicVideoLrc(options.lrc, song.durationSeconds)
+            .filter((segment) => segment.kind === "vocal")
+            .map((segment) => segment.text)
+            .join("\n")
+        : "";
+      const lyricsSource = options.officialLyrics.trim() ? "official" : lrcLyrics ? "lrc" : "asr";
+      const alignedLyrics =
+        lyricsSource === "official"
+          ? options.officialLyrics.trim()
+          : lyricsSource === "lrc"
+            ? lrcLyrics
+            : asr.segments.map((segment) => segment.text.trim()).filter(Boolean).join("\n") ||
+              asr.transcript.trim();
+      let forcedAlignment = read().speech?.forcedAlignment;
+      if (alignedLyrics) {
+        if (!forcedAlignment || read().speech?.alignedLyrics !== alignedLyrics) {
+          await request.beforeSideEffect?.();
+          if (request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+          forcedAlignment = await media.alignLyrics(song.sourcePath, song.sourceSignature, alignedLyrics, voiceConnectionId);
+          if (request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+          assertMvForcedAlignment(forcedAlignment, song, alignedLyrics);
+          update({
+            speech: { ...read().speech, asr, forcedAlignment, alignedLyrics, lyricsSource },
+          });
+        } else assertMvForcedAlignment(forcedAlignment, song, alignedLyrics);
+      } else {
+        update({ speech: { asr, alignedLyrics: "", lyricsSource: "asr" } });
+      }
+    }
     const duration = durationCapability(request);
     const args = (): MusicVideoParseContext => ({
       options,
@@ -567,16 +750,29 @@ export function createMusicVideoWorkflowRunner(
         read().pending?.stage === stage && resolution && resolution !== MUSIC_VIDEO_APPROVAL
           ? resolution
           : undefined;
-      const prompt = `当前阶段：${stage}。真实歌曲：${JSON.stringify(song)}。用户要求：${request.node.config.brief}\n官方歌词（逐字保留重复句）：${options.officialLyrics || "未提供"}\n用户 LRC：${options.lrc || "未提供；必须读取所附真实歌曲，不得伪称已有 ASR 时间戳。产出的时间线需要用户试听审核。"}\n人物模式：${options.characterMode}；人物参考固定ID：${options.characterReferences.map((item, index) => `mv-character-${index + 1}=${item.displayName}`).join("；")}；建议对口型比例：${options.characterMode === "none" ? 0 : options.syncRatio}；视觉要求：${options.visualStyle}；画幅：${options.aspectRatio}。\n当前视频模型真实合法时长能力：${JSON.stringify(duration ?? "文档草案，不提交视频")}.\n已审核前序阶段：${JSON.stringify(read().stages)}\n${feedback ? `用户已确认的本阶段修改：${feedback}` : ""}\n仅输出当前阶段严格JSON。时间线从0完整覆盖${song.durationSeconds}秒，含前奏间奏尾奏。每项一个完整歌词行或多完整行的音乐窗口，禁止拆字和漏掉重复句。分镜和提示词窗口与已审核时间线逐项一致；视频生成时长选择项目合法时长且不少于窗口。过长完整歌词无法执行时明确要求修正时间标记或更换模型。无人物不得sync，sync只近中景且连续最多3段。音频参考仅引导，人工试听决定实际口型。`;
+      const prompt = `当前阶段：${stage}。真实歌曲：${JSON.stringify(song)}。用户要求：${request.node.config.brief}\n官方歌词（逐字保留重复句）：${options.officialLyrics || "未提供"}\n用户 LRC：${options.lrc || "未提供"}\n专用声学分析：${analysisMode === "automatic" ? JSON.stringify(read().speech ?? "未取得") : "历史手工文档模式：未执行专用 ASR 与强制对齐"}。不得将文本模型或 LRC 时间视为声学测量。\n人物模式：${options.characterMode}；人物参考固定ID：${options.characterReferences.map((item, index) => `mv-character-${index + 1}=${item.displayName}`).join("；")}；建议对口型比例：${options.characterMode === "none" ? 0 : options.syncRatio}；视觉要求：${options.visualStyle}；画幅：${options.aspectRatio}。\n当前视频模型真实合法时长能力：${JSON.stringify(duration ?? "文档草案，不提交视频")}.\n已审核前序阶段：${JSON.stringify(read().stages)}\n${feedback ? `用户已确认的本阶段修改：${feedback}` : ""}\n仅输出当前阶段严格JSON。时间线从0完整覆盖${song.durationSeconds}秒，含前奏间奏尾奏。每项一个完整歌词行或多完整行的音乐窗口，禁止拆字和漏掉重复句。分镜和提示词窗口与已审核时间线逐项一致；视频生成时长选择项目合法时长且不少于窗口。过长完整歌词无法执行时明确要求修正时间标记或更换模型。无人物不得sync，sync只近中景且连续最多3段。音频参考仅引导，自动口型检测与人工预览决定实际验收。`;
       if (!old.artifact || feedback) {
         let parsed: ReturnType<typeof parseMusicVideoStage>;
-        if (stage === "timeline" && options.lrc.trim() && !feedback) {
+        if (stage === "timeline" && analysisMode === "automatic") {
+          const timeline = read().speech?.forcedAlignment
+            ? musicVideoTimelineFromAlignment(song, read().speech!.forcedAlignment!)
+            : [{ id: "segment-1", startSeconds: 0, endSeconds: song.durationSeconds, kind: "instrumental" as const, text: "", section: "器乐段" }];
+          validateMusicVideoTimeline(timeline, song, options, duration);
+          parsed = {
+            artifact: {
+              content: timelineMarkdown(timeline),
+              inputSummary: `依据专用 ASR ${read().speech?.asr?.engine} 与声学强制对齐 ${read().speech?.forcedAlignment?.engine ?? "无唱词"}；仍需试听人工核对`,
+              timeline,
+            },
+            decision: null,
+          };
+        } else if (stage === "timeline" && options.lrc.trim() && !feedback) {
           const timeline = parseMusicVideoLrc(options.lrc, song.durationSeconds);
           validateMusicVideoTimeline(timeline, song, options, duration);
           parsed = {
             artifact: {
               content: timelineMarkdown(timeline),
-              inputSummary: "依据用户 LRC 边界与本地探测歌曲时长；仍需试听人工核对",
+              inputSummary: "历史手工文档模式：依据用户 LRC 边界与歌曲时长，未执行声学强制对齐",
               timeline,
             },
             decision: null,
@@ -586,7 +782,7 @@ export function createMusicVideoWorkflowRunner(
             STAGE_MODES[stage],
             prompt,
             (raw) => parseMusicVideoStage(raw, stage, args()),
-            stage === "timeline" && !options.lrc.trim(),
+            stage === "timeline" && analysisMode === "manual" && !options.lrc.trim(),
           );
         if (parsed.decision) {
           update({ pending: { stage, step: "revision" } });
@@ -626,7 +822,7 @@ export function createMusicVideoWorkflowRunner(
           "music_video_review",
           `${prompt}\n待核对的当前产物：${JSON.stringify(run.artifact)}\n逐项检查原曲覆盖、歌词完整性、真实时窗、人物模式及项目模型能力。对无法从输入证明的实际口型标明需人工试听，不可据静帧宣称口型通过。`,
           parseComicDramaReview,
-          stage === "timeline" && !options.lrc.trim(),
+          stage === "timeline" && analysisMode === "manual" && !options.lrc.trim(),
         );
         save({ ...run, review });
         run = read().stages[stage]!;
@@ -672,6 +868,30 @@ export function createMusicVideoWorkflowRunner(
     requiresMediaReview: true,
     forceComposition: true,
     validateMedia: (context) => {
+      const state = context.checkpoint().musicVideo;
+      if (!state?.song || !state.speech?.asr)
+        throw new Error("成片模式必须先取得专用 ASR 的真实歌曲分析结果。");
+      assertMvAsr(state.speech.asr, state.song, Boolean(state.speech.alignedLyrics));
+      const timeline = state.stages.timeline?.artifact?.timeline ?? [];
+      if (timeline.some((segment) => segment.kind === "vocal")) {
+        if (!state.speech.forcedAlignment || !state.speech.alignedLyrics)
+          throw new Error("成片模式必须先取得完整歌词的声学强制对齐结果。");
+        assertMvForcedAlignment(state.speech.forcedAlignment, state.song, state.speech.alignedLyrics);
+      }
+      const measuredTimeline = state.speech.forcedAlignment
+        ? musicVideoTimelineFromAlignment(state.song, state.speech.forcedAlignment)
+        : [{ startSeconds: 0, endSeconds: state.song.durationSeconds, kind: "instrumental", text: "" }];
+      if (
+        timeline.length !== measuredTimeline.length ||
+        timeline.some(
+          (segment, index) =>
+            segment.kind !== measuredTimeline[index]?.kind ||
+            lyricsText(segment.text) !== lyricsText(measuredTimeline[index]?.text ?? "") ||
+            Math.abs(segment.startSeconds - measuredTimeline[index]!.startSeconds) > EPSILON ||
+            Math.abs(segment.endSeconds - measuredTimeline[index]!.endSeconds) > EPSILON,
+        )
+      )
+        throw new Error("当前 MV 时间线与已保存的声学强制对齐结果不一致，请重新制作并审核对齐，不能把手工时间标记当作自动验证结果。");
       if (
         context
           .checkpoint()
@@ -723,6 +943,12 @@ export function createMusicVideoWorkflowRunner(
       }
       if (!state?.song || state.inputSignature !== signature(request))
         throw new Error("MV 歌曲、歌词或制作设置已修改，请重新制作，避免复用旧内容。");
+      if (
+        request.node.config.musicVideo?.deliverable === "video" &&
+        state.planningComplete &&
+        !state.speech?.asr
+      )
+        throw new Error("旧 MV 成片检查点没有专用 ASR 与强制对齐证据，请重新制作；不能把旧结果自动升级为已验收。");
       const song = await media.probeSong(request.node.config.musicVideo!.songPath);
       if (
         song.sourceSignature !== state.song.sourceSignature ||
@@ -759,6 +985,7 @@ export function createMusicVideoWorkflowRunner(
       ];
     },
     startComposition: async (context, clips) => {
+      await requireHumanLipReviews(context);
       const state = context.checkpoint().musicVideo!;
       if (!state.song) throw new Error("MV 缺少原曲身份。");
       const shots = state.stages.prompts?.artifact?.shots ?? [];
@@ -792,6 +1019,7 @@ export function createMusicVideoWorkflowRunner(
         throw new Error(
           "原曲与成片的真实音视频流时长不一致，请检查音乐窗口后重新合成；该检查不判断嘴型。",
         );
+      await requireHumanLipReviews(context);
     },
   });
 }

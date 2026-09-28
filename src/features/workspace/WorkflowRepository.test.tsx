@@ -37,6 +37,21 @@ describe("WorkflowRepository", () => {
     expect(insertReverse).toHaveBeenCalledTimes(1);
     expect(insertKnowledge).not.toHaveBeenCalled();
   });
+  it("offers a native shot-analysis and synchronized-video workflow", () => {
+    const insert = vi.fn();
+    render(
+      <WorkflowRepository
+        expanded
+        onToggle={vi.fn()}
+        onInsertKnowledgeVideoWorkflow={vi.fn()}
+        onInsertReelbenchWorkflow={insert}
+      />,
+    );
+    expect(screen.getByRole("heading", { name: "视频拉片与分镜合成" })).toBeInTheDocument();
+    expect(screen.queryByRole("link")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "添加视频拉片与分镜合成工作流节点" }));
+    expect(insert).toHaveBeenCalledOnce();
+  });
   it("offers the animation template with a separate insertion action", () => {
     const insertRemotion = vi.fn();
     const insertKnowledge = vi.fn();
@@ -96,7 +111,7 @@ describe("WorkflowRepository", () => {
         onInsertKnowledgeVideoWorkflow={insertKnowledge}
       />,
     );
-    expect(screen.getByText("9 个自动工作流")).toBeInTheDocument();
+    expect(screen.getByText("10 个自动工作流")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "AI影视工作流 V1.3" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "添加AI影视工作流节点" }));
     expect(insertFilm).toHaveBeenCalledTimes(1);
@@ -146,7 +161,7 @@ describe("WorkflowRepository", () => {
     expect(content).toHaveAttribute("hidden");
   });
 
-  it("opens all nine templates and restores focus when dismissed with Escape or close", async () => {
+  it("opens all ten templates and restores focus when dismissed with Escape or close", async () => {
     const user = userEvent.setup();
     function Harness() {
       const [expanded, setExpanded] = useState(false);
@@ -168,7 +183,7 @@ describe("WorkflowRepository", () => {
     const toggle = screen.getByRole("button", { name: "工作流仓库" });
     await user.click(toggle);
     const dialog = screen.getByRole("dialog", { name: "工作流仓库" });
-    expect(within(dialog).getAllByRole("heading")).toHaveLength(9);
+    expect(within(dialog).getAllByRole("heading")).toHaveLength(10);
     expect(within(dialog).getByRole("button", { name: "添加短视频反推工作流节点" })).toHaveFocus();
     await user.keyboard("{Escape}");
     expect(screen.queryByRole("dialog")).not.toBeInTheDocument();

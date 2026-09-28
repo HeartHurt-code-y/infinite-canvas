@@ -285,7 +285,9 @@ describe("ProviderSettingsDialog", () => {
       target: { value: "aliyun-bailian" },
     });
     await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("阿里云百炼"));
-    expect(screen.queryByPlaceholderText("https://api.company.com 或 …/v1")).not.toBeInTheDocument();
+    expect(
+      screen.queryByPlaceholderText("https://api.company.com 或 …/v1"),
+    ).not.toBeInTheDocument();
     fireEvent.change(screen.getByPlaceholderText("llm-xxxxxxxx"), {
       target: { value: "llm-workspace-1" },
     });
@@ -579,7 +581,7 @@ describe("ProviderSettingsDialog", () => {
     expect(client.listSavedProviderModels).toHaveBeenCalledWith(SAVED_PROVIDER.id);
     expect(client.fetchProviderModels).not.toHaveBeenCalled();
 
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(
         SAVED_PROVIDER.id,
@@ -638,7 +640,7 @@ describe("ProviderSettingsDialog", () => {
     expect(within(textModel as HTMLElement).getByRole("radio", { name: "文本模型" })).toBeChecked();
     expect(screen.getByText("文本模型 1")).toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(
         SAVED_PROVIDER.id,
@@ -733,7 +735,7 @@ describe("ProviderSettingsDialog", () => {
     );
 
     await waitFor(() => expect(screen.getByLabelText("供应商连接")).toHaveValue(SAVED_PROVIDER.id));
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     expect(await screen.findByText(/供应商 公司接口 连通性测试通过/)).toBeInTheDocument();
     expect(client.testConnection).toHaveBeenCalledWith(SAVED_PROVIDER.id);
@@ -764,7 +766,7 @@ describe("ProviderSettingsDialog", () => {
     );
 
     await waitFor(() => expect(screen.getByLabelText("供应商连接")).toHaveValue(SAVED_PROVIDER.id));
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     expect(await screen.findByText(/连通性测试失败（HTTP 401）/)).toBeInTheDocument();
     // 保存本身成功，成功消息与失败提示同时可见。
@@ -878,7 +880,7 @@ describe("ProviderSettingsDialog", () => {
       within(videoModel as HTMLElement).getByRole("radio", { name: "视频模型" }),
     ).toBeChecked();
     expect(within(videoModel as HTMLElement).queryByRole("checkbox")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(
@@ -946,7 +948,7 @@ describe("ProviderSettingsDialog", () => {
     expect(within(tokenSelect).getByRole("option", { name: "as分组" })).toBeInTheDocument();
     fireEvent.change(tokenSelect, { target: { value: "as分组" } });
 
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     // 保存时该模型的绑定应携带 tokenGroup: "as分组"。
     await waitFor(() =>
@@ -1000,7 +1002,7 @@ describe("ProviderSettingsDialog", () => {
     expect(model).not.toBeNull();
     expect(within(model as HTMLElement).getByRole("radio", { name: "不启用" })).toBeChecked();
     expect(within(model as HTMLElement).queryByRole("checkbox")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(SAVED_PROVIDER.id, [
         expect.objectContaining({
@@ -1037,7 +1039,7 @@ describe("ProviderSettingsDialog", () => {
     const model = (await screen.findByText("公司图片模型")).closest("article");
     expect(model).not.toBeNull();
     fireEvent.click(within(model as HTMLElement).getByRole("radio", { name: "不启用" }));
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(SAVED_PROVIDER.id, [
@@ -1130,7 +1132,7 @@ describe("ProviderSettingsDialog", () => {
     expect(
       within(imageModel as HTMLElement).getByRole("checkbox", { name: "图片参考生成" }),
     ).not.toBeChecked();
-    fireEvent.click(screen.getByRole("button", { name: "保存图片、视频与文本模型" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
 
     await waitFor(() =>
       expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(SAVED_PROVIDER.id, [
@@ -1196,5 +1198,109 @@ describe("ProviderSettingsDialog", () => {
     fireEvent.change(screen.getByLabelText("供应商连接"), { target: { value: "provider-other" } });
     await waitFor(() => expect(screen.getByLabelText(/^API Key/)).toHaveValue("OTHER-KEY"));
     expect(client.getCredential).toHaveBeenCalledWith(otherProvider.apiKeyRef);
+  });
+
+  it("keeps Doubao Voice and SAMI secrets in separate credential references", async () => {
+    const voiceProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-voice",
+      displayName: "火山豆包语音",
+      adapterId: "doubao_voice_v1",
+      baseUrl: "https://openspeech.bytedance.com",
+      apiKeyRef: "provider:provider-voice:api-key",
+    };
+    const saved = new Map([
+      [voiceProvider.apiKeyRef, "VOICE-KEY"],
+      ["provider:provider-voice:sami_appkey", "SAMI-APP"],
+      ["provider:provider-voice:sami_token", "SAMI-TOKEN"],
+    ]);
+    const client = createClient({
+      listProviderConnections: vi.fn(() => Promise.resolve([voiceProvider])),
+      upsertProviderConnection: vi.fn(() => Promise.resolve(voiceProvider)),
+      getCredential: vi.fn((ref: string) => Promise.resolve(saved.get(ref) ?? "")),
+    });
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={vi.fn()}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^豆包语音 API Key/)).toHaveValue("VOICE-KEY"),
+    );
+    await waitFor(() =>
+      expect(screen.getByLabelText(/^歌词对齐 SAMI Token/)).toHaveValue("SAMI-TOKEN"),
+    );
+    expect(screen.getByLabelText(/^歌词对齐 SAMI AppKey/)).toHaveValue("SAMI-APP");
+    fireEvent.click(screen.getByRole("button", { name: "保存连接" }));
+    await waitFor(() =>
+      expect(client.setCredential).toHaveBeenCalledWith({
+        credentialRef: "provider:provider-voice:sami_token",
+        secret: "SAMI-TOKEN",
+      }),
+    );
+    expect(client.setCredential).toHaveBeenCalledWith({
+      credentialRef: voiceProvider.apiKeyRef,
+      secret: "VOICE-KEY",
+    });
+    expect(client.setCredential).toHaveBeenCalledWith({
+      credentialRef: "provider:provider-voice:sami_appkey",
+      secret: "SAMI-APP",
+    });
+    expect(JSON.stringify(vi.mocked(client.upsertProviderConnection).mock.calls)).not.toContain(
+      "SAMI-TOKEN",
+    );
+  });
+
+  it("persists a Doubao speech model under speech_generation", async () => {
+    const voiceProvider: ProviderConnection = {
+      ...SAVED_PROVIDER,
+      id: "provider-voice",
+      displayName: "火山豆包语音",
+      adapterId: "doubao_voice_v1",
+      baseUrl: "https://openspeech.bytedance.com",
+    };
+    const model: RemoteModelOption = {
+      id: "seed-tts-2.0",
+      modelDefinitionId: "remote::provider-voice::seed-tts-2.0",
+      displayName: "豆包语音 Seed-TTS 2.0",
+      ownedBy: "火山引擎豆包语音",
+      hasConfiguredBinding: true,
+      configuredOperations: ["speech_generation"],
+      suggestedOperations: ["speech_generation"],
+      operationSchema: { speech_generation: { resultType: "audio", parameters: {} } },
+      tokenGroup: null,
+    };
+    const client = createClient({
+      listProviderConnections: vi.fn(() => Promise.resolve([voiceProvider])),
+      listSavedProviderModels: vi.fn(() => Promise.resolve([model])),
+    });
+    render(
+      <ProviderSettingsDialog
+        open
+        onClose={vi.fn()}
+        onCatalogChanged={vi.fn()}
+        client={client}
+        tosClient={TOS_STUB}
+      />,
+    );
+    await waitFor(() => expect(screen.getByRole("button", { name: "保存模型绑定" })).toBeEnabled());
+    expect(screen.getByRole("radio", { name: "语音模型" })).toBeChecked();
+    fireEvent.click(screen.getByRole("button", { name: "保存模型绑定" }));
+    await waitFor(() =>
+      expect(client.replaceProviderModelBindings).toHaveBeenCalledWith(
+        voiceProvider.id,
+        expect.arrayContaining([
+          expect.objectContaining({
+            remoteModelId: "seed-tts-2.0",
+            enabledOperations: ["speech_generation"],
+          }),
+        ]),
+      ),
+    );
   });
 });

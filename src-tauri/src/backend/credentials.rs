@@ -261,7 +261,7 @@ fn write_map(path: &Path, map: &Map<String, Value>) -> BackendResult<()> {
 ///
 /// 已存在的文件先收紧权限再截断，避免沿用旧的宽松 ACL。Unix 用 `0o600`；
 /// Windows 去掉继承并只授予当前用户读写。
-fn write_private_file(path: &Path, body: &str) -> std::io::Result<()> {
+pub(crate) fn write_private_file(path: &Path, body: &str) -> std::io::Result<()> {
     #[cfg(unix)]
     {
         use std::io::Write;

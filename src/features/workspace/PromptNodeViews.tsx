@@ -25,6 +25,13 @@ import {
   type SeedanceTaskMode,
 } from "../../lib/seedanceTasks";
 import {
+  perTaskVideoInputIssue,
+  perTaskVideoProfile,
+  perTaskVideoUrlIssue,
+  type PerTaskVideoProfile,
+  type PerTaskVideoUrlInput,
+} from "../../lib/perTaskVideo";
+import {
   createPromptContentEditorSession,
   describePromptContentCandidates,
   PROMPT_AUTO_DETECT_DEBOUNCE_MS,
@@ -1742,6 +1749,21 @@ export function VideoNodeSettings({
   const selectedModel = availableModels.find(
     (model) => model.definitionId === config.modelSelection.modelDefinitionId,
   );
+  const perTaskProfile = perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
+  const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
+  const perTaskInputIssue = perTaskProfile
+    ? (perTaskVideoUrlIssue(perTaskPublicUrls) ??
+      perTaskVideoInputIssue(perTaskProfile, [
+        ...(mediaInputs ?? []).map((input) => ({
+          kind: input.kind,
+          role: config.mediaRoles?.[input.key] ?? "",
+        })),
+        ...perTaskPublicUrls.map((input) => ({
+          kind: input.kind,
+          role: input.kind === "image" ? "reference_image" : "reference_audio",
+        })),
+      ]))
+    : null;
   const parameterCapabilities = selectedModel
     ? modelParameterCapabilities(
         selectedModel.operationSchema,
@@ -1869,6 +1891,57 @@ export function VideoNodeSettings({
           ))}
         </select>
       </label>
+
+      {perTaskProfile ? (
+        <div className="canvas-gen-node__media-roles" role="status">
+          <small>
+            按次计费：每条视频单独提交并收取一次固定费用；生成数量为 {config.generationCount}{" "}
+            时会创建 {config.generationCount} 个独立任务。
+          </small>
+          <small>
+            720P ·{" "}
+            {perTaskProfile.minimumDuration === perTaskProfile.maximumDuration
+              ? "固定 30 秒"
+              : `${perTaskProfile.minimumDuration}–${perTaskProfile.maximumDuration} 秒`}
+            ；最多 {perTaskProfile.maxImages} 张参考图
+            {perTaskProfile.maxAudios > 0
+              ? `、${perTaskProfile.maxAudios} 段参考音频`
+              : "，不支持参考音频"}
+            ；不支持参考视频或首尾帧。
+          </small>
+          {perTaskInputIssue ? (
+            <div className="canvas-gen-node__media-role-warning" role="alert">
+              <Icon name="warning-circle" aria-hidden="true" size="sm" />
+              <span>{perTaskInputIssue}</span>
+              {perTaskInputIssue.includes("旧素材角色") ? (
+                <button
+                  type="button"
+                  className="canvas-gen-node__url-add"
+                  onClick={() => onChange({ ...config, mediaRoles: {} })}
+                >
+                  清除旧素材角色
+                </button>
+              ) : null}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+      {perTaskProfile && (config.urlMedia?.length ?? 0) > 0 ? (
+        <div className="canvas-gen-node__media-roles" role="status">
+          <small>
+            已保留 {config.urlMedia?.length} 个万相文档/网页
+            URL；此按次型号不会提交它们。切回万相模型可继续使用。
+          </small>
+        </div>
+      ) : null}
+      {!perTaskProfile && perTaskPublicUrls.length > 0 ? (
+        <div className="canvas-gen-node__media-roles" role="status">
+          <small>
+            已保留 {perTaskPublicUrls.length} 个按次参考
+            URL；当前型号不会提交它们。切回按次型号可继续使用。
+          </small>
+        </div>
+      ) : null}
 
       {taskState.enabled ? (
         <>
@@ -2057,6 +2130,14 @@ export function VideoNodeSettings({
           urlMedia={config.urlMedia ?? []}
           hasConnectedMedia={(mediaInputs?.length ?? 0) > 0}
           onChange={(urlMedia) => onChange({ ...config, urlMedia })}
+        />
+      ) : null}
+      {perTaskProfile ? (
+        <PerTaskVideoUrlSection
+          profile={perTaskProfile}
+          urlMedia={perTaskPublicUrls}
+          connectedInputs={mediaInputs ?? []}
+          onChange={(perTaskUrlMedia) => onChange({ ...config, perTaskUrlMedia })}
         />
       ) : null}
     </div>
@@ -2295,6 +2376,147 @@ function VideoUrlMediaSection({
               ? "文档（file）与网页（link）二选一，各限 1 个。"
               : "文档/网页生视频不与其它素材混用，请仅保留 URL 素材。"}
           </span>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+/** Public image/audio references for the SP 2.5 per-task gateway. */
+function PerTaskVideoUrlSection({
+  profile,
+  urlMedia,
+  connectedInputs,
+  onChange,
+}: {
+  readonly profile: PerTaskVideoProfile;
+  readonly urlMedia: readonly PerTaskVideoUrlInput[];
+  readonly connectedInputs: readonly (ConnectedAssetInput | InheritedAssetInput)[];
+  readonly onChange: (urlMedia: readonly PerTaskVideoUrlInput[]) => void;
+}) {
+  const [draftKind, setDraftKind] = useState<"image" | "audio" | null>(null);
+  const [draftUrl, setDraftUrl] = useState("");
+  const [draftError, setDraftError] = useState<string | null>(null);
+
+  const cancelDraft = () => {
+    setDraftKind(null);
+    setDraftUrl("");
+    setDraftError(null);
+  };
+  const commitDraft = () => {
+    if (draftKind == null) return;
+    const kindLimit = draftKind === "image" ? profile.maxImages : profile.maxAudios;
+    const connectedCount = connectedInputs.filter((input) => input.kind === draftKind).length;
+    const urlCount = urlMedia.filter((input) => input.kind === draftKind).length;
+    if (connectedCount + urlCount >= kindLimit) {
+      setDraftError(
+        draftKind === "image"
+          ? `此型号最多支持 ${kindLimit} 张参考图。`
+          : kindLimit === 0
+            ? "此型号不支持参考音频。"
+            : `此型号最多支持 ${kindLimit} 段参考音频。`,
+      );
+      return;
+    }
+    const next: PerTaskVideoUrlInput = {
+      id: `sp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
+      kind: draftKind,
+      url: draftUrl.trim(),
+    };
+    const issue = perTaskVideoUrlIssue([...urlMedia, next]);
+    if (issue) {
+      setDraftError(issue);
+      return;
+    }
+    onChange([...urlMedia, next]);
+    cancelDraft();
+  };
+
+  return (
+    <div className="canvas-gen-node__url-media" aria-label="按次参考 URL">
+      <div className="canvas-gen-node__section-title">
+        <span>公网参考 URL</span>
+        <small>可与画布连线素材一起使用；提交时保留原 URL 和签名参数</small>
+      </div>
+      {urlMedia.length > 0 ? (
+        <ol className="canvas-gen-node__url-list">
+          {urlMedia.map((input) => (
+            <li key={input.id} className="canvas-gen-node__url-item">
+              <AssetKindIcon kind={input.kind} size="md" />
+              <span className="canvas-gen-node__url-copy">
+                <strong>{input.kind === "image" ? "参考图" : "参考音频"}</strong>
+                <small title={input.url}>{input.url}</small>
+              </span>
+              <button
+                type="button"
+                className="canvas-gen-node__url-remove"
+                aria-label={`移除${input.kind === "image" ? "参考图" : "参考音频"} URL`}
+                onClick={() => onChange(urlMedia.filter((item) => item.id !== input.id))}
+              >
+                <Icon name="x" aria-hidden="true" size="xs" />
+              </button>
+            </li>
+          ))}
+        </ol>
+      ) : null}
+      {draftKind != null ? (
+        <div className="canvas-gen-node__url-draft">
+          <span className="canvas-gen-node__url-draft-label">
+            {draftKind === "image" ? "参考图 URL" : "参考音频 URL"}
+          </span>
+          <input
+            type="url"
+            className="canvas-gen-node__url-draft-input"
+            aria-label={draftKind === "image" ? "参考图 URL" : "参考音频 URL"}
+            placeholder={
+              draftKind === "image" ? "https://…/reference.png" : "https://…/reference.mp3"
+            }
+            value={draftUrl}
+            onChange={(event) => {
+              setDraftUrl(event.target.value);
+              setDraftError(null);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") commitDraft();
+              if (event.key === "Escape") cancelDraft();
+            }}
+            autoFocus
+          />
+          <button type="button" className="canvas-gen-node__url-draft-add" onClick={commitDraft}>
+            添加
+          </button>
+          <button
+            type="button"
+            className="canvas-gen-node__url-draft-cancel"
+            aria-label="取消"
+            onClick={cancelDraft}
+          >
+            <Icon name="x" aria-hidden="true" size="xs" />
+          </button>
+        </div>
+      ) : (
+        <div className="canvas-gen-node__url-actions">
+          <button
+            type="button"
+            className="canvas-gen-node__url-add"
+            onClick={() => setDraftKind("image")}
+          >
+            粘贴参考图 URL
+          </button>
+          {profile.maxAudios > 0 ? (
+            <button
+              type="button"
+              className="canvas-gen-node__url-add"
+              onClick={() => setDraftKind("audio")}
+            >
+              粘贴参考音频 URL
+            </button>
+          ) : null}
+        </div>
+      )}
+      {draftError ? (
+        <div className="canvas-gen-node__url-error" role="alert">
+          {draftError}
         </div>
       ) : null}
     </div>

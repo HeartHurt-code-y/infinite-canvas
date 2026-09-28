@@ -12,6 +12,7 @@ import {
   fakeDependencies,
 } from "../../test/videoWorkflowFixtures";
 import { createAiFilmCheckpoint } from "./aiFilmWorkflowModel";
+import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import {
   workflowReferenceFixtures,
   workflowConnectedReferenceFixtures,
@@ -715,6 +716,159 @@ describe("knowledge video workflow runner", () => {
     expect(adopted.phase).toBe("done");
     expect(fake.generation.start).toHaveBeenCalledTimes(8);
     expect(adopted.shotRuns["shot-01"]?.clipPath).toBe(paused.shotRuns["shot-01"]?.clipPath);
+  });
+
+  it("adopts only the QC decision's signed shot and presents another failed shot separately", async () => {
+    const retry = JSON.stringify({
+      result: "RETRY",
+      report: "镜头 1 尾帧有偏差",
+      repairPrompt: "保持人物完整可见",
+    });
+    const needsDecision = JSON.stringify({
+      result: "NEEDS_DECISION",
+      report: "镜头 2 仍有独立差异",
+      question: "是否采用镜头 2？",
+      recommendation: "先检查镜头 2",
+    });
+    const fake = fakeDependencies(planJson(), [retry, retry, needsDecision]);
+    const source = node();
+    const sourceNode = { ...source, config: { ...source.config, maxAutomaticRetries: 1 } };
+    const runner = createKnowledgeVideoWorkflowRunner({
+      promptClient: fake.promptClient,
+      generationClient: fake.generation,
+      frameClient: fake.frames,
+      composerClient: fake.composer,
+      sleep: () => Promise.resolve(),
+    });
+    const request = {
+      node: sourceNode,
+      providerCatalog: catalog,
+      signal: new AbortController().signal,
+      onCheckpoint: vi.fn(),
+      onProgress: vi.fn(),
+    };
+    const paused = await runner.run(request);
+    expect(paused.phase).toBe("awaiting_approval");
+    expect(paused.decision?.kind).toBe("qc");
+    expect(paused.decision?.qcTarget?.shotId).toBe("shot-01");
+    expect(paused.decision?.qcTarget?.signature.length).toBeGreaterThan(0);
+    const staleClip = await runner.run({
+      ...request,
+      resume: true,
+      node: {
+        ...sourceNode,
+        config: {
+          ...sourceNode.config,
+          checkpoint: {
+            ...paused,
+            shotRuns: {
+              ...paused.shotRuns,
+              "shot-01": { ...paused.shotRuns["shot-01"]!, clipPath: "C:\\output\\replaced.mp4" },
+            },
+          },
+        },
+      },
+    });
+    expect(staleClip.phase).toBe("failed");
+    expect(staleClip.shotRuns["shot-01"]?.qcStatus).toBe("failed");
+    expect(fake.composer.startComposition).not.toHaveBeenCalled();
+    const secondRun = paused.shotRuns["shot-02"]!;
+    expect(secondRun.clipPath).toBeTruthy();
+    const restored: KnowledgeVideoWorkflowCheckpoint = {
+      ...paused,
+      shotRuns: {
+        ...paused.shotRuns,
+        "shot-02": {
+          ...secondRun,
+          qcStatus: "failed",
+          qcReport: "镜头 2 尚未得到人工确认",
+        },
+      },
+    };
+    const checkpoints: KnowledgeVideoWorkflowCheckpoint[] = [];
+    const submittedBeforeResume = vi.mocked(fake.generation.start).mock.calls.length;
+    const resumed = await runner.run({
+      ...request,
+      resume: true,
+      node: { ...sourceNode, config: { ...sourceNode.config, checkpoint: restored } },
+      onCheckpoint: (checkpoint) => checkpoints.push(checkpoint),
+    });
+
+    const firstApproval = checkpoints.find(
+      (checkpoint) =>
+        checkpoint.decision === null && checkpoint.shotRuns["shot-01"]?.qcStatus === "passed",
+    );
+    expect(firstApproval).toBeDefined();
+    expect(firstApproval!.shotRuns["shot-01"]?.clipPath).toBe(paused.shotRuns["shot-01"]?.clipPath);
+    expect(firstApproval!.shotRuns["shot-02"]).toMatchObject({
+      qcStatus: "failed",
+      qcReport: "镜头 2 尚未得到人工确认",
+      clipPath: secondRun.clipPath,
+      videoTaskId: secondRun.videoTaskId,
+    });
+    expect(resumed.phase).toBe("awaiting_approval");
+    expect(resumed.decision?.kind).toBe("qc");
+    expect(resumed.decision?.qcTarget?.shotId).toBe("shot-02");
+    expect(resumed.decision?.qcTarget?.signature.length).toBeGreaterThan(0);
+    expect(resumed.shotRuns["shot-02"]?.qcStatus).toBe("failed");
+    expect(vi.mocked(fake.generation.start).mock.calls.length).toBe(submittedBeforeResume);
+    expect(fake.composer.startComposition).not.toHaveBeenCalled();
+  });
+
+  it("does not implicitly adopt multiple failed shots from a legacy QC decision without a target", async () => {
+    const retry = JSON.stringify({
+      result: "RETRY",
+      report: "镜头 1 尾帧有偏差",
+      repairPrompt: "保持人物完整可见",
+    });
+    const fake = fakeDependencies(planJson(), [retry, retry]);
+    const source = node();
+    const sourceNode = { ...source, config: { ...source.config, maxAutomaticRetries: 1 } };
+    const runner = createKnowledgeVideoWorkflowRunner({
+      promptClient: fake.promptClient,
+      generationClient: fake.generation,
+      frameClient: fake.frames,
+      composerClient: fake.composer,
+      sleep: () => Promise.resolve(),
+    });
+    const request = {
+      node: sourceNode,
+      providerCatalog: catalog,
+      signal: new AbortController().signal,
+      onCheckpoint: vi.fn(),
+      onProgress: vi.fn(),
+    };
+    const paused = await runner.run(request);
+    expect(paused.phase).toBe("awaiting_approval");
+    const legacyCheckpoint = {
+      ...paused,
+      decision: {
+        kind: "qc" as const,
+        question: paused.decision!.question,
+        recommendation: paused.decision!.recommendation,
+      },
+      shotRuns: {
+        ...paused.shotRuns,
+        "shot-02": {
+          ...paused.shotRuns["shot-02"]!,
+          qcStatus: "failed" as const,
+          qcReport: "镜头 2 尚未得到人工确认",
+        },
+      },
+    } satisfies KnowledgeVideoWorkflowCheckpoint;
+    const submittedBeforeResume = vi.mocked(fake.generation.start).mock.calls.length;
+    const resumed = await runner.run({
+      ...request,
+      resume: true,
+      node: { ...sourceNode, config: { ...sourceNode.config, checkpoint: legacyCheckpoint } },
+    });
+
+    expect(resumed.phase).not.toBe("done");
+    expect(resumed.shotRuns["shot-01"]?.qcStatus).toBe("failed");
+    expect(resumed.shotRuns["shot-02"]?.qcStatus).toBe("failed");
+    expect(resumed.shotRuns["shot-02"]?.qcReport).toBe("镜头 2 尚未得到人工确认");
+    expect(vi.mocked(fake.generation.start).mock.calls.length).toBe(submittedBeforeResume);
+    expect(fake.composer.startComposition).not.toHaveBeenCalled();
   });
 
   it("pauses for confirmation when visual QC infrastructure cannot produce five frames", async () => {

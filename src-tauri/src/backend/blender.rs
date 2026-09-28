@@ -79,6 +79,55 @@ pub struct WhiteModelMotion {
     pub speed: Option<f64>,
 }
 
+/// Declarative refinement metadata is retained with the scene; TypeScript alone evaluates it
+/// into the same baked samples used by the viewport and the trusted Blender script.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotionTarget {
+    pub position: [f64; 3],
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pole: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub weight: Option<f64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotionTargets {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_hand: Option<WhiteModelMotionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_hand: Option<WhiteModelMotionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub left_foot: Option<WhiteModelMotionTarget>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub right_foot: Option<WhiteModelMotionTarget>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotionRefinementKeyframe {
+    pub time: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pelvis_offset: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub torso_rotation: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_rotation: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub targets: Option<WhiteModelMotionTargets>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WhiteModelMotionRefinement {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interpolation: Option<String>,
+    pub keyframes: Vec<WhiteModelMotionRefinementKeyframe>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhiteModelObject {
@@ -90,6 +139,8 @@ pub struct WhiteModelObject {
     pub facing: String,
     pub keyframes: Vec<WhiteModelKeyframe>,
     pub motion: WhiteModelMotion,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion_refinement: Option<WhiteModelMotionRefinement>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,6 +308,63 @@ fn validate_motion(motion: &WhiteModelMotion) -> bool {
     }
 }
 
+fn validate_motion_refinement(refinement: &WhiteModelMotionRefinement, duration: f64) -> bool {
+    let valid_vector = |value: &[f64; 3], limit| valid_series(value, 3, limit);
+    if refinement
+        .interpolation
+        .as_deref()
+        .is_some_and(|value| !["linear", "smooth"].contains(&value))
+        || !(1..=256).contains(&refinement.keyframes.len())
+        || !strictly_increasing_times(
+            refinement.keyframes.iter().map(|frame| &frame.time),
+            duration,
+        )
+    {
+        return false;
+    }
+    refinement.keyframes.iter().all(|frame| {
+        let pose_valid = frame.pose.as_deref().is_none_or(|pose| {
+            [
+                "source", "stand", "sit", "kneel", "crouch", "reach", "arms_up",
+            ]
+            .contains(&pose)
+        });
+        pose_valid
+            && frame
+                .pelvis_offset
+                .as_ref()
+                .is_none_or(|value| valid_vector(value, 2.0))
+            && frame
+                .torso_rotation
+                .as_ref()
+                .is_none_or(|value| valid_vector(value, 180.0))
+            && frame
+                .head_rotation
+                .as_ref()
+                .is_none_or(|value| valid_vector(value, 180.0))
+            && frame.targets.as_ref().is_none_or(|targets| {
+                [
+                    &targets.left_hand,
+                    &targets.right_hand,
+                    &targets.left_foot,
+                    &targets.right_foot,
+                ]
+                .into_iter()
+                .flatten()
+                .all(|target| {
+                    valid_vector(&target.position, 4.0)
+                        && target
+                            .pole
+                            .as_ref()
+                            .is_none_or(|value| valid_vector(value, 4.0))
+                        && target
+                            .weight
+                            .is_none_or(|value| finite_between(value, 0.0, 1.0))
+                })
+            })
+    })
+}
+
 pub fn expected_frame_count(plan: &WhiteModelScenePlan) -> u32 {
     ((plan.duration_seconds * f64::from(plan.fps)).round() as u32).max(1)
 }
@@ -337,6 +445,14 @@ pub fn validate_request(request: &StartBlenderRenderRequest) -> BackendResult<()
         {
             return Err(invalid(
                 "白模关键帧须按时间严格递增，时间不能超出片长，坐标须在 -100–100 范围内",
+            ));
+        }
+        if object.motion_refinement.as_ref().is_some_and(|refinement| {
+            object.shape != "person"
+                || !validate_motion_refinement(refinement, plan.duration_seconds)
+        }) {
+            return Err(invalid(
+                "动作精修仅支持人形，须有 1–256 个递增关键帧；请检查时间、姿势、偏移、旋转和 IK 目标范围",
             ));
         }
     }
@@ -1412,6 +1528,98 @@ mod tests {
         let mut data = serde_json::to_value(base).unwrap();
         data["plan"]["python"] = json!("print('untrusted')");
         assert!(serde_json::from_value::<StartBlenderRenderRequest>(data).is_err());
+    }
+
+    #[test]
+    fn motion_refinement_round_trips_with_original_motion_and_still_requires_bake() {
+        let refinement = json!({
+            "interpolation": "smooth",
+            "keyframes": [
+                {"time": 0.0},
+                {
+                    "time": 1.0, "pose": "source", "pelvisOffset": [0.1, 0.0, -0.2],
+                    "torsoRotation": [5.0, 0.0, 15.0], "headRotation": [0.0, 0.0, -10.0],
+                    "targets": {
+                        "leftHand": {"position": [0.5, -0.2, 1.2], "pole": [1.0, 0.0, 0.6], "weight": 0.8},
+                        "rightFoot": {"position": [-0.1, 0.0, 0.0]}
+                    }
+                }
+            ]
+        });
+        let mut data = serde_json::to_value(request()).unwrap();
+        data["plan"]["objects"][1]["motion"] = json!({
+            "kind": "clip", "startTime": 0, "loop": true, "speed": 1,
+            "clip": {
+                "fps": 8, "frameCount": 8,
+                "joints": base64::Engine::encode(&base64::engine::general_purpose::STANDARD, vec![0_u8; 8 * JOINT_COUNT * 3 * 2]),
+                "sourceName": "existing-motion.mp4"
+            }
+        });
+        data["plan"]["objects"][1]["motionRefinement"] = refinement.clone();
+        let mut parsed: StartBlenderRenderRequest = serde_json::from_value(data.clone()).unwrap();
+        validate_request(&parsed).unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        let input_path = temporary.path().join("input.json");
+        write_json(&input_path, &parsed).unwrap();
+        let persisted: Value = serde_json::from_slice(&std::fs::read(input_path).unwrap()).unwrap();
+        assert_eq!(
+            persisted["plan"]["objects"][1]["motionRefinement"],
+            refinement
+        );
+        assert_eq!(
+            persisted["plan"]["objects"][1]["motion"]["clip"],
+            data["plan"]["objects"][1]["motion"]["clip"]
+        );
+        assert!(
+            persisted["plan"]["objects"][0]
+                .get("motionRefinement")
+                .is_none()
+        );
+        parsed.bake = None;
+        assert!(validate_request(&parsed).is_err());
+    }
+
+    #[test]
+    fn motion_refinement_rejects_invalid_metadata_before_native_execution() {
+        let invalid_refinements = [
+            json!({"keyframes": []}),
+            json!({"keyframes": vec![json!({"time": 0}); 257]}),
+            json!({"keyframes": [{"time": 0}, {"time": 0}]}),
+            json!({"keyframes": [{"time": 0.5}, {"time": 0.2}]}),
+            json!({"keyframes": [{"time": -0.01}]}),
+            json!({"keyframes": [{"time": 1.001}]}),
+            json!({"interpolation": "python", "keyframes": [{"time": 0}]}),
+            json!({"keyframes": [{"time": 0, "pose": "dance"}]}),
+            json!({"keyframes": [{"time": 0, "pelvisOffset": [2.01, 0, 0]}]}),
+            json!({"keyframes": [{"time": 0, "torsoRotation": [0, -180.01, 0]}]}),
+            json!({"keyframes": [{"time": 0, "headRotation": [0, 0, 180.01]}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"leftHand": {"position": [4.01, 0, 0]}}}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"leftFoot": {"position": [0, 0, 0], "pole": [0, 0, -4.01]}}}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"rightFoot": {"position": [0, 0, 0], "weight": -0.01}}}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"rightHand": {"position": [0, 0, 0], "weight": 1.01}}}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"head": {"position": [0, 0, 0]}}}]}),
+            json!({"keyframes": [{"time": 0, "targets": {"leftHand": {"position": [0, 0]}}}]}),
+            json!({"keyframes": [{"time": 0, "python": "print('untrusted')"}]}),
+        ];
+        for refinement in invalid_refinements {
+            let mut data = serde_json::to_value(request()).unwrap();
+            data["plan"]["objects"][1]["motionRefinement"] = refinement.clone();
+            let parsed = serde_json::from_value::<StartBlenderRenderRequest>(data);
+            assert!(
+                parsed.is_err() || validate_request(&parsed.unwrap()).is_err(),
+                "accepted {refinement}"
+            );
+        }
+        let valid: WhiteModelMotionRefinement =
+            serde_json::from_value(json!({"keyframes": [{"time": 0}]})).unwrap();
+        let mut non_person = request();
+        non_person.plan.objects[0].motion_refinement = Some(valid.clone());
+        assert!(validate_request(&non_person).is_err());
+        let mut non_finite = request();
+        let mut refinement = valid;
+        refinement.keyframes[0].pelvis_offset = Some([0.0, f64::NAN, 0.0]);
+        non_finite.plan.objects[1].motion_refinement = Some(refinement);
+        assert!(validate_request(&non_finite).is_err());
     }
 
     /// 烘焙数据必须与方案逐帧、逐对象对齐；导入工程时不需要烘焙。

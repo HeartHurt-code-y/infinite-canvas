@@ -2,7 +2,13 @@ import { useState } from "react";
 
 import { ImeTextarea } from "../../components/ImeTextField";
 import { MarkdownView } from "../../components/MarkdownView";
-import { formatRawBackendError, toMediaSrc } from "../../lib/backend";
+import {
+  formatRawBackendError,
+  toMediaSrc,
+  type VideoDownloaderCookieBrowser,
+  type VideoDownloaderEngineStatus,
+} from "../../lib/backend";
+import { DownloadCookieSourceControls } from "./DownloadCookieSourceControls";
 import { revealDesktopItem } from "./desktopActions";
 import {
   reverseVideoDeliveryMarkdown,
@@ -20,6 +26,10 @@ interface ReverseVideoConfigurationProps {
   readonly onPickVideo?: () => Promise<void> | void;
   readonly onRemoveVideo?: () => void;
   readonly onOpenDownloadSettings?: () => void;
+  readonly cookieStatus?: VideoDownloaderEngineStatus | null;
+  readonly cookieBusy?: boolean | undefined;
+  readonly onSelectCookieBrowser?: ((browser: VideoDownloaderCookieBrowser | null) => void) | undefined;
+  readonly onClearCookies?: (() => void) | undefined;
 }
 
 export function ReverseVideoConfiguration({
@@ -31,6 +41,10 @@ export function ReverseVideoConfiguration({
   onPickVideo,
   onRemoveVideo,
   onOpenDownloadSettings,
+  cookieStatus = null,
+  cookieBusy = false,
+  onSelectCookieBrowser,
+  onClearCookies,
 }: ReverseVideoConfigurationProps) {
   const [picking, setPicking] = useState(false);
   const [pickError, setPickError] = useState<string | null>(null);
@@ -86,16 +100,21 @@ export function ReverseVideoConfiguration({
                 ? "改用本地视频"
                 : "选择本地视频"}
         </button>
-        {!localSelected && options.sourceUrl.trim() && onOpenDownloadSettings ? (
-          <button type="button" onClick={onOpenDownloadSettings}>
-            导入下载登录凭据
-          </button>
-        ) : null}
       </div>
+      {!localSelected && options.sourceUrl.trim() && onOpenDownloadSettings ? (
+        <DownloadCookieSourceControls
+          status={cookieStatus}
+          busy={cookieBusy}
+          onSelectBrowser={onSelectCookieBrowser}
+          onImportCookies={onOpenDownloadSettings}
+          onClearCookies={onClearCookies}
+          importLabel="导入下载登录凭据"
+        />
+      ) : null}
       <small>
         {localSelected
           ? "无需下载，使用已选择的视频完成抽帧与分析。"
-          : "链接由项目内的下载器处理。若平台要求登录，可导入下载登录凭据后重试。"}
+          : "链接由项目内的下载器处理。若平台要求登录，可选择本机浏览器或导入 cookies.txt 后重试。"}
       </small>
       {pickError ? <p role="alert">{pickError}</p> : null}
       <label className="canvas-knowledge-workflow__brief">

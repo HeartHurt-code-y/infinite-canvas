@@ -5,13 +5,15 @@
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {
-    "test": "node --test plan.test.mjs"
+    "test": "node --test plan.test.mjs resolve-douyin.test.mjs resolve-rednote.test.mjs"
   },
   "dependencies": {
     "@remotion/renderer": "4.0.425",
+    "playwright-core": "1.63.0",
     "react": "19.1.0",
     "react-dom": "19.1.0",
-    "remotion": "4.0.425"
+    "remotion": "4.0.425",
+    "source-map": "0.8.0"
   },
   "devDependencies": {
     "@remotion/bundler": "4.0.425"

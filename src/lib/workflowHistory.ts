@@ -15,7 +15,8 @@ export type WorkflowHistoryKind =
   | "remotion"
   | "xhsCover"
   | "productScene"
-  | "reverseVideo";
+  | "reverseVideo"
+  | "reelbench";
 
 export interface WorkflowHistoryModelSnapshot {
   readonly role: "text" | "image" | "video";
@@ -125,6 +126,7 @@ const recordSchema = v.object({
     "xhsCover",
     "productScene",
     "reverseVideo",
+    "reelbench",
   ]),
   title: v.string(),
   status: phaseSchema,

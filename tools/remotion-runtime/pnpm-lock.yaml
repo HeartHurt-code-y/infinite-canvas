@@ -169,6 +169,9 @@ importers:
       '@remotion/renderer':
         specifier: 4.0.425
         version: 4.0.425(react-dom@19.1.0(react@19.1.0))(react@19.1.0)(supports-color@8.1.1)
+      playwright-core:
+        specifier: 1.63.0
+        version: 1.63.0
       react:
         specifier: 19.1.0
         version: 19.1.0
@@ -178,6 +181,9 @@ importers:
       remotion:
         specifier: 4.0.425
         version: 4.0.425(react-dom@19.1.0(react@19.1.0))(react@19.1.0)
+      source-map:
+        specifier: 0.8.0
+        version: 0.8.0
     devDependencies:
       '@remotion/bundler':
         specifier: 4.0.425
@@ -818,6 +824,11 @@ packages:
 
   picocolors@1.1.1:
     resolution: {integrity: sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==}
+
+  playwright-core@1.63.0:
+    resolution: {integrity: sha512-rYCsBF/M5HjUch52bbtVONEFjv6Xu8sm8h72dNlR5bzIE1fvC/bxgspzkjSfU+MweEMmPM8KJebG6nnyxo5mCg==}
+    engines: {node: '>=20'}
+    hasBin: true
 
   postcss-modules-extract-imports@3.1.0:
     resolution: {integrity: sha512-k3kNe0aNFQDAZGbin48pL2VNidTF0w4/eASDsxlyspobzU3wZQLOGj7L9gfRe0Jo9/4uud09DsjFNH7winGv8Q==}
@@ -1697,6 +1708,8 @@ snapshots:
   pend@1.2.0: {}
 
   picocolors@1.1.1: {}
+
+  playwright-core@1.63.0: {}
 
   postcss-modules-extract-imports@3.1.0(postcss@8.5.28):
     dependencies:

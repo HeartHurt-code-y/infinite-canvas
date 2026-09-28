@@ -18,6 +18,7 @@ import {
   musicVideoDeliveryBundle,
   MUSIC_VIDEO_APPROVAL,
   patchMusicVideoArtifact,
+  setMusicVideoLipReview,
   type MusicVideoShot,
   type MusicVideoStage,
   type MusicVideoTimelineSegment,
@@ -126,6 +127,7 @@ function setup(
         ...createMusicVideoOptions(),
         songPath: song.sourcePath,
         songName: "真实歌曲.wav",
+        speechProviderConnectionId: "project-voice",
         lrc: options.noLrc ? "" : "[00:00.00]完整一句歌词\n[00:04.00][Instrumental]",
         characterMode: options.sync ? "generate" : "none",
         deliverable: options.documents ? "documents" : "video",
@@ -169,6 +171,26 @@ function setup(
         aligned: true,
       }),
     ),
+    clipSignature: vi.fn<MvMediaClient["clipSignature"]>(() => Promise.resolve("c".repeat(64))),
+    transcribeSong: vi.fn<MvMediaClient["transcribeSong"]>(() =>
+      Promise.resolve({
+        sourceSignature: songProbe.sourceSignature,
+        engine: "measured-asr",
+        modelVersion: "test-1",
+        transcript: "完整一句歌词",
+        segments: [{ startSeconds: 0, endSeconds: 4, text: "完整一句歌词", confidence: 0.9 }],
+      }),
+    ),
+    alignLyrics: vi.fn<MvMediaClient["alignLyrics"]>((_path, _signature, lyrics) =>
+      Promise.resolve({
+        sourceSignature: songProbe.sourceSignature,
+        engine: "measured-aligner",
+        modelVersion: "test-1",
+        lyrics,
+        lines: [{ startSeconds: 0, endSeconds: 4, text: lyrics, confidence: 0.9 }],
+        unmatchedLyrics: [],
+      }),
+    ),
   } satisfies MvMediaClient;
   vi.mocked(fake.promptClient.run).mockImplementation((command: OptimizeVideoPromptCommand) => {
     let output: unknown = { result: "PASS", report: "结构检查通过；实际时间与口型仍需人工试听" };
@@ -187,7 +209,7 @@ function setup(
     const json = JSON.stringify(output);
     return Promise.resolve({ optimizedPrompt: json, rawModelOutput: json });
   });
-  const providerCatalog: readonly ProviderCatalogEntry[] = options.audioProfile
+  const configuredCatalog: readonly ProviderCatalogEntry[] = options.audioProfile
     ? catalog.map((provider) => ({
         ...provider,
         models: provider.models.map((model) =>
@@ -205,6 +227,18 @@ function setup(
         ),
       }))
     : catalog;
+  const providerCatalog: readonly ProviderCatalogEntry[] = [
+    ...configuredCatalog,
+    {
+      provider: {
+        ...catalog[0]!.provider,
+        id: "project-voice",
+        adapterId: "doubao_voice_v1",
+        displayName: "豆包语音",
+      },
+      models: [],
+    },
+  ];
   const runner = createMusicVideoWorkflowRunner({
     promptClient: fake.promptClient,
     generationClient: fake.generation,
@@ -245,6 +279,20 @@ function setup(
     get: () => current,
     set: (value: KnowledgeVideoWorkflowNodeData) => {
       current = value;
+    },
+    reviewLip: (decision: "approved" | "rejected" = "approved") => {
+      current = {
+        ...current,
+        config: {
+          ...current.config,
+          checkpoint: setMusicVideoLipReview(
+            current.config.checkpoint,
+            "shot-1",
+            decision,
+            "c".repeat(64),
+          ),
+        },
+      };
     },
     approve: () => {
       current = approved(current);
@@ -326,6 +374,19 @@ describe("MV time windows and authoring validation", () => {
 describe("MV human-reviewed production", () => {
   it("rejects zero-frame music windows before text or video paid calls", async () => {
     const flow = setup();
+    flow.media.alignLyrics.mockImplementationOnce((_path, sourceSignature, lyrics) =>
+      Promise.resolve({
+        sourceSignature,
+        engine: "measured-aligner",
+        modelVersion: "test-1",
+        lyrics,
+        lines: [
+          { startSeconds: 0, endSeconds: 0.01, text: "过短的完整行", confidence: 0.9 },
+          { startSeconds: 0.01, endSeconds: 4, text: "下一行", confidence: 0.9 },
+        ],
+        unmatchedLyrics: [],
+      }),
+    );
     const source = flow.get();
     flow.set({
       ...source,
@@ -405,23 +466,60 @@ describe("MV human-reviewed production", () => {
         ),
     ).toBe(true);
   });
-  it("reads the real song for non-LRC time proposals and requires human timing approval", async () => {
+  it("uses dedicated ASR and forced alignment without asking a text model to invent timestamps", async () => {
     const flow = setup({ documents: true, noLrc: true });
     flow.approve();
     const result = await flow.run();
     expect(result.musicVideo?.pending?.stage).toBe("timeline");
+    expect(flow.media.transcribeSong).toHaveBeenCalledWith(song.sourcePath, song.sourceSignature, "project-voice");
+    expect(flow.media.alignLyrics).toHaveBeenCalledWith(
+      song.sourcePath,
+      song.sourceSignature,
+      "完整一句歌词",
+      "project-voice",
+    );
     const commands = vi.mocked(flow.fake.promptClient.run).mock.calls.map(([input]) => input);
-    expect(commands.map((input) => input.mode)).toEqual([
-      "music_video_timeline",
-      "music_video_review",
-    ]);
+    expect(commands.map((input) => input.mode)).toEqual(["music_video_review"]);
     expect(
       commands.every((input) =>
-        input.multimodalInputs?.some(
-          (item) => item.localPath === song.sourcePath && item.kind === "audio",
-        ),
+        !input.multimodalInputs?.some((item) => item.localPath === song.sourcePath && item.kind === "audio"),
       ),
     ).toBe(true);
+  });
+  it("keeps legacy document-only LRC usable without claiming automatic acoustic validation", async () => {
+    const flow = setup({ documents: true });
+    const source = flow.get();
+    flow.set({
+      ...source,
+      config: {
+        ...source.config,
+        musicVideo: { ...source.config.musicVideo!, speechAnalysisMode: "manual" },
+      },
+    });
+    flow.approve();
+    const result = await flow.run();
+    expect(result.musicVideo?.pending?.stage).toBe("timeline");
+    expect(result.musicVideo?.stages.timeline?.artifact?.inputSummary).toContain("未执行声学强制对齐");
+    expect(flow.media.transcribeSong).not.toHaveBeenCalled();
+    expect(flow.media.alignLyrics).not.toHaveBeenCalled();
+  });
+  it("blocks missing ASR before text or media calls and reuses measured ASR after alignment retry", async () => {
+    const flow = setup();
+    flow.approve();
+    flow.media.transcribeSong.mockRejectedValueOnce(new Error("项目供应商未配置语音识别模型"));
+    const missing = await flow.run();
+    expect(missing.phase).toBe("failed");
+    expect(missing.error).toContain("未配置语音识别模型");
+    expect(flow.fake.promptClient.run).not.toHaveBeenCalled();
+    expect(flow.fake.generation.start).not.toHaveBeenCalled();
+    flow.media.alignLyrics.mockRejectedValueOnce(new Error("强制对齐暂不可用"));
+    const interrupted = await flow.run();
+    expect(interrupted.phase).toBe("failed");
+    expect(interrupted.musicVideo?.speech?.asr?.engine).toBe("measured-asr");
+    const resumed = await flow.run();
+    expect(resumed.musicVideo?.pending?.stage).toBe("timeline");
+    expect(flow.media.transcribeSong).toHaveBeenCalledTimes(2);
+    expect(flow.media.alignLyrics).toHaveBeenCalledTimes(2);
   });
   it("blocks media before unsupported audio-reference sync and detects same-path song replacement", async () => {
     const flow = setup({ sync: true });
@@ -466,6 +564,7 @@ describe("MV human-reviewed production", () => {
         .mocked(flow.fake.generation.start)
         .mock.calls.filter(([input]) => input.operation === "video_generation"),
     ).toHaveLength(2);
+    flow.reviewLip();
     flow.approve();
     expect((await flow.run()).executionPlan?.review?.kind).toBe("final");
     expect(flow.media.startComposition).toHaveBeenCalledTimes(1);
@@ -484,6 +583,44 @@ describe("MV human-reviewed production", () => {
     expect((await flow.run()).phase).toBe("done");
     expect(flow.media.startComposition).toHaveBeenCalledTimes(1);
     expect(flow.media.checkAlignment).toHaveBeenCalledWith(expect.any(String), 8);
+    expect(flow.media.clipSignature).toHaveBeenCalledTimes(3);
+    expect(flow.get().config.checkpoint.musicVideo?.lipReviews?.["shot-1"]?.decision).toBe(
+      "approved",
+    );
+  });
+  it("blocks composition until every sync clip is explicitly reviewed, including rejected clips", async () => {
+    const flow = setup({ sync: true, audioProfile: true });
+    await flow.planAll();
+    for (const kind of ["assets", "first_shot", "composition"]) {
+      flow.approve();
+      expect((await flow.run()).executionPlan?.review?.kind).toBe(kind);
+    }
+    flow.approve();
+    const blocked = await flow.run();
+    expect(blocked.phase).toBe("failed");
+    expect(blocked.error).toContain("尚未人工选用");
+    expect(flow.media.startComposition).not.toHaveBeenCalled();
+    flow.reviewLip("rejected");
+    expect((await flow.run()).error).toContain("尚未人工选用");
+    flow.reviewLip("approved");
+    const composed = await flow.run();
+    expect(composed.executionPlan?.review?.kind).toBe("final");
+    expect(flow.media.startComposition).toHaveBeenCalledTimes(1);
+  });
+  it("invalidates a human lip review when the clip bytes change at the same path", async () => {
+    const flow = setup({ sync: true, audioProfile: true });
+    await flow.planAll();
+    for (let index = 0; index < 3; index += 1) {
+      flow.approve();
+      await flow.run();
+    }
+    flow.reviewLip();
+    flow.media.clipSignature.mockResolvedValueOnce("d".repeat(64));
+    flow.approve();
+    const blocked = await flow.run();
+    expect(blocked.phase).toBe("failed");
+    expect(blocked.error).toContain("片段正文");
+    expect(flow.media.startComposition).not.toHaveBeenCalled();
   });
   it("checks structural edits before model review without overwriting the user's draft", async () => {
     const flow = setup({ documents: true });

@@ -8,6 +8,7 @@ pub enum GenerationOperation {
     ImageToImage,
     VideoGeneration,
     TextGeneration,
+    SpeechGeneration,
 }
 
 impl GenerationOperation {
@@ -17,6 +18,7 @@ impl GenerationOperation {
             Self::ImageToImage => "image_to_image",
             Self::VideoGeneration => "video_generation",
             Self::TextGeneration => "text_generation",
+            Self::SpeechGeneration => "speech_generation",
         }
     }
 }
@@ -30,6 +32,7 @@ impl TryFrom<&str> for GenerationOperation {
             "image_to_image" => Ok(Self::ImageToImage),
             "video_generation" => Ok(Self::VideoGeneration),
             "text_generation" => Ok(Self::TextGeneration),
+            "speech_generation" => Ok(Self::SpeechGeneration),
             _ => Err(format!("unknown generation operation: {value}")),
         }
     }
@@ -209,6 +212,13 @@ pub enum MediaReferenceTarget {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         canvas_node_key: Option<String>,
     },
+    /// Base64 正文保存在本机应用数据目录的素材，不依赖对象存储。
+    LocalBase64Asset {
+        asset_id: String,
+        media_type: MediaType,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        canvas_node_key: Option<String>,
+    },
     LocalResult {
         generation_task_id: String,
         result_index: u32,
@@ -238,6 +248,7 @@ impl MediaReferenceTarget {
         match self {
             Self::Asset { media_type, .. }
             | Self::LocalAsset { media_type, .. }
+            | Self::LocalBase64Asset { media_type, .. }
             | Self::LocalResult { media_type, .. }
             | Self::LocalFile { media_type, .. }
             | Self::Url { media_type, .. } => *media_type,
@@ -975,7 +986,7 @@ pub struct RefreshAssetMediaCommand {
     pub media_type: MediaType,
 }
 
-/// 本地素材（对象存储）读取地址续签：按 staging job id 重新签发预签名只读地址。
+/// 旧版对象存储素材读取地址续签：按 staging job id 重新签发预签名只读地址。
 ///
 /// 本地素材的 `previewUrl` 是短期签名地址（`LEASE_URL_EXPIRY_SECS`），
 /// 画布节点把地址持久化进画布文档后会随签名过期而失效，必须能按身份重新签发。
@@ -1180,7 +1191,7 @@ pub struct StagingJobRecord {
     pub updated_at: i64,
 }
 
-/// 本地素材库条目。目录索引保存在本机 SQLite，媒体正文只保存在对象存储。
+/// 旧版对象存储素材条目。目录索引保存在本机 SQLite，媒体正文在对象存储。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct LocalAssetRecord {
@@ -1224,6 +1235,79 @@ pub struct LocalAssetPage {
     pub page: u32,
     pub page_size: u32,
     pub kind_totals: LocalAssetKindTotals,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportLocalBase64AssetCommand {
+    pub local_path: String,
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBase64AssetRecord {
+    pub id: String,
+    pub name: String,
+    pub media_type: MediaType,
+    pub mime_type: String,
+    pub preview_url: String,
+    pub byte_size: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBase64AssetPage {
+    pub items: Vec<LocalBase64AssetRecord>,
+    pub total: u64,
+    pub page: u32,
+    pub page_size: u32,
+    pub kind_totals: LocalAssetKindTotals,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MaterialLibraryDestination {
+    Local,
+    Cloud,
+    ObjectStorage,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ExistingMaterialSourceKind {
+    LocalBase64,
+    ObjectStorage,
+    Cloud,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ExistingMaterialSource {
+    pub kind: ExistingMaterialSourceKind,
+    pub asset_id: String,
+    pub provider_connection_id: Option<String>,
+    pub media_type: MediaType,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveExistingAssetCommand {
+    pub source: ExistingMaterialSource,
+    pub destination: MaterialLibraryDestination,
+    pub target_provider_connection_id: Option<String>,
+    pub group_id: Option<String>,
+    pub name: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SaveExistingAssetResult {
+    pub destination: MaterialLibraryDestination,
+    pub asset_id: String,
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]

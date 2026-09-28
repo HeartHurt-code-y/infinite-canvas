@@ -154,6 +154,7 @@ export function mergeLatestManifest(existing, incoming, version) {
  *   notes?: string,
  *   pubDate?: string,
  *   platforms: Record<string, { url: string, signature: string }>,
+ *   resourceManifest?: { url: string, signature: string },
  * }} input
  */
 export function buildLatestManifest(input) {
@@ -162,6 +163,7 @@ export function buildLatestManifest(input) {
     notes: input.notes ?? "",
     pub_date: input.pubDate ?? new Date().toISOString(),
     platforms: input.platforms,
+    ...(input.resourceManifest ? { resourceManifest: input.resourceManifest } : {}),
   };
 }
 
@@ -224,6 +226,7 @@ export function writeLatestJson(options) {
     notes,
     pubDate: typeof options["pub-date"] === "string" ? options["pub-date"] : undefined,
     platforms: /** @type {Record<string, { url: string, signature: string }>} */ (merged.platforms),
+    resourceManifest: options.resourceManifest,
   });
   writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
   return { out, manifest };

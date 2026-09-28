@@ -12,7 +12,8 @@ export interface PromptReferenceCandidate {
   readonly assetId: string;
   readonly providerConnectionId: string;
   readonly source?: "cloud" | "local";
-  readonly referenceKind?: "asset" | "local_asset" | "local_result" | "local_file";
+  readonly referenceKind?:
+    "asset" | "local_asset" | "local_base64_asset" | "local_result" | "local_file";
   readonly generationTaskId?: string;
   readonly resultIndex?: number;
   readonly kind: "image" | "video" | "audio";
@@ -191,6 +192,8 @@ export function candidateTarget(candidate: PromptReferenceCandidate): MediaRefer
       };
     case "local_asset":
       return { kind, stagingJobId: candidate.assetId, ...identity };
+    case "local_base64_asset":
+      return { kind, assetId: candidate.assetId, ...identity };
     case "asset":
       return {
         kind,
@@ -225,6 +228,8 @@ export function referenceCandidateFromTarget(input: {
       return { ...shared, assetId: target.assetId };
     case "local_asset":
       return { ...shared, assetId: target.stagingJobId };
+    case "local_base64_asset":
+      return { ...shared, assetId: target.assetId };
     case "local_file":
       return { ...shared, assetId: target.path };
     case "local_result":

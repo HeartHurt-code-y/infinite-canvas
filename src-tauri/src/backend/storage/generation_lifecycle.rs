@@ -6,9 +6,10 @@ use serde_json::{Value, json};
 use super::{Storage, now_ms};
 use crate::backend::{
     error::{BackendError, BackendResult},
+    model_schema::is_sp25_per_use_video_model,
     types::{
-        GenerationOperation, GenerationResultRecord, GenerationTaskStatus, QueryHealth, SaveStatus,
-        TokenUsage,
+        GenerationOperation, GenerationResultRecord, GenerationTaskStatus, MediaType, QueryHealth,
+        SaveStatus, TokenUsage,
     },
 };
 
@@ -998,15 +999,21 @@ fn validate_result_change(
                 result.result_index
             ))
         })?;
+    let stored_source: Value = serde_json::from_str(&current.2)?;
     if current.0 != result.media_type.as_str()
         || current.1 != result.remote_task_id
-        || serde_json::from_str::<Value>(&current.2)? != result.source
+        || (stored_source != result.source
+            && (!matches!(current.3.as_str(), "pending" | "writing" | "interrupted")
+                || !allowed_sp25_signed_url_refresh(transaction, task_id, result, &stored_source)?))
     {
         return Err(BackendError::Conflict(format!(
             "generation result {task_id}/{} cannot change its persisted identity or source",
             result.result_index
         )));
     }
+    let sp25_recovery = matches!(current.3.as_str(), "failed" | "local_missing" | "conflict")
+        && result.save_status == SaveStatus::Writing
+        && is_sp25_video_result_task(transaction, task_id, result)?;
     let allowed = match current.3.as_str() {
         "pending" => matches!(
             result.save_status,
@@ -1028,9 +1035,9 @@ fn validate_result_change(
             result.save_status,
             SaveStatus::Succeeded | SaveStatus::LocalMissing | SaveStatus::Conflict
         ),
-        "failed" => result.save_status == SaveStatus::Failed,
-        "local_missing" => result.save_status == SaveStatus::LocalMissing,
-        "conflict" => result.save_status == SaveStatus::Conflict,
+        "failed" => result.save_status == SaveStatus::Failed || sp25_recovery,
+        "local_missing" => result.save_status == SaveStatus::LocalMissing || sp25_recovery,
+        "conflict" => result.save_status == SaveStatus::Conflict || sp25_recovery,
         status => {
             return Err(BackendError::Conflict(format!(
                 "generation result {task_id}/{} has invalid persisted save status {status}",
@@ -1047,6 +1054,68 @@ fn validate_result_change(
         )));
     }
     Ok(())
+}
+
+fn allowed_sp25_signed_url_refresh(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+    result: &GenerationResultRecord,
+    stored_source: &Value,
+) -> BackendResult<bool> {
+    if result.media_type != MediaType::Video {
+        return Ok(false);
+    }
+    let Some(stored) = stored_source.as_object() else {
+        return Ok(false);
+    };
+    let Some(updated) = result.source.as_object() else {
+        return Ok(false);
+    };
+    if stored.get("kind").and_then(Value::as_str) != Some("url")
+        || updated.get("kind").and_then(Value::as_str) != Some("url")
+    {
+        return Ok(false);
+    }
+    let old_url = stored
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let new_url = updated
+        .get("url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if old_url.is_empty()
+        || new_url.is_empty()
+        || !url::Url::parse(new_url)
+            .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+    {
+        return Ok(false);
+    }
+    let mut previous_without_url = stored.clone();
+    let mut updated_without_url = updated.clone();
+    previous_without_url.remove("url");
+    updated_without_url.remove("url");
+    if previous_without_url != updated_without_url {
+        return Ok(false);
+    }
+    is_sp25_video_result_task(transaction, task_id, result)
+}
+
+fn is_sp25_video_result_task(
+    transaction: &Transaction<'_>,
+    task_id: &str,
+    result: &GenerationResultRecord,
+) -> BackendResult<bool> {
+    if result.media_type != MediaType::Video || result.remote_task_id.is_none() {
+        return Ok(false);
+    }
+    let (model_id, task_remote_id): (Option<String>, Option<String>) = transaction.query_row(
+        "SELECT remote_model_id_snapshot, remote_task_id FROM generation_tasks WHERE id = ?1",
+        params![task_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(model_id.as_deref().is_some_and(is_sp25_per_use_video_model)
+        && task_remote_id == result.remote_task_id)
 }
 
 fn upsert_result(
@@ -1616,6 +1685,14 @@ mod tests {
         task_id: &str,
         operation: GenerationOperation,
     ) -> (TempDir, Arc<Storage>, GenerationTaskLifecycle) {
+        task_lifecycle_for_model(task_id, operation, "remote-model-1")
+    }
+
+    fn task_lifecycle_for_model(
+        task_id: &str,
+        operation: GenerationOperation,
+        remote_model_id: &str,
+    ) -> (TempDir, Arc<Storage>, GenerationTaskLifecycle) {
         let directory = TempDir::new().expect("temp dir");
         let storage =
             Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("open db"));
@@ -1632,7 +1709,7 @@ mod tests {
                 provider: &provider,
                 api_key_ref: &provider.api_key_ref,
                 model_definition_id: "model-1",
-                remote_model_id: Some("remote-model-1"),
+                remote_model_id: Some(remote_model_id),
                 logical_request: &json!({ "prompt": "frozen" }),
             })
             .expect("create task");
@@ -1746,6 +1823,187 @@ mod tests {
                 },
             )
             .expect("finish failed call");
+    }
+
+    fn register_video_result(
+        lifecycle: &GenerationTaskLifecycle,
+        task_id: &str,
+    ) -> GenerationResultRecord {
+        begin_submission(lifecycle, task_id);
+        record_successful_call(lifecycle, task_id, "submit-1", "submit-call-1", "submit");
+        lifecycle
+            .commit(
+                task_id,
+                GenerationLifecycleFact::SubmissionRemoteAccepted {
+                    attempt_id: "submit-1".into(),
+                    call_id: "submit-call-1".into(),
+                    tokens: None,
+                    remote_task_id: "remote-video".into(),
+                },
+            )
+            .expect("accept remote task");
+        lifecycle
+            .commit(
+                task_id,
+                GenerationLifecycleFact::BeginObservation {
+                    attempt_id: "observe-1".into(),
+                    backoff_ms: None,
+                },
+            )
+            .expect("begin observation");
+        record_successful_call(lifecycle, task_id, "observe-1", "observe-call-1", "observe");
+        let result = GenerationResultRecord {
+            task_id: task_id.into(),
+            result_index: 1,
+            media_type: MediaType::Video,
+            remote_task_id: Some("remote-video".into()),
+            source: json!({ "kind": "url", "url": "https://example.test/old.mp4?signature=old" }),
+            save_status: SaveStatus::Pending,
+            final_path: None,
+            relative_path: None,
+            byte_size: None,
+            mime_type: None,
+            sha256: None,
+            saved_at: None,
+            error: None,
+        };
+        lifecycle
+            .commit(
+                task_id,
+                GenerationLifecycleFact::ObservationApplied {
+                    attempt_id: "observe-1".into(),
+                    call_id: "observe-call-1".into(),
+                    tokens: None,
+                    observation: GenerationRemoteObservation::Succeeded {
+                        result: result.clone(),
+                    },
+                },
+            )
+            .expect("register video result");
+        result
+    }
+
+    #[test]
+    fn sp25_result_can_renew_only_its_signed_url() {
+        let (_directory, storage, lifecycle) = task_lifecycle_for_model(
+            "task-sp25-result",
+            GenerationOperation::VideoGeneration,
+            "sp2.5-720p-30s-ch5",
+        );
+        let mut result = register_video_result(&lifecycle, "task-sp25-result");
+        result.save_status = SaveStatus::Writing;
+        lifecycle
+            .commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            )
+            .expect("begin save");
+
+        result.source["url"] = json!("https://example.test/new.mp4?signature=new");
+        lifecycle
+            .commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            )
+            .expect("renew signed URL");
+        assert_eq!(
+            storage
+                .get_result(&result.task_id, result.result_index)
+                .expect("stored")
+                .source["url"],
+            result.source["url"]
+        );
+
+        let mut changed_role = result.clone();
+        changed_role.source["role"] = json!("different");
+        assert!(matches!(
+            lifecycle.commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: changed_role,
+                },
+            ),
+            Err(BackendError::Conflict(_))
+        ));
+        let mut changed_identity = result.clone();
+        changed_identity.remote_task_id = Some("another-paid-task".into());
+        assert!(matches!(
+            lifecycle.commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: changed_identity,
+                },
+            ),
+            Err(BackendError::Conflict(_))
+        ));
+        result.save_status = SaveStatus::Succeeded;
+        lifecycle
+            .commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            )
+            .expect("mark signed result saved");
+        result.save_status = SaveStatus::Writing;
+        assert!(matches!(
+            lifecycle.commit(
+                &result.task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            ),
+            Err(BackendError::Conflict(_))
+        ));
+    }
+
+    #[test]
+    fn other_video_model_cannot_replace_its_result_source() {
+        let (_directory, _storage, lifecycle) = task_lifecycle_for_model(
+            "task-other-video",
+            GenerationOperation::VideoGeneration,
+            "doubao-seedance-2-5-260628",
+        );
+        let mut result = register_video_result(&lifecycle, "task-other-video");
+        result.save_status = SaveStatus::Writing;
+        result.source["url"] = json!("https://example.test/other.mp4");
+        let task_id = result.task_id.clone();
+        assert!(matches!(
+            lifecycle.commit(
+                &task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            ),
+            Err(BackendError::Conflict(_))
+        ));
+        result.source["url"] = json!("https://example.test/old.mp4?signature=old");
+        lifecycle
+            .commit(
+                &task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            )
+            .expect("begin ordinary video save");
+        result.save_status = SaveStatus::Failed;
+        lifecycle
+            .commit(
+                &task_id,
+                GenerationLifecycleFact::ResultChanged {
+                    result: result.clone(),
+                },
+            )
+            .expect("record ordinary video failure");
+        result.save_status = SaveStatus::Writing;
+        assert!(matches!(
+            lifecycle.commit(&task_id, GenerationLifecycleFact::ResultChanged { result }),
+            Err(BackendError::Conflict(_))
+        ));
     }
 
     #[test]

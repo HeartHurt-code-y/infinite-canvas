@@ -24,6 +24,8 @@ import {
   generationTaskDetailSchema,
   generationTaskPageSchema,
   localAssetPageSchema,
+  localBase64AssetPageSchema,
+  localBase64AssetRecordSchema,
   modelDefinitionsSchema,
   nullableMediaThumbnailSchema,
   nullableStringSchema,
@@ -38,6 +40,7 @@ import {
   realPersonAuthLinkSchema,
   realPersonGroupsSchema,
   remoteVideoTaskPageSchema,
+  saveExistingAssetResultSchema,
   assetImportOutputRecordsSchema,
   nullableImportedAssetSourceSchema,
   stagingJobRecordSchema,
@@ -54,7 +57,7 @@ import {
 } from "./backendSchemas";
 
 export type GenerationOperation =
-  "text_to_image" | "image_to_image" | "video_generation" | "text_generation";
+  "text_to_image" | "image_to_image" | "video_generation" | "text_generation" | "speech_generation";
 
 /**
  * Canonical, provider-neutral operation schema persisted with a model definition.
@@ -162,6 +165,9 @@ export function describeConnectivityTest(result: ConnectivityTestResult, subject
   const elapsed = result.elapsedMs > 0 ? `，耗时 ${result.elapsedMs}ms` : "";
   if (result.ok) {
     return `${subject}连通性测试通过${elapsed}。`;
+  }
+  if (result.reason === "generation-only-api") {
+    return `${subject}连接已保存；语音接口没有免计费探测，首次真实配音时验证凭据与权限。${result.detail ?? ""}`;
   }
   const status = result.httpStatus != null ? `（HTTP ${result.httpStatus}）` : "";
   const reason = (() => {
@@ -546,7 +552,7 @@ export interface ImportedAssetSource {
   readonly name: string | null;
 }
 
-/** 本机 SQLite 索引中的素材；媒体正文只保存在对象存储。 */ export interface LocalAssetRecord {
+/** 旧版对象存储素材：本机只有 SQLite 索引，媒体正文在 TOS。 */ export interface LocalAssetRecord {
   readonly id: string;
   readonly name: string;
   readonly mediaType: MediaType;
@@ -593,6 +599,68 @@ export interface LocalAssetPage {
   readonly pageSize: number;
   readonly kindTotals: LocalAssetKindTotals;
 }
+
+/** 素材正文以 Base64 文件保存在本机应用数据目录，独立于对象存储。 */
+export interface LocalBase64AssetRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly mediaType: MediaType;
+  readonly mimeType: string;
+  /** 本机原生协议地址；不含远端签名，不会过期。 */
+  readonly previewUrl: string;
+  readonly byteSize: number;
+  readonly createdAt: number;
+}
+
+export interface LocalBase64AssetPage {
+  readonly items: readonly LocalBase64AssetRecord[];
+  readonly total: number;
+  readonly page: number;
+  readonly pageSize: number;
+  readonly kindTotals: LocalAssetKindTotals;
+}
+
+export interface ImportLocalBase64AssetCommand {
+  readonly localPath: string;
+  readonly name?: string | null;
+}
+
+export const localBase64AssetClient = {
+  importAsset: (command: ImportLocalBase64AssetCommand): Promise<LocalBase64AssetRecord> =>
+    invokeDesktop("import_local_base64_asset", localBase64AssetRecordSchema, { command }),
+  listAssets: (query?: LocalAssetListQuery): Promise<LocalBase64AssetPage> =>
+    invokeDesktop("list_local_base64_assets", localBase64AssetPageSchema, { query: query ?? null }),
+  refreshMedia: (command: {
+    readonly assetId: string;
+    readonly mediaType: MediaType;
+  }): Promise<string> => invokeDesktop("refresh_local_base64_asset_media", stringSchema, command),
+};
+
+/** Copy an existing library material by its durable identity, without using its preview URL. */
+export interface SaveExistingAssetCommand {
+  readonly source: {
+    readonly kind: "local_base64" | "object_storage" | "cloud";
+    readonly assetId: string;
+    readonly providerConnectionId?: string | null;
+    readonly mediaType: MediaType;
+  };
+  readonly destination: "local" | "cloud" | "object_storage";
+  readonly targetProviderConnectionId?: string | null;
+  readonly groupId?: string | null;
+  readonly name?: string | null;
+}
+
+export interface SaveExistingAssetResult {
+  readonly destination: SaveExistingAssetCommand["destination"];
+  readonly assetId: string;
+  /** True when the destination already contained the same material. */
+  readonly reused: boolean;
+}
+
+export const existingAssetClient = {
+  saveToLibrary: (command: SaveExistingAssetCommand): Promise<SaveExistingAssetResult> =>
+    invokeDesktop("save_existing_asset_to_library", saveExistingAssetResultSchema, { command }),
+};
 
 /** 「拉取存储桶素材」结果汇总（后端通过 ListObjectsV2 分页列举桶内对象）。 */
 export interface TosBucketPullSummary {
@@ -744,6 +812,9 @@ export async function refreshAssetItemMediaUrl(
       });
     }
     if (asset.id === "") return null;
+    if (asset.id.startsWith("local-b64-")) {
+      return await localBase64AssetClient.refreshMedia({ assetId: asset.id, mediaType });
+    }
     return await tosStagingClient.refreshLocalAssetMedia({
       stagingJobId: asset.id,
       mediaType,
@@ -777,6 +848,8 @@ export async function refreshMediaUrlWithStagingFallback(
   failedUrl: string | null | undefined,
 ): Promise<string | null> {
   const renewed = await refreshAssetItemMediaUrl(asset, mediaType);
+  // Base64 素材使用稳定的本机协议地址，不存在对象存储租约。
+  if (asset.id.startsWith("local-b64-")) return renewed;
   // 地址变了就是有效续签；上游回放同一个死地址（或没有素材身份可续签）才走暂存重签。
   if (renewed != null && renewed !== "" && renewed !== failedUrl) return renewed;
   if (failedUrl == null || failedUrl === "") return renewed;
@@ -809,6 +882,9 @@ export async function refreshAssetItemCoverUrl(asset: {
       });
     }
     if (asset.id === "") return null;
+    if (asset.id.startsWith("local-b64-")) {
+      return await localBase64AssetClient.refreshMedia({ assetId: asset.id, mediaType: "video" });
+    }
     return await tosStagingClient.refreshLocalAssetMedia({
       stagingJobId: asset.id,
       mediaType: "video",
@@ -1487,10 +1563,17 @@ export interface AssetMediaReferenceTarget {
   readonly mediaType: MediaType;
 }
 
-/** 本地素材库引用：目录在本机，正文只保存在对象存储。 */
+/** 旧版对象存储素材引用：目录在本机，正文在 TOS。 */
 export interface LocalAssetMediaReferenceTarget {
   readonly kind: "local_asset";
   readonly stagingJobId: string;
+  readonly canvasNodeKey?: string;
+  readonly mediaType: MediaType;
+}
+
+export interface LocalBase64AssetMediaReferenceTarget {
+  readonly kind: "local_base64_asset";
+  readonly assetId: string;
   readonly canvasNodeKey?: string;
   readonly mediaType: MediaType;
 }
@@ -1530,6 +1613,7 @@ export type ExplicitMediaTarget = MediaReferenceTarget | UrlMediaReferenceTarget
 export type MediaReferenceTarget =
   | AssetMediaReferenceTarget
   | LocalAssetMediaReferenceTarget
+  | LocalBase64AssetMediaReferenceTarget
   | LocalResultMediaReferenceTarget
   | LocalFileMediaReferenceTarget;
 
@@ -1675,11 +1759,13 @@ export type PromptOptimizationMode =
   | "fight_prompt_master"
   | "multi_grid_storyboard"
   | "storyboard_prompt"
-  | "gpt_image_2_style";
+  | "gpt_image_2_style"
+  | "cinematic_dialogue";
 
 /** 文本技能模式；完整技能库随应用编译，运行时保留核心合同并按需选择参考资料。 */
 export type TextSkillMode =
   | PromptOptimizationMode
+  | "canvas_agent"
   | "screenplay"
   | "storyboard"
   | "knowledge_video_director"
@@ -1724,6 +1810,7 @@ export type TextSkillMode =
   | "product_scene_inspect"
   | "reverse_video_analysis"
   | "reverse_video_review"
+  | "reelbench_analysis"
   | "viral_remix";
 
 /** 文本模型请求注入系统提示词的历史上下文条目。 */
@@ -1971,6 +2058,10 @@ export type VideoDownloaderEngineState = "not_installed" | "installing" | "ready
 /** B 站画质路由：best=最高可用画质；sd480=未登录封顶 480P。 */
 export type VideoDownloadQualityMode = "best" | "sd480";
 
+/** 本次真实下载实际使用的来源；none 表示未携带 Cookies。 */
+export type VideoDownloadCredentialSource =
+  "chrome" | "edge" | "firefox" | "brave" | "manual" | "site_session" | "none";
+
 export interface VideoDownloadJobRecord {
   readonly jobId: string;
   readonly url: string;
@@ -1985,6 +2076,10 @@ export interface VideoDownloadJobRecord {
   readonly qualityHint: string | null;
   /** B 站成片下载后是否已自动去除右上角水印（非 B 站恒为 false）。 */
   readonly watermarkRemoved: boolean;
+  /** 自动来源预检期间为 null，真实下载启动时才确定。 */
+  readonly credentialSource?: VideoDownloadCredentialSource | null | undefined;
+  /** 自动模式当前候选的预检状态；选定来源或结束时清空。 */
+  readonly probeStatus?: string | null | undefined;
   readonly error: string | null;
   readonly createdAt: number;
   readonly updatedAt: number;
@@ -1995,16 +2090,23 @@ export interface VideoDownloaderEngineStatus {
   readonly version: string | null;
   readonly binaryPath: string | null;
   readonly cookiesInstalled: boolean;
+  /** 浏览器模式仅保存浏览器名；Cookies 在每次下载时由 yt-dlp 读取。 */
+  readonly cookieBrowser?: VideoDownloaderCookieBrowser | null | undefined;
   /** 已导入的 cookies.txt 是否含 B 站登录态（SESSDATA）。 */
   readonly bilibiliLoggedIn: boolean;
   readonly lastError: string | null;
 }
+
+export type VideoDownloaderCookieBrowser = "auto" | "chrome" | "edge" | "firefox" | "brave";
 
 export interface VideoDownloaderClient {
   getEngine: () => Promise<VideoDownloaderEngineStatus>;
   installEngine: () => Promise<VideoDownloaderEngineStatus>;
   updateEngine: () => Promise<VideoDownloaderEngineStatus>;
   importCookies: (sourcePath: string) => Promise<VideoDownloaderEngineStatus>;
+  setCookieBrowser: (
+    browser: VideoDownloaderCookieBrowser | null,
+  ) => Promise<VideoDownloaderEngineStatus>;
   clearCookies: () => Promise<VideoDownloaderEngineStatus>;
   startDownload: (url: string) => Promise<VideoDownloadJobRecord>;
   getJob: (jobId: string) => Promise<VideoDownloadJobRecord>;
@@ -2019,6 +2121,8 @@ export const videoDownloaderClient: VideoDownloaderClient = {
     invokeDesktop("update_video_downloader_engine", videoDownloaderEngineStatusSchema),
   importCookies: (sourcePath) =>
     invokeDesktop("import_downloader_cookies", videoDownloaderEngineStatusSchema, { sourcePath }),
+  setCookieBrowser: (browser) =>
+    invokeDesktop("set_downloader_cookie_browser", videoDownloaderEngineStatusSchema, { browser }),
   clearCookies: () => invokeDesktop("clear_downloader_cookies", videoDownloaderEngineStatusSchema),
   startDownload: (url) =>
     invokeDesktop("start_video_download", videoDownloadJobRecordSchema, {

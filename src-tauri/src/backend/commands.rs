@@ -1,6 +1,6 @@
 use serde_json::{Value, json};
 use std::path::Path;
-use tauri::{AppHandle, Emitter as _, State};
+use tauri::{AppHandle, Emitter as _, Manager as _, State};
 use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
@@ -11,10 +11,14 @@ use super::{
     cover_images::{
         self, NormalizeCoverImageCommand, NormalizedCoverImage, ResumeCoverImageResultCommand,
     },
-    downloader::{VideoDownloadJobRecord, VideoDownloaderEngineStatus},
+    downloader::{VideoCookieBrowser, VideoDownloadJobRecord, VideoDownloaderEngineStatus},
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
+    material_transfer,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
+    mv_audio::{
+        self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
+    },
     product_scene_images::{
         ApplyProductSceneLogoCommand, ComposeProductSceneCommand, ExportProductScenesCommand,
         NormalizeProductSceneImageCommand, PrepareProductViewCommand, PreparedProductView,
@@ -23,6 +27,11 @@ use super::{
     },
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider_adapter::ProviderAdapterKind,
+    reelbench::{
+        self, AnalyzeReelbenchCommand, ExportReelbenchVideoCommand, RecutReelbenchCommand,
+        ReelbenchShotDraft, ReelbenchValidation, ReelbenchVideoExport,
+    },
+    resource_update::{self, RuntimeResourceUpdateStatus},
     remotion_renderer::{
         RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
     },
@@ -31,6 +40,11 @@ use super::{
         ReverseVideoLearning, SaveReverseVideoEvidenceCommand,
     },
     runtime_components::RuntimeComponentMigrationStatus,
+    speech::{
+        self, ComposeDubbedVideoCommand, DubbedVideo, GetSpeechRequestStatusCommand,
+        ListSpeechVoicesCommand, SpeechRequestStatus, SpeechVoice, SynthesizeSpeechCommand,
+        SynthesizedSpeech,
+    },
     storage::now_ms,
     storage::workflow_history::{
         SaveWorkflowHistoryCommand, WorkflowHistoryDetail, WorkflowHistoryPage,
@@ -45,11 +59,13 @@ use super::{
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
         GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ImportedAssetSource,
         ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, ModelDefinition,
+        ImportLocalBase64AssetCommand, LocalBase64AssetPage, LocalBase64AssetRecord, MediaType,
         ObserveAssetStatusCommand, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
         RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
         RefreshAssetCoverCommand, RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand,
         RefreshStagingObjectCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
-        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
+        ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveExistingAssetCommand,
+        SaveExistingAssetResult, SaveStatus,
         SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
         StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
         TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
@@ -63,6 +79,27 @@ pub fn get_runtime_component_migration_status(
     state: State<'_, BackendState>,
 ) -> RuntimeComponentMigrationStatus {
     state.runtime_migration.status()
+}
+
+#[tauri::command]
+pub async fn prepare_runtime_components_for_update(
+    app: AppHandle,
+    version: String,
+    manifest_url: String,
+    signature: String,
+) -> Result<(), String> {
+    resource_update::prepare_runtime_components_for_update(
+        &app,
+        &version,
+        &manifest_url,
+        &signature,
+    )
+    .await
+}
+
+#[tauri::command]
+pub fn get_runtime_component_update_status() -> RuntimeResourceUpdateStatus {
+    resource_update::runtime_component_update_status()
 }
 
 #[tauri::command]
@@ -587,6 +624,36 @@ pub fn replace_provider_model_bindings(
     command: ReplaceProviderModelBindingsCommand,
 ) -> CommandResult<Vec<ProviderModelBinding>> {
     validate_model_selections(&command).command()?;
+    let provider = state
+        .storage
+        .get_provider_connection(&command.provider_connection_id)
+        .command()?;
+    let is_voice = provider.adapter_id == super::provider_adapter::DOUBAO_VOICE_ADAPTER_ID;
+    for selection in &command.selections {
+        if !selection.enabled {
+            continue;
+        }
+        if is_voice {
+            if selection.remote_model_id != "seed-tts-2.0"
+                || selection.enabled_operations != vec![GenerationOperation::SpeechGeneration]
+            {
+                return Err(BackendError::validation(
+                    "豆包语音连接只允许绑定 seed-tts-2.0 语音生成模型",
+                    json!({"remoteModelId": selection.remote_model_id}),
+                )
+                .payload());
+            }
+        } else if selection
+            .enabled_operations
+            .contains(&GenerationOperation::SpeechGeneration)
+        {
+            return Err(BackendError::validation(
+                "语音生成模型必须使用独立的火山豆包语音连接",
+                json!({"providerConnectionId": command.provider_connection_id}),
+            )
+            .payload());
+        }
+    }
     state
         .storage
         .replace_provider_model_bindings(&command)
@@ -654,6 +721,7 @@ pub async fn run_prompt_node(
         providers: &state.providers,
         assets: &state.assets,
         staging: &state.staging,
+        local_base64_assets: &state.local_base64_assets,
         local_results: &state.local_results,
     };
     super::prompt_optimize::optimize_video_prompt(&deps, command)
@@ -783,7 +851,18 @@ pub async fn delete_asset(
     state: State<'_, BackendState>,
     command: DeleteAssetCommand,
 ) -> CommandResult<String> {
-    state.assets.delete_asset(command).await.command()
+    let asset_id = command.id.clone();
+    let provider_connection_id = command.provider_connection_id.clone();
+    let deleted = state.assets.delete_asset(command).await.command()?;
+    if let Err(error) = material_transfer::remove_imported_source(
+        &state.material_transfer_root,
+        &state.storage,
+        &provider_connection_id,
+        &asset_id,
+    ) {
+        error!("[assets] 已删除云端素材，清理本机回退正文失败: {error}");
+    }
+    Ok(deleted)
 }
 
 /// 复核素材库里尚未就绪的云端素材。失败结论由前端删除并通知；传输失败不在这里删除。
@@ -997,6 +1076,52 @@ pub fn list_local_assets(
     query: Option<LocalAssetListQuery>,
 ) -> CommandResult<LocalAssetPage> {
     state.staging.list_local_assets(query).command()
+}
+
+#[tauri::command]
+pub async fn import_local_base64_asset(
+    state: State<'_, BackendState>,
+    command: ImportLocalBase64AssetCommand,
+) -> CommandResult<LocalBase64AssetRecord> {
+    let library = state.local_base64_assets.clone();
+    tauri::async_runtime::spawn_blocking(move || library.import(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("local import worker failed: {error}" )).payload())?
+        .command()
+}
+
+#[tauri::command]
+pub async fn save_existing_asset_to_library(
+    state: State<'_, BackendState>,
+    command: SaveExistingAssetCommand,
+) -> CommandResult<SaveExistingAssetResult> {
+    material_transfer::save_existing_asset(
+        &state.assets,
+        &state.staging,
+        &state.local_base64_assets,
+        &state.storage,
+        &state.material_transfer_root,
+        command,
+    )
+    .await
+    .command()
+}
+
+#[tauri::command]
+pub fn list_local_base64_assets(
+    state: State<'_, BackendState>,
+    query: Option<LocalAssetListQuery>,
+) -> CommandResult<LocalBase64AssetPage> {
+    state.local_base64_assets.list(query).command()
+}
+
+#[tauri::command]
+pub fn refresh_local_base64_asset_media(
+    state: State<'_, BackendState>,
+    asset_id: String,
+    media_type: MediaType,
+) -> CommandResult<String> {
+    state.local_base64_assets.refresh_media(&asset_id, media_type).command()
 }
 
 /// 本地素材预览续签：按素材身份重新签发对象存储只读地址，供画布节点恢复过期签名。
@@ -1324,6 +1449,14 @@ pub fn clear_downloader_cookies(
 }
 
 #[tauri::command]
+pub fn set_downloader_cookie_browser(
+    state: State<'_, BackendState>,
+    browser: Option<VideoCookieBrowser>,
+) -> CommandResult<VideoDownloaderEngineStatus> {
+    state.downloader.set_cookie_browser(browser).command()
+}
+
+#[tauri::command]
 pub fn start_video_download(
     state: State<'_, BackendState>,
     command: StartVideoDownloadCommand,
@@ -1348,6 +1481,98 @@ pub fn cancel_video_download(
 }
 
 // ---------- 画布视频合成（内置 FFmpeg 引擎） ----------
+
+#[tauri::command]
+pub fn list_speech_voices(
+    state: State<'_, BackendState>,
+    command: ListSpeechVoicesCommand,
+) -> CommandResult<Vec<SpeechVoice>> {
+    speech::list_voices(&state.storage, &state.providers, command).command()
+}
+
+#[tauri::command]
+pub async fn get_speech_request_status(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: GetSpeechRequestStatusCommand,
+) -> CommandResult<SpeechRequestStatus> {
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(BackendError::from)
+        .command()?;
+    speech::get_request_status(&state.composer, &downloads, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn synthesize_speech(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: SynthesizeSpeechCommand,
+) -> CommandResult<SynthesizedSpeech> {
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(BackendError::from)
+        .command()?;
+    speech::synthesize(
+        &state.storage,
+        &state.providers,
+        &state.composer,
+        &downloads,
+        command,
+    )
+    .await
+    .command()
+}
+
+#[tauri::command]
+pub async fn compose_dubbed_video(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: ComposeDubbedVideoCommand,
+) -> CommandResult<DubbedVideo> {
+    let downloads = app
+        .path()
+        .download_dir()
+        .map_err(BackendError::from)
+        .command()?;
+    speech::compose_dubbed_video(&state.composer, &downloads, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn mv_clip_signature(path: String) -> CommandResult<String> {
+    super::mv_media::source_signature(&path).await.command()
+}
+
+#[tauri::command]
+pub async fn transcribe_mv_song(
+    state: State<'_, BackendState>,
+    command: TranscribeMvSongCommand,
+) -> CommandResult<MvAsrTranscript> {
+    mv_audio::transcribe_mv_song(&state.composer, &state.providers, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn align_mv_lyrics(
+    state: State<'_, BackendState>,
+    command: AlignMvLyricsCommand,
+) -> CommandResult<MvLyricsAlignment> {
+    mv_audio::align_mv_lyrics(
+        &state.composer,
+        &state.credentials,
+        &state.providers,
+        command,
+    )
+    .await
+    .command()
+}
 
 #[tauri::command]
 pub async fn probe_mv_song(
@@ -1428,6 +1653,47 @@ pub fn cancel_video_composition(
 }
 
 // ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
+
+#[tauri::command]
+pub async fn analyze_reelbench_video(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: AnalyzeReelbenchCommand,
+) -> CommandResult<ReelbenchShotDraft> {
+    reelbench::analyze(&app, &state.composer, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn recut_reelbench_video(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: RecutReelbenchCommand,
+) -> CommandResult<ReelbenchShotDraft> {
+    reelbench::recut(&app, &state.composer, command)
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn validate_reelbench_shots(
+    app: AppHandle,
+    draft: ReelbenchShotDraft,
+) -> CommandResult<ReelbenchValidation> {
+    reelbench::validate(&app, &draft).await.command()
+}
+
+#[tauri::command]
+pub async fn export_reelbench_video(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    command: ExportReelbenchVideoCommand,
+) -> CommandResult<ReelbenchVideoExport> {
+    reelbench::export_video(&app, &state.composer, command)
+        .await
+        .command()
+}
 
 #[tauri::command]
 pub fn start_video_frame_extraction(

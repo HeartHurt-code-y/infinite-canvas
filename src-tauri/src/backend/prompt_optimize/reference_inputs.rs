@@ -109,6 +109,11 @@ pub(super) async fn resolve_target_bytes(
             download_reference_bytes(deps.providers, &lease.get_url, display_name, byte_limit)
                 .await?
         }
+        MediaReferenceTarget::LocalBase64Asset { asset_id, .. } => {
+            let (record, bytes) = deps.local_base64_assets.read_bytes(asset_id, media_type)?;
+            validate_byte_size(display_name, record.byte_size, byte_limit)?;
+            bytes
+        }
         MediaReferenceTarget::LocalResult {
             generation_task_id,
             result_index,

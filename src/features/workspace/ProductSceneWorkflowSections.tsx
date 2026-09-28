@@ -640,6 +640,27 @@ export function ProductSceneDeliverables({
   const [message, setMessage] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
   const state = checkpoint.productScene;
+  const selectionScope = JSON.stringify([
+    checkpoint.runId,
+    state?.inputSignature,
+    state?.approvedThrough,
+  ]);
+  const [selection, setSelection] = useState<{ scope: string; ids: readonly string[] }>({
+    scope: selectionScope,
+    ids: [],
+  });
+  const selectedIds = selection.scope === selectionScope ? selection.ids : [];
+  function setSelectedIds(
+    next: readonly string[] | ((current: readonly string[]) => readonly string[]),
+  ) {
+    setSelection((current) => {
+      const ids = current.scope === selectionScope ? current.ids : [];
+      return {
+        scope: selectionScope,
+        ids: typeof next === "function" ? next(ids) : next,
+      };
+    });
+  }
   const generationMode = productSceneGenerationMode(options);
   if (!state?.rows.length) return null;
   const accepted = state.rows.filter(
@@ -655,15 +676,29 @@ export function ProductSceneDeliverables({
   const pageCount = Math.max(1, Math.ceil(filtered.length / 12));
   const safePage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(safePage * 12, (safePage + 1) * 12);
+  const batchStart =
+    state.approvedThrough > 0
+      ? Math.floor((state.approvedThrough - 1) / options.batchSize) * options.batchSize + 1
+      : 1;
+  const batchRows = state.rows.filter(
+    (row) => row.index >= batchStart && row.index <= state.approvedThrough,
+  );
+  const batchPending = batchRows.filter(
+    (row) => row.status !== "accepted" && row.status !== "rejected",
+  );
+  const batchEligible = batchPending.filter(
+    (row) => row.status === "needs_review" && productSceneRowCanAccept(row, options),
+  );
+  const batchEligibleIds = new Set(batchEligible.map((row) => row.id));
+  const visibleEligibleIds = visible
+    .filter((row) => batchEligibleIds.has(row.id))
+    .map((row) => row.id);
+  const selectedVisibleIds = visibleEligibleIds.filter((id) => selectedIds.includes(id));
   const hasNext = state.approvedThrough < state.rows.length;
   const canNext = !disabled && !awaitingReview && hasNext;
 
-  function review(id: string, status: "accepted" | "rejected") {
-    if (!state || disabled) return;
-    const selected = state.rows.find((row) => row.id === id);
-    if (status === "accepted" && (!selected || !productSceneRowCanAccept(selected, options)))
-      return;
-    const rows = state.rows.map((row) => (row.id === id ? { ...row, status } : row));
+  function saveReviewedRows(rows: readonly ProductSceneRow[]) {
+    if (!state) return;
     const complete = rows.every(
       (row) =>
         (row.status === "accepted" && productSceneRowCanAccept(row, options)) ||
@@ -674,6 +709,37 @@ export function ProductSceneDeliverables({
       productScene: { ...state, rows },
       ...(complete ? { phase: "done", decision: null } : {}),
     });
+  }
+
+  function review(id: string, status: "accepted" | "rejected") {
+    if (!state || disabled) return;
+    const selected = state.rows.find((row) => row.id === id);
+    if (status === "accepted" && (!selected || !productSceneRowCanAccept(selected, options)))
+      return;
+    const rows = state.rows.map((row) => (row.id === id ? { ...row, status } : row));
+    setSelectedIds((current) => current.filter((selectedId) => selectedId !== id));
+    saveReviewedRows(rows);
+  }
+
+  function acceptBatch(ids: readonly string[]) {
+    if (!state || disabled || !ids.length) return;
+    const requested = new Set(ids);
+    let changed = false;
+    const rows = state.rows.map((row) => {
+      if (
+        !requested.has(row.id) ||
+        row.index < batchStart ||
+        row.index > state.approvedThrough ||
+        row.status !== "needs_review" ||
+        !productSceneRowCanAccept(row, options)
+      )
+        return row;
+      changed = true;
+      return { ...row, status: "accepted" as const };
+    });
+    if (!changed) return;
+    setSelectedIds([]);
+    saveReviewedRows(rows);
   }
 
   function continueBatch() {
@@ -777,6 +843,46 @@ export function ProductSceneDeliverables({
       </div>
       {awaitingReview ? <small>完成当前批次审核后可开启下一批；失败项可重做或拒绝。</small> : null}
       {message ? <p role="status">{message}</p> : null}
+      {state.approvedThrough > 0 ? (
+        <div className="product-scene__bulk-review" aria-label="批量选用产品场景图">
+          <small>
+            本批第 {batchStart}–{state.approvedThrough} 张：可选用 {batchEligible.length} 张
+            {batchPending.length > batchEligible.length
+              ? `，另有 ${batchPending.length - batchEligible.length} 张尚不符合选用条件，需逐张处理`
+              : ""}
+            。请先检查画面；批量选用只处理本批待审核且符合当前选用条件的图片。
+          </small>
+          <div className="product-scene__actions">
+            <button
+              type="button"
+              disabled={disabled || !batchEligible.length}
+              onClick={() => acceptBatch(batchEligible.map((row) => row.id))}
+            >
+              选用本批全部合格图（{batchEligible.length} 张）
+            </button>
+            <button
+              type="button"
+              disabled={disabled || !visibleEligibleIds.length}
+              onClick={() =>
+                setSelectedIds(
+                  selectedVisibleIds.length === visibleEligibleIds.length ? [] : visibleEligibleIds,
+                )
+              }
+            >
+              {selectedVisibleIds.length === visibleEligibleIds.length && visibleEligibleIds.length
+                ? "取消本页选择"
+                : `选择本页合格图（${visibleEligibleIds.length} 张）`}
+            </button>
+            <button
+              type="button"
+              disabled={disabled || !selectedVisibleIds.length}
+              onClick={() => acceptBatch(selectedVisibleIds)}
+            >
+              选用所选 {selectedVisibleIds.length} 张
+            </button>
+          </div>
+        </div>
+      ) : null}
       <label>
         筛选图片
         <select
@@ -785,6 +891,7 @@ export function ProductSceneDeliverables({
           onChange={(event) => {
             setFilter(event.target.value as typeof filter);
             setPage(0);
+            setSelectedIds([]);
           }}
         >
           <option value="all">全部计划</option>
@@ -797,6 +904,24 @@ export function ProductSceneDeliverables({
       <div className="product-scene__rows">
         {visible.map((row) => (
           <article key={row.id} className="product-scene__row">
+            {batchEligibleIds.has(row.id) ? (
+              <label className="product-scene__approval">
+                <input
+                  type="checkbox"
+                  aria-label={`选择第 ${row.index} 张`}
+                  checked={selectedVisibleIds.includes(row.id)}
+                  disabled={disabled}
+                  onChange={(event) =>
+                    setSelectedIds((current) =>
+                      event.target.checked
+                        ? [...current.filter((id) => id !== row.id), row.id]
+                        : current.filter((id) => id !== row.id),
+                    )
+                  }
+                />
+                加入本页批量选用
+              </label>
+            ) : null}
             {row.outputPath ? (
               <button
                 type="button"
@@ -893,7 +1018,14 @@ export function ProductSceneDeliverables({
         ))}
       </div>
       <div className="product-scene__actions">
-        <button type="button" disabled={safePage === 0} onClick={() => setPage(safePage - 1)}>
+        <button
+          type="button"
+          disabled={safePage === 0}
+          onClick={() => {
+            setPage(safePage - 1);
+            setSelectedIds([]);
+          }}
+        >
           上一页
         </button>
         <span>
@@ -902,7 +1034,10 @@ export function ProductSceneDeliverables({
         <button
           type="button"
           disabled={safePage >= pageCount - 1}
-          onClick={() => setPage(safePage + 1)}
+          onClick={() => {
+            setPage(safePage + 1);
+            setSelectedIds([]);
+          }}
         >
           下一页
         </button>

@@ -8,6 +8,7 @@ use std::{
 use chrono::Utc;
 use rusqlite::{Connection, OptionalExtension, Row, params};
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
@@ -47,6 +48,9 @@ mod reverse_video_cases;
 #[path = "storage/remote_video_tasks.rs"]
 mod remote_video_tasks;
 
+#[path = "storage/local_base64_assets.rs"]
+mod local_base64_assets;
+
 pub use generation_lifecycle::{
     GenerationLifecycleFact, GenerationOperationalEvent, GenerationRemoteObservation,
     GenerationTaskLifecycle, PersistedTaskTransition, PersistedTaskTransitionEvent,
@@ -59,6 +63,28 @@ PRAGMA application_id = 1229869902;
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version INTEGER PRIMARY KEY,
   applied_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS local_base64_assets (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  media_type TEXT NOT NULL CHECK (media_type IN ('image', 'video', 'audio')),
+  mime_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL CHECK (byte_size > 0),
+  created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_local_base64_assets_created
+  ON local_base64_assets(created_at DESC, id DESC);
+
+-- One canonical body per exact byte sequence. This separate table also lets old
+-- libraries acquire hashes lazily without changing or deleting existing IDs.
+CREATE TABLE IF NOT EXISTS local_base64_content_hashes (
+  asset_id TEXT PRIMARY KEY REFERENCES local_base64_assets(id),
+  media_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  UNIQUE(media_type, byte_size, sha256)
 );
 
 CREATE TABLE IF NOT EXISTS provider_connections (
@@ -238,6 +264,31 @@ CREATE TABLE IF NOT EXISTS staging_jobs (
 
 CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
   ON staging_jobs(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_staging_jobs_object_key
+  ON staging_jobs(object_key);
+
+-- Only completed user-library uploads enter this index; transient TOS staging
+-- objects and failed uploads never claim a content hash.
+CREATE TABLE IF NOT EXISTS staging_content_index (
+  scope TEXT NOT NULL,
+  media_type TEXT NOT NULL,
+  byte_size INTEGER NOT NULL,
+  sha256 TEXT NOT NULL,
+  job_id TEXT NOT NULL REFERENCES staging_jobs(id),
+  PRIMARY KEY(scope, media_type, byte_size, sha256)
+);
+
+CREATE TABLE IF NOT EXISTS staging_content_reuses (
+  job_id TEXT PRIMARY KEY REFERENCES staging_jobs(id),
+  canonical_job_id TEXT NOT NULL REFERENCES staging_jobs(id)
+);
+
+-- Keep the nonsecret bucket coordinates that produced each durable TOS object.
+-- Reconfiguring the current bucket must not make an older material point at it.
+CREATE TABLE IF NOT EXISTS staging_object_targets (
+  job_id TEXT PRIMARY KEY REFERENCES staging_jobs(id),
+  config_json TEXT NOT NULL
+);
 "#;
 
 /// 首次打开应用时提供的连接模板。凭据由用户按实际环境补充；保持禁用状态，
@@ -366,7 +417,60 @@ impl Storage {
         storage.seed_default_provider_connections()?;
         storage.migrate_legacy_model_bindings()?;
         storage.repair_malformed_model_definitions()?;
+        storage.backfill_legacy_local_asset_targets()?;
         Ok(storage)
+    }
+
+    /// Older local-asset rows did not retain the bucket they were uploaded to.
+    /// Bind them once to the configuration present at upgrade time. The
+    /// migration marker prevents a later bucket switch from reassigning them.
+    fn backfill_legacy_local_asset_targets(&self) -> BackendResult<()> {
+        let config = self.get_tos_config()?;
+        let config_json = config.as_ref().map(serde_json::to_string).transpose()?;
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        let already_migrated: i64 = transaction.query_row(
+            "SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = 2)",
+            [],
+            |row| row.get(0),
+        )?;
+        if already_migrated == 0 {
+            if let (Some(config), Some(config_json)) = (config.as_ref(), config_json) {
+                let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
+                let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
+                let old_rows: Vec<(String, String)> = {
+                    let mut statement = transaction.prepare(
+                        "SELECT jobs.id, jobs.object_key FROM staging_jobs jobs
+                         LEFT JOIN staging_object_targets targets ON targets.job_id = jobs.id
+                         WHERE jobs.purpose = 'local_asset' AND jobs.import_target_json IS NULL
+                           AND jobs.status = 'staged' AND jobs.object_key IS NOT NULL
+                           AND targets.job_id IS NULL",
+                    )?;
+                    let rows = statement.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?;
+                    rows.collect::<Result<_, _>>()?
+                };
+                for (job_id, object_key) in old_rows {
+                    // Application-generated keys encode their original bucket.
+                    // Keep a provably different bucket unassigned instead of
+                    // falsely relabeling it after a settings change.
+                    if app_object_scope_hash(&object_key)
+                        .is_some_and(|hash| hash != &scope_hash[..16])
+                    {
+                        continue;
+                    }
+                    transaction.execute(
+                        "INSERT INTO staging_object_targets (job_id, config_json) VALUES (?1, ?2)",
+                        params![job_id, config_json],
+                    )?;
+                }
+            }
+            transaction.execute(
+                "INSERT INTO schema_migrations(version, applied_at) VALUES (2, ?1)",
+                params![now_ms()],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     fn lock(&self) -> BackendResult<MutexGuard<'_, Connection>> {
@@ -1522,6 +1626,152 @@ impl Storage {
         Ok(())
     }
 
+    pub fn remember_staging_object_target(
+        &self,
+        job_id: &str,
+        config: &TosStagingConfig,
+    ) -> BackendResult<()> {
+        self.lock()?.execute(
+            "INSERT OR REPLACE INTO staging_object_targets (job_id, config_json) VALUES (?1, ?2)",
+            params![job_id, serde_json::to_string(config)?],
+        )?;
+        Ok(())
+    }
+
+    pub fn get_staging_object_target(
+        &self,
+        job_id: &str,
+    ) -> BackendResult<Option<TosStagingConfig>> {
+        let raw: Option<String> = self.lock()?.query_row(
+            "SELECT config_json FROM staging_object_targets WHERE job_id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        ).optional()?;
+        raw.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+    }
+
+    pub fn find_staging_content(
+        &self,
+        scope: &str,
+        media_type: MediaType,
+        byte_size: u64,
+        sha256: &str,
+    ) -> BackendResult<Option<StagingJobRecord>> {
+        let byte_size = checked_sql_integer(byte_size, "byteSize")?;
+        let job_id: Option<String> = self.lock()?.query_row(
+            "SELECT job_id FROM staging_content_index
+             WHERE scope = ?1 AND media_type = ?2 AND byte_size = ?3 AND sha256 = ?4",
+            params![scope, media_type.as_str(), byte_size, sha256],
+            |row| row.get(0),
+        ).optional()?;
+        job_id.map(|id| self.get_staging_job(&id)).transpose()
+    }
+
+    pub fn list_unindexed_completed_staging_jobs(
+        &self,
+        media_type: MediaType,
+    ) -> BackendResult<Vec<StagingJobRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, local_path, purpose, media_type, object_key, status,
+                    bytes_total, bytes_uploaded, asset_id, import_target_json,
+                    error_json, created_at, updated_at, adjustment
+             FROM staging_jobs
+             WHERE media_type = ?1
+               AND ((purpose = 'local_asset' AND import_target_json IS NULL AND status = 'staged')
+                 OR (purpose = 'asset_import' AND import_target_json IS NOT NULL
+                     AND asset_id IS NOT NULL AND status IN ('active', 'cleaned')))
+               AND id NOT IN (SELECT job_id FROM staging_content_index)
+               AND id NOT IN (SELECT job_id FROM staging_content_reuses)
+             ORDER BY created_at, id",
+        )?;
+        statement.query_map(params![media_type.as_str()], staging_job_from_row)?
+            .collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn remember_staging_content(
+        &self,
+        scope: &str,
+        media_type: MediaType,
+        byte_size: u64,
+        sha256: &str,
+        job_id: &str,
+    ) -> BackendResult<()> {
+        let byte_size = checked_sql_integer(byte_size, "byteSize")?;
+        self.lock()?.execute(
+            "INSERT OR IGNORE INTO staging_content_index
+             (scope, media_type, byte_size, sha256, job_id) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![scope, media_type.as_str(), byte_size, sha256, job_id],
+        )?;
+        Ok(())
+    }
+
+    pub fn forget_staging_content(
+        &self,
+        scope: &str,
+        media_type: MediaType,
+        byte_size: u64,
+        sha256: &str,
+    ) -> BackendResult<()> {
+        let byte_size = checked_sql_integer(byte_size, "byteSize")?;
+        self.lock()?.execute(
+            "DELETE FROM staging_content_index
+             WHERE scope = ?1 AND media_type = ?2 AND byte_size = ?3 AND sha256 = ?4",
+            params![scope, media_type.as_str(), byte_size, sha256],
+        )?;
+        Ok(())
+    }
+
+    /// Finish a duplicate request without adding a second library entry.
+    pub fn complete_reused_staging_job(
+        &self,
+        job: &StagingJobRecord,
+        canonical_job_id: &str,
+    ) -> BackendResult<()> {
+        let mut connection = self.lock()?;
+        let transaction = connection.transaction()?;
+        transaction.execute(
+            "UPDATE staging_jobs SET object_key = ?2, status = ?3, bytes_total = ?4,
+                    bytes_uploaded = ?5, asset_id = ?6, error_json = NULL, updated_at = ?7
+             WHERE id = ?1",
+            params![
+                job.id,
+                job.object_key,
+                job.status.as_str(),
+                job.bytes_total.map(|value| checked_sql_integer(value, "bytesTotal")).transpose()?,
+                checked_sql_integer(job.bytes_uploaded, "bytesUploaded")?,
+                job.asset_id,
+                job.updated_at,
+            ],
+        )?;
+        transaction.execute(
+            "INSERT INTO staging_content_reuses (job_id, canonical_job_id) VALUES (?1, ?2)",
+            params![job.id, canonical_job_id],
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub fn staging_reused_from(&self, job_id: &str) -> BackendResult<Option<String>> {
+        self.lock()?.query_row(
+            "SELECT canonical_job_id FROM staging_content_reuses WHERE job_id = ?1",
+            params![job_id],
+            |row| row.get(0),
+        ).optional().map_err(Into::into)
+    }
+
+    pub fn has_active_material_transfer_source(&self, local_path: &str) -> BackendResult<bool> {
+        let exists: i64 = self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM staging_jobs
+             WHERE local_path = ?1 AND purpose = 'asset_import'
+               AND status NOT IN ('failed', 'interrupted')
+               AND id NOT IN (SELECT job_id FROM staging_content_reuses))",
+            params![local_path],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
     pub fn update_staging_job(&self, job: &StagingJobRecord) -> BackendResult<()> {
         let bytes_total = job
             .bytes_total
@@ -1601,6 +1851,7 @@ impl Storage {
                AND import_target_json IS NULL
                AND status = 'staged'
                AND object_key IS NOT NULL
+               AND id NOT IN (SELECT job_id FROM staging_content_reuses)
              ORDER BY created_at DESC, id",
         )?;
         let rows = statement.query_map([], staging_job_from_row)?;
@@ -1630,6 +1881,35 @@ impl Storage {
             .map_err(Into::into)
     }
 
+    /// 整桶同步去重：任何应用创建的暂存任务都拥有该对象键时，不能再把对象
+    /// 当成用户自行放入桶的新素材。包括入库中转、生成输入与尚在上传的 TOS-only 任务。
+    pub fn has_staging_job_by_object_key(&self, object_key: &str) -> BackendResult<bool> {
+        if object_key.trim().is_empty() {
+            return Ok(false);
+        }
+        let exists: i64 = self.lock()?.query_row(
+            "SELECT EXISTS(SELECT 1 FROM staging_jobs WHERE object_key = ?1)",
+            params![object_key],
+            |row| row.get(0),
+        )?;
+        Ok(exists != 0)
+    }
+
+    pub fn list_staging_jobs_by_object_key(
+        &self,
+        object_key: &str,
+    ) -> BackendResult<Vec<StagingJobRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, local_path, purpose, media_type, object_key, status,
+                    bytes_total, bytes_uploaded, asset_id, import_target_json,
+                    error_json, created_at, updated_at, adjustment
+             FROM staging_jobs WHERE object_key = ?1",
+        )?;
+        statement.query_map(params![object_key], staging_job_from_row)?
+            .collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
     /// 按对象键查找素材导入任务（预览兜底用）。
     ///
     /// 素材入库把导入时的暂存租约地址交给上游，上游把它当预览地址原样回放；租约过期、
@@ -1653,6 +1933,7 @@ impl Storage {
                  FROM staging_jobs
                  WHERE purpose = 'asset_import'
                    AND object_key = ?1
+                   AND id NOT IN (SELECT job_id FROM staging_content_reuses)
                  ORDER BY created_at DESC
                  LIMIT 1",
                 params![object_key],
@@ -1685,6 +1966,7 @@ impl Storage {
                  FROM staging_jobs
                  WHERE purpose = 'asset_import'
                    AND asset_id = ?1
+                   AND id NOT IN (SELECT job_id FROM staging_content_reuses)
                  ORDER BY created_at DESC
                  LIMIT 1",
                 params![asset_id],
@@ -1692,6 +1974,31 @@ impl Storage {
             )
             .optional()
             .map_err(Into::into)
+    }
+
+    pub fn find_asset_import_job_by_provider_asset_id(
+        &self,
+        provider_connection_id: &str,
+        asset_id: &str,
+    ) -> BackendResult<Option<StagingJobRecord>> {
+        let asset_id = asset_id.trim().strip_prefix("asset://").unwrap_or(asset_id.trim());
+        if asset_id.is_empty() {
+            return Ok(None);
+        }
+        let connection = self.lock()?;
+        let mut statement = connection.prepare(
+            "SELECT id, local_path, purpose, media_type, object_key, status,
+                    bytes_total, bytes_uploaded, asset_id, import_target_json,
+                    error_json, created_at, updated_at, adjustment
+             FROM staging_jobs
+             WHERE purpose = 'asset_import' AND asset_id = ?1
+               AND id NOT IN (SELECT job_id FROM staging_content_reuses)
+             ORDER BY created_at DESC",
+        )?;
+        let jobs = statement.query_map(params![asset_id], staging_job_from_row)?
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(jobs.into_iter().find(|job| job.import_target.as_ref()
+            .is_some_and(|target| target.provider_connection_id == provider_connection_id)))
     }
 
     pub fn list_recoverable_staging_jobs(&self) -> BackendResult<Vec<StagingJobRecord>> {
@@ -1760,6 +2067,26 @@ fn json_text(value: &Value, keys: &[&str]) -> Option<String> {
 
 /// 读取历史 TOS 行：现行 camelCase、升级前 snake_case、以及 Broker 时代缺桶名的 JSON。
 /// 有桶名就尽量保住启用态；没有桶名也返回一份禁用配置，设置页至少还能打开而不是空白。
+fn app_object_scope_hash(object_key: &str) -> Option<&str> {
+    let segments: Vec<&str> = object_key.split('/').collect();
+    segments.windows(5).find_map(|parts| {
+        let [hash, year, month, day, file] = parts else {
+            return None;
+        };
+        let (stem, _) = file.rsplit_once('.')?;
+        (hash.len() == 16
+            && hash.bytes().all(|byte| byte.is_ascii_hexdigit())
+            && year.len() == 4
+            && year.bytes().all(|byte| byte.is_ascii_digit())
+            && month.len() == 2
+            && month.bytes().all(|byte| byte.is_ascii_digit())
+            && day.len() == 2
+            && day.bytes().all(|byte| byte.is_ascii_digit())
+            && Uuid::parse_str(stem).is_ok())
+        .then_some(*hash)
+    })
+}
+
 fn parse_stored_tos_config(raw: &str) -> Option<TosStagingConfig> {
     if let Ok(config) = serde_json::from_str::<TosStagingConfig>(raw) {
         return Some(sanitize_tos_config(config));
@@ -2208,6 +2535,64 @@ mod tests {
 
     use super::*;
     use crate::backend::types::ProviderModelSelection;
+
+    #[test]
+    fn legacy_local_assets_keep_upgrade_bucket_without_relabeling_known_other_bucket() {
+        let directory = TempDir::new().unwrap();
+        let database = directory.path().join("legacy.sqlite3");
+        let storage = Storage::open(&database).unwrap();
+        let config = TosStagingConfig {
+            bucket: "current-bucket".into(),
+            region: "cn-beijing".into(),
+            endpoint: "tos-cn-beijing.volces.com".into(),
+            object_prefix: "staging".into(),
+            credential_ref: Some("tos-ak-sk".into()),
+            enabled: true,
+        };
+        storage.save_tos_config(&config).unwrap();
+        let current_scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
+        let current_hash = hex::encode(Sha256::digest(current_scope.as_bytes()));
+        let old_scope = format!("{}:{}:{}", "old-bucket", config.region, config.endpoint);
+        let old_hash = hex::encode(Sha256::digest(old_scope.as_bytes()));
+        let uuid = "99abbecc-0123-4567-89ab-cdef01234567";
+        for (id, object_key) in [
+            ("unscoped", "pictures/photo.png".to_string()),
+            ("current", format!("staging/{}/2026/09/01/{uuid}.png", &current_hash[..16])),
+            ("other", format!("staging/{}/2026/09/01/{uuid}.png", &old_hash[..16])),
+        ] {
+            storage.insert_staging_job(&StagingJobRecord {
+                id: id.into(),
+                local_path: "photo.png".into(),
+                purpose: "local_asset".into(),
+                media_type: MediaType::Image,
+                object_key: Some(object_key),
+                status: StagingStatus::Staged,
+                bytes_total: Some(4),
+                bytes_uploaded: 4,
+                asset_id: None,
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: 0,
+                updated_at: 0,
+            }).unwrap();
+        }
+        drop(storage);
+        Connection::open(&database).unwrap()
+            .execute("DELETE FROM schema_migrations WHERE version = 2", [])
+            .unwrap();
+        let reopened = Storage::open(&database).unwrap();
+        assert_eq!(reopened.get_staging_object_target("unscoped").unwrap().unwrap().bucket, config.bucket);
+        assert_eq!(reopened.get_staging_object_target("current").unwrap().unwrap().bucket, config.bucket);
+        assert!(reopened.get_staging_object_target("other").unwrap().is_none());
+        let mut changed = config.clone();
+        changed.bucket = "next-bucket".into();
+        reopened.save_tos_config(&changed).unwrap();
+        drop(reopened);
+        let switched = Storage::open(&database).unwrap();
+        assert_eq!(switched.get_staging_object_target("unscoped").unwrap().unwrap().bucket, config.bucket);
+        assert!(switched.get_staging_object_target("other").unwrap().is_none());
+    }
 
     #[test]
     fn history_date_range_filters_before_pagination_and_validates_bounds() {
@@ -2765,6 +3150,45 @@ mod tests {
         assert_eq!(moyu.base_url, "https://custom.moyu.example/v1");
         assert!(moyu.enabled);
         assert_eq!(moyu.api_key_ref, "provider:provider-moyu-ai:api-key");
+    }
+
+    #[test]
+    fn fetched_sp25_model_with_empty_schema_gets_per_use_video_contract_when_selected() {
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        let model_id = "sp2.5-720p-30s-ch5";
+        let definition_id = provider_scoped_model_definition_id("provider-moyu-ai", model_id);
+        let bindings = storage
+            .replace_provider_model_bindings(&ReplaceProviderModelBindingsCommand {
+                provider_connection_id: "provider-moyu-ai".into(),
+                selections: vec![ProviderModelSelection {
+                    model_definition_id: definition_id.clone(),
+                    display_name: "SP2.5 30 秒 CH5".into(),
+                    remote_model_id: model_id.into(),
+                    enabled: true,
+                    enabled_operations: vec![GenerationOperation::VideoGeneration],
+                    token_group: None,
+                    operation_schema: json!({}),
+                }],
+            })
+            .expect("save fetched selection");
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].enabled);
+        assert_eq!(bindings[0].remote_model_id.as_deref(), Some(model_id));
+
+        let definition = storage
+            .list_model_definitions()
+            .expect("list definitions")
+            .into_iter()
+            .find(|item| item.id == definition_id)
+            .expect("saved definition");
+        let video = &definition.operations["video_generation"];
+        assert_eq!(video["requestProfileId"], "sp25_per_use_video_v1");
+        assert_eq!(video["request"]["parameterContainer"], "root");
+        assert_eq!(video["request"]["mediaEncoding"], "sp25_per_use_urls");
+        assert_eq!(video["request"]["maxImages"], 10);
+        assert_eq!(video["request"]["maxAudios"], 10);
+        assert!(video["parameters"].get("generate_audio").is_none());
     }
 
     #[test]

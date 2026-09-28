@@ -15,8 +15,16 @@ pub const MOYU_ADAPTER_ID: &str = "moyu_v1";
 pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
 /// 阿里云百炼（华北2 北京 Model Studio / MaaS）。
 pub const BAILIAN_ADAPTER_ID: &str = "aliyun_bailian_v1";
+/// 豆包语音 OpenSpeech 服务，密钥与火山方舟完全独立。
+pub const DOUBAO_VOICE_ADAPTER_ID: &str = "doubao_voice_v1";
+pub const DOUBAO_VOICE_BASE_URL: &str = "https://openspeech.bytedance.com";
 
-pub const SUPPORTED_ADAPTER_IDS: [&str; 3] = [MOYU_ADAPTER_ID, ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID];
+pub const SUPPORTED_ADAPTER_IDS: [&str; 4] = [
+    MOYU_ADAPTER_ID,
+    ARK_ADAPTER_ID,
+    BAILIAN_ADAPTER_ID,
+    DOUBAO_VOICE_ADAPTER_ID,
+];
 
 /// 华北2（北京）百炼 MaaS 主机后缀。业务空间 ID 作为子域拼进完整 Base URL。
 pub const BAILIAN_BEIJING_HOST_SUFFIX: &str = "cn-beijing.maas.aliyuncs.com";
@@ -36,6 +44,7 @@ pub enum ProviderAdapterKind {
     Moyu,
     VolcengineArk,
     AliyunBailian,
+    DoubaoVoice,
 }
 
 impl ProviderAdapterKind {
@@ -44,6 +53,7 @@ impl ProviderAdapterKind {
             MOYU_ADAPTER_ID => Some(Self::Moyu),
             ARK_ADAPTER_ID => Some(Self::VolcengineArk),
             BAILIAN_ADAPTER_ID => Some(Self::AliyunBailian),
+            DOUBAO_VOICE_ADAPTER_ID => Some(Self::DoubaoVoice),
             _ => None,
         }
     }
@@ -67,6 +77,7 @@ impl ProviderAdapterKind {
             Self::Moyu => MOYU_ADAPTER_ID,
             Self::VolcengineArk => ARK_ADAPTER_ID,
             Self::AliyunBailian => BAILIAN_ADAPTER_ID,
+            Self::DoubaoVoice => DOUBAO_VOICE_ADAPTER_ID,
         }
     }
 
@@ -76,6 +87,7 @@ impl ProviderAdapterKind {
             Self::VolcengineArk => ARK_MODELS_PATH,
             Self::AliyunBailian => BAILIAN_MODELS_PATH,
             Self::Moyu => GATEWAY_MODELS_PATH,
+            Self::DoubaoVoice => "",
         }
     }
 
@@ -86,7 +98,7 @@ impl ProviderAdapterKind {
                 ("page_size", "1".into()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice => Vec::new(),
         }
     }
 
@@ -97,7 +109,7 @@ impl ProviderAdapterKind {
                 ("page_size", page_size.to_string()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice => Vec::new(),
         }
     }
 
@@ -118,7 +130,7 @@ impl ProviderAdapterKind {
     }
 
     pub fn supports_asset_library(self) -> bool {
-        !matches!(self, Self::AliyunBailian)
+        !matches!(self, Self::AliyunBailian | Self::DoubaoVoice)
     }
 
     pub fn uses_dashscope_wan_envelope(self) -> bool {
@@ -148,6 +160,21 @@ impl ProviderAdapterKind {
                     )
                 })?;
                 assemble_bailian_base_url(&workspace_id)
+            }
+            Self::DoubaoVoice => {
+                let parsed = Url::parse(&base_url)?;
+                if parsed.scheme() != "https"
+                    || parsed.host_str() != Some("openspeech.bytedance.com")
+                    || parsed.path().trim_end_matches('/') != ""
+                    || parsed.query().is_some()
+                    || parsed.fragment().is_some()
+                {
+                    return Err(BackendError::validation(
+                        "豆包语音连接必须使用官方地址 https://openspeech.bytedance.com",
+                        json!({ "baseUrl": base_url }),
+                    ));
+                }
+                Ok(DOUBAO_VOICE_BASE_URL.into())
             }
             Self::Moyu => Ok(base_url),
         }
@@ -378,6 +405,28 @@ mod tests {
                 .expect("ok"),
             "https://ws-1.cn-beijing.maas.aliyuncs.com"
         );
+    }
+
+    #[test]
+    fn doubao_voice_key_is_scoped_to_official_openspeech_host() {
+        assert_eq!(
+            ProviderAdapterKind::DoubaoVoice
+                .normalize_base_url("https://openspeech.bytedance.com/".into())
+                .unwrap(),
+            DOUBAO_VOICE_BASE_URL
+        );
+        for destination in [
+            "http://openspeech.bytedance.com",
+            "https://openspeech.bytedance.com.evil.example",
+            "https://openspeech.bytedance.com/v1",
+        ] {
+            assert!(
+                ProviderAdapterKind::DoubaoVoice
+                    .normalize_base_url(destination.into())
+                    .is_err()
+            );
+        }
+        assert!(!ProviderAdapterKind::DoubaoVoice.supports_asset_library());
     }
 
     #[test]

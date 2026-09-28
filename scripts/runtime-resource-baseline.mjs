@@ -26,6 +26,12 @@ export const STABLE_RESOURCE_DIRS = [
   "src-tauri/skills/music-video-workflow",
   "src-tauri/skills/gpt-image-2-style-library",
 ];
+const SIGNED_FILE_UPDATE_DIRS = new Set([
+  "src-tauri/resources/blender",
+  "src-tauri/resources/remotion-runtime",
+  "src-tauri/resources/ffmpeg",
+  "src-tauri/skills/gpt-image-2-style-library",
+]);
 
 async function fileSha256(filePath) {
   const hash = createHash("sha256");
@@ -94,9 +100,17 @@ export async function createRuntimeBaseline(root = REPO_ROOT, provenance) {
   for (const relativePath of STABLE_RESOURCE_DIRS) {
     resources[relativePath] = await hashResourceTree(path.join(root, relativePath));
   }
+  const config = JSON.parse(readFileSync(path.join(root, "src-tauri", "tauri.conf.json"), "utf8"));
+  const resourceMappings = Object.entries(config.bundle?.resources ?? {}).sort(([left], [right]) =>
+    left < right ? -1 : left > right ? 1 : 0,
+  );
+  const bundleResourceMapSha256 = createHash("sha256")
+    .update(JSON.stringify(resourceMappings))
+    .digest("hex");
   return {
-    schemaVersion: 2,
+    schemaVersion: 3,
     platform: "windows-x86_64",
+    bundleResourceMapSha256,
     ...(provenance
       ? {
           bridgeVersion: provenance.bridgeVersion,
@@ -108,15 +122,16 @@ export async function createRuntimeBaseline(root = REPO_ROOT, provenance) {
   };
 }
 
-export function assertRuntimeBaseline(expected, actual, currentVersion) {
+export function assertRuntimeBaseline(expected, actual, currentVersion, options = {}) {
   const validHash = (value) => typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
   if (
-    expected?.schemaVersion !== 2 ||
+    expected?.schemaVersion !== 3 ||
     expected.platform !== "windows-x86_64" ||
     typeof expected.bridgeVersion !== "string" ||
     !/^\d+\.\d+\.\d+$/.test(expected.bridgeVersion) ||
     !validHash(expected.fullNsisSha256) ||
-    !validHash(expected.fullNsisSignatureSha256)
+    !validHash(expected.fullNsisSignatureSha256) ||
+    !validHash(expected.bundleResourceMapSha256)
   ) {
     throw new Error("过渡版稳定资源基线格式不正确");
   }
@@ -139,15 +154,23 @@ export function assertRuntimeBaseline(expected, actual, currentVersion) {
   if (currentVersion && expected.bridgeVersion === currentVersion) {
     throw new Error("瘦包版本必须高于完整过渡版");
   }
+  if (expected.bundleResourceMapSha256 !== actual.bundleResourceMapSha256) {
+    throw new Error("完整过渡版与当前构建的资源映射不同；必须先发布完整安装包，不能制作瘦包");
+  }
   for (const relativePath of STABLE_RESOURCE_DIRS) {
     const old = expected.resources?.[relativePath];
     const now = actual.resources?.[relativePath];
     if (
       !old ||
       !now ||
-      old.sha256 !== now.sha256 ||
-      old.files !== now.files ||
-      old.bytes !== now.bytes
+      !validHash(old.sha256) ||
+      !validHash(now.sha256) ||
+      !Number.isSafeInteger(old.files) ||
+      !Number.isSafeInteger(now.files) ||
+      !Number.isSafeInteger(old.bytes) ||
+      !Number.isSafeInteger(now.bytes) ||
+      (!(options.signedResourceReleaseVerified && SIGNED_FILE_UPDATE_DIRS.has(relativePath)) &&
+        (old.sha256 !== now.sha256 || old.files !== now.files || old.bytes !== now.bytes))
     ) {
       throw new Error(`资源 ${relativePath} 相比已发布完整过渡版有变化；不能制作瘦包`);
     }

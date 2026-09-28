@@ -74,6 +74,17 @@ pub fn check_persistent_components(app_local_data_dir: &Path) -> Result<(), Stri
     Ok(())
 }
 
+/// Native manifest hashes compiled into this executable. The release builder compares these
+/// against the signed file inventory before publishing a slim installer.
+pub fn compiled_manifest_pins() -> serde_json::Value {
+    serde_json::json!({
+        "blender": env!("IC_BLENDER_MANIFEST_SHA256"),
+        "remotion-runtime": env!("IC_REMOTION_MANIFEST_SHA256"),
+        "ffmpeg": env!("IC_FFMPEG_MANIFEST_SHA256"),
+        "gpt-image-2-style-library": env!("IC_STYLE_MANIFEST_SHA256"),
+    })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeComponentMigrationStatus {
@@ -108,6 +119,10 @@ impl RuntimeComponentMigration {
         if !plans.is_empty() {
             let state = Arc::clone(&migration);
             std::thread::spawn(move || {
+                let retention_plans = plans
+                    .iter()
+                    .map(|plan| (plan.component.clone(), plan.ready))
+                    .collect::<Vec<_>>();
                 let estimates = plans
                     .iter()
                     .map(|plan| plan.component.estimate_bytes(plan.ready))
@@ -156,6 +171,17 @@ impl RuntimeComponentMigration {
                 status.current_component = None;
                 status.preparing = false;
                 status.ready = true;
+                drop(status);
+                // All four release components are now usable. Retain one previous on-disk
+                // version per component for rollback; cleanup never gates application startup.
+                for (component, ready) in retention_plans {
+                    if let Err(error) = component.cleanup_old_versions(ready) {
+                        tauri_plugin_log::log::warn!(
+                            "cleanup of old {} runtime resources skipped: {error}",
+                            component.name
+                        );
+                    }
+                }
             });
         }
         migration
@@ -353,6 +379,123 @@ impl RuntimeComponent {
         self.store_base.join(self.name)
     }
 
+    fn cleanup_old_versions(&self, ready: fn(&Path) -> bool) -> Result<(), String> {
+        let bundled_target = self
+            .manifest_hash(&self.bundled_root)
+            .map(|digest| self.component_dir().join(digest))
+            .filter(|root| self.stored_ready(root, ready));
+        let Some(current) = bundled_target.or_else(|| self.stored_root(ready)) else {
+            return Err("当前持久资源不存在，未清理旧版本".into());
+        };
+        let parent = self.component_dir();
+        let lock = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .open(parent.join(".migration.lock"))
+            .map_err(|error| error.to_string())?;
+        lock.lock_exclusive().map_err(|error| error.to_string())?;
+        if !self.stored_ready(&current, ready) {
+            return Err("当前持久资源校验失败，未清理旧版本".into());
+        }
+        let canonical_store = self
+            .store_base
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let canonical_parent = parent.canonicalize().map_err(|error| error.to_string())?;
+        if !parent
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_dir())
+            || canonical_parent.parent() != Some(canonical_store.as_path())
+        {
+            return Err("资源组件目录路径不可信，未清理旧版本".into());
+        }
+        let mut older = Vec::new();
+        for entry in fs::read_dir(&parent).map_err(|error| error.to_string())? {
+            let entry = entry.map_err(|error| error.to_string())?;
+            let path = entry.path();
+            let name = entry.file_name();
+            let Some(name) = name.to_str() else {
+                continue;
+            };
+            if name.len() != 64
+                || !name
+                    .bytes()
+                    .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+                || path == current
+                || !path
+                    .symlink_metadata()
+                    .is_ok_and(|meta| meta.file_type().is_dir())
+                || !path
+                    .canonicalize()
+                    .is_ok_and(|resolved| resolved.parent() == Some(canonical_parent.as_path()))
+            {
+                continue;
+            }
+            let modified = entry
+                .metadata()
+                .and_then(|meta| meta.modified())
+                .unwrap_or(SystemTime::UNIX_EPOCH);
+            older.push((modified, path));
+        }
+        older.sort_by(|left, right| right.0.cmp(&left.0));
+        let mut kept_rollback = false;
+        for (_, path) in older {
+            if !kept_rollback && self.rollback_version_ready(&path, ready) {
+                kept_rollback = true;
+                continue;
+            }
+            // Check again immediately before the recursive operation. Never recurse through
+            // an untrusted link, quarantine, staging directory, or path outside this component.
+            if path
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.file_type().is_dir())
+                && path
+                    .canonicalize()
+                    .is_ok_and(|resolved| resolved.parent() == Some(canonical_parent.as_path()))
+                && !tree_contains_reparse(&path, &canonical_parent)
+            {
+                if let Err(error) = fs::remove_dir_all(&path) {
+                    tauri_plugin_log::log::warn!(
+                        "failed to remove old runtime component {}: {error}",
+                        path.display()
+                    );
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn rollback_version_ready(&self, root: &Path, ready: fn(&Path) -> bool) -> bool {
+        let manifest = root.join(self.manifest_relative);
+        if !manifest
+            .symlink_metadata()
+            .is_ok_and(|meta| meta.file_type().is_file() && meta.len() <= 2 * 1024 * 1024)
+        {
+            return false;
+        }
+        let Some(expected) = root.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if hash_file(&manifest).ok().as_deref() != Some(expected) {
+            return false;
+        }
+        let Ok(marker) = fs::read(root.join(".complete.json")) else {
+            return false;
+        };
+        if marker.len() > 4096 {
+            return false;
+        }
+        let Ok(marker) = serde_json::from_slice::<CompleteMarker>(&marker) else {
+            return false;
+        };
+        marker.schema_version == 1
+            && marker.component == self.name
+            && marker.manifest_sha256 == expected
+            && ready(root)
+            && self.critical_files_ready(root)
+    }
+
     fn estimate_bytes(&self, ready: fn(&Path) -> bool) -> Result<u64, String> {
         if self.bundled_ready(ready) {
             let mut files = Vec::new();
@@ -455,12 +598,14 @@ impl RuntimeComponent {
             "blender" => {
                 let inventory = env!("IC_BLENDER_INVENTORY_SHA256");
                 let executable = env!("IC_BLENDER_EXECUTABLE");
-                pinned_text(inventory, value["inventory"]["sha256"].as_str())
+                pinned_text(env!("IC_BLENDER_MANIFEST_SHA256"), Some(digest))
+                    && pinned_text(inventory, value["inventory"]["sha256"].as_str())
                     && pinned_text(executable, value["executable"].as_str())
             }
             "remotion-runtime" => {
                 let inventory = env!("IC_REMOTION_INVENTORY_SHA256");
-                pinned_text(inventory, value["inventory"]["sha256"].as_str())
+                pinned_text(env!("IC_REMOTION_MANIFEST_SHA256"), Some(digest))
+                    && pinned_text(inventory, value["inventory"]["sha256"].as_str())
             }
             "gpt-image-2-style-library" => {
                 let expected = env!("IC_STYLE_MANIFEST_SHA256");
@@ -473,6 +618,9 @@ impl RuntimeComponent {
         }
         if self.name != "ffmpeg" {
             return true;
+        }
+        if !pinned_text(env!("IC_FFMPEG_MANIFEST_SHA256"), Some(digest)) {
+            return false;
         }
         let ffmpeg_pin = env!("IC_FFMPEG_SHA256");
         if (ffmpeg_pin.is_empty() && !cfg!(debug_assertions))
@@ -615,6 +763,35 @@ impl RuntimeComponent {
         }
         Some(targets)
     }
+}
+
+fn tree_contains_reparse(root: &Path, allowed_parent: &Path) -> bool {
+    fn visit(path: &Path, allowed_parent: &Path) -> Result<(), ()> {
+        let metadata = path.symlink_metadata().map_err(|_| ())?;
+        if metadata.file_type().is_symlink()
+            || !path
+                .canonicalize()
+                .is_ok_and(|resolved| resolved.starts_with(allowed_parent))
+        {
+            return Err(());
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt as _;
+            if metadata.file_attributes() & 0x400 != 0 {
+                return Err(());
+            }
+        }
+        if metadata.is_dir() {
+            for entry in fs::read_dir(path).map_err(|_| ())? {
+                visit(&entry.map_err(|_| ())?.path(), allowed_parent)?;
+            }
+        } else if !metadata.is_file() {
+            return Err(());
+        }
+        Ok(())
+    }
+    visit(root, allowed_parent).is_err()
 }
 
 fn safe_relative(value: &str) -> Option<PathBuf> {
@@ -822,6 +999,102 @@ mod tests {
         assert_eq!(component.resolve(fixture_ready), Some(stored.clone()));
         fs::write(stored.join("manifest.json"), b"tampered").unwrap();
         assert_eq!(component.resolve(fixture_ready), None);
+    }
+
+    #[test]
+    fn cleanup_retains_current_and_one_prior_sha_version_only() {
+        let temp = tempfile::tempdir().unwrap();
+        let bundled = temp.path().join("bundle/component");
+        fs::create_dir_all(bundled.join("runtime")).unwrap();
+        fs::write(bundled.join("manifest.json"), b"current").unwrap();
+        fs::write(bundled.join("runtime/tool.exe"), b"runtime-bytes").unwrap();
+        let component = RuntimeComponent::new(
+            temp.path().join("appdata/runtime-components"),
+            bundled.clone(),
+            "test-component",
+            "manifest.json",
+        );
+        component.migrate(fixture_ready, |_, _| {}).unwrap();
+        let current = component
+            .component_dir()
+            .join(component.manifest_hash(&bundled).unwrap());
+        let mut older = Vec::new();
+        for index in 0..3 {
+            let manifest = format!("old-{index}");
+            let name = hex::encode(Sha256::digest(manifest.as_bytes()));
+            let path = component.component_dir().join(&name);
+            fs::create_dir_all(path.join("runtime")).unwrap();
+            fs::write(path.join("manifest.json"), &manifest).unwrap();
+            fs::write(path.join("runtime/tool.exe"), b"runtime-bytes").unwrap();
+            fs::write(
+                path.join(".complete.json"),
+                serde_json::to_vec(&CompleteMarker {
+                    schema_version: 1,
+                    component: "test-component".into(),
+                    manifest_sha256: name.clone(),
+                    file_count: 2,
+                    total_bytes: manifest.len() as u64 + b"runtime-bytes".len() as u64,
+                })
+                .unwrap(),
+            )
+            .unwrap();
+            older.push(name);
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        fs::write(
+            component
+                .component_dir()
+                .join(&older[2])
+                .join("manifest.json"),
+            b"damaged",
+        )
+        .unwrap();
+        let ignored = component.component_dir().join(".objects");
+        fs::create_dir_all(&ignored).unwrap();
+        component.cleanup_old_versions(fixture_ready).unwrap();
+        assert!(current.is_dir());
+        assert!(ignored.is_dir());
+        assert_eq!(
+            older
+                .iter()
+                .filter(|name| component.component_dir().join(name).exists())
+                .count(),
+            1
+        );
+        assert!(component.component_dir().join(&older[1]).is_dir());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn cleanup_guard_rejects_nested_junction() {
+        let temp = tempfile::tempdir().unwrap();
+        let parent = temp.path().join("runtime-components");
+        let old = parent.join("a".repeat(64));
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&old).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("keep.txt"), b"keep").unwrap();
+        let script = temp.path().join("junction.ps1");
+        fs::write(&script, "param([string]$Link,[string]$Target)\nNew-Item -ItemType Junction -Path $Link -Target $Target | Out-Null\n").unwrap();
+        use std::os::windows::process::CommandExt as _;
+        let output = std::process::Command::new("powershell.exe")
+            .arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-File")
+            .arg(&script)
+            .arg("-Link")
+            .arg(old.join("escape"))
+            .arg("-Target")
+            .arg(&outside)
+            .creation_flags(0x0800_0000)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "junction creation failed: {output:?}"
+        );
+        assert!(tree_contains_reparse(&old, &parent.canonicalize().unwrap()));
+        assert!(outside.join("keep.txt").is_file());
     }
 
     #[test]

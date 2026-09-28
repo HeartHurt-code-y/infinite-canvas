@@ -2226,7 +2226,7 @@ dependencies = [
 
 [[package]]
 name = "infinite-canvas"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -2241,6 +2241,7 @@ dependencies = [
  "infer",
  "keyring",
  "libc",
+ "minisign-verify",
  "rand 0.9.5",
  "regex",
  "reqwest 0.12.28",

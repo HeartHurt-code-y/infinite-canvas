@@ -198,6 +198,7 @@ function setup() {
     installEngine: vi.fn(() => Promise.resolve(engine)),
     updateEngine: vi.fn(() => Promise.resolve(engine)),
     importCookies: vi.fn(() => Promise.resolve(engine)),
+    setCookieBrowser: vi.fn(() => Promise.resolve(engine)),
     clearCookies: vi.fn(() => Promise.resolve(engine)),
     startDownload: vi.fn(() => Promise.resolve(job("downloading"))),
     getJob: vi.fn(() => Promise.resolve(job("completed"))),
@@ -457,11 +458,22 @@ describe("reverse video workflow", () => {
     "allows an explicit retry after a confirmed %s download",
     async (status) => {
       const run = setup();
-      vi.mocked(run.downloader.startDownload).mockResolvedValueOnce(job(status));
+      const unsuccessfulJob = {
+        ...job(status),
+        credentialSource: status === "failed" ? ("site_session" as const) : null,
+        error: status === "failed" ? "下载器原始错误" : null,
+      };
+      vi.mocked(run.downloader.startDownload).mockResolvedValueOnce(unsuccessfulJob);
       const failed = await run.runner.run(run.request);
       expect(failed.phase).toBe("failed");
       expect(failed.reverseVideo?.downloadJobId).toBe("download-1");
-      vi.mocked(run.downloader.getJob).mockResolvedValueOnce(job(status));
+      expect(failed.error).toContain(
+        status === "failed"
+          ? "本次任务凭据来源：站点会话（不代表已登录）"
+          : "本次任务凭据来源：未记录",
+      );
+      if (status === "failed") expect(failed.error).toContain("下载器原始错误");
+      vi.mocked(run.downloader.getJob).mockResolvedValueOnce(unsuccessfulJob);
       expect((await run.runner.run(run.resume(failed))).phase).toBe("done");
       expect(run.downloader.startDownload).toHaveBeenCalledTimes(2);
     },

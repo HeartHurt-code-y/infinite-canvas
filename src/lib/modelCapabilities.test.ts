@@ -12,6 +12,63 @@ import {
 } from "./modelCapabilities";
 
 describe("model capabilities", () => {
+  it("uses only the documented SP 2.5 per-task parameters", () => {
+    for (const [modelId, first, last] of [
+      ["sp2.5-720p-4-15s", 4, 15],
+      ["sp2.5-720p-16-30s", 16, 30],
+      ["sp2.5-720p-30s-ch1", 30, 30],
+      ["sp2.5-720p-30s-ch2", 30, 30],
+      ["sp2.5-720p-30s-ch3", 30, 30],
+      ["sp2.5-720p-30s-ch4", 30, 30],
+      ["sp2.5-720p-30s-ch5", 30, 30],
+      ["sp2.5-720p-30s-ch6", 30, 30],
+    ] as const) {
+      const schema = defaultModelOperationSchema(modelId, ["video_generation"]);
+      const capabilities = modelParameterCapabilities(schema, "video_generation", modelId);
+      expect(capabilities.map((capability) => capability.key)).toEqual(
+        first === last ? ["ratio"] : ["ratio", "duration"],
+      );
+      expect(capabilities[0]?.options.map((option) => option.value)).toEqual([
+        "16:9",
+        "9:16",
+        "1:1",
+        "4:3",
+        "3:4",
+        "21:9",
+      ]);
+      expect(generationParameters(capabilities, {}, false)).toEqual(
+        first === last ? { ratio: "16:9" } : { ratio: "16:9", duration: first },
+      );
+      if (first !== last) {
+        expect(capabilities[1]?.options.map((option) => option.value)).toEqual(
+          Array.from({ length: last - first + 1 }, (_, index) => first + index),
+        );
+      }
+    }
+    // A stale provider declaration must not surface unsupported paid request fields.
+    expect(
+      modelParameterCapabilities(
+        {
+          video_generation: {
+            parameters: {
+              duration: { type: "integer", default: 30 },
+              generate_audio: { type: "boolean" },
+            },
+          },
+        },
+        "video_generation",
+        "sp2.5-720p-30s-ch5",
+      ).map((capability) => capability.key),
+    ).toEqual(["ratio"]);
+    expect(
+      modelParameterCapabilities(
+        { video_generation: { resultType: "video" } },
+        "video_generation",
+        "sp2.5-720p-30s-ch5",
+      ).map((capability) => capability.key),
+    ).toEqual(["ratio"]);
+  });
+
   it("uses the panqu gateway top-level contract instead of the Seedance 2.0 moyu contract", () => {
     // 盘趣网关的 pan-seedance-2.0 与魔芋 Seedance 2.0 名字相近但契约不同：
     // 分辨率/画幅/时长都是顶层字段，且分辨率参与渠道匹配（该站只有 720p）。

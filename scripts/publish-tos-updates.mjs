@@ -34,6 +34,7 @@ import {
   tosUpdatesPublicBaseUrl,
 } from "./tos-updates-config.mjs";
 import { candidateSecretKeys, presignUrl } from "./tos-v4.mjs";
+import { RESOURCE_COMPONENTS, verifyRuntimeResourceRelease } from "./runtime-resource-release.mjs";
 
 const PROBE_FILE = ".public-probe.txt";
 const PUT_EXPIRES_SECS = 3600;
@@ -157,6 +158,10 @@ export function collectPublishFilePaths(bundleDir) {
   /** @type {string[]} */
   const manifests = [];
   for (const filePath of files) {
+    // Runtime resources have their own immutable object/manifest publishing path.
+    // Their .sig must not be mistaken for an updater installer signature.
+    const relative = path.relative(bundleDir, filePath).replaceAll("\\", "/");
+    if (relative.startsWith("resources/")) continue;
     const fileName = path.basename(filePath);
     const lower = fileName.toLowerCase();
     if (lower === "latest.json") {
@@ -602,9 +607,12 @@ export function immutableObjectMatches(remote, digest, size) {
   );
 }
 
-async function putImmutableFile(config, objectKey, filePath) {
+async function putImmutableFile(config, objectKey, filePath, expectedDigest) {
   const size = statSync(filePath).size;
   const digest = await sha256File(filePath);
+  if (expectedDigest && digest !== expectedDigest) {
+    throw new Error(`资源文件在清单验证后发生变化：${filePath}`);
+  }
   const probe = await tosFetch({
     method: "HEAD",
     host: tosUpdatesHost(config.bucket, config.endpoint),
@@ -729,11 +737,28 @@ export function checkChannelManifest(existing, proposed) {
   if (comparison > 0) return { sameVersion: false, pubDate: undefined };
   if (
     existing.notes !== proposed.notes ||
-    JSON.stringify(existing.platforms) !== JSON.stringify(proposed.platforms)
+    JSON.stringify(existing.platforms) !== JSON.stringify(proposed.platforms) ||
+    JSON.stringify(existing.resourceManifest ?? null) !==
+      JSON.stringify(proposed.resourceManifest ?? null)
   ) {
     throw new Error(`频道 ${proposed.version} 已发布不同产物，拒绝同版覆盖`);
   }
   return { sameVersion: true, pubDate: existing.pub_date };
+}
+
+export function collectRuntimeResourceObjects(manifest, root) {
+  const sources = new Map();
+  for (const [index, component] of manifest.components.entries()) {
+    const definition = RESOURCE_COMPONENTS[index];
+    for (const file of component.files) {
+      const sourcePath = path.join(root, definition.source, ...file.path.split("/"));
+      const previous = sources.get(file.sha256);
+      if (!previous) sources.set(file.sha256, { sha256: file.sha256, size: file.size, sourcePath });
+      else if (previous.size !== file.size)
+        throw new Error(`相同资源哈希有不同大小：${file.sha256}`);
+    }
+  }
+  return [...sources.values()];
 }
 
 export function checkLegacyPlatformFeeds(version, platforms, feeds) {
@@ -905,6 +930,44 @@ export async function publishUpdaterArtifacts(options) {
   const envConfig = readTosPublishEnv(options.env ?? process.env);
   const channel = typeof options.channel === "string" ? options.channel : "";
   const prefix = resolvePublishChannel(channel, incoming, envConfig.prefix, version);
+  const slimWindows = Object.values(incoming).some(({ url }) =>
+    artifactName(url).includes("-slim-"),
+  );
+  const stagedResourceManifest = path.join(
+    bundlePath,
+    "resources",
+    version,
+    "windows-x86_64",
+    "manifest.json",
+  );
+  const resourceManifestPath =
+    typeof options["resource-manifest"] === "string"
+      ? path.resolve(options["resource-manifest"])
+      : existsSync(stagedResourceManifest)
+        ? stagedResourceManifest
+        : null;
+  if (slimWindows && !resourceManifestPath) throw new Error("Windows 瘦包必须附带已签名资源清单");
+  let release = null;
+  if (resourceManifestPath) {
+    release = await verifyRuntimeResourceRelease(
+      resourceManifestPath,
+      `${resourceManifestPath}.sig`,
+    );
+    if (release.manifest.version !== version || release.manifest.platform !== "windows-x86_64") {
+      throw new Error("资源清单与当前 Windows 发布版本不符");
+    }
+    const expectedObjects = `${tosUpdatesPublicBaseUrl(envConfig)}/resources/objects/`;
+    if (release.manifest.objectBaseUrl !== expectedObjects) {
+      throw new Error("签名资源清单对象地址与当前 TOS 发布前缀不同");
+    }
+    const appConfig = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+    );
+    const updaterEndpoint = new URL(appConfig.plugins.updater.endpoints[0]);
+    if (new URL(expectedObjects).origin !== updaterEndpoint.origin) {
+      throw new Error("资源对象地址与已构建客户端的更新源不同");
+    }
+  }
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey, prefix };
   const fullBundleDir = options["full-bundle-dir"];
@@ -920,6 +983,12 @@ export async function publishUpdaterArtifacts(options) {
     endpoint: config.endpoint,
     prefix: config.prefix,
   });
+  const resourceManifest = release
+    ? {
+        url: `${tosUpdatesPublicBaseUrl(envConfig)}/resources/${version}/windows-x86_64/manifest.json`,
+        signature: release.signature,
+      }
+    : undefined;
   const out = path.join(bundlePath, "latest.json");
   const written = writeLatestJson({
     "bundle-dir": bundlePath,
@@ -928,6 +997,7 @@ export async function publishUpdaterArtifacts(options) {
     version,
     notes: typeof options.notes === "string" ? options.notes : "",
     platform: typeof options.platform === "string" ? options.platform : undefined,
+    resourceManifest,
   });
   if (channel === "legacy") {
     const feeds = {};
@@ -952,6 +1022,7 @@ export async function publishUpdaterArtifacts(options) {
       version,
       notes: typeof options.notes === "string" ? options.notes : "",
       platform: typeof options.platform === "string" ? options.platform : undefined,
+      resourceManifest,
       "pub-date": previous.pubDate,
     });
   }
@@ -980,6 +1051,28 @@ export async function publishUpdaterArtifacts(options) {
   });
   /** @type {string[]} */
   const uploadedKeys = [];
+  if (release) {
+    await runWithConcurrency(
+      collectRuntimeResourceObjects(release.manifest, REPO_ROOT),
+      8,
+      async (object) => {
+        const objectKey = tosUpdatesObjectKey(
+          object.sha256,
+          `${envConfig.prefix}/resources/objects`,
+        );
+        if (await putImmutableFile(config, objectKey, object.sourcePath, object.sha256))
+          uploadedKeys.push(objectKey);
+      },
+    );
+    const manifestKey = tosUpdatesObjectKey(
+      "manifest.json",
+      `${envConfig.prefix}/resources/${version}/windows-x86_64`,
+    );
+    if (await putImmutableFile(config, manifestKey, resourceManifestPath))
+      uploadedKeys.push(manifestKey);
+    if (await putImmutableFile(config, `${manifestKey}.sig`, `${resourceManifestPath}.sig`))
+      uploadedKeys.push(`${manifestKey}.sig`);
+  }
   for (const filePath of offlineFiles) {
     const fileName = path.basename(filePath);
     const objectKey = tosUpdatesObjectKey(fileName, `${envConfig.prefix}/offline/${version}`);

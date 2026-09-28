@@ -32,8 +32,11 @@ import { assetLibraryProviders } from "../../lib/assetLibrarySupport";
 import {
   ARK_ADAPTER_ID,
   BAILIAN_ADAPTER_ID,
+  DOUBAO_VOICE_ADAPTER_ID,
+  DOUBAO_VOICE_BASE_URL,
   MOYU_ADAPTER_ID,
   assembleBailianBaseUrl,
+  doubaoSamiCredentialRefs,
   isArkAdapter,
   isBailianAdapter,
   isValidBailianWorkspaceId,
@@ -58,6 +61,12 @@ interface ProviderPreset {
 }
 
 const PROVIDER_PRESETS: readonly ProviderPreset[] = [
+  {
+    id: "doubao-voice",
+    displayName: "火山豆包语音",
+    baseUrl: DOUBAO_VOICE_BASE_URL,
+    adapterId: DOUBAO_VOICE_ADAPTER_ID,
+  },
   {
     id: "aliyun-bailian",
     displayName: "阿里云百炼",
@@ -107,7 +116,7 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
 const CUSTOM_PRESET_ID = "__custom__";
 
 interface ModelUsage {
-  readonly kind: "none" | "image" | "video" | "text";
+  readonly kind: "none" | "image" | "video" | "text" | "speech";
   readonly textToImage: boolean;
   readonly imageToImage: boolean;
 }
@@ -174,14 +183,17 @@ function usageFromOperations(operations: readonly GenerationOperation[]): ModelU
     operations.includes("text_to_image") || operations.includes("image_to_image");
   const hasVideoOperation = operations.includes("video_generation");
   const hasTextOperation = operations.includes("text_generation");
+  const hasSpeechOperation = operations.includes("speech_generation");
   return {
-    kind: hasTextOperation
-      ? "text"
-      : hasImageOperation && !hasVideoOperation
-        ? "image"
-        : hasVideoOperation && !hasImageOperation
-          ? "video"
-          : "none",
+    kind: hasSpeechOperation
+      ? "speech"
+      : hasTextOperation
+        ? "text"
+        : hasImageOperation && !hasVideoOperation
+          ? "image"
+          : hasVideoOperation && !hasImageOperation
+            ? "video"
+            : "none",
     textToImage: operations.includes("text_to_image"),
     imageToImage: operations.includes("image_to_image"),
   };
@@ -190,6 +202,7 @@ function usageFromOperations(operations: readonly GenerationOperation[]): ModelU
 function operationsFromUsage(usage: ModelUsage): GenerationOperation[] {
   if (usage.kind === "video") return ["video_generation"];
   if (usage.kind === "text") return ["text_generation"];
+  if (usage.kind === "speech") return ["speech_generation"];
   if (usage.kind !== "image") return [];
   const operations: GenerationOperation[] = [];
   if (usage.textToImage) operations.push("text_to_image");
@@ -253,6 +266,8 @@ export function ProviderSettingsDialog({
   const dialogRef = useRef<HTMLElement | null>(null);
   const baseUrlRef = useRef<HTMLInputElement | null>(null);
   const apiKeyRef = useRef<HTMLInputElement | null>(null);
+  const samiAppkeyRef = useRef<HTMLInputElement | null>(null);
+  const samiTokenRef = useRef<HTMLInputElement | null>(null);
   const modelSearchRef = useRef<HTMLInputElement | null>(null);
   const savedModelsRequestRef = useRef(0);
   const apiKeyRequestRef = useRef(0);
@@ -324,6 +339,22 @@ export function ProviderSettingsDialog({
       } catch {
         if (requestId !== apiKeyRequestRef.current) return;
         if (apiKeyRef.current) apiKeyRef.current.value = "";
+      }
+      if (provider.adapterId === DOUBAO_VOICE_ADAPTER_ID) {
+        const refs = doubaoSamiCredentialRefs(provider.id);
+        for (const [credentialRef, inputRef] of [
+          [refs.appkey, samiAppkeyRef],
+          [refs.token, samiTokenRef],
+        ] as const) {
+          try {
+            const secret = await client.getCredential(credentialRef);
+            if (requestId !== apiKeyRequestRef.current) return;
+            if (inputRef.current) inputRef.current.value = secret ?? "";
+          } catch {
+            if (requestId !== apiKeyRequestRef.current) return;
+            if (inputRef.current) inputRef.current.value = "";
+          }
+        }
       }
     },
     [client],
@@ -398,19 +429,23 @@ export function ProviderSettingsDialog({
     let image = 0;
     let video = 0;
     let text = 0;
+    let speech = 0;
     for (const model of remoteModels) {
       const usage = modelUsage[model.id] ?? emptyModelUsage();
       if (usage.kind === "image") image += 1;
       else if (usage.kind === "video") video += 1;
       else if (usage.kind === "text") text += 1;
+      else if (usage.kind === "speech") speech += 1;
     }
-    return { all: remoteModels.length, image, video, text };
+    return { all: remoteModels.length, image, video, text, speech };
   }, [remoteModels, modelUsage]);
 
   if (!open) return null;
 
   const selectProvider = (providerId: string) => {
     if (apiKeyRef.current) apiKeyRef.current.value = "";
+    if (samiAppkeyRef.current) samiAppkeyRef.current.value = "";
+    if (samiTokenRef.current) samiTokenRef.current.value = "";
     setRemoteModels([]);
     setModelUsage({});
     setModelSearch("");
@@ -439,6 +474,7 @@ export function ProviderSettingsDialog({
   const isNewProvider = !providers.some((provider) => provider.id === draft.id);
   const isVolcengineArkConnection = isArkAdapter(draft.adapterId);
   const isBailianConnection = isBailianAdapter(draft.adapterId);
+  const isDoubaoVoiceConnection = draft.adapterId === DOUBAO_VOICE_ADAPTER_ID;
 
   const validateConnectionDraft = (): { readonly apiKey: string } | null => {
     const existingProvider = providers.some((provider) => provider.id === draft.id);
@@ -479,6 +515,13 @@ export function ProviderSettingsDialog({
     });
     if (apiKey) {
       await client.setCredential({ credentialRef: provider.apiKeyRef, secret: apiKey });
+    }
+    if (provider.adapterId === DOUBAO_VOICE_ADAPTER_ID) {
+      const refs = doubaoSamiCredentialRefs(provider.id);
+      const appkey = samiAppkeyRef.current?.value.trim();
+      const token = samiTokenRef.current?.value.trim();
+      if (appkey) await client.setCredential({ credentialRef: refs.appkey, secret: appkey });
+      if (token) await client.setCredential({ credentialRef: refs.token, secret: token });
     }
     setProviders((current) => {
       const withoutCurrent = current.filter((candidate) => candidate.id !== provider.id);
@@ -590,7 +633,7 @@ export function ProviderSettingsDialog({
       await client.replaceProviderModelBindings(draft.id, selections);
       await onCatalogChanged();
       setSuccessMessage(
-        `已保存 ${modelTypeCounts.image} 个图片模型、${modelTypeCounts.video} 个视频模型、${modelTypeCounts.text} 个文本模型，对应生成节点与文本功能使用的模型列表已更新。`,
+        `已保存 ${modelTypeCounts.image} 个图片模型、${modelTypeCounts.video} 个视频模型、${modelTypeCounts.text} 个文本模型、${modelTypeCounts.speech} 个语音模型。`,
       );
       // 保存成功后自动做一次真实请求的连通性测试；无论结果如何都提示用户。
       // 测试失败不影响已保存的配置，因此失败只降级为提示而不是错误。
@@ -790,18 +833,21 @@ export function ProviderSettingsDialog({
                     inputMode="url"
                     spellCheck={false}
                     placeholder="https://api.company.com 或 …/v1"
+                    readOnly={isDoubaoVoiceConnection}
                     onChange={(event) =>
                       setDraft((current) => ({ ...current, baseUrl: event.target.value }))
                     }
                     aria-describedby="base-url-hint"
                   />
                   <small id="base-url-hint">
-                    支持根地址和以 /v1 结尾的地址；模型从 /v1/models 拉取。
+                    {isDoubaoVoiceConnection
+                      ? "豆包语音官方固定地址。独立于火山方舟模型推理接口。"
+                      : "支持根地址和以 /v1 结尾的地址；模型从 /v1/models 拉取。"}
                   </small>
                 </label>
               )}
               <label className="provider-field--key">
-                <span>API Key</span>
+                <span>{isDoubaoVoiceConnection ? "豆包语音 API Key" : "API Key"}</span>
                 <input
                   ref={apiKeyRef}
                   type="text"
@@ -817,11 +863,27 @@ export function ProviderSettingsDialog({
                 <small id="api-key-hint">
                   {isVolcengineArkConnection
                     ? "用于拉取模型目录的方舟 API Key（Bearer 令牌）；素材库鉴权在下方「素材库令牌」处分别填写 AK 和 SK。"
-                    : isBailianConnection
-                      ? "阿里云百炼 API Key（Bearer）。须与业务空间同属华北2（北京）地域。"
-                      : "只保存到系统凭据管理器（macOS 钥匙串 / Windows 凭据管理器），不写入数据库、画布或任务日志。"}
+                    : isDoubaoVoiceConnection
+                      ? "来自豆包语音新版控制台 API Key 管理。使用 X-Api-Key 鉴权；方舟 Ark Key 不能代替。"
+                      : isBailianConnection
+                        ? "阿里云百炼 API Key（Bearer）。须与业务空间同属华北2（北京）地域。"
+                        : "只保存到系统凭据管理器（macOS 钥匙串 / Windows 凭据管理器），不写入数据库、画布或任务日志。"}
                 </small>
               </label>
+              {isDoubaoVoiceConnection ? (
+                <>
+                  <label className="provider-field--key">
+                    <span>歌词对齐 SAMI AppKey</span>
+                    <input ref={samiAppkeyRef} type="text" autoComplete="off" spellCheck={false} />
+                    <small>仅 MV 原唱歌词声学对齐使用；独立于豆包语音 API Key。</small>
+                  </label>
+                  <label className="provider-field--key">
+                    <span>歌词对齐 SAMI Token</span>
+                    <input ref={samiTokenRef} type="text" autoComplete="off" spellCheck={false} />
+                    <small>从 SAMI 服务获取正式 Token；过期或未开通时对齐会阻断。</small>
+                  </label>
+                </>
+              ) : null}
             </div>
 
             <div className="provider-form__actions">
@@ -918,7 +980,7 @@ export function ProviderSettingsDialog({
                   <span className="settings-step">02</span>
                   <h3 id="model-picker-title">分类生成模型</h3>
                   <p>
-                    每个供应商分别保存图片、视频与文本模型；图片能力在对应模型内设置，文本模型自动用于提示词优化等功能。
+                    每个供应商分别保存图片、视频、文本与语音模型；豆包语音连接需启用语音生成模型。
                   </p>
                 </div>
               </div>
@@ -964,6 +1026,15 @@ export function ProviderSettingsDialog({
                     视频
                     <span aria-hidden="true">{modelTypeCounts.video}</span>
                   </button>
+                  <button
+                    type="button"
+                    aria-label={`语音模型，${modelTypeCounts.speech} 个`}
+                    aria-pressed={modelTypeFilter === "speech"}
+                    onClick={() => setModelTypeFilter("speech")}
+                  >
+                    语音
+                    <span aria-hidden="true">{modelTypeCounts.speech}</span>
+                  </button>
                 </div>
                 <label className="model-search">
                   <Icon name="magnifying-glass" aria-hidden="true" size="md" />
@@ -995,7 +1066,7 @@ export function ProviderSettingsDialog({
                             role="radiogroup"
                             aria-label={`${model.displayName}模型类型`}
                           >
-                            {(["none", "image", "video", "text"] as const).map((kind) => (
+                            {(["none", "image", "video", "text", "speech"] as const).map((kind) => (
                               <label key={kind}>
                                 <input
                                   type="radio"
@@ -1020,6 +1091,8 @@ export function ProviderSettingsDialog({
                                     <Icon name="video-camera" aria-hidden="true" size="sm" />
                                     视频模型
                                   </>
+                                ) : kind === "speech" ? (
+                                  "语音模型"
                                 ) : (
                                   <>
                                     <Icon name="text-aa" aria-hidden="true" size="sm" />
@@ -1072,6 +1145,8 @@ export function ProviderSettingsDialog({
                               <Icon name="text-aa" aria-hidden="true" size="sm" />
                               对话补全 · 自动适配 OpenAI / Anthropic / Gemini 接口格式
                             </span>
+                          ) : usage.kind === "speech" ? (
+                            <span className="model-option__type-note">语音合成 · 豆包语音 V3</span>
                           ) : null}
                         </div>
                         <label className="model-option__token">
@@ -1128,6 +1203,7 @@ export function ProviderSettingsDialog({
                     <Icon name="text-aa" aria-hidden="true" size="sm" />
                     文本模型 {modelTypeCounts.text}
                   </span>
+                  <span>语音模型 {modelTypeCounts.speech}</span>
                 </div>
                 <button
                   type="button"
@@ -1151,7 +1227,7 @@ export function ProviderSettingsDialog({
                     ? "正在保存…"
                     : busyAction === "testing-connection"
                       ? "正在测试连通性…"
-                      : "保存图片、视频与文本模型"}
+                      : "保存模型绑定"}
                 </button>
               </footer>
 

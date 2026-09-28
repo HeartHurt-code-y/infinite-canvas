@@ -9,6 +9,19 @@
  * yaw = 0 时面朝 -Y（默认机位所在方向）。人形的 `size` 即身高（米）。
  */
 
+import {
+  applyWhiteModelMotionRefinement,
+  whiteModelMotionRefinementIssue,
+  type WhiteModelMotionRefinement,
+} from "./whiteModelMotionRefinement";
+
+export type {
+  WhiteModelIKLimb,
+  WhiteModelIKTarget,
+  WhiteModelMotionRefinement,
+  WhiteModelMotionRefinementKeyframe,
+} from "./whiteModelMotionRefinement";
+
 export type WhiteModelVector = [number, number, number];
 
 export type WhiteModelShape = "box" | "sphere" | "cylinder" | "person";
@@ -47,6 +60,8 @@ export interface WhiteModelObject {
   facing: WhiteModelFacing;
   keyframes: WhiteModelPathKeyframe[];
   motion: WhiteModelMotion;
+  /** Non-destructive local-space pose/IK controls layered over the original motion source. */
+  motionRefinement?: WhiteModelMotionRefinement;
 }
 
 export interface WhiteModelCameraKeyframe {
@@ -292,6 +307,18 @@ export function rescalePlanDuration(
         actor.motion.kind === "clip"
           ? { ...actor.motion, startTime: scaleTime(actor.motion.startTime) }
           : actor.motion,
+      ...(actor.motionRefinement
+        ? {
+            motionRefinement: {
+              ...actor.motionRefinement,
+              keyframes: actor.motionRefinement.keyframes.map((frame) => ({
+                ...frame,
+                // Do not round to milliseconds: close but distinct keys must remain ordered.
+                time: Math.min(durationSeconds, frame.time * factor),
+              })),
+            },
+          }
+        : {}),
     })),
   };
 }
@@ -771,7 +798,10 @@ export function evaluateJoints(
           : idlePose(time);
       break;
   }
-  return pose.map((joint) => vec.scale(joint, actor.size));
+  const refined = actor.motionRefinement
+    ? applyWhiteModelMotionRefinement(pose, actor.motionRefinement, time, presetPose, JOINT)
+    : pose;
+  return refined.map((joint) => vec.scale(joint, actor.size));
 }
 
 /** 把局部关节坐标变换到世界坐标。 */
@@ -1251,6 +1281,11 @@ export function migrateWhiteModelScenePlan(plan: WhiteModelScenePlanV1): WhiteMo
 export function whiteModelPlanIssue(plan: WhiteModelScenePlan): string | null {
   if (!plan.objects.length) return "请添加至少一个角色或几何体。";
   for (const actor of plan.objects) {
+    if (actor.motionRefinement) {
+      if (actor.shape !== "person") return `「${actor.name}」不是人形，不能应用动作精修。`;
+      const issue = whiteModelMotionRefinementIssue(actor.motionRefinement, plan.durationSeconds);
+      if (issue) return `「${actor.name}」的动作精修无效：${issue}`;
+    }
     if (
       !actor.keyframes.length ||
       actor.keyframes.some(

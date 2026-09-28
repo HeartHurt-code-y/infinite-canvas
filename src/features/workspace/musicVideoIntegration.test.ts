@@ -88,7 +88,7 @@ describe("native music-video workflow integration", () => {
     const plan = createWorkflowExecutionPlan(videoNode);
     const ordered = topologicallySortWorkflowSteps([...plan.steps].reverse());
     expect(ordered.map(({ title }) => title)).toEqual([
-      "读取原曲并审核完整歌词时间线",
+      "读取原曲并执行专用语音识别、歌词强制对齐与时间线审核",
       "确认视觉风格与人物设定",
       "确认逐段分镜与音乐窗口",
       "审核视频提示词与唱词、嘴型策略",
@@ -97,7 +97,8 @@ describe("native music-video workflow integration", () => {
       "首镜试产并人工审核",
       "按依赖生成并逐段检查",
       "选用片段并按原曲窗口合成",
-      "检查音视频时长并预览确认成片",
+      "播放原曲窗口与对口型镜头，逐镜人工验收并返工未通过片段",
+      "检查音视频流时长并预览确认成片",
     ]);
     const approved = approveWorkflowExecutionPlan(plan, videoNode, 1);
     expect(isWorkflowExecutionPlanApproved(approved, { ...videoNode, x: 800 })).toBe(true);

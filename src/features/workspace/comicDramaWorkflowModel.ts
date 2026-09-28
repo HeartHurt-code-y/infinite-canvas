@@ -3,6 +3,7 @@ import type {
   KnowledgeVideoWorkflowCheckpoint,
   KnowledgeVideoWorkflowShot,
 } from "./workspaceModel";
+import { stableJsonSignature } from "../../lib/workflowSignatures";
 
 export const COMIC_DRAMA_STAGES = ["screenplay", "style", "art", "director", "storyboard"] as const;
 export type ComicDramaStage = (typeof COMIC_DRAMA_STAGES)[number];
@@ -40,6 +41,127 @@ export interface ComicDramaWorkflowOptions {
   readonly visualStyle: string;
   readonly aspectRatio: string;
   readonly deliverable: "video" | "documents";
+  /** Project provider/model binding and provider-issued voice IDs, never model-prompt inventions. */
+  readonly speech?: {
+    readonly model: {
+      readonly providerId: string;
+      readonly modelDefinitionId: string;
+    };
+    readonly voiceBindings: Readonly<Record<string, string>>;
+  };
+}
+export interface ComicDramaDialogueLine {
+  /** Stable character asset ID from the approved art stage. */
+  readonly speakerId: string;
+  readonly text: string;
+  /** Offset within this shot; the measured synthesized duration must fit. */
+  readonly startSeconds: number;
+}
+export type ComicDramaShot = KnowledgeVideoWorkflowShot & {
+  readonly dialogueLines?: readonly ComicDramaDialogueLine[];
+};
+export interface ComicDramaSpeechResult {
+  readonly shotId: string;
+  readonly lineIndex: number;
+  readonly speakerId: string;
+  readonly text: string;
+  readonly startSeconds: number;
+  readonly voiceId: string;
+  readonly providerId: string;
+  readonly modelDefinitionId: string;
+  readonly taskId?: string;
+  readonly requestId: string;
+  readonly requestSignature: string;
+  readonly path: string;
+  readonly durationSeconds: number;
+}
+export type ComicDramaSpeechIntent = Omit<
+  ComicDramaSpeechResult,
+  "requestSignature" | "path" | "durationSeconds" | "taskId"
+>;
+export interface ComicDramaSpeechCheckpoint {
+  /** Frozen when the first provider speech task is submitted. */
+  readonly voiceBindingsSignature: string;
+  readonly lines: Readonly<Record<string, ComicDramaSpeechResult>>;
+  readonly pendingRequests?: Readonly<Record<string, ComicDramaSpeechIntent>>;
+  readonly pendingDubRequests?: Readonly<Record<string, {
+    readonly requestId: string;
+    readonly sourcePath: string;
+    readonly sourceVideoTaskId: string;
+    readonly speechSignature: string;
+  }>>;
+  readonly dubbedClips?: Readonly<Record<string, {
+    readonly sourcePath: string;
+    readonly sourceVideoTaskId: string;
+    readonly speechSignature: string;
+    readonly requestId: string;
+    readonly requestSignature: string;
+    readonly videoSignature: string;
+    readonly path: string;
+    readonly durationSeconds: number;
+  }>>;
+  readonly lipReviews?: Readonly<Record<string, {
+    readonly signature: string;
+    readonly decision: "approved" | "rejected";
+    readonly reviewedAt: number;
+  }>>;
+}
+
+export function comicDramaDubbedShotSignature(
+  checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  shotId: string,
+): string | null {
+  const shot = checkpoint.shots.find((entry) => entry.id === shotId) as ComicDramaShot | undefined;
+  const speech = checkpoint.comicDrama?.speech;
+  const dubbed = speech?.dubbedClips?.[shotId];
+  if (!shot || !dubbed || !shot.dialogueLines?.length) return null;
+  const lines = shot.dialogueLines.map((_, index) => speech?.lines[`${shotId}#${index}`]);
+  if (lines.some((line) => !line?.path)) return null;
+  return stableJsonSignature({
+    runId: checkpoint.runId,
+    shot,
+    videoTaskId: checkpoint.shotRuns[shotId]?.videoTaskId,
+    dubbed,
+    lines,
+  });
+}
+
+export function reviewComicDramaDubbedShot(
+  checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  shotId: string,
+  decision: "approved" | "rejected",
+  reviewedAt: number,
+  observedVideoSignature: string,
+): KnowledgeVideoWorkflowCheckpoint {
+  const signature = comicDramaDubbedShotSignature(checkpoint, shotId);
+  if (!signature || !checkpoint.comicDrama?.speech)
+    throw new Error(`镜头 ${shotId} 尚无完整的配音视频，不能验收口型。`);
+  if (checkpoint.comicDrama.speech.dubbedClips?.[shotId]?.videoSignature !== observedVideoSignature)
+    throw new Error(`镜头 ${shotId} 的配音视频文件已改变，请重新生成并试听当前版本。`);
+  return {
+    ...checkpoint,
+    comicDrama: {
+      ...checkpoint.comicDrama,
+      speech: {
+        ...checkpoint.comicDrama.speech,
+        lipReviews: {
+          ...checkpoint.comicDrama.speech.lipReviews,
+          [shotId]: { signature, decision, reviewedAt },
+        },
+      },
+    },
+  };
+}
+
+export function comicDramaLipReviewComplete(checkpoint: KnowledgeVideoWorkflowCheckpoint): boolean {
+  const spoken = checkpoint.shots.filter((shot) =>
+    Boolean((shot as ComicDramaShot).dialogueLines?.length),
+  );
+  return spoken.every((shot) => {
+    const signature = comicDramaDubbedShotSignature(checkpoint, shot.id);
+    const review = checkpoint.comicDrama?.speech?.lipReviews?.[shot.id];
+    return Boolean(signature && review?.signature === signature && review.decision === "approved");
+  });
 }
 export interface ComicDramaReview {
   readonly result: "PASS" | "REVISE" | "NEEDS_DECISION";
@@ -54,7 +176,7 @@ export interface ComicDramaArtifact {
   readonly version: number;
   readonly createdAt: number;
   readonly assets: readonly AiFilmAsset[];
-  readonly shots: readonly KnowledgeVideoWorkflowShot[];
+  readonly shots: readonly ComicDramaShot[];
 }
 export interface ComicDramaStageRun {
   readonly approvedVersion?: number;
@@ -80,10 +202,11 @@ export interface ComicDramaWorkflowCheckpoint {
   readonly inputSignature?: string;
   readonly episodes: readonly ComicDramaEpisodeRun[];
   readonly sharedAssets: readonly AiFilmAsset[];
+  readonly speech?: ComicDramaSpeechCheckpoint;
   readonly pending: {
     readonly episodeId: string;
     readonly stage: ComicDramaStage;
-    readonly step: "generation" | "review" | "approval";
+    readonly step: "generation" | "review" | "approval" | "voice_binding";
   } | null;
   readonly planningComplete: boolean;
 }
@@ -93,10 +216,23 @@ export function createComicDramaOptions(): ComicDramaWorkflowOptions {
     visualStyle: "国漫风格，角色造型稳定，电影感光影",
     aspectRatio: "9:16",
     deliverable: "video",
+    speech: { model: { providerId: "", modelDefinitionId: "" }, voiceBindings: {} },
   };
 }
 export function createComicDramaCheckpoint(): ComicDramaWorkflowCheckpoint {
   return { episodes: [], sharedAssets: [], pending: null, planningComplete: false };
+}
+
+/** Only characters with approved spoken lines need a voice binding. */
+export function comicDramaRequiredSpeakers(drama: ComicDramaWorkflowCheckpoint): readonly AiFilmAsset[] {
+  const ids = new Set(
+    drama.episodes.flatMap((episode) =>
+      (episode.stages.storyboard?.artifact?.shots ?? []).flatMap((shot) =>
+        (shot.dialogueLines ?? []).map((line) => line.speakerId),
+      ),
+    ),
+  );
+  return drama.sharedAssets.filter((asset) => asset.kind === "character" && ids.has(asset.id));
 }
 export function comicDramaDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
   const drama = checkpoint.comicDrama;
@@ -126,6 +262,22 @@ export function comicDramaDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowChe
   if (assets.length)
     sections.push(
       `## 跨集共享资产\n\n${assets.map((asset) => `### ${asset.id} · ${asset.name}\n\n${asset.prompt}${asset.path ? `\n\n本地文件：${asset.path}` : ""}`).join("\n\n")}`,
+    );
+  if (drama.speech && Object.keys(drama.speech.lines).length)
+    sections.push(
+      `## 逐句配音与口型审核\n\n${checkpoint.shots.map((shot) => {
+        const lines = (shot as ComicDramaShot).dialogueLines ?? [];
+        if (!lines.length) return "";
+        const signature = comicDramaDubbedShotSignature(checkpoint, shot.id);
+        const review = drama.speech?.lipReviews?.[shot.id];
+        const status = review?.signature === signature
+          ? review.decision === "approved" ? "人工已通过" : "人工已驳回"
+          : "待人工验收";
+        return `### ${shot.id} · ${shot.title}\n\n配音视频：${drama.speech?.dubbedClips?.[shot.id]?.path ?? "尚未合成"}\n\n口型：${status}\n\n${lines.map((line, index) => {
+          const audio = drama.speech?.lines[`${shot.id}#${index}`];
+          return `${line.startSeconds.toFixed(2)} 秒 · ${line.speakerId}：${line.text}\n音色：${audio?.voiceId ?? "未生成"}；音频：${audio?.path ?? "未生成"}；实测时长：${audio?.durationSeconds ?? "未测量"} 秒`;
+        }).join("\n\n")}`;
+      }).filter(Boolean).join("\n\n")}`,
     );
   if (checkpoint.finalPath) sections.push(`## 完整成片\n\n${checkpoint.finalPath}`);
   return `${sections.join("\n\n---\n\n")}\n`;
@@ -167,9 +319,13 @@ export function comicDramaDeliveryBundle(
   const rows = checkpoint.shots
     .map((shot) => {
       const run = checkpoint.shotRuns[shot.id];
-      return `<tr><td>${escape(shot.id)}</td><td>${escape(shot.title)}</td><td>${shot.durationSeconds} 秒（计划）</td><td>${escape(run?.qcReport ?? "尚未检查")}</td><td>${escape(run?.clipPath ?? "未生成")}</td></tr>`;
+      const path = drama.speech?.dubbedClips?.[shot.id]?.path ?? run?.clipPath;
+      return `<tr><td>${escape(shot.id)}</td><td>${escape(shot.title)}</td><td>${shot.durationSeconds} 秒（计划）</td><td>${escape(run?.qcReport ?? "尚未检查")}</td><td>${escape(path ?? "未生成")}</td></tr>`;
     })
     .join("");
+  const spokenShotCount = checkpoint.shots.filter((shot) =>
+    Boolean((shot as ComicDramaShot).dialogueLines?.length),
+  ).length;
   const report = [
     `# ${title} · 成片报告`,
     `运行：${checkpoint.runId ?? "尚未建立"}`,
@@ -177,11 +333,12 @@ export function comicDramaDeliveryBundle(
     `镜头数：${checkpoint.shots.length}`,
     `计划时长：${checkpoint.shots.reduce((sum, shot) => sum + shot.durationSeconds, 0)} 秒（计划值，非媒体实测）`,
     `完整成片：${checkpoint.finalPath ?? "尚未生成"}`,
-    "音色：本工作流提供角色音色设计文档；未调用专用语音合成能力。",
+    `配音：${Object.keys(drama.speech?.lines ?? {}).length ? `已生成 ${Object.keys(drama.speech?.lines ?? {}).length} 句项目供应商语音，配音镜头替换了原片完整音轨` : "未生成独立配音（文档模式或尚未到配音阶段）"}。`,
+    `口型：${spokenShotCount === 0 ? "无对白镜头" : comicDramaLipReviewComplete(checkpoint) ? "所有已配音镜头均经人工逐镜确认" : "尚未全部通过人工逐镜验收"}。`,
     "费用与生成耗时：以项目生成任务历史的实际供应商记录为准，本报告不估算或套用来源平台价格。",
     ...checkpoint.shots.map(
       (shot) =>
-        `## ${shot.id} · ${shot.title}\n\n${checkpoint.shotRuns[shot.id]?.qcReport ?? "尚未检查"}\n\n文件：${checkpoint.shotRuns[shot.id]?.clipPath ?? "未生成"}`,
+        `## ${shot.id} · ${shot.title}\n\n${checkpoint.shotRuns[shot.id]?.qcReport ?? "尚未检查"}\n\n文件：${drama.speech?.dubbedClips?.[shot.id]?.path ?? checkpoint.shotRuns[shot.id]?.clipPath ?? "未生成"}`,
     ),
   ].join("\n\n");
   const overview = `<p>运行：${escape(checkpoint.runId ?? "尚未建立")} · ${drama.episodes.length} 集 · ${checkpoint.shots.length} 镜头 · 状态：${escape(checkpoint.phase)}</p><table><thead><tr><th>剧集</th><th>阶段</th><th>版本</th><th>审核</th></tr></thead><tbody>${timeline.map(({ episode, stage, run }) => `<tr><td>${escape(episode.title)}</td><td>${COMIC_DRAMA_STAGE_LABELS[stage]}</td><td>${run?.artifact?.version ?? "未生成"}</td><td>${run?.artifact && run.approvedVersion === run.artifact.version ? "用户已批准" : "未批准"}</td></tr>`).join("")}</tbody></table><h2>媒体审核</h2><pre>${escape(JSON.stringify(checkpoint.mediaApprovals ?? {}, null, 2))}</pre><h2>逐镜总表</h2><table><thead><tr><th>镜头</th><th>标题</th><th>计划时长</th><th>质检</th><th>本地文件</th></tr></thead><tbody>${rows}</tbody></table><h2>成片</h2><pre>${escape(checkpoint.finalPath ?? "尚未生成")}</pre><p>费用、实际耗时与实测尺寸未随检查点提供时不推断。完整任务记录保存在项目工作流历史。</p>`;

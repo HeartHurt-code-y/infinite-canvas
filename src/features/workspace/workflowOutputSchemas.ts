@@ -85,6 +85,20 @@ export const comicDramaStageSchema = v.picklist(
   COMIC_DRAMA_STAGES as readonly [ComicDramaStage, ...ComicDramaStage[]],
 );
 
+/** Authored speech beats are kept separate from the rendered video prompt. */
+const comicDramaShotSchema = v.looseObject({
+  ...workflowShotSchema.entries,
+  dialogueLines: v.optional(
+    v.array(
+      v.looseObject({
+        speakerId: v.pipe(v.string(), v.nonEmpty("dialogueLines.speakerId 不能为空")),
+        text: v.pipe(v.string(), v.nonEmpty("dialogueLines.text 不能为空")),
+        startSeconds: v.number(),
+      }),
+    ),
+  ),
+});
+
 /** 漫剧阶段输出（parseComicDramaStage）。assets/shots 始终为数组，可能为空。 */
 export const comicDramaStageOutputSchema = v.looseObject({
   schemaVersion: v.literal("comic-drama-stage.v1"),
@@ -94,7 +108,7 @@ export const comicDramaStageOutputSchema = v.looseObject({
   content: v.pipe(v.string(), v.nonEmpty("content 不能为空")),
   inputSummary: v.pipe(v.string(), v.nonEmpty("inputSummary 不能为空")),
   assets: v.array(workflowAssetSchema),
-  shots: v.array(workflowShotSchema),
+  shots: v.array(comicDramaShotSchema),
 });
 
 /** 漫剧审查输出（parseComicDramaReview）。 */

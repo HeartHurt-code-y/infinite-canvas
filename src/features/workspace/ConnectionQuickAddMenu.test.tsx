@@ -41,13 +41,12 @@ describe("ConnectionQuickAddMenu", () => {
     expect(screen.queryByRole("menu", { name: "添加节点" })).not.toBeInTheDocument();
   });
 
-  it("offers upload plus all nine node templates for creation in both menu modes", async () => {
+  it("shows only nine node templates in both creation modes", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     const props = { position: { x: 100, y: 100 }, onSelect, onClose: vi.fn() };
     const { rerender } = render(<ConnectionQuickAddMenu {...props} />);
-    const expectedChoices = [
-      ["上传素材", "asset_upload"],
+    const nodeChoices = [
       ["图片生成", "image"],
       ["视频生成", "video"],
       ["视频拼接与合成", "video_composer"],
@@ -58,26 +57,28 @@ describe("ConnectionQuickAddMenu", () => {
       ["剧本创作与优化", "screenplay"],
       ["剧本转工业级分镜脚本", "storyboard"],
     ] as const;
-
     expect(screen.getByRole("menu", { name: "添加节点" })).toHaveAccessibleDescription(
       "选择后在画布创建节点",
     );
-    expect(screen.getAllByRole("menuitem")).toHaveLength(expectedChoices.length);
+    expect(screen.getAllByRole("menuitem")).toHaveLength(nodeChoices.length);
+    expect(screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
 
     rerender(<ConnectionQuickAddMenu {...props} connectionMode />);
     expect(screen.getByRole("menu", { name: "添加节点" })).toHaveAccessibleDescription(
       "选择后创建并自动连线",
     );
-    for (const [label, kind] of expectedChoices) {
+    expect(screen.getAllByRole("menuitem")).toHaveLength(nodeChoices.length);
+    expect(screen.queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
+    for (const [label, kind] of nodeChoices) {
       const item = screen.getByRole("menuitem", { name: label });
       expect(item).toBeEnabled();
       await user.click(item);
       expect(onSelect).toHaveBeenLastCalledWith(kind);
     }
-    expect(onSelect).toHaveBeenCalledTimes(expectedChoices.length);
+    expect(onSelect).toHaveBeenCalledTimes(nodeChoices.length);
   });
 
-  it("reaches every end of the expanded menu with arrow, Home and End keys", async () => {
+  it("reaches every end of the menu with arrow, Home and End keys", async () => {
     const user = userEvent.setup();
     const onSelect = vi.fn();
     render(<Harness onSelect={onSelect} />);
@@ -85,10 +86,10 @@ describe("ConnectionQuickAddMenu", () => {
     await user.keyboard("{ArrowUp}");
     expect(screen.getByRole("menuitem", { name: "剧本转工业级分镜脚本" })).toHaveFocus();
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "上传素材" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
     await user.keyboard("{End}");
     expect(screen.getByRole("menuitem", { name: "剧本转工业级分镜脚本" })).toHaveFocus();
-    await user.keyboard("{Home}{ArrowDown}{ArrowDown}{Enter}");
+    await user.keyboard("{Home}{ArrowDown}{Enter}");
     expect(onSelect).toHaveBeenCalledWith("video");
   });
 
@@ -97,10 +98,10 @@ describe("ConnectionQuickAddMenu", () => {
     const onSelect = vi.fn();
     render(<Harness onSelect={onSelect} />);
     await user.click(screen.getByRole("button", { name: "打开添加节点菜单" }));
-    expect(screen.getByRole("menuitem", { name: "上传素材" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
 
     await user.keyboard("{ArrowDown}");
-    expect(screen.getByRole("menuitem", { name: "图片生成" })).toHaveFocus();
+    expect(screen.getByRole("menuitem", { name: "视频生成" })).toHaveFocus();
     await user.tab({ shift: true });
 
     await waitFor(() => {

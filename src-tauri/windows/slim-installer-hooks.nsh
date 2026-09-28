@@ -1,6 +1,7 @@
 ; Run the signed new application in a read-only CLI mode before Tauri's
 ; reinstall page can uninstall a previous MSI installation. The CLI verifies
-; all four persistent components against manifests pinned in this executable.
+; all four target-version persistent components against manifests pinned in
+; this executable. The app prepares changed files before downloading the NSIS.
 !macro NSIS_HOOK_PREFLIGHT
   InitPluginsDir
   SetOutPath "$PLUGINSDIR"
@@ -10,7 +11,7 @@
   ${If} ${Errors}
   ${OrIf} $R8 <> 0
     IfSilent +2
-    MessageBox MB_ICONSTOP "本机离线资源尚未准备完成。请先打开完整安装的无限画布，等待资源准备完毕，再执行小包更新。"
+    MessageBox MB_ICONSTOP "目标版本资源尚未完成下载或校验。请返回无限画布重试更新；如果仍失败，可运行完整安装包修复。"
     SetErrorLevel 43
     Abort
   ${EndIf}

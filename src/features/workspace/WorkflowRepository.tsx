@@ -15,6 +15,7 @@ export interface WorkflowRepositoryProps {
   readonly onInsertXhsCoverWorkflow?: () => void;
   readonly onInsertProductSceneWorkflow?: () => void;
   readonly onInsertReverseVideoWorkflow?: () => void;
+  readonly onInsertReelbenchWorkflow?: () => void;
 }
 
 export const WorkflowRepository = memo(function WorkflowRepository({
@@ -29,6 +30,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
   onInsertXhsCoverWorkflow,
   onInsertProductSceneWorkflow,
   onInsertReverseVideoWorkflow,
+  onInsertReelbenchWorkflow,
 }: WorkflowRepositoryProps) {
   const contentId = useId();
   const toggleLabelId = useId();
@@ -118,7 +120,7 @@ export const WorkflowRepository = memo(function WorkflowRepository({
         hidden={!expanded}
       >
         <div className="workflow-repository__content-heading">
-          <span className="workflow-repository__count">9 个自动工作流</span>
+          <span className="workflow-repository__count">10 个自动工作流</span>
           <button
             type="button"
             className="workflow-repository__close"
@@ -158,6 +160,37 @@ export const WorkflowRepository = memo(function WorkflowRepository({
           >
             <Icon name="plus" aria-hidden="true" size="lg" />
             添加产品场景图
+          </button>
+        </article>
+        <article className="workflow-repository__card">
+          <div className="workflow-repository__card-mark" aria-hidden="true">
+            <Icon name="film-slate" size="2xl" />
+          </div>
+          <div className="workflow-repository__card-body">
+            <div className="workflow-repository__card-heading">
+              <span className="workflow-repository__badge">单节点</span>
+              <h2 className="workflow-repository__card-title">视频拉片与分镜合成</h2>
+            </div>
+            <p className="workflow-repository__description">
+              读取本地视频，测量逐镜切点与运动，结合项目视觉模型标注镜头；审核后导出镜头报告与同步分镜视频。
+            </p>
+            <ol className="workflow-repository__stages" aria-label="视频拉片与分镜合成能力">
+              {["本地切镜", "逐镜标注", "批量审核", "报告与视频"].map((label) => (
+                <li key={label} className="workflow-repository__stage">
+                  <span className="workflow-repository__stage-name">{label}</span>
+                </li>
+              ))}
+            </ol>
+          </div>
+          <button
+            type="button"
+            className="workflow-repository__insert"
+            onClick={onInsertReelbenchWorkflow}
+            disabled={!onInsertReelbenchWorkflow}
+            aria-label="添加视频拉片与分镜合成工作流节点"
+          >
+            <Icon name="plus" aria-hidden="true" size="lg" />
+            添加拉片工作流
           </button>
         </article>
         <article className="workflow-repository__card">

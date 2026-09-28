@@ -2200,6 +2200,24 @@ impl AssetLibrary {
             .ok_or_else(|| BackendError::validation("云素材没有可下载的视频正文地址。", json!({})))
     }
 
+    /// Read a stable cloud identity before copying its bytes into another
+    /// user library. The signed URL remains inside the backend.
+    pub(crate) async fn material_transfer_record(
+        &self,
+        identity: CloudAssetIdentity,
+        expected_media_type: MediaType,
+    ) -> BackendResult<CloudAssetRecord> {
+        self.refresh_asset_record(identity, expected_media_type).await
+    }
+
+    pub(crate) async fn download_material_to_file(
+        &self,
+        url: String,
+        destination: PathBuf,
+    ) -> BackendResult<u64> {
+        self.port.download_to_file(url, destination, None).await
+    }
+
     /// 按素材身份重新向供应商读取关键帧封面地址，自动续签已过期的签名封面。
     ///
     /// 对应上游契约 `POST /v1/assets/get`，body `{"id":"asset-…"}`，返回新封面 URL。

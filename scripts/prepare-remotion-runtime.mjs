@@ -9,6 +9,7 @@ import {
   remotionCriticalFilesMatch,
   remotionInventoryFilesMatch,
   remotionTreeIsMaterialized,
+  remotionPackagesPresent,
   materializeRemotionRuntime,
   writeRemotionFileInventory,
 } from "./remotion-runtime-integrity.mjs";
@@ -86,6 +87,8 @@ const fileNames = [
   "Composition.tsx",
   "index.tsx",
   "render.mjs",
+  "resolve-douyin.mjs",
+  "resolve-rednote.mjs",
 ];
 const hash = createHash("sha256");
 for (const name of fileNames) hash.update(await readFile(path.join(source, name)));
@@ -105,9 +108,13 @@ const readyPaths = [
   nodeName,
   "render.mjs",
   "plan.mjs",
+  "resolve-douyin.mjs",
+  "resolve-rednote.mjs",
   "Composition.tsx",
   "bundle/index.html",
   "node_modules/@remotion/renderer/package.json",
+  "node_modules/playwright-core/package.json",
+  "node_modules/source-map/package.json",
   oldManifest?.browserExecutable ?? "missing",
 ];
 if (
@@ -159,7 +166,7 @@ try {
 }
 if (
   installedHash !== lockHash ||
-  !existsSync(path.join(source, "node_modules", "@remotion", "bundler", "package.json"))
+  !remotionPackagesPresent(source, ["@remotion/bundler", "playwright-core"])
 ) {
   await pnpmInstall(source);
   await writeFile(path.join(source, "node_modules", ".canvas-lock"), lockHash);
@@ -171,11 +178,19 @@ await writeFile(
   path.join(destination, "pnpm-workspace.yaml"),
   "packages: []\ndangerouslyAllowAllBuilds: true\n",
 );
-for (const name of ["package.json", "pnpm-lock.yaml", "plan.mjs", "Composition.tsx", "render.mjs"])
+for (const name of [
+  "package.json",
+  "pnpm-lock.yaml",
+  "plan.mjs",
+  "Composition.tsx",
+  "render.mjs",
+  "resolve-douyin.mjs",
+  "resolve-rednote.mjs",
+])
   await copyFile(path.join(source, name), path.join(destination, name));
 if (
   oldManifest?.lockHash !== lockHash ||
-  !existsSync(path.join(destination, "node_modules", "@remotion", "renderer", "package.json"))
+  !remotionPackagesPresent(destination, ["@remotion/renderer", "playwright-core", "source-map"])
 )
   await pnpmInstall(destination, true);
 await copyFile(process.execPath, path.join(destination, nodeName));

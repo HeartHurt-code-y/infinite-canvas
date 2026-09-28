@@ -77,6 +77,10 @@ test("writes latest.json from signed updater artifacts", () => {
       notes: "in-place upgrade",
       "pub-date": "2026-09-18T00:00:00.000Z",
       platform: "windows-x86_64",
+      resourceManifest: {
+        url: "https://cdn.example/resources/manifest.json",
+        signature: "resource-sig",
+      },
     });
     assert.equal(result.out, out);
     const manifest = JSON.parse(readFileSync(out, "utf8"));
@@ -87,6 +91,10 @@ test("writes latest.json from signed updater artifacts", () => {
       "https://cdn.example/app/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83_0.1.1_x64-setup.exe",
     );
     assert.equal(manifest.platforms["windows-x86_64"].signature, "signed");
+    assert.deepEqual(manifest.resourceManifest, {
+      url: "https://cdn.example/resources/manifest.json",
+      signature: "resource-sig",
+    });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

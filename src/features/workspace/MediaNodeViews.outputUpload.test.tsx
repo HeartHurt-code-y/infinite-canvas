@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen } from "@testing-library/react";
 import { QueryClientProvider } from "@tanstack/react-query";
 import { describe, expect, it, vi } from "vitest";
 
@@ -23,21 +23,24 @@ function makeOutputNode(overrides: Partial<OutputNodeData> = {}): OutputNodeData
   };
 }
 
-function renderHarness(
-  node: OutputNodeData,
-  options: { onUploadToCloud?: (key: string) => void } = {},
-) {
-  render(
+function renderHarness(node: OutputNodeData) {
+  const onUploadToCloud = vi.fn();
+  const onUploadToLocal = vi.fn();
+  const onUploadToObjectStorage = vi.fn();
+  const onNodeDragStart = vi.fn();
+  const { unmount } = render(
     <QueryClientProvider client={createQueryClient()}>
       <CanvasOutputNode
         node={node}
         dragging={false}
-        onNodeDragStart={vi.fn()}
+        onNodeDragStart={onNodeDragStart}
         onRemove={vi.fn()}
         onAspectRatioChange={vi.fn()}
         onPreview={vi.fn()}
         onConnectionStart={vi.fn()}
-        onUploadToCloud={options.onUploadToCloud ?? vi.fn()}
+        onUploadToCloud={onUploadToCloud}
+        onUploadToLocal={onUploadToLocal}
+        onUploadToObjectStorage={onUploadToObjectStorage}
         task={null}
         retryInfo={null}
         results={[]}
@@ -46,68 +49,77 @@ function renderHarness(
       />
     </QueryClientProvider>,
   );
+  return { onUploadToCloud, onUploadToLocal, onUploadToObjectStorage, onNodeDragStart, unmount };
 }
 
-describe("CanvasOutputNode 上传到云端素材库绿色小点（持久化到节点数据）", () => {
-  it("未上传时上传按钮不显示绿色小点", () => {
-    renderHarness(makeOutputNode({ uploadedToCloud: false }));
-    const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
-    expect(button).not.toHaveClass("is-uploaded");
-    expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
-    expect(document.querySelector(".canvas-asset-node__cloud-badge")).toBeNull();
+describe("CanvasOutputNode 保存素材菜单", () => {
+  it("图片产物只显示一个入口，三个目标复用原回调且不触发节点拖动", () => {
+    const callbacks = renderHarness(makeOutputNode());
+    const trigger = screen.getByRole("button", { name: "保存产物：sample.png" });
+    fireEvent.mouseDown(trigger);
+    fireEvent.click(trigger);
+    expect(screen.getByRole("group", { name: "保存素材：sample.png" })).toBeInTheDocument();
+    fireEvent.mouseDown(screen.getByRole("button", { name: "保存到本地素材库" }));
+    fireEvent.click(screen.getByRole("button", { name: "保存到本地素材库" }));
+    expect(callbacks.onUploadToLocal).toHaveBeenCalledExactlyOnceWith("output-upload-test");
+    expect(callbacks.onNodeDragStart).not.toHaveBeenCalled();
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "保存到云端素材库" }));
+    expect(callbacks.onUploadToCloud).toHaveBeenCalledExactlyOnceWith("output-upload-test");
+
+    fireEvent.click(trigger);
+    fireEvent.click(screen.getByRole("button", { name: "保存到对象存储" }));
+    expect(callbacks.onUploadToObjectStorage).toHaveBeenCalledExactlyOnceWith("output-upload-test");
   });
 
-  it("未设置 uploadedToCloud 时视为未上传（旧文档兼容）", () => {
+  it("旧文档未设置上传标记时三个目标都可保存", () => {
     renderHarness(makeOutputNode());
-    const button = screen.getByRole("button", { name: /上传图片产物到云端素材库/ });
-    expect(button).not.toHaveClass("is-uploaded");
-    expect(button.querySelector(".canvas-asset-node__upload-dot")).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "保存产物：sample.png" }));
+    expect(screen.getByRole("button", { name: "保存到本地素材库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存到云端素材库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存到对象存储" })).toBeEnabled();
     expect(document.querySelector(".canvas-asset-node__cloud-badge")).toBeNull();
   });
 
-  it("已上传时上传按钮显示绿色小点和已上传样式", () => {
-    renderHarness(makeOutputNode({ uploadedToCloud: true }));
-    const button = screen.getByRole("button", { name: /已上传到云端素材库/ });
-    expect(button).toHaveClass("is-uploaded");
-    expect(button.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
-    expect(button).toHaveAttribute("title", "已上传到云端素材库");
-  });
-
-  it("已上传时名称旁常显绿色小点：上传按钮只在悬停时出现，状态不能只跟着按钮走", () => {
+  it("曾保存到云端时名称旁保留标记，切换供应商后仍可保存", () => {
     renderHarness(makeOutputNode({ uploadedToCloud: true, name: "annotation.png" }));
     const badge = document.querySelector(".canvas-asset-node__cloud-badge");
-    expect(badge).not.toBeNull();
     expect(badge).toHaveAttribute("title", "已在云端素材库");
-    // 小绿点挂在名称行里、紧跟在名称之后，而不是卡片角落。
     expect(badge?.previousElementSibling).toHaveClass("canvas-asset-node__name");
     expect(badge?.previousElementSibling).toHaveTextContent("annotation.png");
+    fireEvent.click(screen.getByRole("button", { name: "保存产物：annotation.png" }));
+    expect(screen.getByRole("button", { name: "保存到云端素材库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存到本地素材库" })).toBeEnabled();
   });
 
-  it("视频产物已上传时也显示绿色小点", () => {
-    renderHarness(
+  it("本地与对象存储的保存状态分别保留", () => {
+    renderHarness(makeOutputNode({ uploadedToLocal: true, uploadedToObjectStorage: true }));
+    expect(document.querySelector(".canvas-asset-node__local-badge")).toHaveAttribute(
+      "title",
+      "已在本地素材库",
+    );
+    expect(document.querySelector(".canvas-asset-node__object-storage-badge")).toHaveAttribute(
+      "title",
+      "已在对象存储",
+    );
+    fireEvent.click(screen.getByRole("button", { name: "保存产物：sample.png" }));
+    expect(screen.getByRole("button", { name: "保存到本地素材库" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存到对象存储" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "保存到云端素材库" })).toBeEnabled();
+  });
+
+  it("视频产物可保存，文本产物没有保存入口", () => {
+    const { unmount } = renderHarness(
       makeOutputNode({
         mediaType: "video",
         finalPath: "C:/outputs/sample.mp4",
         name: "sample.mp4",
-        uploadedToCloud: true,
       }),
     );
-    const button = screen.getByRole("button", { name: /已上传到云端素材库/ });
-    expect(button).toHaveClass("is-uploaded");
-    expect(button.querySelector(".canvas-asset-node__upload-dot")).not.toBeNull();
-  });
-
-  it("文本产物不显示上传按钮", () => {
-    renderHarness(
-      makeOutputNode({
-        mediaType: "text",
-        finalPath: null,
-        textContent: "hello",
-        uploadedToCloud: true,
-      }),
-    );
-    expect(
-      screen.queryByRole("button", { name: /上传|已上传到云端素材库/ }),
-    ).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "保存产物：sample.mp4" })).toBeInTheDocument();
+    unmount();
+    renderHarness(makeOutputNode({ mediaType: "text", finalPath: null, textContent: "hello" }));
+    expect(screen.queryByRole("button", { name: /保存产物：/ })).not.toBeInTheDocument();
   });
 });

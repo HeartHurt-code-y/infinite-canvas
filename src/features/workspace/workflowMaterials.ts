@@ -53,6 +53,8 @@ function mediaIdentity(target: MediaReferenceTarget): unknown {
       };
     case "local_asset":
       return { kind: target.kind, stagingJobId: target.stagingJobId, mediaType: target.mediaType };
+    case "local_base64_asset":
+      return { kind: target.kind, assetId: target.assetId, mediaType: target.mediaType };
     case "local_result":
       return {
         kind: target.kind,

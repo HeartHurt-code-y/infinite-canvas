@@ -156,7 +156,7 @@ describe("画布视口控件", () => {
       ".zoom-control",
       ".canvas-history-control",
       ".canvas-home-control",
-      ".canvas-group-control",
+      ".canvas-node-selection-control",
     ].map(cssRule);
     for (const rule of groups) {
       expect(rule).not.toMatch(/position:\s*absolute/);
@@ -167,7 +167,7 @@ describe("画布视口控件", () => {
     expect(groups[0]).toMatch(/grid-template-columns:\s*2\.25rem 4\.5rem 2\.25rem/);
     expect(groups[1]).toMatch(/grid-template-columns:\s*2\.25rem 2\.25rem/);
     expect(groups[2]).toMatch(/grid-template-columns:\s*2\.25rem/);
-    expect(groups[3]).toMatch(/grid-template-columns:\s*2\.25rem/);
+    expect(groups[3]).toMatch(/grid-template-columns:\s*repeat\(5,\s*2\.25rem\)/);
   });
 
   it("Studio 主题只改工具条底边和间距，框选与其余控件同一条", () => {
@@ -175,19 +175,23 @@ describe("画布视口控件", () => {
       /\.canvas-stage \.canvas-viewport-dock\s*\{[^}]*bottom:\s*var\(--space-lg\)/,
     );
     expect(studioShellCss).toMatch(/\.canvas-stage \.canvas-viewport-dock > \*/);
-    expect(studioShellCss).not.toMatch(/\.canvas-stage \.canvas-group-control\s*\{[^}]*bottom:/);
-    expect(studioShellCss).not.toMatch(/\.canvas-(?:history|home|group)-control\s*\{[^}]*right:/);
+    expect(studioShellCss).not.toMatch(
+      /\.canvas-stage \.canvas-node-selection-control\s*\{[^}]*bottom:/,
+    );
+    expect(studioShellCss).not.toMatch(
+      /\.canvas-(?:history|home|node-selection)-control\s*\{[^}]*right:/,
+    );
   });
 
-  it("框选范围用红框，被框住的素材卡片用绿边", () => {
-    const marquee = cssRule(".canvas-viewport.is-grouping .react-flow__selection");
-    expect(marquee).toMatch(/var\(--color-error\)/);
-    expect(marquee).toMatch(/border:\s*var\(--rule-active\)\s+solid\s+var\(--color-error\)/);
+  it("拖拽框和选中外框为红色，被选节点边缘为绿色", () => {
+    const marquee = appCss.match(
+      /\.canvas-viewport\.is-selecting \.react-flow__selection,\s*\.canvas-viewport\.is-selecting \.react-flow__nodesselection-rect\s*\{([^}]+)\}/,
+    )?.[1];
+    expect(marquee).toMatch(/border:\s*3px\s+solid\s+var\(--color-error\)/);
     const picked = cssRule(
-      ".canvas-viewport.is-grouping .react-flow__node.selected .canvas-asset-node",
+      ".canvas-viewport.is-selecting .react-flow__node.selected > .canvas-flow-node",
     );
-    expect(picked).toMatch(/border-color:\s*var\(--color-success\)/);
-    expect(picked).toMatch(/outline:\s*var\(--rule-active\)\s+solid\s+var\(--color-success\)/);
+    expect(picked).toMatch(/outline:\s*4px\s+solid\s+var\(--color-success\)/);
   });
 
   it("成组后外框保持红色，组内素材卡片保持绿色边缘", () => {

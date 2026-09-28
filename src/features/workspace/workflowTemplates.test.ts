@@ -10,8 +10,10 @@ import {
   createRemotionWorkflow,
   createXhsCoverWorkflow,
   createReverseVideoWorkflow,
+  createReelbenchWorkflow,
   createProductSceneWorkflow,
   REVERSE_VIDEO_WORKFLOW_TEMPLATE_ID,
+  REELBENCH_WORKFLOW_TEMPLATE_ID,
   REMOTION_WORKFLOW_TEMPLATE_ID,
 } from "./workflowTemplates";
 
@@ -74,6 +76,30 @@ function createWorkflow(
 }
 
 describe("createKnowledgeVideoDirectorWorkflow", () => {
+  it("creates one project-native video shot workflow with a text model only", () => {
+    const workflow = createReelbenchWorkflow({
+      anchor: { x: 500, y: 500 },
+      occupied: [],
+      nodeModelSelections: staleSelections,
+      providerCatalog: catalog,
+      providerCatalogLoaded: true,
+    });
+    expect(REELBENCH_WORKFLOW_TEMPLATE_ID).toBe("reelbench-workflow-v1");
+    expect(workflow.nodes).toHaveLength(1);
+    expect(workflow.edges).toEqual([]);
+    const entry = workflow.nodes[0];
+    if (entry?.type !== "knowledgeVideoWorkflow") throw new Error("Missing shot workflow node");
+    expect(entry.data.config.reelbench).toMatchObject({
+      localVideoPath: "",
+      includeSyncVideo: false,
+    });
+    expect(entry.data.config.models).toEqual({
+      text: { providerId: "project-provider", modelDefinitionId: "project-text-model" },
+      image: { providerId: "", modelDefinitionId: "" },
+      video: { providerId: "", modelDefinitionId: "" },
+    });
+    expect(entry.data.config.checkpoint.reelbench).toMatchObject({ step: "source", draft: null });
+  });
   it("creates AI product camera generation and selects a reference-image model", () => {
     const workflow = createProductSceneWorkflow({
       anchor: { x: 500, y: 500 },

@@ -3,6 +3,15 @@
 export const MOYU_ADAPTER_ID = "moyu_v1";
 export const ARK_ADAPTER_ID = "volcengine_ark_v1";
 export const BAILIAN_ADAPTER_ID = "aliyun_bailian_v1";
+export const DOUBAO_VOICE_ADAPTER_ID = "doubao_voice_v1";
+export const DOUBAO_VOICE_BASE_URL = "https://openspeech.bytedance.com";
+
+export function doubaoSamiCredentialRefs(providerConnectionId: string) {
+  return {
+    appkey: `provider:${providerConnectionId}:sami_appkey`,
+    token: `provider:${providerConnectionId}:sami_token`,
+  } as const;
+}
 
 /** 华北2（北京）百炼 MaaS 主机后缀。 */
 export const BAILIAN_BEIJING_HOST_SUFFIX = "cn-beijing.maas.aliyuncs.com";
@@ -20,7 +29,7 @@ export function adapterAllowsEmptyApiKey(adapterId: string): boolean {
 }
 
 export function adapterSupportsAssetLibrary(adapterId: string): boolean {
-  return !isBailianAdapter(adapterId);
+  return !isBailianAdapter(adapterId) && adapterId !== DOUBAO_VOICE_ADAPTER_ID;
 }
 
 export function isValidBailianWorkspaceId(workspaceId: string): boolean {

@@ -1,0 +1,63 @@
+.download-cookie-source {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.download-cookie-source__select,
+.download-cookie-source__actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  min-width: 0;
+}
+
+.download-cookie-source__select > span {
+  flex: 0 0 auto;
+  font-weight: 600;
+}
+
+.download-cookie-source__select > select {
+  min-width: min(100%, 185px);
+  max-width: 100%;
+  padding: 6px 8px;
+  color: inherit;
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+
+.download-cookie-source__actions > span {
+  flex: 1 1 180px;
+  min-width: 0;
+  color: var(--color-muted);
+  overflow-wrap: anywhere;
+}
+
+.download-cookie-source__actions > button {
+  flex: 0 0 auto;
+}
+
+.canvas-video-downloader .download-cookie-source__actions > button {
+  padding: 6px 8px;
+  color: var(--color-accent);
+  font: inherit;
+  font-weight: 700;
+  background: transparent;
+  border: var(--rule-thin) solid var(--color-accent);
+  border-radius: var(--radius-control);
+  cursor: pointer;
+}
+
+.canvas-video-downloader .download-cookie-source__actions > button:hover:not(:disabled),
+.canvas-video-downloader .download-cookie-source__actions > button:focus-visible {
+  color: var(--color-accent-ink);
+  background: var(--color-accent);
+}
+
+.download-cookie-source > small {
+  color: var(--color-muted);
+  line-height: 1.45;
+}

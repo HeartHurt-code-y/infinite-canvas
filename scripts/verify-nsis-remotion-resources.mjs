@@ -38,13 +38,45 @@ export function verifyGeneratedNsisRemotionResources(root = ROOT) {
   return verifyNsisRemotionResourceTable(script, inventory);
 }
 
+export function verifyNsisStyleResourceTable(script, manifest) {
+  const files = [
+    ...script.matchAll(/File \/a "\/oname=skills\\gpt-image-2-style-library\\([^"]+)"/g),
+  ].map((match) => match[1].replaceAll("\\", "/"));
+  const actual = new Set(files);
+  const expected = manifest.files.map((entry) => entry.path);
+  const missing = expected.filter((name) => !actual.has(name));
+  if (missing.length || actual.size !== files.length) {
+    throw new Error(
+      `NSIS 风格库文件表与资源清单不符：缺 ${missing.length}、重复 ${files.length - actual.size}；样例 ${missing.slice(0, 3).join(", ")}`,
+    );
+  }
+  return expected.length;
+}
+
+export function verifyGeneratedNsisStyleResources(root = ROOT) {
+  const script = readFileSync(
+    path.join(root, "src-tauri", "target", "release", "nsis", "x64", "installer.nsi"),
+    "utf8",
+  );
+  const manifest = JSON.parse(
+    readFileSync(
+      path.join(root, "src-tauri", "skills", "gpt-image-2-style-library", "data", "manifest.json"),
+      "utf8",
+    ),
+  );
+  return verifyNsisStyleResourceTable(script, manifest);
+}
+
 const invokedDirectly =
   process.argv[1] !== undefined &&
   import.meta.url === pathToFileURL(path.resolve(process.argv[1])).href;
 if (invokedDirectly) {
   try {
-    const count = verifyGeneratedNsisRemotionResources();
-    console.log(`[nsis-resources] Remotion ${count} 个文件与完整清单一致`);
+    const remotionCount = verifyGeneratedNsisRemotionResources();
+    const styleCount = verifyGeneratedNsisStyleResources();
+    console.log(
+      `[nsis-resources] Remotion ${remotionCount} 个文件、风格库 ${styleCount} 个文件与完整清单一致`,
+    );
   } catch (error) {
     console.error(`[nsis-resources] ${error instanceof Error ? error.message : String(error)}`);
     process.exitCode = 1;

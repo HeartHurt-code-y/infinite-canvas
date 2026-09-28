@@ -18,6 +18,7 @@ import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
 import { createProductSceneOptions } from "./productSceneWorkflowModel";
+import { createReelbenchOptions } from "./reelbenchWorkflowModel";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 
 function approve(source: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflowNodeData {
@@ -34,6 +35,28 @@ function approve(source: KnowledgeVideoWorkflowNodeData): KnowledgeVideoWorkflow
 }
 
 describe("workflow dependency plans and human review", () => {
+  it("binds video shot analysis approval to its source and export choice", () => {
+    const original = node();
+    const source = approve({
+      ...original,
+      config: {
+        ...original.config,
+        reelbench: { ...createReelbenchOptions(), localVideoPath: "C:/clips/source.mp4" },
+      },
+    });
+    const titles = getWorkflowExecutionPlan(source)!.steps.map((step) => step.title);
+    expect(titles).toContain("按机器证据检查镜头表，人工修订切点与标注并确认当前版本");
+    expect(titles.some((title) => title.includes("同步分镜信息视频"))).toBe(false);
+    const changed = {
+      ...source,
+      config: {
+        ...source.config,
+        reelbench: { ...source.config.reelbench!, includeSyncVideo: true },
+      },
+    };
+    expect(isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(source), changed)).toBe(false);
+    expect(createWorkflowExecutionPlan(changed).steps.at(-1)?.title).toContain("同步分镜信息视频");
+  });
   it("discloses per-image inspection and Logo placement, and invalidates prior approval on enablement", () => {
     const original = node();
     const source = approve({

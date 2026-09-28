@@ -40,6 +40,34 @@ export interface MvMediaAlignment {
   readonly aligned: boolean;
 }
 
+export interface MvAsrTranscript {
+  /** SHA-256 of the original song file bytes checked by the native command. */
+  readonly sourceSignature: string;
+  readonly engine: string;
+  readonly modelVersion: string;
+  readonly transcript: string;
+  readonly segments: readonly {
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+    readonly text: string;
+    readonly confidence?: number | undefined;
+  }[];
+}
+
+export interface MvLyricsAlignment {
+  readonly sourceSignature: string;
+  readonly engine: string;
+  readonly modelVersion: string;
+  readonly lyrics: string;
+  readonly lines: readonly {
+    readonly text: string;
+    readonly startSeconds: number;
+    readonly endSeconds: number;
+    readonly confidence?: number | undefined;
+  }[];
+  readonly unmatchedLyrics: readonly string[];
+}
+
 export interface MvMediaClient {
   probeSong(sourcePath: string): Promise<MvSongProbe>;
   prepareAudioWindow(
@@ -49,6 +77,18 @@ export interface MvMediaClient {
   ): Promise<MvAudioWindow>;
   startComposition(command: StartMvCompositionCommand): Promise<VideoCompositionJobRecord>;
   checkAlignment(finalPath: string, expectedDurationSeconds?: number): Promise<MvMediaAlignment>;
+  clipSignature(path: string): Promise<string>;
+  transcribeSong(
+    sourcePath: string,
+    sourceSignature: string,
+    providerConnectionId: string,
+  ): Promise<MvAsrTranscript>;
+  alignLyrics(
+    sourcePath: string,
+    sourceSignature: string,
+    lyrics: string,
+    providerConnectionId: string,
+  ): Promise<MvLyricsAlignment>;
 }
 
 const positive = v.pipe(v.number(), v.finite(), v.minValue(Number.MIN_VALUE));
@@ -76,7 +116,29 @@ const alignmentSchema = v.object({
   toleranceSeconds: positive,
   aligned: v.boolean(),
 });
-
+const sha256Schema = v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/));
+const analysisIdentitySchema = {
+  sourceSignature: sha256Schema,
+  engine: v.pipe(v.string(), v.minLength(1)),
+  modelVersion: v.pipe(v.string(), v.minLength(1)),
+};
+const analysisSegmentSchema = v.object({
+  startSeconds: v.pipe(v.number(), v.finite(), v.minValue(0)),
+  endSeconds: positive,
+  text: v.string(),
+  confidence: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0), v.maxValue(1))),
+});
+const asrSchema = v.object({
+  ...analysisIdentitySchema,
+  transcript: v.string(),
+  segments: v.array(analysisSegmentSchema),
+});
+const lyricsAlignmentSchema = v.object({
+  ...analysisIdentitySchema,
+  lyrics: v.string(),
+  lines: v.array(analysisSegmentSchema),
+  unmatchedLyrics: v.array(v.string()),
+});
 async function call<T extends v.GenericSchema>(name: string, schema: T, command: unknown) {
   if (!isDesktopRuntime()) throw new Error("MV 音频处理和原曲合成需要在桌面应用中执行。");
   const result: unknown = await invoke(name, { command });
@@ -93,4 +155,20 @@ export const mvMediaClient: MvMediaClient = {
     call("start_mv_composition", videoCompositionJobRecordSchema, command),
   checkAlignment: (finalPath, expectedDurationSeconds) =>
     call("check_mv_media_alignment", alignmentSchema, { finalPath, expectedDurationSeconds }),
+  clipSignature: async (path) => {
+    if (!isDesktopRuntime()) throw new Error("口型人工验收需要在桌面应用中读取实际片段。");
+    const value: unknown = await invoke("mv_clip_signature", { path });
+    const parsed = v.safeParse(sha256Schema, value);
+    if (!parsed.success) throw new Error("片段 SHA-256 检查返回了无效结果。");
+    return parsed.output;
+  },
+  transcribeSong: (sourcePath, sourceSignature, providerConnectionId) =>
+    call("transcribe_mv_song", asrSchema, { sourcePath, sourceSignature, providerConnectionId }),
+  alignLyrics: (sourcePath, sourceSignature, lyrics, providerConnectionId) =>
+    call("align_mv_lyrics", lyricsAlignmentSchema, {
+      sourcePath,
+      sourceSignature,
+      lyrics,
+      providerConnectionId,
+    }),
 };

@@ -1,4 +1,5 @@
 import type { WorkflowVersionHistory } from "./workflowVersionHistory";
+import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import {
   referenceCandidateFromTarget,
   type PromptReferenceCandidate,
@@ -15,6 +16,7 @@ import {
   type GenerationOperation,
   type GenerationTaskSummary,
   type LocalAssetRecord,
+  type LocalBase64AssetRecord,
   type MediaReferenceTarget,
   type PickedPromptMaterial,
   type PromptOptimizationContextEntry,
@@ -25,9 +27,11 @@ import {
   type ProviderCatalogEntry,
   type StagingJobRecord,
   type StagingStatus,
+  type VideoDownloadCredentialSource,
   toMediaSrc,
 } from "../../lib/backend";
 import { defaultModelOperationSchema, type ModelParameterValue } from "../../lib/modelCapabilities";
+import type { PerTaskVideoUrlInput } from "../../lib/perTaskVideo";
 import type { SeedanceTaskMode } from "../../lib/seedanceTasks";
 import type { WhiteModelControlConfig } from "../../lib/whiteModelControl";
 import type { WhiteModelStudioDraft } from "../../lib/whiteModelStudio";
@@ -54,6 +58,10 @@ import type {
   ReverseVideoWorkflowCheckpoint,
   ReverseVideoWorkflowOptions,
 } from "./reverseVideoWorkflowModel";
+import type {
+  ReelbenchWorkflowCheckpoint,
+  ReelbenchWorkflowOptions,
+} from "./reelbenchWorkflowModel";
 import type {
   ComicDramaWorkflowCheckpoint,
   ComicDramaWorkflowOptions,
@@ -138,7 +146,8 @@ export interface AssetUploadEntry {
   readonly lastAdvancedAt: number;
   /** 上传中字节长时间未推进（疑似网络中断），由轮询在更新状态时计算。 */
   readonly stalled: boolean;
-  readonly destination: AssetLibrarySource;
+  /** 云端素材库导入、本机 Base64 保存，或仅上传到对象存储。 */
+  readonly destination: AssetLibrarySource | "object_storage";
   /** 后端在上传前对素材做过的自动调整说明（图片尺寸归一化），未调整时为 null。 */
   readonly adjustment: string | null;
 }
@@ -356,7 +365,7 @@ export const SCREENPLAY_NODE_COARSE_HEIGHT = 900;
 export const VIDEO_COMPOSER_NODE_WIDTH = 580;
 export const VIDEO_COMPOSER_NODE_HEIGHT = 500;
 export const VIDEO_DOWNLOADER_NODE_WIDTH = 580;
-export const VIDEO_DOWNLOADER_NODE_HEIGHT = 456;
+export const VIDEO_DOWNLOADER_NODE_HEIGHT = 520;
 export const VIDEO_FRAME_EXTRACTOR_NODE_WIDTH = 580;
 export const VIDEO_FRAME_EXTRACTOR_NODE_HEIGHT = 470;
 export const VIRAL_REMIX_NODE_WIDTH = 620;
@@ -586,6 +595,10 @@ export interface VideoDownloaderRunState {
   readonly qualityHint: string | null;
   /** B 站成片下载后是否已自动去除右上角水印。 */
   readonly watermarkRemoved: boolean;
+  /** 本次真实下载使用的来源；公开访问 none 不代表登录验证。 */
+  readonly credentialSource?: VideoDownloadCredentialSource | null | undefined;
+  /** 自动模式逐项预检状态，来源选定后清空。 */
+  readonly probeStatus?: string | null | undefined;
   readonly error: string | null;
 }
 
@@ -734,6 +747,7 @@ export interface KnowledgeVideoWorkflowCheckpoint {
   readonly xhsCover?: XhsCoverWorkflowCheckpoint;
   readonly productScene?: ProductSceneWorkflowCheckpoint;
   readonly reverseVideo?: ReverseVideoWorkflowCheckpoint;
+  readonly reelbench?: ReelbenchWorkflowCheckpoint;
   readonly documentsOnly?: boolean;
   readonly version: 1;
   readonly runId: string | null;
@@ -750,6 +764,8 @@ export interface KnowledgeVideoWorkflowCheckpoint {
     readonly kind: "planning" | "qc";
     readonly question: string;
     readonly recommendation: string;
+    /** QC 确认仅针对这一镜头及生成结果；缺省只用于旧检查点兼容。 */
+    readonly qcTarget?: { readonly shotId: string; readonly signature: string };
   } | null;
   /** 暂停或失败时保留实际停留阶段，刷新画布后仍能显示正确进度。 */
   readonly lastActivePhase: "planning" | "generating" | "qc" | "composing" | null;
@@ -791,6 +807,7 @@ export interface KnowledgeVideoWorkflowConfig {
   readonly xhsCover?: XhsCoverWorkflowOptions;
   readonly productScene?: ProductSceneWorkflowOptions;
   readonly reverseVideo?: ReverseVideoWorkflowOptions;
+  readonly reelbench?: ReelbenchWorkflowOptions;
   readonly brief: string;
   /** 所有工作流共用的本地参考素材，仅保存路径和元数据。 */
   readonly materials?: readonly PickedPromptMaterial[];
@@ -997,6 +1014,10 @@ export interface OutputNodeData {
   readonly layer?: OutputLayerInfo;
   /** 该产物已成功上传到云端素材库（随画布文档持久化，重启后保留）。 */
   readonly uploadedToCloud?: boolean;
+  /** 该产物已成功上传到本地素材库（随画布文档持久化，重启后保留）。 */
+  readonly uploadedToLocal?: boolean;
+  /** 该产物已独立保存到对象存储，未导入供应商素材库。 */
+  readonly uploadedToObjectStorage?: boolean;
   /**
    * 框选成组后的组 id。与素材节点共用同一套组。
    * 没有点选序号的产物按从上到下、从左到右排在有序号的素材之后。
@@ -1401,14 +1422,19 @@ export function stagingImportReachedLibrary(record: StagingLibraryImportRecord):
 }
 
 /**
- * 素材库导入已经成功收尾：可以自动收起这一行。
+ * 上传目标已经成功收尾：可以自动收起这一行。
  *
- * `staged` 对云端素材只是"对象已上传，仍在导入"，不是成功；失败与中断
+ * `staged` 对独立对象存储上传是成功，对云端素材只是"对象已上传，仍在导入"；失败与中断
  * （`failed` / `interrupted`）**永不**自动收起：用户需要看见原因并重试。
- * 后端记录没有 `assetId` 时一律不认成功（例如导入失败后的清场记录）。
+ * 云端入库记录没有 `assetId` 时一律不认成功（例如导入失败后的清场记录）。
  */
-export function shouldAutoDismissUpload(record: StagingLibraryImportRecord): boolean {
-  return stagingImportReachedLibrary(record);
+export function shouldAutoDismissUpload(
+  record: StagingLibraryImportRecord,
+  destination: AssetUploadEntry["destination"] = "cloud",
+): boolean {
+  return destination === "object_storage"
+    ? record.status === "staged"
+    : stagingImportReachedLibrary(record);
 }
 
 /** 需要实时跟踪的对象存储阶段：每秒刷新并参与停滞检测（preparing 为提交前占位）。 */
@@ -1425,20 +1451,23 @@ export function isStallTrackedStatus(status: StagingStatus): boolean {
 
 export function isTerminalAssetUpload(entry: AssetUploadEntry): boolean {
   return (
-    stagingImportReachedLibrary(entry) ||
+    shouldAutoDismissUpload(entry, entry.destination) ||
     FAILED_UPLOAD_STATUSES.has(entry.status) ||
     (entry.destination === "local" && entry.status === "staged")
   );
 }
 
 /**
- * 后端上传任务是否已经不会再给出新信息：失败/中断，或者已经拿到素材身份。
+ * 后端上传任务是否已经不会再给出新信息：失败/中断、对象存储已 staged，或云端已拿到素材身份。
  *
  * 轮询与僵尸判定都以它为准，别用只认状态的集合：一条停在 `cleaning` 但带回
  * `assetId` 的记录是成功，不是僵尸。
  */
-export function isTerminalStagingJob(job: StagingLibraryImportRecord): boolean {
-  return FAILED_UPLOAD_STATUSES.has(job.status) || stagingImportReachedLibrary(job);
+export function isTerminalStagingJob(
+  job: StagingLibraryImportRecord,
+  destination: AssetUploadEntry["destination"] = "cloud",
+): boolean {
+  return FAILED_UPLOAD_STATUSES.has(job.status) || shouldAutoDismissUpload(job, destination);
 }
 
 // 上传进度只写入 SQLite，staging:state-changed 事件仅在任务结束时发射，
@@ -1576,7 +1605,10 @@ export function mergeStagingJobsIntoUploads(
     // 后端记录本身到不了终态、且长时间没有任何推进（执行它的进程已经不在了）：
     // 落地为已中断，否则这一行会一直转圈，而且非终态行不给关闭按钮。
     // 已经拿到素材身份的记录不算在内：那是入库成功，只是随后的清理没走完。
-    if (!isTerminalStagingJob(job) && now - lastAdvancedAt >= UPLOAD_ABANDONED_MS) {
+    if (
+      !isTerminalStagingJob(job, entry.destination) &&
+      now - lastAdvancedAt >= UPLOAD_ABANDONED_MS
+    ) {
       changed = true;
       return {
         ...entry,
@@ -2174,6 +2206,8 @@ export interface VideoNodeConfig {
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
   readonly urlMedia?: readonly VideoUrlMediaInput[];
+  /** 按次视频专用公网参考图/音频 URL；切换模型时保留，只有按次型号才提交。 */
+  readonly perTaskUrlMedia?: readonly PerTaskVideoUrlInput[];
   /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
    *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
   readonly inputSlots?: readonly (string | null)[];
@@ -2211,6 +2245,10 @@ export interface PromptNodeConfig {
   readonly conversation?: readonly PromptConversationEntry[];
   /** 当前可编辑输出（下发给下游节点）。 */
   readonly generatedPrompt: string;
+  /** 电影对白模式由用户确认的校验基准；不能用模型自报原文代替。 */
+  readonly cinematicDialogueGuard?: CinematicDialogueGuard;
+  /** 仅表示当前输出仍与最近一次通过项目校验的模型结果相同。 */
+  readonly cinematicDialogueValidated?: boolean;
   readonly catalogResolved: boolean;
   /** 兼容旧文档：旧版审计上下文在恢复时迁移进 conversation，此后不再写入。 */
   readonly auditContextHistory?: readonly PromptOptimizationContextEntry[];
@@ -2283,6 +2321,12 @@ export function createPromptNodeConfig(
     sourcePrompt: "",
     conversation: [],
     generatedPrompt: "",
+    cinematicDialogueGuard: {
+      lockedLines: "",
+      targetDurationSeconds: null,
+      targetFormat: "generic",
+    },
+    cinematicDialogueValidated: false,
     catalogResolved,
   };
 }
@@ -2363,6 +2407,7 @@ export const PROMPT_OPTIMIZATION_MODE_LABELS: Record<PromptOptimizationMode, str
   multi_grid_storyboard: "多宫格分镜",
   storyboard_prompt: "故事板",
   gpt_image_2_style: "GPT Image 2 风格库",
+  cinematic_dialogue: "电影对白表演",
 };
 
 /** 把提示词段序列（文本 + @引用）压成纯文本：引用内联为「@显示名」。 */
@@ -2541,12 +2586,13 @@ export function cloudAssetToItem(asset: CloudAsset): AssetItem {
   };
 }
 
-export function localAssetToItem(asset: LocalAssetRecord): AssetItem {
+export function localAssetToItem(asset: LocalAssetRecord | LocalBase64AssetRecord): AssetItem {
+  const isBase64 = asset.id.startsWith("local-b64-");
   return {
     id: asset.id,
     kind: asset.mediaType,
     name: asset.name,
-    meta: `${formatBytes(asset.byteSize) ?? "对象存储"} · 本地索引`,
+    meta: `${formatBytes(asset.byteSize) ?? "素材"} · ${isBase64 ? "本机 Base64" : "对象存储"}`,
     visual: asset.mediaType === "audio" ? "ambience" : "portrait",
     previewUrl: asset.previewUrl,
     videoUrl: asset.mediaType === "video" ? asset.previewUrl : null,
@@ -2556,6 +2602,14 @@ export function localAssetToItem(asset: LocalAssetRecord): AssetItem {
 
 export function assetNodeReferenceTarget(node: AssetNodeData): MediaReferenceTarget {
   if (node.source === "local") {
+    if (node.assetId.startsWith("local-b64-")) {
+      return {
+        kind: "local_base64_asset",
+        assetId: node.assetId,
+        canvasNodeKey: node.key,
+        mediaType: node.kind,
+      };
+    }
     return {
       kind: "local_asset",
       stagingJobId: node.assetId,

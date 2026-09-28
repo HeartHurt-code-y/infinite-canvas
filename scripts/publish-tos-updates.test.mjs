@@ -20,6 +20,7 @@ import {
   checkLegacyPlatformFeeds,
   collectLegacyChannelPlatforms,
   immutableObjectMatches,
+  collectRuntimeResourceObjects,
   tosFetch,
 } from "./publish-tos-updates.mjs";
 import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
@@ -39,6 +40,7 @@ test("publish file picker keeps updater artifacts, signatures and first-install 
     mkdirSync(path.join(dir, "nsis"));
     mkdirSync(path.join(dir, "helper"));
     mkdirSync(path.join(dir, "dmg"));
+    mkdirSync(path.join(dir, "resources", "0.1.1", "windows-x86_64"), { recursive: true });
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz"), "pkg");
     writeFileSync(path.join(dir, "macos", "无限画布.app.tar.gz.sig"), "sig");
     writeFileSync(path.join(dir, "nsis", "无限画布_0.1.1_x64-setup.exe"), "exe");
@@ -46,6 +48,10 @@ test("publish file picker keeps updater artifacts, signatures and first-install 
     writeFileSync(path.join(dir, "dmg", "无限画布_0.1.1_aarch64.dmg"), "dmg");
     writeFileSync(path.join(dir, "latest.json"), "{}\n");
     writeFileSync(path.join(dir, "notes.txt"), "skip me");
+    writeFileSync(
+      path.join(dir, "resources", "0.1.1", "windows-x86_64", "manifest.json.sig"),
+      "resource-sig",
+    );
     const picked = collectPublishFilePaths(dir).map((filePath) => path.basename(filePath));
     assert.deepEqual(
       new Set(picked),
@@ -155,11 +161,37 @@ test("promotion requires matching platform feeds and never rolls a channel back"
       }),
     /同版覆盖/,
   );
+  assert.throws(
+    () =>
+      checkChannelManifest(latest, {
+        ...latest,
+        resourceManifest: {
+          url: "https://cdn.example/resources/manifest.json",
+          signature: "signed",
+        },
+      }),
+    /同版覆盖/,
+  );
   assert.deepEqual(checkChannelManifest(latest, { ...latest, version: "0.1.9" }), {
     sameVersion: false,
     pubDate: undefined,
   });
   assert.equal(compareReleaseVersions("0.1.10", "0.1.9"), 1);
+});
+
+test("content-addressed objects deduplicate identical bytes without losing component paths", () => {
+  const shared = "a".repeat(64);
+  const manifest = {
+    components: [
+      { files: [{ path: "manifest.json", sha256: shared, size: 8 }] },
+      { files: [{ path: "runtime-manifest.json", sha256: shared, size: 8 }] },
+      { files: [] },
+      { files: [] },
+    ],
+  };
+  const objects = collectRuntimeResourceObjects(manifest, REPO_ROOT);
+  assert.equal(objects.length, 1);
+  assert.equal(objects[0].sha256, shared);
 });
 
 test("legacy manifest promotion only references full same-version artifacts from this bucket", () => {

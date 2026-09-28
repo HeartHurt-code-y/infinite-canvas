@@ -62,38 +62,35 @@ export function AssetPanelHeader({
   );
 }
 
-/** 断网提示条：文案按来源区分（本地素材仅影响对象存储预览/上传）。 */
+/** 云端素材库的断网提示条。 */
 export function AssetOfflineBanner({ source }: { readonly source: AssetLibrarySource }) {
   return (
     <div className="asset-panel__offline" role="status">
       <Icon name="warning-circle" aria-hidden="true" size="sm" />
       <span>
         {source === "local"
-          ? "网络连接已断开，对象存储预览与上传暂时不可用。"
+          ? "本地素材可继续浏览与上传。"
           : "网络连接已断开，云端拉取与上传暂时不可用；恢复后会自动刷新素材列表。"}
       </span>
     </div>
   );
 }
 
-/** 来源切换行：云端/本地下拉、整桶拉取（仅本地）、连接状态与就绪图标。 */
+/** 来源切换行：选择素材目录、同步存储桶并显示列表加载状态。 */
 export function AssetOriginSwitcher({
   source,
-  providerId,
-  pullingBucket,
-  assetsLoading,
-  libraryError,
-  onSourceChange,
+  cloudCollection = "library",
+  pullingBucket = false,
   onPullBucket,
+  assetsLoading,
+  onSourceChange,
 }: {
   readonly source: AssetLibrarySource;
-  /** 当前云端供应商连接 ID；null = 未连接。 */
-  readonly providerId: string | null;
-  readonly pullingBucket: boolean;
+  readonly cloudCollection?: "library" | "object_storage";
+  readonly pullingBucket?: boolean;
+  readonly onPullBucket?: () => void;
   readonly assetsLoading: boolean;
-  readonly libraryError: boolean;
   readonly onSourceChange: (next: AssetLibrarySource) => void;
-  readonly onPullBucket: () => void;
 }) {
   return (
     <div className="asset-origin">
@@ -111,40 +108,65 @@ export function AssetOriginSwitcher({
         <option value="cloud">云端素材</option>
         <option value="local">本地素材</option>
       </select>
-      {source === "local" && isDesktopRuntime() ? (
+      {source === "cloud" &&
+      cloudCollection === "object_storage" &&
+      isDesktopRuntime() &&
+      onPullBucket ? (
         <button
           type="button"
           className="asset-origin__pull"
-          aria-label="拉取整个存储桶的素材文件"
+          aria-label="同步存储桶素材"
+          data-tooltip="同步存储桶中尚未建立索引的素材"
           disabled={pullingBucket}
           onClick={onPullBucket}
         >
-          {pullingBucket ? (
-            <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="xs" />
-          ) : (
-            <Icon name="arrows-clockwise" aria-hidden="true" size="xs" />
-          )}
-          拉取整桶
+          <Icon
+            name={pullingBucket ? "circle-notch" : "arrows-clockwise"}
+            aria-hidden="true"
+            data-spin={pullingBucket ? "true" : undefined}
+            size="xs"
+          />
+          同步存储桶
         </button>
       ) : null}
-      <span className="asset-origin__status">
-        {source === "local"
-          ? "本地索引 · 对象存储"
-          : isDesktopRuntime()
-            ? providerId != null
-              ? "已连接"
-              : "未连接"
-            : "Moyu · 制作库"}
-      </span>
       {assetsLoading ? (
         <Icon name="circle-notch" aria-hidden="true" data-spin="true" size="sm" />
-      ) : libraryError ? (
-        <Icon name="warning-circle" aria-hidden="true" size="sm" />
-      ) : source === "local" || providerId != null || !isDesktopRuntime() ? (
-        <Icon name="check-circle" aria-hidden="true" size="sm" />
-      ) : (
-        <Icon name="warning-circle" aria-hidden="true" size="sm" />
-      )}
+      ) : null}
+    </div>
+  );
+}
+
+/** 云端来源下的两个独立目录；对象存储条目不会被当作平台素材库资产。 */
+export function AssetCloudCollectionSwitcher({
+  collection,
+  onChange,
+}: {
+  readonly collection: "library" | "object_storage";
+  readonly onChange: (next: "library" | "object_storage") => void;
+}) {
+  return (
+    <div
+      className="asset-tabs"
+      role="tablist"
+      aria-label="云端素材分类"
+      style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))", marginBlock: "var(--space-xs)" }}
+    >
+      <button
+        type="button"
+        role="tab"
+        aria-selected={collection === "library"}
+        onClick={() => onChange("library")}
+      >
+        云端素材库
+      </button>
+      <button
+        type="button"
+        role="tab"
+        aria-selected={collection === "object_storage"}
+        onClick={() => onChange("object_storage")}
+      >
+        对象存储
+      </button>
     </div>
   );
 }
@@ -389,6 +411,7 @@ export function AssetKindTabs({
 export function AssetSearchBar({
   kind,
   source,
+  cloudCollection = "library",
   providerId,
   search,
   searchPending,
@@ -398,6 +421,7 @@ export function AssetSearchBar({
 }: {
   readonly kind: AssetKind;
   readonly source: AssetLibrarySource;
+  readonly cloudCollection?: "library" | "object_storage";
   readonly providerId: string | null;
   readonly search: string;
   readonly searchPending: boolean;
@@ -425,11 +449,15 @@ export function AssetSearchBar({
             onSearchChange(event.target.value);
           }}
         />
-        {source === "cloud" && providerId != null ? (
+        {source === "cloud" && (cloudCollection === "object_storage" || providerId != null) ? (
           <button
             type="button"
             className="asset-search__refresh"
-            aria-label="刷新素材列表（重新获取视频签名 URL）"
+            aria-label={
+              cloudCollection === "object_storage"
+                ? "刷新对象存储素材列表"
+                : "刷新素材列表（重新获取视频签名 URL）"
+            }
             data-tooltip="刷新素材列表"
             onClick={onRefreshCloud}
           >
@@ -465,6 +493,7 @@ export function AssetSearchBar({
 /** 素材网格空态：按加载/错误/来源派生提示文案与操作按钮。 */
 export function AssetEmptyState({
   source,
+  cloudCollection = "library",
   loading,
   libraryError,
   hasProvider,
@@ -474,6 +503,7 @@ export function AssetEmptyState({
   onImport,
 }: {
   readonly source: AssetLibrarySource;
+  readonly cloudCollection?: "library" | "object_storage";
   readonly loading: boolean;
   readonly libraryError: boolean;
   readonly hasProvider: boolean;
@@ -483,6 +513,7 @@ export function AssetEmptyState({
   readonly onClearSearch: () => void;
   readonly onImport: () => void;
 }) {
+  const objectStorage = source === "cloud" && cloudCollection === "object_storage";
   return (
     <div className="asset-empty">
       {loading ? (
@@ -496,30 +527,40 @@ export function AssetEmptyState({
         {loading
           ? source === "local"
             ? "正在读取本地素材…"
-            : "正在拉取云端素材…"
+            : objectStorage
+              ? "正在读取对象存储素材…"
+              : "正在拉取云端素材…"
           : libraryError
             ? source === "local"
               ? "本地素材库不可用"
-              : "云端素材库不可用"
+              : objectStorage
+                ? "对象存储素材不可用"
+                : "云端素材库不可用"
             : "没有找到素材"}
       </strong>
       <span>
         {loading
           ? source === "local"
-            ? "正在从本机索引签发对象存储预览地址。"
-            : "云端素材库正在同步，稍候即可看到最新素材。"
+            ? "正在读取本机保存的素材记录。"
+            : objectStorage
+              ? "正在读取对象存储中的素材记录。"
+              : "云端素材库正在同步，稍候即可看到最新素材。"
           : libraryError
             ? source === "local"
-              ? "无法读取本地索引或对象存储配置，详情见上方错误信息。"
-              : "云端请求失败（可能是供应商故障或鉴权问题），详情见上方错误信息，稍后可点击「重新拉取」重试。"
-            : source === "cloud" && isDesktopRuntime() && !hasProvider
+              ? "无法读取本地素材库，详情见上方错误信息。"
+              : objectStorage
+                ? "无法读取对象存储素材，详情见上方错误信息。"
+                : "云端请求失败（可能是供应商故障或鉴权问题），详情见上方错误信息，稍后可点击「重新拉取」重试。"
+            : source === "cloud" && !objectStorage && isDesktopRuntime() && !hasProvider
               ? "请先在全局设置中配置并启用供应商连接。"
               : isDesktopRuntime()
                 ? source === "local"
-                  ? "上传的素材只会写入对象存储，不会导入云端素材库。"
-                  : uploadGroupName != null
-                    ? `该分组还没有素材；从此处上传的素材会归入「${uploadGroupName}」。`
-                    : "当前供应商令牌下没有素材。云端库按令牌隔离，自动更新或改原配置不会删数据；换令牌或换供应商会看到另一份库，请先核对后再重新上传。"
+                  ? "素材会以 Base64 编码保存在本机，与对象存储独立。"
+                  : objectStorage
+                    ? "这里仅显示保存到对象存储的素材，不会导入云端素材库。"
+                    : uploadGroupName != null
+                      ? `该分组还没有素材；从此处上传的素材会归入「${uploadGroupName}」。`
+                      : "当前供应商令牌下没有素材。云端库按令牌隔离，自动更新或改原配置不会删数据；换令牌或换供应商会看到另一份库，请先核对后再重新上传。"
                 : "试试更短的名称，或切换素材类型。"}
       </span>
       {!loading && search ? (
@@ -528,10 +569,14 @@ export function AssetEmptyState({
           清除搜索
         </button>
       ) : null}
-      {!loading && isDesktopRuntime() && (source === "local" || hasProvider) ? (
+      {!loading && isDesktopRuntime() && (source === "local" || objectStorage || hasProvider) ? (
         <button type="button" onClick={onImport}>
           <Icon name="upload-simple" aria-hidden="true" size="sm" />
-          {source === "local" ? "上传到本地素材库" : "上传本地素材"}
+          {source === "local"
+            ? "上传到本地素材库"
+            : objectStorage
+              ? "上传到对象存储"
+              : "上传到云端素材库"}
         </button>
       ) : null}
     </div>
@@ -659,9 +704,11 @@ export function AssetPanel({
   onImportLocalAssets,
   isOffline,
   source,
-  onSourceChange,
+  cloudCollection,
   pullingBucket,
   onPullBucket,
+  onSourceChange,
+  onCloudCollectionChange,
   providerId,
   availableProviders,
   onProviderChange,
@@ -671,6 +718,7 @@ export function AssetPanel({
   assetsError,
   onRetryLocal,
   onRetryCloud,
+  onRetryObjectStorage,
   uploads,
   onDismissUpload,
   groups,
@@ -719,9 +767,11 @@ export function AssetPanel({
   /** 全局断网标记（仅桌面端展示提示条）。 */
   readonly isOffline: boolean;
   readonly source: AssetLibrarySource;
-  readonly onSourceChange: (next: AssetLibrarySource) => void;
+  readonly cloudCollection: "library" | "object_storage";
   readonly pullingBucket: boolean;
   readonly onPullBucket: () => void;
+  readonly onSourceChange: (next: AssetLibrarySource) => void;
+  readonly onCloudCollectionChange: (next: "library" | "object_storage") => void;
   readonly providerId: string | null;
   readonly availableProviders: readonly ProviderConnection[];
   readonly onProviderChange: (providerConnectionId: string) => void;
@@ -732,6 +782,7 @@ export function AssetPanel({
   readonly assetsError: string | null;
   readonly onRetryLocal: () => void;
   readonly onRetryCloud: () => void;
+  readonly onRetryObjectStorage: () => void;
   readonly uploads: readonly AssetUploadEntry[];
   readonly onDismissUpload: (jobId: string) => void;
   readonly groups: readonly AssetGroupRecord[];
@@ -800,17 +851,24 @@ export function AssetPanel({
           onImportLocalAssets();
         }}
       />
-      {isDesktopRuntime() && isOffline ? <AssetOfflineBanner source={source} /> : null}
+      {isDesktopRuntime() && isOffline && source === "cloud" ? (
+        <AssetOfflineBanner source={source} />
+      ) : null}
       <AssetOriginSwitcher
         source={source}
-        providerId={providerId}
+        cloudCollection={cloudCollection}
         pullingBucket={pullingBucket}
-        assetsLoading={assetsLoading}
-        libraryError={libraryError}
-        onSourceChange={onSourceChange}
         onPullBucket={onPullBucket}
+        assetsLoading={assetsLoading}
+        onSourceChange={onSourceChange}
       />
-      {source === "cloud" ? (
+      {source === "cloud" && isDesktopRuntime() ? (
+        <AssetCloudCollectionSwitcher
+          collection={cloudCollection}
+          onChange={onCloudCollectionChange}
+        />
+      ) : null}
+      {source === "cloud" && cloudCollection === "library" ? (
         <AssetCloudControls
           providerId={providerId}
           availableProviders={availableProviders}
@@ -825,16 +883,27 @@ export function AssetPanel({
             libraryError
               ? source === "local"
                 ? "本地素材库不可用"
-                : "云端素材库不可用"
+                : cloudCollection === "object_storage"
+                  ? "对象存储素材不可用"
+                  : "云端素材库不可用"
               : "素材上传失败"
           }
           error={assetsError}
-          actionLabel={libraryError ? (source === "local" ? "重新读取" : "重新拉取") : undefined}
+          actionLabel={
+            libraryError
+              ? source === "local" || cloudCollection === "object_storage"
+                ? "重新读取"
+                : "重新拉取"
+              : undefined
+          }
           onAction={
-            libraryError && (source === "local" || providerId != null)
+            libraryError &&
+            (source === "local" || cloudCollection === "object_storage" || providerId != null)
               ? source === "local"
                 ? onRetryLocal
-                : onRetryCloud
+                : cloudCollection === "object_storage"
+                  ? onRetryObjectStorage
+                  : onRetryCloud
               : undefined
           }
         />
@@ -850,7 +919,10 @@ export function AssetPanel({
           ))}
         </ul>
       ) : null}
-      {source === "cloud" && isDesktopRuntime() && providerId != null ? (
+      {source === "cloud" &&
+      cloudCollection === "library" &&
+      isDesktopRuntime() &&
+      providerId != null ? (
         <AssetGroupsPicker
           groups={groups}
           selectedGroupId={selectedGroupId}
@@ -867,12 +939,13 @@ export function AssetPanel({
       <AssetSearchBar
         kind={kind}
         source={source}
+        cloudCollection={cloudCollection}
         providerId={providerId}
         search={search}
         searchPending={searchPending}
         resultSummary={resultSummary}
         onSearchChange={onSearchChange}
-        onRefreshCloud={onRetryCloud}
+        onRefreshCloud={cloudCollection === "object_storage" ? onRetryObjectStorage : onRetryCloud}
       />
       {multiSelect ? (
         <div className="asset-multi-select" role="region" aria-label="多选素材">
@@ -908,6 +981,7 @@ export function AssetPanel({
         ) : (
           <AssetEmptyState
             source={source}
+            cloudCollection={cloudCollection}
             loading={assetsLoading}
             libraryError={libraryError}
             hasProvider={providerId != null}

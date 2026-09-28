@@ -515,15 +515,6 @@ h3 {
   outline-offset: 1px;
 }
 
-.asset-origin__status {
-  overflow: hidden;
-  flex: 1 1 auto;
-  min-width: 0;
-  text-align: right;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
 /* 素材库来源行的「拉取整桶」按钮：与下拉框同一套控件视觉。 */
 .asset-origin__pull {
   display: inline-flex;
@@ -2492,7 +2483,7 @@ svg[data-spin="true"] {
 }
 
 .canvas-asset-node--media
-  > :is(.canvas-asset-node__remove, .canvas-asset-node__upload, .canvas-asset-node__port) {
+  > :is(.canvas-asset-node__remove, .canvas-asset-node__save, .canvas-asset-node__port) {
   z-index: 3;
 }
 
@@ -2510,13 +2501,25 @@ svg[data-spin="true"] {
   font-weight: 600;
 }
 
-.canvas-asset-node__cloud-badge {
+.canvas-asset-node__cloud-badge,
+.canvas-asset-node__local-badge,
+.canvas-asset-node__object-storage-badge {
   flex-shrink: 0;
   width: 0.5rem;
   height: 0.5rem;
   background: var(--color-success);
   border-radius: var(--radius-round);
   box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-success) 22%, transparent);
+}
+
+.canvas-asset-node__local-badge {
+  background: var(--color-accent);
+  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-accent) 22%, transparent);
+}
+
+.canvas-asset-node__object-storage-badge {
+  background: color-mix(in oklch, var(--color-accent) 50%, var(--color-success));
+  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-accent) 22%, transparent);
 }
 
 .canvas-asset-node__cloud-badge[data-state="processing"] {
@@ -2557,8 +2560,9 @@ svg[data-spin="true"] {
   opacity: 1;
 }
 
-.canvas-asset-node__upload {
+.canvas-asset-node__save {
   position: absolute;
+  z-index: 3;
   top: var(--space-3xs);
   right: calc(var(--space-3xs) + 22px);
   display: grid;
@@ -2567,39 +2571,62 @@ svg[data-spin="true"] {
   height: 18px;
   padding: 0;
   color: var(--color-text);
-  /* 与 __remove 同一条约定：图标用 --color-text，底色必须取深色控件面。
-     用 --color-ink 会和文字色同值（近白），上传图标被自己的底色盖住，
-     按钮退化成一颗纯白圆点，在深色卡片上只剩「看不清的白块」。 */
   background: var(--color-chrome-2);
-  border: none;
+  border: 0;
   border-radius: var(--radius-round);
   opacity: 0;
   transition: opacity 120ms ease;
 }
 
-.canvas-asset-node:hover .canvas-asset-node__upload,
-.canvas-asset-node__upload:focus-visible {
-  opacity: 0.85;
+.canvas-asset-node:hover .canvas-asset-node__save,
+.canvas-asset-node__save:focus-visible,
+.canvas-asset-node__save[aria-expanded="true"] {
+  opacity: 0.9;
 }
 
-.canvas-asset-node__upload:hover {
+.canvas-asset-node__save:hover {
   opacity: 1;
 }
 
-.canvas-asset-node__upload.is-uploaded {
-  background: var(--color-success);
+.canvas-asset-node__save-menu {
+  position: absolute;
+  z-index: var(--z-dropdown);
+  top: calc(var(--space-3xs) + 24px);
+  right: var(--space-3xs);
+  display: grid;
+  gap: 2px;
+  width: max-content;
+  min-width: 10rem;
+  padding: var(--space-3xs);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  box-shadow: var(--shadow-whisper);
+  cursor: default;
 }
 
-.canvas-asset-node__upload-dot {
-  position: absolute;
-  top: calc(var(--space-3xs) * -1);
-  right: calc(var(--space-3xs) * -1);
-  width: 0.5rem;
-  height: 0.5rem;
-  background: var(--color-success);
-  border: var(--rule-active) solid var(--color-surface-1);
-  border-radius: var(--radius-round);
-  box-shadow: 0 0 0 var(--rule-active) color-mix(in oklch, var(--color-success) 22%, transparent);
+.canvas-asset-node__save-menu button {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2xs);
+  padding: var(--space-2xs);
+  color: inherit;
+  text-align: left;
+  background: transparent;
+  border: 0;
+  border-radius: var(--radius-xs);
+  cursor: pointer;
+}
+
+.canvas-asset-node__save-menu button:hover:not(:disabled),
+.canvas-asset-node__save-menu button:focus-visible {
+  background: var(--color-chrome-3);
+}
+
+/* React Flow 给节点写内联层级；打开菜单时让它越过相邻卡片。 */
+.canvas-react-flow .react-flow__node:has(.canvas-asset-node__save-menu) {
+  z-index: 10000 !important;
 }
 
 .canvas-asset-node__port {
@@ -3118,6 +3145,9 @@ svg[data-spin="true"] {
   right: var(--space-md);
   bottom: var(--size-zoom-collapsed-offset);
   display: flex;
+  max-width: calc(100% - 2 * var(--space-md));
+  flex-wrap: wrap;
+  justify-content: flex-end;
   align-items: stretch;
   gap: var(--space-2xs);
   pointer-events: none;
@@ -3238,9 +3268,9 @@ svg[data-spin="true"] {
   bottom: calc(100% + var(--space-xs));
 }
 
-.canvas-group-control {
+.canvas-node-selection-control {
   display: grid;
-  grid-template-columns: 2.25rem;
+  grid-template-columns: repeat(5, 2.25rem);
   min-height: 2.25rem;
   color: var(--color-chrome-ink);
   background: var(--color-chrome);
@@ -3249,7 +3279,7 @@ svg[data-spin="true"] {
   box-shadow: var(--shadow-whisper);
 }
 
-.canvas-group-control button {
+.canvas-node-selection-control button {
   display: grid;
   padding: 0;
   color: inherit;
@@ -3258,39 +3288,67 @@ svg[data-spin="true"] {
   place-items: center;
 }
 
-.canvas-group-control button[aria-pressed="true"] {
+.canvas-node-selection-control button[aria-pressed="true"] {
   color: var(--color-accent-ink);
   background: var(--color-accent);
 }
 
+.canvas-node-selection-control button:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
 @media (hover: hover) and (pointer: fine) {
-  .canvas-group-control button:hover {
+  .canvas-node-selection-control button:not(:disabled):hover {
     background: var(--color-chrome-3);
   }
 
-  .canvas-group-control button[aria-pressed="true"]:hover {
+  .canvas-node-selection-control button[aria-pressed="true"]:hover {
     background: var(--color-accent);
   }
 }
 
-.canvas-group-control [data-tooltip]::after {
+.canvas-node-selection-control [data-tooltip]::after {
   top: auto;
   bottom: calc(100% + var(--space-xs));
 }
 
-.canvas-viewport.is-grouping .react-flow__pane {
+.canvas-viewport.is-selecting .react-flow__pane {
   cursor: crosshair;
 }
 
-.canvas-viewport.is-grouping .react-flow__selection {
-  background: color-mix(in srgb, var(--color-error) 22%, transparent);
-  border: var(--rule-active) solid var(--color-error);
+.canvas-viewport.is-selecting .react-flow__selection,
+.canvas-viewport.is-selecting .react-flow__nodesselection-rect {
+  background: color-mix(in srgb, var(--color-error) 12%, transparent);
+  border: 3px solid var(--color-error);
+  box-shadow:
+    0 0 0 1px var(--color-bg-base),
+    0 0 18px 3px color-mix(in srgb, var(--color-error) 58%, transparent);
 }
 
-.canvas-viewport.is-grouping .react-flow__node.selected .canvas-asset-node {
+.canvas-viewport.is-selecting .react-flow__node.selected > .canvas-flow-node {
+  outline: 4px solid var(--color-success);
+  outline-offset: 2px;
+  border-radius: var(--radius-card);
+  box-shadow: 0 0 18px 3px color-mix(in srgb, var(--color-success) 62%, transparent);
+}
+
+.canvas-viewport.is-selecting
+  .react-flow__node.selected
+  > .canvas-flow-node
+  > :is(
+    .canvas-gen-node,
+    .canvas-screenplay-node,
+    .canvas-video-composer,
+    .canvas-video-downloader,
+    .canvas-video-frame-extractor,
+    .canvas-knowledge-workflow,
+    .canvas-asset-node,
+    .canvas-result-node
+  ) {
   border-color: var(--color-success);
-  outline: var(--rule-active) solid var(--color-success);
-  outline-offset: var(--rule-active);
+  outline: 3px solid var(--color-success);
+  outline-offset: 2px;
 }
 
 .react-flow__node.canvas-asset-group-node {
@@ -5024,6 +5082,23 @@ svg[data-spin="true"] {
   overflow-wrap: anywhere;
 }
 
+.canvas-knowledge-workflow__download-recovery {
+  display: grid;
+  justify-items: start;
+  gap: var(--space-xs);
+  margin: 0;
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  color: var(--color-muted);
+  font-size: var(--text-xs);
+  line-height: 1.5;
+}
+
+.canvas-knowledge-workflow__download-recovery p {
+  margin: 0;
+}
+
 .canvas-knowledge-workflow__result {
   display: grid;
   gap: var(--space-xs);
@@ -5678,7 +5753,7 @@ svg[data-spin="true"] {
   z-index: var(--z-base);
   display: flex;
   width: 580px;
-  height: 456px;
+  height: 520px;
   flex-direction: column;
   gap: var(--space-xs);
   padding: var(--space-sm);
@@ -6942,7 +7017,8 @@ svg[data-spin="true"] {
 }
 
 .canvas-prompt-node__field textarea,
-.canvas-prompt-node__field select {
+.canvas-prompt-node__field select,
+.canvas-prompt-node__field input {
   width: 100%;
   min-width: 0;
   padding: var(--space-xs);
@@ -6961,7 +7037,8 @@ svg[data-spin="true"] {
 }
 
 .canvas-prompt-node__field textarea:focus-visible,
-.canvas-prompt-node__field select:focus-visible {
+.canvas-prompt-node__field select:focus-visible,
+.canvas-prompt-node__field input:focus-visible {
   border-color: var(--color-accent);
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--rule-thin);
@@ -6971,6 +7048,19 @@ svg[data-spin="true"] {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: var(--space-xs);
+}
+
+.canvas-prompt-node__dialogue-guard {
+  display: grid;
+  gap: var(--space-xs);
+  padding: var(--space-xs);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+
+.canvas-prompt-node__dialogue-guard > small {
+  color: var(--color-ink-2);
+  font-size: var(--text-xs);
 }
 
 .canvas-prompt-node__output {
@@ -10281,7 +10371,7 @@ button.prompt-mention__recognizable-tag:focus-visible {
   .zoom-control button,
   .canvas-history-control button,
   .canvas-home-control button,
-  .canvas-group-control button,
+  .canvas-node-selection-control button,
   .primary-action,
   .asset-search,
   .settings-dialog__close,

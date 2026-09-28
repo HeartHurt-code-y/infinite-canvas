@@ -1,7 +1,13 @@
 import type { PickedPromptMaterial } from "../../lib/backend";
-import type { MvMediaAlignment, MvSongProbe } from "../../lib/mvMedia";
+import type {
+  MvAsrTranscript,
+  MvLyricsAlignment,
+  MvMediaAlignment,
+  MvSongProbe,
+} from "../../lib/mvMedia";
 import type { AiFilmAsset } from "./aiFilmWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
+import { stableJsonSignature } from "../../lib/workflowSignatures";
 
 export const MUSIC_VIDEO_STAGES = ["timeline", "style", "storyboard", "prompts"] as const;
 export type MusicVideoStage = (typeof MUSIC_VIDEO_STAGES)[number];
@@ -17,6 +23,10 @@ export interface MusicVideoWorkflowOptions {
   readonly songName: string;
   readonly officialLyrics: string;
   readonly lrc: string;
+  /** Absent in older documents, which retain their manually reviewed timeline. */
+  readonly speechAnalysisMode?: "automatic" | "manual";
+  /** Dedicated Doubao Voice connection; Ark model credentials are not interchangeable. */
+  readonly speechProviderConnectionId?: string;
   readonly visualStyle: string;
   readonly aspectRatio: string;
   readonly characterMode: "reference" | "generate" | "none";
@@ -80,7 +90,64 @@ export interface MusicVideoWorkflowCheckpoint {
     readonly step: "approval" | "revision";
   } | null;
   readonly planningComplete: boolean;
+  readonly speech?: {
+    readonly asr?: MvAsrTranscript;
+    readonly forcedAlignment?: MvLyricsAlignment;
+    readonly alignedLyrics?: string;
+    readonly lyricsSource?: "official" | "lrc" | "asr";
+  };
   readonly alignment?: MvMediaAlignment;
+  readonly lipReviews?: Readonly<Record<string, MusicVideoLipReview>>;
+}
+export interface MusicVideoLipReview {
+  readonly decision: "approved" | "rejected";
+  readonly signature: string;
+  readonly clipSignature: string;
+  readonly reviewedAt: number;
+  readonly note: string;
+}
+export function musicVideoLipReviewSignature(
+  checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  shotId: string,
+  clipSignature: string,
+): string {
+  const state = checkpoint.musicVideo;
+  const shot = state?.stages.prompts?.artifact?.shots?.find((item) => item.id === shotId);
+  const clipPath = checkpoint.shotRuns[shotId]?.clipPath;
+  if (!state?.song || !shot || shot.lipSync !== "sync" || !clipPath)
+    throw new Error("口型审核缺少当前正面演唱镜头、片段或原曲身份。");
+  if (!/^[a-f0-9]{64}$/.test(clipSignature)) throw new Error("口型审核需要当前片段正文的 SHA-256。");
+  return stableJsonSignature({
+    runId: checkpoint.runId,
+    songSignature: state.song.sourceSignature,
+    shot,
+    clipPath,
+    clipSignature,
+  });
+}
+export function setMusicVideoLipReview(
+  checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  shotId: string,
+  decision: MusicVideoLipReview["decision"],
+  clipSignature: string,
+  note = "",
+  reviewedAt = Date.now(),
+): KnowledgeVideoWorkflowCheckpoint {
+  if (decision !== "approved" && decision !== "rejected") throw new Error("无效的口型审核决定。");
+  const signature = musicVideoLipReviewSignature(checkpoint, shotId, clipSignature);
+  return {
+    ...checkpoint,
+    musicVideo: {
+      ...checkpoint.musicVideo!,
+      lipReviews: {
+        ...checkpoint.musicVideo?.lipReviews,
+        [shotId]: { decision, signature, clipSignature, reviewedAt, note: note.trim() },
+      },
+    },
+  };
+}
+export function musicVideoSpeechAnalysisMode(options: MusicVideoWorkflowOptions): "automatic" | "manual" {
+  return options.deliverable === "video" ? "automatic" : (options.speechAnalysisMode ?? "manual");
 }
 export function createMusicVideoOptions(): MusicVideoWorkflowOptions {
   return {
@@ -88,6 +155,8 @@ export function createMusicVideoOptions(): MusicVideoWorkflowOptions {
     songName: "",
     officialLyrics: "",
     lrc: "",
+    speechAnalysisMode: "automatic",
+    speechProviderConnectionId: "",
     visualStyle: "",
     aspectRatio: "16:9",
     characterMode: "none",
@@ -136,6 +205,7 @@ export function patchMusicVideoArtifact(
   }
   const nextState = { ...state };
   delete nextState.alignment;
+  delete nextState.lipReviews;
   return {
     ...checkpoint,
     phase: "paused",
@@ -172,13 +242,36 @@ export function musicVideoDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowChe
       `## ${MUSIC_VIDEO_STAGE_LABELS[stage]} · v${run.artifact.version}\n\n${run.artifact.content}\n\n审核：${run.review?.report ?? "待检查"}\n人审：${isMusicVideoStageApproved(run) ? "已确认当前稿" : "待确认"}`,
     );
   }
-  sections.push(
-    "## 验收边界\n\n音频参考仅引导项目视频模型，未执行专用口型同步；实际唱词、嘴型与节拍必须预览人审。最终音轨使用用户提供的原曲母带。",
-  );
+  const speech = state.speech;
+  sections.push("## 歌曲声学分析");
+  if (speech?.asr)
+    sections.push(
+      `专用 ASR：${speech.asr.engine} ${speech.asr.modelVersion}；歌曲 SHA-256：${speech.asr.sourceSignature}。\n识别正文：${speech.asr.transcript || "无可辨识唱词"}`,
+    );
+  else sections.push("未取得专用 ASR 结果；手工歌词或文本模型推测不算自动识别。");
+  if (speech?.forcedAlignment)
+    sections.push(
+      `强制对齐：${speech.forcedAlignment.engine} ${speech.forcedAlignment.modelVersion}；歌词来源：${speech.lyricsSource ?? "未知"}；逐行时间：\n${speech.forcedAlignment.lines.map((line) => `- ${line.startSeconds.toFixed(3)}–${line.endSeconds.toFixed(3)}s ${line.text}`).join("\n")}`,
+    );
+  else sections.push("未取得声学强制对齐结果；时间线仍需人工试听核对。");
   if (state.alignment)
     sections.push(
-      `音视频流时长检查：${state.alignment.aligned ? "通过" : "未通过"}；音频 ${state.alignment.audioDurationSeconds}s / 视频 ${state.alignment.videoDurationSeconds}s。该检查不证明嘴型同步。`,
+      `音视频流时长检查：${state.alignment.aligned ? "通过" : "未通过"}；音频 ${state.alignment.audioDurationSeconds}s / 视频 ${state.alignment.videoDurationSeconds}s。`,
     );
+  const syncShots = state.stages.prompts?.artifact?.shots?.filter((shot) => shot.lipSync === "sync") ?? [];
+  if (syncShots.length) {
+    sections.push("## 逐镜口型人工验收");
+    sections.push(
+      "当前未接入可测量既有视频唇音偏移的自动检测服务；人工审核不等于自动口型验证。",
+    );
+    sections.push(
+      syncShots.map((shot) => {
+        const review = state.lipReviews?.[shot.id];
+        return `- ${shot.id} ${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)}s：${review?.decision === "approved" ? "人工选用" : review?.decision === "rejected" ? "人工驳回" : "待人工验收"}；${review?.note || "无备注"}`;
+      }).join("\n"),
+    );
+  } else sections.push("未安排正面演唱镜头，无口型验收目标。");
+  sections.push("最终音轨使用用户提供的原曲母带；最终交付仍需用户预览确认。");
   if (checkpoint.finalPath) sections.push(`成片：${checkpoint.finalPath}`);
   return sections.join("\n\n");
 }
@@ -218,7 +311,7 @@ export function musicVideoDeliveryBundle(
           (stage) =>
             `## ${MUSIC_VIDEO_STAGE_LABELS[stage]}\n\n${checkpoint.musicVideo?.stages[stage]?.review?.report ?? "待检查"}\n人审：${isMusicVideoStageApproved(checkpoint.musicVideo?.stages[stage]) ? "已确认" : "待确认"}`,
         ).join("\n\n") +
-        `\n\n流时长检查：${JSON.stringify(checkpoint.musicVideo?.alignment ?? "尚未合成检查")}\n仅检查真实流时长，不提供自动口型同步证据。`,
+        `\n\n声学分析：${JSON.stringify(checkpoint.musicVideo?.speech ?? "未执行")}\n流时长检查：${JSON.stringify(checkpoint.musicVideo?.alignment ?? "尚未合成检查")}\n逐镜人工口型审核：${JSON.stringify(checkpoint.musicVideo?.lipReviews ?? "未审核")}\n自动口型检测：未接入，不能宣称自动通过。`,
       mediaType: "text/markdown",
     },
   ];

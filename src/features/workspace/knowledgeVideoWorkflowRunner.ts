@@ -143,6 +143,24 @@ export interface WorkflowPlanningContext {
   readonly resolution?: string;
 }
 
+/** One QC decision is bound to the exact shot and saved result the user reviews. */
+function qcDecisionTarget(
+  checkpoint: KnowledgeVideoWorkflowCheckpoint,
+  shot: KnowledgeVideoWorkflowShot,
+  run: KnowledgeVideoWorkflowShotRun,
+): { readonly shotId: string; readonly signature: string } {
+  if (!run.clipPath) throw new Error(`镜头 ${shot.sequence} 缺少已保存片段，无法请求质检确认。`);
+  return {
+    shotId: shot.id,
+    signature: stableJsonSignature({
+      runId: checkpoint.runId,
+      planRevision: checkpoint.planRevision,
+      shot,
+      run,
+    }),
+  };
+}
+
 export interface VideoWorkflowDefinition {
   readonly isPlanningComplete?: (checkpoint: KnowledgeVideoWorkflowCheckpoint) => boolean;
   readonly validateResume?: (
@@ -156,6 +174,11 @@ export interface VideoWorkflowDefinition {
     context: WorkflowPlanningContext,
     shot: KnowledgeVideoWorkflowShot,
   ) => Promise<readonly ExplicitMediaInput[]>;
+  /** Prepare workflow-specific media and pause for its review before final composition. */
+  readonly prepareComposition?: (
+    context: WorkflowPlanningContext,
+    clips: readonly { shot: KnowledgeVideoWorkflowShot; path: string }[],
+  ) => Promise<boolean>;
   readonly startComposition?: (
     context: WorkflowPlanningContext,
     clips: readonly { shot: KnowledgeVideoWorkflowShot; path: string }[],
@@ -857,7 +880,14 @@ export function createKnowledgeVideoWorkflowRunner(
             "首段 MV 试产已完成，请试听并检查人物、风格、节拍及实际嘴型；确认后才批量制作。";
           messages.composition =
             "全部 MV 片段已完成，请逐段试听检查唱词、节拍和嘴型，确认采用后贴原曲合成。";
-          messages.final = "原曲 MV 已合成，请试听成片确认交付；音视频时长检查不代表口型通过。";
+          messages.final =
+            "原曲 MV 已合成，请对照专用语音识别与歌词对齐证据试听，并逐镜人工验收口型；音视频流时长不能代替口型结论。";
+        }
+        if (node.config.comicDrama) {
+          messages.composition =
+            "全部漫剧片段已完成，请逐段检查画面、角色台词与配音音色，确认采用后合成。";
+          messages.final =
+            "配音成片已生成，请逐句试听并检查人物口型后确认最终交付。";
         }
         commit((current) => ({
           ...current,
@@ -1065,17 +1095,22 @@ export function createKnowledgeVideoWorkflowRunner(
             approvedPlanRevision: current.planRevision,
           }));
         } else if (
+          checkpoint.phase === "awaiting_approval" &&
+          !checkpoint.decision &&
+          definition?.prepareComposition &&
+          (checkpoint.mediaApprovals?.composition ||
+            (!getWorkflowExecutionPlan(node) && !definition.requiresMediaReview))
+        ) {
+          // composeDelivery rechecks the composition approval and workflow-specific
+          // media review against the current files before any further side effects.
+          commit((current) => ({ ...current, phase: "generating", error: null }));
+        } else if (
           checkpoint.phase === "awaiting_approval" ||
           checkpoint.decision?.kind === "planning"
         ) {
           const decision = checkpoint.decision;
-          const decisionKind =
-            decision?.kind ??
-            (Object.values(checkpoint.shotRuns).some((run) => run.qcStatus === "failed")
-              ? "qc"
-              : "planning");
-          if (decisionKind === "planning") {
-            if (!decision) throw new Error("缺少待确认的规划决定。");
+          if (!decision) throw new Error("缺少待确认的工作流决定。");
+          if (decision.kind === "planning") {
             const customerAnswer = request.decisionResolution?.trim();
             const resolution = customerAnswer ? customerAnswer : decision.recommendation;
             commit((current) => ({
@@ -1092,24 +1127,46 @@ export function createKnowledgeVideoWorkflowRunner(
               return checkpoint;
             }
           } else {
+            const failedShots = checkpoint.shots.filter(
+              (shot) => checkpoint.shotRuns[shot.id]?.qcStatus === "failed",
+            );
+            const targetShot = decision.qcTarget
+              ? checkpoint.shots.find((shot) => shot.id === decision.qcTarget?.shotId)
+              : failedShots.length === 1
+                ? failedShots[0]
+                : undefined;
+            const targetRun = targetShot && checkpoint.shotRuns[targetShot.id];
+            if (
+              !targetShot ||
+              !targetRun ||
+              targetRun.qcStatus !== "failed" ||
+              !targetRun.clipPath
+            ) {
+              throw new Error("质检确认无法确定唯一的已保存镜头，请重新质检后逐镜确认。");
+            }
+            if (
+              decision.qcTarget &&
+              qcDecisionTarget(checkpoint, targetShot, targetRun).signature !==
+                decision.qcTarget.signature
+            ) {
+              throw new Error("质检确认对应的镜头或片段已变化，请重新质检后确认。");
+            }
+            const targetShotId = targetShot.id;
             commit((current) => ({
               ...current,
               phase: "qc",
               lastActivePhase: "qc",
               approvedPlanRevision: current.planRevision,
               decision: null,
-              shotRuns: Object.fromEntries(
-                Object.entries(current.shotRuns).map(([key, run]) => [
-                  key,
-                  run.qcStatus === "failed"
-                    ? {
-                        ...run,
-                        qcStatus: "passed",
-                        qcReport: `${run.qcReport ?? ""}\n用户已确认采用推荐方案继续。`.trim(),
-                      }
-                    : run,
-                ]),
-              ),
+              shotRuns: {
+                ...current.shotRuns,
+                [targetShotId]: {
+                  ...current.shotRuns[targetShotId]!,
+                  qcStatus: "passed",
+                  qcReport:
+                    `${current.shotRuns[targetShotId]!.qcReport ?? ""}\n用户已确认采用当前镜头。`.trim(),
+                },
+              },
             }));
           }
         } else if (checkpoint.phase === "failed") {
@@ -1685,49 +1742,51 @@ export function createKnowledgeVideoWorkflowRunner(
                 continue;
               }
               if (qc.result === "NEEDS_DECISION") {
-                commit((current) => ({
-                  ...current,
-                  phase: "awaiting_approval",
-                  lastActivePhase: "qc",
-                  decision: {
-                    kind: "qc",
-                    question: qc.question!,
-                    recommendation: "接受上述差异，保留当前镜头并继续合成",
-                  },
-                  shotRuns: {
-                    ...current.shotRuns,
-                    [shot.id]: {
-                      ...current.shotRuns[shot.id]!,
-                      qcStatus: "failed",
-                      qcReport: qc.report,
+                commit((current) => {
+                  const failedRun: KnowledgeVideoWorkflowShotRun = {
+                    ...current.shotRuns[shot.id]!,
+                    qcStatus: "failed",
+                    qcReport: qc.report,
+                  };
+                  return {
+                    ...current,
+                    phase: "awaiting_approval",
+                    lastActivePhase: "qc",
+                    decision: {
+                      kind: "qc",
+                      question: qc.question!,
+                      recommendation: "接受上述差异，保留当前镜头并继续检查",
+                      qcTarget: qcDecisionTarget(current, shot, failedRun),
                     },
-                  },
-                }));
+                    shotRuns: { ...current.shotRuns, [shot.id]: failedRun },
+                  };
+                });
                 progress("awaiting_approval", 78, "自动质检发现一项需要确认的问题。");
                 return false as const;
               }
               run = checkpoint.shotRuns[shot.id]!;
               if (run.retryCount >= node.config.maxAutomaticRetries) {
-                commit((current) => ({
-                  ...current,
-                  phase: "awaiting_approval",
-                  lastActivePhase: "qc",
-                  decision: {
-                    kind: "qc",
-                    question: `镜头 ${shot.sequence} 已达到 ${node.config.maxAutomaticRetries} 次自动返工上限，仍未通过质检：${qc.report}`,
-                    recommendation:
-                      "检查当前片段后明确选用；如需继续改进，请修改分镜并选择重做该镜头。",
-                  },
-                  shotRuns: {
-                    ...current.shotRuns,
-                    [shot.id]: {
-                      ...current.shotRuns[shot.id]!,
-                      qcStatus: "failed",
-                      qcReport: qc.report,
-                      repairPrompt: qc.repairPrompt,
+                commit((current) => {
+                  const failedRun: KnowledgeVideoWorkflowShotRun = {
+                    ...current.shotRuns[shot.id]!,
+                    qcStatus: "failed",
+                    qcReport: qc.report,
+                    repairPrompt: qc.repairPrompt,
+                  };
+                  return {
+                    ...current,
+                    phase: "awaiting_approval",
+                    lastActivePhase: "qc",
+                    decision: {
+                      kind: "qc",
+                      question: `镜头 ${shot.sequence} 已达到 ${node.config.maxAutomaticRetries} 次自动返工上限，仍未通过质检：${qc.report}`,
+                      recommendation:
+                        "检查当前片段后明确选用；如需继续改进，请修改分镜并选择重做该镜头。",
+                      qcTarget: qcDecisionTarget(current, shot, failedRun),
                     },
-                  },
-                }));
+                    shotRuns: { ...current.shotRuns, [shot.id]: failedRun },
+                  };
+                });
                 progress(
                   "awaiting_approval",
                   78,
@@ -1773,24 +1832,25 @@ export function createKnowledgeVideoWorkflowRunner(
             }
           }
           if (!finished) {
-            commit((current) => ({
-              ...current,
-              phase: "awaiting_approval",
-              lastActivePhase: "qc",
-              decision: {
-                kind: "qc",
-                question: `镜头 ${shot.sequence} 无法完成视觉质检：${qcInfrastructureFailure}`,
-                recommendation: "保留当前片段，按文件完整性结果继续合成",
-              },
-              shotRuns: {
-                ...current.shotRuns,
-                [shot.id]: {
-                  ...current.shotRuns[shot.id]!,
-                  qcStatus: "failed",
-                  qcReport: `视觉质检未完成：${qcInfrastructureFailure}`,
+            commit((current) => {
+              const failedRun: KnowledgeVideoWorkflowShotRun = {
+                ...current.shotRuns[shot.id]!,
+                qcStatus: "failed",
+                qcReport: `视觉质检未完成：${qcInfrastructureFailure}`,
+              };
+              return {
+                ...current,
+                phase: "awaiting_approval",
+                lastActivePhase: "qc",
+                decision: {
+                  kind: "qc",
+                  question: `镜头 ${shot.sequence} 无法完成视觉质检：${qcInfrastructureFailure}`,
+                  recommendation: "保留当前片段，按文件完整性结果继续检查",
+                  qcTarget: qcDecisionTarget(current, shot, failedRun),
                 },
-              },
-            }));
+                shotRuns: { ...current.shotRuns, [shot.id]: failedRun },
+              };
+            });
             progress("awaiting_approval", 78, "视觉质检链路需要确认后继续。");
             return false as const;
           }
@@ -1805,6 +1865,14 @@ export function createKnowledgeVideoWorkflowRunner(
           if (!requireMediaReview("composition")) return false as const;
           const clipPaths = checkpoint.shots.map((shot) => checkpoint.shotRuns[shot.id]?.clipPath);
           if (clipPaths.some((path) => !path)) throw new Error("部分视频片段尚未保存，无法合成。");
+          if (
+            definition?.prepareComposition &&
+            !(await definition.prepareComposition(
+              context(),
+              checkpoint.shots.map((shot, index) => ({ shot, path: clipPaths[index]! })),
+            ))
+          )
+            return false as const;
           let finalPath: string;
           if (checkpoint.finalPath && checkpoint.executionPlan?.review?.kind === "final") {
             finalPath = checkpoint.finalPath;

@@ -14,7 +14,10 @@ import { cloudAssetAwaitingId } from "../workspace/workspaceModel";
 import {
   assetLibraryClient,
   formatRawBackendError,
+  inferMediaKindFromName,
   isDesktopRuntime,
+  localBase64AssetClient,
+  pickLocalMediaFiles,
   refreshMediaUrlWithStagingFallback,
   toMediaSrc,
   tosStagingClient,
@@ -24,6 +27,7 @@ import {
   type GenerationTaskClient,
   type GenerationTaskDetail,
   type LocalAssetRecord,
+  type LocalBase64AssetRecord,
   type MediaReferenceTarget,
   type MediaType,
   type ModelOperationSchema,
@@ -89,6 +93,8 @@ function sameMaterialTarget(first: ExplicitMediaTarget, second: ExplicitMediaTar
     );
   if (first.kind === "local_asset" && second.kind === "local_asset")
     return first.mediaType === second.mediaType && first.stagingJobId === second.stagingJobId;
+  if (first.kind === "local_base64_asset" && second.kind === "local_base64_asset")
+    return first.mediaType === second.mediaType && first.assetId === second.assetId;
   if (first.kind === "local_result" && second.kind === "local_result")
     return (
       first.mediaType === second.mediaType &&
@@ -111,6 +117,8 @@ function targetSignature(target: ExplicitMediaTarget): string {
       return `asset:${target.mediaType}:${target.providerConnectionId}:${target.assetId}`;
     case "local_asset":
       return `local_asset:${target.mediaType}:${target.stagingJobId}`;
+    case "local_base64_asset":
+      return `local_base64_asset:${target.mediaType}:${target.assetId}`;
     case "local_result":
       return `local_result:${target.mediaType}:${target.generationTaskId}:${target.resultIndex}`;
     case "local_file":
@@ -214,6 +222,8 @@ function targetSourceLabel(target: ExplicitMediaTarget): string {
       return "云端素材";
     case "local_asset":
       return "本地素材";
+    case "local_base64_asset":
+      return "本地素材";
     case "local_result":
       return "生成结果";
     case "local_file":
@@ -221,6 +231,11 @@ function targetSourceLabel(target: ExplicitMediaTarget): string {
     case "url":
       return "链接素材";
   }
+}
+
+function isLocalBase64VideoUrl(url: string | null): boolean {
+  if (url == null) return false;
+  return /^localbase64:\/\//i.test(url) || /^https?:\/\/localbase64\.localhost\//i.test(url);
 }
 
 /** 素材行缩略图：按素材类型展示预览图；缺失或加载失败时回退为类型图标。 */
@@ -259,7 +274,10 @@ function MaterialThumb({
     });
   };
   // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
-  const videoSource = mediaType === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;
+  const videoSource =
+    mediaType === "video" && (isVideoSourceUrl(effectiveUrl) || isLocalBase64VideoUrl(effectiveUrl))
+      ? effectiveUrl
+      : null;
   if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-material__thumb" aria-hidden="true">
@@ -334,12 +352,17 @@ function AddListThumb({
     });
   };
   // 参考视频素材取中间帧作封面；预览地址指向封面图时按图片加载。
-  const videoSource = kind === "video" && isVideoSourceUrl(effectiveUrl) ? effectiveUrl : null;
+  const videoSource =
+    kind === "video" && (isVideoSourceUrl(effectiveUrl) || isLocalBase64VideoUrl(effectiveUrl))
+      ? effectiveUrl
+      : null;
   if (effectiveUrl == null || failed) {
     return (
       <span className="regenerate-add__thumb" aria-hidden="true">
         {kind === "video" ? (
           <Icon name="video-camera" size="sm" />
+        ) : kind === "audio" ? (
+          <Icon name="waveform" size="sm" />
         ) : (
           <Icon name="image-square" size="sm" />
         )}
@@ -427,8 +450,13 @@ export function RegenerateGenerationDialog({
   const [addTab, setAddTab] = useState<AddTab>("cloud");
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[] | null>(null);
   const [cloudError, setCloudError] = useState<string | null>(null);
-  const [localAssets, setLocalAssets] = useState<readonly LocalAssetRecord[] | null>(null);
+  const [localAssets, setLocalAssets] = useState<readonly LocalBase64AssetRecord[] | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  const [legacyLocalAssets, setLegacyLocalAssets] = useState<readonly LocalAssetRecord[]>([]);
+  const [localImportPending, setLocalImportPending] = useState(false);
+  const localImportBusyRef = useRef(false);
+  const [localImportError, setLocalImportError] = useState<string | null>(null);
+  const [localImportSuccess, setLocalImportSuccess] = useState<string | null>(null);
   const [localResultPreviews, setLocalResultPreviews] = useState<ReadonlyMap<string, string>>(
     new Map(),
   );
@@ -458,11 +486,18 @@ export function RegenerateGenerationDialog({
       })
       .then(setCloudAssets)
       .catch((reason: unknown) => setCloudError(formatRawBackendError(reason)));
-    void tosStagingClient
-      .listLocalAssets()
+    void localBase64AssetClient
+      .listAssets()
       .then((page) => setLocalAssets(page.items))
       .catch((reason: unknown) => setLocalError(formatRawBackendError(reason)));
-  }, [runtime, frozen?.providerConnectionId]);
+    // 只在旧任务真的引用 TOS 本地索引时读取它，不混入新的本机素材库。
+    if (initialMaterials.some((material) => material.target.kind === "local_asset")) {
+      void tosStagingClient
+        .listLocalAssets()
+        .then((page) => setLegacyLocalAssets(page.items))
+        .catch(() => undefined);
+    }
+  }, [runtime, frozen?.providerConnectionId, initialMaterials]);
 
   // 「生成结果」素材：从引用任务的产物里取 finalPath 作为缩略图（桌面端转换文件协议）。
   useEffect(() => {
@@ -500,12 +535,13 @@ export function RegenerateGenerationDialog({
     };
   }, [client, materials, runtime]);
 
-  // 逐类素材解析缩略图：云端 previewUrl/coverUrl、本地库 previewUrl、
+  // 逐类素材解析缩略图：云端 previewUrl/coverUrl、两代本地库 previewUrl、
   // 生成结果 finalPath、本地文件路径、链接图片直用 URL。
   const previewUrls = useMemo(() => {
     const next = new Map<string, string>();
     const cloudById = new Map((cloudAssets ?? []).map((asset) => [asset.id, asset] as const));
     const localById = new Map((localAssets ?? []).map((asset) => [asset.id, asset] as const));
+    const legacyLocalById = new Map(legacyLocalAssets.map((asset) => [asset.id, asset] as const));
     for (const material of materials) {
       const target = material.target;
       let preview: string | null = null;
@@ -520,7 +556,11 @@ export function RegenerateGenerationDialog({
           break;
         }
         case "local_asset": {
-          preview = localById.get(target.stagingJobId)?.previewUrl ?? null;
+          preview = legacyLocalById.get(target.stagingJobId)?.previewUrl ?? null;
+          break;
+        }
+        case "local_base64_asset": {
+          preview = localById.get(target.assetId)?.previewUrl ?? null;
           break;
         }
         case "local_result": {
@@ -540,7 +580,15 @@ export function RegenerateGenerationDialog({
       if (preview != null) next.set(material.id, preview);
     }
     return next;
-  }, [materials, cloudAssets, localAssets, localResultPreviews, fetchedAssetPreviews, runtime]);
+  }, [
+    materials,
+    cloudAssets,
+    localAssets,
+    legacyLocalAssets,
+    localResultPreviews,
+    fetchedAssetPreviews,
+    runtime,
+  ]);
 
   // 云端素材缩略图兜底：素材库列表按单个连接、单页拉取，覆盖不到的长尾素材行
   // 会没有缩略图；这里按素材自身身份（连接 + 素材 id）单独取一次签名地址。
@@ -664,8 +712,62 @@ export function RegenerateGenerationDialog({
     setUrlRole("");
   };
 
+  const importLocalMaterials = async () => {
+    if (!runtime || busy || localImportBusyRef.current) return;
+    localImportBusyRef.current = true;
+    setLocalImportPending(true);
+    setLocalImportError(null);
+    setLocalImportSuccess(null);
+    try {
+      const paths = await pickLocalMediaFiles();
+      if (paths.length === 0) return;
+      const imported: LocalBase64AssetRecord[] = [];
+      const failures: string[] = [];
+      for (const localPath of paths) {
+        const fileName = localPath.split(/[\\/]/).pop() || localPath;
+        if (inferMediaKindFromName(fileName) == null) {
+          failures.push(`${fileName}：不支持的文件类型`);
+          continue;
+        }
+        try {
+          imported.push(await localBase64AssetClient.importAsset({ localPath }));
+        } catch (reason) {
+          failures.push(`${fileName}：${formatRawBackendError(reason)}`);
+        }
+      }
+      if (imported.length > 0) {
+        setLocalError(null);
+        setLocalAssets((current) => {
+          const byId = new Map((current ?? []).map((asset) => [asset.id, asset] as const));
+          for (const asset of imported) byId.set(asset.id, asset);
+          return [...byId.values()];
+        });
+        setMaterials((current) => {
+          const next = [...current];
+          for (const asset of imported) {
+            const target: MediaReferenceTarget = {
+              kind: "local_base64_asset",
+              assetId: asset.id,
+              mediaType: asset.mediaType,
+            };
+            if (next.some((entry) => sameMaterialTarget(entry.target, target))) continue;
+            next.push({ id: newMaterialId(), target, role: "", displayName: asset.name });
+          }
+          return next;
+        });
+        setLocalImportSuccess(`已保存 ${imported.length} 项本地素材，并加入本次生成。`);
+      }
+      if (failures.length > 0) setLocalImportError(failures.join("；"));
+    } catch (reason) {
+      setLocalImportError(`选择本机文件失败：${formatRawBackendError(reason)}`);
+    } finally {
+      localImportBusyRef.current = false;
+      setLocalImportPending(false);
+    }
+  };
+
   const handleSubmit = () => {
-    if (busy) return;
+    if (busy || localImportPending) return;
     setValidationError(null);
     if (frozen == null) {
       setValidationError("该任务缺少可用的请求快照，无法重新生成。");
@@ -900,44 +1002,62 @@ export function RegenerateGenerationDialog({
                   )
                 ) : null}
                 {addTab === "local" ? (
-                  !runtime ? (
-                    <p className="regenerate-add__error">本地素材库需要桌面应用运行环境。</p>
-                  ) : localError ? (
-                    <p className="regenerate-add__error">{localError}</p>
-                  ) : localAssets == null ? (
-                    <p className="regenerate-add__empty">正在加载本地素材…</p>
-                  ) : localAssets.length === 0 ? (
-                    <p className="regenerate-add__empty">本地素材库为空。</p>
-                  ) : (
-                    <ul className="regenerate-add__list">
-                      {localAssets.map((asset) => (
-                        <li key={asset.id}>
-                          <button
-                            type="button"
-                            disabled={busy}
-                            onClick={() =>
-                              addMaterial({
-                                id: newMaterialId(),
-                                target: {
-                                  kind: "local_asset",
-                                  stagingJobId: asset.id,
-                                  mediaType: asset.mediaType,
-                                },
-                                role: "",
-                                displayName: asset.name,
-                              })
-                            }
-                          >
-                            <AddListThumb previewUrl={asset.previewUrl} kind={asset.mediaType} />
-                            <span>{asset.name}</span>
-                            <span className="regenerate-add__kind">
-                              {MEDIA_TYPE_LABELS[asset.mediaType] ?? asset.mediaType}
-                            </span>
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
-                  )
+                  <>
+                    {runtime ? (
+                      <button
+                        type="button"
+                        className="regenerate-add__submit"
+                        disabled={busy || localImportPending}
+                        onClick={() => void importLocalMaterials()}
+                      >
+                        {localImportPending ? "正在保存到本地素材库…" : "上传本机图片、视频或音频"}
+                      </button>
+                    ) : null}
+                    {localImportSuccess ? <p role="status">{localImportSuccess}</p> : null}
+                    {localImportError ? (
+                      <p role="alert" className="regenerate-add__error">
+                        {localImportError}
+                      </p>
+                    ) : null}
+                    {!runtime ? (
+                      <p className="regenerate-add__error">本地素材库需要桌面应用运行环境。</p>
+                    ) : localError ? (
+                      <p className="regenerate-add__error">{localError}</p>
+                    ) : localAssets == null ? (
+                      <p className="regenerate-add__empty">正在加载本地素材…</p>
+                    ) : localAssets.length === 0 ? (
+                      <p className="regenerate-add__empty">本地素材库为空。</p>
+                    ) : (
+                      <ul className="regenerate-add__list">
+                        {localAssets.map((asset) => (
+                          <li key={asset.id}>
+                            <button
+                              type="button"
+                              disabled={busy || localImportPending}
+                              onClick={() =>
+                                addMaterial({
+                                  id: newMaterialId(),
+                                  target: {
+                                    kind: "local_base64_asset",
+                                    assetId: asset.id,
+                                    mediaType: asset.mediaType,
+                                  },
+                                  role: "",
+                                  displayName: asset.name,
+                                })
+                              }
+                            >
+                              <AddListThumb previewUrl={asset.previewUrl} kind={asset.mediaType} />
+                              <span>{asset.name}</span>
+                              <span className="regenerate-add__kind">
+                                {MEDIA_TYPE_LABELS[asset.mediaType] ?? asset.mediaType}
+                              </span>
+                            </button>
+                          </li>
+                        ))}
+                      </ul>
+                    )}
+                  </>
                 ) : null}
                 {addTab === "url" ? (
                   <div className="regenerate-add__url">
@@ -1012,7 +1132,7 @@ export function RegenerateGenerationDialog({
           <button
             type="button"
             className="regenerate-dialog__submit"
-            disabled={busy}
+            disabled={busy || localImportPending}
             onClick={handleSubmit}
           >
             {busy ? "正在创建任务…" : "重新生成"}

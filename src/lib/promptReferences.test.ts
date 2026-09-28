@@ -259,6 +259,7 @@ describe("reference identity factory", () => {
   it.each([
     { kind: "asset", assetId: "asset-17", providerConnectionId: "provider-9", mediaType: "image" },
     { kind: "local_asset", stagingJobId: "staging-17", mediaType: "audio" },
+    { kind: "local_base64_asset", assetId: "local-b64-17", mediaType: "image" },
     { kind: "local_result", generationTaskId: "task-17", resultIndex: 3, mediaType: "video" },
     { kind: "local_file", path: "C:\\frames\\frame.png", mediaType: "image" },
   ] satisfies MediaReferenceTarget[])(

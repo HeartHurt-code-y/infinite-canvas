@@ -20,8 +20,9 @@ test("slim release baseline detects byte changes in retained resources", async (
     assert.notEqual(first.sha256, second.sha256);
     const resources = Object.fromEntries(STABLE_RESOURCE_DIRS.map((name) => [name, first]));
     const expected = {
-      schemaVersion: 2,
+      schemaVersion: 3,
       platform: "windows-x86_64",
+      bundleResourceMapSha256: "c".repeat(64),
       bridgeVersion: "0.1.8",
       fullNsisSha256: "a".repeat(64),
       fullNsisSignatureSha256: "b".repeat(64),
@@ -29,6 +30,50 @@ test("slim release baseline detects byte changes in retained resources", async (
     };
     assert.doesNotThrow(() => assertRuntimeBaseline(expected, expected, "0.1.9"));
     assert.throws(() => assertRuntimeBaseline(expected, expected, "0.1.8"), /必须高于/);
+    assert.throws(
+      () =>
+        assertRuntimeBaseline(expected, {
+          ...expected,
+          bundleResourceMapSha256: "d".repeat(64),
+        }),
+      /资源映射不同/,
+    );
+    assert.throws(
+      () =>
+        assertRuntimeBaseline(
+          expected,
+          {
+            ...expected,
+            bundleResourceMapSha256: "d".repeat(64),
+            resources: { ...resources, [STABLE_RESOURCE_DIRS[0]]: second },
+          },
+          "0.1.9",
+          { signedResourceReleaseVerified: true },
+        ),
+      /资源映射不同/,
+    );
+    assert.doesNotThrow(() =>
+      assertRuntimeBaseline(
+        expected,
+        { ...expected, resources: { ...resources, [STABLE_RESOURCE_DIRS[0]]: second } },
+        "0.1.9",
+        { signedResourceReleaseVerified: true },
+      ),
+    );
+    assert.throws(
+      () =>
+        assertRuntimeBaseline(
+          expected,
+          { ...expected, resources: { ...resources, [STABLE_RESOURCE_DIRS[3]]: second } },
+          "0.1.9",
+          { signedResourceReleaseVerified: true },
+        ),
+      /不能制作瘦包/,
+    );
+    assert.throws(
+      () => assertRuntimeBaseline({ ...expected, schemaVersion: 2 }, expected, "0.1.9"),
+      /基线格式不正确/,
+    );
     assert.throws(
       () =>
         assertRuntimeBaseline(expected, {

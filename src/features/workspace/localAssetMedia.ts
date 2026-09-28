@@ -6,15 +6,15 @@ export { signedUrlExpired } from "../../lib/signedMediaUrl";
 /**
  * 本地素材预览地址的运行时登记表。
  *
- * 本地素材的 `previewUrl` 是对象存储的短期预签名地址（后端 1 小时），而画布文档会把
- * 节点数据整体持久化，于是「重启后打开画布」必然拿到一批过期签名：节点先渲染失败，
- * 再靠 `onError` 逐节点续签，于是用户看到的是一屏「预览不可用」。
+ * 旧本地素材的 `previewUrl` 是对象存储的短期预签名地址（后端 1 小时）；新 Base64
+ * 素材使用稳定的本机协议地址，不需要网络或续签。画布文档会把旧地址持久化，重启后
+ * 若等到节点加载失败才续签，会短暂出现「预览不可用」。
  *
- * 这里在画布文档水合后按素材身份批量续签，把新地址回写节点数据。因此画布文档不再
- * 依赖其中一份签名的存活期：过期地址在被使用前就被替换，续签失败时仍回落到
+ * 这里在画布文档水合后对旧素材按身份批量续签，也恢复缺少预览字段的 Base64 素材。
+ * 因此旧画布不再依赖其中一份签名的存活期：过期地址在被使用前就被替换，续签失败时仍回落到
  * `CanvasAssetNode` 的 onError 自愈路径。云端素材（供应商签名地址）不由本模块接管。
  *
- * 已经下载过的素材由 `mediaByteCache` 直接命中本地字节，续签只负责让画布文档里的
+ * 已经下载过的旧素材由 `mediaByteCache` 直接命中本地字节，续签只负责让画布文档里的
  * 签名保持新鲜；两者互相独立，任一路径可用预览就不会失败。
  */
 
@@ -25,6 +25,11 @@ const resolved = new Map<string, string>();
 
 function keyOf(assetId: string, kind: AssetKind): string {
   return `${assetId}:${kind}`;
+}
+
+/** Base64 素材由本机持久库提供稳定地址；旧 TOS 素材需要续签。 */
+function isLocalBase64Asset(assetId: string): boolean {
+  return assetId.startsWith("local-b64-");
 }
 
 /** 本地素材节点当前应使用的预览地址：`null` 表示已无可用地址，调用方保持占位。 */
@@ -71,12 +76,19 @@ export function refreshLocalAssetPreviewUrl(
  * 返回取消函数，画布在续签期间被切换时丢弃迟到的回写。
  */
 export function prefetchLocalAssetMedia(
-  nodes: readonly Pick<AssetNodeData, "assetId" | "kind">[],
+  nodes: readonly (Pick<AssetNodeData, "assetId" | "kind"> &
+    Partial<Pick<AssetNodeData, "previewUrl" | "videoUrl">>)[],
   onResolved: (fresh: ReadonlyMap<string, string>) => void,
 ): () => void {
   const wanted = new Map<string, { assetId: string; kind: AssetKind }>();
   for (const node of nodes) {
     if (node.assetId === "") continue;
+    // Stable local URLs need no refresh unless the field used by the renderer is absent.
+    if (
+      isLocalBase64Asset(node.assetId) &&
+      (node.kind === "video" ? node.videoUrl : node.previewUrl)
+    )
+      continue;
     wanted.set(keyOf(node.assetId, node.kind), { assetId: node.assetId, kind: node.kind });
   }
   if (wanted.size === 0) return () => undefined;

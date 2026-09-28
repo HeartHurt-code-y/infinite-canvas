@@ -20,6 +20,7 @@ import {
   remotionInventoryFilesMatch,
   remotionTreeIsMaterialized,
   materializeRemotionRuntime,
+  remotionPackagesPresent,
   writeRemotionFileInventory,
 } from "./remotion-runtime-integrity.mjs";
 
@@ -33,6 +34,8 @@ test("prepared Remotion manifest detects changes to runtime executables and scri
       "browser/chrome-headless-shell.exe",
       "render.mjs",
       "plan.mjs",
+      "resolve-douyin.mjs",
+      "resolve-rednote.mjs",
       "bundle/index.html",
     ]) {
       writeFileSync(path.join(root, name), `original:${name}`);
@@ -42,7 +45,7 @@ test("prepared Remotion manifest detects changes to runtime executables and scri
       "node.exe",
       "browser/chrome-headless-shell.exe",
     );
-    assert.equal(Object.keys(hashes).length, 5);
+    assert.equal(Object.keys(hashes).length, 7);
     assert.equal(
       await remotionCriticalFilesMatch(
         root,
@@ -62,6 +65,36 @@ test("prepared Remotion manifest detects changes to runtime executables and scri
       ),
       false,
     );
+    writeFileSync(path.join(root, "render.mjs"), "original:render.mjs");
+    writeFileSync(path.join(root, "resolve-douyin.mjs"), "changed");
+    assert.equal(
+      await remotionCriticalFilesMatch(
+        root,
+        "node.exe",
+        "browser/chrome-headless-shell.exe",
+        hashes,
+      ),
+      false,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("runtime dependencies must include Playwright and source-map before preparation is ready", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "remotion-deps-"));
+  try {
+    const packages = ["@remotion/renderer", "playwright-core", "source-map"];
+    for (const name of ["@remotion/renderer", "source-map"]) {
+      const directory = path.join(root, "node_modules", ...name.split("/"));
+      mkdirSync(directory, { recursive: true });
+      writeFileSync(path.join(directory, "package.json"), "{}");
+    }
+    assert.equal(remotionPackagesPresent(root, packages), false);
+    const playwright = path.join(root, "node_modules", "playwright-core");
+    mkdirSync(playwright, { recursive: true });
+    writeFileSync(path.join(playwright, "package.json"), "{}");
+    assert.equal(remotionPackagesPresent(root, packages), true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

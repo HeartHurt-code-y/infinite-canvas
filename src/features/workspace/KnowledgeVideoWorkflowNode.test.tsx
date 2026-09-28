@@ -565,15 +565,38 @@ describe("KnowledgeVideoWorkflowNode", () => {
   it("keeps QC decisions to confirming the current generated result", () => {
     const onContinue = vi.fn();
     const base = createKnowledgeVideoWorkflowConfig(selections, true);
+    const shot: KnowledgeVideoWorkflowShot = {
+      id: "shot-03",
+      sequence: 3,
+      section: "VISUAL",
+      track: "LECTURER",
+      title: "镜头 3",
+      durationSeconds: 5,
+      visual: "人物近景",
+      narration: "示例",
+      videoPrompt: "人物讲解",
+      acceptance: "人物自然",
+    };
     const node = createNode({
       ...base,
       checkpoint: {
         ...base.checkpoint,
         phase: "awaiting_approval",
+        shots: [shot],
+        shotRuns: {
+          [shot.id]: {
+            shotId: shot.id,
+            videoTaskId: "task-03",
+            clipPath: "C:\\output\\shot-03.mp4",
+            qcStatus: "failed",
+            retryCount: 0,
+          },
+        },
         decision: {
           kind: "qc",
           question: "镜头 3 的人物手部有轻微形变，是否继续使用？",
           recommendation: "当前问题不影响知识表达，建议采用并继续合成。",
+          qcTarget: { shotId: shot.id, signature: "saved-clip-signature" },
         },
       },
     });
@@ -582,6 +605,8 @@ describe("KnowledgeVideoWorkflowNode", () => {
 
     const decision = screen.getByRole("region", { name: "需要确认" });
     expect(within(decision).queryByRole("textbox")).not.toBeInTheDocument();
+    expect(within(decision).getByText("当前确认：镜头 3")).toBeInTheDocument();
+    expect(within(decision).getByLabelText("镜头 3 当前片段预览")).toBeInTheDocument();
     fireEvent.click(within(decision).getByRole("button", { name: "采用当前结果并继续" }));
     expect(onContinue).toHaveBeenCalledWith("knowledge-video-workflow-1");
   });

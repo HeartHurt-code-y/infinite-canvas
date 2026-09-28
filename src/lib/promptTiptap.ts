@@ -67,6 +67,15 @@ function datasetForTarget(target: MediaReferenceTarget): Record<string, string> 
       "data-media-kind": target.mediaType,
     };
   }
+  if (target.kind === "local_base64_asset") {
+    return {
+      "data-asset-id": target.assetId,
+      "data-provider-id": "",
+      "data-asset-source": "local",
+      "data-reference-kind": "local_base64_asset",
+      "data-media-kind": target.mediaType,
+    };
+  }
   if (target.kind === "local_file") {
     return {
       "data-asset-id": target.path,
@@ -104,6 +113,10 @@ export function promptReferenceTargetFromElement(
     return generationTaskId && Number.isInteger(resultIndex) && resultIndex >= 0
       ? { kind: "local_result", generationTaskId, resultIndex, canvasNodeKey, mediaType }
       : null;
+  }
+  if (element.dataset["referenceKind"] === "local_base64_asset") {
+    const assetId = element.dataset["assetId"] ?? "";
+    return assetId ? { kind: "local_base64_asset", assetId, canvasNodeKey, mediaType } : null;
   }
   if (
     element.dataset["referenceKind"] === "local_asset" ||
@@ -185,11 +198,13 @@ const MediaReference = Node.create({
           ? target.assetId
           : target?.kind === "local_asset"
             ? target.stagingJobId
-            : target?.kind === "local_file"
-              ? target.path
-              : target
-                ? `${target.generationTaskId}#${target.resultIndex}`
-                : ""
+            : target?.kind === "local_base64_asset"
+              ? target.assetId
+              : target?.kind === "local_file"
+                ? target.path
+                : target
+                  ? `${target.generationTaskId}#${target.resultIndex}`
+                  : ""
       } · ${String(node.attrs["canvasNodeKey"] ?? "")}`,
     };
     if (target) Object.assign(attrs, datasetForTarget(target));

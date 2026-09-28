@@ -19,11 +19,14 @@ import {
   type GenerationTaskSummary,
   type MediaReferenceTarget,
   type ProviderCatalogEntry,
+  type VideoDownloadCredentialSource,
+  type VideoDownloaderCookieBrowser,
   type VideoDownloaderEngineStatus,
 } from "../../lib/backend";
 import type { PromptContentEditorSession } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
+import { DownloadCookieSourceControls } from "./DownloadCookieSourceControls";
 import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
 import { localAssetNodeMediaUrl } from "./localAssetMedia";
 import { useMediaByteSource } from "./mediaByteCache";
@@ -710,9 +713,27 @@ export function CanvasVideoComposerNode({
 
 /** 是否为 B 站链接（含 b23.tv 短链），用于触发 B 站画质路由提醒。 */
 function isBilibiliLink(url: string): boolean {
-  const lower = url.toLowerCase();
-  return lower.includes("bilibili.com") || lower.includes("b23.tv");
+  const candidate = url.match(/https?:\/\/[^\s<>"']+/i)?.[0];
+  if (!candidate) return false;
+  try {
+    const hostname = new URL(candidate).hostname.toLowerCase();
+    return ["bilibili.com", "b23.tv"].some(
+      (domain) => hostname === domain || hostname.endsWith(`.${domain}`),
+    );
+  } catch {
+    return false;
+  }
 }
+
+const DOWNLOAD_CREDENTIAL_SOURCE_LABEL: Record<VideoDownloadCredentialSource, string> = {
+  chrome: "Chrome 浏览器 Cookies",
+  edge: "Edge 浏览器 Cookies",
+  firefox: "Firefox 浏览器 Cookies",
+  brave: "Brave 浏览器 Cookies",
+  manual: "已导入的 cookies.txt",
+  site_session: "站点会话",
+  none: "未使用 Cookies",
+};
 
 /**
  * 画布网络爆款视频下载节点：内置 yt-dlp 引擎，粘贴抖音等站点链接下载为
@@ -736,6 +757,7 @@ export function CanvasVideoDownloaderNode({
   onPrepareEngine,
   onUpdateEngine,
   onImportCookies,
+  onSelectCookieBrowser,
   onClearCookies,
   onRevealResult,
   onConnectionStart,
@@ -762,6 +784,7 @@ export function CanvasVideoDownloaderNode({
   readonly onPrepareEngine: () => void;
   readonly onUpdateEngine: () => void;
   readonly onImportCookies: () => void;
+  readonly onSelectCookieBrowser: (browser: VideoDownloaderCookieBrowser | null) => void;
   readonly onClearCookies: () => void;
   readonly onRevealResult: (key: string) => void;
   readonly onConnectionStart: (key: string) => void;
@@ -783,7 +806,10 @@ export function CanvasVideoDownloaderNode({
   const statusText = running
     ? runState?.preparingEngine
       ? "正在准备下载引擎…"
-      : `正在下载 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
+      : runState?.probeStatus ||
+        (engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource
+          ? "正在逐源预检视频访问…"
+          : `正在下载 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`)
     : runState?.status === "done"
       ? "下载完成 · 产物已落在右侧"
       : runState?.status === "cancelled"
@@ -800,7 +826,7 @@ export function CanvasVideoDownloaderNode({
       className={`canvas-video-downloader${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
       aria-busy={running || undefined}
       onMouseDown={(event) => {
-        if ((event.target as HTMLElement).closest("button, input")) {
+        if ((event.target as HTMLElement).closest("button, input, select, label")) {
           onSelect(node.key);
           return;
         }
@@ -944,55 +970,35 @@ export function CanvasVideoDownloaderNode({
         ) : null}
       </div>
 
-      <div className="canvas-video-downloader__cookie-row">
-        <span className="canvas-video-downloader__cookie-label">
-          {engineStatus?.cookiesInstalled
-            ? "已导入浏览器 Cookies"
-            : "未导入 Cookies · 抖音可能需要"}
-        </span>
-        <button
-          type="button"
-          className="canvas-video-downloader__engine-action"
-          aria-label="导入浏览器导出的 cookies 文件"
-          title="导入浏览器扩展导出的 cookies.txt（抖音要求较新的匿名 Cookies，无需登录）"
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onImportCookies();
-          }}
-        >
-          导入 Cookies
-        </button>
-        {engineStatus?.cookiesInstalled ? (
-          <button
-            type="button"
-            className="canvas-video-downloader__engine-action"
-            aria-label="清除已导入的 Cookies"
-            onMouseDown={(event) => event.stopPropagation()}
-            onClick={(event) => {
-              event.stopPropagation();
-              onClearCookies();
-            }}
-          >
-            清除
-          </button>
-        ) : null}
-      </div>
+      <DownloadCookieSourceControls
+        status={engineStatus}
+        busy={enginePreparing || running}
+        onSelectBrowser={onSelectCookieBrowser}
+        onImportCookies={onImportCookies}
+        onClearCookies={onClearCookies}
+        importLabel="导入 Cookies 文件"
+      />
 
       {isBilibiliUrl ? (
         <div
-          className={`canvas-video-downloader__quality${bilibiliLoggedIn ? " is-logged-in" : " is-guest"}`}
+          className={`canvas-video-downloader__quality${!engineStatus?.cookieBrowser && bilibiliLoggedIn ? " is-logged-in" : " is-guest"}`}
           role="status"
         >
-          {bilibiliLoggedIn ? (
+          {engineStatus?.cookieBrowser ? (
+            <Icon name="warning-circle" aria-hidden="true" size="sm" />
+          ) : bilibiliLoggedIn ? (
             <Icon name="check-circle" aria-hidden="true" size="sm" />
           ) : (
             <Icon name="warning-circle" aria-hidden="true" size="sm" />
           )}
           <span>
-            {bilibiliLoggedIn
-              ? "已登录 B 站 · 将下载当前账号可用的最高画质"
-              : "未登录 B 站 · 将自动下载 480P 画质，导入登录态 Cookies 可下载最高画质"}
+            {engineStatus?.cookieBrowser === "auto"
+              ? "下载时自动逐源预检；预检通过不代表视频已下载，实际画质以下载结果为准"
+              : engineStatus?.cookieBrowser
+                ? "下载时尝试读取浏览器 Cookies；目标视频能否访问及实际画质以下载结果为准"
+                : bilibiliLoggedIn
+                  ? "文件含 B 站登录凭据 · 目标视频能否访问及实际画质以下载结果为准"
+                  : "未登录 B 站 · 将自动下载 480P 画质，导入登录态 Cookies 可下载最高画质"}
           </span>
         </div>
       ) : null}
@@ -1015,10 +1021,22 @@ export function CanvasVideoDownloaderNode({
         {runState?.qualityHint ? (
           <span className="canvas-video-downloader__quality-hint">{runState.qualityHint}</span>
         ) : null}
+        {runState?.credentialSource ? (
+          <span className="canvas-video-downloader__quality-hint">
+            本次{runState.status === "done" ? "下载" : "尝试"}使用：
+            {DOWNLOAD_CREDENTIAL_SOURCE_LABEL[runState.credentialSource]}
+            {runState.credentialSource === "none" || runState.credentialSource === "site_session"
+              ? " · 不代表已登录"
+              : ""}
+          </span>
+        ) : null}
         {runState?.watermarkRemoved ? (
           <span className="canvas-video-downloader__watermark-hint">已自动去除 B 站右上角水印</span>
         ) : null}
-        {running && !runState?.preparingEngine ? (
+        {running &&
+        !runState?.preparingEngine &&
+        !runState?.probeStatus &&
+        !(engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource) ? (
           <span
             className="canvas-video-downloader__progress"
             role="progressbar"
@@ -1495,6 +1513,132 @@ function CanvasAssetNodeVideoVisual({
 }
 
 /** 画布上的素材节点：展示素材预览，输出端口可拖出连线到生成节点或其他素材节点。 */
+function refreshAssetNodeMediaUrl(
+  node: AssetNodeData,
+  failedUrl: string | null,
+): Promise<string | null> {
+  return refreshMediaUrlWithStagingFallback(
+    { id: node.assetId, source: node.source, providerConnectionId: node.providerConnectionId },
+    node.kind,
+    failedUrl,
+  );
+}
+
+type CanvasSaveDestination = "local" | "cloud" | "object_storage";
+
+const CANVAS_SAVE_TARGETS = [
+  { destination: "local", label: "本地素材库", icon: "folder-simple-plus" },
+  { destination: "cloud", label: "云端素材库", icon: "cloud-arrow-up" },
+  { destination: "object_storage", label: "对象存储", icon: "stack-simple" },
+] as const;
+
+const ALL_CANVAS_SAVE_DESTINATIONS: readonly CanvasSaveDestination[] = [
+  "local",
+  "cloud",
+  "object_storage",
+];
+
+function CanvasMediaSaveMenu({
+  nodeKey,
+  name,
+  triggerLabel,
+  availableDestinations = ALL_CANVAS_SAVE_DESTINATIONS,
+  onSave,
+}: {
+  readonly nodeKey: string;
+  readonly name: string;
+  readonly triggerLabel: string;
+  readonly availableDestinations?: readonly CanvasSaveDestination[];
+  readonly onSave: (destination: CanvasSaveDestination) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    menuRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
+    const onOutsidePointerDown = (event: PointerEvent) => {
+      const target = event.target;
+      if (!(target instanceof Node)) return;
+      if (triggerRef.current?.contains(target) || menuRef.current?.contains(target)) return;
+      setOpen(false);
+    };
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      event.stopPropagation();
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener("pointerdown", onOutsidePointerDown, true);
+    document.addEventListener("keydown", onEscape, true);
+    return () => {
+      document.removeEventListener("pointerdown", onOutsidePointerDown, true);
+      document.removeEventListener("keydown", onEscape, true);
+    };
+  }, [open]);
+
+  return (
+    <>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="canvas-asset-node__save nodrag nopan"
+        aria-label={triggerLabel}
+        aria-expanded={open}
+        aria-controls={`asset-save-menu-${nodeKey}`}
+        title="选择保存位置"
+        onPointerDown={(event) => event.stopPropagation()}
+        onMouseDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.stopPropagation();
+          setOpen((current) => !current);
+        }}
+      >
+        <Icon name="floppy-disk" aria-hidden="true" size="xs" />
+      </button>
+      {open ? (
+        <div
+          ref={menuRef}
+          id={`asset-save-menu-${nodeKey}`}
+          className="canvas-asset-node__save-menu nodrag nopan nowheel"
+          role="group"
+          aria-label={`保存素材：${name}`}
+          onPointerDown={(event) => event.stopPropagation()}
+          onMouseDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+          onBlur={(event) => {
+            if (
+              !event.currentTarget.contains(event.relatedTarget) &&
+              !triggerRef.current?.contains(event.relatedTarget)
+            ) {
+              setOpen(false);
+            }
+          }}
+        >
+          {CANVAS_SAVE_TARGETS.filter(({ destination }) =>
+            availableDestinations.includes(destination),
+          ).map(({ destination, label, icon }) => (
+            <button
+              key={destination}
+              type="button"
+              onClick={() => {
+                setOpen(false);
+                onSave(destination);
+                triggerRef.current?.focus();
+              }}
+            >
+              <Icon name={icon} aria-hidden="true" size="xs" />
+              <span>保存到{label}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+    </>
+  );
+}
+
 export function CanvasAssetNode({
   node,
   edgeCount,
@@ -1505,6 +1649,7 @@ export function CanvasAssetNode({
   onAspectRatioChange,
   onRefreshMediaUrls,
   onPreview,
+  onSaveToLibrary,
 }: {
   readonly node: AssetNodeData;
   readonly edgeCount: number;
@@ -1525,6 +1670,11 @@ export function CanvasAssetNode({
   readonly onRefreshMediaUrls: (key: string, freshPreviewUrl: string) => void;
   /** 点击素材卡片视觉区域：放大查看原图或视频。 */
   readonly onPreview?: (key: string) => void;
+  /** 将现有素材另存到指定素材库；保存及去重由调用方处理。 */
+  readonly onSaveToLibrary?:
+    ((key: string, destination: "local" | "cloud" | "object_storage") => void) | undefined;
+  /** 兼容调用方的云端连接信息；目标范围与判重在保存操作中处理。 */
+  readonly targetCloudProviderConnectionId?: string | null;
 }) {
   const typeLabel = ASSET_KIND_LABELS[node.kind];
   const awaitingCloudId = node.source !== "local" && isReviewTaskId(node.assetId);
@@ -1546,8 +1696,7 @@ export function CanvasAssetNode({
   const dimensions = assetNodeDimensions(node);
   // 素材签名地址过期后预览失败：同一地址只向后端续签一次，新地址回写节点数据持久化；
   // 续签失败保持置灰，不反复请求（与素材库卡片一致）。
-  // 云端素材按素材身份回读供应商记录；本地素材按 staging job id 重签对象存储地址——
-  // 本地素材没有 providerConnectionId，缺了这条分支画布节点会永久停在「预览不可用」。
+  // 云端素材回读供应商记录，旧本地素材重签对象存储；本机 Base64 素材按 ID 重新读取。
   // 记录「已为哪个地址续签过」而不是布尔标记：画布水合批量重签、其他实例续签或后端重读
   // 都可能换成新地址，新地址失败时理应还能自愈一次。实例内最多两次，杜绝地址反复变化时的循环请求。
   const mediaRefreshAttemptedRef = useRef<{ urls: string[]; count: number }>({
@@ -1562,17 +1711,7 @@ export function CanvasAssetNode({
       if (node.source === "cloud" && node.providerConnectionId === "") return;
       attempted.urls.push(failedUrl);
       attempted.count += 1;
-      // 云端素材按身份回读供应商记录、本地素材按 staging job id 重签；素材入库会把导入时的
-      // 暂存租约地址写进上游素材库，上游读取只会回放这个死地址，共享入口会继续按对象键重签。
-      void refreshMediaUrlWithStagingFallback(
-        {
-          id: node.assetId,
-          source: node.source,
-          providerConnectionId: node.providerConnectionId,
-        },
-        node.kind,
-        failedUrl,
-      ).then((freshUrl) => {
+      void refreshAssetNodeMediaUrl(node, failedUrl).then((freshUrl) => {
         if (freshUrl == null || freshUrl === "") return;
         if (freshUrl !== failedUrl) {
           onRefreshMediaUrls(node.key, freshUrl);
@@ -1696,6 +1835,14 @@ export function CanvasAssetNode({
           ? `${typeLabel} · 云端处理中`
           : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
       </span>
+      {onSaveToLibrary && !awaitingCloudId ? (
+        <CanvasMediaSaveMenu
+          nodeKey={node.key}
+          name={node.name}
+          triggerLabel={`保存素材：${node.name}`}
+          onSave={(destination) => onSaveToLibrary(node.key, destination)}
+        />
+      ) : null}
       <button
         type="button"
         className="canvas-asset-node__remove"
@@ -1854,11 +2001,7 @@ export function CanvasAssetLightbox({
     lightboxBytes.retry();
     if (lightboxBytes.fromCache || refreshAttemptedRef.current) return;
     refreshAttemptedRef.current = true;
-    void refreshMediaUrlWithStagingFallback(
-      { id: node.assetId, source: node.source, providerConnectionId: node.providerConnectionId },
-      node.kind,
-      candidateUrl,
-    ).then((freshUrl) => {
+    void refreshAssetNodeMediaUrl(node, candidateUrl).then((freshUrl) => {
       if (freshUrl == null || freshUrl === "") return;
       if (freshUrl !== candidateUrl) {
         setRefreshedUrl(freshUrl);
@@ -1926,6 +2069,8 @@ export function CanvasOutputNode({
   onPreview,
   onConnectionStart,
   onUploadToCloud,
+  onUploadToLocal,
+  onUploadToObjectStorage,
   task,
   retryInfo,
   results,
@@ -1950,8 +2095,12 @@ export function CanvasOutputNode({
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   readonly onPreview: (key: string) => void;
   readonly onConnectionStart: (key: string) => void;
-  /** 图片产物一键上传到云端素材库；非图片或未传时不展示按钮。 */
+  /** 已保存的图片或视频产物上传到云端素材库。 */
   readonly onUploadToCloud?: (key: string) => void;
+  /** 已保存的图片或视频产物上传到本地素材库。 */
+  readonly onUploadToLocal?: ((key: string) => void) | undefined;
+  /** 已保存的图片或视频产物仅上传到对象存储。 */
+  readonly onUploadToObjectStorage?: ((key: string) => void) | undefined;
   /** 卡片对应任务的最新摘要（任务列表查不到时为 null）。 */
   readonly task: GenerationTaskSummary | null;
   /** 重试等待信息（generation:retry 事件驱动）。 */
@@ -2141,6 +2290,11 @@ export function CanvasOutputNode({
                     }`
                   : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
+  const availableSaveDestinations: CanvasSaveDestination[] = [];
+  if (onUploadToLocal) availableSaveDestinations.push("local");
+  if (onUploadToCloud) availableSaveDestinations.push("cloud");
+  if (onUploadToObjectStorage) availableSaveDestinations.push("object_storage");
+
   return (
     <div
       className={`canvas-asset-node canvas-asset-node--output canvas-asset-node--output--${node.mediaType}${hasArtifact ? " canvas-asset-node--media" : ""}${isFailed ? " canvas-asset-node--output--failed" : ""}${node.assetGroupId ? " is-grouped" : ""}${dragging ? " is-dragging" : ""}`}
@@ -2261,6 +2415,20 @@ export function CanvasOutputNode({
                 className="canvas-asset-node__cloud-badge"
                 title="已在云端素材库"
                 aria-label="已在云端素材库"
+              />
+            ) : null}
+            {node.uploadedToLocal ? (
+              <span
+                className="canvas-asset-node__local-badge"
+                title="已在本地素材库"
+                aria-label="已在本地素材库"
+              />
+            ) : null}
+            {node.uploadedToObjectStorage ? (
+              <span
+                className="canvas-asset-node__object-storage-badge"
+                title="已在对象存储"
+                aria-label="已在对象存储"
               />
             ) : null}
           </span>
@@ -2398,29 +2566,20 @@ export function CanvasOutputNode({
           <span className="canvas-asset-node__meta">{metaLine}</span>
         </>
       )}
-      {onUploadToCloud != null &&
+      {availableSaveDestinations.length > 0 &&
       (node.mediaType === "image" || node.mediaType === "video") &&
       node.finalPath != null ? (
-        <button
-          type="button"
-          className={`canvas-asset-node__upload${node.uploadedToCloud ? " is-uploaded" : ""}`}
-          aria-label={
-            node.uploadedToCloud
-              ? `已上传到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`
-              : `上传${node.mediaType === "video" ? "视频" : "图片"}产物到云端素材库：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`
-          }
-          title={node.uploadedToCloud ? "已上传到云端素材库" : "上传到云端素材库"}
-          onMouseDown={(event) => event.stopPropagation()}
-          onClick={(event) => {
-            event.stopPropagation();
-            onUploadToCloud(node.key);
+        <CanvasMediaSaveMenu
+          nodeKey={node.key}
+          name={node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}
+          triggerLabel={`保存产物：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`}
+          availableDestinations={availableSaveDestinations}
+          onSave={(destination) => {
+            if (destination === "local") onUploadToLocal?.(node.key);
+            else if (destination === "cloud") onUploadToCloud?.(node.key);
+            else onUploadToObjectStorage?.(node.key);
           }}
-        >
-          <Icon name="upload-simple" aria-hidden="true" size="xs" />
-          {node.uploadedToCloud ? (
-            <span className="canvas-asset-node__upload-dot" aria-hidden="true" />
-          ) : null}
-        </button>
+        />
       ) : null}
       <button
         type="button"
@@ -2631,7 +2790,13 @@ export function AutoSizeThumb({
   // 宽高比与来源地址一起记忆：来源换地址后旧比例立即失效，避免沿用上一份媒体的比例。
   const [measured, setMeasured] = useState<{ url: string; ratio: number } | null>(null);
   const measuredRatio = measured != null && measured.url === resolvedUrl ? measured.ratio : null;
-  const videoSource = kind === "video" && isVideoSourceUrl(resolvedUrl) ? resolvedUrl : null;
+  const videoSource =
+    kind === "video" &&
+    (isVideoSourceUrl(resolvedUrl) ||
+      (resolvedUrl != null &&
+        /^https?:\/\/localbase64\.localhost\/|^localbase64:\/\//i.test(resolvedUrl)))
+      ? resolvedUrl
+      : null;
   const showVideo = videoSource != null && !failed;
   const imageSource =
     videoSource == null && resolvedUrl != null && !failed && kind !== "audio" && kind !== "document"
@@ -2692,6 +2857,9 @@ function referenceAssetIdentity(
   if (target.kind === "asset") return { assetId: target.assetId, kind: target.mediaType };
   if (target.kind === "local_asset") {
     return { assetId: target.stagingJobId, kind: target.mediaType };
+  }
+  if (target.kind === "local_base64_asset") {
+    return { assetId: target.assetId, kind: target.mediaType };
   }
   if (target.kind === "local_result") {
     // 产物节点没有素材 ID：按产物身份记账，同一份产物的缩略图只下载一次。
@@ -2788,7 +2956,7 @@ export function GenerationInputChips({
         const previousKey = reorderIndex > 0 ? reorderableOrder[reorderIndex - 1] : null;
         const nextKey = reorderIndex >= 0 ? (reorderableOrder[reorderIndex + 1] ?? null) : null;
         const identity = referenceAssetIdentity(input.target);
-        // 云端素材回读供应商记录、本地素材按 staging job id 重签；产物与本地文件不依赖签名。
+        // 云端素材回读供应商记录；旧本地素材续签，新 Base64 素材校验本机正文。
         const target = input.target;
         const renewAsset =
           target?.kind === "asset"
@@ -2799,7 +2967,9 @@ export function GenerationInputChips({
               }
             : target?.kind === "local_asset"
               ? { id: target.stagingJobId, source: "local", providerConnectionId: null }
-              : null;
+              : target?.kind === "local_base64_asset"
+                ? { id: target.assetId, source: "local", providerConnectionId: null }
+                : null;
         return (
           <li
             key={inherited ? `inherited:${input.promptNodeKey}:${input.key}` : input.edgeId}

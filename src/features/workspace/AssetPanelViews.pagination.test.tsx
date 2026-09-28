@@ -1,7 +1,9 @@
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
 
-import { AssetPagination, AssetPanel } from "./AssetPanelViews";
+import { AssetPagination, AssetPanel, AssetPanelHeader } from "./AssetPanelViews";
+import { AssetUploadRow } from "./AssetLibraryViews";
+import type { AssetUploadEntry } from "./workspaceModel";
 import type * as Backend from "../../lib/backend";
 
 vi.mock("../../lib/backend", async (importOriginal) => {
@@ -47,9 +49,9 @@ describe("AssetPanel 分页页脚结构", () => {
         onImportLocalAssets={noop}
         isOffline={false}
         source="local"
+        cloudCollection="library"
         onSourceChange={noop}
-        pullingBucket={false}
-        onPullBucket={noop}
+        onCloudCollectionChange={noop}
         providerId={null}
         availableProviders={[]}
         onProviderChange={noop}
@@ -59,6 +61,9 @@ describe("AssetPanel 分页页脚结构", () => {
         assetsError={null}
         onRetryLocal={noop}
         onRetryCloud={noop}
+        onRetryObjectStorage={noop}
+        pullingBucket={false}
+        onPullBucket={noop}
         uploads={[]}
         onDismissUpload={noop}
         groups={[]}
@@ -99,6 +104,56 @@ describe("AssetPanel 分页页脚结构", () => {
     expect(pagination).not.toBeNull();
     expect(grid?.contains(pagination)).toBe(false);
     expect(pagination?.nextElementSibling).toHaveClass("asset-panel__hint");
+    expect(screen.queryByRole("button", { name: "上传到对象存储" })).not.toBeInTheDocument();
+  });
+});
+
+describe("AssetPanel 云端上传入口", () => {
+  it("标题栏只保留一个上传按钮，名称跟随当前目录", () => {
+    const onImport = vi.fn();
+    const { rerender } = render(
+      <AssetPanelHeader uploadActionLabel="上传本地素材到云端素材库" onImport={onImport} />,
+    );
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "上传本地素材到云端素材库" }));
+    rerender(<AssetPanelHeader uploadActionLabel="上传到对象存储" onImport={onImport} />);
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "上传到对象存储" }));
+    rerender(<AssetPanelHeader uploadActionLabel="上传到本地素材库" onImport={onImport} />);
+    expect(screen.getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("button", { name: "上传到本地素材库" }));
+    expect(onImport).toHaveBeenCalledTimes(3);
+  });
+
+  it("仅上传对象存储在 staged 时显示单阶段完成且可移除", () => {
+    const onDismiss = vi.fn();
+    const entry: AssetUploadEntry = {
+      jobId: "tos-only-upload-1",
+      name: "only-tos.png",
+      kind: "image",
+      assetId: null,
+      status: "staged",
+      bytesUploaded: 1024,
+      bytesTotal: 1024,
+      error: null,
+      lastAdvancedAt: Date.now(),
+      stalled: false,
+      destination: "object_storage",
+      adjustment: null,
+    };
+    render(
+      <ul>
+        <AssetUploadRow entry={entry} onDismiss={onDismiss} />
+      </ul>,
+    );
+
+    const row = screen.getByRole("listitem");
+    expect(row).toHaveAttribute("data-state", "staged");
+    expect(row).toHaveTextContent("对象存储上传");
+    expect(row).toHaveTextContent("已完成");
+    expect(row).not.toHaveTextContent("上传素材库");
+    fireEvent.click(screen.getByRole("button", { name: "移除上传记录：only-tos.png" }));
+    expect(onDismiss).toHaveBeenCalledOnce();
   });
 });
 

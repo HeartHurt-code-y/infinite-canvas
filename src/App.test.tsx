@@ -1,9 +1,6 @@
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterAll, afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import App, {
-  ACTIVE_ASSET_PROVIDER_STORAGE_KEY,
-  ASSET_LIBRARY_SOURCE_STORAGE_KEY,
-} from "./App";
+import App, { ACTIVE_ASSET_PROVIDER_STORAGE_KEY, ASSET_LIBRARY_SOURCE_STORAGE_KEY } from "./App";
 import type { CloudAsset, SaveCanvasDocumentCommand } from "./lib/backend";
 import { toMediaProxyUrl } from "./lib/mediaProxy";
 import { fireCanvasMouse } from "./test/canvasEvents";
@@ -598,10 +595,7 @@ describe("App workspace", () => {
     const visual = card.querySelector<HTMLElement>(".asset-card__visual--video");
 
     expect(cover).toHaveAttribute("src", toMediaProxyUrl(coverUrl));
-    expect(video).toHaveAttribute(
-      "src",
-      toMediaProxyUrl(videoUrl, { assetId: "video-asset-1" }),
-    );
+    expect(video).toHaveAttribute("src", toMediaProxyUrl(videoUrl, { assetId: "video-asset-1" }));
     expect(video).toHaveAttribute("poster", toMediaProxyUrl(coverUrl));
     expect(video?.muted).toBe(true);
     expect(video?.loop).toBe(true);
@@ -812,10 +806,9 @@ describe("App workspace", () => {
     });
   });
 
-  it("本地素材卡预览签名过期时按 staging job id 重签对象存储地址", async () => {
-    // 本地素材没有 providerConnectionId；过去只判断云端分支，卡片与画布节点都会永久置灰。
-    const staleLocalUrl = "https://tos.example.com/local/stale.png?X-Tos-Signature=expired";
-    const freshLocalUrl = "https://tos.example.com/local/fresh.png?X-Tos-Signature=fresh";
+  it("本机 Base64 素材卡预览失败时按素材 ID 回读本机媒体", async () => {
+    const assetId = "local-b64-11111111-1111-4111-8111-111111111111";
+    const localUrl = `http://localbase64.localhost/${assetId}`;
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
@@ -840,15 +833,15 @@ describe("App workspace", () => {
           return Promise.resolve([]);
         case "list_asset_groups":
           return Promise.resolve([]);
-        case "list_local_assets":
+        case "list_local_base64_assets":
           return Promise.resolve({
             items: [
               {
-                id: "local-asset-9",
-                name: "过期本地图.png",
+                id: assetId,
+                name: "本机图.png",
                 mediaType: "image",
-                objectKey: "staging/expired.png",
-                previewUrl: staleLocalUrl,
+                mimeType: "image/png",
+                previewUrl: localUrl,
                 byteSize: 2048,
                 createdAt: 1,
               },
@@ -858,8 +851,8 @@ describe("App workspace", () => {
             pageSize: 40,
             kindTotals: { image: 1, video: 0, audio: 0 },
           });
-        case "refresh_local_asset_media":
-          return Promise.resolve(freshLocalUrl);
+        case "refresh_local_base64_asset_media":
+          return Promise.resolve(localUrl);
         case "plugin:event|listen":
           return Promise.resolve(1);
         case "plugin:event|unlisten":
@@ -882,30 +875,23 @@ describe("App workspace", () => {
     fireEvent.change(await screen.findByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
     });
-    const card = await screen.findByRole("button", { name: "预览图片素材详情：过期本地图.png" });
+    const card = await screen.findByRole("button", { name: "预览图片素材详情：本机图.png" });
     const image = card.querySelector<HTMLImageElement>(".asset-card__preview");
-    expect(image).toHaveAttribute(
-      "src",
-      toMediaProxyUrl(staleLocalUrl, { assetId: "local-asset-9" }),
-    );
+    expect(image).toHaveAttribute("src", toMediaProxyUrl(localUrl, { assetId }));
 
     fireEvent.error(image!);
     await waitFor(() => {
       const refreshCall = invokeMock.mock.calls.find(
-        ([name]) => name === "refresh_local_asset_media",
-      ) as [string, { command: { stagingJobId: string; mediaType: string } }] | undefined;
-      expect(refreshCall?.[1]?.command).toEqual({
-        stagingJobId: "local-asset-9",
-        mediaType: "image",
-      });
-    });
-    await waitFor(() => {
-      expect(card.querySelector<HTMLImageElement>(".asset-card__preview")).toHaveAttribute(
-        "src",
-        toMediaProxyUrl(freshLocalUrl, { assetId: "local-asset-9" }),
+        ([name]) => name === "refresh_local_base64_asset_media",
       );
+      expect(refreshCall?.[1]).toEqual({ assetId, mediaType: "image" });
     });
-    // 本地素材不得误走云端素材续签接口。
+    expect(
+      invokeMock.mock.calls.filter(([name]) => name === "refresh_local_asset_media"),
+    ).toHaveLength(0);
+    expect(
+      invokeMock.mock.calls.filter(([name]) => name === "refresh_staging_object_url"),
+    ).toHaveLength(0);
     expect(invokeMock.mock.calls.filter(([name]) => name === "refresh_asset_media")).toHaveLength(
       0,
     );
@@ -1902,7 +1888,7 @@ describe("App workspace", () => {
     expect(screen.getByRole("tab", { name: "图片 45" })).toBeInTheDocument();
   });
 
-  it("切换到本地素材后只读本地索引，上传任务只写对象存储", async () => {
+  it("切换到本地素材后读取本机 Base64 库，上传不依赖对象存储", async () => {
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       void args;
       switch (command) {
@@ -1932,15 +1918,15 @@ describe("App workspace", () => {
               name: "云端参考图",
             }),
           ]);
-        case "list_local_assets":
+        case "list_local_base64_assets":
           return Promise.resolve({
             items: [
               {
-                id: "local-upload-1",
+                id: "local-b64-upload-1",
                 name: "本地参考图.png",
                 mediaType: "image",
-                objectKey: "local/asset.png",
-                previewUrl: "https://tos.example.com/local/asset.png?sign=fresh",
+                mimeType: "image/png",
+                previewUrl: "http://localbase64.localhost/local-b64-upload-1",
                 byteSize: 2048,
                 createdAt: 1,
               },
@@ -1952,17 +1938,16 @@ describe("App workspace", () => {
           });
         case "plugin:dialog|open":
           return Promise.resolve(["C:\\media\\new-local.png"]);
-        case "get_tos_staging_config":
+        case "import_local_base64_asset":
           return Promise.resolve({
-            region: "cn-beijing",
-            endpoint: "tos-cn-beijing.volces.com",
-            bucket: "test-staging-bucket",
-            credentialRef: "tos-ak-sk",
-            objectPrefix: "staging",
-            enabled: true,
+            id: "local-b64-upload-2",
+            name: "new-local.png",
+            mediaType: "image",
+            mimeType: "image/png",
+            previewUrl: "http://localbase64.localhost/local-b64-upload-2",
+            byteSize: 4096,
+            createdAt: 2,
           });
-        case "start_staging_upload":
-          return Promise.resolve("local-upload-2");
         case "plugin:event|listen":
           return Promise.resolve(1);
         case "plugin:event|unlisten":
@@ -2001,24 +1986,255 @@ describe("App workspace", () => {
       cloudListCallsBeforeSwitch,
     );
 
-    fireEvent.click(screen.getByRole("button", { name: "上传到本地素材库（仅对象存储）" }));
+    fireEvent.click(screen.getByRole("button", { name: "上传到本地素材库" }));
     await waitFor(() => {
       const uploadCall = invokeMock.mock.calls.find(
-        ([command]) => command === "start_staging_upload",
+        ([command]) => command === "import_local_base64_asset",
       );
       expect(uploadCall?.[1]).toEqual({
+        command: { localPath: "C:\\media\\new-local.png", name: "new-local.png" },
+      });
+    });
+    expect(invokeMock.mock.calls.some(([command]) => command === "get_tos_staging_config")).toBe(
+      false,
+    );
+    expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+      false,
+    );
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "list_asset_groups"),
+    ).toHaveLength(groupListCallsBeforeSwitch);
+    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
+  });
+
+  it("云端视图可独立上传到对象存储，无需供应商且不导入云端素材库", async () => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
+        case "plugin:dialog|open":
+          return Promise.resolve(["C:\\media\\only-tos.png"]);
+        case "get_tos_staging_config":
+          return Promise.resolve({
+            region: "cn-beijing",
+            endpoint: "tos-cn-beijing.volces.com",
+            bucket: "test-staging-bucket",
+            credentialRef: "tos-ak-sk",
+            objectPrefix: "staging",
+            enabled: true,
+          });
+        case "start_staging_upload":
+          return Promise.resolve("tos-only-upload-1");
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    expect(screen.getByRole("combobox", { name: "素材库来源" })).toHaveValue("cloud");
+    const headerActions = document.querySelector<HTMLElement>(".panel-title-row__actions");
+    expect(headerActions).not.toBeNull();
+    expect(
+      await within(headerActions!).findByRole("button", { name: "上传本地素材到云端素材库" }),
+    ).toBeEnabled();
+    expect(within(headerActions!).getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(screen.getByRole("tab", { name: "对象存储" }));
+    const uploadToObjectStorage = await within(headerActions!).findByRole("button", {
+      name: "上传到对象存储",
+    });
+    expect(within(headerActions!).getAllByRole("button")).toHaveLength(2);
+    fireEvent.click(uploadToObjectStorage);
+
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.find(([command]) => command === "start_staging_upload")?.[1],
+      ).toEqual({
         command: {
-          localPath: "C:\\media\\new-local.png",
+          localPath: "C:\\media\\only-tos.png",
           purpose: "local_asset",
           mediaType: "image",
           import: null,
         },
       });
     });
+    expect(invokeMock.mock.calls.some(([command]) => command === "import_local_base64_asset")).toBe(
+      false,
+    );
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_assets")).toBe(false);
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_groups")).toBe(false);
+  });
+
+  it("旧对象存储素材在云端对象存储目录可浏览并拖入画布，不混入云端素材库", async () => {
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+          return Promise.resolve([
+            {
+              id: "moyu-prod",
+              displayName: "Moyu 生产",
+              adapterId: "moyu_v1",
+              baseUrl: "https://api.example.com",
+              apiKeyRef: "moyu-key",
+              enabled: true,
+              createdAt: 0,
+              updatedAt: 0,
+            },
+          ]);
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([
+            cloudAsset("moyu-prod", {
+              id: "cloud-only-image",
+              kind: "image",
+              name: "云端库独有图片",
+            }),
+          ]);
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [
+              {
+                id: "old-tos-upload-1",
+                name: "旧对象存储图片.png",
+                mediaType: "image",
+                objectKey: "staging/old-tos-upload-1.png",
+                previewUrl: "https://tos.example.com/staging/old-tos-upload-1.png",
+                byteSize: 4096,
+                createdAt: 1,
+              },
+            ],
+            total: 1,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 1, video: 0, audio: 0 },
+          });
+        case "pull_tos_bucket_assets":
+          return Promise.resolve({
+            totalObjects: 1,
+            imported: 0,
+            skippedExisting: 1,
+            ignoredUnsupported: 0,
+            prefix: "",
+          });
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
     expect(
-      invokeMock.mock.calls.filter(([command]) => command === "list_asset_groups"),
-    ).toHaveLength(groupListCallsBeforeSwitch);
-    expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
+      await screen.findByRole("button", { name: "预览图片素材详情：云端库独有图片" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "预览图片素材详情：旧对象存储图片.png" }),
+    ).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_local_assets")).toBe(false);
+
+    fireEvent.click(screen.getByRole("tab", { name: "对象存储" }));
+    const oldObject = await screen.findByRole("button", {
+      name: "预览图片素材详情：旧对象存储图片.png",
+    });
+    expect(
+      screen.queryByRole("button", { name: "预览图片素材详情：云端库独有图片" }),
+    ).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "list_local_assets")).toBe(true);
+    expect(screen.queryByLabelText("素材库供应商")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("素材库分组")).not.toBeInTheDocument();
+    expect(document.querySelector(".asset-origin__status")).toBeNull();
+    const pullButton = screen.getByRole("button", { name: "同步存储桶素材" });
+    fireEvent.click(pullButton);
+    await waitFor(() => {
+      expect(invokeMock.mock.calls.some(([command]) => command === "pull_tos_bucket_assets")).toBe(
+        true,
+      );
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "list_local_assets").length,
+      ).toBeGreaterThan(1);
+    });
+
+    const viewport = document.querySelector<HTMLElement>(".canvas-viewport");
+    expect(viewport).not.toBeNull();
+    vi.spyOn(viewport!, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1280,
+      bottom: 800,
+      width: 1280,
+      height: 800,
+      toJSON: () => ({}),
+    });
+    fireEvent.pointerDown(oldObject, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 20,
+      clientY: 20,
+    });
+    fireEvent.pointerMove(window, { pointerId: 1, isPrimary: true, clientX: 40, clientY: 40 });
+    fireEvent.pointerUp(window, {
+      pointerId: 1,
+      isPrimary: true,
+      button: 0,
+      clientX: 320,
+      clientY: 280,
+    });
+    await waitFor(() => {
+      expect(
+        document.querySelectorAll(".canvas-asset-node:not(.canvas-asset-node--output)"),
+      ).toHaveLength(1);
+    });
+    expect(document.querySelector(".canvas-asset-node")?.textContent).toContain(
+      "旧对象存储图片.png",
+    );
+    fireEvent.click(screen.getByRole("tab", { name: "云端素材库" }));
+    expect(
+      screen.queryByRole("button", { name: "预览图片素材详情：旧对象存储图片.png" }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByLabelText("素材库供应商")).toBeInTheDocument();
+    expect(screen.queryByText("已连接")).not.toBeInTheDocument();
   });
 
   it("选中分组后上传的素材直接归入该分组，而不是落回默认上传分组", async () => {
@@ -2182,7 +2398,7 @@ describe("App workspace", () => {
           return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
         case "list_assets":
           return Promise.resolve([]);
-        case "list_local_assets":
+        case "list_local_base64_assets":
           return Promise.resolve({
             items: [],
             total: 0,
@@ -2224,15 +2440,23 @@ describe("App workspace", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }));
+    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库" }));
     expect(await screen.findByText("未选择文件，已取消上传。")).toBeInTheDocument();
-    expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(
+    expect(invokeMock.mock.calls.some(([command]) => command === "import_local_base64_asset")).toBe(
       false,
     );
   });
 
-  it("startUpload 返回前先显示「准备中」占位行，提交完成后切换为校验状态", async () => {
-    const startUploadDeferred = deferred<string>();
+  it("本机 Base64 导入返回前先显示「准备中」占位行，完成后移除占位状态", async () => {
+    const startUploadDeferred = deferred<{
+      id: string;
+      name: string;
+      mediaType: string;
+      mimeType: string;
+      previewUrl: string;
+      byteSize: number;
+      createdAt: number;
+    }>();
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       void args;
       switch (command) {
@@ -2245,8 +2469,14 @@ describe("App workspace", () => {
           return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
         case "list_assets":
           return Promise.resolve([]);
-        case "list_local_assets":
-          return Promise.resolve([]);
+        case "list_local_base64_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 40,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
         case "plugin:dialog|open":
           return Promise.resolve(["C:\\media\\new-local.png"]);
         case "get_tos_staging_config":
@@ -2258,7 +2488,7 @@ describe("App workspace", () => {
             objectPrefix: "staging",
             enabled: true,
           });
-        case "start_staging_upload":
+        case "import_local_base64_asset":
           return startUploadDeferred.promise;
         case "plugin:event|listen":
           return Promise.resolve(1);
@@ -2282,11 +2512,19 @@ describe("App workspace", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "素材库来源" }), {
       target: { value: "local" },
     });
-    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库（仅对象存储）" }));
+    fireEvent.click(await screen.findByRole("button", { name: "上传到本地素材库" }));
     // 提交尚未返回：占位行立即出现，提供明确反馈。
     expect(await screen.findByText("准备中…")).toBeInTheDocument();
     act(() => {
-      startUploadDeferred.resolve("local-upload-2");
+      startUploadDeferred.resolve({
+        id: "local-b64-upload-2",
+        name: "new-local.png",
+        mediaType: "image",
+        mimeType: "image/png",
+        previewUrl: "http://localbase64.localhost/local-b64-upload-2",
+        byteSize: 4096,
+        createdAt: 2,
+      });
     });
     await waitFor(() => {
       expect(screen.queryByText("准备中…")).not.toBeInTheDocument();

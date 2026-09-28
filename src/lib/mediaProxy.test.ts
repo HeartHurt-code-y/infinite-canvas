@@ -42,6 +42,8 @@ describe("media proxy URLs", () => {
     "asset://localhost/C%3A/video.mp4",
     "http://asset.localhost/C%3A%2Fvideo.mp4",
     "https://asset.localhost/C%3A%2Fvideo.mp4",
+    "http://localbase64.localhost/local-b64-123",
+    "localbase64://localhost/local-b64-123",
     "blob:http://localhost/123",
     "data:video/mp4;base64,AAAA",
     "C:/videos/local.mp4",

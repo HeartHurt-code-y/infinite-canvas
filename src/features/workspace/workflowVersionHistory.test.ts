@@ -13,6 +13,9 @@ import {
   createReverseVideoCheckpoint,
   type ReverseVideoAnalysis,
 } from "./reverseVideoWorkflowModel";
+import { createReelbenchCheckpoint, createReelbenchOptions } from "./reelbenchWorkflowModel";
+import { createMusicVideoCheckpoint, createMusicVideoOptions } from "./musicVideoWorkflowModel";
+import type { ReelbenchShotDraft } from "../../lib/reelbenchBackend";
 import {
   initializeWorkflowVersions,
   mergeWorkflowVersionHistory,
@@ -56,7 +59,215 @@ const shot: KnowledgeVideoWorkflowShot = {
   acceptance: "清晰",
 };
 
+function reelbenchDraft(runId: string): ReelbenchShotDraft {
+  return {
+    runId,
+    videoPath: "C:/source.mp4",
+    outputDir: "C:/reelbench",
+    sourceIdentity: { sizeBytes: 100, modifiedUnixMs: 1, sha256: "source-hash" },
+    meta: { durationSeconds: 2, fps: 25, width: 640, height: 360, hasAudio: true },
+    sceneThreshold: 0.3,
+    minShotSeconds: 0.25,
+    seedCuts: [0, 2],
+    manualCuts: [],
+    cast: [],
+    trackPath: "C:/reelbench/track.json",
+    sheets: [],
+    shots: [
+      {
+        id: "S01",
+        start: 0,
+        end: 2,
+        seconds: 2,
+        motion: 0.1,
+        size: "wide",
+        category: "subject",
+        camera: "static",
+        transitionIn: "cut",
+        subjects: ["人物"],
+        frame: "人物在画面中央",
+        onscreenText: "",
+        audio: "",
+        rhythm: "",
+        rhythmNote: "",
+        note: "",
+        frameAPath: "C:/reelbench/a.jpg",
+        frameBPath: "C:/reelbench/b.jpg",
+      },
+    ],
+  };
+}
+
 describe("workflow configuration version history", () => {
+  it("keeps MV acoustic evidence out of authored versions and clears it after restoring different inputs", () => {
+    const base = config();
+    const initial = initializeWorkflowVersions({
+      ...base,
+      musicVideo: { ...createMusicVideoOptions(), songPath: "C:/song.wav" },
+      checkpoint: { ...base.checkpoint, musicVideo: createMusicVideoCheckpoint() },
+    });
+    const analyzed = recordWorkflowVersion(initial, {
+      ...initial,
+      checkpoint: {
+        ...initial.checkpoint,
+        musicVideo: {
+          ...initial.checkpoint.musicVideo!,
+          speech: {
+            asr: {
+              sourceSignature: "a".repeat(64),
+              engine: "doubao-asr",
+              modelVersion: "volc.bigasr.auc_turbo",
+              transcript: "唱词",
+              segments: [{ startSeconds: 1, endSeconds: 2, text: "唱词" }],
+            },
+          },
+        },
+      },
+    });
+    expect(analyzed.versionHistory?.versions).toHaveLength(1);
+    const edited = recordWorkflowVersion(analyzed, {
+      ...analyzed,
+      musicVideo: { ...analyzed.musicVideo!, officialLyrics: "修订歌词" },
+    });
+    const restored = undoWorkflowVersion(edited);
+    expect(restored.musicVideo?.officialLyrics).toBe("");
+    expect(restored.checkpoint.musicVideo?.speech).toBeUndefined();
+  });
+
+  it("records one Reelbench annotation baseline and human edits, not progress or reports", () => {
+    const initial = initializeWorkflowVersions({
+      ...config(),
+      reelbench: { ...createReelbenchOptions(), localVideoPath: "C:/source.mp4" },
+      checkpoint: {
+        ...config().checkpoint,
+        runId: "run-1",
+        reelbench: { ...createReelbenchCheckpoint(), videoPath: "C:/source.mp4" },
+      },
+    });
+    const partial = recordWorkflowVersion(initial, {
+      ...initial,
+      checkpoint: {
+        ...initial.checkpoint,
+        phase: "generating",
+        reelbench: { ...initial.checkpoint.reelbench!, draft: reelbenchDraft("run-1") },
+      },
+    });
+    expect(partial.versionHistory?.versions).toHaveLength(1);
+    const generated = recordWorkflowVersion(partial, {
+      ...partial,
+      checkpoint: {
+        ...partial.checkpoint,
+        reelbench: { ...partial.checkpoint.reelbench!, completedDraftSignature: "generated-v1" },
+      },
+    });
+    expect(generated.versionHistory?.versions).toHaveLength(2);
+    const approved = recordWorkflowVersion(generated, {
+      ...generated,
+      checkpoint: {
+        ...generated.checkpoint,
+        phase: "done",
+        finalPath: "C:/reelbench/report.html",
+        reelbench: {
+          ...generated.checkpoint.reelbench!,
+          approvedDraftSignature: "generated-v1",
+          reportHtmlPath: "C:/reelbench/report.html",
+        },
+      },
+    });
+    expect(approved.versionHistory?.versions).toHaveLength(2);
+    const edited = recordWorkflowVersion(approved, {
+      ...approved,
+      checkpoint: {
+        ...approved.checkpoint,
+        reelbench: {
+          ...approved.checkpoint.reelbench!,
+          manualRevision: 1,
+          draft: {
+            ...approved.checkpoint.reelbench!.draft!,
+            shots: [
+              { ...approved.checkpoint.reelbench!.draft!.shots[0]!, frame: "重新标注的画面" },
+            ],
+          },
+        },
+      },
+    });
+    expect(edited.versionHistory?.versions).toHaveLength(3);
+    const restored = undoWorkflowVersion(edited);
+    expect(restored.checkpoint.reelbench?.draft?.shots[0]?.frame).toBe("人物在画面中央");
+    expect(restored.checkpoint.reelbench?.validation).toBeNull();
+    expect(restored.checkpoint.reelbench?.approvedDraftSignature).toBeNull();
+    expect(restored.checkpoint.reelbench?.reportHtmlPath).toBeNull();
+    expect(restored.checkpoint.reelbench?.step).toBe("validate");
+    expect(restored.checkpoint.finalPath).toBeNull();
+    expect(restored.checkpoint.phase).toBe("paused");
+  });
+
+  it("drops a restored Reelbench draft when its run identity differs", () => {
+    const first = initializeWorkflowVersions({
+      ...config(),
+      reelbench: { ...createReelbenchOptions(), localVideoPath: "C:/source.mp4" },
+      checkpoint: {
+        ...config().checkpoint,
+        runId: "old-run",
+        reelbench: {
+          ...createReelbenchCheckpoint(),
+          draft: reelbenchDraft("old-run"),
+          completedDraftSignature: "old-complete",
+          videoPath: "C:/source.mp4",
+        },
+      },
+    });
+    const later = recordWorkflowVersion(first, {
+      ...first,
+      historyRunId: "current-history",
+      checkpoint: {
+        ...first.checkpoint,
+        runId: "new-run",
+        reelbench: {
+          ...first.checkpoint.reelbench!,
+          draft: reelbenchDraft("new-run"),
+          completedDraftSignature: "new-complete",
+        },
+      },
+    });
+    const restored = undoWorkflowVersion(later);
+    expect(restored.checkpoint.reelbench?.draft).toBeNull();
+    expect(restored.checkpoint.reelbench?.videoPath).toBeNull();
+    expect(restored.checkpoint.runId).toBeNull();
+    expect(restored.checkpoint.reelbench?.step).toBe("source");
+    expect(restored.historyRunId).toBeUndefined();
+    expect(restored.executionPlan?.executionIntent).toBe("restart");
+  });
+
+  it("starts a fresh Reelbench run after restoring different source options", () => {
+    const original = initializeWorkflowVersions({
+      ...config(),
+      reelbench: { ...createReelbenchOptions(), localVideoPath: "C:/source.mp4" },
+      historyRunId: "old-history",
+      checkpoint: {
+        ...config().checkpoint,
+        runId: "old-run",
+        reelbench: {
+          ...createReelbenchCheckpoint(),
+          videoPath: "C:/source.mp4",
+          draft: reelbenchDraft("old-run"),
+          completedDraftSignature: "old-complete",
+        },
+      },
+    });
+    const changed = recordWorkflowVersion(original, {
+      ...original,
+      reelbench: { ...original.reelbench!, localVideoPath: "C:/replacement.mp4" },
+      historyRunId: "new-history",
+    });
+    const restored = undoWorkflowVersion(changed);
+    expect(restored.reelbench?.localVideoPath).toBe("C:/source.mp4");
+    expect(restored.checkpoint.runId).toBeNull();
+    expect(restored.checkpoint.reelbench).toEqual(createReelbenchCheckpoint());
+    expect(restored.historyRunId).toBeUndefined();
+    expect(restored.executionPlan?.executionIntent).toBe("restart");
+  });
+
   it("retains unlimited immutable branches through JSON reload and targeted redo", () => {
     let current = initializeWorkflowVersions(config());
     expect(initializeWorkflowVersions(current)).toBe(current);

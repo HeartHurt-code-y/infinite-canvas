@@ -12,6 +12,7 @@ import {
   getAppUpdateState,
   installAvailableAppUpdate,
   loadCurrentAppVersion,
+  readResourceUpdateManifest,
   relaunchAfterAppUpdate,
   resetAppUpdateStateForTests,
   setAppUpdateClientForTests,
@@ -20,6 +21,9 @@ import {
   startAutomaticAppUpdateChecks,
   type AppUpdateClient,
   type AppUpdateProgressEvent,
+  type PrepareRuntimeResourcesRequest,
+  type RuntimeComponentMigrationStatus,
+  windowsUpdatePackageKind,
 } from "./appUpdate";
 
 function mockClient(overrides: Partial<AppUpdateClient> = {}): AppUpdateClient {
@@ -80,6 +84,8 @@ describe("appUpdate helpers", () => {
           totalBytes: 0,
           preparedBytes: 0,
           totalPreparationBytes: 0,
+          reusedResourceBytes: 0,
+          downloadedResourceBytes: 0,
           error: null,
         },
         "0.1.2",
@@ -96,6 +102,8 @@ describe("appUpdate helpers", () => {
           totalBytes: 20,
           preparedBytes: 0,
           totalPreparationBytes: 0,
+          reusedResourceBytes: 0,
+          downloadedResourceBytes: 0,
           error: null,
         },
         "0.1.2",
@@ -107,6 +115,58 @@ describe("appUpdate helpers", () => {
     expect(describeUpdateError(new Error("NOT_DESKTOP"))).toMatch(/已安装的桌面应用/);
     expect(describeUpdateError(new Error("Could not fetch a valid response json"))).toMatch(/TOS/);
     expect(describeUpdateError(new Error("signature verification failed"))).toMatch(/校验失败/);
+    expect(describeUpdateError(new Error("本地运行组件准备失败：风格库资源不完整"))).toMatch(
+      /完整安装包修复/,
+    );
+  });
+
+  it("identifies the selected Windows installer from the updater platform URL", () => {
+    const platform = (url: string) => ({
+      platforms: { "windows-x86_64": { url } },
+    });
+    expect(
+      windowsUpdatePackageKind(
+        platform("https://updates.example/无限画布_0.1.9_x64-slim-setup.exe?download=1"),
+        "windows-x86_64",
+      ),
+    ).toBe("slim");
+    expect(
+      windowsUpdatePackageKind(
+        platform("https://updates.example/无限画布_0.1.9_x64-setup.exe"),
+        "windows-x86_64",
+      ),
+    ).toBe("full");
+    expect(() =>
+      windowsUpdatePackageKind(
+        { platforms: { "windows-aarch64": { url: "https://updates.example/a-slim-setup.exe" } } },
+        "windows-x86_64",
+      ),
+    ).toThrow(/无法识别 Windows 更新包类型/);
+    expect(() =>
+      windowsUpdatePackageKind(platform("https://updates.example/update.zip"), "windows-x86_64"),
+    ).toThrow(/无法识别 Windows 更新包类型/);
+  });
+
+  it("accepts only HTTPS resource manifests with a signature", () => {
+    expect(
+      readResourceUpdateManifest({
+        resourceManifest: {
+          url: "https://updates.example/resources/manifest.json",
+          signature: "sig",
+        },
+      }),
+    ).toEqual({ url: "https://updates.example/resources/manifest.json", signature: "sig" });
+    expect(readResourceUpdateManifest({})).toBeNull();
+    expect(() =>
+      readResourceUpdateManifest({
+        resourceManifest: { url: "http://updates.example/manifest.json", signature: "sig" },
+      }),
+    ).toThrow(/补丁地址无效/);
+    expect(() =>
+      readResourceUpdateManifest({
+        resourceManifest: { url: "https://updates.example/manifest.json", signature: "" },
+      }),
+    ).toThrow(/补丁信息无效/);
   });
 });
 
@@ -163,6 +223,63 @@ describe("appUpdate store", () => {
     expect(relaunch).toHaveBeenCalledTimes(1);
   });
 
+  it("quietly downloads changed resources and the installer but waits to install until restart", async () => {
+    const order: string[] = [];
+    const prepareRuntimeComponents = vi.fn(() => {
+      order.push("resources");
+      return Promise.resolve();
+    });
+    const download = vi.fn(async (onProgress: (event: AppUpdateProgressEvent) => void) => {
+      order.push("download");
+      await completeDownload(onProgress);
+    });
+    const install = vi.fn(() => {
+      order.push("install");
+      return Promise.resolve();
+    });
+    const relaunch = vi.fn(() => Promise.resolve());
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.10",
+            requiresRuntimeComponents: true,
+            resourceManifest: { url: "https://updates.example/manifest.json", signature: "signed" },
+            download,
+            install,
+          }),
+        ),
+        prepareRuntimeComponents,
+        needsManualRelaunch: vi.fn(() => Promise.resolve(false)),
+        relaunch,
+      }),
+    );
+
+    await checkForAppUpdate({ quiet: true });
+    await vi.waitFor(() => expect(getAppUpdateState().status).toBe("ready"));
+    expect(order).toEqual(["resources", "download"]);
+    expect(install).not.toHaveBeenCalled();
+    await relaunchAfterAppUpdate();
+    expect(order).toEqual(["resources", "download", "install"]);
+    expect(relaunch).not.toHaveBeenCalled();
+  });
+
+  it("does not prefetch a version the user skipped", async () => {
+    window.localStorage.setItem(SKIPPED_UPDATE_STORAGE_KEY, "0.1.10");
+    const download = vi.fn(() => Promise.resolve());
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({ available: true, version: "0.1.10", download, install: vi.fn() }),
+        ),
+      }),
+    );
+    await checkForAppUpdate({ quiet: true });
+    expect(download).not.toHaveBeenCalled();
+    expect(getAppUpdateState().status).toBe("available");
+  });
+
   it("lets the Windows installer restart the app without a second relaunch", async () => {
     setAppUpdateClientForTests(
       mockClient({
@@ -189,15 +306,17 @@ describe("appUpdate store", () => {
     });
     const downloadAndInstall = vi.fn(() => Promise.resolve());
     const waitForRuntimeComponents = vi.fn(
-      async (onProgress: (status: {
-        ready: boolean;
-        preparing: boolean;
-        error: string | null;
-        completedBytes: number;
-        totalBytes: number;
-        completedComponents: number;
-        totalComponents: number;
-      }) => void) => {
+      async (
+        onProgress: (status: {
+          ready: boolean;
+          preparing: boolean;
+          error: string | null;
+          completedBytes: number;
+          totalBytes: number;
+          completedComponents: number;
+          totalComponents: number;
+        }) => void,
+      ) => {
         onProgress({
           ready: false,
           preparing: true,
@@ -222,7 +341,12 @@ describe("appUpdate store", () => {
     setAppUpdateClientForTests(
       mockClient({
         check: vi.fn(() =>
-          Promise.resolve({ available: true, version: "0.1.9", downloadAndInstall }),
+          Promise.resolve({
+            available: true,
+            version: "0.1.9",
+            requiresRuntimeComponents: true,
+            downloadAndInstall,
+          }),
         ),
         waitForRuntimeComponents,
       }),
@@ -247,7 +371,12 @@ describe("appUpdate store", () => {
     setAppUpdateClientForTests(
       mockClient({
         check: vi.fn(() =>
-          Promise.resolve({ available: true, version: "0.1.9", downloadAndInstall }),
+          Promise.resolve({
+            available: true,
+            version: "0.1.9",
+            requiresRuntimeComponents: true,
+            downloadAndInstall,
+          }),
         ),
         waitForRuntimeComponents: vi.fn(() => Promise.reject(new Error("磁盘空间不足"))),
       }),
@@ -258,6 +387,95 @@ describe("appUpdate store", () => {
     expect(downloadAndInstall).not.toHaveBeenCalled();
     expect(getAppUpdateState()).toMatchObject({ status: "error", error: "磁盘空间不足" });
     expect(shouldShowUpdateBanner(getAppUpdateState())).toBe(true);
+  });
+
+  it("installs a full updater package even if old runtime migration failed", async () => {
+    const downloadAndInstall = vi.fn(() => Promise.resolve());
+    const waitForRuntimeComponents = vi.fn(() => Promise.reject(new Error("风格库资源缺失")));
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.9",
+            requiresRuntimeComponents: false,
+            downloadAndInstall,
+          }),
+        ),
+        waitForRuntimeComponents,
+      }),
+    );
+
+    await checkForAppUpdate();
+    await installAvailableAppUpdate();
+    expect(waitForRuntimeComponents).not.toHaveBeenCalled();
+    expect(downloadAndInstall).toHaveBeenCalledTimes(1);
+    expect(getAppUpdateState().status).toBe("ready");
+  });
+
+  it("prepares signed changed resources before downloading the small installer", async () => {
+    const order: string[] = [];
+    const waitForRuntimeComponents = vi.fn(() => Promise.resolve());
+    const prepareRuntimeComponents = vi.fn(
+      (
+        _request: PrepareRuntimeResourcesRequest,
+        onProgress: (status: RuntimeComponentMigrationStatus) => void,
+      ) => {
+        order.push("resources");
+        onProgress({
+          ready: true,
+          preparing: false,
+          error: null,
+          completedBytes: 12,
+          totalBytes: 12,
+          completedComponents: 4,
+          totalComponents: 4,
+          reusedBytes: 10,
+          downloadedBytes: 2,
+        });
+        return Promise.resolve();
+      },
+    );
+    const downloadAndInstall = vi.fn(() => {
+      order.push("installer");
+      return Promise.resolve();
+    });
+    setAppUpdateClientForTests(
+      mockClient({
+        check: vi.fn(() =>
+          Promise.resolve({
+            available: true,
+            version: "0.1.10",
+            requiresRuntimeComponents: true,
+            resourceManifest: {
+              url: "https://updates.example/resources/0.1.10/manifest.json",
+              signature: "signed",
+            },
+            downloadAndInstall,
+          }),
+        ),
+        waitForRuntimeComponents,
+        prepareRuntimeComponents,
+      }),
+    );
+    await checkForAppUpdate();
+    await installAvailableAppUpdate();
+    expect(prepareRuntimeComponents).toHaveBeenCalledWith(
+      {
+        version: "0.1.10",
+        url: "https://updates.example/resources/0.1.10/manifest.json",
+        signature: "signed",
+      },
+      expect.any(Function),
+    );
+    expect(waitForRuntimeComponents).not.toHaveBeenCalled();
+    expect(order).toEqual(["resources", "installer"]);
+    expect(getAppUpdateState()).toMatchObject({
+      preparedBytes: 12,
+      totalPreparationBytes: 12,
+      reusedResourceBytes: 10,
+      downloadedResourceBytes: 2,
+    });
   });
 
   it("remembers a skipped version so the banner can stay quiet", async () => {

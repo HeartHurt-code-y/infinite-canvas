@@ -9,11 +9,12 @@ use super::{
     types::GenerationOperation,
 };
 
-const OPERATION_KEYS: [(&str, GenerationOperation); 4] = [
+const OPERATION_KEYS: [(&str, GenerationOperation); 5] = [
     ("text_to_image", GenerationOperation::TextToImage),
     ("image_to_image", GenerationOperation::ImageToImage),
     ("video_generation", GenerationOperation::VideoGeneration),
     ("text_generation", GenerationOperation::TextGeneration),
+    ("speech_generation", GenerationOperation::SpeechGeneration),
 ];
 
 pub fn provider_scoped_model_definition_id(
@@ -336,6 +337,11 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
 }
 
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
+    // 这八个远端 ID 有明确的按次视频合同。聚合网关的通用目录能力字段可能把
+    // 它们误报成 chat/文本，不能让泛化标签覆盖已知的视频请求协议。
+    if is_sp25_per_use_video_model(model_id) {
+        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
     if let Some(schema) = advertised_schema(item) {
         return complete_advertised_schema(schema, model_id);
     }
@@ -351,6 +357,11 @@ pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) ->
     // 它们会被错误预选为文本模型。
     if is_video_model_identity(&identity) {
         return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
+    if identity.contains("qwen-audio-") && identity.contains("-tts")
+        || identity.contains("cosyvoice-v")
+    {
+        return default_model_schema(model_id, &[GenerationOperation::SpeechGeneration]);
     }
     if identity.contains("gpt-image") || identity.contains("dall-e") {
         return default_model_schema(
@@ -427,6 +438,89 @@ fn is_minimax_h3_video_model(model_id: &str) -> bool {
     identity.contains("minimax-h3")
         || identity.contains("minimax_h3")
         || identity.contains("minimax h3")
+}
+
+/// 按次系列只接受文档列出的八个完整 ID；相近名称或后缀版本不能套用此契约。
+pub(crate) fn sp25_per_use_limits(model_id: &str) -> Option<(u32, u32, u32, u32)> {
+    match model_id {
+        "sp2.5-720p-4-15s" => Some((4, 15, 10, 0)),
+        "sp2.5-720p-16-30s" => Some((16, 30, 10, 0)),
+        "sp2.5-720p-30s-ch1" => Some((30, 30, 30, 0)),
+        "sp2.5-720p-30s-ch2" => Some((30, 30, 9, 0)),
+        "sp2.5-720p-30s-ch3" => Some((30, 30, 30, 0)),
+        "sp2.5-720p-30s-ch4" => Some((30, 30, 9, 0)),
+        "sp2.5-720p-30s-ch5" => Some((30, 30, 10, 10)),
+        "sp2.5-720p-30s-ch6" => Some((30, 30, 30, 10)),
+        _ => None,
+    }
+}
+
+pub(crate) fn is_sp25_per_use_video_model(model_id: &str) -> bool {
+    sp25_per_use_limits(model_id).is_some()
+}
+
+fn sp25_per_use_video_operation_schema(model_id: &str) -> Option<Value> {
+    let (minimum_duration, maximum_duration, max_images, max_audios) =
+        sp25_per_use_limits(model_id)?;
+    let durations = (minimum_duration..=maximum_duration)
+        .map(Value::from)
+        .collect::<Vec<_>>();
+    let mut parameters = json!({
+        "ratio": {
+            "type": "string",
+            "label": "画幅",
+            "default": "16:9",
+            "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+            "requestField": "ratio",
+            "order": 0
+        }
+    });
+    // 固定 30 秒型号由模型 ID 锁定时长，默认省略；文档也接受显式传 30。
+    if minimum_duration != maximum_duration {
+        parameters["duration"] = json!({
+            "type": "integer",
+            "label": "时长",
+            "default": minimum_duration,
+            "enum": durations,
+            "requestField": "duration",
+            "order": 1
+        });
+    } else {
+        parameters["duration"] = json!({
+            "type": "integer",
+            "label": "时长",
+            "optional": true,
+            "enum": [30],
+            "requestField": "duration",
+            "order": 1
+        });
+    }
+    // 分辨率同样由模型 ID 锁定；默认省略，但允许文档声明的显式 720P。
+    parameters["resolution"] = json!({
+        "type": "string",
+        "label": "分辨率",
+        "optional": true,
+        "enum": ["720P"],
+        "requestField": "resolution",
+        "order": 2
+    });
+    Some(json!({
+        "resultType": "video",
+        "requestProfileId": "sp25_per_use_video_v1",
+        "profileVersion": 1,
+        "request": {
+            "path": "/v1/video/generations",
+            "encoding": "json",
+            "parameterContainer": "root",
+            "mediaEncoding": "sp25_per_use_urls",
+            "mediaField": "images",
+            "audioField": "reference_audios",
+            "maxImages": max_images,
+            "maxAudios": max_audios,
+            "maxVideos": 0
+        },
+        "parameters": parameters
+    }))
 }
 
 /// 盘趣聚合网关（One API / new-api 内核）的视频模型，当前为 `pan-seedance-2.0`。
@@ -726,6 +820,7 @@ pub fn schema_for_enabled_operations(
     refresh_veo_video_defaults(&mut schema, model_id);
     refresh_vidu_video_defaults(&mut schema, model_id);
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
+    refresh_sp25_per_use_video_defaults(&mut schema, model_id);
     refresh_seedream_image_parameter_defaults(&mut schema, model_id);
     refresh_async_image_task_defaults(&mut schema, model_id);
     // 端点属于供应商连接：上面按模型名推导出的契约（以及供应商下发的自定义契约）
@@ -838,6 +933,7 @@ pub fn validate_schema_for_operations(
             GenerationOperation::TextToImage | GenerationOperation::ImageToImage => "image",
             GenerationOperation::VideoGeneration => "video",
             GenerationOperation::TextGeneration => "text",
+            GenerationOperation::SpeechGeneration => "audio",
         };
         if definition.get("resultType").and_then(Value::as_str) != Some(expected_result_type) {
             return Err(BackendError::validation(
@@ -929,6 +1025,9 @@ fn parse_operation_alias(value: &str) -> Option<GenerationOperation> {
         | "video" => Some(GenerationOperation::VideoGeneration),
         "text_generation" | "text-generation" | "chat" | "chat_completion" | "chat-completion"
         | "llm" | "text" | "tg" => Some(GenerationOperation::TextGeneration),
+        "speech_generation" | "speech-generation" | "text_to_speech" | "text-to-speech" | "tts" => {
+            Some(GenerationOperation::SpeechGeneration)
+        }
         _ => None,
     }
 }
@@ -968,6 +1067,7 @@ fn complete_advertised_schema(schema: &Value, model_id: &str) -> Value {
     refresh_veo_video_defaults(&mut complete, model_id);
     refresh_vidu_video_defaults(&mut complete, model_id);
     refresh_minimax_h3_video_defaults(&mut complete, model_id);
+    refresh_sp25_per_use_video_defaults(&mut complete, model_id);
     complete
 }
 
@@ -1233,6 +1333,17 @@ fn gpt_image_text_to_image_parameters_with_response_format() -> Value {
 
 fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> Value {
     match operation {
+        GenerationOperation::SpeechGeneration => json!({
+            "resultType": "audio",
+            "requestProfileId": "doubao_voice_tts_v3_sse",
+            "profileVersion": 1,
+            "request": {
+                "path": "/api/v3/tts/unidirectional/sse",
+                "encoding": "json",
+                "parameterContainer": "root"
+            },
+            "parameters": {}
+        }),
         GenerationOperation::TextGeneration => {
             let profile = text_request_profile(model_id);
             // 对话端点按 OpenAI 兼容网关声明；方舟连接由 `apply_request_dialect`
@@ -1453,6 +1564,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
         }
         GenerationOperation::VideoGeneration => {
             let identity = model_id.to_ascii_lowercase();
+            if let Some(schema) = sp25_per_use_video_operation_schema(model_id) {
+                return schema;
+            }
             // 盘趣聚合网关：顶层 `resolution`/`aspect_ratio`/`duration`，media 为顶层
             // `images` URL 数组。必须排在 Seedance 2.0 分支之前，否则会被当成魔芋契约。
             if is_panqu_video_model(&identity) {
@@ -1881,6 +1995,22 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             })
         }
     }
+}
+
+/// 按次系列只允许其文档列出的请求字段。旧的通用 Seedance 档案即使带有非空
+/// 参数也必须替换，否则会把 `metadata`、首尾帧或生成音频等无效字段带入请求。
+fn refresh_sp25_per_use_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    let Some(replacement) = sp25_per_use_video_operation_schema(model_id) else {
+        return false;
+    };
+    let Some(operation) = schema.get_mut(GenerationOperation::VideoGeneration.as_str()) else {
+        return false;
+    };
+    if *operation == replacement {
+        return false;
+    }
+    *operation = replacement;
+    true
 }
 
 /// 把早期版本已经保存的 Wan 3.0 通用视频档案升级为 Wan 专用协议。
@@ -2774,6 +2904,141 @@ mod tests {
                 "model {model_id}"
             );
         }
+    }
+
+    #[test]
+    fn sp25_per_use_models_use_exact_ids_and_documented_limits() {
+        let models = [
+            ("sp2.5-720p-4-15s", 4, 15, 10, 0),
+            ("sp2.5-720p-16-30s", 16, 30, 10, 0),
+            ("sp2.5-720p-30s-ch1", 30, 30, 30, 0),
+            ("sp2.5-720p-30s-ch2", 30, 30, 9, 0),
+            ("sp2.5-720p-30s-ch3", 30, 30, 30, 0),
+            ("sp2.5-720p-30s-ch4", 30, 30, 9, 0),
+            ("sp2.5-720p-30s-ch5", 30, 30, 10, 10),
+            ("sp2.5-720p-30s-ch6", 30, 30, 30, 10),
+        ];
+        for (model_id, min_duration, max_duration, max_images, max_audios) in models {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration]
+            );
+            let video = &schema["video_generation"];
+            assert_eq!(
+                video["requestProfileId"], "sp25_per_use_video_v1",
+                "{model_id}"
+            );
+            assert_eq!(
+                video["request"]["path"], "/v1/video/generations",
+                "{model_id}"
+            );
+            assert_eq!(video["request"]["parameterContainer"], "root", "{model_id}");
+            assert_eq!(
+                video["request"]["mediaEncoding"], "sp25_per_use_urls",
+                "{model_id}"
+            );
+            assert_eq!(video["request"]["maxImages"], max_images, "{model_id}");
+            assert_eq!(video["request"]["maxAudios"], max_audios, "{model_id}");
+            assert_eq!(video["request"]["maxVideos"], 0, "{model_id}");
+            assert_eq!(
+                video["parameters"]["ratio"]["enum"],
+                json!(["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"]),
+                "{model_id}"
+            );
+            assert_eq!(video["parameters"]["resolution"]["enum"], json!(["720P"]));
+            assert!(video["parameters"]["resolution"].get("default").is_none());
+            if min_duration == max_duration {
+                assert_eq!(video["parameters"]["duration"]["enum"], json!([30]));
+                assert!(video["parameters"]["duration"].get("default").is_none());
+            } else {
+                let durations = video["parameters"]["duration"]["enum"].as_array().unwrap();
+                assert_eq!(durations.first(), Some(&json!(min_duration)), "{model_id}");
+                assert_eq!(durations.last(), Some(&json!(max_duration)), "{model_id}");
+                assert_eq!(durations.len(), (max_duration - min_duration + 1) as usize);
+            }
+        }
+        assert!(sp25_per_use_limits("sp2.5-720p-30s-ch7").is_none());
+        assert!(sp25_per_use_limits("sp2.5-720p-30s-ch3-v2").is_none());
+        assert!(sp25_per_use_limits("SP2.5-720P-30S-CH3").is_none());
+    }
+
+    #[test]
+    fn sp25_catalog_ids_override_generic_advertised_capabilities() {
+        for item in [
+            json!({
+                "id": "sp2.5-720p-4-15s",
+                "operations": ["chat"]
+            }),
+            json!({
+                "id": "sp2.5-720p-4-15s",
+                "capabilities": {
+                    "operations": {
+                        "text_generation": { "resultType": "text", "parameters": {} }
+                    }
+                }
+            }),
+        ] {
+            let schema = infer_catalog_schema(&item, "sp2.5-720p-4-15s", "SP 2.5");
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration]
+            );
+            assert_eq!(
+                schema["video_generation"]["requestProfileId"],
+                "sp25_per_use_video_v1"
+            );
+        }
+    }
+
+    #[test]
+    fn sp25_per_use_replaces_stale_seedance_contract_and_parameters() {
+        let model_id = "sp2.5-720p-30s-ch5";
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata",
+                    "contentContainer": "metadata"
+                },
+                "parameters": {
+                    "generate_audio": { "type": "boolean", "default": true },
+                    "duration": { "type": "integer", "default": 5 }
+                }
+            }
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            model_id,
+            &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
+        );
+        let video = &repaired["video_generation"];
+        assert_eq!(video["requestProfileId"], "sp25_per_use_video_v1");
+        assert_eq!(video["request"]["parameterContainer"], "root");
+        assert!(video["request"].get("contentContainer").is_none());
+        assert!(video["parameters"].get("generate_audio").is_none());
+        assert_eq!(
+            normalize_parameters(video, &json!({})).unwrap(),
+            json!({ "ratio": "16:9" })
+        );
+        assert_eq!(
+            normalize_parameters(video, &json!({ "duration": 30, "resolution": "720P" })).unwrap(),
+            json!({ "ratio": "16:9", "duration": 30, "resolution": "720P" })
+        );
+        assert!(normalize_parameters(video, &json!({ "duration": 29 })).is_err());
+        assert!(normalize_parameters(video, &json!({ "resolution": "1080P" })).is_err());
+        assert!(normalize_parameters(video, &json!({ "generate_audio": true })).is_err());
+
+        let mut unchanged = stale.clone();
+        assert!(!refresh_sp25_per_use_video_defaults(
+            &mut unchanged,
+            "sp2.5-720p-30s-ch7"
+        ));
+        assert_eq!(unchanged, stale);
     }
 
     #[test]

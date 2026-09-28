@@ -1,14 +1,20 @@
-import type { TextSkillMode } from "../../lib/backend";
+import type { ExplicitMediaInput, TextSkillMode } from "../../lib/backend";
 import { modelParameterCapabilities } from "../../lib/modelCapabilities";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
+import { speechClient } from "../../lib/speech";
+import { mvMediaClient } from "../../lib/mvMedia";
 import { createAiFilmCheckpoint, type AiFilmAsset } from "./aiFilmWorkflowModel";
 import {
   COMIC_DRAMA_STAGES,
   COMIC_DRAMA_STAGE_LABELS,
+  comicDramaLipReviewComplete,
   comicDramaStageDependencies,
+  comicDramaRequiredSpeakers,
   createComicDramaCheckpoint,
   type ComicDramaArtifact,
+  type ComicDramaShot,
+  type ComicDramaSpeechIntent,
   type ComicDramaReview,
   type ComicDramaStage,
   type ComicDramaStageRun,
@@ -24,7 +30,6 @@ import {
 import {
   CANVAS_ID,
   type KnowledgeVideoWorkflowCheckpoint,
-  type KnowledgeVideoWorkflowShot,
 } from "./workspaceModel";
 import {
   comicDramaReviewOutputSchema,
@@ -34,6 +39,7 @@ import {
 } from "./workflowOutputSchemas";
 import * as v from "valibot";
 import { topologicallySortWorkflowSteps } from "./workflowExecutionPlan";
+import { musicVideoSupportsAudioReference } from "./musicVideoWorkflowRunner";
 
 const GENERATION_MODES: Record<ComicDramaStage, TextSkillMode> = {
   screenplay: "comic_drama_screenplay",
@@ -80,6 +86,10 @@ function inputSignature(node: KnowledgeVideoWorkflowRunRequest["node"]): string 
   });
 }
 
+function voiceBindingsSignature(node: KnowledgeVideoWorkflowRunRequest["node"]): string {
+  return stableJsonSignature(node.config.comicDrama?.speech ?? null);
+}
+
 function stagePassed(run: ComicDramaStageRun | undefined): boolean {
   return (
     !!run?.passed &&
@@ -96,13 +106,16 @@ function validateResume(
   const previous = checkpoint.comicDrama?.inputSignature;
   if (previous && !sameWorkflowSignature(previous, inputSignature(request.node)))
     throw new Error("剧集资料已修改，请重新执行以重建受影响的导演分析、服化道和分镜。");
+  const speech = checkpoint.comicDrama?.speech;
+  if (speech && !sameWorkflowSignature(speech.voiceBindingsSignature, voiceBindingsSignature(request.node)))
+    throw new Error("角色音色绑定已改变，请重新制作，不能复用旧配音和视频片段。");
 }
 
 interface ComicDramaStageResult {
   readonly content: string;
   readonly inputSummary: string;
   readonly assets: readonly AiFilmAsset[];
-  readonly shots: readonly KnowledgeVideoWorkflowShot[];
+  readonly shots: readonly ComicDramaShot[];
   readonly decision: KnowledgeVideoWorkflowCheckpoint["decision"];
 }
 
@@ -111,6 +124,7 @@ export function parseComicDramaStage(
   stage: ComicDramaStage,
   episodeId: string,
   knownAssets: readonly AiFilmAsset[],
+  options: { readonly requireSpeechLines?: boolean } = {},
 ): ComicDramaStageResult {
   let data: v.InferOutput<typeof comicDramaStageOutputSchema>;
   try {
@@ -158,7 +172,7 @@ export function parseComicDramaStage(
       assets.push(previous ?? asset);
     }
   }
-  const shots: KnowledgeVideoWorkflowShot[] = [];
+  const shots: ComicDramaShot[] = [];
   if (stage === "storyboard") {
     if (data.shots.length === 0 || data.shots.length > 120)
       throw new Error("分镜阶段必须提供本集 1～120 个可执行镜头。");
@@ -185,6 +199,19 @@ export function parseComicDramaStage(
         throw new Error(`镜头 ${id} 引用了本集服化道未确认的资产。`);
       if (item.acceptance.length === 0) throw new Error("镜头缺少验收标准。");
       const dialogue = item.dialogue;
+      const dialogueLines = item.dialogueLines ?? [];
+      if (options.requireSpeechLines && Boolean(dialogue.trim()) !== (dialogueLines.length > 0))
+        throw new Error(`镜头 ${id} 的逐字对白与有序说话人台词不一致。`);
+      if (dialogueLines.length && dialogueLines.map((line) => line.text).join("").replace(/\s/gu, "") !== dialogue.replace(/\s/gu, ""))
+        throw new Error(`镜头 ${id} 的有序说话人台词必须逐字覆盖原对白。`);
+      for (const [lineIndex, line] of dialogueLines.entries()) {
+        if (!knownAssets.some((asset) => asset.id === line.speakerId && asset.kind === "character"))
+          throw new Error(`镜头 ${id} 第 ${lineIndex + 1} 句引用了未经确认的说话角色 ${line.speakerId}。`);
+        if (!Number.isFinite(line.startSeconds) || line.startSeconds < 0 || line.startSeconds >= item.durationSeconds)
+          throw new Error(`镜头 ${id} 第 ${lineIndex + 1} 句的起始时间超出镜头。`);
+        if (lineIndex > 0 && line.startSeconds < dialogueLines[lineIndex - 1]!.startSeconds)
+          throw new Error(`镜头 ${id} 的逐句对白必须按镜头内时间排序。`);
+      }
       const dialogueUnits = /[\u3040-\u30ff\u3400-\u9fff]/u.test(dialogue)
         ? [...dialogue.replace(/[\s\p{P}\p{S}]/gu, "")].length
         : dialogue.trim().split(/\s+/u).filter(Boolean).length;
@@ -202,6 +229,7 @@ export function parseComicDramaStage(
         durationSeconds: item.durationSeconds,
         visual: item.visual,
         narration: dialogue,
+        dialogueLines,
         videoPrompt: `${videoPrompt}${dialogue && !videoPrompt.includes(dialogue) ? `\n【逐字对白】${dialogue}` : ""}`,
         referenceAssetIds: references,
         ...(dependsOn.length ? { dependsOn } : {}),
@@ -275,6 +303,27 @@ function reviewFeedback(run: ComicDramaStageRun): string {
         `${label}：${review!.result}\n${review!.report}\n${review!.repairInstructions ?? ""}${review!.question ? `\n问题：${review!.question}\n建议：${review!.recommendation ?? ""}` : ""}`,
     )
     .join("\n\n");
+}
+
+type ComicDramaSpeechClient = Pick<typeof speechClient, "getRequestStatus" | "synthesize" | "composeDubbedVideo">;
+
+function speechLineKey(shotId: string, lineIndex: number): string {
+  return `${shotId}#${lineIndex}`;
+}
+
+function speechLines(shot: KnowledgeVideoWorkflowCheckpoint["shots"][number]) {
+  const lines = (shot as ComicDramaShot).dialogueLines ?? [];
+  if (shot.narration.trim() && !lines.length)
+    throw new Error(`镜头 ${shot.id} 有对白但缺少已确认的逐句说话人，不能自动配音。`);
+  if (lines.map((line) => line.text).join("").replace(/\s/gu, "") !== shot.narration.replace(/\s/gu, ""))
+    throw new Error(`镜头 ${shot.id} 的逐句说话人台词与当前对白不一致，请重新审核分镜。`);
+  for (const [index, line] of lines.entries()) {
+    if (!line.speakerId || !line.text || !Number.isFinite(line.startSeconds) ||
+      line.startSeconds < 0 || line.startSeconds >= shot.durationSeconds ||
+      (index > 0 && line.startSeconds < lines[index - 1]!.startSeconds))
+      throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句的角色、文本或时间无效。`);
+  }
+  return lines;
 }
 
 async function planComicDrama(context: WorkflowPlanningContext): Promise<WorkflowPlan> {
@@ -399,7 +448,7 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
       .map((shot, index) => ({
         ...shot,
         sequence: index + 1,
-        videoPrompt: `${shot.videoPrompt}\n【目标画幅】${options.aspectRatio}${shot.referenceAssetIds?.length ? `\n【参考图映射】\n${shot.referenceAssetIds.map((id, referenceIndex) => `图片${referenceIndex + 1} 对应资产 ${id}（${drama.sharedAssets.find((asset) => asset.id === id)?.name ?? id}）。`).join("\n")}\n按以上对应关系保持人物身份、场景空间和道具一致。` : ""}`,
+        videoPrompt: `${shot.videoPrompt}\n【目标画幅】${options.aspectRatio}${shot.referenceAssetIds?.length ? `\n【参考图映射】\n${shot.referenceAssetIds.map((id, referenceIndex) => `图片${referenceIndex + 1} 对应资产 ${id}（${drama.sharedAssets.find((asset) => asset.id === id)?.name ?? id}）。`).join("\n")}\n按以上对应关系保持人物身份、场景空间和道具一致。` : ""}${shot.dialogueLines?.length ? `\n【逐句角色对白与口型时间】\n${shot.dialogueLines.map((line, lineIndex) => `${line.startSeconds.toFixed(2)} 秒：${drama.sharedAssets.find((asset) => asset.id === line.speakerId)?.name ?? line.speakerId}（${line.speakerId}）说「${line.text}」${musicVideoSupportsAudioReference(request) ? `；参考音频${lineIndex + 1}为该句的真实配音` : ""}`).join("\n")}\n只让对应角色在该句时间张口，未说话角色闭口；最终成片会使用独立配音音轨。` : ""}`,
       }));
     return {
       manifest: JSON.stringify({
@@ -520,7 +569,7 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
         stage === "storyboard"
           ? (readStage("art").artifact?.assets ?? [])
           : getDrama().sharedAssets;
-      return `当前仅处理剧集：${episode.id}（${episode.title}），阶段：${stage}\n制作要求：${node.config.brief || "依据本集剧本完成制作"}\n视觉风格：${options.visualStyle}\n项目画幅：${options.aspectRatio}\n本集原始剧本（唯一剧情依据）：\n${episode.script || "本集剧本尚未提供；请根据制作要求判断是否需要确认。"}\n本集已确认上游成果：\n${inputs || "无"}\n可用资产（固定描述不得改写，变体用新 ID）：${JSON.stringify(assets.map(({ id, kind, name, prompt }) => ({ id, kind, name, prompt })))}\n当前项目图片模型参数：${describeCapabilities(imageCapabilities)}\n当前项目视频模型参数：${describeCapabilities(capabilities)}\n仅依据当前项目模型能力规划素材与镜头，不套用固定品牌的分辨率、参考图数量或时长限制；未声明的能力不能假定已支持。\n交付方式：${options.deliverable}。制作成片时单镜头时长必须匹配所选模型；需要时拆分连续镜头，逐字保留完整对白。只处理本集当前阶段，不读取或编写其他集的剧情。`;
+      return `当前仅处理剧集：${episode.id}（${episode.title}），阶段：${stage}\n制作要求：${node.config.brief || "依据本集剧本完成制作"}\n视觉风格：${options.visualStyle}\n项目画幅：${options.aspectRatio}\n本集原始剧本（唯一剧情依据）：\n${episode.script || "本集剧本尚未提供；请根据制作要求判断是否需要确认。"}\n本集已确认上游成果：\n${inputs || "无"}\n可用资产（固定描述不得改写，变体用新 ID）：${JSON.stringify(assets.map(({ id, kind, name, prompt }) => ({ id, kind, name, prompt })))}\n当前项目图片模型参数：${describeCapabilities(imageCapabilities)}\n当前项目视频模型参数：${describeCapabilities(capabilities)}\n仅依据当前项目模型能力规划素材与镜头，不套用固定品牌的分辨率、参考图数量或时长限制；未声明的能力不能假定已支持。\n交付方式：${options.deliverable}。制作成片时单镜头时长必须匹配所选模型；需要时拆分连续镜头，逐字保留完整对白。${stage === "storyboard" ? "每镜必须输出 dialogue 原文字符串及同样内容的有序 dialogueLines 数组；每句含 speakerId（已确认角色资产 ID）、text（逐字台词）、startSeconds（镜头内起始秒），多人对白按实际开口先后排列，绝不猜测或省略说话人。无对白时两者都为空。" : ""}只处理本集当前阶段，不读取或编写其他集的剧情。`;
     };
     let generate =
       !readStage(stage).artifact ||
@@ -558,6 +607,7 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
               stage === "storyboard"
                 ? (readStage("art").artifact?.assets ?? [])
                 : getDrama().sharedAssets,
+              { requireSpeechLines: stage === "storyboard" && options.deliverable === "video" },
             );
             if (stage === "storyboard" && options.deliverable === "video")
               for (const shot of parsed.shots) {
@@ -667,6 +717,38 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
     }
     if (!stageApproved(readStage(stage))) return requestApproval();
   }
+  if (options.deliverable === "video") {
+    const required = comicDramaRequiredSpeakers(getDrama());
+    if (required.length) {
+      const speechModel = options.speech?.model;
+      const selected = request.providerCatalog
+        .find((entry) => entry.provider.enabled && entry.provider.id === speechModel?.providerId)
+        ?.models.find((entry) =>
+          entry.definitionId === speechModel?.modelDefinitionId &&
+          (entry.operations as readonly string[]).includes("speech_generation"),
+        );
+      const bindings = options.speech?.voiceBindings ?? {};
+      const missing = required.filter((asset) => !bindings[asset.id]?.trim());
+      const malformed = required.filter((asset) => {
+        const voiceId = bindings[asset.id]?.trim() ?? "";
+        return voiceId.length > 128 || /\s/u.test(voiceId);
+      });
+      const ids = required.map((asset) => bindings[asset.id]?.trim()).filter((id): id is string => Boolean(id));
+      const duplicates = new Set(ids).size !== ids.length;
+      if (!selected || missing.length || malformed.length || duplicates) {
+        const target = getDrama().episodes.at(-1)!;
+        updateDrama((drama) => ({
+          ...drama,
+          pending: { episodeId: target.id, stage: "storyboard", step: "voice_binding" },
+        }));
+        return planResult({
+          kind: "planning",
+          question: `${!selected ? "请先选择项目中已启用、支持语音合成的供应商模型。" : ""}${missing.length ? `请为说话角色填写控制台已开通的音色 ID：${missing.map((asset) => asset.name).join("、")}。` : ""}${malformed.length ? `这些角色的音色 ID 格式无效：${malformed.map((asset) => asset.name).join("、")}。` : ""}${duplicates ? "不同说话角色不能绑定同一个音色 ID。" : ""}完成绑定后重新确认执行计划，再继续生成资产与镜头。`,
+          recommendation: "选择项目语音模型并填入每位说话角色在供应商控制台已开通的音色 ID",
+        });
+      }
+    }
+  }
   updateDrama((drama) => ({ ...drama, planningComplete: true, pending: null }));
   const plan = planResult(null);
   // A document-only delivery must obey the same dependency contract as media execution.
@@ -694,12 +776,310 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
 }
 
 export function createComicDramaWorkflowRunner(
-  dependencies: Partial<KnowledgeVideoWorkflowRunnerDependencies> = {},
+  dependencies: Partial<KnowledgeVideoWorkflowRunnerDependencies> & {
+    readonly speechClient?: ComicDramaSpeechClient;
+    readonly clipSignature?: (path: string) => Promise<string>;
+  } = {},
 ) {
-  return createKnowledgeVideoWorkflowRunner(dependencies, {
+  const {
+    speechClient: voiceClient = speechClient,
+    clipSignature = mvMediaClient.clipSignature,
+    ...baseDependencies
+  } = dependencies;
+  return createKnowledgeVideoWorkflowRunner(baseDependencies, {
     title: "漫剧作品",
     plan: planComicDrama,
     qcMode: "ai_film_qc",
+    forceComposition: true,
+    validateMedia: (context) => {
+      const spoken = context.checkpoint().shots.flatMap((shot) => speechLines(shot));
+      if (!spoken.length) return;
+      const options = context.request.node.config.comicDrama;
+      const model = options?.speech?.model;
+      const selected = context.request.providerCatalog
+        .find((entry) => entry.provider.enabled && entry.provider.id === model?.providerId)
+        ?.models.find((entry) =>
+          entry.definitionId === model?.modelDefinitionId &&
+          (entry.operations as readonly string[]).includes("speech_generation"),
+        );
+      if (!selected) throw new Error("漫剧成片需要项目中已启用的语音合成模型，不能沿用未配音的旧分镜。");
+      const known = new Set(context.checkpoint().comicDrama?.sharedAssets
+        .filter((asset) => asset.kind === "character").map((asset) => asset.id));
+      const boundVoices = new Map<string, string>();
+      for (const line of spoken) {
+        const voiceId = options?.speech?.voiceBindings[line.speakerId]?.trim() ?? "";
+        if (!known.has(line.speakerId) || !voiceId)
+          throw new Error(`说话角色 ${line.speakerId} 缺少已确认资产或控制台音色 ID，不能生成媒体。`);
+        if (voiceId.length > 128 || /\s/u.test(voiceId))
+          throw new Error(`说话角色 ${line.speakerId} 的控制台音色 ID 格式无效。`);
+        const otherSpeaker = boundVoices.get(voiceId);
+        if (otherSpeaker && otherSpeaker !== line.speakerId)
+          throw new Error(`说话角色 ${otherSpeaker} 与 ${line.speakerId} 绑定了同一个音色 ID，请分别指定。`);
+        boundVoices.set(voiceId, line.speakerId);
+      }
+    },
+    prepareShotMedia: async (context, shot): Promise<readonly ExplicitMediaInput[]> => {
+      const lines = speechLines(shot);
+      if (!lines.length) return [];
+      const options = context.request.node.config.comicDrama;
+      const speech = options?.speech;
+      const runId = context.checkpoint().runId;
+      if (!speech?.model.providerId || !speech.model.modelDefinitionId || !runId)
+        throw new Error("漫剧配音缺少项目语音模型或运行身份。");
+      const bindingSignature = voiceBindingsSignature(context.request.node);
+      const frozen = context.checkpoint().comicDrama?.speech?.voiceBindingsSignature;
+      if (frozen && !sameWorkflowSignature(frozen, bindingSignature))
+        throw new Error("角色音色绑定与已经提交的配音任务不一致，请重新制作。");
+      for (const [lineIndex, line] of lines.entries()) {
+        if (context.request.signal.aborted) throw new DOMException("已暂停", "AbortError");
+        const voiceId = speech.voiceBindings[line.speakerId];
+        if (!voiceId?.trim())
+          throw new Error(`镜头 ${shot.id} 的角色 ${line.speakerId} 缺少控制台音色 ID。`);
+        const key = speechLineKey(shot.id, lineIndex);
+        const intent: ComicDramaSpeechIntent = {
+          shotId: shot.id,
+          lineIndex,
+          speakerId: line.speakerId,
+          text: line.text,
+          startSeconds: line.startSeconds,
+          voiceId,
+          providerId: speech.model.providerId,
+          modelDefinitionId: speech.model.modelDefinitionId,
+          requestId: `${runId}:speech:${shot.id}:${lineIndex}`,
+        };
+        const prior = context.checkpoint().comicDrama?.speech?.lines[key];
+        if (prior) {
+          if (stableJsonSignature(intent) !== stableJsonSignature({
+            shotId: prior.shotId,
+            lineIndex: prior.lineIndex,
+            speakerId: prior.speakerId,
+            text: prior.text,
+            startSeconds: prior.startSeconds,
+            voiceId: prior.voiceId,
+            providerId: prior.providerId,
+            modelDefinitionId: prior.modelDefinitionId,
+            requestId: prior.requestId,
+          })) throw new Error(`镜头 ${shot.id} 的配音内容已改变，请重新制作。`);
+          const status = await voiceClient.getRequestStatus(prior.requestId);
+          if (status.status === "recoverable") {
+            await context.request.beforeSideEffect?.();
+            const recovered = await voiceClient.synthesize({
+              requestId: intent.requestId,
+              providerConnectionId: intent.providerId,
+              modelDefinitionId: intent.modelDefinitionId,
+              voiceId: intent.voiceId,
+              text: intent.text,
+            });
+            if (recovered.path !== prior.path || recovered.requestSignature !== prior.requestSignature ||
+              recovered.voiceId !== prior.voiceId || recovered.durationSeconds !== prior.durationSeconds)
+              throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句恢复后的配音与已审核版本不一致。`);
+          } else if (status.status !== "ready") {
+            throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句已保存配音文件状态为 ${status.status}，不能继续提交视频。`);
+          }
+          if (status.status === "ready" &&
+            (status.path !== prior.path || status.requestSignature !== prior.requestSignature))
+            throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句已保存配音文件与原请求不一致。`);
+          continue;
+        }
+        const pending = context.checkpoint().comicDrama?.speech?.pendingRequests?.[key];
+        if (pending && stableJsonSignature(pending) !== stableJsonSignature(intent))
+          throw new Error(`镜头 ${shot.id} 的待恢复配音请求与当前文本不一致，请重新制作。`);
+        context.commit((current) => ({
+          ...current,
+          comicDrama: {
+            ...current.comicDrama!,
+            speech: {
+              voiceBindingsSignature: bindingSignature,
+              lines: current.comicDrama?.speech?.lines ?? {},
+              dubbedClips: current.comicDrama?.speech?.dubbedClips ?? {},
+              pendingRequests: {
+                ...current.comicDrama?.speech?.pendingRequests,
+                [key]: intent,
+              },
+              pendingDubRequests: current.comicDrama?.speech?.pendingDubRequests ?? {},
+            },
+          },
+        }));
+        await context.request.beforeSideEffect?.();
+        const result = await voiceClient.synthesize({
+          requestId: intent.requestId,
+          providerConnectionId: intent.providerId,
+          modelDefinitionId: intent.modelDefinitionId,
+          voiceId: intent.voiceId,
+          text: intent.text,
+        });
+        if (!result.path || result.voiceId !== voiceId ||
+          !Number.isFinite(result.durationSeconds) || result.durationSeconds <= 0)
+          throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句没有得到有效的真实配音。`);
+        context.commit((current) => {
+          const saved = current.comicDrama?.speech;
+          const pendingRequests = { ...saved?.pendingRequests };
+          delete pendingRequests[key];
+          return {
+            ...current,
+            comicDrama: {
+              ...current.comicDrama!,
+              speech: {
+                voiceBindingsSignature: bindingSignature,
+                lines: {
+                  ...saved?.lines,
+                  [key]: { ...intent, path: result.path,
+                    durationSeconds: result.durationSeconds,
+                    requestSignature: result.requestSignature },
+                },
+                pendingRequests,
+                dubbedClips: saved?.dubbedClips ?? {},
+                pendingDubRequests: saved?.pendingDubRequests ?? {},
+              },
+            },
+          };
+        });
+      }
+      const savedLines = lines.map((_, index) =>
+        context.checkpoint().comicDrama?.speech?.lines[speechLineKey(shot.id, index)],
+      );
+      for (const [index, result] of savedLines.entries()) {
+        if (!result) throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句缺少已保存配音。`);
+        const nextStart = lines[index + 1]?.startSeconds ?? shot.durationSeconds;
+        if (result.startSeconds + result.durationSeconds > nextStart + 0.04)
+          throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句配音实测时长超过分镜时间窗口，请调整台词或镜头。`);
+      }
+      if (!musicVideoSupportsAudioReference(context.request)) return [];
+      return savedLines.map((result, index) => ({
+        target: { kind: "local_file" as const, path: result!.path, mediaType: "audio" as const },
+        role: "reference_audio" as const,
+        displayNameSnapshot: `角色 ${result!.speakerId} 第 ${index + 1} 句真实配音`,
+        typePosition: index + 1,
+        contentIndex: (shot.referenceAssetIds?.length ?? 0) + index + 1,
+      }));
+    },
+    prepareComposition: async (context, clips) => {
+      const runId = context.checkpoint().runId;
+      if (!runId) throw new Error("漫剧合成缺少运行身份。");
+      for (const { shot, path } of clips) {
+        const lines = speechLines(shot);
+        if (!lines.length) continue;
+        const speech = context.checkpoint().comicDrama?.speech;
+        const segments = lines.map((line, lineIndex) => {
+          const result = speech?.lines[speechLineKey(shot.id, lineIndex)];
+          if (!result?.path) throw new Error(`镜头 ${shot.id} 缺少第 ${lineIndex + 1} 句真实配音。`);
+          if (result.text !== line.text || result.speakerId !== line.speakerId ||
+            result.startSeconds !== line.startSeconds ||
+            result.voiceId !== context.request.node.config.comicDrama?.speech?.voiceBindings[line.speakerId])
+            throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句与已生成配音不一致，请重新制作。`);
+          return { audioPath: result.path, startSeconds: result.startSeconds };
+        });
+        const speechSignature = stableJsonSignature({
+          lines: lines.map((line, lineIndex) => ({
+            line,
+            result: speech?.lines[speechLineKey(shot.id, lineIndex)],
+          })),
+          segments,
+        });
+        const taskId = context.checkpoint().shotRuns[shot.id]?.videoTaskId;
+        if (!taskId) throw new Error(`镜头 ${shot.id} 缺少视频任务身份，不能配音合成。`);
+        const requestId = `${runId}:dub:${shot.id}:${taskId}`;
+        const prior = speech?.dubbedClips?.[shot.id];
+        const command = {
+          requestId,
+          sourcePath: path,
+          segments,
+          outputName: `漫剧-${shot.id}-配音`,
+        };
+        if (!(prior?.path && prior.sourcePath === path && prior.sourceVideoTaskId === taskId && prior.speechSignature === speechSignature)) {
+          const priorIntent = speech?.pendingDubRequests?.[shot.id];
+          if (priorIntent && (priorIntent.requestId !== requestId || priorIntent.sourcePath !== path || priorIntent.speechSignature !== speechSignature))
+            throw new Error(`镜头 ${shot.id} 的待恢复配音合成与当前视频不一致，请重新制作。`);
+          context.commit((current) => ({
+            ...current,
+            comicDrama: {
+              ...current.comicDrama!,
+              speech: {
+                ...current.comicDrama!.speech!,
+                pendingDubRequests: {
+                  ...current.comicDrama!.speech?.pendingDubRequests,
+                  [shot.id]: { requestId, sourcePath: path, sourceVideoTaskId: taskId, speechSignature },
+                },
+              },
+            },
+          }));
+          await context.request.beforeSideEffect?.();
+          const result = await voiceClient.composeDubbedVideo(command);
+          if (!result.path || !Number.isFinite(result.durationSeconds) || result.durationSeconds <= 0)
+            throw new Error(`镜头 ${shot.id} 未获得有效的配音视频。`);
+          context.commit((current) => {
+            const saved = current.comicDrama!.speech!;
+            const pendingDubRequests = { ...saved.pendingDubRequests };
+            delete pendingDubRequests[shot.id];
+            return {
+              ...current,
+              comicDrama: {
+                ...current.comicDrama!,
+                speech: {
+                  ...saved,
+                  pendingDubRequests,
+                  dubbedClips: {
+                    ...saved.dubbedClips,
+                    [shot.id]: {
+                      sourcePath: path,
+                      sourceVideoTaskId: taskId,
+                      speechSignature,
+                      requestId,
+                      requestSignature: result.requestSignature,
+                      videoSignature: result.videoSignature,
+                      path: result.path,
+                      durationSeconds: result.durationSeconds,
+                    },
+                  },
+                },
+              },
+            };
+          });
+        } else {
+          await context.request.beforeSideEffect?.();
+          const verified = await voiceClient.composeDubbedVideo(command);
+          if (verified.requestSignature !== prior.requestSignature ||
+            verified.videoSignature !== prior.videoSignature || verified.path !== prior.path)
+            throw new Error(`镜头 ${shot.id} 的配音视频文件已改变，请重新验收当前版本。`);
+        }
+        const actualSignature = await clipSignature(context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.path ?? "");
+        if (actualSignature !== context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.videoSignature)
+          throw new Error(`镜头 ${shot.id} 的配音视频正文已改变，请重新试听并人工验收。`);
+      }
+      if (!comicDramaLipReviewComplete(context.checkpoint())) {
+        context.commit((current) => ({
+          ...current,
+          phase: "awaiting_approval",
+          lastActivePhase: "composing",
+          decision: null,
+          error: null,
+        }));
+        context.progress({
+          phase: "awaiting_approval",
+          progress: 89,
+          message: "请逐镜试听配音视频并人工确认口型；全部通过后才能合成成片。",
+          error: null,
+        });
+        return false;
+      }
+      return true;
+    },
+    startComposition: async (context, clips) => {
+      if (!comicDramaLipReviewComplete(context.checkpoint()))
+        throw new Error("配音镜头尚未逐镜通过人工口型验收，不能合成成片。");
+      const inputs = await Promise.all(clips.map(async ({ shot, path }, index) => {
+        if (!speechLines(shot).length)
+          return { key: shot.id, name: `镜头-${index + 1}`, source: path };
+        const dubbed = context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id];
+        if (!dubbed?.path || dubbed.sourcePath !== path)
+          throw new Error(`镜头 ${shot.id} 缺少当前版本的已审核配音片段。`);
+        const actualSignature = await clipSignature(dubbed.path);
+        if (actualSignature !== dubbed.videoSignature)
+          throw new Error(`镜头 ${shot.id} 的配音视频正文已改变，原口型验收失效。`);
+        return { key: shot.id, name: `镜头-${index + 1}-配音`, source: dubbed.path };
+      }));
+      return context.dependencies.composerClient.startComposition(inputs, "漫剧-完整配音成片");
+    },
     isPlanningComplete: (checkpoint) =>
       checkpoint.comicDrama?.planningComplete === true &&
       checkpoint.comicDrama.episodes.length > 0 &&

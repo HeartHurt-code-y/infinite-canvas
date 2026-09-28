@@ -1,5 +1,6 @@
 pub mod asset_library;
 pub mod blender;
+mod browser_media;
 pub mod commands;
 pub mod commerce_sources;
 pub mod composer;
@@ -11,21 +12,27 @@ pub mod frame_extractor;
 mod gpt_image_style_library;
 pub mod image_normalize;
 pub mod local_results;
+pub mod local_base64_assets;
+pub mod material_transfer;
 pub mod media;
 pub mod media_cache;
 pub mod media_proxy;
 pub mod model_schema;
+pub mod mv_audio;
 pub mod mv_media;
 pub(crate) mod process_tree;
 pub mod product_scene_images;
 pub mod prompt_optimize;
 pub mod provider;
 pub mod provider_adapter;
+pub mod reelbench;
 pub mod remote_video_tasks;
 pub mod remotion_renderer;
 pub mod result_transfer;
 pub mod reverse_video;
+pub mod resource_update;
 pub mod runtime_components;
+pub mod speech;
 pub mod staging;
 pub mod storage;
 pub mod system_ffmpeg;
@@ -36,6 +43,7 @@ pub mod types;
 pub mod video_edit_source;
 pub mod video_local_edit;
 pub mod volcengine_ark;
+mod xiaohongshu;
 
 use std::sync::Arc;
 
@@ -48,6 +56,7 @@ use downloader::VideoDownloadService;
 use error::BackendResult;
 use frame_extractor::VideoFrameExtractionService;
 use local_results::LocalResultService;
+use local_base64_assets::LocalBase64Library;
 use media::MediaResolver;
 use product_scene_images::ProductSceneImageService;
 use provider::ProviderRuntime;
@@ -68,6 +77,8 @@ pub struct BackendState {
     pub providers: ProviderRuntime,
     pub assets: AssetLibrary,
     pub local_results: LocalResultService,
+    pub local_base64_assets: LocalBase64Library,
+    pub material_transfer_root: std::path::PathBuf,
     pub staging: StagingService,
     pub tasks: GenerationTaskService,
     pub downloader: VideoDownloadService,
@@ -128,6 +139,9 @@ impl BackendState {
             downloads_directory.clone(),
             providers.clone(),
         );
+        let local_base64_assets = LocalBase64Library::new(Arc::clone(&storage), &data_directory)?;
+        let material_transfer_root = data_directory.join("material-transfer-sources");
+        material_transfer::cleanup_orphan_sources(&material_transfer_root, &storage)?;
         // FFmpeg 合成引擎：安装包内置构建（resources/ffmpeg）优先，缺失时
         // 回退到应用数据目录并自动下载。合成产物与下载产物同目录。
         // 需在 StagingService 之前创建：素材导入遇到不支持格式（如 avif）时
@@ -150,12 +164,14 @@ impl BackendState {
             local_results.clone(),
             staging.clone(),
             composer.clone(),
+            local_base64_assets.clone(),
         );
         let video_edit_sources = VideoEditSourceService::new(
             assets.clone(),
             staging.clone(),
             local_results.clone(),
             app.path().app_local_data_dir()?.join("video-edit-previews"),
+            local_base64_assets.clone(),
         )?;
         let tasks = GenerationTaskService::new(
             app.clone(),
@@ -166,13 +182,6 @@ impl BackendState {
             local_results.clone(),
             staging.clone(),
         );
-        // yt-dlp 引擎与浏览器 Cookies 存放在应用数据目录；下载产物与生成结果
-        // 一致落在系统下载目录的「无限画布」子目录。
-        let downloader = VideoDownloadService::new(
-            downloads_directory.clone(),
-            app.path().app_local_data_dir()?.join("yt-dlp-engine"),
-            composer.clone(),
-        )?;
         // 视频抽帧复用同一套 FFmpeg 引擎；产物落在下载目录「无限画布/抽帧」。
         let frame_extractor =
             VideoFrameExtractionService::new(downloads_directory.clone(), composer.clone());
@@ -199,10 +208,18 @@ impl BackendState {
             Some(blender_component.clone()),
         );
         let remotion_renderer = RemotionRenderService::new_with_runtime_store(
-            downloads_directory,
+            downloads_directory.clone(),
             resource_directory.clone(),
             Some(remotion_component.clone()),
         );
+        // Share the already bundled local Chromium with official-site fallback
+        // resolvers. Download outputs still use the yt-dlp engine and directory.
+        let downloader = VideoDownloadService::new_with_browser_runtime(
+            downloads_directory,
+            app.path().app_local_data_dir()?.join("yt-dlp-engine"),
+            composer.clone(),
+            Some(remotion_renderer.clone()),
+        )?;
         let migration_plans = vec![
             ComponentPlan {
                 component: blender_component,
@@ -247,6 +264,8 @@ impl BackendState {
             providers,
             assets,
             local_results,
+            local_base64_assets,
+            material_transfer_root,
             staging,
             tasks,
             downloader,

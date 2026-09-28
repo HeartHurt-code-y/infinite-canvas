@@ -27,6 +27,7 @@ const jsdomTsTests = [
 
 export default defineConfig({
   plugins: [react()],
+  optimizeDeps: { include: ["@xyflow/react"] },
   test: {
     // scripts/ 与 tools/remotion-runtime/ 下的 .mjs 测试走 node --test（原生 runner），
     // 不归 vitest；不加排除会被 test:coverage 扫到并报 No test suite found。

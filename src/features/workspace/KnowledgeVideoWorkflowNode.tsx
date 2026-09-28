@@ -1,10 +1,17 @@
 import { Icon } from "../../components/Icon";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
-import { patchMusicVideoArtifact } from "./musicVideoWorkflowModel";
+import { musicVideoLipReviewSignature, patchMusicVideoArtifact, setMusicVideoLipReview } from "./musicVideoWorkflowModel";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
-import { toMediaSrc, type ProviderCatalogEntry } from "../../lib/backend";
+import {
+  toMediaSrc,
+  type ProviderCatalogEntry,
+  type VideoDownloaderCookieBrowser,
+  type VideoDownloaderEngineStatus,
+} from "../../lib/backend";
+import { mvMediaClient } from "../../lib/mvMedia";
+import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import type {
   CanvasNodeDimensions,
   KnowledgeVideoWorkflowConfig,
@@ -16,6 +23,7 @@ import type {
 import { isTextGenerationModel, isVideoGenerationModel } from "./workspaceModel";
 import { AI_FILM_STAGES, AI_FILM_STAGE_LABELS, type AiFilmStage } from "./aiFilmWorkflowModel";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
+import { comicDramaDubbedShotSignature, comicDramaLipReviewComplete, reviewComicDramaDubbedShot } from "./comicDramaWorkflowModel";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
 import { commerceInputReady } from "./commerceWorkflowModel";
 import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowSections";
@@ -35,7 +43,9 @@ import {
   ReverseVideoConfiguration,
   ReverseVideoDeliverables,
 } from "./ReverseVideoWorkflowSections";
-import { reverseVideoInputReady } from "./reverseVideoWorkflowModel";
+import { reverseVideoInputReady, reverseVideoSourceUrl } from "./reverseVideoWorkflowModel";
+import { ReelbenchConfiguration, ReelbenchDeliverables } from "./ReelbenchWorkflowSections";
+import { reelbenchInputReady, reelbenchInputSignature } from "./reelbenchWorkflowModel";
 import { WorkflowReferenceMaterials } from "./WorkflowReferenceMaterials";
 import { WorkflowPlanReview } from "./WorkflowPlanReview";
 import { WorkflowVersionHistoryPanel } from "./WorkflowVersionHistoryPanel";
@@ -55,6 +65,13 @@ const REVERSE_VIDEO_WORKFLOW_STAGES = [
   { phase: "qc", label: "校验" },
   { phase: "composing", label: "入库" },
   { phase: "done", label: "交付" },
+] as const;
+
+const REELBENCH_WORKFLOW_STAGES = [
+  { phase: "planning", label: "测量切点" },
+  { phase: "generating", label: "逐镜标注" },
+  { phase: "qc", label: "审核镜头表" },
+  { phase: "done", label: "报告与分镜视频" },
 ] as const;
 
 const REVERSE_VIDEO_PHASE_LABELS: Partial<Record<KnowledgeVideoWorkflowPhase, string>> = {
@@ -273,10 +290,16 @@ export interface KnowledgeVideoWorkflowNodeProps {
   readonly onRemoveCoverImage?: (key: string, role: "portrait" | "material", path: string) => void;
   readonly onExportCoverDocuments?: (key: string) => void;
   readonly onPickReverseVideo?: (key: string) => Promise<void> | void;
+  readonly onPickReelbenchVideo?: (key: string) => Promise<void> | void;
   readonly onPickMusicVideoMaterial?: (key: string, role: "song" | "character") => Promise<void>;
   readonly onExportMusicVideoDocuments?: (key: string) => void;
   readonly onRemoveReverseVideo?: (key: string) => void;
+  readonly onRemoveReelbenchVideo?: (key: string) => void;
   readonly onOpenDownloadSettings?: (key: string) => void;
+  readonly downloadCookieStatus?: VideoDownloaderEngineStatus | null;
+  readonly downloadCookieBusy?: boolean;
+  readonly onSelectDownloadCookieBrowser?: (browser: VideoDownloaderCookieBrowser | null) => void;
+  readonly onClearDownloadCookies?: () => void;
 }
 
 export function KnowledgeVideoWorkflowNode({
@@ -317,12 +340,20 @@ export function KnowledgeVideoWorkflowNode({
   onRemoveCoverImage,
   onExportCoverDocuments,
   onPickReverseVideo,
+  onPickReelbenchVideo,
   onPickMusicVideoMaterial,
   onExportMusicVideoDocuments,
   onRemoveReverseVideo,
+  onRemoveReelbenchVideo,
   onOpenDownloadSettings,
+  downloadCookieStatus,
+  downloadCookieBusy,
+  onSelectDownloadCookieBrowser,
+  onClearDownloadCookies,
 }: KnowledgeVideoWorkflowNodeProps) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
+  const latestNodeRef = useRef(node);
+  latestNodeRef.current = node;
   const pickingMaterialsRef = useRef(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
@@ -348,6 +379,8 @@ export function KnowledgeVideoWorkflowNode({
   const isProductReference =
     productSceneOptions != null && productSceneGenerationMode(productSceneOptions) === "reference";
   const reverseOptions = node.config.reverseVideo;
+  const reelbenchOptions = node.config.reelbench;
+  const isReelbench = reelbenchOptions != null;
   const isReverse = !isMusicVideo && reverseOptions != null;
   const isCover = !isReverse && coverOptions != null;
   const isRemotion = !isReverse && !isCover && remotionOptions != null;
@@ -364,21 +397,23 @@ export function KnowledgeVideoWorkflowNode({
     filmOptions != null;
   const workflowTitle = isProductScene
     ? "产品场景图工作流"
-    : isMusicVideo
-      ? "音乐 MV 工作流 V1.0.6"
-      : isReverse
-        ? "短视频反推工作流"
-        : isCover
-          ? "小红书封面工作流"
-          : isRemotion
-            ? "动画逻辑图工作流"
-            : isCommerce
-              ? "剧情带货工作流"
-              : isComicDrama
-                ? "动漫短剧工作流 V2.3"
-                : isFilm
-                  ? "AI影视工作流"
-                  : "知识视频工作流";
+    : isReelbench
+      ? "视频拉片与分镜合成"
+      : isMusicVideo
+        ? "音乐 MV 工作流 V1.0.6"
+        : isReverse
+          ? "短视频反推工作流"
+          : isCover
+            ? "小红书封面工作流"
+            : isRemotion
+              ? "动画逻辑图工作流"
+              : isCommerce
+                ? "剧情带货工作流"
+                : isComicDrama
+                  ? "动漫短剧工作流 V2.3"
+                  : isFilm
+                    ? "AI影视工作流"
+                    : "知识视频工作流";
   const phase = runState?.phase ?? node.config.checkpoint.phase;
   const versionBusy = isActivePhase(phase) || pickingMaterials;
   const displayPhase =
@@ -386,15 +421,51 @@ export function KnowledgeVideoWorkflowNode({
       ? (node.config.checkpoint.lastActivePhase ?? phase)
       : phase;
   const error = runState?.error ?? node.config.checkpoint.error;
+  const downloadInputChanged =
+    phase === "failed" &&
+    ((isReverse &&
+      node.config.checkpoint.reverseVideo?.step === "download" &&
+      Boolean(node.config.checkpoint.reverseVideo.inputSignature) &&
+      !sameWorkflowSignature(
+        node.config.checkpoint.reverseVideo.inputSignature ?? undefined,
+        stableJsonSignature({
+          brief: node.config.brief,
+          sourceUrl: reverseVideoSourceUrl(reverseOptions?.sourceUrl ?? ""),
+          localVideoPath: reverseOptions?.localVideoPath.trim() ?? "",
+        }),
+      )) ||
+      (isReelbench &&
+        node.config.checkpoint.reelbench?.step === "source" &&
+        Boolean(node.config.checkpoint.reelbench.inputSignature) &&
+        !sameWorkflowSignature(
+          node.config.checkpoint.reelbench.inputSignature ?? undefined,
+          reelbenchInputSignature(node.config),
+        )));
+  const failedAtLinkedVideoDownload =
+    phase === "failed" &&
+    Boolean(error) &&
+    !downloadInputChanged &&
+    ((isReverse &&
+      Boolean(reverseOptions?.sourceUrl.trim()) &&
+      !reverseOptions?.localVideoPath &&
+      node.config.checkpoint.reverseVideo?.step === "download") ||
+      (isReelbench &&
+        Boolean(reelbenchOptions?.sourceUrl.trim()) &&
+        !reelbenchOptions?.localVideoPath &&
+        node.config.checkpoint.reelbench?.step === "source" &&
+        !node.config.checkpoint.reelbench.videoPath));
   const progress = Math.min(100, Math.max(0, runState?.progress ?? PHASE_PROGRESS[displayPhase]));
   const runtimeMessage = runState?.message.trim();
-  const phaseLabel = isReverse
-    ? (REVERSE_VIDEO_PHASE_LABELS[phase] ?? PHASE_LABELS[phase])
-    : isRemotion && phase === "planning"
-      ? "方案与检查"
-      : isRemotion && phase === "generating"
-        ? "本地渲染中"
-        : PHASE_LABELS[phase];
+  const phaseLabel =
+    isReelbench && phase === "awaiting_approval"
+      ? "等待镜头表审核"
+      : isReverse
+        ? (REVERSE_VIDEO_PHASE_LABELS[phase] ?? PHASE_LABELS[phase])
+        : isRemotion && phase === "planning"
+          ? "方案与检查"
+          : isRemotion && phase === "generating"
+            ? "本地渲染中"
+            : PHASE_LABELS[phase];
   const message = runtimeMessage && runtimeMessage.length > 0 ? runtimeMessage : phaseLabel;
   const decision = node.config.checkpoint.decision;
   const decisionKey = decision
@@ -404,6 +475,39 @@ export function KnowledgeVideoWorkflowNode({
   const decisionResolution = decisionDraft.key === decisionKey ? decisionDraft.value : "";
   const finalPath = node.config.checkpoint.finalPath;
   const checkpoint = node.config.checkpoint;
+  const awaitingHumanLipReview =
+    phase === "awaiting_approval" &&
+    !decision &&
+    ((isMusicVideo &&
+      Boolean(checkpoint.mediaApprovals?.composition) &&
+      checkpoint.musicVideo?.stages.prompts?.artifact?.shots?.some((shot) => shot.lipSync === "sync")) ||
+      (isComicDrama && Object.keys(checkpoint.comicDrama?.speech?.dubbedClips ?? {}).length > 0));
+  const humanLipReviewComplete = isComicDrama
+    ? comicDramaLipReviewComplete(checkpoint)
+    : (checkpoint.musicVideo?.stages.prompts?.artifact?.shots ?? [])
+        .filter((shot) => shot.lipSync === "sync")
+        .every((shot) => {
+          const review = checkpoint.musicVideo?.lipReviews?.[shot.id];
+          if (review?.decision !== "approved") return false;
+          try {
+            return review.signature === musicVideoLipReviewSignature(checkpoint, shot.id, review.clipSignature);
+          } catch {
+            return false;
+          }
+        });
+  const legacyQcFailedShots =
+    decision?.kind === "qc" && !decision.qcTarget
+      ? checkpoint.shots.filter((shot) => checkpoint.shotRuns[shot.id]?.qcStatus === "failed")
+      : [];
+  const qcDecisionShot =
+    decision?.kind === "qc" && decision.qcTarget
+      ? checkpoint.shots.find((shot) => shot.id === decision.qcTarget?.shotId)
+      : legacyQcFailedShots.length === 1
+        ? legacyQcFailedShots[0]
+        : undefined;
+  const qcDecisionClipPath = qcDecisionShot
+    ? checkpoint.shotRuns[qcDecisionShot.id]?.clipPath
+    : null;
   const workflowStages = isProductScene
     ? [
         { phase: "planning", label: "场景规划" },
@@ -411,42 +515,63 @@ export function KnowledgeVideoWorkflowNode({
         { phase: "qc", label: "逐张审核" },
         { phase: "done", label: "导出选用图片" },
       ]
-    : isReverse
-      ? REVERSE_VIDEO_WORKFLOW_STAGES
-      : isCover
-        ? COVER_WORKFLOW_STAGES
-        : isRemotion
-          ? ANIMATION_WORKFLOW_STAGES
-          : WORKFLOW_STAGES;
-  const activeStageIndex = isReverse
+    : isReelbench
+      ? REELBENCH_WORKFLOW_STAGES
+      : isReverse
+        ? REVERSE_VIDEO_WORKFLOW_STAGES
+        : isCover
+          ? COVER_WORKFLOW_STAGES
+          : isRemotion
+            ? ANIMATION_WORKFLOW_STAGES
+            : WORKFLOW_STAGES;
+  const activeStageIndex = isReelbench
     ? phase === "idle"
       ? -1
       : phase === "done"
-        ? 4
-        : { download: 0, sampling: 0, analysis: 1, review: 2, archive: 3, done: 4 }[
-            node.config.checkpoint.reverseVideo?.step ?? "download"
-          ]
-    : isCover
-      ? displayPhase === "done"
         ? 3
-        : displayPhase === "qc"
+        : checkpoint.reelbench?.step === "review" || displayPhase === "qc"
           ? 2
-          : displayPhase === "generating" || displayPhase === "composing"
-            ? 1
-            : 0
-      : isRemotion
-        ? displayPhase === "done"
-          ? 2
-          : displayPhase === "planning" || displayPhase === "awaiting_approval"
-            ? 0
-            : ["generating", "qc", "composing"].includes(displayPhase)
+          : checkpoint.reelbench?.step === "report" || checkpoint.reelbench?.step === "sync"
+            ? 3
+            : checkpoint.reelbench?.step === "annotate" || displayPhase === "generating"
               ? 1
-              : -1
-        : stageIndexFor(displayPhase);
+              : 0
+    : isReverse
+      ? phase === "idle"
+        ? -1
+        : phase === "done"
+          ? 4
+          : { download: 0, sampling: 0, analysis: 1, review: 2, archive: 3, done: 4 }[
+              node.config.checkpoint.reverseVideo?.step ?? "download"
+            ]
+      : isCover
+        ? displayPhase === "done"
+          ? 3
+          : displayPhase === "qc"
+            ? 2
+            : displayPhase === "generating" || displayPhase === "composing"
+              ? 1
+              : 0
+        : isRemotion
+          ? displayPhase === "done"
+            ? 2
+            : displayPhase === "planning" || displayPhase === "awaiting_approval"
+              ? 0
+              : ["generating", "qc", "composing"].includes(displayPhase)
+                ? 1
+                : -1
+          : stageIndexFor(displayPhase);
   const configurationLocked =
     pickingMaterials ||
     isActivePhase(phase) ||
-    ((isMusicVideo || isReverse || isCover || isRemotion || isCommerce || isComicDrama) &&
+    (isReelbench && phase === "awaiting_approval") ||
+    ((isMusicVideo ||
+      isReverse ||
+      isReelbench ||
+      isCover ||
+      isRemotion ||
+      isCommerce ||
+      isComicDrama) &&
       phase === "awaiting_approval" &&
       decision != null);
 
@@ -471,7 +596,7 @@ export function KnowledgeVideoWorkflowNode({
     : isCover
       ? configuredModels.text !== "待配置" &&
         (coverOptions.deliverable === "prompt" || configuredModels.image !== "待配置")
-      : isReverse || isRemotion || documentsOnly
+      : isReverse || isReelbench || isRemotion || documentsOnly
         ? configuredModels.text !== "待配置"
         : Object.values(configuredModels).every((label) => label !== "待配置");
   const effectiveConfig = withCanvasWorkflowMaterials(node, {
@@ -487,27 +612,29 @@ export function KnowledgeVideoWorkflowNode({
       node.config.connectedMaterials?.length ?? 0,
       node.config.connectedTexts?.length ?? 0,
     ].some((count) => count > 0);
-  const inputReady = isProductScene
-    ? productSceneInputReady(productSceneOptions)
-    : isMusicVideo
-      ? !!musicVideoOptions.songPath.trim() &&
-        (musicVideoOptions.characterMode !== "reference" ||
-          musicVideoOptions.characterReferences.length > 0)
-      : isReverse
-        ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
-        : isCover
-          ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
-          : isRemotion
-            ? Boolean(effectiveConfig.brief.trim())
-            : commerceOptions
-              ? commerceInputReady(commerceOptions)
-              : comicDramaOptions
-                ? comicDramaOptions.episodes.length > 0 &&
-                  comicDramaOptions.episodes.length <= 10 &&
-                  comicDramaOptions.episodes.every(
-                    (episode) => episode.title.trim() && episode.script.trim(),
-                  )
-                : Boolean(effectiveConfig.brief.trim());
+  const inputReady = isReelbench
+    ? reelbenchInputReady(effectiveConfig.brief, reelbenchOptions)
+    : isProductScene
+      ? productSceneInputReady(productSceneOptions)
+      : isMusicVideo
+        ? !!musicVideoOptions.songPath.trim() &&
+          (musicVideoOptions.characterMode !== "reference" ||
+            musicVideoOptions.characterReferences.length > 0)
+        : isReverse
+          ? reverseVideoInputReady(effectiveConfig.brief, reverseOptions)
+          : isCover
+            ? xhsCoverInputReady(effectiveConfig.brief, coverOptions)
+            : isRemotion
+              ? Boolean(effectiveConfig.brief.trim())
+              : commerceOptions
+                ? commerceInputReady(commerceOptions)
+                : comicDramaOptions
+                  ? comicDramaOptions.episodes.length > 0 &&
+                    comicDramaOptions.episodes.length <= 10 &&
+                    comicDramaOptions.episodes.every(
+                      (episode) => episode.title.trim() && episode.script.trim(),
+                    )
+                  : Boolean(effectiveConfig.brief.trim());
   const allMaterials = workflowReferenceMaterials(effectiveConfig);
   const materialQuota = workflowMaterialQuota(effectiveConfig);
   const materialsValid = allMaterials.every(
@@ -577,7 +704,7 @@ export function KnowledgeVideoWorkflowNode({
   return (
     <div
       ref={nodeElementRef}
-      className={`canvas-knowledge-workflow${isReverse ? " canvas-reverse-video-workflow" : ""}${isCover ? " canvas-xhs-cover-workflow" : ""}${isRemotion ? " canvas-remotion-workflow" : ""}${isFilm ? " canvas-ai-film-workflow" : ""}${isComicDrama ? " canvas-comic-drama-workflow" : ""}${isCommerce ? " canvas-commerce-workflow" : ""}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
+      className={`canvas-knowledge-workflow${isReverse ? " canvas-reverse-video-workflow" : ""}${isReelbench ? " canvas-reelbench-workflow" : ""}${isCover ? " canvas-xhs-cover-workflow" : ""}${isRemotion ? " canvas-remotion-workflow" : ""}${isFilm ? " canvas-ai-film-workflow" : ""}${isComicDrama ? " canvas-comic-drama-workflow" : ""}${isCommerce ? " canvas-commerce-workflow" : ""}${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
       aria-busy={isActivePhase(phase) || pickingMaterials}
       onMouseDown={(event) => {
         onSelect?.(node.key);
@@ -598,21 +725,23 @@ export function KnowledgeVideoWorkflowNode({
                 ? isProductReference
                   ? "以产品图片为参考，生成不同机位与场景并逐张审核"
                   : "以产品原图合成已有角度，分批制作并逐张审核"
-                : isMusicVideo
-                  ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
-                  : isReverse
-                    ? "原片自动转为反推提示词、二创路线与可复用案例"
-                    : isCover
-                      ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
-                      : isRemotion
-                        ? "描述或草图自动转为动图、视频与可编辑工程"
-                        : isCommerce
-                          ? "商品资料自动转为剧情、镜头与成片交付"
-                          : isComicDrama
-                            ? "从剧本共创到成片，逐阶段审核并保留制作版本"
-                            : isFilm
-                              ? "八个制作阶段封装执行，支持已有资料接力"
-                              : "一个节点自动完成策划、生成、质检与交付"}
+                : isReelbench
+                  ? "机器测量镜头边界，项目视觉模型标注；审核后导出报告与同步分镜视频"
+                  : isMusicVideo
+                    ? "以原曲为时间轴，逐阶段审核并保留每次制作编辑"
+                    : isReverse
+                      ? "原片自动转为反推提示词、二创路线与可复用案例"
+                      : isCover
+                        ? "人物参考图与选题自动转为 3:4 封面和配套提示词"
+                        : isRemotion
+                          ? "描述或草图自动转为动图、视频与可编辑工程"
+                          : isCommerce
+                            ? "商品资料自动转为剧情、镜头与成片交付"
+                            : isComicDrama
+                              ? "从剧本共创到成片，逐阶段审核并保留制作版本"
+                              : isFilm
+                                ? "八个制作阶段封装执行，支持已有资料接力"
+                                : "一个节点自动完成策划、生成、质检与交付"}
             </small>
           </span>
         </span>
@@ -681,9 +810,9 @@ export function KnowledgeVideoWorkflowNode({
             版本历史
           </button>
         </div>
-        {!isProductScene || unsupportedProductReferences ? (
+        {(!isProductScene || unsupportedProductReferences) && !isReelbench ? (
           <div className="canvas-knowledge-workflow__inputs">
-            {!isReverse && !isCommerce && !isComicDrama && !isProductScene ? (
+            {!isReverse && !isReelbench && !isCommerce && !isComicDrama && !isProductScene ? (
               <label className="canvas-knowledge-workflow__brief">
                 <span>这次要制作什么？</span>
                 <ImeTextarea
@@ -758,6 +887,7 @@ export function KnowledgeVideoWorkflowNode({
         {isMusicVideo && musicVideoOptions ? (
           <MusicVideoConfiguration
             options={musicVideoOptions}
+            providerCatalog={providerCatalog}
             disabled={configurationLocked || phase === "awaiting_approval"}
             onChange={(musicVideo) => onChange({ ...node.config, musicVideo })}
             {...(onPickMusicVideoMaterial
@@ -786,6 +916,33 @@ export function KnowledgeVideoWorkflowNode({
             {...(onOpenDownloadSettings
               ? { onOpenDownloadSettings: () => onOpenDownloadSettings(node.key) }
               : {})}
+            cookieStatus={downloadCookieStatus ?? null}
+            cookieBusy={downloadCookieBusy}
+            onSelectCookieBrowser={onSelectDownloadCookieBrowser}
+            onClearCookies={onClearDownloadCookies}
+          />
+        ) : null}
+
+        {isReelbench && reelbenchOptions ? (
+          <ReelbenchConfiguration
+            options={reelbenchOptions}
+            brief={node.config.brief}
+            disabled={configurationLocked}
+            onChange={(reelbench) => onChange({ ...node.config, reelbench })}
+            onBriefChange={(brief) => onChange({ ...node.config, brief })}
+            {...(onPickReelbenchVideo
+              ? { onPickVideo: () => pickReferenceMaterials(() => onPickReelbenchVideo(node.key)) }
+              : {})}
+            {...(onRemoveReelbenchVideo
+              ? { onRemoveVideo: () => onRemoveReelbenchVideo(node.key) }
+              : {})}
+            {...(onOpenDownloadSettings
+              ? { onOpenDownloadSettings: () => onOpenDownloadSettings(node.key) }
+              : {})}
+            cookieStatus={downloadCookieStatus ?? null}
+            cookieBusy={downloadCookieBusy}
+            onSelectCookieBrowser={onSelectDownloadCookieBrowser}
+            onClearCookies={onClearDownloadCookies}
           />
         ) : null}
 
@@ -842,6 +999,8 @@ export function KnowledgeVideoWorkflowNode({
         {isComicDrama && comicDramaOptions ? (
           <ComicDramaConfiguration
             options={comicDramaOptions}
+            checkpoint={node.config.checkpoint}
+            providerCatalog={providerCatalog}
             brief={node.config.brief}
             disabled={configurationLocked}
             onChange={(comicDrama) => onChange({ ...node.config, comicDrama })}
@@ -931,11 +1090,17 @@ export function KnowledgeVideoWorkflowNode({
             <span className="canvas-knowledge-workflow__model-summary" aria-label="已选模型">
               {!isProductScene || productSceneQuality ? (
                 <span>
-                  {isProductScene ? "视觉检查" : isReverse ? "视觉反推" : "策划"} ·{" "}
-                  {configuredModels.text}
+                  {isProductScene
+                    ? "视觉检查"
+                    : isReelbench
+                      ? "镜头标注"
+                      : isReverse
+                        ? "视觉反推"
+                        : "策划"}{" "}
+                  · {configuredModels.text}
                 </span>
               ) : null}
-              {!isReverse && !isRemotion ? (
+              {!isReverse && !isReelbench && !isRemotion ? (
                 <>
                   <span>图片 · {configuredModels.image}</span>
                   {!isCover && !isProductScene ? (
@@ -950,7 +1115,13 @@ export function KnowledgeVideoWorkflowNode({
             {!isProductScene || productSceneQuality ? (
               <ModelSlot
                 label={
-                  isProductScene ? "产品视觉检查" : isReverse ? "视觉反推与审核" : "策划与审核"
+                  isProductScene
+                    ? "产品视觉检查"
+                    : isReelbench
+                      ? "镜头视觉标注"
+                      : isReverse
+                        ? "视觉反推与审核"
+                        : "策划与审核"
                 }
                 selection={node.config.models.text}
                 providerCatalog={providerCatalog}
@@ -959,7 +1130,7 @@ export function KnowledgeVideoWorkflowNode({
                 onChange={(selection) => patchModels("text", selection)}
               />
             ) : null}
-            {!isReverse && !isRemotion ? (
+            {!isReverse && !isReelbench && !isRemotion ? (
               <>
                 <ModelSlot
                   label="图片生成"
@@ -999,6 +1170,11 @@ export function KnowledgeVideoWorkflowNode({
             </p>
           ) : null}
           {isReverse ? <p>请选择能识别图片的文本模型，用于分析带时间戳的真实视频联系表。</p> : null}
+          {isReelbench ? (
+            <p>
+              请选择可识别图片的项目文本模型。镜头切点和时长由本地媒体引擎测量，模型仅标注可见画面。
+            </p>
+          ) : null}
           {isCover ? (
             <p>策划与审核请选择能识别图片的文本模型，图片生成请选择支持参考图的模型。</p>
           ) : null}
@@ -1074,8 +1250,39 @@ export function KnowledgeVideoWorkflowNode({
             </span>
             <div>
               <small>继续前需要你决定</small>
-              <strong>{decision?.question ?? "自动流程遇到一个需要确认的选择。"}</strong>
-              <p>{decision?.recommendation ?? "采用系统推荐方案后，工作流会继续自动完成。"}</p>
+              <strong>{decision?.question ?? (awaitingHumanLipReview ? "请逐镜试听并验收当前口型。" : "自动流程遇到一个需要确认的选择。")}</strong>
+              <p>{decision?.recommendation ?? (awaitingHumanLipReview ? "下方逐镜选用全部配音或正面演唱片段后，才可继续合成；驳回的镜头需要返工。" : "采用系统推荐方案后，工作流会继续自动完成。")}</p>
+              {decision?.kind === "qc" && !isCover && !isReverse ? (
+                decision.qcTarget || qcDecisionShot ? (
+                  <>
+                    <p>
+                      当前确认：
+                      {qcDecisionShot
+                        ? `镜头 ${qcDecisionShot.sequence}`
+                        : `镜头 ${decision.qcTarget?.shotId ?? "未知"}（当前分镜中未找到）`}
+                      {!decision.qcTarget && qcDecisionShot ? "（旧记录中唯一待确认的镜头）" : ""}
+                    </p>
+                    {qcDecisionClipPath ? (
+                      <video
+                        controls
+                        preload="metadata"
+                        src={toMediaSrc(qcDecisionClipPath)}
+                        aria-label={`镜头 ${qcDecisionShot?.sequence ?? decision.qcTarget?.shotId ?? "未知"} 当前片段预览`}
+                        style={{
+                          display: "block",
+                          width: "100%",
+                          maxWidth: "32rem",
+                          aspectRatio: "16 / 9",
+                        }}
+                      />
+                    ) : (
+                      <p>当前镜头没有可预览的片段，请检查镜头状态。</p>
+                    )}
+                  </>
+                ) : (
+                  <p>旧记录未绑定唯一镜头；确认会被阻止，请重新质检后逐镜确认。</p>
+                )
+              ) : null}
               {decision?.kind === "planning" || isCover || isReverse ? (
                 <label className="canvas-knowledge-workflow__decision-answer">
                   <span>你的回答（可选）</span>
@@ -1107,7 +1314,7 @@ export function KnowledgeVideoWorkflowNode({
             </div>
             <button
               type="button"
-              disabled={pickingMaterials || !materialsValid}
+              disabled={pickingMaterials || !materialsValid || (awaitingHumanLipReview && !humanLipReviewComplete)}
               onClick={() => {
                 const resolution = decisionResolution.trim() || decision?.recommendation?.trim();
                 setDecisionDraft({ key: "", value: "" });
@@ -1118,7 +1325,9 @@ export function KnowledgeVideoWorkflowNode({
                 onContinue(node.key);
               }}
             >
-              {(isCover || isReverse) && decision?.kind === "qc"
+              {awaitingHumanLipReview
+                ? "核对人工验收并继续合成"
+                : (isCover || isReverse) && decision?.kind === "qc"
                 ? "确认后修订并重检"
                 : decision?.kind === "qc"
                   ? "采用当前结果并继续"
@@ -1136,13 +1345,35 @@ export function KnowledgeVideoWorkflowNode({
           </div>
         ) : null}
 
-        {isReverse &&
-        error &&
-        reverseOptions?.sourceUrl.trim() &&
-        node.config.checkpoint.reverseVideo?.step === "download" ? (
-          <p className="canvas-reverse-video__download-hint">
-            下载未完成。可使用上方“导入下载登录凭据”，再重试当前步骤。
+        {downloadInputChanged ? (
+          <p className="canvas-knowledge-workflow__download-recovery">
+            原片输入已改变。请点击“按当前资料重新制作”并审核新计划，旧下载任务不能用于当前输入。
           </p>
+        ) : failedAtLinkedVideoDownload ? (
+          <div className="canvas-knowledge-workflow__download-recovery">
+            <p>
+              原片尚未下载为本地文件。可在上方切换 Cookies 来源后“重试当前步骤”；切换来源只是再次尝试，是否可访问以实际下载结果为准。若已有原片，也可改用本地视频并重新制作。
+            </p>
+            {isReverse && onPickReverseVideo ? (
+              <button
+                type="button"
+                className="canvas-knowledge-workflow__secondary"
+                disabled={pickingMaterials}
+                onClick={() => void pickReferenceMaterials(() => onPickReverseVideo(node.key))}
+              >
+                选择本地视频后重新制作
+              </button>
+            ) : isReelbench && onPickReelbenchVideo ? (
+              <button
+                type="button"
+                className="canvas-knowledge-workflow__secondary"
+                disabled={pickingMaterials}
+                onClick={() => void pickReferenceMaterials(() => onPickReelbenchVideo(node.key))}
+              >
+                选择本地视频后重新制作
+              </button>
+            ) : null}
+          </div>
         ) : null}
 
         {isMusicVideo ? (
@@ -1155,12 +1386,44 @@ export function KnowledgeVideoWorkflowNode({
                 checkpoint: patchMusicVideoArtifact(checkpoint, stage, patch),
               })
             }
+            onLipReview={async (shotId, decision, clipSignature, note) => {
+              const reviewedSignature = musicVideoLipReviewSignature(checkpoint, shotId, clipSignature);
+              const currentPath = latestNodeRef.current.config.checkpoint.shotRuns[shotId]?.clipPath;
+              if (!currentPath) throw new Error(`镜头 ${shotId} 缺少当前片段，请重新试听。`);
+              const actualSignature = await mvMediaClient.clipSignature(currentPath);
+              if (actualSignature !== clipSignature)
+                throw new Error(`镜头 ${shotId} 的片段正文已改变，请重新试听。`);
+              const current = latestNodeRef.current;
+              if (
+                current.config.checkpoint.shotRuns[shotId]?.clipPath !== currentPath ||
+                musicVideoLipReviewSignature(current.config.checkpoint, shotId, actualSignature) !== reviewedSignature
+              )
+                throw new Error(`镜头 ${shotId} 的分镜或原曲已改变，请重新试听。`);
+              onChange({
+                ...current.config,
+                checkpoint: setMusicVideoLipReview(
+                  current.config.checkpoint,
+                  shotId,
+                  decision,
+                  actualSignature,
+                  note,
+                ),
+              });
+            }}
             {...(onExportMusicVideoDocuments
               ? { onExport: () => onExportMusicVideoDocuments(node.key) }
               : {})}
           />
         ) : null}
         {isReverse ? <ReverseVideoDeliverables checkpoint={node.config.checkpoint} /> : null}
+        {isReelbench ? (
+          <ReelbenchDeliverables
+            checkpoint={checkpoint}
+            disabled={isActivePhase(phase) || pickingMaterials || awaitingPlan}
+            onChange={(next) => onChange({ ...node.config, checkpoint: next })}
+            onContinue={() => onContinue(node.key)}
+          />
+        ) : null}
 
         {isProductScene && productSceneOptions ? (
           <ProductSceneDeliverables
@@ -1207,6 +1470,25 @@ export function KnowledgeVideoWorkflowNode({
         {isComicDrama ? (
           <ComicDramaDeliverables
             checkpoint={node.config.checkpoint}
+            onReviewDubbedShot={async (shotId, decision) => {
+              const reviewedSignature = comicDramaDubbedShotSignature(node.config.checkpoint, shotId);
+              const dubbed = node.config.checkpoint.comicDrama?.speech?.dubbedClips?.[shotId];
+              if (!dubbed?.path) throw new Error(`镜头 ${shotId} 尚无可验证的配音片段。`);
+              const observedSha = await mvMediaClient.clipSignature(dubbed.path);
+              const current = latestNodeRef.current;
+              if (comicDramaDubbedShotSignature(current.config.checkpoint, shotId) !== reviewedSignature)
+                throw new Error(`镜头 ${shotId} 的配音片段或分镜已改变，请重新试听。`);
+              onChange({
+                ...current.config,
+                checkpoint: reviewComicDramaDubbedShot(
+                  current.config.checkpoint,
+                  shotId,
+                  decision,
+                  Date.now(),
+                  observedSha,
+                ),
+              });
+            }}
             {...(onExportComicDramaDocuments
               ? { onExport: () => onExportComicDramaDocuments(node.key) }
               : {})}
@@ -1577,20 +1859,22 @@ export function KnowledgeVideoWorkflowNode({
                         ? musicVideoOptions?.songPath
                           ? "请添加人物参考图后开始制作"
                           : "请先选择一首完整歌曲"
-                        : isReverse
-                          ? "请粘贴一条有效视频分享链接，或选择本地视频"
-                          : isCover
-                            ? "请填写封面内容并添加 1–3 张人物参考图"
-                            : isCommerce
-                              ? commerceOptions?.deliverable === "video" &&
-                                !commerceOptions.materials.some(
-                                  (material) => material.kind === "image",
-                                )
-                                ? "请添加真实商品图后开始制作"
-                                : "请填写商品资料后开始制作"
-                              : isComicDrama
-                                ? "请填写每集剧本，至少添加一集"
-                                : "填写制作要求后即可开始"
+                        : isReelbench
+                          ? "请先选择一条本地视频或提供一条有效分享链接"
+                          : isReverse
+                            ? "请粘贴一条有效视频分享链接，或选择本地视频"
+                            : isCover
+                              ? "请填写封面内容并添加 1–3 张人物参考图"
+                              : isCommerce
+                                ? commerceOptions?.deliverable === "video" &&
+                                  !commerceOptions.materials.some(
+                                    (material) => material.kind === "image",
+                                  )
+                                  ? "请添加真实商品图后开始制作"
+                                  : "请填写商品资料后开始制作"
+                                : isComicDrama
+                                  ? "请填写每集剧本，至少添加一集"
+                                  : "填写制作要求后即可开始"
                     : !modelsReady
                       ? isProductScene
                         ? productSceneQuality && configuredModels.text === "待配置"
@@ -1600,7 +1884,7 @@ export function KnowledgeVideoWorkflowNode({
                             : "请配置支持文字生图的图片模型"
                         : isCover
                           ? "请配置文本模型与支持参考图的图片模型"
-                          : isReverse || isRemotion || documentsOnly
+                          : isReverse || isReelbench || isRemotion || documentsOnly
                             ? "请先配置文本模型"
                             : "请先完成三个模型配置"
                       : "先查看执行计划，确认后开始"}
@@ -1618,7 +1902,7 @@ export function KnowledgeVideoWorkflowNode({
           ) : isActivePhase(phase) ? (
             <>
               <span>
-                {isReverse || isRemotion
+                {isReverse || isReelbench || isRemotion
                   ? "可暂停制作，并从已保存的进度继续"
                   : "暂停后续步骤，已提交的生成任务可能继续完成"}
               </span>
@@ -1646,15 +1930,21 @@ export function KnowledgeVideoWorkflowNode({
             </>
           ) : phase === "failed" ? (
             <>
-              <span>已完成的结果会保留</span>
-              <button
-                type="button"
-                className="canvas-knowledge-workflow__primary"
-                disabled={pickingMaterials || !materialsValid}
-                onClick={() => onContinue(node.key)}
-              >
-                重试当前步骤
-              </button>
+              <span>
+                {downloadInputChanged
+                  ? "输入已改变，需重新审核执行计划"
+                  : "已完成的结果会保留"}
+              </span>
+              {!downloadInputChanged ? (
+                <button
+                  type="button"
+                  className="canvas-knowledge-workflow__primary"
+                  disabled={pickingMaterials || !materialsValid}
+                  onClick={() => onContinue(node.key)}
+                >
+                  重试当前步骤
+                </button>
+              ) : null}
             </>
           ) : phase === "awaiting_approval" ? (
             <>

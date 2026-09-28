@@ -801,7 +801,13 @@ export function AssetSourceDialog({
             </div>
             <div>
               <dt>来源</dt>
-              <dd>{asset.source === "local" ? "本地素材库" : "云端素材库"}</dd>
+              <dd>
+                {asset.source === "local"
+                  ? asset.id.startsWith("local-b64-")
+                    ? "本地素材库"
+                    : "对象存储"
+                  : "云端素材库"}
+              </dd>
             </div>
             {asset.cloudStatus ? (
               <div>

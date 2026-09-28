@@ -4,6 +4,7 @@ import { isDesktopRuntime } from "../../lib/backend";
 import {
   dismissAvailableAppUpdate,
   downloadPercent,
+  formatByteSize,
   formatDownloadProgress,
   installAvailableAppUpdate,
   relaunchAfterAppUpdate,
@@ -56,9 +57,9 @@ export function AppUpdateBanner() {
 
 function bannerTitle(status: AppUpdateState["status"], availableVersion: string | null): string {
   if (status === "error") return "更新失败";
-  if (status === "preparing") return "正在准备本地运行组件";
+  if (status === "preparing") return "正在校验并准备运行资源";
   if (status === "downloading") return "正在下载更新";
-  if (status === "ready") return "更新已就绪";
+  if (status === "ready") return "更新已下载完成";
   if (status === "restarting") return "正在完成安装";
   return availableVersion ? `发现新版本 ${availableVersion}` : "发现新版本";
 }
@@ -67,13 +68,13 @@ function bannerDetail(snapshot: AppUpdateState): string {
   if (snapshot.status === "error" && snapshot.error) return snapshot.error;
   if (snapshot.status === "preparing") {
     return snapshot.totalPreparationBytes > 0
-      ? `${formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)}；完成后开始下载更新。`
-      : "正在保留已安装的运行组件，完成后开始下载更新。";
+      ? `${formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)}；复用 ${formatByteSize(snapshot.reusedResourceBytes)}，下载 ${formatByteSize(snapshot.downloadedResourceBytes)}。`
+      : "正在校验和复用本地资源文件。";
   }
   if (snapshot.status === "downloading") {
     return formatDownloadProgress(snapshot.downloadedBytes, snapshot.totalBytes);
   }
-  if (snapshot.status === "ready") return "重启后即可使用新版本，画布会自动保存。";
+  if (snapshot.status === "ready") return "更新已准备好，点击安装并重启后使用新版本。";
   if (snapshot.status === "restarting") return "安装程序会自动重启应用。";
   return "直接升级，不必卸载重装。";
 }
@@ -109,7 +110,7 @@ function bannerActions(snapshot: AppUpdateState) {
           void relaunchAfterAppUpdate();
         }}
       >
-        立即重启
+        安装并重启
       </button>
     );
   }

@@ -19,6 +19,8 @@ import type {
   GenerationTaskPage,
   LocalAssetPage,
   LocalAssetRecord,
+  LocalBase64AssetPage,
+  LocalBase64AssetRecord,
   MediaThumbnail,
   ModelDefinition,
   OptimizedPromptResult,
@@ -29,6 +31,7 @@ import type {
   RealPersonGroup,
   RemoteModelOption,
   RemoteVideoTaskPage,
+  SaveExistingAssetResult,
   StagingJobRecord,
   StagingStateChangedEvent,
   TosBucketPullSummary,
@@ -55,6 +58,7 @@ export const generationOperationSchema = v.picklist([
   "image_to_image",
   "video_generation",
   "text_generation",
+  "speech_generation",
 ]);
 
 export const providerConnectionSchema = v.looseObject({
@@ -243,6 +247,34 @@ export const localAssetPageSchema = v.looseObject({
     audio: v.number(),
   }),
 }) satisfies v.GenericSchema<LocalAssetPage>;
+
+export const localBase64AssetRecordSchema = v.looseObject({
+  id: v.string(),
+  name: v.string(),
+  mediaType: mediaTypeSchema,
+  mimeType: v.string(),
+  previewUrl: v.string(),
+  byteSize: v.number(),
+  createdAt: v.number(),
+}) satisfies v.GenericSchema<LocalBase64AssetRecord>;
+
+export const localBase64AssetPageSchema = v.looseObject({
+  items: v.array(localBase64AssetRecordSchema),
+  total: v.number(),
+  page: v.number(),
+  pageSize: v.number(),
+  kindTotals: v.looseObject({
+    image: v.number(),
+    video: v.number(),
+    audio: v.number(),
+  }),
+}) satisfies v.GenericSchema<LocalBase64AssetPage>;
+
+export const saveExistingAssetResultSchema = v.looseObject({
+  destination: v.picklist(["local", "cloud", "object_storage"]),
+  assetId: v.string(),
+  reused: v.boolean(),
+}) satisfies v.GenericSchema<SaveExistingAssetResult>;
 
 export const tosBucketPullSummarySchema = v.looseObject({
   totalObjects: v.number(),
@@ -545,6 +577,13 @@ export const videoDownloadJobRecordSchema = v.looseObject({
   qualityMode: v.nullable(v.picklist(["best", "sd480"])),
   qualityHint: nullableStringSchema,
   watermarkRemoved: v.boolean(),
+  credentialSource: v.optional(
+    v.nullable(
+      v.picklist(["chrome", "edge", "firefox", "brave", "manual", "site_session", "none"]),
+    ),
+    null,
+  ),
+  probeStatus: v.optional(nullableStringSchema, null),
   error: nullableStringSchema,
   createdAt: v.number(),
   updatedAt: v.number(),
@@ -555,6 +594,10 @@ export const videoDownloaderEngineStatusSchema = v.looseObject({
   version: nullableStringSchema,
   binaryPath: nullableStringSchema,
   cookiesInstalled: v.boolean(),
+  cookieBrowser: v.optional(
+    v.nullable(v.picklist(["auto", "chrome", "edge", "firefox", "brave"])),
+    null,
+  ),
   bilibiliLoggedIn: v.boolean(),
   lastError: nullableStringSchema,
 }) satisfies v.GenericSchema<VideoDownloaderEngineStatus>;

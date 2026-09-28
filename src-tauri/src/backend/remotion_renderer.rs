@@ -132,7 +132,7 @@ impl RemotionRenderService {
         }
     }
 
-    fn runtime_dir(&self) -> Option<PathBuf> {
+    pub(crate) fn runtime_dir(&self) -> Option<PathBuf> {
         if let Some(component) = &self.inner.persistent_component {
             if let Some(root) = component.resolve(runtime_ready) {
                 return Some(root);
@@ -449,11 +449,15 @@ pub(crate) fn runtime_ready(directory: &Path) -> bool {
         node_binary,
         "render.mjs",
         "plan.mjs",
+        "resolve-douyin.mjs",
+        "resolve-rednote.mjs",
         "Composition.tsx",
         "bundle/index.html",
         "runtime-manifest.json",
         browser_binary,
         "node_modules/@remotion/renderer/package.json",
+        "node_modules/playwright-core/package.json",
+        "node_modules/source-map/package.json",
     ]
     .iter()
     .all(|relative| {
@@ -932,6 +936,10 @@ mod tests {
             "runtime-manifest.json",
             browser_binary,
             "node_modules/@remotion/renderer/package.json",
+            "node_modules/playwright-core/package.json",
+            "node_modules/source-map/package.json",
+            "resolve-douyin.mjs",
+            "resolve-rednote.mjs",
         ] {
             let path = directory.path().join(name);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();

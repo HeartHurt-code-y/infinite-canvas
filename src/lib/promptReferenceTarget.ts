@@ -30,6 +30,10 @@ export function decodeMediaReferenceTarget(
       return typeof target["stagingJobId"] === "string" && target["stagingJobId"]
         ? { kind: "local_asset", stagingJobId: target["stagingJobId"], ...base }
         : null;
+    case "local_base64_asset":
+      return typeof target["assetId"] === "string" && target["assetId"]
+        ? { kind: "local_base64_asset", assetId: target["assetId"], ...base }
+        : null;
     case "local_file":
       return typeof target["path"] === "string" && target["path"].trim()
         ? { kind: "local_file", path: target["path"], ...base }
@@ -67,6 +71,8 @@ export function sameMediaSourceIdentity(
     );
   if (first.kind === "local_asset" && second.kind === "local_asset")
     return first.stagingJobId === second.stagingJobId;
+  if (first.kind === "local_base64_asset" && second.kind === "local_base64_asset")
+    return first.assetId === second.assetId;
   if (first.kind === "local_result" && second.kind === "local_result")
     return (
       first.generationTaskId === second.generationTaskId && first.resultIndex === second.resultIndex

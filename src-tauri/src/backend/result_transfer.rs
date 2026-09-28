@@ -140,6 +140,12 @@ async fn start_fresh(
     policy: TransferPolicy,
     progress: &ProgressEmitter,
 ) -> BackendResult<()> {
+    // Some signed video URLs are rate limited by request count. A single-stream
+    // policy must start with one ordinary GET instead of spending a request on
+    // a Range probe before the actual download.
+    if policy.max_parts <= 1 {
+        return stream_full(client, url, auth, part_path, policy.stall, progress).await;
+    }
     let probe = send_range(&client, url, auth, 0, Some(0)).await?;
     let status = probe.status().as_u16();
     if status == 206 {
@@ -649,6 +655,46 @@ mod tests {
         .await
         .expect("trickle succeeds");
         assert_eq!(bytes, b"hello-media");
+    }
+
+    #[tokio::test]
+    async fn single_stream_policy_uses_one_plain_get_without_a_range_probe() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("addr").port();
+        let request = Arc::new(Mutex::new(String::new()));
+        let captured = Arc::clone(&request);
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept");
+            let mut buffer = [0_u8; 4096];
+            let read = stream.read(&mut buffer).expect("read");
+            *captured.lock().expect("lock") = String::from_utf8_lossy(&buffer[..read]).into_owned();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nvideo",
+                )
+                .expect("respond");
+        });
+        let dir = tempfile::tempdir().expect("temp");
+        let part = dir.path().join("single.download");
+        let bytes = download_result(
+            test_client(),
+            &format!("http://127.0.0.1:{port}/signed.mp4"),
+            &ResultDownloadAuth::default(),
+            &part,
+            TransferPolicy {
+                max_parts: 1,
+                ..test_policy()
+            },
+            |_| {},
+        )
+        .await
+        .expect("download");
+        server.join().expect("server");
+        assert_eq!(bytes, b"video");
+        let captured = request.lock().expect("lock").to_ascii_lowercase();
+        assert!(captured.starts_with("get /signed.mp4 http/1.1"));
+        assert!(!captured.contains("range:"));
+        assert!(!captured.contains("authorization:"));
     }
 
     #[tokio::test]

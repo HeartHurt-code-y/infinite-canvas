@@ -2,6 +2,7 @@ import { createContext, createElement, useContext, useState, type ReactNode } fr
 import { useStore } from "zustand";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
+import type { AgentState } from "../workspace/agent/agentTypes";
 import {
   initializeWorkflowVersions,
   mergeWorkflowVersionHistory,
@@ -121,6 +122,8 @@ export interface CanvasDocumentV1 {
 /** V2 不再持久化浏览器 HTML；提示内容使用可验证的 canonical document。 */
 export interface CanvasDocumentV2 {
   readonly version: 2;
+  /** Canvas-scoped assistant history; restored by its own runtime, outside undo history. */
+  readonly agent?: AgentState;
   readonly assetNodes: readonly AssetNodeData[];
   readonly genNodes: readonly GenNodeData[];
   readonly screenplayNodes?: readonly ScreenplayNodeData[];

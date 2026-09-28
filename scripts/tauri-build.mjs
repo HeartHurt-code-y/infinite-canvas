@@ -7,7 +7,10 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { verifyGeneratedNsisRemotionResources } from "./verify-nsis-remotion-resources.mjs";
+import {
+  verifyGeneratedNsisRemotionResources,
+  verifyGeneratedNsisStyleResources,
+} from "./verify-nsis-remotion-resources.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -115,8 +118,11 @@ async function main() {
     !passthrough.includes("--no-bundle") &&
     (bundles === "all" || bundles.split(",").includes("nsis"))
   ) {
-    const count = verifyGeneratedNsisRemotionResources();
-    console.log(`[tauri-build] 完整 NSIS 已包含 ${count} 个 Remotion 资源文件`);
+    const remotionCount = verifyGeneratedNsisRemotionResources();
+    const styleCount = verifyGeneratedNsisStyleResources();
+    console.log(
+      `[tauri-build] 完整 NSIS 已包含 ${remotionCount} 个 Remotion 资源文件和 ${styleCount} 个风格库清单文件`,
+    );
   }
 }
 

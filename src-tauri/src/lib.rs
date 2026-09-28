@@ -3,6 +3,21 @@ mod backend;
 use backend::commands;
 use tauri::Manager as _;
 
+/// Release packaging checks that the slim executable expects exactly the
+/// component manifests listed in the signed resource release.
+fn run_runtime_component_pins_if_requested() -> bool {
+    if !std::env::args().any(|arg| arg == "--print-runtime-component-pins") {
+        return false;
+    }
+    println!(
+        "IC_RUNTIME_COMPONENT_PINS_V1 {}",
+        backend::runtime_components::compiled_manifest_pins()
+    );
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
+
 /// The slim NSIS installer runs this before it can remove an older MSI/NSIS install.
 /// It must work without starting WebView, backend services, or a migration thread.
 fn run_runtime_component_check_if_requested() -> bool {
@@ -66,6 +81,9 @@ fn run_keychain_access_self_test_if_requested() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if run_runtime_component_pins_if_requested() {
+        return;
+    }
     if run_runtime_component_check_if_requested() {
         return;
     }
@@ -94,6 +112,10 @@ pub fn run() {
         .register_asynchronous_uri_scheme_protocol(
             backend::media_proxy::MEDIA_PROXY_SCHEME,
             backend::media_proxy::handle_media_proxy_request,
+        )
+        .register_asynchronous_uri_scheme_protocol(
+            backend::local_base64_assets::LOCAL_BASE64_SCHEME,
+            backend::local_base64_assets::handle_local_base64_request,
         )
         .plugin(tauri_plugin_websocket::init())
         .plugin(tauri_plugin_upload::init())
@@ -170,6 +192,8 @@ pub fn run() {
             commands::resume_generation_result,
             commands::remotion_renderer_preflight,
             commands::get_runtime_component_migration_status,
+            commands::prepare_runtime_components_for_update,
+            commands::get_runtime_component_update_status,
             commands::start_remotion_render,
             commands::get_remotion_render,
             commands::cancel_remotion_render,
@@ -208,6 +232,10 @@ pub fn run() {
             commands::list_asset_import_outputs,
             commands::resolve_imported_asset_source,
             commands::list_local_assets,
+            commands::import_local_base64_asset,
+            commands::save_existing_asset_to_library,
+            commands::list_local_base64_assets,
+            commands::refresh_local_base64_asset_media,
             commands::refresh_local_asset_media,
             commands::refresh_staging_object_url,
             commands::pull_tos_bucket_assets,
@@ -217,12 +245,20 @@ pub fn run() {
             commands::update_video_downloader_engine,
             commands::import_downloader_cookies,
             commands::clear_downloader_cookies,
+            commands::set_downloader_cookie_browser,
             commands::start_video_download,
             commands::get_video_download_job,
             commands::cancel_video_download,
             commands::get_video_composer_engine,
             commands::install_video_composer_engine,
             commands::start_video_composition,
+            commands::list_speech_voices,
+            commands::get_speech_request_status,
+            commands::synthesize_speech,
+            commands::compose_dubbed_video,
+            commands::mv_clip_signature,
+            commands::transcribe_mv_song,
+            commands::align_mv_lyrics,
             commands::probe_mv_song,
             commands::prepare_mv_audio_window,
             commands::start_mv_composition,
@@ -232,6 +268,10 @@ pub fn run() {
             commands::start_video_frame_extraction,
             commands::get_video_frame_extraction_job,
             commands::cancel_video_frame_extraction,
+            commands::analyze_reelbench_video,
+            commands::recut_reelbench_video,
+            commands::validate_reelbench_shots,
+            commands::export_reelbench_video,
             backend::thumbnail::create_media_thumbnail,
             commands::backend_health,
         ])

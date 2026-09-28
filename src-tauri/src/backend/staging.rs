@@ -1,10 +1,12 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
-        Arc,
+        Arc, Weak,
         atomic::{AtomicU64, Ordering},
     },
+    time::{Duration, UNIX_EPOCH},
 };
 
 use chrono::{Datelike as _, Utc};
@@ -13,6 +15,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use tauri_plugin_log::log::{error, info, warn};
 use tokio::io::AsyncReadExt as _;
+use tokio::sync::Mutex as AsyncMutex;
 use tokio_util::io::ReaderStream;
 use url::Url;
 use uuid::Uuid;
@@ -29,9 +32,9 @@ use super::{
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
-        AssetImportOutputRecord, ConnectivityTestResult, ImportedAssetSource, LocalAssetKindTotals,
+        AssetImportOutputRecord, CloudAssetStatus, ConnectivityTestResult, ImportedAssetSource, LocalAssetKindTotals,
         LocalAssetListQuery, LocalAssetPage, LocalAssetRecord, MediaType,
-        RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand, StagingJobRecord,
+        ObserveAssetStatusCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand, StagingJobRecord,
         StagingStatus, StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
     },
 };
@@ -536,6 +539,21 @@ pub struct StagingService {
     /// 共享 FFmpeg 引擎：素材导入遇到不支持格式（如 avif）时用于本地转码。
     composer: VideoCompositionService,
     client: reqwest::Client,
+    content_gates: Arc<AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+}
+
+async fn gate_for_content(
+    gates: &AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>,
+    key: &str,
+) -> Arc<AsyncMutex<()>> {
+    let mut gates = gates.lock().await;
+    gates.retain(|_, gate| gate.strong_count() > 0);
+    if let Some(existing) = gates.get(key).and_then(Weak::upgrade) {
+        return existing;
+    }
+    let gate = Arc::new(AsyncMutex::new(()));
+    gates.insert(key.to_string(), Arc::downgrade(&gate));
+    gate
 }
 
 #[derive(Debug, Clone)]
@@ -564,6 +582,7 @@ impl StagingService {
             assets,
             composer,
             client,
+            content_gates: Arc::new(AsyncMutex::new(HashMap::new())),
         })
     }
 
@@ -696,6 +715,11 @@ impl StagingService {
             updated_at: timestamp,
         };
         self.storage.insert_staging_job(&job)?;
+        if job.purpose == "local_asset" && job.import_target.is_none() {
+            if let Some(config) = self.storage.get_tos_config()? {
+                self.storage.remember_staging_object_target(&job.id, &config)?;
+            }
+        }
         Ok(job)
     }
 
@@ -771,11 +795,18 @@ impl StagingService {
         query: Option<LocalAssetListQuery>,
     ) -> BackendResult<LocalAssetPage> {
         let jobs = self.storage.list_local_asset_jobs()?;
+        let current_config = self.storage.get_tos_config()?;
         let mut kind_totals = LocalAssetKindTotals::default();
         // 先构造 (job, 文件名) 全集并校验 object_key，保证缺 object_key 的坏数据
         // 与旧行为一致地直接报错，同时支撑全库类型计数。
         let mut rows: Vec<(StagingJobRecord, String)> = Vec::with_capacity(jobs.len());
         for job in jobs {
+            if let Some(current) = current_config.as_ref() {
+                let saved = self.storage.get_staging_object_target(&job.id)?;
+                if !local_asset_matches_current_scope(saved.as_ref(), &job, current) {
+                    continue;
+                }
+            }
             if job.object_key.is_none() {
                 return Err(BackendError::protocol(
                     "local asset upload has no object key",
@@ -854,7 +885,7 @@ impl StagingService {
                 json!({ "stagingJobId": job.id }),
             )
         })?;
-        let preview_url = match self.presign_existing_object(&job.id, object_key) {
+        let preview_url = match self.material_object_lease(job, object_key) {
             Ok(lease) => {
                 remember_asset_preview_url(&job.id, Some(&lease.get_url));
                 lease.get_url
@@ -919,7 +950,49 @@ impl StagingService {
                 json!({ "stagingJobId": staging_job_id }),
             )
         })?;
-        self.presign_existing_object(staging_job_id, object_key)
+        self.material_object_lease(&job, object_key)
+    }
+
+    /// A synced object may not have a local source file or content hash. Its
+    /// existing object is already the desired copy when the bucket matches.
+    pub async fn local_asset_is_in_current_bucket(&self, staging_job_id: &str) -> BackendResult<bool> {
+        let job = self.storage.get_staging_job(staging_job_id)?;
+        let Some(current) = self.storage.get_tos_config()? else {
+            return Ok(false);
+        };
+        let saved = self.storage.get_staging_object_target(staging_job_id)?;
+        let same_bucket = local_asset_matches_current_scope(saved.as_ref(), &job, &current);
+        if !same_bucket {
+            return Ok(false);
+        }
+        if !self.staging_content_exists(&job).await? {
+            return Err(BackendError::NotFound(format!(
+                "object-storage material {} is no longer available",
+                staging_job_id
+            )));
+        }
+        Ok(true)
+    }
+
+    fn material_object_lease(
+        &self,
+        job: &StagingJobRecord,
+        object_key: &str,
+    ) -> BackendResult<StagingLease> {
+        let current = self.storage.get_tos_config()?.ok_or_else(|| BackendError::validation(
+            "TOS staging is not configured", json!({ "jobId": job.id })
+        ))?;
+        if !current.enabled {
+            return Err(BackendError::validation(
+                "TOS staging is not enabled",
+                json!({ "jobId": job.id }),
+            ));
+        }
+        if let Some(config) = self.storage.get_staging_object_target(&job.id)? {
+            let chosen = if same_object_scope(&config, &current) { &current } else { &config };
+            return self.presign_existing_object_with_config(&job.id, object_key, chosen);
+        }
+        self.presign_existing_object_with_config(&job.id, object_key, &current)
     }
 
     /// 为一幅已入库的本地素材重新签发读取地址（画布节点预览续签）。
@@ -1045,11 +1118,7 @@ impl StagingService {
                 ignored_unsupported += 1;
                 continue;
             };
-            if self
-                .storage
-                .find_local_asset_job_by_object_key(&object.key)?
-                .is_some()
-            {
+            if should_skip_bucket_object_in_config(&self.storage, &object.key, &config)? {
                 skipped_existing += 1;
                 continue;
             }
@@ -1078,6 +1147,7 @@ impl StagingService {
                 updated_at: timestamp,
             };
             self.storage.insert_staging_job(&job)?;
+            self.storage.remember_staging_object_target(&job.id, &config)?;
             imported += 1;
             info!(
                 "[staging] 存储桶对象已写入本地索引: objectKey={}, size={} 字节, mediaType={}",
@@ -1278,6 +1348,199 @@ impl StagingService {
     }
 
     async fn run_job_inner(&self, job: &mut StagingJobRecord) -> BackendResult<()> {
+        let target_config = if job.purpose == "local_asset" && job.import_target.is_none() {
+            self.storage.get_staging_object_target(&job.id)?
+                .or(self.storage.get_tos_config()?)
+        } else {
+            None
+        };
+        if job.purpose == "local_asset" && job.import_target.is_none() {
+            if let Some(config) = target_config.as_ref() {
+                // Also freeze legacy/recovered jobs that predate target snapshots.
+                self.storage.remember_staging_object_target(&job.id, config)?;
+            }
+        }
+        let scope = match job.purpose.as_str() {
+            "local_asset" | "asset_import" => Some(staging_content_scope(job, target_config.as_ref())?),
+            _ => None,
+        };
+        let Some(scope) = scope else {
+            return self.run_job_inner_unindexed(job).await;
+        };
+        let (sha256, byte_size) = sha256_file(Path::new(&job.local_path)).await?;
+        let gate_key = format!("{scope}:{byte_size}:{sha256}");
+        let gate = gate_for_content(&self.content_gates, &gate_key).await;
+        let _guard = gate.lock().await;
+        if self
+            .storage
+            .find_staging_content(&scope, job.media_type, byte_size, &sha256)?
+            .is_none()
+        {
+            self.backfill_legacy_staging_content(&scope, job.media_type, byte_size, &sha256, target_config.as_ref())
+                .await?;
+        }
+        if let Some(existing) = self
+            .storage
+            .find_staging_content(&scope, job.media_type, byte_size, &sha256)?
+        {
+            if self.staging_content_exists(&existing).await? {
+                job.object_key = existing.object_key.clone();
+                job.bytes_total = existing.bytes_total;
+                job.bytes_uploaded = existing.bytes_uploaded;
+                job.asset_id = if job.import_target.is_some() {
+                    existing.asset_id.clone()
+                } else {
+                    Some(existing.id.clone())
+                };
+                job.status = if job.import_target.is_some() {
+                    StagingStatus::Active
+                } else {
+                    StagingStatus::Staged
+                };
+                job.updated_at = now_ms();
+                self.storage.complete_reused_staging_job(job, &existing.id)?;
+                if job.import_target.is_none() {
+                    if let Some(config) = target_config.as_ref() {
+                        self.storage.remember_staging_object_target(&job.id, &config)?;
+                    }
+                }
+                return Ok(());
+            }
+            self.storage
+                .forget_staging_content(&scope, job.media_type, byte_size, &sha256)?;
+        }
+        self.run_job_inner_unindexed(job).await?;
+        // The source could have changed during the network operation. Never
+        // claim a hash for bytes that may differ from the uploaded body.
+        match sha256_file(Path::new(&job.local_path)).await {
+            Ok((after_hash, after_size)) if after_hash == sha256 && after_size == byte_size => {
+                if let Err(error) = self.storage.remember_staging_content(
+                    &scope,
+                    job.media_type,
+                    byte_size,
+                    &sha256,
+                    &job.id,
+                ) {
+                    warn!("[staging] 已上传素材但去重索引写入失败: jobId={}, error={error}", job.id);
+                }
+            }
+            _ => warn!("[staging] 上传期间源文件变化，未记录去重索引: jobId={}", job.id),
+        }
+        Ok(())
+    }
+
+    async fn backfill_legacy_staging_content(
+        &self,
+        scope: &str,
+        media_type: MediaType,
+        byte_size: u64,
+        sought_sha256: &str,
+        target_config: Option<&TosStagingConfig>,
+    ) -> BackendResult<()> {
+        let config = target_config;
+        for candidate in self.storage.list_unindexed_completed_staging_jobs(media_type)? {
+            if candidate.import_target.is_none() && config.is_none() {
+                continue;
+            }
+            if staging_content_scope(&candidate, config)? != scope {
+                continue;
+            }
+            if candidate.import_target.is_none() {
+                let Some(config) = config else { continue; };
+                let saved = self.storage.get_staging_object_target(&candidate.id)?;
+                if !local_asset_matches_current_scope(saved.as_ref(), &candidate, config) {
+                    continue;
+                }
+            }
+            let path = Path::new(&candidate.local_path);
+            if !path.is_absolute() {
+                continue;
+            }
+            let Ok(metadata) = tokio::fs::metadata(path).await else {
+                continue;
+            };
+            if !metadata.is_file() || metadata.len() != byte_size {
+                continue;
+            }
+            // A file edited after the old upload is not proof of the remote
+            // body's content; avoid mapping its new bytes to that old asset.
+            let uploaded_at = UNIX_EPOCH + Duration::from_millis(candidate.created_at.max(0) as u64);
+            if metadata.modified().is_ok_and(|modified| modified > uploaded_at) {
+                continue;
+            }
+            let Ok((candidate_hash, candidate_size)) = sha256_file(path).await else {
+                continue;
+            };
+            if candidate_size != byte_size {
+                continue;
+            }
+            if candidate_hash == sought_sha256 {
+                if self.staging_content_exists(&candidate).await? {
+                    self.storage.remember_staging_content(
+                        scope, media_type, byte_size, &candidate_hash, &candidate.id,
+                    )?;
+                    break;
+                }
+            } else {
+                // Index unchanged legacy files as we encounter their size,
+                // avoiding repeated hashing on subsequent imports.
+                self.storage.remember_staging_content(
+                    scope, media_type, byte_size, &candidate_hash, &candidate.id,
+                )?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn staging_content_exists(&self, job: &StagingJobRecord) -> BackendResult<bool> {
+        if job.import_target.is_some() {
+            let Some(asset_id) = job.asset_id.as_ref() else {
+                return Ok(false);
+            };
+            let target = job.import_target.as_ref().expect("checked above");
+            let observed = self.assets.observe_asset_status(ObserveAssetStatusCommand {
+                provider_connection_id: target.provider_connection_id.clone(),
+                id: asset_id.clone(),
+            }).await?;
+            if observed.missing || matches!(observed.status, CloudAssetStatus::Failed | CloudAssetStatus::Deleted) {
+                return Ok(false);
+            }
+            if observed.status != CloudAssetStatus::Ready {
+                return Err(BackendError::Conflict("existing cloud material is still processing; retry later".into()));
+            }
+            return Ok(true);
+        }
+        let Some(object_key) = job.object_key.as_deref() else {
+            return Ok(false);
+        };
+        let saved = self.storage.get_staging_object_target(&job.id)?;
+        let current = self.storage.get_tos_config()?;
+        let config = match (saved, current) {
+            (Some(saved), Some(current)) if same_object_scope(&saved, &current) => current,
+            (Some(saved), _) => saved,
+            (None, Some(current)) => current,
+            (None, None) => return Err(BackendError::validation("TOS staging is not configured", json!({}))),
+        };
+        let lease = self.presign_existing_object_with_config(&job.id, object_key, &config)?;
+        let client = fake_ip_aware_client(&lease.get_url, self.client.clone()).await;
+        let response = client
+            .get(&lease.get_url)
+            .header(reqwest::header::RANGE, "bytes=0-0")
+            .send()
+            .await?;
+        if response.status() == reqwest::StatusCode::NOT_FOUND {
+            return Ok(false);
+        }
+        if !response.status().is_success() {
+            return Err(BackendError::protocol(
+                "could not verify existing object-storage material",
+                json!({ "httpStatus": response.status().as_u16() }),
+            ));
+        }
+        Ok(true)
+    }
+
+    async fn run_job_inner_unindexed(&self, job: &mut StagingJobRecord) -> BackendResult<()> {
         let lease = self.upload(job).await?;
         let Some(import_target) = job.import_target.clone() else {
             job.status = StagingStatus::Staged;
@@ -1349,7 +1612,12 @@ impl StagingService {
     }
 
     async fn upload(&self, job: &mut StagingJobRecord) -> BackendResult<StagingLease> {
-        let config = self.storage.get_tos_config()?.ok_or_else(|| {
+        let config = if job.purpose == "local_asset" && job.import_target.is_none() {
+            self.storage.get_staging_object_target(&job.id)?
+                .or(self.storage.get_tos_config()?)
+        } else {
+            self.storage.get_tos_config()?
+        }.ok_or_else(|| {
             BackendError::validation(
                 "TOS staging is not configured",
                 json!({ "required": ["bucket", "region", "endpoint", "objectPrefix"] }),
@@ -1368,6 +1636,9 @@ impl StagingService {
             )
         })?;
         let credentials = TosCredentials::parse(&self.credentials.get(credential_ref)?)?;
+        if job.purpose == "local_asset" && job.import_target.is_none() {
+            self.storage.remember_staging_object_target(&job.id, &config)?;
+        }
 
         let local_path = Path::new(&job.local_path);
         let source_metadata = tokio::fs::metadata(local_path).await?;
@@ -1378,12 +1649,10 @@ impl StagingService {
             ));
         }
         let (mut mime_type, mut extension) = detect_local_media(local_path, job.media_type).await?;
-        // avif 等摸鱼素材库不支持的图片扩展名 → 先用共享 FFmpeg 引擎转码为 webp，
-        // 再对转码产物做预签名上传与素材导入；转码临时文件随本函数退出自动清理。
+        // 只有目标是云端素材库时才按供应商格式限制转码。TOS-only 上传只保存原件，
+        // 保留原始图片字节与对象键扩展名；转码临时文件随本函数退出自动清理。
         let mut upload_path = local_path.to_path_buf();
-        let _converted_guard = if job.media_type == MediaType::Image
-            && !SUPPORTED_IMPORT_IMAGE_EXTENSIONS.contains(&extension.as_str())
-        {
+        let _converted_guard = if needs_asset_import_transcode(job, &extension) {
             let (temp_path, transcode_ext, transcode_mime) =
                 transcode_local_media(&self.composer, &job.id, local_path, &extension).await?;
             mime_type = transcode_mime;
@@ -1604,17 +1873,12 @@ impl StagingService {
         })
     }
 
-    fn presign_existing_object(
+    fn presign_existing_object_with_config(
         &self,
         job_id: &str,
         object_key: &str,
+        config: &TosStagingConfig,
     ) -> BackendResult<StagingLease> {
-        let config = self.storage.get_tos_config()?.ok_or_else(|| {
-            BackendError::validation(
-                "TOS staging is not configured",
-                json!({ "required": ["bucket", "region", "endpoint", "objectPrefix"] }),
-            )
-        })?;
         if !config.enabled {
             return Err(BackendError::validation(
                 "TOS staging is disabled",
@@ -1654,6 +1918,32 @@ impl StagingService {
             delete_url: Some(delete_url),
         })
     }
+}
+
+/// 应用暂存对象（云端素材库导入、生成输入等）在任务结束后会清理；
+/// 已由应用管理的对象键都不能通过整桶同步变成第二份长期素材索引。
+fn should_skip_bucket_object(storage: &Storage, object_key: &str) -> BackendResult<bool> {
+    storage.has_staging_job_by_object_key(object_key)
+}
+
+fn should_skip_bucket_object_in_config(
+    storage: &Storage,
+    object_key: &str,
+    config: &TosStagingConfig,
+) -> BackendResult<bool> {
+    for job in storage.list_staging_jobs_by_object_key(object_key)? {
+        let saved = storage.get_staging_object_target(&job.id)?;
+        if local_asset_matches_current_scope(saved.as_ref(), &job, config) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn needs_asset_import_transcode(job: &StagingJobRecord, extension: &str) -> bool {
+    job.import_target.is_some()
+        && job.media_type == MediaType::Image
+        && !SUPPORTED_IMPORT_IMAGE_EXTENSIONS.contains(&extension)
 }
 
 /// 上游取字节失败时的本地副本来源：素材导入时上传的原始文件。
@@ -1942,6 +2232,70 @@ fn build_object_key(config: &TosStagingConfig, extension: &str) -> String {
     )
 }
 
+fn staging_content_scope(
+    job: &StagingJobRecord,
+    config: Option<&TosStagingConfig>,
+) -> BackendResult<String> {
+    if let Some(target) = job.import_target.as_ref() {
+        let group = target.group_id.as_deref().unwrap_or_default().trim();
+        return Ok(serde_json::to_string(&(
+            "cloud",
+            target.provider_connection_id.trim(),
+            group,
+        ))?);
+    }
+    let config = config.ok_or_else(|| {
+        BackendError::validation("TOS staging is not configured", json!({}))
+    })?;
+    Ok(serde_json::to_string(&(
+        "object_storage",
+        config.bucket.trim(),
+        config.region.trim(),
+        config.endpoint.trim().to_ascii_lowercase(),
+    ))?)
+}
+
+fn legacy_object_key_matches_config(job: &StagingJobRecord, config: &TosStagingConfig) -> bool {
+    let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
+    let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
+    job.object_key.as_deref().is_some_and(|key| {
+        key.split('/').any(|segment| segment == &scope_hash[..16])
+    })
+}
+
+fn local_asset_matches_current_scope(
+    saved: Option<&TosStagingConfig>,
+    job: &StagingJobRecord,
+    current: &TosStagingConfig,
+) -> bool {
+    saved.map_or_else(
+        || legacy_object_key_matches_config(job, current),
+        |saved| same_object_scope(saved, current),
+    )
+}
+
+fn same_object_scope(left: &TosStagingConfig, right: &TosStagingConfig) -> bool {
+    left.bucket.trim() == right.bucket.trim()
+        && left.region.trim() == right.region.trim()
+        && left.endpoint.trim().eq_ignore_ascii_case(right.endpoint.trim())
+}
+
+async fn sha256_file(path: &Path) -> BackendResult<(String, u64)> {
+    let mut file = tokio::fs::File::open(path).await?;
+    let mut hasher = Sha256::new();
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut size = 0_u64;
+    loop {
+        let read = file.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size.saturating_add(read as u64);
+    }
+    Ok((hex::encode(hasher.finalize()), size))
+}
+
 /// 直连 TOS 的配置校验：启用时桶名、地域、Endpoint、对象前缀与凭据引用必须齐备。
 fn validate_tos_config(config: &TosStagingConfig) -> BackendResult<()> {
     if !config.enabled {
@@ -2067,6 +2421,231 @@ mod tests {
             object_prefix: "staging".into(),
             enabled: true,
         }
+    }
+
+    #[test]
+    fn content_scope_separates_cloud_groups_and_tos_buckets() {
+        let config = sample_config();
+        let mut job = StagingJobRecord {
+            id: "scope".into(),
+            local_path: "image.png".into(),
+            purpose: "local_asset".into(),
+            media_type: MediaType::Image,
+            object_key: None,
+            status: StagingStatus::Validating,
+            bytes_total: None,
+            bytes_uploaded: 0,
+            asset_id: None,
+            import_target: None,
+            adjustment: None,
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        let tos_scope = staging_content_scope(&job, Some(&config)).unwrap();
+        let mut other_bucket = config.clone();
+        other_bucket.bucket = "another-bucket".into();
+        assert_ne!(tos_scope, staging_content_scope(&job, Some(&other_bucket)).unwrap());
+        let mut other_prefix = config.clone();
+        other_prefix.object_prefix = "another-prefix".into();
+        assert_eq!(tos_scope, staging_content_scope(&job, Some(&other_prefix)).unwrap());
+        job.import_target = Some(crate::backend::types::StagingAssetImportTarget {
+            provider_connection_id: "provider-a".into(),
+            name: None,
+            group_id: Some("group-a".into()),
+        });
+        let first_group = staging_content_scope(&job, Some(&config)).unwrap();
+        job.import_target.as_mut().unwrap().group_id = Some("group-b".into());
+        assert_ne!(first_group, staging_content_scope(&job, Some(&config)).unwrap());
+        job.import_target.as_mut().unwrap().group_id = Some("group-a".into());
+        job.import_target.as_mut().unwrap().provider_connection_id = "provider-b".into();
+        assert_ne!(first_group, staging_content_scope(&job, Some(&config)).unwrap());
+    }
+
+    #[test]
+    fn saved_bucket_identity_controls_same_bucket_reuse() {
+        let current = sample_config();
+        let mut old_bucket = current.clone();
+        old_bucket.bucket = "old-bucket".into();
+        let job = StagingJobRecord {
+            id: "synced-object".into(),
+            local_path: "synced.png".into(),
+            purpose: "local_asset".into(),
+            media_type: MediaType::Image,
+            object_key: Some("staging/synced.png".into()),
+            status: StagingStatus::Staged,
+            bytes_total: Some(4),
+            bytes_uploaded: 4,
+            asset_id: None,
+            import_target: None,
+            adjustment: None,
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(local_asset_matches_current_scope(Some(&current), &job, &current));
+        assert!(!local_asset_matches_current_scope(Some(&old_bucket), &job, &current));
+        assert!(!local_asset_matches_current_scope(None, &job, &current));
+        let mut new_prefix = current.clone();
+        new_prefix.object_prefix = "another-prefix".into();
+        assert!(local_asset_matches_current_scope(Some(&current), &job, &new_prefix));
+    }
+
+    #[tokio::test]
+    async fn same_content_gate_allows_only_one_completed_index_insert() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let root = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&root.path().join("staging.sqlite3")).unwrap());
+        let gates = Arc::new(AsyncMutex::new(HashMap::new()));
+        let uploaded = Arc::new(AtomicUsize::new(0));
+        for id in ["first", "second"] {
+            storage.insert_staging_job(&StagingJobRecord {
+                id: id.into(),
+                local_path: "image.png".into(),
+                purpose: "local_asset".into(),
+                media_type: MediaType::Image,
+                object_key: None,
+                status: StagingStatus::Validating,
+                bytes_total: None,
+                bytes_uploaded: 0,
+                asset_id: None,
+                import_target: None,
+                adjustment: None,
+                error: None,
+                created_at: 0,
+                updated_at: 0,
+            }).unwrap();
+        }
+        let handles = ["first", "second"].map(|id| {
+            let storage = Arc::clone(&storage);
+            let gates = Arc::clone(&gates);
+            let uploaded = Arc::clone(&uploaded);
+            tokio::spawn(async move {
+                let gate = gate_for_content(&gates, "same-scope:3:abc").await;
+                let _guard = gate.lock().await;
+                if storage.find_staging_content("same-scope", MediaType::Image, 3, "abc")
+                    .unwrap().is_none() {
+                    tokio::task::yield_now().await;
+                    uploaded.fetch_add(1, Ordering::SeqCst);
+                    storage.remember_staging_content("same-scope", MediaType::Image, 3, "abc", id)
+                        .unwrap();
+                }
+            })
+        });
+        for handle in handles { handle.await.unwrap(); }
+        assert_eq!(uploaded.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn tos_only_upload_keeps_unsupported_import_image_format() {
+        let mut job = StagingJobRecord {
+            id: "tos-only".into(),
+            local_path: "example.avif".into(),
+            purpose: "local_asset".into(),
+            media_type: MediaType::Image,
+            object_key: None,
+            status: StagingStatus::Validating,
+            bytes_total: None,
+            bytes_uploaded: 0,
+            asset_id: None,
+            import_target: None,
+            adjustment: None,
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        assert!(!needs_asset_import_transcode(&job, "avif"));
+        job.import_target = Some(crate::backend::types::StagingAssetImportTarget {
+            provider_connection_id: "provider".into(),
+            name: None,
+            group_id: None,
+        });
+        assert!(needs_asset_import_transcode(&job, "avif"));
+        assert!(!needs_asset_import_transcode(&job, "png"));
+        job.media_type = MediaType::Video;
+        assert!(!needs_asset_import_transcode(&job, "avif"));
+    }
+
+    #[test]
+    fn bucket_pull_skips_app_managed_temporary_objects_but_keeps_user_objects() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("staging.sqlite3")).unwrap();
+        assert!(!should_skip_bucket_object(&storage, "user/photo.png").unwrap());
+
+        for (index, purpose, status) in [
+            (1, "asset_import", StagingStatus::Importing),
+            (2, "generation_input", StagingStatus::InUse),
+            (3, "local_asset", StagingStatus::Uploading),
+            (4, "local_asset", StagingStatus::Staged),
+        ] {
+            let object_key = format!("staging/app-{index}.png");
+            storage.insert_staging_job(&StagingJobRecord {
+                id: format!("job-{index}"),
+                local_path: "C:/source/photo.png".into(),
+                purpose: purpose.into(),
+                media_type: MediaType::Image,
+                object_key: Some(object_key.clone()),
+                status,
+                bytes_total: Some(8),
+                bytes_uploaded: 8,
+                asset_id: None,
+                import_target: (purpose == "asset_import").then(|| {
+                    crate::backend::types::StagingAssetImportTarget {
+                        provider_connection_id: "provider".into(),
+                        name: None,
+                        group_id: None,
+                    }
+                }),
+                adjustment: None,
+                error: None,
+                created_at: index,
+                updated_at: index,
+            }).unwrap();
+            if purpose == "asset_import" {
+                // 旧去重仅查 local_asset，正会漏过这类待清理的中转对象。
+                assert!(storage.find_local_asset_job_by_object_key(&object_key).unwrap().is_none());
+            }
+            assert!(should_skip_bucket_object(&storage, &object_key).unwrap());
+        }
+        assert!(!should_skip_bucket_object(&storage, "user/photo.png").unwrap());
+    }
+
+    #[test]
+    fn object_scope_filter_does_not_mix_identical_keys_from_two_buckets() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("staging.sqlite3")).unwrap();
+        let config = sample_config();
+        let mut other = config.clone();
+        other.bucket = "different-bucket".into();
+        let job = StagingJobRecord {
+            id: "old-bucket-object".into(),
+            local_path: "photo.png".into(),
+            purpose: "local_asset".into(),
+            media_type: MediaType::Image,
+            object_key: Some("user/photo.png".into()),
+            status: StagingStatus::Staged,
+            bytes_total: Some(8),
+            bytes_uploaded: 8,
+            asset_id: None,
+            import_target: None,
+            adjustment: None,
+            error: None,
+            created_at: 0,
+            updated_at: 0,
+        };
+        storage.insert_staging_job(&job).unwrap();
+        storage.remember_staging_object_target(&job.id, &config).unwrap();
+        assert!(should_skip_bucket_object_in_config(&storage, "user/photo.png", &config).unwrap());
+        assert!(!should_skip_bucket_object_in_config(&storage, "user/photo.png", &other).unwrap());
+
+        let legacy_key = build_object_key(&config, "png");
+        let mut legacy = job;
+        legacy.id = "legacy-generated".into();
+        legacy.object_key = Some(legacy_key.clone());
+        storage.insert_staging_job(&legacy).unwrap();
+        assert!(should_skip_bucket_object_in_config(&storage, &legacy_key, &config).unwrap());
+        assert!(!should_skip_bucket_object_in_config(&storage, &legacy_key, &other).unwrap());
     }
 
     #[test]

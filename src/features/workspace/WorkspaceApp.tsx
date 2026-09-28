@@ -1,5 +1,15 @@
 import { Icon } from "../../components/Icon";
 import { AppUpdateBanner } from "./AppUpdateBanner";
+import { CanvasAgentController } from "./agent/canvasAgentController";
+import { CanvasAgentPanel } from "./agent/CanvasAgentPanel";
+import { createAgentCanvasTools } from "./agent/agentCanvasTools";
+import { createAgentBlenderTools, previewAgentBlenderScenes } from "./agent/agentBlenderTools";
+import {
+  agentCanvasContext,
+  agentCanvasSignature,
+  agentPlanReview,
+} from "./agent/agentCanvasContext";
+import type { AgentToolContext } from "./agent/agentTypes";
 import { videoDownloadInputs } from "./videoDownloadInputs";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -28,6 +38,7 @@ import {
   useMemo,
   useRef,
   useState,
+  useSyncExternalStore,
   type ReactNode,
 } from "react";
 import { useHotkeys } from "react-hotkeys-hook";
@@ -35,6 +46,7 @@ import { toast } from "sonner";
 import { useShallow } from "zustand/react/shallow";
 import {
   assetLibraryClient,
+  existingAssetClient,
   formatRawBackendError,
   frontendLog,
   generationClient,
@@ -48,6 +60,7 @@ import {
   subscribeStagingEvents,
   toMediaSrc,
   tosStagingClient,
+  localBase64AssetClient,
   workspaceUiClient,
   videoComposerClient,
   videoDownloaderClient,
@@ -62,6 +75,7 @@ import {
   type GenerationTaskSummary,
   type LocalAssetKindTotals,
   type LocalAssetRecord,
+  type LocalBase64AssetRecord,
   type MediaType,
   type PromptOptimizationContextEntry,
   type PromptMultimodalInput,
@@ -72,6 +86,7 @@ import {
   type StartGenerationCommand,
   type TosStagingConfig,
   type VideoDownloadJobRecord,
+  type VideoDownloaderCookieBrowser,
   type VideoDownloaderEngineStatus,
   type VideoFrameExtractionJobRecord,
 } from "../../lib/backend";
@@ -85,13 +100,22 @@ import {
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
 } from "../../lib/modelCapabilities";
+import {
+  perTaskVideoInputIssue,
+  perTaskVideoProfile,
+  perTaskVideoUrlConnection,
+  perTaskVideoUrlIssue,
+} from "../../lib/perTaskVideo";
 import type {
   PromptContentConnection,
+  PromptContentDocumentV1,
   PromptContentEditorSession,
   PromptContentIssue,
 } from "../../lib/promptContent";
 import { cleanGeneratedPrompt, createPromptContentModule } from "../../lib/promptContent";
 import { cleanGptImage2Prompt } from "../../lib/gptImage2Prompt";
+import { parseCinematicDialogueResponse } from "./cinematicDialogueResponse";
+import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import {
   composeVideosInOrder,
   composedVideoFileName,
@@ -157,7 +181,12 @@ import {
   CanvasVideoDownloaderNode,
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
-import { AssetGroupFrame, AssetGroupSelectionReader } from "./AssetGroupFrame";
+import { AssetGroupFrame, CanvasMarqueeSelectionReader } from "./AssetGroupFrame";
+import {
+  captureCanvasNodes,
+  pasteCanvasNodes,
+  type CanvasNodeClipboard,
+} from "./canvasNodeClipboard";
 import {
   assetGroupBounds,
   assetGroupFlowId,
@@ -351,6 +380,7 @@ import {
   isTerminalStagingJob,
   isTerminalTaskStatus,
   isTextGenerationModel,
+  isVideoGenerationModel,
   localAssetToItem,
   localPathFileName,
   markdownDocumentExportName,
@@ -506,24 +536,24 @@ function canvasNodeKeyFromEventTarget(target: EventTarget | null): string | null
   return id != null && id !== "" ? id : null;
 }
 
-function stagingJobAssetIdForCanvas(
-  job: StagingJobRecord | null | undefined,
-  destination: AssetLibrarySource,
-): string | null {
-  if (job == null) return null;
-  if (job.assetId != null && job.assetId !== "") return job.assetId;
-  if (destination === "local" && job.status === "staged") return job.id;
-  return null;
+/** Clipboard is shared by canvas sessions in this window, without changing the OS text clipboard. */
+let canvasNodeClipboard: CanvasNodeClipboard | null = null;
+let canvasNodePasteCount = 0;
+const canvasNodeClipboardListeners = new Set<() => void>();
+
+function subscribeCanvasNodeClipboard(listener: () => void): () => void {
+  canvasNodeClipboardListeners.add(listener);
+  return () => canvasNodeClipboardListeners.delete(listener);
 }
 
-interface CanvasUploadPlacement {
-  readonly x: number;
-  readonly y: number;
-  readonly slotIndex: number;
-  readonly connection: {
-    readonly nodeKey: string;
-    readonly handleType: "source" | "target";
-  } | null;
+function hasCanvasNodeClipboard(): boolean {
+  return (canvasNodeClipboard?.nodes.length ?? 0) > 0;
+}
+
+function writeCanvasNodeClipboard(copied: CanvasNodeClipboard): void {
+  canvasNodeClipboard = copied;
+  canvasNodePasteCount = 0;
+  for (const listener of canvasNodeClipboardListeners) listener();
 }
 
 function promptContentIssueMessage(issue: PromptContentIssue): string {
@@ -689,12 +719,19 @@ export function WorkspaceApp({
 }) {
   const [assetLibrarySource, setAssetLibrarySource] =
     useState<AssetLibrarySource>(readAssetLibrarySource);
+  const [cloudCollection, setCloudCollection] = useState<"library" | "object_storage">("library");
   const [workspaceUiHydrated, setWorkspaceUiHydrated] = useState(() => !isDesktopRuntime());
   const [assetKind, setAssetKind] = useState<AssetKind>("image");
   const [assetSearch, setAssetSearch] = useState("");
   const [assetMultiSelect, setAssetMultiSelect] = useState(false);
   const [pickedAssets, setPickedAssets] = useState<readonly AssetItem[]>([]);
-  const [assetGroupMarquee, setAssetGroupMarquee] = useState(false);
+  const [nodeMarquee, setNodeMarquee] = useState(false);
+  const canPasteCanvasNodes = useSyncExternalStore(
+    subscribeCanvasNodeClipboard,
+    hasCanvasNodeClipboard,
+    hasCanvasNodeClipboard,
+  );
+  const [marqueeNodeKeys, setMarqueeNodeKeys] = useState<ReadonlySet<string>>(() => new Set());
   const [marqueeSelectionEpoch, setMarqueeSelectionEpoch] = useState(0);
   // 搜索防抖提交值：桌面端分页查询把它发给后端过滤，避免每次击键都发起请求。
   const [committedAssetSearch, setCommittedAssetSearch] = useState("");
@@ -705,6 +742,13 @@ export function WorkspaceApp({
   const [localAssetPageNumber, setLocalAssetPageNumber] = useState(1);
   const [localAssetTotal, setLocalAssetTotal] = useState(0);
   const [localAssetKindTotals, setLocalAssetKindTotals] = useState<LocalAssetKindTotals>({
+    image: 0,
+    video: 0,
+    audio: 0,
+  });
+  const [objectStoragePageNumber, setObjectStoragePageNumber] = useState(1);
+  const [objectStorageTotal, setObjectStorageTotal] = useState(0);
+  const [objectStorageKindTotals, setObjectStorageKindTotals] = useState<LocalAssetKindTotals>({
     image: 0,
     video: 0,
     audio: 0,
@@ -740,6 +784,7 @@ export function WorkspaceApp({
     readonly input: GenerationMediaInput;
   } | null>(null);
   const [whiteModelStudioNodeKey, setWhiteModelStudioNodeKey] = useState<string | null>(null);
+  const [canvasAgent] = useState(() => new CanvasAgentController());
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -801,6 +846,60 @@ export function WorkspaceApp({
       hasCanvasNodes: state.hasNodes,
     })),
   );
+  const candidateCanvasNodeKeys = useMemo(
+    () =>
+      new Set(
+        [
+          ...assetNodes,
+          ...genNodes,
+          ...screenplayNodes,
+          ...storyboardNodes,
+          ...knowledgeVideoWorkflowNodes,
+          ...viralRemixNodes,
+          ...videoComposerNodes,
+          ...videoDownloaderNodes,
+          ...frameExtractorNodes,
+          ...resultNodes,
+          ...outputNodes,
+        ].map((node) => node.key),
+      ),
+    [
+      assetNodes,
+      genNodes,
+      screenplayNodes,
+      storyboardNodes,
+      knowledgeVideoWorkflowNodes,
+      viralRemixNodes,
+      videoComposerNodes,
+      videoDownloaderNodes,
+      frameExtractorNodes,
+      resultNodes,
+      outputNodes,
+    ],
+  );
+  const stableCanvasNodeKeysRef = useRef(candidateCanvasNodeKeys);
+  if (
+    stableCanvasNodeKeysRef.current.size !== candidateCanvasNodeKeys.size ||
+    [...candidateCanvasNodeKeys].some((key) => !stableCanvasNodeKeysRef.current.has(key))
+  ) {
+    stableCanvasNodeKeysRef.current = candidateCanvasNodeKeys;
+  }
+  const canvasNodeKeys = stableCanvasNodeKeysRef.current;
+  const selectedCanvasNodeKeys = useMemo(() => {
+    const keys = new Set([...marqueeNodeKeys].filter((key) => canvasNodeKeys.has(key)));
+    if (selectedNodeKey != null && canvasNodeKeys.has(selectedNodeKey)) keys.add(selectedNodeKey);
+    return keys;
+  }, [canvasNodeKeys, marqueeNodeKeys, selectedNodeKey]);
+  const selectedGroupableNodeKeys = useMemo(
+    () =>
+      [...selectedCanvasNodeKeys].filter(
+        (key) => assetNodeByKey.has(key) || outputNodeByKey.has(key),
+      ),
+    [assetNodeByKey, outputNodeByKey, selectedCanvasNodeKeys],
+  );
+  const canGroupSelectedNodes =
+    selectedGroupableNodeKeys.length >= 2 &&
+    selectedGroupableNodeKeys.length === selectedCanvasNodeKeys.size;
   const {
     insertSubgraph,
     addNode,
@@ -866,6 +965,8 @@ export function WorkspaceApp({
   const [providerCatalogLoaded, setProviderCatalogLoaded] = useState(() => !isDesktopRuntime());
   const providerCatalogRequestRef = useRef(0);
   const cloudAssetsRequestRef = useRef(0);
+  const localAssetsRequestRef = useRef(0);
+  const objectStorageRequestRef = useRef(0);
   const purgedCloudAssetIdsRef = useRef(new Set<string>());
   const applyCloudAssetKindDeltaRef = useRef<
     (providerConnectionId: string, groupId: string | null, kind: AssetKind, delta: 1 | -1) => void
@@ -937,6 +1038,7 @@ export function WorkspaceApp({
   const committedAssetSearchRef = useRef("");
   const cloudAssetPageRef = useRef(1);
   const localAssetPageRef = useRef(1);
+  const objectStoragePageRef = useRef(1);
   const [newGroupDialogOpen, setNewGroupDialogOpen] = useState(false);
   const [creatingGroup, setCreatingGroup] = useState(false);
   // 正在删除的云端素材库分组 ID（删除期间禁用入口，并阻止重复提交）。
@@ -948,25 +1050,25 @@ export function WorkspaceApp({
   // 上一次云端素材列表拉取是否失败。assetsError 同时承载列表错误与上传错误，
   // 但空状态的"素材库不可用"提示只应针对列表拉取失败显示。
   const [libraryError, setLibraryError] = useState(false);
-  const [localAssets, setLocalAssets] = useState<readonly LocalAssetRecord[]>([]);
+  const [localAssets, setLocalAssets] = useState<readonly LocalBase64AssetRecord[]>([]);
   const [localAssetsLoading, setLocalAssetsLoading] = useState(false);
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
-  // 拉取整个存储桶素材（ListObjectsV2 分页列举 + 写入本地索引）进行中标记。
+  const [objectStorageAssets, setObjectStorageAssets] = useState<readonly LocalAssetRecord[]>([]);
+  const [objectStorageLoading, setObjectStorageLoading] = useState(false);
+  const [objectStorageError, setObjectStorageError] = useState<string | null>(null);
+  const [objectStorageLibraryError, setObjectStorageLibraryError] = useState(false);
   const [pullingBucket, setPullingBucket] = useState(false);
+  const pullingBucketRef = useRef(false);
   const [assetUploads, setAssetUploads] = useState<readonly AssetUploadEntry[]>([]);
-  // staging jobId -> 产物节点 key 映射，上传成功事件只有 jobId，需通过此映射回查产物节点并标记已上传。
-  const uploadJobToOutputKeyRef = useRef<Map<string, string>>(new Map());
+  // 云端 staging jobId -> 产物节点。本机 Base64 保存不经过 staging。
+  const uploadJobToOutputRef = useRef<Map<string, string>>(new Map());
+  // 独立对象存储 staging jobId -> 产物节点；成功判据是 staged，不是云端素材 ID。
+  const objectStorageUploadJobToOutputRef = useRef<Map<string, string>>(new Map());
   /** 预览替换：上传任务 → 被替换的旧云端素材，入库成功后改写画布引用。 */
   const previewRepairJobsRef = useRef<
     Map<string, { readonly oldAssetId: string; readonly providerConnectionId: string }>
   >(new Map());
-  // 从画布菜单发起的上传：任务完成后把素材节点放到落点，并按需自动连线。
-  const canvasUploadPlacementsRef = useRef(new Map<string, CanvasUploadPlacement>());
-  const placedCanvasUploadJobIdsRef = useRef(new Set<string>());
-  const placeCanvasUploadRef = useRef<
-    (jobId: string, job: StagingJobRecord | null | undefined) => void
-  >(() => undefined);
   // 供轮询订阅回调读取最新上传条目（destination 映射），避免闭包过期。
   const uploadEntriesRef = useRef<readonly AssetUploadEntry[]>([]);
   useEffect(() => {
@@ -1008,6 +1110,7 @@ export function WorkspaceApp({
     useState<VideoDownloaderEngineStatus | null>(null);
   const downloaderEngineLoadedRef = useRef(false);
   const [downloaderEngineBusy, setDownloaderEngineBusy] = useState(false);
+  const [downloaderCookieBusy, setDownloaderCookieBusy] = useState(false);
   // 视频抽帧节点：抽帧任务与会话内运行状态；产物自动落 origin=frame_extract 图片卡片。
   const [frameExtractorRuns, setFrameExtractorRuns] = useState<
     Readonly<Record<string, VideoFrameExtractorRunState>>
@@ -1195,6 +1298,15 @@ export function WorkspaceApp({
   const mediaInputTargetKeysRef = useRef<ReadonlySet<string>>(new Set());
   // 提示内容 module 持有 canonical documents 与节点级 handle；视口裁剪不会丢内容。
   const [promptContents] = useState(createPromptContentModule);
+  const deletedPromptContentsRef = useRef(new Map<string, PromptContentDocumentV1>());
+  useEffect(() => {
+    for (const node of genNodes) {
+      const deleted = deletedPromptContentsRef.current.get(node.key);
+      if (deleted == null) continue;
+      promptContents.restoreDocument(node.key, deleted);
+      deletedPromptContentsRef.current.delete(node.key);
+    }
+  }, [genNodes, promptContents]);
   // 追踪上游原始输出版本；结构化引用的显示文字和用户手改内容都不用于判定重新导入。
   const importedPromptSourcesRef = useRef(
     new Map<string, { edgeId: string; sourceKey: string; text: string; importedText: string }>(),
@@ -1281,16 +1393,23 @@ export function WorkspaceApp({
 
   const collectCanvasDocument = useCallback((): CanvasDocumentV2 => {
     const generationNodeKeys = new Set(
-      genNodes.filter((node) => node.kind !== "prompt").map((node) => node.key),
+      snapshotV2({})
+        .genNodes.filter((node) => node.kind !== "prompt")
+        .map((node) => node.key),
     );
-    return snapshotV2(promptContents.snapshotAll(generationNodeKeys));
-  }, [genNodes, promptContents, snapshotV2]);
+    return {
+      ...snapshotV2(promptContents.snapshotAll(generationNodeKeys)),
+      agent: canvasAgent.getState(),
+    };
+  }, [canvasAgent, promptContents, snapshotV2]);
 
   const restoreCanvasDocument = useCallback(
     (raw: unknown) => {
       const restored = restoreDocument(raw);
       if (!restored.ok) throw new Error(`画布存档无法恢复：${restored.issues.join("；")}`);
+      deletedPromptContentsRef.current.clear();
       const document = raw as CanvasDocument;
+      canvasAgent.restore(document.version === 2 ? document.agent : undefined);
       // restoreDocument 已原子替换节点、连线、视图与选择并清空画布操作历史。
       void flowInstanceRef.current?.setViewport({
         x: restored.view.pan.x,
@@ -1328,11 +1447,12 @@ export function WorkspaceApp({
         }
       }
     },
-    [promptContents, restoreDocument],
+    [canvasAgent, promptContents, restoreDocument],
   );
 
   const validateCanvasDelete = useCallback(async () => {
     if (
+      canvasAgent.getState().status !== "idle" ||
       startingNodeKeys.size > 0 ||
       knowledgeVideoWorkflowAbortControllersRef.current.size > 0 ||
       activeWorkflowHistoryIdsRef.current.size > 0 ||
@@ -1356,7 +1476,14 @@ export function WorkspaceApp({
     if (tasks.items.length > 0) {
       throw new Error("此画布仍有生成任务正在执行，请等待任务完成后再删除。");
     }
-  }, [canvasId, startingNodeKeys, videoComposerRuns, videoDownloaderRuns, frameExtractorRuns]);
+  }, [
+    canvasAgent,
+    canvasId,
+    startingNodeKeys,
+    videoComposerRuns,
+    videoDownloaderRuns,
+    frameExtractorRuns,
+  ]);
 
   const canvasPersistence = useCanvasDocumentPersistence({
     canvasId,
@@ -1818,6 +1945,7 @@ export function WorkspaceApp({
   );
 
   const refreshLocalAssets = useCallback((source: AssetRefreshSource): void => {
+    const requestId = ++localAssetsRequestRef.current;
     const pageNumber = localAssetPageRef.current;
     const mediaType = assetKindRef.current;
     const name = committedAssetSearchRef.current.trim();
@@ -1827,8 +1955,8 @@ export function WorkspaceApp({
       "info",
       `[assets] 本地素材索引开始读取: 触发来源=${source}, 类型=${mediaType}, 页码=${pageNumber}`,
     );
-    void tosStagingClient
-      .listLocalAssets({
+    void localBase64AssetClient
+      .listAssets({
         mediaType,
         name: name || null,
         page: pageNumber,
@@ -1836,6 +1964,7 @@ export function WorkspaceApp({
       })
       .then(
         (page) => {
+          if (requestId !== localAssetsRequestRef.current) return;
           setLocalAssets(page.items);
           setLocalAssetTotal(page.total);
           setLocalAssetKindTotals(page.kindTotals);
@@ -1847,6 +1976,7 @@ export function WorkspaceApp({
           );
         },
         (error: unknown) => {
+          if (requestId !== localAssetsRequestRef.current) return;
           const formatted = formatRawBackendError(error);
           setLocalAssetsError(error instanceof Error ? error.message : formatted);
           setLocalLibraryError(true);
@@ -1856,46 +1986,72 @@ export function WorkspaceApp({
           );
         },
       )
-      .finally(() => setLocalAssetsLoading(false));
+      .finally(() => {
+        if (requestId === localAssetsRequestRef.current) setLocalAssetsLoading(false);
+      });
   }, []);
 
-  /** 拉取整个对象存储桶下的素材文件到本地素材索引（TOS ListObjectsV2 分页列举）。 */
-  const handlePullBucketAssets = useCallback(async (): Promise<void> => {
-    if (!isDesktopRuntime()) {
-      toast.error("拉取存储桶素材仅在桌面应用中可用，浏览器预览模式暂不支持。");
-      return;
-    }
-    if (pullingBucket) return;
+  // 对象存储保留独立目录：旧 TOS-only 素材与新上传的对象都在这里按页浏览，
+  // 不混入云端供应商素材库，也不混入本机 Base64 素材库。
+  const refreshObjectStorageAssets = useCallback((source: AssetRefreshSource): void => {
+    const requestId = ++objectStorageRequestRef.current;
+    const pageNumber = objectStoragePageRef.current;
+    const mediaType = assetKindRef.current;
+    const name = committedAssetSearchRef.current.trim();
+    setObjectStorageLoading(true);
+    void tosStagingClient
+      .listLocalAssets({
+        mediaType,
+        name: name || null,
+        page: pageNumber,
+        pageSize: ASSET_PAGE_SIZE,
+      })
+      .then(
+        (page) => {
+          if (requestId !== objectStorageRequestRef.current) return;
+          setObjectStorageAssets(page.items);
+          setObjectStorageTotal(page.total);
+          setObjectStorageKindTotals(page.kindTotals);
+          setObjectStorageError(null);
+          setObjectStorageLibraryError(false);
+          frontendLog(
+            "info",
+            `[assets] 对象存储索引读取成功: 来源=${source}, 类型=${mediaType}, 页码=${pageNumber}, 本页=${page.items.length}, 总数=${page.total}`,
+          );
+        },
+        (error: unknown) => {
+          if (requestId !== objectStorageRequestRef.current) return;
+          const formatted = formatRawBackendError(error);
+          setObjectStorageError(formatted);
+          setObjectStorageLibraryError(true);
+          frontendLog("error", `[assets] 对象存储索引读取失败: 来源=${source}, 错误=${formatted}`);
+        },
+      )
+      .finally(() => {
+        if (requestId === objectStorageRequestRef.current) setObjectStorageLoading(false);
+      });
+  }, []);
+
+  const handlePullObjectStorageBucket = useCallback(async (): Promise<void> => {
+    if (pullingBucketRef.current) return;
+    pullingBucketRef.current = true;
     setPullingBucket(true);
-    const startedAt = Date.now();
     try {
       const summary = await tosStagingClient.pullBucketAssets();
-      frontendLog(
-        "info",
-        `[assets] 存储桶素材拉取完成: 总对象 ${summary.totalObjects}, 新导入 ${summary.imported}, 已存在跳过 ${summary.skippedExisting}, 非媒体忽略 ${summary.ignoredUnsupported}, 耗时 ${Date.now() - startedAt}ms`,
-      );
-      const details: string[] = [];
-      if (summary.skippedExisting > 0) {
-        details.push(`跳过 ${summary.skippedExisting} 个已存在`);
-      }
-      if (summary.ignoredUnsupported > 0) {
-        details.push(`忽略 ${summary.ignoredUnsupported} 个非媒体文件`);
-      }
+      refreshObjectStorageAssets("manual");
+      setObjectStorageError(null);
       toast.success(
-        `已拉取 ${summary.imported} 个新素材${details.length > 0 ? `（${details.join("，")}）` : ""}`,
+        `对象存储同步完成：新增 ${summary.imported} 项，已有 ${summary.skippedExisting} 项`,
       );
-      refreshLocalAssets("manual");
     } catch (error) {
-      const formatted = formatRawBackendError(error);
-      frontendLog(
-        "error",
-        `[assets] 存储桶素材拉取失败: 耗时 ${Date.now() - startedAt}ms, 错误: ${formatted}`,
-      );
-      toast.error(`拉取存储桶素材失败：${formatted}`);
+      const message = formatRawBackendError(error);
+      setObjectStorageError(message);
+      toast.error(`对象存储同步失败：${message}`);
     } finally {
+      pullingBucketRef.current = false;
       setPullingBucket(false);
     }
-  }, [pullingBucket, refreshLocalAssets]);
+  }, [refreshObjectStorageAssets]);
 
   // 拉取当前令牌作用域下的云端素材库分组。分组失败不阻塞素材浏览：
   // 选中保持「全部素材」，仅记录错误并允许在界面上重试。
@@ -2166,21 +2322,29 @@ export function WorkspaceApp({
     const resetToFirstPage = () => {
       cloudAssetPageRef.current = 1;
       localAssetPageRef.current = 1;
+      objectStoragePageRef.current = 1;
       setCloudAssetPageNumber(1);
       setLocalAssetPageNumber(1);
+      setObjectStoragePageNumber(1);
     };
     if (!isDesktopRuntime()) {
       assetQueryScopeKeyRef.current = "";
       return;
     }
     const scopeKey =
-      assetLibrarySource === "cloud"
-        ? `cloud|${assetProvider?.id ?? ""}|${settingsOpen ? "settings" : ""}`
-        : `local|`;
+      assetLibrarySource === "local"
+        ? "local"
+        : cloudCollection === "object_storage"
+          ? "object_storage"
+          : `cloud|${assetProvider?.id ?? ""}|${settingsOpen ? "settings" : ""}`;
     if (assetQueryScopeKeyRef.current === scopeKey) return;
     assetQueryScopeKeyRef.current = scopeKey;
     resetToFirstPage();
     if (assetLibrarySource === "cloud") {
+      if (cloudCollection === "object_storage") {
+        refreshObjectStorageAssets("initial");
+        return;
+      }
       if (!assetProvider || settingsOpen) return;
       refreshCloudAssets(assetProvider.id, "initial");
       refreshAssetGroups(assetProvider.id);
@@ -2193,10 +2357,12 @@ export function WorkspaceApp({
     // refreshCloudAssets / refreshLocalAssets / refreshAssetGroups 均为稳定回调（依赖为空）。
   }, [
     assetLibrarySource,
+    cloudCollection,
     assetProvider,
     refreshAssetGroups,
     refreshCloudAssets,
     refreshLocalAssets,
+    refreshObjectStorageAssets,
     settingsOpen,
   ]);
 
@@ -2211,7 +2377,7 @@ export function WorkspaceApp({
       assetQueryFilterKeyRef.current = "";
       return;
     }
-    const filterKey = `${assetKind}|${committedAssetSearch}|${selectedAssetGroupId ?? ""}`;
+    const filterKey = `${assetKind}|${committedAssetSearch}|${cloudCollection === "library" ? (selectedAssetGroupId ?? "") : ""}`;
     if (assetQueryFilterKeyRef.current === filterKey) return;
     assetQueryFilterKeyRef.current = filterKey;
     if (!assetQueryFilterArmedRef.current) {
@@ -2220,9 +2386,15 @@ export function WorkspaceApp({
     }
     cloudAssetPageRef.current = 1;
     localAssetPageRef.current = 1;
+    objectStoragePageRef.current = 1;
     setCloudAssetPageNumber(1);
     setLocalAssetPageNumber(1);
+    setObjectStoragePageNumber(1);
     if (assetLibrarySource === "cloud") {
+      if (cloudCollection === "object_storage") {
+        refreshObjectStorageAssets("filter");
+        return;
+      }
       if (!assetProvider || settingsOpen) return;
       refreshCloudAssets(assetProvider.id, "filter");
     } else {
@@ -2231,10 +2403,12 @@ export function WorkspaceApp({
   }, [
     assetKind,
     assetLibrarySource,
+    cloudCollection,
     assetProvider,
     committedAssetSearch,
     refreshCloudAssets,
     refreshLocalAssets,
+    refreshObjectStorageAssets,
     selectedAssetGroupId,
     settingsOpen,
   ]);
@@ -2249,10 +2423,12 @@ export function WorkspaceApp({
     return () => window.clearTimeout(timer);
   }, [assetSearch]);
 
-  // 断网恢复时自动重拉云端素材列表（首次挂载不算）。
+  // 断网恢复时自动重拉当前云端目录（首次挂载不算）。
   useEffect(() => {
     if (wasOfflineRef.current && !isOffline && assetLibrarySource === "cloud") {
-      if (!assetProvider) {
+      if (cloudCollection === "object_storage") {
+        refreshObjectStorageAssets("reconnect");
+      } else if (!assetProvider) {
         frontendLog("warn", "[assets] 检测到断网恢复，但没有已启用的供应商连接，跳过自动刷新");
       } else {
         const providerId = assetProvider.id;
@@ -2265,28 +2441,30 @@ export function WorkspaceApp({
       }
     }
     wasOfflineRef.current = isOffline;
-  }, [isOffline, assetLibrarySource, assetProvider, refreshAssetGroups, refreshCloudAssets]);
+  }, [
+    isOffline,
+    assetLibrarySource,
+    assetProvider,
+    cloudCollection,
+    refreshAssetGroups,
+    refreshCloudAssets,
+    refreshObjectStorageAssets,
+  ]);
 
   const handleImportLocalAssets = useCallback(
     async (
       realPersonGroup?: RealPersonGroup,
       options?: {
-        readonly canvasPlacement?: {
-          readonly x: number;
-          readonly y: number;
-          readonly connection?: {
-            readonly nodeKey: string;
-            readonly handleType: "source" | "target";
-          } | null;
-        };
+        readonly destination?: AssetLibrarySource | "object_storage";
       },
     ): Promise<number> => {
-      const destination = realPersonGroup ? "cloud" : assetLibrarySource;
-      const fromCanvas = options?.canvasPlacement != null;
+      const destination = realPersonGroup ? "cloud" : (options?.destination ?? assetLibrarySource);
+      const uploadOutsideCurrentLibrary = destination !== assetLibrarySource;
       const reportError = (message: string) => {
         if (destination === "cloud") setAssetsError(message);
+        else if (destination === "object_storage") setObjectStorageError(message);
         else setLocalAssetsError(message);
-        if (fromCanvas) toast.error(message);
+        if (uploadOutsideCurrentLibrary) toast.error(message);
       };
       // 非桌面（浏览器预览）环境：文件选择器直接返回空，明确提示而非静默无反应。
       if (!isDesktopRuntime()) {
@@ -2298,20 +2476,23 @@ export function WorkspaceApp({
         return 0;
       }
       if (destination === "cloud") setAssetsError(null);
+      else if (destination === "object_storage") setObjectStorageError(null);
       else setLocalAssetsError(null);
-      // 预检对象存储（TOS）配置：未配置或未启用时直接明确提示，避免后台异步静默失败。
-      let stagingConfig: TosStagingConfig | null;
-      try {
-        stagingConfig = await tosStagingClient.getConfig();
-      } catch (error) {
-        reportError(`对象存储配置读取失败：${formatRawBackendError(error)}`);
-        return 0;
-      }
-      if (stagingConfig == null || !stagingConfig.enabled) {
-        reportError(
-          "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存（桶名为空会停用上传）。",
-        );
-        return 0;
+      if (destination !== "local") {
+        // 云端导入仍需 TOS 中转；本机 Base64 入库不读取对象存储配置。
+        let stagingConfig: TosStagingConfig | null;
+        try {
+          stagingConfig = await tosStagingClient.getConfig();
+        } catch (error) {
+          reportError(`对象存储配置读取失败：${formatRawBackendError(error)}`);
+          return 0;
+        }
+        if (stagingConfig == null || !stagingConfig.enabled) {
+          reportError(
+            "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存（桶名为空会停用上传）。",
+          );
+          return 0;
+        }
       }
       const files = await pickLocalMediaFiles();
       if (files.length === 0) {
@@ -2341,17 +2522,6 @@ export function WorkspaceApp({
           kind,
         });
       }
-      const canvasPlacement = options?.canvasPlacement;
-      if (canvasPlacement) {
-        candidates.forEach((candidate, slotIndex) => {
-          canvasUploadPlacementsRef.current.set(candidate.pendingId, {
-            x: canvasPlacement.x,
-            y: canvasPlacement.y,
-            slotIndex,
-            connection: canvasPlacement.connection ?? null,
-          });
-        });
-      }
       if (candidates.length > 0) {
         setAssetUploads((current) => [
           ...current,
@@ -2377,17 +2547,42 @@ export function WorkspaceApp({
       let firstError: unknown = null;
       for (const candidate of candidates) {
         try {
+          if (destination === "local") {
+            const record = await localBase64AssetClient.importAsset({
+              localPath: candidate.filePath,
+              name: candidate.name,
+            });
+            startedCount += 1;
+            setAssetUploads((current) =>
+              current.map((entry) =>
+                entry.jobId === candidate.pendingId
+                  ? {
+                      ...entry,
+                      jobId: record.id,
+                      assetId: record.id,
+                      status: "staged",
+                      bytesUploaded: record.byteSize,
+                      bytesTotal: record.byteSize,
+                      lastAdvancedAt: Date.now(),
+                    }
+                  : entry,
+              ),
+            );
+            window.setTimeout(() => {
+              setAssetUploads((current) => current.filter((entry) => entry.jobId !== record.id));
+            }, UPLOAD_AUTO_DISMISS_DELAY_MS);
+            continue;
+          }
           const jobId = await tosStagingClient.startUpload({
             localPath: candidate.filePath,
-            purpose: destination === "local" ? "local_asset" : "asset_import",
+            purpose: destination === "object_storage" ? "local_asset" : "asset_import",
             mediaType: candidate.kind,
             import:
               destination === "cloud" && assetProvider
                 ? {
                     providerConnectionId: assetProvider.id,
                     name: candidate.name,
-                    // 真人素材上传用平台数值分组 ID；普通上传沿用面板当前选中的分组，
-                    // 未选中任何分组时传 null，由后端发现/创建默认上传分组。
+                    // 真人素材上传用平台数值分组 ID；普通上传沿用面板当前选中的分组。
                     groupId:
                       realPersonGroup != null
                         ? String(realPersonGroup.id)
@@ -2396,11 +2591,6 @@ export function WorkspaceApp({
                 : null,
           });
           startedCount += 1;
-          const placement = canvasUploadPlacementsRef.current.get(candidate.pendingId);
-          if (placement) {
-            canvasUploadPlacementsRef.current.delete(candidate.pendingId);
-            canvasUploadPlacementsRef.current.set(jobId, placement);
-          }
           setAssetUploads((current) =>
             current.map((entry) =>
               entry.jobId === candidate.pendingId
@@ -2415,7 +2605,6 @@ export function WorkspaceApp({
           );
         } catch (error) {
           firstError ??= error;
-          canvasUploadPlacementsRef.current.delete(candidate.pendingId);
           setAssetUploads((current) =>
             current.map((entry) =>
               entry.jobId === candidate.pendingId
@@ -2429,20 +2618,28 @@ export function WorkspaceApp({
             ),
           );
           if (destination === "cloud") setAssetsError(formatRawBackendError(error));
+          else if (destination === "object_storage")
+            setObjectStorageError(formatRawBackendError(error));
           else setLocalAssetsError(formatRawBackendError(error));
-          if (fromCanvas) toast.error(`上传失败：${formatRawBackendError(error)}`);
+          if (uploadOutsideCurrentLibrary) toast.error(`上传失败：${formatRawBackendError(error)}`);
         }
       }
       if (unsupportedFiles.length > 0) {
         const message = `不支持的文件类型，已跳过：${unsupportedFiles.join("、")}。支持 mp4 / mov / webm / avi / mkv 等常见格式。`;
         if (destination === "cloud") setAssetsError(message);
+        else if (destination === "object_storage") setObjectStorageError(message);
         else setLocalAssetsError(message);
-        if (fromCanvas) toast.error(message);
+        if (uploadOutsideCurrentLibrary) toast.error(message);
       }
-      if (startedCount > 0 && fromCanvas) {
-        toast.info("正在上传素材，完成后会放到画布上", {
-          description: "进度也可以在左侧素材库查看。",
-        });
+      if (startedCount > 0 && destination === "local") refreshLocalAssets("upload-finished");
+      if (startedCount > 0 && uploadOutsideCurrentLibrary) {
+        if (destination === "local") toast.success(`已保存 ${startedCount} 项素材到本地素材库`);
+        else {
+          const target = destination === "object_storage" ? "对象存储" : "云端素材库";
+          toast.info(`正在上传 ${startedCount} 项素材到${target}`, {
+            description: "进度也可以在左侧素材库查看。",
+          });
+        }
       }
       if (startedCount === 0 && firstError != null && realPersonGroup) {
         throw firstError instanceof Error
@@ -2451,15 +2648,15 @@ export function WorkspaceApp({
       }
       return startedCount;
     },
-    [assetLibrarySource, assetProvider],
+    [assetLibrarySource, assetProvider, refreshLocalAssets],
   );
 
-  /**
-   * 把已保存的图片/视频产物上传到指定素材库。
-   * 单张卡片固定走云端；成组后的一键上传走面板当前打开的素材库。
-   */
+  /** 把已保存的图片/视频产物写入明确选择的目标。 */
   const uploadOutputsToLibrary = useCallback(
-    async (outputKeys: readonly string[], destination: "cloud" | "local"): Promise<void> => {
+    async (
+      outputKeys: readonly string[],
+      destination: "cloud" | "local" | "object_storage",
+    ): Promise<void> => {
       const wanted = new Set(outputKeys);
       const saved = outputNodes.flatMap((node) => {
         if (!wanted.has(node.key)) return [];
@@ -2469,8 +2666,8 @@ export function WorkspaceApp({
       });
       if (saved.length === 0) {
         toast.error(
-          outputKeys.length === 1 && destination === "cloud"
-            ? "仅已保存到本地的图片/视频产物支持上传到云端素材库。"
+          outputKeys.length === 1
+            ? "仅已保存到本地的图片/视频产物支持上传到素材库。"
             : "组内没有已保存到本地的图片或视频产物，无法上传到当前素材库。",
         );
         return;
@@ -2483,20 +2680,27 @@ export function WorkspaceApp({
         toast.error("请先在全局设置中配置并启用供应商连接，再上传到云端素材库。");
         return;
       }
-      let stagingConfig: TosStagingConfig | null;
-      try {
-        stagingConfig = await tosStagingClient.getConfig();
-      } catch (error) {
-        toast.error(`对象存储配置读取失败：${formatRawBackendError(error)}`);
-        return;
+      if (destination !== "local") {
+        let stagingConfig: TosStagingConfig | null;
+        try {
+          stagingConfig = await tosStagingClient.getConfig();
+        } catch (error) {
+          toast.error(`对象存储配置读取失败：${formatRawBackendError(error)}`);
+          return;
+        }
+        if (stagingConfig == null || !stagingConfig.enabled) {
+          toast.error(
+            "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存。",
+          );
+          return;
+        }
       }
-      if (stagingConfig == null || !stagingConfig.enabled) {
-        toast.error(
-          "对象存储未启用，无法上传素材：请在“设置 → 对象存储”中填写桶名、AccessKey 与 Secret 并保存。",
-        );
-        return;
-      }
-      const libraryName = destination === "local" ? "本地素材库" : "云端素材库";
+      const libraryName =
+        destination === "local"
+          ? "本地素材库"
+          : destination === "object_storage"
+            ? "对象存储"
+            : "云端素材库";
       let started = 0;
       for (const output of saved) {
         const pendingId = `pending-upload-${pendingUploadSeqRef.current++}`;
@@ -2504,8 +2708,9 @@ export function WorkspaceApp({
           output.node.name ??
           output.localPath.split(/[\\/]/).pop() ??
           `${output.mediaType === "video" ? "视频" : "图片"}产物`;
-        if (destination === "cloud")
-          uploadJobToOutputKeyRef.current.set(pendingId, output.node.key);
+        if (destination === "cloud") uploadJobToOutputRef.current.set(pendingId, output.node.key);
+        if (destination === "object_storage")
+          objectStorageUploadJobToOutputRef.current.set(pendingId, output.node.key);
         setAssetUploads((current) => [
           ...current,
           {
@@ -2524,9 +2729,38 @@ export function WorkspaceApp({
           },
         ]);
         try {
+          if (destination === "local") {
+            const record = await localBase64AssetClient.importAsset({
+              localPath: output.localPath,
+              name,
+            });
+            setAssetUploads((current) =>
+              current.map((entry) =>
+                entry.jobId === pendingId
+                  ? {
+                      ...entry,
+                      jobId: record.id,
+                      assetId: record.id,
+                      status: "staged",
+                      bytesUploaded: record.byteSize,
+                      bytesTotal: record.byteSize,
+                      lastAdvancedAt: Date.now(),
+                    }
+                  : entry,
+              ),
+            );
+            window.setTimeout(() => {
+              setAssetUploads((current) => current.filter((entry) => entry.jobId !== record.id));
+            }, UPLOAD_AUTO_DISMISS_DELAY_MS);
+            patchNode("output", output.node.key, (node) => ({ ...node, uploadedToLocal: true }));
+            refreshLocalAssets("upload-finished");
+            started += 1;
+            if (outputKeys.length === 1) toast.success(`已保存「${name}」到本地素材库`);
+            continue;
+          }
           const jobId = await tosStagingClient.startUpload({
             localPath: output.localPath,
-            purpose: destination === "local" ? "local_asset" : "asset_import",
+            purpose: destination === "object_storage" ? "local_asset" : "asset_import",
             mediaType: output.mediaType,
             import:
               destination === "cloud" && assetProvider
@@ -2538,8 +2772,11 @@ export function WorkspaceApp({
                 : null,
           });
           if (destination === "cloud") {
-            uploadJobToOutputKeyRef.current.delete(pendingId);
-            uploadJobToOutputKeyRef.current.set(jobId, output.node.key);
+            uploadJobToOutputRef.current.delete(pendingId);
+            uploadJobToOutputRef.current.set(jobId, output.node.key);
+          } else {
+            objectStorageUploadJobToOutputRef.current.delete(pendingId);
+            objectStorageUploadJobToOutputRef.current.set(jobId, output.node.key);
           }
           setAssetUploads((current) =>
             current.map((entry) =>
@@ -2549,9 +2786,8 @@ export function WorkspaceApp({
             ),
           );
           started += 1;
-          if (outputKeys.length === 1 && destination === "cloud") {
-            toast.success(`已开始上传「${name}」到云端素材库，可在素材面板查看进度。`);
-          }
+          if (outputKeys.length === 1)
+            toast.success(`已开始上传「${name}」到${libraryName}，可在素材面板查看进度。`);
         } catch (error) {
           setAssetUploads((current) =>
             current.map((entry) =>
@@ -2560,21 +2796,27 @@ export function WorkspaceApp({
                 : entry,
             ),
           );
-          if (destination === "cloud") uploadJobToOutputKeyRef.current.delete(pendingId);
+          uploadJobToOutputRef.current.delete(pendingId);
+          objectStorageUploadJobToOutputRef.current.delete(pendingId);
           toast.error(`上传失败：${formatRawBackendError(error)}`);
         }
       }
       const skipped = outputKeys.length - saved.length;
-      if (started > 0 && !(outputKeys.length === 1 && destination === "cloud")) {
-        toast.success(`已开始把 ${started} 个产物上传到${libraryName}`, {
-          description:
-            skipped > 0
-              ? `已跳过 ${skipped} 个尚未保存或不是图片/视频的产物。`
-              : "进度可以在素材面板查看。",
-        });
+      if (started > 0 && outputKeys.length !== 1) {
+        toast.success(
+          `${destination === "local" ? "已保存" : "已开始上传"} ${started} 个产物到${libraryName}`,
+          {
+            description:
+              skipped > 0
+                ? `已跳过 ${skipped} 个尚未保存或不是图片/视频的产物。`
+                : destination === "local"
+                  ? "可以在本地素材库查看。"
+                  : "进度可以在素材面板查看。",
+          },
+        );
       }
     },
-    [assetProvider, outputNodes],
+    [assetProvider, outputNodes, patchNode, refreshLocalAssets],
   );
   const handleUploadOutputToCloud = useCallback(
     (outputKey: string) => {
@@ -2582,7 +2824,117 @@ export function WorkspaceApp({
     },
     [uploadOutputsToLibrary],
   );
+  const handleUploadOutputToLocal = useCallback(
+    (outputKey: string) => {
+      void uploadOutputsToLibrary([outputKey], "local");
+    },
+    [uploadOutputsToLibrary],
+  );
+  const handleUploadOutputToObjectStorage = useCallback(
+    (outputKey: string) => {
+      void uploadOutputsToLibrary([outputKey], "object_storage");
+    },
+    [uploadOutputsToLibrary],
+  );
 
+  const savingExistingAssetsRef = useRef(new Set<string>());
+  const saveExistingAssetToLibrary = useCallback(
+    async (
+      asset: {
+        readonly id: string;
+        readonly kind: MediaType;
+        readonly name: string;
+        readonly source?: AssetLibrarySource | undefined;
+        readonly providerConnectionId?: string | undefined;
+      },
+      destination: "local" | "cloud" | "object_storage",
+    ) => {
+      if (!isDesktopRuntime()) {
+        toast.error("保存素材功能仅在桌面应用中使用。");
+        return;
+      }
+      if (destination === "cloud" && !assetProvider) {
+        toast.error("请先在全局设置中配置并启用云端素材库连接。");
+        return;
+      }
+      if (asset.source !== "local" && !asset.providerConnectionId) {
+        toast.error("素材缺少来源供应商，无法读取原始内容。");
+        return;
+      }
+      const sourceKind =
+        asset.source !== "local"
+          ? "cloud"
+          : asset.id.startsWith("local-b64-")
+            ? "local_base64"
+            : "object_storage";
+      const targetName =
+        destination === "local"
+          ? "本地素材库"
+          : destination === "cloud"
+            ? "云端素材库"
+            : "对象存储";
+      const saveKey = `${sourceKind}:${asset.providerConnectionId ?? ""}:${asset.id}:${destination}:${assetProvider?.id ?? ""}:${selectedAssetGroupIdRef.current ?? ""}`;
+      if (savingExistingAssetsRef.current.has(saveKey)) return;
+      savingExistingAssetsRef.current.add(saveKey);
+      const toastId = toast.loading(`正在保存「${asset.name}」到${targetName}…`);
+      try {
+        const result = await existingAssetClient.saveToLibrary({
+          source: {
+            kind: sourceKind,
+            assetId: asset.id,
+            providerConnectionId:
+              sourceKind === "cloud" ? (asset.providerConnectionId ?? null) : null,
+            mediaType: asset.kind,
+          },
+          destination,
+          targetProviderConnectionId: destination === "cloud" ? (assetProvider?.id ?? null) : null,
+          groupId: destination === "cloud" ? selectedAssetGroupIdRef.current : null,
+          name: asset.name,
+        });
+        if (result.destination === "local") refreshLocalAssets("upload-finished");
+        else if (result.destination === "object_storage")
+          refreshObjectStorageAssets("upload-finished");
+        else if (assetProvider) {
+          void refreshCloudAssets(assetProvider.id, "upload-finished");
+          refreshAssetGroups(assetProvider.id);
+        }
+        toast.success(
+          result.reused
+            ? `「${asset.name}」已在${targetName}，未重复保存`
+            : `已保存「${asset.name}」到${targetName}`,
+        );
+      } catch (error) {
+        toast.error(`保存素材失败：${formatRawBackendError(error)}`);
+      } finally {
+        toast.dismiss(toastId);
+        savingExistingAssetsRef.current.delete(saveKey);
+      }
+    },
+    [
+      assetProvider,
+      refreshAssetGroups,
+      refreshCloudAssets,
+      refreshLocalAssets,
+      refreshObjectStorageAssets,
+    ],
+  );
+  const handleSaveAssetNodeToLibrary = useCallback(
+    (key: string, destination: "local" | "cloud" | "object_storage") => {
+      const node = assetNodeByKey.get(key);
+      if (!node) return;
+      void saveExistingAssetToLibrary(
+        {
+          id: node.assetId,
+          kind: node.kind,
+          name: node.name,
+          source: node.source,
+          providerConnectionId: node.providerConnectionId,
+        },
+        destination,
+      );
+    },
+    [assetNodeByKey, saveExistingAssetToLibrary],
+  );
   useEffect(() => {
     return subscribeStagingEvents((payload) => {
       setAssetUploads((current) => {
@@ -2612,11 +2964,24 @@ export function WorkspaceApp({
         return next;
       });
       const status = payload.job?.status;
+      const uploadDestination =
+        uploadEntriesRef.current.find((entry) => entry.jobId === payload.jobId)?.destination ??
+        (payload.job?.purpose === "local_asset" ? "object_storage" : "cloud");
       // 入库是否成功看 `assetId` 而不是状态：后端给出素材身份后还会清理暂存对象
       // （active → cleaning → cleaned），事件里读到的未必是 active。
       const reachedLibrary = payload.job != null && stagingImportReachedLibrary(payload.job);
       if (payload.job?.purpose === "local_asset" && status === "staged") {
-        refreshLocalAssets("upload-finished");
+        refreshObjectStorageAssets("upload-finished");
+        const outputKey = objectStorageUploadJobToOutputRef.current.get(payload.jobId);
+        if (outputKey) {
+          patchNodes("output", (node) =>
+            node.key === outputKey && !node.uploadedToObjectStorage
+              ? { ...node, uploadedToObjectStorage: true }
+              : node,
+          );
+          objectStorageUploadJobToOutputRef.current.delete(payload.jobId);
+        }
+        toast.success("已保存到对象存储，可在云端素材的对象存储列表查看");
       } else if (assetLibrarySource === "cloud" && reachedLibrary) {
         if (assetProvider) {
           void refreshCloudAssets(assetProvider.id, "upload-finished");
@@ -2632,17 +2997,18 @@ export function WorkspaceApp({
           }
         }
       }
-      // 上传到云端素材库成功：标记对应产物节点已上传（写入节点数据，随画布文档持久化）。
+      const outputUpload = uploadJobToOutputRef.current.get(payload.jobId);
+      if (outputUpload && reachedLibrary) {
+        patchNodes("output", (node) =>
+          node.key !== outputUpload
+            ? node
+            : node.uploadedToCloud
+              ? node
+              : { ...node, uploadedToCloud: true },
+        );
+        uploadJobToOutputRef.current.delete(payload.jobId);
+      }
       if (reachedLibrary) {
-        const outputKey = uploadJobToOutputKeyRef.current.get(payload.jobId);
-        if (outputKey) {
-          patchNodes("output", (node) =>
-            node.key === outputKey && !node.uploadedToCloud
-              ? { ...node, uploadedToCloud: true }
-              : node,
-          );
-          uploadJobToOutputKeyRef.current.delete(payload.jobId);
-        }
         const repair = previewRepairJobsRef.current.get(payload.jobId);
         const newAssetId = payload.job?.assetId;
         if (repair && newAssetId && newAssetId !== repair.oldAssetId) {
@@ -2670,15 +3036,14 @@ export function WorkspaceApp({
         }
       } else if (status === "failed" || status === "interrupted") {
         // 上传失败：清理映射，不标记已上传。
-        uploadJobToOutputKeyRef.current.delete(payload.jobId);
-        canvasUploadPlacementsRef.current.delete(payload.jobId);
+        uploadJobToOutputRef.current.delete(payload.jobId);
+        objectStorageUploadJobToOutputRef.current.delete(payload.jobId);
         previewRepairJobsRef.current.delete(payload.jobId);
       }
-      placeCanvasUploadRef.current(payload.jobId, payload.job);
       // 成功的上传不用用户再点一次 ×：素材已经入库、绿色小点已经点亮，这一行
       // 留一小会儿让"已完成"被看见，然后自行收起。失败/中断行永不自动收起
       // （用户要看原因并重试），僵尸在途行也留着由行内判定落地为可移除的已中断行。
-      if (payload.job != null && shouldAutoDismissUpload(payload.job)) {
+      if (payload.job != null && shouldAutoDismissUpload(payload.job, uploadDestination)) {
         uploadAutoDismissTimersRef.current.set(
           payload.jobId,
           window.setTimeout(() => {
@@ -2698,6 +3063,7 @@ export function WorkspaceApp({
     refreshAssetGroups,
     refreshCloudAssets,
     refreshLocalAssets,
+    refreshObjectStorageAssets,
   ]);
 
   const dismissAssetUpload = useCallback((jobId: string) => {
@@ -2793,7 +3159,7 @@ export function WorkspaceApp({
       const outputKey = outputKeyByLocalPath.get(normalizeLocalPathKey(record.localPath));
       if (outputKey == null) continue;
       // 先重建映射再点亮：即使产物节点这一刻还没补齐 uploadedToCloud，事件路径也能命中。
-      uploadJobToOutputKeyRef.current.set(record.jobId, outputKey);
+      uploadJobToOutputRef.current.set(record.jobId, outputKey);
       if (outputNodes.some((node) => node.key === outputKey && node.uploadedToCloud !== true)) {
         matchedKeys.push(outputKey);
       }
@@ -3015,8 +3381,6 @@ export function WorkspaceApp({
   /** 先准备完整节点，再由菜单将节点和可选连线一次写入。 */
   const createQuickAddEntry = (kind: CanvasQuickAddKind, x: number, y: number): CanvasNodeEntry => {
     switch (kind) {
-      case "asset_upload":
-        throw new Error("上传素材由画布菜单单独处理，不会创建生成节点。");
       case "image":
       case "video":
       case "prompt":
@@ -3051,7 +3415,8 @@ export function WorkspaceApp({
         | "remotion"
         | "xhsCover"
         | "productScene"
-        | "reverseVideo",
+        | "reverseVideo"
+        | "reelbench",
     ) => {
       try {
         const anchor = viewportCenterBoardCoordinates();
@@ -3074,6 +3439,7 @@ export function WorkspaceApp({
           xhsCover: templateModule.createXhsCoverWorkflow,
           productScene: templateModule.createProductSceneWorkflow,
           reverseVideo: templateModule.createReverseVideoWorkflow,
+          reelbench: templateModule.createReelbenchWorkflow,
         }[kind];
         const title = {
           knowledge: "知识教学视频",
@@ -3085,6 +3451,7 @@ export function WorkspaceApp({
           xhsCover: "小红书封面",
           productScene: "产品场景图",
           reverseVideo: "短视频反推",
+          reelbench: "视频拉片与分镜合成",
         }[kind];
         const workflow = createWorkflow({
           anchor: { x: anchor.x, y: anchor.y + topInset },
@@ -3110,15 +3477,17 @@ export function WorkspaceApp({
                 ? "选择原曲，逐阶段确认歌词、风格与分镜，审核首镜和片段后合成 MV。"
                 : kind === "reverseVideo"
                   ? "粘贴视频链接或选择本地视频，自动下载、拆解并交付提示词与二创方案。"
-                  : kind === "xhsCover"
-                    ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
-                    : kind === "remotion"
-                      ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
-                      : kind === "commerce"
-                        ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
-                        : kind === "comicDrama"
-                          ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
-                          : "填写制作要求并点击开始，其余步骤由节点自动完成。",
+                  : kind === "reelbench"
+                    ? "选择本地视频，确认计划后测量切点、标注镜头，批量审核并导出报告和同步分镜视频。"
+                    : kind === "xhsCover"
+                      ? "添加人物参考图和选题，使用项目模型自动制作 3:4 封面。"
+                      : kind === "remotion"
+                        ? "描述动画或粘贴 ASCII 草图，选择项目文本模型后自动渲染。"
+                        : kind === "commerce"
+                          ? "添加产品原图与资料，配置项目模型后自动制作剧情带货视频。"
+                          : kind === "comicDrama"
+                            ? "在节点中添加各集剧本，点击开始后自动完成导演、服化道与分镜。"
+                            : "填写制作要求并点击开始，其余步骤由节点自动完成。",
         });
       } catch (error: unknown) {
         const message = error instanceof Error ? error.message : String(error);
@@ -3160,6 +3529,9 @@ export function WorkspaceApp({
   const insertReverseVideoWorkflow = useCallback(() => {
     void insertWorkflow("reverseVideo");
   }, [insertWorkflow]);
+  const insertReelbenchWorkflow = useCallback(() => {
+    void insertWorkflow("reelbench");
+  }, [insertWorkflow]);
   const insertMusicVideoWorkflow = useCallback(() => {
     void insertWorkflow("musicVideo");
   }, [insertWorkflow]);
@@ -3168,26 +3540,27 @@ export function WorkspaceApp({
     [],
   );
 
-  const productSceneHistoryEditsRef = useRef(new Map<string, Promise<void>>());
+  const workflowReviewHistoryEditsRef = useRef(new Map<string, Promise<void>>());
   const updateKnowledgeVideoWorkflowConfig = useCallback(
     (key: string, config: KnowledgeVideoWorkflowConfig) => {
-      const previousNode = config.productScene
-        ? snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key)
-        : undefined;
+      const previousNode =
+        config.productScene || config.reelbench
+          ? snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key)
+          : undefined;
       if (
         previousNode &&
         workflowExecutionInputSignature(previousNode) !==
           workflowExecutionInputSignature({ ...previousNode, config })
       ) {
-        // Edited product inputs begin a new production run. The previous paid run
-        // keeps its original product/model association in the durable archive.
+        // Edited inputs begin a new production run. The previous run retains its
+        // original media/model association in the durable archive.
         const next = { ...config };
         delete next.historyRunId;
         config = next;
       }
       patchNode("knowledgeVideoWorkflow", key, (node) => ({ ...node, config }));
       if (
-        (config.musicVideo || config.productScene) &&
+        (config.musicVideo || config.productScene || config.reelbench) &&
         !knowledgeVideoWorkflowAbortControllersRef.current.has(key)
       ) {
         setKnowledgeVideoWorkflowRuns((current) => {
@@ -3197,7 +3570,7 @@ export function WorkspaceApp({
         });
       }
       if (
-        config.productScene &&
+        (config.productScene || config.reelbench) &&
         config.historyRunId &&
         previousNode &&
         workflowExecutionInputSignature(previousNode) ===
@@ -3206,7 +3579,7 @@ export function WorkspaceApp({
       ) {
         const node = snapshotV2({}).knowledgeVideoWorkflowNodes?.find((item) => item.key === key);
         if (node) {
-          const previous = productSceneHistoryEditsRef.current.get(key) ?? Promise.resolve();
+          const previous = workflowReviewHistoryEditsRef.current.get(key) ?? Promise.resolve();
           const save = previous
             .catch(() => undefined)
             .then(async () => {
@@ -3216,14 +3589,16 @@ export function WorkspaceApp({
                   ...record,
                   nodeSnapshot: node,
                   status: node.config.checkpoint.phase,
-                  message: `产品场景图审核 · 已选用 ${node.config.checkpoint.productScene?.rows.filter((row) => row.status === "accepted").length ?? 0} 张`,
+                  message: node.config.reelbench
+                    ? `镜头表审核 · 已标注 ${node.config.checkpoint.reelbench?.draft?.shots.filter((shot) => Boolean(shot.frame?.trim())).length ?? 0} 镜`
+                    : `产品场景图审核 · 已选用 ${node.config.checkpoint.productScene?.rows.filter((row) => row.status === "accepted").length ?? 0} 张`,
                   updatedAt: Date.now(),
                 },
               });
             });
-          productSceneHistoryEditsRef.current.set(key, save);
+          workflowReviewHistoryEditsRef.current.set(key, save);
           void save.catch((error: unknown) =>
-            toast.error("产品场景图审核历史保存失败", { description: formatWorkflowError(error) }),
+            toast.error("工作流审核历史保存失败", { description: formatWorkflowError(error) }),
           );
         }
       }
@@ -3394,7 +3769,7 @@ export function WorkspaceApp({
         },
       }));
       void recoverWorkflowHistory()
-        .then(() => productSceneHistoryEditsRef.current.get(key)?.catch(() => undefined))
+        .then(() => workflowReviewHistoryEditsRef.current.get(key)?.catch(() => undefined))
         .then(() =>
           recordedWorkflowRunner.run({
             node,
@@ -3424,29 +3799,33 @@ export function WorkspaceApp({
             toast.success(
               node.config.productScene
                 ? "产品场景图审核完成"
-                : node.config.musicVideo
-                  ? "音乐 MV 制作完成"
-                  : node.config.xhsCover
-                    ? "小红书封面制作完成"
-                    : node.config.remotion
-                      ? "动画逻辑图制作完成"
-                      : node.config.commerce
-                        ? "剧情带货制作完成"
-                        : node.config.comicDrama
-                          ? "漫剧制作完成"
-                          : node.config.film
-                            ? "影视制作完成"
-                            : "知识视频制作完成",
+                : node.config.reelbench
+                  ? "视频拉片与分镜合成完成"
+                  : node.config.musicVideo
+                    ? "音乐 MV 制作完成"
+                    : node.config.xhsCover
+                      ? "小红书封面制作完成"
+                      : node.config.remotion
+                        ? "动画逻辑图制作完成"
+                        : node.config.commerce
+                          ? "剧情带货制作完成"
+                          : node.config.comicDrama
+                            ? "漫剧制作完成"
+                            : node.config.film
+                              ? "影视制作完成"
+                              : "知识视频制作完成",
               {
                 description: node.config.productScene
                   ? "逐张审核记录已保存，可从节点导出已选用图片。"
-                  : node.config.xhsCover
-                    ? "封面方案、提示词与交付物已保存在工作流节点中。"
-                    : node.config.remotion
-                      ? "动画、预览图和可编辑工程已保存在工作流节点中。"
-                      : checkpoint.documentsOnly
-                        ? "制作文档与提示词已保存在工作流节点中。"
-                        : "完整成片与过程文档已保存在工作流节点中。",
+                  : node.config.reelbench
+                    ? "镜头表、质检结果与本地报告已保存在工作流节点中。"
+                    : node.config.xhsCover
+                      ? "封面方案、提示词与交付物已保存在工作流节点中。"
+                      : node.config.remotion
+                        ? "动画、预览图和可编辑工程已保存在工作流节点中。"
+                        : checkpoint.documentsOnly
+                          ? "制作文档与提示词已保存在工作流节点中。"
+                          : "完整成片与过程文档已保存在工作流节点中。",
               },
             );
           } else if (checkpoint.phase === "awaiting_approval") {
@@ -3719,6 +4098,69 @@ export function WorkspaceApp({
             ...node.config,
             reverseVideo: {
               ...node.config.reverseVideo,
+              localVideoPath: "",
+              localVideoName: "",
+            },
+          },
+        };
+      });
+    },
+    [patchNode],
+  );
+
+  const handlePickReelbenchVideo = useCallback(
+    async (key: string) => {
+      try {
+        const { open } = await import("@tauri-apps/plugin-dialog");
+        const selection = await open({
+          multiple: false,
+          directory: false,
+          title: "选择要拉片的本地视频",
+          filters: [{ name: "视频", extensions: ["mp4", "mov", "webm", "mkv", "avi", "m4v"] }],
+        });
+        if (typeof selection !== "string" || !selection) return;
+        patchNode("knowledgeVideoWorkflow", key, (node) => {
+          if (
+            !node.config.reelbench ||
+            knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+            node.config.checkpoint.phase === "awaiting_approval"
+          )
+            return node;
+          return {
+            ...node,
+            config: {
+              ...node.config,
+              reelbench: {
+                ...node.config.reelbench,
+                sourceUrl: "",
+                localVideoPath: selection,
+                localVideoName: selection.split(/[\\/]/).at(-1) ?? "本地视频",
+              },
+            },
+          };
+        });
+      } catch (error) {
+        toast.error("选择视频失败", { description: formatWorkflowError(error) });
+      }
+    },
+    [patchNode],
+  );
+
+  const handleRemoveReelbenchVideo = useCallback(
+    (key: string) => {
+      patchNode("knowledgeVideoWorkflow", key, (node) => {
+        if (
+          !node.config.reelbench ||
+          knowledgeVideoWorkflowAbortControllersRef.current.has(key) ||
+          node.config.checkpoint.phase === "awaiting_approval"
+        )
+          return node;
+        return {
+          ...node,
+          config: {
+            ...node.config,
+            reelbench: {
+              ...node.config.reelbench,
               localVideoPath: "",
               localVideoName: "",
             },
@@ -4383,6 +4825,12 @@ export function WorkspaceApp({
       const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
       const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
       const isGptImage2Style = node.config.mode === "gpt_image_2_style";
+      const isCinematicDialogue = node.config.mode === "cinematic_dialogue";
+      const dialogueGuard: CinematicDialogueGuard = node.config.cinematicDialogueGuard ?? {
+        lockedLines: "",
+        targetDurationSeconds: null,
+        targetFormat: "generic",
+      };
       const defaultFpvPrompt =
         isFpvPath && node.config.task === "generate" && visionImages.length > 0
           ? "请根据已连接参考图中的路径标记，生成完整的 FPV 飞行提示词方案。"
@@ -4429,6 +4877,19 @@ export function WorkspaceApp({
               node.config.generatedPrompt.trim()
             ? "请继续优化当前输出中的图片提示词，沿用已确认的图片用途、主体、文字、画幅与风格要求，结合风格库模板完善构图、材质和细节，返回可直接交给图片节点的完整提示词。"
             : "";
+      const defaultCinematicDialoguePrompt =
+        isCinematicDialogue &&
+        node.config.task === "generate" &&
+        (visionImages.length > 0 ||
+          videoMaterials.length > 0 ||
+          canvasInputsFor(nodeKey).texts.length > 0 ||
+          dialogueGuard.lockedLines.trim().length > 0)
+          ? "请依据节点锁定原台词、已连接的剧本文字与实际可见参考素材设计对白表演提示词；若未锁定台词的改编权限、目标视频模型或时长尚未明确，请合并询问。"
+          : isCinematicDialogue &&
+              node.config.task === "optimize" &&
+              node.config.generatedPrompt.trim()
+            ? "请基于当前可编辑输出优化对白表演提示词，保留已确认的台词、角色关系、目标模型和时长。"
+            : "";
       const sourcePrompt =
         node.config.sourcePrompt.trim() ||
         defaultFpvPrompt ||
@@ -4436,6 +4897,7 @@ export function WorkspaceApp({
         defaultMultiGridPrompt ||
         defaultStoryboardPrompt ||
         defaultGptImage2StylePrompt ||
+        defaultCinematicDialoguePrompt ||
         (canvasInputsFor(nodeKey).texts.length || canvasInputsFor(nodeKey).media.length
           ? "请依据已连接的文本和参考素材生成或优化提示词。"
           : "");
@@ -4452,7 +4914,9 @@ export function WorkspaceApp({
                     ? "请填写故事板用途与创意，或连接参考图片、已保存的视频产物。"
                     : isGptImage2Style
                       ? "请填写图片用途、主体或风格要求，或连接参考图片、已保存的视频产物。"
-                      : "请输入创意或需求，再生成提示词。"
+                      : isCinematicDialogue
+                        ? "请填写对白创意、锁定原台词，或连接剧本文字、参考素材。"
+                        : "请输入创意或需求，再生成提示词。"
             : "请输入需要优化的提示词。",
         );
         return;
@@ -4473,7 +4937,10 @@ export function WorkspaceApp({
       // 多轮对话：把全部已完成轮次逐条注入系统上下文，本轮输入作为新的用户消息。
       const conversation = node.config.conversation ?? [];
       const contextHistory: PromptOptimizationContextEntry[] = conversation.map((entry, index) => ({
-        role: `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
+        role:
+          isCinematicDialogue && (entry.role === "user" || entry.role === "assistant")
+            ? entry.role
+            : `第 ${index + 1} 条 · ${promptConversationRoleLabel(entry.role)}`,
         content: entry.content,
       }));
       contextHistory.push(
@@ -4487,10 +4954,53 @@ export function WorkspaceApp({
           isFightPromptMaster ||
           isMultiGridStoryboard ||
           isStoryboardPrompt ||
-          isGptImage2Style) &&
+          isGptImage2Style ||
+          isCinematicDialogue) &&
         node.config.generatedPrompt.trim()
       ) {
         contextHistory.push({ role: "当前输出提示词", content: node.config.generatedPrompt });
+      }
+      if (isCinematicDialogue) {
+        contextHistory.push({
+          role: "用户在节点确认的对白校验基准（优先于模型自述）",
+          content: JSON.stringify(dialogueGuard),
+        });
+        const availableVideoModelIds = [
+          ...new Set(
+            providerCatalog
+              .filter((entry) => entry.provider.enabled)
+              .flatMap((entry) =>
+                entry.models
+                  .filter((item) => item.operations.includes("video_generation"))
+                  .map((item) => item.remoteModelId),
+              ),
+          ),
+        ];
+        contextHistory.push({
+          role: "项目当前启用的视频模型候选",
+          content: availableVideoModelIds.length
+            ? availableVideoModelIds.join("、")
+            : "当前没有已启用的视频模型；只能讨论草案，不得声称可直接提交生成。",
+        });
+        const targetModelIds = new Set(
+          assetEdges
+            .filter((edge) => edge.fromKey === nodeKey)
+            .map((edge) => genNodes.find((item) => item.key === edge.toKey))
+            .filter((item) => item?.kind === "video")
+            .map((item) =>
+              item?.kind === "video"
+                ? resolveGenerationSelection("video", item.config.modelSelection, providerCatalog)
+                    ?.model.remoteModelId
+                : undefined,
+            )
+            .filter((id): id is string => Boolean(id)),
+        );
+        if (targetModelIds.size === 1) {
+          contextHistory.push({
+            role: "当前已连接的下游视频模型",
+            content: [...targetModelIds][0]!,
+          });
+        }
       }
       setNodeStartError(nodeKey, null);
       setStartingNodeKeys((current) => new Set(current).add(nodeKey));
@@ -4512,20 +5022,32 @@ export function WorkspaceApp({
           referenceInputs: videoMaterials,
         })
         .then((result) => {
-          const outputPrompt = isGptImage2Style
-            ? cleanGptImage2Prompt(result.optimizedPrompt)
-            : cleanGeneratedPrompt(result.optimizedPrompt);
+          const dialogueResponse = isCinematicDialogue
+            ? parseCinematicDialogueResponse(result.optimizedPrompt, dialogueGuard)
+            : null;
+          const outputPrompt = dialogueResponse
+            ? dialogueResponse.downstreamPrompt
+            : isGptImage2Style
+              ? cleanGptImage2Prompt(result.optimizedPrompt)
+              : cleanGeneratedPrompt(result.optimizedPrompt);
+          const assistantText = dialogueResponse?.displayText ?? outputPrompt ?? "";
           patchNode("gen", nodeKey, (item) =>
             item.kind === "prompt"
               ? {
                   ...item,
                   config: {
                     ...item.config,
-                    generatedPrompt: outputPrompt,
+                    generatedPrompt: outputPrompt ?? item.config.generatedPrompt,
+                    cinematicDialogueValidated:
+                      dialogueResponse?.status === "ready"
+                        ? true
+                        : isCinematicDialogue
+                          ? (item.config.cinematicDialogueValidated ?? false)
+                          : false,
                     conversation: [
                       ...(item.config.conversation ?? []),
                       { id: promptMessageId(), role: "user", content: sourcePrompt },
-                      { id: promptMessageId(), role: "assistant", content: outputPrompt },
+                      { id: promptMessageId(), role: "assistant", content: assistantText },
                     ],
                   },
                 }
@@ -4533,12 +5055,17 @@ export function WorkspaceApp({
           );
           frontendLog(
             "info",
-            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符，写入 ${outputPrompt.length} 字符`,
+            `[generation] 提示词节点请求完成: node=${nodeKey}, 返回 ${result.optimizedPrompt.length} 字符，写入 ${outputPrompt?.length ?? 0} 字符`,
           );
-          toast.success("提示词已生成");
+          toast.success(
+            dialogueResponse?.status === "needs_input" ? "请补充对白要求" : "提示词已生成",
+          );
         })
         .catch((error: unknown) => {
-          const message = formatRawBackendError(error);
+          const message =
+            isCinematicDialogue && error instanceof Error
+              ? error.message
+              : formatRawBackendError(error);
           setNodeStartError(nodeKey, message);
           toast.error("提示词生成失败", { description: message });
           frontendLog("error", `[generation] 提示词节点请求失败: node=${nodeKey}, ${message}`);
@@ -4555,6 +5082,7 @@ export function WorkspaceApp({
     },
     [
       canvasId,
+      assetEdges,
       genNodes,
       promptVideoMaterials,
       promptVisionImages,
@@ -5137,56 +5665,6 @@ export function WorkspaceApp({
     [assetNodes, connectCanvasNodes, outputNodes],
   );
 
-  const placeCanvasUploadFromJob = useCallback(
-    (jobId: string, job: StagingJobRecord | null | undefined) => {
-      const placement = canvasUploadPlacementsRef.current.get(jobId);
-      if (placement == null || placedCanvasUploadJobIdsRef.current.has(jobId)) return;
-      const entry = uploadEntriesRef.current.find((item) => item.jobId === jobId);
-      const destination =
-        entry?.destination ?? (job?.purpose === "local_asset" ? "local" : "cloud");
-      const assetId = stagingJobAssetIdForCanvas(job, destination);
-      const kind = job?.mediaType ?? entry?.kind;
-      if (assetId == null || (kind !== "image" && kind !== "video" && kind !== "audio")) return;
-      // 审核任务号还不能当素材用。先留着落点，等真正的素材 ID 到了再放到画布。
-      if (cloudAssetAwaitingId({ id: assetId, source: destination })) return;
-      placedCanvasUploadJobIdsRef.current.add(jobId);
-      canvasUploadPlacementsRef.current.delete(jobId);
-      const name = entry?.name ?? job?.localPath.split(/[\\/]/).pop() ?? "素材";
-      const stagger = placement.slotIndex * 56;
-      const node = addAssetNode(
-        {
-          id: assetId,
-          kind,
-          name,
-          previewUrl: null,
-          videoUrl: null,
-          source: destination,
-          providerConnectionId: destination === "cloud" ? (assetProvider?.id ?? "") : "",
-        },
-        placement.x + stagger,
-        placement.y + stagger,
-      );
-      if (node == null || placement.connection == null) return;
-      const sourceGroupId =
-        placement.connection.handleType === "source"
-          ? assetGroupIdFromFlowId(placement.connection.nodeKey)
-          : null;
-      if (sourceGroupId != null) {
-        connectAssetGroup(sourceGroupId, node.key);
-        return;
-      }
-      const [fromKey, toKey] =
-        placement.connection.handleType === "source"
-          ? [placement.connection.nodeKey, node.key]
-          : [node.key, placement.connection.nodeKey];
-      connectCanvasNodes(fromKey, toKey);
-    },
-    [addAssetNode, assetProvider?.id, connectAssetGroup, connectCanvasNodes],
-  );
-  useEffect(() => {
-    placeCanvasUploadRef.current = placeCanvasUploadFromJob;
-  }, [placeCanvasUploadFromJob]);
-
   /** 媒体加载完成后记录原始比例，卡片与连线端点随尺寸同步更新。 */
   const handleAssetAspectRatioChange = useCallback(
     (key: string, aspectRatio: number) => {
@@ -5199,7 +5677,7 @@ export function WorkspaceApp({
     [patchNode],
   );
 
-  // 素材节点预览续签成功（云端素材回读供应商记录 / 本地素材重签对象存储地址）：
+  // 素材节点预览地址按稳定身份刷新：旧 TOS 本地素材续签，新 Base64 素材验证本机文件。
   // 把新签名地址回写节点数据并随画布文档持久化。
   const handleAssetMediaRefresh = useCallback(
     (key: string, freshPreviewUrl: string) => {
@@ -5216,9 +5694,7 @@ export function WorkspaceApp({
     [patchNode],
   );
 
-  // 画布文档水合后批量重签本地素材的预览地址：本地素材的签名只活 1 小时，而节点数据
-  // 会被整体持久化，所以「重启后打开画布」拿到的必然是一批过期签名。这里在首次渲染
-  // 前把节点数据换成新签名，用户不会再看到一屏「预览不可用」。
+  // 画布文档水合后给旧 TOS 素材续签；本机 Base64 素材仅在地址字段缺失时按 ID 恢复。
   // 依赖只看本轮画布里的素材身份集合：续签写回节点后签名变化不会重新触发本效果。
   const localAssetNodeSignature = useMemo(
     () =>
@@ -5271,14 +5747,24 @@ export function WorkspaceApp({
   /** 删除生成节点（连同其所有连线与提示词引用）。 */
   const removeGenNode = useCallback(
     (key: string) => {
-      removeCanvasNode(key);
+      const removed = removeCanvasNode(key);
       setGenNodeSizes((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
         delete next[key];
         return next;
       });
-      promptContents.remove(key);
+      if (removed != null) {
+        const document = promptContents.remove(key);
+        if (document != null) {
+          deletedPromptContentsRef.current.set(key, document);
+          // The canvas history keeps at most 200 structural operations.
+          if (deletedPromptContentsRef.current.size > 200) {
+            const oldest = deletedPromptContentsRef.current.keys().next().value;
+            if (oldest != null) deletedPromptContentsRef.current.delete(oldest);
+          }
+        }
+      }
       setStartErrorsByNode((current) => {
         if (!(key in current)) return current;
         const next = { ...current };
@@ -6062,7 +6548,10 @@ export function WorkspaceApp({
   // 查询 key 随活动任务集合变化：全部到达终态后集合为空，轮询自动停止；
   // 单个任务查询失败只跳过该任务，不影响同批其他任务的进度。
   const activeUploadJobIds = useMemo(
-    () => assetUploads.filter((entry) => !isTerminalAssetUpload(entry)).map((entry) => entry.jobId),
+    () =>
+      assetUploads
+        .filter((entry) => entry.destination !== "local" && !isTerminalAssetUpload(entry))
+        .map((entry) => entry.jobId),
     [assetUploads],
   );
   // 查询仅负责拉取与定时；结果合并通过下方对 Query 缓存的订阅完成。
@@ -6100,12 +6589,35 @@ export function WorkspaceApp({
         if (job == null) continue;
         const entry = uploadEntriesRef.current.find((item) => item.jobId === job.id);
         if (entry == null || isTerminalAssetUpload(entry)) continue;
-        const reachedTerminal =
-          isTerminalStagingJob(job) || (entry.destination === "local" && job.status === "staged");
+        const reachedTerminal = isTerminalStagingJob(job, entry.destination);
         if (!reachedTerminal) continue;
-        if (entry.destination === "local") {
-          refreshLocalAssets("upload-finished");
-        } else if (assetLibrarySource === "cloud" && assetProvider) {
+        const outputUpload = uploadJobToOutputRef.current.get(job.id);
+        if (outputUpload && stagingImportReachedLibrary(job)) {
+          patchNodes("output", (node) =>
+            node.key !== outputUpload
+              ? node
+              : node.uploadedToCloud
+                ? node
+                : { ...node, uploadedToCloud: true },
+          );
+          uploadJobToOutputRef.current.delete(job.id);
+        }
+        if (entry.destination === "object_storage" && job.status === "staged") {
+          refreshObjectStorageAssets("upload-finished");
+          const objectOutput = objectStorageUploadJobToOutputRef.current.get(job.id);
+          if (objectOutput) {
+            patchNodes("output", (node) =>
+              node.key === objectOutput && !node.uploadedToObjectStorage
+                ? { ...node, uploadedToObjectStorage: true }
+                : node,
+            );
+            objectStorageUploadJobToOutputRef.current.delete(job.id);
+          }
+        } else if (
+          entry.destination === "cloud" &&
+          assetLibrarySource === "cloud" &&
+          assetProvider
+        ) {
           void refreshCloudAssets(assetProvider.id, "upload-finished");
           refreshAssetGroups(assetProvider.id);
         }
@@ -6115,17 +6627,16 @@ export function WorkspaceApp({
         // 僵尸判定要等两分钟，抽成纯函数后可以直接验证边界，不必在测试里真实等待。
         return mergeStagingJobsIntoUploads(current, jobs, now) ?? current;
       });
-      for (const job of jobs) {
-        if (job != null) placeCanvasUploadRef.current(job.id, job);
-      }
     });
   }, [
     assetLibrarySource,
     assetProvider,
+    patchNodes,
     queryClient,
     refreshAssetGroups,
     refreshCloudAssets,
     refreshLocalAssets,
+    refreshObjectStorageAssets,
   ]);
 
   const libraryAssets = useMemo<readonly AssetItem[]>(() => {
@@ -6140,6 +6651,7 @@ export function WorkspaceApp({
         : ASSETS;
     }
     if (assetLibrarySource === "local") return localAssets.map(localAssetToItem);
+    if (cloudCollection === "object_storage") return objectStorageAssets.map(localAssetToItem);
     return cloudAssets.map((asset) => {
       const item = cloudAssetToItem(asset);
       return assetProvider?.id === asset.providerConnectionId
@@ -6149,7 +6661,14 @@ export function WorkspaceApp({
           }
         : item;
     });
-  }, [assetLibrarySource, assetProvider, cloudAssets, localAssets]);
+  }, [
+    assetLibrarySource,
+    assetProvider,
+    cloudCollection,
+    cloudAssets,
+    localAssets,
+    objectStorageAssets,
+  ]);
 
   const refreshProviderCatalog = useCallback(async () => {
     if (!isDesktopRuntime()) return;
@@ -6679,7 +7198,7 @@ export function WorkspaceApp({
   }, [outputNodes, taskById, taskResults, rawResponses, loadRawResponse]);
 
   const handleStartGeneration = useCallback(
-    (nodeKey: string) => {
+    (nodeKey: string, agentContext?: AgentToolContext) => {
       if (startingNodeKeys.has(nodeKey)) return;
       const liveCanvas = snapshotV2({});
       const genNode = liveCanvas.genNodes.find((node) => node.key === nodeKey);
@@ -6760,6 +7279,31 @@ export function WorkspaceApp({
         return;
       }
 
+      const perTaskProfile =
+        genNode.kind === "video"
+          ? perTaskVideoProfile(resolvedSelection.model.remoteModelId)
+          : null;
+      if (perTaskProfile && genNode.kind === "video") {
+        if (genNode.config.greenScreen?.enabled || genNode.config.whiteModelControl?.enabled) {
+          setNodeStartError(nodeKey, "按次系列只支持参考图及指定型号的参考音频，请先关闭绿幕或白模视频控制。");
+          return;
+        }
+        // Wan's file/link inputs are stored on the node but hidden for this model.
+        // They are not reference images and must never enter this paid request.
+        connections = connections.slice(0, connectedAssets.length);
+        const publicUrlInputs = genNode.config.perTaskUrlMedia ?? [];
+        const urlIssue = perTaskVideoUrlIssue(publicUrlInputs);
+        if (urlIssue) {
+          setNodeStartError(nodeKey, urlIssue);
+          return;
+        }
+        connections = [...connections, ...publicUrlInputs.map(perTaskVideoUrlConnection)];
+        const mediaIssue = perTaskVideoInputIssue(perTaskProfile, connections);
+        if (mediaIssue) {
+          setNodeStartError(nodeKey, mediaIssue);
+          return;
+        }
+      }
       const parameterCapabilities = modelParameterCapabilities(
         resolvedSelection.model.operationSchema,
         operation,
@@ -6894,6 +7438,8 @@ export function WorkspaceApp({
         `[generation] 发起画布生成: node=${nodeKey}（${genNode.kind}）, operation=${operation}, 提示词片段 ${promptSegments.length} 个（含 ${promptSegments.filter((s) => s.kind === "media_reference").length} 个 @引用）, 显式媒体输入 ${explicitMedia.length} 个, 生成数量 ${generationCount}${supportsBatchCount ? `（作为 n 参数一次请求提交）` : `（拆分为 ${taskCount} 个任务）`}`,
       );
       const startErrors: string[] = [];
+      const startedTaskIds: string[] = [];
+      const submissions: Promise<unknown>[] = [];
       let remaining = taskCount;
       const settleOne = () => {
         remaining -= 1;
@@ -6913,7 +7459,7 @@ export function WorkspaceApp({
         }
       };
       for (let index = 0; index < taskCount; index += 1) {
-        void generationClient
+        const submission = generationClient
           .start({
             canvasId: canvasId,
             sourceNodeId: nodeKey,
@@ -6927,50 +7473,55 @@ export function WorkspaceApp({
             generationCount: 1,
           })
           .then((taskId) => {
-            if (greenScreenSignature) {
-              patchNode("gen", nodeKey, (node) =>
-                node.kind === "video" && node.config.greenScreen
-                  ? {
-                      ...node,
-                      config: {
-                        ...node.config,
-                        greenScreen: {
-                          ...node.config.greenScreen,
-                          preparationTasks: [
-                            ...node.config.greenScreen.preparationTasks,
-                            { taskId, signature: greenScreenSignature },
-                          ],
-                        },
-                      },
-                    }
-                  : node,
-              );
-            }
-            // 任务创建成功 → 立即在来源生成节点右侧落下占位产物卡片并连虚线，
-            // 卡片承担任务状态栏职责：进行中展示进度，成功填充产物，失败展示完整错误。
-            // 支持 n 参数的模型一次请求返回多张图：生成开始时就落下与数量相等的占位卡片，
-            // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
-            // 编号必须与后端结果索引保持一致（1 起）：错位会让占位卡片永远匹配不到结果，
-            // 同一次生成既留下永远等待保存的卡片，又多出一张重复产物卡片。
+            startedTaskIds.push(taskId);
             const placeholderCount = supportsBatchCount ? generationCount : 1;
-            for (let resultIndex = 1; resultIndex <= placeholderCount; resultIndex += 1) {
-              const key = outputNodeKey();
-              addOutput((current, nodesById) => ({
-                key,
-                resultKey: supportsBatchCount ? `${taskId}#${resultIndex}` : null,
-                sourceNodeId: genNode.key,
-                taskId,
-                mediaType: genNode.kind === "video" ? "video" : "image",
-                finalPath: null,
-                previewSrc: null,
-                name: null,
-                ...nextOutputSlot(
-                  currentOutputSource(nodesById, "gen", genNode),
-                  current,
-                  outputPlacementOptionsFor(nodesById, genNode.key),
-                ),
-              }));
-            }
+            const publish = () => {
+              if (greenScreenSignature) {
+                patchNode("gen", nodeKey, (node) =>
+                  node.kind === "video" && node.config.greenScreen
+                    ? {
+                        ...node,
+                        config: {
+                          ...node.config,
+                          greenScreen: {
+                            ...node.config.greenScreen,
+                            preparationTasks: [
+                              ...node.config.greenScreen.preparationTasks,
+                              { taskId, signature: greenScreenSignature },
+                            ],
+                          },
+                        },
+                      }
+                    : node,
+                );
+              }
+              // 任务创建成功 → 立即在来源生成节点右侧落下占位产物卡片并连虚线，
+              // 卡片承担任务状态栏职责：进行中展示进度，成功填充产物，失败展示完整错误。
+              // 支持 n 参数的模型一次请求返回多张图：生成开始时就落下与数量相等的占位卡片，
+              // 每个卡片预设 resultKey=taskId#index，结果返回后按 index 原地填充。
+              // 编号必须与后端结果索引保持一致（1 起）：错位会让占位卡片永远匹配不到结果，
+              // 同一次生成既留下永远等待保存的卡片，又多出一张重复产物卡片。
+              for (let resultIndex = 1; resultIndex <= placeholderCount; resultIndex += 1) {
+                const key = outputNodeKey();
+                addOutput((current, nodesById) => ({
+                  key,
+                  resultKey: supportsBatchCount ? `${taskId}#${resultIndex}` : null,
+                  sourceNodeId: genNode.key,
+                  taskId,
+                  mediaType: genNode.kind === "video" ? "video" : "image",
+                  finalPath: null,
+                  previewSrc: null,
+                  name: null,
+                  ...nextOutputSlot(
+                    currentOutputSource(nodesById, "gen", genNode),
+                    current,
+                    outputPlacementOptionsFor(nodesById, genNode.key),
+                  ),
+                }));
+              }
+            };
+            if (agentContext) agentContext.mutate(publish);
+            else publish();
             frontendLog(
               "info",
               `[canvas] 已创建生成占位产物卡片: task=${taskId}, 数量=${placeholderCount}`,
@@ -6981,7 +7532,12 @@ export function WorkspaceApp({
             startErrors.push(formatRawBackendError(error));
           })
           .finally(settleOne);
+        submissions.push(submission);
       }
+      return Promise.all(submissions).then(() => ({
+        taskIds: startedTaskIds,
+        errors: startErrors,
+      }));
     },
     [
       canvasId,
@@ -7520,12 +8076,18 @@ export function WorkspaceApp({
       });
   }, []);
 
-  // 画布上第一次出现下载节点时加载引擎状态；之后由操作结果直接更新。
+  const hasVideoLinkWorkflow = knowledgeVideoWorkflowNodes.some(
+    (node) => node.config.reverseVideo != null || node.config.reelbench != null,
+  );
+  // 第一次出现下载节点或链接工作流时加载引擎状态；之后由操作结果直接更新。
   useEffect(() => {
-    if (videoDownloaderNodes.length === 0 || downloaderEngineLoadedRef.current) return;
+    if (
+      (videoDownloaderNodes.length === 0 && !hasVideoLinkWorkflow) ||
+      downloaderEngineLoadedRef.current
+    ) return;
     downloaderEngineLoadedRef.current = true;
     refreshDownloaderEngineStatus();
-  }, [refreshDownloaderEngineStatus, videoDownloaderNodes.length]);
+  }, [refreshDownloaderEngineStatus, videoDownloaderNodes.length, hasVideoLinkWorkflow]);
 
   const runDownloaderEngineOperation = useCallback(
     (operation: "install" | "update") => {
@@ -7568,6 +8130,8 @@ export function WorkspaceApp({
 
   const importDownloaderCookies = useCallback(() => {
     void (async () => {
+      if (downloaderCookieBusy) return;
+      setDownloaderCookieBusy(true);
       try {
         const { open } = await import("@tauri-apps/plugin-dialog");
         const selection = await open({
@@ -7580,25 +8144,58 @@ export function WorkspaceApp({
         const status = await videoDownloaderClient.importCookies(selection);
         setDownloaderEngineStatus(status);
         toast.success("下载登录凭据已导入，可以重试下载步骤");
-        frontendLog("info", "[downloader] Cookies 已导入，抖音下载将自动携带");
+        frontendLog("info", "[downloader] Cookies 文件已导入，后续下载将使用该文件");
       } catch (error: unknown) {
         frontendLog("error", `[downloader] Cookies 导入失败: ${formatRawBackendError(error)}`);
         toast.error("下载登录凭据导入失败", { description: formatWorkflowError(error) });
+      } finally {
+        setDownloaderCookieBusy(false);
       }
     })();
-  }, []);
+  }, [downloaderCookieBusy]);
+
+  const selectDownloaderCookieBrowser = useCallback(
+    (browser: VideoDownloaderCookieBrowser | null) => {
+      if (downloaderCookieBusy) return;
+      setDownloaderCookieBusy(true);
+      void videoDownloaderClient
+        .setCookieBrowser(browser)
+        .then((status) => {
+          setDownloaderEngineStatus(status);
+          toast.success(
+            browser === "auto"
+              ? "已开启自动来源：按站点尝试已导入文件、浏览器与无 Cookies 访问"
+              : browser
+              ? `已选择 ${browser}，下载时会尝试读取该浏览器的 Cookies`
+              : "已关闭浏览器 Cookies 来源",
+          );
+        })
+        .catch((error: unknown) => {
+          frontendLog("error", `[downloader] 浏览器 Cookies 来源设置失败: ${formatRawBackendError(error)}`);
+          toast.error("浏览器 Cookies 来源设置失败", { description: formatWorkflowError(error) });
+          refreshDownloaderEngineStatus();
+        })
+        .finally(() => setDownloaderCookieBusy(false));
+    },
+    [downloaderCookieBusy, refreshDownloaderEngineStatus],
+  );
 
   const clearDownloaderCookies = useCallback(() => {
+    if (downloaderCookieBusy) return;
+    setDownloaderCookieBusy(true);
     videoDownloaderClient
       .clearCookies()
       .then((status) => {
         setDownloaderEngineStatus(status);
-        frontendLog("info", "[downloader] Cookies 已清除");
+        frontendLog("info", "[downloader] 手动 Cookies 文件已清除");
+        toast.success("已清除手动 Cookies 文件");
       })
       .catch((error: unknown) => {
         frontendLog("error", `[downloader] Cookies 清除失败: ${formatRawBackendError(error)}`);
-      });
-  }, []);
+        toast.error("清除下载登录凭据失败", { description: formatWorkflowError(error) });
+      })
+      .finally(() => setDownloaderCookieBusy(false));
+  }, [downloaderCookieBusy]);
 
   /** 打开该节点最近一次下载产物所在文件夹。 */
   const revealDownloaderResult = useCallback(
@@ -7667,6 +8264,8 @@ export function WorkspaceApp({
             progress: null,
             qualityHint: null,
             watermarkRemoved: false,
+            credentialSource: record.credentialSource ?? null,
+            probeStatus: record.probeStatus ?? null,
             error: null,
           },
         }));
@@ -7753,7 +8352,9 @@ export function WorkspaceApp({
             if (
               previous.status === "running" &&
               previous.preparingEngine === preparingEngine &&
-              previous.progress === job.progress
+              previous.progress === job.progress &&
+              previous.credentialSource === (job.credentialSource ?? null) &&
+              previous.probeStatus === (job.probeStatus ?? null)
             ) {
               return current;
             }
@@ -7766,6 +8367,8 @@ export function WorkspaceApp({
                 progress: job.progress,
                 qualityHint: job.qualityHint,
                 watermarkRemoved: job.watermarkRemoved,
+                credentialSource: job.credentialSource ?? null,
+                probeStatus: job.probeStatus ?? null,
                 error: null,
               },
             };
@@ -7819,6 +8422,8 @@ export function WorkspaceApp({
                 progress: 100,
                 qualityHint: job.qualityHint,
                 watermarkRemoved: job.watermarkRemoved,
+                credentialSource: job.credentialSource ?? null,
+                probeStatus: null,
                 error: null,
               },
             };
@@ -7840,6 +8445,8 @@ export function WorkspaceApp({
                 progress: null,
                 qualityHint: null,
                 watermarkRemoved: false,
+                credentialSource: job.credentialSource ?? null,
+                probeStatus: null,
                 error: null,
               },
             };
@@ -7863,6 +8470,8 @@ export function WorkspaceApp({
               progress: null,
               qualityHint: job?.qualityHint ?? null,
               watermarkRemoved: job?.watermarkRemoved ?? false,
+              credentialSource: job?.credentialSource ?? null,
+              probeStatus: null,
               error: message,
             },
           };
@@ -8314,44 +8923,50 @@ export function WorkspaceApp({
     [generationInputs],
   );
 
+  /** UI and agent commands share this reconciliation, including the imported version marker. */
+  const synchronizePromptSources = useCallback(
+    (
+      sourcesByTarget: ReadonlyMap<string, ReturnType<typeof canvasInputsFor>["texts"]>,
+      candidatesFor: (nodeKey: string) => readonly MentionCandidate[],
+    ) => {
+      const imported = importedPromptSourcesRef.current;
+      for (const [targetKey, previous] of imported) {
+        if (sourcesByTarget.has(targetKey)) continue;
+        // 断开最后一条来源时清除自动导入内容，保留用户另行修改的内容。
+        if (promptContents.read(targetKey)?.plainText === previous.importedText) {
+          promptContents.replaceText(targetKey, "", candidatesFor(targetKey));
+        }
+        imported.delete(targetKey);
+      }
+      for (const [targetKey, sources] of sourcesByTarget) {
+        const version = {
+          edgeId: sources.map((source) => source.edgeId).join("\n"),
+          sourceKey: sources.map((source) => source.sourceKey).join("\n"),
+          text: sources.map((source) => source.text).join("\n\n"),
+          importedText: connectedCanvasPromptText(sources),
+        };
+        const previous = imported.get(targetKey);
+        if (
+          previous?.edgeId === version.edgeId &&
+          previous.sourceKey === version.sourceKey &&
+          previous.text === version.text &&
+          previous.importedText === version.importedText
+        )
+          continue;
+        if (
+          promptContents.replaceText(targetKey, version.importedText, candidatesFor(targetKey)) !=
+          null
+        ) {
+          imported.set(targetKey, version);
+        }
+      }
+    },
+    [promptContents],
+  );
   /** 同步合并后的文本；同一上游版本保留用户手工编辑。 */
   useEffect(() => {
-    if (!canvasHydrated) return;
-    const imported = importedPromptSourcesRef.current;
-    for (const [targetKey, previous] of imported) {
-      if (promptSourceByTarget.has(targetKey)) continue;
-      // 断开最后一条来源时清除自动导入内容，保留用户另行修改的内容。
-      if (promptContents.read(targetKey)?.plainText === previous.importedText) {
-        promptContents.replaceText(targetKey, "", mentionCandidatesFor(targetKey));
-      }
-      imported.delete(targetKey);
-    }
-    for (const [targetKey, sources] of promptSourceByTarget) {
-      const version = {
-        edgeId: sources.map((source) => source.edgeId).join("\n"),
-        sourceKey: sources.map((source) => source.sourceKey).join("\n"),
-        text: sources.map((source) => source.text).join("\n\n"),
-        importedText: connectedCanvasPromptText(sources),
-      };
-      const previous = imported.get(targetKey);
-      if (
-        previous?.edgeId === version.edgeId &&
-        previous.sourceKey === version.sourceKey &&
-        previous.text === version.text &&
-        previous.importedText === version.importedText
-      )
-        continue;
-      if (
-        promptContents.replaceText(
-          targetKey,
-          version.importedText,
-          mentionCandidatesFor(targetKey),
-        ) != null
-      ) {
-        imported.set(targetKey, version);
-      }
-    }
-  }, [canvasHydrated, mentionCandidatesFor, promptContents, promptSourceByTarget]);
+    if (canvasHydrated) synchronizePromptSources(promptSourceByTarget, mentionCandidatesFor);
+  }, [canvasHydrated, mentionCandidatesFor, promptSourceByTarget, synchronizePromptSources]);
 
   const nodeDescriptorContext = useMemo(
     () => ({ providerCatalog, nodeModelSelections }),
@@ -8373,6 +8988,7 @@ export function WorkspaceApp({
     ? assetSearch.trim() !== committedAssetSearch
     : assetSearch !== deferredAssetSearch;
   const localAssetTotalPages = Math.max(1, Math.ceil(localAssetTotal / ASSET_PAGE_SIZE));
+  const objectStorageTotalPages = Math.max(1, Math.ceil(objectStorageTotal / ASSET_PAGE_SIZE));
   // 云端类型角标已是当前分组的全库计数；无搜索时即可换算总页数。
   // 名称搜索仍无过滤总数，分页文案退回「第 N 页」。
   const cloudAssetTotal =
@@ -8398,6 +9014,15 @@ export function WorkspaceApp({
       refreshLocalAssets("page");
     },
     [refreshLocalAssets],
+  );
+  const goToObjectStoragePage = useCallback(
+    (page: number) => {
+      if (page === objectStoragePageRef.current) return;
+      objectStoragePageRef.current = page;
+      setObjectStoragePageNumber(page);
+      refreshObjectStorageAssets("page");
+    },
+    [refreshObjectStorageAssets],
   );
   const handlePreviewAsset = useCallback((asset: AssetItem) => setPreviewAsset(asset), []);
   const handleDropAssetToCanvas = useCallback(
@@ -8661,7 +9286,8 @@ export function WorkspaceApp({
   useHotkeys(
     "esc",
     () => {
-      setAssetGroupMarquee(false);
+      setNodeMarquee(false);
+      setMarqueeNodeKeys(new Set());
       setMobilePanel(null);
       selectEdge(null);
       selectNode(null);
@@ -8773,11 +9399,132 @@ export function WorkspaceApp({
     ],
   );
 
+  const copySelectedCanvasNodes = useCallback((): CanvasNodeClipboard | null => {
+    const captured = captureCanvasNodes(collectCanvasDocument(), selectedCanvasNodeKeys);
+    if (captured.nodes.length === 0) {
+      toast.error(
+        captured.skippedPendingOutputs > 0
+          ? "进行中的产物尚未保存，暂时无法复制"
+          : "请先选择要复制的节点",
+      );
+      return null;
+    }
+    writeCanvasNodeClipboard(captured);
+    toast.success(`已复制 ${captured.nodes.length} 个节点`, {
+      ...(captured.skippedPendingOutputs > 0
+        ? { description: `跳过 ${captured.skippedPendingOutputs} 个尚未保存的产物` }
+        : {}),
+    });
+    return captured;
+  }, [collectCanvasDocument, selectedCanvasNodeKeys]);
+
+  const pasteCopiedCanvasNodes = useCallback(
+    (source: CanvasNodeClipboard | null = canvasNodeClipboard) => {
+      if (source == null || source.nodes.length === 0) {
+        toast.error("请先复制画布节点");
+        return;
+      }
+      const offset = 40 * ++canvasNodePasteCount;
+      const anchor = viewportCenterBoardCoordinates();
+      let minX = Infinity;
+      let minY = Infinity;
+      let maxX = -Infinity;
+      let maxY = -Infinity;
+      for (const { data } of source.nodes) {
+        minX = Math.min(minX, data.x);
+        minY = Math.min(minY, data.y);
+        maxX = Math.max(maxX, data.x);
+        maxY = Math.max(maxY, data.y);
+      }
+      const pasted = pasteCanvasNodes(
+        source,
+        {
+          x: anchor.x - (minX + maxX) / 2 + offset,
+          y: anchor.y - (minY + maxY) / 2 + offset,
+        },
+        (entry) => `${entry.type}-${crypto.randomUUID()}`,
+      );
+      insertSubgraph(pasted.nodes, pasted.edges, { selectNodeKey: null });
+      for (const [key, document] of Object.entries(pasted.promptContents)) {
+        promptContents.restoreDocument(key, document);
+      }
+      setNodeMarquee(true);
+      setMarqueeNodeKeys(new Set(pasted.keys));
+      selectEdge(null);
+      toast.success(`已粘贴 ${pasted.nodes.length} 个节点`);
+    },
+    [insertSubgraph, promptContents, selectEdge, viewportCenterBoardCoordinates],
+  );
+
+  const duplicateSelectedCanvasNodes = useCallback(() => {
+    const copied = copySelectedCanvasNodes();
+    if (copied != null) pasteCopiedCanvasNodes(copied);
+  }, [copySelectedCanvasNodes, pasteCopiedCanvasNodes]);
+
+  const deleteSelectedCanvasNodes = useCallback(() => {
+    const keys = [...selectedCanvasNodeKeys];
+    if (keys.length === 0) return;
+    for (const key of keys) removeSelectedCanvasNode(key);
+    setMarqueeNodeKeys(new Set());
+    toast.success(`已删除 ${keys.length} 个节点`);
+  }, [removeSelectedCanvasNode, selectedCanvasNodeKeys]);
+
+  useHotkeys(
+    ["mod+c", "mod+v", "mod+d"],
+    (event, hotkey) => {
+      if (hotkey.hotkey === "mod+v") {
+        if (!canPasteCanvasNodes) return;
+        event.preventDefault();
+        pasteCopiedCanvasNodes();
+        return;
+      }
+      if (selectedCanvasNodeKeys.size === 0) return;
+      event.preventDefault();
+      if (hotkey.hotkey === "mod+c") copySelectedCanvasNodes();
+      else duplicateSelectedCanvasNodes();
+    },
+    {
+      enabled:
+        active &&
+        canvasHydrated &&
+        !settingsOpen &&
+        !historyOpen &&
+        !realPersonDialogOpen &&
+        videoLocalEdit == null &&
+        whiteModelStudioNodeKey == null &&
+        previewAsset == null &&
+        previewAssetNodeKey == null &&
+        previewOutputNodeKey == null,
+      preventDefault: false,
+    },
+    [
+      active,
+      canvasHydrated,
+      canPasteCanvasNodes,
+      copySelectedCanvasNodes,
+      duplicateSelectedCanvasNodes,
+      historyOpen,
+      pasteCopiedCanvasNodes,
+      previewAsset,
+      previewAssetNodeKey,
+      previewOutputNodeKey,
+      realPersonDialogOpen,
+      selectedCanvasNodeKeys,
+      settingsOpen,
+      videoLocalEdit,
+      whiteModelStudioNodeKey,
+    ],
+  );
+
   // 输入框 / 可编辑区域默认不触发：避免在提示词里按 Backspace 时把整张卡片删掉。
   useHotkeys(
     ["Delete", "Backspace"],
     (event) => {
       event.preventDefault();
+      if (selectedCanvasNodeKeys.size > 1 || marqueeNodeKeys.size > 0) {
+        deleteSelectedCanvasNodes();
+        return;
+      }
       if (selectedEdgeId != null) {
         removeAssetEdge(selectedEdgeId);
         return;
@@ -8796,14 +9543,16 @@ export function WorkspaceApp({
         previewAsset == null &&
         previewAssetNodeKey == null &&
         previewOutputNodeKey == null &&
-        (selectedEdgeId != null || selectedNodeKey != null),
+        (selectedEdgeId != null || selectedCanvasNodeKeys.size > 0),
       preventDefault: true,
       useKey: true,
     },
     [
       active,
       canvasHydrated,
+      deleteSelectedCanvasNodes,
       historyOpen,
+      marqueeNodeKeys,
       previewAsset,
       previewAssetNodeKey,
       previewOutputNodeKey,
@@ -8811,6 +9560,7 @@ export function WorkspaceApp({
       removeAssetEdge,
       removeSelectedCanvasNode,
       selectedEdgeId,
+      selectedCanvasNodeKeys,
       selectedNodeKey,
       settingsOpen,
       videoLocalEdit,
@@ -8834,20 +9584,22 @@ export function WorkspaceApp({
           node.key,
           [
             node,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             canvasEdgeIndex.countByNode.get(node.key) ?? 0,
             ignoreLegacyNodeDrag,
             ignoreLegacyConnectionStart,
             removeAssetNode,
             handleAssetAspectRatioChange,
             handleAssetMediaRefresh,
+            handleSaveAssetNodeToLibrary,
+            assetProvider?.id,
           ],
           () => ({
             id: node.key,
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -8863,6 +9615,8 @@ export function WorkspaceApp({
                   onAspectRatioChange={handleAssetAspectRatioChange}
                   onRefreshMediaUrls={handleAssetMediaRefresh}
                   onPreview={setPreviewAssetNodeKey}
+                  {...(isDesktopRuntime() ? { onSaveToLibrary: handleSaveAssetNodeToLibrary } : {})}
+                  targetCloudProviderConnectionId={assetProvider?.id ?? null}
                 />
               ),
             },
@@ -8872,12 +9626,14 @@ export function WorkspaceApp({
     [
       assetNodes,
       canvasEdgeIndex,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       ignoreLegacyNodeDrag,
       ignoreLegacyConnectionStart,
       removeAssetNode,
       handleAssetAspectRatioChange,
       handleAssetMediaRefresh,
+      handleSaveAssetNodeToLibrary,
+      assetProvider?.id,
     ],
   );
 
@@ -8892,7 +9648,7 @@ export function WorkspaceApp({
           [
             node,
             task,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             retryInfoByTask[node.taskId] ?? null,
             taskResults[node.taskId],
             rawResponses[node.taskId] ?? null,
@@ -8903,13 +9659,15 @@ export function WorkspaceApp({
             setPreviewOutputNodeKey,
             ignoreLegacyConnectionStart,
             handleUploadOutputToCloud,
+            handleUploadOutputToLocal,
+            handleUploadOutputToObjectStorage,
           ],
           () => ({
             id: node.key,
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -8924,6 +9682,8 @@ export function WorkspaceApp({
                   onPreview={setPreviewOutputNodeKey}
                   onConnectionStart={ignoreLegacyConnectionStart}
                   onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
+                  onUploadToLocal={(key) => void handleUploadOutputToLocal(key)}
+                  onUploadToObjectStorage={(key) => void handleUploadOutputToObjectStorage(key)}
                   task={task}
                   retryInfo={retryInfoByTask[node.taskId] ?? null}
                   results={taskResults[node.taskId] ?? []}
@@ -8942,7 +9702,7 @@ export function WorkspaceApp({
       }),
     [
       outputNodes,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       taskById,
       ignoreLegacyNodeDrag,
       removeOutputNode,
@@ -8950,6 +9710,8 @@ export function WorkspaceApp({
       setPreviewOutputNodeKey,
       ignoreLegacyConnectionStart,
       handleUploadOutputToCloud,
+      handleUploadOutputToLocal,
+      handleUploadOutputToObjectStorage,
       retryInfoByTask,
       taskResults,
       saveProgressByResult,
@@ -8967,7 +9729,7 @@ export function WorkspaceApp({
           node.key,
           [
             node,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
@@ -8991,7 +9753,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -8999,7 +9761,7 @@ export function WorkspaceApp({
                 <CanvasDocumentSkillNode
                   key={node.key}
                   node={node}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -9025,7 +9787,7 @@ export function WorkspaceApp({
       ),
     [
       screenplayNodes,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
@@ -9054,7 +9816,7 @@ export function WorkspaceApp({
           node.key,
           [
             node,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
@@ -9076,7 +9838,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9084,7 +9846,7 @@ export function WorkspaceApp({
                 <CanvasDocumentSkillNode
                   key={node.key}
                   node={node}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -9108,7 +9870,7 @@ export function WorkspaceApp({
       ),
     [
       storyboardNodes,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
@@ -9136,7 +9898,7 @@ export function WorkspaceApp({
           [
             node,
             workflowInputsByNode.get(node.key),
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             knowledgeVideoWorkflowRuns[node.key] ?? null,
             providerCatalog,
             removeAssetEdge,
@@ -9158,9 +9920,15 @@ export function WorkspaceApp({
             handlePickWorkflowMaterials,
             handleRemoveWorkflowMaterial,
             handlePickReverseVideo,
+            handlePickReelbenchVideo,
             handlePickMusicVideoMaterial,
             handleRemoveReverseVideo,
+            handleRemoveReelbenchVideo,
             importDownloaderCookies,
+            downloaderEngineStatus,
+            downloaderCookieBusy,
+            selectDownloaderCookieBrowser,
+            clearDownloaderCookies,
             exportFilmDocuments,
             revealRemotionProject,
             handlePickCommerceMaterials,
@@ -9173,10 +9941,10 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
-              hasTargetHandle: !node.config.productScene,
+              hasTargetHandle: !node.config.productScene && !node.config.reelbench,
               content: (
                 <KnowledgeVideoWorkflowNode
                   key={node.key}
@@ -9197,7 +9965,7 @@ export function WorkspaceApp({
                   }
                   providerCatalog={providerCatalog}
                   runState={knowledgeVideoWorkflowRuns[node.key] ?? null}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   onSelect={selectNode}
                   onNodeDragStart={ignoreLegacyNodeDrag}
@@ -9217,10 +9985,16 @@ export function WorkspaceApp({
                   onPickMaterials={handlePickWorkflowMaterials}
                   onRemoveMaterial={handleRemoveWorkflowMaterial}
                   onPickReverseVideo={handlePickReverseVideo}
+                  onPickReelbenchVideo={handlePickReelbenchVideo}
                   onPickMusicVideoMaterial={handlePickMusicVideoMaterial}
                   onExportMusicVideoDocuments={exportFilmDocuments}
                   onRemoveReverseVideo={handleRemoveReverseVideo}
+                  onRemoveReelbenchVideo={handleRemoveReelbenchVideo}
                   onOpenDownloadSettings={importDownloaderCookies}
+                  downloadCookieStatus={downloaderEngineStatus}
+                  downloadCookieBusy={downloaderCookieBusy}
+                  onSelectDownloadCookieBrowser={selectDownloaderCookieBrowser}
+                  onClearDownloadCookies={clearDownloaderCookies}
                   onExportFilmDocuments={exportFilmDocuments}
                   onExportComicDramaDocuments={exportFilmDocuments}
                   onExportCommerceDocuments={exportFilmDocuments}
@@ -9244,7 +10018,7 @@ export function WorkspaceApp({
       patchNode,
       providerCatalog,
       knowledgeVideoWorkflowRuns,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       selectNode,
       ignoreLegacyNodeDrag,
       handleGenNodeSizeChange,
@@ -9263,9 +10037,15 @@ export function WorkspaceApp({
       handlePickWorkflowMaterials,
       handleRemoveWorkflowMaterial,
       handlePickReverseVideo,
+      handlePickReelbenchVideo,
       handlePickMusicVideoMaterial,
       handleRemoveReverseVideo,
+      handleRemoveReelbenchVideo,
       importDownloaderCookies,
+      downloaderEngineStatus,
+      downloaderCookieBusy,
+      selectDownloaderCookieBrowser,
+      clearDownloaderCookies,
       exportFilmDocuments,
       revealRemotionProject,
       handlePickCommerceMaterials,
@@ -9285,7 +10065,7 @@ export function WorkspaceApp({
           [
             node,
             viralRemixInputsByNode.get(node.key),
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
@@ -9305,7 +10085,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9314,7 +10094,7 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   inputs={viralRemixInputsByNode.get(node.key) ?? []}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -9337,7 +10117,7 @@ export function WorkspaceApp({
     [
       viralRemixNodes,
       viralRemixInputsByNode,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
@@ -9423,7 +10203,7 @@ export function WorkspaceApp({
             node,
             isPrompt,
             nodeDescriptorContext,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             startingNodeKeys.has(node.key),
             startErrorsByNode[node.key] ?? null,
             // 流式正文变化必须让节点重建，否则画布上看不到逐字推进。
@@ -9477,7 +10257,7 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   descriptor={descriptor}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   running={startingNodeKeys.has(node.key)}
                   streamingText={streamingTextByNode[node.key] ?? null}
@@ -9503,7 +10283,7 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   descriptor={descriptor}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   starting={startingNodeKeys.has(node.key)}
                   startError={startErrorsByNode[node.key] ?? null}
@@ -9539,7 +10319,9 @@ export function WorkspaceApp({
                   onImportGreenScreenVideo={(nodeKey) => {
                     void importGreenScreenVideo(nodeKey);
                   }}
-                  onStartGeneration={handleStartGeneration}
+                  onStartGeneration={(key) => {
+                    void handleStartGeneration(key);
+                  }}
                 />
               );
             return {
@@ -9547,7 +10329,7 @@ export function WorkspaceApp({
               type: "canvas",
               position: { x: node.x, y: node.y },
               ...measuredFor(node),
-              selected: selectedNodeKey === node.key,
+              selected: selectedCanvasNodeKeys.has(node.key),
               data: {
                 hasSourceHandle: true,
                 hasTargetHandle: true,
@@ -9562,7 +10344,7 @@ export function WorkspaceApp({
       nodeDescriptorContext,
       connectedInputsByNode,
       inputSlotsByNode,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       startingNodeKeys,
       startErrorsByNode,
       providerCatalog,
@@ -9604,7 +10386,7 @@ export function WorkspaceApp({
           [
             node,
             videoComposerInputsByNode.get(node.key),
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             videoComposerRuns[node.key],
             videoCompositionFormat,
             selectNode,
@@ -9620,7 +10402,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9629,7 +10411,7 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   inputs={videoComposerInputsByNode.get(node.key) ?? []}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   runState={videoComposerRuns[node.key]}
                   recordingFormat={videoCompositionFormat}
@@ -9649,7 +10431,7 @@ export function WorkspaceApp({
     [
       videoComposerNodes,
       videoComposerInputsByNode,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       videoComposerRuns,
       videoCompositionFormat,
       selectNode,
@@ -9672,10 +10454,11 @@ export function WorkspaceApp({
           [
             node,
             videoDownloadSourcesByNode.get(node.key),
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             videoDownloaderRuns[node.key],
             downloaderEngineStatus,
             downloaderEngineBusy,
+            downloaderCookieBusy,
             selectNode,
             ignoreLegacyNodeDrag,
             removeVideoDownloaderNode,
@@ -9685,6 +10468,7 @@ export function WorkspaceApp({
             prepareDownloaderEngine,
             updateDownloaderEngine,
             importDownloaderCookies,
+            selectDownloaderCookieBrowser,
             clearDownloaderCookies,
             revealDownloaderResult,
             ignoreLegacyConnectionStart,
@@ -9694,7 +10478,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9703,11 +10487,11 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   downloadSources={videoDownloadSourcesByNode.get(node.key) ?? []}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   runState={videoDownloaderRuns[node.key]}
                   engineStatus={downloaderEngineStatus}
-                  enginePreparing={downloaderEngineBusy}
+                  enginePreparing={downloaderEngineBusy || downloaderCookieBusy}
                   onSelect={selectNode}
                   onNodeDragStart={ignoreLegacyNodeDrag}
                   onRemove={removeVideoDownloaderNode}
@@ -9717,6 +10501,7 @@ export function WorkspaceApp({
                   onPrepareEngine={prepareDownloaderEngine}
                   onUpdateEngine={updateDownloaderEngine}
                   onImportCookies={importDownloaderCookies}
+                  onSelectCookieBrowser={selectDownloaderCookieBrowser}
                   onClearCookies={clearDownloaderCookies}
                   onRevealResult={revealDownloaderResult}
                   onConnectionStart={ignoreLegacyConnectionStart}
@@ -9729,10 +10514,11 @@ export function WorkspaceApp({
     [
       videoDownloaderNodes,
       videoDownloadSourcesByNode,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       videoDownloaderRuns,
       downloaderEngineStatus,
       downloaderEngineBusy,
+      downloaderCookieBusy,
       selectNode,
       ignoreLegacyNodeDrag,
       removeVideoDownloaderNode,
@@ -9742,6 +10528,7 @@ export function WorkspaceApp({
       prepareDownloaderEngine,
       updateDownloaderEngine,
       importDownloaderCookies,
+      selectDownloaderCookieBrowser,
       clearDownloaderCookies,
       revealDownloaderResult,
       ignoreLegacyConnectionStart,
@@ -9757,7 +10544,7 @@ export function WorkspaceApp({
           node.key,
           [
             node,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             frameExtractorInputsByNode.get(node.key),
             frameExtractorOutputsByNode.get(node.key),
             frameExtractorRuns[node.key],
@@ -9773,7 +10560,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9781,7 +10568,7 @@ export function WorkspaceApp({
                 <CanvasVideoFrameExtractorNode
                   key={node.key}
                   node={node}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   inputs={frameExtractorInputsByNode.get(node.key) ?? []}
                   producedFrames={frameExtractorOutputsByNode.get(node.key) ?? []}
@@ -9800,7 +10587,7 @@ export function WorkspaceApp({
       ),
     [
       frameExtractorNodes,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       frameExtractorInputsByNode,
       frameExtractorOutputsByNode,
       frameExtractorRuns,
@@ -9823,7 +10610,7 @@ export function WorkspaceApp({
           [
             node,
             nodeDescriptorContext,
-            selectedNodeKey === node.key,
+            selectedCanvasNodeKeys.has(node.key),
             latestResult,
             selectNode,
             ignoreLegacyNodeDrag,
@@ -9834,7 +10621,7 @@ export function WorkspaceApp({
             type: "canvas",
             position: { x: node.x, y: node.y },
             ...measuredFor(node),
-            selected: selectedNodeKey === node.key,
+            selected: selectedCanvasNodeKeys.has(node.key),
             data: {
               hasSourceHandle: true,
               hasTargetHandle: true,
@@ -9843,7 +10630,7 @@ export function WorkspaceApp({
                   key={node.key}
                   node={node}
                   descriptor={getNodeDescriptor("result", nodeDescriptorContext)}
-                  selected={selectedNodeKey === node.key}
+                  selected={selectedCanvasNodeKeys.has(node.key)}
                   dragging={false}
                   latestResult={latestResult}
                   onSelect={selectNode}
@@ -9858,7 +10645,7 @@ export function WorkspaceApp({
     [
       resultNodes,
       nodeDescriptorContext,
-      selectedNodeKey,
+      selectedCanvasNodeKeys,
       latestResult,
       selectNode,
       ignoreLegacyNodeDrag,
@@ -9891,6 +10678,8 @@ export function WorkspaceApp({
       // Switching canvases cancels the transient gesture and its menu.
       setConnectionQuickAdd(null);
       setConnectionSourceKey(null);
+      setNodeMarquee(false);
+      setMarqueeNodeKeys(new Set());
     }
   }, [active]);
 
@@ -9982,10 +10771,14 @@ export function WorkspaceApp({
       if (group == null) return;
       void uploadOutputsToLibrary(
         group.members.filter(isUploadableOutput).map((member) => member.key),
-        assetLibrarySource,
+        assetLibrarySource === "local"
+          ? "local"
+          : cloudCollection === "object_storage"
+            ? "object_storage"
+            : "cloud",
       );
     },
-    [assetLibrarySource, canvasAssetGroups, uploadOutputsToLibrary],
+    [assetLibrarySource, canvasAssetGroups, cloudCollection, uploadOutputsToLibrary],
   );
   const assetGroupFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
@@ -9998,7 +10791,11 @@ export function WorkspaceApp({
           )
           .join("|");
         const uploadLabel =
-          assetLibrarySource === "local" ? "上传到本地素材库" : "上传到云端素材库";
+          assetLibrarySource === "local"
+            ? "上传到本地素材库"
+            : cloudCollection === "object_storage"
+              ? "上传到对象存储"
+              : "上传到云端素材库";
         const canUpload = group.members.some(isUploadableOutput);
         return stableCanvasFlowNode(
           canvasFlowNodeCachesRef.current,
@@ -10048,7 +10845,13 @@ export function WorkspaceApp({
           }),
         );
       }),
-    [assetLibrarySource, canvasAssetGroups, dissolveCanvasAssetGroup, uploadCanvasGroupToLibrary],
+    [
+      assetLibrarySource,
+      canvasAssetGroups,
+      cloudCollection,
+      dissolveCanvasAssetGroup,
+      uploadCanvasGroupToLibrary,
+    ],
   );
 
   const flowNodes = useMemo<CanvasFlowNode[]>(() => {
@@ -10113,7 +10916,7 @@ export function WorkspaceApp({
         }),
       );
     });
-    // 未成组的框选只改了 React Flow 内部选中态。计数变化时交出新数组，受控同步后高亮会清掉。
+    // 框选只改了 React Flow 内部选中态。计数变化时交出新数组，受控同步后高亮会清掉。
     if (marqueeSelectionEpoch < 0) return [];
     return [...assetGroupFlowNodes, ...projected];
   }, [
@@ -10253,8 +11056,8 @@ export function WorkspaceApp({
             measured: change.dimensions,
           });
         } else if (change.type === "select") {
-          // 框选成组时选区只存在于这一次手势里，不写进单选状态，避免中途把外框冲掉。
-          if (assetGroupMarquee) continue;
+          // The marquee owns its selection until the gesture ends.
+          if (nodeMarquee) continue;
           persistedChanges.push({
             type: "select",
             key: change.id,
@@ -10264,7 +11067,7 @@ export function WorkspaceApp({
       }
       applyNodeChanges(persistedChanges);
     },
-    [applyNodeChanges, assetGroupMarquee],
+    [applyNodeChanges, nodeMarquee],
   );
 
   const handleFlowNodeDragStop: OnNodeDrag<CanvasFlowNode> = useCallback(
@@ -10282,7 +11085,7 @@ export function WorkspaceApp({
   );
 
   const handleFlowEdgesChange = (changes: EdgeChange<CanvasFlowEdge>[]) => {
-    if (assetGroupMarquee) return;
+    if (nodeMarquee) return;
     for (const change of changes) {
       if (change.type === "select") {
         selectEdge(change.selected ? change.id : null);
@@ -10361,17 +11164,6 @@ export function WorkspaceApp({
   const handleConnectionQuickAdd = (kind: CanvasQuickAddKind) => {
     if (!connectionQuickAdd) return;
     const { connection, boardPosition } = connectionQuickAdd;
-    if (kind === "asset_upload") {
-      closeConnectionQuickAdd();
-      void handleImportLocalAssets(undefined, {
-        canvasPlacement: {
-          x: boardPosition.x,
-          y: boardPosition.y,
-          connection,
-        },
-      });
-      return;
-    }
     const sourceGroupId =
       connection?.handleType === "source" ? assetGroupIdFromFlowId(connection.nodeKey) : null;
     if (sourceGroupId != null) {
@@ -10408,22 +11200,20 @@ export function WorkspaceApp({
     );
   };
 
-  const assetKeySetRef = useRef<ReadonlySet<string>>(new Set());
-  assetKeySetRef.current = new Set([
-    ...assetNodes.map((node) => node.key),
-    ...outputNodes.map((node) => node.key),
-  ]);
-  const readGroupSelectionRef = useRef<() => readonly string[]>(() => []);
-  const handleGroupSelectionEnd = useCallback(() => {
-    const keys = readGroupSelectionRef.current();
-    setAssetGroupMarquee(false);
-    if (keys.length < 2) {
-      setMarqueeSelectionEpoch((epoch) => epoch + 1);
-      return;
-    }
+  const canvasNodeKeySetRef = useRef<ReadonlySet<string>>(new Set());
+  canvasNodeKeySetRef.current = canvasNodeKeys;
+  const readNodeSelectionRef = useRef<() => readonly string[]>(() => []);
+  const handleNodeSelectionEnd = useCallback(() => {
+    setMarqueeNodeKeys(new Set(readNodeSelectionRef.current()));
+    selectNode(null);
+    selectEdge(null);
+  }, [selectEdge, selectNode]);
+  const groupSelectedCanvasNodes = useCallback(() => {
+    if (!canGroupSelectedNodes) return;
+    const keys = selectedGroupableNodeKeys;
     const next = regroupAssetNodes([...assetNodes, ...outputNodes], keys, assetGroupKey());
     if (next == null) {
-      setMarqueeSelectionEpoch((epoch) => epoch + 1);
+      toast.info("所选素材或产物已在同一组");
       return;
     }
     const byKey = new Map(next.map((node) => [node.key, node]));
@@ -10435,6 +11225,11 @@ export function WorkspaceApp({
       const updated = byKey.get(node.key);
       return updated != null && !("assetId" in updated) ? updated : node;
     });
+    setNodeMarquee(false);
+    setMarqueeNodeKeys(new Set());
+    selectNode(null);
+    selectEdge(null);
+    setMarqueeSelectionEpoch((epoch) => epoch + 1);
     const assetKeySet = new Set(assetNodes.map((node) => node.key));
     const assetCount = keys.filter((key) => assetKeySet.has(key)).length;
     const outputCount = keys.length - assetCount;
@@ -10445,7 +11240,15 @@ export function WorkspaceApp({
           ? `已成组，共 ${outputCount} 个产物`
           : `已成组，共 ${assetCount} 个素材、${outputCount} 个产物`,
     );
-  }, [assetNodes, outputNodes, patchNodes]);
+  }, [
+    assetNodes,
+    canGroupSelectedNodes,
+    outputNodes,
+    patchNodes,
+    selectEdge,
+    selectedGroupableNodeKeys,
+    selectNode,
+  ]);
 
   const handleFlowConnect = (connection: Connection) => {
     if (!connection.source || !connection.target) return;
@@ -10473,22 +11276,386 @@ export function WorkspaceApp({
     setView({ pan: { x: viewport.x, y: viewport.y }, zoom: Math.round(viewport.zoom * 100) });
   };
 
-  const selectedAssetsLoading = assetLibrarySource === "local" ? localAssetsLoading : assetsLoading;
-  const selectedAssetsError = assetLibrarySource === "local" ? localAssetsError : assetsError;
-  const selectedLibraryError = assetLibrarySource === "local" ? localLibraryError : libraryError;
+  const selectedAssetsLoading =
+    assetLibrarySource === "local"
+      ? localAssetsLoading
+      : cloudCollection === "object_storage"
+        ? objectStorageLoading
+        : assetsLoading;
+  const selectedAssetsError =
+    assetLibrarySource === "local"
+      ? localAssetsError
+      : cloudCollection === "object_storage"
+        ? objectStorageError
+        : assetsError;
+  const selectedLibraryError =
+    assetLibrarySource === "local"
+      ? localLibraryError
+      : cloudCollection === "object_storage"
+        ? objectStorageLibraryError
+        : libraryError;
   const uploadActionLabel =
-    assetLibrarySource === "local" ? "上传到本地素材库（仅对象存储）" : "上传本地素材到云端素材库";
+    assetLibrarySource === "local"
+      ? "上传到本地素材库"
+      : cloudCollection === "object_storage"
+        ? "上传到对象存储"
+        : "上传本地素材到云端素材库";
   // 云端面板当前选中的分组即上传目标：选中分组后，上传必须直接归入该分组，
   // 而不是始终落到默认上传分组、只在「全部素材」里可见。
   const uploadGroupName =
-    assetLibrarySource === "cloud"
+    assetLibrarySource === "cloud" && cloudCollection === "library"
       ? (assetGroups.find((group) => group.id === selectedAssetGroupId)?.name ?? null)
       : null;
+
+  // Bind every action to this canvas session. The controller checks the live signature again
+  // before each write; asynchronous calls never fall back to whichever canvas is now active.
+  useLayoutEffect(() => {
+    // Prompt-node text is already canonical in config; its mounted editor is a UI mirror.
+    // Use the same filtered prompt documents as persistence so mounting an editor is not an edit.
+    const readDocument = collectCanvasDocument;
+    const context = () =>
+      agentCanvasContext(readDocument(), providerCatalog, [...selectedCanvasNodeKeys]);
+    const requireNode = (nodeKey: string) => {
+      const node = snapshotV2({}).genNodes.find((item) => item.key === nodeKey);
+      if (!node) throw new Error("目标创作节点已不存在，请重新读取画布。");
+      return node;
+    };
+    const reconcilePrompts = () => {
+      const document = snapshotV2({});
+      const resolve = createCanvasInputResolver(
+        canvasNodesByKeyFromDocument(document),
+        document.assetEdges,
+      );
+      const sources = new Map<string, ReturnType<typeof canvasInputsFor>["texts"]>();
+      for (const node of document.genNodes) {
+        if (node.kind === "prompt") continue;
+        const texts = resolve(node.key).texts;
+        if (texts.length) sources.set(node.key, texts);
+      }
+      synchronizePromptSources(sources, (key) =>
+        resolve(key).media.map(generationInputMentionCandidate),
+      );
+    };
+    const setPrompt = (nodeKey: string, text: string) => {
+      const node = requireNode(nodeKey);
+      if (node.kind === "prompt") {
+        patchNode("gen", nodeKey, (item) =>
+          item.kind === "prompt"
+            ? {
+                ...item,
+                config: {
+                  ...item.config,
+                  sourcePrompt: text,
+                  generatedPrompt: text,
+                  cinematicDialogueValidated: false,
+                  conversation: [],
+                },
+              }
+            : item,
+        );
+        reconcilePrompts();
+      } else {
+        promptContents.restoreDocument(nodeKey, {
+          schema: "prompt-content",
+          version: 1,
+          items: text ? [{ kind: "text", text }] : [],
+        });
+      }
+    };
+    const canvasTools = createAgentCanvasTools({
+      context,
+      createNode: (kind, text) => {
+        const center = viewportCenterBoardCoordinates();
+        const node = createGenNode(kind, center.x, center.y);
+        addNode("gen", node, { select: true });
+        setPrompt(node.key, text);
+        return node.key;
+      },
+      setPrompt,
+      setModel: (nodeKey, modelSelection) => {
+        const node = requireNode(nodeKey);
+        const model = providerCatalog
+          .find(
+            (entry) => entry.provider.enabled && entry.provider.id === modelSelection.providerId,
+          )
+          ?.models.find((item) => item.definitionId === modelSelection.modelDefinitionId);
+        const compatible =
+          model &&
+          (node.kind === "prompt"
+            ? isTextGenerationModel(model)
+            : node.kind === "video"
+              ? isVideoGenerationModel(model)
+              : model.operations.some(
+                  (operation) => operation === "text_to_image" || operation === "image_to_image",
+                ));
+        if (!compatible)
+          throw new Error("所选模型不可用或不支持这个节点，请从实际模型目录重新选择。");
+        const selection = {
+          providerId: modelSelection.providerId,
+          modelDefinitionId: modelSelection.modelDefinitionId,
+        };
+        if (node.kind === "prompt")
+          updatePromptNodeConfig(nodeKey, { ...node.config, modelSelection: selection });
+        else if (node.kind === "video")
+          updateVideoNodeConfig(nodeKey, {
+            ...node.config,
+            modelSelection: selection,
+            parameterValues: {},
+            seedanceTaskMode: "auto",
+            mediaRoles: {},
+          });
+        else
+          updateImageNodeConfig(nodeKey, {
+            ...node.config,
+            modelSelection: selection,
+            parameterValues: {},
+          });
+      },
+      connect: (fromKey, toKey) => {
+        const result = connectCanvasStateNodes(fromKey, toKey);
+        if (result.status === "rejected") throw new Error(`连线失败：${result.reason}`);
+        reconcilePrompts();
+      },
+      move: (nodeKey, x, y) => {
+        const nodes = canvasNodesByKeyFromDocument(snapshotV2({}));
+        if (
+          !(Object.keys(nodes) as (keyof typeof nodes)[]).some((type) => nodes[type].has(nodeKey))
+        )
+          throw new Error("要移动的节点已不存在。");
+        applyNodeChanges([{ type: "position", key: nodeKey, position: { x, y } }]);
+      },
+      generate: async (nodeKey, toolContext) => {
+        const node = requireNode(nodeKey);
+        if (node.kind === "prompt")
+          throw new Error("文字创作可直接在对话中完成，再写入提示词节点。此工具只提交图片或视频。");
+        if (node.config.generationCount !== 1)
+          throw new Error("首版助手每次只提交一次生成，请把节点生成数量设为 1 后重新确认。");
+        const running = await generationClient.list({
+          canvasId,
+          sourceNodeId: nodeKey,
+          statuses: [
+            "created",
+            "submitting",
+            "retry_wait",
+            "queued",
+            "running",
+            "unknown",
+            "interrupted",
+          ],
+          limit: 1,
+        });
+        toolContext.assertCurrent();
+        if (running.items.length)
+          throw new Error(
+            "该节点已有进行中或结果未确认的生成任务，请先在任务历史中查询或恢复，避免重复提交。",
+          );
+        const submitted = handleStartGeneration(nodeKey, toolContext);
+        if (!submitted) throw new Error("未提交生成，请检查节点上显示的模型、提示词或素材错误。");
+        const result = await submitted;
+        if (result.errors.length)
+          throw new Error(
+            `生成提交遇到问题；已创建任务 ${result.taskIds.join("、") || "无"}：${result.errors.join("；")}。请先检查任务历史，不要重复提交。`,
+          );
+        return {
+          nodeKey,
+          submittedTaskIds: result.taskIds,
+          status: "submitted",
+          message: "已提交，生成结果请查看画布或历史。",
+        };
+      },
+    });
+    const blenderTools = createAgentBlenderTools({
+      getDraft: (nodeKey) => {
+        const node = requireNode(nodeKey);
+        if (node.kind === "prompt") throw new Error("请使用图片或视频节点承载白模方案。");
+        return node.config.whiteModelStudio ?? null;
+      },
+      setDraft: async (nodeKey, draft) => {
+        canvasAgent.mutate(() => {
+          const node = requireNode(nodeKey);
+          if (node.kind === "prompt") throw new Error("提示词节点不能承载白模方案。");
+          patchNode("gen", nodeKey, (item) =>
+            item.kind !== "prompt"
+              ? {
+                  ...item,
+                  config: { ...item.config, whiteModelStudio: draft },
+                }
+              : item,
+          );
+        });
+        await canvasPersistence.flush();
+      },
+      attachVideo: async (nodeKey, job) => {
+        const result = canvasAgent.mutate(() => {
+          const node = requireNode(nodeKey);
+          if (node.kind === "prompt" || !job.videoPath || job.status !== "succeeded")
+            throw new Error("白模结果尚不可用。");
+          const draft = node.config.whiteModelStudio;
+          if (
+            draft?.jobId !== job.jobId ||
+            draft.jobInputSignature !== whiteModelRenderSignature(draft)
+          )
+            throw new Error("白模方案已改变，请重新渲染。");
+          const document = snapshotV2({});
+          const existing = document.outputNodes?.find(
+            (output) =>
+              output.origin === "white_model" &&
+              output.taskId === job.jobId &&
+              output.finalPath === job.videoPath,
+          );
+          const key = existing?.key ?? outputNodeKey();
+          const name = existing?.name ?? `白模动画 · ${job.jobId.slice(0, 8)}.mp4`;
+          if (!existing)
+            addOutput({
+              key,
+              resultKey: null,
+              sourceNodeId: `blender-${job.jobId}`,
+              taskId: job.jobId,
+              origin: "white_model",
+              mediaType: "video",
+              finalPath: job.videoPath,
+              name,
+              aspectRatio: job.width / job.height,
+              x: node.x - 360,
+              y: node.y,
+            });
+          const connected = connectCanvasStateNodes(key, nodeKey);
+          if (connected.status === "rejected")
+            throw new Error("白模结果已保留，但连接目标节点失败。");
+          if (node.kind === "video") {
+            const control = node.config.whiteModelControl ?? createWhiteModelControlConfig();
+            const media = {
+              key,
+              name,
+              kind: "video" as const,
+              target: {
+                kind: "local_file" as const,
+                path: job.videoPath,
+                canvasNodeKey: key,
+                mediaType: "video" as const,
+              },
+            };
+            const prior = document.outputNodes?.find(
+              (output) => output.key === control.source?.key && output.origin === "white_model",
+            );
+            if (prior && prior.key !== key)
+              document.assetEdges
+                .filter((edge) => edge.fromKey === prior.key && edge.toKey === nodeKey)
+                .forEach((edge) => disconnectCanvasEdge(edge.id));
+            const selection = resolveGenerationSelection(
+              "video",
+              node.config.modelSelection,
+              providerCatalog,
+            );
+            let nextConfig = node.config;
+            let enabled = false;
+            if (selection) {
+              const capabilities = modelParameterCapabilities(
+                selection.model.operationSchema,
+                "video_generation",
+                selection.model.remoteModelId,
+              );
+              const current = snapshotV2({});
+              const inputs = createCanvasInputResolver(
+                canvasNodesByKeyFromDocument(current),
+                current.assetEdges,
+              )(nodeKey).media;
+              const proposed = selectSeedanceTask(
+                selection.model.remoteModelId,
+                capabilities,
+                node.config,
+                inputs,
+                "reference",
+              );
+              const task = resolveSeedanceTask(
+                selection.model.remoteModelId,
+                capabilities,
+                proposed,
+                inputs,
+              );
+              if (task.enabled && !task.issue) {
+                nextConfig = proposed;
+                enabled = true;
+              }
+            }
+            updateVideoNodeConfig(nodeKey, {
+              ...nextConfig,
+              whiteModelControl: {
+                ...control,
+                enabled,
+                source: { key, name, target: media.target },
+              },
+            });
+          }
+          return { nodeKey, outputNodeKey: key, jobId: job.jobId, name, status: "succeeded" };
+        });
+        await canvasPersistence.flush();
+        return result;
+      },
+      openStudio: (nodeKey) => {
+        const node = requireNode(nodeKey);
+        if (node.kind === "prompt" || !node.config.whiteModelStudio)
+          throw new Error("请先设置白模场景，再打开导演台。");
+        setWhiteModelStudioNodeKey(nodeKey);
+      },
+    });
+    canvasAgent.configure({
+      tools: [...canvasTools, ...blenderTools],
+      context,
+      review: (actions) =>
+        agentPlanReview(readDocument(), providerCatalog, nodeModelSelections, actions),
+      previewScenes: (actions) =>
+        previewAgentBlenderScenes(actions, (nodeKey) => {
+          const node = requireNode(nodeKey);
+          return node.kind === "prompt" ? null : (node.config.whiteModelStudio ?? null);
+        }),
+      signature: () => agentCanvasSignature(readDocument(), providerCatalog),
+      available: () => active && canvasHydrated,
+      save: canvasPersistence.flush,
+      ask: async (model, userPrompt) => {
+        if (!isDesktopRuntime())
+          throw new Error("请在桌面应用中使用创作助手；浏览器预览不提交模型请求。");
+        const provider = providerCatalog.find(
+          (entry) => entry.provider.enabled && entry.provider.id === model.providerId,
+        );
+        if (
+          !provider?.models.some(
+            (item) => item.definitionId === model.modelDefinitionId && isTextGenerationModel(item),
+          )
+        )
+          throw new Error("助手文本模型已不可用，请重新选择。");
+        const result = await promptNodeClient.run({
+          canvasId,
+          sourceNodeId: `canvas-agent:${canvasId}`,
+          providerConnectionId: model.providerId,
+          modelDefinitionId: model.modelDefinitionId,
+          mode: "canvas_agent",
+          task: "generate",
+          userPrompt,
+        });
+        return result.optimizedPrompt;
+      },
+    });
+  });
+  useEffect(() => {
+    if (!active && canvasAgent.getState().status !== "idle") canvasAgent.stop();
+  }, [active, canvasAgent]);
+  useEffect(
+    () => () => {
+      if (canvasAgent.getState().status !== "idle") canvasAgent.stop();
+    },
+    [canvasAgent],
+  );
 
   if (!active) return null;
 
   return (
     <main className="workspace-shell">
+      <CanvasAgentPanel
+        controller={canvasAgent}
+        catalog={providerCatalog}
+        disabled={!canvasHydrated}
+      />
       {!canvasHydrated ? (
         <div className="canvas-load-notice" role="status">
           <strong>{canvasPersistence.error ? "画布读取失败" : "正在读取画布…"}</strong>
@@ -10551,6 +11718,7 @@ export function WorkspaceApp({
               onInsertXhsCoverWorkflow={insertXhsCoverWorkflow}
               onInsertProductSceneWorkflow={insertProductSceneWorkflow}
               onInsertReverseVideoWorkflow={insertReverseVideoWorkflow}
+              onInsertReelbenchWorkflow={insertReelbenchWorkflow}
               onInsertMusicVideoWorkflow={insertMusicVideoWorkflow}
             />
             <button
@@ -10641,10 +11809,26 @@ export function WorkspaceApp({
           onCloseMobilePanel={closeMobilePanel}
           uploadActionLabel={uploadActionLabel}
           onImportLocalAssets={() => {
-            void handleImportLocalAssets();
+            void handleImportLocalAssets(undefined, {
+              destination:
+                assetLibrarySource === "local"
+                  ? "local"
+                  : cloudCollection === "object_storage"
+                    ? "object_storage"
+                    : "cloud",
+            });
           }}
           isOffline={isOffline}
           source={assetLibrarySource}
+          cloudCollection={cloudCollection}
+          onCloudCollectionChange={(next) => {
+            if (next === cloudCollection) return;
+            setAssetSearch("");
+            committedAssetSearchRef.current = "";
+            setCommittedAssetSearch("");
+            setPickedAssets([]);
+            setCloudCollection(next);
+          }}
           onSourceChange={(next) => {
             setAssetLibrarySource(next);
             persistWorkspaceUi(activeAssetProviderId, next);
@@ -10652,10 +11836,6 @@ export function WorkspaceApp({
             if (!isDesktopRuntime()) return;
             if (next === "local") refreshLocalAssets("initial");
             else setAssetsLoading(Boolean(assetProvider));
-          }}
-          pullingBucket={pullingBucket}
-          onPullBucket={() => {
-            void handlePullBucketAssets();
           }}
           providerId={assetProvider?.id ?? null}
           availableProviders={availableAssetProviders}
@@ -10670,6 +11850,11 @@ export function WorkspaceApp({
           onRetryLocal={() => refreshLocalAssets("manual")}
           onRetryCloud={() => {
             if (assetProvider) refreshCloudAssets(assetProvider.id, "manual");
+          }}
+          onRetryObjectStorage={() => refreshObjectStorageAssets("manual")}
+          pullingBucket={pullingBucket}
+          onPullBucket={() => {
+            void handlePullObjectStorageBucket();
           }}
           uploads={assetUploads}
           onDismissUpload={dismissAssetUpload}
@@ -10691,7 +11876,9 @@ export function WorkspaceApp({
               ? libraryAssets.filter((asset) => asset.kind === tabKind).length
               : assetLibrarySource === "local"
                 ? localAssetKindTotals[tabKind]
-                : (cloudAssetKindTotals?.[tabKind] ?? null)
+                : cloudCollection === "object_storage"
+                  ? objectStorageKindTotals[tabKind]
+                  : (cloudAssetKindTotals?.[tabKind] ?? null)
           }
           onKindChange={(tabKind) => {
             setAssetKind(tabKind);
@@ -10706,12 +11893,16 @@ export function WorkspaceApp({
               ? `找到 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
               : assetLibrarySource === "local"
                 ? `找到 ${localAssetTotal} 个${ASSET_KIND_LABELS[assetKind]}素材`
-                : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
+                : cloudCollection === "object_storage"
+                  ? `找到 ${objectStorageTotal} 个${ASSET_KIND_LABELS[assetKind]}对象`
+                  : `本页 ${visibleAssets.length} 个${ASSET_KIND_LABELS[assetKind]}素材`
           }
           visibleAssets={visibleAssets}
           onPreviewAsset={handlePreviewAsset}
           onDropAssetToCanvas={handleDropAssetToCanvas}
-          onPreviewUnavailable={handleUnavailableCloudAsset}
+          {...(cloudCollection === "library"
+            ? { onPreviewUnavailable: handleUnavailableCloudAsset }
+            : {})}
           multiSelect={assetMultiSelect}
           pickedCount={pickedAssets.length}
           pickOrderByKey={pickOrderByKey}
@@ -10722,12 +11913,22 @@ export function WorkspaceApp({
           localPage={localAssetPageNumber}
           localTotalPages={localAssetTotalPages}
           localTotal={localAssetTotal}
-          cloudPage={cloudAssetPageNumber}
-          cloudTotalPages={cloudAssetTotalPages}
-          cloudTotal={cloudAssetTotal}
-          cloudHasMore={cloudAssetHasMore}
+          cloudPage={
+            cloudCollection === "object_storage" ? objectStoragePageNumber : cloudAssetPageNumber
+          }
+          cloudTotalPages={
+            cloudCollection === "object_storage" ? objectStorageTotalPages : cloudAssetTotalPages
+          }
+          cloudTotal={cloudCollection === "object_storage" ? objectStorageTotal : cloudAssetTotal}
+          cloudHasMore={
+            cloudCollection === "object_storage"
+              ? objectStoragePageNumber < objectStorageTotalPages
+              : cloudAssetHasMore
+          }
           onLocalPageChange={goToLocalAssetPage}
-          onCloudPageChange={goToCloudAssetPage}
+          onCloudPageChange={
+            cloudCollection === "object_storage" ? goToObjectStoragePage : goToCloudAssetPage
+          }
         />
 
         <section
@@ -10738,7 +11939,7 @@ export function WorkspaceApp({
         >
           <AppUpdateBanner />
           <div
-            className={`canvas-viewport${isPanning ? " is-panning" : ""}${assetGroupMarquee ? " is-grouping" : ""}`}
+            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}`}
             ref={canvasViewportRef}
           >
             <LiveCanvasFlow
@@ -10749,10 +11950,10 @@ export function WorkspaceApp({
               edgeTypes={CANVAS_FLOW_EDGE_TYPES}
               minZoom={MIN_ZOOM / 100}
               maxZoom={MAX_ZOOM / 100}
-              panOnDrag={assetGroupMarquee ? [1] : [0, 1]}
-              selectionOnDrag={assetGroupMarquee}
-              selectionMode={assetGroupMarquee ? SelectionMode.Partial : SelectionMode.Full}
-              {...(assetGroupMarquee ? { onSelectionEnd: handleGroupSelectionEnd } : {})}
+              panOnDrag={nodeMarquee ? [1] : [0, 1]}
+              selectionOnDrag={nodeMarquee}
+              selectionMode={nodeMarquee ? SelectionMode.Partial : SelectionMode.Full}
+              {...(nodeMarquee ? { onSelectionEnd: handleNodeSelectionEnd } : {})}
               zoomOnScroll
               zoomOnPinch
               zoomOnDoubleClick={false}
@@ -10774,6 +11975,7 @@ export function WorkspaceApp({
               onPaneClick={() => {
                 selectNode(null);
                 selectEdge(null);
+                setMarqueeNodeKeys(new Set());
               }}
               onPaneContextMenu={(event) => {
                 event.preventDefault();
@@ -10785,11 +11987,27 @@ export function WorkspaceApp({
                   boardPosition,
                 });
               }}
-              onNodeClick={(_, node) => {
+              onNodeClick={(event, node) => {
+                if (nodeMarquee) {
+                  if (!canvasNodeKeySetRef.current.has(node.id)) return;
+                  setMarqueeNodeKeys((current) => {
+                    if (!event.shiftKey && !event.ctrlKey && !event.metaKey)
+                      return new Set([node.id]);
+                    const next = new Set(current);
+                    if (next.has(node.id)) next.delete(node.id);
+                    else next.add(node.id);
+                    return next;
+                  });
+                  selectNode(null);
+                  selectEdge(null);
+                  return;
+                }
+                setMarqueeNodeKeys(new Set());
                 selectNode(node.id);
                 selectEdge(null);
               }}
               onEdgeClick={(_, edge) => {
+                if (nodeMarquee) return;
                 if (edge.selectable !== false) {
                   selectEdge(edge.id);
                   selectNode(null);
@@ -10798,10 +12016,10 @@ export function WorkspaceApp({
               aria-label="无限画布节点编辑器"
               attributionPosition="bottom-left"
             >
-              {assetGroupMarquee ? (
-                <AssetGroupSelectionReader
-                  assetKeySetRef={assetKeySetRef}
-                  readSelectionRef={readGroupSelectionRef}
+              {nodeMarquee ? (
+                <CanvasMarqueeSelectionReader
+                  selectableKeysRef={canvasNodeKeySetRef}
+                  readSelectionRef={readNodeSelectionRef}
                 />
               ) : null}
               {/* 虚线网格随原生视口平移缩放，为创作区域提供空间参照。 */}
@@ -10839,29 +12057,76 @@ export function WorkspaceApp({
                 </div>
                 <strong>画布为空</strong>
                 <span>
-                  右键画布空白处或点击顶部「节点」可添加节点或直接上传素材，也可从素材库拖入。
+                  右键画布空白处或点击顶部「节点」添加节点；本机素材可从素材库上传，再拖入画布。
                 </span>
               </div>
             ) : null}
           </div>
 
           <div className="canvas-viewport-dock">
-            <div className="canvas-group-control" role="group" aria-label="框选成组">
+            <div
+              className="canvas-node-selection-control"
+              role="group"
+              aria-label="选择与编辑画布节点"
+            >
               <button
                 type="button"
-                aria-pressed={assetGroupMarquee}
-                aria-label={assetGroupMarquee ? "退出框选成组" : "框选素材或产物成组"}
-                data-tooltip={
-                  assetGroupMarquee
-                    ? "拖拽框选素材或产物。从组端口连到生成节点时，按点选顺序输入"
-                    : "框选素材或产物成组"
-                }
-                onClick={() => setAssetGroupMarquee((enabled) => !enabled)}
+                aria-pressed={nodeMarquee}
+                aria-label={nodeMarquee ? "退出节点框选" : "框选节点"}
+                data-tooltip={nodeMarquee ? "拖拽框选节点；中键拖动画布" : "框选节点"}
+                onClick={() => {
+                  setNodeMarquee((enabled) => !enabled);
+                  setMarqueeNodeKeys(new Set());
+                  selectNode(null);
+                  selectEdge(null);
+                }}
               >
                 <Icon name="bounding-box" aria-hidden="true" size="md" />
               </button>
+              <button
+                type="button"
+                aria-label={`将选中素材或产物成组，当前 ${selectedCanvasNodeKeys.size} 个`}
+                data-tooltip={
+                  selectedCanvasNodeKeys.size > 0 && !canGroupSelectedNodes
+                    ? "仅支持至少两个素材或产物成组"
+                    : "将选中素材或产物成组"
+                }
+                disabled={!canGroupSelectedNodes}
+                onClick={groupSelectedCanvasNodes}
+              >
+                <Icon name="stack-simple" aria-hidden="true" size="md" />
+              </button>
+              <button
+                type="button"
+                aria-label={`复制选中节点到剪贴板，当前 ${selectedCanvasNodeKeys.size} 个`}
+                aria-keyshortcuts="Control+C"
+                data-tooltip="复制到剪贴板 · Ctrl+C"
+                disabled={selectedCanvasNodeKeys.size === 0}
+                onClick={copySelectedCanvasNodes}
+              >
+                <Icon name="copy-simple" aria-hidden="true" size="md" />
+              </button>
+              <button
+                type="button"
+                aria-label="粘贴已复制节点"
+                aria-keyshortcuts="Control+V"
+                data-tooltip={canPasteCanvasNodes ? "粘贴 · Ctrl+V" : "请先复制画布节点"}
+                disabled={!canPasteCanvasNodes}
+                onClick={() => pasteCopiedCanvasNodes()}
+              >
+                <Icon name="clipboard" aria-hidden="true" size="md" />
+              </button>
+              <button
+                type="button"
+                aria-label={`删除选中节点，当前 ${selectedCanvasNodeKeys.size} 个`}
+                aria-keyshortcuts="Delete"
+                data-tooltip="删除选中节点 · Delete"
+                disabled={selectedCanvasNodeKeys.size === 0}
+                onClick={deleteSelectedCanvasNodes}
+              >
+                <Icon name="trash-simple" aria-hidden="true" size="md" />
+              </button>
             </div>
-
             <div className="canvas-home-control" role="group" aria-label="画布视图归位">
               <button
                 type="button"

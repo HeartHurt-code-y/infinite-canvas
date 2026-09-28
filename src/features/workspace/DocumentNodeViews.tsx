@@ -10,6 +10,7 @@ import {
 import { MarkdownView } from "../../components/MarkdownView";
 
 import { NodeTypeIcon, PromptMentionInput } from "./PromptNodeViews";
+import type { CinematicDialogueGuard } from "./cinematicDialogueValidator";
 import { AutoSizeThumb } from "./MediaNodeViews";
 import type {
   AssetKind,
@@ -1060,12 +1061,19 @@ export function CanvasPromptNode({
   const isMultiGridStoryboard = node.config.mode === "multi_grid_storyboard";
   const isStoryboardPrompt = node.config.mode === "storyboard_prompt";
   const isGptImage2Style = node.config.mode === "gpt_image_2_style";
+  const isCinematicDialogue = node.config.mode === "cinematic_dialogue";
+  const cinematicDialogueGuard: CinematicDialogueGuard = node.config.cinematicDialogueGuard ?? {
+    lockedLines: "",
+    targetDurationSeconds: null,
+    targetFormat: "generic",
+  };
   const hasModeHint =
     isFpvPath ||
     isFightPromptMaster ||
     isMultiGridStoryboard ||
     isStoryboardPrompt ||
-    isGptImage2Style;
+    isGptImage2Style ||
+    isCinematicDialogue;
   const modeHintId = `prompt-mode-hint-${node.key}`;
   const conversation = node.config.conversation ?? [];
   const conversationRef = useRef<HTMLDivElement>(null);
@@ -1077,6 +1085,16 @@ export function CanvasPromptNode({
   // 跟踪最后一次由外部（大模型生成）写入的文本，避免 onTextChange 回写时触发循环。
   // 初始化为 null，确保节点挂载时即使 generatedPrompt 已有值也会同步到编辑器。
   const lastExternalTextRef = useRef<string | null>(null);
+  const updateCinematicDialogueGuard = (patch: Partial<CinematicDialogueGuard>) => {
+    lastExternalTextRef.current = "";
+    promptContents.replaceText(node.key, "", mentionCandidates);
+    onChange({
+      ...node.config,
+      generatedPrompt: "",
+      cinematicDialogueValidated: false,
+      cinematicDialogueGuard: { ...cinematicDialogueGuard, ...patch },
+    });
+  };
   // 大模型生成新提示词时，同步到 PromptMentionInput 的 session，并自动识别 @素材名。
   useEffect(() => {
     const next = node.config.generatedPrompt;
@@ -1092,9 +1110,15 @@ export function CanvasPromptNode({
       // 用户编辑产生的变化才回写到 generatedPrompt；外部写入触发的变化跳过。
       if (text === lastExternalTextRef.current) return;
       lastExternalTextRef.current = text;
-      onChange({ ...node.config, generatedPrompt: text });
+      onChange({
+        ...node.config,
+        generatedPrompt: text,
+        cinematicDialogueValidated: isCinematicDialogue
+          ? false
+          : (node.config.cinematicDialogueValidated ?? false),
+      });
     },
-    [node.config, onChange],
+    [isCinematicDialogue, node.config, onChange],
   );
 
   // 新消息出现时把对话区滚动到底部。
@@ -1294,6 +1318,7 @@ export function CanvasPromptNode({
               onChange({
                 ...node.config,
                 mode: event.target.value as PromptOptimizationMode,
+                cinematicDialogueValidated: false,
               })
             }
           >
@@ -1339,6 +1364,74 @@ export function CanvasPromptNode({
               按图片用途匹配内置案例与风格，也可指定风格名称；输出可直接交给图片节点的提示词正文，不附模板说明或案例编号。沿用所选项目文本模型，案例图、参考图片与视频画面需使用支持图片理解的文本模型；生成图片请连接图片节点。
             </span>
           </div>
+        ) : isCinematicDialogue ? (
+          <div id={modeHintId} className="canvas-prompt-node__intro">
+            <span>
+              把剧本或创意整理成对白表演视频提示词。填写目标时长后会检查时间线；需要逐字保留的台词请逐行锁定。话轮、预算和验收建议留在对话里，下方输出只传给视频节点。
+            </span>
+          </div>
+        ) : null}
+        {isCinematicDialogue ? (
+          <div
+            className="canvas-prompt-node__dialogue-guard nodrag"
+            role="group"
+            aria-label="对白确定性校验基准"
+          >
+            <div className="canvas-prompt-node__fields">
+              <label className="canvas-prompt-node__field">
+                <span>目标时长（秒，必填）</span>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  aria-label="对白目标时长（秒）"
+                  value={cinematicDialogueGuard.targetDurationSeconds ?? ""}
+                  disabled={running}
+                  onChange={(event) =>
+                    updateCinematicDialogueGuard({
+                      targetDurationSeconds: event.target.value ? Number(event.target.value) : null,
+                    })
+                  }
+                />
+              </label>
+              <label className="canvas-prompt-node__field">
+                <span>目标格式</span>
+                <select
+                  aria-label="对白目标格式"
+                  value={cinematicDialogueGuard.targetFormat}
+                  disabled={running}
+                  onChange={(event) =>
+                    updateCinematicDialogueGuard({
+                      targetFormat: event.target.value as CinematicDialogueGuard["targetFormat"],
+                    })
+                  }
+                >
+                  <option value="generic">通用视频提示词</option>
+                  <option value="h3">H3 分区格式</option>
+                </select>
+              </label>
+            </div>
+            <label className="canvas-prompt-node__field">
+              <span>锁定原台词（逐字保留时填写，每行“角色：台词”）</span>
+              <textarea
+                aria-label="锁定原台词"
+                placeholder={"甲：别走。\n乙：我会回来。"}
+                value={cinematicDialogueGuard.lockedLines}
+                disabled={running}
+                onChange={(event) =>
+                  updateCinematicDialogueGuard({ lockedLines: event.target.value })
+                }
+              />
+            </label>
+            <small>更改这些基准会清除旧输出；未锁定原台词时，逐字保留无法核验。</small>
+            {node.config.generatedPrompt ? (
+              <small>
+                {node.config.cinematicDialogueValidated
+                  ? "当前输出与最近一次通过校验的模型结果一致。"
+                  : "当前输出已手动改动或来自旧版本；对话中的校验报告不适用于它。"}
+              </small>
+            ) : null}
+          </div>
         ) : null}
         <div
           ref={conversationRef}
@@ -1360,7 +1453,9 @@ export function CanvasPromptNode({
                         ? "描述故事与用途，或连接角色、场景与风格参考素材"
                         : isGptImage2Style
                           ? "描述图片用途与主体，或连接图片和风格参考素材"
-                          : "从一句创意或待优化提示词开始"}
+                          : isCinematicDialogue
+                            ? "提供双人或多人对白、目标视频模型与时长"
+                            : "从一句创意或待优化提示词开始"}
               </strong>
               <span>每一轮都会带上之前的全部对话；最新输出会自动下发给连接的图片或视频节点。</span>
             </div>
@@ -1430,9 +1525,13 @@ export function CanvasPromptNode({
                         ? node.config.task === "generate"
                           ? "例如：咖啡新品海报，温暖复古风格，3:4，标题「醒来一杯好心情」；也可指定风格名称或连接参考素材"
                           : "粘贴图片提示词或填写修改要求，例如：保留主体和标题，改成杂志封面风格；留空可优化当前输出"
-                        : node.config.task === "generate"
-                          ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
-                          : "粘贴一段已有提示词，补充镜头、主体和风格细节"
+                        : isCinematicDialogue
+                          ? node.config.task === "generate"
+                            ? "例如：这段台词可以改编；目标视频模型和时长…… 两人因一封信发生争执，附对白原文……"
+                            : "例如：保留原台词与角色关系，调整抢话时机；留空可优化当前输出"
+                          : node.config.task === "generate"
+                            ? "例如：雨夜站台，女孩撑伞等候列车，电影感"
+                            : "粘贴一段已有提示词，补充镜头、主体和风格细节"
             }
             value={node.config.sourcePrompt}
             disabled={running}

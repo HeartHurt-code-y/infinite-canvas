@@ -5,6 +5,7 @@ import {
   checkForAppUpdate,
   dismissAvailableAppUpdate,
   downloadPercent,
+  formatByteSize,
   formatDownloadProgress,
   installAvailableAppUpdate,
   loadCurrentAppVersion,
@@ -31,7 +32,7 @@ export function AppUpdateSettings() {
           <strong id="app-update-settings-title">应用升级</strong>
           <p>
             新版本可以直接安装，不必手动卸载。画布、密钥和素材库在用户数据目录，升级不会清掉。
-            首次安装与迁移版包含完整本地引擎；准备好本地组件后，后续常规更新只需下载较小的程序包。
+            首次安装包含完整本地引擎；后续更新会在后台复用已有资源，只下载变化的文件和较小的程序包，准备好后提示安装并重启。
           </p>
         </div>
         <span className="tos-status-badge" data-state={badge.state}>
@@ -63,7 +64,7 @@ export function AppUpdateSettings() {
           <span>
             {snapshot.status === "preparing"
               ? snapshot.totalPreparationBytes > 0
-                ? formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)
+                ? `${formatDownloadProgress(snapshot.preparedBytes, snapshot.totalPreparationBytes)} · 复用 ${formatByteSize(snapshot.reusedResourceBytes)} · 下载 ${formatByteSize(snapshot.downloadedResourceBytes)}`
                 : "正在准备本地运行组件…"
               : formatDownloadProgress(snapshot.downloadedBytes, snapshot.totalBytes)}
           </span>
@@ -105,7 +106,7 @@ function statusBadge(
     };
   }
   if (snapshot.status === "ready" || snapshot.status === "restarting") {
-    return { state: "enabled", text: "待重启" };
+    return { state: "enabled", text: "待安装" };
   }
   if (snapshot.status === "available") return { state: "enabled", text: "有新版本" };
   if (snapshot.status === "current") return { state: "enabled", text: "已是最新" };
@@ -144,11 +145,14 @@ function actionButtons(snapshot: AppUpdateState, desktop: boolean) {
         ) : (
           <Icon name="arrow-clockwise" aria-hidden="true" size="md" />
         )}
-        {snapshot.status === "restarting" ? "正在重启…" : "立即重启以完成更新"}
+        {snapshot.status === "restarting" ? "正在安装…" : "安装并重启"}
       </button>
     );
   }
-  if (snapshot.status === "available" || (snapshot.status === "error" && snapshot.availableVersion)) {
+  if (
+    snapshot.status === "available" ||
+    (snapshot.status === "error" && snapshot.availableVersion)
+  ) {
     return (
       <>
         <button

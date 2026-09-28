@@ -132,6 +132,78 @@ describe("本地素材预览续签登记表", () => {
     expect(resolved).not.toHaveBeenCalled();
   });
 
+  it("本机 Base64 素材使用持久预览地址，旧 TOS 素材仍按身份续签", async () => {
+    const refresh = vi.fn((asset: { readonly id: string }) =>
+      Promise.resolve(
+        asset.id.startsWith("local-b64-")
+          ? `http://localbase64.localhost/${asset.id}`
+          : "https://tos.example.com/legacy-fresh.png",
+      ),
+    );
+    const { media } = await loadModules(refresh);
+    const resolved: Array<ReadonlyMap<string, string>> = [];
+    const localNode = assetNode({
+      assetId: "local-b64-001",
+      previewUrl: "asset://localhost/local-b64-001",
+    });
+
+    expect(media.localAssetNodeMediaUrl(localNode)).toBe("asset://localhost/local-b64-001");
+    expect(await media.refreshLocalAssetPreviewUrl(localNode.assetId, localNode.kind)).toBe(
+      "http://localbase64.localhost/local-b64-001",
+    );
+    media.prefetchLocalAssetMedia(
+      [localNode, { assetId: "legacy-job-1", kind: "image" }],
+      (fresh) => resolved.push(fresh),
+    );
+
+    await waitFor(() => expect(resolved).toHaveLength(1));
+    expect(refresh).toHaveBeenCalledTimes(2);
+    expect(refresh).toHaveBeenCalledWith({ id: "legacy-job-1", source: "local" }, "image");
+    expect([...resolved[0]!.keys()]).toEqual(["legacy-job-1:image"]);
+    expect(media.localAssetNodeMediaUrl(localNode)).toBe(
+      "http://localbase64.localhost/local-b64-001",
+    );
+  });
+
+  it("本机 Base64 素材的持久预览字段缺失时按素材身份恢复", async () => {
+    const refresh = vi.fn(() => Promise.resolve("http://localbase64.localhost/local-b64-002"));
+    const { media } = await loadModules(refresh);
+    const resolved: Array<ReadonlyMap<string, string>> = [];
+    const node = assetNode({ assetId: "local-b64-002", previewUrl: null });
+
+    media.prefetchLocalAssetMedia([node], (fresh) => resolved.push(fresh));
+
+    await waitFor(() => expect(resolved).toHaveLength(1));
+    expect(refresh).toHaveBeenCalledWith({ id: node.assetId, source: "local" }, "image");
+    expect([...resolved[0]!.entries()]).toEqual([
+      ["local-b64-002:image", "http://localbase64.localhost/local-b64-002"],
+    ]);
+  });
+
+  it("本机 Base64 视频即使有缩略图地址也会恢复缺失的播放地址", async () => {
+    const refresh = vi.fn(() => Promise.resolve("http://localbase64.localhost/local-b64-video"));
+    const { media } = await loadModules(refresh);
+    const resolved: Array<ReadonlyMap<string, string>> = [];
+
+    media.prefetchLocalAssetMedia(
+      [
+        assetNode({
+          assetId: "local-b64-video",
+          kind: "video",
+          previewUrl: "http://localbase64.localhost/local-b64-video",
+          videoUrl: null,
+        }),
+      ],
+      (fresh) => resolved.push(fresh),
+    );
+
+    await waitFor(() => expect(resolved).toHaveLength(1));
+    expect(refresh).toHaveBeenCalledWith({ id: "local-b64-video", source: "local" }, "video");
+    expect(resolved[0]?.get("local-b64-video:video")).toBe(
+      "http://localbase64.localhost/local-b64-video",
+    );
+  });
+
   it("续签失败时不写登记表，节点继续用自带地址（交给 onError 自愈路径）", async () => {
     const { media } = await loadModules(() => Promise.reject(new Error("offline")));
     const resolved = vi.fn();

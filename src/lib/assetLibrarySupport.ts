@@ -5,6 +5,7 @@
 //! （实测见 `docs/integrations/panqu-video-api.md`）。这类连接只参与模型生成；
 //! 一旦被当成素材库来源，面板只会把上游 404 原样展示成「云端素材库不可用」。
 //! 所以在进入素材库的任何供应商选项之前，先按上游主机把它们过滤掉。
+//! 按次系列网关只声明 `/v1/assets/uploads` 参考素材上传，也不作为云端素材库来源。
 
 import type { ProviderConnection } from "./backend";
 import { adapterSupportsAssetLibrary } from "./providerAdapters";
@@ -15,6 +16,7 @@ import { adapterSupportsAssetLibrary } from "./providerAdapters";
  */
 const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = [
   "115.191.2.88",
+  "101.34.211.152",
   "panqu.com",
   "maas.aliyuncs.com",
 ];

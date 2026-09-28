@@ -33,7 +33,6 @@ import {
   stagingErrorSummary,
   stagingImportReachedLibrary,
 } from "./workspaceModel";
-
 function startVideoPreview(video: HTMLVideoElement | null, fromStart = true) {
   if (video == null || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
   if (fromStart) video.currentTime = 0;
@@ -704,7 +703,11 @@ export function AssetUploadRow({
         <span className="asset-upload__name">{entry.name}</span>
         <span className="asset-upload__status">
           <span className="asset-upload__phase">
-            <span className="asset-upload__phase-name">{UPLOAD_PHASE_NAMES.objectStorage}</span>
+            <span className="asset-upload__phase-name">
+              {entry.destination === "local"
+                ? "本机 Base64 保存"
+                : UPLOAD_PHASE_NAMES.objectStorage}
+            </span>
             <span className="asset-upload__phase-value">{objectStorageValue}</span>
           </span>
           {showAssetImportPhase ? (

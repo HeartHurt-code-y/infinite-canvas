@@ -3,6 +3,7 @@ import {
   createWorkflowExecutionPlan,
   workflowExecutionInputSignature,
 } from "./workflowExecutionPlan";
+import { createReelbenchCheckpoint } from "./reelbenchWorkflowModel";
 import type {
   KnowledgeVideoWorkflowConfig,
   KnowledgeVideoWorkflowNodeData,
@@ -96,6 +97,10 @@ const CHECKPOINT_RUNTIME_FIELDS = new Set([
   "inputSignature",
   "materialsSignature",
   "alignment",
+  "speech",
+  "lipSyncVerification",
+  "lipSyncFinalPath",
+  "lipReviews",
 ]);
 
 function authoredPlan(value: unknown): unknown {
@@ -105,6 +110,13 @@ function authoredPlan(value: unknown): unknown {
 function authoredCheckpoint(value: unknown, includePlan = true): unknown {
   if (Array.isArray(value)) return value.map((child) => authoredCheckpoint(child, includePlan));
   if (!isRecord(value)) return value;
+  // The runner persists every measured cut, contact sheet, annotation batch and quality gate.
+  // Only a completed annotation baseline or a human edit creates an authored version.
+  if ("draft" in value && "approvedDraftSignature" in value && "manualRevision" in value)
+    return {
+      manualRevision: value["manualRevision"],
+      completedDraftSignature: value["completedDraftSignature"] ?? null,
+    };
   // Batch progress is runtime state. A 500-image job must not copy its complete plan
   // into a new authored version for every task update or image-review click.
   if (Array.isArray(value["rows"]) && "approvedThrough" in value)
@@ -318,6 +330,24 @@ function asNode(config: KnowledgeVideoWorkflowConfig): KnowledgeVideoWorkflowNod
   return { key: "workflow-version", kind: "knowledge_video_workflow", x: 0, y: 0, config };
 }
 
+function clearAudioEvidence(checkpoint: Record<string, unknown>): void {
+  // Keep authored dialogue and lyrics, but never reuse paid/audio review evidence
+  // after restoring different content or inputs.
+  delete checkpoint["speech"];
+  if (isRecord(checkpoint["comicDrama"])) {
+    checkpoint["comicDrama"] = without(checkpoint["comicDrama"], ["speech"]);
+  }
+  if (isRecord(checkpoint["musicVideo"])) {
+    checkpoint["musicVideo"] = without(checkpoint["musicVideo"], [
+      "speech",
+      "alignment",
+      "lipSyncVerification",
+      "lipSyncFinalPath",
+      "lipReviews",
+    ]);
+  }
+}
+
 function restoreConfiguration(
   current: KnowledgeVideoWorkflowConfig,
   historical: WorkflowVersionConfig,
@@ -331,6 +361,69 @@ function restoreConfiguration(
     string,
     unknown
   >;
+  const creativeContentChanged =
+    checkpointContentSignature(historical.checkpoint) !==
+    checkpointContentSignature(current.checkpoint);
+  if (creativeContentChanged) clearAudioEvidence(checkpoint);
+  let reelbenchRunMismatch = false;
+  if (isRecord(checkpoint["reelbench"])) {
+    const reelbench = { ...checkpoint["reelbench"] };
+    const draft = isRecord(reelbench["draft"]) ? reelbench["draft"] : null;
+    const historicalReelbench = isRecord(historical.checkpoint?.reelbench)
+      ? historical.checkpoint.reelbench
+      : null;
+    const historicalDraft =
+      historicalReelbench && isRecord(historicalReelbench["draft"])
+        ? historicalReelbench["draft"]
+        : null;
+    if (draft && historicalDraft?.["runId"] !== checkpoint["runId"]) {
+      // Restored draft and retained execution identity must never point to different runs.
+      reelbenchRunMismatch = true;
+      reelbench["draft"] = null;
+      reelbench["completedDraftSignature"] = null;
+      reelbench["videoPath"] = null;
+      reelbench["downloadJobId"] = null;
+      reelbench["inputSignature"] = null;
+      checkpoint["runId"] = null;
+      delete restored["historyRunId"];
+    }
+    const usableDraft = isRecord(reelbench["draft"]) ? reelbench["draft"] : null;
+    const shots = usableDraft && Array.isArray(usableDraft["shots"]) ? usableDraft["shots"] : [];
+    const annotated =
+      shots.length > 0 &&
+      shots.every(
+        (shot) =>
+          isRecord(shot) &&
+          Boolean(
+            shot["size"] &&
+            shot["category"] &&
+            shot["camera"] &&
+            typeof shot["frame"] === "string" &&
+            shot["frame"].trim(),
+          ),
+      );
+    Object.assign(reelbench, {
+      validation: null,
+      validatedDraftSignature: null,
+      approvedDraftSignature: null,
+      reportJsonPath: null,
+      reportMarkdownPath: null,
+      reportHtmlPath: null,
+      syncVideoPath: null,
+      step: usableDraft
+        ? annotated
+          ? "validate"
+          : "annotate"
+        : reelbench["videoPath"]
+          ? "seed"
+          : "source",
+    });
+    checkpoint["reelbench"] = reelbench;
+    checkpoint["finalPath"] = null;
+    checkpoint["phase"] = "paused";
+    checkpoint["lastActivePhase"] = "qc";
+    checkpoint["error"] = null;
+  }
   checkpoint["mediaApprovals"] = {};
   checkpoint["approvedPlanRevision"] = null;
   if (isRecord(checkpoint["executionPlan"])) {
@@ -340,10 +433,7 @@ function restoreConfiguration(
     restored["executionPlan"] = { ...restored["executionPlan"], approval: null };
   }
   invalidateRestoredShotOutputs(checkpoint, current.checkpoint);
-  if (
-    checkpointContentSignature(historical.checkpoint) !==
-    checkpointContentSignature(current.checkpoint)
-  ) {
+  if (creativeContentChanged) {
     checkpoint["phase"] = "paused";
     checkpoint["finalPath"] = null;
     checkpoint["activeCompositionJobId"] = null;
@@ -358,15 +448,23 @@ function restoreConfiguration(
   const inputsChanged =
     workflowExecutionInputSignature(asNode({ ...config, brief: originalBrief(config) })) !==
     workflowExecutionInputSignature(asNode({ ...current, brief: originalBrief(current) }));
+  if (inputsChanged && !creativeContentChanged) clearAudioEvidence(checkpoint);
+  const restartReelbench = Boolean(config.reelbench && inputsChanged);
   const executionPlan =
-    !inputsChanged && config.executionPlan?.scope === "workflow"
+    !inputsChanged && !reelbenchRunMismatch && config.executionPlan?.scope === "workflow"
       ? { ...config.executionPlan, executionIntent: "resume" as const, approval: null }
-      : createWorkflowExecutionPlan(asNode(config), inputsChanged ? "restart" : "resume");
+      : createWorkflowExecutionPlan(
+          asNode(config),
+          inputsChanged || reelbenchRunMismatch ? "restart" : "resume",
+        );
+  const outputConfig = { ...config };
+  if (restartReelbench) delete outputConfig.historyRunId;
   return clone({
-    ...config,
+    ...outputConfig,
     executionPlan,
     checkpoint: {
       ...config.checkpoint,
+      ...(restartReelbench ? { runId: null, reelbench: createReelbenchCheckpoint() } : {}),
       executionPlan,
       ...(inputsChanged
         ? { phase: "awaiting_approval" as const, finalPath: null, activeCompositionJobId: null }

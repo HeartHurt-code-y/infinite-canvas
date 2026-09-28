@@ -64,6 +64,7 @@ import { Check } from "@phosphor-icons/react/Check";
 import { CheckCircle } from "@phosphor-icons/react/CheckCircle";
 import { CircleNotch } from "@phosphor-icons/react/CircleNotch";
 import { Clock } from "@phosphor-icons/react/Clock";
+import { ClipboardText } from "@phosphor-icons/react/ClipboardText";
 import { CloudArrowDown } from "@phosphor-icons/react/CloudArrowDown";
 import { CloudArrowUp } from "@phosphor-icons/react/CloudArrowUp";
 import { Copy } from "@phosphor-icons/react/Copy";
@@ -148,6 +149,7 @@ const GLYPHS = {
   "check-circle": CheckCircle,
   "circle-notch": CircleNotch,
   clock: Clock,
+  clipboard: ClipboardText,
   "cloud-arrow-down": CloudArrowDown,
   "cloud-arrow-up": CloudArrowUp,
   copy: Copy,

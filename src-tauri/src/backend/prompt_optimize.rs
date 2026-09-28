@@ -94,6 +94,9 @@ pub const REALISTIC_CHARACTER_SKILL_DIR: &str = "builtin://realistic-character-p
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PromptOptimizationMode {
+    /// 客户端画布智能体：复用文本适配与历史记录，由客户端校验和执行声明式工具计划。
+    #[serde(rename = "canvas_agent")]
+    CanvasAgent,
     // 前端契约使用带下划线的模式名（"seedance_2_0" / "wan_3_0" / "minimax_h3" 等）；旧别名兜底。
     #[serde(rename = "seedance_2_0", alias = "seedance20")]
     Seedance20,
@@ -113,6 +116,8 @@ pub enum PromptOptimizationMode {
     StoryboardPrompt,
     #[serde(rename = "gpt_image_2_style")]
     GptImage2Style,
+    #[serde(rename = "cinematic_dialogue")]
+    CinematicDialogue,
     #[serde(rename = "realistic_character", alias = "realisticcharacter")]
     RealisticCharacter,
     #[serde(rename = "screenplay", alias = "screenwriter")]
@@ -203,6 +208,8 @@ pub enum PromptOptimizationMode {
     ReverseVideoAnalysis,
     #[serde(rename = "reverse_video_review")]
     ReverseVideoReview,
+    #[serde(rename = "reelbench_analysis")]
+    ReelbenchAnalysis,
     #[serde(rename = "viral_remix", alias = "video_remix")]
     ViralRemix,
 }
@@ -220,6 +227,7 @@ pub enum PromptTask {
 impl PromptOptimizationMode {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::CanvasAgent => "canvas_agent",
             Self::Seedance20 => "seedance_2_0",
             Self::Seedance25 => "seedance_2_5",
             Self::Wan30 => "wan_3_0",
@@ -229,6 +237,7 @@ impl PromptOptimizationMode {
             Self::MultiGridStoryboard => "multi_grid_storyboard",
             Self::StoryboardPrompt => "storyboard_prompt",
             Self::GptImage2Style => "gpt_image_2_style",
+            Self::CinematicDialogue => "cinematic_dialogue",
             Self::RealisticCharacter => "realistic_character",
             Self::Screenplay => "screenplay",
             Self::Storyboard => "storyboard",
@@ -274,12 +283,14 @@ impl PromptOptimizationMode {
             Self::ProductSceneInspect => "product_scene_inspect",
             Self::ReverseVideoAnalysis => "reverse_video_analysis",
             Self::ReverseVideoReview => "reverse_video_review",
+            Self::ReelbenchAnalysis => "reelbench_analysis",
             Self::ViralRemix => "viral_remix",
         }
     }
 
     fn skill_dir(self) -> &'static str {
         match self {
+            Self::CanvasAgent => "builtin://canvas-agent",
             Self::Seedance20 => SEEDANCE_20_SKILL_DIR,
             Self::Seedance25 => SEEDANCE_25_SKILL_DIR,
             Self::Wan30 => WAN30_SKILL_DIR,
@@ -289,6 +300,7 @@ impl PromptOptimizationMode {
             Self::MultiGridStoryboard => "builtin://multi-grid-storyboard-prompter",
             Self::StoryboardPrompt => "builtin://storyboard-prompt",
             Self::GptImage2Style => "builtin://gpt-image-2-style-library",
+            Self::CinematicDialogue => "builtin://cinematic-dialogue",
             Self::RealisticCharacter => REALISTIC_CHARACTER_SKILL_DIR,
             // 剧本双技能使用 include_str! 编译进应用，不依赖用户电脑上的外部路径。
             Self::Screenplay => "builtin://screenplay-dual-skill",
@@ -338,6 +350,7 @@ impl PromptOptimizationMode {
             Self::ProductSceneInspect => "builtin://product-scene-workflow/inspect",
             Self::ReverseVideoAnalysis => "builtin://reverse-video-workflow/analysis",
             Self::ReverseVideoReview => "builtin://reverse-video-workflow/review",
+            Self::ReelbenchAnalysis => "builtin://reelbench/analysis",
             // 复刻技能是从 douyin-reverse-prompt V1.1 裁剪出的纯视觉分析版本。
             Self::ViralRemix => "builtin://douyin-reverse-prompt-v1.1-remix-only",
         }
@@ -460,6 +473,7 @@ pub struct PromptVisionDeps<'a> {
     pub providers: &'a ProviderRuntime,
     pub assets: &'a AssetLibrary,
     pub staging: &'a StagingService,
+    pub local_base64_assets: &'a super::local_base64_assets::LocalBase64Library,
     pub local_results: &'a LocalResultService,
 }
 
@@ -543,11 +557,17 @@ fn collect_skill_markdown_files(root: &Path) -> BackendResult<Vec<PathBuf>> {
 /// 读取完整离线技能包，供按需选择、完整性校验与显式全文查询使用。
 /// 实际模型请求必须使用 `load_skill_context`，不能直接发送这个完整包。
 pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<String> {
+    if mode == PromptOptimizationMode::CanvasAgent {
+        return Ok(include_str!("../../skills/canvas-agent/SKILL.md").to_string());
+    }
     if mode == PromptOptimizationMode::ReverseVideoAnalysis {
         return Ok(include_str!("../../skills/reverse-video-workflow/analysis.md").to_string());
     }
     if mode == PromptOptimizationMode::ReverseVideoReview {
         return Ok(include_str!("../../skills/reverse-video-workflow/review.md").to_string());
+    }
+    if mode == PromptOptimizationMode::ReelbenchAnalysis {
+        return Ok(include_str!("../../skills/reelbench/analysis.md").to_string());
     }
     if mode == PromptOptimizationMode::MiniMaxH3 {
         return Ok(load_builtin_minimax_h3_system_prompt());
@@ -566,6 +586,9 @@ pub fn load_skill_system_prompt(mode: PromptOptimizationMode) -> BackendResult<S
     }
     if mode == PromptOptimizationMode::GptImage2Style {
         return Ok(load_builtin_gpt_image_2_style_system_prompt());
+    }
+    if mode == PromptOptimizationMode::CinematicDialogue {
+        return Ok(load_builtin_cinematic_dialogue_system_prompt());
     }
     if mode == PromptOptimizationMode::XhsCoverPlan {
         return Ok(include_str!("../../skills/xhs-cover-workflow/plan.md").to_string());
@@ -896,6 +919,33 @@ fn load_builtin_gpt_image_2_style_system_prompt() -> String {
         sections.push(format!("---\n# 技能文档：{path}\n\n{content}"));
     }
     sections.push(format!("---\n继续遵守应用 SKILL.md：只输出可直接用于图片生成的完整提示词正文，去掉围栏、模板说明、案例编号和来源信息。完整案例库已离线内置，本轮只附带按当前请求与最新编辑稿选择的模板全文、案例正文及实际图片；索引链接本身不代表已读取对应案例或图片。普通细节合理选择，只合并补问无法可靠推断的必要事实，不执行外部工具或生成媒体。\n\n{}", gpt_image_style_library::REFERENCE_BOUNDARY));
+    sections.join("\n\n")
+}
+
+/// 对白表演方法随应用编译；文字模型只生成提示词和审阅资料。
+fn load_builtin_cinematic_dialogue_system_prompt() -> String {
+    const DOCUMENTS: &[(&str, &str)] = &[
+        (
+            "SKILL.md",
+            include_str!("../../skills/cinematic-dialogue/SKILL.md"),
+        ),
+        (
+            "references/turn-taking.md",
+            include_str!("../../skills/cinematic-dialogue/references/turn-taking.md"),
+        ),
+        (
+            "references/formatting.md",
+            include_str!("../../skills/cinematic-dialogue/references/formatting.md"),
+        ),
+        (
+            "references/review.md",
+            include_str!("../../skills/cinematic-dialogue/references/review.md"),
+        ),
+    ];
+    let mut sections = vec!["# 电影对白提示词节点运行合同\n\n当前调用只生成文本；视频生成由用户连接的项目视频节点执行。目标模型和时长以用户决定及项目实际已启用能力为准，不采用来源中的固定供应商、计费或时长口径。无需 Python、文件读取、命令行或第三方服务。下游仅接收 JSON 的 videoPrompt 字段；其余字段仅供节点对话审阅。不能声称已运行脚本、播放视频、听到音频或验证成片。".to_string()];
+    for (path, content) in DOCUMENTS {
+        sections.push(format!("---\n# 技能文档：{path}\n\n{content}"));
+    }
     sections.join("\n\n")
 }
 
@@ -1868,6 +1918,14 @@ fn strip_thinking_blocks(text: &str) -> String {
 
 /// 按模式提取交付内容；图片风格库单独剥离模板元信息，其余完整文档模式保持原合同。
 pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) -> String {
+    // 工具参数是数据；不能把 JSON 字符串里的标记误当思考块、提示词元信息或说明删掉。
+    // 仅兼容剥离整段 JSON 的外层围栏，最终语法和工具参数由客户端严格验证。
+    if matches!(
+        mode,
+        PromptOptimizationMode::CanvasAgent | PromptOptimizationMode::CinematicDialogue
+    ) {
+        return strip_outer_code_fence(raw_output.trim()).to_string();
+    }
     // 推理模型常在正文前内嵌思维链：先剥离 think/思考块，避免思考内容进入对话、稿件或下游提示词。
     let content = strip_thinking_blocks(raw_output.trim());
     if content.is_empty() {
@@ -1898,7 +1956,9 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         PromptOptimizationMode::RealisticCharacter => {
             strip_realistic_character_explanation(strip_outer_code_fence(&content))
         }
-        PromptOptimizationMode::Screenplay
+        PromptOptimizationMode::CanvasAgent
+        | PromptOptimizationMode::CinematicDialogue
+        | PromptOptimizationMode::Screenplay
         | PromptOptimizationMode::Storyboard
         | PromptOptimizationMode::KnowledgeVideoDirector
         | PromptOptimizationMode::KnowledgeVideoQc
@@ -1942,6 +2002,7 @@ pub fn extract_optimized_prompt(mode: PromptOptimizationMode, raw_output: &str) 
         | PromptOptimizationMode::ProductSceneInspect
         | PromptOptimizationMode::ReverseVideoAnalysis
         | PromptOptimizationMode::ReverseVideoReview
+        | PromptOptimizationMode::ReelbenchAnalysis
         | PromptOptimizationMode::ViralRemix => strip_outer_code_fence(&content).to_string(),
     }
 }
@@ -2014,7 +2075,9 @@ fn build_system_and_user_prompts(
         }
         merged.push(message);
     }
-    let user = if command.mode == PromptOptimizationMode::ViralRemix {
+    let user = if command.mode == PromptOptimizationMode::CanvasAgent {
+        command.user_prompt.clone()
+    } else if command.mode == PromptOptimizationMode::ViralRemix {
         format!(
             "请逐格读取随请求附带的全部视频联系表，完成爆款视频复刻分析。用户的补充方向如下（为空时按技能默认合同执行）：\n\n{}",
             command.user_prompt
@@ -2084,6 +2147,11 @@ fn build_system_and_user_prompts(
     } else if command.mode == PromptOptimizationMode::ReverseVideoReview {
         format!(
             "独立核对真实视觉证据、动作节拍、尾帧收尾、四段结构和三条二创路线，汇总全部可修复问题，只输出 PASS、REVISE 或 NEEDS_DECISION 的严格 JSON：\n\n{}",
+            command.user_prompt
+        )
+    } else if command.mode == PromptOptimizationMode::ReelbenchAnalysis {
+        format!(
+            "依据本轮随请求附带的镜头首尾帧，按给定镜号与机器测得的切点逐镜标注。只输出 shot-analysis.v1 严格 JSON；绝不改写镜号、时间、时长或运动量，也不声称听过未提供的声音：\n\n{}",
             command.user_prompt
         )
     } else if command.mode == PromptOptimizationMode::XhsCoverPlan {
@@ -2295,6 +2363,26 @@ fn build_system_and_user_prompts(
         };
         format!(
             "请按 GPT Image 2 风格库处理本轮{action}请求：按产物用途、模板类别、视觉风格和场景选择方向，使用本轮实际提供的内置案例正文与图片证据。优化以当前可编辑输出为基础，保留完整历史中已确认的主体、画面文字、品牌事实、风格、画幅和交付范围，落实本轮修改。只交付可直接交给图片生成模型的完整提示词正文，用自然段覆盖主体与任务、构图与布局、视觉风格与材质、画面文字、画幅与输出形式、约束与排除细节。不要输出 Markdown 围栏、分析过程、所选模板方向、模板名称、适用理由、案例索引、案例 ID、来源链接或来源说明；案例只用于内部参考，不能冒充用户的参考图。保留用户要求实际出现在画面中的文字、标点、网址和显式 @ 引用，不因为清洗元信息而删除这些内容。跟随用户语言。用户需要多个方案时完整交付每个方案，不只保留首个；普通细节合理选择，仅对无法推断的必要事实合并补问。此轮只交付文字，图片由下游图片节点执行生成。\n\n{evidence}\n\n用户本轮请求：\n{}",
+            command.user_prompt
+        )
+    } else if command.mode == PromptOptimizationMode::CinematicDialogue {
+        let action = match command.task {
+            PromptTask::Generate => "生成",
+            PromptTask::Optimize => "优化",
+        };
+        let image_count = command.vision_images.len()
+            + command
+                .reference_inputs
+                .iter()
+                .filter(|input| input.target.media_type() == MediaType::Image)
+                .count();
+        let video_count = command
+            .reference_inputs
+            .iter()
+            .filter(|input| input.target.media_type() == MediaType::Video)
+            .count();
+        format!(
+            "请按内置对白表演方法{action}本轮对白视频提示词。沿用对话中已确认的台词改编权限、目标视频模型、时长、人物关系和当前可编辑输出；缺失真正必要的决定时，在一个 needs_input 消息中合并询问，已有决定不重复问。只返回技能合同规定的一个 JSON 对象。ready 时 videoPrompt 必须是可直接传给下游视频节点的纯提示词，话轮、预算、验收与可选第二格式分别置于其他字段。当前调用实际附带 {image_count} 张图片和 {video_count} 份视频参考；只据实际可见或可读内容描述，不把静态图当成音频证据。不运行外部工具，也不声称已经生成或验收视频。用户本轮请求：\n\n{}",
             command.user_prompt
         )
     } else if command.task == PromptTask::Generate {
@@ -2790,6 +2878,9 @@ fn validate_prompt_response_completeness(
     payload: &Value,
 ) -> BackendResult<()> {
     let truncation_message = match mode {
+        PromptOptimizationMode::CanvasAgent => {
+            "智能体计划达到输出长度上限，尚未完整生成；没有执行本轮工具，请缩小本轮范围后重试"
+        }
         PromptOptimizationMode::FightPromptMaster => {
             "输出达到长度上限，结果不完整，请指定单一强度或缩短时长后重试"
         }
@@ -2801,6 +2892,9 @@ fn validate_prompt_response_completeness(
         }
         PromptOptimizationMode::GptImage2Style => {
             "输出达到长度上限，风格库图片提示词不完整，请减少方案数量或精简描述后重试"
+        }
+        PromptOptimizationMode::CinematicDialogue => {
+            "对白提示词达到输出长度上限，结构化交付不完整，请缩短台词或分段重试"
         }
         PromptOptimizationMode::ProductSceneInspect => {
             "产品场景检查结果达到输出长度上限，接口和 Logo 检查尚不完整，请重试检查"
@@ -3777,6 +3871,121 @@ mod tests {
     use super::*;
 
     #[test]
+    fn cinematic_dialogue_uses_local_text_contract_and_preserves_json() {
+        let command: OptimizeVideoPromptCommand = serde_json::from_value(json!({
+            "canvasId": "canvas-a",
+            "sourceNodeId": "prompt-a",
+            "providerConnectionId": "provider",
+            "modelDefinitionId": "model",
+            "mode": "cinematic_dialogue",
+            "task": "generate",
+            "userPrompt": "台词逐字保留，15 秒，给当前视频节点使用",
+            "contextHistory": [{"role": "当前已连接的下游视频模型", "content": "enabled-video-model"}],
+        }))
+        .unwrap();
+        assert_eq!(command.mode, PromptOptimizationMode::CinematicDialogue);
+        assert_eq!(command.mode.as_str(), "cinematic_dialogue");
+        assert_eq!(command.mode.skill_dir(), "builtin://cinematic-dialogue");
+        let loaded = load_skill_context(&command).unwrap();
+        assert!(loaded.system_prompt.contains("\"videoPrompt\""));
+        assert!(loaded.system_prompt.contains("references/turn-taking.md"));
+        assert!(!loaded.system_prompt.contains("check_dialogue_prompt.py"));
+        let conversation = build_system_and_user_prompts(&command, &loaded.system_prompt);
+        assert!(
+            conversation
+                .user
+                .contains("只返回技能合同规定的一个 JSON 对象")
+        );
+        assert!(conversation.user.contains("台词逐字保留"));
+        assert!(
+            conversation.history[0]["content"]
+                .as_str()
+                .unwrap()
+                .contains("enabled-video-model")
+        );
+
+        let output = json!({
+            "status": "ready",
+            "videoPrompt": "A 说：\"我在。\"",
+            "target": "enabled-video-model",
+            "turnPlan": "接话",
+            "budget": "15 秒",
+            "reviewChecklist": "待检查",
+            "adaptationNotes": ""
+        })
+        .to_string();
+        assert_eq!(extract_optimized_prompt(command.mode, &output), output);
+        assert_eq!(
+            extract_optimized_prompt(command.mode, &format!("```json\n{output}\n```")),
+            output
+        );
+        assert!(
+            validate_prompt_response_completeness(
+                command.mode,
+                &json!({"choices": [{"finish_reason": "length"}]}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn canvas_agent_preserves_json_and_uses_its_own_builtin_contract() {
+        let user_prompt = json!({
+            "request": "做一个小人向前走的白模",
+            "tools": [{"name": "white_model.create"}],
+            "context": {"canvasId": "canvas-a"},
+        })
+        .to_string();
+        let command: OptimizeVideoPromptCommand = serde_json::from_value(json!({
+            "canvasId": "canvas-a",
+            "sourceNodeId": "canvas-agent:session-a",
+            "providerConnectionId": "provider",
+            "modelDefinitionId": "model",
+            "mode": "canvas_agent",
+            "task": "generate",
+            "userPrompt": user_prompt,
+            "contextHistory": [{"role": "assistant", "content": "之前的真实回复"}],
+        }))
+        .unwrap();
+        assert_eq!(command.mode, PromptOptimizationMode::CanvasAgent);
+        assert_eq!(command.mode.as_str(), "canvas_agent");
+        assert_eq!(command.mode.skill_dir(), "builtin://canvas-agent");
+        let loaded = load_skill_context(&command).unwrap();
+        assert!(loaded.system_prompt.contains("\"dependsOn\":[]"));
+        assert!(loaded.system_prompt.contains("不输出或执行 Python"));
+        assert!(loaded.system_prompt.contains("只有真实工具成功结果"));
+        let conversation = build_system_and_user_prompts(&command, &loaded.system_prompt);
+        assert_eq!(conversation.system, loaded.system_prompt);
+        assert_eq!(conversation.user, user_prompt);
+        assert_eq!(conversation.history.len(), 1);
+        assert_eq!(conversation.history[0]["role"], "assistant");
+
+        // A tool argument is data even if its text resembles a normal prompt's cleanup markers.
+        let output = json!({
+            "message": "将创建白模计划，等待客户端确认。",
+            "actions": [{
+                "id": "create-1",
+                "tool": "white_model.create",
+                "args": {"label": "[think]原样标题[/think]", "steps": [1, 2]},
+                "dependsOn": [],
+            }],
+        })
+        .to_string();
+        assert_eq!(extract_optimized_prompt(command.mode, &output), output);
+        assert_eq!(
+            extract_optimized_prompt(command.mode, &format!("```json\n{output}\n```")),
+            output
+        );
+        assert!(
+            validate_prompt_response_completeness(
+                command.mode,
+                &json!({"choices": [{"finish_reason": "length"}]}),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
     fn seedance_20_loads_builtin_skill_without_host_path() {
         let prompt = load_skill_system_prompt(PromptOptimizationMode::Seedance20).unwrap();
         assert!(
@@ -3885,7 +4094,8 @@ mod tests {
         // 编译期强制穷尽：新增模式若未登记到本函数会编译失败，必须补 `builtin://` 哨兵。
         fn assert_mode_skill_dir_in_sync(mode: PromptOptimizationMode) -> &'static str {
             match mode {
-                PromptOptimizationMode::Seedance20
+                PromptOptimizationMode::CanvasAgent
+                | PromptOptimizationMode::Seedance20
                 | PromptOptimizationMode::Seedance25
                 | PromptOptimizationMode::Wan30
                 | PromptOptimizationMode::MiniMaxH3
@@ -3894,6 +4104,7 @@ mod tests {
                 | PromptOptimizationMode::MultiGridStoryboard
                 | PromptOptimizationMode::StoryboardPrompt
                 | PromptOptimizationMode::GptImage2Style
+                | PromptOptimizationMode::CinematicDialogue
                 | PromptOptimizationMode::RealisticCharacter
                 | PromptOptimizationMode::Screenplay
                 | PromptOptimizationMode::Storyboard
@@ -3939,10 +4150,12 @@ mod tests {
                 | PromptOptimizationMode::ProductSceneInspect
                 | PromptOptimizationMode::ReverseVideoAnalysis
                 | PromptOptimizationMode::ReverseVideoReview
+                | PromptOptimizationMode::ReelbenchAnalysis
                 | PromptOptimizationMode::ViralRemix => mode.skill_dir(),
             }
         }
         const MODES: &[PromptOptimizationMode] = &[
+            PromptOptimizationMode::CanvasAgent,
             PromptOptimizationMode::Seedance20,
             PromptOptimizationMode::Seedance25,
             PromptOptimizationMode::Wan30,
@@ -3952,6 +4165,7 @@ mod tests {
             PromptOptimizationMode::MultiGridStoryboard,
             PromptOptimizationMode::StoryboardPrompt,
             PromptOptimizationMode::GptImage2Style,
+            PromptOptimizationMode::CinematicDialogue,
             PromptOptimizationMode::RealisticCharacter,
             PromptOptimizationMode::Screenplay,
             PromptOptimizationMode::Storyboard,
@@ -3997,9 +4211,10 @@ mod tests {
             PromptOptimizationMode::ProductSceneInspect,
             PromptOptimizationMode::ReverseVideoAnalysis,
             PromptOptimizationMode::ReverseVideoReview,
+            PromptOptimizationMode::ReelbenchAnalysis,
             PromptOptimizationMode::ViralRemix,
         ];
-        assert_eq!(MODES.len(), 55, "MODES 列表登记数量与 enum 变体数不一致");
+        assert_eq!(MODES.len(), 58, "MODES 列表登记数量与 enum 变体数不一致");
         for mode in MODES {
             // 编译期 helper 已被引用，触发穷尽检查。
             let _ = assert_mode_skill_dir_in_sync(*mode);

@@ -10,6 +10,8 @@ import {
   type PromptContentDocumentV1,
 } from "./promptContent";
 import type { PromptReferenceCandidate } from "./promptReferences";
+import { decodeMediaReferenceTarget } from "./promptReferenceTarget";
+import { promptReferenceTargetFromElement } from "./promptTiptap";
 
 function assetCandidate(
   canvasNodeKey: string,
@@ -378,6 +380,48 @@ describe("prompt content interface", () => {
     expect(reference).toHaveAttribute("contenteditable", "false");
     expect(reference).toHaveAttribute("data-canvas-node-key", "asset-node-1");
     expect(reference).toHaveTextContent("@角色.png");
+    expect(session.snapshot()).toEqual(persisted);
+  });
+
+  it("roundtrips a local Base64 reference through the editor chip", () => {
+    const target: MediaReferenceTarget = {
+      kind: "local_base64_asset",
+      assetId: "local-b64-17",
+      canvasNodeKey: "local-node-17",
+      mediaType: "image",
+    };
+    const persisted: PromptContentDocumentV1 = {
+      schema: "prompt-content",
+      version: 1,
+      items: [
+        {
+          kind: "media_reference",
+          mentionId: "mention-local-17",
+          canvasNodeKey: "local-node-17",
+          target,
+          displayNameSnapshot: "本机参考.png",
+        },
+      ],
+    };
+    const candidate: PromptReferenceCandidate = {
+      canvasNodeKey: "local-node-17",
+      assetId: "local-b64-17",
+      providerConnectionId: "",
+      source: "local",
+      referenceKind: "local_base64_asset",
+      kind: "image",
+      name: "本机参考.png",
+    };
+    const session = createPromptContentEditorSession([candidate]);
+    session.restore(persisted);
+    const host = document.createElement("div");
+    session.attach(host);
+
+    const chip = host.querySelector<HTMLElement>("[data-mention-id='mention-local-17']");
+    expect(chip).not.toBeNull();
+    expect(chip).toHaveAttribute("data-reference-kind", "local_base64_asset");
+    expect(promptReferenceTargetFromElement(chip!)).toEqual(target);
+    expect(decodeMediaReferenceTarget(target)).toEqual(target);
     expect(session.snapshot()).toEqual(persisted);
   });
 

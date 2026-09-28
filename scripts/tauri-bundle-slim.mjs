@@ -13,6 +13,7 @@ import {
 import { readAppVersion, writeLatestJson } from "./write-latest-json.mjs";
 import { tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 import { assertRuntimeBaseline, createRuntimeBaseline } from "./runtime-resource-baseline.mjs";
+import { RESOURCE_COMPONENTS, stageRuntimeResourceRelease } from "./runtime-resource-release.mjs";
 import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
 
 const BUNDLE_ROOT = path.join(REPO_ROOT, "src-tauri", "target", "release", "bundle");
@@ -20,6 +21,8 @@ const SLIM_CONFIG_PATH = path.join(REPO_ROOT, "src-tauri", "tauri.slim.conf.json
 const PINNED_TAURI_CLI_VERSION = "2.11.4";
 const PREFLIGHT_FLAG = "--check-runtime-components";
 const PREFLIGHT_MARKER = "IC_RUNTIME_COMPONENT_CHECK_V1";
+const PINS_FLAG = "--print-runtime-component-pins";
+const PINS_MARKER = "IC_RUNTIME_COMPONENT_PINS_V1 ";
 
 export function assertPinnedTauriCli(actual) {
   if (actual !== PINNED_TAURI_CLI_VERSION) {
@@ -58,6 +61,81 @@ export async function assertPreflightExecutable(executable) {
         reject(new Error("release exe 未按资源自检协议退出；不能制作瘦包"));
       } else {
         resolve();
+      }
+    });
+  });
+}
+
+export function assertCompiledManifestPinsOutput(output, manifest) {
+  const lines = output.split(/\r?\n/).filter((line) => line.startsWith(PINS_MARKER));
+  if (lines.length !== 1) throw new Error("release exe 未提供唯一的资源清单编译标记");
+  let pins;
+  try {
+    pins = JSON.parse(lines[0].slice(PINS_MARKER.length));
+  } catch {
+    throw new Error("release exe 的资源清单编译标记不是 JSON");
+  }
+  const expected = Object.fromEntries(
+    manifest.components.map((component) => [component.name, component.manifestSha256]),
+  );
+  if (
+    !pins ||
+    typeof pins !== "object" ||
+    Array.isArray(pins) ||
+    Object.keys(pins).length !== Object.keys(expected).length ||
+    Object.entries(expected).some(([name, sha256]) => pins[name] !== sha256)
+  ) {
+    throw new Error("release exe 内置资源清单与签名资源发布清单不一致；不能制作瘦包");
+  }
+}
+
+export function assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root = REPO_ROOT) {
+  const bundleTime = statSync(fullNsis).mtimeMs;
+  const inputs = [executable];
+  for (const component of manifest.components) {
+    const definition = RESOURCE_COMPONENTS.find((item) => item.name === component.name);
+    if (!definition) throw new Error(`未知资源组件：${component.name}`);
+    for (const file of component.files) {
+      inputs.push(path.join(root, definition.source, ...file.path.split("/")));
+    }
+  }
+  for (const input of inputs) {
+    const info = statSync(input);
+    if (!info.isFile() || info.mtimeMs >= bundleTime) {
+      throw new Error(`完整 NSIS 早于程序或资源文件 ${input}；请重新构建完整安装包`);
+    }
+  }
+}
+
+export async function assertCompiledResourcePins(executable, manifest) {
+  await new Promise((resolve, reject) => {
+    const child = spawn(executable, [PINS_FLAG], {
+      cwd: REPO_ROOT,
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    });
+    let output = "";
+    const capture = (chunk) => {
+      output += chunk.toString("utf8");
+    };
+    child.stdout.on("data", capture);
+    child.stderr.on("data", capture);
+    const timeout = setTimeout(() => {
+      child.kill();
+      reject(new Error("release exe 资源清单编译标记读取超时；不能制作瘦包"));
+    }, 30_000);
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      reject(error);
+    });
+    child.once("exit", (code) => {
+      clearTimeout(timeout);
+      try {
+        if (code !== 0) throw new Error("release exe 资源清单编译标记读取失败；不能制作瘦包");
+        assertCompiledManifestPinsOutput(output, manifest);
+        resolve();
+      } catch (error) {
+        reject(error);
       }
     });
   });
@@ -128,11 +206,7 @@ export async function stageSlimWindowsBundle(baselinePath) {
   );
   assertPinnedTauriCli(cli.version);
   const version = readAppVersion();
-  assertRuntimeBaseline(
-    JSON.parse(readFileSync(baselinePath, "utf8")),
-    await createRuntimeBaseline(),
-    version,
-  );
+  const bridgeBaseline = JSON.parse(readFileSync(baselinePath, "utf8"));
   const conf = JSON.parse(
     readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
   );
@@ -171,6 +245,37 @@ export async function stageSlimWindowsBundle(baselinePath) {
   const msi = path.join(BUNDLE_ROOT, "msi", names.msi);
   if (existsSync(msi)) copyFileSync(msi, path.join(fullDir, names.msi));
 
+  // The full NSIS was built from this source tree. Sign a complete file-level
+  // inventory only after checking that its generated file table contains each
+  // resource exactly once. This proof replaces the old byte-equality gate.
+  const fullNsisScript = path.join(
+    REPO_ROOT,
+    "src-tauri",
+    "target",
+    "release",
+    "nsis",
+    "x64",
+    "installer.nsi",
+  );
+  const resourceRelease = await stageRuntimeResourceRelease({
+    root: REPO_ROOT,
+    version,
+    outDir: path.join(slimDir, "resources", version, "windows-x86_64"),
+    nsisScriptPath: fullNsisScript,
+  });
+  assertFullNsisNewerThanInputs(
+    fullNsis,
+    path.join(REPO_ROOT, "src-tauri", "target", "release", "infinite-canvas.exe"),
+    resourceRelease.manifest,
+  );
+  await assertCompiledResourcePins(
+    path.join(REPO_ROOT, "src-tauri", "target", "release", "infinite-canvas.exe"),
+    resourceRelease.manifest,
+  );
+  assertRuntimeBaseline(bridgeBaseline, await createRuntimeBaseline(), version, {
+    signedResourceReleaseVerified: true,
+  });
+
   try {
     await runTauriBundle(env);
     const generatedScript = path.join(
@@ -205,6 +310,10 @@ export async function stageSlimWindowsBundle(baselinePath) {
       out: path.join(slimDir, "latest.json"),
       version,
       platform: "windows-x86_64",
+      resourceManifest: {
+        url: `${tosUpdatesPublicBaseUrl()}/resources/${version}/windows-x86_64/manifest.json`,
+        signature: resourceRelease.signature,
+      },
     });
     return { stageRoot, fullBytes, slimBytes, fullDir, slimDir };
   } finally {

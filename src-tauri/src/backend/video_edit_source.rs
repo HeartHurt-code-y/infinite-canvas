@@ -213,6 +213,7 @@ pub struct VideoEditSourceService {
     records: Arc<dyn SourceRecords>,
     client: reqwest::Client,
     cache: Arc<PreviewCache>,
+    local_base64_assets: Option<super::local_base64_assets::LocalBase64Library>,
     // None denotes a user's own local file: releasing that lease must never delete it.
     leases: Arc<Mutex<HashMap<String, Option<PathBuf>>>>,
 }
@@ -223,6 +224,7 @@ impl VideoEditSourceService {
         staging: StagingService,
         results: LocalResultService,
         directory: PathBuf,
+        local_base64_assets: super::local_base64_assets::LocalBase64Library,
     ) -> BackendResult<Self> {
         // Keep the project's native proxy/TLS and timeout behavior. Redirects are explicit
         // so every new host gets its own fake-IP resolution, without forwarding credentials.
@@ -232,7 +234,7 @@ impl VideoEditSourceService {
             .user_agent("InfiniteCanvas/0.1")
             .redirect(reqwest::redirect::Policy::none())
             .build()?;
-        Self::with_records(
+        let mut service = Self::with_records(
             Arc::new(ProjectSourceRecords {
                 assets,
                 staging,
@@ -240,7 +242,9 @@ impl VideoEditSourceService {
             }),
             client,
             &directory,
-        )
+        )?;
+        service.local_base64_assets = Some(local_base64_assets);
+        Ok(service)
     }
 
     fn with_records(
@@ -252,6 +256,7 @@ impl VideoEditSourceService {
             records,
             client,
             cache: Arc::new(PreviewCache::new(directory)?),
+            local_base64_assets: None,
             leases: Arc::new(Mutex::new(HashMap::new())),
         })
     }
@@ -298,6 +303,12 @@ impl VideoEditSourceService {
             MediaReferenceTarget::LocalAsset { staging_job_id, .. } => {
                 let url = self.records.local_asset_url(staging_job_id)?;
                 (self.download(&url).await?, true)
+            }
+            MediaReferenceTarget::LocalBase64Asset { asset_id, .. } => {
+                let library = self.local_base64_assets.as_ref().ok_or_else(|| {
+                    BackendError::Conflict("local Base64 library is unavailable".into())
+                })?;
+                (library.decoded_path(asset_id, MediaType::Video)?, true)
             }
             MediaReferenceTarget::Url { url, .. } => (self.download(url).await?, true),
         };

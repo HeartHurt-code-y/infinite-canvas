@@ -9,6 +9,9 @@ import type {
 import { flushCanvasMediaVisibility } from "../workspace/mediaPreview";
 import { HistoryDialog } from "./HistoryDialog";
 
+const dialogOpen = vi.hoisted(() => vi.fn());
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: dialogOpen }));
+
 const DESKTOP_INTERNALS_KEY = "__TAURI_INTERNALS__";
 
 const SUMMARY: GenerationTaskSummary = {
@@ -498,11 +501,11 @@ describe("HistoryDialog diagnostics", () => {
       height: 120,
       toJSON: () => ({}),
     } as DOMRect;
-    const rectSpy = vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
-      function (this: Element) {
+    const rectSpy = vi
+      .spyOn(Element.prototype, "getBoundingClientRect")
+      .mockImplementation(function (this: Element) {
         return this === pane ? paneRect : farRect;
-      },
-    );
+      });
     (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
       invoke: () => Promise.resolve(null),
       transformCallback: () => 1,
@@ -708,6 +711,153 @@ describe("HistoryDialog regeneration", () => {
       url: "https://example.com/reference",
       mediaType: "image",
     });
+  });
+
+  it("uploads a local Base64 material without object storage and uses its stable identity", async () => {
+    const record = {
+      id: "local-b64-123",
+      name: "本机参考.png",
+      mediaType: "image",
+      mimeType: "image/png",
+      previewUrl: "asset://localhost/local-b64-123",
+      byteSize: 32,
+      createdAt: 1_777_000_000_000,
+    };
+    const invoke = vi.fn((command: string, _args?: unknown) => {
+      switch (command) {
+        case "list_assets":
+          return Promise.resolve([]);
+        case "list_local_base64_assets":
+        case "list_local_assets":
+          return Promise.resolve({
+            items: [],
+            total: 0,
+            page: 1,
+            pageSize: 1,
+            kindTotals: { image: 0, video: 0, audio: 0 },
+          });
+        case "import_local_base64_asset":
+          return Promise.resolve(record);
+        default:
+          return Promise.resolve(null);
+      }
+    });
+    dialogOpen.mockResolvedValueOnce("C:\\media\\本机参考.png");
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    try {
+      const client = createClient(REGEN_DETAIL);
+      render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+      await screen.findByText("任务概要");
+      fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+      const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+      fireEvent.click(within(dialog).getByText("添加素材"));
+      fireEvent.click(within(dialog).getByRole("tab", { name: "本地素材库" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "上传本机图片、视频或音频" }));
+
+      await within(dialog).findByText("已保存 1 项本地素材，并加入本次生成。");
+      expect(within(dialog).getAllByText("本机参考.png")).toHaveLength(2);
+      fireEvent.click(within(dialog).getByRole("button", { name: "重新生成" }));
+
+      await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+      const submitted = vi.mocked(client.start).mock.calls[0]![0];
+      expect(
+        submitted.explicitMedia?.some(
+          (input) =>
+            input.target.kind === "local_base64_asset" && input.target.assetId === record.id,
+        ),
+      ).toBe(true);
+      expect(
+        invoke.mock.calls.find(([command]) => command === "import_local_base64_asset")?.[1],
+      ).toEqual({
+        command: { localPath: "C:\\media\\本机参考.png" },
+      });
+      expect(
+        invoke.mock.calls.some(
+          ([command]) => command === "get_tos_staging_config" || command === "start_staging_upload",
+        ),
+      ).toBe(false);
+    } finally {
+      dialogOpen.mockReset();
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
+  });
+
+  it("keeps an existing TOS local material reference when regenerating", async () => {
+    const legacyTarget = { kind: "local_asset", stagingJobId: "legacy-job-17", mediaType: "image" };
+    const detail: GenerationTaskDetail = {
+      ...REGEN_DETAIL,
+      logicalRequest: {
+        ...REGEN_LOGICAL_REQUEST,
+        prompt: [{ kind: "text", text: "参考旧素材" }],
+        explicitMedia: [{ target: legacyTarget, role: "", displayNameSnapshot: "旧素材.png" }],
+      },
+    };
+    const invoke = vi.fn((command: string) => {
+      if (command === "list_assets") return Promise.resolve([]);
+      if (command === "list_local_base64_assets") {
+        return Promise.resolve({
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 1,
+          kindTotals: { image: 0, video: 0, audio: 0 },
+        });
+      }
+      if (command === "list_local_assets") {
+        return Promise.resolve({
+          items: [
+            {
+              id: "legacy-job-17",
+              name: "旧素材.png",
+              mediaType: "image",
+              objectKey: "legacy/17.png",
+              previewUrl: "https://tos.example.com/legacy.png",
+              byteSize: 32,
+              createdAt: 1_777_000_000_000,
+            },
+          ],
+          total: 1,
+          page: 1,
+          pageSize: 1,
+          kindTotals: { image: 1, video: 0, audio: 0 },
+        });
+      }
+      return Promise.resolve(null);
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+
+    try {
+      const client = createClient(detail);
+      render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+      await screen.findByText("任务概要");
+      fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+      const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+      expect(await within(dialog).findByText("旧素材.png")).toBeInTheDocument();
+      await waitFor(() =>
+        expect(dialog.querySelector(".regenerate-material__thumb img")).toHaveAttribute(
+          "src",
+          expect.stringContaining(encodeURIComponent("https://tos.example.com/legacy.png")),
+        ),
+      );
+      fireEvent.click(within(dialog).getByRole("button", { name: "重新生成" }));
+      await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+      expect(vi.mocked(client.start).mock.calls[0]![0].explicitMedia?.[0]?.target).toMatchObject(
+        legacyTarget,
+      );
+    } finally {
+      delete (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY];
+    }
   });
 
   it("云端素材不在素材库列表里时按素材身份单独取预览地址", async () => {

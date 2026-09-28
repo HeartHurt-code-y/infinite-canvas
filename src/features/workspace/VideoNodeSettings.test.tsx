@@ -12,6 +12,7 @@ import type { ConnectedAssetInput, VideoNodeConfig } from "./workspaceModel";
 
 const DOMESTIC = "doubao-seedance-2-5-260628";
 const OVERSEAS = "dreamina-seedance-2.5";
+const PER_TASK = "sp2.5-720p-30s-ch5";
 const catalog: readonly ProviderCatalogEntry[] = [
   {
     provider: {
@@ -24,7 +25,7 @@ const catalog: readonly ProviderCatalogEntry[] = [
       createdAt: 1,
       updatedAt: 1,
     },
-    models: [DOMESTIC, OVERSEAS, "wan3.0-video"].map((id) => ({
+    models: [DOMESTIC, OVERSEAS, "wan3.0-video", PER_TASK, "sp2.5-720p-30s-ch4"].map((id) => ({
       definitionId: id,
       remoteModelId: id,
       displayName: id,
@@ -43,6 +44,7 @@ function mountSettings(
   modelId = DOMESTIC,
   inputs: readonly ConnectedAssetInput[] = [video],
   providerCatalog = catalog,
+  initialConfig: Partial<VideoNodeConfig> = {},
 ) {
   const changed = vi.fn<(config: VideoNodeConfig) => void>();
   const annotate = vi.fn();
@@ -52,6 +54,7 @@ function mountSettings(
       generationCount: 1,
       catalogResolved: true,
       parameterValues: { ratio: "16:9", duration: 10 },
+      ...initialConfig,
     });
     return (
       <VideoNodeSettings
@@ -189,5 +192,62 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     expect(screen.getByRole("alert")).toHaveTextContent(
       "未开放智能（-1）或 4–30 秒范围内的可用时长",
     );
+  });
+});
+
+describe("VideoNodeSettings SP 2.5 public references", () => {
+  it("saves typed image and audio URLs without losing them when switching models", () => {
+    const imageUrl = "https://assets.example.test/image.png?signature=img%2F1";
+    const audioUrl = "https://assets.example.test/audio.wav?signature=aud%2B2";
+    const { changed } = mountSettings(PER_TASK, [], catalog, {
+      urlMedia: [
+        { id: "wan-doc", role: "file", label: "文档", url: "https://example.test/doc.pdf" },
+      ],
+    });
+    expect(screen.getByText(/已保留 1 个万相文档\/网页 URL/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "粘贴文档 URL" })).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "粘贴参考图 URL" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "参考图 URL" }), {
+      target: { value: imageUrl },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    fireEvent.click(screen.getByRole("button", { name: "粘贴参考音频 URL" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "参考音频 URL" }), {
+      target: { value: audioUrl },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+
+    expect(changed.mock.lastCall?.[0].perTaskUrlMedia).toEqual([
+      expect.objectContaining({ kind: "image", url: imageUrl }),
+      expect.objectContaining({ kind: "audio", url: audioUrl }),
+    ]);
+    fireEvent.change(screen.getByRole("combobox", { name: "视频模型" }), {
+      target: { value: "wan3.0-video" },
+    });
+    expect(screen.getByText(/已保留 2 个按次参考 URL/)).toBeInTheDocument();
+    expect(screen.queryByLabelText("按次参考 URL")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByRole("combobox", { name: "视频模型" }), {
+      target: { value: PER_TASK },
+    });
+    expect(within(screen.getByLabelText("按次参考 URL")).getAllByRole("listitem")).toHaveLength(2);
+    expect(screen.getByText(imageUrl)).toBeInTheDocument();
+    expect(screen.getByText(audioUrl)).toBeInTheDocument();
+    expect(changed.mock.lastCall?.[0].urlMedia).toHaveLength(1);
+  });
+
+  it("blocks an invalid or over-limit URL before adding it to a paid request", () => {
+    const { changed } = mountSettings(
+      "sp2.5-720p-30s-ch4",
+      Array.from({ length: 9 }, (_, index) => asset(`图${index}`, "image")),
+    );
+    expect(screen.queryByRole("button", { name: "粘贴参考音频 URL" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "粘贴参考图 URL" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "参考图 URL" }), {
+      target: { value: "https://assets.example.test/extra.png" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "添加" }));
+    expect(screen.getByRole("alert")).toHaveTextContent("最多支持 9 张参考图");
+    expect(changed).not.toHaveBeenCalled();
   });
 });

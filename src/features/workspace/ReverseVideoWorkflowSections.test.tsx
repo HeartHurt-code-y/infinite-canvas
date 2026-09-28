@@ -3,6 +3,7 @@ import { useState } from "react";
 import { describe, expect, it, vi } from "vitest";
 
 import { catalog, node } from "../../test/videoWorkflowFixtures";
+import { stableJsonSignature } from "../../lib/workflowSignatures";
 import { KnowledgeVideoWorkflowNode } from "./KnowledgeVideoWorkflowNode";
 import {
   ReverseVideoConfiguration,
@@ -12,6 +13,7 @@ import { revealDesktopItem } from "./desktopActions";
 import {
   createReverseVideoCheckpoint,
   createReverseVideoOptions,
+  reverseVideoSourceUrl,
   type ReverseVideoAnalysis,
 } from "./reverseVideoWorkflowModel";
 import type {
@@ -186,6 +188,7 @@ describe("ReverseVideoConfiguration", () => {
   it("switches share messages and local video through project pickers without ambiguous sources", async () => {
     const pick = vi.fn(async () => {});
     const login = vi.fn();
+    const selectBrowser = vi.fn();
     function Harness() {
       const [options, setOptions] = useState({ ...createReverseVideoOptions(), sourceUrl });
       return (
@@ -196,6 +199,16 @@ describe("ReverseVideoConfiguration", () => {
           onChange={setOptions}
           onBriefChange={vi.fn()}
           onOpenDownloadSettings={login}
+          cookieStatus={{
+            state: "ready",
+            version: "2026.09.27",
+            binaryPath: "C:/app/yt-dlp.exe",
+            cookieBrowser: null,
+            cookiesInstalled: false,
+            bilibiliLoggedIn: false,
+            lastError: null,
+          }}
+          onSelectCookieBrowser={selectBrowser}
           onPickVideo={async () => {
             await pick();
             setOptions({ sourceUrl: "", localVideoPath: videoPath, localVideoName: "原片.mp4" });
@@ -208,6 +221,10 @@ describe("ReverseVideoConfiguration", () => {
     expect(screen.getByLabelText("反推视频分享链接")).toHaveValue(sourceUrl);
     fireEvent.click(screen.getByRole("button", { name: "导入下载登录凭据" }));
     expect(login).toHaveBeenCalledOnce();
+    fireEvent.change(screen.getByRole("combobox", { name: "下载 Cookies 来源" }), {
+      target: { value: "edge" },
+    });
+    expect(selectBrowser).toHaveBeenCalledWith("edge");
     fireEvent.click(screen.getByRole("button", { name: "改用本地视频" }));
     await screen.findByText("原片.mp4");
     expect(pick).toHaveBeenCalledOnce();
@@ -348,7 +365,7 @@ describe("reverse-video workflow node", () => {
     expect(props.onContinue).toHaveBeenCalledWith(workflowNode.key, "确认是水杯");
   });
 
-  it("locks active inputs, shows automatic stages and offers pause then breakpoint retry", () => {
+  it("locks active inputs, shows automatic stages and offers pause then breakpoint retry", async () => {
     const props = nodeProps(reverseNode("generating"));
     const { rerender } = render(<KnowledgeVideoWorkflowNode {...props} />);
     expect(screen.getByLabelText("反推补充方向")).toBeDisabled();
@@ -359,6 +376,11 @@ describe("reverse-video workflow node", () => {
     fireEvent.click(screen.getByRole("button", { name: "暂停后续步骤" }));
     expect(props.onCancel).toHaveBeenCalledWith(props.node.key);
     const failed = reverseNode("failed");
+    const savedLinkSignature = stableJsonSignature({
+      brief: failed.config.brief,
+      sourceUrl: reverseVideoSourceUrl(failed.config.reverseVideo!.sourceUrl),
+      localVideoPath: "",
+    });
     rerender(
       <KnowledgeVideoWorkflowNode
         {...props}
@@ -366,15 +388,58 @@ describe("reverse-video workflow node", () => {
           ...failed,
           config: {
             ...failed.config,
-            checkpoint: { ...failed.config.checkpoint, error: "下载器登录凭据已失效" },
+            checkpoint: {
+              ...failed.config.checkpoint,
+              error: "下载器登录凭据已失效",
+              reverseVideo: {
+                ...createReverseVideoCheckpoint(),
+                inputSignature: savedLinkSignature,
+                downloadJobId: "download-1",
+              },
+            },
           },
         }}
       />,
     );
     expect(screen.getByRole("alert")).toHaveTextContent("下载器登录凭据已失效");
-    expect(screen.getByText(/下载未完成/)).toBeInTheDocument();
+    expect(screen.getByText(/原片尚未下载为本地文件/)).toBeInTheDocument();
+    expect(screen.getByText(/切换来源只是再次尝试/)).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "重试当前步骤" }));
     expect(props.onContinue).toHaveBeenCalledWith(props.node.key);
+    fireEvent.click(screen.getByRole("button", { name: "选择本地视频后重新制作" }));
+    expect(props.onPickReverseVideo).toHaveBeenCalledWith(props.node.key);
+
+    rerender(
+      <KnowledgeVideoWorkflowNode
+        {...props}
+        node={{
+          ...failed,
+          config: {
+            ...failed.config,
+            reverseVideo: {
+              ...failed.config.reverseVideo!,
+              sourceUrl: "",
+              localVideoPath: videoPath,
+              localVideoName: "原片.mp4",
+            },
+            checkpoint: {
+              ...failed.config.checkpoint,
+              error: "旧链接下载失败",
+              reverseVideo: {
+                ...createReverseVideoCheckpoint(),
+                inputSignature: savedLinkSignature,
+                downloadJobId: "download-1",
+              },
+            },
+          },
+        }}
+      />,
+    );
+    expect(screen.getByText(/原片输入已改变/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "重试当前步骤" })).not.toBeInTheDocument();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "按当前资料重新制作" })).toBeEnabled(),
+    );
   });
 });
 

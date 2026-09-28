@@ -48,6 +48,7 @@ const KIND_LABELS: Record<string, string> = {
   xhsCover: "小红书封面",
   productScene: "产品场景图",
   reverseVideo: "短视频反推",
+  reelbench: "视频拉片与分镜合成",
 };
 const ACTIVE_PHASES: readonly KnowledgeVideoWorkflowPhase[] = [
   "planning",
@@ -112,6 +113,24 @@ function DeferredSection({
 }
 
 function deliveryMarkdown(checkpoint: KnowledgeVideoWorkflowCheckpoint): string {
+  if (checkpoint.reelbench) {
+    const result = checkpoint.reelbench;
+    return [
+      "# 视频拉片与分镜合成",
+      result.draft
+        ? `源片：${result.draft.videoPath}\n\n片长：${result.draft.meta.durationSeconds.toFixed(2)} 秒；镜头：${result.draft.shots.length} 个。`
+        : "尚未完成镜头测量。",
+      result.validation ? `机器检查：${result.validation.ok ? "通过" : "待修订"}` : "",
+      result.draft?.shots.length
+        ? `## 镜头表\n\n${result.draft.shots.map((shot) => `- ${shot.id} ${shot.start.toFixed(2)}–${shot.end.toFixed(2)} 秒：${shot.frame?.trim() || "待标注"}`).join("\n")}`
+        : "",
+      result.reportMarkdownPath ? `Markdown：${result.reportMarkdownPath}` : "",
+      result.reportHtmlPath ? `离线报告：${result.reportHtmlPath}` : "",
+      result.syncVideoPath ? `同步分镜视频：${result.syncVideoPath}` : "",
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+  }
   if (checkpoint.productScene) return productSceneDeliveryMarkdown(checkpoint);
   if (checkpoint.musicVideo) return musicVideoDeliveryMarkdown(checkpoint);
   if (checkpoint.reverseVideo) return reverseVideoDeliveryMarkdown(checkpoint);
@@ -143,12 +162,18 @@ function retainedMedia(checkpoint: KnowledgeVideoWorkflowCheckpoint) {
     );
   }
   add(
-    checkpoint.finalPath,
+    checkpoint.reelbench ? null : checkpoint.finalPath,
     checkpoint.reverseVideo ? "原视频" : checkpoint.xhsCover ? "最终封面" : "最终成片",
     checkpoint.xhsCover ? "image" : "video",
   );
   add(checkpoint.coverImagePath, "封面", "image");
   add(checkpoint.reverseVideo?.videoPath, "下载原片", "video");
+  add(checkpoint.reelbench?.videoPath, "拉片原视频", "video");
+  add(checkpoint.reelbench?.syncVideoPath, "同步分镜视频", "video");
+  for (const sheet of checkpoint.reelbench?.draft?.sheets ?? []) {
+    add(sheet.frameAPath, `${sheet.fromId}–${sheet.toId} 首帧联系表`, "image");
+    add(sheet.frameBPath, `${sheet.fromId}–${sheet.toId} 尾帧联系表`, "image");
+  }
   for (const sheet of checkpoint.reverseVideo?.evidence?.sheets ?? [])
     add(sheet.localPath, sheet.displayName, "image");
   for (const frame of checkpoint.reverseVideo?.evidence?.representativeFrames ?? [])

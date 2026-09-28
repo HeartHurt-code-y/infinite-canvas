@@ -194,5 +194,5 @@ export function useCanvasDocumentPersistence({
     }
   };
 
-  return { hydrated, status, error, schedule, documentChanged, retry };
+  return { hydrated, status, error, schedule, documentChanged, retry, flush };
 }

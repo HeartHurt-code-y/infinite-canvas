@@ -14,6 +14,7 @@ import {
   createReverseVideoCheckpoint,
   createReverseVideoOptions,
 } from "./reverseVideoWorkflowModel";
+import { createReelbenchCheckpoint, createReelbenchOptions } from "./reelbenchWorkflowModel";
 import {
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
   createKnowledgeVideoWorkflowConfig,
@@ -36,6 +37,7 @@ export const COMMERCE_WORKFLOW_TEMPLATE_ID = "commerce-video-workflow-v1";
 export const REMOTION_WORKFLOW_TEMPLATE_ID = "remotion-animation-workflow-v1";
 export const XHS_COVER_WORKFLOW_TEMPLATE_ID = "xhs-cover-workflow-v1";
 export const REVERSE_VIDEO_WORKFLOW_TEMPLATE_ID = "reverse-video-workflow-v1.1";
+export const REELBENCH_WORKFLOW_TEMPLATE_ID = "reelbench-workflow-v1";
 
 export interface WorkflowTemplateAnchor {
   /** 工作流节点的目标中心点。 */
@@ -350,6 +352,38 @@ export function createReverseVideoWorkflow(
                 checkpoint: {
                   ...entry.data.config.checkpoint,
                   reverseVideo: createReverseVideoCheckpoint(),
+                },
+              },
+            },
+          }
+        : entry,
+    ),
+  };
+}
+
+export function createReelbenchWorkflow(
+  options: CreateKnowledgeVideoDirectorWorkflowOptions,
+): WorkflowTemplateSubgraph {
+  const template = createKnowledgeVideoDirectorWorkflow(options);
+  return {
+    ...template,
+    nodes: template.nodes.map((entry) =>
+      entry.type === "knowledgeVideoWorkflow"
+        ? {
+            ...entry,
+            data: {
+              ...entry.data,
+              config: {
+                ...entry.data.config,
+                models: {
+                  text: entry.data.config.models.text,
+                  image: { providerId: "", modelDefinitionId: "" },
+                  video: { providerId: "", modelDefinitionId: "" },
+                },
+                reelbench: createReelbenchOptions(),
+                checkpoint: {
+                  ...entry.data.config.checkpoint,
+                  reelbench: createReelbenchCheckpoint(),
                 },
               },
             },

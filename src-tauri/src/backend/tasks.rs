@@ -14,7 +14,7 @@ use super::{
     error::{BackendError, BackendResult},
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
-    model_schema::normalize_parameters,
+    model_schema::{default_model_schema, is_sp25_per_use_video_model, normalize_parameters},
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
     staging::StagingService,
     storage::{
@@ -71,6 +71,24 @@ struct SuccessfulObservation {
     call_id: String,
     observation: GenerationObservation,
     tokens: Option<super::types::TokenUsage>,
+}
+
+/// 冻结任务时以绑定的远端模型 ID 为准。旧库中的 model_definitions 可能仍存着
+/// Seedance 通用档案；按次型号必须使用已知的专属协议，不能让旧档案决定素材暂存
+/// 或付费请求的形状。其他型号和操作继续沿用已保存的自定义 Schema。
+fn operation_schema_for_start(
+    stored_operations: &Value,
+    operation: GenerationOperation,
+    remote_model_id: Option<&str>,
+) -> Option<Value> {
+    if operation == GenerationOperation::VideoGeneration
+        && let Some(model_id) = remote_model_id.filter(|id| is_sp25_per_use_video_model(id))
+    {
+        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration])
+            .get(operation.as_str())
+            .cloned();
+    }
+    stored_operations.get(operation.as_str()).cloned()
 }
 
 #[derive(Clone)]
@@ -159,19 +177,21 @@ impl GenerationTaskService {
             .ok_or_else(|| {
                 BackendError::NotFound(format!("model definition {}", command.model_definition_id))
             })?;
-        let operation_schema = model
-            .operations
-            .get(command.operation.as_str())
-            .ok_or_else(|| {
-                BackendError::validation(
-                    "model definition does not declare this operation",
-                    json!({
-                        "modelDefinitionId": model.id,
-                        "operation": command.operation,
-                        "operations": model.operations
-                    }),
-                )
-            })?;
+        let operation_schema = operation_schema_for_start(
+            &model.operations,
+            command.operation,
+            binding.remote_model_id.as_deref(),
+        )
+        .ok_or_else(|| {
+            BackendError::validation(
+                "model definition does not declare this operation",
+                json!({
+                    "modelDefinitionId": model.id,
+                    "operation": command.operation,
+                    "operations": model.operations
+                }),
+            )
+        })?;
         if !operation_schema.is_object() {
             return Err(BackendError::validation(
                 "model operation schema must be a JSON object",
@@ -187,8 +207,8 @@ impl GenerationTaskService {
         } else {
             command.parameters.clone()
         };
-        command.parameters = normalize_parameters(operation_schema, &supplied_parameters)?;
-        command.model_operation_schema_snapshot = Some(operation_schema.clone());
+        command.parameters = normalize_parameters(&operation_schema, &supplied_parameters)?;
+        command.model_operation_schema_snapshot = Some(operation_schema);
         // 模型绑定指定了令牌分组时，用该分组的密钥；否则用供应商主 API Key。
         // 先解析出密钥引用并校验其可用（resolve 会读取凭据），再冻结进任务快照。
         let task_api_key_ref = self.storage.resolve_binding_credential_ref(
@@ -684,7 +704,10 @@ impl GenerationTaskService {
                     );
                     if !retryable || retry_index == MAX_AUTOMATIC_RETRIES {
                         let exhausted = retry_index == MAX_AUTOMATIC_RETRIES && retryable;
-                        let conclusion = if matches!(error, BackendError::Transport(_)) {
+                        let conclusion = if matches!(error, BackendError::Transport(_))
+                            || matches!(&error, BackendError::Protocol { details, .. }
+                                if details.get("ambiguousPaidSubmission").and_then(Value::as_bool) == Some(true))
+                        {
                             GenerationTaskStatus::Unknown
                         } else {
                             GenerationTaskStatus::Failed
@@ -1477,6 +1500,14 @@ fn is_retryable_generation_error(error: &BackendError) -> bool {
     match error {
         BackendError::Transport(_) => true,
         BackendError::Protocol { details, .. } => {
+            if details
+                .get("ambiguousPaidSubmission")
+                .and_then(Value::as_bool)
+                == Some(true)
+                || details.get("noChargeTerminal").and_then(Value::as_bool) == Some(true)
+            {
+                return false;
+            }
             details
                 .get("retryable")
                 .and_then(Value::as_bool)
@@ -1504,6 +1535,47 @@ fn video_poll_interval(model_id: Option<&str>) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sp25_freezes_canonical_schema_from_bound_remote_id() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "request": { "parameterContainer": "metadata", "contentContainer": "metadata" },
+                "parameters": { "generate_audio": { "type": "boolean", "default": true } }
+            },
+            "text_generation": { "resultType": "text", "parameters": {} }
+        });
+        let frozen = operation_schema_for_start(
+            &stale,
+            GenerationOperation::VideoGeneration,
+            Some("sp2.5-720p-30s-ch5"),
+        )
+        .expect("canonical video schema");
+        assert_eq!(frozen["requestProfileId"], "sp25_per_use_video_v1");
+        assert_eq!(frozen["request"]["parameterContainer"], "root");
+        assert_eq!(frozen["request"]["maxImages"], 10);
+        assert_eq!(frozen["request"]["maxAudios"], 10);
+        assert!(frozen["request"].get("contentContainer").is_none());
+        assert!(frozen["parameters"].get("generate_audio").is_none());
+        assert_eq!(
+            operation_schema_for_start(
+                &stale,
+                GenerationOperation::TextGeneration,
+                Some("sp2.5-720p-30s-ch5"),
+            ),
+            Some(stale["text_generation"].clone())
+        );
+        assert_eq!(
+            operation_schema_for_start(
+                &stale,
+                GenerationOperation::VideoGeneration,
+                Some("sp2.5-720p-30s-ch7"),
+            ),
+            Some(stale["video_generation"].clone())
+        );
+    }
 
     #[tokio::test]
     async fn manual_queries_share_a_poll_worker_and_wake_its_next_observation() {
@@ -1575,6 +1647,14 @@ mod tests {
             "parse error",
             json!({})
         )));
+        assert!(!is_retryable_generation_error(&BackendError::protocol(
+            "paid submission may have been accepted",
+            json!({ "httpStatus": 503, "ambiguousPaidSubmission": true })
+        )));
+        assert!(!is_retryable_generation_error(&BackendError::protocol(
+            "no channel was available",
+            json!({ "httpStatus": 500, "noChargeTerminal": true })
+        )));
     }
 
     #[test]
@@ -1585,6 +1665,10 @@ mod tests {
         );
         assert_eq!(
             video_poll_interval(Some("doubao-seedance-2-5-260628")),
+            std::time::Duration::from_secs(5)
+        );
+        assert_eq!(
+            video_poll_interval(Some("sp2.5-720p-30s-ch5")),
             std::time::Duration::from_secs(5)
         );
     }

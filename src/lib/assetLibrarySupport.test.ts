@@ -66,6 +66,10 @@ describe("素材库供应商支持判定", () => {
     ).toBe(false);
   });
 
+  it("按次系列上传端点不被误认为云端素材库", () => {
+    expect(providerSupportsAssetLibrary(provider("http://101.34.211.152/v1"))).toBe(false);
+  });
+
   it("地址缺失或写法不规范时保持原有行为，不误排除连接", () => {
     expect(providerSupportsAssetLibrary(provider(""))).toBe(true);
     expect(providerSupportsAssetLibrary(provider("   "))).toBe(true);

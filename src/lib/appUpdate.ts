@@ -24,6 +24,8 @@ export interface RuntimeComponentMigrationStatus {
   readonly totalBytes: number;
   readonly completedComponents: number;
   readonly totalComponents: number;
+  readonly reusedBytes?: number | undefined;
+  readonly downloadedBytes?: number | undefined;
 }
 
 export interface AppUpdateProgressEvent {
@@ -38,14 +40,32 @@ export interface AppUpdateCheckResult {
   readonly available: boolean;
   readonly version?: string | undefined;
   readonly notes?: string | null | undefined;
+  readonly requiresRuntimeComponents?: boolean | undefined;
+  readonly resourceManifest?: ResourceUpdateManifest | null | undefined;
+  readonly download?:
+    ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
+  readonly install?: (() => Promise<void>) | undefined;
   readonly downloadAndInstall?:
     ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
+}
+
+export interface ResourceUpdateManifest {
+  readonly url: string;
+  readonly signature: string;
+}
+
+export interface PrepareRuntimeResourcesRequest extends ResourceUpdateManifest {
+  readonly version: string;
 }
 
 export interface AppUpdateClient {
   getCurrentVersion(): Promise<string>;
   check(): Promise<AppUpdateCheckResult>;
   waitForRuntimeComponents?(
+    onProgress: (status: RuntimeComponentMigrationStatus) => void,
+  ): Promise<void>;
+  prepareRuntimeComponents?(
+    request: PrepareRuntimeResourcesRequest,
     onProgress: (status: RuntimeComponentMigrationStatus) => void,
   ): Promise<void>;
   relaunch(): Promise<void>;
@@ -61,6 +81,8 @@ export interface AppUpdateState {
   readonly totalBytes: number;
   readonly preparedBytes: number;
   readonly totalPreparationBytes: number;
+  readonly reusedResourceBytes: number;
+  readonly downloadedResourceBytes: number;
   readonly error: string | null;
 }
 
@@ -73,6 +95,8 @@ const INITIAL_STATE: AppUpdateState = {
   totalBytes: 0,
   preparedBytes: 0,
   totalPreparationBytes: 0,
+  reusedResourceBytes: 0,
+  downloadedResourceBytes: 0,
   error: null,
 };
 
@@ -82,7 +106,63 @@ let client: AppUpdateClient = createDesktopAppUpdateClient();
 let checkGeneration = 0;
 let downloadGeneration = 0;
 let pendingDownload: AppUpdateCheckResult["downloadAndInstall"];
+let pendingDownloadOnly: AppUpdateCheckResult["download"];
+let pendingInstall: AppUpdateCheckResult["install"];
+let pendingUpdateRequiresRuntimeComponents = false;
+let pendingResourceManifest: PrepareRuntimeResourcesRequest | null = null;
 let checkInFlight: Promise<void> | null = null;
+
+/** The slim NSIS package depends on resources copied by a previous full install. */
+export function windowsUpdatePackageKind(
+  rawJson: Record<string, unknown>,
+  target: string,
+): "slim" | "full" {
+  const platforms = rawJson["platforms"];
+  const platform =
+    platforms != null && typeof platforms === "object" && !Array.isArray(platforms)
+      ? (platforms as Record<string, unknown>)[target]
+      : undefined;
+  const url =
+    platform != null && typeof platform === "object" && !Array.isArray(platform)
+      ? (platform as Record<string, unknown>)["url"]
+      : platforms === undefined
+        ? rawJson["url"]
+        : undefined;
+  if (typeof url === "string") {
+    try {
+      const parsed = new URL(url);
+      if (parsed.protocol === "https:" || parsed.protocol === "http:") {
+        const filename = decodeURIComponent(parsed.pathname.split("/").pop() ?? "");
+        if (/-slim-setup\.exe$/i.test(filename)) return "slim";
+        if (/-setup\.exe$/i.test(filename)) return "full";
+      }
+    } catch {
+      // A malformed or unrecognized URL must not bypass the slim-package gate.
+    }
+  }
+  throw new Error("无法识别 Windows 更新包类型，已取消安装。请检查更新清单的平台下载地址。");
+}
+
+export function readResourceUpdateManifest(
+  rawJson: Record<string, unknown>,
+): ResourceUpdateManifest | null {
+  const resourceManifest = rawJson["resourceManifest"];
+  if (resourceManifest == null) return null;
+  if (typeof resourceManifest !== "object" || Array.isArray(resourceManifest)) {
+    throw new Error("更新清单的资源补丁信息无效，已取消安装。");
+  }
+  const url = (resourceManifest as Record<string, unknown>)["url"];
+  const signature = (resourceManifest as Record<string, unknown>)["signature"];
+  if (typeof url !== "string" || typeof signature !== "string" || signature.trim() === "") {
+    throw new Error("更新清单的资源补丁信息无效，已取消安装。");
+  }
+  try {
+    if (new URL(url).protocol !== "https:") throw new Error("not https");
+  } catch {
+    throw new Error("更新清单的资源补丁地址无效，已取消安装。");
+  }
+  return { url, signature };
+}
 
 function isInstallingUpdate(): boolean {
   return (
@@ -126,6 +206,10 @@ export function resetAppUpdateStateForTests(): void {
   downloadGeneration += 1;
   checkInFlight = null;
   pendingDownload = undefined;
+  pendingDownloadOnly = undefined;
+  pendingInstall = undefined;
+  pendingUpdateRequiresRuntimeComponents = false;
+  pendingResourceManifest = null;
   state = INITIAL_STATE;
   emit();
 }
@@ -173,6 +257,10 @@ async function performAppUpdateCheck(options?: {
     if (generation !== checkGeneration) return;
     if (!result.available) {
       pendingDownload = undefined;
+      pendingDownloadOnly = undefined;
+      pendingInstall = undefined;
+      pendingUpdateRequiresRuntimeComponents = false;
+      pendingResourceManifest = null;
       patch({
         status: "current",
         currentVersion,
@@ -189,6 +277,12 @@ async function performAppUpdateCheck(options?: {
       throw new Error("更新源返回了空版本号。");
     }
     pendingDownload = result.downloadAndInstall ?? undefined;
+    pendingDownloadOnly = result.download ?? undefined;
+    pendingInstall = result.install ?? undefined;
+    pendingUpdateRequiresRuntimeComponents = result.requiresRuntimeComponents === true;
+    pendingResourceManifest = result.resourceManifest
+      ? { ...result.resourceManifest, version: availableVersion }
+      : null;
     patch({
       status: "available",
       currentVersion,
@@ -198,6 +292,10 @@ async function performAppUpdateCheck(options?: {
       totalBytes: 0,
       error: null,
     });
+    if (pendingDownloadOnly && pendingInstall && readSkippedVersion() !== availableVersion) {
+      // Download in the background; installation waits for the user's restart.
+      void installAvailableAppUpdate();
+    }
   } catch (error) {
     if (generation !== checkGeneration) return;
     const message = describeUpdateError(error);
@@ -209,7 +307,7 @@ async function performAppUpdateCheck(options?: {
   }
 }
 
-/** Keep a running desktop session aware of releases without downloading large installers. */
+/** Check active sessions and prepare updates without interrupting the workspace. */
 export function startAutomaticAppUpdateChecks(): () => void {
   let lastAttemptAt = Number.NEGATIVE_INFINITY;
   const checkWhenActive = () => {
@@ -234,7 +332,8 @@ export function startAutomaticAppUpdateChecks(): () => void {
 }
 
 export async function installAvailableAppUpdate(): Promise<void> {
-  const download = pendingDownload;
+  const splitDownload = pendingDownloadOnly && pendingInstall ? pendingDownloadOnly : undefined;
+  const download = splitDownload ?? pendingDownload;
   if (download == null) {
     patch({ status: "error", error: "没有可安装的更新，请先检查更新。" });
     return;
@@ -245,16 +344,36 @@ export async function installAvailableAppUpdate(): Promise<void> {
   let downloadedBytes = 0;
   let totalBytes = 0;
   try {
-    if (client.waitForRuntimeComponents) {
-      patch({ status: "preparing", preparedBytes: 0, totalPreparationBytes: 0, error: null });
-      await client.waitForRuntimeComponents((progress) => {
+    if (pendingUpdateRequiresRuntimeComponents) {
+      patch({
+        status: "preparing",
+        preparedBytes: 0,
+        totalPreparationBytes: 0,
+        reusedResourceBytes: 0,
+        downloadedResourceBytes: 0,
+        error: null,
+      });
+      const onProgress = (progress: RuntimeComponentMigrationStatus) => {
         if (generation !== downloadGeneration) return;
         patch({
           status: "preparing",
           preparedBytes: progress.completedBytes,
           totalPreparationBytes: progress.totalBytes,
+          reusedResourceBytes: progress.reusedBytes ?? 0,
+          downloadedResourceBytes: progress.downloadedBytes ?? 0,
         });
-      });
+      };
+      if (pendingResourceManifest) {
+        if (!client.prepareRuntimeComponents) {
+          throw new Error("当前应用无法准备按文件更新所需的本地资源。");
+        }
+        await client.prepareRuntimeComponents(pendingResourceManifest, onProgress);
+      } else {
+        if (!client.waitForRuntimeComponents) {
+          throw new Error("小型更新包需要本地运行组件校验，当前应用无法完成校验。");
+        }
+        await client.waitForRuntimeComponents(onProgress);
+      }
       if (generation !== downloadGeneration) return;
     }
     patch({ status: "downloading", downloadedBytes: 0, totalBytes: 0, error: null });
@@ -274,6 +393,15 @@ export async function installAvailableAppUpdate(): Promise<void> {
       patch({ status: "downloading", downloadedBytes, totalBytes });
     });
     if (generation !== downloadGeneration) return;
+    if (splitDownload) {
+      patch({
+        status: "ready",
+        downloadedBytes: totalBytes > 0 ? totalBytes : downloadedBytes,
+        totalBytes,
+        error: null,
+      });
+      return;
+    }
     const needsManualRelaunch = await client.needsManualRelaunch();
     if (generation !== downloadGeneration) return;
     patch({
@@ -292,6 +420,10 @@ export async function relaunchAfterAppUpdate(): Promise<void> {
   if (state.status !== "ready") return;
   patch({ status: "restarting", error: null });
   try {
+    if (pendingInstall) {
+      await pendingInstall();
+      if (!(await client.needsManualRelaunch())) return;
+    }
     await client.relaunch();
   } catch (error) {
     patch({ status: "ready", error: describeUpdateError(error) });
@@ -369,6 +501,9 @@ export function downloadPercent(downloadedBytes: number, totalBytes: number): nu
 export function describeUpdateError(error: unknown): string {
   const raw = error instanceof Error ? error.message : formatRawBackendError(error);
   const text = raw.toLowerCase();
+  if (raw.includes("本地运行组件准备失败") || raw.includes("本地运行组件尚未准备好")) {
+    return `${raw}。小型更新需要完整的本地组件，请改用该版本的完整安装包修复。`;
+  }
   if (text.includes("not_desktop") || text.includes("not a tauri")) {
     return "请在已安装的桌面应用中检查更新。浏览器预览不能升级安装包。";
   }
@@ -404,33 +539,53 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
       if (!isDesktopRuntime()) {
         throw new Error("NOT_DESKTOP");
       }
-      const { check } = await import("@tauri-apps/plugin-updater");
+      const [{ check }, { arch, type }] = await Promise.all([
+        import("@tauri-apps/plugin-updater"),
+        import("@tauri-apps/plugin-os"),
+      ]);
       const update = await check();
       if (update == null) return { available: false };
+      const requiresRuntimeComponents =
+        type() === "windows" &&
+        windowsUpdatePackageKind(update.rawJson, `windows-${arch()}`) === "slim";
+      const resourceManifest = requiresRuntimeComponents
+        ? readResourceUpdateManifest(update.rawJson)
+        : null;
+      const reportDownload =
+        (onProgress: (event: AppUpdateProgressEvent) => void) =>
+        (event: AppUpdateProgressEvent) => {
+          switch (event.event) {
+            case "Started":
+              onProgress({
+                event: "Started",
+                data: { contentLength: event.data?.contentLength },
+              });
+              break;
+            case "Progress":
+              onProgress({
+                event: "Progress",
+                data: { chunkLength: event.data?.chunkLength },
+              });
+              break;
+            case "Finished":
+              onProgress({ event: "Finished" });
+              break;
+          }
+        };
       return {
         available: true,
         version: update.version,
         notes: update.body,
+        requiresRuntimeComponents,
+        resourceManifest,
+        download: async (onProgress) => {
+          await update.download(reportDownload(onProgress));
+        },
+        install: async () => {
+          await update.install();
+        },
         downloadAndInstall: async (onProgress) => {
-          await update.downloadAndInstall((event) => {
-            switch (event.event) {
-              case "Started":
-                onProgress({
-                  event: "Started",
-                  data: { contentLength: event.data.contentLength },
-                });
-                break;
-              case "Progress":
-                onProgress({
-                  event: "Progress",
-                  data: { chunkLength: event.data.chunkLength },
-                });
-                break;
-              case "Finished":
-                onProgress({ event: "Finished" });
-                break;
-            }
-          });
+          await update.downloadAndInstall(reportDownload(onProgress));
         },
       };
     },
@@ -446,6 +601,42 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         if (status.error) throw new Error(`本地运行组件准备失败：${status.error}`);
         if (!status.preparing) throw new Error("本地运行组件尚未准备好，请重启应用后重试更新。");
         await new Promise<void>((resolve) => window.setTimeout(resolve, 750));
+      }
+    },
+    async prepareRuntimeComponents(request, onProgress) {
+      if (!isDesktopRuntime()) throw new Error("NOT_DESKTOP");
+      const { invoke } = await import("@tauri-apps/api/core");
+      let settled = false;
+      const preparation = invoke<void>("prepare_runtime_components_for_update", {
+        version: request.version,
+        manifestUrl: request.url,
+        signature: request.signature,
+      });
+      // Observe both outcomes immediately while keeping the original rejection
+      // for the awaited call below. A fast native error may precede the poll.
+      void preparation.then(
+        () => {
+          settled = true;
+        },
+        () => {
+          settled = true;
+        },
+      );
+      try {
+        while (!settled) {
+          const status = await invoke<RuntimeComponentMigrationStatus>(
+            "get_runtime_component_update_status",
+          );
+          onProgress(status);
+          if (!settled) await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
+        }
+        await preparation;
+        onProgress(
+          await invoke<RuntimeComponentMigrationStatus>("get_runtime_component_update_status"),
+        );
+      } catch (error) {
+        void preparation.catch(() => undefined);
+        throw error;
       }
     },
     async relaunch() {

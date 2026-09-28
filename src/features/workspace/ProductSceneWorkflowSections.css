@@ -112,6 +112,17 @@
   gap: 8px;
   flex-wrap: wrap;
 }
+.product-scene__bulk-review {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  padding: 10px;
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+.product-scene__bulk-review small {
+  overflow-wrap: anywhere;
+}
 .product-scene__preview {
   width: 100%;
   min-width: 0;
