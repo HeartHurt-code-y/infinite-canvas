@@ -49,6 +49,7 @@ export const TOS_FETCH_MAX_ATTEMPTS = 5;
 export const TOS_MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
 export const TOS_MULTIPART_PART_SIZE_BYTES = 32 * 1024 * 1024;
 export const TOS_MULTIPART_CONCURRENCY = 3;
+export const TOS_HTTP_REQUEST_DEADLINE_MS = 180_000;
 
 /**
  * Node 全局 fetch（undici）默认 headersTimeout=300s，计时从**发出请求**开始，
@@ -71,7 +72,7 @@ export function isRetryableTosNetworkError(error) {
     parts.push(String(current));
     break;
   }
-  return /headers timeout|body timeout|connect timeout|und_err_|econnreset|etimedout|enotfound|eai_again|econnrefused|socket hang up|fetch failed|other side closed|network socket/.test(
+  return /headers timeout|body timeout|connect timeout|und_err_|econnreset|econnaborted|epipe|etimedout|enotfound|eai_again|econnrefused|err_stream_premature_close|socket hang up|fetch failed|other side closed|network socket/.test(
     parts.join(" ").toLowerCase(),
   );
 }
@@ -88,20 +89,36 @@ export function wrapTosFetchError(error) {
 
 /**
  * 用 node:https，避免 undici headersTimeout 把大文件上传误判成超时。
- * 不设 req.setTimeout：上传期间套接字一直在写，空闲超时会误伤。
+ * 每次请求有总时限；即使套接字持续写入或服务端始终不结束响应，也不能无限等待。
  *
  * @param {{
  *   url: string,
  *   method: string,
  *   headers: Record<string, string>,
  *   body?: Buffer | string | null,
+ *   timeoutMs?: number,
  * }} request
+ * @param {typeof https.request} [requestImpl]
  * @returns {Promise<{ status: number, text: string, url: string }>}
  */
-export function performTosHttpRequest(request) {
+export function performTosHttpRequest(request, requestImpl = https.request) {
   return new Promise((resolve, reject) => {
+    let settled = false;
+    let deadline;
+    const finish = (error, result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(deadline);
+      if (error) reject(error);
+      else resolve(result);
+    };
+    const connectionError = (message) => {
+      const error = new Error(message);
+      error.code = "ECONNRESET";
+      return error;
+    };
     const parsed = new URL(request.url);
-    const req = https.request(
+    const req = requestImpl(
       {
         hostname: parsed.hostname,
         port: parsed.port === "" ? 443 : Number(parsed.port),
@@ -112,12 +129,19 @@ export function performTosHttpRequest(request) {
       (res) => {
         /** @type {Buffer[]} */
         const chunks = [];
+        res.on("error", (error) => {
+          const wrapped = connectionError("TOS 响应读取失败");
+          wrapped.cause = error;
+          finish(wrapped);
+        });
+        res.on("aborted", () => finish(connectionError("TOS 响应被中止")));
+        res.on("close", () => finish(connectionError("TOS 响应提前关闭")));
         res.on("data", (chunk) => {
           chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
         });
         res.on("end", () => {
           const etagHeader = res.headers.etag;
-          resolve({
+          finish(null, {
             status: res.statusCode ?? 0,
             text: Buffer.concat(chunks).toString("utf8"),
             url: request.url,
@@ -127,12 +151,19 @@ export function performTosHttpRequest(request) {
         });
       },
     );
-    req.on("error", reject);
-    if (request.body == null) {
-      req.end();
-      return;
+    req.on("error", (error) => finish(error));
+    deadline = setTimeout(() => {
+      const error = new Error("TOS 请求超过总时限");
+      error.code = "ETIMEDOUT";
+      finish(error);
+      req.destroy(error);
+    }, request.timeoutMs ?? TOS_HTTP_REQUEST_DEADLINE_MS);
+    try {
+      req.end(request.body ?? undefined);
+    } catch (error) {
+      finish(error);
+      req.destroy();
     }
-    req.end(request.body);
   });
 }
 
@@ -504,6 +535,7 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
     let persistLock = Promise.resolve();
     await runWithConcurrency(pending, TOS_MULTIPART_CONCURRENCY, async (slice) => {
       const body = readFileSlice(filePath, slice.offset, slice.length);
+      const startedAt = Date.now();
       console.log(
         `[tos-publish] 分片 ${slice.partNumber} ${objectKey} ${slice.offset}-${slice.offset + slice.length - 1}/${size}`,
       );
@@ -528,6 +560,9 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
           `上传分片 ${slice.partNumber} ${objectKey} 失败：HTTP ${uploaded.status} ${uploaded.text.slice(0, 300)}`,
         );
       }
+      console.log(
+        `[tos-publish] 分片 ${slice.partNumber} ${objectKey} 上传完成，耗时 ${Date.now() - startedAt}ms`,
+      );
       const previous = persistLock;
       let release = () => {};
       persistLock = new Promise((resolve) => {
@@ -1312,7 +1347,7 @@ export async function publishUpdaterArtifacts(options) {
       uploadedKeys.push(`${manifestKey}.sig`);
   }
   if (macDeltaRelease) {
-    await runWithConcurrency(macDeltaRelease.objects, 8, async (object) => {
+    await runWithConcurrency(macDeltaRelease.objects, 2, async (object) => {
       const objectKey = tosUpdatesObjectKey(object.sha256, `${envConfig.prefix}/mac-delta/objects`);
       if (await putImmutableFile(config, objectKey, object.sourcePath, object.sha256)) {
         uploadedKeys.push(objectKey);

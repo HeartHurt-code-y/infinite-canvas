@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { EventEmitter } from "node:events";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -27,6 +28,7 @@ import {
   macDeltaTransferIsSmaller,
   assertMacDeltaMatchesFullArchive,
   inventoryMacFullArchive,
+  performTosHttpRequest,
   tosFetch,
 } from "./publish-tos-updates.mjs";
 import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
@@ -517,6 +519,99 @@ test("tosFetch surfaces the original Headers Timeout after retries are exhausted
       }),
     /请求 TOS 失败：fetch failed \(Headers Timeout Error\)/,
   );
+});
+
+test("a silent TOS request reaches its deadline, destroys the socket, and can be retried", async () => {
+  let requests = 0;
+  let destroyed = 0;
+  const requestImpl = () => {
+    requests += 1;
+    const req = new EventEmitter();
+    req.end = () => {};
+    req.destroy = (error) => {
+      destroyed += 1;
+      req.emit("error", error);
+    };
+    return req;
+  };
+  await assert.rejects(
+    () =>
+      tosFetch({
+        method: "PUT",
+        host: "example.invalid",
+        objectKey: "part",
+        region: "cn-beijing",
+        accessKey: "ak",
+        secretKey: "sk",
+        attempts: 2,
+        sleep: async () => {},
+        requestImpl: (request) => performTosHttpRequest({ ...request, timeoutMs: 5 }, requestImpl),
+      }),
+    /TOS 请求超过总时限/,
+  );
+  assert.equal(requests, 2);
+  assert.equal(destroyed, 2);
+});
+
+test("TOS response errors, aborts and early closes reject as retryable failures", async () => {
+  for (const eventName of ["error", "aborted", "close"]) {
+    const requestImpl = (_options, onResponse) => {
+      const req = new EventEmitter();
+      req.end = () => {
+        const res = new EventEmitter();
+        res.headers = {};
+        res.statusCode = 200;
+        onResponse(res);
+        res.emit("data", Buffer.from("partial"));
+        if (eventName === "error") {
+          const error = new Error("connection reset");
+          error.code = "ECONNRESET";
+          res.emit("error", error);
+        } else {
+          res.emit(eventName);
+        }
+      };
+      req.destroy = () => {};
+      return req;
+    };
+    await assert.rejects(
+      () =>
+        performTosHttpRequest(
+          {
+            url: "https://example.invalid/part",
+            method: "PUT",
+            headers: {},
+            body: Buffer.from("x"),
+          },
+          requestImpl,
+        ),
+      (error) => {
+        assert.equal(isRetryableTosNetworkError(error), true, eventName);
+        return true;
+      },
+    );
+  }
+});
+
+test("a complete TOS response remains successful when its socket closes", async () => {
+  const result = await performTosHttpRequest(
+    { url: "https://example.invalid/part", method: "PUT", headers: {}, body: Buffer.from("x") },
+    (_options, onResponse) => {
+      const req = new EventEmitter();
+      req.end = () => {
+        const res = new EventEmitter();
+        res.headers = { etag: '"etag"' };
+        res.statusCode = 200;
+        onResponse(res);
+        res.emit("end");
+        res.emit("close");
+      };
+      req.destroy = () => {};
+      return req;
+    },
+  );
+  assert.equal(result.status, 200);
+  assert.equal(result.etag, '"etag"');
 });
 
 test("parses TOS multipart upload id and complete XML", () => {
