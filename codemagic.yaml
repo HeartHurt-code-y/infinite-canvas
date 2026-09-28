@@ -268,7 +268,7 @@ workflows:
           if [ "$windows_version" = "$release_version" ]; then
             pnpm update:publish -- --promote-legacy --version "$release_version"
           else
-            echo "Windows 平台频道为 $windows_version；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
+            echo "Windows 平台频道为 ${windows_version}；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
           fi
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
