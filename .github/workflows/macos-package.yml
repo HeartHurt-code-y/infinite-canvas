@@ -17,21 +17,11 @@ jobs:
       artifact_name: ${{ steps.publish-artifact-links.outputs.artifact_name }}
       run_url: ${{ steps.publish-artifact-links.outputs.run_url }}
 
-    # 放在 job 级而不是单个 step：构建步骤要用它们签名与公证，report 步骤要据此
-    # 判断「分发就绪度」。只落在某一个 step 上的话，另一个 step 读不到。
+    # Developer ID 是可选的；项目固定采用无 Apple 公证的发布流程。
     env:
       # --- 签名（Developer ID Application）---
       APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
       APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-      # --- 公证：两种凭据任选其一 ---
-      # 1) Apple ID（APPLE_PASSWORD 必须是 App 专用密码，不是账号密码）
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-      # 2) App Store Connect API Key（推荐：不受双重验证影响）
-      APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-      APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-      APPLE_API_KEY_PATH: ${{ secrets.APPLE_API_KEY_PATH }}
       # --- 应用内热更新签名（minisign）---
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
@@ -111,40 +101,16 @@ jobs:
       - name: Resolve macOS signing identity
         run: node scripts/macos-signing-identity.mjs
 
-      # 把「这个包能不能给所有人打开」写进 run summary。判据有三项，缺一不可：
-      # Developer ID 证书、公证、以及公证凭据；缺任何一项，陌生用户双击都会被拦。
+      # 无公证是固定发布约定，报告 Gatekeeper 的首次安装边界。
       - name: Report signing scope
         run: |
           source_kind="${INFINITE_CANVAS_SIGNING_IDENTITY_SOURCE:-none}"
-          if [ -n "${APPLE_API_KEY:-}" ] && [ -n "${APPLE_API_ISSUER:-}" ]; then
-            notary_ready="yes (API key)"
-          elif [ -n "${APPLE_ID:-}" ] && [ -n "${APPLE_PASSWORD:-}" ] && [ -n "${APPLE_TEAM_ID:-}" ]; then
-            notary_ready="yes (Apple ID)"
-          else
-            notary_ready="no"
-          fi
           {
             echo "### macOS 分发就绪度"
             echo "- 签名身份：\`${APPLE_SIGNING_IDENTITY:-<none>}\`（类型：\`${source_kind}\`）"
-            echo "- 公证凭据：\`${notary_ready}\`"
-            if [ "$source_kind" = "developer-id" ] && [ "$notary_ready" != "no" ]; then
-              echo "- ✅ 可对外分发：陌生用户双击即可打开。"
-            else
-              echo "- ⚠️ **不能直接给所有人用**。要让任何 Mac 双击即可打开，需要同时具备："
-              echo "  1. Developer ID Application 证书（\`APPLE_CERTIFICATE\` / \`APPLE_CERTIFICATE_PASSWORD\`）；"
-              echo "  2. 公证凭据（\`APPLE_ID\`+\`APPLE_PASSWORD\`+\`APPLE_TEAM_ID\`，或 \`APPLE_API_KEY\`+\`APPLE_API_ISSUER\`+\`APPLE_API_KEY_PATH\`）。"
-              echo "  缺任一项时，用户需手动绕过 Gatekeeper：系统设置 → 隐私与安全性 → 「仍要打开」"
-              echo "  （macOS 15 起右键打开已失效），或执行 \`xattr -dr com.apple.quarantine <app>\`。"
-            fi
+            echo "- Apple 公证：按项目约定不执行。"
+            echo "- 首次安装可能被 Gatekeeper 拦截；请按 scripts/install-macos.sh 的指引处理。"
           } >> "$GITHUB_STEP_SUMMARY"
-
-      # 注意：Developer ID 证书只是**签名**。要让所有用户双击就能打开（不被 Gatekeeper
-      # 拦下），**还必须公证（notarize）**——Apple 自 macOS 10.15 起要求分发到 App Store
-      # 之外的软件必须公证。签名但不公证的包仍会提示「无法验证开发者」。
-      #
-      # Tauri CLI 自己会读取 job 级环境里的 APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID
-      # 或 APPLE_API_KEY*，调用 notarytool 公证，再用 stapler 把票据钉进产物
-      # （已在 darwin 二进制里核实这些变量名与 notarize / stapler 相关字符串均存在）。
       - name: Build macOS installer
         run: pnpm tauri:build
         env:
@@ -175,7 +141,7 @@ jobs:
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
 
-      # Signing and notarization finish here. Keep this artifact pending until the
+      # Signing finishes here. Keep this artifact pending until the
       # matching Windows bridge package is ready for one explicit shared-feed promotion.
       - name: Stage versioned updater archive
         run: pnpm update:stage:macos

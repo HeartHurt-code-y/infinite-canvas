@@ -81,6 +81,10 @@ test("writes latest.json from signed updater artifacts", () => {
         url: "https://cdn.example/resources/manifest.json",
         signature: "resource-sig",
       },
+      macDeltaManifest: {
+        url: "https://cdn.example/mac-delta/0.1.1/darwin-aarch64/manifest.json",
+        signature: "mac-delta-sig",
+      },
     });
     assert.equal(result.out, out);
     const manifest = JSON.parse(readFileSync(out, "utf8"));
@@ -94,6 +98,10 @@ test("writes latest.json from signed updater artifacts", () => {
     assert.deepEqual(manifest.resourceManifest, {
       url: "https://cdn.example/resources/manifest.json",
       signature: "resource-sig",
+    });
+    assert.deepEqual(manifest.macDeltaManifest, {
+      url: "https://cdn.example/mac-delta/0.1.1/darwin-aarch64/manifest.json",
+      signature: "mac-delta-sig",
     });
   } finally {
     rmSync(dir, { recursive: true, force: true });

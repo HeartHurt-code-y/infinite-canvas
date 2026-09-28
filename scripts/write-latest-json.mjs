@@ -155,6 +155,7 @@ export function mergeLatestManifest(existing, incoming, version) {
  *   pubDate?: string,
  *   platforms: Record<string, { url: string, signature: string }>,
  *   resourceManifest?: { url: string, signature: string },
+ *   macDeltaManifest?: { url: string, signature: string },
  * }} input
  */
 export function buildLatestManifest(input) {
@@ -164,6 +165,7 @@ export function buildLatestManifest(input) {
     pub_date: input.pubDate ?? new Date().toISOString(),
     platforms: input.platforms,
     ...(input.resourceManifest ? { resourceManifest: input.resourceManifest } : {}),
+    ...(input.macDeltaManifest ? { macDeltaManifest: input.macDeltaManifest } : {}),
   };
 }
 
@@ -227,6 +229,7 @@ export function writeLatestJson(options) {
     pubDate: typeof options["pub-date"] === "string" ? options["pub-date"] : undefined,
     platforms: /** @type {Record<string, { url: string, signature: string }>} */ (merged.platforms),
     resourceManifest: options.resourceManifest,
+    macDeltaManifest: options.macDeltaManifest,
   });
   writeFileSync(out, `${JSON.stringify(manifest, null, 2)}\n`);
   return { out, manifest };

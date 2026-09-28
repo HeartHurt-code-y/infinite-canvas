@@ -52,7 +52,7 @@
     "update:publish": "node scripts/publish-tos-updates.mjs",
     "update:stage:macos": "node scripts/stage-macos-release.mjs",
     "update:baseline": "node scripts/runtime-resource-baseline.mjs",
-    "update:manifest-test": "node --test scripts/write-latest-json.test.mjs scripts/tauri-build.test.mjs scripts/tauri-bundle-slim.test.mjs scripts/stage-macos-release.test.mjs scripts/runtime-resource-baseline.test.mjs scripts/runtime-resource-release.test.mjs scripts/remotion-runtime-integrity.test.mjs scripts/verify-nsis-remotion-resources.test.mjs scripts/verify-updater-signature.test.mjs scripts/tos-v4.test.mjs scripts/publish-tos-updates.test.mjs",
+    "update:manifest-test": "node --test scripts/write-latest-json.test.mjs scripts/tauri-build.test.mjs scripts/tauri-bundle-slim.test.mjs scripts/stage-macos-release.test.mjs scripts/mac-delta-manifest.test.mjs scripts/runtime-resource-baseline.test.mjs scripts/runtime-resource-release.test.mjs scripts/remotion-runtime-integrity.test.mjs scripts/verify-nsis-remotion-resources.test.mjs scripts/verify-updater-signature.test.mjs scripts/tos-v4.test.mjs scripts/publish-tos-updates.test.mjs",
     "tauri:dev": "tauri dev",
     "tauri:build": "node scripts/tauri-build.mjs",
     "tauri:bundle:slim": "node scripts/tauri-bundle-slim.mjs"

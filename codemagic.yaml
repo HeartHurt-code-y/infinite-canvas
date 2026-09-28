@@ -29,7 +29,7 @@ workflows:
           echo 'export PATH="$HOME/.cargo/bin:$PATH"' >> "$CM_ENV"
       - name: Install dependencies
         script: pnpm install --frozen-lockfile
-      - name: Check bridge release inputs
+      - name: Check release inputs and focused delta tests
         script: |
           set -euo pipefail
           if [ "$(node -p 'process.arch')" != "arm64" ]; then
@@ -40,6 +40,13 @@ workflows:
             echo "缺少 TAURI_SIGNING_PRIVATE_KEY，不能生成已签名的 updater 包" >&2
             exit 1
           fi
+          if [ -n "${CM_COMMIT:-}" ] && [ "$(git rev-parse HEAD)" != "$(git rev-parse "${CM_COMMIT}^{commit}")" ]; then
+            echo "Codemagic checkout 与触发构建的 source commit 不一致" >&2
+            exit 1
+          fi
+          echo "macOS release source commit: $(git rev-parse HEAD)"
+          python3 --version
+          node --test scripts/mac-delta-manifest.test.mjs scripts/publish-tos-updates.test.mjs scripts/write-latest-json.test.mjs
           node --input-type=module <<'NODE'
           import { readFileSync } from 'node:fs';
           const packageVersion = JSON.parse(readFileSync('package.json', 'utf8')).version;
@@ -102,8 +109,7 @@ workflows:
           fi
           bash scripts/verify-macos-bundle.sh "$app_path"
           if [ "${INFINITE_CANVAS_SIGNING_IDENTITY_SOURCE:-}" = "developer-id" ]; then
-            spctl -a -t exec -vv "$app_path"
-            xcrun stapler validate "$app_path"
+            spctl -a -t exec -vv "$app_path" || echo "未公证版本可能被 Gatekeeper 拦截；不阻断发布。"
           fi
       - name: Verify offline DMG
         script: |
@@ -148,6 +154,84 @@ workflows:
           assert.equal(manifest.platforms['darwin-aarch64'].signature, readFileSync(`${archive}.sig`, 'utf8').trim());
           console.log(`已验签并暂存 macOS ${config.version} arm64 updater；公开更新频道未变更。`);
           NODE
+      - name: Stage signed macOS app delta from the previous release
+        script: |
+          set -euo pipefail
+          release_version="$(node -p "require('./package.json').version")"
+          delta_work_dir="$(mktemp -d)"
+          trap 'rm -rf "$delta_work_dir"' EXIT
+          export MAC_DELTA_BASE_INFO_PATH="$delta_work_dir/base.json"
+          export MAC_DELTA_RELEASE_VERSION="$release_version"
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from 'node:fs';
+          import { compareReleaseVersions } from './scripts/publish-tos-updates.mjs';
+          import { tosPlatformLatestJsonUrl, tosUpdatesPublicBaseUrl } from './scripts/tos-updates-config.mjs';
+          const response = await fetch(tosPlatformLatestJsonUrl('darwin-aarch64'), {
+            signal: AbortSignal.timeout(30_000),
+            cache: 'no-store',
+          });
+          if (!response.ok) throw new Error(`读取上一版 Mac 更新清单失败：HTTP ${response.status}`);
+          const feed = await response.json();
+          const version = process.env.MAC_DELTA_RELEASE_VERSION;
+          const baseVersion = process.env.MAC_DELTA_BASE_VERSION?.trim() || feed.version;
+          if (compareReleaseVersions(baseVersion, version) >= 0) {
+            throw new Error(`差分基线 ${baseVersion} 必须早于目标 ${version}；重跑同版时设置 MAC_DELTA_BASE_VERSION`);
+          }
+          const name = `无限画布_${baseVersion}_aarch64-full.app.tar.gz`;
+          const url = `${tosUpdatesPublicBaseUrl()}/darwin-aarch64/${encodeURIComponent(name)}`;
+          const expectedSignature = baseVersion === feed.version
+            ? feed.platforms?.['darwin-aarch64']?.signature
+            : null;
+          if (baseVersion === feed.version && (
+            feed.platforms?.['darwin-aarch64']?.url !== url ||
+            typeof expectedSignature !== 'string' || expectedSignature.trim() === ''
+          )) throw new Error('上一版 Mac 平台频道未指向预期完整签名包');
+          writeFileSync(process.env.MAC_DELTA_BASE_INFO_PATH, JSON.stringify({ baseVersion, url, expectedSignature }));
+          NODE
+          base_version="$(node -p "require(process.env.MAC_DELTA_BASE_INFO_PATH).baseVersion")"
+          base_url="$(node -p "require(process.env.MAC_DELTA_BASE_INFO_PATH).url")"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$delta_work_dir/base.app.tar.gz" "$base_url"
+          curl --fail --location --retry 3 --retry-delay 2 --output "$delta_work_dir/base.app.tar.gz.sig" "$base_url.sig"
+          export MAC_DELTA_BASE_ARCHIVE="$delta_work_dir/base.app.tar.gz"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { verifyUpdaterSignature } from './scripts/verify-updater-signature.mjs';
+          const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const archive = process.env.MAC_DELTA_BASE_ARCHIVE;
+          await verifyUpdaterSignature(archive, `${archive}.sig`, config.plugins.updater.pubkey);
+          const expected = JSON.parse(readFileSync(process.env.MAC_DELTA_BASE_INFO_PATH, 'utf8')).expectedSignature;
+          if (expected && readFileSync(`${archive}.sig`, 'utf8').trim() !== expected.trim()) {
+            throw new Error('上一版 Mac archive 签名与平台频道不一致');
+          }
+          NODE
+          mkdir -p "$delta_work_dir/base" "$delta_work_dir/target"
+          tar -xzf "$delta_work_dir/base.app.tar.gz" -C "$delta_work_dir/base"
+          staged="src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full"
+          target_archive="$staged/无限画布_${release_version}_aarch64-full.app.tar.gz"
+          tar -xzf "$target_archive" -C "$delta_work_dir/target"
+          base_app="$delta_work_dir/base/无限画布.app"
+          target_app="$delta_work_dir/target/无限画布.app"
+          test -d "$base_app"
+          test -d "$target_app"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$base_app/Contents/Info.plist")" = "$base_version"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$target_app/Contents/Info.plist")" = "$release_version"
+          codesign --verify --deep --strict "$base_app"
+          codesign --verify --deep --strict "$target_app"
+          delta_out="$staged/mac-delta"
+          node scripts/mac-delta-manifest.mjs "$base_app" "$target_app" "$base_version" "$release_version" "$delta_out"
+          pnpm exec tauri signer sign "$delta_out/manifest.json"
+          export MAC_DELTA_MANIFEST_PATH="$delta_out/manifest.json"
+          node --input-type=module <<'NODE'
+          import { readFileSync } from 'node:fs';
+          import { validateMacDeltaManifest } from './scripts/mac-delta-manifest.mjs';
+          import { verifyUpdaterSignature } from './scripts/verify-updater-signature.mjs';
+          const config = JSON.parse(readFileSync('src-tauri/tauri.conf.json', 'utf8'));
+          const manifestPath = process.env.MAC_DELTA_MANIFEST_PATH;
+          await verifyUpdaterSignature(manifestPath, `${manifestPath}.sig`, config.plugins.updater.pubkey);
+          const manifest = validateMacDeltaManifest(JSON.parse(readFileSync(manifestPath, 'utf8')));
+          if (manifest.version !== config.version) throw new Error('已签名 Mac 差分清单版本不符');
+          console.log(`Mac ${manifest.baseVersion} → ${manifest.version} 差分已暂存并验签，尚未发布。`);
+          NODE
       - name: Publish macOS updater
         script: |
           set -euo pipefail
@@ -157,7 +241,12 @@ workflows:
         script: |
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
-          pnpm update:publish -- --promote-legacy --version "$release_version"
+          windows_version="$(node --input-type=module -e "const response = await fetch('https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/windows-x86_64/latest.json', {signal: AbortSignal.timeout(30000)}); if (!response.ok) throw new Error('Windows feed HTTP ' + response.status); console.log((await response.json()).version)")"
+          if [ "$windows_version" = "$release_version" ]; then
+            pnpm update:publish -- --promote-legacy --version "$release_version"
+          else
+            echo "Windows 平台频道为 $windows_version；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
+          fi
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz
@@ -165,6 +254,8 @@ workflows:
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/*.app.tar.gz
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/*.app.tar.gz.sig
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/latest.json
+      - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json
+      - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json.sig
       - src-tauri/target/release/bundle/helper/install-macos.sh
   promote-legacy-update:
     name: Promote 0.1.8 shared update

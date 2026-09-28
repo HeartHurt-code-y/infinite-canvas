@@ -1,0 +1,47 @@
+name: macOS Delta Check
+
+on:
+  push:
+    branches:
+      - "codex/**"
+    paths:
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/src/backend/mac_delta_update.rs"
+      - "src-tauri/src/backend/mac_delta_update/**"
+      - "scripts/mac-delta-manifest.mjs"
+      - "scripts/mac-delta-manifest.test.mjs"
+      - ".github/workflows/macos-delta-check.yml"
+  pull_request:
+    paths:
+      - "src-tauri/Cargo.toml"
+      - "src-tauri/Cargo.lock"
+      - "src-tauri/src/backend/mac_delta_update.rs"
+      - "src-tauri/src/backend/mac_delta_update/**"
+      - "scripts/mac-delta-manifest.mjs"
+      - "scripts/mac-delta-manifest.test.mjs"
+      - ".github/workflows/macos-delta-check.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  delta:
+    runs-on: macos-14
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: "2"
+      CARGO_INCREMENTAL: "0"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Prepare build-script resource directories
+        run: mkdir -p src-tauri/resources/ffmpeg src-tauri/resources/remotion-runtime src-tauri/resources/blender
+      - name: Check macOS delta manifest and symlinks
+        run: node --test scripts/mac-delta-manifest.test.mjs
+      - name: Compile and test macOS delta installer
+        run: cargo test --manifest-path src-tauri/Cargo.toml --locked --lib backend::mac_delta_update::tests

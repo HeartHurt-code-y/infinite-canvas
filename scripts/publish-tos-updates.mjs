@@ -3,7 +3,9 @@
 import {
   closeSync,
   existsSync,
+  lstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   readSync,
   statSync,
@@ -11,11 +13,13 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import https from "node:https";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import {
+  REPO_ROOT,
   buildLatestManifest,
   collectUpdaterPlatforms,
   listFilesRecursive,
@@ -35,6 +39,8 @@ import {
 } from "./tos-updates-config.mjs";
 import { candidateSecretKeys, presignUrl } from "./tos-v4.mjs";
 import { RESOURCE_COMPONENTS, verifyRuntimeResourceRelease } from "./runtime-resource-release.mjs";
+import { validateMacDeltaManifest } from "./mac-delta-manifest.mjs";
+import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
 
 const PROBE_FILE = ".public-probe.txt";
 const PUT_EXPIRES_SECS = 3600;
@@ -162,6 +168,8 @@ export function collectPublishFilePaths(bundleDir) {
     // Their .sig must not be mistaken for an updater installer signature.
     const relative = path.relative(bundleDir, filePath).replaceAll("\\", "/");
     if (relative.startsWith("resources/")) continue;
+    // macOS delta objects and signed manifest are published to immutable keys separately.
+    if (relative.startsWith("mac-delta/")) continue;
     const fileName = path.basename(filePath);
     const lower = fileName.toLowerCase();
     if (lower === "latest.json") {
@@ -738,7 +746,9 @@ export function checkChannelManifest(existing, proposed) {
     existing.notes !== proposed.notes ||
     JSON.stringify(existing.platforms) !== JSON.stringify(proposed.platforms) ||
     JSON.stringify(existing.resourceManifest ?? null) !==
-      JSON.stringify(proposed.resourceManifest ?? null)
+      JSON.stringify(proposed.resourceManifest ?? null) ||
+    JSON.stringify(existing.macDeltaManifest ?? null) !==
+      JSON.stringify(proposed.macDeltaManifest ?? null)
   ) {
     throw new Error(`频道 ${proposed.version} 已发布不同产物，拒绝同版覆盖`);
   }
@@ -758,6 +768,157 @@ export function collectRuntimeResourceObjects(manifest, root) {
     }
   }
   return [...sources.values()];
+}
+
+/** Validate publication inputs before touching a live feed. The signed manifest is
+ * also checked by the client, but the publisher must not upload a broken release. */
+export function collectMacDeltaObjects(manifest, version, expectedObjectBaseUrl) {
+  validateMacDeltaManifest(manifest);
+  if (
+    compareReleaseVersions(manifest.baseVersion, version) >= 0 ||
+    manifest.version !== version ||
+    manifest.platform !== "darwin-aarch64" ||
+    manifest.appName !== "无限画布.app" ||
+    manifest.objectBaseUrl !== expectedObjectBaseUrl
+  )
+    throw new Error("macOS 差分清单版本、平台或对象地址无效");
+
+  const objects = new Map();
+  let totalBytes = 0;
+  for (const entry of manifest.files) {
+    if (entry.kind === "file") {
+      if (entry.size > 8 * 1024 ** 3) throw new Error(`macOS 差分文件超限：${entry.path}`);
+      totalBytes += entry.size;
+      if (entry.source === "object") {
+        const previous = objects.get(entry.sha256);
+        if (previous != null && previous !== entry.size) {
+          throw new Error(`macOS 差分对象哈希大小冲突：${entry.sha256}`);
+        }
+        objects.set(entry.sha256, entry.size);
+      }
+    }
+  }
+  if (totalBytes > 20 * 1024 ** 3) throw new Error("macOS 差分清单总大小超限");
+  return [...objects].map(([sha256, size]) => ({ sha256, size }));
+}
+
+export function macDeltaTransferIsSmaller(
+  objects,
+  manifestBytes,
+  signatureBytes,
+  fullArchiveBytes,
+) {
+  const deltaBytes = objects.reduce(
+    (total, object) => total + object.size,
+    manifestBytes + signatureBytes,
+  );
+  return Number.isSafeInteger(deltaBytes) && deltaBytes < fullArchiveBytes;
+}
+
+function macDeltaEntryIdentity(entry) {
+  if (entry.kind === "file") {
+    return [entry.path, entry.kind, entry.size, entry.sha256, entry.mode];
+  }
+  if (entry.kind === "dir") return [entry.path, entry.kind, entry.mode];
+  return [entry.path, entry.kind, entry.target];
+}
+
+/** Read a signed macOS full updater as a stream; never extract archive entries. */
+export async function inventoryMacFullArchive(archivePath, appName) {
+  const script = path.join(REPO_ROOT, "scripts", "inventory-macos-updater-archive.py");
+  const python = process.platform === "win32" ? "python" : "python3";
+  return new Promise((resolve, reject) => {
+    const child = spawn(python, [script, archivePath, appName], {
+      cwd: REPO_ROOT,
+      windowsHide: true,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    const output = [];
+    let outputBytes = 0;
+    let stderr = "";
+    let oversized = false;
+    child.stdout.on("data", (chunk) => {
+      outputBytes += chunk.length;
+      if (outputBytes > 32 * 1024 * 1024) {
+        oversized = true;
+        child.kill();
+      } else {
+        output.push(chunk);
+      }
+    });
+    child.stderr.on("data", (chunk) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(0, 2_000);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (oversized) return reject(new Error("macOS 完整包文件树清单输出超限"));
+      if (code !== 0) return reject(new Error(`读取 macOS 完整包文件树失败：${stderr}`));
+      try {
+        resolve(JSON.parse(Buffer.concat(output).toString("utf8")));
+      } catch {
+        reject(new Error("macOS 完整包文件树输出格式无效"));
+      }
+    });
+  });
+}
+
+export async function assertMacDeltaMatchesFullArchive(archivePath, manifest) {
+  const actual = await inventoryMacFullArchive(archivePath, manifest.appName);
+  const expected = manifest.files;
+  if (!Array.isArray(actual) || actual.length !== expected.length) {
+    throw new Error("macOS 差分目标文件树与完整 updater 包不一致：文件数量不同");
+  }
+  for (let index = 0; index < expected.length; index += 1) {
+    if (
+      JSON.stringify(macDeltaEntryIdentity(actual[index])) !==
+      JSON.stringify(macDeltaEntryIdentity(expected[index]))
+    ) {
+      throw new Error(`macOS 差分目标文件树与完整 updater 包不一致：${expected[index].path}`);
+    }
+  }
+}
+
+async function verifyStagedMacDeltaRelease({
+  manifestPath,
+  version,
+  expectedObjectBaseUrl,
+  fullArchivePath,
+  pubkey,
+}) {
+  if (statSync(manifestPath).size > 16 * 1024 * 1024) {
+    throw new Error("macOS 差分清单超过客户端允许的 16 MiB");
+  }
+  await verifyUpdaterSignature(manifestPath, `${manifestPath}.sig`, pubkey);
+  const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+  const objects = collectMacDeltaObjects(manifest, version, expectedObjectBaseUrl);
+  const objectDir = path.join(path.dirname(manifestPath), "objects");
+  const expected = new Set(objects.map((object) => object.sha256));
+  const actual = new Set(readdirSync(objectDir));
+  if (expected.size !== actual.size || [...expected].some((name) => !actual.has(name))) {
+    throw new Error("macOS 差分暂存对象与已签名清单不一致");
+  }
+  for (const object of objects) {
+    const sourcePath = path.join(objectDir, object.sha256);
+    const source = lstatSync(sourcePath);
+    if (
+      !source.isFile() ||
+      source.isSymbolicLink() ||
+      source.size !== object.size ||
+      (await sha256File(sourcePath)) !== object.sha256
+    ) {
+      throw new Error(`macOS 差分对象哈希或大小不匹配：${object.sha256}`);
+    }
+  }
+  await verifyUpdaterSignature(fullArchivePath, `${fullArchivePath}.sig`, pubkey);
+  await assertMacDeltaMatchesFullArchive(fullArchivePath, manifest);
+  return {
+    manifest,
+    signature: readFileSync(`${manifestPath}.sig`, "utf8").trim(),
+    objects: objects.map((object) => ({
+      ...object,
+      sourcePath: path.join(objectDir, object.sha256),
+    })),
+  };
 }
 
 export function checkLegacyPlatformFeeds(version, platforms, feeds) {
@@ -917,7 +1078,9 @@ export function collectMacFullOfflineFiles(directory, version) {
     path.basename(filePath).endsWith(`_${version}_aarch64.dmg`),
   );
   if (dmgs.length !== 1) {
-    throw new Error(`macOS 完整离线暂存目录需要恰好一个本版 aarch64 DMG，实际找到 ${dmgs.length} 个`);
+    throw new Error(
+      `macOS 完整离线暂存目录需要恰好一个本版 aarch64 DMG，实际找到 ${dmgs.length} 个`,
+    );
   }
   const helpers = files.filter((filePath) => path.basename(filePath) === "install-macos.sh");
   if (helpers.length > 1) {
@@ -982,6 +1145,54 @@ export async function publishUpdaterArtifacts(options) {
       throw new Error("资源对象地址与已构建客户端的更新源不同");
     }
   }
+  const stagedMacDeltaManifest = path.join(bundlePath, "mac-delta", "manifest.json");
+  const macDeltaManifestPath =
+    typeof options["mac-delta-manifest"] === "string"
+      ? path.resolve(options["mac-delta-manifest"])
+      : existsSync(stagedMacDeltaManifest)
+        ? stagedMacDeltaManifest
+        : null;
+  if (macDeltaManifestPath && channel !== "darwin-aarch64") {
+    throw new Error("macOS 差分清单只能随 darwin-aarch64 平台频道发布");
+  }
+  let macDeltaRelease = null;
+  if (macDeltaManifestPath) {
+    const fullName = artifactName(incoming["darwin-aarch64"].url);
+    const fullArchives = listFilesRecursive(bundlePath).filter(
+      (filePath) => path.basename(filePath) === fullName,
+    );
+    if (fullArchives.length !== 1 || fullName !== `无限画布_${version}_aarch64-full.app.tar.gz`) {
+      throw new Error("macOS 差分发布需要恰好一个同版完整 updater 包");
+    }
+    const appConfig = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+    );
+    const expectedObjects = `${tosUpdatesPublicBaseUrl(envConfig)}/mac-delta/objects/`;
+    const updaterEndpoint = new URL(appConfig.plugins.updater.endpoints[0]);
+    if (new URL(expectedObjects).origin !== updaterEndpoint.origin) {
+      throw new Error("macOS 差分对象地址与已构建客户端更新源不同");
+    }
+    macDeltaRelease = await verifyStagedMacDeltaRelease({
+      manifestPath: macDeltaManifestPath,
+      version,
+      expectedObjectBaseUrl: expectedObjects,
+      fullArchivePath: fullArchives[0],
+      pubkey: appConfig.plugins.updater.pubkey,
+    });
+    if (
+      !macDeltaTransferIsSmaller(
+        macDeltaRelease.objects,
+        statSync(macDeltaManifestPath).size,
+        statSync(`${macDeltaManifestPath}.sig`).size,
+        statSync(fullArchives[0]).size,
+      )
+    ) {
+      console.warn(
+        "[tos-publish] macOS 差分传输量不小于完整 updater 包；本版只发布完整包，不附加 macDeltaManifest",
+      );
+      macDeltaRelease = null;
+    }
+  }
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey, prefix };
   const fullBundleDir = options["full-bundle-dir"];
@@ -992,9 +1203,10 @@ export async function publishUpdaterArtifacts(options) {
   let offlineFiles = [];
   if (hasFullBundleDir) {
     const offlineDir = path.resolve(fullBundleDir);
-    offlineFiles = channel === "darwin-aarch64"
-      ? collectMacFullOfflineFiles(offlineDir, version)
-      : collectFullOfflineFiles(offlineDir, version);
+    offlineFiles =
+      channel === "darwin-aarch64"
+        ? collectMacFullOfflineFiles(offlineDir, version)
+        : collectFullOfflineFiles(offlineDir, version);
   }
   const publicBase = tosUpdatesPublicBaseUrl({
     bucket: config.bucket,
@@ -1007,6 +1219,12 @@ export async function publishUpdaterArtifacts(options) {
         signature: release.signature,
       }
     : undefined;
+  const macDeltaManifest = macDeltaRelease
+    ? {
+        url: `${tosUpdatesPublicBaseUrl(envConfig)}/mac-delta/${version}/darwin-aarch64/manifest.json`,
+        signature: macDeltaRelease.signature,
+      }
+    : undefined;
   const out = path.join(bundlePath, "latest.json");
   const written = writeLatestJson({
     "bundle-dir": bundlePath,
@@ -1016,6 +1234,7 @@ export async function publishUpdaterArtifacts(options) {
     notes: typeof options.notes === "string" ? options.notes : "",
     platform: typeof options.platform === "string" ? options.platform : undefined,
     resourceManifest,
+    macDeltaManifest,
   });
   if (channel === "legacy") {
     const feeds = {};
@@ -1041,6 +1260,7 @@ export async function publishUpdaterArtifacts(options) {
       notes: typeof options.notes === "string" ? options.notes : "",
       platform: typeof options.platform === "string" ? options.platform : undefined,
       resourceManifest,
+      macDeltaManifest,
       "pub-date": previous.pubDate,
     });
   }
@@ -1090,6 +1310,24 @@ export async function publishUpdaterArtifacts(options) {
       uploadedKeys.push(manifestKey);
     if (await putImmutableFile(config, `${manifestKey}.sig`, `${resourceManifestPath}.sig`))
       uploadedKeys.push(`${manifestKey}.sig`);
+  }
+  if (macDeltaRelease) {
+    await runWithConcurrency(macDeltaRelease.objects, 8, async (object) => {
+      const objectKey = tosUpdatesObjectKey(object.sha256, `${envConfig.prefix}/mac-delta/objects`);
+      if (await putImmutableFile(config, objectKey, object.sourcePath, object.sha256)) {
+        uploadedKeys.push(objectKey);
+      }
+    });
+    const manifestKey = tosUpdatesObjectKey(
+      "manifest.json",
+      `${envConfig.prefix}/mac-delta/${version}/darwin-aarch64`,
+    );
+    if (await putImmutableFile(config, manifestKey, macDeltaManifestPath)) {
+      uploadedKeys.push(manifestKey);
+    }
+    if (await putImmutableFile(config, `${manifestKey}.sig`, `${macDeltaManifestPath}.sig`)) {
+      uploadedKeys.push(`${manifestKey}.sig`);
+    }
   }
   for (const filePath of offlineFiles) {
     const fileName = path.basename(filePath);

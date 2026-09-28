@@ -28,6 +28,15 @@ export interface RuntimeComponentMigrationStatus {
   readonly downloadedBytes?: number | undefined;
 }
 
+interface MacDeltaUpdateStatus {
+  readonly preparing: boolean;
+  readonly ready: boolean;
+  readonly error: string | null;
+  readonly downloadedBytes: number;
+  readonly totalBytes: number;
+  readonly reusedBytes: number;
+}
+
 export interface AppUpdateProgressEvent {
   readonly event: "Started" | "Progress" | "Finished";
   readonly data?: {
@@ -44,7 +53,8 @@ export interface AppUpdateCheckResult {
   readonly resourceManifest?: ResourceUpdateManifest | null | undefined;
   readonly download?:
     ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
-  readonly install?: (() => Promise<void>) | undefined;
+  readonly install?:
+    ((onProgress?: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
   readonly downloadAndInstall?:
     ((onProgress: (event: AppUpdateProgressEvent) => void) => Promise<void>) | undefined;
 }
@@ -421,7 +431,22 @@ export async function relaunchAfterAppUpdate(): Promise<void> {
   patch({ status: "restarting", error: null });
   try {
     if (pendingInstall) {
-      await pendingInstall();
+      let fallbackDownloadedBytes = 0;
+      await pendingInstall((event) => {
+        if (event.event === "Started") {
+          fallbackDownloadedBytes = 0;
+          patch({
+            status: "downloading",
+            downloadedBytes: 0,
+            totalBytes: event.data?.contentLength ?? 0,
+          });
+        } else if (event.event === "Progress") {
+          fallbackDownloadedBytes += event.data?.chunkLength ?? 0;
+          patch({ status: "downloading", downloadedBytes: fallbackDownloadedBytes });
+        } else {
+          patch({ status: "restarting" });
+        }
+      });
       if (!(await client.needsManualRelaunch())) return;
     }
     await client.relaunch();
@@ -551,6 +576,9 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
       const resourceManifest = requiresRuntimeComponents
         ? readResourceUpdateManifest(update.rawJson)
         : null;
+      const offersMacDelta = type() === "macos" && update.rawJson["macDeltaManifest"] != null;
+      let macDeltaPrepared = false;
+      let fullDownloaded = false;
       const reportDownload =
         (onProgress: (event: AppUpdateProgressEvent) => void) =>
         (event: AppUpdateProgressEvent) => {
@@ -579,9 +607,86 @@ export function createDesktopAppUpdateClient(): AppUpdateClient {
         requiresRuntimeComponents,
         resourceManifest,
         download: async (onProgress) => {
+          if (offersMacDelta) {
+            const { invoke } = await import("@tauri-apps/api/core");
+            let done = false;
+            let lastDownloaded = 0;
+            let started = false;
+            const preparation = invoke<boolean>("prepare_macos_delta_update", {
+              version: update.version,
+            });
+            void preparation
+              .finally(() => {
+                done = true;
+              })
+              .catch(() => undefined);
+            try {
+              while (!done) {
+                const progress = await invoke<MacDeltaUpdateStatus>(
+                  "get_macos_delta_update_status",
+                );
+                if (!started && progress.totalBytes > 0) {
+                  onProgress({ event: "Started", data: { contentLength: progress.totalBytes } });
+                  started = true;
+                }
+                if (progress.downloadedBytes > lastDownloaded) {
+                  onProgress({
+                    event: "Progress",
+                    data: { chunkLength: progress.downloadedBytes - lastDownloaded },
+                  });
+                  lastDownloaded = progress.downloadedBytes;
+                }
+                if (!done) await new Promise<void>((resolve) => window.setTimeout(resolve, 500));
+              }
+              macDeltaPrepared = await preparation;
+              if (macDeltaPrepared) {
+                const progress = await invoke<MacDeltaUpdateStatus>(
+                  "get_macos_delta_update_status",
+                );
+                if (!started) {
+                  onProgress({ event: "Started", data: { contentLength: progress.totalBytes } });
+                }
+                if (progress.downloadedBytes > lastDownloaded) {
+                  onProgress({
+                    event: "Progress",
+                    data: { chunkLength: progress.downloadedBytes - lastDownloaded },
+                  });
+                }
+                onProgress({ event: "Finished" });
+                return;
+              }
+            } catch (error) {
+              void preparation.catch(() => undefined);
+              frontendLog(
+                "warn",
+                `[app-update] macOS 差分不可用，改用完整更新包：${describeUpdateError(error)}`,
+              );
+              macDeltaPrepared = false;
+            }
+          }
           await update.download(reportDownload(onProgress));
+          fullDownloaded = true;
         },
-        install: async () => {
+        install: async (onProgress) => {
+          if (macDeltaPrepared) {
+            const { invoke } = await import("@tauri-apps/api/core");
+            try {
+              await invoke("install_prepared_macos_delta_update", { version: update.version });
+              return;
+            } catch (error) {
+              const raw = error instanceof Error ? error.message : formatRawBackendError(error);
+              // Only an explicit native preflight error is known to be free
+              // of install side effects. Unknown IPC or installer failures
+              // must never start a second installer.
+              if (!raw.startsWith("MAC_DELTA_PREINSTALL:")) throw error;
+              frontendLog("warn", `[app-update] macOS 差分安装前校验失败，改用完整包：${raw}`);
+              macDeltaPrepared = false;
+            }
+          }
+          if (!fullDownloaded) {
+            await update.download(reportDownload(onProgress ?? (() => undefined)));
+            fullDownloaded = true;
+          }
           await update.install();
         },
         downloadAndInstall: async (onProgress) => {

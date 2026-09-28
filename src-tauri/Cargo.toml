@@ -30,6 +30,7 @@ base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 futures-util = "0.3"
 fs2 = "0.4.3"
+flate2 = "1"
 hex = "0.4"
 hmac = "0.12"
 minisign-verify = "0.2.5"
@@ -67,6 +68,8 @@ ffmpeg-sidecar = "2.5.2"
 hickory-resolver = { version = "0.24", features = ["tokio-runtime"] }
 # 凭据自检需要在系统临时目录建一个一次性凭据文件（不碰用户数据）。
 tempfile = "3"
+tar = "0.4"
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "test-util"] }

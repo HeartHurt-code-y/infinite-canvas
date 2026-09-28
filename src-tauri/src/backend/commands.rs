@@ -15,6 +15,7 @@ use super::{
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
     material_transfer,
+    mac_delta_update::{self, MacDeltaUpdateStatus},
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     mv_audio::{
         self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
@@ -100,6 +101,24 @@ pub async fn prepare_runtime_components_for_update(
 #[tauri::command]
 pub fn get_runtime_component_update_status() -> RuntimeResourceUpdateStatus {
     resource_update::runtime_component_update_status()
+}
+
+#[tauri::command]
+pub async fn prepare_macos_delta_update(app: AppHandle, version: String) -> Result<bool, String> {
+    mac_delta_update::prepare(&app, &version).await
+}
+
+#[tauri::command]
+pub fn get_macos_delta_update_status() -> MacDeltaUpdateStatus {
+    mac_delta_update::status()
+}
+
+#[tauri::command]
+pub async fn install_prepared_macos_delta_update(
+    app: AppHandle,
+    version: String,
+) -> Result<(), String> {
+    mac_delta_update::install(&app, &version).await
 }
 
 #[tauri::command]
