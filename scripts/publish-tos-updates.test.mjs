@@ -29,6 +29,9 @@ import {
   assertMacDeltaMatchesFullArchive,
   inventoryMacFullArchive,
   performTosHttpRequest,
+  readMultipartProgress,
+  TOS_MULTIPART_PART_SIZE_BYTES,
+  TOS_MULTIPART_THRESHOLD_BYTES,
   tosFetch,
 } from "./publish-tos-updates.mjs";
 import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
@@ -612,6 +615,39 @@ test("a complete TOS response remains successful when its socket closes", async 
   );
   assert.equal(result.status, 200);
   assert.equal(result.etag, '"etag"');
+});
+
+test("8 MiB multipart uploads reject cached 32 MiB and changed-file progress", () => {
+  assert.equal(TOS_MULTIPART_PART_SIZE_BYTES, 8 * 1024 * 1024);
+  assert.equal(TOS_MULTIPART_THRESHOLD_BYTES, 32 * 1024 * 1024);
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-multipart-progress-"));
+  try {
+    const filePath = path.join(dir, "installer.dmg");
+    const progressPath = `${filePath}.multipart.json`;
+    const objectKey = "infinite-canvas/updates/offline/0.1.11/installer.dmg";
+    const size = 793_000_000;
+    const digest = "a".repeat(64);
+    const base = {
+      objectKey,
+      size,
+      uploadId: "old-upload",
+      parts: [{ partNumber: 1, etag: '"old-etag"' }],
+    };
+    const save = (progress) => writeFileSync(progressPath, JSON.stringify(progress));
+
+    save(base);
+    assert.equal(readMultipartProgress(filePath, objectKey, size, digest), null);
+    save({ ...base, partSize: 32 * 1024 * 1024, digest });
+    assert.equal(readMultipartProgress(filePath, objectKey, size, digest), null);
+    save({ ...base, partSize: TOS_MULTIPART_PART_SIZE_BYTES, digest: "b".repeat(64) });
+    assert.equal(readMultipartProgress(filePath, objectKey, size, digest), null);
+
+    const current = { ...base, partSize: TOS_MULTIPART_PART_SIZE_BYTES, digest };
+    save(current);
+    assert.deepEqual(readMultipartProgress(filePath, objectKey, size, digest), current);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 test("parses TOS multipart upload id and complete XML", () => {

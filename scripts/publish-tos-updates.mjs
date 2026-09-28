@@ -47,7 +47,7 @@ const PUT_EXPIRES_SECS = 3600;
 export const TOS_FETCH_MAX_ATTEMPTS = 5;
 /** 单次 PUT 会被 TOS 408 掐掉（约 700MB 安装包）。大于该体积改走分片。 */
 export const TOS_MULTIPART_THRESHOLD_BYTES = 32 * 1024 * 1024;
-export const TOS_MULTIPART_PART_SIZE_BYTES = 32 * 1024 * 1024;
+export const TOS_MULTIPART_PART_SIZE_BYTES = 8 * 1024 * 1024;
 export const TOS_MULTIPART_CONCURRENCY = 3;
 export const TOS_HTTP_REQUEST_DEADLINE_MS = 180_000;
 
@@ -416,7 +416,7 @@ function multipartProgressPath(filePath) {
   return `${filePath}.multipart.json`;
 }
 
-function readMultipartProgress(filePath, objectKey, size) {
+export function readMultipartProgress(filePath, objectKey, size, digest) {
   const progressPath = multipartProgressPath(filePath);
   if (!existsSync(progressPath)) return null;
   try {
@@ -425,6 +425,8 @@ function readMultipartProgress(filePath, objectKey, size) {
       parsed &&
       parsed.objectKey === objectKey &&
       parsed.size === size &&
+      parsed.partSize === TOS_MULTIPART_PART_SIZE_BYTES &&
+      parsed.digest === (digest ?? null) &&
       typeof parsed.uploadId === "string" &&
       parsed.uploadId !== "" &&
       Array.isArray(parsed.parts)
@@ -491,7 +493,7 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
   }
   const host = tosUpdatesHost(config.bucket, config.endpoint);
   const contentType = contentTypeForFileName(fileName);
-  let progress = readMultipartProgress(filePath, objectKey, size);
+  let progress = readMultipartProgress(filePath, objectKey, size, digest);
   if (!progress) {
     const initiated = await tosFetch({
       method: "POST",
@@ -516,6 +518,8 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
     progress = {
       objectKey,
       size,
+      partSize: TOS_MULTIPART_PART_SIZE_BYTES,
+      digest: digest ?? null,
       uploadId: parseTosUploadId(initiated.text),
       parts: [],
     };
@@ -574,6 +578,8 @@ export async function putPublicObjectFromFile(config, objectKey, filePath, fileN
         writeMultipartProgress(filePath, {
           objectKey,
           size,
+          partSize: TOS_MULTIPART_PART_SIZE_BYTES,
+          digest: digest ?? null,
           uploadId,
           parts: [...parts].sort((left, right) => left.partNumber - right.partNumber),
         });
