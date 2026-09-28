@@ -101,19 +101,19 @@ Apple 的 TN3127《Inside Code Signing: Requirements》描述了同一机制：a
 
 **前提（重要）**：`bundle.macOS.signingIdentity` 必须是 `"-"`（本项目已配置）。不设它的话 Tauri 会**整段跳过签名**，产出的未签名 bundle 在 macOS 上会被报成「**已损坏，无法打开**」——这不是 Gatekeeper 的可绕过提示，而是 bundle 签名不自洽。设成 `"-"` 后 Tauri 会执行 **ad-hoc 签名**（`codesign -f -s -`），bundle 签名自洽，app 可以正常运行。
 
-ad-hoc 之后，用户唯一需要做的就是把下载带来的隔离属性清掉。给用户**一条自包含、不依赖任何脚本文件**的命令：
+ad-hoc 签名后，首次从下载的 DMG 安装仍需清除 macOS 的隔离属性。双击挂载 DMG，把「无限画布.app」拖进「应用程序」，然后在终端运行内置脚本：
 
 ```bash
-APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo cp -R "$APP" /Applications/ && sudo xattr -cr "/Applications/$(basename "$APP")" && open "/Applications/$(basename "$APP")"
+sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-macos-app.sh"
 ```
 
-先**双击挂载 DMG**，再粘贴这一行。它做的事：把 DMG 里的 app 复制出来 → 清掉隔离属性 → 安装到 `/Applications` → 直接打开。
+脚本随 DMG 中的 app 一起交付，无需另行下载。它先校验已安装 app 的签名，只移除该 app 的 `com.apple.quarantine`，再复验签名；完成后从「应用程序」打开即可。它不会覆盖或重新签名 app，因此不会改变包级差分更新所需的文件内容。
 
-> 早期版本让用户执行 `sudo bash install-macos.sh <dmg>`，但那个脚本不在 DMG 里、也不在用户当前目录，用户会撞到 `No such file or directory`。上面这条命令因此不再依赖任何额外文件。`scripts/install-macos.sh` 仍保留给愿意下载脚本的人，功能更全（含由内到外的逐文件重签与校验）。
+旧版 DMG 没有内置脚本时，仍可使用 `sudo xattr -dr com.apple.quarantine "/Applications/无限画布.app"` 解锁已安装、签名校验通过的 app。仓库中的 `scripts/install-macos.sh` 是旧式安装与修复工具，不适用于保留包级差分基线的日常安装。
 
 **为什么 ad-hoc 是必须的**（网上「只需清 quarantine」的建议不完整）：Apple Silicon 上 **arm64 可执行文件必须有有效签名才能被内核执行**。没有 `signingIdentity: "-"` 时 Tauri 什么都不签，未签名的 bundle 甚至不给你绕过 Gatekeeper 的机会，直接报「已损坏」。
 
-代价：用户要粘贴一条命令（**这是没有 Apple 证书的必然代价**，没有技术替代方案）；每次重新下载都要再做一次。
+未公证的 DMG 需要用户对新安装的 app 执行一次解锁命令；如果日后重新从 DMG 安装，也需要对新副本重新执行。
 
 ### 方案 B：有 Apple 证书 —— 用户双击即可
 
@@ -130,7 +130,7 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，上传同版离线 DMG 和安装脚本，最后切换 macOS 与同版共享更新清单。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
+当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，把解锁脚本随 app 打入离线 DMG，并在最后切换 macOS 与同版共享更新清单。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
 
 ### 自检
 
@@ -138,7 +138,7 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 - 方案 B 打包后自检：`pnpm macos:verify-bundle "src-tauri/target/release/bundle/macos/无限画布.app"`。
   它会跑 `spctl -a -t exec`（Finder 双击时 Gatekeeper 走的同一判定）与 `stapler validate`，
   所以**它就是「所有人能不能打开」的答案**；同时检查内置 FFmpeg / Blender 的签名。
-- 方案 A 的参数自检：`bash scripts/install-macos.sh <dmg> --dry-run`（只解析参数、不做任何改动，任意平台可跑）。
+- 方案 A 的脚本语法自检：`bash -n scripts/unlock-installed-macos-app.sh`；构建流水线还会核对 `.app` 和 DMG 中的脚本内容及应用签名。
 - 当前 Codemagic 构建机为 `mac_mini_m2`；产物要求 macOS 11.0+（见 `tauri.conf.json` 的 `minimumSystemVersion`）。
 
 ## 应用内升级

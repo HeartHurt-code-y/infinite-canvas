@@ -107,6 +107,9 @@ workflows:
             echo "未找到 macOS .app 构建产物" >&2
             exit 1
           fi
+          bash -n scripts/unlock-installed-macos-app.sh
+          bash scripts/unlock-installed-macos-app.sh --help >/dev/null
+          cmp scripts/unlock-installed-macos-app.sh "$app_path/Contents/Resources/unlock-installed-macos-app.sh"
           bash scripts/verify-macos-bundle.sh "$app_path"
           if [ "${INFINITE_CANVAS_SIGNING_IDENTITY_SOURCE:-}" = "developer-id" ]; then
             spctl -a -t exec -vv "$app_path" || echo "未公证版本可能被 Gatekeeper 拦截；不阻断发布。"
@@ -123,6 +126,20 @@ workflows:
           fi
           dmg_path="$(find "$dmg_dir" -maxdepth 1 -type f -name "*_${release_version}_aarch64.dmg" -print -quit)"
           hdiutil verify "$dmg_path"
+          mount_point="$(mktemp -d "${TMPDIR:-/tmp}/infinite-canvas-dmg.XXXXXX")"
+          mounted=0
+          cleanup_dmg() {
+            if [ "$mounted" -eq 1 ]; then
+              hdiutil detach "$mount_point" -quiet
+            fi
+            rmdir "$mount_point"
+          }
+          trap cleanup_dmg EXIT
+          hdiutil attach "$dmg_path" -nobrowse -readonly -quiet -mountpoint "$mount_point"
+          mounted=1
+          dmg_app="$mount_point/无限画布.app"
+          cmp scripts/unlock-installed-macos-app.sh "$dmg_app/Contents/Resources/unlock-installed-macos-app.sh"
+          codesign --verify --deep --strict "$dmg_app"
       - name: Stage unsigned-install helper
         script: |
           set -euo pipefail

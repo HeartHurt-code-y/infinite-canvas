@@ -10,4 +10,4 @@ macOS arm64 平台频道的 `latest.json` 始终把标准 `platforms.darwin-aarc
 
 Codemagic 在当前版构建完成后，从公开的 Mac 平台频道读取上一版；如需重跑已发布版本，可设置 `MAC_DELTA_BASE_VERSION` 指明较早的基线。流水线下载上一版完整 updater 包及 `.sig`，验签并核对旧版 `.app/Contents/Info.plist` 版本，再从已验签的本版完整包解出目标 `.app`。两棵树生成清单及变化对象，签名和验证后才调用 `pnpm update:publish`。已安装 0.1.10 的客户端尚无差分代码，因此首次含差分代码的新版本仍通过完整包过渡；之后的相邻版本才会实际走差分。
 
-发布前只运行更新路径的 Node 测试、版本及 source commit 检查、macOS `.app` 代码签名校验、DMG 校验、完整 updater 与差分清单验签。发布后核对公开平台清单、签名、对象可读性和下载大小；客户机升级仍需单独验证。当前流水线不以 Apple 公证为发布前提；无 Developer ID 时用 ad-hoc 签名。未经公证的包首次打开可能被 Gatekeeper 拦截，离线安装可使用 [`scripts/install-macos.sh`](../../scripts/install-macos.sh)。
+发布前只运行更新路径的 Node 测试、版本及 source commit 检查、macOS `.app` 代码签名校验、DMG 校验、完整 updater 与差分清单验签。发布后核对公开平台清单、签名、对象可读性和下载大小；客户机升级仍需单独验证。当前流水线不以 Apple 公证为发布前提；无 Developer ID 时用 ad-hoc 签名。离线安装时，双击挂载 DMG、把「无限画布.app」拖入「应用程序」，再运行随 app 内置的命令 `sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-macos-app.sh"`。该脚本只对已安装 app 验签并清除隔离属性，不重新签名，因而保留差分更新所需的本地文件哈希。

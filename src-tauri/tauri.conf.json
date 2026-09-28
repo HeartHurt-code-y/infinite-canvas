@@ -60,7 +60,10 @@
     },
     "macOS": {
       "minimumSystemVersion": "11.0",
-      "signingIdentity": "-"
+      "signingIdentity": "-",
+      "files": {
+        "Resources/unlock-installed-macos-app.sh": "../scripts/unlock-installed-macos-app.sh"
+      }
     },
     "icon": [
       "icons/32x32.png",

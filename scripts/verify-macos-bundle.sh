@@ -67,7 +67,7 @@ log "TeamIdentifier：${team_id:-<无>}"
 case "$signature_kind:$authority" in
   "ad-hoc:-")
     log "身份等级：ad-hoc（合法基线）。bundle 签名自洽，app 可以运行；"
-    log "      其他用户首次打开需清一次隔离属性：sudo bash scripts/install-macos.sh <dmg>"
+    log "      从 DMG 拖入应用程序后运行：sudo bash \"/Applications/无限画布.app/Contents/Resources/unlock-installed-macos-app.sh\""
     ;;
   "certificate:Developer ID Application:"*)
     log "身份等级：Developer ID（可对外分发）。"
