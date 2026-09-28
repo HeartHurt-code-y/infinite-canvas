@@ -2725,7 +2725,11 @@ impl AssetLibrary {
             if started.elapsed() >= self.poll_policy.timeout {
                 return Err(BackendError::protocol(
                     "asset import did not become ready before the local wait deadline",
-                    json!({ "assetId": poll_id, "waitedMs": started.elapsed().as_millis() }),
+                    json!({
+                        "assetId": poll_id,
+                        "waitedMs": started.elapsed().as_millis(),
+                        "terminalStatus": "TimedOut",
+                    }),
                 ));
             }
             let response = match self
@@ -2780,10 +2784,20 @@ impl AssetLibrary {
                 })?;
             match status.trim().to_ascii_lowercase().as_str() {
                 "active" | "ready" => {
-                    return Ok(CloudAssetIdentity {
-                        provider_connection_id: provider_connection_id.to_string(),
-                        asset_id: returned_asset_id.unwrap_or_else(|| poll_id.to_string()),
-                    });
+                    // Some gateways mark the review task Active before filling in its
+                    // material ID. A task-* lookup key is not a usable asset identity;
+                    // keep polling the same task until the real ID arrives or the local
+                    // wait deadline expires.
+                    let ready_asset_id = returned_asset_id
+                        .filter(|id| !is_review_task_id(id))
+                        .or_else(|| (!is_review_task_id(poll_id)).then(|| poll_id.to_string()));
+                    if let Some(asset_id) = ready_asset_id {
+                        return Ok(CloudAssetIdentity {
+                            provider_connection_id: provider_connection_id.to_string(),
+                            asset_id,
+                        });
+                    }
+                    self.wait_before_next_import_poll().await;
                 }
                 "failed" | "deleted" => {
                     return Err(BackendError::protocol(
@@ -2824,7 +2838,7 @@ fn asset_id_string(value: &Value) -> Option<String> {
 }
 
 /// 素材审核任务 ID。处理过程中它会占着 `id`，完成后真正的素材 ID 在 `asset_id`。
-fn is_review_task_id(id: &str) -> bool {
+pub(super) fn is_review_task_id(id: &str) -> bool {
     id.trim().len() > "task-".len()
         && id
             .trim()
@@ -5628,6 +5642,57 @@ mod tests {
             .expect("import");
 
         assert_eq!(identity.asset_id, "asset-20260922091640-real");
+    }
+
+    #[tokio::test]
+    async fn import_staged_keeps_polling_when_active_still_has_only_a_task_id() {
+        let adapter = Arc::new(InMemoryAssetAdapter::with_responses([
+            response(
+                200,
+                json!({ "data": [{ "id": 12, "name": UPLOAD_GROUP_NAME }] }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "task-review-1", "status": "Processing" } }),
+            ),
+            response(
+                200,
+                json!({ "data": { "id": "task-review-1", "status": "Active" } }),
+            ),
+            response(
+                200,
+                json!({
+                    "data": {
+                        "id": "task-review-1",
+                        "asset_id": "asset-real-1",
+                        "status": "Active"
+                    }
+                }),
+            ),
+        ]));
+        let library = test_library(Arc::clone(&adapter), immediate_poll());
+
+        let identity = library
+            .import_staged(ImportStagedAsset {
+                provider_connection_id: "provider-1".into(),
+                public_url: "https://tos.example.com/a.png".into(),
+                media_type: MediaType::Image,
+                display_name: Some("参考图".into()),
+                group_id: None,
+            })
+            .await
+            .expect("Active review task should be polled until a real material ID arrives");
+
+        assert_eq!(identity.asset_id, "asset-real-1");
+        assert_eq!(
+            adapter.request_paths(),
+            vec![
+                "/v1/assets/groups",
+                "/v1/assets/async",
+                "/v1/assets/get",
+                "/v1/assets/get",
+            ]
+        );
     }
 
     #[tokio::test]

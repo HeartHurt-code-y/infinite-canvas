@@ -1226,7 +1226,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     fireEvent.click(screen.getByRole("button", { name: "添加节点" }));
     const menu = screen.getByRole("menu", { name: "添加节点" });
     expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
-    expect(within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
+    expect(
+      within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ }),
+    ).not.toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
@@ -1404,7 +1406,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
       const menu = await screen.findByRole("menu", { name: "添加节点" });
       expect(within(menu).getAllByRole("menuitem")).toHaveLength(9);
-      expect(within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ })).toBeNull();
+      expect(
+        within(menu).queryByRole("menuitem", { name: /素材库|对象存储|本机素材/ }),
+      ).not.toBeInTheDocument();
       for (const name of ["图片生成", "视频生成", "提示词生成与优化"]) {
         expect(within(menu).getByRole("menuitem", { name })).toBeEnabled();
       }
@@ -6821,6 +6825,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
             status: "staged",
             updatedAt: restoredAt - 10 * 60 * 1000,
           }),
+          {
+            ...importOutput({
+              jobId: "job-legacy-task-id",
+              localPath: "C:\\generated\\legacy-task-id.png",
+              status: "cleaning",
+              updatedAt: restoredAt - 10 * 60 * 1000,
+            }),
+            assetId: "task-20260922083550-5987851d",
+          },
         ]);
       }
       if (command === "list_assets") {
@@ -6903,6 +6916,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     // 同一批里的另一条已中断记录不受影响。
     const staleRow = await uploadRowNamed("stale-upload.png");
     expect(staleRow).toHaveAttribute("data-state", "interrupted");
+    expect(screen.queryByText("legacy-task-id.png")).not.toBeInTheDocument();
 
     expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_import_outputs")).toBe(
       true,

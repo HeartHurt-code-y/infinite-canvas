@@ -30,6 +30,7 @@ import {
   isStallTrackedStatus,
   isTerminalAssetUpload,
   isTimedOutAssetImport,
+  isUnresolvedLegacyAssetImport,
   measuredAspectRatio,
   stagingErrorFullText,
   stagingErrorSummary,
@@ -641,6 +642,7 @@ export function AssetUploadRow({
     status === "uploading";
   const hasFailed = status === "failed" || status === "interrupted";
   const timedOut = isTimedOutAssetImport(entry);
+  const unresolvedLegacyImport = isUnresolvedLegacyAssetImport(entry);
   const objectStorageValue = timedOut
     ? "已完成"
     : hasFailed
@@ -673,24 +675,28 @@ export function AssetUploadRow({
     ? timedOut
       ? "上传超时"
       : "失败"
-    : awaitingPlaceholderIdentity && !assetImportInProgress
-      ? "平台处理中…"
-      : assetImportInProgress
-        ? assetImportHasByteProgress
-          ? `上传中 ${assetImportPercent}%`
-          : status === "importing"
-            ? "平台处理中…"
-            : "上传中…"
-        : assetImportDone
-          ? "已完成"
-          : "等待中";
+    : unresolvedLegacyImport
+      ? "未返回素材 ID"
+      : awaitingPlaceholderIdentity && !assetImportInProgress
+        ? "平台处理中…"
+        : assetImportInProgress
+          ? assetImportHasByteProgress
+            ? `上传中 ${assetImportPercent}%`
+            : status === "importing"
+              ? "平台处理中…"
+              : "上传中…"
+          : assetImportDone
+            ? "已完成"
+            : "等待中";
   // 折叠态展示人类可读摘要；展开态展示后端返回的完整原始错误（JSON，含
   // message/kind/details/rawResponse/httpStatus 等全部诊断字段）。
   const errorSummary = timedOut
     ? "上传超时，已清理"
-    : hasFailed
-      ? stagingErrorSummary(abandoned ? abandonedUploadError(entry.status) : entry.error)
-      : null;
+    : unresolvedLegacyImport
+      ? "平台只返回了审核任务号，本机上传记录已结束；请检查云端素材库。"
+      : hasFailed
+        ? stagingErrorSummary(abandoned ? abandonedUploadError(entry.status) : entry.error)
+        : null;
   const errorDetail =
     hasFailed && !timedOut
       ? stagingErrorFullText(abandoned ? abandonedUploadError(entry.status) : entry.error)

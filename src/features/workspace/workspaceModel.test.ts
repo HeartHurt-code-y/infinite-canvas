@@ -500,7 +500,7 @@ describe("stagingImportReachedLibrary / isTerminalStagingJob", () => {
     }
   });
 
-  it("还没拿到素材身份就不算成功，也不停止跟踪", () => {
+  it("还没拿到素材身份就不算成功；旧版已结束的 task 占位上传收起", () => {
     for (const status of ["staged", "importing", "cleaning", "cleaned"] satisfies StagingStatus[]) {
       expect(stagingImportReachedLibrary({ status, assetId: null })).toBe(false);
       expect(isTerminalStagingJob({ status, assetId: null })).toBe(false);
@@ -512,8 +512,12 @@ describe("stagingImportReachedLibrary / isTerminalStagingJob", () => {
       "asset://task-20260924081817-bef4eede",
     ]) {
       expect(stagingImportReachedLibrary({ status: "active", assetId })).toBe(false);
-      expect(isTerminalStagingJob({ status: "active", assetId })).toBe(false);
-      expect(shouldAutoDismissUpload({ status: "cleaned", assetId })).toBe(false);
+      expect(isTerminalStagingJob({ status: "active", assetId })).toBe(true);
+      expect(shouldAutoDismissUpload({ status: "cleaned", assetId })).toBe(true);
+      expect(shouldAutoDismissUpload({ status: "active", assetId, overseasDbId: 1351 })).toBe(
+        false,
+      );
+      expect(shouldAutoDismissUpload({ status: "importing", assetId })).toBe(false);
     }
   });
 

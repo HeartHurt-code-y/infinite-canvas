@@ -114,7 +114,7 @@ describe("上传行的素材库导入结论", () => {
     expect(screen.queryByText(/1351|继续查询|审核失败/)).not.toBeInTheDocument();
   });
 
-  it("旧记录只有 task 占位、没有 db_id 时也保持简洁处理中", () => {
+  it("旧记录已结束但只有 task 占位时显示未取得素材 ID，并允许移除", () => {
     render(
       <AssetUploadRow
         entry={buildEntry({
@@ -125,9 +125,9 @@ describe("上传行的素材库导入结论", () => {
         onDismiss={() => undefined}
       />,
     );
-    expect(within(assetImportPhase()).getByText("平台处理中…")).toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: /移除上传记录/ })).not.toBeInTheDocument();
-    expect(screen.queryByRole("button", { name: "继续查询" })).not.toBeInTheDocument();
+    expect(within(assetImportPhase()).getByText("未返回素材 ID")).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /移除上传记录/ })).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("请检查云端素材库");
   });
 
   it("固定等待截止后只显示简洁超时结果，允许短暂展示后收起", () => {

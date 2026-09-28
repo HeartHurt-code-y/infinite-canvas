@@ -1394,6 +1394,7 @@ export const UPLOAD_AUTO_DISMISS_DELAY_MS = 3_000;
 export interface StagingLibraryImportRecord {
   readonly status: StagingStatus;
   readonly assetId: string | null;
+  readonly overseasDbId?: number | null | undefined;
   readonly error?: unknown;
 }
 
@@ -1429,6 +1430,20 @@ export function stagingImportReachedLibrary(record: StagingLibraryImportRecord):
   return IMPORT_SETTLED_STATUSES.has(record.status);
 }
 
+/**
+ * 旧版国内导入曾把 `task-...` 审核任务号当作真实素材 ID，并把任务推进到
+ * active/cleaning/cleaned。此时后端已结束导入，没有 db_id 可供续查；这条上传进度
+ * 不能继续冒充「平台处理中」，也不能把任务号交给生成。仅结束本机上传行，不删除云端素材。
+ */
+export function isUnresolvedLegacyAssetImport(record: StagingLibraryImportRecord): boolean {
+  return (
+    record.overseasDbId == null &&
+    record.assetId != null &&
+    isPlaceholderAssetIdentity(record.assetId) &&
+    IMPORT_SETTLED_STATUSES.has(record.status)
+  );
+}
+
 /** 平台审核任务占位符不是可用于生成的素材身份。 */
 export function isPlaceholderAssetIdentity(id: string): boolean {
   const identity = id.trim();
@@ -1452,7 +1467,9 @@ export function shouldAutoDismissUpload(
 ): boolean {
   return destination === "object_storage"
     ? record.status === "staged"
-    : stagingImportReachedLibrary(record) || isTimedOutAssetImport(record);
+    : stagingImportReachedLibrary(record) ||
+        isTimedOutAssetImport(record) ||
+        isUnresolvedLegacyAssetImport(record);
 }
 
 /** 本地等待海外处理到固定截止后的终态；与平台主动返回 Failed 区分。 */
@@ -1664,8 +1681,7 @@ export function mergeStagingJobsIntoUploads(
     if (
       !isTerminalStagingJob(job, entry.destination) &&
       (entry.destination !== "cloud" ||
-        (overseasDbId == null &&
-          (assetId == null || !isPlaceholderAssetIdentity(assetId)))) &&
+        (overseasDbId == null && (assetId == null || !isPlaceholderAssetIdentity(assetId)))) &&
       now - lastAdvancedAt >= UPLOAD_ABANDONED_MS
     ) {
       changed = true;

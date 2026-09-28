@@ -1,7 +1,12 @@
 //! 工作流运行历史：持久化完整断点、事件与模型任务归属，使用CAS防止旧回调覆盖进度。
 
-use std::sync::LazyLock;
+use std::{
+    io::{Read, Write},
+    sync::LazyLock,
+};
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
+use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use regex::Regex;
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior, params};
 use serde::{Deserialize, Serialize};
@@ -46,6 +51,12 @@ CREATE TABLE IF NOT EXISTS workflow_history_tasks (
 );
 CREATE INDEX IF NOT EXISTS idx_workflow_history_tasks_run ON workflow_history_tasks(run_id,task_id);
 "#;
+
+const MAX_UNCOMPRESSED_RECORD_BYTES: usize = 256 * 1024 * 1024;
+const MAX_LIST_PAGE_BYTES: usize = 64 * 1024 * 1024;
+const COMPRESS_RECORD_AFTER_BYTES: usize = 1024 * 1024;
+// A serialized record is always a JSON object, so this prefix cannot collide with old rows.
+const COMPRESSED_RECORD_PREFIX: &str = "workflow-history:gzip:v1:";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -271,8 +282,74 @@ pub(crate) fn sanitize_value(value: &Value) -> Value {
     }
 }
 
+fn sanitize_record(record: &mut WorkflowHistoryRecord) {
+    record.node_snapshot = sanitize_value(&record.node_snapshot);
+    record.models = sanitize_value(&record.models);
+    record.title = sanitize_text(&record.title);
+    record.message = sanitize_text(&record.message);
+    record.error = record.error.as_deref().map(sanitize_text);
+}
+
+fn encode_record(record: &WorkflowHistoryRecord) -> BackendResult<String> {
+    let json = serde_json::to_string(record)?;
+    if json.len() > MAX_UNCOMPRESSED_RECORD_BYTES {
+        return Err(BackendError::validation(
+            "工作流历史记录解压后超过256MiB，请缩小单个工作流的版本内容",
+            Value::Null,
+        ));
+    }
+    if json.len() <= COMPRESS_RECORD_AFTER_BYTES {
+        return Ok(json);
+    }
+    let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(json.as_bytes())?;
+    let compressed = encoder.finish()?;
+    let stored = format!(
+        "{COMPRESSED_RECORD_PREFIX}{}",
+        BASE64_STANDARD.encode(compressed)
+    );
+    // Base64 can enlarge entropy-heavy JSON; keep the smaller lossless representation.
+    if stored.len() >= json.len() {
+        return Ok(json);
+    }
+    Ok(stored)
+}
+
+fn decode_record_with_limit(
+    stored: &str,
+    max_uncompressed_bytes: usize,
+) -> Result<(WorkflowHistoryRecord, usize), Box<dyn std::error::Error + Send + Sync>> {
+    if let Some(encoded) = stored.strip_prefix(COMPRESSED_RECORD_PREFIX) {
+        if stored.len() > MAX_UNCOMPRESSED_RECORD_BYTES {
+            return Err("compressed workflow history record exceeds the storage limit".into());
+        }
+        let bytes = BASE64_STANDARD.decode(encoded)?;
+        let decoder = GzDecoder::new(bytes.as_slice());
+        let mut bounded = decoder.take(max_uncompressed_bytes as u64 + 1);
+        let mut json = Vec::new();
+        bounded.read_to_end(&mut json)?;
+        if json.len() > max_uncompressed_bytes {
+            return Err("decompressed workflow history record exceeds the recovery limit".into());
+        }
+        Ok((serde_json::from_slice(&json)?, json.len()))
+    } else {
+        if stored.len() > max_uncompressed_bytes {
+            return Err("workflow history record exceeds the recovery limit".into());
+        }
+        Ok((serde_json::from_str(stored)?, stored.len()))
+    }
+}
+
+fn read_record_with_size(
+    row: &rusqlite::Row<'_>,
+) -> rusqlite::Result<(WorkflowHistoryRecord, usize)> {
+    decode_record_with_limit(&row.get::<_, String>(0)?, MAX_UNCOMPRESSED_RECORD_BYTES).map_err(
+        |error| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, error),
+    )
+}
+
 fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<WorkflowHistoryRecord> {
-    serde_json::from_str(&row.get::<_, String>(0)?).map_err(json_sql_error)
+    read_record_with_size(row).map(|(record, _)| record)
 }
 
 fn write_event(
@@ -311,11 +388,7 @@ impl Storage {
     ) -> BackendResult<WorkflowHistoryRecord> {
         let mut record = command.record;
         validate_record(&record)?;
-        record.node_snapshot = sanitize_value(&record.node_snapshot);
-        record.models = sanitize_value(&record.models);
-        record.title = sanitize_text(&record.title);
-        record.message = sanitize_text(&record.message);
-        record.error = record.error.as_deref().map(sanitize_text);
+        sanitize_record(&mut record);
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let previous = transaction
@@ -355,13 +428,7 @@ impl Storage {
             .checked_add(1)
             .ok_or_else(|| BackendError::Conflict("工作流历史版本超出范围".to_string()))?;
         let revision = checked_sql_integer(record.revision, "revision")?;
-        let encoded = serde_json::to_string(&record)?;
-        if encoded.len() > 32 * 1024 * 1024 {
-            return Err(BackendError::validation(
-                "工作流断点快照超过32MiB，请移除内联媒体后重试",
-                Value::Null,
-            ));
-        }
+        let encoded = encode_record(&record)?;
         transaction.execute("INSERT INTO workflow_history(id,canvas_id,source_node_id,workflow_kind,status,revision,created_at,updated_at,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9) ON CONFLICT(id) DO UPDATE SET source_node_id=excluded.source_node_id,status=excluded.status,revision=excluded.revision,updated_at=excluded.updated_at,record_json=excluded.record_json", params![record.id,record.canvas_id,record.source_node_id,record.workflow_kind.as_str(),record.status,revision,record.created_at,record.updated_at,encoded])?;
         if let Some(event) = command.event {
             write_event(&transaction, &record.id, event, record.updated_at)?;
@@ -404,26 +471,32 @@ impl Storage {
             AND (?5 IS NULL OR created_at <= ?5)
             ORDER BY updated_at DESC,id LIMIT ?6 OFFSET ?7",
         )?;
-        let mut items = statement
-            .query_map(
-                params![
-                    query.canvas_id,
-                    query.source_node_id,
-                    statuses,
-                    query.created_from,
-                    query.created_to,
-                    limit + 1,
-                    offset
-                ],
-                read_record,
-            )?
-            .collect::<Result<Vec<_>, _>>()?;
-        let next_cursor = if items.len() > limit as usize {
-            items.pop();
-            Some(offset.saturating_add(limit).to_string())
-        } else {
-            None
-        };
+        let mut rows = statement.query(params![
+            query.canvas_id,
+            query.source_node_id,
+            statuses,
+            query.created_from,
+            query.created_to,
+            limit + 1,
+            offset
+        ])?;
+        let mut items = Vec::new();
+        let mut decoded_bytes = 0usize;
+        let mut has_more = false;
+        while let Some(row) = rows.next()? {
+            if items.len() == limit as usize {
+                has_more = true;
+                break;
+            }
+            let (record, size) = read_record_with_size(row)?;
+            if !items.is_empty() && decoded_bytes.saturating_add(size) > MAX_LIST_PAGE_BYTES {
+                has_more = true;
+                break;
+            }
+            decoded_bytes = decoded_bytes.saturating_add(size);
+            items.push(record);
+        }
+        let next_cursor = has_more.then(|| offset.saturating_add(items.len() as i64).to_string());
         Ok(WorkflowHistoryPage { items, next_cursor })
     }
 
@@ -490,7 +563,8 @@ impl Storage {
             checkpoint.insert("phase".to_string(), json!("paused"));
             checkpoint.insert("error".to_string(), Value::Null);
             checkpoint.insert("updatedAt".to_string(), json!(record.updated_at));
-            transaction.execute("UPDATE workflow_history SET status='paused',revision=?2,updated_at=?3,record_json=?4 WHERE id=?1", params![record.id,checked_sql_integer(record.revision,"revision")?,record.updated_at,serde_json::to_string(&record)?])?;
+            sanitize_record(&mut record);
+            transaction.execute("UPDATE workflow_history SET status='paused',revision=?2,updated_at=?3,record_json=?4 WHERE id=?1", params![record.id,checked_sql_integer(record.revision,"revision")?,record.updated_at,encode_record(&record)?])?;
             write_event(
                 &transaction,
                 &record.id,
@@ -550,12 +624,16 @@ pub(super) fn associate_task(
 mod tests {
     use std::sync::{Arc, Barrier};
 
+    use rand::{RngCore, SeedableRng, rngs::StdRng};
+
     use super::*;
     use crate::backend::{
         prompt_optimize::OptimizeVideoPromptCommand,
         storage::{GenerationLifecycleFact, GenerationTaskLifecycle, NewTask},
         types::{GenerationOperation, GenerationTaskStatus, StartGenerationCommand},
     };
+
+    const PREVIOUS_RECORD_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 
     fn record(id: &str, status: &str) -> WorkflowHistoryRecord {
         WorkflowHistoryRecord {
@@ -666,6 +744,301 @@ mod tests {
                 assert!(!serialized.contains(secret), "history retained {secret}");
             }
         }
+    }
+
+    #[test]
+    fn saves_oversized_500_row_version_history_and_recovers_every_checkpoint() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite");
+        let storage = Storage::open(&path).unwrap();
+        let prompt = "Create the exact approved product from the supplied views. ".repeat(55);
+        let options = json!({
+            "generationMode": "reference", "productName": "Sample product", "totalCount": 500,
+            "batchSize": 10, "maxConcurrency": 10, "sceneBias": "mixed", "aspectRatio": "3:4",
+            "depthStrength": 0.2, "productScale": 0.48, "seed": 20260923,
+            "views": [{
+                "id": "view-1", "label": "Front view", "angle": "front45",
+                "sourcePath": "C:/product/front.png", "preparedPath": "C:/product/prepared/front.png",
+                "contentHash": "a".repeat(64), "approved": true, "width": 1200, "height": 1600
+            }]
+        });
+        let rows: Vec<Value> = (0..500)
+            .map(|index| {
+                let recipe = json!({
+                    "generationMode": "reference", "targetCamera": {
+                        "id": "front-45", "label": "Front 45 degrees", "azimuth": 45,
+                        "elevation": 15, "focalLength": 35, "distance": "medium"
+                    },
+                    "depthStrength": 0.2, "aspectRatio": "3:4", "scene": "desk",
+                    "label": "Desk", "material": "wood", "props": "monitor",
+                    "lighting": "soft", "camera": "front-45", "viewId": "view-1",
+                    "prompt": prompt,
+                    "placement": {"centerX": 0.5, "baselineY": 0.77, "widthFraction": 0.48}
+                });
+                json!({
+                    "id": format!("product-scene-{}", index + 1),
+                    "index": index + 1,
+                    "recipe": recipe,
+                    "status": if index == 0 { "needs_review" } else { "queued" },
+                    "taskId": if index == 0 { Some("paid-image-task") } else { None },
+                    "backgroundPath": null,
+                    "outputPath": if index == 0 { Some("C:/product/output/first.png") } else { None },
+                    "backgroundHash": null, "foregroundHash": null, "error": null,
+                    "reviewNotes": [], "attempts": []
+                })
+            })
+            .collect();
+        let versions: Vec<Value> = (0..24)
+            .map(|index| {
+                json!({
+                    "id": format!("v-{index}"),
+                    "parentId": if index == 0 { None } else { Some(format!("v-{}", index - 1)) },
+                    "createdAt": index,
+                    "label": "人工修改工作流",
+                    "config": {
+                        "brief": "产品场景图",
+                        "productScene": options,
+                        "materials": [], "connectedMaterials": [], "connectedTexts": [],
+                        "models": {
+                            "text": {"providerId": "project-provider", "modelDefinitionId": "project-text"},
+                            "image": {"providerId": "project-provider", "modelDefinitionId": "project-image"},
+                            "video": {"providerId": "project-provider", "modelDefinitionId": "project-video"}
+                        },
+                        "imageParameterValues": {}, "videoParameterValues": {},
+                        "approvalPolicy": "exceptions_only", "maxAutomaticRetries": 2,
+                        "catalogResolved": true,
+                        "checkpoint": {"version": 1, "productScene": {
+                            "inputSignature": "approved-input", "rows": rows,
+                            "approvedThrough": 10, "batchReviewPending": false
+                        }}
+                    }
+                })
+            })
+            .collect();
+        let mut next = record("large-product-scene", "generating");
+        next.workflow_kind = WorkflowKind::ProductScene;
+        next.node_snapshot["config"]["productScene"] = options;
+        next.node_snapshot["config"]["checkpoint"]["version"] = json!(1);
+        next.node_snapshot["config"]["checkpoint"]["productScene"] = json!({"inputSignature": "approved-input", "rows": rows, "approvedThrough": 10, "batchReviewPending": false});
+        next.node_snapshot["config"]["versionHistory"] = json!({
+            "version": 1,
+            "currentVersionId": "v-23",
+            "versions": versions,
+            "preferredChildByVersion": {}
+        });
+        let uncompressed_bytes = serde_json::to_vec(&next).unwrap().len();
+        assert!(uncompressed_bytes > PREVIOUS_RECORD_LIMIT_BYTES);
+        let saved = save(&storage, next).unwrap();
+        let stored: String = storage
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM workflow_history WHERE id=?1",
+                params![saved.id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(COMPRESSED_RECORD_PREFIX));
+        assert!(stored.len() < uncompressed_bytes);
+        let listed = storage
+            .list_workflow_history(WorkflowHistoryQuery::default())
+            .unwrap();
+        assert_eq!(listed.items.len(), 1);
+        assert_eq!(
+            listed.items[0].node_snapshot["config"]["versionHistory"]["versions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            24
+        );
+        drop(listed);
+        let mut second = saved.clone();
+        second.id = "large-product-scene-2".into();
+        second.revision = 0;
+        save(&storage, second).unwrap();
+        let first_page = storage
+            .list_workflow_history(WorkflowHistoryQuery {
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(first_page.items.len(), 1);
+        assert_eq!(first_page.next_cursor.as_deref(), Some("1"));
+        let second_page = storage
+            .list_workflow_history(WorkflowHistoryQuery {
+                cursor: first_page.next_cursor.clone(),
+                limit: Some(10),
+                ..Default::default()
+            })
+            .unwrap();
+        assert_eq!(second_page.items.len(), 1);
+        assert!(second_page.next_cursor.is_none());
+        drop(first_page);
+        drop(second_page);
+        drop(storage);
+        let reopened = Storage::open(&path).unwrap();
+        assert_eq!(reopened.recover_workflow_history().unwrap(), 2);
+        let detail = reopened.get_workflow_history(&saved.id).unwrap();
+        assert_eq!(detail.record.status, "paused");
+        assert_eq!(detail.record.revision, 2);
+        assert_eq!(
+            detail.record.node_snapshot["config"]["checkpoint"]["productScene"]["rows"]
+                .as_array()
+                .unwrap()
+                .len(),
+            500
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["checkpoint"]["shots"][0]["taskId"],
+            "media-existing"
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["checkpoint"]["productScene"]["rows"][0]["taskId"],
+            "paid-image-task"
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["checkpoint"]["productScene"]["rows"][0]["outputPath"],
+            "C:/product/output/first.png"
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["productScene"]["views"][0]["contentHash"],
+            "a".repeat(64)
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["versionHistory"]["versions"]
+                .as_array()
+                .unwrap()
+                .len(),
+            24
+        );
+        assert_eq!(
+            detail.record.node_snapshot["config"]["versionHistory"]["versions"][23]["config"]["checkpoint"]
+                ["productScene"]["rows"][499]["recipe"]["prompt"],
+            prompt
+        );
+    }
+
+    #[test]
+    fn reads_legacy_json_and_reencodes_it_when_recovering() {
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Storage::open(&directory.path().join("history.sqlite")).unwrap();
+        let mut legacy = record("legacy-json", "planning");
+        legacy.revision = 1;
+        legacy.created_at = 1;
+        legacy.updated_at = 1;
+        legacy.node_snapshot["config"]["checkpoint"]["script"] =
+            json!("Human-authored script. ".repeat(60_000));
+        let raw = serde_json::to_string(&legacy).unwrap();
+        assert!(raw.len() > COMPRESS_RECORD_AFTER_BYTES);
+        storage.lock().unwrap().execute(
+            "INSERT INTO workflow_history(id,canvas_id,source_node_id,workflow_kind,status,revision,created_at,updated_at,record_json) VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9)",
+            params![legacy.id, legacy.canvas_id, legacy.source_node_id, "knowledge", legacy.status, checked_sql_integer(legacy.revision, "revision").unwrap(), legacy.created_at, legacy.updated_at, raw],
+        ).unwrap();
+        assert_eq!(
+            storage
+                .get_workflow_history("legacy-json")
+                .unwrap()
+                .record
+                .revision,
+            1
+        );
+        assert_eq!(
+            storage
+                .list_workflow_history(WorkflowHistoryQuery::default())
+                .unwrap()
+                .items
+                .len(),
+            1
+        );
+        assert_eq!(storage.recover_workflow_history().unwrap(), 1);
+        let stored: String = storage
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM workflow_history WHERE id='legacy-json'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.starts_with(COMPRESSED_RECORD_PREFIX));
+        let recovered = storage.get_workflow_history("legacy-json").unwrap();
+        assert_eq!(
+            recovered.record.node_snapshot["config"]["checkpoint"]["script"],
+            "Human-authored script. ".repeat(60_000)
+        );
+        assert_eq!(recovered.record.revision, 2);
+    }
+
+    #[test]
+    fn accepts_incompressible_update_above_previous_storage_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("history.sqlite");
+        let storage = Storage::open(&path).unwrap();
+        let saved = save(&storage, record("oversize", "planning")).unwrap();
+        let mut changed = saved.clone();
+        let mut rng = StdRng::seed_from_u64(20260928);
+        let mut random = vec![0; 36 * 1024 * 1024];
+        rng.fill_bytes(&mut random);
+        const ALPHABET: &[u8] = b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&'()*+,-./:;<=>?@[]^_`{|}~";
+        for byte in &mut random {
+            *byte = ALPHABET[*byte as usize % ALPHABET.len()];
+        }
+        changed.node_snapshot["config"]["checkpoint"]["script"] =
+            json!(String::from_utf8(random).unwrap());
+        assert!(serde_json::to_vec(&changed).unwrap().len() > PREVIOUS_RECORD_LIMIT_BYTES);
+        let updated = save(&storage, changed).unwrap();
+        let stored: String = storage
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT record_json FROM workflow_history WHERE id='oversize'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(stored.len() > PREVIOUS_RECORD_LIMIT_BYTES);
+        assert!(stored.starts_with('{'));
+        let detail = storage.get_workflow_history("oversize").unwrap();
+        assert_eq!(detail.record.revision, saved.revision + 1);
+        assert_eq!(detail.record.node_snapshot, updated.node_snapshot);
+        assert_eq!(detail.events.len(), 2);
+        drop(detail);
+        drop(stored);
+        drop(storage);
+        let reopened = Storage::open(&path).unwrap();
+        assert_eq!(reopened.recover_workflow_history().unwrap(), 1);
+        let recovered = reopened.get_workflow_history("oversize").unwrap();
+        assert_eq!(recovered.record.status, "paused");
+        assert_eq!(recovered.record.revision, saved.revision + 2);
+        assert_eq!(
+            recovered.record.node_snapshot["config"]["checkpoint"]["script"],
+            updated.node_snapshot["config"]["checkpoint"]["script"]
+        );
+        assert_eq!(recovered.events.len(), 3);
+    }
+
+    #[test]
+    fn rejects_corrupt_compressed_rows_and_bounded_decompression() {
+        assert!(decode_record_with_limit("workflow-history:gzip:v1:invalid!", 1024).is_err());
+        let mut large = record("bounded", "paused");
+        large.node_snapshot["config"]["checkpoint"]["script"] =
+            json!("Human-authored draft. ".repeat(100));
+        let raw = serde_json::to_vec(&large).unwrap();
+        assert!(raw.len() > 1024);
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(&raw).unwrap();
+        let compressed = format!(
+            "{COMPRESSED_RECORD_PREFIX}{}",
+            BASE64_STANDARD.encode(encoder.finish().unwrap())
+        );
+        assert!(decode_record_with_limit(&compressed, 1024).is_err());
+        assert_eq!(
+            decode_record_with_limit(&compressed, raw.len())
+                .unwrap()
+                .0
+                .id,
+            "bounded"
+        );
     }
 
     #[test]

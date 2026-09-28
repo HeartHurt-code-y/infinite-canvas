@@ -2232,6 +2232,7 @@ dependencies = [
  "chrono",
  "dirs",
  "ffmpeg-sidecar",
+ "flate2",
  "fs2",
  "futures-util",
  "hex",

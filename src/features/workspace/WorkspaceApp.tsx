@@ -380,6 +380,7 @@ import {
   isTerminalAssetUpload,
   isTerminalStagingJob,
   isTimedOutAssetImport,
+  isUnresolvedLegacyAssetImport,
   isTerminalTaskStatus,
   isTextGenerationModel,
   isVideoGenerationModel,
@@ -1123,10 +1124,14 @@ export function WorkspaceApp({
       timers.clear();
     };
   }, []);
-  // 终态事件偶尔丢失时，轮询仍会把超时结果写到上传行；同样短暂展示后自动收起。
+  // 终态事件偶尔丢失时，轮询仍会把超时结果写到上传行；旧版误存 task 号的
+  // active/cleaning/cleaned 行也需要收尾，不能在当前会话永久显示处理中。
   useEffect(() => {
     for (const entry of assetUploads) {
-      if (!isTimedOutAssetImport(entry) || uploadAutoDismissTimersRef.current.has(entry.jobId)) {
+      if (
+        (!isTimedOutAssetImport(entry) && !isUnresolvedLegacyAssetImport(entry)) ||
+        uploadAutoDismissTimersRef.current.has(entry.jobId)
+      ) {
         continue;
       }
       const timer = window.setTimeout(() => {
@@ -3106,7 +3111,11 @@ export function WorkspaceApp({
       // 成功的上传不用用户再点一次 ×：素材已经入库、绿色小点已经点亮，这一行
       // 留一小会儿让"已完成"被看见，然后自行收起。失败/中断行永不自动收起
       // （用户要看原因并重试），僵尸在途行也留着由行内判定落地为可移除的已中断行。
-      if (payload.job != null && shouldAutoDismissUpload(payload.job, uploadDestination)) {
+      if (
+        payload.job != null &&
+        shouldAutoDismissUpload(payload.job, uploadDestination) &&
+        !uploadAutoDismissTimersRef.current.has(payload.jobId)
+      ) {
         uploadAutoDismissTimersRef.current.set(
           payload.jobId,
           window.setTimeout(() => {
@@ -3171,9 +3180,7 @@ export function WorkspaceApp({
         // 已经拿到素材身份的记录不算在内：那是入库成功（随后清理暂存对象没走完而已），
         // 恢复成在途行会让它两分钟后被判成"已中断"，而素材其实已经在库里了。
         const restoredEntries: AssetUploadEntry[] = records
-          .filter(
-            (record) => !stagingImportReachedLibrary(record) && !isTimedOutAssetImport(record),
-          )
+          .filter((record) => !shouldAutoDismissUpload(record))
           .map((record) => {
             const lastAdvancedAt = record.updatedAt || restoredAt;
             const abandoned =

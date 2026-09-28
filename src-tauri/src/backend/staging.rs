@@ -1648,6 +1648,11 @@ impl StagingService {
             let Some(asset_id) = job.asset_id.as_ref() else {
                 return Ok(false);
             };
+            // 旧版导入曾把平台审核任务号误存为素材 ID。它只能用于查询审核状态，
+            // 绝不能证明已有可复用素材，否则同一文件再次上传会复用这条死记录。
+            if super::asset_library::is_review_task_id(asset_id) {
+                return Ok(false);
+            }
             let target = job.import_target.as_ref().expect("checked above");
             let observed = self.assets.observe_asset_status(ObserveAssetStatusCommand {
                 provider_connection_id: target.provider_connection_id.clone(),
@@ -3728,6 +3733,28 @@ mod tests {
             .unwrap(),
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn legacy_review_task_id_cannot_be_reused_as_a_cloud_asset() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = test_staging_service(&directory);
+        let mut job = staging
+            .create_job(StartStagingCommand {
+                local_path: "C:/media/original.png".into(),
+                purpose: "asset_import".into(),
+                media_type: MediaType::Image,
+                import: Some(super::super::types::StagingAssetImportTarget {
+                    provider_connection_id: "provider-1".into(),
+                    name: Some("original.png".into()),
+                    group_id: None,
+                }),
+            })
+            .unwrap();
+        job.status = StagingStatus::Cleaned;
+        job.asset_id = Some("task-20260922083550-5987851d".into());
+
+        assert!(!staging.staging_content_exists(&job).await.unwrap());
     }
 
     #[tokio::test]
