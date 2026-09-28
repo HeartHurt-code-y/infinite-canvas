@@ -1026,6 +1026,7 @@ pub fn start_staging_upload(
     };
 
     let staging = state.staging.clone();
+    let storage = state.storage.clone();
     let job_id = job.id.clone();
     let spawned_job_id = job_id.clone();
     tauri::async_runtime::spawn(async move {
@@ -1053,7 +1054,19 @@ pub fn start_staging_upload(
                     spawned_job_id,
                     run_started_at.elapsed().as_millis()
                 );
-                json!({ "jobId": spawned_job_id, "error": record })
+                if matches!(
+                    &runtime_error,
+                    BackendError::Protocol { details, .. }
+                        if details.get("terminalStatus").and_then(Value::as_str)
+                            .is_some_and(|status| status.eq_ignore_ascii_case("TimedOut"))
+                ) {
+                    match storage.get_staging_job(&spawned_job_id) {
+                        Ok(job) => json!({ "jobId": spawned_job_id, "job": job }),
+                        Err(_) => json!({ "jobId": spawned_job_id, "error": record }),
+                    }
+                } else {
+                    json!({ "jobId": spawned_job_id, "error": record })
+                }
             }
         };
         if let Err(emit_error) = app.emit("staging:state-changed", event) {
@@ -1067,6 +1080,49 @@ pub fn start_staging_upload(
         job_id,
         started_at.elapsed().as_millis()
     );
+    Ok(job_id)
+}
+
+/// 对已被海外平台接受的上传只按本机保存的 db_id 续查，绝不再次上传文件。
+#[tauri::command]
+pub fn resume_staging_import(
+    app: AppHandle,
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<String> {
+    // 请求阶段先校验任务身份，避免后台才报一个与按钮点击无关的错误。
+    let job = state.storage.get_staging_job(&job_id).command()?;
+    if job.purpose != "asset_import" || job.overseas_db_id.is_none() || job.asset_id.is_some() {
+        return Err(BackendError::validation(
+            "staging job has no unresolved overseas upload to query",
+            json!({ "jobId": job_id }),
+        )
+        .payload());
+    }
+    let staging = state.staging.clone();
+    let storage = state.storage.clone();
+    let spawned_job_id = job_id.clone();
+    tauri::async_runtime::spawn(async move {
+        let event = match staging.resume_import_job(&spawned_job_id).await {
+            Ok(job) => json!({ "jobId": spawned_job_id, "job": job }),
+            // 同一任务已有查询在途时复用那次后台查询，避免第二个错误事件
+            // 把前端仍在执行的任务误判为失败。
+            Err(BackendError::Conflict(_)) => return,
+            Err(runtime_error) => {
+                let record = runtime_error.runtime_record();
+                error!("[staging] 海外素材续查失败: jobId={spawned_job_id}, 错误: {record}");
+                match storage.get_staging_job(&spawned_job_id) {
+                    Ok(job) => json!({ "jobId": spawned_job_id, "job": job }),
+                    Err(_) => json!({ "jobId": spawned_job_id, "error": record }),
+                }
+            }
+        };
+        if let Err(emit_error) = app.emit("staging:state-changed", event) {
+            error!(
+                "[staging] 海外素材续查事件发射失败: jobId={spawned_job_id}, 错误: {emit_error}"
+            );
+        }
+    });
     Ok(job_id)
 }
 

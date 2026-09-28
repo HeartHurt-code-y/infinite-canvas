@@ -45,7 +45,7 @@ describe("素材 ID 尚未返回的云端素材", () => {
 
     const blocked = screen.getByRole("button", { name: "云端处理中，暂不可用：审核中的封面" });
     expect(blocked).toBeDisabled();
-    expect(blocked.querySelector(".asset-card__status")).toHaveTextContent("云端处理中");
+    expect(blocked.querySelector(".asset-card__status")).toHaveTextContent("素材处理中");
     expect(blocked.querySelector(".asset-card__status")).toHaveAttribute(
       "data-state",
       "processing",
@@ -63,5 +63,27 @@ describe("素材 ID 尚未返回的云端素材", () => {
     const ready = screen.getByRole("button", { name: "选择图片素材：已就绪封面" });
     expect(ready).toBeEnabled();
     expect(ready.querySelector(".asset-card__status")).toBeNull();
+  });
+
+  it("真实 id 已返回但 asset_url 仍指向 task 时继续阻止选用", () => {
+    render(
+      <AssetFlow
+        assets={[
+          asset({
+            id: "asset-ready-id",
+            dbId: 1351,
+            assetUrl: "asset://task-20260922091628-d59f46b5",
+            name: "引用待确认的封面",
+          }),
+        ]}
+        onPreview={vi.fn()}
+        onDropToCanvas={vi.fn()}
+      />,
+    );
+    const card = screen.getByRole("button", {
+      name: "云端处理中，暂不可用：引用待确认的封面",
+    });
+    expect(card).toBeDisabled();
+    expect(card.querySelector(".asset-card__status")).toHaveTextContent("素材处理中");
   });
 });

@@ -518,6 +518,7 @@ mod tests {
                 bytes_total: Some(4),
                 bytes_uploaded: 4,
                 asset_id: Some("asset-kept".into()),
+                overseas_db_id: None,
                 import_target: Some(StagingAssetImportTarget {
                     provider_connection_id: "provider".into(),
                     name: None,
@@ -540,6 +541,7 @@ mod tests {
                 bytes_total: Some(5),
                 bytes_uploaded: 5,
                 asset_id: Some("asset-kept".into()),
+                overseas_db_id: None,
                 import_target: Some(StagingAssetImportTarget {
                     provider_connection_id: "other-provider".into(),
                     name: None,

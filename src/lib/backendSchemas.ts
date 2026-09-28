@@ -184,6 +184,7 @@ export const stagingJobRecordSchema = v.looseObject({
   bytesTotal: nullableNumberSchema,
   bytesUploaded: v.number(),
   assetId: nullableStringSchema,
+  overseasDbId: v.optional(nullableNumberSchema),
   importTarget: v.nullable(stagingAssetImportTargetSchema),
   // 上传前的自动调整说明（旧后端没有该字段，缺省即「未调整」）。
   adjustment: v.optional(nullableStringSchema),
@@ -200,10 +201,12 @@ export const stagingStateChangedEventSchema = v.looseObject({
 
 const assetImportOutputRecordSchema = v.looseObject({
   jobId: v.string(),
+  providerConnectionId: v.optional(v.string()),
   localPath: v.string(),
   mediaType: mediaTypeSchema,
   status: stagingStatusSchema,
   assetId: nullableStringSchema,
+  overseasDbId: v.optional(nullableNumberSchema),
   // 后端总是显式给出该字段（未指定分组时为 null）。
   groupId: nullableStringSchema,
   bytesUploaded: v.number(),
@@ -290,6 +293,7 @@ export const cloudAssetSchema = v.looseObject({
   providerConnectionId: v.string(),
   id: v.string(),
   reviewTaskId: v.optional(nullableStringSchema),
+  dbId: v.nullable(v.number()),
   name: v.string(),
   kind: mediaTypeSchema,
   status: cloudAssetStatusSchema,

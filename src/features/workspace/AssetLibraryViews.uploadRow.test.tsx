@@ -95,6 +95,56 @@ describe("上传行的素材库导入结论", () => {
     expect(within(assetImportPhase()).getByText("等待中")).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /移除上传记录/ })).not.toBeInTheDocument();
   });
+
+  it("平台 Active 但返回 task 占位时仍显示处理中", () => {
+    render(
+      <AssetUploadRow
+        entry={buildEntry({
+          status: "active",
+          assetId: "task-20260924081817-bef4eede",
+          overseasDbId: 1351,
+          lastAdvancedAt: Date.now() - 600_000,
+        })}
+        onDismiss={() => undefined}
+      />,
+    );
+
+    expect(within(assetImportPhase()).getByText("平台处理中…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /移除上传记录/ })).not.toBeInTheDocument();
+    expect(screen.queryByText(/1351|继续查询|审核失败/)).not.toBeInTheDocument();
+  });
+
+  it("旧记录只有 task 占位、没有 db_id 时也保持简洁处理中", () => {
+    render(
+      <AssetUploadRow
+        entry={buildEntry({
+          status: "active",
+          assetId: "task-20260924081817-bef4eede",
+          lastAdvancedAt: Date.now() - 600_000,
+        })}
+        onDismiss={() => undefined}
+      />,
+    );
+    expect(within(assetImportPhase()).getByText("平台处理中…")).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: /移除上传记录/ })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "继续查询" })).not.toBeInTheDocument();
+  });
+
+  it("固定等待截止后只显示简洁超时结果，允许短暂展示后收起", () => {
+    render(
+      <AssetUploadRow
+        entry={buildEntry({
+          status: "failed",
+          overseasDbId: 1351,
+          error: { kind: "asset_import_timeout", details: { terminalStatus: "TimedOut" } },
+        })}
+        onDismiss={() => undefined}
+      />,
+    );
+    expect(within(assetImportPhase()).getByText("上传超时")).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("上传超时，已清理");
+    expect(screen.queryByRole("button", { name: "展开完整报错" })).not.toBeInTheDocument();
+  });
 });
 
 describe("上传失败提示", () => {

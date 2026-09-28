@@ -11,6 +11,7 @@ import {
   UPLOAD_ABANDONED_MS,
   canvasHomeViewport,
   clampCanvasZoom,
+  isAbandonedAssetUpload,
   isTerminalAssetUpload,
   isTerminalStagingJob,
   isNodeRectAvailable,
@@ -259,6 +260,33 @@ function stagingJob(overrides: Partial<StagingJobRecord> = {}): StagingJobRecord
 }
 
 describe("mergeStagingJobsIntoUploads", () => {
+  it("海外审核有 db_id 时保留原任务，超过两分钟仍可继续查询", () => {
+    const entry = uploadEntry({ lastAdvancedAt: 0 });
+    const merged = mergeStagingJobsIntoUploads(
+      [entry],
+      [stagingJob({ overseasDbId: 1351, error: { message: "本次查询超时" } })],
+      600_000,
+    );
+    expect(merged?.[0]).toMatchObject({
+      status: "importing",
+      overseasDbId: 1351,
+      error: { message: "本次查询超时" },
+    });
+    expect(isAbandonedAssetUpload(merged![0]!, 900_000)).toBe(false);
+  });
+
+  it("旧上传只有 task 占位时也不误导用户重传", () => {
+    const entry = uploadEntry({ assetId: "task-20260924081817-bef4eede", lastAdvancedAt: 0 });
+    expect(isAbandonedAssetUpload(entry, 600_000)).toBe(false);
+    expect(
+      mergeStagingJobsIntoUploads(
+        [entry],
+        [stagingJob({ assetId: "task-20260924081817-bef4eede" })],
+        600_000,
+      ),
+    ).toBeNull();
+  });
+
   it("后端记录长时间无任何推进时落地为已中断并带上原因（僵尸在途行）", () => {
     // 真实场景：导入阶段后端进程退出，记录永远停在 importing，
     // 前端此前会一直转圈，而且非终态行不给关闭按钮。
@@ -479,6 +507,29 @@ describe("stagingImportReachedLibrary / isTerminalStagingJob", () => {
     }
     expect(isTerminalStagingJob({ status: "failed", assetId: null })).toBe(true);
     expect(isTerminalStagingJob({ status: "interrupted", assetId: null })).toBe(true);
+    for (const assetId of [
+      "task-20260924081817-bef4eede",
+      "asset://task-20260924081817-bef4eede",
+    ]) {
+      expect(stagingImportReachedLibrary({ status: "active", assetId })).toBe(false);
+      expect(isTerminalStagingJob({ status: "active", assetId })).toBe(false);
+      expect(shouldAutoDismissUpload({ status: "cleaned", assetId })).toBe(false);
+    }
+  });
+
+  it("海外本地等待截止才自动收起，平台普通 Failed 保留失败行", () => {
+    const timedOut = {
+      status: "failed" as const,
+      assetId: null,
+      error: { kind: "asset_import_timeout", details: { terminalStatus: "TimedOut" } },
+    };
+    expect(shouldAutoDismissUpload(timedOut)).toBe(true);
+    expect(
+      shouldAutoDismissUpload({
+        ...timedOut,
+        error: { kind: "asset_import_failed", details: { terminalStatus: "Failed" } },
+      }),
+    ).toBe(false);
   });
 });
 
@@ -626,6 +677,7 @@ function cloudAsset(overrides: Partial<CloudAsset> = {}): CloudAsset {
   return {
     providerConnectionId: "provider",
     id: "asset-1",
+    dbId: null,
     name: "封面",
     kind: "image",
     status: "ready",
@@ -658,6 +710,42 @@ describe("cloudAssetAwaitingId", () => {
     });
     expect(cloudAssetToItem(activeButNoAssetId).cloudStatus).toBe("processing");
 
+    const realIdButTaskUrl = cloudAsset({
+      id: "asset-20260922091640-real",
+      dbId: 1351,
+      assetUrl: "asset://task-20260922091628-d59f46b5",
+      status: "ready",
+      rawStatus: "Active",
+    });
+    const unresolvedUrlItem = cloudAssetToItem(realIdButTaskUrl);
+    expect(unresolvedUrlItem.cloudStatus).toBe("processing");
+    expect(cloudAssetAwaitingId(unresolvedUrlItem)).toBe(true);
+
+    const mismatchedRealUrl = cloudAsset({
+      id: "asset-20260922091640-real",
+      dbId: 1351,
+      assetUrl: "asset://asset-another-record",
+      status: "ready",
+    });
+    expect(cloudAssetAwaitingId({ ...mismatchedRealUrl, source: "cloud" })).toBe(true);
+
+    const missingOverseasUrl = cloudAsset({
+      id: "asset-20260922091640-real",
+      dbId: 1351,
+      assetUrl: null,
+      status: "ready",
+    });
+    expect(cloudAssetToItem(missingOverseasUrl).cloudStatus).toBe("processing");
+    expect(cloudAssetAwaitingId(cloudAssetToItem(missingOverseasUrl))).toBe(true);
+
+    const confirmedOverseas = cloudAsset({
+      id: "asset-20260922091640-real",
+      dbId: 1351,
+      assetUrl: "asset://asset-20260922091640-real",
+      status: "ready",
+    });
+    expect(cloudAssetToItem(confirmedOverseas).cloudStatus).toBe("ready");
+
     const ready = cloudAsset({
       id: "asset-20260922091640-real",
       reviewTaskId: "task-20260922091628-d59f46b5",
@@ -667,6 +755,7 @@ describe("cloudAssetAwaitingId", () => {
       false,
     );
     expect(cloudAssetToItem(ready).cloudStatus).toBe("ready");
+    expect(cloudAssetAwaitingId({ ...ready, assetUrl: null, source: "cloud" })).toBe(false);
 
     const stillProcessingWithId = cloudAsset({
       id: "asset-20260922091640-real",

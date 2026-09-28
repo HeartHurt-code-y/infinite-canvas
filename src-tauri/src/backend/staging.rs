@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -47,6 +47,7 @@ const PUT_URL_EXPIRY_SECS: i64 = 900;
 
 /// 预签名 GET / DELETE URL 有效期：1 小时，需覆盖素材导入轮询（最长 300 秒）与安全重试窗口。
 const LEASE_URL_EXPIRY_SECS: i64 = 3600;
+const OVERSEAS_UPLOAD_DEADLINE_MS: i64 = 20 * 60 * 1000;
 
 /// 连通性测试探针对象的预签名 URL 有效期：只需覆盖一次立即发出的请求。
 const PROBE_URL_EXPIRY_SECS: i64 = 60;
@@ -540,6 +541,7 @@ pub struct StagingService {
     composer: VideoCompositionService,
     client: reqwest::Client,
     content_gates: Arc<AsyncMutex<HashMap<String, Weak<AsyncMutex<()>>>>>,
+    active_jobs: Arc<AsyncMutex<HashSet<String>>>,
 }
 
 async fn gate_for_content(
@@ -563,6 +565,43 @@ pub struct StagingLease {
     pub delete_url: Option<String>,
 }
 
+fn is_overseas_terminal_error(error: &BackendError) -> bool {
+    match error {
+        BackendError::Protocol { details, .. } => details
+            .get("terminalStatus")
+            .and_then(Value::as_str)
+            .is_some_and(|status| {
+                status.eq_ignore_ascii_case("failed")
+                    || status.eq_ignore_ascii_case("deleted")
+                    || status.eq_ignore_ascii_case("timedout")
+            }),
+        _ => false,
+    }
+}
+
+fn is_overseas_timeout_error(error: &BackendError) -> bool {
+    matches!(
+        error,
+        BackendError::Protocol { details, .. }
+            if details.get("terminalStatus")
+                .and_then(Value::as_str)
+                .is_some_and(|status| status.eq_ignore_ascii_case("timedout"))
+    )
+}
+
+fn overseas_timeout_error(db_id: u64) -> BackendError {
+    BackendError::protocol(
+        "overseas asset upload exceeded its 20-minute local deadline",
+        json!({ "terminalStatus": "TimedOut", "dbId": db_id }),
+    )
+}
+
+fn remaining_overseas_wait_ms(submitted_at: i64, now: i64) -> i64 {
+    submitted_at
+        .saturating_add(OVERSEAS_UPLOAD_DEADLINE_MS)
+        .saturating_sub(now)
+}
+
 impl StagingService {
     pub fn new(
         storage: Arc<Storage>,
@@ -583,6 +622,7 @@ impl StagingService {
             composer,
             client,
             content_gates: Arc::new(AsyncMutex::new(HashMap::new())),
+            active_jobs: Arc::new(AsyncMutex::new(HashSet::new())),
         })
     }
 
@@ -708,6 +748,7 @@ impl StagingService {
             bytes_total: None,
             bytes_uploaded: 0,
             asset_id: None,
+            overseas_db_id: None,
             import_target: command.import,
             adjustment: None,
             error: None,
@@ -739,10 +780,16 @@ impl StagingService {
                     .and_then(|target| target.group_id.clone());
                 AssetImportOutputRecord {
                     job_id: job.id,
+                    provider_connection_id: job
+                        .import_target
+                        .as_ref()
+                        .map(|target| target.provider_connection_id.clone())
+                        .unwrap_or_default(),
                     local_path: job.local_path,
                     media_type: job.media_type,
                     status: job.status,
                     asset_id: job.asset_id,
+                    overseas_db_id: job.overseas_db_id,
                     group_id,
                     bytes_uploaded: job.bytes_uploaded,
                     bytes_total: job.bytes_total,
@@ -1140,6 +1187,7 @@ impl StagingService {
                 bytes_total: Some(object.size),
                 bytes_uploaded: object.size,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -1280,17 +1328,117 @@ impl StagingService {
     }
 
     pub async fn run_job(&self, job_id: &str) -> BackendResult<StagingJobRecord> {
+        self.reserve_job(job_id).await?;
+        let result = self.run_job_reserved(job_id).await;
+        self.active_jobs.lock().await.remove(job_id);
+        result
+    }
+
+    async fn run_job_reserved(&self, job_id: &str) -> BackendResult<StagingJobRecord> {
         let mut job = self.storage.get_staging_job(job_id)?;
-        match self.run_job_inner(&mut job).await {
+        let result = match self.run_job_inner(&mut job).await {
             Ok(()) => Ok(job),
             Err(error) => {
-                job.status = StagingStatus::Failed;
-                job.error = Some(error.runtime_record());
+                // 一旦海外平台确认收件并发回 db_id，本机超时、网络故障及上游
+                // Active + task 占位符都只表示结果未知。保留同一任务供续查，绝不重传。
+                job.overseas_db_id = self.storage.get_staging_job(job_id)?.overseas_db_id;
+                let timed_out = is_overseas_timeout_error(&error);
+                job.status = if job.overseas_db_id.is_some() && !is_overseas_terminal_error(&error)
+                {
+                    StagingStatus::Importing
+                } else {
+                    StagingStatus::Failed
+                };
+                let mut record = if timed_out {
+                    json!({
+                        "kind": "asset_import_timeout",
+                        "message": "上传超时，已清理本地待处理素材",
+                        "details": {
+                            "terminalStatus": "TimedOut",
+                            "dbId": job.overseas_db_id,
+                        }
+                    })
+                } else {
+                    error.runtime_record()
+                };
+                if job.overseas_db_id.is_some() && matches!(job.status, StagingStatus::Importing) {
+                    record["tokenScopeHint"] = json!(
+                        "继续查询时须使用原上传的素材库连接和令牌；切换令牌可能查不到这条 db_id 记录"
+                    );
+                }
+                if timed_out && job.overseas_db_id.is_some() {
+                    let persisted = self.storage.get_staging_job(job_id)?;
+                    if !matches!(persisted.status, StagingStatus::Cleaned) {
+                        if let Some(object_key) = persisted.object_key.as_deref() {
+                            let current_config = self.storage.get_tos_config().ok().flatten();
+                            if let Some(config) = current_config
+                                .as_ref()
+                                .filter(|config| staging_object_matches_scope(object_key, config))
+                            {
+                                match self.presign_existing_object_with_config(
+                                    job_id, object_key, config,
+                                ) {
+                                    Ok(lease) => {
+                                        if let Err(cleanup_error) = self.cleanup_lease(&lease).await
+                                        {
+                                            warn!(
+                                                "[staging] 超时后清理 TOS 暂存对象失败: jobId={job_id}, 错误: {cleanup_error}"
+                                            );
+                                        } else {
+                                            job.object_key = None;
+                                        }
+                                    }
+                                    Err(cleanup_error) => warn!(
+                                        "[staging] 超时后无法重签 TOS 删除地址: jobId={job_id}, 错误: {cleanup_error}"
+                                    ),
+                                }
+                            } else {
+                                warn!(
+                                    "[staging] 超时后暂存对象不在当前配置前缀内，跳过删除: jobId={job_id}"
+                                );
+                            }
+                        }
+                    } else {
+                        job.object_key = None;
+                    }
+                }
+                job.error = Some(record);
                 job.updated_at = now_ms();
                 self.storage.update_staging_job(&job)?;
-                Err(error)
+                if matches!(job.status, StagingStatus::Importing) {
+                    Ok(job)
+                } else {
+                    Err(error)
+                }
             }
+        };
+        result
+    }
+
+    /// 仅按原上传回执中的 db_id 续查；命令调用方不得重新提交文件。
+    pub async fn resume_import_job(&self, job_id: &str) -> BackendResult<StagingJobRecord> {
+        let job = self.storage.get_staging_job(job_id)?;
+        if job.purpose != "asset_import"
+            || job.overseas_db_id.is_none()
+            || job.import_target.is_none()
+            || job.asset_id.is_some()
+            || matches!(job.status, StagingStatus::Failed)
+        {
+            return Err(BackendError::validation(
+                "staging job has no unresolved overseas upload to query",
+                json!({ "jobId": job_id }),
+            ));
         }
+        self.run_job(job_id).await
+    }
+
+    async fn reserve_job(&self, job_id: &str) -> BackendResult<()> {
+        if !self.active_jobs.lock().await.insert(job_id.to_string()) {
+            return Err(BackendError::Conflict(format!(
+                "staging job {job_id} is already running"
+            )));
+        }
+        Ok(())
     }
 
     pub async fn stage_for_remote_input(
@@ -1348,6 +1496,9 @@ impl StagingService {
     }
 
     async fn run_job_inner(&self, job: &mut StagingJobRecord) -> BackendResult<()> {
+        if job.overseas_db_id.is_some() {
+            return self.run_job_inner_unindexed(job).await;
+        }
         let target_config = if job.purpose == "local_asset" && job.import_target.is_none() {
             self.storage.get_staging_object_target(&job.id)?
                 .or(self.storage.get_tos_config()?)
@@ -1541,6 +1692,46 @@ impl StagingService {
     }
 
     async fn run_job_inner_unindexed(&self, job: &mut StagingJobRecord) -> BackendResult<()> {
+        if let Some(db_id) = job.overseas_db_id {
+            let import_target = job.import_target.as_ref().ok_or_else(|| {
+                BackendError::validation(
+                    "overseas upload is missing its provider connection",
+                    json!({ "jobId": job.id, "dbId": db_id }),
+                )
+            })?;
+            let submitted_at = self
+                .storage
+                .get_staging_overseas_submitted_at(&job.id)?
+                .ok_or_else(|| {
+                    BackendError::protocol(
+                        "overseas upload has no persisted submission time",
+                        json!({ "dbId": db_id }),
+                    )
+                })?;
+            let remaining_ms = remaining_overseas_wait_ms(submitted_at, now_ms());
+            if remaining_ms <= 0 {
+                return Err(overseas_timeout_error(db_id));
+            }
+            job.status = StagingStatus::Importing;
+            job.updated_at = now_ms();
+            self.storage.update_staging_job(job)?;
+            let identity = tokio::time::timeout(
+                std::time::Duration::from_millis(remaining_ms as u64),
+                self.assets.resume_overseas_import_by_db_id(
+                    &import_target.provider_connection_id,
+                    db_id,
+                    import_target.name.as_deref(),
+                ),
+            )
+            .await
+            .map_err(|_| overseas_timeout_error(db_id))??;
+            job.asset_id = Some(identity.asset_id);
+            job.status = StagingStatus::Active;
+            job.error = None;
+            job.updated_at = now_ms();
+            self.storage.update_staging_job(job)?;
+            return Ok(());
+        }
         let lease = self.upload(job).await?;
         let Some(import_target) = job.import_target.clone() else {
             job.status = StagingStatus::Staged;
@@ -1562,9 +1753,14 @@ impl StagingService {
                 let _ = storage.update_staging_import_progress(&job_id, done, total);
             }
         };
+        let on_submitted = {
+            let storage = Arc::clone(&self.storage);
+            let job_id = job.id.clone();
+            move |db_id: u64| storage.set_staging_overseas_db_id(&job_id, db_id)
+        };
         let imported = self
             .assets
-            .import_staged_with_progress(
+            .import_staged_with_progress_and_submission(
                 ImportStagedAsset {
                     provider_connection_id: import_target.provider_connection_id.clone(),
                     public_url: lease.get_url.clone(),
@@ -1580,6 +1776,7 @@ impl StagingService {
                         .map(str::to_string),
                 },
                 Some(Arc::new(import_progress)),
+                Some(Arc::new(on_submitted)),
             )
             .await;
         let identity = match imported {
@@ -1598,7 +1795,9 @@ impl StagingService {
         };
 
         job.asset_id = Some(identity.asset_id);
+        job.overseas_db_id = self.storage.get_staging_job(&job.id)?.overseas_db_id;
         job.status = StagingStatus::Active;
+        job.error = None;
         job.updated_at = now_ms();
         self.storage.update_staging_job(job)?;
         if let Err(cleanup_error) = self.cleanup_lease(&lease).await {
@@ -2296,6 +2495,19 @@ async fn sha256_file(path: &Path) -> BackendResult<(String, u64)> {
     Ok((hex::encode(hasher.finalize()), size))
 }
 
+/// 仅对本应用按当前桶、地域和 endpoint 生成的对象重签删除地址。
+/// scope 哈希是对象键的一部分；用户切换 TOS 配置后不会误删新桶里的同名键。
+fn staging_object_matches_scope(object_key: &str, config: &TosStagingConfig) -> bool {
+    let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
+    let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
+    let expected_prefix = format!(
+        "{}/{}/",
+        config.object_prefix.trim_matches('/'),
+        &scope_hash[..16]
+    );
+    object_key.starts_with(&expected_prefix) && object_key.len() > expected_prefix.len()
+}
+
 /// 直连 TOS 的配置校验：启用时桶名、地域、Endpoint、对象前缀与凭据引用必须齐备。
 fn validate_tos_config(config: &TosStagingConfig) -> BackendResult<()> {
     if !config.enabled {
@@ -2412,6 +2624,45 @@ fn extract_error_code(body: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn only_explicit_remote_terminal_status_finishes_accepted_upload_as_failed() {
+        let reviewed_failure = BackendError::protocol(
+            "asset upload review rejected",
+            json!({ "terminalStatus": "Failed", "reviewErrorMsg": "rejected" }),
+        );
+        let remote_delete = BackendError::protocol(
+            "asset upload deleted",
+            json!({ "terminalStatus": "Deleted" }),
+        );
+        let local_deadline =
+            BackendError::protocol("local wait deadline reached", json!({ "dbId": 1351 }));
+        let server_error = BackendError::protocol(
+            "status request returned HTTP 500",
+            json!({ "httpStatus": 500 }),
+        );
+        let deadline = overseas_timeout_error(1351);
+        assert!(is_overseas_terminal_error(&reviewed_failure));
+        assert!(is_overseas_terminal_error(&remote_delete));
+        assert!(is_overseas_terminal_error(&deadline));
+        assert!(is_overseas_timeout_error(&deadline));
+        assert!(!is_overseas_terminal_error(&local_deadline));
+        assert!(!is_overseas_terminal_error(&server_error));
+    }
+
+    #[test]
+    fn restart_poll_uses_original_submission_deadline() {
+        let submitted_at = 1_000_000;
+        assert_eq!(
+            remaining_overseas_wait_ms(submitted_at, submitted_at + 12 * 60 * 1000),
+            8 * 60 * 1000
+        );
+        assert_eq!(
+            remaining_overseas_wait_ms(submitted_at, submitted_at + 20 * 60 * 1000),
+            0
+        );
+        assert!(remaining_overseas_wait_ms(submitted_at, submitted_at + 21 * 60 * 1000) < 0);
+    }
+
     fn sample_config() -> TosStagingConfig {
         TosStagingConfig {
             region: "cn-beijing".into(),
@@ -2436,6 +2687,7 @@ mod tests {
             bytes_total: None,
             bytes_uploaded: 0,
             asset_id: None,
+            overseas_db_id: None,
             import_target: None,
             adjustment: None,
             error: None,
@@ -2477,6 +2729,7 @@ mod tests {
             bytes_total: Some(4),
             bytes_uploaded: 4,
             asset_id: None,
+            overseas_db_id: None,
             import_target: None,
             adjustment: None,
             error: None,
@@ -2510,6 +2763,7 @@ mod tests {
                 bytes_total: None,
                 bytes_uploaded: 0,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -2549,6 +2803,7 @@ mod tests {
             bytes_total: None,
             bytes_uploaded: 0,
             asset_id: None,
+            overseas_db_id: None,
             import_target: None,
             adjustment: None,
             error: None,
@@ -2590,6 +2845,7 @@ mod tests {
                 bytes_total: Some(8),
                 bytes_uploaded: 8,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: (purpose == "asset_import").then(|| {
                     crate::backend::types::StagingAssetImportTarget {
                         provider_connection_id: "provider".into(),
@@ -2628,6 +2884,7 @@ mod tests {
             bytes_total: Some(8),
             bytes_uploaded: 8,
             asset_id: None,
+            overseas_db_id: None,
             import_target: None,
             adjustment: None,
             error: None,
@@ -2656,6 +2913,17 @@ mod tests {
         assert!(key.ends_with(".png"));
         assert!(!key.contains("tos-ak-sk"));
         assert!(!key.contains("example-staging-bucket"));
+        assert!(staging_object_matches_scope(&key, &config));
+        let mut switched_bucket = config.clone();
+        switched_bucket.bucket = "different-bucket".into();
+        assert!(!staging_object_matches_scope(&key, &switched_bucket));
+        let mut switched_region = config.clone();
+        switched_region.region = "cn-shanghai".into();
+        assert!(!staging_object_matches_scope(&key, &switched_region));
+        assert!(!staging_object_matches_scope(
+            "staging/random/a.png",
+            &config
+        ));
     }
 
     #[test]
@@ -2761,6 +3029,7 @@ mod tests {
                 bytes_total: Some(8),
                 bytes_uploaded: 8,
                 asset_id: Some("asset-20260914103421-82xww".into()),
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -2817,6 +3086,7 @@ mod tests {
                 bytes_total: Some(8),
                 bytes_uploaded: 8,
                 asset_id: Some("asset-20260914103421-82xww".into()),
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -2855,6 +3125,7 @@ mod tests {
                 bytes_total: Some(8),
                 bytes_uploaded: 8,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -3459,6 +3730,55 @@ mod tests {
         .unwrap()
     }
 
+    #[tokio::test]
+    async fn expired_submitted_upload_stays_failed_after_tos_was_cleaned() {
+        let directory = tempfile::tempdir().unwrap();
+        let staging = test_staging_service(&directory);
+        let job = StagingJobRecord {
+            id: "expired-overseas".into(),
+            local_path: "C:/media/original.png".into(),
+            purpose: "asset_import".into(),
+            media_type: MediaType::Image,
+            object_key: Some("staging/expired.png".into()),
+            status: StagingStatus::Cleaned,
+            bytes_total: Some(10),
+            bytes_uploaded: 10,
+            asset_id: None,
+            overseas_db_id: None,
+            import_target: Some(super::super::types::StagingAssetImportTarget {
+                provider_connection_id: "provider-overseas".into(),
+                name: Some("original.png".into()),
+                group_id: None,
+            }),
+            adjustment: None,
+            error: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        staging.storage.insert_staging_job(&job).unwrap();
+        staging
+            .storage
+            .set_staging_overseas_db_id(&job.id, 1351)
+            .unwrap();
+        let connection = rusqlite::Connection::open(directory.path().join("app.sqlite3")).unwrap();
+        connection
+            .execute(
+                "UPDATE staging_jobs SET overseas_submitted_at = ?1 WHERE id = ?2",
+                rusqlite::params![now_ms() - OVERSEAS_UPLOAD_DEADLINE_MS - 1, job.id],
+            )
+            .unwrap();
+        let error = staging.run_job(&job.id).await.unwrap_err();
+        assert!(is_overseas_timeout_error(&error));
+        let persisted = staging.storage.get_staging_job(&job.id).unwrap();
+        assert!(matches!(persisted.status, StagingStatus::Failed));
+        assert!(persisted.object_key.is_none());
+        assert_eq!(persisted.overseas_db_id, Some(1351));
+        assert_eq!(
+            persisted.error.as_ref().unwrap()["kind"],
+            "asset_import_timeout"
+        );
+    }
+
     #[test]
     fn list_local_assets_keeps_index_when_tos_is_not_configured() {
         // 升级后 TOS 行暂时读不出来时，SQLite 本地索引必须仍能列出；
@@ -3478,6 +3798,7 @@ mod tests {
                 bytes_total: Some(32),
                 bytes_uploaded: 32,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,

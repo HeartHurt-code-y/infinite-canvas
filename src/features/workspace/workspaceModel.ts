@@ -106,6 +106,7 @@ export const CANVAS_CONNECTION_RADIUS = 48;
 
 export interface AssetItem {
   readonly id: string;
+  readonly dbId?: number | null | undefined;
   /** 素材审核任务号。只在详情里单独一行展示，不占用素材 ID。 */
   readonly reviewTaskId?: string | null;
   readonly kind: AssetKind;
@@ -113,6 +114,8 @@ export interface AssetItem {
   readonly meta: string;
   readonly visual: "portrait" | "station" | "rain" | "sketch" | "train" | "ambience";
   readonly previewUrl?: string | null;
+  /** 云端素材引用；`asset://task-...` 仍是审核占位符，不能送往生成。 */
+  readonly assetUrl?: string | null;
   /** 视频关键帧封面（供应商封面图），缺失时抽取视频中间帧兜底。 */
   readonly coverUrl?: string | null;
   /** 视频源地址（素材卡片悬浮播放用）。 */
@@ -138,6 +141,9 @@ export interface AssetUploadEntry {
    * 只看状态既会漏认成功、又会把成功的一次判成失败。
    */
   readonly assetId: string | null;
+  /** 海外上传返回的数据库记录 ID；有它时可按原任务继续查询，不能当僵尸上传重传。 */
+  readonly overseasDbId?: number | null | undefined;
+  readonly providerConnectionId?: string | null | undefined;
   readonly status: StagingStatus;
   readonly bytesUploaded: number;
   readonly bytesTotal: number | null;
@@ -1388,6 +1394,7 @@ export const UPLOAD_AUTO_DISMISS_DELAY_MS = 3_000;
 export interface StagingLibraryImportRecord {
   readonly status: StagingStatus;
   readonly assetId: string | null;
+  readonly error?: unknown;
 }
 
 /**
@@ -1417,16 +1424,27 @@ const FAILED_UPLOAD_STATUSES: ReadonlySet<StagingStatus> = new Set(["failed", "i
  *   （后端报失败前会先尽力删掉暂存对象），而那种记录没有 `assetId`。
  */
 export function stagingImportReachedLibrary(record: StagingLibraryImportRecord): boolean {
-  if (record.assetId == null || record.assetId === "") return false;
+  if (record.assetId == null || record.assetId.trim() === "") return false;
+  if (isPlaceholderAssetIdentity(record.assetId)) return false;
   return IMPORT_SETTLED_STATUSES.has(record.status);
+}
+
+/** 平台审核任务占位符不是可用于生成的素材身份。 */
+export function isPlaceholderAssetIdentity(id: string): boolean {
+  const identity = id.trim();
+  return (
+    isReviewTaskId(identity) ||
+    (identity.slice(0, "asset://".length).toLowerCase() === "asset://" &&
+      isReviewTaskId(identity.slice("asset://".length)))
+  );
 }
 
 /**
  * 上传目标已经成功收尾：可以自动收起这一行。
  *
- * `staged` 对独立对象存储上传是成功，对云端素材只是"对象已上传，仍在导入"；失败与中断
- * （`failed` / `interrupted`）**永不**自动收起：用户需要看见原因并重试。
- * 云端入库记录没有 `assetId` 时一律不认成功（例如导入失败后的清场记录）。
+ * `staged` 对独立对象存储上传是成功，对云端素材只是"对象已上传，仍在导入"。
+ * 普通失败/中断行保留原因与关闭入口；海外本地等待超时已到固定终态时，
+ * 短暂展示后收起。云端入库记录没有真实 `assetId` 时不认成功。
  */
 export function shouldAutoDismissUpload(
   record: StagingLibraryImportRecord,
@@ -1434,7 +1452,26 @@ export function shouldAutoDismissUpload(
 ): boolean {
   return destination === "object_storage"
     ? record.status === "staged"
-    : stagingImportReachedLibrary(record);
+    : stagingImportReachedLibrary(record) || isTimedOutAssetImport(record);
+}
+
+/** 本地等待海外处理到固定截止后的终态；与平台主动返回 Failed 区分。 */
+export function isTimedOutAssetImport(record: {
+  readonly status: StagingStatus;
+  readonly error?: unknown;
+}): boolean {
+  if (record.status !== "failed" || record.error == null || typeof record.error !== "object") {
+    return false;
+  }
+  const error = record.error as { kind?: unknown; details?: unknown };
+  if (
+    error.kind !== "asset_import_timeout" ||
+    error.details == null ||
+    typeof error.details !== "object"
+  ) {
+    return false;
+  }
+  return (error.details as { terminalStatus?: unknown }).terminalStatus === "TimedOut";
 }
 
 /** 需要实时跟踪的对象存储阶段：每秒刷新并参与停滞检测（preparing 为提交前占位）。 */
@@ -1532,6 +1569,13 @@ const UPLOAD_ABANDONED_MAX_IDLE_MS = 24 * 60 * 60 * 1000;
  */
 export function isAbandonedAssetUpload(entry: AssetUploadEntry, now: number): boolean {
   if (isTerminalAssetUpload(entry)) return false;
+  if (
+    entry.destination === "cloud" &&
+    (entry.overseasDbId != null ||
+      (entry.assetId != null && isPlaceholderAssetIdentity(entry.assetId)))
+  ) {
+    return false;
+  }
   if (entry.status === "preparing" || entry.status === "validating") return false;
   const idleMs = now - entry.lastAdvancedAt;
   return idleMs >= UPLOAD_ABANDONED_MS && idleMs <= UPLOAD_ABANDONED_MAX_IDLE_MS;
@@ -1589,10 +1633,17 @@ export function mergeStagingJobsIntoUploads(
     }
     const assetId = job.assetId ?? entry.assetId;
     const identityArrived = assetId !== entry.assetId;
+    const overseasDbId = job.overseasDbId ?? entry.overseasDbId;
+    const providerConnectionId =
+      job.importTarget?.providerConnectionId ?? entry.providerConnectionId;
+    const recoveryKeyArrived = overseasDbId !== entry.overseasDbId;
+    const errorCleared = entry.error != null && job.error == null;
     const bytesAdvanced = job.bytesUploaded > entry.bytesUploaded;
     const statusChanged = job.status !== entry.status;
     const lastAdvancedAt =
-      bytesAdvanced || statusChanged || identityArrived ? now : entry.lastAdvancedAt;
+      bytesAdvanced || statusChanged || identityArrived || recoveryKeyArrived
+        ? now
+        : entry.lastAdvancedAt;
     // 需要实时跟踪的阶段（preparing/validating/authorizing/uploading）每秒刷新一次，
     // 让停滞提示能按时间出现；其余阶段数据未变时跳过，避免无谓重渲染。
     //
@@ -1600,13 +1651,21 @@ export function mergeStagingJobsIntoUploads(
     // cleaning）本来就是"字节不再变、状态也不变"的阶段，若先跳过，僵尸判定永远轮不到
     // 执行——真机上那行一直在转圈就是这么来的（staged 的 mp4 卡了两小时也不落地）。
     const nothingChanged =
-      !bytesAdvanced && !statusChanged && !identityArrived && !isStallTrackedStatus(entry.status);
+      !bytesAdvanced &&
+      !statusChanged &&
+      !identityArrived &&
+      !recoveryKeyArrived &&
+      !errorCleared &&
+      !isStallTrackedStatus(entry.status);
 
     // 后端记录本身到不了终态、且长时间没有任何推进（执行它的进程已经不在了）：
     // 落地为已中断，否则这一行会一直转圈，而且非终态行不给关闭按钮。
     // 已经拿到素材身份的记录不算在内：那是入库成功，只是随后的清理没走完。
     if (
       !isTerminalStagingJob(job, entry.destination) &&
+      (entry.destination !== "cloud" ||
+        (overseasDbId == null &&
+          (assetId == null || !isPlaceholderAssetIdentity(assetId)))) &&
       now - lastAdvancedAt >= UPLOAD_ABANDONED_MS
     ) {
       changed = true;
@@ -1628,9 +1687,12 @@ export function mergeStagingJobsIntoUploads(
       ...entry,
       status: job.status,
       assetId,
+      overseasDbId,
+      providerConnectionId,
       bytesUploaded: job.bytesUploaded,
       bytesTotal: job.bytesTotal ?? entry.bytesTotal,
-      error: job.error ?? entry.error,
+      error:
+        job.error ?? (job.status === "failed" || job.status === "interrupted" ? entry.error : null),
       lastAdvancedAt,
       stalled: isStallTrackedStatus(job.status) && now - lastAdvancedAt >= UPLOAD_STALL_HINT_MS,
     };
@@ -2520,13 +2582,19 @@ export function isReviewTaskId(id: string): boolean {
  */
 export function cloudAssetAwaitingId(asset: {
   readonly id: string;
+  readonly dbId?: number | null | undefined;
   readonly reviewTaskId?: string | null | undefined;
+  readonly assetUrl?: string | null | undefined;
   readonly source?: AssetLibrarySource;
   readonly cloudStatus?: CloudAssetStatus;
 }): boolean {
   if (asset.source === "local") return false;
   if (asset.cloudStatus === "failed" || asset.cloudStatus === "deleted") return false;
-  return listedIdentityIsReviewTask(asset);
+  if (listedIdentityIsReviewTask(asset)) return true;
+  // 海外列表的 db_id 仅是数据库查询键。真正可用的素材还必须有与 id 一致的
+  // asset:// 引用；无 db_id 的旧版/国内素材保留原有身份判定。
+  if (asset.dbId != null) return asset.assetUrl?.trim() !== `asset://${asset.id}`;
+  return false;
 }
 
 function listedIdentityIsReviewTask(asset: {
@@ -2534,9 +2602,10 @@ function listedIdentityIsReviewTask(asset: {
   readonly reviewTaskId?: string | null | undefined;
 }): boolean {
   const fromField = asset.reviewTaskId?.trim() ?? "";
-  const reviewTaskId = fromField !== "" ? fromField : isReviewTaskId(asset.id) ? asset.id : null;
+  const reviewTaskId =
+    fromField !== "" ? fromField : isPlaceholderAssetIdentity(asset.id) ? asset.id : null;
   if (reviewTaskId == null) return false;
-  return asset.id === reviewTaskId || isReviewTaskId(asset.id);
+  return asset.id === reviewTaskId || isPlaceholderAssetIdentity(asset.id);
 }
 
 /**
@@ -2550,7 +2619,11 @@ export function assetDetailIdentity(asset: {
   const fromField = asset.reviewTaskId?.trim() ?? "";
   let reviewTaskId: string | null = null;
   if (fromField !== "") reviewTaskId = fromField;
-  else if (isReviewTaskId(asset.id)) reviewTaskId = asset.id;
+  else if (isPlaceholderAssetIdentity(asset.id)) {
+    reviewTaskId = asset.id.toLowerCase().startsWith("asset://")
+      ? asset.id.slice("asset://".length)
+      : asset.id;
+  }
   const assetId = listedIdentityIsReviewTask(asset) ? "尚未返回" : asset.id;
   return { assetId, reviewTaskId };
 }
@@ -2560,7 +2633,9 @@ export function cloudAssetToItem(asset: CloudAsset): AssetItem {
   // 就不能当已就绪素材用，卡片统一显示「云端处理中」。
   const awaitingId = cloudAssetAwaitingId({
     id: asset.id,
+    dbId: asset.dbId,
     reviewTaskId: asset.reviewTaskId,
+    assetUrl: asset.assetUrl,
     source: "cloud",
     cloudStatus: asset.status,
   });
@@ -2570,12 +2645,14 @@ export function cloudAssetToItem(asset: CloudAsset): AssetItem {
     status === "ready" ? (asset.assetUrl ?? asset.id) : `${statusLabel} · ${asset.rawStatus}`;
   return {
     id: asset.id,
+    dbId: asset.dbId,
     reviewTaskId: asset.reviewTaskId ?? null,
     kind: asset.kind,
     name: asset.name,
     meta,
     visual: asset.kind === "audio" ? "ambience" : "portrait",
     previewUrl: asset.previewUrl,
+    assetUrl: asset.assetUrl,
     coverUrl: asset.coverUrl,
     // assetUrl may be an opaque asset:// reference; only the signed preview URL is playable.
     videoUrl: asset.kind === "video" ? asset.previewUrl : null,

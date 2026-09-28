@@ -31,6 +31,7 @@ function createClient(
     setCredential: vi.fn(() => Promise.resolve()),
     getCredential: vi.fn(() => Promise.resolve("")),
     startUpload: vi.fn(() => Promise.resolve("job-1")),
+    resumeStagingImport: vi.fn(() => Promise.resolve("job-1")),
     getJob: vi.fn(() => {
       throw new Error("not used in these tests");
     }),

@@ -28,6 +28,7 @@ describe("assetLibraryClient.list", () => {
       {
         providerConnectionId: "provider-1",
         id: "asset-1",
+        dbId: null,
         name: "封面图",
         kind: "image",
         status: "ready",

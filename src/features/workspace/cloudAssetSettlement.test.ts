@@ -17,6 +17,7 @@ function observation(overrides: Partial<AssetStatusObservation> = {}): AssetStat
 const processingAsset: CloudAsset = {
   providerConnectionId: "provider-1",
   id: "asset-1",
+  dbId: null,
   name: "封面",
   kind: "image",
   status: "processing",

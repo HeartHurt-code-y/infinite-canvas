@@ -24,6 +24,7 @@ const ASSETS: CloudAsset[] = [
   {
     providerConnectionId: "provider-company",
     id: "asset-1",
+    dbId: null,
     name: "参考图",
     kind: "image",
     status: "ready",

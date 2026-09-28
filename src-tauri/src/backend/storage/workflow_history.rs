@@ -633,7 +633,7 @@ mod tests {
         let page = reopened
             .list_workflow_history(WorkflowHistoryQuery::default())
             .unwrap();
-        assert_eq!(page.items.len(), 8);
+        assert_eq!(page.items.len(), 9);
         for item in page.items {
             let detail = reopened.get_workflow_history(&item.id).unwrap();
             assert_eq!(

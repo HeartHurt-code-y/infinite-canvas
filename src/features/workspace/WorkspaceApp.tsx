@@ -375,9 +375,11 @@ import {
   generationInputMentionCandidate,
   getNodeDescriptor,
   isRunningTaskStatus,
+  isPlaceholderAssetIdentity,
   textResultFromSource,
   isTerminalAssetUpload,
   isTerminalStagingJob,
+  isTimedOutAssetImport,
   isTerminalTaskStatus,
   isTextGenerationModel,
   isVideoGenerationModel,
@@ -1065,6 +1067,44 @@ export function WorkspaceApp({
   const uploadJobToOutputRef = useRef<Map<string, string>>(new Map());
   // 独立对象存储 staging jobId -> 产物节点；成功判据是 staged，不是云端素材 ID。
   const objectStorageUploadJobToOutputRef = useRef<Map<string, string>>(new Map());
+  const [timedOutCloudAssetKeys, setTimedOutCloudAssetKeys] = useState<ReadonlySet<string>>(
+    () => new Set(),
+  );
+  const hiddenCloudAssetKeys = useMemo(() => {
+    const keys = new Set(timedOutCloudAssetKeys);
+    for (const entry of assetUploads) {
+      if (
+        entry.destination !== "cloud" ||
+        entry.providerConnectionId == null ||
+        entry.overseasDbId == null ||
+        isTerminalAssetUpload(entry)
+      ) {
+        continue;
+      }
+      keys.add(JSON.stringify([entry.providerConnectionId, entry.overseasDbId]));
+    }
+    return keys;
+  }, [assetUploads, timedOutCloudAssetKeys]);
+  const hideTimedOutCloudAsset = useCallback((providerConnectionId: string, dbId: number) => {
+    const key = JSON.stringify([providerConnectionId, dbId]);
+    setTimedOutCloudAssetKeys((current) => {
+      if (current.has(key)) return current;
+      return new Set([...current, key]);
+    });
+  }, []);
+  const timeoutNotifiedJobIdsRef = useRef(new Set<string>());
+  const noteTimedOutAssetImport = useCallback(
+    (job: StagingJobRecord) => {
+      if (!isTimedOutAssetImport(job)) return;
+      if (job.overseasDbId != null && job.importTarget?.providerConnectionId != null) {
+        hideTimedOutCloudAsset(job.importTarget.providerConnectionId, job.overseasDbId);
+      }
+      if (timeoutNotifiedJobIdsRef.current.has(job.id)) return;
+      timeoutNotifiedJobIdsRef.current.add(job.id);
+      toast.error("上传超时，已清理本地待处理素材");
+    },
+    [hideTimedOutCloudAsset],
+  );
   /** 预览替换：上传任务 → 被替换的旧云端素材，入库成功后改写画布引用。 */
   const previewRepairJobsRef = useRef<
     Map<string, { readonly oldAssetId: string; readonly providerConnectionId: string }>
@@ -1083,6 +1123,19 @@ export function WorkspaceApp({
       timers.clear();
     };
   }, []);
+  // 终态事件偶尔丢失时，轮询仍会把超时结果写到上传行；同样短暂展示后自动收起。
+  useEffect(() => {
+    for (const entry of assetUploads) {
+      if (!isTimedOutAssetImport(entry) || uploadAutoDismissTimersRef.current.has(entry.jobId)) {
+        continue;
+      }
+      const timer = window.setTimeout(() => {
+        uploadAutoDismissTimersRef.current.delete(entry.jobId);
+        setAssetUploads((current) => current.filter((item) => item.jobId !== entry.jobId));
+      }, UPLOAD_AUTO_DISMISS_DELAY_MS);
+      uploadAutoDismissTimersRef.current.set(entry.jobId, timer);
+    }
+  }, [assetUploads]);
   // startUpload 返回 jobId 前，占位行的临时自增 id（前缀避免与后端真实 id 冲突）。
   const pendingUploadSeqRef = useRef(0);
   const [videoComposerRuns, setVideoComposerRuns] = useState<
@@ -2950,13 +3003,16 @@ export function WorkspaceApp({
             // 素材身份只在入库成功后由后端写回；它是"这次上传成没成"的判据，
             // 事件里带上就必须落到行上（见 stagingImportReachedLibrary）。
             assetId: job?.assetId ?? existing.assetId,
+            overseasDbId: job?.overseasDbId ?? existing.overseasDbId,
+            providerConnectionId:
+              job?.importTarget?.providerConnectionId ?? existing.providerConnectionId,
             bytesUploaded: job?.bytesUploaded ?? existing.bytesUploaded,
             bytesTotal: job?.bytesTotal ?? existing.bytesTotal,
             // 失败原因有两个来源：事件顶层的 error（进程内失败时后端只发 error），
             // 以及任务记录里的 job.error（跑完一轮后落库的完整记录，前端走 startUpload
             // 的那条路径就吃这个）。只看顶层会把后者的失败原因丢掉，用户看到一行
             // "失败"却没有任何原因。
-            error: payload.error ?? job?.error ?? existing.error,
+            error: payload.error ?? (job != null ? job.error : existing.error),
             // 后端的尺寸归一化说明在上传阶段就已写回任务记录，随事件一起送达。
             adjustment: job?.adjustment ?? existing.adjustment,
           };
@@ -2967,6 +3023,13 @@ export function WorkspaceApp({
       const uploadDestination =
         uploadEntriesRef.current.find((entry) => entry.jobId === payload.jobId)?.destination ??
         (payload.job?.purpose === "local_asset" ? "object_storage" : "cloud");
+      if (payload.job != null && isTimedOutAssetImport(payload.job)) {
+        noteTimedOutAssetImport(payload.job);
+        const providerId = payload.job.importTarget?.providerConnectionId;
+        if (providerId != null && assetProvider?.id === providerId) {
+          refreshCloudAssets(providerId, "upload-finished");
+        }
+      }
       // 入库是否成功看 `assetId` 而不是状态：后端给出素材身份后还会清理暂存对象
       // （active → cleaning → cleaned），事件里读到的未必是 active。
       const reachedLibrary = payload.job != null && stagingImportReachedLibrary(payload.job);
@@ -3058,6 +3121,7 @@ export function WorkspaceApp({
     assetLibrarySource,
     assetProvider,
     applyCloudAssetKindDelta,
+    noteTimedOutAssetImport,
     patchNodes,
     promptContents,
     refreshAssetGroups,
@@ -3091,6 +3155,15 @@ export function WorkspaceApp({
     void tosStagingClient.listAssetImportOutputs().then(
       (records) => {
         recoveredAssetImportsRef.current = records;
+        for (const record of records) {
+          if (
+            isTimedOutAssetImport(record) &&
+            record.providerConnectionId != null &&
+            record.overseasDbId != null
+          ) {
+            hideTimedOutCloudAsset(record.providerConnectionId, record.overseasDbId);
+          }
+        }
         // 在途上传恢复成面板行：状态与字节进度都来自后端记录，之后由既有轮询继续推进。
         // 长时间没有推进的记录不再当作"还在传"：进程在上传途中被杀时后端会留下一个
         // staged/importing 的僵死记录，显示成在途会让进度条永远转下去，用户既
@@ -3098,15 +3171,22 @@ export function WorkspaceApp({
         // 已经拿到素材身份的记录不算在内：那是入库成功（随后清理暂存对象没走完而已），
         // 恢复成在途行会让它两分钟后被判成"已中断"，而素材其实已经在库里了。
         const restoredEntries: AssetUploadEntry[] = records
-          .filter((record) => !stagingImportReachedLibrary(record))
+          .filter(
+            (record) => !stagingImportReachedLibrary(record) && !isTimedOutAssetImport(record),
+          )
           .map((record) => {
             const lastAdvancedAt = record.updatedAt || restoredAt;
-            const abandoned = restoredAt - lastAdvancedAt >= UPLOAD_ABANDONED_MS;
+            const abandoned =
+              record.overseasDbId == null &&
+              (record.assetId == null || !isPlaceholderAssetIdentity(record.assetId)) &&
+              restoredAt - lastAdvancedAt >= UPLOAD_ABANDONED_MS;
             return {
               jobId: record.jobId,
               name: localPathFileName(record.localPath),
               kind: record.mediaType,
               assetId: record.assetId,
+              overseasDbId: record.overseasDbId,
+              providerConnectionId: record.providerConnectionId,
               status: abandoned ? ("interrupted" as const) : record.status,
               bytesUploaded: record.bytesUploaded,
               bytesTotal: record.bytesTotal,
@@ -3123,8 +3203,19 @@ export function WorkspaceApp({
             const merged = [...current, ...restoredEntries.filter((it) => !known.has(it.jobId))];
             return merged.sort((first, second) => first.lastAdvancedAt - second.lastAdvancedAt);
           });
-          toast.info(`已接管 ${restoredEntries.length} 个重启前未完成的上传`, {
-            description: "后台仍在继续，可在素材面板查看进度。",
+          toast.info(`已恢复 ${restoredEntries.length} 条重启前的上传记录`, {
+            description: "可在素材面板查看处理状态。",
+          });
+        }
+        // 重启后只恢复同一 db_id 的状态查询。后端按海外提交时间执行固定截止，
+        // 截止后的记录直接落为失败并清理；这里不重新上传素材，也不显示续查入口。
+        for (const record of records) {
+          if (record.status !== "importing" || record.overseasDbId == null) continue;
+          void tosStagingClient.resumeStagingImport(record.jobId).catch((error: unknown) => {
+            frontendLog(
+              "info",
+              `[assets] 重启后状态查询未启动: jobId=${record.jobId}, 原因=${formatRawBackendError(error)}`,
+            );
           });
         }
         frontendLog(
@@ -3136,7 +3227,7 @@ export function WorkspaceApp({
         frontendLog("error", `[assets] 重启恢复产物入库上传失败: ${formatRawBackendError(error)}`);
       },
     );
-  }, []);
+  }, [hideTimedOutCloudAsset]);
 
   /**
    * 把已入库的上传记录配回产物节点并点亮绿色小点。
@@ -5565,7 +5656,15 @@ export function WorkspaceApp({
     (
       asset: Pick<
         AssetItem,
-        "id" | "kind" | "name" | "previewUrl" | "videoUrl" | "source" | "providerConnectionId"
+        | "id"
+        | "dbId"
+        | "kind"
+        | "name"
+        | "previewUrl"
+        | "assetUrl"
+        | "videoUrl"
+        | "source"
+        | "providerConnectionId"
       >,
       rawX: number,
       rawY: number,
@@ -5573,6 +5672,13 @@ export function WorkspaceApp({
       const source = asset.source ?? "cloud";
       if (cloudAssetAwaitingId({ ...asset, source })) return null;
       const providerConnectionId = asset.providerConnectionId ?? assetProvider?.id ?? "";
+      if (
+        source === "cloud" &&
+        asset.dbId != null &&
+        hiddenCloudAssetKeys.has(JSON.stringify([providerConnectionId, asset.dbId]))
+      ) {
+        return null;
+      }
       if (source === "cloud" && !providerConnectionId) {
         setAssetsError("拖放素材需要已启用的供应商连接。请先在全局设置中配置。");
         return null;
@@ -5598,7 +5704,7 @@ export function WorkspaceApp({
       );
       return node;
     },
-    [addNode, assetNodes, assetProvider?.id, dropPosition],
+    [addNode, assetNodes, assetProvider?.id, dropPosition, hiddenCloudAssetKeys],
   );
 
   /** 连线保存节点身份；全部参数通过共享解析器在执行时读取。 */
@@ -6587,6 +6693,7 @@ export function WorkspaceApp({
       // 事件通道仍是主路径，此处与事件刷新重复调用是幂等的列表拉取。
       for (const job of jobs) {
         if (job == null) continue;
+        noteTimedOutAssetImport(job);
         const entry = uploadEntriesRef.current.find((item) => item.jobId === job.id);
         if (entry == null || isTerminalAssetUpload(entry)) continue;
         const reachedTerminal = isTerminalStagingJob(job, entry.destination);
@@ -6632,6 +6739,7 @@ export function WorkspaceApp({
     assetLibrarySource,
     assetProvider,
     patchNodes,
+    noteTimedOutAssetImport,
     queryClient,
     refreshAssetGroups,
     refreshCloudAssets,
@@ -6652,20 +6760,27 @@ export function WorkspaceApp({
     }
     if (assetLibrarySource === "local") return localAssets.map(localAssetToItem);
     if (cloudCollection === "object_storage") return objectStorageAssets.map(localAssetToItem);
-    return cloudAssets.map((asset) => {
-      const item = cloudAssetToItem(asset);
-      return assetProvider?.id === asset.providerConnectionId
-        ? {
-            ...item,
-            providerDisplayName: assetProvider.displayName,
-          }
-        : item;
-    });
+    return cloudAssets
+      .filter(
+        (asset) =>
+          asset.dbId == null ||
+          !hiddenCloudAssetKeys.has(JSON.stringify([asset.providerConnectionId, asset.dbId])),
+      )
+      .map((asset) => {
+        const item = cloudAssetToItem(asset);
+        return assetProvider?.id === asset.providerConnectionId
+          ? {
+              ...item,
+              providerDisplayName: assetProvider.displayName,
+            }
+          : item;
+      });
   }, [
     assetLibrarySource,
     assetProvider,
     cloudCollection,
     cloudAssets,
+    hiddenCloudAssetKeys,
     localAssets,
     objectStorageAssets,
   ]);

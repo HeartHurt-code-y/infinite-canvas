@@ -26,8 +26,10 @@ import {
   abandonedUploadError,
   assetErrorPresentation,
   isAbandonedAssetUpload,
+  isPlaceholderAssetIdentity,
   isStallTrackedStatus,
   isTerminalAssetUpload,
+  isTimedOutAssetImport,
   measuredAspectRatio,
   stagingErrorFullText,
   stagingErrorSummary,
@@ -397,7 +399,7 @@ function AssetCard({
         type="button"
         className={`asset-card${pointerDragging ? " is-dragging" : ""}${picked ? " is-picked" : ""}`}
         disabled={awaitingCloudId}
-        title={awaitingCloudId ? "云端处理中，素材 ID 尚未返回" : undefined}
+        title={awaitingCloudId ? "素材处理中，完成后自动可用" : undefined}
         aria-pressed={multiSelect ? picked : undefined}
         aria-label={
           awaitingCloudId
@@ -523,7 +525,7 @@ function AssetCard({
         )}
         {showCloudBadge ? (
           <span className="asset-card__status" data-state={cloudStatusState}>
-            {ASSET_CLOUD_STATUS_LABELS[cloudStatusState]}
+            {awaitingCloudId ? "素材处理中" : ASSET_CLOUD_STATUS_LABELS[cloudStatusState]}
           </span>
         ) : null}
         {picked ? (
@@ -638,18 +640,23 @@ export function AssetUploadRow({
     status === "authorizing" ||
     status === "uploading";
   const hasFailed = status === "failed" || status === "interrupted";
-  const objectStorageValue = hasFailed
-    ? "失败"
-    : status === "preparing"
-      ? "准备中…"
-      : isObjectStoragePhase
-        ? `${STAGING_STATUS_LABELS[status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
-        : "已完成";
+  const timedOut = isTimedOutAssetImport(entry);
+  const objectStorageValue = timedOut
+    ? "已完成"
+    : hasFailed
+      ? "失败"
+      : status === "preparing"
+        ? "准备中…"
+        : isObjectStoragePhase
+          ? `${STAGING_STATUS_LABELS[status]}${progressPercent != null ? ` ${progressPercent}%` : ""} · ${progressLabel}`
+          : "已完成";
   const showAssetImportPhase = entry.destination === "cloud";
   const assetImportInProgress = status === "staged" || status === "importing";
   // 入库是否成功看素材身份而不是状态：后端给出素材身份后还会清理暂存对象
   // （active → cleaning → cleaned），清理没走完的记录同样是成功。
   const assetImportDone = stagingImportReachedLibrary(entry);
+  const awaitingPlaceholderIdentity =
+    entry.assetId != null && isPlaceholderAssetIdentity(entry.assetId);
   // 素材库导入字节进度：海外路径在 importing 期间由后端推进（bytesTotal = 2×文件大小，
   // 下载 + 上传）；国内路径（/v1/assets/async 平台侧拉取）无字节进度，bytes 保持对象
   // 存储阶段的值（bytesUploaded ≥ bytesTotal），因此走"平台处理中"。
@@ -663,24 +670,31 @@ export function AssetUploadRow({
       ? Math.min(100, Math.round((entry.bytesUploaded / entry.bytesTotal) * 100))
       : null;
   const assetImportValue = hasFailed
-    ? "失败"
-    : assetImportInProgress
-      ? assetImportHasByteProgress
-        ? `上传中 ${assetImportPercent}%`
-        : status === "importing"
-          ? "平台处理中…"
-          : "上传中…"
-      : assetImportDone
-        ? "已完成"
-        : "等待中";
+    ? timedOut
+      ? "上传超时"
+      : "失败"
+    : awaitingPlaceholderIdentity && !assetImportInProgress
+      ? "平台处理中…"
+      : assetImportInProgress
+        ? assetImportHasByteProgress
+          ? `上传中 ${assetImportPercent}%`
+          : status === "importing"
+            ? "平台处理中…"
+            : "上传中…"
+        : assetImportDone
+          ? "已完成"
+          : "等待中";
   // 折叠态展示人类可读摘要；展开态展示后端返回的完整原始错误（JSON，含
   // message/kind/details/rawResponse/httpStatus 等全部诊断字段）。
-  const errorSummary = hasFailed
-    ? stagingErrorSummary(abandoned ? abandonedUploadError(entry.status) : entry.error)
-    : null;
-  const errorDetail = hasFailed
-    ? stagingErrorFullText(abandoned ? abandonedUploadError(entry.status) : entry.error)
-    : null;
+  const errorSummary = timedOut
+    ? "上传超时，已清理"
+    : hasFailed
+      ? stagingErrorSummary(abandoned ? abandonedUploadError(entry.status) : entry.error)
+      : null;
+  const errorDetail =
+    hasFailed && !timedOut
+      ? stagingErrorFullText(abandoned ? abandonedUploadError(entry.status) : entry.error)
+      : null;
   const [errorExpanded, setErrorExpanded] = useState(false);
   const [errorCopied, setErrorCopied] = useState(false);
   // 完整原始错误过长才提供折叠/展开；摘要本身也可能被 -webkit-line-clamp 收成两行。

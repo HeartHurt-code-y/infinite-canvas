@@ -514,6 +514,8 @@ export interface StagingJobRecord {
   readonly bytesTotal: number | null;
   readonly bytesUploaded: number;
   readonly assetId: string | null;
+  /** 海外上传回执的续查键，不是可用于生成的素材 ID。 */
+  readonly overseasDbId?: number | null | undefined;
   readonly importTarget: StagingAssetImportTarget | null;
   /** 上传前的自动调整说明（目前只有「图片尺寸归一化」），未调整时为 null。 */
   readonly adjustment?: string | null | undefined;
@@ -530,11 +532,14 @@ export interface StagingJobRecord {
  */
 export interface AssetImportOutputRecord {
   readonly jobId: string;
+  readonly providerConnectionId?: string | undefined;
   readonly localPath: string;
   readonly mediaType: MediaType;
   readonly status: StagingStatus;
   /** 入库成功后拿到的素材 ID；尚未入库完成时为 null。 */
   readonly assetId: string | null;
+  /** 海外上传回执的续查键，重启后按此继续查询原任务。 */
+  readonly overseasDbId?: number | null | undefined;
   /** 上传时选中的素材库分组；未选中时为 null（由服务端决定默认上传分组）。 */
   readonly groupId: string | null;
   readonly bytesUploaded: number;
@@ -685,6 +690,8 @@ export interface TosStagingClient {
   /** 按引用名回读已保存的凭据明文（TOS 存为 JSON），供设置界面重新打开时明文回填 AK/SK。 */
   getCredential(this: void, credentialRef: string): Promise<string>;
   startUpload(this: void, command: StartStagingCommand): Promise<string>;
+  /** 只按已保存的 db_id 续查同一个海外素材任务，立即返回 jobId。 */
+  resumeStagingImport(this: void, jobId: string): Promise<string>;
   getJob(this: void, jobId: string): Promise<StagingJobRecord>;
   /**
    * 列出仍在推进或刚完成的产物入库上传，供应用重启后重建
@@ -730,6 +737,8 @@ export const tosStagingClient: TosStagingClient = {
   getCredential: (credentialRef) =>
     invokeDesktop("get_credential", stringSchema, { credentialRef }),
   startUpload: (command) => invokeDesktop("start_staging_upload", stringSchema, { command }),
+  resumeStagingImport: (jobId) =>
+    invokeDesktop("resume_staging_import", stringSchema, { jobId }),
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
   listAssetImportOutputs: () =>
     invokeDesktop("list_asset_import_outputs", assetImportOutputRecordsSchema),
@@ -956,6 +965,8 @@ export interface CloudAsset {
   readonly id: string;
   /** 素材审核任务号。有则单独展示，不写入素材 ID。 */
   readonly reviewTaskId?: string | null | undefined;
+  /** 海外上传记录的数值查询键，用于精确定位和清理该记录。 */
+  readonly dbId: number | null;
   readonly name: string;
   readonly kind: MediaType;
   readonly status: CloudAssetStatus;

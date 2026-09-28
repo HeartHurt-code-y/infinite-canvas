@@ -457,6 +457,7 @@ const CLOUD_ASSETS: readonly CloudAsset[] = [
   {
     providerConnectionId: PROVIDER.id,
     id: "asset-image-1",
+    dbId: null,
     kind: "image",
     name: "站台参考图",
     status: "ready",
@@ -469,6 +470,7 @@ const CLOUD_ASSETS: readonly CloudAsset[] = [
   {
     providerConnectionId: PROVIDER.id,
     id: "asset-video-1",
+    dbId: null,
     kind: "video",
     name: "列车进站参考",
     status: "ready",
@@ -481,6 +483,7 @@ const CLOUD_ASSETS: readonly CloudAsset[] = [
   {
     providerConnectionId: PROVIDER.id,
     id: "asset-video-2",
+    dbId: null,
     kind: "video",
     name: "衣摆运动参考",
     status: "ready",
@@ -1592,6 +1595,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     const audioAsset: CloudAsset = {
       providerConnectionId: PROVIDER.id,
       id: "asset-audio-1",
+      dbId: null,
       kind: "audio",
       name: "旁白参考音频",
       status: "ready",
@@ -2149,7 +2153,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(invokeMock).toHaveBeenCalledWith("set_downloader_cookie_browser", { browser: "auto" }),
     );
     await waitFor(() =>
-      expect(within(node).getByText(/下载时自动逐源预检 · 已导入文件可作后备/)).toBeInTheDocument(),
+      expect(within(node).getByText(/下载时自动逐源预检 · 已导入文件可用于站点解析和后备/)).toBeInTheDocument(),
     );
   });
 
@@ -2218,7 +2222,7 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
   it.each([
     {
       source: "none" as const,
-      expected: /本次下载使用：公开访问（未使用 Cookies） · 不代表已登录/,
+      expected: /本次下载使用：未使用 Cookies · 不代表已登录/,
     },
     {
       source: "site_session" as const,
@@ -6758,12 +6762,16 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       localPath: string;
       status: string;
       updatedAt: number;
+      overseasDbId?: number;
+      providerConnectionId?: string;
     }) => ({
       jobId: overrides.jobId,
       localPath: overrides.localPath,
       mediaType: "image",
       status: overrides.status,
       assetId: overrides.status === "active" ? "asset-restored-1" : null,
+      overseasDbId: overrides.overseasDbId,
+      providerConnectionId: overrides.providerConnectionId,
       groupId: null,
       bytesUploaded: 2048,
       bytesTotal: 2048,
@@ -6790,6 +6798,15 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
             status: "importing",
             updatedAt: restoredAt,
           }),
+          // 海外审核尚未到后端终态；恢复时后台查询原任务，界面只显示处理中。
+          importOutput({
+            jobId: "job-restored-overseas",
+            localPath: "C:\\generated\\awaiting-review.png",
+            status: "importing",
+            updatedAt: restoredAt - 15 * 60 * 1000,
+            overseasDbId: 1351,
+            providerConnectionId: PROVIDER.id,
+          }),
           // 进程在"清理暂存对象"途中被杀留下的僵死记录：这正是真机上卡住的三种状态
           // （cleaning / staged / importing），必须落地为可关闭的已中断行。
           importOutput({
@@ -6806,6 +6823,22 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
           }),
         ]);
       }
+      if (command === "list_assets") {
+        return Promise.resolve([
+          ...CLOUD_ASSETS,
+          {
+            ...CLOUD_ASSETS[0],
+            id: "asset-early-1351",
+            dbId: 1351,
+            name: "尚未独立确认的海外素材",
+            status: "ready",
+            rawStatus: "Active",
+            assetUrl: "asset://asset-early-1351",
+            providerConnectionId: PROVIDER.id,
+          },
+        ]);
+      }
+      if (command === "resume_staging_import") return Promise.resolve("job-restored-overseas");
       return null;
     });
     render(<App />);
@@ -6825,12 +6858,28 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     // 未完成的上传恢复成面板在途行，并说明已被接管（后台仍在推进，用户不必重传）。
     const restoredRow = await waitFor(() => {
-      const row = document.querySelector<HTMLElement>(".asset-upload[data-state='importing']");
+      const row = screen.getByText("still-importing.png").closest<HTMLElement>(".asset-upload");
       expect(row).not.toBeNull();
       return row!;
     });
+    expect(restoredRow).toHaveAttribute("data-state", "importing");
     expect(within(restoredRow).getByText("still-importing.png")).toBeInTheDocument();
     expect(within(restoredRow).getByText("平台处理中…")).toBeInTheDocument();
+
+    const overseasRow = screen
+      .getByText("awaiting-review.png")
+      .closest<HTMLElement>(".asset-upload")!;
+    expect(overseasRow).toHaveAttribute("data-state", "importing");
+    expect(within(overseasRow).getByText("平台处理中…")).toBeInTheDocument();
+    expect(within(overseasRow).queryByText(/1351|继续查询|审核失败/)).not.toBeInTheDocument();
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "resume_staging_import"),
+      ).toHaveLength(1);
+    });
+    expect(
+      invokeMock.mock.calls.find(([command]) => command === "resume_staging_import")?.[1],
+    ).toEqual({ jobId: "job-restored-overseas" });
 
     /** 按文件名取回该行（不依赖行顺序：同一批里可能有多条终态记录）。 */
     const uploadRowNamed = async (name: string): Promise<HTMLElement> =>
@@ -6857,6 +6906,64 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
 
     expect(invokeMock.mock.calls.some(([command]) => command === "list_asset_import_outputs")).toBe(
       true,
+    );
+    await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" });
+    expect(
+      screen.queryByRole("button", { name: "预览图片素材详情：尚未独立确认的海外素材" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("重启后继续隐藏已超时的海外占位素材，不恢复上传行", async () => {
+    restoreCompletedImageOutputCard((command) => {
+      if (command === "list_asset_import_outputs") {
+        return Promise.resolve([
+          {
+            jobId: "job-timeout-1351",
+            localPath: "C:\\generated\\timeout.png",
+            mediaType: "image",
+            status: "failed",
+            assetId: null,
+            overseasDbId: 1351,
+            providerConnectionId: PROVIDER.id,
+            groupId: null,
+            bytesUploaded: 2048,
+            bytesTotal: 2048,
+            error: { kind: "asset_import_timeout", details: { terminalStatus: "TimedOut" } },
+            createdAt: 1,
+            updatedAt: Date.now(),
+          },
+        ]);
+      }
+      if (command === "list_assets") {
+        return Promise.resolve([
+          ...CLOUD_ASSETS,
+          {
+            ...CLOUD_ASSETS[0],
+            id: "asset-stale-1351",
+            dbId: 1351,
+            name: "已超时的海外占位素材",
+            status: "ready",
+            rawStatus: "Active",
+            assetUrl: "asset://asset-stale-1351",
+            providerConnectionId: PROVIDER.id,
+          },
+        ]);
+      }
+      return null;
+    });
+    render(<App />);
+    await waitFor(() => {
+      expect(
+        invokeMock.mock.calls.some(([command]) => command === "list_asset_import_outputs"),
+      ).toBe(true);
+    });
+    await screen.findByRole("button", { name: "预览图片素材详情：站台参考图" });
+    expect(screen.queryByText("timeout.png")).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "预览图片素材详情：已超时的海外占位素材" }),
+    ).not.toBeInTheDocument();
+    expect(invokeMock.mock.calls.some(([command]) => command === "resume_staging_import")).toBe(
+      false,
     );
   });
 

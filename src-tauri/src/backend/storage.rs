@@ -259,7 +259,9 @@ CREATE TABLE IF NOT EXISTS staging_jobs (
   error_json TEXT,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
-  adjustment TEXT
+  adjustment TEXT,
+  overseas_db_id INTEGER,
+  overseas_submitted_at INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_staging_jobs_status
@@ -408,6 +410,8 @@ impl Storage {
         migrate_generation_tasks_tokens(&connection)?;
         migrate_provider_token_groups(&connection)?;
         migrate_staging_jobs_adjustment(&connection)?;
+        migrate_staging_jobs_overseas_db_id(&connection)?;
+        migrate_staging_jobs_overseas_submitted_at(&connection)?;
         migrate_panqu_provider_base_url(&connection)?;
 
         let storage = Self {
@@ -1597,12 +1601,16 @@ impl Storage {
             .map(|value| checked_sql_integer(value, "bytesTotal"))
             .transpose()?;
         let bytes_uploaded = checked_sql_integer(job.bytes_uploaded, "bytesUploaded")?;
+        let overseas_db_id = job
+            .overseas_db_id
+            .map(|value| checked_sql_integer(value, "overseasDbId"))
+            .transpose()?;
         self.lock()?.execute(
             "INSERT INTO staging_jobs
              (id, local_path, purpose, media_type, object_key, status, bytes_total,
               bytes_uploaded, asset_id, import_target_json, error_json, created_at, updated_at,
-              adjustment)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+              adjustment, overseas_db_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15)",
             params![
                 job.id,
                 job.local_path,
@@ -1620,7 +1628,8 @@ impl Storage {
                 job.error.as_ref().map(serde_json::to_string).transpose()?,
                 job.created_at,
                 job.updated_at,
-                job.adjustment
+                job.adjustment,
+                overseas_db_id
             ],
         )?;
         Ok(())
@@ -1675,7 +1684,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
              WHERE media_type = ?1
                AND ((purpose = 'local_asset' AND import_target_json IS NULL AND status = 'staged')
@@ -1798,6 +1807,35 @@ impl Storage {
         Ok(())
     }
 
+    /// 素材上传已被海外网关接受后立即落库，早于任何状态轮询。
+    /// 此 ID 是续查键，不是可供画布使用的 asset_id。
+    pub fn set_staging_overseas_db_id(&self, id: &str, db_id: u64) -> BackendResult<()> {
+        let db_id = checked_sql_integer(db_id, "overseasDbId")?;
+        let changed = self.lock()?.execute(
+            "UPDATE staging_jobs SET overseas_db_id = ?2,
+                    overseas_submitted_at = COALESCE(overseas_submitted_at, ?3), updated_at = ?3
+             WHERE id = ?1 AND (overseas_db_id IS NULL OR overseas_db_id = ?2)",
+            params![id, db_id, now_ms()],
+        )?;
+        if changed == 0 {
+            return Err(BackendError::Conflict(format!(
+                "staging job {id} already has a different overseas db id"
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn get_staging_overseas_submitted_at(&self, id: &str) -> BackendResult<Option<i64>> {
+        self.lock()?
+            .query_row(
+                "SELECT overseas_submitted_at FROM staging_jobs WHERE id = ?1",
+                params![id],
+                |row| row.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| BackendError::NotFound(format!("staging job {id}")))
+    }
+
     pub fn update_staging_progress(&self, id: &str, bytes_uploaded: u64) -> BackendResult<()> {
         let bytes_uploaded = checked_sql_integer(bytes_uploaded, "bytesUploaded")?;
         self.lock()?.execute(
@@ -1830,7 +1868,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at, adjustment
+                        error_json, created_at, updated_at, adjustment, overseas_db_id
                  FROM staging_jobs WHERE id = ?1",
                 params![id],
                 staging_job_from_row,
@@ -1845,7 +1883,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
              WHERE purpose = 'local_asset'
                AND import_target_json IS NULL
@@ -1867,7 +1905,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at, adjustment
+                        error_json, created_at, updated_at, adjustment, overseas_db_id
                  FROM staging_jobs
                  WHERE purpose = 'local_asset'
                    AND import_target_json IS NULL
@@ -1903,7 +1941,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs WHERE object_key = ?1",
         )?;
         statement.query_map(params![object_key], staging_job_from_row)?
@@ -1929,7 +1967,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at, adjustment
+                        error_json, created_at, updated_at, adjustment, overseas_db_id
                  FROM staging_jobs
                  WHERE purpose = 'asset_import'
                    AND object_key = ?1
@@ -1962,7 +2000,7 @@ impl Storage {
             .query_row(
                 "SELECT id, local_path, purpose, media_type, object_key, status,
                         bytes_total, bytes_uploaded, asset_id, import_target_json,
-                        error_json, created_at, updated_at, adjustment
+                        error_json, created_at, updated_at, adjustment, overseas_db_id
                  FROM staging_jobs
                  WHERE purpose = 'asset_import'
                    AND asset_id = ?1
@@ -1989,7 +2027,7 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
              WHERE purpose = 'asset_import' AND asset_id = ?1
                AND id NOT IN (SELECT job_id FROM staging_content_reuses)
@@ -2006,9 +2044,10 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
              WHERE status IN ('validating','authorizing','uploading','staged','importing','cleaning')
+                OR (overseas_db_id IS NOT NULL AND asset_id IS NULL AND status != 'failed')
              ORDER BY created_at",
         )?;
         let rows = statement.query_map([], staging_job_from_row)?;
@@ -2030,12 +2069,15 @@ impl Storage {
         let mut statement = connection.prepare(
             "SELECT id, local_path, purpose, media_type, object_key, status,
                     bytes_total, bytes_uploaded, asset_id, import_target_json,
-                    error_json, created_at, updated_at, adjustment
+                    error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs
              WHERE purpose = 'asset_import'
                AND import_target_json IS NOT NULL
                AND (
                  status IN ('validating','authorizing','uploading','staged','importing','cleaning')
+                 OR (overseas_db_id IS NOT NULL AND asset_id IS NULL AND status != 'failed')
+                 OR (status = 'failed' AND overseas_db_id IS NOT NULL
+                     AND json_extract(error_json, '$.kind') = 'asset_import_timeout')
                  OR (status IN ('active','cleaned') AND created_at >= ?1)
                )
              ORDER BY created_at",
@@ -2187,6 +2229,52 @@ fn migrate_staging_jobs_adjustment(connection: &Connection) -> BackendResult<()>
     if !has_adjustment_column {
         connection.execute("ALTER TABLE staging_jobs ADD COLUMN adjustment TEXT", [])?;
     }
+    Ok(())
+}
+
+fn migrate_staging_jobs_overseas_db_id(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(staging_jobs)")?;
+    let has_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| result.map(|name| name == "overseas_db_id").unwrap_or(false));
+    drop(statement);
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE staging_jobs ADD COLUMN overseas_db_id INTEGER",
+            [],
+        )?;
+    }
+    // 暂存对象清理不等于云端素材已生成；重启时仍须按原 db_id 续查。
+    connection.execute(
+        "UPDATE staging_jobs SET status = 'importing'
+         WHERE overseas_db_id IS NOT NULL AND asset_id IS NULL
+           AND status IN ('cleaning', 'cleaned')",
+        [],
+    )?;
+    Ok(())
+}
+
+fn migrate_staging_jobs_overseas_submitted_at(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(staging_jobs)")?;
+    let has_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| {
+            result
+                .map(|name| name == "overseas_submitted_at")
+                .unwrap_or(false)
+        });
+    drop(statement);
+    if !has_column {
+        connection.execute(
+            "ALTER TABLE staging_jobs ADD COLUMN overseas_submitted_at INTEGER",
+            [],
+        )?;
+    }
+    connection.execute(
+        "UPDATE staging_jobs SET overseas_submitted_at = updated_at
+         WHERE overseas_db_id IS NOT NULL AND overseas_submitted_at IS NULL",
+        [],
+    )?;
     Ok(())
 }
 
@@ -2400,6 +2488,7 @@ fn staging_job_from_row(row: &Row<'_>) -> rusqlite::Result<StagingJobRecord> {
         created_at: row.get(11)?,
         updated_at: row.get(12)?,
         adjustment: row.get(13)?,
+        overseas_db_id: optional_nonnegative_integer(row, 14)?,
     })
 }
 
@@ -2570,6 +2659,7 @@ mod tests {
                 bytes_total: Some(4),
                 bytes_uploaded: 4,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target: None,
                 adjustment: None,
                 error: None,
@@ -2592,6 +2682,77 @@ mod tests {
         let switched = Storage::open(&database).unwrap();
         assert_eq!(switched.get_staging_object_target("unscoped").unwrap().unwrap().bucket, config.bucket);
         assert!(switched.get_staging_object_target("other").unwrap().is_none());
+    }
+
+    #[test]
+    fn accepted_overseas_upload_db_id_survives_reopen_and_stale_job_update() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("backend.sqlite");
+        let storage = Storage::open(&path).unwrap();
+        let job = StagingJobRecord {
+            id: "overseas-pending".into(),
+            local_path: "C:/media/portrait.png".into(),
+            purpose: "asset_import".into(),
+            media_type: MediaType::Image,
+            object_key: Some("staging/portrait.png".into()),
+            status: StagingStatus::Importing,
+            bytes_total: Some(100),
+            bytes_uploaded: 100,
+            asset_id: None,
+            overseas_db_id: None,
+            import_target: Some(StagingAssetImportTarget {
+                provider_connection_id: "provider-overseas".into(),
+                name: Some("portrait.png".into()),
+                group_id: None,
+            }),
+            adjustment: None,
+            error: None,
+            created_at: now_ms(),
+            updated_at: now_ms(),
+        };
+        storage.insert_staging_job(&job).unwrap();
+        storage.set_staging_overseas_db_id(&job.id, 1351).unwrap();
+        let submitted_at = storage
+            .get_staging_overseas_submitted_at(&job.id)
+            .unwrap()
+            .unwrap();
+        storage.set_staging_overseas_db_id(&job.id, 1351).unwrap();
+        assert_eq!(
+            storage.get_staging_overseas_submitted_at(&job.id).unwrap(),
+            Some(submitted_at),
+            "repeated callback must not restart the 20-minute deadline"
+        );
+        // 上传调用栈手中的 job 副本仍未见到回调写入的 db_id，状态更新不可覆盖它。
+        let mut interrupted_during_cleanup = job.clone();
+        interrupted_during_cleanup.status = StagingStatus::Cleaned;
+        storage
+            .update_staging_job(&interrupted_during_cleanup)
+            .unwrap();
+        assert_eq!(
+            storage.get_staging_job(&job.id).unwrap().overseas_db_id,
+            Some(1351)
+        );
+        drop(storage);
+
+        let reopened = Storage::open(&path).unwrap();
+        let recovered = reopened.list_asset_import_outputs().unwrap();
+        assert_eq!(recovered.len(), 1);
+        assert_eq!(recovered[0].id, job.id);
+        assert_eq!(recovered[0].overseas_db_id, Some(1351));
+        assert_eq!(
+            reopened.get_staging_overseas_submitted_at(&job.id).unwrap(),
+            Some(submitted_at)
+        );
+        assert!(recovered[0].asset_id.is_none());
+        assert!(matches!(recovered[0].status, StagingStatus::Importing));
+        assert!(reopened.set_staging_overseas_db_id(&job.id, 1352).is_err());
+        let mut timed_out = recovered[0].clone();
+        timed_out.status = StagingStatus::Failed;
+        timed_out.error = Some(json!({ "kind": "asset_import_timeout" }));
+        reopened.update_staging_job(&timed_out).unwrap();
+        let tombstones = reopened.list_asset_import_outputs().unwrap();
+        assert_eq!(tombstones.len(), 1);
+        assert_eq!(tombstones[0].overseas_db_id, Some(1351));
     }
 
     #[test]
@@ -2685,6 +2846,7 @@ mod tests {
                 bytes_total: Some(128),
                 bytes_uploaded: 128,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target,
                 adjustment: None,
                 error: None,
@@ -2768,6 +2930,7 @@ mod tests {
                 bytes_total: Some(128),
                 bytes_uploaded: 128,
                 asset_id: None,
+                overseas_db_id: None,
                 import_target,
                 adjustment: None,
                 error: None,

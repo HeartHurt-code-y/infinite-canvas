@@ -34,6 +34,7 @@ function cloudAsset(
 ): CloudAsset {
   return {
     providerConnectionId,
+    dbId: null,
     status: "ready",
     rawStatus: "Active",
     previewUrl: null,

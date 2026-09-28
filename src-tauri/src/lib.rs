@@ -228,6 +228,7 @@ pub fn run() {
             commands::save_workspace_ui_prefs,
             commands::test_tos_connectivity,
             commands::start_staging_upload,
+            commands::resume_staging_import,
             commands::get_staging_job,
             commands::list_asset_import_outputs,
             commands::resolve_imported_asset_source,

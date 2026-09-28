@@ -763,6 +763,9 @@ pub struct CloudAssetRecord {
     /// 素材审核任务号（`task-…`）。和素材 ID 分开：列表里的 `id` 在审核完成前经常就是任务号。
     #[serde(default)]
     pub review_task_id: Option<String>,
+    /// 海外上传记录的数值查询键，用于精确匹配上传结果与本地清理记录。
+    #[serde(default)]
+    pub db_id: Option<u64>,
     pub name: String,
     pub kind: MediaType,
     pub status: CloudAssetStatus,
@@ -1086,11 +1089,16 @@ pub struct StagingAssetImportTarget {
 #[serde(rename_all = "camelCase")]
 pub struct AssetImportOutputRecord {
     pub job_id: String,
+    /// 上传时选择的素材库连接，用于按连接 + db_id 精确屏蔽超时记录。
+    pub provider_connection_id: String,
     pub local_path: String,
     pub media_type: MediaType,
     pub status: StagingStatus,
     /// 入库成功后拿到的素材 ID；未入库完成时为 None。
     pub asset_id: Option<String>,
+    /// 海外上传回执中的数据库 ID，仅用于继续查询，不是可使用的素材 ID。
+    #[serde(default)]
+    pub overseas_db_id: Option<u64>,
     /// 分组 ID：上传时选中的素材库分组，未选中时为 None（由服务端决定默认上传分组）。
     pub group_id: Option<String>,
     pub bytes_uploaded: u64,
@@ -1182,6 +1190,9 @@ pub struct StagingJobRecord {
     pub bytes_total: Option<u64>,
     pub bytes_uploaded: u64,
     pub asset_id: Option<String>,
+    /// 海外素材上传已被受理时返回的查询键；本地等待超时后仍须保留。
+    #[serde(default)]
+    pub overseas_db_id: Option<u64>,
     pub import_target: Option<StagingAssetImportTarget>,
     /// 上传前的自动调整说明（目前只有「图片尺寸归一化」），面向用户展示。
     #[serde(default)]
