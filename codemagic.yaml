@@ -105,11 +105,24 @@ workflows:
             spctl -a -t exec -vv "$app_path"
             xcrun stapler validate "$app_path"
           fi
+      - name: Verify offline DMG
+        script: |
+          set -euo pipefail
+          release_version="$(node -p "require('./package.json').version")"
+          dmg_dir="src-tauri/target/release/bundle/dmg"
+          dmg_count="$(find "$dmg_dir" -maxdepth 1 -type f -name "*_${release_version}_aarch64.dmg" | wc -l | tr -d ' ')"
+          if [ "$dmg_count" != "1" ]; then
+            echo "需要恰好一个同版 arm64 离线 DMG，找到 $dmg_count 个" >&2
+            exit 1
+          fi
+          dmg_path="$(find "$dmg_dir" -maxdepth 1 -type f -name "*_${release_version}_aarch64.dmg" -print -quit)"
+          hdiutil verify "$dmg_path"
       - name: Stage unsigned-install helper
         script: |
           set -euo pipefail
           mkdir -p src-tauri/target/release/bundle/helper
           cp scripts/install-macos.sh src-tauri/target/release/bundle/helper/
+          cp scripts/install-macos.sh src-tauri/target/release/bundle/dmg/
       - name: Stage versioned updater archive
         script: |
           set -euo pipefail
@@ -139,7 +152,7 @@ workflows:
         script: |
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
-          pnpm update:publish -- --channel darwin-aarch64 --bundle-dir "src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full" --version "$release_version"
+          pnpm update:publish -- --channel darwin-aarch64 --bundle-dir "src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full" --full-bundle-dir src-tauri/target/release/bundle/dmg --version "$release_version"
       - name: Enable in-app upgrade from the shared channel
         script: |
           set -euo pipefail

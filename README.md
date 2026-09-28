@@ -130,7 +130,7 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-当前 macOS 构建使用 `codemagic.yaml` 的 `macos-package` 工作流。将 updater 私钥、Developer ID 证书与公证凭据放在 Codemagic 的 `updater_signing` 环境组；工作流构建并暂存签名包，**不会自动发布更新清单**。发布前须核对签名、公证和同版 Windows 包。GitHub Actions 的手动工作流保留作备用入口。
+当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，上传同版离线 DMG 和安装脚本，最后切换 macOS 与同版共享更新清单。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
 
 ### 自检
 
@@ -148,9 +148,9 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 | 平台    | 已安装用户怎么升级                                                                                                          |
 | ------- | --------------------------------------------------------------------------------------------------------------------------- |
 | Windows | 直接运行新的安装包即可覆盖。NSIS（`.exe`）是自动更新用的包；WiX（`.msi`）靠固定 `upgradeCode` + **升高版本号** 做覆盖安装。 |
-| macOS   | 把新 `.app` 覆盖到 `/Applications`（现有安装命令已经是覆盖）。之后即可走应用内更新。                                        |
+| macOS   | 旧版若在资源迁移阶段无法下载更新，使用同版离线 DMG 覆盖 `/Applications` 中的 `.app`；之后即可走应用内更新。                 |
 
-应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本时画布上方出现提示，设置页「应用升级」也可手动检查。下载须由用户确认，完成后按提示重启。
+应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本后自动下载，准备好时在画布上方提示重启应用；设置页「应用升级」也可手动检查。
 
 当前 `0.1.7` 仍使用完整 NSIS 更新包。下一次迁移版需要完整安装包，把内置引擎与风格图片安全转存到用户数据目录；迁移完成后，常规 Windows 更新可只分发较小的程序安装包。Tauri 的 Windows updater 仍下载所选安装包，并非二进制差分。详细发版顺序和验证边界见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
@@ -158,7 +158,7 @@ APP=$(ls -d /Volumes/*/*.app 2>/dev/null | head -1); sudo xattr -cr "$APP"; sudo
 
 ### 发版时开发者要做的
 
-每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。当前 macOS CI 仅暂存签名包；公开更新清单由开发者核对同版产物后显式发布。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
+每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。Mac Codemagic 工作流通过产物校验后会自动发布 macOS 平台清单及同版共享清单，触发前须确认源码提交和 Windows 同版完整包。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
 ## 系统访问能力
 

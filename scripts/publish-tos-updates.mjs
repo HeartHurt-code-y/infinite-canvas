@@ -180,8 +180,7 @@ export function collectPublishFilePaths(bundleDir) {
       selected.push(filePath);
       continue;
     }
-    // 不上传 .dmg：海外 CI 传到 tos-cn-beijing 约 700MB×2 会超过 Codemagic 时限，
-    // 自动更新只用 .app.tar.gz。首次安装脚本仍随包发布。
+    // 平台更新包只用 .app.tar.gz；完整 DMG 从 --full-bundle-dir 单独上传到离线前缀。
     if (lower === "install-macos.sh") {
       selected.push(filePath);
     }
@@ -912,6 +911,21 @@ export function collectFullOfflineFiles(directory, version) {
   );
 }
 
+export function collectMacFullOfflineFiles(directory, version) {
+  const files = listFilesRecursive(directory);
+  const dmgs = files.filter((filePath) =>
+    path.basename(filePath).endsWith(`_${version}_aarch64.dmg`),
+  );
+  if (dmgs.length !== 1) {
+    throw new Error(`macOS 完整离线暂存目录需要恰好一个本版 aarch64 DMG，实际找到 ${dmgs.length} 个`);
+  }
+  const helpers = files.filter((filePath) => path.basename(filePath) === "install-macos.sh");
+  if (helpers.length > 1) {
+    throw new Error("macOS 完整离线暂存目录不能包含多个 install-macos.sh");
+  }
+  return [...dmgs, ...helpers];
+}
+
 export async function publishUpdaterArtifacts(options) {
   const bundleDir = options["bundle-dir"];
   if (typeof bundleDir !== "string" || bundleDir.trim() === "") {
@@ -971,12 +985,16 @@ export async function publishUpdaterArtifacts(options) {
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey, prefix };
   const fullBundleDir = options["full-bundle-dir"];
-  const offlineFiles =
-    typeof fullBundleDir === "string" && fullBundleDir.trim() !== ""
-      ? collectFullOfflineFiles(path.resolve(fullBundleDir), version)
-      : [];
-  if (channel.startsWith("windows-") && offlineFiles.length === 0) {
-    throw new Error("平台瘦包发布需要 --full-bundle-dir 提供同版完整离线安装包");
+  const hasFullBundleDir = typeof fullBundleDir === "string" && fullBundleDir.trim() !== "";
+  if ((channel.startsWith("windows-") || channel === "darwin-aarch64") && !hasFullBundleDir) {
+    throw new Error(`平台频道 ${channel} 发布需要 --full-bundle-dir 提供同版完整离线安装包`);
+  }
+  let offlineFiles = [];
+  if (hasFullBundleDir) {
+    const offlineDir = path.resolve(fullBundleDir);
+    offlineFiles = channel === "darwin-aarch64"
+      ? collectMacFullOfflineFiles(offlineDir, version)
+      : collectFullOfflineFiles(offlineDir, version);
   }
   const publicBase = tosUpdatesPublicBaseUrl({
     bucket: config.bucket,

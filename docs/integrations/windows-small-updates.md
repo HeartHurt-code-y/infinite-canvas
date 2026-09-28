@@ -16,9 +16,9 @@ Tauri 2 在 Windows 上把完整 NSIS/MSI 安装器作为 updater 产物，因�
 ## 构建和发布顺序
 
 1. 将 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 升到相同的新版本。备齐原 updater 签名私钥；不能更换已经发给客户的公钥。
-2. Windows 上运行 `pnpm tauri:build` 生成并保留同版签名 NSIS。对构建时准备的稳定资源运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，把含完整包及签名哈希的基线与安装包一同归档。将同版提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥、Developer ID 与公证凭据后，运行 `codemagic.yaml` 的 `macos-package`；它只生成并暂存带版本号的签名包，不自动更改公开清单。旧 `.github/workflows/macos-package.yml` 可作为手动备用构建入口。
-3. 分别用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <windows-full-dir> --full-bundle-dir <windows-full-dir> --version <version>` 与 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --version <version>` 初始化新平台地址。发布脚本要求显式指定只含本版产物的目录，并将 `latest.json` 最后上传。
-4. 汇集同版 Windows 与 macOS 签名包到一个独立暂存目录，使用 `pnpm update:publish -- --channel legacy --bundle-dir <mixed-full-dir> --version <version>` 最后切换旧共享地址。未齐备两个平台时不得切换。
+2. Windows 上运行 `pnpm tauri:build` 生成并保留同版签名 NSIS。对构建时准备的稳定资源运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，把含完整包及签名哈希的基线与安装包一同归档。将同版源码提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥与 TOS 上传凭据后，再触发 `codemagic.yaml` 的 `macos-package`。本项目不要求 Apple 公证；无证书时使用 ad-hoc 签名，并向首次安装者提供隔离属性处理指引。
+3. Windows 用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <windows-full-dir> --full-bundle-dir <windows-full-dir> --version <version>` 发布。Codemagic 的 Mac 工作流在验签后用 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --full-bundle-dir <mac-dmg-dir> --version <version>` 先上传同版离线 DMG 与安装脚本，再切换平台 `latest.json`。旧 Mac 客户端若在资源迁移阶段卡住，可用离线 DMG 一次性覆盖安装。`.github/workflows/macos-package.yml` 只构建产物，作为备用入口。
+4. Mac 工作流确认公开 Windows 与 Mac 平台清单同版，且 Windows 包为完整 NSIS 后，自动运行 `--promote-legacy` 切换旧共享地址。未齐备两个平台时不得切换。
 5. **仅在过渡版的迁移与升级路径通过验证后**，下次常规 Windows 发版先构建完整离线安装包，再运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。此步骤从完整 NSIS 文件表生成目标版本的签名资源清单，并要求完整包的修改时间晚于新程序及清单覆盖的所有资源源文件；小型包继续只包含程序。检查清单、完整包、小包及签名，再用 `--channel windows-x86_64 --bundle-dir <slim-dir> --full-bundle-dir <full-dir> --version <version>` 发布。发布脚本先确认内容哈希对象与清单均可匿名访问，最后切换 `latest.json`；完整安装包继续作为离线安装和修复入口。
 
 上述命令中的目录必须来自同一次构建。`TOS_ACCESS_KEY`、`TOS_SECRET_KEY` 只从环境变量读取；不要放进命令、文档或仓库。每次更新都升版本号，避免 CDN 的长期缓存复用旧安装包 URL。

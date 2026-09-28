@@ -15,6 +15,7 @@ import {
   readTosPublishEnv,
   resolvePublishChannel,
   collectFullOfflineFiles,
+  collectMacFullOfflineFiles,
   compareReleaseVersions,
   checkChannelManifest,
   checkLegacyPlatformFeeds,
@@ -289,6 +290,27 @@ test("offline staging selects only same-version full NSIS and MSI", () => {
       new Set(collectFullOfflineFiles(dir, "0.1.8")),
       new Set([full, `${full}.sig`, msi]),
     );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("macOS offline staging selects one same-version arm64 DMG and optional install helper", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-mac-offline-"));
+  try {
+    const dmg = path.join(dir, "无限画布_0.1.10_aarch64.dmg");
+    const helper = path.join(dir, "install-macos.sh");
+    writeFileSync(dmg, "current");
+    writeFileSync(helper, "#!/bin/sh\n");
+    writeFileSync(path.join(dir, "无限画布_0.1.9_aarch64.dmg"), "old");
+    writeFileSync(path.join(dir, "无限画布_0.1.10_x64.dmg"), "other-arch");
+    assert.deepEqual(collectMacFullOfflineFiles(dir, "0.1.10"), [dmg, helper]);
+    rmSync(helper);
+    assert.deepEqual(collectMacFullOfflineFiles(dir, "0.1.10"), [dmg]);
+    assert.throws(() => collectMacFullOfflineFiles(dir, "0.1.11"), /恰好一个本版 aarch64 DMG/);
+    mkdirSync(path.join(dir, "duplicate"));
+    writeFileSync(path.join(dir, "duplicate", path.basename(dmg)), "duplicate");
+    assert.throws(() => collectMacFullOfflineFiles(dir, "0.1.10"), /恰好一个本版 aarch64 DMG/);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
