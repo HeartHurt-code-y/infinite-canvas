@@ -37,6 +37,12 @@ import {
   verifyStagedWindowsSlimUpdater,
   immutableObjectMatches,
   collectRuntimeResourceObjects,
+  collectChangedRuntimeResourceObjects,
+  assertFullOfflinePublishOptions,
+  assertLegacyRetirementTarget,
+  assertRetiredSharedChannelWrite,
+  promoteLegacyFromPlatformFeeds,
+  publishUpdaterArtifacts,
   collectMacDeltaObjects,
   macDeltaTransferIsSmaller,
   assertMacDeltaMatchesFullArchive,
@@ -47,6 +53,7 @@ import {
   TOS_MULTIPART_THRESHOLD_BYTES,
   tosFetch,
 } from "./publish-tos-updates.mjs";
+import { RESOURCE_COMPONENTS } from "./runtime-resource-release.mjs";
 import { tosPlatformLatestJsonUrl } from "./tos-updates-config.mjs";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -350,6 +357,107 @@ test("content-addressed objects deduplicate identical bytes without losing compo
   const objects = collectRuntimeResourceObjects(manifest, REPO_ROOT);
   assert.equal(objects.length, 1);
   assert.equal(objects[0].sha256, shared);
+});
+
+test("resource publication selects changed component paths and preserves bridge reuse", () => {
+  const a = "a".repeat(64);
+  const b = "b".repeat(64);
+  const c = "c".repeat(64);
+  const makeManifest = (version, ffmpegFile) => ({
+    schemaVersion: 1,
+    version,
+    platform: "windows-x86_64",
+    objectBaseUrl: "https://example.com/infinite-canvas/updates/resources/objects/",
+    components: RESOURCE_COMPONENTS.map((definition) => {
+      const manifestSha256 = definition.name === "ffmpeg" ? b : a;
+      return {
+        name: definition.name,
+        manifestPath: definition.manifestPath,
+        manifestSha256,
+        files: [
+          { path: definition.manifestPath, size: 1, sha256: manifestSha256 },
+          ...(definition.name === "ffmpeg" ? [ffmpegFile] : []),
+        ],
+      };
+    }),
+  });
+  const prior = makeManifest("0.1.11", { path: "bin/ffmpeg.exe", size: 1, sha256: b });
+  const same = makeManifest("0.1.12", { path: "bin/ffmpeg.exe", size: 1, sha256: b });
+  assert.deepEqual(collectChangedRuntimeResourceObjects(same, REPO_ROOT, prior), []);
+  const changed = makeManifest("0.1.12", { path: "bin/ffmpeg.exe", size: 1, sha256: c });
+  assert.deepEqual(
+    collectChangedRuntimeResourceObjects(changed, REPO_ROOT, prior).map((object) => object.sha256),
+    [c],
+  );
+  const moved = makeManifest("0.1.12", { path: "bin/moved.exe", size: 1, sha256: b });
+  assert.deepEqual(
+    collectChangedRuntimeResourceObjects(moved, REPO_ROOT, prior).map((object) => object.sha256),
+    [b],
+  );
+  assert.deepEqual(
+    collectChangedRuntimeResourceObjects(
+      same,
+      REPO_ROOT,
+      null,
+      RESOURCE_COMPONENTS.map(({ name }) => name),
+    ),
+    [],
+  );
+});
+
+test("skipping full offline upload requires an explicit Windows slim opt-in", () => {
+  assert.doesNotThrow(() => assertFullOfflinePublishOptions("windows-x86_64", true, false, true));
+  assert.throws(
+    () => assertFullOfflinePublishOptions("windows-x86_64", false, false, true),
+    /只能用于/,
+  );
+  assert.throws(
+    () => assertFullOfflinePublishOptions("darwin-aarch64", false, false, true),
+    /只能用于/,
+  );
+  assert.throws(
+    () => assertFullOfflinePublishOptions("windows-x86_64", true, true, true),
+    /不能同时/,
+  );
+  assert.throws(
+    () => assertFullOfflinePublishOptions("windows-x86_64", true, false, false),
+    /需要 --full-bundle-dir/,
+  );
+});
+
+test("legacy retirement targets only the expected shared feed and requires a backup", () => {
+  const config = readTosPublishEnv({
+    TOS_ACCESS_KEY: "AKEXAMPLE",
+    TOS_SECRET_KEY: "SKEXAMPLE",
+  });
+  assert.equal(
+    assertLegacyRetirementTarget(config, "0.1.10", "C:/backup/shared-0.1.10.json"),
+    "infinite-canvas/updates/latest.json",
+  );
+  assert.throws(() => assertLegacyRetirementTarget(config, "0.1.10", ""), /备份路径/);
+  assert.throws(
+    () =>
+      assertLegacyRetirementTarget({ ...config, prefix: "other/updates" }, "0.1.10", "backup.json"),
+    /精确桶/,
+  );
+});
+
+test("retired shared channel cannot be recreated through CLI or exported publishers", async () => {
+  assert.doesNotThrow(() => assertRetiredSharedChannelWrite({ "retire-legacy": true }));
+  assert.doesNotThrow(() => assertRetiredSharedChannelWrite({ channel: "windows-x86_64" }));
+  for (const options of [{ channel: "legacy" }, { "promote-legacy": true }]) {
+    assert.throws(() => assertRetiredSharedChannelWrite(options), /永久停用/);
+  }
+  await assert.rejects(promoteLegacyFromPlatformFeeds({}), /永久停用/);
+  await assert.rejects(publishUpdaterArtifacts({ channel: "legacy" }), /永久停用/);
+  for (const args of [["--promote-legacy"], ["--channel", "legacy"]]) {
+    const result = spawnSync(process.execPath, ["scripts/publish-tos-updates.mjs", ...args], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /永久停用/);
+  }
 });
 
 test("legacy manifest promotion only references full same-version artifacts from this bucket", () => {

@@ -38,9 +38,17 @@ import {
   tosUpdatesPublicBaseUrl,
 } from "./tos-updates-config.mjs";
 import { candidateSecretKeys, presignUrl } from "./tos-v4.mjs";
-import { RESOURCE_COMPONENTS, verifyRuntimeResourceRelease } from "./runtime-resource-release.mjs";
+import {
+  RESOURCE_COMPONENTS,
+  assertRuntimeReleaseShape,
+  verifyRuntimeResourceRelease,
+} from "./runtime-resource-release.mjs";
+import { assertRuntimeBaseline, createRuntimeBaseline } from "./runtime-resource-baseline.mjs";
 import { validateMacDeltaManifest } from "./mac-delta-manifest.mjs";
-import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
+import {
+  verifyUpdaterSignature,
+  verifyUpdaterSignatureBytes,
+} from "./verify-updater-signature.mjs";
 
 const PROBE_FILE = ".public-probe.txt";
 const PUT_EXPIRES_SECS = 3600;
@@ -811,6 +819,34 @@ export function collectRuntimeResourceObjects(manifest, root) {
   return [...sources.values()];
 }
 
+/** Only identical component/path/size/hash entries from a signed prior release
+ * or unchanged trees from a verified full bridge can omit object publication. */
+export function collectChangedRuntimeResourceObjects(
+  manifest,
+  root,
+  previousManifest = null,
+  unchangedBridgeComponents = [],
+) {
+  assertRuntimeReleaseShape(manifest);
+  if (previousManifest) assertRuntimeReleaseShape(previousManifest);
+  const bridgeNames = new Set(unchangedBridgeComponents);
+  const changed = new Set();
+  for (const [index, component] of manifest.components.entries()) {
+    const prior = previousManifest?.components[index];
+    const priorFiles = new Map(prior?.files.map((file) => [file.path, file]) ?? []);
+    if (bridgeNames.has(component.name)) continue;
+    for (const file of component.files) {
+      const previous = priorFiles.get(file.path);
+      if (previous?.sha256 !== file.sha256 || previous.size !== file.size) {
+        changed.add(file.sha256);
+      }
+    }
+  }
+  return collectRuntimeResourceObjects(manifest, root).filter((object) =>
+    changed.has(object.sha256),
+  );
+}
+
 /** Validate publication inputs before touching a live feed. The signed manifest is
  * also checked by the client, but the publisher must not upload a broken release. */
 export function collectMacDeltaObjects(manifest, version, expectedObjectBaseUrl) {
@@ -1112,7 +1148,162 @@ async function readPublicManifest(config, objectKey) {
   }
 }
 
+export function assertLegacyRetirementTarget(config, expectedVersion, backupFile) {
+  if (
+    config.bucket !== TOS_UPDATES_BUCKET ||
+    config.endpoint !== TOS_UPDATES_ENDPOINT ||
+    config.prefix !== TOS_UPDATES_PREFIX ||
+    !/^\d+\.\d+\.\d+$/.test(expectedVersion ?? "") ||
+    typeof backupFile !== "string" ||
+    backupFile.trim() === ""
+  ) {
+    throw new Error("停用旧共享频道需要精确桶、前缀、预期版本和本地备份路径");
+  }
+  return tosUpdatesObjectKey("latest.json", TOS_UPDATES_PREFIX);
+}
+
+export async function retireLegacyFeed(options = {}) {
+  const expectedVersion = options["expected-version"];
+  const backupFile = options["backup-file"];
+  const requiredWindowsVersion = options["require-windows-version"];
+  const envConfig = readTosPublishEnv(options.env ?? process.env);
+  const key = assertLegacyRetirementTarget(envConfig, expectedVersion, backupFile);
+  if (!/^\d+\.\d+\.\d+$/.test(requiredWindowsVersion ?? "")) {
+    throw new Error("停用旧共享频道需要 --require-windows-version 指定已发布的 Windows 平台版本");
+  }
+  const secretKey = await findWorkingSecretKey(envConfig);
+  const config = { ...envConfig, secretKey };
+  const windowsFeed = await readPublicManifest(
+    config,
+    tosUpdatesObjectKey("latest.json", `${TOS_UPDATES_PREFIX}/windows-x86_64`),
+  );
+  const windowsArtifact = windowsFeed?.platforms?.["windows-x86_64"]?.url;
+  if (
+    windowsFeed?.version !== requiredWindowsVersion ||
+    windowsArtifact !==
+      `${tosUpdatesPublicBaseUrl()}/windows-x86_64/${encodeURIComponent(`无限画布_${requiredWindowsVersion}_x64-slim-setup.exe`)}` ||
+    !windowsFeed.resourceManifest
+  ) {
+    throw new Error("目标 Windows 瘦包平台频道尚未验证发布，拒绝停用旧共享频道");
+  }
+  const pubkey = JSON.parse(
+    readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+  ).plugins.updater.pubkey;
+  await readSignedPreviousResourceManifest(config, windowsFeed, pubkey, TOS_UPDATES_PREFIX);
+  const current = await getAnonymousObject(config, key);
+  if (current.status !== 200) {
+    throw new Error(`旧共享频道清单无法备份：HTTP ${current.status}`);
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(current.text);
+  } catch {
+    throw new Error("旧共享频道清单不是有效 JSON");
+  }
+  if (parsed.version !== expectedVersion) {
+    throw new Error(`旧共享频道版本 ${parsed.version} 与预期 ${expectedVersion} 不一致`);
+  }
+  writeFileSync(path.resolve(backupFile), current.text, { flag: "wx" });
+  const removed = await deleteObject(config, key);
+  if (removed.status < 200 || removed.status >= 300) {
+    throw new Error(`停用旧共享频道失败：HTTP ${removed.status}`);
+  }
+  const verified = await getAnonymousObject(config, key);
+  if (verified.status !== 404) {
+    throw new Error(`旧共享频道删除后匿名读取仍返回 HTTP ${verified.status}`);
+  }
+  return { key, backupFile: path.resolve(backupFile) };
+}
+
+async function readSignedPreviousResourceManifest(config, feed, pubkey, basePrefix) {
+  const previousVersion = feed?.version;
+  const reference = feed?.resourceManifest;
+  const base = tosUpdatesPublicBaseUrl({ ...config, prefix: basePrefix });
+  const expectedUrl = `${base}/resources/${previousVersion}/windows-x86_64/manifest.json`;
+  if (
+    typeof previousVersion !== "string" ||
+    reference?.url !== expectedUrl ||
+    typeof reference.signature !== "string" ||
+    reference.signature.trim() === ""
+  ) {
+    throw new Error("上一版 Windows 频道缺少可信的签名资源清单");
+  }
+  const key = tosUpdatesObjectKey(
+    "manifest.json",
+    `${basePrefix}/resources/${previousVersion}/windows-x86_64`,
+  );
+  const response = await getAnonymousObject(config, key);
+  if (response.status !== 200 || Buffer.byteLength(response.text, "utf8") > 16 * 1024 * 1024) {
+    throw new Error(`上一版签名资源清单无法读取：HTTP ${response.status}`);
+  }
+  verifyUpdaterSignatureBytes(Buffer.from(response.text), reference.signature, pubkey);
+  const previousManifest = JSON.parse(response.text);
+  assertRuntimeReleaseShape(previousManifest);
+  if (
+    previousManifest.version !== previousVersion ||
+    previousManifest.objectBaseUrl !== `${base}/resources/objects/`
+  ) {
+    throw new Error("上一版签名资源清单的版本或对象地址不匹配");
+  }
+  return previousManifest;
+}
+
+export async function verifyResourceBridgeBaseline(
+  baselinePath,
+  previousFeed,
+  targetVersion,
+  pubkey,
+  basePrefix,
+  config,
+) {
+  const baseline = JSON.parse(readFileSync(baselinePath, "utf8"));
+  if (compareReleaseVersions(baseline.bridgeVersion, targetVersion) >= 0) {
+    throw new Error("资源基线的过渡版必须早于待发布版本");
+  }
+  const actual = await createRuntimeBaseline();
+  assertRuntimeBaseline(baseline, actual, targetVersion, {
+    signedResourceReleaseVerified: true,
+  });
+  const installer = collectLegacyWindowsFullFile(
+    path.dirname(baselinePath),
+    baseline.bridgeVersion,
+  );
+  const signaturePath = `${installer}.sig`;
+  await verifyUpdaterSignature(installer, signaturePath, pubkey);
+  assertWindowsInstallerProductVersion(
+    readWindowsInstallerProductVersion(installer),
+    baseline.bridgeVersion,
+  );
+  if (
+    (await sha256File(installer)) !== baseline.fullNsisSha256 ||
+    (await sha256File(signaturePath)) !== baseline.fullNsisSignatureSha256
+  ) {
+    throw new Error("完整过渡版安装包与资源基线的签名来源不匹配");
+  }
+  const expectedUrl = `${tosUpdatesPublicBaseUrl({ ...config, prefix: basePrefix })}/windows-x86_64/${encodeURIComponent(path.basename(installer))}`;
+  if (
+    previousFeed?.version !== baseline.bridgeVersion ||
+    previousFeed.platforms?.["windows-x86_64"]?.url !== expectedUrl ||
+    previousFeed.platforms["windows-x86_64"].signature !==
+      readFileSync(signaturePath, "utf8").trim()
+  ) {
+    throw new Error("资源基线安装包与线上上一版 Windows 频道不一致");
+  }
+  return RESOURCE_COMPONENTS.filter((component) => {
+    const old = baseline.resources[component.source];
+    const now = actual.resources[component.source];
+    return old.sha256 === now.sha256 && old.files === now.files && old.bytes === now.bytes;
+  }).map((component) => component.name);
+}
+
+export function assertRetiredSharedChannelWrite(options = {}) {
+  if (options["promote-legacy"] === true || options.channel === "legacy") {
+    throw new Error("旧共享更新频道已永久停用；禁止重新发布 updates/latest.json");
+  }
+}
+
 export async function promoteLegacyFromPlatformFeeds(options = {}) {
+  assertRetiredSharedChannelWrite({ ...options, "promote-legacy": true });
   const version = typeof options.version === "string" ? options.version : readAppVersion();
   assertReleaseVersionMatchesSource(version, readAppVersion());
   const windowsFullDir = options["windows-full-bundle-dir"];
@@ -1244,6 +1435,25 @@ export function collectFullOfflineFiles(directory, version) {
   );
 }
 
+export function assertFullOfflinePublishOptions(
+  channel,
+  slimWindows,
+  hasFullBundleDir,
+  noFullOffline,
+) {
+  if (noFullOffline) {
+    if (channel !== "windows-x86_64" || !slimWindows || hasFullBundleDir) {
+      throw new Error(
+        "--no-full-offline 只能用于 Windows 瘦包平台发布，且不能同时提供完整离线目录",
+      );
+    }
+    return;
+  }
+  if ((channel.startsWith("windows-") || channel === "darwin-aarch64") && !hasFullBundleDir) {
+    throw new Error(`平台频道 ${channel} 发布需要 --full-bundle-dir 提供同版完整离线安装包`);
+  }
+}
+
 export function collectMacFullOfflineFiles(directory, version) {
   const files = listFilesRecursive(directory);
   const dmgs = files.filter((filePath) =>
@@ -1262,6 +1472,7 @@ export function collectMacFullOfflineFiles(directory, version) {
 }
 
 export async function publishUpdaterArtifacts(options) {
+  assertRetiredSharedChannelWrite(options);
   const bundleDir = options["bundle-dir"];
   if (typeof bundleDir !== "string" || bundleDir.trim() === "") {
     throw new Error("发布前必须用 --bundle-dir 指定只含本版产物的暂存目录");
@@ -1309,6 +1520,7 @@ export async function publishUpdaterArtifacts(options) {
         : null;
   if (slimWindows && !resourceManifestPath) throw new Error("Windows 瘦包必须附带已签名资源清单");
   let release = null;
+  let resourcePubkey = null;
   if (resourceManifestPath) {
     release = await verifyRuntimeResourceRelease(
       resourceManifestPath,
@@ -1324,6 +1536,7 @@ export async function publishUpdaterArtifacts(options) {
     const appConfig = JSON.parse(
       readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
     );
+    resourcePubkey = appConfig.plugins.updater.pubkey;
     const updaterEndpoint = new URL(appConfig.plugins.updater.endpoints[0]);
     if (new URL(expectedObjects).origin !== updaterEndpoint.origin) {
       throw new Error("资源对象地址与已构建客户端的更新源不同");
@@ -1381,9 +1594,12 @@ export async function publishUpdaterArtifacts(options) {
   const config = { ...envConfig, secretKey, prefix };
   const fullBundleDir = options["full-bundle-dir"];
   const hasFullBundleDir = typeof fullBundleDir === "string" && fullBundleDir.trim() !== "";
-  if ((channel.startsWith("windows-") || channel === "darwin-aarch64") && !hasFullBundleDir) {
-    throw new Error(`平台频道 ${channel} 发布需要 --full-bundle-dir 提供同版完整离线安装包`);
-  }
+  assertFullOfflinePublishOptions(
+    channel,
+    slimWindows,
+    hasFullBundleDir,
+    options["no-full-offline"] === true,
+  );
   let offlineFiles = [];
   if (hasFullBundleDir) {
     const offlineDir = path.resolve(fullBundleDir);
@@ -1435,6 +1651,41 @@ export async function publishUpdaterArtifacts(options) {
     tosUpdatesObjectKey("latest.json", config.prefix),
   );
   const previous = checkChannelManifest(remoteLatest, written.manifest);
+  let changedResourceObjects = [];
+  if (release) {
+    let previousManifest = null;
+    let unchangedBridgeComponents = [];
+    if (remoteLatest?.resourceManifest) {
+      previousManifest = await readSignedPreviousResourceManifest(
+        config,
+        remoteLatest,
+        resourcePubkey,
+        envConfig.prefix,
+      );
+    } else {
+      const baselinePath = options["resource-baseline"];
+      if (typeof baselinePath !== "string" || baselinePath.trim() === "") {
+        throw new Error("首次 Windows 资源差分发布需要 --resource-baseline 指定完整过渡版基线");
+      }
+      unchangedBridgeComponents = await verifyResourceBridgeBaseline(
+        path.resolve(baselinePath),
+        remoteLatest,
+        version,
+        resourcePubkey,
+        envConfig.prefix,
+        config,
+      );
+    }
+    changedResourceObjects = collectChangedRuntimeResourceObjects(
+      release.manifest,
+      REPO_ROOT,
+      previousManifest,
+      unchangedBridgeComponents,
+    );
+    console.log(
+      `[tos-publish] Windows 资源清单含 ${collectRuntimeResourceObjects(release.manifest, REPO_ROOT).length} 个去重对象；本版需上传 ${changedResourceObjects.length} 个变化对象`,
+    );
+  }
   if (previous.sameVersion) {
     writeLatestJson({
       "bundle-dir": bundlePath,
@@ -1474,18 +1725,11 @@ export async function publishUpdaterArtifacts(options) {
   /** @type {string[]} */
   const uploadedKeys = [];
   if (release) {
-    await runWithConcurrency(
-      collectRuntimeResourceObjects(release.manifest, REPO_ROOT),
-      8,
-      async (object) => {
-        const objectKey = tosUpdatesObjectKey(
-          object.sha256,
-          `${envConfig.prefix}/resources/objects`,
-        );
-        if (await putImmutableFile(config, objectKey, object.sourcePath, object.sha256))
-          uploadedKeys.push(objectKey);
-      },
-    );
+    await runWithConcurrency(changedResourceObjects, 8, async (object) => {
+      const objectKey = tosUpdatesObjectKey(object.sha256, `${envConfig.prefix}/resources/objects`);
+      if (await putImmutableFile(config, objectKey, object.sourcePath, object.sha256))
+        uploadedKeys.push(objectKey);
+    });
     const manifestKey = tosUpdatesObjectKey(
       "manifest.json",
       `${envConfig.prefix}/resources/${version}/windows-x86_64`,
@@ -1543,12 +1787,12 @@ export async function publishUpdaterArtifacts(options) {
 
 async function main() {
   const parsed = parseArgs(process.argv.slice(2));
-  if (parsed["promote-legacy"] === true) {
-    const result = await promoteLegacyFromPlatformFeeds(parsed);
-    console.log(`[tos-publish] 已发布 ${result.uploadedKeys.length} 个对象`);
-    console.log(`[tos-publish] latest.json ${result.latestJsonUrl}`);
+  if (parsed["retire-legacy"] === true) {
+    const retired = await retireLegacyFeed(parsed);
+    console.log(`[tos-publish] 已停用旧共享频道 ${retired.key}；备份 ${retired.backupFile}`);
     return;
   }
+  assertRetiredSharedChannelWrite(parsed);
   const envConfig = readTosPublishEnv();
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey };

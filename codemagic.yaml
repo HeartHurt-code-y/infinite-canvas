@@ -260,18 +260,6 @@ workflows:
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
           pnpm update:publish -- --channel darwin-aarch64 --bundle-dir "src-tauri/target/release/bundle/release-staging/$release_version/darwin-aarch64/full" --full-bundle-dir src-tauri/target/release/bundle/dmg --version "$release_version"
-      - name: Enable in-app upgrade from the shared channel
-        script: |
-          set -euo pipefail
-          release_version="$(node -p "require('./package.json').version")"
-          windows_release="$(node --input-type=module -e "const response = await fetch('https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/windows-x86_64/latest.json', {signal: AbortSignal.timeout(30000)}); if (!response.ok) throw new Error('Windows feed HTTP ' + response.status); const feed = await response.json(); const url = feed.platforms?.['windows-x86_64']?.url; if (typeof url !== 'string') throw new Error('Windows feed missing package URL'); console.log(feed.version + '|' + (url.includes('-slim-setup.exe') ? 'slim' : 'full'))")"
-          if [ "$windows_release" = "$release_version|full" ]; then
-            pnpm update:publish -- --promote-legacy --version "$release_version"
-          elif [ "$windows_release" = "$release_version|slim" ]; then
-            echo "Windows 平台频道为本版瘦包；共享频道需要已验签的本版完整 Windows 包，由 Windows 发布机使用 --windows-full-bundle-dir 晋升。"
-          else
-            echo "Windows 平台频道状态为 ${windows_release}；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
-          fi
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
       - src-tauri/target/release/bundle/macos/*.app.tar.gz
@@ -282,16 +270,3 @@ workflows:
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json
       - src-tauri/target/release/bundle/release-staging/*/darwin-aarch64/full/mac-delta/manifest.json.sig
       - src-tauri/target/release/bundle/helper/install-macos.sh
-  promote-legacy-update:
-    name: Promote 0.1.8 shared update
-    instance_type: mac_mini_m2
-    max_build_duration: 10
-    environment:
-      groups:
-        - updater_signing
-      node: 24
-    scripts:
-      - name: Verify both public packages and publish shared manifest
-        script: |
-          set -euo pipefail
-          node scripts/publish-tos-updates.mjs --promote-legacy --version 0.1.8

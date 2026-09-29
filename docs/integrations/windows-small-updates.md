@@ -1,35 +1,34 @@
 # Windows 小型更新与过渡发版
 
-Tauri 2 在 Windows 上把完整 NSIS/MSI 安装器作为 updater 产物，因此本项目的 `0.1.7` 更新下载约 733 MiB。这里的小型更新仍是经过 Tauri 签名的 NSIS 安装器；它只包含新的程序，不重复携带稳定的 Blender、Remotion、FFmpeg 与风格库资源。首次安装始终提供包含全部资源的离线安装包。
+Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本项目的 `0.1.7` 更新下载约 733 MiB。这里的小型更新仍是经过 Tauri 签名的 NSIS 安装器；它只包含新的程序，不重复携带稳定的 Blender、Remotion、FFmpeg 与风格库资源。构建小包仍须在本地生成同版完整 NSIS，以核对资源文件表；常规发版不再默认上传完整离线包。
 
 ## 兼容边界
 
-- `0.1.7` 客户端固定读取 `infinite-canvas/updates/latest.json`，Windows 和 macOS 共用一个顶层版本。它不能区分先前使用 NSIS 还是 MSI 安装。**该旧地址只接收同一版本的完整 Windows 与 macOS 过渡安装包**；不能直接换成小型 Windows 包，也不能把旧 Mac 产物合并进新版本清单。
-- 过渡版改用 `updates/{{target}}-{{arch}}/latest.json`。这样其后的 Windows 与 macOS 版本可以独立推进。发布旧地址之前，先初始化两个平台的新地址，避免客户升级后检查更新失败。
+- `0.1.7` 客户端固定读取 `infinite-canvas/updates/latest.json`，Windows 和 macOS 共用一个顶层版本，且不能区分先前使用 NSIS 还是 MSI 安装。该旧共享清单停用；Windows 平台 `0.1.11` 发布并验证后删除，后续发版只维护平台清单。仍读取旧地址的客户端将无法从此地址获得新版本，须手动安装支持平台频道的完整过渡版。
+- 过渡版改用 `updates/{{target}}-{{arch}}/latest.json`，使 Windows 与 macOS 版本可以独立推进。旧共享地址不能指向 Windows 小包，因为旧客户端不具备按文件准备资源的能力。
 - 过渡版启动后，在后台把四类稳定资源复制到 `AppLocalData/runtime-components/` 的版本目录，逐文件校验后才标记完成。迁移期间依旧使用安装目录里的完整资源。组件未准备好时，应用内更新会等待并显示本地进度；失败时保留原安装并显示错误。
-- 小包的 NSIS 安装程序在卸载任何旧版之前，先运行新程序的只读组件自检。自检只接受四类已持久化且与新构建清单匹配的资源，手动运行小包或静默安装也必须通过；失败时停止安装，改用完整离线包修复。
+- 小包的 NSIS 安装程序在卸载任何旧版之前，先运行新程序的只读组件自检。自检只接受四类已持久化且与新构建清单匹配的资源，手动运行小包或静默安装也必须通过；失败时停止安装。可使用已发布的完整过渡版，或由发布者单独提供的完整安装包修复。
 - 新版客户端在下载小型 NSIS 前先获取目标版本的签名资源清单。它按 SHA-256 复用本地已有文件，仅下载缺少或内容变化的对象，逐文件校验后在持久组件目录发布完整的目标版本；安装器预检再以新程序内置的清单核对这四类组件。失败时保留旧组件与旧程序，可重试。
-- 应用保持自动检查更新；发现新版本后在后台准备资源并下载小型安装包。下载完成只提示“安装并重启”，由用户决定何时中断当前画布会话。
+- 应用保持自动检查更新；发现新版本后在后台准备资源并下载小型安装包。准备完成后自动安装并重启应用；画布保存失败时停止安装并显示错误。
 - `update:baseline` 保留完整过渡包的版本、签名包哈希与资源映射来源。`tauri:bundle:slim` 要求本版完整 NSIS 文件表覆盖四类资源的每个文件，且新程序内置的四个清单哈希与签名资源清单一致，才允许这些组件的资源树变化。资源映射或未纳入按文件更新的其他技能资源变化仍需新的完整过渡包。
-- 旧 NSIS 的 `/UPDATE` 安装会保留未列入新包的资源；从 MSI 来的客户可能先卸载原安装。持久组件目录覆盖这两条路径。小包安装失败时仍可运行完整离线安装包修复。
+- 旧 NSIS 的 `/UPDATE` 安装会保留未列入新包的资源；从 MSI 来的客户可能先卸载原安装。持久组件目录覆盖这两条路径。小包安装失败时可运行完整过渡版或单独提供的完整安装包修复。
 
 ## 构建和发布顺序
 
 1. 将 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 升到相同的新版本。备齐原 updater 签名私钥；不能更换已经发给客户的公钥。
-2. Windows 上运行 `pnpm tauri:build` 生成并保留同版签名 NSIS。对构建时准备的稳定资源运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，把含完整包及签名哈希的基线与安装包一同归档。将同版源码提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥与 TOS 上传凭据后，再触发 `codemagic.yaml` 的 `macos-package`。本项目不要求 Apple 公证；无证书时使用 ad-hoc 签名，并向首次安装者提供隔离属性处理指引。
-3. Windows 用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <windows-full-dir> --full-bundle-dir <windows-full-dir> --version <version>` 发布。Codemagic 的 Mac 工作流在验签后用 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --full-bundle-dir <mac-dmg-dir> --version <version>` 先上传同版离线 DMG 与安装脚本，再切换平台 `latest.json`。旧 Mac 客户端若在资源迁移阶段卡住，可用离线 DMG 一次性覆盖安装。`.github/workflows/macos-package.yml` 只构建产物，作为备用入口。
-4. Mac 工作流确认公开 Windows 与 Mac 平台清单同版，且 Windows 包为完整 NSIS 后，自动运行 `--promote-legacy` 切换旧共享地址。如果 Windows 平台本版发布瘦包，Mac 工作流只发布自己的平台频道；Windows 发布机需用 `pnpm update:publish -- --promote-legacy --version <version> --windows-full-bundle-dir <同版完整NSIS目录>` 单独晋升共享地址。此命令本地验签完整 NSIS，并核对公开 `offline/<version>/` 完整包的字节数、SHA-256 元数据和签名；共享频道的 Windows 条目引用该完整包，平台频道继续引用瘦包。未齐备两个平台及完整离线包时不得切换。
-5. **仅在过渡版的迁移与升级路径通过验证后**，下次常规 Windows 发版先构建完整离线安装包，再运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。此步骤从完整 NSIS 文件表生成目标版本的签名资源清单，并要求完整包的修改时间晚于新程序及清单覆盖的所有资源源文件；小型包继续只包含程序。检查清单、完整包、小包及签名，再用 `--channel windows-x86_64 --bundle-dir <slim-dir> --full-bundle-dir <full-dir> --version <version>` 发布。发布脚本先确认内容哈希对象与清单均可匿名访问，最后切换 `latest.json`；完整安装包继续作为离线安装和修复入口。
+2. Windows 上运行 `pnpm tauri:build --bundles nsis`，在本地生成并保留同版签名完整 NSIS。完整过渡版须运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，将含完整包及签名哈希的基线与安装包一同归档。小包发版使用已经验证的完整过渡版基线。将同版源码提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥与 TOS 上传凭据后，再触发 `codemagic.yaml` 的 `macos-package`。本项目不要求 Apple 公证；无证书时使用 ad-hoc 签名，并向首次安装者提供隔离属性处理指引。
+3. **仅在过渡版的迁移与升级路径通过验证后**，常规 Windows 发版运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。此步骤从同版完整 NSIS 文件表生成目标版本的签名资源清单，并要求完整包的修改时间晚于新程序及清单覆盖的所有资源源文件；小包只包含程序。检查清单、完整包、小包及签名，再用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <slim-dir> --resource-baseline <0.1.10 bridge-baseline.json> --no-full-offline --version <version>` 发布。发布脚本先确认内容哈希对象与清单均可匿名访问，最后切换 Windows 平台 `latest.json`；完整 NSIS 留在本地，不上传。
+4. Codemagic 的 Mac 工作流在验签后用 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --full-bundle-dir <mac-dmg-dir> --version <version>` 发布 Mac 平台频道。Mac 离线 DMG 与安装脚本仍供首次安装和修复使用；`.github/workflows/macos-package.yml` 只构建产物，作为备用入口。Mac 工作流不发布旧共享清单。Windows 平台 `0.1.11` 验证完成后，运行 `pnpm update:publish --retire-legacy --expected-version 0.1.10 --require-windows-version 0.1.11 --backup-file <new local path>`，先在全新本地路径保存旧清单，再删除远端 `updates/latest.json`；后续不重新创建它。
 
 上述命令中的目录必须来自同一次构建。`TOS_ACCESS_KEY`、`TOS_SECRET_KEY` 只从环境变量读取；不要放进命令、文档或仓库。每次更新都升版本号，避免 CDN 的长期缓存复用旧安装包 URL。
-修改时间检查能拦住完整包构建后又修改程序或资源的常见失配，但不是完整 NSIS 内每个文件字节与当前源码一致的证明。发布验收仍需核对实际完整包和小包。
+修改时间检查能拦住完整包构建后又修改程序或资源的常见失配，但不是完整 NSIS 内每个文件字节与当前源码一致的证明。发布验收仍需核对本地完整包和公开小包。
 
 ## 最小验收
 
 1. 运行更新脚本的定向测试、Rust 组件迁移及按文件预备的定向测试，以及 TypeScript 类型检查。
 2. 对实际生成的 NSIS 脚本确认小包未含 `blender/`、`remotion-runtime/`、`ffmpeg/`、`skills/`；比较完整包与小包的字节数，并确认两份 `.sig` 均非空。
 3. 在隔离的 Windows 安装上依次执行 `0.1.7 → 完整过渡版 → 小型更新版`，至少覆盖 NSIS 与 MSI 来源各一次。用目标版本只修改少量资源的样本核对下载字节数、未变文件复用、断点重试、哈希错误拒绝与旧版本保留。检查画布/密钥保留，以及断网后的 Blender、Remotion、FFmpeg 与风格库图片可用；目标组件未准备完成时应拒绝小包安装。
-4. 发布后读取两个新平台清单和旧共享清单，核对版本、唯一的版本化下载 URL、签名和 HTTP 可访问性；旧共享清单只在完整过渡版发布时更新。
+4. 发布后读取两个平台清单，核对版本、唯一的版本化下载 URL、签名和 HTTP 可访问性。确认旧共享清单删除后返回不存在，并记录旧客户端需要手动过渡的影响。
 
 ## 2026-09-28 已发布版本的修复边界
 
@@ -41,4 +40,4 @@ Tauri 2 在 Windows 上把完整 NSIS/MSI 安装器作为 updater 产物，因�
 
 ## 0.1.11 分流边界
 
-`0.1.11` Windows 平台频道发布瘦包时，只有已完成 `0.1.10` 完整包桥接、且持久资源组件自检通过的客户端可直接升级。仍在 `0.1.8`、`0.1.9` 等平台频道旧客户端无法靠共享频道的完整包自动改道，应先安装 `0.1.10` 或本版完整离线 NSIS，完成资源迁移后再使用平台小包。共享旧版频道的 `0.1.11` Windows 条目必须保持完整 NSIS；不要把平台瘦包 URL 复制过去。发布前从隔离安装验证 `0.1.10 → 0.1.11` 的按文件准备和安装，以及旧版使用完整离线包的恢复路径。
+`0.1.11` Windows 平台频道只发布瘦包，只有已完成 `0.1.10` 完整包桥接、且持久资源组件自检通过的客户端可直接升级。仍在 `0.1.8`、`0.1.9` 等平台频道旧客户端应先手动安装 `0.1.10` 完整过渡包，完成资源迁移后再使用平台小包。仍读取旧共享清单的 `0.1.7` 等客户端在该清单删除后不会收到新版本，亦需手动安装完整过渡包。`0.1.11` 的完整 NSIS 只在本地保留以校验小包，默认不上传；如需单独修复，由发布者验签后提供。发布前应从隔离安装验证 `0.1.10 → 0.1.11` 的按文件准备和安装，以及旧版使用完整过渡包的恢复路径。

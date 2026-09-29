@@ -63,3 +63,17 @@ export async function verifyUpdaterSignature(filePath, signaturePath, encodedPub
     throw new Error("updater 签名备注验证失败");
   }
 }
+
+export function verifyUpdaterSignatureBytes(contents, signatureText, encodedPublicKey) {
+  const publicKey = parseMinisignPublicKey(encodedPublicKey);
+  const signature = parseMinisignSignature(signatureText);
+  if (!publicKey.id.equals(signature.id)) throw new Error("updater 签名公钥 ID 不匹配");
+  const digest = createHash("blake2b512").update(contents).digest();
+  if (!verify(null, digest, publicKey.key, signature.signature)) {
+    throw new Error("updater 安装包签名验证失败");
+  }
+  const globalPayload = Buffer.concat([signature.signature, Buffer.from(signature.trustedComment)]);
+  if (!verify(null, globalPayload, publicKey.key, signature.globalSignature)) {
+    throw new Error("updater 签名备注验证失败");
+  }
+}

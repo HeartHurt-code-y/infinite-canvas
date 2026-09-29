@@ -4,7 +4,10 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
+import {
+  verifyUpdaterSignature,
+  verifyUpdaterSignatureBytes,
+} from "./verify-updater-signature.mjs";
 
 test("updater verification accepts a matching Minisign signature and rejects changed bytes", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "updater-signature-"));
@@ -25,6 +28,22 @@ test("updater verification accepts a matching Minisign signature and rejects cha
     const minisign = `untrusted comment: test signature\n${Buffer.concat([Buffer.from("ED"), id, signature]).toString("base64")}\ntrusted comment: ${comment}\n${global.toString("base64")}\n`;
     writeFileSync(signatureFile, Buffer.from(minisign).toString("base64"));
     await assert.doesNotReject(() => verifyUpdaterSignature(file, signatureFile, encodedKey));
+    assert.doesNotThrow(() =>
+      verifyUpdaterSignatureBytes(
+        readFileSync(file),
+        readFileSync(signatureFile, "utf8"),
+        encodedKey,
+      ),
+    );
+    assert.throws(
+      () =>
+        verifyUpdaterSignatureBytes(
+          Buffer.from("changed bytes"),
+          readFileSync(signatureFile, "utf8"),
+          encodedKey,
+        ),
+      /签名验证失败/,
+    );
     writeFileSync(file, "changed bytes");
     await assert.rejects(
       () => verifyUpdaterSignature(file, signatureFile, encodedKey),

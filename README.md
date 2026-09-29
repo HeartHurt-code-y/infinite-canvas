@@ -28,23 +28,23 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 
 ## 常用命令
 
-| 命令                       | 用途                                                                                 |
-| -------------------------- | ------------------------------------------------------------------------------------ |
-| `pnpm dev`                 | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）                        |
-| `pnpm dev:daemon`          | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）                    |
-| `pnpm tauri:dev`           | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）                             |
-| `pnpm build`               | 类型检查并构建前端                                                                   |
-| `pnpm tauri:build`         | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物                  |
-| `pnpm tauri:bundle:slim`   | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线               |
-| `pnpm update:manifest`     | 根据指定版本的 updater 产物生成 `latest.json`                                      |
-| `pnpm test`                | 运行前端测试                                                                         |
-| `pnpm lint`                | 执行类型感知 ESLint 检查                                                             |
-| `pnpm format`              | 使用 Prettier 格式化工程文件                                                         |
-| `pnpm check`               | 执行前端、Rust 格式化及 Clippy 全量检查                                              |
-| `pnpm ffmpeg:prepare`      | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`                           |
-| `pnpm remotion:prepare`    | 准备内置动画渲染运行时                                                               |
-| `pnpm blender:prepare`     | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码                            |
-| `pnpm macos:verify-bundle` | 校验 macOS 产物签名与内置可执行文件签名                                              |
+| 命令                       | 用途                                                                |
+| -------------------------- | ------------------------------------------------------------------- |
+| `pnpm dev`                 | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）       |
+| `pnpm dev:daemon`          | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）   |
+| `pnpm tauri:dev`           | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）            |
+| `pnpm build`               | 类型检查并构建前端                                                  |
+| `pnpm tauri:build`         | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物   |
+| `pnpm tauri:bundle:slim`   | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线 |
+| `pnpm update:manifest`     | 根据指定版本的 updater 产物生成 `latest.json`                       |
+| `pnpm test`                | 运行前端测试                                                        |
+| `pnpm lint`                | 执行类型感知 ESLint 检查                                            |
+| `pnpm format`              | 使用 Prettier 格式化工程文件                                        |
+| `pnpm check`               | 执行前端、Rust 格式化及 Clippy 全量检查                             |
+| `pnpm ffmpeg:prepare`      | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`          |
+| `pnpm remotion:prepare`    | 准备内置动画渲染运行时                                              |
+| `pnpm blender:prepare`     | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码           |
+| `pnpm macos:verify-bundle` | 校验 macOS 产物签名与内置可执行文件签名                             |
 
 白模工作室默认使用应用内置 Blender，用户无需另行安装或首次运行时下载引擎。构建准备在开发机器上完成，正式安装包包含完整运行库、Python 与工程精修所需资源。外部 Blender 仅作为高级可选设置；内置资源缺失时会报告安装包损坏。打包方式、支持平台与验证说明见 [Blender 桥接](tools/blender/README.md)。
 
@@ -130,7 +130,7 @@ sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-ma
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，把解锁脚本随 app 打入离线 DMG，并切换 macOS 平台清单。Windows 同版平台频道指向完整包时，工作流还会晋升共享更新清单；若 Windows 平台发布瘦包，共享频道须由 Windows 发布机使用本版已验签完整 NSIS 单独晋升。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
+当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，把解锁脚本随 app 打入离线 DMG，只切换 macOS 平台清单。旧共享更新清单不再发布；Windows 平台 `0.1.11` 验证后删除旧清单。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
 
 ### 自检
 
@@ -150,15 +150,15 @@ sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-ma
 | Windows | 直接运行新的安装包即可覆盖。NSIS（`.exe`）是自动更新用的包；WiX（`.msi`）靠固定 `upgradeCode` + **升高版本号** 做覆盖安装。 |
 | macOS   | 旧版若在资源迁移阶段无法下载更新，使用同版离线 DMG 覆盖 `/Applications` 中的 `.app`；之后即可走应用内更新。                 |
 
-应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本后自动下载，准备好时在画布上方提示重启应用；设置页「应用升级」也可手动检查。
+应用启动后会静默检查更新；运行期间窗口可见且联网时每两分钟检查一次，窗口重新获得焦点或网络恢复时也会补查。发现新版本后自动准备资源、下载安装并重启应用；画布保存失败时停止安装并显示错误。设置页「应用升级」也可手动检查。
 
-当前 `0.1.7` 仍使用完整 NSIS 更新包。下一次迁移版需要完整安装包，把内置引擎与风格图片安全转存到用户数据目录；迁移完成后，常规 Windows 更新可只分发较小的程序安装包。Tauri 的 Windows updater 仍下载所选安装包，并非二进制差分。详细发版顺序和验证边界见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
+Windows `0.1.10` 完整过渡版把内置引擎与风格图片安全转存到用户数据目录；完成桥接的客户端可通过 `0.1.11` 平台频道下载小型程序安装包和变化的资源文件。Tauri 的 Windows updater 仍下载所选安装包，并非二进制差分。`0.1.11` 发版在本地构建完整 NSIS 以校验小包，默认不上传完整离线包。`0.1.8`、`0.1.9` 等尚未完成桥接的客户端需先手动安装 `0.1.10` 完整过渡版；旧共享频道客户端在旧清单删除后也需手动过渡。详细发版顺序和验证边界见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
 当前已装的 `0.1.0` **还没有更新器**，需要装一次 `0.1.1`。从 `0.1.1` 起就可以在应用里直接升。
 
 ### 发版时开发者要做的
 
-每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。Mac Codemagic 工作流通过产物校验后会自动发布 macOS 平台清单及同版共享清单，触发前须确认源码提交和 Windows 同版完整包。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
+每次发版都升高 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 的版本号并保持一致。签名私钥只放在本机被忽略的 `src-tauri/.updater-key` 或 CI 密钥环境变量中，上传凭据只使用 `TOS_ACCESS_KEY` / `TOS_SECRET_KEY`。Mac Codemagic 工作流通过产物校验后只发布 macOS 平台清单，触发前须确认源码提交。Windows 小包发布前仍须在本地构建、验签同版完整 NSIS，但默认只上传小包和变化的资源文件。完整命令、平台通道和回滚要求见 [Windows 小型更新方案](docs/integrations/windows-small-updates.md)。
 
 ## 系统访问能力
 
