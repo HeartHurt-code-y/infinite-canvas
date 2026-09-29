@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 6] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 7] = [
     (
         "provider-sd20",
         "SD2.0",
@@ -342,6 +342,21 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 6] = [
         "provider-panqu-api",
         "盘趣API",
         "https://aiapis.panqu.com/",
+        "moyu_v1",
+    ),
+    (
+        // Seedance 2.5 RD 网关（new-api 内核）：视频生成走 `POST /v1/video/generations`，
+        // 请求体为顶层 `model`/`prompt`/`duration`/`ratio`/`resolution`/`generate_audio`
+        // 与顶层媒体数组 `images`/`reference_videos`/`reference_audios`/`start_frame`/
+        // `end_frame`；本地素材经免费的 `POST /v1/assets/uploads` 换取公网 URL 后提交。
+        // 该网关没有素材库浏览接口，素材库仍使用本地素材与本地生成结果。
+        //
+        // 上游就是文档声明的明文 HTTP 直连 IP（无域名、无 TLS），不存在盘趣网关的
+        // 证书问题；与文档保持一致使用 `http://101.34.211.152/`。
+        // 契约详见 `docs/integrations/rd-video-api.md`。
+        "provider-rd-api",
+        "RD API",
+        "http://101.34.211.152/",
         "moyu_v1",
     ),
 ];
@@ -3138,6 +3153,7 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![
                 "MAIGateway",
+                "RD API",
                 "SD2.0",
                 "海外平台",
                 "火山引擎",
@@ -3220,6 +3236,21 @@ mod tests {
                 .base_url,
             "https://my-proxy.example.com/"
         );
+    }
+
+    #[test]
+    fn rd_gateway_connection_seeds_with_the_documented_http_address() {
+        // Seedance 2.5 RD 网关按文档就是明文 HTTP 直连 IP（无域名、无 TLS）；
+        // 预置地址必须与文档一致，且默认停用等待用户填入 API Key。
+        let directory = TempDir::new().expect("temp dir");
+        let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
+        let rd = storage
+            .get_provider_connection("provider-rd-api")
+            .expect("rd connection");
+        assert_eq!(rd.base_url, "http://101.34.211.152/");
+        assert_eq!(rd.display_name, "RD API");
+        assert_eq!(rd.adapter_id, "moyu_v1");
+        assert!(!rd.enabled);
     }
 
     #[test]

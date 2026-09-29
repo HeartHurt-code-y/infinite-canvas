@@ -10,6 +10,7 @@ import {
 } from "../../lib/backend";
 import {
   isMinimaxH3VideoModel,
+  isRdVideoModel,
   isWan30VideoModel,
   modelGenerationCountMaximum,
   modelParameterCapabilities,
@@ -20,8 +21,8 @@ import {
 } from "../../lib/modelCapabilities";
 import {
   resolveSeedanceTask,
+  seedanceTaskOptions,
   selectSeedanceTask,
-  SEEDANCE_TASK_OPTIONS,
   type SeedanceTaskMode,
 } from "../../lib/seedanceTasks";
 import {
@@ -1786,9 +1787,13 @@ export function VideoNodeSettings({
     greenScreen ? { ...config, seedanceTaskMode: greenScreen.taskMode } : config,
     greenScreen ? greenScreen.connections : (mediaInputs ?? []),
   );
-  const currentTaskLabel = SEEDANCE_TASK_OPTIONS.find(
+  const currentTaskLabel = seedanceTaskOptions(selectedModel?.remoteModelId ?? "").find(
     (option) => option.value === taskState.mode,
   )?.label;
+  // 绿幕与白模依赖魔芋 Seedance 2.5 的编辑/参考任务契约；RD 网关没有这些任务，
+  // 不渲染入口（未启用的存档配置仍显示，保留关闭或切换模型的路径）。
+  const showSeedanceExtras =
+    taskState.enabled && !isRdVideoModel(selectedModel?.remoteModelId ?? "");
 
   return (
     <div className="canvas-gen-node__settings" aria-label="视频生成参数">
@@ -1962,7 +1967,7 @@ export function VideoNodeSettings({
                 )
               }
             >
-              {SEEDANCE_TASK_OPTIONS.map((option) => (
+              {seedanceTaskOptions(selectedModel?.remoteModelId ?? "").map((option) => (
                 <option key={option.value} value={option.value}>
                   {option.label}
                 </option>
@@ -2050,7 +2055,7 @@ export function VideoNodeSettings({
         </>
       ) : null}
 
-      {taskState.enabled || config.greenScreen ? (
+      {showSeedanceExtras || config.greenScreen ? (
         <GreenScreenSection
           config={config.greenScreen}
           inputs={greenScreenInputs}
@@ -2072,7 +2077,7 @@ export function VideoNodeSettings({
         />
       ) : null}
 
-      {taskState.enabled || config.whiteModelControl ? (
+      {showSeedanceExtras || config.whiteModelControl ? (
         <WhiteModelControlSection
           onOpenStudio={onOpenWhiteModelStudio}
           {...(config.whiteModelControl ? { config: config.whiteModelControl } : {})}

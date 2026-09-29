@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use super::{Storage, now_ms};
 use crate::backend::{
     error::{BackendError, BackendResult},
-    model_schema::is_sp25_per_use_video_model,
+    model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
     types::{
         GenerationOperation, GenerationResultRecord, GenerationTaskStatus, MediaType, QueryHealth,
         SaveStatus, TokenUsage,
@@ -1114,7 +1114,9 @@ fn is_sp25_video_result_task(
         params![task_id],
         |row| Ok((row.get(0)?, row.get(1)?)),
     )?;
-    Ok(model_id.as_deref().is_some_and(is_sp25_per_use_video_model)
+    Ok(model_id
+        .as_deref()
+        .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model))
         && task_remote_id == result.remote_task_id)
 }
 

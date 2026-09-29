@@ -14,7 +14,9 @@ use super::{
     error::{BackendError, BackendResult},
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
-    model_schema::{default_model_schema, is_sp25_per_use_video_model, normalize_parameters},
+    model_schema::{
+        default_model_schema, is_rd_video_model, is_sp25_per_use_video_model, normalize_parameters,
+    },
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
     staging::StagingService,
     storage::{
@@ -75,15 +77,16 @@ struct SuccessfulObservation {
 }
 
 /// 冻结任务时以绑定的远端模型 ID 为准。旧库中的 model_definitions 可能仍存着
-/// Seedance 通用档案；按次型号必须使用已知的专属协议，不能让旧档案决定素材暂存
-/// 或付费请求的形状。其他型号和操作继续沿用已保存的自定义 Schema。
+/// Seedance 通用档案；按次与 RD 型号必须使用已知的专属协议，不能让旧档案决定
+/// 素材暂存或付费请求的形状。其他型号和操作继续沿用已保存的自定义 Schema。
 fn operation_schema_for_start(
     stored_operations: &Value,
     operation: GenerationOperation,
     remote_model_id: Option<&str>,
 ) -> Option<Value> {
     if operation == GenerationOperation::VideoGeneration
-        && let Some(model_id) = remote_model_id.filter(|id| is_sp25_per_use_video_model(id))
+        && let Some(model_id) =
+            remote_model_id.filter(|id| is_sp25_per_use_video_model(id) || is_rd_video_model(id))
     {
         return default_model_schema(model_id, &[GenerationOperation::VideoGeneration])
             .get(operation.as_str())

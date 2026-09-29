@@ -275,7 +275,7 @@ fn changing_subject_reselects_documents_and_preserves_the_original_request_when_
 
 #[test]
 fn all_modes_keep_core_and_output_contracts_and_report_actual_byte_counts() {
-    assert_eq!(ALL_MODES.len(), 45);
+    assert_eq!(ALL_MODES.len(), 46);
     for mode in ALL_MODES {
         let command = command(*mode, "继续处理当前请求，保留已确认决定和当前输出格式。");
         let before = serde_json::to_value(&command).unwrap();

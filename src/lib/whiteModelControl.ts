@@ -1,5 +1,5 @@
 import type { ExplicitMediaTarget, MediaReferenceTarget } from "./backend";
-import { isSeedance25VideoModel } from "./modelCapabilities";
+import { isRdVideoModel, isSeedance25VideoModel } from "./modelCapabilities";
 import {
   createPromptContentEditorSession,
   decodePromptContentDocument,
@@ -134,6 +134,12 @@ export function resolveWhiteModelControl(
   if (!config.enabled) return failure(null);
   if (!isSeedance25VideoModel(modelId))
     return failure("专业级白模控制需要选择 Seedance 2.5 视频模型。");
+  // RD 网关没有任务类型字段，参考视频每段只允许 2–15 秒且合计 15 秒，
+  // 与白模动画的时长特征不符；该流程继续使用魔芋 Seedance 2.5 契约。
+  if (isRdVideoModel(modelId))
+    return failure(
+      "专业级白模控制依赖魔芋 Seedance 2.5 的参考任务与素材时长规则，当前 RD 网关模型未开放。",
+    );
   if (taskMode !== "auto" && taskMode !== "reference") {
     return failure("专业级白模控制需要使用全参考 / 自动判断或参考生视频任务，请先切换任务类型。");
   }

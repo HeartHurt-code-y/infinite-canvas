@@ -640,6 +640,63 @@ function panquVideoParameters(): Record<string, unknown> {
   };
 }
 
+/**
+ * Seedance 2.5 RD 网关（new-api 内核）的视频模型：
+ * `rd-seedance-2.5-480p` / `rd-seedance-2.5-720p` / `rd-seedance-2.5-1080p`。
+ *
+ * 该网关契约全部为顶层字段：`duration`（4–30 秒，必填）、`ratio`（六档，默认 16:9）、
+ * `resolution`（可省略，传了必须与模型档位一致）、`generate_audio`（默认出声）；
+ * 媒体为顶层 `images`（≤30）/ `reference_videos`（≤10，各 2–15 秒合计 15 秒）/
+ * `reference_audios`（≤10，各 2–15 秒合计 15 秒）/ `start_frame`+`end_frame`
+ * （成对、不与 images 同用）。本地素材经 `POST /v1/assets/uploads` 免费上传取 URL。
+ * 模型 ID 含 `seedance-2.5` 子串，必须排在 Seedance 2.5 的魔芋契约之前判定。
+ */
+export function isRdVideoModel(modelId: string): boolean {
+  return (
+    modelId === "rd-seedance-2.5-480p" ||
+    modelId === "rd-seedance-2.5-720p" ||
+    modelId === "rd-seedance-2.5-1080p"
+  );
+}
+
+function rdVideoResolutionTier(modelId: string): string {
+  if (modelId.endsWith("-1080p")) return "1080P";
+  if (modelId.endsWith("-480p")) return "480P";
+  return "720P";
+}
+
+function rdVideoParameters(modelId: string): Record<string, unknown> {
+  return {
+    duration: {
+      type: "integer",
+      label: "时长",
+      default: 5,
+      enum: Array.from({ length: 27 }, (_, index) => index + 4),
+      order: 0,
+    },
+    ratio: {
+      type: "string",
+      label: "画幅",
+      default: "16:9",
+      enum: ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+      order: 1,
+    },
+    resolution: {
+      type: "string",
+      label: "分辨率",
+      optional: true,
+      enum: [rdVideoResolutionTier(modelId)],
+      order: 2,
+    },
+    generate_audio: {
+      type: "boolean",
+      label: "生成音频",
+      default: true,
+      order: 3,
+    },
+  };
+}
+
 function videoParameters(modelId: string): Record<string, unknown> {
   const normalized = modelId.toLocaleLowerCase();
   const perTask = perTaskVideoProfile(modelId);
@@ -667,6 +724,12 @@ function videoParameters(modelId: string): Record<string, unknown> {
             },
           }),
     };
+  }
+  // Seedance 2.5 RD 网关：顶层 duration/ratio/resolution/generate_audio 与顶层
+  // 媒体数组。模型 ID 含 `seedance-2.5` 子串，必须排在 Seedance 2.5 的魔芋契约
+  // 之前判定（与盘趣网关同理）。
+  if (isRdVideoModel(modelId)) {
+    return rdVideoParameters(modelId);
   }
   const panqu = isPanquVideoModel(normalized);
   if (panqu) {
@@ -1059,6 +1122,7 @@ export function modelParameterCapabilities(
           isVeoVideoModel(modelId) ||
           isViduVideoModel(modelId) ||
           isMinimaxH3VideoModel(modelId) ||
+          isRdVideoModel(modelId) ||
           isGptImageModel(modelId) ||
           isGeminiImageModel(modelId) ||
           isSeedreamImageModel(modelId) ||

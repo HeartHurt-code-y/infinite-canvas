@@ -1,5 +1,5 @@
 import type { ExplicitMediaTarget, MediaReferenceTarget } from "./backend";
-import { isSeedance25VideoModel } from "./modelCapabilities";
+import { isRdVideoModel, isSeedance25VideoModel } from "./modelCapabilities";
 import {
   createPromptContentEditorSession,
   decodePromptContentDocument,
@@ -162,6 +162,11 @@ export function resolveGreenScreen(
   if (!config.enabled) return { ...failure(null), connections: inputs };
   if (!isSeedance25VideoModel(modelId))
     return failure("无缝绿幕编辑需要选择 Seedance 2.5 视频模型。");
+  // RD 网关没有视频编辑/延长任务，也没有自适应画幅；转绿与编辑依赖这些魔芋契约能力。
+  if (isRdVideoModel(modelId))
+    return failure(
+      "无缝绿幕编辑依赖视频编辑任务，当前 RD 网关模型未开放；请选择魔芋 Seedance 2.5 模型。",
+    );
   if (config.phase !== "prepare" && config.phase !== "composite")
     return failure("绿幕工作流程阶段无效，请重新选择制作绿幕或场景合成。");
   if (!["generate", "convert", "existing"].includes(config.preparationMode))

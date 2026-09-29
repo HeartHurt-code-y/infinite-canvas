@@ -342,6 +342,10 @@ pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) ->
     if is_sp25_per_use_video_model(model_id) {
         return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
     }
+    // RD 网关的三个模型同理：目录能力字段可能把它们误报成 chat/文本。
+    if is_rd_video_model(model_id) {
+        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
     if let Some(schema) = advertised_schema(item) {
         return complete_advertised_schema(schema, model_id);
     }
@@ -518,6 +522,112 @@ fn sp25_per_use_video_operation_schema(model_id: &str) -> Option<Value> {
             "maxImages": max_images,
             "maxAudios": max_audios,
             "maxVideos": 0
+        },
+        "parameters": parameters
+    }))
+}
+
+/// Seedance 2.5 RD 网关的按档位能力表。文档声明“本系列所有模型共用这套契约，
+/// 只有价格、时长范围和参考素材上限不同”，因此这里按完整模型 ID 建表（与按次
+/// 系列同一原则：相近名称或后缀版本不能套用此契约），未来新增档位只需扩表。
+///
+/// - `rd-seedance-2.5-480p/720p/1080p`：4–30 秒，30 图 + 10 视频 + 10 音频，
+///   分辨率由模型 ID 锁定（`resolution` 可省略，传了必须与档位一致）。
+#[derive(Clone, Copy)]
+pub(crate) struct RdVideoLimits {
+    /// 模型档位对应的显式分辨率值（文档示例为大写 `720P`）。
+    pub resolution: &'static str,
+    pub minimum_duration: u32,
+    pub maximum_duration: u32,
+    pub max_images: u32,
+    pub max_videos: u32,
+    pub max_audios: u32,
+}
+
+pub(crate) fn rd_video_limits(model_id: &str) -> Option<RdVideoLimits> {
+    let resolution = match model_id {
+        "rd-seedance-2.5-480p" => "480P",
+        "rd-seedance-2.5-720p" => "720P",
+        "rd-seedance-2.5-1080p" => "1080P",
+        _ => return None,
+    };
+    Some(RdVideoLimits {
+        resolution,
+        minimum_duration: 4,
+        maximum_duration: 30,
+        max_images: 30,
+        max_videos: 10,
+        max_audios: 10,
+    })
+}
+
+pub(crate) fn is_rd_video_model(model_id: &str) -> bool {
+    rd_video_limits(model_id).is_some()
+}
+
+/// Seedance 2.5 RD 网关的视频操作 Schema。
+///
+/// 该网关（new-api 内核）与魔芋 Seedance 契约（`metadata.content` + `metadata.*`）
+/// 不同：`model`/`prompt`/`duration`/`ratio`/`resolution`/`generate_audio` 以及媒体
+/// 数组 `images`/`reference_videos`/`reference_audios`/`start_frame`/`end_frame` 全部
+/// 是顶层字段。模型 ID 含 `seedance-2.5` 子串，必须排在通用 Seedance 分支之前，
+/// 否则会被误判为魔芋契约（与盘趣网关同理）。
+///
+/// 媒体上传沿用按次系列的 `POST /v1/assets/uploads`（免费），本地素材先上传取回
+/// 公网 URL 再提交；该网关没有素材库浏览接口，素材库侧按主机排除。
+fn rd_video_operation_schema(model_id: &str) -> Option<Value> {
+    let limits = rd_video_limits(model_id)?;
+    let durations = (limits.minimum_duration..=limits.maximum_duration)
+        .map(Value::from)
+        .collect::<Vec<_>>();
+    let parameters = json!({
+        "duration": {
+            "type": "integer",
+            "label": "时长",
+            "default": 5,
+            "enum": durations,
+            "requestField": "duration",
+            "order": 0
+        },
+        "ratio": {
+            "type": "string",
+            "label": "画幅",
+            "default": "16:9",
+            "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
+            "requestField": "ratio",
+            "order": 1
+        },
+        "resolution": {
+            "type": "string",
+            "label": "分辨率",
+            "optional": true,
+            "enum": [limits.resolution],
+            "requestField": "resolution",
+            "order": 2
+        },
+        "generate_audio": {
+            "type": "boolean",
+            "label": "生成音频",
+            "default": true,
+            "requestField": "generate_audio",
+            "order": 3
+        }
+    });
+    Some(json!({
+        "resultType": "video",
+        "requestProfileId": "rd_video_v1",
+        "profileVersion": 1,
+        "request": {
+            "path": "/v1/video/generations",
+            "encoding": "json",
+            "parameterContainer": "root",
+            "mediaEncoding": "rd_video_urls",
+            "mediaField": "images",
+            "videoField": "reference_videos",
+            "audioField": "reference_audios",
+            "maxImages": limits.max_images,
+            "maxVideos": limits.max_videos,
+            "maxAudios": limits.max_audios
         },
         "parameters": parameters
     }))
@@ -821,6 +931,7 @@ pub fn schema_for_enabled_operations(
     refresh_vidu_video_defaults(&mut schema, model_id);
     refresh_minimax_h3_video_defaults(&mut schema, model_id);
     refresh_sp25_per_use_video_defaults(&mut schema, model_id);
+    refresh_rd_video_defaults(&mut schema, model_id);
     refresh_seedream_image_parameter_defaults(&mut schema, model_id);
     refresh_async_image_task_defaults(&mut schema, model_id);
     // 端点属于供应商连接：上面按模型名推导出的契约（以及供应商下发的自定义契约）
@@ -1567,6 +1678,12 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             if let Some(schema) = sp25_per_use_video_operation_schema(model_id) {
                 return schema;
             }
+            // Seedance 2.5 RD 网关：顶层 `duration`/`ratio`/`resolution` 与顶层媒体数组。
+            // 模型 ID 含 `seedance-2.5` 子串，必须排在通用 Seedance 2.5 分支之前，
+            // 否则会被当成魔芋 metadata 契约（与盘趣网关同理）。
+            if let Some(schema) = rd_video_operation_schema(model_id) {
+                return schema;
+            }
             // 盘趣聚合网关：顶层 `resolution`/`aspect_ratio`/`duration`，media 为顶层
             // `images` URL 数组。必须排在 Seedance 2.0 分支之前，否则会被当成魔芋契约。
             if is_panqu_video_model(&identity) {
@@ -2186,6 +2303,12 @@ pub fn refresh_seedance_20_video_defaults(schema: &mut Value, model_id: &str) ->
 /// - 非空档案：原位补齐缺失的 `1080p` 分辨率与 `web_search` 定义，
 ///   不覆盖服务商下发的自定义参数。
 pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    // RD 网关模型 ID 含 `seedance-2.5` 子串，但契约完全不同；
+    // 其档案由 `refresh_rd_video_defaults` 负责刷新，这里不能把 1080p/联网搜索
+    // 等魔芋能力塞进 RD 顶层契约。
+    if is_rd_video_model(model_id) {
+        return false;
+    }
     if !is_seedance_25_video_model(model_id) || is_dreamina_seedance_video_model(model_id) {
         return false;
     }
@@ -2233,6 +2356,41 @@ pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) ->
         return changed;
     }
 
+    let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    *operation = replacement;
+    true
+}
+
+/// 把 RD 网关模型保存的旧视频档案刷新为当前顶层契约。
+///
+/// RD 模型 ID 含 `seedance-2.5` 子串：在本档案分支存在之前保存的绑定会被
+/// 推断成魔芋 metadata 契约，提交时会因字段容器错位被网关拒绝。只要视频
+/// 档案不是当前 `rd_video_v1` 档案，就整体替换为按当前档位表生成的规范
+/// Schema（与按次系列的档案升级同一原则）。
+pub fn refresh_rd_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if !is_rd_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = schema
+        .get_mut(GenerationOperation::VideoGeneration.as_str())
+        .and_then(Value::as_object_mut)
+    else {
+        return false;
+    };
+    if operation.get("requestProfileId").and_then(Value::as_str) == Some("rd_video_v1") {
+        return false;
+    }
     let mut replacement = default_operation_schema(model_id, GenerationOperation::VideoGeneration)
         .as_object()
         .cloned()
@@ -3762,6 +3920,133 @@ mod tests {
             "pan-image-1",
         );
         assert!(schema.get("video_generation").is_none());
+    }
+
+    #[test]
+    fn rd_video_models_use_the_top_level_gateway_contract() {
+        for (model_id, tier) in [
+            ("rd-seedance-2.5-480p", "480P"),
+            ("rd-seedance-2.5-720p", "720P"),
+            ("rd-seedance-2.5-1080p", "1080P"),
+        ] {
+            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
+            let definition = &schema["video_generation"];
+            let parameters = &definition["parameters"];
+
+            assert_eq!(
+                operations_from_schema(&schema),
+                [GenerationOperation::VideoGeneration],
+                "model {model_id}"
+            );
+            assert_eq!(definition["resultType"], "video");
+            // 模型 ID 含 `seedance-2.5` 子串，但必须命中 RD 顶层契约而不是魔芋契约。
+            assert_eq!(definition["requestProfileId"], "rd_video_v1");
+            assert_eq!(definition["request"]["path"], "/v1/video/generations");
+            assert_eq!(definition["request"]["parameterContainer"], "root");
+            assert_eq!(definition["request"]["mediaEncoding"], "rd_video_urls");
+            assert_eq!(definition["request"]["mediaField"], "images");
+            assert_eq!(definition["request"]["videoField"], "reference_videos");
+            assert_eq!(definition["request"]["audioField"], "reference_audios");
+            assert_eq!(definition["request"]["maxImages"], 30);
+            assert_eq!(definition["request"]["maxVideos"], 10);
+            assert_eq!(definition["request"]["maxAudios"], 10);
+            assert!(definition["request"].get("observePath").is_none());
+
+            // 分辨率由模型 ID 锁定；可省略，显式传值必须与档位一致。
+            assert_eq!(parameters["resolution"]["enum"], json!([tier]));
+            assert_eq!(parameters["resolution"]["optional"], true);
+            assert_eq!(parameters["duration"]["default"], 5);
+            assert_eq!(
+                parameters["duration"]["enum"]
+                    .as_array()
+                    .unwrap()
+                    .as_slice(),
+                &(4..=30).map(Value::from).collect::<Vec<_>>()
+            );
+            assert_eq!(parameters["ratio"]["default"], "16:9");
+            assert_eq!(
+                parameters["ratio"]["enum"],
+                json!(["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"])
+            );
+            assert_eq!(parameters["generate_audio"]["default"], true);
+            // RD 契约没有魔芋 Seedance 2.5 的任务类型、联网搜索与输出格式字段。
+            assert!(parameters.get("omni_reference_task_type").is_none());
+            assert!(parameters.get("web_search").is_none());
+            assert!(parameters.get("output_format").is_none());
+        }
+    }
+
+    #[test]
+    fn domestic_seedance_25_keeps_the_moyu_contract_next_to_rd_models() {
+        let schema = infer_catalog_schema(
+            &json!({ "id": "doubao-seedance-2-5-260628" }),
+            "doubao-seedance-2-5-260628",
+            "doubao-seedance-2-5-260628",
+        );
+        assert_eq!(
+            schema["video_generation"]["requestProfileId"],
+            "moyu_video_metadata_v1"
+        );
+    }
+
+    #[test]
+    fn seedance_25_refresher_does_not_touch_rd_archives() {
+        let rd_schema =
+            default_operation_schema("rd-seedance-2.5-720p", GenerationOperation::VideoGeneration);
+        let mut schema = json!({ "video_generation": rd_schema });
+        // 魔芋刷新器会把 1080p/联网搜索塞进国内 Seedance 2.5 档案；RD 档案必须原样保留。
+        assert!(!refresh_seedance_25_video_defaults(
+            &mut schema,
+            "rd-seedance-2.5-720p"
+        ));
+        assert_eq!(
+            schema["video_generation"]["requestProfileId"],
+            "rd_video_v1"
+        );
+        assert!(
+            schema["video_generation"]["parameters"]
+                .get("web_search")
+                .is_none()
+        );
+        assert_eq!(
+            schema["video_generation"]["parameters"]["resolution"]["enum"],
+            json!(["720P"])
+        );
+    }
+
+    #[test]
+    fn stale_moyu_archive_for_rd_model_is_upgraded_to_the_rd_contract() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "profileVersion": 1,
+                "request": {
+                    "path": "/v1/video/generations",
+                    "encoding": "json",
+                    "parameterContainer": "metadata"
+                },
+                "parameters": {}
+            }
+        });
+        let repaired = schema_for_enabled_operations(
+            &stale,
+            "rd-seedance-2.5-1080p",
+            &[GenerationOperation::VideoGeneration],
+            RequestDialect::OpenAiCompatible,
+        );
+        assert_eq!(
+            repaired["video_generation"]["requestProfileId"],
+            "rd_video_v1"
+        );
+        assert_eq!(
+            repaired["video_generation"]["request"]["parameterContainer"],
+            "root"
+        );
+        assert_eq!(
+            repaired["video_generation"]["parameters"]["resolution"]["enum"],
+            json!(["1080P"])
+        );
     }
 
     #[test]

@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 use super::{
     error::{BackendError, BackendResult},
-    model_schema::is_sp25_per_use_video_model,
+    model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
     provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
     result_transfer::{
         self, TransferPolicy, TransferProgress, download_result, is_retryable_transfer,
@@ -173,12 +173,13 @@ impl LocalResultService {
     }
 
     fn is_sp25_video_result(&self, task_id: &str) -> BackendResult<bool> {
+        // 按次系列与 RD 网关的结果都是带签名与过期时间的直链，支持重新查询续签。
         Ok(self
             .storage
             .get_task_execution(task_id)?
             .remote_model_id_snapshot
             .as_deref()
-            .is_some_and(is_sp25_per_use_video_model))
+            .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model)))
     }
 
     fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {

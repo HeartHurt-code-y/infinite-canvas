@@ -4,7 +4,12 @@ import {
   modelParameterCapabilities,
   type ModelParameterCapability,
 } from "./modelCapabilities";
-import { resolveSeedanceTask, selectSeedanceTask, type SeedanceTaskMode } from "./seedanceTasks";
+import {
+  resolveSeedanceTask,
+  seedanceTaskOptions,
+  selectSeedanceTask,
+  type SeedanceTaskMode,
+} from "./seedanceTasks";
 
 const DOMESTIC = "doubao-seedance-2-5-260628";
 const OVERSEAS = "dreamina-seedance-2.5";
@@ -245,5 +250,90 @@ describe("Seedance task parameter and media contract", () => {
     );
     expect(state.issue).toContain("任务字段未开放所选任务类型");
     expect(state.parameters).not.toHaveProperty("omni_reference_task_type");
+  });
+});
+
+describe("RD gateway task contract", () => {
+  const RD = "rd-seedance-2.5-720p";
+
+  it("only offers auto and first-last-frame task options for RD models", () => {
+    const options = seedanceTaskOptions(RD).map((option) => option.value);
+    expect(options).toEqual(["auto", "first_last_frame"]);
+    // 魔芋 Seedance 2.5 保留全部六档任务。
+    expect(seedanceTaskOptions(DOMESTIC)).toHaveLength(6);
+  });
+
+  it("keeps explicit duration/ratio in auto mode instead of forcing adaptive/smart defaults", () => {
+    const state = resolveSeedanceTask(
+      RD,
+      capabilities(RD),
+      { seedanceTaskMode: "auto", parameterValues: { ratio: "21:9", duration: 12 } },
+      [imageA, video, imageB],
+    );
+    expect(state.enabled).toBe(true);
+    expect(state.mode).toBe("auto");
+    expect(state.issue).toBeNull();
+    // 全部素材自动设为参考角色。
+    expect(state.mediaRoles).toEqual({
+      "image-a": "reference_image",
+      "video-a": "reference_video",
+      "image-b": "reference_image",
+    });
+    // RD 没有自适应画幅与智能时长：用户所选值原样提交。
+    expect(state.parameters["ratio"]).toBe("21:9");
+    expect(state.parameters["duration"]).toBe(12);
+    expect(state.parameters).not.toHaveProperty("omni_reference_task_type");
+    // 未选择时长时回退到档案默认值 5（RD 的 duration 是必填字段）。
+    const defaulted = resolveSeedanceTask(RD, capabilities(RD), { parameterValues: {} }, []);
+    expect(defaulted.parameters["duration"]).toBe(5);
+    expect(defaulted.parameters["ratio"]).toBe("16:9");
+  });
+
+  it("requires a paired first/last frame and never locks ratio or duration", () => {
+    const frameInputs = [
+      { key: "image-a", kind: "image" as const },
+      { key: "image-b", kind: "image" as const },
+    ];
+    const state = resolveSeedanceTask(
+      RD,
+      capabilities(RD),
+      { seedanceTaskMode: "first_last_frame", parameterValues: { ratio: "4:3", duration: 20 } },
+      frameInputs,
+    );
+    expect(state.mode).toBe("first_last_frame");
+    expect(state.issue).toBeNull();
+    expect(state.mediaRoles).toEqual({ "image-a": "first_frame", "image-b": "last_frame" });
+    expect(state.parameters["ratio"]).toBe("4:3");
+    expect(state.parameters["duration"]).toBe(20);
+
+    // 混入视频素材：首尾帧不能与参考素材混用。
+    const mixed = resolveSeedanceTask(
+      RD,
+      capabilities(RD),
+      { seedanceTaskMode: "first_last_frame", parameterValues: {} },
+      [imageA, video, imageB],
+    );
+    expect(mixed.issue).toContain("2 张图片");
+
+    // 旧存档里的 edit 模式回退到 auto，而不是带着魔芋任务语义提交。
+    const restored = resolveSeedanceTask(
+      RD,
+      capabilities(RD),
+      { seedanceTaskMode: "edit", parameterValues: { ratio: "adaptive", duration: -1 } },
+      [imageA, imageB],
+    );
+    expect(restored.mode).toBe("auto");
+  });
+
+  it("does not inject adaptive/smart defaults when selecting auto on RD models", () => {
+    const next = selectSeedanceTask(
+      RD,
+      capabilities(RD),
+      { parameterValues: { ratio: "16:9", duration: 8 } },
+      [],
+      "auto",
+    );
+    expect(next.parameterValues["ratio"]).toBe("16:9");
+    expect(next.parameterValues["duration"]).toBe(8);
   });
 });

@@ -5,6 +5,7 @@ import {
   isGeminiImageModel,
   isMinimaxH3VideoModel,
   isPanquVideoModel,
+  isRdVideoModel,
   isSeedreamImageModel,
   modelAllowsMediaOnlyPrompt,
   modelParameterCapabilities,
@@ -101,6 +102,43 @@ describe("model capabilities", () => {
     expect(generationParameters(capabilities, { web_search: true }, true)).not.toHaveProperty(
       "web_search",
     );
+  });
+
+  it("uses the RD gateway top-level contract instead of the Seedance 2.5 moyu contract", () => {
+    // RD 网关的模型 ID 含 `seedance-2.5` 子串，但契约是顶层 duration/ratio/
+    // resolution/generate_audio + 顶层媒体数组；必须先于魔芋 Seedance 2.5 判定。
+    for (const [modelId, tier] of [
+      ["rd-seedance-2.5-480p", "480P"],
+      ["rd-seedance-2.5-720p", "720P"],
+      ["rd-seedance-2.5-1080p", "1080P"],
+    ] as const) {
+      expect(isRdVideoModel(modelId)).toBe(true);
+      const schema = defaultModelOperationSchema(modelId, ["video_generation"]);
+      const rdCapabilities = modelParameterCapabilities(schema, "video_generation", modelId);
+      expect(rdCapabilities.map((capability) => capability.key)).toEqual([
+        "duration",
+        "ratio",
+        "resolution",
+        "generate_audio",
+      ]);
+      expect(
+        rdCapabilities
+          .find((capability) => capability.key === "duration")
+          ?.options.map((o) => o.value),
+      ).toEqual(Array.from({ length: 27 }, (_, index) => index + 4));
+      expect(rdCapabilities.find((capability) => capability.key === "resolution")?.options).toEqual(
+        [{ value: tier, label: tier }],
+      );
+      // 魔芋 Seedance 2.5 的任务类型、联网搜索与输出格式不在 RD 契约里。
+      expect(
+        rdCapabilities.some((capability) => capability.key === "omni_reference_task_type"),
+      ).toBe(false);
+      expect(rdCapabilities.some((capability) => capability.key === "web_search")).toBe(false);
+      expect(rdCapabilities.some((capability) => capability.key === "output_format")).toBe(false);
+    }
+    // 相近名称不套用 RD 契约；魔芋 Seedance 2.5 仍走 metadata 契约。
+    expect(isRdVideoModel("rd-seedance-2.5-720p-v9")).toBe(false);
+    expect(isRdVideoModel("doubao-seedance-2-5-260628")).toBe(false);
   });
 
   it("renders provider-declared parameters without hardcoded field names", () => {

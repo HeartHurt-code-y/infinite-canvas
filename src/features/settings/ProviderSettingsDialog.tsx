@@ -87,6 +87,14 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     adapterId: MOYU_ADAPTER_ID,
   },
   {
+    id: "rd-api",
+    displayName: "RD API",
+    // Seedance 2.5 RD 网关：上游就是文档声明的明文 HTTP 直连 IP（无域名、无 TLS），
+    // 不存在盘趣网关的证书问题，与文档保持一致。
+    baseUrl: "http://101.34.211.152/",
+    adapterId: MOYU_ADAPTER_ID,
+  },
+  {
     id: "moyu-ai",
     displayName: "魔芋AI",
     baseUrl: "https://www.moyu.info/",

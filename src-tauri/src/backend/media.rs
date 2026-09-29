@@ -12,7 +12,7 @@ use super::{
     error::{BackendError, BackendResult},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
     local_base64_assets::{LocalBase64Library, extension_for_mime},
-    model_schema::{is_seedance_25_video_model, is_seedream_image_model},
+    model_schema::{is_rd_video_model, is_seedance_25_video_model, is_seedream_image_model},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
         redact_request_value, redact_url_string, seedance_video_task_type,
@@ -336,10 +336,17 @@ impl MediaResolver {
             .model_operation_schema_snapshot
             .clone()
             .unwrap_or_else(|| json!({}));
-        let needs_local_bytes = operation_schema
+        let request_profile = operation_schema
             .get("requestProfileId")
             .and_then(Value::as_str)
-            == Some("sp25_per_use_video_v1")
+            .unwrap_or_default();
+        let rd_video = task
+            .remote_model_id_snapshot
+            .as_deref()
+            .is_some_and(is_rd_video_model);
+        // 按次系列与 RD 网关把本地素材上传到供应商的 /v1/assets/uploads，
+        // 因此解析阶段必须拿到本地字节；纯 URL 素材不受影响。
+        let needs_local_bytes = matches!(request_profile, "sp25_per_use_video_v1" | "rd_video_v1")
             || image_edit_needs_local_bytes(
                 task.operation,
                 task.remote_model_id_snapshot.as_deref(),
@@ -392,7 +399,25 @@ impl MediaResolver {
             if let Some(lease) = lease {
                 staging_leases.push(lease);
             }
-            if probe_task_videos && resolved.media_type == MediaType::Video {
+            if rd_video && matches!(resolved.media_type, MediaType::Video | MediaType::Audio) {
+                // RD 网关要求参考视频/音频每段 2–15 秒且合计 15 秒；
+                // 时长由真实媒体探测确认，探测失败给出可操作的错误。
+                let kind = if resolved.media_type == MediaType::Video {
+                    "参考视频"
+                } else {
+                    "参考音频"
+                };
+                let duration = self
+                    .probe_input_video_duration(task, attempt_id, input.target, &resolved)
+                    .await
+                    .map_err(|error| {
+                        BackendError::validation(
+                            format!("无法确认{kind}「{}」的实际时长，当前任务要求 2–15 秒，请检查素材是否可读取", input.display_name),
+                            redact_request_value(&json!({ "media": resolved.archive(), "sourceError": error.runtime_record() })),
+                        )
+                    })?;
+                resolved.duration_seconds = Some(duration);
+            } else if probe_task_videos && resolved.media_type == MediaType::Video {
                 let minimum_seconds = if task_type == VideoTaskType::Edit {
                     4
                 } else {
@@ -477,6 +502,7 @@ impl MediaResolver {
             } => {
                 // Asset:// 是模型引用身份，不能交给 ffprobe。使用同一素材服务解析
                 // 可下载的真实字节，避免相信名称、封面或前端 duration 元数据。
+                // RD 网关对参考音频也做时长探测，因此按被探测素材的实际类型解析。
                 let asset = self
                     .assets
                     .resolve(ResolveAsset {
@@ -484,14 +510,14 @@ impl MediaResolver {
                             provider_connection_id: provider_connection_id.clone(),
                             asset_id: asset_id.clone(),
                         },
-                        expected_media_type: MediaType::Video,
+                        expected_media_type: media.media_type,
                         delivery: AssetDelivery::Bytes,
                         trace: AssetReadTrace { task, attempt_id },
                     })
                     .await?;
                 let ResolvedAssetAccess::Bytes(bytes) = asset.access else {
                     return Err(BackendError::protocol(
-                        "视频时长校验未取得可读取的素材字节",
+                        "媒体时长校验未取得可读取的素材字节",
                         media.archive(),
                     ));
                 };
