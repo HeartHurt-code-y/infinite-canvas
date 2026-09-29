@@ -1420,7 +1420,7 @@ impl ProviderRuntime {
                 let response = self
                     .send_submission_json(task, attempt_id, &context, "submit", &path, body)
                     .await?;
-                let submission = parse_image_submission(&response, false)?;
+                let submission = parse_image_submission(&response)?;
                 Ok((submission, response))
             }
             GenerationOperation::ImageToImage => {
@@ -1452,11 +1452,7 @@ impl ProviderRuntime {
                     self.captured_image_edit(task, attempt_id, &context, resolved, &path)
                         .await?
                 };
-                let submission = if encoding == "json" {
-                    parse_image_submission(&response, false)?
-                } else {
-                    parse_image_submission(&response, true)?
-                };
+                let submission = parse_image_submission(&response)?;
                 Ok((submission, response))
             }
             GenerationOperation::VideoGeneration => {
@@ -5374,13 +5370,10 @@ fn video_media_content(media: &ResolvedMedia, reference: &str) -> Value {
     }
 }
 
-fn parse_image_submission(
-    response: &CapturedHttpResponse,
-    require_base64: bool,
-) -> BackendResult<GenerationSubmission> {
+fn parse_image_submission(response: &CapturedHttpResponse) -> BackendResult<GenerationSubmission> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
-    let sources = extract_image_sources(&value, require_base64);
+    let sources = extract_image_sources(&value);
     if !sources.is_empty() {
         return Ok(GenerationSubmission::Images(sources));
     }
@@ -5406,7 +5399,7 @@ fn parse_image_observation(
 ) -> BackendResult<GenerationObservation> {
     require_success(response)?;
     let value: Value = serde_json::from_str(&response.body)?;
-    let images = extract_image_sources(&value, false);
+    let images = extract_image_sources(&value);
     let remote_status = value
         .pointer("/output/task_status")
         .or_else(|| value.pointer("/data/status"))
@@ -5449,7 +5442,10 @@ fn parse_image_observation(
     })
 }
 
-fn extract_image_sources(value: &Value, require_base64: bool) -> Vec<ImageSource> {
+/// 收集成功响应里的全部图片结果。`data[].url` 与 `data[].b64_json` 同等有效：
+/// 同一接口经不同网关可能回内联 Base64，也可能回托管 URL（new-api 聚合网关常见），
+/// 一律接受，交给结果落盘层统一下载持久化；单项同时带两者时优先 URL。
+fn extract_image_sources(value: &Value) -> Vec<ImageSource> {
     let mut sources = Vec::new();
     if let Some(items) = value.get("data").and_then(Value::as_array) {
         for item in items {
@@ -5475,14 +5471,7 @@ fn extract_image_sources(value: &Value, require_base64: bool) -> Vec<ImageSource
             } else {
                 None
             };
-            if require_base64 {
-                if let Some(base64) = base64.filter(|value| !value.is_empty()) {
-                    sources.push(ImageSource::Base64 {
-                        data: base64.to_string(),
-                        layer,
-                    });
-                }
-            } else if let Some(url) = url.filter(|value| !value.is_empty()) {
+            if let Some(url) = url.filter(|value| !value.is_empty()) {
                 sources.push(ImageSource::Url {
                     url: url.to_string(),
                     layer,
@@ -5495,14 +5484,12 @@ fn extract_image_sources(value: &Value, require_base64: bool) -> Vec<ImageSource
             }
         }
     }
-    if !require_base64 {
-        if let Some(urls) = value.pointer("/data/image_urls").and_then(Value::as_array) {
-            for url in urls.iter().filter_map(Value::as_str) {
-                push_unique_image_url(&mut sources, url);
-            }
+    if let Some(urls) = value.pointer("/data/image_urls").and_then(Value::as_array) {
+        for url in urls.iter().filter_map(Value::as_str) {
+            push_unique_image_url(&mut sources, url);
         }
-        collect_additional_image_sources(value, &mut sources);
     }
+    collect_additional_image_sources(value, &mut sources);
     sources
 }
 
@@ -9839,12 +9826,44 @@ mod tests {
             .to_string(),
         };
         let GenerationSubmission::Images(images) =
-            parse_image_submission(&response, false).expect("images")
+            parse_image_submission(&response).expect("images")
         else {
             panic!("expected images");
         };
         assert!(matches!(images[0], ImageSource::Url { .. }));
         assert!(matches!(images[1], ImageSource::Base64 { .. }));
+    }
+
+    #[test]
+    fn image_parser_accepts_gateway_url_only_submission() {
+        // new-api 聚合网关会把编辑接口的结果托管成 URL（data[0].url + revised_prompt）。
+        // multipart 编辑路径曾因强制 b64_json 把这种 HTTP 200 成功响应误判为协议错误。
+        let response = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "created": 1790666459,
+                "data": [{
+                    "url": "https://media.example.com/image/20260929/abc.png",
+                    "revised_prompt": "Create one ordinary smartphone-style photograph"
+                }],
+                "usage": {
+                    "prompt_tokens": 31756,
+                    "completion_tokens": 3168,
+                    "total_tokens": 9523
+                }
+            })
+            .to_string(),
+        };
+        let GenerationSubmission::Images(images) =
+            parse_image_submission(&response).expect("images")
+        else {
+            panic!("expected images");
+        };
+        assert_eq!(images.len(), 1);
+        assert!(matches!(&images[0], ImageSource::Url { url, .. }
+                if url == "https://media.example.com/image/20260929/abc.png"));
     }
 
     #[test]
@@ -9861,7 +9880,7 @@ mod tests {
             .to_string(),
         };
         let GenerationSubmission::RemoteImageTask { task_id } =
-            parse_image_submission(&accepted, false).expect("task ticket")
+            parse_image_submission(&accepted).expect("task ticket")
         else {
             panic!("expected a remote image task");
         };
@@ -9879,7 +9898,7 @@ mod tests {
             .to_string(),
         };
         let GenerationSubmission::Images(images) =
-            parse_image_submission(&immediate, false).expect("images")
+            parse_image_submission(&immediate).expect("images")
         else {
             panic!("expected images");
         };
@@ -9892,7 +9911,7 @@ mod tests {
             body: json!({ "id": "task-9", "status": "failed", "error": "content policy" })
                 .to_string(),
         };
-        let error = parse_image_submission(&failed, false).expect_err("failed task");
+        let error = parse_image_submission(&failed).expect_err("failed task");
         assert!(error.to_string().contains("content policy"));
     }
 
@@ -9940,7 +9959,7 @@ mod tests {
             body: body.to_string(),
         };
         let GenerationSubmission::Images(images) =
-            parse_image_submission(&response, false).expect("completed submission")
+            parse_image_submission(&response).expect("completed submission")
         else {
             panic!("a success payload with results must be images, not a failure");
         };
@@ -10010,7 +10029,7 @@ mod tests {
             .to_string(),
         };
         let GenerationSubmission::Images(images) =
-            parse_image_submission(&response, false).expect("images")
+            parse_image_submission(&response).expect("images")
         else {
             panic!("expected images");
         };
