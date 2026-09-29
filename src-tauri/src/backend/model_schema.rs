@@ -4,7 +4,7 @@ use super::{
     error::{BackendError, BackendResult},
     provider_adapter::{
         ARK_ADAPTER_ID, BAILIAN_ADAPTER_ID, BAILIAN_VIDEO_OBSERVE_PATH, BAILIAN_VIDEO_PATH,
-        DASHSCOPE_VIDEO_ENVELOPE,
+        DASHSCOPE_VIDEO_ENVELOPE, GRSAI_ADAPTER_ID,
     },
     types::GenerationOperation,
 };
@@ -50,16 +50,23 @@ pub enum RequestDialect {
     /// 阿里云百炼（华北2）官方 DashScope：万相走
     /// `/api/v1/services/aigc/video-generation/video-synthesis`。
     AliyunBailian,
+    /// Grsai 图片生成 API（gpt-image-2 系列）：提交 `POST /v1/api/generate`，
+    /// 轮询 `GET /v1/api/result?id={task_id}`；同名模型在聚合网关上走
+    /// `/v1/images/generations`，契约必须按连接方言区分。
+    Grsai,
 }
 
 impl RequestDialect {
     /// 适配器 → 方言。方舟推理 API 的 Base URL 自带 `/api/v3`，端点因此不带
-    /// `/v1` 前缀；百炼走官方 MaaS 路径；其余适配器都是 OpenAI 兼容网关。
+    /// `/v1` 前缀；百炼走官方 MaaS 路径；Grsai 是自有协议；其余适配器都是
+    /// OpenAI 兼容网关。
     pub fn for_adapter(adapter_id: &str) -> Self {
         if adapter_id == ARK_ADAPTER_ID {
             Self::VolcengineArk
         } else if adapter_id == BAILIAN_ADAPTER_ID {
             Self::AliyunBailian
+        } else if adapter_id == GRSAI_ADAPTER_ID {
+            Self::Grsai
         } else {
             Self::OpenAiCompatible
         }
@@ -83,7 +90,9 @@ const GATEWAY_CHAT_PATH: &str = "/v1/chat/completions";
 /// `default_operation_schema` 只看得到模型名，只能给出 OpenAI 兼容网关的规范值；
 /// 本函数是方舟连接的唯一改写入口，也在保存模型与打开数据库时把历史按模型名写下的
 /// 方舟原生端点改回网关端点。只在这三对互为替代的端点之间互换，其他家族
-/// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic、盘趣）自己的路径原样保留。
+/// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic、盘趣）自己的路径原样保留；
+/// Grsai 连接是唯一整条契约改写的例外（端点 + 轮询 + 参数，见
+/// `apply_grsai_image_dialect`）。
 ///
 /// 返回是否发生改写，调用方据此决定是否需要把定义写回数据库。
 pub fn apply_request_dialect(schema: &mut Value, model_id: &str, dialect: RequestDialect) -> bool {
@@ -148,6 +157,9 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     let path = current_request_path(request).to_string();
     match dialect {
         RequestDialect::AliyunBailian => false,
+        // Grsai 只承载 gpt-image 系图片契约；图片家族改写在 `apply_image_dialect`
+        // 已提前返回，视频契约在这里保持原样（不被误改写成网关端点）。
+        RequestDialect::Grsai => false,
         // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax / 盘趣在方舟上
         // 没有端点，它们自己的契约保持原样。
         RequestDialect::VolcengineArk => {
@@ -271,7 +283,11 @@ fn apply_bailian_wan_video_dialect(schema: &mut Value, identity: &str) -> bool {
 
 /// 文生图与图生图共用同一对图片端点：
 /// 网关 `/v1/images/generations` ↔ 方舟原生 `/images/generations`。
+/// Grsai 连接例外：端点、轮询与参数整条换成 Grsai 自有协议。
 fn apply_image_dialect(schema: &mut Value, identity: &str, dialect: RequestDialect) -> bool {
+    if dialect == RequestDialect::Grsai {
+        return apply_grsai_image_dialect(schema, identity);
+    }
     let mut changed = false;
     for operation in [
         GenerationOperation::TextToImage,
@@ -294,6 +310,8 @@ fn apply_image_operation_dialect(
     let path = current_request_path(request).to_string();
     match dialect {
         RequestDialect::AliyunBailian => false,
+        // Grsai 连接的图片契约在 `apply_image_dialect` 入口整条改写，不会走到这里。
+        RequestDialect::Grsai => false,
         // 方舟原生图片接口只承载自家 Seedream；其他家族的图片契约保持原样。
         RequestDialect::VolcengineArk => {
             if !is_seedream_image_model(identity) || path != GATEWAY_IMAGE_PATH {
@@ -319,6 +337,8 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
     let domestic_doubao = identity.starts_with("doubao-") || identity == "doubao";
     match dialect {
         RequestDialect::AliyunBailian => false,
+        // Grsai 连接不承载文本对话模型，文本契约保持原样。
+        RequestDialect::Grsai => false,
         RequestDialect::VolcengineArk => {
             if !domestic_doubao || path != GATEWAY_CHAT_PATH {
                 return false;
@@ -1353,6 +1373,183 @@ fn async_image_task_parameters() -> Value {
             "order": 2
         }
     })
+}
+
+/// Grsai 图片生成 API（gpt-image-2 系列）契约（文档
+/// https://qmy27nhsd9.apifox.cn/452409160e0.md 与
+/// https://qmy27nhsd9.apifox.cn/452409577e0.md）：
+/// `POST /v1/api/generate` 提交（`replyType: async` 换任务号），
+/// `GET /v1/api/result?id={task_id}` 轮询。同一批模型名在聚合网关上走
+/// `/v1/images/generations`，契约必须按连接方言区分，不能按模型名全局推断。
+pub const GRSAI_IMAGE_PROFILE: &str = "grsai_image_v1";
+const GRSAI_GENERATE_PATH: &str = "/v1/api/generate";
+/// 轮询模板带查询串：观察路径校验允许恰好一个 `?`，`endpoint` 会把它落成 URL 查询。
+const GRSAI_RESULT_OBSERVE_PATH: &str = "/v1/api/result?id={task_id}";
+
+/// Grsai 的 vip 系（`-vip` / `-flare` / `-sunburst`）：`aspectRatio` 只接受像素值，
+/// 传比例字符串会被上游拒绝；`gpt-image-2` / `gpt-image-2.5` 则直接接受比例。
+pub fn is_grsai_pixel_image_model(model_id: &str) -> bool {
+    let identity = model_id.to_ascii_lowercase();
+    if !identity.contains("gpt-image") {
+        return false;
+    }
+    identity.contains("-vip") || identity.contains("-flare") || identity.contains("-sunburst")
+}
+
+/// vip 系「比例 × 分辨率档位 → 文档像素值」参考表。1:3 与 3:1 没有第三档
+/// （4K 档会超出文档声明的 3840px 最大边长约束）；`auto` 不查表、直接透传。
+pub fn grsai_pixel_dimensions(aspect_ratio: &str, resolution: &str) -> Option<&'static str> {
+    let (one_k, two_k, four_k) = match aspect_ratio {
+        "1:1" => ("1024x1024", "2048x2048", "2880x2880"),
+        "16:9" => ("1280x720", "2048x1152", "3840x2160"),
+        "9:16" => ("720x1280", "1152x2048", "2160x3840"),
+        "4:3" => ("1152x864", "2304x1728", "3264x2448"),
+        "3:4" => ("864x1152", "1728x2304", "2448x3264"),
+        "3:2" => ("1536x1024", "2048x1360", "3504x2336"),
+        "2:3" => ("1024x1536", "1360x2048", "2336x3504"),
+        "5:4" => ("1120x896", "2240x1792", "3200x2560"),
+        "4:5" => ("896x1120", "1792x2240", "2560x3200"),
+        "21:9" => ("1456x624", "2912x1248", "3840x1648"),
+        "9:21" => ("624x1456", "1248x2912", "1648x3840"),
+        "1:3" => ("688x2048", "1280x3840", ""),
+        "3:1" => ("2048x688", "3840x1280", ""),
+        "2:1" => ("1536x768", "3072x1536", "3840x1920"),
+        "1:2" => ("768x1536", "1536x3072", "1920x3840"),
+        _ => return None,
+    };
+    let pixel = match resolution {
+        "1k" => one_k,
+        "2k" => two_k,
+        "4k" => four_k,
+        _ => return None,
+    };
+    (!pixel.is_empty()).then_some(pixel)
+}
+
+/// Grsai 契约参数：非 vip 系只声明画幅（`aspectRatio` 收比例字符串；文档的
+/// gpt-image-2 比例参考没有 1:3 与 3:1）。vip 系声明画幅 + 分辨率 + 质量 +
+/// 透明背景：质量在 vip 上只接受 medium（唯一取值不再声明）、flare 上
+/// low/medium/high、sunburst 上另有 xhigh/max；`background` 仅这三款支持
+/// `transparent`，客户端按布尔勾选、只在勾选时发送。
+fn grsai_image_parameters(model_id: &str) -> Value {
+    if !is_grsai_pixel_image_model(model_id) {
+        return json!({
+            "aspect_ratio": {
+                "type": "string",
+                "label": "画幅",
+                "default": "1:1",
+                "enum": [
+                    "auto", "1:1", "16:9", "9:16", "4:3", "3:4",
+                    "3:2", "2:3", "5:4", "4:5", "21:9", "9:21", "1:2", "2:1"
+                ],
+                "requestField": "aspectRatio",
+                "order": 1
+            }
+        });
+    }
+    let identity = model_id.to_ascii_lowercase();
+    let mut parameters = Map::new();
+    parameters.insert(
+        "aspect_ratio".into(),
+        json!({
+            "type": "string",
+            "label": "画幅",
+            "default": "1:1",
+            "enum": [
+                "auto", "1:1", "16:9", "9:16", "4:3", "3:4", "3:2", "2:3",
+                "5:4", "4:5", "21:9", "9:21", "1:3", "3:1", "2:1", "1:2"
+            ],
+            "requestField": "aspectRatio",
+            "order": 1
+        }),
+    );
+    parameters.insert(
+        "resolution".into(),
+        json!({
+            "type": "string",
+            "label": "分辨率",
+            "default": "2k",
+            "enum": ["1k", "2k", "4k"],
+            "order": 2
+        }),
+    );
+    if identity.contains("-flare") {
+        parameters.insert(
+            "quality".into(),
+            json!({
+                "type": "string",
+                "label": "质量",
+                "default": "medium",
+                "enum": ["low", "medium", "high"],
+                "order": 3
+            }),
+        );
+    } else if identity.contains("-sunburst") {
+        parameters.insert(
+            "quality".into(),
+            json!({
+                "type": "string",
+                "label": "质量",
+                "default": "medium",
+                "enum": ["low", "medium", "high", "xhigh", "max"],
+                "order": 3
+            }),
+        );
+    }
+    parameters.insert(
+        "background".into(),
+        json!({
+            "type": "boolean",
+            "label": "透明背景",
+            "default": false,
+            "order": 4
+        }),
+    );
+    Value::Object(parameters)
+}
+
+fn grsai_image_operation_schema(model_id: &str, operation: GenerationOperation) -> Value {
+    let mut request = Map::new();
+    request.insert("path".into(), json!(GRSAI_GENERATE_PATH));
+    request.insert("encoding".into(), json!("json"));
+    request.insert("parameterContainer".into(), json!("root"));
+    request.insert("observePath".into(), json!(GRSAI_RESULT_OBSERVE_PATH));
+    if operation == GenerationOperation::ImageToImage {
+        // 参考图走顶层 `images` 数组：公网 URL 原样透传，本地图片编码为
+        // data URI（文档声明 base64 与 URL 均可）。
+        request.insert("mediaEncoding".into(), json!("grsai_image_inputs"));
+        request.insert("mediaField".into(), json!("images"));
+    }
+    json!({
+        "resultType": "image",
+        "requestProfileId": GRSAI_IMAGE_PROFILE,
+        "profileVersion": 1,
+        "request": request,
+        "parameters": grsai_image_parameters(model_id)
+    })
+}
+
+/// Grsai 连接上的 gpt-image 系模型整条改写成 Grsai 契约（端点、轮询、参数）。
+/// 生成结果与当前条目一致时不写入，保证重复应用是幂等的。
+fn apply_grsai_image_dialect(schema: &mut Value, identity: &str) -> bool {
+    if !identity.contains("gpt-image") {
+        return false;
+    }
+    let mut changed = false;
+    for operation in [
+        GenerationOperation::TextToImage,
+        GenerationOperation::ImageToImage,
+    ] {
+        let Some(slot) = schema.get_mut(operation.as_str()) else {
+            continue;
+        };
+        let replacement = grsai_image_operation_schema(identity, operation);
+        if *slot != replacement {
+            *slot = replacement;
+            changed = true;
+        }
+    }
+    changed
 }
 
 /// GPT-Image 契约的尺寸参数：接口文档规定只接受 `auto` 与三种标准尺寸。
@@ -4782,6 +4979,141 @@ mod tests {
                 .is_some()
         );
         assert!(saved["text_to_image"]["parameters"].get("size").is_none());
+    }
+
+    #[test]
+    fn grsai_dialect_rewrites_gpt_image_families_to_the_generate_api() {
+        // 同一批模型名：聚合网关方言得到 openai_image_tasks_v1 / openai_images_v1，
+        // Grsai 方言整条换成 grsai_image_v1（端点 + 轮询 + 参数）。
+        let sunburst = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-sunburst",
+            &[
+                GenerationOperation::TextToImage,
+                GenerationOperation::ImageToImage,
+            ],
+            RequestDialect::Grsai,
+        );
+        let definition = &sunburst["text_to_image"];
+        assert_eq!(definition["requestProfileId"], "grsai_image_v1");
+        assert_eq!(definition["request"]["path"], "/v1/api/generate");
+        assert_eq!(
+            definition["request"]["observePath"],
+            "/v1/api/result?id={task_id}"
+        );
+        // vip 系参数：画幅 + 分辨率 + 质量（sunburst 独有 xhigh/max）+ 透明背景。
+        assert_eq!(
+            definition["parameters"]["aspect_ratio"]["requestField"],
+            "aspectRatio"
+        );
+        assert_eq!(definition["parameters"]["resolution"]["default"], "2k");
+        assert_eq!(
+            definition["parameters"]["quality"]["enum"],
+            json!(["low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(definition["parameters"]["background"]["type"], "boolean");
+        // 图生图：参考图走顶层 images 数组。
+        assert_eq!(
+            sunburst["image_to_image"]["request"]["mediaEncoding"],
+            "grsai_image_inputs"
+        );
+        assert_eq!(
+            sunburst["image_to_image"]["request"]["mediaField"],
+            "images"
+        );
+
+        // 非 vip：只声明画幅（aspectRatio 直接收比例字符串），没有分辨率与透明背景。
+        let plain = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        let plain_definition = &plain["text_to_image"];
+        assert_eq!(plain_definition["requestProfileId"], "grsai_image_v1");
+        assert!(plain_definition["parameters"].get("resolution").is_none());
+        assert!(plain_definition["parameters"].get("quality").is_none());
+        assert!(plain_definition["parameters"].get("background").is_none());
+        // 文档的 gpt-image-2 比例参考没有 1:3 / 3:1。
+        let ratios = plain_definition["parameters"]["aspect_ratio"]["enum"]
+            .as_array()
+            .expect("enum");
+        assert!(!ratios.contains(&json!("1:3")));
+        assert!(!ratios.contains(&json!("3:1")));
+
+        // flare 的质量枚举与 sunburst 不同；vip 只接受 medium（不再声明质量参数）。
+        let flare = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-flare",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        assert_eq!(
+            flare["text_to_image"]["parameters"]["quality"]["enum"],
+            json!(["low", "medium", "high"])
+        );
+        let vip = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2-vip",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        assert!(vip["text_to_image"]["parameters"].get("quality").is_none());
+        assert!(
+            vip["text_to_image"]["parameters"]
+                .get("background")
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn grsai_dialect_rewrite_is_idempotent_and_scoped() {
+        // 重复应用（保存回读再保存）不产生第二次改写。
+        let mut schema = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        assert!(!apply_request_dialect(
+            &mut schema,
+            "gpt-image-2.5",
+            RequestDialect::Grsai
+        ));
+        // Grsai 连接上的非 gpt-image 模型契约保持原样（不误改写成 Grsai 协议）。
+        let seedream = schema_for_enabled_operations(
+            &json!({}),
+            "doubao-seedream-4-0",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        assert_eq!(
+            seedream["text_to_image"]["requestProfileId"],
+            "moyu_seedream_image_v1"
+        );
+        assert_eq!(
+            seedream["text_to_image"]["request"]["path"],
+            "/v1/images/generations"
+        );
+    }
+
+    #[test]
+    fn grsai_profile_is_immune_to_async_task_refresher() {
+        // 已保存的 Grsai 定义重新经过 schema_for_enabled_operations（绑定刷新路径）：
+        // 异步任务刷新器只认 openai 系档案，不得把 grsai_image_v1 改写回去。
+        let saved = schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-sunburst",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        let rebound = schema_for_enabled_operations(
+            &saved,
+            "gpt-image-2.5-sunburst",
+            &[GenerationOperation::TextToImage],
+            RequestDialect::Grsai,
+        );
+        assert_eq!(rebound, saved);
     }
 
     #[test]

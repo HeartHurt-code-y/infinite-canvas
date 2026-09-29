@@ -299,7 +299,7 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 7] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
     (
         "provider-sd20",
         "SD2.0",
@@ -358,6 +358,18 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 7] = [
         "RD API",
         "http://101.34.211.152/",
         "moyu_v1",
+    ),
+    (
+        // Grsai 图片生成 API（gpt-image-2 系列，https://qmy27nhsd9.apifox.cn/452409160e0.md）：
+        // 文生图与图生图共用 `POST /v1/api/generate`（`replyType: async` 换任务号，
+        // `aspectRatio` 收比例或像素值），结果轮询 `GET /v1/api/result?id=`；
+        // 参考图走顶层 `images` 数组（公网 URL 或 base64 data URI）。该平台没有模型
+        // 目录接口，「拉取模型」返回文档列明的固定清单；没有素材库。
+        // 契约详见 `docs/integrations/grsai-image-api.md`。
+        "provider-grsai",
+        "Grsai",
+        "https://grsaiapi.com/",
+        "grsai_v1",
     ),
 ];
 
@@ -3215,6 +3227,7 @@ mod tests {
                 .map(|provider| provider.display_name.as_str())
                 .collect::<Vec<_>>(),
             vec![
+                "Grsai",
                 "MAIGateway",
                 "RD API",
                 "SD2.0",

@@ -34,6 +34,7 @@ import {
   BAILIAN_ADAPTER_ID,
   DOUBAO_VOICE_ADAPTER_ID,
   DOUBAO_VOICE_BASE_URL,
+  GRSAI_ADAPTER_ID,
   MOYU_ADAPTER_ID,
   assembleBailianBaseUrl,
   doubaoSamiCredentialRefs,
@@ -93,6 +94,14 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     // 不存在盘趣网关的证书问题，与文档保持一致。
     baseUrl: "http://101.34.211.152/",
     adapterId: MOYU_ADAPTER_ID,
+  },
+  {
+    id: "grsai",
+    displayName: "Grsai",
+    // Grsai 图片生成 API（gpt-image-2 系列）：默认全球节点，国内可换
+    // https://grsai.dakka.com.cn；没有模型目录与连接探测接口。
+    baseUrl: "https://grsaiapi.com/",
+    adapterId: GRSAI_ADAPTER_ID,
   },
   {
     id: "moyu-ai",

@@ -5,6 +5,8 @@ export const ARK_ADAPTER_ID = "volcengine_ark_v1";
 export const BAILIAN_ADAPTER_ID = "aliyun_bailian_v1";
 export const DOUBAO_VOICE_ADAPTER_ID = "doubao_voice_v1";
 export const DOUBAO_VOICE_BASE_URL = "https://openspeech.bytedance.com";
+/** Grsai 图片生成 API：自有协议（`/v1/api/generate` + `/v1/api/result`）。 */
+export const GRSAI_ADAPTER_ID = "grsai_v1";
 
 export function doubaoSamiCredentialRefs(providerConnectionId: string) {
   return {
@@ -29,7 +31,12 @@ export function adapterAllowsEmptyApiKey(adapterId: string): boolean {
 }
 
 export function adapterSupportsAssetLibrary(adapterId: string): boolean {
-  return !isBailianAdapter(adapterId) && adapterId !== DOUBAO_VOICE_ADAPTER_ID;
+  // Grsai 只有 generate / result 两个接口，没有素材库。
+  return (
+    !isBailianAdapter(adapterId) &&
+    adapterId !== DOUBAO_VOICE_ADAPTER_ID &&
+    adapterId !== GRSAI_ADAPTER_ID
+  );
 }
 
 export function isValidBailianWorkspaceId(workspaceId: string): boolean {

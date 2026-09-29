@@ -17,13 +17,17 @@ pub const ARK_ADAPTER_ID: &str = "volcengine_ark_v1";
 pub const BAILIAN_ADAPTER_ID: &str = "aliyun_bailian_v1";
 /// 豆包语音 OpenSpeech 服务，密钥与火山方舟完全独立。
 pub const DOUBAO_VOICE_ADAPTER_ID: &str = "doubao_voice_v1";
+/// Grsai 图片生成 API（gpt-image-2 系列）：`POST /v1/api/generate` 提交、
+/// `GET /v1/api/result?id=` 轮询，与 OpenAI 兼容网关的 `/v1/images/*` 完全不同。
+pub const GRSAI_ADAPTER_ID: &str = "grsai_v1";
 pub const DOUBAO_VOICE_BASE_URL: &str = "https://openspeech.bytedance.com";
 
-pub const SUPPORTED_ADAPTER_IDS: [&str; 4] = [
+pub const SUPPORTED_ADAPTER_IDS: [&str; 5] = [
     MOYU_ADAPTER_ID,
     ARK_ADAPTER_ID,
     BAILIAN_ADAPTER_ID,
     DOUBAO_VOICE_ADAPTER_ID,
+    GRSAI_ADAPTER_ID,
 ];
 
 /// 华北2（北京）百炼 MaaS 主机后缀。业务空间 ID 作为子域拼进完整 Base URL。
@@ -45,6 +49,7 @@ pub enum ProviderAdapterKind {
     VolcengineArk,
     AliyunBailian,
     DoubaoVoice,
+    Grsai,
 }
 
 impl ProviderAdapterKind {
@@ -54,6 +59,7 @@ impl ProviderAdapterKind {
             ARK_ADAPTER_ID => Some(Self::VolcengineArk),
             BAILIAN_ADAPTER_ID => Some(Self::AliyunBailian),
             DOUBAO_VOICE_ADAPTER_ID => Some(Self::DoubaoVoice),
+            GRSAI_ADAPTER_ID => Some(Self::Grsai),
             _ => None,
         }
     }
@@ -78,6 +84,7 @@ impl ProviderAdapterKind {
             Self::VolcengineArk => ARK_ADAPTER_ID,
             Self::AliyunBailian => BAILIAN_ADAPTER_ID,
             Self::DoubaoVoice => DOUBAO_VOICE_ADAPTER_ID,
+            Self::Grsai => GRSAI_ADAPTER_ID,
         }
     }
 
@@ -86,8 +93,10 @@ impl ProviderAdapterKind {
         match self {
             Self::VolcengineArk => ARK_MODELS_PATH,
             Self::AliyunBailian => BAILIAN_MODELS_PATH,
+            // Grsai 与豆包语音一样没有目录接口：`list_models` 直接返回文档列明的
+            // 固定模型清单，不走这个路径。
+            Self::Grsai | Self::DoubaoVoice => "",
             Self::Moyu => GATEWAY_MODELS_PATH,
-            Self::DoubaoVoice => "",
         }
     }
 
@@ -98,7 +107,7 @@ impl ProviderAdapterKind {
                 ("page_size", "1".into()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai => Vec::new(),
         }
     }
 
@@ -109,7 +118,7 @@ impl ProviderAdapterKind {
                 ("page_size", page_size.to_string()),
                 ("language", "zh-CN".into()),
             ],
-            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice => Vec::new(),
+            Self::Moyu | Self::VolcengineArk | Self::DoubaoVoice | Self::Grsai => Vec::new(),
         }
     }
 
@@ -130,7 +139,8 @@ impl ProviderAdapterKind {
     }
 
     pub fn supports_asset_library(self) -> bool {
-        !matches!(self, Self::AliyunBailian | Self::DoubaoVoice)
+        // Grsai 只有 generate / result 两个接口，没有素材库浏览或上传。
+        !matches!(self, Self::AliyunBailian | Self::DoubaoVoice | Self::Grsai)
     }
 
     pub fn uses_dashscope_wan_envelope(self) -> bool {
@@ -176,7 +186,9 @@ impl ProviderAdapterKind {
                 }
                 Ok(DOUBAO_VOICE_BASE_URL.into())
             }
-            Self::Moyu => Ok(base_url),
+            // Grsai 有全球 / 国内两个官方节点，也常见自建中转：像 OpenAI 兼容网关一样
+            // 保留用户填写的 Base URL，不做主机白名单。
+            Self::Grsai | Self::Moyu => Ok(base_url),
         }
     }
 }
@@ -464,5 +476,31 @@ mod tests {
             "prompt_extend": false
         }));
         assert_eq!(wrapped["parameters"]["prompt_extend"], true);
+    }
+
+    #[test]
+    fn grsai_adapter_is_a_generation_only_gateway_without_catalog() {
+        assert_eq!(
+            ProviderAdapterKind::parse(GRSAI_ADAPTER_ID),
+            Some(ProviderAdapterKind::Grsai)
+        );
+        assert_eq!(ProviderAdapterKind::Grsai.as_str(), GRSAI_ADAPTER_ID);
+        // 没有目录接口：连通性测试与「拉取模型」都不能打 /v1/models。
+        assert_eq!(ProviderAdapterKind::Grsai.catalog_path(), "");
+        assert!(!ProviderAdapterKind::Grsai.paginates_catalog());
+        assert!(
+            ProviderAdapterKind::Grsai
+                .extra_headers(&Method::POST)
+                .is_empty()
+        );
+        assert!(!ProviderAdapterKind::Grsai.supports_asset_library());
+        assert!(!ProviderAdapterKind::Grsai.allows_empty_credential());
+        // 全球 / 国内两个官方节点外加自建中转都保留原样。
+        assert_eq!(
+            ProviderAdapterKind::Grsai
+                .normalize_base_url("https://grsai.dakka.com.cn".into())
+                .unwrap(),
+            "https://grsai.dakka.com.cn"
+        );
     }
 }

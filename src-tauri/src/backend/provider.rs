@@ -16,10 +16,11 @@ use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     model_schema::{
-        RequestDialect, apply_request_dialect, default_model_schema, infer_catalog_schema,
+        GRSAI_IMAGE_PROFILE, RequestDialect, apply_request_dialect, default_model_schema,
+        grsai_pixel_dimensions, infer_catalog_schema, is_grsai_pixel_image_model,
         is_rd_video_model, is_seedance_25_video_model, is_sp25_per_use_video_model,
         operations_from_schema, provider_scoped_model_definition_id, rd_video_limits,
-        sp25_per_use_limits,
+        schema_for_enabled_operations, sp25_per_use_limits,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
@@ -1415,7 +1416,11 @@ impl ProviderRuntime {
         let context = self.resolve_frozen(task)?;
         match task.operation {
             GenerationOperation::TextToImage => {
-                let body = build_text_to_image_body(task, resolved)?;
+                let body = if resolved.operation_schema["requestProfileId"] == GRSAI_IMAGE_PROFILE {
+                    build_grsai_image_body(task, resolved)?
+                } else {
+                    build_text_to_image_body(task, resolved)?
+                };
                 let path = request_path(&resolved.operation_schema, "/v1/images/generations")?;
                 let response = self
                     .send_submission_json(task, attempt_id, &context, "submit", &path, body)
@@ -1428,7 +1433,9 @@ impl ProviderRuntime {
                 // Seedream 图生图走 JSON（`POST /v1/images/generations`，参考图以
                 // 顶层 `image` 字段传 URL）；Gemini 图生图同样走 JSON，但 `image`
                 // 传 data URI（`data:<mime>;base64,<DATA>`，见 https://doc.moyu.info/
-                // 9280683m0.md）；其余模型沿用 multipart edits 契约。
+                // 9280683m0.md）；Grsai 图生图与文生图共用 `POST /v1/api/generate`，
+                // 参考图以顶层 `images` 数组传 URL 或 data URI；
+                // 其余模型沿用 multipart edits 契约。
                 let encoding = resolved
                     .operation_schema
                     .pointer("/request/encoding")
@@ -1444,6 +1451,7 @@ impl ProviderRuntime {
                         "gemini_image_data_uri" => {
                             build_gemini_image_to_image_body(task, resolved)?
                         }
+                        "grsai_image_inputs" => build_grsai_image_body(task, resolved)?,
                         _ => build_seedream_image_to_image_body(task, resolved)?,
                     };
                     self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
@@ -2983,6 +2991,24 @@ impl ProviderRuntime {
                 }),
             });
         }
+        if kind == Some(ProviderAdapterKind::Grsai) {
+            // Grsai 只开放付费的 generate / result 两个接口，没有目录或探测端点；
+            // 不能为了测连接发一次计费请求，凭据留待首次真实生成验证。
+            let credential = self.resolve_token_group(provider_connection_id, token_group);
+            return Ok(ConnectivityTestResult {
+                ok: false,
+                http_status: None,
+                elapsed_ms: elapsed_ms(),
+                reason: Some("generation-only-api".into()),
+                detail: Some(match credential {
+                    Ok(_) => {
+                        "Grsai 凭据已配置；官方只有付费的生成与结果接口，连接测试留待首次真实生成时验证。"
+                            .into()
+                    }
+                    Err(error) => error.to_string(),
+                }),
+            });
+        }
         let probe_query = kind
             .map(ProviderAdapterKind::catalog_probe_query)
             .unwrap_or_default();
@@ -3050,6 +3076,45 @@ impl ProviderRuntime {
                 ),
                 token_group: token_group.map(ToOwned::to_owned),
             }]
+        } else if kind == Some(ProviderAdapterKind::Grsai) {
+            // Grsai 没有模型目录接口：文档在 `model` 参数里逐个列出模型 ID，
+            // 这里按文档返回固定清单，契约由 Grsai 方言改写生成。
+            self.resolve_token_group(provider_connection_id, token_group)?;
+            const GRSAI_IMAGE_MODELS: [(&str, &str); 5] = [
+                ("gpt-image-2", "GPT Image 2"),
+                ("gpt-image-2-vip", "GPT Image 2 VIP"),
+                ("gpt-image-2.5", "GPT Image 2.5"),
+                ("gpt-image-2.5-flare", "GPT Image 2.5 Flare"),
+                ("gpt-image-2.5-sunburst", "GPT Image 2.5 Sunburst"),
+            ];
+            GRSAI_IMAGE_MODELS
+                .into_iter()
+                .map(|(model, display_name)| {
+                    let operations = [
+                        GenerationOperation::TextToImage,
+                        GenerationOperation::ImageToImage,
+                    ];
+                    RemoteModelOption {
+                        id: model.into(),
+                        model_definition_id: provider_scoped_model_definition_id(
+                            provider_connection_id,
+                            model,
+                        ),
+                        display_name: format!("Grsai {display_name}"),
+                        owned_by: Some("Grsai".into()),
+                        has_configured_binding: false,
+                        configured_operations: vec![],
+                        suggested_operations: operations.to_vec(),
+                        operation_schema: schema_for_enabled_operations(
+                            &Value::Null,
+                            model,
+                            &operations,
+                            RequestDialect::Grsai,
+                        ),
+                        token_group: token_group.map(ToOwned::to_owned),
+                    }
+                })
+                .collect()
         } else if let Some(kind) = kind.filter(|kind| kind.paginates_catalog()) {
             self.list_paginated_models(provider_connection_id, token_group, kind, dialect)
                 .await?
@@ -3613,6 +3678,152 @@ fn build_gemini_image_to_image_body(
     Ok(Value::Object(body))
 }
 
+/// Grsai 图片生成请求体（`POST /v1/api/generate`，文生图与图生图共用一个端点）：
+/// `model` / `prompt` / `replyType: "async"`（换取任务号后轮询
+/// `GET /v1/api/result?id=`）/ `aspectRatio` / `quality` / `background` 放顶层，
+/// 参考图通过顶层 `images` 数组传入——公网 URL 原样透传，本地图片编码为
+/// data URI（文档声明 base64 与 URL 均可）。
+///
+/// `aspectRatio` 按模型家族组装：gpt-image-2 / gpt-image-2.5 直接收比例字符串；
+/// vip 系（-vip / -flare / -sunburst）只收像素值，由「画幅 × 分辨率档位」查文档
+/// 参考表得到（`auto` 直接透传）。`background` 是布尔参数，仅在勾选时发送
+/// `transparent`（文档只接受该取值）。
+fn build_grsai_image_body(
+    task: &TaskExecutionRecord,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !resolved.images.is_empty() && task.operation != GenerationOperation::ImageToImage {
+        return Err(BackendError::validation(
+            "grsai text-to-image cannot encode image references",
+            resolved.archive(),
+        ));
+    }
+    if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
+        return Err(BackendError::validation(
+            "grsai image generation only accepts image reference inputs",
+            json!({
+                "taskId": task.id,
+                "videos": resolved.videos.len(),
+                "audios": resolved.audios.len()
+            }),
+        ));
+    }
+    if resolved.rendered_prompt.trim().is_empty() {
+        return Err(BackendError::validation(
+            "grsai image generation prompt must not be empty",
+            json!({ "taskId": task.id }),
+        ));
+    }
+    let model = task
+        .remote_model_id_snapshot
+        .as_deref()
+        .filter(|model| !model.is_empty())
+        .ok_or_else(|| {
+            BackendError::validation(
+                "grsai image task is missing its model id",
+                json!({ "taskId": task.id }),
+            )
+        })?;
+    ensure_request_encoding(&resolved.operation_schema, "json")?;
+    let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
+    let metadata_field = request_field(&resolved.operation_schema, "metadataField", "metadata")?;
+
+    let mut body = Map::new();
+    body.insert("model".into(), Value::String(model.to_string()));
+    body.insert(
+        prompt_field,
+        Value::String(resolved.rendered_prompt.clone()),
+    );
+    // 应用侧是异步任务架构：提交换任务号、轮询取结果。同步 json 模式会占住
+    // 提交请求直到生成完成，长任务容易撞上客户端超时；stream 模式则是 SSE。
+    body.insert("replyType".into(), Value::String("async".into()));
+
+    if task.operation == GenerationOperation::ImageToImage {
+        let image_field = request_field(&resolved.operation_schema, "mediaField", "images")?;
+        let inputs = resolved
+            .images
+            .iter()
+            .map(|image| {
+                if let Some(reference) = image
+                    .remote_reference
+                    .as_deref()
+                    .filter(|reference| !reference.is_empty())
+                {
+                    return Ok(Value::String(reference.to_string()));
+                }
+                let bytes = image.bytes.clone().ok_or_else(|| {
+                    BackendError::validation(
+                        "grsai image input has no bytes for base64 data uri encoding",
+                        image.archive(),
+                    )
+                })?;
+                Ok(Value::String(format!(
+                    "data:{};base64,{}",
+                    image.mime_type,
+                    base64::engine::general_purpose::STANDARD.encode(bytes)
+                )))
+            })
+            .collect::<BackendResult<Vec<_>>>()?;
+        if inputs.is_empty() {
+            return Err(BackendError::validation(
+                "grsai image-to-image requires at least one image reference",
+                json!({ "taskId": task.id }),
+            ));
+        }
+        body.insert(image_field, Value::Array(inputs));
+    }
+
+    // aspectRatio / quality / background 由这里组装，mapped_parameters 只负责
+    // 校验与透传其余参数（过滤掉同名映射字段避免插入冲突）。
+    let parameters = mapped_parameters(resolved, "root")?
+        .into_iter()
+        .filter(|parameter| {
+            !matches!(
+                parameter.field.as_str(),
+                "aspectRatio" | "resolution" | "background"
+            )
+        })
+        .collect::<Vec<_>>();
+    insert_mapped_parameters(&mut body, &metadata_field, parameters)?;
+
+    let values = resolved.parameters.as_object();
+    let aspect_ratio = values
+        .and_then(|values| values.get("aspect_ratio"))
+        .cloned()
+        .unwrap_or(json!("1:1"));
+    let aspect_ratio = aspect_ratio.as_str().unwrap_or("1:1");
+    let aspect_ratio_value = if aspect_ratio == "auto" {
+        Value::String("auto".into())
+    } else if is_grsai_pixel_image_model(model) {
+        let resolution = values
+            .and_then(|values| values.get("resolution"))
+            .and_then(Value::as_str)
+            .unwrap_or("2k");
+        let pixel = grsai_pixel_dimensions(aspect_ratio, resolution).ok_or_else(|| {
+            BackendError::validation(
+                "grsai vip 系模型不支持该画幅与分辨率档位组合（1:3 / 3:1 没有第三档）",
+                json!({
+                    "model": model,
+                    "aspectRatio": aspect_ratio,
+                    "resolution": resolution
+                }),
+            )
+        })?;
+        Value::String(pixel.into())
+    } else {
+        Value::String(aspect_ratio.into())
+    };
+    body.insert("aspectRatio".into(), aspect_ratio_value);
+    let transparent = values
+        .and_then(|values| values.get("background"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    if transparent {
+        body.insert("background".into(), Value::String("transparent".into()));
+    }
+    Ok(Value::Object(body))
+}
+
 /// 计算视频任务的状态轮询路径。
 ///
 /// 默认使用 `GET /v1/video/generations/{task_id}`；模型定义可在操作 schema 的
@@ -3639,16 +3850,45 @@ fn video_observe_path_from_schema(
         .and_then(Value::as_str)
         .map(ToOwned::to_owned);
     let path = match observe_path {
-        Some(template) => template.replace("{task_id}", remote_task_id),
+        Some(template) => render_observe_template(&template, remote_task_id),
         None => format!("/v1/video/generations/{remote_task_id}"),
     };
     checked_observe_path(path)
 }
 
+/// 渲染观察路径模板：路径段的 `{task_id}` 原样替换（历史行为），查询段（首个
+/// `?` 之后）的 `{task_id}` 按 URL 查询值做百分号编码，避免任务号里的特殊
+/// 字符破坏查询串。
+fn render_observe_template(template: &str, remote_task_id: &str) -> String {
+    match template.split_once('?') {
+        Some((path, query)) => format!(
+            "{}?{}",
+            path.replace("{task_id}", remote_task_id),
+            query.replace("{task_id}", &encode_query_value(remote_task_id))
+        ),
+        None => template.replace("{task_id}", remote_task_id),
+    }
+}
+
+/// URL 查询值的百分号编码：保留非保留字符，其余按字节编码为大写十六进制。
+fn encode_query_value(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => encoded.push_str(&format!("%{byte:02X}")),
+        }
+    }
+    encoded
+}
+
 const IMAGE_TASK_OBSERVE_TEMPLATE: &str = "/v1/images/tasks/{task_id}";
 
 /// 异步图片任务的默认轮询路径是 `GET /v1/images/tasks/{id}`。
-/// 模型可以在对应操作的 `request.observePath` 里改掉它。
+/// 模型可以在对应操作的 `request.observePath` 里改掉它；Grsai 这类查询串风格
+/// 的接口声明 `/v1/api/result?id={task_id}`。
 fn image_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendResult<String> {
     let remote_task_id = task.remote_task_id.as_deref().unwrap_or_default();
     let operations = storage
@@ -3663,25 +3903,37 @@ fn image_observe_path(storage: &Storage, task: &TaskExecutionRecord) -> BackendR
             .or_else(|| schema.pointer("/request/observePath"))
             .and_then(Value::as_str)
     });
-    let path = template
-        .unwrap_or(IMAGE_TASK_OBSERVE_TEMPLATE)
-        .replace("{task_id}", remote_task_id);
+    let path = match template {
+        Some(template) => render_observe_template(template, remote_task_id),
+        None => IMAGE_TASK_OBSERVE_TEMPLATE.replace("{task_id}", remote_task_id),
+    };
     checked_observe_path(path)
 }
 
 fn checked_observe_path(path: String) -> BackendResult<String> {
-    if !path.starts_with('/')
-        || path.starts_with("//")
-        || path.contains('?')
-        || path.contains('#')
-        || path.len() > 512
-    {
+    // 允许恰好一个 `?` 把路径与查询串分开（Grsai `GET /v1/api/result?id=…`）；
+    // `?` 之前仍必须是相对绝对路径，查询串内不允许再出现 `?` 或 `#`。
+    let (path_part, query) = match path.split_once('?') {
+        Some((path_part, query)) => (path_part.to_string(), Some(query.to_string())),
+        None => (path, None),
+    };
+    let invalid_path = !path_part.starts_with('/')
+        || path_part.starts_with("//")
+        || path_part.contains('#')
+        || path_part.len() > 512;
+    let invalid_query = query.as_deref().is_some_and(|query| {
+        query.is_empty() || query.contains('?') || query.contains('#') || query.len() > 512
+    });
+    if invalid_path || invalid_query {
         return Err(BackendError::validation(
-            "model observe path must be a relative absolute-path without query or fragment",
-            json!({ "path": path }),
+            "model observe path must be a relative absolute-path with at most one well-formed query",
+            json!({ "path": path_part, "query": query }),
         ));
     }
-    Ok(path)
+    Ok(match query {
+        Some(query) => format!("{path_part}?{query}"),
+        None => path_part,
+    })
 }
 
 /// 公网 URL 校验核心：按素材来源家族（按次视频 / RD 视频…）生成用户可读的错误文案。
@@ -5423,9 +5675,10 @@ fn parse_image_observation(
         .get("error")
         .cloned()
         .or_else(|| value.get("message").cloned());
+    // Grsai 把内容违规单独标记为 `violation`（终态，不再轮询）。
     let remote_failed = matches!(
         remote_status.to_ascii_lowercase().as_str(),
-        "failure" | "failed" | "canceled" | "cancelled" | "error"
+        "failure" | "failed" | "canceled" | "cancelled" | "error" | "violation"
     );
     let failure = if remote_failed {
         Some(json!({ "failReason": fail_reason }))
@@ -5613,7 +5866,7 @@ fn image_task_failure_message(value: &Value) -> Option<String> {
         .to_ascii_lowercase();
     if !matches!(
         status.as_str(),
-        "failed" | "failure" | "canceled" | "cancelled" | "error"
+        "failed" | "failure" | "canceled" | "cancelled" | "error" | "violation"
     ) {
         return None;
     }
@@ -6286,6 +6539,13 @@ fn version_root_within<'a>(segments: &[&'a str], limit: usize) -> Option<&'a str
 
 pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
     let mut url = Url::parse(base_url)?;
+    // 路径可以带恰好一段查询串（观察路径 `GET /v1/api/result?id=…`）：查询部分
+    // 不参与路径段拼接与版本根判定，最终整体设为 URL 查询；不带 `?` 的调用方
+    // 行为不变（查询仍被清空）。
+    let (path, query) = match path.split_once('?') {
+        Some((path, query)) if !query.is_empty() => (path, Some(query.to_string())),
+        _ => (path, None),
+    };
     let mut base_segments = url
         .path()
         .split('/')
@@ -6336,7 +6596,7 @@ pub fn endpoint(base_url: &str, path: &str) -> BackendResult<Url> {
         .chain(requested_segments[overlap..].iter().copied())
         .collect::<Vec<_>>();
     url.set_path(&format!("/{}", joined_segments.join("/")));
-    url.set_query(None);
+    url.set_query(query.as_deref());
     url.set_fragment(None);
     Ok(url)
 }
@@ -9996,6 +10256,233 @@ mod tests {
         assert!(body.get("size").is_none());
         assert!(body.get("quality").is_none());
         assert!(body.get("n").is_none());
+    }
+
+    #[test]
+    fn grsai_image_body_uses_ratio_directly_for_plain_models() {
+        let schema = super::super::model_schema::schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2",
+            &[GenerationOperation::TextToImage],
+            super::super::model_schema::RequestDialect::Grsai,
+        );
+        let mut record = task(GenerationOperation::TextToImage);
+        record.remote_model_id_snapshot = Some("gpt-image-2".into());
+        let body = build_grsai_image_body(
+            &record,
+            &resolved(
+                schema["text_to_image"].clone(),
+                json!({ "aspect_ratio": "16:9" }),
+            ),
+        )
+        .expect("body");
+        assert_eq!(body["model"], "gpt-image-2");
+        assert_eq!(body["prompt"], "A train arrives");
+        assert_eq!(body["replyType"], "async");
+        assert_eq!(body["aspectRatio"], "16:9");
+        assert!(body.get("aspect_ratio").is_none());
+        assert!(body.get("quality").is_none());
+        assert!(body.get("background").is_none());
+        assert!(body.get("resolution").is_none());
+        assert!(body.get("images").is_none());
+    }
+
+    #[test]
+    fn grsai_image_body_maps_vip_ratio_and_resolution_to_documented_pixels() {
+        let schema = super::super::model_schema::schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-sunburst",
+            &[GenerationOperation::TextToImage],
+            super::super::model_schema::RequestDialect::Grsai,
+        );
+        let mut record = task(GenerationOperation::TextToImage);
+        record.remote_model_id_snapshot = Some("gpt-image-2.5-sunburst".into());
+        let body = build_grsai_image_body(
+            &record,
+            &resolved(
+                schema["text_to_image"].clone(),
+                json!({
+                    "aspect_ratio": "16:9",
+                    "resolution": "2k",
+                    "quality": "high",
+                    "background": true
+                }),
+            ),
+        )
+        .expect("body");
+        // vip 系 aspectRatio 只收像素值：文档 16:9 的 2K 档是 2048x1152。
+        assert_eq!(body["aspectRatio"], "2048x1152");
+        assert_eq!(body["quality"], "high");
+        assert_eq!(body["background"], "transparent");
+        assert!(body.get("resolution").is_none());
+        assert!(body.get("aspect_ratio").is_none());
+
+        // auto 透传；未勾选透明背景时不发送该字段。
+        let auto = build_grsai_image_body(
+            &record,
+            &resolved(
+                schema["text_to_image"].clone(),
+                json!({ "aspect_ratio": "auto", "quality": "low" }),
+            ),
+        )
+        .expect("body");
+        assert_eq!(auto["aspectRatio"], "auto");
+        assert!(auto.get("background").is_none());
+
+        // 1:3 / 3:1 没有第三档：组合落在文档表外时报可读错误，不发请求。
+        let error = build_grsai_image_body(
+            &record,
+            &resolved(
+                schema["text_to_image"].clone(),
+                json!({ "aspect_ratio": "1:3", "resolution": "4k" }),
+            ),
+        )
+        .expect_err("1:3 has no 4k tier");
+        assert!(error.to_string().contains("画幅"));
+    }
+
+    #[test]
+    fn grsai_image_body_mixes_url_and_data_uri_references() {
+        let schema = super::super::model_schema::schema_for_enabled_operations(
+            &json!({}),
+            "gpt-image-2.5-flare",
+            &[GenerationOperation::ImageToImage],
+            super::super::model_schema::RequestDialect::Grsai,
+        );
+        let mut record = task(GenerationOperation::ImageToImage);
+        record.remote_model_id_snapshot = Some("gpt-image-2.5-flare".into());
+        let mut generation = resolved(
+            schema["image_to_image"].clone(),
+            json!({ "aspect_ratio": "1:1", "resolution": "1k", "quality": "medium" }),
+        );
+        let mut remote = resolved_media(
+            MediaType::Image,
+            0,
+            "reference",
+            "https://cdn.example.com/a.png",
+            None,
+        );
+        remote.bytes = None;
+        let mut local = resolved_media(MediaType::Image, 1, "reference", "", None);
+        local.remote_reference = None;
+        local.bytes = Some(vec![1, 2, 3, 4]);
+        generation.images = vec![remote, local];
+        let body = build_grsai_image_body(&record, &generation).expect("body");
+        let images = body["images"].as_array().expect("images array");
+        assert_eq!(images.len(), 2);
+        assert_eq!(images[0], "https://cdn.example.com/a.png");
+        assert_eq!(
+            images[1],
+            format!(
+                "data:image/png;base64,{}",
+                base64::engine::general_purpose::STANDARD.encode(vec![1, 2, 3, 4])
+            )
+        );
+        // flare 的 1K 档 1:1 像素。
+        assert_eq!(body["aspectRatio"], "1024x1024");
+    }
+
+    #[test]
+    fn grsai_submission_ticket_observation_and_violation_parse() {
+        // 提交：replyType=async 返回 {id, status: running} → 任务单。
+        let submitted = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "id": "14-5f3cf761-a4bb-486a-8016-77f490998f80",
+                "status": "running",
+                "progress": 0
+            })
+            .to_string(),
+        };
+        let GenerationSubmission::RemoteImageTask { task_id } =
+            parse_image_submission(&submitted).expect("task ticket")
+        else {
+            panic!("expected a remote image task");
+        };
+        assert_eq!(task_id, "14-5f3cf761-a4bb-486a-8016-77f490998f80");
+
+        // 轮询：succeeded + results[].url + progress。
+        let succeeded = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "id": task_id,
+                "status": "succeeded",
+                "progress": 100,
+                "results": [
+                    { "url": "https://file1.aitohumanize.com/file/fcdd2d07449d438d9d69d450f5626976.png" }
+                ]
+            })
+            .to_string(),
+        };
+        let observation = parse_image_observation(&succeeded).expect("observation");
+        assert_eq!(observation.remote_status, "succeeded");
+        assert_eq!(observation.progress, Some(100.0));
+        assert_eq!(observation.images.len(), 1);
+        assert!(matches!(
+            &observation.images[0],
+            ImageSource::Url { url, .. } if url.ends_with("/fcdd2d07449d438d9d69d450f5626976.png")
+        ));
+
+        // 轮询：violation 是终态失败，error 文案进入失败原因。
+        let violation = CapturedHttpResponse {
+            call_id: "test-call".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({
+                "id": task_id,
+                "status": "violation",
+                "error": "content policy violation"
+            })
+            .to_string(),
+        };
+        let observed = parse_image_observation(&violation).expect("observation");
+        assert_eq!(observed.remote_status, "violation");
+        assert_eq!(
+            observed.failure.expect("violation failure")["failReason"],
+            json!("content policy violation")
+        );
+
+        // 提交阶段直接回 violation：报错而不是当成任务单。
+        let rejected = parse_image_submission(&violation).expect_err("violation terminal");
+        assert!(rejected.to_string().contains("content policy violation"));
+    }
+
+    #[test]
+    fn grsai_observe_query_path_and_endpoint_carry_the_task_id() {
+        // 模板渲染：查询段占位符做百分号编码，路径段原样。
+        assert_eq!(
+            render_observe_template("/v1/api/result?id={task_id}", "14-abc"),
+            "/v1/api/result?id=14-abc"
+        );
+        assert_eq!(
+            render_observe_template("/v1/api/result?id={task_id}", "a b&c"),
+            "/v1/api/result?id=a%20b%26c"
+        );
+        // 校验：恰好一个 ? 合法；两个 ? 或带 # 拒绝。
+        assert_eq!(
+            checked_observe_path("/v1/api/result?id=1".into()).expect("path"),
+            "/v1/api/result?id=1"
+        );
+        assert!(checked_observe_path("/v1/api/result?id=1&x=2?3".into()).is_err());
+        assert!(checked_observe_path("/v1/api/result?id=1#f".into()).is_err());
+        assert!(checked_observe_path("/v1/api/result?".into()).is_err());
+        // endpoint 把查询串落成 URL 查询；不带 ? 的行为不变。
+        assert_eq!(
+            endpoint("https://grsaiapi.com/", "/v1/api/result?id=14-abc")
+                .expect("url")
+                .as_str(),
+            "https://grsaiapi.com/v1/api/result?id=14-abc"
+        );
+        assert_eq!(
+            endpoint("https://example.com", "/v1/images/tasks/t1")
+                .expect("url")
+                .as_str(),
+            "https://example.com/v1/images/tasks/t1"
+        );
     }
 
     #[test]
