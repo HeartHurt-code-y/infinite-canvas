@@ -260,9 +260,21 @@ export async function assertRuntimeReleaseCoversResources(manifest, root = REPO_
   }
 }
 
-async function signManifest(manifestPath, root) {
-  const env = resolveUpdaterSigningEnv(process.env, path.join(root, "src-tauri", ".updater-key"));
+export function resolveResourceManifestSignerEnv(sourceEnv, defaultKeyPath) {
+  const env = resolveUpdaterSigningEnv(sourceEnv, defaultKeyPath);
   if (!env.TAURI_SIGNING_PRIVATE_KEY) throw new Error("缺少 updater 私钥，不能签资源清单");
+  // Tauri's `signer sign` treats these as mutually exclusive CLI options even
+  // when they come from environment variables. The build helper loads a local
+  // key file into the inline value, so keep that value for this signer call.
+  delete env.TAURI_SIGNING_PRIVATE_KEY_PATH;
+  return env;
+}
+
+async function signManifest(manifestPath, root) {
+  const env = resolveResourceManifestSignerEnv(
+    process.env,
+    path.join(root, "src-tauri", ".updater-key"),
+  );
   await new Promise((resolve, reject) => {
     const child = spawn("pnpm", ["exec", "tauri", "signer", "sign", manifestPath], {
       cwd: root,

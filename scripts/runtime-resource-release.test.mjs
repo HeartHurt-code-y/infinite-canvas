@@ -10,10 +10,37 @@ import {
   assertRuntimeReleaseCoversResources,
   assertRuntimeReleaseShape,
   inventoryComponent,
+  resolveResourceManifestSignerEnv,
   validRuntimeResourcePath,
 } from "./runtime-resource-release.mjs";
 
 const digest = (value) => createHash("sha256").update(value).digest("hex");
+
+test("resource manifest signer passes exactly one private key source to Tauri", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "resource-signing-env-"));
+  try {
+    const keyPath = path.join(root, ".updater-key");
+    writeFileSync(keyPath, "example-test-key\n");
+    const local = resolveResourceManifestSignerEnv({}, keyPath);
+    assert.equal(local.TAURI_SIGNING_PRIVATE_KEY, "example-test-key");
+    assert.equal(local.TAURI_SIGNING_PRIVATE_KEY_PATH, undefined);
+    assert.equal(local.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, "");
+
+    const inline = resolveResourceManifestSignerEnv(
+      {
+        TAURI_SIGNING_PRIVATE_KEY: "explicit-test-key",
+        TAURI_SIGNING_PRIVATE_KEY_PATH: keyPath,
+        TAURI_SIGNING_PRIVATE_KEY_PASSWORD: "test-password",
+      },
+      keyPath,
+    );
+    assert.equal(inline.TAURI_SIGNING_PRIVATE_KEY, "explicit-test-key");
+    assert.equal(inline.TAURI_SIGNING_PRIVATE_KEY_PATH, undefined);
+    assert.equal(inline.TAURI_SIGNING_PRIVATE_KEY_PASSWORD, "test-password");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 test("signed release inventory covers all four logical component trees and full NSIS paths", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "resource-release-"));

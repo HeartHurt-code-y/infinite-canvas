@@ -148,6 +148,21 @@ test("slim build rejects a full NSIS older than any signed resource or release e
       /重新构建完整安装包/,
     );
     utimesSync(source, before, before);
+    const nearBundleTime = new Date(bundleTime.getTime() + 120);
+    utimesSync(source, nearBundleTime, nearBundleTime);
+    assert.throws(
+      () => assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root),
+      /重新构建完整安装包/,
+    );
+    utimesSync(source, before, before);
+    utimesSync(executable, nearBundleTime, nearBundleTime);
+    assert.doesNotThrow(() => assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root));
+    const tooFarAfterBundle = new Date(bundleTime.getTime() + 1_000);
+    utimesSync(executable, tooFarAfterBundle, tooFarAfterBundle);
+    assert.throws(
+      () => assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root),
+      /重新构建完整安装包/,
+    );
     utimesSync(executable, after, after);
     assert.throws(
       () => assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root),

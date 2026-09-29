@@ -91,6 +91,10 @@ export function assertCompiledManifestPinsOutput(output, manifest) {
 
 export function assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root = REPO_ROOT) {
   const bundleTime = statSync(fullNsis).mtimeMs;
+  // Windows can finalize the executable and NSIS output timestamps within the
+  // same build in either order. Allow only a subsecond skew for the executable;
+  // resource files must still be strictly older than the full installer.
+  const EXECUTABLE_TIMESTAMP_SKEW_MS = 500;
   const inputs = [executable];
   for (const component of manifest.components) {
     const definition = RESOURCE_COMPONENTS.find((item) => item.name === component.name);
@@ -101,7 +105,8 @@ export function assertFullNsisNewerThanInputs(fullNsis, executable, manifest, ro
   }
   for (const input of inputs) {
     const info = statSync(input);
-    if (!info.isFile() || info.mtimeMs >= bundleTime) {
+    const allowedSkew = input === executable ? EXECUTABLE_TIMESTAMP_SKEW_MS : 0;
+    if (!info.isFile() || info.mtimeMs >= bundleTime + allowedSkew) {
       throw new Error(`完整 NSIS 早于程序或资源文件 ${input}；请重新构建完整安装包`);
     }
   }
