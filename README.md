@@ -130,7 +130,7 @@ sudo bash "/Applications/无限画布.app/Contents/Resources/unlock-installed-ma
 - Apple ID：`APPLE_ID` + `APPLE_PASSWORD`（**App 专用密码**，不是账号密码）+ `APPLE_TEAM_ID`
 - App Store Connect API Key（推荐，不受双重验证影响）：`APPLE_API_KEY` + `APPLE_API_ISSUER` + `APPLE_API_KEY_PATH`
 
-当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，把解锁脚本随 app 打入离线 DMG，并在最后切换 macOS 与同版共享更新清单。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
+当前 macOS 更新发布使用 `codemagic.yaml` 的 `macos-package` 工作流。`updater_signing` 环境组需要 Tauri updater 私钥和 TOS 上传凭据；Apple 证书与公证凭据不是本项目发布的前提，缺少时使用 ad-hoc 签名。工作流校验应用包及 updater 签名，把解锁脚本随 app 打入离线 DMG，并切换 macOS 平台清单。Windows 同版平台频道指向完整包时，工作流还会晋升共享更新清单；若 Windows 平台发布瘦包，共享频道须由 Windows 发布机使用本版已验签完整 NSIS 单独晋升。未公证的 DMG 首次安装需按方案 A 处理。GitHub Actions 的手动工作流只构建、暂存产物，可作备用入口。
 
 ### 自检
 

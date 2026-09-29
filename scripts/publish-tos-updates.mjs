@@ -13,7 +13,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { createHash } from "node:crypto";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { createReadStream } from "node:fs";
 import https from "node:https";
 import path from "node:path";
@@ -962,22 +962,32 @@ async function verifyStagedMacDeltaRelease({
   };
 }
 
-export function checkLegacyPlatformFeeds(version, platforms, feeds) {
+export function checkLegacyPlatformFeeds(version, platforms, feeds, windowsFullOffline = false) {
   for (const platform of ["windows-x86_64", "darwin-aarch64"]) {
     const feed = feeds[platform];
     if (
       feed?.version !== version ||
-      feed.platforms?.[platform]?.signature !== platforms[platform]?.signature
+      ((!windowsFullOffline || platform !== "windows-x86_64") &&
+        feed.platforms?.[platform]?.signature !== platforms[platform]?.signature)
     ) {
       throw new Error(`旧版频道发布前必须初始化同版 ${platform} 平台频道`);
     }
   }
-  if (artifactName(feeds["windows-x86_64"].platforms["windows-x86_64"].url).includes("-slim-")) {
-    throw new Error("旧版频道发布前 Windows 平台频道必须指向完整包");
+  const windowsName = artifactName(feeds["windows-x86_64"].platforms["windows-x86_64"].url);
+  if (windowsFullOffline ? !windowsName.includes("-slim-") : windowsName.includes("-slim-")) {
+    throw new Error(
+      windowsFullOffline
+        ? "离线完整包晋升前 Windows 平台频道必须指向瘦包"
+        : "旧版频道发布前 Windows 平台频道必须指向完整包",
+    );
   }
 }
 
-export function collectLegacyChannelPlatforms(version, feeds, publicBase) {
+export function collectLegacyChannelPlatforms(version, feeds, publicBase, windowsFullSignature) {
+  const windowsFullOffline = typeof windowsFullSignature === "string";
+  if (windowsFullOffline && windowsFullSignature.trim() === "") {
+    throw new Error("旧版频道离线完整 Windows 包签名为空");
+  }
   const platforms = {};
   for (const platform of ["windows-x86_64", "darwin-aarch64"]) {
     const feed = feeds[platform];
@@ -994,7 +1004,7 @@ export function collectLegacyChannelPlatforms(version, feeds, publicBase) {
     const fileName = artifactName(entry.url);
     const expectedName =
       platform === "windows-x86_64"
-        ? `无限画布_${version}_x64-setup.exe`
+        ? `无限画布_${version}_x64${windowsFullOffline ? "-slim" : ""}-setup.exe`
         : `无限画布_${version}_aarch64-full.app.tar.gz`;
     if (fileName !== expectedName) {
       throw new Error(`旧版频道只能引用本版完整 ${platform} 更新包`);
@@ -1003,9 +1013,90 @@ export function collectLegacyChannelPlatforms(version, feeds, publicBase) {
     if (entry.url !== expectedUrl) {
       throw new Error(`旧版频道 ${platform} 的下载地址不在预期 TOS 前缀`);
     }
-    platforms[platform] = { url: entry.url, signature: entry.signature };
+    platforms[platform] =
+      platform === "windows-x86_64" && windowsFullOffline
+        ? {
+            url: `${publicBase}/offline/${version}/${encodeURIComponent(`无限画布_${version}_x64-setup.exe`)}`,
+            signature: windowsFullSignature,
+          }
+        : { url: entry.url, signature: entry.signature };
   }
   return platforms;
+}
+
+export function collectLegacyWindowsFullFile(directory, version) {
+  const name = `无限画布_${version}_x64-setup.exe`;
+  const matches = listFilesRecursive(directory).filter(
+    (filePath) => path.basename(filePath) === name,
+  );
+  if (matches.length !== 1) throw new Error("旧版频道需要恰好一个本版完整 Windows NSIS 包");
+  const filePath = matches[0];
+  if (
+    !lstatSync(filePath).isFile() ||
+    statSync(filePath).size === 0 ||
+    !existsSync(`${filePath}.sig`) ||
+    !lstatSync(`${filePath}.sig`).isFile() ||
+    statSync(`${filePath}.sig`).size === 0
+  ) {
+    throw new Error("旧版频道完整 Windows NSIS 包或签名文件无效");
+  }
+  return filePath;
+}
+
+export function assertReleaseVersionMatchesSource(version, sourceVersion) {
+  if (version !== sourceVersion) {
+    throw new Error(`发布版本 ${version} 与当前源码版本 ${sourceVersion} 不一致`);
+  }
+}
+
+export function assertWindowsInstallerProductVersion(productVersion, version) {
+  if (productVersion !== version) {
+    throw new Error(
+      `完整 Windows NSIS 内部 ProductVersion ${productVersion || "<空>"} 与 ${version} 不一致`,
+    );
+  }
+}
+
+export function readWindowsInstallerProductVersion(filePath) {
+  if (process.platform !== "win32") {
+    throw new Error("离线完整 Windows NSIS 内部版本校验必须在 Windows 发布机执行");
+  }
+  const powershell = path.join(
+    process.env.SystemRoot ?? "C:\\Windows",
+    "System32",
+    "WindowsPowerShell",
+    "v1.0",
+    "powershell.exe",
+  );
+  return execFileSync(
+    powershell,
+    [
+      "-NoProfile",
+      "-NonInteractive",
+      "-Command",
+      "[System.Diagnostics.FileVersionInfo]::GetVersionInfo($env:IC_NSIS_PATH).ProductVersion",
+    ],
+    {
+      encoding: "utf8",
+      env: { ...process.env, IC_NSIS_PATH: filePath },
+      timeout: 30_000,
+      maxBuffer: 4096,
+      windowsHide: true,
+    },
+  ).trim();
+}
+
+export async function verifyStagedWindowsSlimUpdater(bundleDir, version, pubkey) {
+  const expectedName = `无限画布_${version}_x64-slim-setup.exe`;
+  const matches = listFilesRecursive(bundleDir).filter(
+    (filePath) => path.basename(filePath) === expectedName,
+  );
+  if (matches.length !== 1) {
+    throw new Error("Windows 瘦包暂存目录需要恰好一个本版 NSIS 安装包");
+  }
+  await verifyUpdaterSignature(matches[0], `${matches[0]}.sig`, pubkey);
+  assertWindowsInstallerProductVersion(readWindowsInstallerProductVersion(matches[0]), version);
+  return matches[0];
 }
 
 async function readPublicManifest(config, objectKey) {
@@ -1023,6 +1114,23 @@ async function readPublicManifest(config, objectKey) {
 
 export async function promoteLegacyFromPlatformFeeds(options = {}) {
   const version = typeof options.version === "string" ? options.version : readAppVersion();
+  assertReleaseVersionMatchesSource(version, readAppVersion());
+  const windowsFullDir = options["windows-full-bundle-dir"];
+  const windowsFullOffline = typeof windowsFullDir === "string" && windowsFullDir.trim() !== "";
+  let windowsFull = null;
+  if (windowsFullOffline) {
+    const filePath = collectLegacyWindowsFullFile(path.resolve(windowsFullDir), version);
+    const appConfig = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+    );
+    await verifyUpdaterSignature(filePath, `${filePath}.sig`, appConfig.plugins.updater.pubkey);
+    assertWindowsInstallerProductVersion(readWindowsInstallerProductVersion(filePath), version);
+    windowsFull = {
+      signature: readFileSync(`${filePath}.sig`, "utf8").trim(),
+      sha256: await sha256File(filePath),
+      size: statSync(filePath).size,
+    };
+  }
   const envConfig = readTosPublishEnv(options.env ?? process.env);
   const secretKey = await findWorkingSecretKey(envConfig);
   const config = { ...envConfig, secretKey };
@@ -1034,11 +1142,28 @@ export async function promoteLegacyFromPlatformFeeds(options = {}) {
       tosUpdatesObjectKey("latest.json", `${config.prefix}/${platform}`),
     );
   }
-  const platforms = collectLegacyChannelPlatforms(version, feeds, publicBase);
-  checkLegacyPlatformFeeds(version, platforms, feeds);
-  for (const [platform, entry] of Object.entries(platforms)) {
+  const platforms = collectLegacyChannelPlatforms(
+    version,
+    feeds,
+    publicBase,
+    windowsFull?.signature,
+  );
+  checkLegacyPlatformFeeds(version, platforms, feeds, windowsFullOffline);
+  const artifacts = windowsFullOffline
+    ? [
+        ["windows-x86_64", feeds["windows-x86_64"].platforms["windows-x86_64"]],
+        ["offline", platforms["windows-x86_64"]],
+        ["darwin-aarch64", platforms["darwin-aarch64"]],
+      ]
+    : Object.entries(platforms);
+  for (const [platform, entry] of artifacts) {
     const fileName = artifactName(entry.url);
-    const objectKey = tosUpdatesObjectKey(fileName, `${config.prefix}/${platform}`);
+    const objectKey = tosUpdatesObjectKey(
+      fileName,
+      platform === "offline"
+        ? `${config.prefix}/offline/${version}`
+        : `${config.prefix}/${platform}`,
+    );
     const artifact = await tosFetch({
       method: "HEAD",
       host: tosUpdatesHost(config.bucket, config.endpoint),
@@ -1055,6 +1180,12 @@ export async function promoteLegacyFromPlatformFeeds(options = {}) {
       !/^[a-f0-9]{64}$/i.test(artifact.headers?.["x-tos-meta-sha256"] ?? "")
     ) {
       throw new Error(`旧版频道发布前 ${platform} 更新包未通过公开对象校验`);
+    }
+    if (
+      platform === "offline" &&
+      !immutableObjectMatches(artifact, windowsFull.sha256, windowsFull.size)
+    ) {
+      throw new Error("旧版频道发布前离线完整 Windows 包与本地已验签产物不一致");
     }
     const signature = await getAnonymousObject(config, `${objectKey}.sig`);
     if (signature.status !== 200 || signature.text.trim() !== entry.signature.trim()) {
@@ -1151,6 +1282,18 @@ export async function publishUpdaterArtifacts(options) {
   const slimWindows = Object.values(incoming).some(({ url }) =>
     artifactName(url).includes("-slim-"),
   );
+  if (slimWindows) {
+    if (channel !== "windows-x86_64") {
+      throw new Error("Windows 瘦包只能发布到 windows-x86_64 平台频道");
+    }
+    if (artifactName(incoming["windows-x86_64"].url) !== `无限画布_${version}_x64-slim-setup.exe`) {
+      throw new Error("Windows 瘦包文件名与本版预期产物不符");
+    }
+    const appConfig = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+    );
+    await verifyStagedWindowsSlimUpdater(bundlePath, version, appConfig.plugins.updater.pubkey);
+  }
   const stagedResourceManifest = path.join(
     bundlePath,
     "resources",

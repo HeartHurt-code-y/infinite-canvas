@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdtempSync,
+  mkdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -22,6 +30,11 @@ import {
   checkChannelManifest,
   checkLegacyPlatformFeeds,
   collectLegacyChannelPlatforms,
+  collectLegacyWindowsFullFile,
+  assertReleaseVersionMatchesSource,
+  assertWindowsInstallerProductVersion,
+  readWindowsInstallerProductVersion,
+  verifyStagedWindowsSlimUpdater,
   immutableObjectMatches,
   collectRuntimeResourceObjects,
   collectMacDeltaObjects,
@@ -396,6 +409,155 @@ test("legacy manifest promotion only references full same-version artifacts from
     /预期 TOS 前缀/,
   );
 });
+
+test("legacy can use an independently signed offline full NSIS while Windows platform stays slim", () => {
+  const base = "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates";
+  const slim = {
+    url: `${base}/windows-x86_64/${encodeURIComponent("无限画布_0.1.11_x64-slim-setup.exe")}`,
+    signature: "slim-signature",
+  };
+  const mac = {
+    url: `${base}/darwin-aarch64/${encodeURIComponent("无限画布_0.1.11_aarch64-full.app.tar.gz")}`,
+    signature: "mac-signature",
+  };
+  const feeds = {
+    "windows-x86_64": { version: "0.1.11", platforms: { "windows-x86_64": slim } },
+    "darwin-aarch64": { version: "0.1.11", platforms: { "darwin-aarch64": mac } },
+  };
+  const platforms = collectLegacyChannelPlatforms("0.1.11", feeds, base, "full-signature");
+  assert.deepEqual(platforms, {
+    "windows-x86_64": {
+      url: `${base}/offline/0.1.11/${encodeURIComponent("无限画布_0.1.11_x64-setup.exe")}`,
+      signature: "full-signature",
+    },
+    "darwin-aarch64": mac,
+  });
+  assert.doesNotThrow(() => checkLegacyPlatformFeeds("0.1.11", platforms, feeds, true));
+  assert.throws(
+    () => checkLegacyPlatformFeeds("0.1.11", platforms, feeds),
+    /初始化同版|必须指向完整包/,
+  );
+  assert.throws(() => collectLegacyChannelPlatforms("0.1.11", feeds, base, ""), /签名为空/);
+  assert.throws(
+    () => collectLegacyChannelPlatforms("0.1.10", feeds, base, "full-signature"),
+    /初始化同版/,
+  );
+  assert.throws(
+    () =>
+      collectLegacyChannelPlatforms(
+        "0.1.11",
+        {
+          ...feeds,
+          "windows-x86_64": {
+            ...feeds["windows-x86_64"],
+            platforms: {
+              "windows-x86_64": { ...slim, url: slim.url.replace(base, "https://other.example") },
+            },
+          },
+        },
+        base,
+        "full-signature",
+      ),
+    /预期 TOS 前缀/,
+  );
+});
+
+test("offline full NSIS promotion input must be unique and exactly versioned", () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-legacy-full-"));
+  try {
+    const full = path.join(dir, "无限画布_0.1.11_x64-setup.exe");
+    const sig = `${full}.sig`;
+    writeFileSync(full, "full");
+    writeFileSync(sig, "signature");
+    assert.equal(collectLegacyWindowsFullFile(dir, "0.1.11"), full);
+    assert.throws(() => collectLegacyWindowsFullFile(dir, "0.1.10"), /恰好一个/);
+    mkdirSync(path.join(dir, "duplicate"));
+    writeFileSync(path.join(dir, "duplicate", path.basename(full)), "another full");
+    assert.throws(() => collectLegacyWindowsFullFile(dir, "0.1.11"), /恰好一个/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("legacy promotion rejects a requested version or PE ProductVersion different from source", () => {
+  assert.doesNotThrow(() => assertReleaseVersionMatchesSource("0.1.11", "0.1.11"));
+  assert.throws(
+    () => assertReleaseVersionMatchesSource("0.1.10", "0.1.11"),
+    /与当前源码版本.*不一致/,
+  );
+  assert.doesNotThrow(() => assertWindowsInstallerProductVersion("0.1.11", "0.1.11"));
+  assert.throws(
+    () => assertWindowsInstallerProductVersion("0.1.10", "0.1.11"),
+    /内部 ProductVersion.*不一致/,
+  );
+  assert.throws(
+    () => assertWindowsInstallerProductVersion("", "0.1.11"),
+    /内部 ProductVersion.*不一致/,
+  );
+});
+
+test(
+  "Windows PE metadata probe reads a real executable without treating the path as a command",
+  { skip: process.platform !== "win32" },
+  () => {
+    assert.match(readWindowsInstallerProductVersion(process.execPath), /^\d+\.\d+\.\d+/);
+  },
+);
+
+test("Windows slim publication rejects an invalid updater signature before upload", async () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-slim-signature-"));
+  try {
+    const filePath = path.join(dir, "无限画布_0.1.11_x64-slim-setup.exe");
+    const pubkey = JSON.parse(
+      readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+    ).plugins.updater.pubkey;
+    writeFileSync(filePath, "unsigned installer");
+    writeFileSync(`${filePath}.sig`, "invalid");
+    await assert.rejects(
+      verifyStagedWindowsSlimUpdater(dir, "0.1.11", pubkey),
+      /updater 签名格式无效/,
+    );
+    await assert.rejects(verifyStagedWindowsSlimUpdater(dir, "0.1.10", pubkey), /恰好一个本版/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+const previousSignedSlim = path.join(
+  REPO_ROOT,
+  "src-tauri",
+  "target",
+  "release",
+  "bundle",
+  "release-staging",
+  "0.1.9",
+  "windows-x86_64",
+  "slim",
+  "无限画布_0.1.9_x64-slim-setup.exe",
+);
+
+test(
+  "renaming a previously signed slim installer cannot publish it as a newer version",
+  { skip: process.platform !== "win32" || !existsSync(previousSignedSlim) },
+  async () => {
+    const dir = mkdtempSync(path.join(os.tmpdir(), "infinite-canvas-renamed-slim-"));
+    try {
+      const renamed = path.join(dir, "无限画布_0.1.11_x64-slim-setup.exe");
+      copyFileSync(previousSignedSlim, renamed);
+      copyFileSync(`${previousSignedSlim}.sig`, `${renamed}.sig`);
+      const pubkey = JSON.parse(
+        readFileSync(path.join(REPO_ROOT, "src-tauri", "tauri.conf.json"), "utf8"),
+      ).plugins.updater.pubkey;
+      assert.equal(readWindowsInstallerProductVersion(renamed), "0.1.9");
+      await assert.rejects(
+        verifyStagedWindowsSlimUpdater(dir, "0.1.11", pubkey),
+        /内部 ProductVersion 0\.1\.9 与 0\.1\.11 不一致/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  },
+);
 
 test("immutable versioned objects require matching SHA-256 metadata and length", () => {
   const digest = "a".repeat(64);

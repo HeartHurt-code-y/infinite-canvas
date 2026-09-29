@@ -264,11 +264,13 @@ workflows:
         script: |
           set -euo pipefail
           release_version="$(node -p "require('./package.json').version")"
-          windows_version="$(node --input-type=module -e "const response = await fetch('https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/windows-x86_64/latest.json', {signal: AbortSignal.timeout(30000)}); if (!response.ok) throw new Error('Windows feed HTTP ' + response.status); console.log((await response.json()).version)")"
-          if [ "$windows_version" = "$release_version" ]; then
+          windows_release="$(node --input-type=module -e "const response = await fetch('https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/windows-x86_64/latest.json', {signal: AbortSignal.timeout(30000)}); if (!response.ok) throw new Error('Windows feed HTTP ' + response.status); const feed = await response.json(); const url = feed.platforms?.['windows-x86_64']?.url; if (typeof url !== 'string') throw new Error('Windows feed missing package URL'); console.log(feed.version + '|' + (url.includes('-slim-setup.exe') ? 'slim' : 'full'))")"
+          if [ "$windows_release" = "$release_version|full" ]; then
             pnpm update:publish -- --promote-legacy --version "$release_version"
+          elif [ "$windows_release" = "$release_version|slim" ]; then
+            echo "Windows 平台频道为本版瘦包；共享频道需要已验签的本版完整 Windows 包，由 Windows 发布机使用 --windows-full-bundle-dir 晋升。"
           else
-            echo "Windows 平台频道为 ${windows_version}；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
+            echo "Windows 平台频道状态为 ${windows_release}；Mac 已独立发布，共用旧版频道稍后同版再晋升。"
           fi
     artifacts:
       - src-tauri/target/release/bundle/dmg/*.dmg
