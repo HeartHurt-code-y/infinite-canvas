@@ -41,8 +41,9 @@ export interface ProductSceneWorkflowOptions {
   readonly generationMode?: ProductSceneGenerationMode;
   readonly productName: string;
   readonly totalCount: number;
+  /** Legacy: batches no longer gate approval since one-click full-plan approval; kept so saved plans still validate. */
   readonly batchSize: number;
-  /** Maximum parallel image requests in a batch. Missing on saved plans defaults to 10. */
+  /** Maximum parallel image requests. Missing on saved plans defaults to 10. */
   readonly maxConcurrency?: number;
   readonly sceneBias: "mixed" | "geek" | "office" | "unboxing";
   readonly aspectRatio: "3:4" | "9:16";

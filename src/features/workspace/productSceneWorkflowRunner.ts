@@ -174,7 +174,7 @@ export function createProductSceneWorkflowRunner(
         const options = node.config.productScene;
         if (!options || !productSceneInputReady(options))
           throw new Error(
-            "请上传并确认同一产品的参考原图、来源角度和参数；数量为 1～500，单批 1～50，画幅为 3:4 或 9:16。",
+            "请上传并确认同一产品的参考原图、来源角度和参数；数量为 1～500，画幅为 3:4 或 9:16。",
           );
         const mode = productSceneGenerationMode(options);
         const operation = mode === "reference" ? "image_to_image" : "text_to_image";
@@ -194,9 +194,9 @@ export function createProductSceneWorkflowRunner(
             error: null,
             decision: null,
             productScene: { ...createProductSceneCheckpoint(), inputSignature: signature, rows },
-            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；每批 ${options.batchSize} 张，并发最多 ${Math.min(options.batchSize, options.maxConcurrency ?? 10)} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}逐张选用后才能导出。`,
+            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；一次审批全部张数，并发最多 ${options.maxConcurrency ?? 10} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}逐张选用后才能导出。`,
           });
-          progress("本地场景计划已生成，尚未调用图片模型。请确认首批后开始。");
+          progress("本地场景计划已生成，尚未调用图片模型。请一键审批全部张数后开始。");
           return checkpoint;
         }
         if (
@@ -204,19 +204,19 @@ export function createProductSceneWorkflowRunner(
           state().approvedThrough < 0 ||
           state().approvedThrough > state().rows.length
         )
-          throw new Error("本批生成授权数量无效，请重新确认批次。");
+          throw new Error("生成授权数量无效，请重新一键审批。");
         if (!state().approvedThrough || state().batchReviewPending) {
           commit({ phase: "awaiting_approval", error: null, decision: null });
           progress(
             state().batchReviewPending
-              ? "本批已生成，请逐张选用或淘汰，再明确开始下一批。"
-              : "请明确确认首批生成数量。",
+              ? "已生成图片待审核，可一键选用、逐张处理或重做失败项。"
+              : "请一键审批全部张数后开始生成。",
           );
           return checkpoint;
         }
         const currentNode = { ...node, config: { ...node.config, checkpoint } };
         if (!isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(currentNode), currentNode))
-          throw new Error("请先确认当前工作流执行计划，再开始已选择的批次。");
+          throw new Error("请先确认当前工作流执行计划，再开始生成。");
         const imageModel = request.providerCatalog
           .find(
             (entry) =>
@@ -260,21 +260,6 @@ export function createProductSceneWorkflowRunner(
             (!row.outputPath ||
               (qualityEnabled && (!row.quality || row.quality.status === "pending"))),
         );
-        // This cap also protects imported/corrupted checkpoints that raise the quota past one batch.
-        if (pending.length > options.batchSize)
-          throw new Error("待生成授权超过单批数量，请按批次确认，避免一次提交全部计划。");
-        const batchStart = pending.length
-          ? Math.floor((Math.min(...pending.map((row) => row.index)) - 1) / options.batchSize) *
-              options.batchSize +
-            1
-          : state().approvedThrough + 1;
-        if (
-          state().rows.some(
-            (row) =>
-              row.index < batchStart && row.status !== "accepted" && row.status !== "rejected",
-          )
-        )
-          throw new Error("前一批尚有图片未人工选用或淘汰，请完成审核后再开始下一批。");
         commit({ phase: "generating", lastActivePhase: "generating", error: null, decision: null });
         let fatalError: ProductSceneSourceChangedError | null = null;
         const inspectRow = async (rowId: string) => {
@@ -696,10 +681,10 @@ export function createProductSceneWorkflowRunner(
         commit({ phase: "awaiting_approval", error: null, decision: null });
         progress(
           failedRows.length
-            ? `本批有 ${failedRows.length} 张失败（第 ${failedRows.sort((a, b) => a - b).join("、")} 张）；其他图片已保留，请查看失败项并重做或拒绝。`
+            ? `有 ${failedRows.length} 张失败（第 ${failedRows.sort((a, b) => a - b).join("、")} 张）；其他图片已保留，请查看失败项并重做或拒绝。`
             : allGenerated
               ? "计划内图片已生成，仍须逐张人工选用；生成完成不代表验收或全部交付。"
-              : "本批已生成并暂停，请逐张审核，再明确开始下一批。",
+              : "本轮已生成并暂停，请审核图片或重做失败项。",
         );
         return checkpoint;
       } catch (error) {

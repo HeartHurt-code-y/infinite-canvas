@@ -429,22 +429,6 @@ export function ProductSceneConfiguration({
           />
         </label>
         <label>
-          每批张数
-          <input
-            aria-label="每批张数"
-            type="number"
-            min={10}
-            max={50}
-            value={options.batchSize}
-            onChange={(event) =>
-              onChange({
-                ...options,
-                batchSize: Math.min(50, Math.max(10, Number(event.target.value) || 10)),
-              })
-            }
-          />
-        </label>
-        <label>
           同时生成张数上限
           <input
             aria-label="同时生成张数上限"
@@ -459,10 +443,7 @@ export function ProductSceneConfiguration({
               })
             }
           />
-          <small>
-            每批同时提交最多 {Math.min(options.batchSize, options.maxConcurrency ?? 10)}{" "}
-            张；受模型服务的并发额度限制。
-          </small>
+          <small>一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。</small>
         </label>
         <label>
           场景倾向
@@ -718,15 +699,6 @@ export function ProductSceneDeliverables({
       ),
     [rows, options],
   );
-  const currentRows = useMemo(
-    () => (rows ?? []).filter((row) => row.index <= approvedThrough),
-    [rows, approvedThrough],
-  );
-  const awaitingReview = currentRows.some(
-    (row) =>
-      ["needs_review", "running", "queued", "error"].includes(row.status) ||
-      (row.status === "accepted" && !productSceneRowCanAccept(row, options)),
-  );
   const filtered = useMemo(
     () => (rows ?? []).filter((row) => filter === "all" || row.status === filter),
     [rows, filter],
@@ -734,32 +706,25 @@ export function ProductSceneDeliverables({
   const pageCount = Math.max(1, Math.ceil(filtered.length / 12));
   const safePage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(safePage * 12, (safePage + 1) * 12);
-  const batchStart =
-    approvedThrough > 0
-      ? Math.floor((approvedThrough - 1) / options.batchSize) * options.batchSize + 1
-      : 1;
-  const batchRows = useMemo(
-    () => (rows ?? []).filter((row) => row.index >= batchStart && row.index <= approvedThrough),
-    [rows, batchStart, approvedThrough],
+  // 一键全量审批后不再有批次窗口：选用范围覆盖整个计划。
+  const pendingReview = useMemo(
+    () => (rows ?? []).filter((row) => row.status !== "accepted" && row.status !== "rejected"),
+    [rows],
   );
-  const batchPending = useMemo(
-    () => batchRows.filter((row) => row.status !== "accepted" && row.status !== "rejected"),
-    [batchRows],
-  );
-  const batchEligible = useMemo(
+  const eligible = useMemo(
     () =>
-      batchPending.filter(
+      pendingReview.filter(
         (row) => row.status === "needs_review" && productSceneRowCanAccept(row, options),
       ),
-    [batchPending, options],
+    [pendingReview, options],
   );
-  const batchEligibleIds = new Set(batchEligible.map((row) => row.id));
+  const eligibleIds = new Set(eligible.map((row) => row.id));
   const visibleEligibleIds = visible
-    .filter((row) => batchEligibleIds.has(row.id))
+    .filter((row) => eligibleIds.has(row.id))
     .map((row) => row.id);
   const selectedVisibleIds = visibleEligibleIds.filter((id) => selectedIds.includes(id));
   const hasNext = approvedThrough < (rows?.length ?? 0);
-  const canNext = !disabled && !awaitingReview && hasNext;
+  const canNext = !disabled && hasNext;
   if (!state?.rows.length) return null;
 
   function saveReviewedRows(rows: readonly ProductSceneRow[]) {
@@ -786,15 +751,13 @@ export function ProductSceneDeliverables({
     saveReviewedRows(rows);
   }
 
-  function acceptBatch(ids: readonly string[]) {
+  function acceptRows(ids: readonly string[]) {
     if (!state || disabled || !ids.length) return;
     const requested = new Set(ids);
     let changed = false;
     const rows = state.rows.map((row) => {
       if (
         !requested.has(row.id) ||
-        row.index < batchStart ||
-        row.index > state.approvedThrough ||
         row.status !== "needs_review" ||
         !productSceneRowCanAccept(row, options)
       )
@@ -807,7 +770,7 @@ export function ProductSceneDeliverables({
     saveReviewedRows(rows);
   }
 
-  function continueBatch() {
+  function approveAll() {
     if (!state || !canNext) return;
     onChange({
       ...checkpoint,
@@ -815,7 +778,7 @@ export function ProductSceneDeliverables({
       decision: null,
       productScene: {
         ...state,
-        approvedThrough: Math.min(state.rows.length, state.approvedThrough + options.batchSize),
+        approvedThrough: state.rows.length,
         batchReviewPending: false,
       },
     });
@@ -893,10 +856,10 @@ export function ProductSceneDeliverables({
         相似度检查只能辅助去重；选用后才进入导出包。
       </p>
       <div className="product-scene__actions">
-        <button type="button" disabled={!canNext} onClick={continueBatch}>
+        <button type="button" disabled={!canNext} onClick={approveAll}>
           {state.approvedThrough === 0
-            ? `确认生成首批 ${Math.min(options.batchSize, state.rows.length)} 张`
-            : `确认生成下一批 ${Math.min(options.batchSize, state.rows.length - state.approvedThrough)} 张`}
+            ? `一键审批全部 ${state.rows.length} 张并生成`
+            : `一键审批剩余 ${state.rows.length - state.approvedThrough} 张并生成`}
         </button>
         <button
           type="button"
@@ -906,24 +869,23 @@ export function ProductSceneDeliverables({
           {exporting ? "正在导出…" : `导出已选用 ${accepted.length} 张`}
         </button>
       </div>
-      {awaitingReview ? <small>完成当前批次审核后可开启下一批；失败项可重做或拒绝。</small> : null}
       {message ? <p role="status">{message}</p> : null}
       {state.approvedThrough > 0 ? (
         <div className="product-scene__bulk-review" aria-label="批量选用产品场景图">
           <small>
-            本批第 {batchStart}–{state.approvedThrough} 张：可选用 {batchEligible.length} 张
-            {batchPending.length > batchEligible.length
-              ? `，另有 ${batchPending.length - batchEligible.length} 张尚不符合选用条件，需逐张处理`
+            全部计划：可选用 {eligible.length} 张
+            {pendingReview.length > eligible.length
+              ? `，另有 ${pendingReview.length - eligible.length} 张尚不符合选用条件，需逐张处理`
               : ""}
-            。请先检查画面；批量选用只处理本批待审核且符合当前选用条件的图片。
+            。请先检查画面；批量选用只处理待审核且符合当前选用条件的图片。
           </small>
           <div className="product-scene__actions">
             <button
               type="button"
-              disabled={disabled || !batchEligible.length}
-              onClick={() => acceptBatch(batchEligible.map((row) => row.id))}
+              disabled={disabled || !eligible.length}
+              onClick={() => acceptRows(eligible.map((row) => row.id))}
             >
-              选用本批全部合格图（{batchEligible.length} 张）
+              一键选用全部合格图（{eligible.length} 张）
             </button>
             <button
               type="button"
@@ -941,7 +903,7 @@ export function ProductSceneDeliverables({
             <button
               type="button"
               disabled={disabled || !selectedVisibleIds.length}
-              onClick={() => acceptBatch(selectedVisibleIds)}
+              onClick={() => acceptRows(selectedVisibleIds)}
             >
               选用所选 {selectedVisibleIds.length} 张
             </button>
@@ -969,7 +931,7 @@ export function ProductSceneDeliverables({
       <div className="product-scene__rows">
         {visible.map((row) => (
           <article key={row.id} className="product-scene__row">
-            {batchEligibleIds.has(row.id) ? (
+            {eligibleIds.has(row.id) ? (
               <label className="product-scene__approval">
                 <input
                   type="checkbox"
@@ -984,7 +946,7 @@ export function ProductSceneDeliverables({
                     )
                   }
                 />
-                加入本页批量选用
+                加入批量选用
               </label>
             ) : null}
             {row.outputPath ? (

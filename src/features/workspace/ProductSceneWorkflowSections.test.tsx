@@ -327,7 +327,7 @@ describe("ProductSceneWorkflowSections", () => {
     );
   });
 
-  it("blocks the next batch until every produced image is reviewed and exports only accepted images", async () => {
+  it("allows one-click full approval regardless of pending reviews and exports only accepted images", async () => {
     const base = checkpoint();
     const initial: KnowledgeVideoWorkflowCheckpoint = {
       ...base,
@@ -341,6 +341,7 @@ describe("ProductSceneWorkflowSections", () => {
       },
     };
     const proceed = vi.fn();
+    const change = vi.fn();
     const exportMock = vi
       .spyOn(productSceneImageClient, "export")
       .mockResolvedValue({ directory: "C:/delivery", count: 1 });
@@ -351,16 +352,18 @@ describe("ProductSceneWorkflowSections", () => {
           options={options()}
           checkpoint={state}
           disabled={false}
-          onChange={setState}
+          onChange={(next) => {
+            change(next);
+            setState(next);
+          }}
           onContinue={proceed}
         />
       );
     }
     render(<Harness />);
-    expect(screen.getByRole("button", { name: "确认生成下一批 1 张" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "一键审批剩余 2 张并生成" })).toBeEnabled();
     expect(screen.getByRole("button", { name: "导出已选用 0 张" })).toBeDisabled();
     fireEvent.click(screen.getByRole("button", { name: "选用第 1 张" }));
-    expect(screen.getByRole("button", { name: "确认生成下一批 1 张" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "导出已选用 1 张" }));
     await waitFor(() => expect(exportMock).toHaveBeenCalledOnce());
     const command = exportMock.mock.calls[0]![0];
@@ -371,11 +374,14 @@ describe("ProductSceneWorkflowSections", () => {
     expect((JSON.parse(command.manifest) as { rows: unknown }).rows).toEqual([
       expect.objectContaining({ taskId: "paid-1", status: "accepted" }),
     ]);
-    fireEvent.click(screen.getByRole("button", { name: "确认生成下一批 1 张" }));
+    fireEvent.click(screen.getByRole("button", { name: "一键审批剩余 2 张并生成" }));
     expect(proceed).toHaveBeenCalledOnce();
+    const approved = change.mock.calls.at(-1)![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(approved.productScene!.approvedThrough).toBe(3);
+    expect(approved.productScene!.batchReviewPending).toBe(false);
   });
 
-  it("accepts the whole approved batch across pages with one checkpoint update", () => {
+  it("accepts the whole approved plan across pages with one checkpoint update", () => {
     const batchOptions = { ...options(), totalCount: 14, batchSize: 14 };
     const base = checkpoint();
     const initial: KnowledgeVideoWorkflowCheckpoint = {
@@ -401,7 +407,7 @@ describe("ProductSceneWorkflowSections", () => {
       />,
     );
     expect(screen.getByText("1 / 2")).toBeVisible();
-    fireEvent.click(screen.getByRole("button", { name: "选用本批全部合格图（14 张）" }));
+    fireEvent.click(screen.getByRole("button", { name: "一键选用全部合格图（14 张）" }));
     expect(change).toHaveBeenCalledOnce();
     const next = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
     expect(next.phase).toBe("done");
@@ -502,7 +508,7 @@ describe("ProductSceneWorkflowSections", () => {
     expect(screen.getByRole("button", { name: "选用所选 0 张" })).toBeDisabled();
   });
 
-  it("excludes blocked quality and unapproved future rows from batch acceptance", () => {
+  it("excludes blocked quality rows from one-click full acceptance", () => {
     const batchOptions = {
       ...options(),
       totalCount: 4,
@@ -553,14 +559,14 @@ describe("ProductSceneWorkflowSections", () => {
     );
     expect(screen.getByText(/另有 1 张尚不符合选用条件/)).toBeVisible();
     expect(screen.queryByRole("checkbox", { name: "选择第 2 张" })).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "选用本批全部合格图（1 张）" }));
+    fireEvent.click(screen.getByRole("button", { name: "一键选用全部合格图（3 张）" }));
     expect(change).toHaveBeenCalledOnce();
     const next = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
     expect(next.productScene!.rows.map((row) => row.status)).toEqual([
       "accepted",
       "needs_review",
-      "needs_review",
-      "needs_review",
+      "accepted",
+      "accepted",
     ]);
     expect(next.phase).toBe("awaiting_approval");
   });

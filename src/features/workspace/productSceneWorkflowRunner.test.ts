@@ -891,12 +891,12 @@ describe("recoverable product scene batches", () => {
     expect(generation.start).not.toHaveBeenCalled();
   });
 
-  it("requires the current execution-plan approval and limits each approved quota to one batch", async () => {
+  it("requires the current execution-plan approval and generates the whole plan past legacy batch size", async () => {
     const { runner, request, resume, generation } = setup();
     const planned = await runner.run(request);
     const unapproved = {
       ...planned,
-      productScene: { ...planned.productScene!, approvedThrough: 2 },
+      productScene: { ...planned.productScene!, approvedThrough: 3 },
     };
     const denied = await runner.run({
       ...request,
@@ -904,9 +904,12 @@ describe("recoverable product scene batches", () => {
       node: { ...request.node, config: { ...request.node.config, checkpoint: unapproved } },
     });
     expect(denied.error).toContain("执行计划");
-    const tooMany = await runner.run(resume(planned, 3));
-    expect(tooMany.error).toContain("超过单批数量");
     expect(generation.start).not.toHaveBeenCalled();
+    // 一键全量审批：approvedThrough 超过遗留 batchSize 也应单次运行生成全部 3 张。
+    const done = await runner.run(resume(planned, 3));
+    expect(done.phase).toBe("awaiting_approval");
+    expect(done.productScene!.rows.every((row) => row.outputPath)).toBe(true);
+    expect(generation.start).toHaveBeenCalledTimes(3);
   });
 
   it("never auto-retries a failed remote task; explicit redo retains the previous attempt", async () => {
