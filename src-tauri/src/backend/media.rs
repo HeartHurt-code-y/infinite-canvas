@@ -10,8 +10,8 @@ use super::{
     },
     composer::VideoCompositionService,
     error::{BackendError, BackendResult},
-    local_results::{LocalResultService, safe_file_stem, sha256_bytes},
     local_base64_assets::{LocalBase64Library, extension_for_mime},
+    local_results::{LocalResultService, safe_file_stem, sha256_bytes},
     model_schema::{is_rd_video_model, is_seedance_25_video_model, is_seedream_image_model},
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
@@ -527,8 +527,13 @@ impl MediaResolver {
                 if let Some(bytes) = media.bytes.as_deref() {
                     self.composer.probe_video_bytes_duration(bytes).await
                 } else {
-                    let path = self.local_base64_assets.decoded_path(asset_id, MediaType::Video)?;
-                    let probe = self.composer.probe_video_duration(path.to_string_lossy().as_ref()).await;
+                    let path = self
+                        .local_base64_assets
+                        .decoded_path(asset_id, MediaType::Video)?;
+                    let probe = self
+                        .composer
+                        .probe_video_duration(path.to_string_lossy().as_ref())
+                        .await;
                     let _ = std::fs::remove_file(path);
                     probe
                 }
@@ -689,15 +694,18 @@ impl MediaResolver {
                     let hash = sha256_bytes(&bytes);
                     (Some(bytes), hash, None, None)
                 } else {
-                    let path = self.local_base64_assets.decoded_path(asset_id, *media_type)?;
+                    let path = self
+                        .local_base64_assets
+                        .decoded_path(asset_id, *media_type)?;
                     let hash_result = LocalBase64Library::sha256_path(&path);
                     if hash_result.is_err() {
                         let _ = std::fs::remove_file(&path);
                     }
                     let hash = hash_result?;
-                    let stage_result = self.staging.stage_for_remote_input(
-                        path.to_string_lossy().as_ref(), *media_type,
-                    ).await;
+                    let stage_result = self
+                        .staging
+                        .stage_for_remote_input(path.to_string_lossy().as_ref(), *media_type)
+                        .await;
                     let _ = std::fs::remove_file(&path);
                     let lease = stage_result.map_err(|error| match error {
                         BackendError::Validation { message, .. } if message.starts_with("TOS staging") => {
@@ -710,27 +718,31 @@ impl MediaResolver {
                     })?;
                     (None, hash, Some(lease.get_url.clone()), Some(lease))
                 };
-                let file_name = media_file_name(display_name, extension_for_mime(&record.mime_type));
-                Ok((ResolvedMedia {
-                    media_type: *media_type,
-                    type_position,
-                    role: role.to_string(),
-                    display_name: display_name.to_string(),
-                    stable_identity: json!({
-                        "kind": "local_base64_asset",
-                        "assetId": asset_id,
-                        "canvasNodeKey": canvas_node_key,
-                    }),
-                    mime_type: record.mime_type,
-                    duration_seconds: None,
-                    byte_size: record.byte_size,
-                    sha256: hash,
-                    file_name,
-                    bytes,
-                    remote_reference,
-                    prompt_segment_index,
-                    content_index,
-                }, lease))
+                let file_name =
+                    media_file_name(display_name, extension_for_mime(&record.mime_type));
+                Ok((
+                    ResolvedMedia {
+                        media_type: *media_type,
+                        type_position,
+                        role: role.to_string(),
+                        display_name: display_name.to_string(),
+                        stable_identity: json!({
+                            "kind": "local_base64_asset",
+                            "assetId": asset_id,
+                            "canvasNodeKey": canvas_node_key,
+                        }),
+                        mime_type: record.mime_type,
+                        duration_seconds: None,
+                        byte_size: record.byte_size,
+                        sha256: hash,
+                        file_name,
+                        bytes,
+                        remote_reference,
+                        prompt_segment_index,
+                        content_index,
+                    },
+                    lease,
+                ))
             }
             MediaReferenceTarget::LocalResult {
                 generation_task_id,

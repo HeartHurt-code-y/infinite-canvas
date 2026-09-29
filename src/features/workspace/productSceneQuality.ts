@@ -70,10 +70,25 @@ export function productSceneQualityOptionsValid(options: ProductSceneWorkflowOpt
     )
   );
 }
+// 行与选项都按不可变替换更新，引用不变即结果不变：把「stringify 检查报告再解析」
+// 的重校验按行缓存，避免 500 行的审核网格在每次渲染时全量重算。
+const rowCanAcceptCache = new WeakMap<
+  ProductSceneRow,
+  { options: ProductSceneWorkflowOptions; result: boolean }
+>();
+
 export function productSceneRowCanAccept(
   row: ProductSceneRow,
   options: ProductSceneWorkflowOptions,
 ): boolean {
+  const cached = rowCanAcceptCache.get(row);
+  if (cached && cached.options === options) return cached.result;
+  const result = computeRowCanAccept(row, options);
+  rowCanAcceptCache.set(row, { options, result });
+  return result;
+}
+
+function computeRowCanAccept(row: ProductSceneRow, options: ProductSceneWorkflowOptions): boolean {
   if (!productSceneQualityOptionsValid(options)) return false;
   if (
     !row.outputPath ||

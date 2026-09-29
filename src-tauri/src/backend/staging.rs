@@ -32,10 +32,11 @@ use super::{
     storage::{Storage, now_ms},
     tos_sign::{PresignParams, TosCredentials, presign_url, presign_url_with_query},
     types::{
-        AssetImportOutputRecord, CloudAssetStatus, ConnectivityTestResult, ImportedAssetSource, LocalAssetKindTotals,
-        LocalAssetListQuery, LocalAssetPage, LocalAssetRecord, MediaType,
-        ObserveAssetStatusCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand, StagingJobRecord,
-        StagingStatus, StartStagingCommand, TosBucketPullSummary, TosStagingConfig,
+        AssetImportOutputRecord, CloudAssetStatus, ConnectivityTestResult, ImportedAssetSource,
+        LocalAssetKindTotals, LocalAssetListQuery, LocalAssetPage, LocalAssetRecord, MediaType,
+        ObserveAssetStatusCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
+        StagingJobRecord, StagingStatus, StartStagingCommand, TosBucketPullSummary,
+        TosStagingConfig,
     },
 };
 
@@ -758,7 +759,8 @@ impl StagingService {
         self.storage.insert_staging_job(&job)?;
         if job.purpose == "local_asset" && job.import_target.is_none() {
             if let Some(config) = self.storage.get_tos_config()? {
-                self.storage.remember_staging_object_target(&job.id, &config)?;
+                self.storage
+                    .remember_staging_object_target(&job.id, &config)?;
             }
         }
         Ok(job)
@@ -1002,7 +1004,10 @@ impl StagingService {
 
     /// A synced object may not have a local source file or content hash. Its
     /// existing object is already the desired copy when the bucket matches.
-    pub async fn local_asset_is_in_current_bucket(&self, staging_job_id: &str) -> BackendResult<bool> {
+    pub async fn local_asset_is_in_current_bucket(
+        &self,
+        staging_job_id: &str,
+    ) -> BackendResult<bool> {
         let job = self.storage.get_staging_job(staging_job_id)?;
         let Some(current) = self.storage.get_tos_config()? else {
             return Ok(false);
@@ -1026,9 +1031,9 @@ impl StagingService {
         job: &StagingJobRecord,
         object_key: &str,
     ) -> BackendResult<StagingLease> {
-        let current = self.storage.get_tos_config()?.ok_or_else(|| BackendError::validation(
-            "TOS staging is not configured", json!({ "jobId": job.id })
-        ))?;
+        let current = self.storage.get_tos_config()?.ok_or_else(|| {
+            BackendError::validation("TOS staging is not configured", json!({ "jobId": job.id }))
+        })?;
         if !current.enabled {
             return Err(BackendError::validation(
                 "TOS staging is not enabled",
@@ -1036,7 +1041,11 @@ impl StagingService {
             ));
         }
         if let Some(config) = self.storage.get_staging_object_target(&job.id)? {
-            let chosen = if same_object_scope(&config, &current) { &current } else { &config };
+            let chosen = if same_object_scope(&config, &current) {
+                &current
+            } else {
+                &config
+            };
             return self.presign_existing_object_with_config(&job.id, object_key, chosen);
         }
         self.presign_existing_object_with_config(&job.id, object_key, &current)
@@ -1195,7 +1204,8 @@ impl StagingService {
                 updated_at: timestamp,
             };
             self.storage.insert_staging_job(&job)?;
-            self.storage.remember_staging_object_target(&job.id, &config)?;
+            self.storage
+                .remember_staging_object_target(&job.id, &config)?;
             imported += 1;
             info!(
                 "[staging] 存储桶对象已写入本地索引: objectKey={}, size={} 字节, mediaType={}",
@@ -1375,9 +1385,9 @@ impl StagingService {
                                 .as_ref()
                                 .filter(|config| staging_object_matches_scope(object_key, config))
                             {
-                                match self.presign_existing_object_with_config(
-                                    job_id, object_key, config,
-                                ) {
+                                match self
+                                    .presign_existing_object_with_config(job_id, object_key, config)
+                                {
                                     Ok(lease) => {
                                         if let Err(cleanup_error) = self.cleanup_lease(&lease).await
                                         {
@@ -1500,7 +1510,8 @@ impl StagingService {
             return self.run_job_inner_unindexed(job).await;
         }
         let target_config = if job.purpose == "local_asset" && job.import_target.is_none() {
-            self.storage.get_staging_object_target(&job.id)?
+            self.storage
+                .get_staging_object_target(&job.id)?
                 .or(self.storage.get_tos_config()?)
         } else {
             None
@@ -1508,11 +1519,14 @@ impl StagingService {
         if job.purpose == "local_asset" && job.import_target.is_none() {
             if let Some(config) = target_config.as_ref() {
                 // Also freeze legacy/recovered jobs that predate target snapshots.
-                self.storage.remember_staging_object_target(&job.id, config)?;
+                self.storage
+                    .remember_staging_object_target(&job.id, config)?;
             }
         }
         let scope = match job.purpose.as_str() {
-            "local_asset" | "asset_import" => Some(staging_content_scope(job, target_config.as_ref())?),
+            "local_asset" | "asset_import" => {
+                Some(staging_content_scope(job, target_config.as_ref())?)
+            }
             _ => None,
         };
         let Some(scope) = scope else {
@@ -1527,12 +1541,18 @@ impl StagingService {
             .find_staging_content(&scope, job.media_type, byte_size, &sha256)?
             .is_none()
         {
-            self.backfill_legacy_staging_content(&scope, job.media_type, byte_size, &sha256, target_config.as_ref())
-                .await?;
+            self.backfill_legacy_staging_content(
+                &scope,
+                job.media_type,
+                byte_size,
+                &sha256,
+                target_config.as_ref(),
+            )
+            .await?;
         }
-        if let Some(existing) = self
-            .storage
-            .find_staging_content(&scope, job.media_type, byte_size, &sha256)?
+        if let Some(existing) =
+            self.storage
+                .find_staging_content(&scope, job.media_type, byte_size, &sha256)?
         {
             if self.staging_content_exists(&existing).await? {
                 job.object_key = existing.object_key.clone();
@@ -1549,10 +1569,12 @@ impl StagingService {
                     StagingStatus::Staged
                 };
                 job.updated_at = now_ms();
-                self.storage.complete_reused_staging_job(job, &existing.id)?;
+                self.storage
+                    .complete_reused_staging_job(job, &existing.id)?;
                 if job.import_target.is_none() {
                     if let Some(config) = target_config.as_ref() {
-                        self.storage.remember_staging_object_target(&job.id, &config)?;
+                        self.storage
+                            .remember_staging_object_target(&job.id, &config)?;
                     }
                 }
                 return Ok(());
@@ -1572,10 +1594,16 @@ impl StagingService {
                     &sha256,
                     &job.id,
                 ) {
-                    warn!("[staging] 已上传素材但去重索引写入失败: jobId={}, error={error}", job.id);
+                    warn!(
+                        "[staging] 已上传素材但去重索引写入失败: jobId={}, error={error}",
+                        job.id
+                    );
                 }
             }
-            _ => warn!("[staging] 上传期间源文件变化，未记录去重索引: jobId={}", job.id),
+            _ => warn!(
+                "[staging] 上传期间源文件变化，未记录去重索引: jobId={}",
+                job.id
+            ),
         }
         Ok(())
     }
@@ -1589,7 +1617,10 @@ impl StagingService {
         target_config: Option<&TosStagingConfig>,
     ) -> BackendResult<()> {
         let config = target_config;
-        for candidate in self.storage.list_unindexed_completed_staging_jobs(media_type)? {
+        for candidate in self
+            .storage
+            .list_unindexed_completed_staging_jobs(media_type)?
+        {
             if candidate.import_target.is_none() && config.is_none() {
                 continue;
             }
@@ -1597,7 +1628,9 @@ impl StagingService {
                 continue;
             }
             if candidate.import_target.is_none() {
-                let Some(config) = config else { continue; };
+                let Some(config) = config else {
+                    continue;
+                };
                 let saved = self.storage.get_staging_object_target(&candidate.id)?;
                 if !local_asset_matches_current_scope(saved.as_ref(), &candidate, config) {
                     continue;
@@ -1615,8 +1648,12 @@ impl StagingService {
             }
             // A file edited after the old upload is not proof of the remote
             // body's content; avoid mapping its new bytes to that old asset.
-            let uploaded_at = UNIX_EPOCH + Duration::from_millis(candidate.created_at.max(0) as u64);
-            if metadata.modified().is_ok_and(|modified| modified > uploaded_at) {
+            let uploaded_at =
+                UNIX_EPOCH + Duration::from_millis(candidate.created_at.max(0) as u64);
+            if metadata
+                .modified()
+                .is_ok_and(|modified| modified > uploaded_at)
+            {
                 continue;
             }
             let Ok((candidate_hash, candidate_size)) = sha256_file(path).await else {
@@ -1628,7 +1665,11 @@ impl StagingService {
             if candidate_hash == sought_sha256 {
                 if self.staging_content_exists(&candidate).await? {
                     self.storage.remember_staging_content(
-                        scope, media_type, byte_size, &candidate_hash, &candidate.id,
+                        scope,
+                        media_type,
+                        byte_size,
+                        &candidate_hash,
+                        &candidate.id,
                     )?;
                     break;
                 }
@@ -1636,7 +1677,11 @@ impl StagingService {
                 // Index unchanged legacy files as we encounter their size,
                 // avoiding repeated hashing on subsequent imports.
                 self.storage.remember_staging_content(
-                    scope, media_type, byte_size, &candidate_hash, &candidate.id,
+                    scope,
+                    media_type,
+                    byte_size,
+                    &candidate_hash,
+                    &candidate.id,
                 )?;
             }
         }
@@ -1654,15 +1699,25 @@ impl StagingService {
                 return Ok(false);
             }
             let target = job.import_target.as_ref().expect("checked above");
-            let observed = self.assets.observe_asset_status(ObserveAssetStatusCommand {
-                provider_connection_id: target.provider_connection_id.clone(),
-                id: asset_id.clone(),
-            }).await?;
-            if observed.missing || matches!(observed.status, CloudAssetStatus::Failed | CloudAssetStatus::Deleted) {
+            let observed = self
+                .assets
+                .observe_asset_status(ObserveAssetStatusCommand {
+                    provider_connection_id: target.provider_connection_id.clone(),
+                    id: asset_id.clone(),
+                })
+                .await?;
+            if observed.missing
+                || matches!(
+                    observed.status,
+                    CloudAssetStatus::Failed | CloudAssetStatus::Deleted
+                )
+            {
                 return Ok(false);
             }
             if observed.status != CloudAssetStatus::Ready {
-                return Err(BackendError::Conflict("existing cloud material is still processing; retry later".into()));
+                return Err(BackendError::Conflict(
+                    "existing cloud material is still processing; retry later".into(),
+                ));
             }
             return Ok(true);
         }
@@ -1675,7 +1730,12 @@ impl StagingService {
             (Some(saved), Some(current)) if same_object_scope(&saved, &current) => current,
             (Some(saved), _) => saved,
             (None, Some(current)) => current,
-            (None, None) => return Err(BackendError::validation("TOS staging is not configured", json!({}))),
+            (None, None) => {
+                return Err(BackendError::validation(
+                    "TOS staging is not configured",
+                    json!({}),
+                ));
+            }
         };
         let lease = self.presign_existing_object_with_config(&job.id, object_key, &config)?;
         let client = fake_ip_aware_client(&lease.get_url, self.client.clone()).await;
@@ -1817,11 +1877,13 @@ impl StagingService {
 
     async fn upload(&self, job: &mut StagingJobRecord) -> BackendResult<StagingLease> {
         let config = if job.purpose == "local_asset" && job.import_target.is_none() {
-            self.storage.get_staging_object_target(&job.id)?
+            self.storage
+                .get_staging_object_target(&job.id)?
                 .or(self.storage.get_tos_config()?)
         } else {
             self.storage.get_tos_config()?
-        }.ok_or_else(|| {
+        }
+        .ok_or_else(|| {
             BackendError::validation(
                 "TOS staging is not configured",
                 json!({ "required": ["bucket", "region", "endpoint", "objectPrefix"] }),
@@ -1841,7 +1903,8 @@ impl StagingService {
         })?;
         let credentials = TosCredentials::parse(&self.credentials.get(credential_ref)?)?;
         if job.purpose == "local_asset" && job.import_target.is_none() {
-            self.storage.remember_staging_object_target(&job.id, &config)?;
+            self.storage
+                .remember_staging_object_target(&job.id, &config)?;
         }
 
         let local_path = Path::new(&job.local_path);
@@ -2448,9 +2511,8 @@ fn staging_content_scope(
             group,
         ))?);
     }
-    let config = config.ok_or_else(|| {
-        BackendError::validation("TOS staging is not configured", json!({}))
-    })?;
+    let config = config
+        .ok_or_else(|| BackendError::validation("TOS staging is not configured", json!({})))?;
     Ok(serde_json::to_string(&(
         "object_storage",
         config.bucket.trim(),
@@ -2462,9 +2524,9 @@ fn staging_content_scope(
 fn legacy_object_key_matches_config(job: &StagingJobRecord, config: &TosStagingConfig) -> bool {
     let scope = format!("{}:{}:{}", config.bucket, config.region, config.endpoint);
     let scope_hash = hex::encode(Sha256::digest(scope.as_bytes()));
-    job.object_key.as_deref().is_some_and(|key| {
-        key.split('/').any(|segment| segment == &scope_hash[..16])
-    })
+    job.object_key
+        .as_deref()
+        .is_some_and(|key| key.split('/').any(|segment| segment == &scope_hash[..16]))
 }
 
 fn local_asset_matches_current_scope(
@@ -2481,7 +2543,10 @@ fn local_asset_matches_current_scope(
 fn same_object_scope(left: &TosStagingConfig, right: &TosStagingConfig) -> bool {
     left.bucket.trim() == right.bucket.trim()
         && left.region.trim() == right.region.trim()
-        && left.endpoint.trim().eq_ignore_ascii_case(right.endpoint.trim())
+        && left
+            .endpoint
+            .trim()
+            .eq_ignore_ascii_case(right.endpoint.trim())
 }
 
 async fn sha256_file(path: &Path) -> BackendResult<(String, u64)> {
@@ -2702,10 +2767,16 @@ mod tests {
         let tos_scope = staging_content_scope(&job, Some(&config)).unwrap();
         let mut other_bucket = config.clone();
         other_bucket.bucket = "another-bucket".into();
-        assert_ne!(tos_scope, staging_content_scope(&job, Some(&other_bucket)).unwrap());
+        assert_ne!(
+            tos_scope,
+            staging_content_scope(&job, Some(&other_bucket)).unwrap()
+        );
         let mut other_prefix = config.clone();
         other_prefix.object_prefix = "another-prefix".into();
-        assert_eq!(tos_scope, staging_content_scope(&job, Some(&other_prefix)).unwrap());
+        assert_eq!(
+            tos_scope,
+            staging_content_scope(&job, Some(&other_prefix)).unwrap()
+        );
         job.import_target = Some(crate::backend::types::StagingAssetImportTarget {
             provider_connection_id: "provider-a".into(),
             name: None,
@@ -2713,10 +2784,16 @@ mod tests {
         });
         let first_group = staging_content_scope(&job, Some(&config)).unwrap();
         job.import_target.as_mut().unwrap().group_id = Some("group-b".into());
-        assert_ne!(first_group, staging_content_scope(&job, Some(&config)).unwrap());
+        assert_ne!(
+            first_group,
+            staging_content_scope(&job, Some(&config)).unwrap()
+        );
         job.import_target.as_mut().unwrap().group_id = Some("group-a".into());
         job.import_target.as_mut().unwrap().provider_connection_id = "provider-b".into();
-        assert_ne!(first_group, staging_content_scope(&job, Some(&config)).unwrap());
+        assert_ne!(
+            first_group,
+            staging_content_scope(&job, Some(&config)).unwrap()
+        );
     }
 
     #[test]
@@ -2741,12 +2818,24 @@ mod tests {
             created_at: 0,
             updated_at: 0,
         };
-        assert!(local_asset_matches_current_scope(Some(&current), &job, &current));
-        assert!(!local_asset_matches_current_scope(Some(&old_bucket), &job, &current));
+        assert!(local_asset_matches_current_scope(
+            Some(&current),
+            &job,
+            &current
+        ));
+        assert!(!local_asset_matches_current_scope(
+            Some(&old_bucket),
+            &job,
+            &current
+        ));
         assert!(!local_asset_matches_current_scope(None, &job, &current));
         let mut new_prefix = current.clone();
         new_prefix.object_prefix = "another-prefix".into();
-        assert!(local_asset_matches_current_scope(Some(&current), &job, &new_prefix));
+        assert!(local_asset_matches_current_scope(
+            Some(&current),
+            &job,
+            &new_prefix
+        ));
     }
 
     #[tokio::test]
@@ -2758,23 +2847,25 @@ mod tests {
         let gates = Arc::new(AsyncMutex::new(HashMap::new()));
         let uploaded = Arc::new(AtomicUsize::new(0));
         for id in ["first", "second"] {
-            storage.insert_staging_job(&StagingJobRecord {
-                id: id.into(),
-                local_path: "image.png".into(),
-                purpose: "local_asset".into(),
-                media_type: MediaType::Image,
-                object_key: None,
-                status: StagingStatus::Validating,
-                bytes_total: None,
-                bytes_uploaded: 0,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: 0,
-                updated_at: 0,
-            }).unwrap();
+            storage
+                .insert_staging_job(&StagingJobRecord {
+                    id: id.into(),
+                    local_path: "image.png".into(),
+                    purpose: "local_asset".into(),
+                    media_type: MediaType::Image,
+                    object_key: None,
+                    status: StagingStatus::Validating,
+                    bytes_total: None,
+                    bytes_uploaded: 0,
+                    asset_id: None,
+                    overseas_db_id: None,
+                    import_target: None,
+                    adjustment: None,
+                    error: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .unwrap();
         }
         let handles = ["first", "second"].map(|id| {
             let storage = Arc::clone(&storage);
@@ -2783,16 +2874,22 @@ mod tests {
             tokio::spawn(async move {
                 let gate = gate_for_content(&gates, "same-scope:3:abc").await;
                 let _guard = gate.lock().await;
-                if storage.find_staging_content("same-scope", MediaType::Image, 3, "abc")
-                    .unwrap().is_none() {
+                if storage
+                    .find_staging_content("same-scope", MediaType::Image, 3, "abc")
+                    .unwrap()
+                    .is_none()
+                {
                     tokio::task::yield_now().await;
                     uploaded.fetch_add(1, Ordering::SeqCst);
-                    storage.remember_staging_content("same-scope", MediaType::Image, 3, "abc", id)
+                    storage
+                        .remember_staging_content("same-scope", MediaType::Image, 3, "abc", id)
                         .unwrap();
                 }
             })
         });
-        for handle in handles { handle.await.unwrap(); }
+        for handle in handles {
+            handle.await.unwrap();
+        }
         assert_eq!(uploaded.load(Ordering::SeqCst), 1);
     }
 
@@ -2840,32 +2937,39 @@ mod tests {
             (4, "local_asset", StagingStatus::Staged),
         ] {
             let object_key = format!("staging/app-{index}.png");
-            storage.insert_staging_job(&StagingJobRecord {
-                id: format!("job-{index}"),
-                local_path: "C:/source/photo.png".into(),
-                purpose: purpose.into(),
-                media_type: MediaType::Image,
-                object_key: Some(object_key.clone()),
-                status,
-                bytes_total: Some(8),
-                bytes_uploaded: 8,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target: (purpose == "asset_import").then(|| {
-                    crate::backend::types::StagingAssetImportTarget {
-                        provider_connection_id: "provider".into(),
-                        name: None,
-                        group_id: None,
-                    }
-                }),
-                adjustment: None,
-                error: None,
-                created_at: index,
-                updated_at: index,
-            }).unwrap();
+            storage
+                .insert_staging_job(&StagingJobRecord {
+                    id: format!("job-{index}"),
+                    local_path: "C:/source/photo.png".into(),
+                    purpose: purpose.into(),
+                    media_type: MediaType::Image,
+                    object_key: Some(object_key.clone()),
+                    status,
+                    bytes_total: Some(8),
+                    bytes_uploaded: 8,
+                    asset_id: None,
+                    overseas_db_id: None,
+                    import_target: (purpose == "asset_import").then(|| {
+                        crate::backend::types::StagingAssetImportTarget {
+                            provider_connection_id: "provider".into(),
+                            name: None,
+                            group_id: None,
+                        }
+                    }),
+                    adjustment: None,
+                    error: None,
+                    created_at: index,
+                    updated_at: index,
+                })
+                .unwrap();
             if purpose == "asset_import" {
                 // 旧去重仅查 local_asset，正会漏过这类待清理的中转对象。
-                assert!(storage.find_local_asset_job_by_object_key(&object_key).unwrap().is_none());
+                assert!(
+                    storage
+                        .find_local_asset_job_by_object_key(&object_key)
+                        .unwrap()
+                        .is_none()
+                );
             }
             assert!(should_skip_bucket_object(&storage, &object_key).unwrap());
         }
@@ -2897,7 +3001,9 @@ mod tests {
             updated_at: 0,
         };
         storage.insert_staging_job(&job).unwrap();
-        storage.remember_staging_object_target(&job.id, &config).unwrap();
+        storage
+            .remember_staging_object_target(&job.id, &config)
+            .unwrap();
         assert!(should_skip_bucket_object_in_config(&storage, "user/photo.png", &config).unwrap());
         assert!(!should_skip_bucket_object_in_config(&storage, "user/photo.png", &other).unwrap());
 

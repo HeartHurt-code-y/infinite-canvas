@@ -7,6 +7,7 @@ import {
   initializeWorkflowVersions,
   mergeWorkflowVersionHistory,
   recordWorkflowVersion,
+  workflowVersionContentSignature,
 } from "../workspace/workflowVersionHistory";
 import { decodePromptContentDocument, type PromptContentDocumentV1 } from "../../lib/promptContent";
 import {
@@ -952,12 +953,59 @@ export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNod
 /** 历史栈上限：超出后丢弃最旧记录，防止长会话内存无界增长。 */
 const CANVAS_HISTORY_LIMIT = 200;
 
+/**
+ * 工作流运行期的机器进度判定：本次写入只改了 knowledgeVideoWorkflow 节点 config
+ * 的运行时字段（断点、任务身份、批次状态、审查进度），authored 内容签名不变。
+ * 节点增删、位移、其他族变化、连线变化或任何内容编辑都会使其返回 false，
+ * 从而按普通用户操作逐条入栈。签名按对象引用缓存（config 不可变替换），
+ * 稳态下每次补丁只对真正变化的新 config 算一次签名。
+ */
+function isWorkflowRuntimeProgressOnly(
+  past: Pick<CanvasStoreState, "nodesById" | "assetEdges">,
+  current: Pick<CanvasStoreState, "nodesById" | "assetEdges">,
+): boolean {
+  if (past.assetEdges !== current.assetEdges) return false;
+  const pastNodes = past.nodesById;
+  const nextNodes = current.nodesById;
+  if (pastNodes === nextNodes) return false;
+  const pastKeys = Object.keys(pastNodes);
+  if (pastKeys.length !== Object.keys(nextNodes).length) return false;
+  for (const key of pastKeys) {
+    const pastEntry = pastNodes[key];
+    const nextEntry = nextNodes[key];
+    if (pastEntry === nextEntry) continue;
+    if (pastEntry == null || nextEntry == null || pastEntry.type !== nextEntry.type) return false;
+    if (pastEntry.type !== "knowledgeVideoWorkflow" || nextEntry.type !== "knowledgeVideoWorkflow")
+      return false;
+    const pastData = pastEntry.data;
+    const nextData = nextEntry.data;
+    for (const field of Object.keys(nextData)) {
+      if (field === "config") continue;
+      if (
+        pastData[field as keyof KnowledgeVideoWorkflowNodeData] !==
+        nextData[field as keyof KnowledgeVideoWorkflowNodeData]
+      )
+        return false;
+    }
+    if (
+      workflowVersionContentSignature(pastData.config) !==
+      workflowVersionContentSignature(nextData.config)
+    )
+      return false;
+  }
+  return true;
+}
+
 function createCanvasStore(initialZoom = 100): CanvasStore {
   // 同一同步批次内的多次写入（如清空画布会连写九类节点与连线）合并为一条历史，
   // 一次用户操作对应一步撤销；跨 await 的写入天然分批。
   let coalescingHistory = false;
   // RF 的尺寸回存与选中同步是被动测量/视图态，不是用户操作：置位时跳过历史记录。
   let suppressHistory = false;
+  // 工作流运行期的机器进度（断点、任务身份、批次状态）只改运行时字段，authored
+  // 内容签名不变，工作流自身的版本链已独立记录。连续的机器进度折叠为一条撤销
+  // 记录：一次运行占用一步撤销，而不是把撤销栈灌满图片进度。
+  let lastRecordedProgressOnly = false;
 
   return createStore<CanvasStoreState>()(
     temporal(
@@ -1398,6 +1446,7 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
             } finally {
               suppressHistory = false;
             }
+            lastRecordedProgressOnly = false;
             temporalStore.getState().clear();
             return {
               ok: true,
@@ -1408,11 +1457,13 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
           },
           undo: () => {
             if (temporalStore.getState().pastStates.length === 0) return "unchanged";
+            lastRecordedProgressOnly = false;
             temporalStore.getState().undo();
             return "applied";
           },
           redo: () => {
             if (temporalStore.getState().futureStates.length === 0) return "unchanged";
+            lastRecordedProgressOnly = false;
             temporalStore.getState().redo();
             return "applied";
           },
@@ -1429,6 +1480,13 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
         limit: CANVAS_HISTORY_LIMIT,
         handleSet: (handleSet) => (pastState, replace, currentState, deltaState) => {
           if (coalescingHistory || suppressHistory) return;
+          // zundo 的参数类型照抄 setState 首参（含函数分支），运行时这里始终是状态对象。
+          const past = pastState as CanvasStoreState;
+          const current = currentState as CanvasStoreState;
+          const progressOnly = isWorkflowRuntimeProgressOnly(past, current);
+          // 连续机器进度只保留首条撤销记录：整次运行折叠为一步，后续进度直接跳过。
+          if (progressOnly && lastRecordedProgressOnly) return;
+          lastRecordedProgressOnly = progressOnly;
           coalescingHistory = true;
           // zundo 选项类型把内层声明成 setState（1-2 参），运行时实际接收 4 参。
           const recordHistory = handleSet as (
@@ -1635,6 +1693,13 @@ export function useCanvasCommands(): CanvasCommands {
   const canvas = useContext(CanvasStoreContext);
   if (canvas == null) throw new Error("useCanvasCommands must be used within CanvasStoreProvider");
   return canvas.commands;
+}
+
+/** 渲染无关的 store 订阅入口。非活跃画布冻结渲染后，保存调度等后台职责从这里走。 */
+export function useCanvasStore(): CanvasStore {
+  const canvas = useContext(CanvasStoreContext);
+  if (canvas == null) throw new Error("useCanvasStore must be used within CanvasStoreProvider");
+  return canvas.store;
 }
 
 /** 订阅撤销/重做历史长度，供工具栏按钮的可用态渲染。 */

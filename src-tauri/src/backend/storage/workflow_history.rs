@@ -391,29 +391,47 @@ impl Storage {
         sanitize_record(&mut record);
         let mut connection = self.lock()?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        // 冲突检查只需要五个标量列，它们与 record_json 在同一次写入中保持一致。
+        // 解码整份旧记录（可能数 MB 且带 gzip）会把每个检查点保存的代价放大一个量级。
         let previous = transaction
             .query_row(
-                "SELECT record_json FROM workflow_history WHERE id=?1",
+                "SELECT canvas_id, workflow_kind, revision, created_at, updated_at
+                 FROM workflow_history WHERE id=?1",
                 params![record.id],
-                read_record,
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, i64>(2)?,
+                        row.get::<_, i64>(3)?,
+                        row.get::<_, i64>(4)?,
+                    ))
+                },
             )
             .optional()?;
-        if let Some(previous) = &previous {
-            if record.revision != previous.revision {
+        if let Some((
+            previous_canvas_id,
+            previous_kind,
+            previous_revision,
+            previous_created_at,
+            previous_updated_at,
+        )) = &previous
+        {
+            if record.revision != previous_revision.unsigned_abs() {
                 return Err(BackendError::Conflict(format!(
                     "工作流历史已更新，请读取最新进度（当前版本{}，提交版本{}）",
-                    previous.revision, record.revision
+                    previous_revision, record.revision
                 )));
             }
-            if record.canvas_id != previous.canvas_id
-                || record.workflow_kind != previous.workflow_kind
+            if record.canvas_id != *previous_canvas_id
+                || record.workflow_kind.as_str() != previous_kind.as_str()
             {
                 return Err(BackendError::Conflict(
                     "工作流历史不能切换所属画布或工作流类型".to_string(),
                 ));
             }
-            record.created_at = previous.created_at;
-            record.updated_at = now_ms().max(previous.updated_at.saturating_add(1));
+            record.created_at = *previous_created_at;
+            record.updated_at = now_ms().max(previous_updated_at.saturating_add(1));
         } else {
             if record.revision != 0 {
                 return Err(BackendError::Conflict(

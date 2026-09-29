@@ -90,7 +90,11 @@ export const CanvasFlowNodeView = memo(function CanvasFlowNodeView({
   );
 });
 
-export function CanvasFlowEdgeView({
+/**
+ * 边视图同样以 memo 包裹：上游按 per-edge 输入浅比较保证 data 引用在连线内容
+ * 未变化时稳定，这里按引用比较即可跳过重渲染；节点拖动只影响两端坐标 props。
+ */
+export const CanvasFlowEdgeView = memo(function CanvasFlowEdgeView({
   id,
   sourceX,
   sourceY,
@@ -162,4 +166,4 @@ export function CanvasFlowEdgeView({
       </EdgeLabelRenderer>
     </>
   );
-}
+});

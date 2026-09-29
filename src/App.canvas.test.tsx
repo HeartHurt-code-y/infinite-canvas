@@ -1164,6 +1164,16 @@ function baseInvokeImplementation(
       return Promise.resolve("asset-image-1");
     case "start_generation":
       return Promise.resolve("task-1");
+    case "create_media_thumbnail": {
+      // 缩略图管线：产物卡片在拿到缩略图前不渲染 <img>（避免解码原图）。
+      // 测试里直接回显源路径作为缩略图路径，卡片 src 因此保留原文件名。
+      const sourcePath = args?.["sourcePath"];
+      return Promise.resolve({
+        path: typeof sourcePath === "string" ? sourcePath : "",
+        width: 512,
+        height: 512,
+      });
+    }
     case "prepare_video_edit_source":
       return Promise.resolve({ previewId: "preview-id", path: "C:/preview.mp4" });
     case "release_video_edit_source":
@@ -1219,12 +1229,21 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     invokeMock.mockImplementation((command, args) => {
       if (command === "import_local_base64_asset") {
         const { localPath, name } = args?.["command"] as { localPath: string; name: string };
-        const mediaType = name.endsWith(".mp4") ? "video" : name.endsWith(".m4a") ? "audio" : "image";
+        const mediaType = name.endsWith(".mp4")
+          ? "video"
+          : name.endsWith(".m4a")
+            ? "audio"
+            : "image";
         return Promise.resolve({
           id: `local-b64-${name}`,
           name,
           mediaType,
-          mimeType: mediaType === "video" ? "video/mp4" : mediaType === "audio" ? "audio/mp4" : "image/jpeg",
+          mimeType:
+            mediaType === "video"
+              ? "video/mp4"
+              : mediaType === "audio"
+                ? "audio/mp4"
+                : "image/jpeg",
           previewUrl: `asset://localhost/${encodeURIComponent(localPath)}`,
           byteSize: 2048,
           createdAt: 1,
@@ -1263,7 +1282,12 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       const id = listener?.[1]?.["handler"] as number;
       return tauriCallbacks.get(id)!;
     });
-    const paths = ["P:\\scene\\first.jpg", "P:\\scene\\clip.mp4", "P:\\scene\\notes.txt", "P:\\scene\\voice.m4a"];
+    const paths = [
+      "P:\\scene\\first.jpg",
+      "P:\\scene\\clip.mp4",
+      "P:\\scene\\notes.txt",
+      "P:\\scene\\voice.m4a",
+    ];
     act(() => {
       dropHandler({
         event: "tauri://drag-drop",
@@ -1271,8 +1295,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         payload: { paths, position: { x: 1600, y: 900 } },
       });
     });
-    expect(invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"))
-      .toHaveLength(0);
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"),
+    ).toHaveLength(0);
     act(() => {
       dropHandler({
         event: "tauri://drag-drop",
@@ -1313,7 +1338,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         "local-b64-first.jpg",
       ]);
       expect(document?.assetNodes.map((node) => node.libraryPickOrder)).toEqual([1, 2, 3, 4]);
-      expect(document?.assetNodes.find((node) => node.kind === "video")?.videoUrl).toContain("clip.mp4");
+      expect(document?.assetNodes.find((node) => node.kind === "video")?.videoUrl).toContain(
+        "clip.mp4",
+      );
     });
     fireEvent.click(screen.getByRole("button", { name: "打开全局设置" }));
     await waitFor(() => expect(getCanvasViewport().closest("[inert]")).not.toBeNull());
@@ -1324,8 +1351,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         payload: { paths: [paths[0]], position: { x: 600, y: 400 } },
       });
     });
-    expect(invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"))
-      .toHaveLength(4);
+    expect(
+      invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"),
+    ).toHaveLength(4);
   });
 
   it("初始画布为空，添加节点菜单只展示九种节点", async () => {
@@ -1345,6 +1373,53 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
     expect(within(menu).getByRole("menuitem", { name: "图片生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频生成" })).toBeInTheDocument();
     expect(within(menu).getByRole("menuitem", { name: "视频拼接与合成" })).toBeInTheDocument();
+  });
+
+  it("视口裁剪在真实布局下生效：离屏节点不渲染 DOM，平移回来后恢复", async () => {
+    // 生产模式下视口有真实布局，React Flow 开启 onlyRenderVisibleElements；
+    // 其余测试运行在 test 模式（裁剪关闭），这条用例 stub 环境验证裁剪路径本身。
+    vi.stubEnv("MODE", "production");
+    const rectSpy = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1280,
+      bottom: 800,
+      width: 1280,
+      height: 800,
+      toJSON: () => ({}),
+    });
+    try {
+      render(<App />);
+      expect(await screen.findByText("画布为空")).toBeInTheDocument();
+
+      // 先在初始视图内创建节点：裁剪开启时可见节点照常渲染。
+      createNodeAt("图片生成", 400, 300);
+      expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
+
+      // 把视图拖到 (+700, +400)：节点离开裁剪窗口，DOM 卸载但画布数据保留。
+      const pane = document.querySelector<HTMLElement>(".react-flow__pane");
+      expect(pane).not.toBeNull();
+      fireCanvasMouse(pane!, "mousedown", { clientX: 400, clientY: 300 });
+      fireCanvasMouse(document, "mousemove", { clientX: 1100, clientY: 700 });
+      fireCanvasMouse(document, "mouseup", { clientX: 1100, clientY: 700 });
+      await waitFor(() => {
+        expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(0);
+      });
+      expect(screen.queryByText("画布为空")).not.toBeInTheDocument();
+
+      // 拖回原位：同一个节点重新渲染，没有被裁剪破坏。
+      fireCanvasMouse(pane!, "mousedown", { clientX: 1100, clientY: 700 });
+      fireCanvasMouse(document, "mousemove", { clientX: 400, clientY: 300 });
+      fireCanvasMouse(document, "mouseup", { clientX: 400, clientY: 300 });
+      await waitFor(() => {
+        expect(document.querySelectorAll(".canvas-gen-node")).toHaveLength(1);
+      });
+    } finally {
+      rectSpy.mockRestore();
+      vi.unstubAllEnvs();
+    }
   });
 
   it("画布素材卡片按稳定身份保存到本地库，已有内容不会重复入库", async () => {
@@ -2270,7 +2345,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
       expect(invokeMock).toHaveBeenCalledWith("set_downloader_cookie_browser", { browser: "auto" }),
     );
     await waitFor(() =>
-      expect(within(node).getByText(/下载时自动逐源预检 · 已导入文件可用于站点解析和后备/)).toBeInTheDocument(),
+      expect(
+        within(node).getByText(/下载时自动逐源预检 · 已导入文件可用于站点解析和后备/),
+      ).toBeInTheDocument(),
     );
   });
 

@@ -78,13 +78,13 @@ fn main() {
             || blender_inventory.is_none()
             || remotion_inventory.is_none()
             || !remotion_inventory_ready
-            || remotion.as_ref().map_or(true, |(_, value)| {
+            || remotion.as_ref().is_none_or(|(_, value)| {
                 value["criticalSha256"]
                     .as_object()
-                    .map_or(true, |files| files.len() < 5)
+                    .is_none_or(|files| files.len() < 5)
             })
             || style_hash.is_none()
-            || ffmpeg.as_ref().map_or(true, |(_, value)| {
+            || ffmpeg.as_ref().is_none_or(|(_, value)| {
                 value["ffmpegSha256"].as_str().is_none()
                     || (value["ffprobeSha256"].as_str().is_none()
                         && !(macos_target

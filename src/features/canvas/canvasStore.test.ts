@@ -189,6 +189,65 @@ describe("canvas state interface", () => {
     expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config.brief).toBe("解释复利");
   });
 
+  it("collapses consecutive workflow runtime progress into one undo entry", async () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("knowledgeVideoWorkflow", knowledgeVideoWorkflowNode);
+    // 同批写入合并发生在微任务里：命令之间让出一次微任务，模拟真实异步节奏。
+    const tick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
+    await tick();
+    expect(canvas.getHistory()).toMatchObject({ pastCount: 1 });
+    const patchProgress = (phase: string, runId: string | null) =>
+      canvas.commands.patchNode("knowledgeVideoWorkflow", "knowledge-video-1", (node) => ({
+        ...node,
+        config: {
+          ...node.config,
+          checkpoint: {
+            ...node.config.checkpoint,
+            phase,
+            runId,
+          } as typeof node.config.checkpoint,
+        },
+      }));
+
+    // 机器进度只改运行时字段：三次补丁折叠为一条撤销记录。
+    // 阶段用非活动值（不在 INTERRUPTED_KNOWLEDGE_VIDEO_PHASES 内），
+    // 避免触发 commands.undo 对在途工作流的配置保护，专注验证撤销折叠本身。
+    expect(patchProgress("awaiting_approval", "run-1")).toBe("applied");
+    await tick();
+    expect(patchProgress("paused", "run-1")).toBe("applied");
+    await tick();
+    expect(patchProgress("awaiting_approval", "run-1")).toBe("applied");
+    await tick();
+    expect(canvas.getHistory()).toMatchObject({ pastCount: 2, futureCount: 0 });
+
+    // 用户内容编辑单独入栈，撤销恰好回到进度补丁之后的状态。
+    canvas.commands.patchNode("knowledgeVideoWorkflow", "knowledge-video-1", (node) => ({
+      ...node,
+      config: { ...node.config, brief: "解释复利" },
+    }));
+    await tick();
+    expect(canvas.getHistory()).toMatchObject({ pastCount: 3 });
+    expect(canvas.commands.undo()).toBe("applied");
+    expect(canvas.getSnapshot().nodes.knowledgeVideoWorkflow[0]?.config.brief).toBe(
+      knowledgeVideoWorkflowNode.config.brief,
+    );
+    expect(canvas.getHistory()).toMatchObject({ pastCount: 2, futureCount: 1 });
+
+    // 位移是用户操作，正常入栈；紧随的机器进度先入栈一条、再折叠。
+    canvas.commands.patchNode("knowledgeVideoWorkflow", "knowledge-video-1", (node) => ({
+      ...node,
+      x: node.x + 50,
+    }));
+    await tick();
+    expect(canvas.getHistory().pastCount).toBe(3);
+    expect(patchProgress("paused", "run-2")).toBe("applied");
+    await tick();
+    expect(canvas.getHistory().pastCount).toBe(4);
+    expect(patchProgress("awaiting_approval", "run-2")).toBe("applied");
+    await tick();
+    expect(canvas.getHistory().pastCount).toBe(4);
+  });
+
   it("rejects duplicate keys across node families", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", assetNode);

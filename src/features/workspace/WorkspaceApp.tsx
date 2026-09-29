@@ -126,6 +126,7 @@ import {
   useCanvas,
   useCanvasCommands,
   useCanvasHistoryCounts,
+  useCanvasStore,
   isSupportedConnection,
   type CanvasDocument,
   type CanvasDocumentV2,
@@ -133,12 +134,14 @@ import {
   type CanvasNodeType,
   type CanvasNodesById,
   type CanvasNodesByType,
+  type CanvasReadModel,
   type CanvasStoreNodeChange,
 } from "../canvas/canvasStore";
 import {
   useCanvasDocumentPersistence,
   type CanvasSessionServices,
 } from "../canvas/useCanvasDocumentPersistence";
+import { useDeferredSessionState } from "./useDeferredSessionState";
 import { buildInputOrderByEdge } from "../canvas/connectionIndex";
 import {
   createCanvasInputResolver,
@@ -464,6 +467,25 @@ type CanvasFlowNodeCacheEntry = {
 };
 type CanvasFlowNodeCache = Map<string, Map<string, CanvasFlowNodeCacheEntry>>;
 
+function stableCachedItem<T>(
+  cache: Map<string, { inputs: unknown[]; node: T }>,
+  key: string,
+  inputs: unknown[],
+  build: () => T,
+): T {
+  const previous = cache.get(key);
+  if (
+    previous != null &&
+    previous.inputs.length === inputs.length &&
+    inputs.every((value, index) => value === previous.inputs[index])
+  ) {
+    return previous.node;
+  }
+  const item = build();
+  cache.set(key, { inputs, node: item });
+  return item;
+}
+
 function stableCanvasFlowNode(
   caches: CanvasFlowNodeCache,
   cacheId: string,
@@ -476,17 +498,7 @@ function stableCanvasFlowNode(
     cache = new Map();
     caches.set(cacheId, cache);
   }
-  const previous = cache.get(key);
-  if (
-    previous != null &&
-    previous.inputs.length === inputs.length &&
-    inputs.every((value, index) => value === previous.inputs[index])
-  ) {
-    return previous.node;
-  }
-  const node = build();
-  cache.set(key, { inputs, node });
-  return node;
+  return stableCachedItem(cache, key, inputs, build);
 }
 
 /**
@@ -710,6 +722,44 @@ function cloudAssetKindTotalsScopeKey(
   return `${providerConnectionId}|${groupId ?? ""}`;
 }
 
+/**
+ * WorkspaceApp 订阅的画布视图切片。抽成纯函数：非活跃画布把上次结果冻结后原样返回，
+ * 让 zustand 的浅比较判定「无变化」，后台进度写入不再触发 1.2 万行组件体重跑。
+ */
+function selectCanvasViewModel(state: CanvasReadModel) {
+  return {
+    selectedNodeKey: state.selection.nodeKey,
+    selectedEdgeId: state.selection.edgeId,
+    zoom: state.view.zoom,
+    pan: state.view.pan,
+    assetNodes: state.nodes.asset,
+    genNodes: state.nodes.gen,
+    screenplayNodes: state.nodes.screenplay,
+    storyboardNodes: state.nodes.storyboard,
+    knowledgeVideoWorkflowNodes: state.nodes.knowledgeVideoWorkflow,
+    viralRemixNodes: state.nodes.viralRemix,
+    videoComposerNodes: state.nodes.videoComposer,
+    videoDownloaderNodes: state.nodes.videoDownloader,
+    frameExtractorNodes: state.nodes.frameExtractor,
+    resultNodes: state.nodes.result,
+    outputNodes: state.nodes.output,
+    assetNodeByKey: state.nodeByKey.asset,
+    outputNodeByKey: state.nodeByKey.output,
+    genNodeByKey: state.nodeByKey.gen,
+    screenplayNodeByKey: state.nodeByKey.screenplay,
+    storyboardNodeByKey: state.nodeByKey.storyboard,
+    videoComposerNodeByKey: state.nodeByKey.videoComposer,
+    videoDownloaderNodeByKey: state.nodeByKey.videoDownloader,
+    frameExtractorNodeByKey: state.nodeByKey.frameExtractor,
+    viralRemixNodeByKey: state.nodeByKey.viralRemix,
+    assetEdges: state.graph.edges,
+    canvasNodeByKey: state.nodeByKey,
+    canvasEdgeIndex: state.graph,
+    hasCanvasNodes: state.hasNodes,
+  };
+}
+type CanvasViewModel = ReturnType<typeof selectCanvasViewModel>;
+
 export function WorkspaceApp({
   canvasId,
   active,
@@ -721,6 +771,9 @@ export function WorkspaceApp({
   readonly services: CanvasSessionServices;
   readonly canvasNavigation?: ReactNode;
 }) {
+  // 非活跃画布的降载开关：后台事件回调与 store 订阅读 ref，激活态变化驱动缓冲回放。
+  const activeRef = useRef(active);
+  activeRef.current = active;
   const [assetLibrarySource, setAssetLibrarySource] =
     useState<AssetLibrarySource>(readAssetLibrarySource);
   const [cloudCollection, setCloudCollection] = useState<"library" | "object_storage">("library");
@@ -789,6 +842,7 @@ export function WorkspaceApp({
   } | null>(null);
   const [whiteModelStudioNodeKey, setWhiteModelStudioNodeKey] = useState<string | null>(null);
   const [canvasAgent] = useState(() => new CanvasAgentController());
+  const canvasViewRef = useRef<CanvasViewModel | null>(null);
   const {
     selectedNodeKey,
     selectedEdgeId,
@@ -819,36 +873,14 @@ export function WorkspaceApp({
     canvasEdgeIndex,
     hasCanvasNodes,
   } = useCanvas(
-    useShallow((state) => ({
-      selectedNodeKey: state.selection.nodeKey,
-      selectedEdgeId: state.selection.edgeId,
-      zoom: state.view.zoom,
-      pan: state.view.pan,
-      assetNodes: state.nodes.asset,
-      genNodes: state.nodes.gen,
-      screenplayNodes: state.nodes.screenplay,
-      storyboardNodes: state.nodes.storyboard,
-      knowledgeVideoWorkflowNodes: state.nodes.knowledgeVideoWorkflow,
-      viralRemixNodes: state.nodes.viralRemix,
-      videoComposerNodes: state.nodes.videoComposer,
-      videoDownloaderNodes: state.nodes.videoDownloader,
-      frameExtractorNodes: state.nodes.frameExtractor,
-      resultNodes: state.nodes.result,
-      outputNodes: state.nodes.output,
-      assetNodeByKey: state.nodeByKey.asset,
-      outputNodeByKey: state.nodeByKey.output,
-      genNodeByKey: state.nodeByKey.gen,
-      screenplayNodeByKey: state.nodeByKey.screenplay,
-      storyboardNodeByKey: state.nodeByKey.storyboard,
-      videoComposerNodeByKey: state.nodeByKey.videoComposer,
-      videoDownloaderNodeByKey: state.nodeByKey.videoDownloader,
-      frameExtractorNodeByKey: state.nodeByKey.frameExtractor,
-      viralRemixNodeByKey: state.nodeByKey.viralRemix,
-      assetEdges: state.graph.edges,
-      canvasNodeByKey: state.nodeByKey,
-      canvasEdgeIndex: state.graph,
-      hasCanvasNodes: state.hasNodes,
-    })),
+    useShallow((state) => {
+      // 非活跃画布渲染 null，却会被后台进度写入反复触发全组件重跑。冻结为上次
+      // 计算的视图：store 写入照常入库、持久化与撤销，UI 在重新激活时整体刷新。
+      if (!activeRef.current) return canvasViewRef.current ?? selectCanvasViewModel(state);
+      const view = selectCanvasViewModel(state);
+      canvasViewRef.current = view;
+      return view;
+    }),
   );
   const candidateCanvasNodeKeys = useMemo(
     () =>
@@ -995,19 +1027,42 @@ export function WorkspaceApp({
    * 只用于「运行中」的实时展示：任务完成后由 run 的回调写入完整结果并清空这里，
    * 因此它不是画布文档的一部分，不参与持久化。
    */
-  const [streamingTextByNode, setStreamingTextByNode] = useState<Record<string, string>>({});
+  const [streamingTextByNode, setStreamingTextByNodeInternal] = useState<Record<string, string>>(
+    {},
+  );
+  // 非活跃画布的后台事件不再逐次 setState 重渲染整个组件：updater 进缓冲，激活时回放。
+  const setStreamingTextByNode = useDeferredSessionState(
+    setStreamingTextByNodeInternal,
+    activeRef,
+    active,
+  );
   /** 记录每个节点当前流式任务 ID：任务换了说明是新一轮，需要从空重新累积。 */
   const streamingTextTaskByNodeRef = useRef<Map<string, string>>(new Map());
+  /** 流式正文 50ms 合帧缓冲：同批 token 追加合并为一次 setState。 */
+  const streamingTextBatchRef = useRef<{
+    entries: Map<string, { text: string; replace: boolean }>;
+    timer: number | null;
+  }>({ entries: new Map(), timer: null });
+  useEffect(
+    () => () => {
+      if (streamingTextBatchRef.current.timer !== null)
+        window.clearTimeout(streamingTextBatchRef.current.timer);
+    },
+    [],
+  );
   /** 本轮结束（成功或失败）后清掉流式草稿：完整结果由调用方写入节点。 */
-  const clearStreamingText = useCallback((nodeKey: string) => {
-    streamingTextTaskByNodeRef.current.delete(nodeKey);
-    setStreamingTextByNode((current) => {
-      if (!(nodeKey in current)) return current;
-      const next = { ...current };
-      delete next[nodeKey];
-      return next;
-    });
-  }, []);
+  const clearStreamingText = useCallback(
+    (nodeKey: string) => {
+      streamingTextTaskByNodeRef.current.delete(nodeKey);
+      setStreamingTextByNode((current) => {
+        if (!(nodeKey in current)) return current;
+        const next = { ...current };
+        delete next[nodeKey];
+        return next;
+      });
+    },
+    [setStreamingTextByNode],
+  );
   const [startErrorsByNode, setStartErrorsByNode] = useState<Record<string, string>>({});
   const setNodeStartError = useCallback((nodeKey: string, error: string | null) => {
     setStartErrorsByNode((current) => {
@@ -1020,13 +1075,20 @@ export function WorkspaceApp({
       return { ...current, [nodeKey]: error };
     });
   }, []);
-  const [taskResults, setTaskResults] = useState<Record<string, readonly GenerationResultRecord[]>>(
-    {},
-  );
-  const [saveProgressByResult, setSaveProgressByResult] = useState<
+  const [taskResults, setTaskResultsInternal] = useState<
+    Record<string, readonly GenerationResultRecord[]>
+  >({});
+  const setTaskResults = useDeferredSessionState(setTaskResultsInternal, activeRef, active);
+  const [saveProgressByResult, setSaveProgressByResultInternal] = useState<
     Record<string, GenerationResultSaveProgress>
   >({});
-  const [retryInfoByTask, setRetryInfoByTask] = useState<Record<string, RetryInfo>>({});
+  const setSaveProgressByResult = useDeferredSessionState(
+    setSaveProgressByResultInternal,
+    activeRef,
+    active,
+  );
+  const [retryInfoByTask, setRetryInfoByTaskInternal] = useState<Record<string, RetryInfo>>({});
+  const setRetryInfoByTask = useDeferredSessionState(setRetryInfoByTaskInternal, activeRef, active);
   const [rawResponses, setRawResponses] = useState<Record<string, string>>({});
   const [cloudAssets, setCloudAssets] = useState<readonly CloudAsset[]>([]);
   // 云端素材库分组：按令牌作用域隔离，所有供应商/平台共用同一套接口。
@@ -1144,14 +1206,24 @@ export function WorkspaceApp({
   }, [assetUploads]);
   // startUpload 返回 jobId 前，占位行的临时自增 id（前缀避免与后端真实 id 冲突）。
   const pendingUploadSeqRef = useRef(0);
-  const [videoComposerRuns, setVideoComposerRuns] = useState<
+  const [videoComposerRuns, setVideoComposerRunsInternal] = useState<
     Readonly<Record<string, VideoComposerRunState>>
   >({});
+  const setVideoComposerRuns = useDeferredSessionState(
+    setVideoComposerRunsInternal,
+    activeRef,
+    active,
+  );
   const videoComposerAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   // 网络爆款视频下载节点：节点随画布持久化，下载任务与引擎状态只在会话内。
-  const [videoDownloaderRuns, setVideoDownloaderRuns] = useState<
+  const [videoDownloaderRuns, setVideoDownloaderRunsInternal] = useState<
     Readonly<Record<string, VideoDownloaderRunState>>
   >({});
+  const setVideoDownloaderRuns = useDeferredSessionState(
+    setVideoDownloaderRunsInternal,
+    activeRef,
+    active,
+  );
   // 下载启动时的节点快照：产物卡片落点按启动时节点位置计算（轮询期间用户
   // 拖动节点不改变落点，与迁移前 setTimeout 轮询的语义一致）。
   const videoDownloaderStartNodesRef = useRef<Map<string, VideoDownloaderNodeData>>(new Map());
@@ -1171,9 +1243,14 @@ export function WorkspaceApp({
   const [downloaderEngineBusy, setDownloaderEngineBusy] = useState(false);
   const [downloaderCookieBusy, setDownloaderCookieBusy] = useState(false);
   // 视频抽帧节点：抽帧任务与会话内运行状态；产物自动落 origin=frame_extract 图片卡片。
-  const [frameExtractorRuns, setFrameExtractorRuns] = useState<
+  const [frameExtractorRuns, setFrameExtractorRunsInternal] = useState<
     Readonly<Record<string, VideoFrameExtractorRunState>>
   >({});
+  const setFrameExtractorRuns = useDeferredSessionState(
+    setFrameExtractorRunsInternal,
+    activeRef,
+    active,
+  );
   const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
   const frameExtractionQueuesRef = useRef(
     new Map<
@@ -1227,10 +1304,15 @@ export function WorkspaceApp({
       if (queue.activeJobId)
         void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch(() => undefined);
     }
-  }, [videoDownloaderNodes, frameExtractorNodes]);
-  const [knowledgeVideoWorkflowRuns, setKnowledgeVideoWorkflowRuns] = useState<
+  }, [videoDownloaderNodes, frameExtractorNodes, setVideoDownloaderRuns, setFrameExtractorRuns]);
+  const [knowledgeVideoWorkflowRuns, setKnowledgeVideoWorkflowRunsInternal] = useState<
     Readonly<Record<string, KnowledgeVideoWorkflowRunState>>
   >({});
+  const setKnowledgeVideoWorkflowRuns = useDeferredSessionState(
+    setKnowledgeVideoWorkflowRunsInternal,
+    activeRef,
+    active,
+  );
   const knowledgeVideoWorkflowAbortControllersRef = useRef<Map<string, AbortController>>(new Map());
   const recordedWorkflowRunner = useMemo(
     () => createRecordedWorkflowRunner({ canvasId }),
@@ -1371,6 +1453,24 @@ export function WorkspaceApp({
     new Map<string, { edgeId: string; sourceKey: string; text: string; importedText: string }>(),
   );
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
+  // 视口裁剪开关：仅在容器有真实布局尺寸时启用 React Flow 的
+  // onlyRenderVisibleElements（画布上大量节点离屏时跳过整棵 DOM 子树）。
+  // 测试环境（jsdom）永不启用：测试会伪造视口 rect 驱动拖拽几何，
+  // 与裁剪所依赖的真实布局互相冲突。
+  const [canvasViewportMeasured, setCanvasViewportMeasured] = useState(false);
+  useEffect(() => {
+    if (!active || import.meta.env.MODE === "test") return;
+    const container = canvasViewportRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const measure = () => {
+      const rect = container.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) setCanvasViewportMeasured(true);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, [active]);
   const [externalMediaDropHover, setExternalMediaDropHover] = useState(false);
   // React Flow 实例引用：命令式视口操作（恢复视图/锚点缩放/坐标换算）的唯一入口。
   const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
@@ -1551,6 +1651,7 @@ export function WorkspaceApp({
     restore: restoreCanvasDocument,
     services,
     validateDelete: validateCanvasDelete,
+    active,
   });
   const {
     hydrated: canvasHydrated,
@@ -1564,26 +1665,32 @@ export function WorkspaceApp({
     scheduleCanvasSaveRef.current = scheduleCanvasSave;
   }, [scheduleCanvasSave]);
 
+  // 保存调度改为直接订阅 store：非活跃画布冻结渲染后，后台进度写入不再触发组件
+  // 重渲染与 effect 重跑，但断点与画布文档仍必须按时落盘。订阅与渲染解耦后两者
+  // 互不影响。只有节点/连线/视口变化才需要保存；选中态等 UI 字段跳过。
+  const canvasStore = useCanvasStore();
   useEffect(() => {
-    if (canvasHydrated) documentChanged();
-  }, [
-    canvasHydrated,
-    documentChanged,
-    assetEdges,
-    assetNodes,
-    genNodes,
-    screenplayNodes,
-    storyboardNodes,
-    viralRemixNodes,
-    videoComposerNodes,
-    videoDownloaderNodes,
-    frameExtractorNodes,
-    outputNodes,
-    knowledgeVideoWorkflowNodes,
-    pan,
-    resultNodes,
-    zoom,
-  ]);
+    if (!canvasHydrated) return;
+    documentChanged();
+    let lastNodes = canvasStore.getState().nodesById;
+    let lastEdges = canvasStore.getState().assetEdges;
+    let lastZoom = canvasStore.getState().zoom;
+    let lastPan = canvasStore.getState().pan;
+    return canvasStore.subscribe((state) => {
+      if (
+        state.nodesById === lastNodes &&
+        state.assetEdges === lastEdges &&
+        state.zoom === lastZoom &&
+        state.pan === lastPan
+      )
+        return;
+      lastNodes = state.nodesById;
+      lastEdges = state.assetEdges;
+      lastZoom = state.zoom;
+      lastPan = state.pan;
+      documentChanged();
+    });
+  }, [canvasHydrated, documentChanged, canvasStore]);
 
   useEffect(() => {
     if (!canvasHydrated || !active) return;
@@ -3703,7 +3810,7 @@ export function WorkspaceApp({
         }
       }
     },
-    [patchNode, snapshotV2],
+    [patchNode, snapshotV2, setKnowledgeVideoWorkflowRuns],
   );
 
   const navigateWorkflowVersion = useCallback(
@@ -3739,7 +3846,13 @@ export function WorkspaceApp({
         toast.error("工作流版本无法恢复", { description: formatWorkflowError(error) });
       }
     },
-    [snapshotV2, knowledgeVideoWorkflowRuns, patchNode, scheduleCanvasSave],
+    [
+      snapshotV2,
+      knowledgeVideoWorkflowRuns,
+      patchNode,
+      scheduleCanvasSave,
+      setKnowledgeVideoWorkflowRuns,
+    ],
   );
   const undoKnowledgeVideoWorkflowVersion = useCallback(
     (key: string) => navigateWorkflowVersion(key, undoWorkflowVersion),
@@ -3949,7 +4062,14 @@ export function WorkspaceApp({
           }
         });
     },
-    [recordedWorkflowRunner, snapshotV2, recoverWorkflowHistory, patchNode, providerCatalog],
+    [
+      recordedWorkflowRunner,
+      snapshotV2,
+      recoverWorkflowHistory,
+      patchNode,
+      providerCatalog,
+      setKnowledgeVideoWorkflowRuns,
+    ],
   );
 
   const restoreStoredWorkflow = useCallback(
@@ -4499,7 +4619,7 @@ export function WorkspaceApp({
         },
       }));
     },
-    [snapshotV2, patchNode],
+    [snapshotV2, patchNode, setKnowledgeVideoWorkflowRuns],
   );
   const approveKnowledgeVideoWorkflowPlan = useCallback(
     (key: string) => {
@@ -4642,7 +4762,7 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [removeCanvasNode],
+    [removeCanvasNode, setKnowledgeVideoWorkflowRuns],
   );
   const revealKnowledgeVideoWorkflowResult = useCallback(
     (key: string) => {
@@ -5978,7 +6098,7 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [removeCanvasNode],
+    [removeCanvasNode, setVideoComposerRuns],
   );
 
   /** 删除结果节点。 */
@@ -6684,6 +6804,8 @@ export function WorkspaceApp({
         }),
       ),
     enabled: isDesktopRuntime(),
+    // 结果只经缓存订阅消费，无需触发任何重渲染。
+    notifyOnChangeProps: [],
     refetchInterval: activeUploadJobIds.length > 0 ? UPLOAD_POLL_INTERVAL_MS : false,
   });
   // 轮询结果 → 会话状态合并。订阅 Query 缓存而不是在 effect 体里同步 setState：
@@ -6831,6 +6953,9 @@ export function WorkspaceApp({
     queryKey: [...GENERATION_TASKS_QUERY_KEY, canvasId],
     queryFn: () => generationClient.list({ canvasId, limit: 50 }),
     enabled: isDesktopRuntime(),
+    // 非活跃画布不需要任务列表触发的重渲染（渲染本就被冻结为 null）：
+    // 数据继续进缓存，激活后下一条渲染直接读到最新值。
+    notifyOnChangeProps: active ? undefined : [],
     refetchInterval: (query) => {
       const tasks = query.state.data?.items ?? [];
       return tasks.some((task) => !isTerminalTaskStatus(task.status))
@@ -6847,8 +6972,27 @@ export function WorkspaceApp({
 
   const refreshTasks = useCallback(() => {
     if (!isDesktopRuntime()) return;
-    void queryClient.invalidateQueries({ queryKey: GENERATION_TASKS_QUERY_KEY });
-  }, [queryClient]);
+    // 只失效本画布的任务列表：generation:* 事件是全局广播，每个画布实例都会收到，
+    // 若按基础 key 失效，一次事件会让所有打开的画布各拉一遍任务列表。
+    void queryClient.invalidateQueries({ queryKey: [...GENERATION_TASKS_QUERY_KEY, canvasId] });
+  }, [queryClient, canvasId]);
+
+  // 高频事件（图片保存进度、逐张结果）不需要逐次拉任务列表：500ms 合并一次兜底刷新，
+  // 语义不变（事件后 0.5s 内必然对账），但把 N 次 IPC 收敛为 1 次。
+  const tasksRefreshTimerRef = useRef<number | null>(null);
+  const scheduleTasksRefresh = useCallback(() => {
+    if (tasksRefreshTimerRef.current !== null) return;
+    tasksRefreshTimerRef.current = window.setTimeout(() => {
+      tasksRefreshTimerRef.current = null;
+      refreshTasks();
+    }, 500);
+  }, [refreshTasks]);
+  useEffect(
+    () => () => {
+      if (tasksRefreshTimerRef.current !== null) window.clearTimeout(tasksRefreshTimerRef.current);
+    },
+    [],
+  );
 
   useEffect(() => {
     if (!isDesktopRuntime() || !active) return;
@@ -6913,7 +7057,7 @@ export function WorkspaceApp({
       );
       setTaskResults(Object.fromEntries(entries));
     })();
-  }, [generationTasksQuery.data]);
+  }, [generationTasksQuery.data, setTaskResults]);
 
   // 生成结果落卡去重（taskId#resultIndex）：占位卡片在任务启动时即已创建。
   // result-ready 只写入会话内 previewSrc，result-saved 再写入稳定的 finalPath；
@@ -7083,16 +7227,34 @@ export function WorkspaceApp({
         const nodeKey = info?.sourceNodeId;
         const chunk = info?.delta;
         if (!nodeKey || !chunk) return;
-        if (info?.taskId && info.taskId !== streamingTextTaskByNodeRef.current.get(nodeKey)) {
+        const taskChanged =
+          Boolean(info?.taskId) && info?.taskId !== streamingTextTaskByNodeRef.current.get(nodeKey);
+        if (taskChanged) {
           // 同一节点可能被连续发起多轮；任务 ID 变了说明是新一轮，从空开始累积。
-          streamingTextTaskByNodeRef.current.set(nodeKey, info.taskId);
-          setStreamingTextByNode((current) => ({ ...current, [nodeKey]: chunk }));
-          return;
+          streamingTextTaskByNodeRef.current.set(nodeKey, info?.taskId as string);
         }
-        setStreamingTextByNode((current) => ({
-          ...current,
-          [nodeKey]: `${current[nodeKey] ?? ""}${chunk}`,
-        }));
+        // 流式正文按 50ms 合帧：每个 token 一次 setState 会让整棵组件树空转。
+        const batch = streamingTextBatchRef.current;
+        const entry = batch.entries.get(nodeKey);
+        if (taskChanged || !entry)
+          batch.entries.set(nodeKey, { text: chunk, replace: taskChanged });
+        else entry.text += chunk;
+        batch.timer ??= window.setTimeout(() => {
+          batch.timer = null;
+          const pending = batch.entries;
+          batch.entries = new Map();
+          if (pending.size === 0) return;
+          setStreamingTextByNode((current) => {
+            let next = current;
+            for (const [key, item] of pending) {
+              next = {
+                ...next,
+                [key]: item.replace ? item.text : `${next[key] ?? ""}${item.text}`,
+              };
+            }
+            return next;
+          });
+        }, 50);
         return;
       }
       if (eventName === "generation:result-save-progress") {
@@ -7159,9 +7321,16 @@ export function WorkspaceApp({
           }));
         }
       }
-      void refreshTasks();
+      void scheduleTasksRefresh();
     },
-    [applyResultToOutputCard, refreshTasks],
+    [
+      applyResultToOutputCard,
+      scheduleTasksRefresh,
+      setRetryInfoByTask,
+      setSaveProgressByResult,
+      setStreamingTextByNode,
+      setTaskResults,
+    ],
   );
 
   // 事件处理器每次渲染都会重建（依赖 applyResultToOutputCard → outputNodes），因此订阅
@@ -7409,7 +7578,10 @@ export function WorkspaceApp({
           : null;
       if (perTaskProfile && genNode.kind === "video") {
         if (genNode.config.greenScreen?.enabled || genNode.config.whiteModelControl?.enabled) {
-          setNodeStartError(nodeKey, "按次系列只支持参考图及指定型号的参考音频，请先关闭绿幕或白模视频控制。");
+          setNodeStartError(
+            nodeKey,
+            "按次系列只支持参考图及指定型号的参考音频，请先关闭绿幕或白模视频控制。",
+          );
           return;
         }
         // Wan's file/link inputs are stored on the node but hidden for this model.
@@ -8185,6 +8357,7 @@ export function WorkspaceApp({
       runFfmpegComposition,
       addOutput,
       outputPlacementOptionsFor,
+      setVideoComposerRuns,
     ],
   );
 
@@ -8208,7 +8381,8 @@ export function WorkspaceApp({
     if (
       (videoDownloaderNodes.length === 0 && !hasVideoLinkWorkflow) ||
       downloaderEngineLoadedRef.current
-    ) return;
+    )
+      return;
     downloaderEngineLoadedRef.current = true;
     refreshDownloaderEngineStatus();
   }, [refreshDownloaderEngineStatus, videoDownloaderNodes.length, hasVideoLinkWorkflow]);
@@ -8290,12 +8464,15 @@ export function WorkspaceApp({
             browser === "auto"
               ? "已开启自动来源：按站点尝试已导入文件、浏览器与无 Cookies 访问"
               : browser
-              ? `已选择 ${browser}，下载时会尝试读取该浏览器的 Cookies`
-              : "已关闭浏览器 Cookies 来源",
+                ? `已选择 ${browser}，下载时会尝试读取该浏览器的 Cookies`
+                : "已关闭浏览器 Cookies 来源",
           );
         })
         .catch((error: unknown) => {
-          frontendLog("error", `[downloader] 浏览器 Cookies 来源设置失败: ${formatRawBackendError(error)}`);
+          frontendLog(
+            "error",
+            `[downloader] 浏览器 Cookies 来源设置失败: ${formatRawBackendError(error)}`,
+          );
           toast.error("浏览器 Cookies 来源设置失败", { description: formatWorkflowError(error) });
           refreshDownloaderEngineStatus();
         })
@@ -8354,63 +8531,66 @@ export function WorkspaceApp({
       ),
     [canvasInputsFor, videoDownloaderNodes],
   );
-  const submitNextVideoDownload = useCallback((nodeKey: string) => {
-    const queue = videoDownloadQueuesRef.current.get(nodeKey);
-    const source = queue?.sources.shift();
-    if (!queue || !source) return;
-    queue.activeJobId = "";
-    setVideoDownloaderRuns((current) => ({
-      ...current,
-      [nodeKey]: {
-        jobId: "",
-        status: "running",
-        preparingEngine: false,
-        progress: null,
-        qualityHint: null,
-        watermarkRemoved: false,
-        error: null,
-      },
-    }));
-    void videoDownloaderClient
-      .startDownload(source)
-      .then((record) => {
-        if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) {
-          void videoDownloaderClient.cancelJob(record.jobId).catch(() => undefined);
-          return;
-        }
-        queue.activeJobId = record.jobId;
-        setVideoDownloaderRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: record.jobId,
-            status: "running",
-            preparingEngine: false,
-            progress: null,
-            qualityHint: null,
-            watermarkRemoved: false,
-            credentialSource: record.credentialSource ?? null,
-            probeStatus: record.probeStatus ?? null,
-            error: null,
-          },
-        }));
-      })
-      .catch((error: unknown) => {
-        if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) return;
-        videoDownloadQueuesRef.current.delete(nodeKey);
-        setVideoDownloaderRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            qualityHint: null,
-            watermarkRemoved: false,
-            error: formatRawBackendError(error),
-          },
-        }));
-      });
-  }, []);
+  const submitNextVideoDownload = useCallback(
+    (nodeKey: string) => {
+      const queue = videoDownloadQueuesRef.current.get(nodeKey);
+      const source = queue?.sources.shift();
+      if (!queue || !source) return;
+      queue.activeJobId = "";
+      setVideoDownloaderRuns((current) => ({
+        ...current,
+        [nodeKey]: {
+          jobId: "",
+          status: "running",
+          preparingEngine: false,
+          progress: null,
+          qualityHint: null,
+          watermarkRemoved: false,
+          error: null,
+        },
+      }));
+      void videoDownloaderClient
+        .startDownload(source)
+        .then((record) => {
+          if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) {
+            void videoDownloaderClient.cancelJob(record.jobId).catch(() => undefined);
+            return;
+          }
+          queue.activeJobId = record.jobId;
+          setVideoDownloaderRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId: record.jobId,
+              status: "running",
+              preparingEngine: false,
+              progress: null,
+              qualityHint: null,
+              watermarkRemoved: false,
+              credentialSource: record.credentialSource ?? null,
+              probeStatus: record.probeStatus ?? null,
+              error: null,
+            },
+          }));
+        })
+        .catch((error: unknown) => {
+          if (videoDownloadQueuesRef.current.get(nodeKey) !== queue) return;
+          videoDownloadQueuesRef.current.delete(nodeKey);
+          setVideoDownloaderRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId: "",
+              status: "error",
+              preparingEngine: false,
+              progress: null,
+              qualityHint: null,
+              watermarkRemoved: false,
+              error: formatRawBackendError(error),
+            },
+          }));
+        });
+    },
+    [setVideoDownloaderRuns],
+  );
 
   // 活动下载任务（运行中且已拿到 jobId）：查询 key 随该集合变化，任务到达
   // 终态后离开集合，轮询随之停止；定时与清理由 React Query 管理。
@@ -8442,6 +8622,8 @@ export function WorkspaceApp({
         }),
       ),
     enabled: isDesktopRuntime(),
+    // 结果只经缓存订阅消费，无需触发任何重渲染。
+    notifyOnChangeProps: [],
     refetchInterval: activeDownloadJobs.length > 0 ? DOWNLOAD_POLL_INTERVAL_MS : false,
   });
 
@@ -8609,6 +8791,7 @@ export function WorkspaceApp({
     videoDownloaderNodes,
     submitNextVideoDownload,
     outputPlacementOptionsFor,
+    setVideoDownloaderRuns,
   ]);
 
   const handleStartVideoDownload = useCallback(
@@ -8639,30 +8822,38 @@ export function WorkspaceApp({
       });
       submitNextVideoDownload(nodeKey);
     },
-    [videoDownloaderNodes, videoDownloadSourcesByNode, submitNextVideoDownload],
+    [
+      videoDownloaderNodes,
+      videoDownloadSourcesByNode,
+      submitNextVideoDownload,
+      setVideoDownloaderRuns,
+    ],
   );
 
-  const handleCancelVideoDownload = useCallback((nodeKey: string) => {
-    const queue = videoDownloadQueuesRef.current.get(nodeKey);
-    if (!queue) return;
-    videoDownloadQueuesRef.current.delete(nodeKey);
-    setVideoDownloaderRuns((current) => ({
-      ...current,
-      [nodeKey]: {
-        jobId: queue.activeJobId,
-        status: "cancelled",
-        preparingEngine: false,
-        progress: null,
-        qualityHint: null,
-        watermarkRemoved: false,
-        error: null,
-      },
-    }));
-    if (queue.activeJobId)
-      void videoDownloaderClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
-        frontendLog("error", `[downloader] 取消请求失败: ${formatRawBackendError(error)}`);
-      });
-  }, []);
+  const handleCancelVideoDownload = useCallback(
+    (nodeKey: string) => {
+      const queue = videoDownloadQueuesRef.current.get(nodeKey);
+      if (!queue) return;
+      videoDownloadQueuesRef.current.delete(nodeKey);
+      setVideoDownloaderRuns((current) => ({
+        ...current,
+        [nodeKey]: {
+          jobId: queue.activeJobId,
+          status: "cancelled",
+          preparingEngine: false,
+          progress: null,
+          qualityHint: null,
+          watermarkRemoved: false,
+          error: null,
+        },
+      }));
+      if (queue.activeJobId)
+        void videoDownloaderClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
+          frontendLog("error", `[downloader] 取消请求失败: ${formatRawBackendError(error)}`);
+        });
+    },
+    [setVideoDownloaderRuns],
+  );
 
   /** 删除视频下载节点（保留已经生成的产物卡片）。 */
   const removeVideoDownloaderNode = useCallback(
@@ -8681,60 +8872,63 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [removeCanvasNode, videoDownloaderRuns],
+    [removeCanvasNode, videoDownloaderRuns, setVideoDownloaderRuns],
   );
 
   // ---- 视频抽帧：任务轮询与终态落卡 ----
 
-  const submitNextFrameExtraction = useCallback((nodeKey: string) => {
-    const queue = frameExtractionQueuesRef.current.get(nodeKey);
-    const source = queue?.sources.shift();
-    if (!queue || !source) return;
-    queue.activeJobId = "";
-    setFrameExtractorRuns((current) => ({
-      ...current,
-      [nodeKey]: {
-        jobId: "",
-        status: "running",
-        preparingEngine: false,
-        progress: null,
-        error: null,
-      },
-    }));
-    void videoFrameExtractionClient
-      .startExtraction(source, queue.timestamps)
-      .then((record) => {
-        if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) {
-          void videoFrameExtractionClient.cancelJob(record.jobId).catch(() => undefined);
-          return;
-        }
-        queue.activeJobId = record.jobId;
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: record.jobId,
-            status: "running",
-            preparingEngine: false,
-            progress: null,
-            error: null,
-          },
-        }));
-      })
-      .catch((error: unknown) => {
-        if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
-        frameExtractionQueuesRef.current.delete(nodeKey);
-        setFrameExtractorRuns((current) => ({
-          ...current,
-          [nodeKey]: {
-            jobId: "",
-            status: "error",
-            preparingEngine: false,
-            progress: null,
-            error: formatRawBackendError(error),
-          },
-        }));
-      });
-  }, []);
+  const submitNextFrameExtraction = useCallback(
+    (nodeKey: string) => {
+      const queue = frameExtractionQueuesRef.current.get(nodeKey);
+      const source = queue?.sources.shift();
+      if (!queue || !source) return;
+      queue.activeJobId = "";
+      setFrameExtractorRuns((current) => ({
+        ...current,
+        [nodeKey]: {
+          jobId: "",
+          status: "running",
+          preparingEngine: false,
+          progress: null,
+          error: null,
+        },
+      }));
+      void videoFrameExtractionClient
+        .startExtraction(source, queue.timestamps)
+        .then((record) => {
+          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) {
+            void videoFrameExtractionClient.cancelJob(record.jobId).catch(() => undefined);
+            return;
+          }
+          queue.activeJobId = record.jobId;
+          setFrameExtractorRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId: record.jobId,
+              status: "running",
+              preparingEngine: false,
+              progress: null,
+              error: null,
+            },
+          }));
+        })
+        .catch((error: unknown) => {
+          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
+          frameExtractionQueuesRef.current.delete(nodeKey);
+          setFrameExtractorRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId: "",
+              status: "error",
+              preparingEngine: false,
+              progress: null,
+              error: formatRawBackendError(error),
+            },
+          }));
+        });
+    },
+    [setFrameExtractorRuns],
+  );
 
   // 活动抽帧任务：查询 key 随运行任务集合变化，任务到终态后离开集合停止轮询。
   const activeFrameExtractionJobs = useMemo(
@@ -8769,6 +8963,8 @@ export function WorkspaceApp({
         }),
       ),
     enabled: isDesktopRuntime(),
+    // 结果只经缓存订阅消费，无需触发任何重渲染（非活跃画布尤其不该被 700ms 轮询重绘）。
+    notifyOnChangeProps: [],
     refetchInterval: activeFrameExtractionJobs.length > 0 ? DOWNLOAD_POLL_INTERVAL_MS : false,
   });
 
@@ -8919,6 +9115,7 @@ export function WorkspaceApp({
     frameExtractorNodes,
     submitNextFrameExtraction,
     outputPlacementOptionsFor,
+    setFrameExtractorRuns,
   ]);
 
   /** 每个上游视频依次抽帧；同一批次保留所有来源的完整帧产物。 */
@@ -8963,28 +9160,36 @@ export function WorkspaceApp({
       });
       submitNextFrameExtraction(nodeKey);
     },
-    [frameExtractorNodes, frameExtractorInputsByNode, submitNextFrameExtraction],
+    [
+      frameExtractorNodes,
+      frameExtractorInputsByNode,
+      submitNextFrameExtraction,
+      setFrameExtractorRuns,
+    ],
   );
 
-  const handleCancelFrameExtraction = useCallback((nodeKey: string) => {
-    const queue = frameExtractionQueuesRef.current.get(nodeKey);
-    if (!queue) return;
-    frameExtractionQueuesRef.current.delete(nodeKey);
-    setFrameExtractorRuns((current) => ({
-      ...current,
-      [nodeKey]: {
-        jobId: queue.activeJobId,
-        status: "cancelled",
-        preparingEngine: false,
-        progress: null,
-        error: null,
-      },
-    }));
-    if (queue.activeJobId)
-      void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
-        frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
-      });
-  }, []);
+  const handleCancelFrameExtraction = useCallback(
+    (nodeKey: string) => {
+      const queue = frameExtractionQueuesRef.current.get(nodeKey);
+      if (!queue) return;
+      frameExtractionQueuesRef.current.delete(nodeKey);
+      setFrameExtractorRuns((current) => ({
+        ...current,
+        [nodeKey]: {
+          jobId: queue.activeJobId,
+          status: "cancelled",
+          preparingEngine: false,
+          progress: null,
+          error: null,
+        },
+      }));
+      if (queue.activeJobId)
+        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
+          frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
+        });
+    },
+    [setFrameExtractorRuns],
+  );
 
   /** 删除视频抽帧节点（保留已经生成的图片产物卡片）。 */
   const removeFrameExtractorNode = useCallback(
@@ -9003,7 +9208,7 @@ export function WorkspaceApp({
         return next;
       });
     },
-    [removeCanvasNode, frameExtractorRuns],
+    [removeCanvasNode, frameExtractorRuns, setFrameExtractorRuns],
   );
 
   /** 文本输出可经任意中间节点传入；多个来源按连接顺序合并。 */
@@ -9213,7 +9418,8 @@ export function WorkspaceApp({
                 kind: asset.kind,
                 name: asset.name,
                 previewUrl: asset.previewUrl ?? null,
-                videoUrl: asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl ?? null) : null,
+                videoUrl:
+                  asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl ?? null) : null,
                 libraryPickOrder: libraryPickOrder++,
                 x: position.x,
                 y: position.y,
@@ -9300,7 +9506,8 @@ export function WorkspaceApp({
           } else {
             draggingMedia = false;
             setExternalMediaDropHover(false);
-            if (insideCanvas) void handleDropExternalMediaRef.current(payload.paths, point.x, point.y);
+            if (insideCanvas)
+              void handleDropExternalMediaRef.current(payload.paths, point.x, point.y);
           }
         });
         if (disposed) stop();
@@ -10976,6 +11183,16 @@ export function WorkspaceApp({
   }, [active, connectionSourceKey]);
 
   // 从各类节点索引中按 key 查找并组装 CanvasNodeEntry，供连接合法性判断复用。
+  // 工作流与产物两族没有现成 byKey 索引，用 useMemo 建一次 Map，
+  // 避免 flowNodes/flowEdges 重建时每节点/每边各做一次线性 find。
+  const knowledgeVideoWorkflowNodeByKeyMap = useMemo(
+    () => new Map(knowledgeVideoWorkflowNodes.map((node) => [node.key, node])),
+    [knowledgeVideoWorkflowNodes],
+  );
+  const resultNodeByKeyMap = useMemo(
+    () => new Map(resultNodes.map((node) => [node.key, node])),
+    [resultNodes],
+  );
   const canvasEntryByKey = useCallback(
     (key: string): CanvasNodeEntry | null => {
       const asset = assetNodeByKey.get(key);
@@ -10996,9 +11213,9 @@ export function WorkspaceApp({
       if (extractor) return { type: "frameExtractor", data: extractor };
       const output = outputNodeByKey.get(key);
       if (output) return { type: "output", data: output };
-      const workflow = knowledgeVideoWorkflowNodes.find((n) => n.key === key);
+      const workflow = knowledgeVideoWorkflowNodeByKeyMap.get(key);
       if (workflow) return { type: "knowledgeVideoWorkflow", data: workflow };
-      const result = resultNodes.find((n) => n.key === key);
+      const result = resultNodeByKeyMap.get(key);
       if (result) return { type: "result", data: result };
       return null;
     },
@@ -11012,8 +11229,8 @@ export function WorkspaceApp({
       videoDownloaderNodeByKey,
       frameExtractorNodeByKey,
       outputNodeByKey,
-      knowledgeVideoWorkflowNodes,
-      resultNodes,
+      knowledgeVideoWorkflowNodeByKeyMap,
+      resultNodeByKeyMap,
     ],
   );
 
@@ -11222,103 +11439,132 @@ export function WorkspaceApp({
     outputNodeByKey,
   ]);
 
-  const flowEdges = useMemo<CanvasFlowEdge[]>(
-    () =>
-      assetEdges.map((edge) => {
-        const genSource = genTopologyByKey.get(edge.fromKey);
-        const composerSource = videoComposerNodeByKey.get(edge.fromKey);
-        const downloaderSource = videoDownloaderNodeByKey.get(edge.fromKey);
-        const frameExtractorSource = frameExtractorNodeByKey.get(edge.fromKey);
-        const screenplaySource = screenplayNodeByKey.get(edge.fromKey);
-        const source = assetNodeByKey.get(edge.fromKey);
-        const outputSource = outputNodeByKey.get(edge.fromKey);
-        const generationTarget = genTopologyByKey.get(edge.toKey);
-        const composerTarget = videoComposerNodeByKey.get(edge.toKey);
-        const viralRemixTarget = viralRemixNodeByKey.get(edge.toKey);
-        const frameExtractorTarget = frameExtractorNodeByKey.get(edge.toKey);
-        const storyboardTarget = storyboardNodeByKey.get(edge.toKey);
-        const workflowTarget = workflowInputsByNode.has(edge.toKey);
-        const assetTarget = assetNodeByKey.get(edge.toKey);
-        const isGenOutput =
-          (genSource != null || composerSource != null) && outputNodeByKey.has(edge.toKey);
-        const promptSource = genSource?.kind === "prompt" ? genSource : null;
-        const isScreenplayToStoryboard = screenplaySource != null && storyboardTarget != null;
-        const sourceName = promptSource
-          ? "提示词节点"
-          : screenplaySource
-            ? connectedScreenplayName(screenplaySource)
-            : downloaderSource
-              ? "网络爆款视频下载节点"
-              : composerSource
-                ? "视频拼接与合成节点"
-                : frameExtractorSource
-                  ? "视频抽帧节点"
-                  : (source?.name ??
-                    outputSource?.name ??
-                    canvasNodeLabel(canvasEntryByKey(edge.fromKey)));
-        const targetName = generationTarget
-          ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}生成节点`
-          : composerTarget
-            ? "视频拼接与合成节点"
-            : viralRemixTarget
-              ? "爆款视频复刻节点"
-              : frameExtractorTarget
+  // 每条边的稳定缓存：内容输入（端点、名称、类名、序号、选中态、回调）不变时
+  // 返回同一 edge 对象引用，React Flow 便不会因一次全表重建而重渲染所有连线。
+  const flowEdgeCacheRef = useRef(new Map<string, { inputs: unknown[]; node: CanvasFlowEdge }>());
+  const flowEdges = useMemo<CanvasFlowEdge[]>(() => {
+    const cache = flowEdgeCacheRef.current;
+    const nextEdges = assetEdges.map((edge) => {
+      const genSource = genTopologyByKey.get(edge.fromKey);
+      const composerSource = videoComposerNodeByKey.get(edge.fromKey);
+      const downloaderSource = videoDownloaderNodeByKey.get(edge.fromKey);
+      const frameExtractorSource = frameExtractorNodeByKey.get(edge.fromKey);
+      const screenplaySource = screenplayNodeByKey.get(edge.fromKey);
+      const source = assetNodeByKey.get(edge.fromKey);
+      const outputSource = outputNodeByKey.get(edge.fromKey);
+      const generationTarget = genTopologyByKey.get(edge.toKey);
+      const composerTarget = videoComposerNodeByKey.get(edge.toKey);
+      const viralRemixTarget = viralRemixNodeByKey.get(edge.toKey);
+      const frameExtractorTarget = frameExtractorNodeByKey.get(edge.toKey);
+      const storyboardTarget = storyboardNodeByKey.get(edge.toKey);
+      const workflowTarget = workflowInputsByNode.has(edge.toKey);
+      const assetTarget = assetNodeByKey.get(edge.toKey);
+      const isGenOutput =
+        (genSource != null || composerSource != null) && outputNodeByKey.has(edge.toKey);
+      const promptSource = genSource?.kind === "prompt" ? genSource : null;
+      const isScreenplayToStoryboard = screenplaySource != null && storyboardTarget != null;
+      const sourceName = promptSource
+        ? "提示词节点"
+        : screenplaySource
+          ? connectedScreenplayName(screenplaySource)
+          : downloaderSource
+            ? "网络爆款视频下载节点"
+            : composerSource
+              ? "视频拼接与合成节点"
+              : frameExtractorSource
                 ? "视频抽帧节点"
-                : storyboardTarget
-                  ? "剧本转工业级分镜脚本节点"
-                  : workflowTarget
-                    ? "工作流节点"
-                    : (assetTarget?.name ?? canvasNodeLabel(canvasEntryByKey(edge.toKey)));
-        const connectionOrder = inputOrderByEdge.get(edge.id) ?? 0;
-        return {
-          id: edge.id,
-          type: "canvas",
-          source: edge.fromKey,
-          target: edge.toKey,
-          sourceHandle: "source",
-          targetHandle: "target",
-          selected: selectedEdgeId === edge.id,
-          selectable: true,
-          focusable: true,
-          data: {
-            label: `${sourceName} → ${targetName}`,
-            edgeClassName: isGenOutput
-              ? `edge edge--gen-output edge--gen-output--${genSource?.kind ?? "video"}`
-              : promptSource
-                ? "edge edge--prompt-generation"
-                : isScreenplayToStoryboard
-                  ? "edge edge--screenplay-storyboard"
-                  : `edge edge--asset${workflowTarget || generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`,
-            order: connectionOrder,
-            removable: true,
-            onSelect: () => {
-              selectEdge(edge.id);
-              selectNode(null);
+                : (source?.name ??
+                  outputSource?.name ??
+                  canvasNodeLabel(canvasEntryByKey(edge.fromKey)));
+      const targetName = generationTarget
+        ? `${generationTarget.kind === "image" ? "图片" : generationTarget.kind === "video" ? "视频" : "提示词"}生成节点`
+        : composerTarget
+          ? "视频拼接与合成节点"
+          : viralRemixTarget
+            ? "爆款视频复刻节点"
+            : frameExtractorTarget
+              ? "视频抽帧节点"
+              : storyboardTarget
+                ? "剧本转工业级分镜脚本节点"
+                : workflowTarget
+                  ? "工作流节点"
+                  : (assetTarget?.name ?? canvasNodeLabel(canvasEntryByKey(edge.toKey)));
+      const connectionOrder = inputOrderByEdge.get(edge.id) ?? 0;
+      const edgeClassName = isGenOutput
+        ? `edge edge--gen-output edge--gen-output--${genSource?.kind ?? "video"}`
+        : promptSource
+          ? "edge edge--prompt-generation"
+          : isScreenplayToStoryboard
+            ? "edge edge--screenplay-storyboard"
+            : `edge edge--asset${workflowTarget || generationTarget || composerTarget || viralRemixTarget || frameExtractorTarget ? " edge--asset-generation" : ""}`;
+      const isSelected = selectedEdgeId === edge.id;
+      return stableCachedItem(
+        cache,
+        edge.id,
+        [
+          edge.fromKey,
+          edge.toKey,
+          sourceName,
+          targetName,
+          edgeClassName,
+          connectionOrder,
+          isSelected,
+          selectEdge,
+          selectNode,
+          removeAssetEdge,
+        ],
+        () =>
+          ({
+            id: edge.id,
+            type: "canvas",
+            source: edge.fromKey,
+            target: edge.toKey,
+            sourceHandle: "source",
+            targetHandle: "target",
+            selected: isSelected,
+            selectable: true,
+            focusable: true,
+            data: {
+              label: `${sourceName} → ${targetName}`,
+              edgeClassName,
+              order: connectionOrder,
+              removable: true,
+              onSelect: () => {
+                selectEdge(edge.id);
+                selectNode(null);
+              },
+              onRemove: () => removeAssetEdge(edge.id),
             },
-            onRemove: () => removeAssetEdge(edge.id),
-          },
-        };
-      }),
-    [
-      assetEdges,
-      canvasEntryByKey,
-      workflowInputsByNode,
-      genTopologyByKey,
-      videoComposerNodeByKey,
-      videoDownloaderNodeByKey,
-      frameExtractorNodeByKey,
-      screenplayNodeByKey,
-      storyboardNodeByKey,
-      assetNodeByKey,
-      outputNodeByKey,
-      viralRemixNodeByKey,
-      selectedEdgeId,
-      inputOrderByEdge,
-      removeAssetEdge,
-      selectEdge,
-      selectNode,
-    ],
-  );
+          }) satisfies CanvasFlowEdge,
+      );
+    });
+    // 已删除的边退出缓存，防止长会话下 Map 无界增长。
+    if (cache.size > nextEdges.length) {
+      const alive = new Set(nextEdges.map((item) => item.id));
+      for (const key of [...cache.keys()]) {
+        if (!alive.has(key)) cache.delete(key);
+      }
+    }
+    return nextEdges;
+  }, [
+    assetEdges,
+    canvasEntryByKey,
+    workflowInputsByNode,
+    genTopologyByKey,
+    videoComposerNodeByKey,
+    videoDownloaderNodeByKey,
+    frameExtractorNodeByKey,
+    screenplayNodeByKey,
+    storyboardNodeByKey,
+    assetNodeByKey,
+    outputNodeByKey,
+    viralRemixNodeByKey,
+    selectedEdgeId,
+    inputOrderByEdge,
+    removeAssetEdge,
+    selectEdge,
+    selectNode,
+  ]);
 
   const handleFlowNodesChange = useCallback(
     (changes: NodeChange<CanvasFlowNode>[]) => {
@@ -12232,6 +12478,7 @@ export function WorkspaceApp({
               className="canvas-react-flow"
               nodes={flowNodes}
               edges={flowEdges}
+              onlyRenderVisibleElements={canvasViewportMeasured}
               nodeTypes={CANVAS_FLOW_NODE_TYPES}
               edgeTypes={CANVAS_FLOW_EDGE_TYPES}
               minZoom={MIN_ZOOM / 100}

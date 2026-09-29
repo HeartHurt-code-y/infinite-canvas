@@ -21,13 +21,13 @@ use super::{
     types::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
         GenerationProgressResult, GenerationResultRecord, GenerationTaskDetail,
-        GenerationTaskEvent, GenerationTaskListQuery, GenerationTaskProgress,
-        GenerationTaskPage, GenerationTaskStatus, GenerationTaskSummary, MediaType,
-        ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
-        ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
-        SaveCanvasDocumentCommand, SaveStatus, StagingAssetImportTarget, StagingJobRecord,
-        StagingStatus, TextGenerationOutputRecord, TokenUsage, TosStagingConfig,
-        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
+        GenerationTaskEvent, GenerationTaskListQuery, GenerationTaskPage, GenerationTaskProgress,
+        GenerationTaskStatus, GenerationTaskSummary, MediaType, ModelDefinition,
+        ProviderCallRecord, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
+        QueryHealth, ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveStatus,
+        StagingAssetImportTarget, StagingJobRecord, StagingStatus, TextGenerationOutputRecord,
+        TokenUsage, TosStagingConfig, UpsertProviderConnectionCommand,
+        UpsertProviderTokenGroupCommand, WorkspaceUiPrefs,
     },
 };
 
@@ -1696,12 +1696,16 @@ impl Storage {
         &self,
         job_id: &str,
     ) -> BackendResult<Option<TosStagingConfig>> {
-        let raw: Option<String> = self.lock()?.query_row(
-            "SELECT config_json FROM staging_object_targets WHERE job_id = ?1",
-            params![job_id],
-            |row| row.get(0),
-        ).optional()?;
-        raw.map(|value| serde_json::from_str(&value).map_err(Into::into)).transpose()
+        let raw: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT config_json FROM staging_object_targets WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()?;
+        raw.map(|value| serde_json::from_str(&value).map_err(Into::into))
+            .transpose()
     }
 
     pub fn find_staging_content(
@@ -1712,12 +1716,15 @@ impl Storage {
         sha256: &str,
     ) -> BackendResult<Option<StagingJobRecord>> {
         let byte_size = checked_sql_integer(byte_size, "byteSize")?;
-        let job_id: Option<String> = self.lock()?.query_row(
-            "SELECT job_id FROM staging_content_index
+        let job_id: Option<String> = self
+            .lock()?
+            .query_row(
+                "SELECT job_id FROM staging_content_index
              WHERE scope = ?1 AND media_type = ?2 AND byte_size = ?3 AND sha256 = ?4",
-            params![scope, media_type.as_str(), byte_size, sha256],
-            |row| row.get(0),
-        ).optional()?;
+                params![scope, media_type.as_str(), byte_size, sha256],
+                |row| row.get(0),
+            )
+            .optional()?;
         job_id.map(|id| self.get_staging_job(&id)).transpose()
     }
 
@@ -1739,8 +1746,10 @@ impl Storage {
                AND id NOT IN (SELECT job_id FROM staging_content_reuses)
              ORDER BY created_at, id",
         )?;
-        statement.query_map(params![media_type.as_str()], staging_job_from_row)?
-            .collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        statement
+            .query_map(params![media_type.as_str()], staging_job_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     pub fn remember_staging_content(
@@ -1792,7 +1801,9 @@ impl Storage {
                 job.id,
                 job.object_key,
                 job.status.as_str(),
-                job.bytes_total.map(|value| checked_sql_integer(value, "bytesTotal")).transpose()?,
+                job.bytes_total
+                    .map(|value| checked_sql_integer(value, "bytesTotal"))
+                    .transpose()?,
                 checked_sql_integer(job.bytes_uploaded, "bytesUploaded")?,
                 job.asset_id,
                 job.updated_at,
@@ -1807,11 +1818,14 @@ impl Storage {
     }
 
     pub fn staging_reused_from(&self, job_id: &str) -> BackendResult<Option<String>> {
-        self.lock()?.query_row(
-            "SELECT canonical_job_id FROM staging_content_reuses WHERE job_id = ?1",
-            params![job_id],
-            |row| row.get(0),
-        ).optional().map_err(Into::into)
+        self.lock()?
+            .query_row(
+                "SELECT canonical_job_id FROM staging_content_reuses WHERE job_id = ?1",
+                params![job_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     pub fn has_active_material_transfer_source(&self, local_path: &str) -> BackendResult<bool> {
@@ -1989,8 +2003,10 @@ impl Storage {
                     error_json, created_at, updated_at, adjustment, overseas_db_id
              FROM staging_jobs WHERE object_key = ?1",
         )?;
-        statement.query_map(params![object_key], staging_job_from_row)?
-            .collect::<Result<Vec<_>, _>>().map_err(Into::into)
+        statement
+            .query_map(params![object_key], staging_job_from_row)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(Into::into)
     }
 
     /// 按对象键查找素材导入任务（预览兜底用）。
@@ -2064,7 +2080,10 @@ impl Storage {
         provider_connection_id: &str,
         asset_id: &str,
     ) -> BackendResult<Option<StagingJobRecord>> {
-        let asset_id = asset_id.trim().strip_prefix("asset://").unwrap_or(asset_id.trim());
+        let asset_id = asset_id
+            .trim()
+            .strip_prefix("asset://")
+            .unwrap_or(asset_id.trim());
         if asset_id.is_empty() {
             return Ok(None);
         }
@@ -2078,10 +2097,14 @@ impl Storage {
                AND id NOT IN (SELECT job_id FROM staging_content_reuses)
              ORDER BY created_at DESC",
         )?;
-        let jobs = statement.query_map(params![asset_id], staging_job_from_row)?
+        let jobs = statement
+            .query_map(params![asset_id], staging_job_from_row)?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(jobs.into_iter().find(|job| job.import_target.as_ref()
-            .is_some_and(|target| target.provider_connection_id == provider_connection_id)))
+        Ok(jobs.into_iter().find(|job| {
+            job.import_target
+                .as_ref()
+                .is_some_and(|target| target.provider_connection_id == provider_connection_id)
+        }))
     }
 
     pub fn list_recoverable_staging_jobs(&self) -> BackendResult<Vec<StagingJobRecord>> {
@@ -2705,42 +2728,82 @@ mod tests {
         let uuid = "99abbecc-0123-4567-89ab-cdef01234567";
         for (id, object_key) in [
             ("unscoped", "pictures/photo.png".to_string()),
-            ("current", format!("staging/{}/2026/09/01/{uuid}.png", &current_hash[..16])),
-            ("other", format!("staging/{}/2026/09/01/{uuid}.png", &old_hash[..16])),
+            (
+                "current",
+                format!("staging/{}/2026/09/01/{uuid}.png", &current_hash[..16]),
+            ),
+            (
+                "other",
+                format!("staging/{}/2026/09/01/{uuid}.png", &old_hash[..16]),
+            ),
         ] {
-            storage.insert_staging_job(&StagingJobRecord {
-                id: id.into(),
-                local_path: "photo.png".into(),
-                purpose: "local_asset".into(),
-                media_type: MediaType::Image,
-                object_key: Some(object_key),
-                status: StagingStatus::Staged,
-                bytes_total: Some(4),
-                bytes_uploaded: 4,
-                asset_id: None,
-                overseas_db_id: None,
-                import_target: None,
-                adjustment: None,
-                error: None,
-                created_at: 0,
-                updated_at: 0,
-            }).unwrap();
+            storage
+                .insert_staging_job(&StagingJobRecord {
+                    id: id.into(),
+                    local_path: "photo.png".into(),
+                    purpose: "local_asset".into(),
+                    media_type: MediaType::Image,
+                    object_key: Some(object_key),
+                    status: StagingStatus::Staged,
+                    bytes_total: Some(4),
+                    bytes_uploaded: 4,
+                    asset_id: None,
+                    overseas_db_id: None,
+                    import_target: None,
+                    adjustment: None,
+                    error: None,
+                    created_at: 0,
+                    updated_at: 0,
+                })
+                .unwrap();
         }
         drop(storage);
-        Connection::open(&database).unwrap()
+        Connection::open(&database)
+            .unwrap()
             .execute("DELETE FROM schema_migrations WHERE version = 2", [])
             .unwrap();
         let reopened = Storage::open(&database).unwrap();
-        assert_eq!(reopened.get_staging_object_target("unscoped").unwrap().unwrap().bucket, config.bucket);
-        assert_eq!(reopened.get_staging_object_target("current").unwrap().unwrap().bucket, config.bucket);
-        assert!(reopened.get_staging_object_target("other").unwrap().is_none());
+        assert_eq!(
+            reopened
+                .get_staging_object_target("unscoped")
+                .unwrap()
+                .unwrap()
+                .bucket,
+            config.bucket
+        );
+        assert_eq!(
+            reopened
+                .get_staging_object_target("current")
+                .unwrap()
+                .unwrap()
+                .bucket,
+            config.bucket
+        );
+        assert!(
+            reopened
+                .get_staging_object_target("other")
+                .unwrap()
+                .is_none()
+        );
         let mut changed = config.clone();
         changed.bucket = "next-bucket".into();
         reopened.save_tos_config(&changed).unwrap();
         drop(reopened);
         let switched = Storage::open(&database).unwrap();
-        assert_eq!(switched.get_staging_object_target("unscoped").unwrap().unwrap().bucket, config.bucket);
-        assert!(switched.get_staging_object_target("other").unwrap().is_none());
+        assert_eq!(
+            switched
+                .get_staging_object_target("unscoped")
+                .unwrap()
+                .unwrap()
+                .bucket,
+            config.bucket
+        );
+        assert!(
+            switched
+                .get_staging_object_target("other")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
@@ -3358,13 +3421,20 @@ mod tests {
         let output = detail.text_output.expect("text output");
         assert_eq!(output.optimized_prompt, "节点实际采用文本");
         assert_eq!(output.raw_model_output, "模型完整原始文本");
-        let progress = storage.get_task_progress("text-task-1").expect("task progress");
+        let progress = storage
+            .get_task_progress("text-task-1")
+            .expect("task progress");
         assert_eq!(progress.summary.id, "text-task-1");
         assert_eq!(progress.results.len(), 1);
-        assert_eq!(progress.results[0].final_path.as_deref(), Some("C:/result.png"));
-        assert!(!serde_json::to_string(&progress)
-            .expect("serialize progress")
-            .contains("PRIVATE_IMAGE_BYTES"));
+        assert_eq!(
+            progress.results[0].final_path.as_deref(),
+            Some("C:/result.png")
+        );
+        assert!(
+            !serde_json::to_string(&progress)
+                .expect("serialize progress")
+                .contains("PRIVATE_IMAGE_BYTES")
+        );
     }
 
     #[test]

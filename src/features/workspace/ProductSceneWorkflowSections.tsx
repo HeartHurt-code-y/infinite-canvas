@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
 import {
@@ -707,40 +707,60 @@ export function ProductSceneDeliverables({
     });
   }
   const generationMode = productSceneGenerationMode(options);
-  if (!state?.rows.length) return null;
-  const accepted = state.rows.filter(
-    (row) => row.status === "accepted" && productSceneRowCanAccept(row, options),
+  // 全量行过滤都走 useMemo：跑批期间检查点以秒级频率更新 500 行计划，
+  // 未变化的行引用不变，配合 productSceneRowCanAccept 的按行缓存几乎零成本。
+  const rows = state?.rows;
+  const approvedThrough = state?.approvedThrough ?? 0;
+  const accepted = useMemo(
+    () =>
+      (rows ?? []).filter(
+        (row) => row.status === "accepted" && productSceneRowCanAccept(row, options),
+      ),
+    [rows, options],
   );
-  const currentRows = state.rows.filter((row) => row.index <= state.approvedThrough);
+  const currentRows = useMemo(
+    () => (rows ?? []).filter((row) => row.index <= approvedThrough),
+    [rows, approvedThrough],
+  );
   const awaitingReview = currentRows.some(
     (row) =>
       ["needs_review", "running", "queued", "error"].includes(row.status) ||
       (row.status === "accepted" && !productSceneRowCanAccept(row, options)),
   );
-  const filtered = state.rows.filter((row) => filter === "all" || row.status === filter);
+  const filtered = useMemo(
+    () => (rows ?? []).filter((row) => filter === "all" || row.status === filter),
+    [rows, filter],
+  );
   const pageCount = Math.max(1, Math.ceil(filtered.length / 12));
   const safePage = Math.min(page, pageCount - 1);
   const visible = filtered.slice(safePage * 12, (safePage + 1) * 12);
   const batchStart =
-    state.approvedThrough > 0
-      ? Math.floor((state.approvedThrough - 1) / options.batchSize) * options.batchSize + 1
+    approvedThrough > 0
+      ? Math.floor((approvedThrough - 1) / options.batchSize) * options.batchSize + 1
       : 1;
-  const batchRows = state.rows.filter(
-    (row) => row.index >= batchStart && row.index <= state.approvedThrough,
+  const batchRows = useMemo(
+    () => (rows ?? []).filter((row) => row.index >= batchStart && row.index <= approvedThrough),
+    [rows, batchStart, approvedThrough],
   );
-  const batchPending = batchRows.filter(
-    (row) => row.status !== "accepted" && row.status !== "rejected",
+  const batchPending = useMemo(
+    () => batchRows.filter((row) => row.status !== "accepted" && row.status !== "rejected"),
+    [batchRows],
   );
-  const batchEligible = batchPending.filter(
-    (row) => row.status === "needs_review" && productSceneRowCanAccept(row, options),
+  const batchEligible = useMemo(
+    () =>
+      batchPending.filter(
+        (row) => row.status === "needs_review" && productSceneRowCanAccept(row, options),
+      ),
+    [batchPending, options],
   );
   const batchEligibleIds = new Set(batchEligible.map((row) => row.id));
   const visibleEligibleIds = visible
     .filter((row) => batchEligibleIds.has(row.id))
     .map((row) => row.id);
   const selectedVisibleIds = visibleEligibleIds.filter((id) => selectedIds.includes(id));
-  const hasNext = state.approvedThrough < state.rows.length;
+  const hasNext = approvedThrough < (rows?.length ?? 0);
   const canNext = !disabled && !awaitingReview && hasNext;
+  if (!state?.rows.length) return null;
 
   function saveReviewedRows(rows: readonly ProductSceneRow[]) {
     if (!state) return;

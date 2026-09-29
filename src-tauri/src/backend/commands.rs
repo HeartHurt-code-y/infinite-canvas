@@ -14,8 +14,8 @@ use super::{
     downloader::{VideoCookieBrowser, VideoDownloadJobRecord, VideoDownloaderEngineStatus},
     error::{BackendError, CommandResult, IntoCommandResult as _},
     frame_extractor::VideoFrameExtractionJobRecord,
-    material_transfer,
     mac_delta_update::{self, MacDeltaUpdateStatus},
+    material_transfer,
     model_schema::{provider_scoped_model_definition_id, validate_schema_for_operations},
     mv_audio::{
         self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
@@ -32,10 +32,10 @@ use super::{
         self, AnalyzeReelbenchCommand, ExportReelbenchVideoCommand, RecutReelbenchCommand,
         ReelbenchShotDraft, ReelbenchValidation, ReelbenchVideoExport,
     },
-    resource_update::{self, RuntimeResourceUpdateStatus},
     remotion_renderer::{
         RemotionRenderRecord, RemotionRendererPreflight, StartRemotionRenderCommand,
     },
+    resource_update::{self, RuntimeResourceUpdateStatus},
     reverse_video::{
         DeliverReverseVideoCommand, ReverseVideoDelivery, ReverseVideoEvidence,
         ReverseVideoLearning, SaveReverseVideoEvidenceCommand,
@@ -58,21 +58,20 @@ use super::{
         CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
         DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
-        GenerationTaskProgress, ImportedAssetSource,
-        ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, ModelDefinition,
-        ImportLocalBase64AssetCommand, LocalBase64AssetPage, LocalBase64AssetRecord, MediaType,
-        ObserveAssetStatusCommand, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
-        RealPersonAuthLink, RealPersonGroup, RealPersonProviderCommand, RecoveryReport,
-        RefreshAssetCoverCommand, RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand,
-        RefreshStagingObjectCommand, RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, GenerationTaskProgress,
+        ImportLocalBase64AssetCommand, ImportedAssetSource, ListAssetGroupsCommand,
+        LocalAssetListQuery, LocalAssetPage, LocalBase64AssetPage, LocalBase64AssetRecord,
+        MediaType, ModelDefinition, ObserveAssetStatusCommand, ProviderConnection,
+        ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
+        RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
+        RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
+        RemoteModelOption, RemoteVideoTaskPage, RenameAssetCommand,
         ReplaceProviderModelBindingsCommand, SaveCanvasDocumentCommand, SaveExistingAssetCommand,
-        SaveExistingAssetResult, SaveStatus,
-        SetCredentialCommand, StagingJobRecord, StartGenerationCommand, StartStagingCommand,
-        StartVideoCompositionCommand, StartVideoDownloadCommand, StartVideoFrameExtractionCommand,
-        TosBucketPullSummary, TosStagingConfig, UpdateAssetGroupCommand,
-        UpsertProviderConnectionCommand, UpsertProviderTokenGroupCommand, VideoTaskListCommand,
-        WorkspaceUiPrefs,
+        SaveExistingAssetResult, SaveStatus, SetCredentialCommand, StagingJobRecord,
+        StartGenerationCommand, StartStagingCommand, StartVideoCompositionCommand,
+        StartVideoDownloadCommand, StartVideoFrameExtractionCommand, TosBucketPullSummary,
+        TosStagingConfig, UpdateAssetGroupCommand, UpsertProviderConnectionCommand,
+        UpsertProviderTokenGroupCommand, VideoTaskListCommand, WorkspaceUiPrefs,
     },
 };
 
@@ -1170,7 +1169,9 @@ pub async fn import_local_base64_asset(
     let library = state.local_base64_assets.clone();
     tauri::async_runtime::spawn_blocking(move || library.import(command))
         .await
-        .map_err(|error| BackendError::Conflict(format!("local import worker failed: {error}" )).payload())?
+        .map_err(|error| {
+            BackendError::Conflict(format!("local import worker failed: {error}")).payload()
+        })?
         .command()
 }
 
@@ -1205,7 +1206,10 @@ pub fn refresh_local_base64_asset_media(
     asset_id: String,
     media_type: MediaType,
 ) -> CommandResult<String> {
-    state.local_base64_assets.refresh_media(&asset_id, media_type).command()
+    state
+        .local_base64_assets
+        .refresh_media(&asset_id, media_type)
+        .command()
 }
 
 /// 本地素材预览续签：按素材身份重新签发对象存储只读地址，供画布节点恢复过期签名。

@@ -2464,7 +2464,8 @@ impl AssetLibrary {
         identity: CloudAssetIdentity,
         expected_media_type: MediaType,
     ) -> BackendResult<CloudAssetRecord> {
-        self.refresh_asset_record(identity, expected_media_type).await
+        self.refresh_asset_record(identity, expected_media_type)
+            .await
     }
 
     pub(crate) async fn download_material_to_file(

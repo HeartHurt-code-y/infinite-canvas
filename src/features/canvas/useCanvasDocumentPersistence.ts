@@ -25,12 +25,15 @@ export function useCanvasDocumentPersistence({
   restore,
   services,
   validateDelete,
+  active = true,
 }: {
   readonly canvasId: string;
   readonly collect: () => CanvasDocumentV2;
   readonly restore: (document: unknown) => void;
   readonly services: CanvasSessionServices;
   readonly validateDelete?: () => Promise<void>;
+  /** 非活跃画布的 saving/saved/pending 状态不可见，跳过以免后台保存触发无谓重渲染。 */
+  readonly active?: boolean;
 }) {
   const [hydrated, setHydrated] = useState(false);
   const [status, setStatus] = useState<"loading" | "pending" | "saving" | "saved" | "error">(
@@ -45,6 +48,17 @@ export function useCanvasDocumentPersistence({
   const request = useRef(0);
   const suspended = useRef(false);
   const deleteValidator = useRef(validateDelete);
+  const activeRef = useRef(active);
+
+  const updateStatus = useCallback((next: "loading" | "pending" | "saving" | "saved" | "error") => {
+    // 错误必须照常记录：激活后用户要能看到失败原因与重试入口。
+    if (!activeRef.current && (next === "pending" || next === "saving" || next === "saved")) return;
+    setStatus(next);
+  }, []);
+
+  useEffect(() => {
+    activeRef.current = active;
+  }, [active]);
 
   useEffect(() => {
     collector.current = collect;
@@ -103,7 +117,7 @@ export function useCanvasDocumentPersistence({
       }
       const currentRequest = ++request.current;
       const document = collector.current();
-      setStatus("saving");
+      updateStatus("saving");
       try {
         await canvasDocumentRepository.save({
           id: canvasId,
@@ -111,7 +125,7 @@ export function useCanvasDocumentPersistence({
           document,
         });
         if (!suspended.current && request.current === currentRequest) {
-          setStatus("saved");
+          updateStatus("saved");
           setError(null);
         }
       } catch (failure) {
@@ -124,7 +138,7 @@ export function useCanvasDocumentPersistence({
         throw failure;
       }
     },
-    [canvasId, services],
+    [canvasId, services, updateStatus],
   );
 
   const schedule = useCallback(() => {
@@ -132,12 +146,12 @@ export function useCanvasDocumentPersistence({
     // A previous save must not announce "saved" over a newer unsaved edit.
     request.current += 1;
     if (timer.current !== null) clearTimeout(timer.current);
-    setStatus("pending");
+    updateStatus("pending");
     timer.current = setTimeout(() => {
       timer.current = null;
       void flush().catch(() => undefined);
     }, CANVAS_SAVE_DEBOUNCE_MS);
-  }, [flush]);
+  }, [flush, updateStatus]);
 
   const documentChanged = useCallback(() => {
     if (!ready.current || suspended.current) return;

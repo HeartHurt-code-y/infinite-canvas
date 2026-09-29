@@ -199,7 +199,8 @@ export function createCanvasDocumentRepository(
     async save(command) {
       if (deletions.has(command.id)) throw deletedError(command.id);
       // Capture the JSON at call time; edits made while another write is pending belong to a later save.
-      const snapshot = JSON.parse(JSON.stringify(command)) as SaveCanvasDocumentCommand;
+      // 文档是纯 JSON 数据，structuredClone 比 JSON 往返快数倍。
+      const snapshot = structuredClone(command);
       return await enqueue(command.id, () => saveDirect(snapshot));
     },
     rename(canvasId, title) {

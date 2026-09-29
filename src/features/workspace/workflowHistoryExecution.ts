@@ -139,7 +139,9 @@ function defaultRunnerFactory(
 }
 
 function snapshot<T>(value: T): T {
-  return JSON.parse(JSON.stringify(value)) as T;
+  // 记录是纯 JSON 数据；structuredClone 比 JSON 往返快数倍，且语义一致
+  // （undefined 字段在 IPC/持久化序列化时同样被丢弃）。
+  return structuredClone(value);
 }
 
 function stringsIn(value: unknown, result = new Set<string>()): Set<string> {
@@ -264,6 +266,9 @@ export function createRecordedWorkflowRunner(
         request.versionConfig ?? request.node.config,
       );
       const versionCheckpoint = (value: KnowledgeVideoWorkflowCheckpoint) => {
+        // publishCheckpoint already recorded this exact checkpoint object; re-running
+        // recordWorkflowVersion would only recompute identical content signatures.
+        if (versionedConfig.checkpoint === value) return versionedConfig;
         versionedConfig = recordWorkflowVersion(versionedConfig, {
           ...versionedConfig,
           checkpoint: value,
@@ -364,6 +369,17 @@ export function createRecordedWorkflowRunner(
       };
       let productSceneSaveActive = false;
       let pendingProductSceneSave: ProductSceneSave | null = null;
+      // 行级中间态落盘节流：批次跑动时每行有 3-4 次检查点发布，逐次写 SQLite 会让
+      // 全量记录序列化挤占主线程与磁盘。中间态最多每 500ms 落一次盘；flush()（每个
+      // 付费模型请求的前置条件）会请求立即排空，提交节奏不受节流影响。
+      const PRODUCT_SCENE_SAVE_THROTTLE_MS = 500;
+      let productSceneLastWriteAt = 0;
+      let productSceneDrainRequested = false;
+      const productSceneDrainWaiters: Array<() => void> = [];
+      const requestProductSceneDrain = () => {
+        productSceneDrainRequested = true;
+        for (const wake of productSceneDrainWaiters.splice(0)) wake();
+      };
       const publishFailure = (error: unknown, historyFailure: boolean) => {
         const message = `${historyFailure ? "工作流历史记录保存失败：" : "工作流历史恢复失败："}${formatWorkflowError(error)}`;
         checkpoint = { ...checkpoint, phase: "failed", error: message };
@@ -402,6 +418,25 @@ export function createRecordedWorkflowRunner(
           queue = queue.then(async () => {
             let next: ProductSceneSave | null = first;
             while (next && !persistenceFailure) {
+              const sinceLastWrite = dependencies.now() - productSceneLastWriteAt;
+              if (
+                !productSceneDrainRequested &&
+                productSceneLastWriteAt > 0 &&
+                sinceLastWrite < PRODUCT_SCENE_SAVE_THROTTLE_MS
+              ) {
+                // 可打断的等待：flush()（模型调用前必经）会立即唤醒，提交不被节流拖慢。
+                await new Promise<void>((resolve) => {
+                  const timer = setTimeout(
+                    resolve,
+                    PRODUCT_SCENE_SAVE_THROTTLE_MS - sinceLastWrite,
+                  );
+                  productSceneDrainWaiters.push(() => {
+                    clearTimeout(timer);
+                    resolve();
+                  });
+                });
+              }
+              productSceneDrainRequested = false;
               const savedCheckpoint: KnowledgeVideoWorkflowCheckpoint = next.checkpoint;
               const savedProgress: KnowledgeVideoWorkflowRunState = next.progress;
               const savedHistory: WorkflowVersionHistory = next.versionHistory;
@@ -431,6 +466,7 @@ export function createRecordedWorkflowRunner(
                 });
                 revision = saved.revision;
                 record = saved;
+                productSceneLastWriteAt = dependencies.now();
               } catch (error) {
                 persistenceFailure = error;
               }
@@ -472,6 +508,8 @@ export function createRecordedWorkflowRunner(
         });
       };
       const flush = async () => {
+        // 付费请求前必须落盘：打断节流等待并排空整个保存队列。
+        requestProductSceneDrain();
         let pending: Promise<void>;
         do {
           pending = queue;

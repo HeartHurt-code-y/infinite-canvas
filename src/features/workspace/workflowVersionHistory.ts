@@ -253,8 +253,16 @@ function invalidateRestoredShotOutputs(
   checkpoint["lastActivePhase"] = changedMedia ? "generating" : "composing";
 }
 
+// Config objects are replaced immutably across the app, so one reference's signature
+// never changes. Publishing a checkpoint recomputes this signature several times
+// (runner publish, canvas store, history enqueue) over a plan that can hold 500 rows;
+// the cache turns the repeats into lookups instead of full-tree stringify passes.
+const contentSignatureCache = new WeakMap<object, string>();
+
 /** Only the workflow's editable content participates; canvas layout is outside this module. */
 export function workflowVersionContentSignature(config: KnowledgeVideoWorkflowConfig): string {
+  const cached = contentSignatureCache.get(config);
+  if (cached !== undefined) return cached;
   const authored = without(config as unknown as Record<string, unknown>, [
     ...RUNTIME_CONFIG_FIELDS,
     "versionHistory",
@@ -265,7 +273,21 @@ export function workflowVersionContentSignature(config: KnowledgeVideoWorkflowCo
   authored["historicalReferences"] = workflowMaterialsSignature({ ...config, materials: [] });
   authored["checkpoint"] = authoredCheckpoint(config.checkpoint);
   if (config.executionPlan) authored["executionPlan"] = authoredPlan(config.executionPlan);
-  return stableJsonSignature(authored);
+  const signature = stableJsonSignature(authored);
+  contentSignatureCache.set(config, signature);
+  return signature;
+}
+
+// Version records are created once and never mutated, so their full-JSON signatures
+// (used to detect conflicting history merges) are cacheable per reference.
+const versionSignatureCache = new WeakMap<object, string>();
+
+function versionSignature(value: WorkflowVersion): string {
+  const cached = versionSignatureCache.get(value);
+  if (cached !== undefined) return cached;
+  const signature = stableJsonSignature(value);
+  versionSignatureCache.set(value, signature);
+  return signature;
 }
 
 function originalBrief(config: KnowledgeVideoWorkflowConfig): string {
@@ -578,7 +600,7 @@ function mergeHistories(
   for (const version of incoming.versions) {
     const existing = byId.get(version.id);
     if (existing) {
-      if (stableJsonSignature(existing) !== stableJsonSignature(version)) {
+      if (versionSignature(existing) !== versionSignature(version)) {
         throw new Error(`工作流版本 ${version.id} 存在不同内容，无法覆盖已有历史。`);
       }
       continue;
