@@ -16,6 +16,8 @@ import {
   assertCompiledManifestPinsOutput,
   assertFullNsisNewerThanInputs,
   assertPinnedTauriCli,
+  assertReleaseExecutableFreshness,
+  assertReusableFullVersions,
   assertSlimNsisScript,
   expectedWindowsBundleNames,
 } from "./tauri-bundle-slim.mjs";
@@ -168,6 +170,37 @@ test("slim build rejects a full NSIS older than any signed resource or release e
       () => assertFullNsisNewerThanInputs(fullNsis, executable, manifest, root),
       /重新构建完整安装包/,
     );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("slim-only reuse requires a signed full release between the bridge and target", () => {
+  assert.doesNotThrow(() => assertReusableFullVersions("0.1.12", "0.2.0", "0.1.10"));
+  for (const [source, target, bridge] of [
+    ["0.1.10", "0.1.10", "0.1.10"],
+    ["0.2.0", "0.2.0", "0.1.10"],
+    ["0.1.9", "0.2.0", "0.1.10"],
+    ["not-a-version", "0.2.0", "0.1.10"],
+  ]) {
+    assert.throws(() => assertReusableFullVersions(source, target, bridge), /复用的完整包版本/);
+  }
+});
+
+test("slim-only rejects an executable older than current source or frontend output", () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "slim-exe-freshness-"));
+  try {
+    const exe = path.join(root, "release.exe");
+    const source = path.join(root, "app.tsx");
+    writeFileSync(exe, "built executable");
+    writeFileSync(source, "source");
+    const before = new Date("2026-01-01T00:00:00Z");
+    const after = new Date("2026-01-02T00:00:00Z");
+    utimesSync(source, before, before);
+    utimesSync(exe, after, after);
+    assert.doesNotThrow(() => assertReleaseExecutableFreshness(exe, [source]));
+    utimesSync(source, new Date("2026-01-03T00:00:00Z"), new Date("2026-01-03T00:00:00Z"));
+    assert.throws(() => assertReleaseExecutableFreshness(exe, [source]), /请重新构建程序/);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

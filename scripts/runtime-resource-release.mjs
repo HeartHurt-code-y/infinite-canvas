@@ -336,6 +336,10 @@ export async function stageRuntimeResourceRelease({
   };
   assertRuntimeReleaseShape(manifest);
   assertFullNsisCoversResourceRelease(readFileSync(nsisScriptPath, "utf8"), manifest);
+  return stageSignedRuntimeResourceManifest(root, outDir, manifest);
+}
+
+async function stageSignedRuntimeResourceManifest(root, outDir, manifest) {
   await mkdir(outDir, { recursive: true });
   const manifestPath = path.join(outDir, "manifest.json");
   const manifestBytes = Buffer.from(`${JSON.stringify(manifest, null, 2)}\n`);
@@ -344,4 +348,34 @@ export async function stageRuntimeResourceRelease({
   await signManifest(manifestPath, root);
   const verified = await verifyRuntimeResourceRelease(manifestPath, `${manifestPath}.sig`, root);
   return { ...verified, manifestPath, signaturePath: `${manifestPath}.sig` };
+}
+
+/** Only for a slim release whose resources were independently proven to match
+ * an earlier signed full bridge. The source manifest must itself be signed and
+ * every listed file must still match the current resource tree. */
+export async function stageRuntimeResourceReleaseFromSignedManifest({
+  root = REPO_ROOT,
+  version,
+  outDir,
+  sourceManifestPath,
+  sourceVersion,
+  objectBaseUrl = `${tosUpdatesPublicBaseUrl()}/resources/objects/`,
+}) {
+  if (!version || !outDir || !sourceManifestPath || !sourceVersion) {
+    throw new Error("复用签名资源清单需要新旧版本、输出目录和旧版清单路径");
+  }
+  const source = await verifyRuntimeResourceRelease(
+    sourceManifestPath,
+    `${sourceManifestPath}.sig`,
+    root,
+  );
+  if (source.manifest.version !== sourceVersion || sourceVersion === version) {
+    throw new Error("复用版本的签名资源清单版本不匹配");
+  }
+  if (source.manifest.objectBaseUrl !== objectBaseUrl) {
+    throw new Error("旧版签名资源清单的对象地址与当前发布地址不一致");
+  }
+  const manifest = { ...source.manifest, version };
+  assertRuntimeReleaseShape(manifest);
+  return stageSignedRuntimeResourceManifest(root, outDir, manifest);
 }

@@ -21,6 +21,7 @@ Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本�
 4. Codemagic 的 Mac 工作流在验签后用 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --full-bundle-dir <mac-dmg-dir> --version <version>` 发布 Mac 平台频道。Mac 离线 DMG 与安装脚本仍供首次安装和修复使用；`.github/workflows/macos-package.yml` 只构建产物，作为备用入口。Mac 工作流不发布旧共享清单。Windows 平台 `0.1.11` 验证完成后，运行 `pnpm update:publish --retire-legacy --expected-version 0.1.10 --require-windows-version 0.1.11 --backup-file <new local path>`，先在全新本地路径保存旧清单，再删除远端 `updates/latest.json`；后续不重新创建它。
 
 上述命令中的目录必须来自同一次构建。`TOS_ACCESS_KEY`、`TOS_SECRET_KEY` 只从环境变量读取；不要放进命令、文档或仓库。每次更新都升版本号，避免 CDN 的长期缓存复用旧安装包 URL。
+仅有程序代码变化、稳定资源目录及 `bundle.resources` 映射与已发布完整过渡版严格一致时，可只构建本版程序并复用已有签名完整包作校验，不压制本版完整 NSIS：先运行 `pnpm tauri:build --no-bundle`，再运行 `pnpm tauri:bundle:slim -- --baseline <已发布过渡版 bridge-baseline.json> --reuse-full-version <本机留存的已签名完整包版本>`。此路径会核验过渡版完整包与基线哈希、旧完整包及资源清单签名、当前每个资源文件和程序内置清单、程序版本及构建时间；任一不一致即停止。发布仍使用上述 Windows 平台命令和 `--no-full-offline`。资源或映射有变化时须走常规的同版完整包校验流程。
 修改时间检查能拦住完整包构建后又修改程序或资源的常见失配，但不是完整 NSIS 内每个文件字节与当前源码一致的证明。发布验收仍需核对本地完整包和公开小包。
 
 ## 最小验收
