@@ -25,7 +25,10 @@ import {
   generationTaskProgressSchema,
   generationTaskPageSchema,
   localAssetPageSchema,
+  localBase64AssetGroupSchema,
+  localBase64AssetGroupsSchema,
   localBase64AssetPageSchema,
+  numberSchema,
   localBase64AssetRecordSchema,
   modelDefinitionsSchema,
   nullableMediaThumbnailSchema,
@@ -592,6 +595,11 @@ export interface LocalAssetKindTotals {
 export interface LocalAssetListQuery {
   readonly mediaType?: MediaType | null;
   readonly name?: string | null;
+  /**
+   * 分组过滤：null/省略 = 全部素材；`ungrouped` 哨兵 = 未分组；其余为分组 ID。
+   * 仅本机 Base64 素材库生效，旧对象存储列表忽略该字段。
+   */
+  readonly groupId?: string | null;
   /** 1-based 页码，缺省 1。 */
   readonly page?: number | null;
   readonly pageSize?: number | null;
@@ -616,6 +624,8 @@ export interface LocalBase64AssetRecord {
   readonly previewUrl: string;
   readonly byteSize: number;
   readonly createdAt: number;
+  /** 所属本地分组 ID；null/缺省 = 未分组（旧持久化与测试夹具可能没有该字段）。 */
+  readonly groupId?: string | null | undefined;
 }
 
 export interface LocalBase64AssetPage {
@@ -629,7 +639,41 @@ export interface LocalBase64AssetPage {
 export interface ImportLocalBase64AssetCommand {
   readonly localPath: string;
   readonly name?: string | null;
+  /** 新素材归入的本地分组；null = 未分组。内容去重复用时保留原分组。 */
+  readonly groupId?: string | null;
 }
+
+/** 本地素材分组（文件夹语义）：只存在本机，删除分组不删除素材。 */
+export interface LocalBase64AssetGroupRecord {
+  readonly id: string;
+  readonly name: string;
+  readonly assetCount: number;
+  readonly createdAt: number;
+}
+
+export interface CreateLocalBase64AssetGroupCommand {
+  readonly name: string;
+}
+
+export interface DeleteLocalBase64AssetGroupCommand {
+  readonly id: string;
+}
+
+/** 批量移动本地素材到分组；`groupId` 为 null 时移出分组（未分组）。 */
+export interface MoveLocalBase64AssetsCommand {
+  readonly assetIds: readonly string[];
+  readonly groupId?: string | null;
+}
+
+export interface DeleteLocalBase64AssetCommand {
+  readonly id: string;
+}
+
+/**
+ * 分组过滤哨兵：查询/选择器里表示「未分组」。真实分组 ID 一律是
+ * `local-group-{uuid}`，与哨兵不可能冲突。
+ */
+export const LOCAL_ASSET_UNGROUPED_GROUP_ID = "ungrouped";
 
 export const localBase64AssetClient = {
   importAsset: (command: ImportLocalBase64AssetCommand): Promise<LocalBase64AssetRecord> =>
@@ -640,6 +684,21 @@ export const localBase64AssetClient = {
     readonly assetId: string;
     readonly mediaType: MediaType;
   }): Promise<string> => invokeDesktop("refresh_local_base64_asset_media", stringSchema, command),
+  listGroups: (): Promise<LocalBase64AssetGroupRecord[]> =>
+    invokeDesktop("list_local_base64_asset_groups", localBase64AssetGroupsSchema),
+  createGroup: (
+    command: CreateLocalBase64AssetGroupCommand,
+  ): Promise<LocalBase64AssetGroupRecord> =>
+    invokeDesktop("create_local_base64_asset_group", localBase64AssetGroupSchema, { command }),
+  /** 删除本地分组：组内素材保留并回到未分组。 */
+  deleteGroup: (command: DeleteLocalBase64AssetGroupCommand): Promise<void> =>
+    invokeDesktopVoid("delete_local_base64_asset_group", { command }),
+  /** 批量移动本地素材到分组；返回实际命中的素材数。 */
+  moveAssets: (command: MoveLocalBase64AssetsCommand): Promise<number> =>
+    invokeDesktop("move_local_base64_assets", numberSchema, { command }),
+  /** 删除本地 Base64 素材（正文文件 + 索引行），不可恢复。 */
+  deleteAsset: (command: DeleteLocalBase64AssetCommand): Promise<string> =>
+    invokeDesktop("delete_local_base64_asset", stringSchema, { command }),
 };
 
 /** Copy an existing library material by its durable identity, without using its preview URL. */
@@ -738,8 +797,7 @@ export const tosStagingClient: TosStagingClient = {
   getCredential: (credentialRef) =>
     invokeDesktop("get_credential", stringSchema, { credentialRef }),
   startUpload: (command) => invokeDesktop("start_staging_upload", stringSchema, { command }),
-  resumeStagingImport: (jobId) =>
-    invokeDesktop("resume_staging_import", stringSchema, { jobId }),
+  resumeStagingImport: (jobId) => invokeDesktop("resume_staging_import", stringSchema, { jobId }),
   getJob: (jobId) => invokeDesktop("get_staging_job", stagingJobRecordSchema, { jobId }),
   listAssetImportOutputs: () =>
     invokeDesktop("list_asset_import_outputs", assetImportOutputRecordsSchema),

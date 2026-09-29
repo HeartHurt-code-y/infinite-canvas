@@ -121,7 +121,7 @@ export interface AssetItem {
   /** 视频源地址（素材卡片悬浮播放用）。 */
   readonly videoUrl?: string | null;
   readonly cloudStatus?: CloudAssetStatus;
-  /** 云端素材所属分组（平台分组 ID 的字符串形态）；本地素材或旧记录缺省为 undefined。 */
+  /** 所属分组：云端为平台分组 ID 字符串，本地（local-b64-）为 `local-group-*`；未分组为 null。 */
   readonly groupId?: string | null;
   /** 未声明时按历史行为视为云端素材。 */
   readonly source?: AssetLibrarySource;
@@ -2689,6 +2689,7 @@ export function localAssetToItem(asset: LocalAssetRecord | LocalBase64AssetRecor
     visual: asset.mediaType === "audio" ? "ambience" : "portrait",
     previewUrl: asset.previewUrl,
     videoUrl: asset.mediaType === "video" ? asset.previewUrl : null,
+    groupId: isBase64 ? ((asset as LocalBase64AssetRecord).groupId ?? null) : null,
     source: "local",
   };
 }

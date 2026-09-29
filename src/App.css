@@ -1012,6 +1012,28 @@ h3 {
   cursor: default;
 }
 
+/* 本地素材批量整理：移动到分组下拉与两段式确认删除按钮。 */
+.asset-multi-select__move select {
+  max-width: 9rem;
+  padding: 0.15rem 0.3rem;
+  color: inherit;
+  background: var(--color-chrome-3);
+  border: var(--rule-thin) solid var(--color-rule);
+  border-radius: var(--radius-control);
+  font-size: var(--text-2xs);
+}
+
+.asset-multi-select__move select:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.asset-multi-select button.asset-multi-select__delete.is-armed {
+  color: var(--color-text);
+  background: var(--color-error);
+  border-color: var(--color-error);
+}
+
 .asset-card.is-dragging {
   cursor: grabbing;
   outline: var(--rule-active) solid var(--color-accent);
@@ -12696,6 +12718,24 @@ details[open] > summary .history-disclosure__caret {
 }
 
 .asset-source-dialog__rename-form input:focus-visible {
+  outline: var(--rule-active) solid var(--color-focus);
+  outline-offset: var(--space-3xs);
+}
+
+/* 详情弹窗「移动到分组」下拉：与行内改名输入同一套表面样式。 */
+.asset-source-dialog__group select {
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2xs) var(--space-xs);
+  color: var(--color-ink);
+  background: var(--color-paper);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+  font: inherit;
+  font-size: var(--text-sm);
+}
+
+.asset-source-dialog__group select:focus-visible {
   outline: var(--rule-active) solid var(--color-focus);
   outline-offset: var(--space-3xs);
 }

@@ -7,7 +7,9 @@ import { Icon } from "../../components/Icon";
 import { useEffect, useRef, useState } from "react";
 import {
   isDesktopRuntime,
+  LOCAL_ASSET_UNGROUPED_GROUP_ID,
   type AssetGroupRecord,
+  type LocalBase64AssetGroupRecord,
   type ProviderConnection,
 } from "../../lib/backend";
 import { isDeletableCloudAssetGroupId } from "../../lib/assetLibrarySupport";
@@ -17,7 +19,11 @@ import type { AssetItem, AssetKind, AssetLibrarySource, AssetUploadEntry } from 
 import { ASSET_KIND_LABELS } from "./workspaceModel";
 
 const EMPTY_ASSET_PICK_ORDERS = new Map<string, number>();
+const EMPTY_LOCAL_ASSET_GROUPS: readonly LocalBase64AssetGroupRecord[] = [];
 function noopAssetPanelAction() {}
+// 零参函数可安全赋给带参回调类型；避免为未用参数引入下划线约定。
+function noopLocalGroupChange(): void {}
+function noopLocalGroupChangeWithId(): void {}
 
 /** 素材面板标题行：面板名 + 上传入口。 */
 export function AssetPanelHeader({
@@ -368,8 +374,138 @@ export function AssetGroupsPicker({
   );
 }
 
-/** 素材类型 Tab：图片/视频/音频，角标计数由调用方按来源解析（null = 尚无计数，不显示）。 */
-export function AssetKindTabs({
+/** 本地素材分组：下拉（全部/未分组/各分组）+ 新建/删除，交互对齐云端分组选择器。 */
+export function LocalAssetGroupsPicker({
+  groups,
+  selectedGroupId,
+  loading,
+  error,
+  onGroupChange,
+  onCreateGroup,
+  onDeleteGroup,
+  onRetry,
+}: {
+  readonly groups: readonly LocalBase64AssetGroupRecord[];
+  readonly selectedGroupId: string | null;
+  readonly loading: boolean;
+  readonly error: string | null;
+  /** 切换分组：null = 全部素材；哨兵值 = 未分组；其余为分组 ID。 */
+  readonly onGroupChange: (groupId: string | null) => void;
+  readonly onCreateGroup: () => void;
+  /** 删除本地分组：组内素材保留并回到未分组；选中「全部/未分组」时不触发。 */
+  readonly onDeleteGroup: (groupId: string) => void;
+  readonly onRetry: () => void;
+}) {
+  // 与云端分组一致的两段式确认：4 秒内再点才真正删除，切分组/卸载时取消。
+  const [confirmingDelete, setConfirmingDelete] = useState(false);
+  const deleteArmTimerRef = useRef<number | null>(null);
+
+  const selectedGroup = groups.find((group) => group.id === selectedGroupId) ?? null;
+
+  useEffect(() => {
+    return () => {
+      if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    };
+  }, []);
+
+  const armDelete = () => {
+    if (confirmingDelete || selectedGroup == null) return;
+    setConfirmingDelete(true);
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    deleteArmTimerRef.current = window.setTimeout(() => setConfirmingDelete(false), 4_000);
+  };
+  const confirmDelete = () => {
+    if (!confirmingDelete || selectedGroupId == null) return;
+    if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+    setConfirmingDelete(false);
+    onDeleteGroup(selectedGroupId);
+  };
+
+  return (
+    <div className="asset-groups">
+      <div className="asset-groups__heading">
+        <span className="asset-groups__title">分组</span>
+      </div>
+      <div className="asset-groups__select-row">
+        <label className="sr-only" htmlFor="local-asset-group-select">
+          本地素材分组
+        </label>
+        <select
+          id="local-asset-group-select"
+          aria-label="本地素材分组"
+          value={selectedGroupId ?? ""}
+          disabled={loading && groups.length === 0}
+          onChange={(event) => {
+            const value = event.target.value;
+            setConfirmingDelete(false);
+            if (deleteArmTimerRef.current != null) window.clearTimeout(deleteArmTimerRef.current);
+            onGroupChange(value ? value : null);
+          }}
+        >
+          <option value="">全部素材</option>
+          <option value={LOCAL_ASSET_UNGROUPED_GROUP_ID}>未分组</option>
+          {groups.map((group) => (
+            <option key={group.id} value={group.id}>
+              {group.name}
+              {group.assetCount > 0 ? `（${group.assetCount}）` : ""}
+            </option>
+          ))}
+        </select>
+        {loading ? (
+          <Icon name="circle-notch" data-spin="true" aria-hidden="true" size="sm" />
+        ) : null}
+        <div className="asset-groups__actions">
+          <button
+            type="button"
+            className="asset-groups__create"
+            aria-label="新建本地素材分组"
+            onClick={onCreateGroup}
+          >
+            <Icon name="plus" aria-hidden="true" size="xs" />
+            新建分组
+          </button>
+          {selectedGroup != null ? (
+            <button
+              type="button"
+              className={`asset-groups__delete${confirmingDelete ? " is-armed" : ""}`}
+              aria-label={
+                confirmingDelete
+                  ? `确认删除分组：${selectedGroup.name}`
+                  : `删除分组：${selectedGroup.name}`
+              }
+              onClick={confirmingDelete ? confirmDelete : armDelete}
+            >
+              <Icon name="trash" aria-hidden="true" size="xs" />
+              {confirmingDelete ? "确认删除？" : "删除分组"}
+            </button>
+          ) : null}
+        </div>
+      </div>
+      {selectedGroup != null && !confirmingDelete ? (
+        <span className="asset-groups__upload-hint" role="status">
+          上传的素材会归入「{selectedGroup.name}」，不会落到其他分组。
+        </span>
+      ) : null}
+      {confirmingDelete ? (
+        <span className="asset-groups__delete-hint" role="status">
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
+          只删除分组本身；组内素材会保留并回到「未分组」。
+        </span>
+      ) : null}
+      {error ? (
+        <span className="asset-groups__error" role="status">
+          <Icon name="warning-circle" aria-hidden="true" size="sm" />
+          本地分组读取失败，仍显示全部素材
+          <button type="button" onClick={onRetry}>
+            重试
+          </button>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+/** 素材类型 Tab：图片/视频/音频，角标计数由调用方按来源解析（null = 尚无计数，不显示）。 */ export function AssetKindTabs({
   kind,
   getKindCount,
   onKindChange,
@@ -555,7 +691,9 @@ export function AssetEmptyState({
               ? "请先在全局设置中配置并启用供应商连接。"
               : isDesktopRuntime()
                 ? source === "local"
-                  ? "素材会以 Base64 编码保存在本机，与对象存储独立。"
+                  ? uploadGroupName != null
+                    ? `该分组还没有素材；从此处上传的素材会归入「${uploadGroupName}」。`
+                    : "素材会以 Base64 编码保存在本机，与对象存储独立。"
                   : objectStorage
                     ? "这里仅显示保存到对象存储的素材，不会导入云端素材库。"
                     : uploadGroupName != null
@@ -729,6 +867,17 @@ export function AssetPanel({
   onRefreshGroups,
   onCreateGroup,
   onDeleteGroup,
+  localGroups = EMPTY_LOCAL_ASSET_GROUPS,
+  localGroupsLoading = false,
+  localGroupsError = null,
+  selectedLocalGroupId = null,
+  onLocalGroupChange = noopLocalGroupChange,
+  onRefreshLocalGroups = noopAssetPanelAction,
+  onCreateLocalGroup = noopAssetPanelAction,
+  onDeleteLocalGroup = noopLocalGroupChangeWithId,
+  onMovePickedLocalAssets,
+  onDeletePickedLocalAssets,
+  deletingPickedLocalAssets = false,
   kind,
   getKindCount,
   onKindChange,
@@ -794,6 +943,20 @@ export function AssetPanel({
   readonly onCreateGroup: () => void;
   /** 删除云端素材库分组（连带组内全部素材，不可逆）。 */
   readonly onDeleteGroup: (groupId: string) => void;
+  /** 本地素材分组（source === "local" 时渲染本地分组选择器）。 */
+  readonly localGroups?: readonly LocalBase64AssetGroupRecord[];
+  readonly localGroupsLoading?: boolean;
+  readonly localGroupsError?: string | null;
+  readonly selectedLocalGroupId?: string | null;
+  readonly onLocalGroupChange?: (groupId: string | null) => void;
+  readonly onRefreshLocalGroups?: () => void;
+  readonly onCreateLocalGroup?: () => void;
+  /** 删除本地分组（组内素材保留并回到未分组）。 */
+  readonly onDeleteLocalGroup?: (groupId: string) => void;
+  /** 多选模式下批量整理本地素材：移动到分组（null = 移出分组）。提供时渲染批量操作行。 */
+  readonly onMovePickedLocalAssets?: (groupId: string | null) => void;
+  readonly onDeletePickedLocalAssets?: () => void;
+  readonly deletingPickedLocalAssets?: boolean;
   readonly kind: AssetKind;
   /**
    * Tab 角标计数：浏览器=演示数据计数，本地=分页响应全库计数，
@@ -829,6 +992,35 @@ export function AssetPanel({
   readonly onPlacePickedAssets?: () => void;
   readonly onClearPickedAssets?: () => void;
 }) {
+  // 多选批量删除本地素材：与详情弹窗一致的两段式确认，4 秒内再点才真正删除。
+  const [confirmingBatchDelete, setConfirmingBatchDelete] = useState(false);
+  const batchDeleteArmTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (batchDeleteArmTimerRef.current != null) {
+        window.clearTimeout(batchDeleteArmTimerRef.current);
+      }
+    };
+  }, []);
+  const armBatchDelete = () => {
+    if (confirmingBatchDelete) return;
+    setConfirmingBatchDelete(true);
+    if (batchDeleteArmTimerRef.current != null) {
+      window.clearTimeout(batchDeleteArmTimerRef.current);
+    }
+    batchDeleteArmTimerRef.current = window.setTimeout(
+      () => setConfirmingBatchDelete(false),
+      4_000,
+    );
+  };
+  const confirmBatchDelete = () => {
+    if (!confirmingBatchDelete) return;
+    if (batchDeleteArmTimerRef.current != null) {
+      window.clearTimeout(batchDeleteArmTimerRef.current);
+    }
+    setConfirmingBatchDelete(false);
+    onDeletePickedLocalAssets?.();
+  };
   return (
     <aside
       id="asset-panel"
@@ -935,6 +1127,18 @@ export function AssetPanel({
           onRetry={onRefreshGroups}
         />
       ) : null}
+      {source === "local" && isDesktopRuntime() ? (
+        <LocalAssetGroupsPicker
+          groups={localGroups}
+          selectedGroupId={selectedLocalGroupId}
+          loading={localGroupsLoading}
+          error={localGroupsError}
+          onGroupChange={onLocalGroupChange}
+          onCreateGroup={onCreateLocalGroup}
+          onDeleteGroup={onDeleteLocalGroup}
+          onRetry={onRefreshLocalGroups}
+        />
+      ) : null}
       <AssetKindTabs kind={kind} getKindCount={getKindCount} onKindChange={onKindChange} />
       <AssetSearchBar
         kind={kind}
@@ -954,6 +1158,32 @@ export function AssetPanel({
               ? `已选 ${pickedCount} 个，顺序即生成输入顺序`
               : "按顺序点选素材，再一次放到画布"}
           </span>
+          {source === "local" && onMovePickedLocalAssets != null ? (
+            <label className="asset-multi-select__move">
+              <span className="sr-only">移动所选素材到分组</span>
+              <select
+                aria-label="移动所选素材到分组"
+                value=""
+                disabled={pickedCount === 0 || deletingPickedLocalAssets}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  if (!value) return;
+                  // 动作型下拉：触发移动后立即复位占位项，避免停留在刚选的分组名上。
+                  event.currentTarget.value = "";
+                  setConfirmingBatchDelete(false);
+                  onMovePickedLocalAssets(value === LOCAL_ASSET_UNGROUPED_GROUP_ID ? null : value);
+                }}
+              >
+                <option value="">移动到分组…</option>
+                {localGroups.map((group) => (
+                  <option key={group.id} value={group.id}>
+                    {group.name}
+                  </option>
+                ))}
+                <option value={LOCAL_ASSET_UNGROUPED_GROUP_ID}>未分组</option>
+              </select>
+            </label>
+          ) : null}
           <button
             type="button"
             className="is-primary"
@@ -962,6 +1192,17 @@ export function AssetPanel({
           >
             放到画布
           </button>
+          {source === "local" && onDeletePickedLocalAssets != null ? (
+            <button
+              type="button"
+              className={`asset-multi-select__delete${confirmingBatchDelete ? " is-armed" : ""}`}
+              aria-label={confirmingBatchDelete ? "确认删除所选素材" : "删除所选素材"}
+              disabled={pickedCount === 0 || deletingPickedLocalAssets}
+              onClick={confirmingBatchDelete ? confirmBatchDelete : armBatchDelete}
+            >
+              {confirmingBatchDelete ? "确认删除？" : "删除所选"}
+            </button>
+          ) : null}
           <button type="button" disabled={pickedCount === 0} onClick={onClearPickedAssets}>
             清空
           </button>

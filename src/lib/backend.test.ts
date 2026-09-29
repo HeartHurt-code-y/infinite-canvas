@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   assetLibraryClient,
   BackendContractError,
+  localBase64AssetClient,
   providerSettingsClient,
   refreshMediaUrlWithStagingFallback,
   tosStagingClient,
@@ -563,5 +564,87 @@ describe("refreshMediaUrlWithStagingFallback", () => {
     expect(local).toHaveBeenCalledWith({ stagingJobId: "job-1", mediaType: "image" });
     // 本地素材没有 providerConnectionId，不该去问供应商记录。
     expect(read).not.toHaveBeenCalled();
+  });
+});
+
+describe("localBase64AssetClient groups and deletion", () => {
+  it("lists, creates and deletes local asset groups with canonical payloads", async () => {
+    const group = { id: "local-group-1", name: "品牌物料", assetCount: 2, createdAt: 1_726 };
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    mockDesktopInvoke((command, args) => {
+      calls.push([command, args]);
+      if (command === "list_local_base64_asset_groups") return Promise.resolve([group]);
+      if (command === "create_local_base64_asset_group") return Promise.resolve(group);
+      return Promise.resolve(group.id);
+    });
+
+    await expect(localBase64AssetClient.listGroups()).resolves.toEqual([group]);
+    await expect(localBase64AssetClient.createGroup({ name: "品牌物料" })).resolves.toEqual(group);
+    await expect(localBase64AssetClient.deleteGroup({ id: group.id })).resolves.toBeUndefined();
+    expect(calls.map(([command]) => command)).toEqual([
+      "list_local_base64_asset_groups",
+      "create_local_base64_asset_group",
+      "delete_local_base64_asset_group",
+    ]);
+    expect(calls[1]?.[1]).toEqual({ command: { name: "品牌物料" } });
+    expect(calls[2]?.[1]).toEqual({ command: { id: "local-group-1" } });
+  });
+
+  it("moves assets in bulk and forwards the ungrouped target as null", async () => {
+    let capturedCommand = "";
+    let capturedArgs: Record<string, unknown> | undefined;
+    mockDesktopInvoke((command, args) => {
+      capturedCommand = command;
+      capturedArgs = args;
+      return Promise.resolve(2);
+    });
+
+    await expect(
+      localBase64AssetClient.moveAssets({
+        assetIds: ["local-b64-a", "local-b64-b"],
+        groupId: null,
+      }),
+    ).resolves.toBe(2);
+    expect(capturedCommand).toBe("move_local_base64_assets");
+    expect(capturedArgs).toEqual({
+      command: { assetIds: ["local-b64-a", "local-b64-b"], groupId: null },
+    });
+  });
+
+  it("deletes a local asset and passes the selected group through on import", async () => {
+    const calls: Array<[string, Record<string, unknown> | undefined]> = [];
+    const record = {
+      id: "local-b64-1",
+      name: "素材.png",
+      mediaType: "image" as const,
+      mimeType: "image/png",
+      previewUrl: "http://localbase64.localhost/local-b64-1",
+      byteSize: 12,
+      createdAt: 1_726,
+      groupId: "local-group-1",
+    };
+    mockDesktopInvoke((command, args) => {
+      calls.push([command, args]);
+      if (command === "delete_local_base64_asset") return Promise.resolve("local-b64-1");
+      return Promise.resolve(record);
+    });
+
+    await expect(localBase64AssetClient.deleteAsset({ id: "local-b64-1" })).resolves.toBe(
+      "local-b64-1",
+    );
+    await expect(
+      localBase64AssetClient.importAsset({
+        localPath: "C:/tmp/素材.png",
+        name: "素材.png",
+        groupId: "local-group-1",
+      }),
+    ).resolves.toEqual(record);
+    expect(calls.map(([command]) => command)).toEqual([
+      "delete_local_base64_asset",
+      "import_local_base64_asset",
+    ]);
+    expect(calls[1]?.[1]).toEqual({
+      command: { localPath: "C:/tmp/素材.png", name: "素材.png", groupId: "local-group-1" },
+    });
   });
 });

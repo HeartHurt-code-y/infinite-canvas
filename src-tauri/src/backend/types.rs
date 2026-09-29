@@ -1245,6 +1245,9 @@ pub struct LocalAssetRecord {
 pub struct LocalAssetListQuery {
     pub media_type: Option<MediaType>,
     pub name: Option<String>,
+    /// 分组过滤：None/空 = 全部素材；`ungrouped` 哨兵 = 未分组；其余为分组 ID。
+    /// 旧版对象存储列表忽略该字段。
+    pub group_id: Option<String>,
     /// 1-based 页码，缺省 1。
     pub page: Option<u32>,
     pub page_size: Option<u32>,
@@ -1276,6 +1279,9 @@ pub struct ImportLocalBase64AssetCommand {
     pub local_path: String,
     #[serde(default)]
     pub name: Option<String>,
+    /// 新素材直接归入的分组；None = 未分组。内容去重复用时保留原分组不变。
+    #[serde(default)]
+    pub group_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1288,6 +1294,47 @@ pub struct LocalBase64AssetRecord {
     pub preview_url: String,
     pub byte_size: u64,
     pub created_at: i64,
+    /// 所属分组 ID；None = 未分组。
+    #[serde(default)]
+    pub group_id: Option<String>,
+}
+
+/// 本地素材分组（文件夹语义）：只存在本机 SQLite，与云端素材库分组互不影响；
+/// 删除分组不删除素材，组内素材回到未分组。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalBase64AssetGroupRecord {
+    pub id: String,
+    pub name: String,
+    pub asset_count: u64,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateLocalBase64AssetGroupCommand {
+    pub name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteLocalBase64AssetGroupCommand {
+    pub id: String,
+}
+
+/// 批量移动本地素材到分组；`group_id` 为 None 时移出分组（未分组）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveLocalBase64AssetsCommand {
+    pub asset_ids: Vec<String>,
+    #[serde(default)]
+    pub group_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DeleteLocalBase64AssetCommand {
+    pub id: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

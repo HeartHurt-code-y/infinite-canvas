@@ -61,6 +61,7 @@ import {
   toMediaSrc,
   tosStagingClient,
   localBase64AssetClient,
+  LOCAL_ASSET_UNGROUPED_GROUP_ID,
   workspaceUiClient,
   videoComposerClient,
   videoDownloaderClient,
@@ -75,6 +76,7 @@ import {
   type GenerationTaskSummary,
   type LocalAssetKindTotals,
   type LocalAssetRecord,
+  type LocalBase64AssetGroupRecord,
   type LocalBase64AssetRecord,
   type MediaType,
   type PromptOptimizationContextEntry,
@@ -1120,6 +1122,21 @@ export function WorkspaceApp({
   const [localAssetsLoading, setLocalAssetsLoading] = useState(false);
   const [localAssetsError, setLocalAssetsError] = useState<string | null>(null);
   const [localLibraryError, setLocalLibraryError] = useState(false);
+  // 本地素材分组（文件夹语义，本机 SQLite）：交互对齐云端分组选择器。
+  const [localAssetGroups, setLocalAssetGroups] = useState<readonly LocalBase64AssetGroupRecord[]>(
+    [],
+  );
+  const [localGroupsLoading, setLocalGroupsLoading] = useState(false);
+  const [localGroupsError, setLocalGroupsError] = useState<string | null>(null);
+  const [selectedLocalAssetGroupId, setSelectedLocalAssetGroupId] = useState<string | null>(null);
+  // refreshLocalAssets 是稳定回调（依赖为空），通过 ref 读取当前分组避免重建。
+  const selectedLocalAssetGroupIdRef = useRef<string | null>(null);
+  const [newLocalGroupDialogOpen, setNewLocalGroupDialogOpen] = useState(false);
+  const [creatingLocalGroup, setCreatingLocalGroup] = useState(false);
+  // 正在删除的本地分组 ID（删除期间禁用入口，并阻止重复提交）。
+  const [deletingLocalAssetGroupId, setDeletingLocalAssetGroupId] = useState<string | null>(null);
+  // 多选批量删除本地素材进行中（禁用批量操作，防止重复提交）。
+  const [deletingPickedLocalAssets, setDeletingPickedLocalAssets] = useState(false);
   const [objectStorageAssets, setObjectStorageAssets] = useState<readonly LocalAssetRecord[]>([]);
   const [objectStorageLoading, setObjectStorageLoading] = useState(false);
   const [objectStorageError, setObjectStorageError] = useState<string | null>(null);
@@ -2116,16 +2133,18 @@ export function WorkspaceApp({
     const pageNumber = localAssetPageRef.current;
     const mediaType = assetKindRef.current;
     const name = committedAssetSearchRef.current.trim();
+    const groupId = selectedLocalAssetGroupIdRef.current;
     const startedAt = Date.now();
     setLocalAssetsLoading(true);
     frontendLog(
       "info",
-      `[assets] 本地素材索引开始读取: 触发来源=${source}, 类型=${mediaType}, 页码=${pageNumber}`,
+      `[assets] 本地素材索引开始读取: 触发来源=${source}, 类型=${mediaType}, 页码=${pageNumber}, 分组=${groupId ?? "全部"}`,
     );
     void localBase64AssetClient
       .listAssets({
         mediaType,
         name: name || null,
+        groupId,
         page: pageNumber,
         pageSize: ASSET_PAGE_SIZE,
       })
@@ -2157,6 +2176,177 @@ export function WorkspaceApp({
         if (requestId === localAssetsRequestRef.current) setLocalAssetsLoading(false);
       });
   }, []);
+
+  // 本地素材分组：列表拉取保持选中（分组消失时回退「全部素材」），失败不阻塞浏览。
+  const refreshLocalAssetGroups = useCallback((): void => {
+    if (!isDesktopRuntime()) return;
+    setLocalGroupsLoading(true);
+    void localBase64AssetClient
+      .listGroups()
+      .then(
+        (groups) => {
+          setLocalAssetGroups(groups);
+          const wanted = selectedLocalAssetGroupIdRef.current;
+          const next =
+            wanted != null && groups.some((group) => group.id === wanted) ? wanted : null;
+          selectedLocalAssetGroupIdRef.current = next;
+          setSelectedLocalAssetGroupId(next);
+          setLocalGroupsError(null);
+        },
+        (error: unknown) => {
+          const formatted = formatRawBackendError(error);
+          frontendLog("error", `[assets] 本地素材分组读取失败: 错误: ${formatted}`);
+          setLocalGroupsError(error instanceof Error ? error.message : formatted);
+        },
+      )
+      .finally(() => setLocalGroupsLoading(false));
+  }, []);
+
+  /** 面板当前选中的本地分组即上传目标：全部/未分组视图落「未分组」（只读 ref，稳定回调）。 */
+  const uploadTargetLocalGroupId = useCallback((): string | null => {
+    const groupId = selectedLocalAssetGroupIdRef.current;
+    return groupId != null && groupId !== LOCAL_ASSET_UNGROUPED_GROUP_ID ? groupId : null;
+  }, []);
+
+  const handleLocalAssetGroupChanged = useCallback((groupId: string | null) => {
+    selectedLocalAssetGroupIdRef.current = groupId;
+    setSelectedLocalAssetGroupId(groupId);
+    // 重查由分页查询 filter effect 统一处理（分组选择是 filterKey 的一部分）。
+  }, []);
+
+  const handleCreateLocalAssetGroup = useCallback(
+    (name: string) => {
+      setCreatingLocalGroup(true);
+      void localBase64AssetClient
+        .createGroup({ name })
+        .then(
+          (group) => {
+            setNewLocalGroupDialogOpen(false);
+            frontendLog(
+              "info",
+              `[assets] 本地素材分组已创建: groupId=${group.id}, name=${group.name}`,
+            );
+            selectedLocalAssetGroupIdRef.current = group.id;
+            setSelectedLocalAssetGroupId(group.id);
+            // 本地先插入保证选择器立即可见；后台刷新同步计数。
+            setLocalAssetGroups((current) =>
+              current.some((entry) => entry.id === group.id) ? current : [...current, group],
+            );
+            refreshLocalAssetGroups();
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog("error", `[assets] 本地素材分组创建失败: 错误: ${formatted}`);
+            // 同名冲突最常见；弹窗挡着面板错误区，直接 toast 给出结论。
+            toast.error("新建本地分组失败", { description: formatted });
+          },
+        )
+        .finally(() => setCreatingLocalGroup(false));
+    },
+    [refreshLocalAssetGroups],
+  );
+
+  const handleDeleteLocalAssetGroup = useCallback(
+    (groupId: string) => {
+      if (deletingLocalAssetGroupId != null) return;
+      if (groupId === LOCAL_ASSET_UNGROUPED_GROUP_ID) return;
+      setDeletingLocalAssetGroupId(groupId);
+      void localBase64AssetClient
+        .deleteGroup({ id: groupId })
+        .then(
+          () => {
+            frontendLog("info", `[assets] 本地素材分组已删除: groupId=${groupId}`);
+            if (selectedLocalAssetGroupIdRef.current === groupId) {
+              selectedLocalAssetGroupIdRef.current = null;
+              setSelectedLocalAssetGroupId(null);
+            }
+            setLocalAssetGroups((current) => current.filter((group) => group.id !== groupId));
+            refreshLocalAssetGroups();
+            // 组内素材回到未分组：当前列表与 Tab 计数都要重查。
+            refreshLocalAssets("group-deleted");
+          },
+          (error: unknown) => {
+            const formatted = formatRawBackendError(error);
+            frontendLog(
+              "error",
+              `[assets] 本地素材分组删除失败: groupId=${groupId}, 错误: ${formatted}`,
+            );
+            setLocalAssetsError(error instanceof Error ? error.message : formatted);
+          },
+        )
+        .finally(() => setDeletingLocalAssetGroupId(null));
+    },
+    [deletingLocalAssetGroupId, refreshLocalAssetGroups, refreshLocalAssets],
+  );
+
+  /** 移动本地素材到分组（null = 移出分组）；供详情弹窗单素材与多选批量共用。 */
+  const handleMoveLocalAssets = useCallback(
+    (assets: readonly AssetItem[], groupId: string | null) => {
+      const ids = assets
+        .filter((asset) => asset.source === "local" && asset.id.startsWith("local-b64-"))
+        .map((asset) => asset.id);
+      if (ids.length === 0) return;
+      void localBase64AssetClient.moveAssets({ assetIds: ids, groupId }).then(
+        (moved) => {
+          frontendLog(
+            "info",
+            `[assets] 本地素材已移动分组: 目标=${groupId ?? "未分组"}, 命中 ${moved}/${ids.length} 个`,
+          );
+          if (moved === 0) {
+            toast.info("没有可移动的素材，列表可能已更新。");
+            return;
+          }
+          if (moved < ids.length) toast.info(`部分素材已不在本地素材库，移动了 ${moved} 项。`);
+          refreshLocalAssetGroups();
+          refreshLocalAssets("group-changed");
+          setPickedAssets([]);
+        },
+        (error: unknown) => {
+          const formatted = formatRawBackendError(error);
+          frontendLog("error", `[assets] 本地素材移动分组失败: 错误: ${formatted}`);
+          toast.error("移动分组失败", { description: formatted });
+        },
+      );
+    },
+    [refreshLocalAssetGroups, refreshLocalAssets],
+  );
+
+  /** 删除本地 Base64 素材（正文 + 索引行）；供详情弹窗单素材与多选批量共用。 */
+  const handleDeleteLocalAssets = useCallback(
+    async (assets: readonly AssetItem[]): Promise<void> => {
+      const targets = assets.filter(
+        (asset) => asset.source === "local" && asset.id.startsWith("local-b64-"),
+      );
+      if (targets.length === 0) return;
+      let deleted = 0;
+      for (const asset of targets) {
+        try {
+          await localBase64AssetClient.deleteAsset({ id: asset.id });
+          deleted += 1;
+        } catch (error) {
+          frontendLog(
+            "error",
+            `[assets] 本地素材删除失败: assetId=${asset.id}, 错误: ${formatRawBackendError(error)}`,
+          );
+        }
+      }
+      if (deleted > 0) {
+        frontendLog("info", `[assets] 本地素材已删除: ${deleted}/${targets.length} 个`);
+        refreshLocalAssetGroups();
+        refreshLocalAssets("delete");
+        setPickedAssets([]);
+        toast.success(
+          targets.length === 1
+            ? `已从本地素材库删除「${targets[0]?.name ?? ""}」`
+            : `已从本地素材库删除 ${deleted} 项素材`,
+        );
+      }
+      if (deleted < targets.length) {
+        toast.error(`有 ${targets.length - deleted} 项素材删除失败，列表可能已更新。`);
+      }
+    },
+    [refreshLocalAssetGroups, refreshLocalAssets],
+  );
 
   // 对象存储保留独立目录：旧 TOS-only 素材与新上传的对象都在这里按页浏览，
   // 不混入云端供应商素材库，也不混入本机 Base64 素材库。
@@ -2520,6 +2710,8 @@ export function WorkspaceApp({
       // 误杀在途响应且不重发，导致面板卡在空列表。
     } else {
       refreshLocalAssets("initial");
+      // 本地分组与素材列表并行拉取；分组失败不阻塞浏览（选择器显示重试）。
+      refreshLocalAssetGroups();
     }
     // refreshCloudAssets / refreshLocalAssets / refreshAssetGroups 均为稳定回调（依赖为空）。
   }, [
@@ -2528,6 +2720,7 @@ export function WorkspaceApp({
     assetProvider,
     refreshAssetGroups,
     refreshCloudAssets,
+    refreshLocalAssetGroups,
     refreshLocalAssets,
     refreshObjectStorageAssets,
     settingsOpen,
@@ -2544,7 +2737,15 @@ export function WorkspaceApp({
       assetQueryFilterKeyRef.current = "";
       return;
     }
-    const filterKey = `${assetKind}|${committedAssetSearch}|${cloudCollection === "library" ? (selectedAssetGroupId ?? "") : ""}`;
+    // 分组段按来源取值：本地=本地分组，云端素材库=云端分组，对象存储无分组。
+    // 空串与「未选分组」等价，来源切换（两边都没选分组）不会触发多余重查。
+    const groupSegment =
+      assetLibrarySource === "local"
+        ? (selectedLocalAssetGroupId ?? "")
+        : cloudCollection === "library"
+          ? (selectedAssetGroupId ?? "")
+          : "";
+    const filterKey = `${assetKind}|${committedAssetSearch}|${groupSegment}`;
     if (assetQueryFilterKeyRef.current === filterKey) return;
     assetQueryFilterKeyRef.current = filterKey;
     if (!assetQueryFilterArmedRef.current) {
@@ -2577,6 +2778,7 @@ export function WorkspaceApp({
     refreshLocalAssets,
     refreshObjectStorageAssets,
     selectedAssetGroupId,
+    selectedLocalAssetGroupId,
     settingsOpen,
   ]);
 
@@ -2718,6 +2920,8 @@ export function WorkspaceApp({
             const record = await localBase64AssetClient.importAsset({
               localPath: candidate.filePath,
               name: candidate.name,
+              // 上传目标跟随面板当前选中的本地分组（全部/未分组 = 未分组）。
+              groupId: uploadTargetLocalGroupId(),
             });
             startedCount += 1;
             setAssetUploads((current) =>
@@ -2815,7 +3019,7 @@ export function WorkspaceApp({
       }
       return startedCount;
     },
-    [assetLibrarySource, assetProvider, refreshLocalAssets],
+    [assetLibrarySource, assetProvider, refreshLocalAssets, uploadTargetLocalGroupId],
   );
 
   /** 把已保存的图片/视频产物写入明确选择的目标。 */
@@ -2900,6 +3104,7 @@ export function WorkspaceApp({
             const record = await localBase64AssetClient.importAsset({
               localPath: output.localPath,
               name,
+              groupId: uploadTargetLocalGroupId(),
             });
             setAssetUploads((current) =>
               current.map((entry) =>
@@ -2983,7 +3188,7 @@ export function WorkspaceApp({
         );
       }
     },
-    [assetProvider, outputNodes, patchNode, refreshLocalAssets],
+    [assetProvider, outputNodes, patchNode, refreshLocalAssets, uploadTargetLocalGroupId],
   );
   const handleUploadOutputToCloud = useCallback(
     (outputKey: string) => {
@@ -9389,7 +9594,13 @@ export function WorkspaceApp({
       for (const path of mediaPaths) {
         const name = path.split(/[\\/]/).pop() ?? path;
         try {
-          imported.push(await localBase64AssetClient.importAsset({ localPath: path, name }));
+          imported.push(
+            await localBase64AssetClient.importAsset({
+              localPath: path,
+              name,
+              groupId: uploadTargetLocalGroupId(),
+            }),
+          );
         } catch (error) {
           failures.push(`${name}：${formatRawBackendError(error)}`);
         }
@@ -9468,7 +9679,7 @@ export function WorkspaceApp({
         toast.success(`已将 ${imported.length} 项素材放入画布并保存到本地素材库`, { id: toastId });
       }
     },
-    [dropClientPointToBoard, insertSubgraph, refreshLocalAssets],
+    [dropClientPointToBoard, insertSubgraph, refreshLocalAssets, uploadTargetLocalGroupId],
   );
   const dropClientPointToBoardRef = useRef(dropClientPointToBoard);
   const handleDropExternalMediaRef = useRef(handleDropExternalMedia);
@@ -11827,12 +12038,14 @@ export function WorkspaceApp({
       : cloudCollection === "object_storage"
         ? "上传到对象存储"
         : "上传本地素材到云端素材库";
-  // 云端面板当前选中的分组即上传目标：选中分组后，上传必须直接归入该分组，
-  // 而不是始终落到默认上传分组、只在「全部素材」里可见。
+  // 面板当前选中的分组即上传目标（云端与本地同规则）：选中分组后，上传必须直接
+  // 归入该分组，而不是落到默认位置、只在「全部素材」里可见。
   const uploadGroupName =
-    assetLibrarySource === "cloud" && cloudCollection === "library"
-      ? (assetGroups.find((group) => group.id === selectedAssetGroupId)?.name ?? null)
-      : null;
+    assetLibrarySource === "local"
+      ? (localAssetGroups.find((group) => group.id === selectedLocalAssetGroupId)?.name ?? null)
+      : cloudCollection === "library"
+        ? (assetGroups.find((group) => group.id === selectedAssetGroupId)?.name ?? null)
+        : null;
 
   // Bind every action to this canvas session. The controller checks the live signature again
   // before each write; asynchronous calls never fall back to whichever canvas is now active.
@@ -12395,6 +12608,24 @@ export function WorkspaceApp({
           onDeleteGroup={(groupId) => {
             if (assetProvider) handleDeleteAssetGroup(assetProvider.id, groupId);
           }}
+          localGroups={localAssetGroups}
+          localGroupsLoading={localGroupsLoading}
+          localGroupsError={localGroupsError}
+          selectedLocalGroupId={selectedLocalAssetGroupId}
+          onLocalGroupChange={handleLocalAssetGroupChanged}
+          onRefreshLocalGroups={refreshLocalAssetGroups}
+          onCreateLocalGroup={() => setNewLocalGroupDialogOpen(true)}
+          onDeleteLocalGroup={handleDeleteLocalAssetGroup}
+          onMovePickedLocalAssets={(groupId) => {
+            handleMoveLocalAssets(pickedAssets, groupId);
+          }}
+          onDeletePickedLocalAssets={() => {
+            setDeletingPickedLocalAssets(true);
+            void handleDeleteLocalAssets(pickedAssets).finally(() =>
+              setDeletingPickedLocalAssets(false),
+            );
+          }}
+          deletingPickedLocalAssets={deletingPickedLocalAssets}
           kind={assetKind}
           getKindCount={(tabKind) =>
             // 浏览器模式：演示数据即时计数；本地素材：分页响应携带的全库类型计数；
@@ -12799,6 +13030,22 @@ export function WorkspaceApp({
             onDelete={
               previewAsset.source === "cloud" && previewAsset.providerConnectionId
                 ? () => handleDeleteAsset(previewAsset)
+                : previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                  ? () => void handleDeleteLocalAssets([previewAsset])
+                  : null
+            }
+            localGroups={
+              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                ? localAssetGroups
+                : undefined
+            }
+            onMoveToGroup={
+              previewAsset.source === "local" && previewAsset.id.startsWith("local-b64-")
+                ? (groupId) => {
+                    handleMoveLocalAssets([previewAsset], groupId);
+                    // 弹窗保持打开：立即反映新分组，列表由处理器后台重查。
+                    setPreviewAsset({ ...previewAsset, groupId });
+                  }
                 : null
             }
             onRename={
@@ -12844,6 +13091,24 @@ export function WorkspaceApp({
             busy={creatingGroup}
             onClose={() => setNewGroupDialogOpen(false)}
             onCreate={(name) => handleCreateAssetGroup(assetProvider.id, name)}
+          />
+        </Suspense>
+      ) : null}
+      {newLocalGroupDialogOpen ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="local-asset-group-create-dialog"
+              label="新建本地素材分组"
+              onClose={() => setNewLocalGroupDialogOpen(false)}
+            />
+          }
+        >
+          <AssetGroupCreateDialog
+            scope="local"
+            busy={creatingLocalGroup}
+            onClose={() => setNewLocalGroupDialogOpen(false)}
+            onCreate={handleCreateLocalAssetGroup}
           />
         </Suspense>
       ) : null}

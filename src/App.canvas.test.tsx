@@ -1311,9 +1311,9 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         .filter(([command]) => command === "import_local_base64_asset")
         .map(([, args]) => args?.["command"]),
     ).toEqual([
-      { localPath: paths[0], name: "first.jpg" },
-      { localPath: paths[1], name: "clip.mp4" },
-      { localPath: paths[3], name: "voice.m4a" },
+      { localPath: paths[0], name: "first.jpg", groupId: null },
+      { localPath: paths[1], name: "clip.mp4", groupId: null },
+      { localPath: paths[3], name: "voice.m4a", groupId: null },
     ]);
     expect(screen.getByRole("button", { name: "从 first.jpg 拖出连线" })).toBeInTheDocument();
     expect(screen.getByRole("button", { name: "从 clip.mp4 拖出连线" })).toBeInTheDocument();
@@ -6688,7 +6688,11 @@ describe("画布素材拖拽与连线（桌面运行时）", () => {
         ([command]) => command === "import_local_base64_asset",
       );
       expect(uploadCall?.[1]).toEqual({
-        command: { localPath: "C:\\generated\\night-train.png", name: "night-train.png" },
+        command: {
+          localPath: "C:\\generated\\night-train.png",
+          name: "night-train.png",
+          groupId: null,
+        },
       });
     });
     expect(invokeMock.mock.calls.some(([command]) => command === "start_staging_upload")).toBe(

@@ -6,6 +6,8 @@ import {
   assetLibraryClient,
   formatRawBackendError,
   refreshMediaUrlWithStagingFallback,
+  LOCAL_ASSET_UNGROUPED_GROUP_ID,
+  type LocalBase64AssetGroupRecord,
   type RealPersonAssetLibraryClient,
   type RealPersonAuthLink,
   type RealPersonGroup,
@@ -426,11 +428,15 @@ export function RealPersonAssetDialog({
 
 export function AssetGroupCreateDialog({
   providerDisplayName,
+  scope = "cloud",
   onClose,
   onCreate,
   busy,
 }: {
-  readonly providerDisplayName: string;
+  /** 云端模式必填：展示「当前供应商连接」。本地模式（scope = "local"）忽略。 */
+  readonly providerDisplayName?: string | null;
+  /** "local" = 新建本地素材分组（本机 SQLite，与云端互不影响）。 */
+  readonly scope?: "cloud" | "local";
   readonly onClose: () => void;
   readonly onCreate: (name: string) => void;
   readonly busy: boolean;
@@ -486,7 +492,11 @@ export function AssetGroupCreateDialog({
             <h2 id="asset-group-dialog-title">新建素材分组</h2>
           </div>
         </div>
-        <p>分组按当前令牌作用域隔离；所有供应商和平台共用同一套素材库接口。</p>
+        <p>
+          {scope === "local"
+            ? "分组保存在本机，仅用于整理本地素材库，与云端素材库互不影响。"
+            : "分组按当前令牌作用域隔离；所有供应商和平台共用同一套素材库接口。"}
+        </p>
         <button
           type="button"
           className="asset-group-dialog__close"
@@ -520,7 +530,11 @@ export function AssetGroupCreateDialog({
             onChange={(event) => setName(event.target.value)}
           />
           <span className="asset-group-dialog__counter">{name.length} / 64</span>
-          <span className="asset-group-dialog__hint">当前供应商连接：{providerDisplayName}</span>
+          <span className="asset-group-dialog__hint">
+            {scope === "local"
+              ? "目标素材库：本地素材库"
+              : `当前供应商连接：${providerDisplayName ?? ""}`}
+          </span>
           <div className="asset-group-dialog__actions">
             <button type="button" onClick={onClose} disabled={busy}>
               取消
@@ -546,19 +560,27 @@ export function AssetSourceDialog({
   onClose,
   onDelete,
   onRename,
+  localGroups,
+  onMoveToGroup,
 }: {
   readonly asset: AssetItem;
   readonly onClose: () => void;
-  /** 云端素材提供删除；本地素材传 null 不渲染删除操作。 */
+  /** 云端素材提供删除；本地素材（local-b64-）也提供删除，其余传 null 不渲染。 */
   readonly onDelete: (() => void) | null;
   /** 云端素材提供改名；本地素材传 null 不渲染改名操作。 */
   readonly onRename: ((name: string) => void) | null;
+  /** 本地素材分组列表；提供且素材属于本地 Base64 库时展示「移动到分组」行。 */
+  readonly localGroups?: readonly LocalBase64AssetGroupRecord[] | undefined;
+  /** 移动本地素材到分组（null = 移出分组）。 */
+  readonly onMoveToGroup?: ((groupId: string | null) => void) | null | undefined;
 }) {
   const dialogRef = useRef<HTMLDialogElement | null>(null);
   const closeButtonRef = useRef<HTMLButtonElement | null>(null);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const typeLabel = ASSET_KIND_LABELS[asset.kind];
   const detailIdentity = assetDetailIdentity(asset);
+  // 本机 Base64 素材：支持删除与移动分组；旧对象存储索引素材不支持。
+  const isLocalBase64Asset = asset.source === "local" && asset.id.startsWith("local-b64-");
   // 云端素材签名地址过期时续签一次：图片预览与视频播放共用新预览地址。
   const [refreshedMediaUrl, setRefreshedMediaUrl] = useState<string | null>(null);
   const mediaRefreshAttemptedRef = useRef(false);
@@ -815,6 +837,32 @@ export function AssetSourceDialog({
                 <dd>{ASSET_CLOUD_STATUS_LABELS[asset.cloudStatus]}</dd>
               </div>
             ) : null}
+            {isLocalBase64Asset && localGroups != null && onMoveToGroup != null ? (
+              <div>
+                <dt>分组</dt>
+                <dd className="asset-source-dialog__group">
+                  <label className="sr-only" htmlFor="asset-source-dialog-group-select">
+                    移动素材到分组
+                  </label>
+                  <select
+                    id="asset-source-dialog-group-select"
+                    aria-label="移动素材到分组"
+                    value={asset.groupId ?? LOCAL_ASSET_UNGROUPED_GROUP_ID}
+                    onChange={(event) => {
+                      const value = event.target.value;
+                      onMoveToGroup(value === LOCAL_ASSET_UNGROUPED_GROUP_ID ? null : value);
+                    }}
+                  >
+                    <option value={LOCAL_ASSET_UNGROUPED_GROUP_ID}>未分组</option>
+                    {localGroups.map((group) => (
+                      <option key={group.id} value={group.id}>
+                        {group.name}
+                      </option>
+                    ))}
+                  </select>
+                </dd>
+              </div>
+            ) : null}
             {asset.providerDisplayName ? (
               <div>
                 <dt>供应商连接</dt>
@@ -846,7 +894,9 @@ export function AssetSourceDialog({
               </button>
               {confirmingDelete ? (
                 <p className="asset-source-dialog__delete-hint">
-                  素材将从云端素材库永久删除，此操作不可撤销。
+                  {asset.source === "local"
+                    ? "素材将从本机永久删除（含 Base64 正文文件），画布上仍在使用它的节点会失去预览，此操作不可撤销。"
+                    : "素材将从云端素材库永久删除，此操作不可撤销。"}
                 </p>
               ) : null}
             </div>

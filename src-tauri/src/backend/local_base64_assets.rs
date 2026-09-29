@@ -23,8 +23,8 @@ use super::{
     error::{BackendError, BackendResult},
     storage::{Storage, now_ms},
     types::{
-        ImportLocalBase64AssetCommand, LocalAssetListQuery, LocalBase64AssetPage,
-        LocalBase64AssetRecord, MediaType,
+        ImportLocalBase64AssetCommand, LocalAssetListQuery, LocalBase64AssetGroupRecord,
+        LocalBase64AssetPage, LocalBase64AssetRecord, MediaType,
     },
 };
 
@@ -131,6 +131,12 @@ impl LocalBase64Library {
             preview_url: preview_url(&destination),
             byte_size: metadata.len(),
             created_at: now_ms(),
+            group_id: command
+                .group_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string),
         };
         let write_result = (|| -> BackendResult<()> {
             let file = File::create(&temporary)?;
@@ -296,6 +302,95 @@ impl LocalBase64Library {
 
     pub fn sha256_path(path: &Path) -> BackendResult<String> {
         Ok(sha256_reader(&mut File::open(path)?)?.0)
+    }
+
+    pub fn list_groups(&self) -> BackendResult<Vec<LocalBase64AssetGroupRecord>> {
+        self.storage.list_local_base64_asset_groups()
+    }
+
+    pub fn create_group(&self, name: &str) -> BackendResult<LocalBase64AssetGroupRecord> {
+        let trimmed = name.trim();
+        if trimmed.is_empty() {
+            return Err(BackendError::validation(
+                "local asset group name must not be empty",
+                json!({ "name": name }),
+            ));
+        }
+        if trimmed.chars().count() > 64 {
+            return Err(BackendError::validation(
+                "local asset group name must be at most 64 characters",
+                json!({ "name": name, "maxChars": 64 }),
+            ));
+        }
+        if self
+            .storage
+            .find_local_base64_asset_group_by_name(trimmed)?
+            .is_some()
+        {
+            return Err(BackendError::Conflict(format!(
+                "local asset group named {trimmed:?} already exists"
+            )));
+        }
+        let record = LocalBase64AssetGroupRecord {
+            id: format!("local-group-{}", Uuid::new_v4()),
+            name: trimmed.to_string(),
+            asset_count: 0,
+            created_at: now_ms(),
+        };
+        self.storage.insert_local_base64_asset_group(&record)?;
+        Ok(record)
+    }
+
+    /// 删除分组本身；成员素材保留并回到未分组，正文与行都不受影响。
+    pub fn delete_group(&self, id: &str) -> BackendResult<()> {
+        let trimmed = id.trim();
+        if trimmed.is_empty() {
+            return Err(BackendError::validation(
+                "local asset group id must not be empty",
+                json!({ "groupId": id }),
+            ));
+        }
+        self.storage.delete_local_base64_asset_group(trimmed)
+    }
+
+    /// 批量移动素材到分组；`group_id` 为 None 时移出分组。返回实际命中的素材数。
+    pub fn move_assets(&self, asset_ids: &[String], group_id: Option<&str>) -> BackendResult<u64> {
+        let target = group_id.map(str::trim).filter(|value| !value.is_empty());
+        if let Some(target) = target {
+            // 先确认目标分组存在，避免静默把素材指向不存在的分组。
+            self.storage.get_local_base64_asset_group(target)?;
+        }
+        let mut unique = Vec::with_capacity(asset_ids.len());
+        for asset_id in asset_ids {
+            let trimmed = asset_id.trim();
+            if !trimmed.is_empty() && !unique.iter().any(|value| value == trimmed) {
+                unique.push(trimmed.to_string());
+            }
+        }
+        self.storage.move_local_base64_assets(&unique, target)
+    }
+
+    /// 删除本地素材：SQLite 行与哈希索引先在事务里移除，正文 `.b64` 与解码缓存
+    /// 尽力删除；残留文件由启动时的孤儿清理回收（数据库是唯一事实来源）。
+    pub fn delete_asset(&self, id: &str) -> BackendResult<()> {
+        let _record = self.storage.get_local_base64_asset(id)?;
+        let body = self.path(id)?;
+        self.storage.delete_local_base64_asset(id)?;
+        let _ = fs::remove_file(&body);
+        if let Ok(entries) = fs::read_dir(self.root.join("decoded-cache")) {
+            let prefix = format!("{id}-");
+            for entry in entries.flatten() {
+                let cached = entry.path();
+                let matches = cached
+                    .file_name()
+                    .and_then(|value| value.to_str())
+                    .is_some_and(|name| name.starts_with(&prefix));
+                if matches {
+                    let _ = fs::remove_file(&cached);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn cleanup_stale_temporary_files(&self) {
@@ -641,6 +736,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: input.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         assert!(record.id.starts_with("local-b64-"));
@@ -653,6 +749,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: second_path.to_string_lossy().into_owned(),
                 name: Some("second".into()),
+                group_id: None,
             })
             .unwrap();
         assert_eq!(second.id, record.id);
@@ -660,6 +757,7 @@ mod tests {
             .list(Some(LocalAssetListQuery {
                 media_type: Some(MediaType::Image),
                 name: None,
+                group_id: None,
                 page: Some(1),
                 page_size: Some(1),
             }))
@@ -674,6 +772,7 @@ mod tests {
                 .import(ImportLocalBase64AssetCommand {
                     local_path: empty.to_string_lossy().into_owned(),
                     name: None,
+                    group_id: None,
                 })
                 .is_err()
         );
@@ -733,6 +832,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: first_path.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         // Simulate an existing library created before content indexing existed.
@@ -746,6 +846,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: same_path.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         assert_eq!(reused.id, original.id);
@@ -755,6 +856,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: distinct_path.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         assert_ne!(distinct.id, original.id);
@@ -780,6 +882,7 @@ mod tests {
                     .import(ImportLocalBase64AssetCommand {
                         local_path: path.to_string_lossy().into_owned(),
                         name: None,
+                        group_id: None,
                     })
                     .unwrap()
                     .id
@@ -805,6 +908,7 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: input.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         fs::write(
@@ -816,12 +920,173 @@ mod tests {
             .import(ImportLocalBase64AssetCommand {
                 local_path: input.to_string_lossy().into_owned(),
                 name: None,
+                group_id: None,
             })
             .unwrap();
         assert_ne!(second.id, first.id);
         assert_eq!(
             library.read_bytes(&second.id, MediaType::Image).unwrap().1,
             bytes
+        );
+    }
+
+    #[test]
+    fn groups_filter_move_and_delete_semantics() {
+        let root = tempfile::tempdir().unwrap();
+        let library = LocalBase64Library::new(
+            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
+            root.path(),
+        )
+        .unwrap();
+        let group = library.create_group("  品牌物料  ").unwrap();
+        assert_eq!(group.name, "品牌物料");
+        assert!(group.id.starts_with("local-group-"));
+        // 分组名去重与长度/空白校验。
+        assert!(library.create_group("品牌物料").is_err());
+        assert!(library.create_group("   ").is_err());
+        assert!(library.create_group(&"长".repeat(65)).is_err());
+
+        let grouped_path = root.path().join("grouped.png");
+        fs::write(&grouped_path, b"\x89PNG\r\n\x1a\nin-group").unwrap();
+        let grouped = library
+            .import(ImportLocalBase64AssetCommand {
+                local_path: grouped_path.to_string_lossy().into_owned(),
+                name: None,
+                group_id: Some(group.id.clone()),
+            })
+            .unwrap();
+        assert_eq!(grouped.group_id.as_deref(), Some(group.id.as_str()));
+        // 内容去重复用已有素材：保留原分组，不把重复上传的分组改写进去。
+        let duplicate_path = root.path().join("duplicate.png");
+        fs::copy(&grouped_path, &duplicate_path).unwrap();
+        let reused = library
+            .import(ImportLocalBase64AssetCommand {
+                local_path: duplicate_path.to_string_lossy().into_owned(),
+                name: None,
+                group_id: None,
+            })
+            .unwrap();
+        assert_eq!(reused.id, grouped.id);
+        assert_eq!(reused.group_id.as_deref(), Some(group.id.as_str()));
+
+        let loose_path = root.path().join("loose.png");
+        fs::write(&loose_path, b"\x89PNG\r\n\x1a\nloose").unwrap();
+        let loose = library
+            .import(ImportLocalBase64AssetCommand {
+                local_path: loose_path.to_string_lossy().into_owned(),
+                name: None,
+                group_id: None,
+            })
+            .unwrap();
+        assert!(loose.group_id.is_none());
+
+        let query = |group_filter: Option<&str>| {
+            library
+                .list(Some(LocalAssetListQuery {
+                    media_type: Some(MediaType::Image),
+                    name: None,
+                    group_id: group_filter.map(str::to_string),
+                    page: Some(1),
+                    page_size: Some(40),
+                }))
+                .unwrap()
+        };
+        assert_eq!(query(None).total, 2);
+        assert_eq!(query(None).kind_totals.image, 2);
+        let in_group = query(Some(group.id.as_str()));
+        assert_eq!(in_group.total, 1);
+        assert_eq!(in_group.items[0].id, grouped.id);
+        assert_eq!(in_group.kind_totals.image, 1);
+        let ungrouped = query(Some("ungrouped"));
+        assert_eq!(ungrouped.total, 1);
+        assert_eq!(ungrouped.items[0].id, loose.id);
+
+        // 批量移动：未知 ID 被忽略并如实返回命中数；目标分组必须存在。
+        let loose_ids = [loose.id.clone()];
+        assert_eq!(
+            library
+                .move_assets(&loose_ids, Some(group.id.as_str()))
+                .unwrap(),
+            1
+        );
+        assert_eq!(query(Some(group.id.as_str())).total, 2);
+        assert_eq!(
+            library
+                .move_assets(
+                    &[
+                        loose.id.clone(),
+                        "local-b64-00000000-0000-0000-0000-000000000000".into()
+                    ],
+                    None
+                )
+                .unwrap(),
+            1
+        );
+        assert_eq!(query(Some("ungrouped")).total, 1);
+        assert!(
+            library
+                .move_assets(
+                    &loose_ids,
+                    Some("local-group-00000000-0000-0000-0000-000000000000")
+                )
+                .is_err()
+        );
+
+        let groups = library.list_groups().unwrap();
+        assert_eq!(groups.len(), 1);
+        assert_eq!(groups[0].asset_count, 1);
+
+        // 删除分组：成员回到未分组，素材与正文都保留。
+        library.delete_group(&group.id).unwrap();
+        assert!(library.list_groups().unwrap().is_empty());
+        assert_eq!(query(None).total, 2);
+        assert_eq!(query(Some("ungrouped")).total, 2);
+        assert!(library.read_bytes(&grouped.id, MediaType::Image).is_ok());
+        assert!(library.delete_group(&group.id).is_err());
+    }
+
+    #[test]
+    fn delete_asset_removes_body_cache_and_hash_index() {
+        let root = tempfile::tempdir().unwrap();
+        let library = LocalBase64Library::new(
+            Arc::new(Storage::open(&root.path().join("data.sqlite3")).unwrap()),
+            root.path(),
+        )
+        .unwrap();
+        let input = root.path().join("image.png");
+        let bytes = b"\x89PNG\r\n\x1a\ndoomed";
+        fs::write(&input, bytes).unwrap();
+        let record = library
+            .import(ImportLocalBase64AssetCommand {
+                local_path: input.to_string_lossy().into_owned(),
+                name: None,
+                group_id: None,
+            })
+            .unwrap();
+        let cache_root = library.root.join("decoded-cache");
+        fs::create_dir_all(&cache_root).unwrap();
+        let cache = cache_root.join(format!("{0}-{0}.png", record.id));
+        fs::write(&cache, b"cached").unwrap();
+
+        library.delete_asset(&record.id).unwrap();
+        assert!(!library.path(&record.id).unwrap().exists());
+        assert!(!cache.exists());
+        assert!(library.storage.get_local_base64_asset(&record.id).is_err());
+        // 哈希索引随素材删除：同样字节可以重新入库为新素材。
+        let reborn_path = root.path().join("reborn.png");
+        fs::write(&reborn_path, bytes).unwrap();
+        let reborn = library
+            .import(ImportLocalBase64AssetCommand {
+                local_path: reborn_path.to_string_lossy().into_owned(),
+                name: None,
+                group_id: None,
+            })
+            .unwrap();
+        assert_ne!(reborn.id, record.id);
+        assert!(
+            library
+                .delete_asset("local-b64-00000000-0000-0000-0000-000000000000")
+                .is_err()
         );
     }
 }

@@ -305,6 +305,7 @@ pub async fn save_existing_asset(
             local.import_with_status(ImportLocalBase64AssetCommand {
                 local_path: path,
                 name: Some(display_name),
+                group_id: command.group_id.as_deref().map(str::to_string),
             })
         })
         .await

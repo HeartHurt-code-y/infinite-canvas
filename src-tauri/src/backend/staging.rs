@@ -3943,6 +3943,7 @@ mod tests {
         let page = staging
             .list_local_assets(Some(LocalAssetListQuery {
                 media_type: None,
+                group_id: None,
                 name: None,
                 page: Some(1),
                 page_size: Some(40),

@@ -20,6 +20,7 @@ import type {
   GenerationTaskPage,
   LocalAssetPage,
   LocalAssetRecord,
+  LocalBase64AssetGroupRecord,
   LocalBase64AssetPage,
   LocalBase64AssetRecord,
   MediaThumbnail,
@@ -260,6 +261,8 @@ export const localBase64AssetRecordSchema = v.looseObject({
   previewUrl: v.string(),
   byteSize: v.number(),
   createdAt: v.number(),
+  // 旧持久化/测试夹具可能没有该字段；缺失按未分组处理。
+  groupId: v.optional(nullableStringSchema, null),
 }) satisfies v.GenericSchema<LocalBase64AssetRecord>;
 
 export const localBase64AssetPageSchema = v.looseObject({
@@ -273,6 +276,15 @@ export const localBase64AssetPageSchema = v.looseObject({
     audio: v.number(),
   }),
 }) satisfies v.GenericSchema<LocalBase64AssetPage>;
+
+export const localBase64AssetGroupSchema = v.looseObject({
+  id: v.string(),
+  name: v.string(),
+  assetCount: v.number(),
+  createdAt: v.number(),
+}) satisfies v.GenericSchema<LocalBase64AssetGroupRecord>;
+
+export const localBase64AssetGroupsSchema = v.array(localBase64AssetGroupSchema);
 
 export const saveExistingAssetResultSchema = v.looseObject({
   destination: v.picklist(["local", "cloud", "object_storage"]),
@@ -670,4 +682,5 @@ export const videoFrameExtractionJobRecordSchema = v.looseObject({
 }) satisfies v.GenericSchema<VideoFrameExtractionJobRecord>;
 
 export const stringSchema = v.string();
+export const numberSchema = v.number();
 export const unknownSchema = v.unknown();

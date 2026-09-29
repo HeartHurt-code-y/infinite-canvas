@@ -72,11 +72,23 @@ CREATE TABLE IF NOT EXISTS local_base64_assets (
   media_type TEXT NOT NULL CHECK (media_type IN ('image', 'video', 'audio')),
   mime_type TEXT NOT NULL,
   byte_size INTEGER NOT NULL CHECK (byte_size > 0),
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  group_id TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_local_base64_assets_created
   ON local_base64_assets(created_at DESC, id DESC);
+
+-- 本机素材分组（文件夹语义）。删除分组时把成员置回未分组，不删除素材正文，
+-- 因此不加外键约束：旧库经 ALTER TABLE 补列无法携带外键，行为以代码事务为准。
+CREATE TABLE IF NOT EXISTS local_base64_asset_groups (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  created_at INTEGER NOT NULL
+);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_local_base64_asset_groups_name
+  ON local_base64_asset_groups(name);
 
 -- One canonical body per exact byte sequence. This separate table also lets old
 -- libraries acquire hashes lazily without changing or deleting existing IDs.
@@ -441,6 +453,7 @@ impl Storage {
         migrate_staging_jobs_overseas_db_id(&connection)?;
         migrate_staging_jobs_overseas_submitted_at(&connection)?;
         migrate_panqu_provider_base_url(&connection)?;
+        migrate_local_base64_asset_groups(&connection)?;
 
         let storage = Self {
             connection: Mutex::new(connection),
@@ -2295,6 +2308,30 @@ fn migrate_provider_token_groups(connection: &Connection) -> BackendResult<()> {
             [],
         )?;
     }
+    Ok(())
+}
+
+/// 为旧数据库补齐本地素材分组支持：
+/// 1. `local_base64_assets` 缺 `group_id` 列时 ALTER 补齐（NULL = 未分组）；
+/// 2. `local_base64_asset_groups` 表与分组名唯一索引由 SCHEMA 的 IF NOT EXISTS 保证，
+///    但 `group_id` 过滤索引必须等旧库补完列后才能建，放在这里统一执行。
+fn migrate_local_base64_asset_groups(connection: &Connection) -> BackendResult<()> {
+    let mut statement = connection.prepare("PRAGMA table_info(local_base64_assets)")?;
+    let has_group_column = statement
+        .query_map([], |row| row.get::<_, String>(1))?
+        .any(|result| result.map(|name| name == "group_id").unwrap_or(false));
+    drop(statement);
+    if !has_group_column {
+        connection.execute(
+            "ALTER TABLE local_base64_assets ADD COLUMN group_id TEXT",
+            [],
+        )?;
+    }
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_local_base64_assets_group
+         ON local_base64_assets(group_id)",
+        [],
+    )?;
     Ok(())
 }
 

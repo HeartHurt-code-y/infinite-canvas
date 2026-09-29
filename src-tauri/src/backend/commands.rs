@@ -55,13 +55,15 @@ use super::{
         AssetGroupRecord, AssetImportOutputRecord, AssetKindCountCommand, AssetListCommand,
         AssetStatusObservation, CanvasDocumentRecord, CanvasDocumentSummary, CloudAssetKindTotals,
         CloudAssetRecord, ConnectivityTestResult, CreateAssetGroupCommand,
-        CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
-        DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
-        DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, GenerationTaskProgress,
-        ImportLocalBase64AssetCommand, ImportedAssetSource, ListAssetGroupsCommand,
-        LocalAssetListQuery, LocalAssetPage, LocalBase64AssetPage, LocalBase64AssetRecord,
-        MediaType, ModelDefinition, ObserveAssetStatusCommand, ProviderConnection,
+        CreateLocalBase64AssetGroupCommand, CreateRealPersonAuthLinkCommand, CredentialStatus,
+        DeleteAssetCommand, DeleteAssetGroupCommand, DeleteLocalBase64AssetCommand,
+        DeleteLocalBase64AssetGroupCommand, DeleteProviderTokenGroupCommand,
+        DeleteRealPersonAssetCommand, DeleteRealPersonGroupCommand, GenerationOperation,
+        GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
+        GenerationTaskProgress, ImportLocalBase64AssetCommand, ImportedAssetSource,
+        ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, LocalBase64AssetGroupRecord,
+        LocalBase64AssetPage, LocalBase64AssetRecord, MediaType, ModelDefinition,
+        MoveLocalBase64AssetsCommand, ObserveAssetStatusCommand, ProviderConnection,
         ProviderModelBinding, ProviderTokenGroup, RealPersonAuthLink, RealPersonGroup,
         RealPersonProviderCommand, RecoveryReport, RefreshAssetCoverCommand,
         RefreshAssetMediaCommand, RefreshLocalAssetMediaCommand, RefreshStagingObjectCommand,
@@ -1209,6 +1211,61 @@ pub fn refresh_local_base64_asset_media(
     state
         .local_base64_assets
         .refresh_media(&asset_id, media_type)
+        .command()
+}
+
+#[tauri::command]
+pub fn list_local_base64_asset_groups(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<LocalBase64AssetGroupRecord>> {
+    state.local_base64_assets.list_groups().command()
+}
+
+#[tauri::command]
+pub fn create_local_base64_asset_group(
+    state: State<'_, BackendState>,
+    command: CreateLocalBase64AssetGroupCommand,
+) -> CommandResult<LocalBase64AssetGroupRecord> {
+    state
+        .local_base64_assets
+        .create_group(&command.name)
+        .command()
+}
+
+/// 删除本地素材分组：组内素材保留并回到未分组，不删除素材正文。
+#[tauri::command]
+pub fn delete_local_base64_asset_group(
+    state: State<'_, BackendState>,
+    command: DeleteLocalBase64AssetGroupCommand,
+) -> CommandResult<()> {
+    state
+        .local_base64_assets
+        .delete_group(&command.id)
+        .command()
+}
+
+/// 批量移动本地素材到分组；返回实际命中的素材数。
+#[tauri::command]
+pub fn move_local_base64_assets(
+    state: State<'_, BackendState>,
+    command: MoveLocalBase64AssetsCommand,
+) -> CommandResult<u64> {
+    state
+        .local_base64_assets
+        .move_assets(&command.asset_ids, command.group_id.as_deref())
+        .command()
+}
+
+/// 删除本地 Base64 素材：移除 `.b64` 正文、解码缓存与 SQLite 行，不可恢复。
+#[tauri::command]
+pub fn delete_local_base64_asset(
+    state: State<'_, BackendState>,
+    command: DeleteLocalBase64AssetCommand,
+) -> CommandResult<String> {
+    state
+        .local_base64_assets
+        .delete_asset(&command.id)
+        .map(|_| command.id)
         .command()
 }
 

@@ -1993,7 +1993,11 @@ describe("App workspace", () => {
         ([command]) => command === "import_local_base64_asset",
       );
       expect(uploadCall?.[1]).toEqual({
-        command: { localPath: "C:\\media\\new-local.png", name: "new-local.png" },
+        command: {
+          localPath: "C:\\media\\new-local.png",
+          name: "new-local.png",
+          groupId: null,
+        },
       });
     });
     expect(invokeMock.mock.calls.some(([command]) => command === "get_tos_staging_config")).toBe(
@@ -2006,6 +2010,164 @@ describe("App workspace", () => {
       invokeMock.mock.calls.filter(([command]) => command === "list_asset_groups"),
     ).toHaveLength(groupListCallsBeforeSwitch);
     expect(invokeMock.mock.calls.some(([command]) => command === "create_asset_group")).toBe(false);
+  });
+
+  it("本地素材分组：选择过滤、上传归组、新建与两段式删除", async () => {
+    let groups: Array<Record<string, unknown>> = [
+      { id: "local-group-1", name: "品牌物料", assetCount: 1, createdAt: 1 },
+    ];
+    const listQueries: Array<Record<string, unknown> | undefined> = [];
+    const localPage = {
+      items: [
+        {
+          id: "local-b64-in-group",
+          name: "分组内素材.png",
+          mediaType: "image",
+          mimeType: "image/png",
+          previewUrl: "http://localbase64.localhost/local-b64-in-group",
+          byteSize: 1024,
+          createdAt: 2,
+          groupId: "local-group-1",
+        },
+      ],
+      total: 1,
+      page: 1,
+      pageSize: 40,
+      kindTotals: { image: 1, video: 0, audio: 0 },
+    };
+    const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
+      switch (command) {
+        case "list_provider_connections":
+        case "list_model_definitions":
+        case "list_provider_model_bindings":
+          return Promise.resolve([]);
+        case "list_generation_tasks":
+          return Promise.resolve({ items: [], nextCursorCreatedBefore: null });
+        case "list_assets":
+          return Promise.resolve([]);
+        case "list_local_base64_assets":
+          listQueries.push(args?.["query"] as Record<string, unknown>);
+          return Promise.resolve(localPage);
+        case "list_local_base64_asset_groups":
+          return Promise.resolve(groups);
+        case "create_local_base64_asset_group":
+          groups = [
+            ...groups,
+            { id: "local-group-2", name: "新分组", assetCount: 0, createdAt: 3 },
+          ];
+          return Promise.resolve({
+            id: "local-group-2",
+            name: "新分组",
+            assetCount: 0,
+            createdAt: 3,
+          });
+        case "delete_local_base64_asset_group":
+          groups = groups.filter(
+            (group) => group["id"] !== (args?.["command"] as { id: string })?.id,
+          );
+          return Promise.resolve(null);
+        case "plugin:dialog|open":
+          return Promise.resolve(["C:\\media\\grouped.png"]);
+        case "import_local_base64_asset":
+          return Promise.resolve({
+            id: "local-b64-grouped",
+            name: "grouped.png",
+            mediaType: "image",
+            mimeType: "image/png",
+            previewUrl: "http://localbase64.localhost/local-b64-grouped",
+            byteSize: 256,
+            createdAt: 4,
+          });
+        case "plugin:event|listen":
+          return Promise.resolve(1);
+        case "plugin:event|unlisten":
+          return Promise.resolve(null);
+        default:
+          return defaultCanvasInvoke(command, args);
+      }
+    });
+    (window as unknown as Record<string, unknown>)[DESKTOP_INTERNALS_KEY] = {
+      invoke: invokeMock,
+      transformCallback: () => 1,
+      convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
+      metadata: { currentWindow: { label: "main" } },
+    };
+    (window as unknown as Record<string, unknown>)[DESKTOP_EVENT_INTERNALS_KEY] = {
+      unregisterListener: () => undefined,
+    };
+
+    render(<App />);
+    fireEvent.change(await screen.findByRole("combobox", { name: "素材库来源" }), {
+      target: { value: "local" },
+    });
+    const groupSelect = await screen.findByRole("combobox", { name: "本地素材分组" });
+    const optionTexts = () =>
+      Array.from(groupSelect.querySelectorAll("option")).map((option) => option.textContent);
+    // 初始拉取分组列表；下拉含全部/未分组与分组项（带计数）。
+    await waitFor(() => expect(optionTexts()).toEqual(["全部素材", "未分组", "品牌物料（1）"]));
+    expect(listQueries.at(-1)?.["groupId"]).toBeNull();
+
+    // 选中分组 → 列表按 groupId 过滤；切到未分组用哨兵值。
+    fireEvent.change(groupSelect, { target: { value: "local-group-1" } });
+    await waitFor(() => expect(listQueries.at(-1)?.["groupId"]).toBe("local-group-1"));
+    fireEvent.change(groupSelect, { target: { value: "ungrouped" } });
+    await waitFor(() => expect(listQueries.at(-1)?.["groupId"]).toBe("ungrouped"));
+
+    // 选中分组后上传，导入命令直接归入该分组。
+    fireEvent.change(groupSelect, { target: { value: "local-group-1" } });
+    await waitFor(() => expect(listQueries.at(-1)?.["groupId"]).toBe("local-group-1"));
+    fireEvent.click(screen.getByRole("button", { name: "上传到本地素材库" }));
+    await waitFor(() => {
+      const uploadCall = invokeMock.mock.calls.find(
+        ([command]) => command === "import_local_base64_asset",
+      );
+      expect(uploadCall?.[1]).toEqual({
+        command: {
+          localPath: "C:\\media\\grouped.png",
+          name: "grouped.png",
+          groupId: "local-group-1",
+        },
+      });
+    });
+
+    // 新建分组：名称去空格提交，成功后本地立即可选并自动选中。
+    fireEvent.click(screen.getByRole("button", { name: "新建本地素材分组" }));
+    // 新建分组弹窗按需懒加载（deferredDialogs），显式放宽等待；输入框是弹窗的同步子节点。
+    fireEvent.change(await screen.findByLabelText(/分组名称/, {}, { timeout: 5_000 }), {
+      target: { value: " 新分组 " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "创建分组" }));
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "create_local_base64_asset_group"),
+      ).toHaveLength(1),
+    );
+    expect(
+      invokeMock.mock.calls.find(([command]) => command === "create_local_base64_asset_group")?.[1],
+    ).toEqual({
+      command: { name: "新分组" },
+    });
+    await waitFor(() => expect((groupSelect as HTMLSelectElement).value).toBe("local-group-2"));
+
+    // 删除分组：两段式确认；未选分组时不渲染删除按钮。
+    expect(screen.queryByRole("button", { name: "删除分组：品牌物料" })).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "删除分组：新分组" }));
+    fireEvent.click(screen.getByRole("button", { name: "确认删除分组：新分组" }));
+    await waitFor(() =>
+      expect(
+        invokeMock.mock.calls.filter(([command]) => command === "delete_local_base64_asset_group"),
+      ).toHaveLength(1),
+    );
+    expect(
+      invokeMock.mock.calls.find(([command]) => command === "delete_local_base64_asset_group")?.[1],
+    ).toEqual({
+      command: { id: "local-group-2" },
+    });
+    // 被删分组从下拉消失，选择回退「全部素材」。
+    await waitFor(() => {
+      expect((groupSelect as HTMLSelectElement).value).toBe("");
+      expect(optionTexts()).toEqual(["全部素材", "未分组", "品牌物料（1）"]);
+    });
   });
 
   it("云端视图可独立上传到对象存储，无需供应商且不导入云端素材库", async () => {
