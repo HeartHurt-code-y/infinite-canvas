@@ -20,7 +20,8 @@ use super::{
     },
     types::{
         CanvasDocumentRecord, CanvasDocumentSummary, GenerationAttemptRecord, GenerationOperation,
-        GenerationResultRecord, GenerationTaskDetail, GenerationTaskEvent, GenerationTaskListQuery,
+        GenerationProgressResult, GenerationResultRecord, GenerationTaskDetail,
+        GenerationTaskEvent, GenerationTaskListQuery, GenerationTaskProgress,
         GenerationTaskPage, GenerationTaskStatus, GenerationTaskSummary, MediaType,
         ModelDefinition, ProviderCallRecord, ProviderConnection, ProviderModelBinding,
         ProviderTokenGroup, QueryHealth, ReplaceProviderModelBindingsCommand,
@@ -1451,6 +1452,35 @@ impl Storage {
         })
     }
 
+    pub fn get_task_progress(&self, task_id: &str) -> BackendResult<GenerationTaskProgress> {
+        let connection = self.lock()?;
+        let summary = connection
+            .query_row(
+                &task_summary_sql("WHERE id = ?1"),
+                params![task_id],
+                task_summary_from_row,
+            )
+            .optional()?
+            .ok_or_else(|| BackendError::NotFound(format!("generation task {task_id}")))?;
+        let final_error: Option<String> = connection.query_row(
+            "SELECT final_error_json FROM generation_tasks WHERE id = ?1",
+            params![task_id],
+            |row| row.get(0),
+        )?;
+        let results = collect_rows(
+            &connection,
+            "SELECT task_id, result_index, media_type, save_status, final_path, error_json
+             FROM generation_results WHERE task_id = ?1 ORDER BY result_index",
+            task_id,
+            progress_result_from_row,
+        )?;
+        Ok(GenerationTaskProgress {
+            summary,
+            results,
+            final_error: final_error.map(parse_json_column).transpose()?,
+        })
+    }
+
     pub fn list_tasks(&self, query: &GenerationTaskListQuery) -> BackendResult<GenerationTaskPage> {
         validate_history_date_range(query.created_from, query.created_to)?;
         let connection = self.lock()?;
@@ -2464,6 +2494,20 @@ fn result_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationResultRecord> {
     })
 }
 
+fn progress_result_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationProgressResult> {
+    let media_type: String = row.get(2)?;
+    let save_status: String = row.get(3)?;
+    let error: Option<String> = row.get(5)?;
+    Ok(GenerationProgressResult {
+        task_id: row.get(0)?,
+        result_index: row.get(1)?,
+        media_type: parse_media_type(media_type)?,
+        save_status: parse_save_status(save_status)?,
+        final_path: row.get(4)?,
+        error: error.map(parse_json_column).transpose()?,
+    })
+}
+
 fn staging_job_from_row(row: &Row<'_>) -> rusqlite::Result<StagingJobRecord> {
     let media_type: String = row.get(3)?;
     let status: String = row.get(5)?;
@@ -3259,10 +3303,37 @@ mod tests {
             )
             .expect("finish text generation");
 
+        let bulky_marker = "PRIVATE_IMAGE_BYTES".repeat(1024);
+        storage
+            .lock()
+            .expect("database lock")
+            .execute(
+                "UPDATE provider_calls SET raw_response = ?1 WHERE id = 'text-call-1'",
+                params![bulky_marker],
+            )
+            .expect("store bulky provider response");
+        storage
+            .lock()
+            .expect("database lock")
+            .execute(
+                "INSERT INTO generation_results
+                 (task_id, result_index, media_type, source_json, save_status, final_path)
+                 VALUES ('text-task-1', 1, 'image', ?1, 'succeeded', 'C:/result.png')",
+                params![json!({ "base64": bulky_marker }).to_string()],
+            )
+            .expect("store bulky result source");
+
         let detail = storage.get_task_detail("text-task-1").expect("task detail");
         let output = detail.text_output.expect("text output");
         assert_eq!(output.optimized_prompt, "节点实际采用文本");
         assert_eq!(output.raw_model_output, "模型完整原始文本");
+        let progress = storage.get_task_progress("text-task-1").expect("task progress");
+        assert_eq!(progress.summary.id, "text-task-1");
+        assert_eq!(progress.results.len(), 1);
+        assert_eq!(progress.results[0].final_path.as_deref(), Some("C:/result.png"));
+        assert!(!serde_json::to_string(&progress)
+            .expect("serialize progress")
+            .contains("PRIVATE_IMAGE_BYTES"));
     }
 
     #[test]

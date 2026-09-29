@@ -567,6 +567,28 @@ pub struct GenerationTaskDetail {
     pub final_error: Option<Value>,
 }
 
+/// Small polling payload for workflows. Provider responses and result sources may
+/// contain entire base64 images, so they must not cross the WebView IPC boundary
+/// on every status check.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationTaskProgress {
+    pub summary: GenerationTaskSummary,
+    pub results: Vec<GenerationProgressResult>,
+    pub final_error: Option<Value>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GenerationProgressResult {
+    pub task_id: String,
+    pub result_index: u32,
+    pub media_type: MediaType,
+    pub save_status: SaveStatus,
+    pub final_path: Option<String>,
+    pub error: Option<Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskListQuery {

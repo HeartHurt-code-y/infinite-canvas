@@ -22,6 +22,7 @@ import {
   generationStateChangedEventSchema,
   generationTextDeltaEventSchema,
   generationTaskDetailSchema,
+  generationTaskProgressSchema,
   generationTaskPageSchema,
   localAssetPageSchema,
   localBase64AssetPageSchema,
@@ -1285,8 +1286,13 @@ const MEDIA_EXTENSION_KINDS: Record<string, MediaType> = {
   webp: "image",
   gif: "image",
   bmp: "image",
+  tif: "image",
+  tiff: "image",
+  heic: "image",
+  heif: "image",
   avif: "image",
   mp4: "video",
+  m4v: "video",
   mov: "video",
   webm: "video",
   avi: "video",
@@ -1296,6 +1302,7 @@ const MEDIA_EXTENSION_KINDS: Record<string, MediaType> = {
   aac: "audio",
   flac: "audio",
   ogg: "audio",
+  opus: "audio",
   m4a: "audio",
 };
 
@@ -1551,6 +1558,16 @@ export interface GenerationTaskDetail {
   readonly finalError: unknown;
 }
 
+/** Status-only polling data; excludes provider response bodies and result sources. */
+export interface GenerationTaskProgress {
+  readonly summary: GenerationTaskSummary;
+  readonly results: readonly Pick<
+    GenerationResultRecord,
+    "taskId" | "resultIndex" | "mediaType" | "saveStatus" | "finalPath" | "error"
+  >[];
+  readonly finalError: unknown;
+}
+
 export interface TextGenerationOutputRecord {
   /** 应用从模型输出中提取、实际交付给节点的提示词正文。 */
   readonly optimizedPrompt: string;
@@ -1670,6 +1687,7 @@ export interface GenerationTaskClient {
   start(this: void, command: StartGenerationCommand): Promise<string>;
   list(this: void, query: GenerationTaskListQuery): Promise<GenerationTaskPage>;
   get(this: void, taskId: string): Promise<GenerationTaskDetail>;
+  getProgress(this: void, taskId: string): Promise<GenerationTaskProgress>;
   queryVideoTaskNow(this: void, taskId: string): Promise<void>;
 }
 
@@ -1677,6 +1695,8 @@ export const generationClient: GenerationTaskClient = {
   start: (command) => invokeDesktop("start_generation", stringSchema, { command }),
   list: (query) => invokeDesktop("list_generation_tasks", generationTaskPageSchema, { query }),
   get: (taskId) => invokeDesktop("get_generation_task", generationTaskDetailSchema, { taskId }),
+  getProgress: (taskId) =>
+    invokeDesktop("get_generation_task_progress", generationTaskProgressSchema, { taskId }),
   queryVideoTaskNow: (taskId) => invokeDesktopVoid("query_video_task_now", { taskId }),
 };
 
@@ -2211,7 +2231,7 @@ export interface MediaThumbnail {
 export interface MediaClient {
   /**
    * 生成本地图片的缩略图（磁盘缓存，源文件变化或尺寸变化时重新生成）。
-   * 格式不可缩放（未启用解码的 webp/gif 等）或文件缺失时返回 null，前端回退原图。
+   * 格式不可缩放或文件缺失时返回 null；卡片显示不可用状态，避免解码原图。
    */
   createThumbnail: (sourcePath: string, maxDimension?: number) => Promise<MediaThumbnail | null>;
 }

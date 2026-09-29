@@ -1,7 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
-import { formatRawBackendError, pickPromptMultimodalFiles, toMediaSrc } from "../../lib/backend";
+import {
+  formatRawBackendError,
+  isDesktopRuntime,
+  mediaClient,
+  pickPromptMultimodalFiles,
+  toMediaSrc,
+} from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
 import {
   productSceneGenerationMode,
@@ -42,6 +48,45 @@ const QUALITY_STATUS = {
   blocked: "待处理",
   failed: "检查失败",
 } as const;
+const PRODUCT_SCENE_THUMBNAIL_MAX_DIMENSION = 512;
+
+function ProductSceneRowThumbnail({ path, alt }: { readonly path: string; readonly alt: string }) {
+  const desktop = isDesktopRuntime();
+  const [thumbnail, setThumbnail] = useState<{
+    sourcePath: string;
+    thumbnailPath: string | null;
+    ready: boolean;
+  } | null>(null);
+  useEffect(() => {
+    if (!desktop) return;
+    let current = true;
+    void mediaClient
+      .createThumbnail(path, PRODUCT_SCENE_THUMBNAIL_MAX_DIMENSION)
+      .then((result) => {
+        if (current)
+          setThumbnail({ sourcePath: path, thumbnailPath: result?.path ?? null, ready: true });
+      })
+      .catch(() => {
+        if (current) setThumbnail({ sourcePath: path, thumbnailPath: null, ready: true });
+      });
+    return () => {
+      current = false;
+    };
+  }, [desktop, path]);
+  const matching = thumbnail?.sourcePath === path ? thumbnail : null;
+  const src = desktop
+    ? matching?.thumbnailPath
+      ? toMediaSrc(matching.thumbnailPath)
+      : null
+    : toMediaSrc(path);
+  return src ? (
+    <img src={src} alt={alt} loading="lazy" />
+  ) : (
+    <span className="product-scene__placeholder">
+      {matching?.ready ? "预览不可用，点开查看原图" : "正在加载预览"}
+    </span>
+  );
+}
 
 function ProductSceneQualityDetails({
   row,
@@ -929,10 +974,9 @@ export function ProductSceneDeliverables({
                 onClick={() => setPreview(row.outputPath)}
                 aria-label={`放大第 ${row.index} 张`}
               >
-                <img
-                  src={toMediaSrc(row.outputPath)}
+                <ProductSceneRowThumbnail
+                  path={row.outputPath}
                   alt={`第 ${row.index} 张 ${row.recipe.label}`}
-                  loading="lazy"
                 />
               </button>
             ) : (

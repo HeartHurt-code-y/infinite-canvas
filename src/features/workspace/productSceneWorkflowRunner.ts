@@ -521,7 +521,7 @@ export function createProductSceneWorkflowRunner(
             let backgroundReady = false;
             for (let poll = 0; poll < 1800; poll++) {
               abort();
-              const detail = await dependencies.generationClient.get(row().taskId!);
+              const detail = await dependencies.generationClient.getProgress(row().taskId!);
               const saved = detail.results.find(
                 (result) =>
                   result.mediaType === "image" &&

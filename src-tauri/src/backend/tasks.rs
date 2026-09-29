@@ -24,7 +24,8 @@ use super::{
     },
     types::{
         GenerationOperation, GenerationResultRecord, GenerationTaskDetail, GenerationTaskListQuery,
-        GenerationTaskPage, GenerationTaskStatus, RecoveryReport, StartGenerationCommand,
+        GenerationTaskPage, GenerationTaskProgress, GenerationTaskStatus, RecoveryReport,
+        StartGenerationCommand,
     },
 };
 
@@ -276,6 +277,10 @@ impl GenerationTaskService {
 
     pub fn get(&self, task_id: &str) -> BackendResult<GenerationTaskDetail> {
         self.storage.get_task_detail(task_id)
+    }
+
+    pub fn get_progress(&self, task_id: &str) -> BackendResult<GenerationTaskProgress> {
+        self.storage.get_task_progress(task_id)
     }
 
     pub fn recover(&self) -> BackendResult<RecoveryReport> {

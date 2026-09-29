@@ -1,7 +1,8 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useState } from "react";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { node } from "../../test/videoWorkflowFixtures";
+import { mediaClient } from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
 import {
   ProductSceneConfiguration,
@@ -21,6 +22,11 @@ import { isSupportedConnection } from "../canvas/canvasStore";
 vi.mock("../../lib/productSceneImages", () => ({
   productSceneImageClient: { prepare: vi.fn(), prepareLogo: vi.fn(), export: vi.fn() },
 }));
+
+afterEach(() => {
+  vi.restoreAllMocks();
+  delete (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"];
+});
 
 function options() {
   return {
@@ -54,6 +60,54 @@ function checkpoint(): KnowledgeVideoWorkflowCheckpoint {
 }
 
 describe("ProductSceneWorkflowSections", () => {
+  it("uses a small cached thumbnail for desktop review cards and loads the original only in preview", async () => {
+    const originalPath = "C:/outputs/full-scene.png";
+    const thumbnailPath = "C:/cache/full-scene-thumb.jpg";
+    (window as unknown as Record<string, unknown>)["__TAURI_INTERNALS__"] = {
+      convertFileSrc: (path: string) => `asset://localhost/${path}`,
+    };
+    let finish!: (value: { path: string; width: number; height: number }) => void;
+    const request = new Promise<{ path: string; width: number; height: number }>((resolve) => {
+      finish = resolve;
+    });
+    const createThumbnail = vi.spyOn(mediaClient, "createThumbnail").mockReturnValue(request);
+    const base = checkpoint();
+    const initial = {
+      ...base,
+      productScene: {
+        ...base.productScene!,
+        rows: base.productScene!.rows.map((row, index) =>
+          index ? row : { ...row, status: "needs_review" as const, outputPath: originalPath },
+        ),
+      },
+    };
+    render(
+      <ProductSceneDeliverables
+        options={options()}
+        checkpoint={initial}
+        disabled={false}
+        onChange={vi.fn()}
+        onContinue={vi.fn()}
+      />,
+    );
+    const card = screen.getByRole("button", { name: "放大第 1 张" });
+    await waitFor(() => expect(createThumbnail).toHaveBeenCalledWith(originalPath, 512));
+    expect(card.querySelector("img")).toBeNull();
+    expect(card).toHaveTextContent("正在加载预览");
+
+    finish({ path: thumbnailPath, width: 384, height: 512 });
+    await waitFor(() =>
+      expect(card.querySelector("img")).toHaveAttribute(
+        "src",
+        `asset://localhost/${thumbnailPath}`,
+      ),
+    );
+    fireEvent.click(card);
+    expect(
+      screen.getByRole("dialog", { name: "产品场景图预览" }).querySelector("img"),
+    ).toHaveAttribute("src", `asset://localhost/${originalPath}`);
+  });
+
   it("blocks uncertain port results and rechecks the same paid image without resetting its identity", () => {
     const inspection: ProductSceneInspection = {
       version: 1,

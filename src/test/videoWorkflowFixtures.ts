@@ -217,6 +217,14 @@ function fakeDependencies(
       ),
     ),
     get: vi.fn((taskId: string) => Promise.resolve(completedTask(taskId))),
+    getProgress: vi.fn((taskId: string) => {
+      const detail = completedTask(taskId);
+      return Promise.resolve({
+        summary: detail.summary,
+        results: detail.results,
+        finalError: detail.finalError,
+      });
+    }),
     list: vi.fn(),
     queryVideoTaskNow: vi.fn(),
   };

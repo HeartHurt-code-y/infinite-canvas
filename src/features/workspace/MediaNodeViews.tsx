@@ -1382,12 +1382,18 @@ function formatTimestampSeconds(value: number): string {
   return String(Number(value.toFixed(2)));
 }
 
-/** 本地图片缩略图：后端磁盘缓存（sha256 键），不可缩放/失败返回 null 回退原图。 */
+/** 本地图片缩略图：后端磁盘缓存（sha256 键）。卡片不能在等待或失败时解码原图。 */
 const MEDIA_THUMBNAIL_MAX_DIMENSION = 512;
 
-function useMediaThumbnailSrc(finalPath: string | null): string | null {
-  const enabled = isDesktopRuntime() && finalPath != null;
-  const { data } = useQuery({
+function useMediaThumbnailSrc(
+  finalPath: string | null,
+  visible = true,
+): {
+  readonly src: string | null;
+  readonly unavailable: boolean;
+} {
+  const enabled = isDesktopRuntime() && finalPath != null && visible;
+  const { data, isError } = useQuery({
     queryKey: ["media-thumbnail", finalPath, MEDIA_THUMBNAIL_MAX_DIMENSION],
     queryFn: () => mediaClient.createThumbnail(finalPath as string, MEDIA_THUMBNAIL_MAX_DIMENSION),
     enabled,
@@ -1395,8 +1401,10 @@ function useMediaThumbnailSrc(finalPath: string | null): string | null {
     gcTime: 30 * 60 * 1000,
     retry: false,
   });
-  if (data == null || finalPath == null) return null;
-  return toMediaSrc(data.path);
+  return {
+    src: data == null || finalPath == null ? null : toMediaSrc(data.path),
+    unavailable: enabled && (isError || data === null),
+  };
 }
 
 /** 抽帧结果单帧缩略图：成批本地图片走缩略图管线，避免逐帧全量解码。 */
@@ -1407,8 +1415,13 @@ function FrameExtractorThumb({
   readonly finalPath: string;
   readonly label: string;
 }) {
-  const thumbnailSrc = useMediaThumbnailSrc(finalPath);
-  return <img src={thumbnailSrc ?? toMediaSrc(finalPath)} alt={label} draggable={false} />;
+  const thumbnail = useMediaThumbnailSrc(finalPath);
+  const src = isDesktopRuntime() ? thumbnail.src : toMediaSrc(finalPath);
+  return src ? (
+    <img src={src} alt={label} draggable={false} />
+  ) : (
+    <AssetMediaState kind="image" state={thumbnail.unavailable ? "unavailable" : "loading"} />
+  );
 }
 
 /**
@@ -2137,10 +2150,13 @@ export function CanvasOutputNode({
   const [copied, setCopied] = useState(false);
   const [resuming, setResuming] = useState(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
-  // 视口懒挂载与本地图片缩略图：滚出视口卸载 <video>；本地产物图片走缩略图管线。
+  // 视口懒挂载与本地图片缩略图：离屏不启动缩略图任务，也不解码原图。
   const { containerRef: previewButtonRef, inView: previewInView } =
     useNodeInView<HTMLButtonElement>({ heavy: isVideo });
-  const imageThumbnailSrc = useMediaThumbnailSrc(node.finalPath);
+  const imageThumbnail = useMediaThumbnailSrc(
+    !isVideo && !isTextResult ? node.finalPath : null,
+    previewInView,
+  );
   const mediaSrc = node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null);
 
   // 供应商结果已返回 → 立即展示媒体/文本；本地 finalPath 到达后再切换为长期引用。
@@ -2399,9 +2415,16 @@ export function CanvasOutputNode({
                 mountMedia={previewInView}
                 onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
               />
+            ) : !previewInView ? (
+              <span className="canvas-asset-node__video-lazy" aria-hidden="true" />
+            ) : node.finalPath != null && isDesktopRuntime() && imageThumbnail.src == null ? (
+              <AssetMediaState
+                kind="image"
+                state={imageThumbnail.unavailable ? "unavailable" : "loading"}
+              />
             ) : (
               <img
-                src={imageThumbnailSrc ?? mediaSrc}
+                src={imageThumbnail.src ?? mediaSrc}
                 alt=""
                 draggable={false}
                 decoding="async"

@@ -16,6 +16,7 @@ import type {
   GenerationStateChangedEvent,
   GenerationTextDeltaEvent,
   GenerationTaskDetail,
+  GenerationTaskProgress,
   GenerationTaskPage,
   LocalAssetPage,
   LocalAssetRecord,
@@ -473,6 +474,21 @@ export const generationTaskDetailSchema = v.looseObject({
   textOutput: v.nullable(textGenerationOutputRecordSchema),
   finalError: v.unknown(),
 }) satisfies v.GenericSchema<GenerationTaskDetail>;
+
+export const generationTaskProgressSchema = v.looseObject({
+  summary: generationTaskSummarySchema,
+  results: v.array(
+    v.looseObject({
+      taskId: v.string(),
+      resultIndex: v.number(),
+      mediaType: generationResultMediaTypeSchema,
+      saveStatus: generationResultRecordSchema.entries.saveStatus,
+      finalPath: nullableStringSchema,
+      error: v.unknown(),
+    }),
+  ),
+  finalError: v.unknown(),
+}) satisfies v.GenericSchema<GenerationTaskProgress>;
 
 export const canvasDocumentRecordSchema = v.looseObject({
   id: v.string(),

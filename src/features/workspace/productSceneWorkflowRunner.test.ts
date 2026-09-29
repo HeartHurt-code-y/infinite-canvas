@@ -89,6 +89,7 @@ function setup(config: ProductSceneWorkflowOptions = options) {
   const generation: GenerationTaskClient = {
     start: vi.fn(() => Promise.resolve(`image-${++sequence}`)),
     get: vi.fn((taskId: string) => Promise.resolve(completedTask(taskId))),
+    getProgress: vi.fn((taskId: string) => Promise.resolve(completedTask(taskId))),
     list: vi.fn(),
     queryVideoTaskNow: vi.fn(),
   };
@@ -640,6 +641,36 @@ describe("recoverable product scene batches", () => {
     ]);
     expect(result.productScene?.rows.every((row) => row.status === "needs_review")).toBe(true);
     expect(result.productScene?.batchReviewPending).toBe(true);
+    expect(generation.get).not.toHaveBeenCalled();
+  });
+
+  it("honors a requested 50 concurrent images without runtime throttling", async () => {
+    const config = { ...options, totalCount: 50, batchSize: 50, maxConcurrency: 50 };
+    const { runner, request, resume, generation } = setup(config);
+    const releases: Array<() => void> = [];
+    let active = 0;
+    let peak = 0;
+    vi.mocked(generation.start).mockImplementation(() => {
+      const taskId = `image-${releases.length + 1}`;
+      active += 1;
+      peak = Math.max(peak, active);
+      return new Promise<string>((resolve) => {
+        releases.push(() => {
+          active -= 1;
+          resolve(taskId);
+        });
+      });
+    });
+    const plan = await runner.run(request);
+    const controller = new AbortController();
+    const running = runner.run({ ...resume(plan, 50), signal: controller.signal });
+    await vi.waitFor(() => expect(generation.start).toHaveBeenCalledTimes(50));
+    expect(peak).toBe(50);
+    controller.abort();
+    releases.forEach((release) => release());
+    const paused = await running;
+    expect(paused.phase).toBe("paused");
+    expect(generation.start).toHaveBeenCalledTimes(50);
   });
 
   it("isolates a failed submission while preserving other concurrent results for review", async () => {
@@ -709,7 +740,7 @@ describe("recoverable product scene batches", () => {
       maxConcurrency: 2,
     });
     const releaseGets: Array<() => void> = [];
-    vi.mocked(generation.get)
+    vi.mocked(generation.getProgress)
       .mockImplementationOnce(
         (taskId) =>
           new Promise((resolve) => {
@@ -725,7 +756,7 @@ describe("recoverable product scene batches", () => {
     const plan = await runner.run(request);
     const controller = new AbortController();
     const running = runner.run({ ...resume(plan, 2), signal: controller.signal });
-    await vi.waitFor(() => expect(generation.get).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(generation.getProgress).toHaveBeenCalledTimes(2));
     controller.abort();
     releaseGets.forEach((release) => release());
     const paused = await running;
@@ -819,7 +850,7 @@ describe("recoverable product scene batches", () => {
       const paused = await runner.run({ ...resume(planned, 1), signal: abort.signal });
       expect(paused.phase).toBe("paused");
       expect(paused.productScene?.rows[0]?.taskId).toBe("image-pending");
-      expect(generation.get).not.toHaveBeenCalled();
+      expect(generation.getProgress).not.toHaveBeenCalled();
       const done = await runner.run(resume(paused));
       expect(done.productScene?.rows[0]?.outputPath).toBeTruthy();
       expect(generation.start).toHaveBeenCalledOnce();
@@ -833,7 +864,7 @@ describe("recoverable product scene batches", () => {
       batchSize: 1,
     });
     const planned = await runner.run(request);
-    vi.mocked(generation.get).mockImplementation((taskId) => {
+    vi.mocked(generation.getProgress).mockImplementation((taskId) => {
       const detail = completedTask(taskId);
       return Promise.resolve({
         ...detail,
@@ -885,7 +916,7 @@ describe("recoverable product scene batches", () => {
       batchSize: 1,
     });
     const planned = await runner.run(request);
-    vi.mocked(generation.get).mockImplementation((taskId) =>
+    vi.mocked(generation.getProgress).mockImplementation((taskId) =>
       Promise.resolve({
         ...completedTask(taskId),
         results: [],
@@ -900,7 +931,7 @@ describe("recoverable product scene batches", () => {
     expect(reset.rows[0]?.taskId).toBeNull();
     expect(reset.rows[0]?.recipe.prompt).not.toBe(failed.productScene?.rows[0]?.recipe.prompt);
     expect(reset.rows[0]?.attempts[0]?.recipe).toEqual(failed.productScene?.rows[0]?.recipe);
-    vi.mocked(generation.get).mockImplementation((taskId) =>
+    vi.mocked(generation.getProgress).mockImplementation((taskId) =>
       Promise.resolve(completedTask(taskId)),
     );
     const done = await runner.run(resume({ ...failed, productScene: reset }));

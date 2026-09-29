@@ -17,7 +17,11 @@ import { createCommerceOptions } from "./commerceWorkflowModel";
 import { createRemotionOptions } from "./remotionWorkflowModel";
 import { createReverseVideoOptions } from "./reverseVideoWorkflowModel";
 import { createXhsCoverOptions } from "./xhsCoverWorkflowModel";
-import { createProductSceneOptions } from "./productSceneWorkflowModel";
+import {
+  createProductSceneCheckpoint,
+  createProductSceneOptions,
+  generateProductScenePlan,
+} from "./productSceneWorkflowModel";
 import { createXhsCoverWorkflowRunner } from "./xhsCoverWorkflowRunner";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import { restoreWorkflowVersion } from "./workflowVersionHistory";
@@ -466,6 +470,62 @@ describe("recorded workflow execution", () => {
     expect(records.get("history-1")?.nodeSnapshot.config.checkpoint.finalPath).toBe(
       "C:\\result.png",
     );
+  });
+
+  it("bounds queued product-scene snapshots while retaining the latest task identity", async () => {
+    const { runner, request, runnerFactory, historyClient, records } = setup();
+    const options = {
+      ...createProductSceneOptions(),
+      totalCount: 500,
+      batchSize: 50,
+      views: [{
+        id: "front",
+        label: "正面",
+        angle: "eye" as const,
+        sourcePath: "C:\\source.png",
+        preparedPath: "C:\\prepared.png",
+        contentHash: "a".repeat(64),
+        approved: true,
+      }],
+    };
+    runnerFactory.mockReturnValue({
+      async run(input) {
+        let rows = generateProductScenePlan(options);
+        let current = {
+          ...input.node.config.checkpoint,
+          phase: "generating" as const,
+          productScene: {
+            ...createProductSceneCheckpoint(),
+            rows,
+            approvedThrough: rows.length,
+          },
+        };
+        for (let index = 0; index < 50; index++) {
+          rows = rows.map((row, rowIndex) =>
+            rowIndex === index ? { ...row, taskId: `task-${index}` } : row,
+          );
+          current = { ...current, productScene: { ...current.productScene, rows } };
+          input.onCheckpoint(current);
+        }
+        await input.beforeSideEffect?.();
+        expect(records.get("history-1")?.nodeSnapshot.config.checkpoint.productScene?.rows[49]?.taskId)
+          .toBe("task-49");
+        return { ...current, phase: "paused" };
+      },
+    });
+
+    const result = await runner.run({
+      ...request,
+      node: { ...request.node, config: { ...request.node.config, productScene: options } },
+    });
+
+    expect(runnerFactory).toHaveBeenCalledOnce();
+    expect(result.error).toBeNull();
+    const saved = records.get("history-1")!.nodeSnapshot.config.checkpoint.productScene;
+    expect(saved?.rows[49]?.taskId).toBe("task-49");
+    expect(historyClient.save.mock.calls.length).toBeLessThan(10);
+    const revisions = historyClient.save.mock.calls.map(([command]) => command.record.revision);
+    expect(revisions).toEqual(revisions.map((_, index) => index));
   });
 
   it("stops before a later model call if an enqueued checkpoint cannot be persisted", async () => {

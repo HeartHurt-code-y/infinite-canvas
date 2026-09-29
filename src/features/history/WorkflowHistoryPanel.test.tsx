@@ -412,6 +412,7 @@ describe("WorkflowHistoryPanel", () => {
       start: vi.fn(),
       list: vi.fn(() => Promise.resolve({ items: [other.summary], nextCursorCreatedBefore: null })),
       get: vi.fn((id) => Promise.resolve(id === linked.summary.id ? linked : other)),
+      getProgress: vi.fn(),
       queryVideoTaskNow: vi.fn(),
     };
     render(
@@ -440,6 +441,7 @@ describe("WorkflowHistoryPanel", () => {
       start: vi.fn(),
       list: vi.fn(() => Promise.resolve({ items: [], nextCursorCreatedBefore: null })),
       get: vi.fn(),
+      getProgress: vi.fn(),
       queryVideoTaskNow: vi.fn(),
     };
     render(

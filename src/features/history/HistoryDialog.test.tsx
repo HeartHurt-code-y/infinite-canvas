@@ -97,6 +97,9 @@ function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClie
     start: vi.fn(() => Promise.resolve(detail.summary.id)),
     list: vi.fn(() => Promise.resolve({ items: [detail.summary], nextCursorCreatedBefore: null })),
     get: vi.fn(() => Promise.resolve(detail)),
+    getProgress: vi.fn(() =>
+      Promise.resolve({ summary: detail.summary, results: [], finalError: detail.finalError }),
+    ),
     queryVideoTaskNow: vi.fn(() => Promise.resolve()),
   };
 }
@@ -724,6 +727,7 @@ describe("HistoryDialog regeneration", () => {
       createdAt: 1_777_000_000_000,
     };
     const invoke = vi.fn((command: string, _args?: unknown) => {
+      void _args;
       switch (command) {
         case "list_assets":
           return Promise.resolve([]);

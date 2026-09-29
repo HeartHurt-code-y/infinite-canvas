@@ -58,7 +58,8 @@ use super::{
         CreateRealPersonAuthLinkCommand, CredentialStatus, DeleteAssetCommand,
         DeleteAssetGroupCommand, DeleteProviderTokenGroupCommand, DeleteRealPersonAssetCommand,
         DeleteRealPersonGroupCommand, GenerationOperation, GenerationResultRecord,
-        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage, ImportedAssetSource,
+        GenerationTaskDetail, GenerationTaskListQuery, GenerationTaskPage,
+        GenerationTaskProgress, ImportedAssetSource,
         ListAssetGroupsCommand, LocalAssetListQuery, LocalAssetPage, ModelDefinition,
         ImportLocalBase64AssetCommand, LocalBase64AssetPage, LocalBase64AssetRecord, MediaType,
         ObserveAssetStatusCommand, ProviderConnection, ProviderModelBinding, ProviderTokenGroup,
@@ -762,6 +763,14 @@ pub fn get_generation_task(
     task_id: String,
 ) -> CommandResult<GenerationTaskDetail> {
     state.tasks.get(&task_id).command()
+}
+
+#[tauri::command]
+pub fn get_generation_task_progress(
+    state: State<'_, BackendState>,
+    task_id: String,
+) -> CommandResult<GenerationTaskProgress> {
+    state.tasks.get_progress(&task_id).command()
 }
 
 #[tauri::command]

@@ -207,6 +207,7 @@ pub fn run() {
             commands::open_blender_project,
             commands::list_generation_tasks,
             commands::get_generation_task,
+            commands::get_generation_task_progress,
             commands::recover_generation_tasks,
             commands::query_video_task_now,
             commands::list_remote_video_tasks,

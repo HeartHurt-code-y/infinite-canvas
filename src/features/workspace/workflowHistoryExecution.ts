@@ -356,6 +356,14 @@ export function createRecordedWorkflowRunner(
       let record: WorkflowHistoryRecord | null = null;
       const historyId = request.node.config.historyRunId;
       const kind = workflowKindForNode(request.node);
+      type ProductSceneSave = {
+        readonly checkpoint: KnowledgeVideoWorkflowCheckpoint;
+        readonly progress: KnowledgeVideoWorkflowRunState;
+        readonly versionHistory: WorkflowVersionHistory;
+        readonly event?: WorkflowHistoryEvent;
+      };
+      let productSceneSaveActive = false;
+      let pendingProductSceneSave: ProductSceneSave | null = null;
       const publishFailure = (error: unknown, historyFailure: boolean) => {
         const message = `${historyFailure ? "工作流历史记录保存失败：" : "工作流历史恢复失败："}${formatWorkflowError(error)}`;
         checkpoint = { ...checkpoint, phase: "failed", error: message };
@@ -370,6 +378,69 @@ export function createRecordedWorkflowRunner(
       };
       const enqueue = (event?: WorkflowHistoryEvent) => {
         if (!record) return;
+        if (kind === "productScene") {
+          // A batch can publish several checkpoints while one SQLite write is in flight.
+          // Keep the in-flight snapshot and the newest pending snapshot, instead of
+          // eagerly cloning the complete (up to 500-row) plan for every row update.
+          const first: ProductSceneSave = {
+            checkpoint,
+            progress: latestProgress,
+            versionHistory: versionCheckpoint(checkpoint).versionHistory!,
+            ...(event ? { event } : {}),
+          };
+          if (productSceneSaveActive) {
+            pendingProductSceneSave = {
+              ...first,
+              // A later checkpoint without a progress event must retain the latest event.
+              ...(first.event || !pendingProductSceneSave?.event
+                ? {}
+                : { event: pendingProductSceneSave.event }),
+            };
+            return;
+          }
+          productSceneSaveActive = true;
+          queue = queue.then(async () => {
+            let next: ProductSceneSave | null = first;
+            while (next && !persistenceFailure) {
+              const savedCheckpoint: KnowledgeVideoWorkflowCheckpoint = next.checkpoint;
+              const savedProgress: KnowledgeVideoWorkflowRunState = next.progress;
+              const savedHistory: WorkflowVersionHistory = next.versionHistory;
+              const savedEvent: WorkflowHistoryEvent | undefined = next.event;
+              // Product-scene commits replace their checkpoint and row array rather
+              // than mutating them. Copy only when this snapshot is actually written.
+              try {
+                const captured = snapshot({
+                  ...record!,
+                  status: savedCheckpoint.phase,
+                  progress: savedProgress.progress,
+                  message: savedProgress.message,
+                  error: savedCheckpoint.error ?? savedProgress.error,
+                  nodeSnapshot: {
+                    ...request.node,
+                    config: {
+                      ...request.node.config,
+                      checkpoint: savedCheckpoint,
+                      versionHistory: savedHistory,
+                    },
+                  },
+                  updatedAt: dependencies.now(),
+                });
+                const saved = await dependencies.historyClient.save({
+                  record: { ...captured, revision },
+                  ...(savedEvent ? { event: savedEvent } : {}),
+                });
+                revision = saved.revision;
+                record = saved;
+              } catch (error) {
+                persistenceFailure = error;
+              }
+              next = pendingProductSceneSave;
+              pendingProductSceneSave = null;
+            }
+            productSceneSaveActive = false;
+          });
+          return;
+        }
         const captured = snapshot({
           ...record,
           status: checkpoint.phase,

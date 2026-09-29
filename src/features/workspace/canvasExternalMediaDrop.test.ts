@@ -38,4 +38,16 @@ describe("external media drop", () => {
     const path = "C:\\art#1.jpg";
     expect(classifyExternalMediaPaths([path])).toEqual({ mediaPaths: [path], skippedCount: 0 });
   });
+
+  it("accepts the additional media formats supported by the local importer", () => {
+    const paths = [
+      "C:\\shots\\clip.m4v",
+      "C:\\shots\\voice.opus",
+      "C:\\shots\\scan.tif",
+      "C:\\shots\\scan.tiff",
+      "C:\\shots\\photo.heic",
+      "C:\\shots\\photo.heif",
+    ];
+    expect(classifyExternalMediaPaths(paths)).toEqual({ mediaPaths: paths, skippedCount: 0 });
+  });
 });
