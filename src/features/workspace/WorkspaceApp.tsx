@@ -182,6 +182,7 @@ import {
   CanvasVideoFrameExtractorNode,
 } from "./MediaNodeViews";
 import { AssetGroupFrame, CanvasMarqueeSelectionReader } from "./AssetGroupFrame";
+import { classifyExternalMediaPaths, nativeDropClientPoint } from "./canvasExternalMediaDrop";
 import {
   captureCanvasNodes,
   pasteCanvasNodes,
@@ -1370,6 +1371,7 @@ export function WorkspaceApp({
     new Map<string, { edgeId: string; sourceKey: string; text: string; importedText: string }>(),
   );
   const canvasViewportRef = useRef<HTMLDivElement | null>(null);
+  const [externalMediaDropHover, setExternalMediaDropHover] = useState(false);
   // React Flow 实例引用：命令式视口操作（恢复视图/锚点缩放/坐标换算）的唯一入口。
   const flowInstanceRef = useRef<ReactFlowInstance<CanvasFlowNode, CanvasFlowEdge> | null>(null);
   const outputPlacementOptionsFor = useCallback(
@@ -9156,6 +9158,163 @@ export function WorkspaceApp({
     },
     [addAssetNode, dropClientPointToBoard],
   );
+  const externalDropPlacementRef = useRef({
+    occupied: occupiedNodeRects,
+    nextOrder: nextLibraryPickOrder(assetNodes),
+  });
+  useLayoutEffect(() => {
+    externalDropPlacementRef.current = {
+      occupied: occupiedNodeRects,
+      nextOrder: nextLibraryPickOrder(assetNodes),
+    };
+  }, [assetNodes, occupiedNodeRects]);
+  const handleDropExternalMedia = useCallback(
+    async (paths: readonly string[], clientX: number, clientY: number) => {
+      const anchor = dropClientPointToBoard(clientX, clientY);
+      if (anchor == null) return;
+      const { mediaPaths, skippedCount } = classifyExternalMediaPaths(paths);
+      if (mediaPaths.length === 0) {
+        toast.error("请拖入图片、视频或音频文件。");
+        return;
+      }
+      const toastId = `canvas-media-drop-${pendingUploadSeqRef.current++}`;
+      toast.loading(`正在将 ${mediaPaths.length} 项素材保存到本地素材库…`, { id: toastId });
+      const imported: LocalBase64AssetRecord[] = [];
+      const failures: string[] = [];
+      for (const path of mediaPaths) {
+        const name = path.split(/[\\/]/).pop() ?? path;
+        try {
+          imported.push(await localBase64AssetClient.importAsset({ localPath: path, name }));
+        } catch (error) {
+          failures.push(`${name}：${formatRawBackendError(error)}`);
+        }
+      }
+      if (imported.length > 0) {
+        const placement = externalDropPlacementRef.current;
+        const positions = layoutAssetPlacements(
+          imported.length,
+          anchor,
+          { width: ASSET_NODE_WIDTH, height: ASSET_NODE_HEIGHT },
+          placement.occupied,
+        );
+        let libraryPickOrder = placement.nextOrder;
+        const entries: CanvasNodeEntry[] = imported.flatMap((record, index) => {
+          const position = positions[index];
+          if (position == null) return [];
+          const asset = localAssetToItem(record);
+          return [
+            {
+              type: "asset" as const,
+              data: {
+                key: assetNodeKey(),
+                assetId: asset.id,
+                providerConnectionId: "",
+                source: "local" as const,
+                kind: asset.kind,
+                name: asset.name,
+                previewUrl: asset.previewUrl ?? null,
+                videoUrl: asset.kind === "video" ? (asset.videoUrl ?? asset.previewUrl ?? null) : null,
+                libraryPickOrder: libraryPickOrder++,
+                x: position.x,
+                y: position.y,
+              },
+            },
+          ];
+        });
+        if (insertSubgraph(entries, []) !== "applied") {
+          toast.error("素材已保存到本地素材库，但未能放入画布", { id: toastId });
+          refreshLocalAssets("upload-finished");
+          return;
+        }
+        externalDropPlacementRef.current = {
+          occupied: [
+            ...placement.occupied,
+            ...positions.map((position) => ({
+              ...position,
+              width: ASSET_NODE_WIDTH,
+              height: ASSET_NODE_HEIGHT,
+            })),
+          ],
+          nextOrder: libraryPickOrder,
+        };
+        refreshLocalAssets("upload-finished");
+      }
+      if (imported.length === 0) {
+        toast.error("素材未能导入画布", {
+          id: toastId,
+          description: failures[0] ?? "请确认文件是可读取的图片、视频或音频。",
+        });
+      } else if (failures.length > 0 || skippedCount > 0) {
+        const details = [
+          failures.length > 0 ? failures[0] : null,
+          skippedCount > 0 ? `跳过 ${skippedCount} 个不支持的项目` : null,
+        ]
+          .filter(Boolean)
+          .join("；");
+        toast.warning(
+          `已放入 ${imported.length} 项素材，${failures.length + skippedCount} 项未导入`,
+          {
+            id: toastId,
+            description: details,
+          },
+        );
+      } else {
+        toast.success(`已将 ${imported.length} 项素材放入画布并保存到本地素材库`, { id: toastId });
+      }
+    },
+    [dropClientPointToBoard, insertSubgraph, refreshLocalAssets],
+  );
+  const dropClientPointToBoardRef = useRef(dropClientPointToBoard);
+  const handleDropExternalMediaRef = useRef(handleDropExternalMedia);
+  useLayoutEffect(() => {
+    dropClientPointToBoardRef.current = dropClientPointToBoard;
+    handleDropExternalMediaRef.current = handleDropExternalMedia;
+  }, [dropClientPointToBoard, handleDropExternalMedia]);
+  useEffect(() => {
+    if (!isDesktopRuntime() || !active || !canvasHydrated) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    let draggingMedia = false;
+    void import("@tauri-apps/api/webview")
+      .then(async ({ getCurrentWebview }) => {
+        const stop = await getCurrentWebview().onDragDropEvent(({ payload }) => {
+          if (payload.type === "leave") {
+            draggingMedia = false;
+            setExternalMediaDropHover(false);
+            return;
+          }
+          const point = nativeDropClientPoint(payload.position, window.devicePixelRatio);
+          const viewport = canvasViewportRef.current;
+          const topElement = document.elementFromPoint?.(point.x, point.y);
+          const insideCanvas =
+            viewport != null &&
+            viewport.closest("[inert]") == null &&
+            document.querySelector("dialog[open]") == null &&
+            (topElement == null || viewport.contains(topElement)) &&
+            dropClientPointToBoardRef.current(point.x, point.y) != null;
+          if (payload.type === "enter") {
+            draggingMedia = classifyExternalMediaPaths(payload.paths).mediaPaths.length > 0;
+            setExternalMediaDropHover(draggingMedia && insideCanvas);
+          } else if (payload.type === "over") {
+            setExternalMediaDropHover(draggingMedia && insideCanvas);
+          } else {
+            draggingMedia = false;
+            setExternalMediaDropHover(false);
+            if (insideCanvas) void handleDropExternalMediaRef.current(payload.paths, point.x, point.y);
+          }
+        });
+        if (disposed) stop();
+        else unlisten = stop;
+      })
+      .catch((error: unknown) => {
+        frontendLog("error", `[canvas] 注册外部素材拖放失败: ${formatRawBackendError(error)}`);
+      });
+    return () => {
+      disposed = true;
+      unlisten?.();
+      setExternalMediaDropHover(false);
+    };
+  }, [active, canvasHydrated]);
   const toggleAssetMultiSelect = useCallback(() => {
     setAssetMultiSelect((enabled) => {
       if (enabled) setPickedAssets([]);
@@ -12061,9 +12220,14 @@ export function WorkspaceApp({
         >
           <AppUpdateBanner />
           <div
-            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}`}
+            className={`canvas-viewport${isPanning ? " is-panning" : ""}${nodeMarquee ? " is-selecting" : ""}${externalMediaDropHover ? " is-external-media-drop" : ""}`}
             ref={canvasViewportRef}
           >
+            {externalMediaDropHover ? (
+              <div className="canvas-external-media-drop-hint" role="status">
+                松开以将素材放入画布并保存到本地素材库
+              </div>
+            ) : null}
             <LiveCanvasFlow
               className="canvas-react-flow"
               nodes={flowNodes}

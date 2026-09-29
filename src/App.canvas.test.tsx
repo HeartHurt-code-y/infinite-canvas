@@ -527,7 +527,7 @@ function setupDesktopRuntime(): void {
       return id;
     },
     convertFileSrc: (filePath: string) => `asset://localhost/${encodeURIComponent(filePath)}`,
-    metadata: { currentWindow: { label: "main" } },
+    metadata: { currentWindow: { label: "main" }, currentWebview: { label: "main" } },
   };
   // @tauri-apps/api v2.11 的事件反注册依赖该内部对象。
   (window as unknown as Record<string, unknown>)["__TAURI_EVENT_PLUGIN_INTERNALS__"] = {
@@ -1215,6 +1215,119 @@ afterEach(async () => {
 });
 
 describe("画布素材拖拽与连线（桌面运行时）", () => {
+  it("接收资源管理器图片、视频和音频，在落点批量创建持久本地素材节点", async () => {
+    invokeMock.mockImplementation((command, args) => {
+      if (command === "import_local_base64_asset") {
+        const { localPath, name } = args?.["command"] as { localPath: string; name: string };
+        const mediaType = name.endsWith(".mp4") ? "video" : name.endsWith(".m4a") ? "audio" : "image";
+        return Promise.resolve({
+          id: `local-b64-${name}`,
+          name,
+          mediaType,
+          mimeType: mediaType === "video" ? "video/mp4" : mediaType === "audio" ? "audio/mp4" : "image/jpeg",
+          previewUrl: `asset://localhost/${encodeURIComponent(localPath)}`,
+          byteSize: 2048,
+          createdAt: 1,
+        });
+      }
+      if (command === "list_local_base64_assets") {
+        return Promise.resolve({
+          items: [],
+          total: 0,
+          page: 1,
+          pageSize: 30,
+          kindTotals: { image: 0, video: 0, audio: 0 },
+        });
+      }
+      return baseInvokeImplementation(command, args);
+    });
+    render(<App />);
+    await screen.findByText("画布为空");
+    vi.spyOn(getCanvasViewport(), "getBoundingClientRect").mockReturnValue({
+      x: 0,
+      y: 0,
+      top: 0,
+      left: 0,
+      right: 1280,
+      bottom: 800,
+      width: 1280,
+      height: 800,
+      toJSON: () => ({}),
+    });
+    const dropHandler = await waitFor(() => {
+      const listener = invokeMock.mock.calls.find(
+        ([command, args]) =>
+          command === "plugin:event|listen" && args?.["event"] === "tauri://drag-drop",
+      );
+      expect(listener).toBeDefined();
+      const id = listener?.[1]?.["handler"] as number;
+      return tauriCallbacks.get(id)!;
+    });
+    const paths = ["P:\\scene\\first.jpg", "P:\\scene\\clip.mp4", "P:\\scene\\notes.txt", "P:\\scene\\voice.m4a"];
+    act(() => {
+      dropHandler({
+        event: "tauri://drag-drop",
+        id: 1,
+        payload: { paths, position: { x: 1600, y: 900 } },
+      });
+    });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"))
+      .toHaveLength(0);
+    act(() => {
+      dropHandler({
+        event: "tauri://drag-drop",
+        id: 1,
+        payload: { paths, position: { x: 400, y: 300 } },
+      });
+    });
+    await waitFor(() => expect(document.querySelectorAll(".canvas-asset-node")).toHaveLength(3));
+    expect(
+      invokeMock.mock.calls
+        .filter(([command]) => command === "import_local_base64_asset")
+        .map(([, args]) => args?.["command"]),
+    ).toEqual([
+      { localPath: paths[0], name: "first.jpg" },
+      { localPath: paths[1], name: "clip.mp4" },
+      { localPath: paths[3], name: "voice.m4a" },
+    ]);
+    expect(screen.getByRole("button", { name: "从 first.jpg 拖出连线" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "从 clip.mp4 拖出连线" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "从 voice.m4a 拖出连线" })).toBeInTheDocument();
+    act(() => {
+      dropHandler({
+        event: "tauri://drag-drop",
+        id: 1,
+        payload: { paths: [paths[0]], position: { x: 600, y: 400 } },
+      });
+    });
+    await waitFor(() => expect(document.querySelectorAll(".canvas-asset-node")).toHaveLength(4));
+    await waitFor(() => {
+      const saved = invokeMock.mock.calls
+        .filter(([command]) => command === "save_canvas_document")
+        .at(-1)?.[1]?.["command"] as SaveCanvasDocumentCommand | undefined;
+      const document = saved?.document as CanvasDocumentV2 | undefined;
+      expect(document?.assetNodes.map((node) => node.assetId)).toEqual([
+        "local-b64-first.jpg",
+        "local-b64-clip.mp4",
+        "local-b64-voice.m4a",
+        "local-b64-first.jpg",
+      ]);
+      expect(document?.assetNodes.map((node) => node.libraryPickOrder)).toEqual([1, 2, 3, 4]);
+      expect(document?.assetNodes.find((node) => node.kind === "video")?.videoUrl).toContain("clip.mp4");
+    });
+    fireEvent.click(screen.getByRole("button", { name: "打开全局设置" }));
+    await waitFor(() => expect(getCanvasViewport().closest("[inert]")).not.toBeNull());
+    act(() => {
+      dropHandler({
+        event: "tauri://drag-drop",
+        id: 1,
+        payload: { paths: [paths[0]], position: { x: 600, y: 400 } },
+      });
+    });
+    expect(invokeMock.mock.calls.filter(([command]) => command === "import_local_base64_asset"))
+      .toHaveLength(4);
+  });
+
   it("初始画布为空，添加节点菜单只展示九种节点", async () => {
     render(<App />);
 

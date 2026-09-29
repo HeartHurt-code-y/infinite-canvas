@@ -1668,7 +1668,7 @@ export function CanvasAssetNode({
   readonly onAspectRatioChange: (key: string, aspectRatio: number) => void;
   /** 云端素材预览续签成功：用新签名地址回写节点数据（持久化到画布文档）。 */
   readonly onRefreshMediaUrls: (key: string, freshPreviewUrl: string) => void;
-  /** 点击素材卡片视觉区域：放大查看原图或视频。 */
+  /** 点击素材卡片视觉区域：查看图片、视频或试听音频。 */
   readonly onPreview?: (key: string) => void;
   /** 将现有素材另存到指定素材库；保存及去重由调用方处理。 */
   readonly onSaveToLibrary?:
@@ -1766,8 +1766,16 @@ export function CanvasAssetNode({
         }
         role={onPreview ? "button" : undefined}
         tabIndex={onPreview ? 0 : undefined}
-        aria-label={onPreview ? `放大查看${node.name}` : undefined}
-        title={onPreview ? "点击放大查看原图或视频" : undefined}
+        aria-label={
+          onPreview ? `${node.kind === "audio" ? "试听音频" : "放大查看"}${node.name}` : undefined
+        }
+        title={
+          onPreview
+            ? node.kind === "audio"
+              ? "点击试听音频"
+              : "点击放大查看原图或视频"
+            : undefined
+        }
       >
         {isVideo && node.videoUrl ? (
           <CanvasAssetNodeVideoVisual
@@ -1953,7 +1961,7 @@ export function CanvasOutputLightbox({
   );
 }
 
-/** 画布素材节点的全屏媒体浏览器：点击素材卡片放大查看原图或视频。 */
+/** 画布素材节点的全屏媒体浏览器：查看原图、视频或试听音频。 */
 export function CanvasAssetLightbox({
   node,
   onClose,
@@ -1983,7 +1991,7 @@ export function CanvasAssetLightbox({
 
   // 大图同样优先用会话内已下载的字节：放大查看不必等一次远端往返，签名过期也照常显示。
   // 地址取与节点视觉区同一份（本地素材续签登记表优先），避免「节点里已是新签名、放大后
-  // 反而拿旧签名」；视频不读整包字节（按 Range 播放），交给媒体代理直连。
+  // 反而拿旧签名」；视频和音频不读整包字节（按 Range 播放），交给媒体代理直连。
   const [refreshedUrl, setRefreshedUrl] = useState<string | null>(null);
   const refreshAttemptedRef = useRef(false);
   const listedUrl = localAssetNodeMediaUrl(node);
@@ -2037,6 +2045,15 @@ export function CanvasAssetLightbox({
             autoPlay
             muted
             playsInline
+            onError={handleMediaError}
+          />
+        ) : node.kind === "audio" ? (
+          <audio
+            className="history-lightbox__media"
+            src={mediaSrc}
+            aria-label={node.name}
+            controls
+            autoPlay
             onError={handleMediaError}
           />
         ) : (
