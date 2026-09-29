@@ -3952,13 +3952,40 @@ fn build_sp25_video_body(
     Ok(Value::Object(body))
 }
 
+/// 参考媒体实测时长的边界容差。生成与剪辑产物的封装时长普遍带有 1–2 帧误差
+/// （如标称 30 秒的 Seedance 产物实测 30.08 秒），严格卡线会把自家合法产物
+/// 拒之门外；小幅越界放行、由上游做最终判定，客户端不为几十毫秒的封装误差
+/// 拦下付费任务。
+const REFERENCE_DURATION_TOLERANCE_SECONDS: f64 = 0.5;
+
+fn reference_duration_in_range(duration: Option<f64>, minimum: f64, maximum: f64) -> bool {
+    let tolerance = REFERENCE_DURATION_TOLERANCE_SECONDS;
+    duration.is_some_and(|duration| {
+        duration.is_finite() && (minimum - tolerance..=maximum + tolerance).contains(&duration)
+    })
+}
+
+fn reference_duration_total_exceeds(total: f64, maximum: f64) -> bool {
+    total > maximum + REFERENCE_DURATION_TOLERANCE_SECONDS
+}
+
+/// 错误信息附带实测时长：用户剪短副本后仍看到原文件被拒绝时，
+/// 能从"实测 30.08 秒"直接看出任务引用的还是原始文件。
+fn describe_measured_duration(duration: Option<f64>) -> String {
+    duration
+        .filter(|value| value.is_finite())
+        .map(|value| format!("（实测 {value:.2} 秒）"))
+        .unwrap_or_default()
+}
+
 /// Seedance 2.5 RD 网关提交前校验。文档契约：`duration` 4–30 必填；`ratio` 六档、
 /// 默认 16:9；`resolution` 可省略但必须与模型档位一致；参考图最多 30 张
 /// （JPG/PNG/WebP，各 ≤10 MB）；参考视频最多 10 段（MP4，各 ≤60 MB，每段 2–15 秒
 /// 且合计 ≤15 秒）；参考音频最多 10 段（MP3/WAV，各 ≤50 MB，每段 2–15 秒且合计
 /// ≤15 秒）；`start_frame`/`end_frame` 各 1 张、必须成对、不能与 `images` 同用；
 /// `generate_audio` 默认出声；`n` 只接受 1（不暴露该字段）。
-/// 校验全部在预扣费用的提交之前完成。
+/// 时长边界带 [`REFERENCE_DURATION_TOLERANCE_SECONDS`] 容差；校验全部在
+/// 预扣费用的提交之前完成。
 fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> BackendResult<()> {
     let limits = rd_video_limits(model).ok_or_else(|| {
         BackendError::validation("不支持的 RD 视频模型 ID", json!({ "model": model }))
@@ -4154,14 +4181,13 @@ fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> Back
             rd_existing_reference_url(media)?;
         }
         // 每段参考视频须为 2–15 秒；时长由真实媒体探测确认，不接受元数据自报。
-        if !media
-            .duration_seconds
-            .is_some_and(|duration| duration.is_finite() && (2.0..=15.0).contains(&duration))
-        {
+        // 边界带容差：封装误差导致的小幅越界放行，由上游做最终判定。
+        if !reference_duration_in_range(media.duration_seconds, 2.0, 15.0) {
             return Err(BackendError::validation(
                 format!(
-                    "RD 视频要求每个参考视频的实际时长为 2–15 秒：{}",
-                    media.display_name
+                    "RD 视频要求每个参考视频的实际时长为 2–15 秒：{}{}",
+                    media.display_name,
+                    describe_measured_duration(media.duration_seconds)
                 ),
                 media.archive(),
             ));
@@ -4172,7 +4198,7 @@ fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> Back
         .iter()
         .filter_map(|video| video.duration_seconds)
         .sum();
-    if reference_video_total > 15.0 {
+    if reference_duration_total_exceeds(reference_video_total, 15.0) {
         return Err(BackendError::validation(
             "RD 视频参考视频实际总时长不能超过 15 秒",
             json!({ "totalDurationSeconds": reference_video_total }),
@@ -4201,14 +4227,12 @@ fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> Back
         } else {
             rd_existing_reference_url(media)?;
         }
-        if !media
-            .duration_seconds
-            .is_some_and(|duration| duration.is_finite() && (2.0..=15.0).contains(&duration))
-        {
+        if !reference_duration_in_range(media.duration_seconds, 2.0, 15.0) {
             return Err(BackendError::validation(
                 format!(
-                    "RD 视频要求每段参考音频的实际时长为 2–15 秒：{}",
-                    media.display_name
+                    "RD 视频要求每段参考音频的实际时长为 2–15 秒：{}{}",
+                    media.display_name,
+                    describe_measured_duration(media.duration_seconds)
                 ),
                 media.archive(),
             ));
@@ -4219,7 +4243,7 @@ fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> Back
         .iter()
         .filter_map(|audio| audio.duration_seconds)
         .sum();
-    if reference_audio_total > 15.0 {
+    if reference_duration_total_exceeds(reference_audio_total, 15.0) {
         return Err(BackendError::validation(
             "RD 视频参考音频实际总时长不能超过 15 秒",
             json!({ "totalDurationSeconds": reference_audio_total }),
@@ -4682,13 +4706,12 @@ fn validate_seedance_25_video_task(
             2.0
         };
         for video in &resolved.videos {
-            if !video.duration_seconds.is_some_and(|duration| {
-                duration.is_finite() && (minimum_seconds..=30.0).contains(&duration)
-            }) {
+            if !reference_duration_in_range(video.duration_seconds, minimum_seconds, 30.0) {
                 return Err(BackendError::validation(
                     format!(
-                        "当前视频任务要求每个参考视频的实际时长为 {minimum_seconds}–30 秒：{}",
-                        video.display_name
+                        "当前视频任务要求每个参考视频的实际时长为 {minimum_seconds}–30 秒：{}{}",
+                        video.display_name,
+                        describe_measured_duration(video.duration_seconds)
                     ),
                     video.archive(),
                 ));
@@ -4699,7 +4722,7 @@ fn validate_seedance_25_video_task(
             .iter()
             .filter_map(|video| video.duration_seconds)
             .sum();
-        if total_seconds > 30.0 {
+        if reference_duration_total_exceeds(total_seconds, 30.0) {
             return Err(BackendError::validation(
                 "视频编辑和视频延长的参考视频实际总时长不能超过 30 秒",
                 json!({ "totalDurationSeconds": total_seconds }),
@@ -8193,8 +8216,8 @@ mod tests {
             ));
             for duration in [
                 None,
-                Some(3.99),
-                Some(30.01),
+                Some(3.0),
+                Some(31.0),
                 Some(f64::NAN),
                 Some(f64::INFINITY),
             ] {
@@ -8204,7 +8227,8 @@ mod tests {
                     "invalid actual duration: {duration:?}"
                 );
             }
-            for duration in [4.0, 16.5, 30.0] {
+            // 标称 30 秒的生成产物实测常带 1–2 帧封装越界（30.08 秒），容差内放行。
+            for duration in [4.0, 16.5, 30.0, 30.08] {
                 generation.videos[0].duration_seconds = Some(duration);
                 let body = build_video_body(&task, &generation).expect("valid edit");
                 // 本地任务类型只参与校验，不写进请求体：远端字段由冻结 schema 决定
@@ -8306,10 +8330,13 @@ mod tests {
             "https://cdn.example.com/extend.mp4",
             None,
         ));
-        for duration in [None, Some(1.99), Some(30.01)] {
+        for duration in [None, Some(1.0), Some(31.0)] {
             generation.videos[0].duration_seconds = duration;
             assert!(build_video_body(&task, &generation).is_err());
         }
+        // 实测 30.08 秒在 2–30 秒边界的封装容差内。
+        generation.videos[0].duration_seconds = Some(30.08);
+        assert!(build_video_body(&task, &generation).is_ok());
         generation.videos[0].duration_seconds = Some(2.0);
         for duration in [-1, 4, 15, 30] {
             generation.parameters["duration"] = json!(duration);
@@ -8367,7 +8394,13 @@ mod tests {
                     build_video_body(&task, &generation).is_ok(),
                     "30 seconds total"
                 );
-                generation.videos[1].duration_seconds = Some(15.01);
+                // 单段容差内越界（合计 30.08 秒）放行；明确超限仍拒绝。
+                generation.videos[1].duration_seconds = Some(15.08);
+                assert!(
+                    build_video_body(&task, &generation).is_ok(),
+                    "30.08 seconds total within tolerance"
+                );
+                generation.videos[1].duration_seconds = Some(15.6);
                 assert!(
                     build_video_body(&task, &generation).is_err(),
                     "more than 30 seconds total"
@@ -10541,7 +10574,7 @@ mod tests {
             "https://example.com/v.mp4",
             None,
         );
-        short_video.duration_seconds = Some(1.5);
+        short_video.duration_seconds = Some(1.0);
         request.videos = vec![short_video];
         assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
         let mut long_video = resolved_media(
@@ -10551,9 +10584,20 @@ mod tests {
             "https://example.com/v.mp4",
             None,
         );
-        long_video.duration_seconds = Some(15.5);
+        long_video.duration_seconds = Some(16.0);
         request.videos = vec![long_video];
         assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        // 标称 15 秒产物的封装越界（实测 15.08 秒）在容差内放行。
+        let mut boundary_video = resolved_media(
+            MediaType::Video,
+            1,
+            "reference_video",
+            "https://example.com/v.mp4",
+            None,
+        );
+        boundary_video.duration_seconds = Some(15.08);
+        request.videos = vec![boundary_video];
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         // 合计 15 秒上限。
         request.videos = (1..=2)
             .map(|index| {
