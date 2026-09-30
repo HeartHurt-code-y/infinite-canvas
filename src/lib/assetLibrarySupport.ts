@@ -1,11 +1,11 @@
 //! 云端素材库的供应商支持判定。
 //!
-//! 供应商连接并不都实现云端素材库：盘趣聚合网关（One API / new-api 内核）只开放
-//! `/v1/models` 与 `/v1/video/generations*`，`/v1/assets/*` 全部 404
-//! （实测见 `docs/integrations/panqu-video-api.md`）。这类连接只参与模型生成；
-//! 一旦被当成素材库来源，面板只会把上游 404 原样展示成「云端素材库不可用」。
-//! 所以在进入素材库的任何供应商选项之前，先按上游主机把它们过滤掉。
-//! 按次系列网关只声明 `/v1/assets/uploads` 参考素材上传，也不作为云端素材库来源。
+//! 供应商连接并不都实现云端素材库：Seedance 2.5 RD 网关只开放
+//! `/v1/models`、`/v1/video/generations*` 与免费的上传中转 `/v1/assets/uploads`，
+//! 没有素材库浏览接口（实测见 `docs/integrations/rd-video-api.md`）。这类连接只
+//! 参与模型生成；一旦被当成素材库来源，面板只会把上游 404 原样展示成
+//! 「云端素材库不可用」。所以在进入素材库的任何供应商选项之前，先按上游主机
+//! 把它们过滤掉。
 
 import type { ProviderConnection } from "./backend";
 import { adapterSupportsAssetLibrary } from "./providerAdapters";
@@ -15,9 +15,7 @@ import { adapterSupportsAssetLibrary } from "./providerAdapters";
  * 用户照着同一个地址新建的连接同样没有素材库，而改名后的连接仍应被排除。
  */
 const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = [
-  "115.191.2.88",
   "101.34.211.152",
-  "panqu.com",
   "maas.aliyuncs.com",
 ];
 

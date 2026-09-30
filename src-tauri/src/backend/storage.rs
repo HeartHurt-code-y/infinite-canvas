@@ -311,7 +311,7 @@ CREATE TABLE IF NOT EXISTS staging_object_targets (
 /// 用户填入 API Key 后即可启用。使用稳定 ID + INSERT OR IGNORE，
 /// 这样既能为旧数据库补齐模板，也不会覆盖用户已经编辑过的连接信息。
 /// 第四个元素为适配器 ID（魔芋 `moyu_v1` / 火山引擎方舟 `volcengine_ark_v1`）。
-const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
+const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 7] = [
     (
         "provider-sd20",
         "SD2.0",
@@ -343,28 +343,14 @@ const DEFAULT_PROVIDER_CONNECTIONS: [(&str, &str, &str, &str); 8] = [
         "volcengine_ark_v1",
     ),
     (
-        // 盘趣聚合网关（One API / new-api 内核）：视频生成走
-        // `POST /v1/video/generations`，请求体为顶层 `model`/`prompt`/
-        // `resolution`/`aspect_ratio`/`duration`，轮询 `GET /v1/video/generations/{task_id}`。
-        // 截至接入时该站点只开放 `pan-seedance-2.0`，且没有 `/v1/assets/*` 素材库接口，
-        // 因此这条连接只参与模型生成，素材库仍使用本地素材与本地生成结果。
-        //
-        // 必须使用域名而不是直连 IP `115.191.2.88`：服务器证书是 `*.panqu.com`，
-        // 不覆盖 IP，rustls 会在握手阶段直接拒绝该地址（TCP 端口 3000 则完全不通）。
-        "provider-panqu-api",
-        "盘趣API",
-        "https://aiapis.panqu.com/",
-        "moyu_v1",
-    ),
-    (
         // Seedance 2.5 RD 网关（new-api 内核）：视频生成走 `POST /v1/video/generations`，
         // 请求体为顶层 `model`/`prompt`/`duration`/`ratio`/`resolution`/`generate_audio`
         // 与顶层媒体数组 `images`/`reference_videos`/`reference_audios`/`start_frame`/
         // `end_frame`；本地素材经免费的 `POST /v1/assets/uploads` 换取公网 URL 后提交。
         // 该网关没有素材库浏览接口，素材库仍使用本地素材与本地生成结果。
         //
-        // 上游就是文档声明的明文 HTTP 直连 IP（无域名、无 TLS），不存在盘趣网关的
-        // 证书问题；与文档保持一致使用 `http://101.34.211.152/`。
+        // 上游就是文档声明的明文 HTTP 直连 IP（无域名、无 TLS），
+        // 与文档保持一致使用 `http://101.34.211.152/`。
         // 契约详见 `docs/integrations/rd-video-api.md`。
         "provider-rd-api",
         "RD API",
@@ -452,7 +438,7 @@ impl Storage {
         migrate_staging_jobs_adjustment(&connection)?;
         migrate_staging_jobs_overseas_db_id(&connection)?;
         migrate_staging_jobs_overseas_submitted_at(&connection)?;
-        migrate_panqu_provider_base_url(&connection)?;
+        migrate_remove_panqu_provider_connections(&connection)?;
         migrate_local_base64_asset_groups(&connection)?;
 
         let storage = Self {
@@ -697,7 +683,7 @@ impl Storage {
     /// 模型定义使用的请求方言：由引用它的供应商连接的适配器决定。
     ///
     /// 没有任何绑定（预置定义）或同时被不同方言的连接引用时，映射里没有这一项，
-    /// 调用方按规范（OpenAI 兼容）方言处理。盘趣之类的聚合网关仍是 `moyu_v1`
+    /// 调用方按规范（OpenAI 兼容）方言处理。魔芋之类的聚合网关仍是 `moyu_v1`
     /// 适配器，方言为 OpenAI 兼容；只有方舟连接会得到原生方言。
     fn model_definition_dialects(&self) -> BackendResult<BTreeMap<String, RequestDialect>> {
         let adapters = self
@@ -2395,22 +2381,33 @@ fn migrate_staging_jobs_overseas_submitted_at(connection: &Connection) -> Backen
     Ok(())
 }
 
-/// 修正盘趣连接的直连 IP 地址：`https://115.191.2.88/` 的服务器证书只覆盖
-/// `*.panqu.com`，严格校验的 TLS 客户端（应用的 rustls）会在握手阶段以
-/// `invalid peer certificate: certificate not valid for name "115.191.2.88"` 失败，
-/// 表现为「连通但拉不到模型」的 transport 错误。同一服务的域名地址证书有效。
+/// 盘趣聚合网关已从预置连接中移除：把仍指向盘趣上游的连接连同它的模型绑定与
+/// 令牌分组一并清掉，避免残留一条指向已不再支持网关的僵尸连接。
 ///
-/// 只改 `base_url`，且只在它仍然是那个不可用地址时生效，因此不会覆盖用户在
-/// 连接上做过的任何其他编辑；API Key、启用状态与模型绑定都保持不变。
-fn migrate_panqu_provider_base_url(connection: &Connection) -> BackendResult<()> {
+/// 判定按上游主机（`panqu.com` 与其直连 IP `115.191.2.88`）而不是连接 ID：
+/// 用户克隆出来的盘趣连接同样要清；而把预置 ID 改接到自己代理上的连接已经
+/// 不是盘趣上游，保留它不会破坏用户的现有编辑。`model_definitions` 按项目惯例
+/// 保留，避免破坏生成任务快照等历史引用。幂等：无命中时为空操作。
+fn migrate_remove_panqu_provider_connections(connection: &Connection) -> BackendResult<()> {
+    const PANQU_HOST_PREDICATE: &str = "base_url LIKE '%panqu.com%' \
+         OR base_url LIKE '%115.191.2.88%'";
     connection.execute(
-        "UPDATE provider_connections SET base_url = ?1, updated_at = ?2
-         WHERE id = 'provider-panqu-api' AND base_url = ?3",
-        params![
-            "https://aiapis.panqu.com/",
-            now_ms(),
-            "https://115.191.2.88/"
-        ],
+        &format!(
+            "DELETE FROM provider_model_bindings
+              WHERE provider_connection_id IN (SELECT id FROM provider_connections WHERE {PANQU_HOST_PREDICATE})"
+        ),
+        [],
+    )?;
+    connection.execute(
+        &format!(
+            "DELETE FROM provider_token_groups
+              WHERE provider_connection_id IN (SELECT id FROM provider_connections WHERE {PANQU_HOST_PREDICATE})"
+        ),
+        [],
+    )?;
+    connection.execute(
+        &format!("DELETE FROM provider_connections WHERE {PANQU_HOST_PREDICATE}"),
+        [],
     )?;
     Ok(())
 }
@@ -3270,8 +3267,7 @@ mod tests {
                 "SD2.0",
                 "海外平台",
                 "火山引擎",
-                "盘趣API",
-                "魔芋AI"
+                "魔芋AI",
             ]
         );
         assert!(providers.iter().all(|provider| !provider.enabled));
@@ -3284,71 +3280,120 @@ mod tests {
     }
 
     #[test]
-    fn panqu_connection_migrates_off_the_tls_invalid_ip_address() {
+    fn panqu_connections_are_removed_with_bindings_and_token_groups() {
         let directory = TempDir::new().expect("temp dir");
         let storage = Storage::open(&directory.path().join("backend.sqlite")).expect("open db");
-        // 预置本身已经是域名地址。
-        assert_eq!(
-            storage
-                .get_provider_connection("provider-panqu-api")
-                .expect("panqu connection")
-                .base_url,
-            "https://aiapis.panqu.com/"
-        );
-
-        // 模拟旧库：地址仍是证书不覆盖的直连 IP，且用户改过显示名与模型绑定。
+        // 旧库残留在三种形态：预置连接本身、用户克隆到同一主机的连接、以及把预置
+        // ID 改接到自己代理上的连接（已不是盘趣上游，必须保留）。绑定与令牌分组
+        // 挂在两条将被删除的连接上；生成任务按快照存历史，不受迁移影响。
         {
             let connection = storage.lock().expect("database lock");
+            let timestamp = now_ms();
+            connection
+                .execute(
+                    "INSERT INTO provider_connections
+                     (id, display_name, adapter_id, base_url, api_key_ref, enabled, created_at, updated_at)
+                     VALUES ('provider-panqu-clone', '我克隆的盘趣', 'moyu_v1',
+                             'https://aiapis.panqu.com/v1', 'provider:provider-panqu-clone:api-key',
+                             1, ?1, ?1)",
+                    params![timestamp],
+                )
+                .expect("seed panqu clone");
             connection
                 .execute(
                     "UPDATE provider_connections
-                        SET base_url = 'https://115.191.2.88/', display_name = '我改过的名字', enabled = 1
-                      WHERE id = 'provider-panqu-api'",
+                        SET base_url = 'https://my-proxy.example.com/', display_name = '我的代理'
+                      WHERE id = 'provider-moyu-ai'",
                     [],
                 )
-                .expect("seed legacy address");
-            migrate_panqu_provider_base_url(&connection).expect("migrate base url");
-            // 幂等：再跑一次不会改变结果。
-            migrate_panqu_provider_base_url(&connection).expect("migrate base url twice");
-            // 其他连接不受影响（SD2.0 的历史地址保持不变）。
-            let sd20: String = connection
+                .expect("repurpose preset connection");
+            connection
+                .execute(
+                    "INSERT INTO model_definitions (id, display_name, operations_json, created_at, updated_at)
+                     VALUES ('remote::provider-panqu-clone::pan-seedance-2.0', '盘趣视频', '{}', ?1, ?1)",
+                    params![timestamp],
+                )
+                .expect("seed model definition");
+            connection
+                .execute(
+                    "INSERT INTO provider_model_bindings
+                     (provider_connection_id, model_definition_id, enabled_operations_json,
+                      remote_model_id, enabled, token_group, created_at, updated_at)
+                     VALUES ('provider-panqu-clone', 'remote::provider-panqu-clone::pan-seedance-2.0',
+                             '[]', 'pan-seedance-2.0', 1, NULL, ?1, ?1)",
+                    params![timestamp],
+                )
+                .expect("seed binding");
+            connection
+                .execute(
+                    "INSERT INTO provider_token_groups
+                     (id, provider_connection_id, group_name, credential_ref, enabled, created_at, updated_at)
+                     VALUES ('panqu-clone-group', 'provider-panqu-clone', '分组',
+                             'token-group:panqu-clone-group', 1, ?1, ?1)",
+                    params![timestamp],
+                )
+                .expect("seed token group");
+            connection
+                .execute(
+                    "INSERT INTO generation_tasks
+                     (id, canvas_id, source_node_id, operation, status, query_health,
+                      provider_connection_id, provider_display_name_snapshot, adapter_id_snapshot,
+                      base_url_snapshot, api_key_ref_snapshot, model_definition_id,
+                      logical_request_json, created_at, updated_at)
+                     VALUES ('task-panqu-history', 'canvas', 'node', 'video_generation', 'succeeded',
+                             'healthy', 'provider-panqu-clone', '我克隆的盘趣', 'moyu_v1',
+                             'https://aiapis.panqu.com/v1', 'provider:provider-panqu-clone:api-key',
+                             'remote::provider-panqu-clone::pan-seedance-2.0', '{}', ?1, ?1)",
+                    params![timestamp],
+                )
+                .expect("seed generation task");
+
+            migrate_remove_panqu_provider_connections(&connection).expect("migrate remove");
+            // 幂等：再跑一次不报错也不改变结果。
+            migrate_remove_panqu_provider_connections(&connection).expect("migrate remove twice");
+        }
+
+        let providers = storage
+            .list_provider_connections()
+            .expect("list providers after migration");
+        assert!(
+            providers
+                .iter()
+                .all(|provider| provider.id != "provider-panqu-api"
+                    && provider.id != "provider-panqu-clone"),
+            "panqu upstream connections must be gone"
+        );
+        // 改接到自己代理上的预置连接按用户编辑保留。
+        let repurposed = storage
+            .get_provider_connection("provider-moyu-ai")
+            .expect("repurposed connection");
+        assert_eq!(repurposed.base_url, "https://my-proxy.example.com/");
+        assert_eq!(repurposed.display_name, "我的代理");
+        // 连接删掉后绑定与令牌分组一并清掉。
+        {
+            let connection = storage.lock().expect("database lock");
+            let bindings: i64 = connection
+                .query_row("SELECT COUNT(*) FROM provider_model_bindings", [], |row| {
+                    row.get(0)
+                })
+                .expect("count bindings");
+            assert_eq!(bindings, 0);
+            let token_groups: i64 = connection
+                .query_row("SELECT COUNT(*) FROM provider_token_groups", [], |row| {
+                    row.get(0)
+                })
+                .expect("count token groups");
+            assert_eq!(token_groups, 0);
+            // 生成任务历史按快照保留，不随连接删除。
+            let history: i64 = connection
                 .query_row(
-                    "SELECT base_url FROM provider_connections WHERE id = 'provider-sd20'",
+                    "SELECT COUNT(*) FROM generation_tasks WHERE id = 'task-panqu-history'",
                     [],
                     |row| row.get(0),
                 )
-                .expect("sd20 address");
-            assert_eq!(sd20, "https://47.94.250.161/");
+                .expect("count history task");
+            assert_eq!(history, 1);
         }
-
-        let migrated = storage
-            .get_provider_connection("provider-panqu-api")
-            .expect("panqu connection");
-        assert_eq!(migrated.base_url, "https://aiapis.panqu.com/");
-        // 只改地址：显示名与启用状态保留用户自己的编辑。
-        assert_eq!(migrated.display_name, "我改过的名字");
-        assert!(migrated.enabled);
-
-        // 用户自己填过的其他地址不会被这条迁移覆盖。
-        {
-            let connection = storage.lock().expect("database lock");
-            connection
-                .execute(
-                    "UPDATE provider_connections
-                        SET base_url = 'https://my-proxy.example.com/'
-                      WHERE id = 'provider-panqu-api'",
-                    [],
-                )
-                .expect("set custom address");
-            migrate_panqu_provider_base_url(&connection).expect("migrate base url");
-        }
-        assert_eq!(
-            storage
-                .get_provider_connection("provider-panqu-api")
-                .expect("panqu connection")
-                .base_url,
-            "https://my-proxy.example.com/"
-        );
     }
 
     #[test]

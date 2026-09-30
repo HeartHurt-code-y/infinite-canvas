@@ -310,82 +310,35 @@ describe("ProviderSettingsDialog", () => {
     );
   });
 
-  it("新建连接选择盘趣API预置模板后沿用 moyu_v1 适配器与域名地址", async () => {
-    // 盘趣网关是 OpenAI 兼容的转发站，复用 moyu_v1 适配器。地址必须是域名：
-    // 直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会在握手阶段拒绝，
-    // 表现为「连接正常但拉不到模型」；3000 端口则完全不可达。
-    const panquProvider: ProviderConnection = {
+  it("RD API 没有云端素材库，不出现在素材库令牌的供应商列表里", async () => {
+    const rdProvider: ProviderConnection = {
       ...SAVED_PROVIDER,
-      id: "provider-new-panqu",
-      displayName: "盘趣API",
-      adapterId: "moyu_v1",
-      baseUrl: "https://aiapis.panqu.com/",
-    };
-    const client = createClient({
-      upsertProviderConnection: vi.fn(() => Promise.resolve(panquProvider)),
-    });
-    const onCatalogChanged = vi.fn(() => Promise.resolve());
-    render(
-      <ProviderSettingsDialog
-        open
-        onClose={vi.fn()}
-        onCatalogChanged={onCatalogChanged}
-        client={client}
-        tosClient={TOS_STUB}
-      />,
-    );
-
-    fireEvent.change(screen.getByLabelText("预置模板"), {
-      target: { value: "panqu-api" },
-    });
-    await waitFor(() => expect(screen.getByLabelText("供应商名称")).toHaveValue("盘趣API"));
-    expect(screen.getByLabelText(/^Base URL/)).toHaveValue("https://aiapis.panqu.com/");
-
-    fireEvent.change(screen.getByLabelText(/^API Key/), { target: { value: "<REDACTED>" } });
-    const saveButton = screen.getByRole("button", { name: "保存连接" });
-    await waitFor(() => expect(saveButton).toBeEnabled());
-    fireEvent.click(saveButton);
-
-    await waitFor(() =>
-      expect(client.upsertProviderConnection).toHaveBeenCalledWith(
-        expect.objectContaining({
-          displayName: "盘趣API",
-          baseUrl: "https://aiapis.panqu.com/",
-          adapterId: "moyu_v1",
-        }),
-      ),
-    );
-  });
-
-  it("盘趣API 没有云端素材库，不出现在素材库令牌的供应商列表里", async () => {
-    const panquProvider: ProviderConnection = {
-      ...SAVED_PROVIDER,
-      id: "provider-panqu-api",
-      displayName: "盘趣API",
-      baseUrl: "https://115.191.2.88/",
-      apiKeyRef: "provider:provider-panqu-api:api-key",
+      id: "provider-rd-api",
+      displayName: "RD API",
+      baseUrl: "http://101.34.211.152/",
+      apiKeyRef: "provider:provider-rd-api:api-key",
       updatedAt: 2,
     };
     const client = createClient({
-      listProviderConnections: vi.fn(() => Promise.resolve([panquProvider, SAVED_PROVIDER])),
+      listProviderConnections: vi.fn(() => Promise.resolve([rdProvider, SAVED_PROVIDER])),
     });
     render(
       <ProviderSettingsDialog
         open
         onClose={vi.fn()}
         onCatalogChanged={vi.fn()}
-        activeAssetProviderId={panquProvider.id}
+        activeAssetProviderId={rdProvider.id}
         client={client}
         tosClient={TOS_STUB}
       />,
     );
 
     const assetProviderSelect = await screen.findByLabelText("素材库供应商连接");
-    // 素材库令牌只对实现了云端素材库的连接开放；当前选中的盘趣连接整体不参与素材库，
+    // 素材库令牌只对实现了云端素材库的连接开放；当前选中的 RD 连接整体不参与素材库，
     // 因此这段配置退到第一条可用连接，而不是留在没有素材库的连接上。
     await waitFor(() => expect(assetProviderSelect).toHaveValue(SAVED_PROVIDER.id));
     expect(
-      within(assetProviderSelect).queryByRole("option", { name: "盘趣API" }),
+      within(assetProviderSelect).queryByRole("option", { name: "RD API" }),
     ).not.toBeInTheDocument();
     expect(
       within(assetProviderSelect).getByRole("option", { name: "公司接口" }),

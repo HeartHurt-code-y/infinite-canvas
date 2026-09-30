@@ -2711,8 +2711,8 @@ export function WorkspaceApp({
     );
   }, [canvasEdgeSignature, canvasInputsFor, canvasNodesNow]);
 
-  // 只有实现了云端素材库的连接才会出现在素材库来源里：盘趣API 这类只有生成接口的
-  // 网关没有 `/v1/assets/*`，列出来只会让面板把上游 404 当成素材库故障展示。
+  // 只有实现了云端素材库的连接才会出现在素材库来源里：RD API 这类只有生成接口的
+  // 网关没有素材库接口，列出来只会让面板把上游 404 当成素材库故障展示。
   const availableAssetProviders = useMemo(
     () =>
       assetLibraryProviders(

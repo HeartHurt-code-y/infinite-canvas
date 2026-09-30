@@ -90,7 +90,7 @@ const GATEWAY_CHAT_PATH: &str = "/v1/chat/completions";
 /// `default_operation_schema` 只看得到模型名，只能给出 OpenAI 兼容网关的规范值；
 /// 本函数是方舟连接的唯一改写入口，也在保存模型与打开数据库时把历史按模型名写下的
 /// 方舟原生端点改回网关端点。只在这三对互为替代的端点之间互换，其他家族
-/// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic、盘趣）自己的路径原样保留；
+/// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic）自己的路径原样保留；
 /// Grsai 连接是唯一整条契约改写的例外（端点 + 轮询 + 参数，见
 /// `apply_grsai_image_dialect`）。
 ///
@@ -160,12 +160,11 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
         // Grsai 只承载 gpt-image 系图片契约；图片家族改写在 `apply_image_dialect`
         // 已提前返回，视频契约在这里保持原样（不被误改写成网关端点）。
         RequestDialect::Grsai => false,
-        // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax / 盘趣在方舟上
+        // 方舟只承载自家 Seedance（含 1.x）。Vidu / Wan / Veo / MiniMax 在方舟上
         // 没有端点，它们自己的契约保持原样。
         RequestDialect::VolcengineArk => {
-            let native_seedance = identity.contains("seedance")
-                && !is_dreamina_seedance_video_model(identity)
-                && !is_panqu_video_model(identity);
+            let native_seedance =
+                identity.contains("seedance") && !is_dreamina_seedance_video_model(identity);
             if !native_seedance {
                 return false;
             }
@@ -201,8 +200,8 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
             }
             let mut changed = set_request_field(request, "path", json!(GATEWAY_VIDEO_PATH));
             // 参数容器随方言走：原生契约把画幅/时长/分辨率平铺在顶层、content 也在顶层，
-            // 网关契约把它们归入 `metadata`。只认通用视频档案，供应商自定义档案的容器
-            // 保持原样（盘趣网关的顶层契约即属此类）。
+            // 网关契约把它们归入 `metadata`。只认通用视频档案，供应商自定义档案的
+            // 顶层参数容器保持原样。
             if profile == "moyu_video_metadata_v1"
                 && request.get("parameterContainer").and_then(Value::as_str) == Some("root")
             {
@@ -591,7 +590,7 @@ pub(crate) fn is_rd_video_model(model_id: &str) -> bool {
 /// 不同：`model`/`prompt`/`duration`/`ratio`/`resolution`/`generate_audio` 以及媒体
 /// 数组 `images`/`reference_videos`/`reference_audios`/`start_frame`/`end_frame` 全部
 /// 是顶层字段。模型 ID 含 `seedance-2.5` 子串，必须排在通用 Seedance 分支之前，
-/// 否则会被误判为魔芋契约（与盘趣网关同理）。
+/// 否则会被误判为魔芋契约。
 ///
 /// 媒体上传沿用按次系列的 `POST /v1/assets/uploads`（免费），本地素材先上传取回
 /// 公网 URL 再提交；该网关没有素材库浏览接口，素材库侧按主机排除。
@@ -651,102 +650,6 @@ fn rd_video_operation_schema(model_id: &str) -> Option<Value> {
         },
         "parameters": parameters
     }))
-}
-
-/// 盘趣聚合网关（One API / new-api 内核）的视频模型，当前为 `pan-seedance-2.0`。
-///
-/// 这个网关虽然也接受 `metadata.*` 透传，但**分辨率与画幅是按顶层字段做渠道匹配的**：
-/// 把 `resolution` 放进 `metadata` 时渠道不看该字段，任务会被路由到默认渠道；
-/// 而顶层传一个渠道未覆盖的档位（实测该站 480p / 1080p）会直接以
-/// `No available channel for model … matching resolution=…` 拒绝提交。
-/// 因此这里按 API 文档声明顶层字段，并只开放实测可用的分辨率。
-///
-/// 与 Seedance 2.0 的魔芋契约（`metadata.content` + `metadata.*`）不同，二者不能共用
-/// 一份操作 Schema；识别依据是网关公开的 `pan-` 模型前缀（本机没有该前缀的其他模型）。
-fn is_panqu_video_model(model_id: &str) -> bool {
-    let identity = model_id.to_ascii_lowercase();
-    identity.starts_with("pan-") && identity.contains("seedance")
-}
-
-/// 盘趣网关的视频操作 Schema：`model`/`prompt`/`resolution`/`aspect_ratio`/`duration`
-/// 全部为顶层字段，轮询使用默认 `GET /v1/video/generations/{task_id}`。
-///
-/// 只声明实测可用的分辨率（该站 `pan-seedance-2.0` 的渠道仅覆盖 720p）；把 480p/1080p
-/// 也列进枚举会让用户选到必然 503 的档位。时长按 API 文档的 `4–15` 秒。
-fn panqu_video_operation_schema() -> Value {
-    json!({
-        "resultType": "video",
-        "requestProfileId": "panqu_video_v1",
-        "profileVersion": 1,
-        "request": {
-            "path": "/v1/video/generations",
-            "encoding": "json",
-            "parameterContainer": "root",
-            "mediaEncoding": "vidu_image_urls",
-            "mediaField": "images",
-            "metadataField": "metadata"
-        },
-        "parameters": {
-            "resolution": {
-                "type": "string",
-                "label": "分辨率",
-                "default": "720p",
-                "enum": ["720p"],
-                "requestField": "resolution",
-                "order": 0
-            },
-            "aspect_ratio": {
-                "type": "string",
-                "label": "画幅",
-                "default": "16:9",
-                "enum": ["16:9", "9:16", "1:1", "4:3", "3:4", "21:9"],
-                "requestField": "aspect_ratio",
-                "order": 1
-            },
-            "duration": {
-                "type": "integer",
-                "label": "时长",
-                "default": 5,
-                "enum": [4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
-                "requestField": "duration",
-                "order": 2
-            },
-            "seed": {
-                "type": "integer",
-                "label": "随机种子",
-                "optional": true,
-                "minimum": -1,
-                "maximum": 4294967295i64,
-                "requestField": "seed",
-                "order": 3
-            },
-            "generate_audio": {
-                "type": "boolean",
-                "label": "生成音频",
-                "default": true,
-                "requestField": "generate_audio",
-                "order": 4
-            },
-            "watermark": {
-                "type": "boolean",
-                "label": "添加水印",
-                "default": false,
-                "requestField": "watermark",
-                "order": 5
-            },
-            // 该网关只支持 `[{"type":"web_search"}]` 形式的联网搜索，且仅纯文生视频可用；
-            // `web_search_tool` 变换把它映射为顶层 `tools` 数组（与既有 Seedance 契约同名）。
-            "web_search": {
-                "type": "boolean",
-                "label": "联网搜索",
-                "default": false,
-                "requestField": "tools",
-                "transform": "web_search_tool",
-                "requiresNoMedia": true,
-                "order": 6
-            }
-        }
-    })
 }
 
 /// 已知视频生成家族与常见生成方向缩写。这里不使用宽泛的厂商品牌名，避免把
@@ -1877,14 +1780,9 @@ fn default_operation_schema(model_id: &str, operation: GenerationOperation) -> V
             }
             // Seedance 2.5 RD 网关：顶层 `duration`/`ratio`/`resolution` 与顶层媒体数组。
             // 模型 ID 含 `seedance-2.5` 子串，必须排在通用 Seedance 2.5 分支之前，
-            // 否则会被当成魔芋 metadata 契约（与盘趣网关同理）。
+            // 否则会被当成魔芋 metadata 契约。
             if let Some(schema) = rd_video_operation_schema(model_id) {
                 return schema;
-            }
-            // 盘趣聚合网关：顶层 `resolution`/`aspect_ratio`/`duration`，media 为顶层
-            // `images` URL 数组。必须排在 Seedance 2.0 分支之前，否则会被当成魔芋契约。
-            if is_panqu_video_model(&identity) {
-                return panqu_video_operation_schema();
             }
             let vidu = is_vidu_video_model(&identity);
             if vidu {
@@ -3529,19 +3427,8 @@ mod tests {
                 .is_none()
         );
 
-        // 其他家族自己的端点不受影响：盘趣网关顶层字段契约、Vidu 的 `/v1/videos` 轮询
+        // 其他家族自己的端点不受影响：Vidu 的 `/v1/videos` 轮询
         // 在两种方言下都保持原样（方舟上没有它们的位置）。
-        let mut panqu =
-            default_model_schema("pan-seedance-2.0", &[GenerationOperation::VideoGeneration]);
-        assert!(!apply_request_dialect(
-            &mut panqu,
-            "pan-seedance-2.0",
-            RequestDialect::VolcengineArk
-        ));
-        assert_eq!(
-            panqu["video_generation"]["request"]["parameterContainer"],
-            "root"
-        );
         let mut vidu = default_model_schema("viduq3-pro", &[GenerationOperation::VideoGeneration]);
         assert!(!apply_request_dialect(
             &mut vidu,
@@ -4059,64 +3946,6 @@ mod tests {
             generic["video_generation"]["requestProfileId"],
             "moyu_video_metadata_v1"
         );
-    }
-
-    #[test]
-    fn panqu_video_model_uses_top_level_fields_and_720p_only() {
-        for model_id in ["pan-seedance-2.0", "pan-seedance-2-0-260128"] {
-            let schema = infer_catalog_schema(&json!({ "id": model_id }), model_id, model_id);
-            let definition = &schema["video_generation"];
-            let parameters = &definition["parameters"];
-
-            assert_eq!(
-                operations_from_schema(&schema),
-                [GenerationOperation::VideoGeneration],
-                "model {model_id}"
-            );
-            assert_eq!(definition["resultType"], "video");
-            assert_eq!(definition["requestProfileId"], "panqu_video_v1");
-            assert_eq!(definition["request"]["path"], "/v1/video/generations");
-            // 顶层字段：分辨率参与网关的渠道匹配，放进 metadata 会被忽略。
-            assert_eq!(definition["request"]["parameterContainer"], "root");
-            assert_eq!(definition["request"]["mediaEncoding"], "vidu_image_urls");
-            assert_eq!(definition["request"]["mediaField"], "images");
-            // 轮询沿用默认 `GET /v1/video/generations/{task_id}`。
-            assert!(definition["request"].get("observePath").is_none());
-
-            // 该站 pan-seedance-2.0 的渠道只覆盖 720p：不把 480p/1080p 列进枚举。
-            assert_eq!(parameters["resolution"]["default"], "720p");
-            assert_eq!(parameters["resolution"]["enum"], json!(["720p"]));
-            assert_eq!(parameters["aspect_ratio"]["default"], "16:9");
-            assert_eq!(parameters["duration"]["default"], 5);
-            assert_eq!(
-                parameters["duration"]["enum"]
-                    .as_array()
-                    .unwrap()
-                    .as_slice(),
-                &(4..=15).map(Value::from).collect::<Vec<_>>()
-            );
-            assert_eq!(parameters["generate_audio"]["default"], true);
-            assert_eq!(parameters["watermark"]["default"], false);
-            // 联网搜索映射为顶层 `tools` 数组，并且只在没有媒体输入时提交。
-            assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
-            assert_eq!(parameters["web_search"]["requestField"], "tools");
-            assert_eq!(parameters["web_search"]["requiresNoMedia"], true);
-            // 顶层参数不声明 requestLocation（默认落在参数容器 root）。
-            assert!(parameters["resolution"].get("requestLocation").is_none());
-            assert!(parameters["duration"].get("requestLocation").is_none());
-        }
-    }
-
-    #[test]
-    fn panqu_prefix_without_seedance_keeps_the_gateway_contract() {
-        // 其他 `pan-` 前缀模型不属于盘趣网关的视频契约：仍按既有规则推断，
-        // 不能因为前缀相似就把它们当成盘趣视频模型。
-        let schema = infer_catalog_schema(
-            &json!({ "id": "pan-image-1" }),
-            "pan-image-1",
-            "pan-image-1",
-        );
-        assert!(schema.get("video_generation").is_none());
     }
 
     #[test]

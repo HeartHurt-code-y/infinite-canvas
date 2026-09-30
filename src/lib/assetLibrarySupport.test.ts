@@ -25,24 +25,23 @@ function provider(
 }
 
 describe("素材库供应商支持判定", () => {
-  it("盘趣网关的直连 IP 与域名都不参与素材库", () => {
-    // 该网关没有 /v1/assets/*，无论用户填 IP 还是文档里的域名都同样排除。
-    expect(providerSupportsAssetLibrary(provider("https://115.191.2.88/"))).toBe(false);
-    expect(providerSupportsAssetLibrary(provider("https://115.191.2.88:3000/"))).toBe(false);
-    expect(providerSupportsAssetLibrary(provider("https://aiapis.panqu.com/"))).toBe(false);
-    expect(providerSupportsAssetLibrary(provider("https://panqu.com/v1"))).toBe(false);
+  it("RD 网关的直连 IP 不参与素材库", () => {
+    // 该网关只有上传接口没有素材库，无论用户填裸 IP 还是带端口、带路径都同样排除。
+    expect(providerSupportsAssetLibrary(provider("http://101.34.211.152/"))).toBe(false);
+    expect(providerSupportsAssetLibrary(provider("http://101.34.211.152:3000/"))).toBe(false);
+    expect(providerSupportsAssetLibrary(provider("http://101.34.211.152/v1"))).toBe(false);
   });
 
   it("判定按上游主机而不是连接身份，命名与地址写法都不影响结论", () => {
     expect(
       providerSupportsAssetLibrary(
-        provider("HTTP://115.191.2.88/", { displayName: "随便改的名字" }),
+        provider("HTTP://101.34.211.152/", { displayName: "随便改的名字" }),
       ),
     ).toBe(false);
-    // 只是名字里带 panqu 的连接仍有素材库：素材库能力属于上游地址。
+    // 只是名字里带 RD 的连接仍有素材库：素材库能力属于上游地址。
     expect(providerSupportsAssetLibrary(provider("https://api.example.com/v1"))).toBe(true);
     expect(
-      providerSupportsAssetLibrary(provider("https://api.example.com/v1", { id: "panqu-like" })),
+      providerSupportsAssetLibrary(provider("https://api.example.com/v1", { id: "rd-like" })),
     ).toBe(true);
   });
 
@@ -78,17 +77,17 @@ describe("素材库供应商支持判定", () => {
 
   it("过滤保持传入顺序，只去掉没有素材库的连接", () => {
     const moyu = provider("https://www.moyu.info/", { id: "provider-moyu" });
-    const panqu = provider("https://115.191.2.88/", { id: "provider-panqu-api" });
+    const rd = provider("http://101.34.211.152/", { id: "provider-rd-api" });
     const ark = provider("https://ark.cn-beijing.volces.com/api/v3", {
       id: "provider-ark",
       adapterId: "volcengine_ark_v1",
     });
 
-    expect(assetLibraryProviders([moyu, panqu, ark]).map((entry) => entry.id)).toEqual([
+    expect(assetLibraryProviders([moyu, rd, ark]).map((entry) => entry.id)).toEqual([
       "provider-moyu",
       "provider-ark",
     ]);
-    expect(assetLibraryProviders([panqu])).toEqual([]);
+    expect(assetLibraryProviders([rd])).toEqual([]);
   });
 });
 

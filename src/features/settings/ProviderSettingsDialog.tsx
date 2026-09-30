@@ -81,17 +81,10 @@ const PROVIDER_PRESETS: readonly ProviderPreset[] = [
     adapterId: ARK_ADAPTER_ID,
   },
   {
-    id: "panqu-api",
-    displayName: "盘趣API",
-    // 必须用域名：直连 IP 115.191.2.88 的服务端证书只覆盖 *.panqu.com，TLS 校验会直接拒绝。
-    baseUrl: "https://aiapis.panqu.com/",
-    adapterId: MOYU_ADAPTER_ID,
-  },
-  {
     id: "rd-api",
     displayName: "RD API",
     // Seedance 2.5 RD 网关：上游就是文档声明的明文 HTTP 直连 IP（无域名、无 TLS），
-    // 不存在盘趣网关的证书问题，与文档保持一致。
+    // 与文档保持一致。
     baseUrl: "http://101.34.211.152/",
     adapterId: MOYU_ADAPTER_ID,
   },
@@ -419,8 +412,8 @@ export function ProviderSettingsDialog({
     };
   }, [activeAssetProviderId, client, open, restoreSavedModels, loadApiKey]);
 
-  // 素材库令牌只对实现了云端素材库的连接有意义：盘趣API 这类网关没有 `/v1/assets/*`，
-  // 令牌与素材请求都无从落地，因此不出现在这里（该连接仍可正常用于模型生成）。
+  // 素材库令牌只对实现了云端素材库的连接有意义：RD API 这类网关没有素材库
+  // 接口，令牌与素材请求都无从落地，因此不出现在这里（该连接仍可正常用于模型生成）。
   const assetTokenProviders = useMemo(() => assetLibraryProviders(providers), [providers]);
   // 当前选中的连接没有素材库时，退到第一条可用连接，而不是让整段配置变成空状态。
   const assetTokenProvider =

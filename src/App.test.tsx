@@ -1462,20 +1462,20 @@ describe("App workspace", () => {
     ).toBeInTheDocument();
   });
 
-  it("盘趣API 没有云端素材库，不作为素材库来源，也不为它拉取素材", async () => {
+  it("RD API 没有云端素材库，不作为素材库来源，也不为它拉取素材", async () => {
     const assetListCalls: string[] = [];
     const invokeMock = vi.fn((command: string, args?: Record<string, unknown>) => {
       switch (command) {
         case "list_provider_connections":
           return Promise.resolve([
             {
-              // 盘趣网关是最新编辑的连接，但只有模型生成接口（`/v1/assets/*` 全 404）：
+              // RD 网关是最新编辑的连接，但只有模型生成接口（没有素材库浏览接口）：
               // 素材库来源不能落到它头上，否则面板只会显示上游 404。
-              id: "provider-panqu-api",
-              displayName: "盘趣API",
+              id: "provider-rd-api",
+              displayName: "RD API",
               adapterId: "moyu_v1",
-              baseUrl: "https://115.191.2.88/",
-              apiKeyRef: "provider:provider-panqu-api:api-key",
+              baseUrl: "http://101.34.211.152/",
+              apiKeyRef: "provider:provider-rd-api:api-key",
               enabled: true,
               createdAt: 2,
               updatedAt: 3,
@@ -1532,12 +1532,12 @@ describe("App workspace", () => {
 
     const providerSelect = await screen.findByRole("combobox", { name: "素材库供应商" });
     await waitFor(() => expect(assetListCalls).toContain("moyu-prod"));
-    // 最新编辑的盘趣连接被跳过，素材库回落到唯一可用的素材库来源。
+    // 最新编辑的 RD 连接被跳过，素材库回落到唯一可用的素材库来源。
     expect(providerSelect).toHaveValue("moyu-prod");
     expect(
-      within(providerSelect).queryByRole("option", { name: "盘趣API" }),
+      within(providerSelect).queryByRole("option", { name: "RD API" }),
     ).not.toBeInTheDocument();
-    expect(assetListCalls).not.toContain("provider-panqu-api");
+    expect(assetListCalls).not.toContain("provider-rd-api");
   });
 
   it("可以在素材库中切换全局配置的供应商 key", async () => {

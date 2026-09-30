@@ -50,19 +50,12 @@ fn model_catalog_path(adapter_id: &str) -> &'static str {
 
 /// 没有云端素材库的上游主机（小写、不含端口）。
 ///
-/// 盘趣聚合网关（One API / new-api 内核）只开放 `/v1/models` 与
-/// `/v1/video/generations*`，`/v1/assets/*` 全部 404：该连接只参与模型生成。
 /// Seedance 2.5 RD 网关只有免费的 `POST /v1/assets/uploads` 素材上传（生成输入
-/// 中转用），没有素材库浏览/导入接口，同样不作为素材库来源。
+/// 中转用），没有素材库浏览/导入接口，不作为素材库来源。
 /// 素材库请求在解析阶段就按主机挡掉，避免把上游 404 原样当成「素材库故障」展示；
 /// 判定口径与前端 `src/lib/assetLibrarySupport.ts` 保持一致。
-/// 实测记录见 `docs/integrations/panqu-video-api.md` 与 `docs/integrations/rd-video-api.md`。
-const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 4] = [
-    "115.191.2.88",
-    "101.34.211.152",
-    "panqu.com",
-    "maas.aliyuncs.com",
-];
+/// 实测记录见 `docs/integrations/rd-video-api.md`。
+const HOSTS_WITHOUT_ASSET_LIBRARY: [&str; 2] = ["101.34.211.152", "maas.aliyuncs.com"];
 
 /// 返回命中的「没有素材库」主机；地址无法解析时退回原始字符串比对（用户可能只填主机）。
 fn host_without_asset_library(base_url: &str) -> Option<&'static str> {
@@ -7554,18 +7547,14 @@ mod tests {
 
     #[test]
     fn gateways_without_asset_endpoints_are_kept_out_of_the_asset_library() {
-        // 盘趣网关没有 `/v1/assets/*`：直连 IP、带端口的地址与文档域名同样要挡住。
+        // RD 网关只有上传没有素材库：直连 IP、带端口的地址同样要挡住。
         assert_eq!(
-            host_without_asset_library("https://115.191.2.88/"),
-            Some("115.191.2.88")
+            host_without_asset_library("http://101.34.211.152/"),
+            Some("101.34.211.152")
         );
         assert_eq!(
-            host_without_asset_library("http://115.191.2.88:3000/v1"),
-            Some("115.191.2.88")
-        );
-        assert_eq!(
-            host_without_asset_library("https://aiapis.panqu.com/"),
-            Some("panqu.com")
+            host_without_asset_library("http://101.34.211.152:3000/v1"),
+            Some("101.34.211.152")
         );
         // 其他上游继续使用既有素材库链路（魔芋聚合与火山引擎方舟）。
         assert_eq!(host_without_asset_library("https://www.moyu.info/"), None);
