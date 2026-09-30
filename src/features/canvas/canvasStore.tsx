@@ -1,5 +1,6 @@
 import { createContext, createElement, useContext, useState, type ReactNode } from "react";
 import { useStore } from "zustand";
+import { useShallow } from "zustand/react/shallow";
 import { createStore, type StoreApi } from "zustand/vanilla";
 import { temporal, type TemporalState } from "zundo";
 import type { AgentState } from "../workspace/agent/agentTypes";
@@ -273,6 +274,11 @@ export interface CanvasCommands {
   readonly restoreDocument: (document: unknown) => CanvasRestoreResult;
   readonly undo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
   readonly redo: (protectedWorkflowKeys?: ReadonlySet<string>) => CanvasWriteResult;
+  /**
+   * 机器驱动的连续写入（工作流 checkpoint 落卡等）在包裹期间走时间窗折叠：
+   * 至多每窗口一条补记录，避免撤销栈被后台进度灌满。用户命令不受影响。
+   */
+  readonly runWithCoalescedHistory: <T>(fn: () => T) => T;
 }
 
 /** Zustand/zundo 细节不越过此 interface。 */
@@ -283,7 +289,7 @@ export interface CanvasStateModule {
   readonly subscribe: (listener: () => void) => () => void;
 }
 
-interface CanvasStoreState {
+export interface CanvasStoreState {
   readonly nodesById: CanvasNodesById;
   readonly assetEdges: readonly AssetEdgeData[];
   readonly zoom: number;
@@ -337,6 +343,8 @@ interface CanvasStoreState {
   readonly undo: () => CanvasWriteResult;
   /** 重做上一次被撤销的操作；无可重做时是安全的空操作。 */
   readonly redo: () => CanvasWriteResult;
+  /** 机器驱动的连续写入在包裹期间走时间窗折叠（详见 CanvasCommands 注释）。 */
+  readonly runWithCoalescedHistory: <T>(fn: () => T) => T;
 }
 
 /** 撤销/重做跟踪的状态切片：仅节点与连线；zoom/pan/选中态属于视图，不参与历史。 */
@@ -952,6 +960,11 @@ export function isSupportedConnection(source: CanvasNodeEntry, target: CanvasNod
 
 /** 历史栈上限：超出后丢弃最旧记录，防止长会话内存无界增长。 */
 const CANVAS_HISTORY_LIMIT = 200;
+/**
+ * 撤销记录的时间窗：窗口内紧随上一条记录的连续写入折叠成一条补记录。
+ * 跑批逐行落卡等高频写入至多每窗口两条记录，撤销步长按窗口粒度合并。
+ */
+const CANVAS_HISTORY_COALESCING_WINDOW_MS = 500;
 
 /**
  * 工作流运行期的机器进度判定：本次写入只改了 knowledgeVideoWorkflow 节点 config
@@ -996,7 +1009,11 @@ function isWorkflowRuntimeProgressOnly(
   return true;
 }
 
-function createCanvasStore(initialZoom = 100): CanvasStore {
+function createCanvasStore(initialZoom = 100): {
+  store: CanvasStore;
+  flushPendingHistory: () => void;
+  cancelPendingHistory: () => void;
+} {
   // 同一同步批次内的多次写入（如清空画布会连写九类节点与连线）合并为一条历史，
   // 一次用户操作对应一步撤销；跨 await 的写入天然分批。
   let coalescingHistory = false;
@@ -1006,9 +1023,60 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
   // 内容签名不变，工作流自身的版本链已独立记录。连续的机器进度折叠为一条撤销
   // 记录：一次运行占用一步撤销，而不是把撤销栈灌满图片进度。
   let lastRecordedProgressOnly = false;
+  // 时间窗合帧：紧随上一条记录的连续写入（跑批逐行落卡、批量粘贴回存等）不再逐条
+  // 入栈，而是按窗口折叠——首条写入立即入栈（保持离散操作一步撤销），窗口内的后续
+  // 写入只在窗口收口时补一条「窗口起点」快照。跑批的高频写入因此至多每窗口产生
+  // 两条记录，不再把撤销栈灌满中间态、也不再 pin 住大批旧节点对象。
+  let lastHistoryRecordAt = Number.NEGATIVE_INFINITY;
+  let pendingHistoryPast: CanvasHistoryState | null = null;
+  let pendingHistoryCurrent: CanvasHistoryState | null = null;
+  let pendingHistoryProgressOnly = false;
+  let historyFlushTimer: ReturnType<typeof setTimeout> | null = null;
+  let pushHistoryRecord: ((past: CanvasHistoryState) => void) | null = null;
+  // >0 表示正处于机器写入包裹期（runWithCoalescedHistory）：写入走时间窗折叠；
+  // 未包裹的写入一律立即入栈，用户命令保持一步一记录。
+  let transientHistoryDepth = 0;
 
-  return createStore<CanvasStoreState>()(
-    temporal(
+  /** 收口：把窗口内折叠的「窗口起点」快照补进撤销栈。查询/撤销前调用保证一致性。 */
+  const flushPendingHistory = () => {
+    if (historyFlushTimer !== null) {
+      clearTimeout(historyFlushTimer);
+      historyFlushTimer = null;
+    }
+    const pendingPast = pendingHistoryPast;
+    const pendingCurrent = pendingHistoryCurrent;
+    const progressOnlyTail = pendingHistoryProgressOnly;
+    pendingHistoryPast = null;
+    pendingHistoryCurrent = null;
+    pendingHistoryProgressOnly = false;
+    if (pendingPast == null || pushHistoryRecord == null) return;
+    // 折叠状态跟随窗口内最后一条写入：纯进度收口后，后续进度仍继续折叠为同一步。
+    lastRecordedProgressOnly = progressOnlyTail;
+    // 窗口内的写入最终把状态改回窗口起点时，补记录只是空步骤，跳过。
+    if (
+      pendingCurrent != null &&
+      pendingPast.nodesById === pendingCurrent.nodesById &&
+      pendingPast.assetEdges === pendingCurrent.assetEdges
+    ) {
+      return;
+    }
+    lastHistoryRecordAt = Date.now();
+    pushHistoryRecord(pendingPast);
+  };
+  /** 丢弃未收口的折叠记录：restore/clear 会整体重建历史，旧快照不能迟于清空入栈。 */
+  const cancelPendingHistory = () => {
+    if (historyFlushTimer !== null) {
+      clearTimeout(historyFlushTimer);
+      historyFlushTimer = null;
+    }
+    pendingHistoryPast = null;
+    pendingHistoryCurrent = null;
+  };
+
+  const canvasStore = createStore<CanvasStoreState>()(
+    // UState 显式钉为历史切片：zundo 对 handleSet 里 currentState 的推断在
+    // 本调用形态下会落到错误候选（boolean），显式泛型保证窄订阅类型正确。
+    temporal<CanvasStoreState, [], [], CanvasHistoryState>(
       (set, _get, api) => {
         const temporalStore = api.temporal as CanvasStore["temporal"];
         return {
@@ -1447,6 +1515,8 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
               suppressHistory = false;
             }
             lastRecordedProgressOnly = false;
+            // 恢复整体重建历史：丢弃未收口的折叠记录，避免旧快照迟于清空入栈。
+            cancelPendingHistory();
             temporalStore.getState().clear();
             return {
               ok: true,
@@ -1456,16 +1526,27 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
             };
           },
           undo: () => {
+            // 先收口折叠窗口：窗口内的写入也要成为可撤销的一步。
+            flushPendingHistory();
             if (temporalStore.getState().pastStates.length === 0) return "unchanged";
             lastRecordedProgressOnly = false;
             temporalStore.getState().undo();
             return "applied";
           },
           redo: () => {
+            flushPendingHistory();
             if (temporalStore.getState().futureStates.length === 0) return "unchanged";
             lastRecordedProgressOnly = false;
             temporalStore.getState().redo();
             return "applied";
+          },
+          runWithCoalescedHistory: <T,>(fn: () => T): T => {
+            transientHistoryDepth += 1;
+            try {
+              return fn();
+            } finally {
+              transientHistoryDepth -= 1;
+            }
           },
         };
       },
@@ -1478,31 +1559,52 @@ function createCanvasStore(initialZoom = 100): CanvasStore {
         equality: (past, current) =>
           past.nodesById === current.nodesById && past.assetEdges === current.assetEdges,
         limit: CANVAS_HISTORY_LIMIT,
-        handleSet: (handleSet) => (pastState, replace, currentState, deltaState) => {
-          if (coalescingHistory || suppressHistory) return;
-          // zundo 的参数类型照抄 setState 首参（含函数分支），运行时这里始终是状态对象。
-          const past = pastState as CanvasStoreState;
-          const current = currentState as CanvasStoreState;
-          const progressOnly = isWorkflowRuntimeProgressOnly(past, current);
-          // 连续机器进度只保留首条撤销记录：整次运行折叠为一步，后续进度直接跳过。
-          if (progressOnly && lastRecordedProgressOnly) return;
-          lastRecordedProgressOnly = progressOnly;
-          coalescingHistory = true;
-          // zundo 选项类型把内层声明成 setState（1-2 参），运行时实际接收 4 参。
-          const recordHistory = handleSet as (
-            past: typeof pastState,
-            replaceArg: typeof replace,
-            current: typeof currentState,
-            delta: typeof deltaState,
-          ) => void;
-          recordHistory(pastState, replace, currentState, deltaState);
-          queueMicrotask(() => {
-            coalescingHistory = false;
-          });
+        handleSet: (handleSet) => {
+          // zundo 的无 diff 配置只把 pastState（变更前部分化快照）入栈；
+          // 这里收敛成单参入口，供 leading 记录与窗口收口共用。
+          pushHistoryRecord = (past) => {
+            (handleSet as unknown as (past: CanvasHistoryState) => void)(past);
+          };
+          // 注意形参位置：第二位是 zundo 的 replace 标记（boolean），必须占位，
+          //currentState 才是第三个参数（部分化后的历史切片）。
+          return (rawPastState, _replace, currentState) => {
+            if (coalescingHistory || suppressHistory) return;
+            // zundo 的参数类型照抄 setState 首参（含函数分支），运行时这里始终是状态对象。
+            const pastState = rawPastState as CanvasStoreState;
+            const progressOnly = isWorkflowRuntimeProgressOnly(pastState, currentState);
+            // 连续机器进度只保留首条撤销记录：整次运行折叠为一步，后续进度直接跳过。
+            if (progressOnly && lastRecordedProgressOnly) return;
+            lastRecordedProgressOnly = progressOnly;
+            if (transientHistoryDepth === 0) {
+              // 非包裹写入（用户命令等）：立即入栈。守卫保持到微任务边界——
+              // 同一同步批次内的多次写入（如清空画布连写九类节点、批量删除逐个
+              // removeNode）仍合并为一条记录，一次用户操作对应一步撤销。
+              cancelPendingHistory();
+              lastHistoryRecordAt = Date.now();
+              coalescingHistory = true;
+              pushHistoryRecord?.(pastState);
+              queueMicrotask(() => {
+                coalescingHistory = false;
+              });
+              return;
+            }
+            // 包裹期写入走时间窗：保留最早的「变更前」快照与最新状态，收口时补一条记录。
+            pendingHistoryPast ??= pastState;
+            pendingHistoryCurrent = currentState;
+            pendingHistoryProgressOnly = progressOnly;
+            historyFlushTimer ??= setTimeout(
+              () => {
+                historyFlushTimer = null;
+                flushPendingHistory();
+              },
+              Math.max(0, lastHistoryRecordAt + CANVAS_HISTORY_COALESCING_WINDOW_MS - Date.now()),
+            );
+          };
         },
       },
     ),
   );
+  return { store: canvasStore, flushPendingHistory, cancelPendingHistory };
 }
 
 interface CanvasStateImplementation extends CanvasStateModule {
@@ -1517,7 +1619,7 @@ function historySummary(store: CanvasStore): CanvasHistorySummary {
 }
 
 function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplementation {
-  const store = createCanvasStore(initialZoom);
+  const { store, flushPendingHistory } = createCanvasStore(initialZoom);
   // Canvas structural undo stays in zundo. Each workflow's durable version branches outlive
   // the older node snapshots stored there, including a delete followed by canvas undo.
   const workflowVersions = new Map<string, KnowledgeVideoWorkflowConfig>();
@@ -1656,12 +1758,17 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
       if (result === "applied") reconcileWorkflows(false, protectedNodes);
       return result;
     },
+    runWithCoalescedHistory: (fn) => store.getState().runWithCoalescedHistory(fn),
   };
   return {
     store,
     commands,
     getSnapshot: () => canvasReadModel(store.getState()),
-    getHistory: () => historySummary(store),
+    getHistory: () => {
+      // 查询前收口折叠窗口，让撤销计数与即将发生的 undo 语义一致。
+      flushPendingHistory();
+      return historySummary(store);
+    },
     subscribe: (listener) => store.subscribe(() => listener()),
   };
 }
@@ -1714,4 +1821,47 @@ export function useCanvasHistoryCounts(): {
   const pastCount = useStore(canvas.store.temporal, (state) => state.pastStates.length);
   const futureCount = useStore(canvas.store.temporal, (state) => state.futureStates.length);
   return { pastCount, futureCount };
+}
+
+/**
+ * 单节点条目订阅：节点卡片等 per-node 订阅者组件的切片入口。zustand 以 Object.is
+ * 比较选中值，因此只有该节点自身的条目被整体替换时订阅者才重渲染；其余节点的
+ * 写入、视图/选区/连线变化都不触发。key 不存在时返回 undefined。
+ */
+export function useCanvasNodeEntry(key: string): CanvasNodeEntry | undefined {
+  const canvas = useContext(CanvasStoreContext);
+  if (canvas == null) throw new Error("useCanvasNodeEntry must be used within CanvasStoreProvider");
+  return useStore(canvas.store, (state) => state.nodesById[key]);
+}
+
+/**
+ * 一类节点的 key 列表订阅（浅比较）。节点内容补丁不改变成员集合，因此跑批等高频
+ * 写入不会触发订阅层重渲染；只有该类型新增/删除节点时才返回新数组。
+ */
+export function useCanvasNodeKeys(type: CanvasNodeType): readonly string[] {
+  const canvas = useContext(CanvasStoreContext);
+  if (canvas == null) throw new Error("useCanvasNodeKeys must be used within CanvasStoreProvider");
+  return useStore(
+    canvas.store,
+    useShallow(
+      (state: CanvasStoreState) =>
+        canvasNodeLists(state.nodesById)[type].map((node) => node.key) as readonly string[],
+    ),
+  );
+}
+
+/**
+ * 非响应式读取一类节点的有序列表：布局指纹变化后，节点层用它从当前 store 快照重建
+ * 外壳数组。订阅仍由 useCanvasNodeKeys / 布局指纹负责，这里只做事件期读取。
+ */
+export function canvasNodesOfState<K extends CanvasNodeType>(
+  state: { readonly nodesById: CanvasNodesById },
+  type: K,
+): readonly CanvasNodesByType[K][] {
+  return canvasNodeLists(state.nodesById)[type] as readonly CanvasNodesByType[K][];
+}
+
+/** 非响应式把原始 store state 折算成读模型（带缓存）；事件期/指纹变更期快照读取用。 */
+export function canvasReadModelOfState(state: CanvasStoreState): CanvasReadModel {
+  return canvasReadModel(state);
 }

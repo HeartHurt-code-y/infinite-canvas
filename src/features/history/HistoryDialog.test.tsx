@@ -922,6 +922,7 @@ describe("HistoryDialog regeneration", () => {
             {
               providerConnectionId: "provider-1",
               id: "asset-1",
+              dbId: 1,
               name: "参考图A",
               kind: "image",
               status: "ready",
@@ -956,6 +957,10 @@ describe("HistoryDialog regeneration", () => {
       await screen.findByText("任务概要");
       fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
       const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+      // 先等素材行渲染完成，再断言缩略图用的是列表地址。
+      await within(dialog).findByText("参考图A", {
+        selector: ".regenerate-material__name",
+      });
 
       await waitFor(() => {
         expect(dialog.querySelector(".regenerate-material__thumb img")).toHaveAttribute(

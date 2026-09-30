@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type {
   AssetNodeData,
   GenNodeData,
@@ -255,6 +255,42 @@ describe("canvas state interface", () => {
     expect(() => canvas.commands.addNode("gen", { ...genNode, key: assetNode.key })).toThrow(
       "Canvas node key already exists",
     );
+  });
+
+  it("coalesces wrapped machine writes in the window while user writes stay immediate", async () => {
+    vi.useFakeTimers();
+    try {
+      const canvas = createCanvasState();
+      canvas.commands.addNode("asset", assetNode);
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canvas.getHistory()).toMatchObject({ pastCount: 1 });
+
+      // 包裹期（机器写入）连续落卡：窗口收口时整窗折叠为一条「窗口起点」补记录。
+      canvas.commands.runWithCoalescedHistory(() =>
+        canvas.commands.patchNode("asset", "asset-1", (node) => ({ ...node, name: "改名-0" })),
+      );
+      await vi.advanceTimersByTimeAsync(100);
+      canvas.commands.runWithCoalescedHistory(() =>
+        canvas.commands.patchNode("asset", "asset-1", (node) => ({ ...node, name: "改名-1" })),
+      );
+      await vi.advanceTimersByTimeAsync(500);
+      expect(canvas.getHistory()).toMatchObject({ pastCount: 2 });
+
+      // 未包裹写入（用户命令）不受窗口影响：立即入栈，保持一步一记录。
+      canvas.commands.patchNode("asset", "asset-1", (node) => ({ ...node, name: "手改名" }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(canvas.getHistory()).toMatchObject({ pastCount: 3 });
+
+      // 撤销步长：一步撤手改，一步退回窗口起点，再一步撤掉建节点。
+      expect(canvas.commands.undo()).toBe("applied");
+      expect(canvas.getSnapshot().nodes.asset[0]?.name).toBe("改名-1");
+      expect(canvas.commands.undo()).toBe("applied");
+      expect(canvas.getSnapshot().nodes.asset[0]?.name).toBe(assetNode.name);
+      expect(canvas.commands.undo()).toBe("applied");
+      expect(canvas.getSnapshot().nodes.asset).toHaveLength(0);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("inserts a validated subgraph in one undoable write", async () => {
