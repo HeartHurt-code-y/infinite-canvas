@@ -270,7 +270,15 @@ export function musicVideoDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowChe
       syncShots
         .map((shot) => {
           const review = state.lipReviews?.[shot.id];
-          return `- ${shot.id} ${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)}s：${review?.decision === "approved" ? "人工选用" : review?.decision === "rejected" ? "人工驳回" : "待人工验收"}；${review?.note || "无备注"}`;
+          const decisionLabel =
+            review?.decision === "approved"
+              ? "人工选用"
+              : review?.decision === "rejected"
+                ? "人工驳回"
+                : "待人工验收";
+          // 空备注与缺备注都归一为「无备注」，因此需要真值判断而不是 ??（?? 会放行空串）。
+          const noteLabel = review?.note ? review.note : "无备注";
+          return `- ${shot.id} ${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)}s：${decisionLabel}；${noteLabel}`;
         })
         .join("\n"),
     );

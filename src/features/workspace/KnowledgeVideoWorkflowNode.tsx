@@ -361,10 +361,14 @@ export function KnowledgeVideoWorkflowNode({
 }: KnowledgeVideoWorkflowNodeProps) {
   const nodeElementRef = useRef<HTMLDivElement>(null);
   const latestNodeRef = useRef(node);
-  latestNodeRef.current = node;
   const pickingMaterialsRef = useRef(false);
   const [pickingMaterials, setPickingMaterials] = useState(false);
   const [showVersionHistory, setShowVersionHistory] = useState(false);
+  // 提交完成的异步验收回调要读到提交时的最新节点，因此在提交后同步 ref，
+  // 而不是在渲染期写入（渲染期写 ref 会让组件漏更新）。
+  useEffect(() => {
+    latestNodeRef.current = node;
+  }, [node]);
   const versions = useMemo(() => workflowVersionState(node.config), [node.config]);
   const [editingShotId, setEditingShotId] = useState<string | null>(null);
   const [shotDraft, setShotDraft] = useState<{
@@ -483,15 +487,22 @@ export function KnowledgeVideoWorkflowNode({
   const decisionResolution = decisionDraft.key === decisionKey ? decisionDraft.value : "";
   const finalPath = node.config.checkpoint.finalPath;
   const checkpoint = node.config.checkpoint;
+  // 两条分支都归一成严格布尔：可选链让 some() 可能是 undefined，直接写 || 会让
+  // 规则误判成可空合并，而这里要的就是「任一成立即等待人工」。
+  const musicVideoLipTargetsPending =
+    isMusicVideo &&
+    Boolean(checkpoint.mediaApprovals?.composition) &&
+    Boolean(
+      checkpoint.musicVideo?.stages.prompts?.artifact?.shots?.some(
+        (shot) => shot.lipSync === "sync",
+      ),
+    );
+  const comicDramaDubbedClipsPresent =
+    isComicDrama && Object.keys(checkpoint.comicDrama?.speech?.dubbedClips ?? {}).length > 0;
   const awaitingHumanLipReview =
     phase === "awaiting_approval" &&
     !decision &&
-    ((isMusicVideo &&
-      Boolean(checkpoint.mediaApprovals?.composition) &&
-      checkpoint.musicVideo?.stages.prompts?.artifact?.shots?.some(
-        (shot) => shot.lipSync === "sync",
-      )) ||
-      (isComicDrama && Object.keys(checkpoint.comicDrama?.speech?.dubbedClips ?? {}).length > 0));
+    (musicVideoLipTargetsPending || comicDramaDubbedClipsPresent);
   const humanLipReviewComplete = isComicDrama
     ? comicDramaLipReviewComplete(checkpoint)
     : (checkpoint.musicVideo?.stages.prompts?.artifact?.shots ?? [])

@@ -925,8 +925,8 @@ export function createMusicVideoWorkflowRunner(
           (segment, index) =>
             segment.kind !== measuredTimeline[index]?.kind ||
             lyricsText(segment.text) !== lyricsText(measuredTimeline[index]?.text ?? "") ||
-            Math.abs(segment.startSeconds - measuredTimeline[index]!.startSeconds) > EPSILON ||
-            Math.abs(segment.endSeconds - measuredTimeline[index]!.endSeconds) > EPSILON,
+            Math.abs(segment.startSeconds - measuredTimeline[index].startSeconds) > EPSILON ||
+            Math.abs(segment.endSeconds - measuredTimeline[index].endSeconds) > EPSILON,
         )
       )
         throw new Error(

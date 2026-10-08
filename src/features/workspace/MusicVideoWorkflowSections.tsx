@@ -675,7 +675,8 @@ export function MusicVideoDeliverables({
                 <strong>
                   {shot.title} · {shot.startSeconds.toFixed(2)}–{shot.endSeconds.toFixed(2)} 秒
                 </strong>
-                <p>{lyric || "该镜头没有已确认歌词"}</p>
+                {/* 空歌词行同样算「没有已确认歌词」，因此用真值判断而不是 ??。 */}
+                <p>{lyric ? lyric : "该镜头没有已确认歌词"}</p>
                 <p>
                   状态：
                   {!current

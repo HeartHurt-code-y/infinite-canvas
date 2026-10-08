@@ -811,7 +811,9 @@ export function createComicDramaWorkflowRunner(
 ) {
   const {
     speechClient: voiceClient = speechClient,
-    clipSignature = mvMediaClient.clipSignature,
+    // 默认值包一层：`mvMediaClient.clipSignature` 是对象方法，直接解构会脱离接收者，
+    // 后续实现若开始使用 `this` 就会静默丢上下文。
+    clipSignature = (path: string) => mvMediaClient.clipSignature(path),
     ...baseDependencies
   } = dependencies;
   return createKnowledgeVideoWorkflowRunner(baseDependencies, {
