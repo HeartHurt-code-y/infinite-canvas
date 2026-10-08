@@ -193,7 +193,10 @@ describe("机位求值与跟随", () => {
   it("切换跟随模式时换算关键帧，切换瞬间画面不跳；写入机位时自动换算偏移", () => {
     const world = plan();
     const before = evaluateCamera(world, 0);
-    const tracked = { ...world, camera: convertCameraFollow(world, { actorId: "walker", mode: "track" }) };
+    const tracked = {
+      ...world,
+      camera: convertCameraFollow(world, { actorId: "walker", mode: "track" }),
+    };
     expect(tracked.camera.keyframes[0]!.position).toEqual([2, -6, 2]);
     expect(evaluateCamera(tracked, 0)).toEqual(before);
     const restored = { ...tracked, camera: convertCameraFollow(tracked, null) };
@@ -212,7 +215,9 @@ describe("机位求值与跟随", () => {
       90,
       0,
     );
-    expect(vec.distance(orbited.position, [0, 0, 1])).toBeCloseTo(vec.distance([0, -6, 2], [0, 0, 1]));
+    expect(vec.distance(orbited.position, [0, 0, 1])).toBeCloseTo(
+      vec.distance([0, -6, 2], [0, 0, 1]),
+    );
     expect(orbited.position[0]).toBeCloseTo(6);
     expect(orbited.position[1]).toBeCloseTo(0);
   });
@@ -232,7 +237,12 @@ describe("镜头语言", () => {
     const subject = { position: [1, 2, 0] as const, yaw: 90, height: 1.75, isPerson: true };
     const lens = 50;
     const aspect = 16 / 9;
-    const full = solveShot({ ...subject, position: [1, 2, 0] }, { size: "full", angle: "eye", direction: "front" }, lens, aspect);
+    const full = solveShot(
+      { ...subject, position: [1, 2, 0] },
+      { size: "full", angle: "eye", direction: "front" },
+      lens,
+      aspect,
+    );
     const distance = vec.distance(full.position, full.target);
     const vfov = verticalFovDegrees(lens, aspect) * DEG;
     const visibleHeight = 2 * distance * Math.tan(vfov / 2);
@@ -241,22 +251,47 @@ describe("镜头语言", () => {
     // 角色面朝 +X，「正面」机位在 +X 一侧。
     expect(full.position[0]).toBeGreaterThan(1);
     expect(full.position[1]).toBeCloseTo(2, 3);
-    const extreme = solveShot({ ...subject, position: [1, 2, 0] }, { size: "extreme", angle: "eye", direction: "front" }, lens, aspect);
-    const wide = solveShot({ ...subject, position: [1, 2, 0] }, { size: "wide", angle: "eye", direction: "front" }, lens, aspect);
+    const extreme = solveShot(
+      { ...subject, position: [1, 2, 0] },
+      { size: "extreme", angle: "eye", direction: "front" },
+      lens,
+      aspect,
+    );
+    const wide = solveShot(
+      { ...subject, position: [1, 2, 0] },
+      { size: "wide", angle: "eye", direction: "front" },
+      lens,
+      aspect,
+    );
     expect(vec.distance(extreme.position, extreme.target)).toBeLessThan(distance);
     expect(vec.distance(wide.position, wide.target)).toBeGreaterThan(distance);
-    const low = solveShot({ ...subject, position: [1, 2, 0] }, { size: "medium", angle: "low", direction: "back" }, lens, aspect);
+    const low = solveShot(
+      { ...subject, position: [1, 2, 0] },
+      { size: "medium", angle: "low", direction: "back" },
+      lens,
+      aspect,
+    );
     expect(low.position[2]).toBeLessThan(low.target[2]);
     expect(low.position[0]).toBeLessThan(1);
   });
 
   it("运镜预设：推镜结束于基准机位，环绕保持距离且首尾对称", () => {
     const base = { position: [0, -6, 2] as const, target: [0, 0, 1] as const };
-    const push = cameraMoveKeyframes({ position: [...base.position], target: [...base.target] }, "push_in", 8);
+    const push = cameraMoveKeyframes(
+      { position: [...base.position], target: [...base.target] },
+      "push_in",
+      8,
+    );
     expect(push).toHaveLength(2);
     expect(push[1]).toEqual({ time: 8, position: [0, -6, 2], target: [0, 0, 1] });
-    expect(vec.distance(push[0]!.position, [0, 0, 1])).toBeGreaterThan(vec.distance([0, -6, 2], [0, 0, 1]));
-    const arc = cameraMoveKeyframes({ position: [...base.position], target: [...base.target] }, "arc_left", 8);
+    expect(vec.distance(push[0]!.position, [0, 0, 1])).toBeGreaterThan(
+      vec.distance([0, -6, 2], [0, 0, 1]),
+    );
+    const arc = cameraMoveKeyframes(
+      { position: [...base.position], target: [...base.target] },
+      "arc_left",
+      8,
+    );
     expect(arc).toHaveLength(9);
     const radius = vec.distance([0, -6, 2], [0, 0, 1]);
     for (const frame of arc) expect(vec.distance(frame.position, [0, 0, 1])).toBeCloseTo(radius, 3);
@@ -381,6 +416,8 @@ describe("旧版方案迁移", () => {
     const draft = createWhiteModelStudioDraft();
     expect(whiteModelRenderRequest(draft).bake?.frameCount).toBe(8 * 24);
     expect(whiteModelRenderSignature(draft)).not.toContain("frameCount");
-    expect(whiteModelRenderRequest({ ...draft, mode: "blend", sourceBlendPath: "C:/a.blend" }).bake).toBeNull();
+    expect(
+      whiteModelRenderRequest({ ...draft, mode: "blend", sourceBlendPath: "C:/a.blend" }).bake,
+    ).toBeNull();
   });
 });

@@ -84,27 +84,42 @@ export interface ComicDramaSpeechCheckpoint {
   readonly voiceBindingsSignature: string;
   readonly lines: Readonly<Record<string, ComicDramaSpeechResult>>;
   readonly pendingRequests?: Readonly<Record<string, ComicDramaSpeechIntent>>;
-  readonly pendingDubRequests?: Readonly<Record<string, {
-    readonly requestId: string;
-    readonly sourcePath: string;
-    readonly sourceVideoTaskId: string;
-    readonly speechSignature: string;
-  }>>;
-  readonly dubbedClips?: Readonly<Record<string, {
-    readonly sourcePath: string;
-    readonly sourceVideoTaskId: string;
-    readonly speechSignature: string;
-    readonly requestId: string;
-    readonly requestSignature: string;
-    readonly videoSignature: string;
-    readonly path: string;
-    readonly durationSeconds: number;
-  }>>;
-  readonly lipReviews?: Readonly<Record<string, {
-    readonly signature: string;
-    readonly decision: "approved" | "rejected";
-    readonly reviewedAt: number;
-  }>>;
+  readonly pendingDubRequests?: Readonly<
+    Record<
+      string,
+      {
+        readonly requestId: string;
+        readonly sourcePath: string;
+        readonly sourceVideoTaskId: string;
+        readonly speechSignature: string;
+      }
+    >
+  >;
+  readonly dubbedClips?: Readonly<
+    Record<
+      string,
+      {
+        readonly sourcePath: string;
+        readonly sourceVideoTaskId: string;
+        readonly speechSignature: string;
+        readonly requestId: string;
+        readonly requestSignature: string;
+        readonly videoSignature: string;
+        readonly path: string;
+        readonly durationSeconds: number;
+      }
+    >
+  >;
+  readonly lipReviews?: Readonly<
+    Record<
+      string,
+      {
+        readonly signature: string;
+        readonly decision: "approved" | "rejected";
+        readonly reviewedAt: number;
+      }
+    >
+  >;
 }
 
 export function comicDramaDubbedShotSignature(
@@ -224,7 +239,9 @@ export function createComicDramaCheckpoint(): ComicDramaWorkflowCheckpoint {
 }
 
 /** Only characters with approved spoken lines need a voice binding. */
-export function comicDramaRequiredSpeakers(drama: ComicDramaWorkflowCheckpoint): readonly AiFilmAsset[] {
+export function comicDramaRequiredSpeakers(
+  drama: ComicDramaWorkflowCheckpoint,
+): readonly AiFilmAsset[] {
   const ids = new Set(
     drama.episodes.flatMap((episode) =>
       (episode.stages.storyboard?.artifact?.shots ?? []).flatMap((shot) =>
@@ -265,19 +282,27 @@ export function comicDramaDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowChe
     );
   if (drama.speech && Object.keys(drama.speech.lines).length)
     sections.push(
-      `## 逐句配音与口型审核\n\n${checkpoint.shots.map((shot) => {
-        const lines = (shot as ComicDramaShot).dialogueLines ?? [];
-        if (!lines.length) return "";
-        const signature = comicDramaDubbedShotSignature(checkpoint, shot.id);
-        const review = drama.speech?.lipReviews?.[shot.id];
-        const status = review?.signature === signature
-          ? review.decision === "approved" ? "人工已通过" : "人工已驳回"
-          : "待人工验收";
-        return `### ${shot.id} · ${shot.title}\n\n配音视频：${drama.speech?.dubbedClips?.[shot.id]?.path ?? "尚未合成"}\n\n口型：${status}\n\n${lines.map((line, index) => {
-          const audio = drama.speech?.lines[`${shot.id}#${index}`];
-          return `${line.startSeconds.toFixed(2)} 秒 · ${line.speakerId}：${line.text}\n音色：${audio?.voiceId ?? "未生成"}；音频：${audio?.path ?? "未生成"}；实测时长：${audio?.durationSeconds ?? "未测量"} 秒`;
-        }).join("\n\n")}`;
-      }).filter(Boolean).join("\n\n")}`,
+      `## 逐句配音与口型审核\n\n${checkpoint.shots
+        .map((shot) => {
+          const lines = (shot as ComicDramaShot).dialogueLines ?? [];
+          if (!lines.length) return "";
+          const signature = comicDramaDubbedShotSignature(checkpoint, shot.id);
+          const review = drama.speech?.lipReviews?.[shot.id];
+          const status =
+            review?.signature === signature
+              ? review.decision === "approved"
+                ? "人工已通过"
+                : "人工已驳回"
+              : "待人工验收";
+          return `### ${shot.id} · ${shot.title}\n\n配音视频：${drama.speech?.dubbedClips?.[shot.id]?.path ?? "尚未合成"}\n\n口型：${status}\n\n${lines
+            .map((line, index) => {
+              const audio = drama.speech?.lines[`${shot.id}#${index}`];
+              return `${line.startSeconds.toFixed(2)} 秒 · ${line.speakerId}：${line.text}\n音色：${audio?.voiceId ?? "未生成"}；音频：${audio?.path ?? "未生成"}；实测时长：${audio?.durationSeconds ?? "未测量"} 秒`;
+            })
+            .join("\n\n")}`;
+        })
+        .filter(Boolean)
+        .join("\n\n")}`,
     );
   if (checkpoint.finalPath) sections.push(`## 完整成片\n\n${checkpoint.finalPath}`);
   return `${sections.join("\n\n---\n\n")}\n`;

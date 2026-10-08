@@ -289,7 +289,8 @@ export function TosStagingSettings({
       {leftoverCredential && !savedConfig?.enabled ? (
         <p className="settings-success" role="status">
           <Icon name="check-circle" aria-hidden="true" size="md" />
-          系统凭据管理器里还留着上次的 AccessKey，自动更新没有清掉密钥。补填原来的桶名后保存即可；素材文件仍在桶里，可到「本地素材」点「拉取整桶」。
+          系统凭据管理器里还留着上次的
+          AccessKey，自动更新没有清掉密钥。补填原来的桶名后保存即可；素材文件仍在桶里，可到「本地素材」点「拉取整桶」。
         </p>
       ) : null}
 

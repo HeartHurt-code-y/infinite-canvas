@@ -52,15 +52,15 @@ export function ComicDramaConfiguration({
       ),
     }))
     .filter((entry) => entry.provider.enabled && entry.models.length);
-  const selectedProvider = speechProviders.find((entry) =>
-    entry.provider.id === options.speech?.model.providerId,
+  const selectedProvider = speechProviders.find(
+    (entry) => entry.provider.id === options.speech?.model.providerId,
   );
-  const selectedModel = selectedProvider?.models.find((model) =>
-    model.definitionId === options.speech?.model.modelDefinitionId,
+  const selectedModel = selectedProvider?.models.find(
+    (model) => model.definitionId === options.speech?.model.modelDefinitionId,
   );
-  const chosenVoiceIds = requiredSpeakers.map((asset) =>
-    options.speech?.voiceBindings[asset.id]?.trim() ?? "",
-  ).filter(Boolean);
+  const chosenVoiceIds = requiredSpeakers
+    .map((asset) => options.speech?.voiceBindings[asset.id]?.trim() ?? "")
+    .filter(Boolean);
   const hasDuplicateVoices = new Set(chosenVoiceIds).size !== chosenVoiceIds.length;
 
   useEffect(() => {
@@ -103,7 +103,10 @@ export function ComicDramaConfiguration({
   };
 
   return (
-    <details ref={settingsRef} className="canvas-knowledge-workflow__models canvas-ai-film-workflow__scope canvas-comic-drama-workflow__scope">
+    <details
+      ref={settingsRef}
+      className="canvas-knowledge-workflow__models canvas-ai-film-workflow__scope canvas-comic-drama-workflow__scope"
+    >
       <summary>
         <span className="canvas-knowledge-workflow__models-title">分集剧本与制作设置</span>
         <span>{populatedCount ? `${populatedCount} 集剧本已就绪` : "添加或导入剧本"}</span>
@@ -248,7 +251,10 @@ export function ComicDramaConfiguration({
       {options.deliverable === "video" ? (
         <section aria-label="角色配音音色" className="canvas-comic-drama-workflow__settings">
           <strong>角色配音音色</strong>
-          <small>选择项目中已启用的语音模型，并从供应商控制台复制各角色已开通的真实音色 ID。成片将逐句合成配音，替换对应视频片段的原音轨。</small>
+          <small>
+            选择项目中已启用的语音模型，并从供应商控制台复制各角色已开通的真实音色
+            ID。成片将逐句合成配音，替换对应视频片段的原音轨。
+          </small>
           <fieldset disabled={disabled && !bindingPending}>
             <label>
               <span>项目语音供应商</span>
@@ -257,7 +263,9 @@ export function ComicDramaConfiguration({
                 value={options.speech?.model.providerId ?? ""}
                 onChange={(event) => {
                   const providerId = event.target.value;
-                  const modelDefinitionId = speechProviders.find((entry) => entry.provider.id === providerId)?.models[0]?.definitionId ?? "";
+                  const modelDefinitionId =
+                    speechProviders.find((entry) => entry.provider.id === providerId)?.models[0]
+                      ?.definitionId ?? "";
                   onChange({
                     ...options,
                     speech: { model: { providerId, modelDefinitionId }, voiceBindings: {} },
@@ -266,10 +274,14 @@ export function ComicDramaConfiguration({
               >
                 <option value="">请选择项目供应商</option>
                 {options.speech?.model.providerId && !selectedProvider ? (
-                  <option value={options.speech.model.providerId}>{options.speech.model.providerId}（不可用）</option>
+                  <option value={options.speech.model.providerId}>
+                    {options.speech.model.providerId}（不可用）
+                  </option>
                 ) : null}
                 {speechProviders.map((entry) => (
-                  <option key={entry.provider.id} value={entry.provider.id}>{entry.provider.displayName}</option>
+                  <option key={entry.provider.id} value={entry.provider.id}>
+                    {entry.provider.displayName}
+                  </option>
                 ))}
               </select>
             </label>
@@ -278,20 +290,29 @@ export function ComicDramaConfiguration({
               <select
                 aria-label="漫剧语音模型"
                 value={options.speech?.model.modelDefinitionId ?? ""}
-                onChange={(event) => onChange({
-                  ...options,
-                  speech: {
-                    model: { providerId: options.speech?.model.providerId ?? "", modelDefinitionId: event.target.value },
-                    voiceBindings: {},
-                  },
-                })}
+                onChange={(event) =>
+                  onChange({
+                    ...options,
+                    speech: {
+                      model: {
+                        providerId: options.speech?.model.providerId ?? "",
+                        modelDefinitionId: event.target.value,
+                      },
+                      voiceBindings: {},
+                    },
+                  })
+                }
               >
                 <option value="">请选择模型</option>
                 {options.speech?.model.modelDefinitionId && !selectedModel ? (
-                  <option value={options.speech.model.modelDefinitionId}>{options.speech.model.modelDefinitionId}（不可用）</option>
+                  <option value={options.speech.model.modelDefinitionId}>
+                    {options.speech.model.modelDefinitionId}（不可用）
+                  </option>
                 ) : null}
                 {selectedProvider?.models.map((model) => (
-                  <option key={model.definitionId} value={model.definitionId}>{model.displayName}</option>
+                  <option key={model.definitionId} value={model.definitionId}>
+                    {model.displayName}
+                  </option>
                 ))}
               </select>
             </label>
@@ -302,31 +323,44 @@ export function ComicDramaConfiguration({
                 const selected = options.speech?.voiceBindings[asset.id] ?? "";
                 return (
                   <label key={asset.id}>
-                    <span>{asset.name}（{asset.id}）· 控制台音色 ID，需账号已开通</span>
+                    <span>
+                      {asset.name}（{asset.id}）· 控制台音色 ID，需账号已开通
+                    </span>
                     <ImeInput
                       aria-label={`${asset.name}控制台音色 ID`}
                       value={selected}
                       disabled={!selectedModel}
                       placeholder="粘贴供应商控制台中的真实音色 ID"
-                      onValueChange={(value) => onChange({
-                        ...options,
-                        speech: {
-                          model: options.speech?.model ?? { providerId: "", modelDefinitionId: "" },
-                          voiceBindings: {
-                            ...options.speech?.voiceBindings,
-                            [asset.id]: value.trim(),
+                      onValueChange={(value) =>
+                        onChange({
+                          ...options,
+                          speech: {
+                            model: options.speech?.model ?? {
+                              providerId: "",
+                              modelDefinitionId: "",
+                            },
+                            voiceBindings: {
+                              ...options.speech?.voiceBindings,
+                              [asset.id]: value.trim(),
+                            },
                           },
-                        },
-                      })}
+                        })
+                      }
                     />
                   </label>
                 );
               })}
             </fieldset>
-          ) : <small>确认分镜后会列出需要配音的角色。</small>}
-          {hasDuplicateVoices ? <small role="alert">不同说话角色请绑定不同的控制台音色 ID。</small> : null}
+          ) : (
+            <small>确认分镜后会列出需要配音的角色。</small>
+          )}
+          {hasDuplicateVoices ? (
+            <small role="alert">不同说话角色请绑定不同的控制台音色 ID。</small>
+          ) : null}
           <small>账号音色权限以供应商实际语音合成响应为准；示例 ID 不代表当前账号已开通。</small>
-          {!speechProviders.length ? <small>项目尚未启用语音合成模型，请先在供应商设置中绑定支持该能力的模型。</small> : null}
+          {!speechProviders.length ? (
+            <small>项目尚未启用语音合成模型，请先在供应商设置中绑定支持该能力的模型。</small>
+          ) : null}
           {!isDesktopRuntime() ? <small>配音需要在桌面应用中执行。</small> : null}
         </section>
       ) : null}
@@ -366,7 +400,10 @@ export function ComicDramaDeliverables({
 }: {
   readonly checkpoint: KnowledgeVideoWorkflowCheckpoint;
   readonly onExport?: () => void;
-  readonly onReviewDubbedShot?: (shotId: string, decision: "approved" | "rejected") => void | Promise<void>;
+  readonly onReviewDubbedShot?: (
+    shotId: string,
+    decision: "approved" | "rejected",
+  ) => void | Promise<void>;
 }) {
   const [reviewError, setReviewError] = useState("");
   const [reviewingShot, setReviewingShot] = useState<string | null>(null);
@@ -460,31 +497,66 @@ export function ComicDramaDeliverables({
         </details>
       ) : null}
       {checkpoint.shots.some((shot) =>
-        Boolean(checkpoint.comicDrama?.speech?.dubbedClips?.[shot.id])) ? (
-        <details className="canvas-knowledge-workflow__deliverables" open={checkpoint.phase === "awaiting_approval"}>
+        Boolean(checkpoint.comicDrama?.speech?.dubbedClips?.[shot.id]),
+      ) ? (
+        <details
+          className="canvas-knowledge-workflow__deliverables"
+          open={checkpoint.phase === "awaiting_approval"}
+        >
           <summary>逐镜配音与口型人工验收</summary>
           <div>
-            <small>请逐镜试听并观看嘴部动作。配音镜头的原音轨已被替换；人工通过前不会合成成片。</small>
+            <small>
+              请逐镜试听并观看嘴部动作。配音镜头的原音轨已被替换；人工通过前不会合成成片。
+            </small>
             {reviewError ? <p role="alert">{reviewError}</p> : null}
             {checkpoint.shots.map((shot) => {
               const dubbed = checkpoint.comicDrama?.speech?.dubbedClips?.[shot.id];
               if (!dubbed) return null;
               const signature = comicDramaDubbedShotSignature(checkpoint, shot.id);
               const review = checkpoint.comicDrama?.speech?.lipReviews?.[shot.id];
-              const status = review?.signature === signature
-                ? review.decision === "approved" ? "人工已通过" : "已驳回，需重做"
-                : "待人工验收";
+              const status =
+                review?.signature === signature
+                  ? review.decision === "approved"
+                    ? "人工已通过"
+                    : "已驳回，需重做"
+                  : "待人工验收";
               return (
                 <figure key={shot.id}>
-                  <figcaption>{shot.title} · {status}</figcaption>
-                  <video controls preload="metadata" src={toMediaSrc(dubbed.path)} aria-label={`${shot.title}配音预览`} />
-                  <small>说话角色：{(shot as { dialogueLines?: readonly { speakerId: string }[] }).dialogueLines?.map((line) => line.speakerId).join("、")}</small>
+                  <figcaption>
+                    {shot.title} · {status}
+                  </figcaption>
+                  <video
+                    controls
+                    preload="metadata"
+                    src={toMediaSrc(dubbed.path)}
+                    aria-label={`${shot.title}配音预览`}
+                  />
+                  <small>
+                    说话角色：
+                    {(shot as { dialogueLines?: readonly { speakerId: string }[] }).dialogueLines
+                      ?.map((line) => line.speakerId)
+                      .join("、")}
+                  </small>
                   {onReviewDubbedShot && checkpoint.phase === "awaiting_approval" ? (
                     <div>
-                      <button type="button" disabled={reviewingShot != null}
-                        onClick={() => { void reviewShot(shot.id, "approved"); }}>口型通过，采用本镜</button>
-                      <button type="button" disabled={reviewingShot != null}
-                        onClick={() => { void reviewShot(shot.id, "rejected"); }}>口型不通过</button>
+                      <button
+                        type="button"
+                        disabled={reviewingShot != null}
+                        onClick={() => {
+                          void reviewShot(shot.id, "approved");
+                        }}
+                      >
+                        口型通过，采用本镜
+                      </button>
+                      <button
+                        type="button"
+                        disabled={reviewingShot != null}
+                        onClick={() => {
+                          void reviewShot(shot.id, "rejected");
+                        }}
+                      >
+                        口型不通过
+                      </button>
                     </div>
                   ) : null}
                 </figure>

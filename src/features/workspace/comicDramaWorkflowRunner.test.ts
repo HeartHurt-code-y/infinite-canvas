@@ -202,18 +202,22 @@ function setup(deliverable: "video" | "documents" = "documents") {
   };
   const request = {
     node: dramaNode,
-    providerCatalog: deliverable === "video"
-      ? catalog.map((entry) => ({
-          ...entry,
-          models: [...entry.models, {
-            definitionId: "project-speech",
-            remoteModelId: "project-speech",
-            displayName: "项目语音模型",
-            operations: ["speech_generation"] as unknown as ConfiguredModel["operations"],
-            operationSchema: {},
-          }],
-        }))
-      : catalog,
+    providerCatalog:
+      deliverable === "video"
+        ? catalog.map((entry) => ({
+            ...entry,
+            models: [
+              ...entry.models,
+              {
+                definitionId: "project-speech",
+                remoteModelId: "project-speech",
+                displayName: "项目语音模型",
+                operations: ["speech_generation"] as unknown as ConfiguredModel["operations"],
+                operationSchema: {},
+              },
+            ],
+          }))
+        : catalog,
     signal: new AbortController().signal,
     onCheckpoint: vi.fn(),
     onProgress: vi.fn(),
@@ -312,7 +316,9 @@ describe("comic drama composite workflow", () => {
     expect(shot.videoPrompt).toContain("</d> 说完嘴唇合上。");
     expect(shot.videoPrompt.match(/回来就好/g)).toHaveLength(1);
     data.shots[0]!.dialogue = "这段台词超过了五秒镜头所能容纳的实际容量需要拆镜头";
-    data.shots[0]!.dialogueLines = [{ speakerId: "father", text: data.shots[0]!.dialogue, startSeconds: 0.8 }];
+    data.shots[0]!.dialogueLines = [
+      { speakerId: "father", text: data.shots[0]!.dialogue, startSeconds: 0.8 },
+    ];
     expect(() => parseComicDramaStage(JSON.stringify(data), "storyboard", "ep01", art)).toThrow(
       "对白超过当前时长容量",
     );
@@ -321,36 +327,60 @@ describe("comic drama composite workflow", () => {
   it("requires ordered and character-bound speech beats for video delivery", () => {
     const art = parseComicDramaStage(JSON.stringify(stageData("art")), "art", "ep01", []).assets;
     const data = stageData("storyboard");
-    const parse = (shot: object) => parseComicDramaStage(
-      JSON.stringify({ ...data, shots: [shot] }), "storyboard", "ep01", art,
-      { requireSpeechLines: true },
-    );
+    const parse = (shot: object) =>
+      parseComicDramaStage(JSON.stringify({ ...data, shots: [shot] }), "storyboard", "ep01", art, {
+        requireSpeechLines: true,
+      });
     const shot = data.shots[0]!;
     expect(parse(shot).shots[0]?.dialogueLines).toEqual(shot.dialogueLines);
     expect(() => parse({ ...shot, dialogueLines: [] })).toThrow("逐字对白与有序说话人台词不一致");
-    expect(() => parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], text: "你回来就好。" }] }))
-      .toThrow("必须逐字覆盖原对白");
-    expect(() => parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], speakerId: "shop" }] }))
-      .toThrow("未经确认的说话角色");
-    expect(() => parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], startSeconds: 5 }] }))
-      .toThrow("起始时间超出镜头");
-    expect(() => parse({ ...shot, dialogueLines: [
-      { speakerId: "father", text: "回来", startSeconds: 2 },
-      { speakerId: "father", text: "就好。", startSeconds: 1 },
-    ] })).toThrow("必须按镜头内时间排序");
-    const daughter = { id: "daughter", kind: "character" as const, name: "女儿", prompt: "青年女子" };
-    const twoSpeakers = parseComicDramaStage(JSON.stringify({
-      ...data,
-      shots: [{ ...shot,
-        dialogue: "回来就好。爸，我回来了。",
+    expect(() =>
+      parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], text: "你回来就好。" }] }),
+    ).toThrow("必须逐字覆盖原对白");
+    expect(() =>
+      parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], speakerId: "shop" }] }),
+    ).toThrow("未经确认的说话角色");
+    expect(() =>
+      parse({ ...shot, dialogueLines: [{ ...shot.dialogueLines[0], startSeconds: 5 }] }),
+    ).toThrow("起始时间超出镜头");
+    expect(() =>
+      parse({
+        ...shot,
         dialogueLines: [
-          { speakerId: "father", text: "回来就好。", startSeconds: 0.8 },
-          { speakerId: "daughter", text: "爸，我回来了。", startSeconds: 2.6 },
+          { speakerId: "father", text: "回来", startSeconds: 2 },
+          { speakerId: "father", text: "就好。", startSeconds: 1 },
         ],
-      }],
-    }), "storyboard", "ep01", [...art, daughter], { requireSpeechLines: true });
-    expect(twoSpeakers.shots[0]?.dialogueLines?.map((line) => line.speakerId))
-      .toEqual(["father", "daughter"]);
+      }),
+    ).toThrow("必须按镜头内时间排序");
+    const daughter = {
+      id: "daughter",
+      kind: "character" as const,
+      name: "女儿",
+      prompt: "青年女子",
+    };
+    const twoSpeakers = parseComicDramaStage(
+      JSON.stringify({
+        ...data,
+        shots: [
+          {
+            ...shot,
+            dialogue: "回来就好。爸，我回来了。",
+            dialogueLines: [
+              { speakerId: "father", text: "回来就好。", startSeconds: 0.8 },
+              { speakerId: "daughter", text: "爸，我回来了。", startSeconds: 2.6 },
+            ],
+          },
+        ],
+      }),
+      "storyboard",
+      "ep01",
+      [...art, daughter],
+      { requireSpeechLines: true },
+    );
+    expect(twoSpeakers.shots[0]?.dialogueLines?.map((line) => line.speakerId)).toEqual([
+      "father",
+      "daughter",
+    ]);
   });
 
   it("stops before image and video tasks until every speaking role has a project voice", async () => {
@@ -618,16 +648,19 @@ describe("comic drama composite workflow", () => {
     expect(awaitingLipReview.comicDrama?.speech?.dubbedClips?.["ep01:P1-1"]?.path).toBeTruthy();
     expect(comicDramaLipReviewComplete(awaitingLipReview)).toBe(false);
     expect(speech.synthesize).toHaveBeenCalledTimes(2);
-    expect(speech.synthesize).toHaveBeenCalledWith(expect.objectContaining({
-      providerConnectionId: "project-provider",
-      modelDefinitionId: "project-speech",
-      voiceId: "project-voice-father",
-      text: "回来就好。",
-    }));
+    expect(speech.synthesize).toHaveBeenCalledWith(
+      expect.objectContaining({
+        providerConnectionId: "project-provider",
+        modelDefinitionId: "project-speech",
+        voiceId: "project-voice-father",
+        text: "回来就好。",
+      }),
+    );
     expect(speech.composeDubbedVideo).toHaveBeenCalledTimes(2);
     expect(fake.composer.startComposition).not.toHaveBeenCalled();
     const reviewed = awaitingLipReview.shots.reduce(
-      (current, shot) => reviewComicDramaDubbedShot(current, shot.id, "approved", 42, "c".repeat(64)),
+      (current, shot) =>
+        reviewComicDramaDubbedShot(current, shot.id, "approved", 42, "c".repeat(64)),
       awaitingLipReview,
     );
     expect(comicDramaLipReviewComplete(reviewed)).toBe(true);
@@ -682,8 +715,9 @@ describe("comic drama composite workflow", () => {
       expect(prompt.text).toContain("【逐字对白】回来就好。");
     }
     expect(fake.composer.startComposition).toHaveBeenCalledTimes(1);
-    expect(vi.mocked(fake.composer.startComposition).mock.calls[0]?.[0].map((input) => input.source))
-      .toEqual(["C:\\output\\dubbed.mp4", "C:\\output\\dubbed.mp4"]);
+    expect(
+      vi.mocked(fake.composer.startComposition).mock.calls[0]?.[0].map((input) => input.source),
+    ).toEqual(["C:\\output\\dubbed.mp4", "C:\\output\\dubbed.mp4"]);
     expect(speech.synthesize).toHaveBeenCalledTimes(2);
     expect(result.finalPath).toBeTruthy();
   });
@@ -692,11 +726,15 @@ describe("comic drama composite workflow", () => {
     const { fake, clipSignature, runner, request } = setup("video");
     const pending = await runner.run(request);
     expect(pending.phase).toBe("awaiting_approval");
-    expect(() => reviewComicDramaDubbedShot(
-      pending, "ep01:P1-1", "approved", 42, "d".repeat(64),
-    )).toThrow("文件已改变");
+    expect(() =>
+      reviewComicDramaDubbedShot(pending, "ep01:P1-1", "approved", 42, "d".repeat(64)),
+    ).toThrow("文件已改变");
     const approved = reviewComicDramaDubbedShot(
-      pending, "ep01:P1-1", "approved", 42, "c".repeat(64),
+      pending,
+      "ep01:P1-1",
+      "approved",
+      42,
+      "c".repeat(64),
     );
     clipSignature.mockResolvedValue("d".repeat(64));
     const result = await runner.run({
@@ -724,7 +762,9 @@ describe("comic drama composite workflow", () => {
     const first = await runner.run(request);
     expect(first.phase).toBe("failed");
     expect(first.comicDrama?.speech?.lines["ep01:P1-1#0"]?.path).toBe("C:\\output\\voice.wav");
-    expect(start.mock.calls.filter(([command]) => command.operation === "video_generation")).toHaveLength(1);
+    expect(
+      start.mock.calls.filter(([command]) => command.operation === "video_generation"),
+    ).toHaveLength(1);
     speech.getRequestStatus.mockResolvedValue({
       status: "invalid_output",
       path: null,
@@ -737,7 +777,9 @@ describe("comic drama composite workflow", () => {
     });
     expect(result.phase).toBe("failed");
     expect(result.error).toContain("invalid_output");
-    expect(start.mock.calls.filter(([command]) => command.operation === "video_generation")).toHaveLength(1);
+    expect(
+      start.mock.calls.filter(([command]) => command.operation === "video_generation"),
+    ).toHaveLength(1);
   });
 
   it("rejects input changes before using an already completed plan on resume", async () => {

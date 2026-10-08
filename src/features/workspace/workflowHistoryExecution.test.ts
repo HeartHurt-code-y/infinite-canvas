@@ -478,15 +478,17 @@ describe("recorded workflow execution", () => {
       ...createProductSceneOptions(),
       totalCount: 500,
       batchSize: 50,
-      views: [{
-        id: "front",
-        label: "正面",
-        angle: "eye" as const,
-        sourcePath: "C:\\source.png",
-        preparedPath: "C:\\prepared.png",
-        contentHash: "a".repeat(64),
-        approved: true,
-      }],
+      views: [
+        {
+          id: "front",
+          label: "正面",
+          angle: "eye" as const,
+          sourcePath: "C:\\source.png",
+          preparedPath: "C:\\prepared.png",
+          contentHash: "a".repeat(64),
+          approved: true,
+        },
+      ],
     };
     runnerFactory.mockReturnValue({
       async run(input) {
@@ -508,8 +510,9 @@ describe("recorded workflow execution", () => {
           input.onCheckpoint(current);
         }
         await input.beforeSideEffect?.();
-        expect(records.get("history-1")?.nodeSnapshot.config.checkpoint.productScene?.rows[49]?.taskId)
-          .toBe("task-49");
+        expect(
+          records.get("history-1")?.nodeSnapshot.config.checkpoint.productScene?.rows[49]?.taskId,
+        ).toBe("task-49");
         return { ...current, phase: "paused" };
       },
     });

@@ -363,7 +363,11 @@ describe("workflow reference materials", () => {
       connectedMaterials: [
         {
           displayName: "本机图片",
-          target: { kind: "local_base64_asset" as const, assetId: "local-b64-one", mediaType: "image" as const },
+          target: {
+            kind: "local_base64_asset" as const,
+            assetId: "local-b64-one",
+            mediaType: "image" as const,
+          },
         },
       ],
     };

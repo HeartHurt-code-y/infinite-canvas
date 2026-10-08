@@ -33,10 +33,7 @@ function imageBinding(key: string, name = key): WhiteModelBinding {
   return { key, name, target };
 }
 
-function capability(
-  key: string,
-  options: string[],
-): ModelParameterCapability {
+function capability(key: string, options: string[]): ModelParameterCapability {
   return {
     key,
     label: key,
@@ -109,7 +106,12 @@ describe("假人编号与站位提示词", () => {
     expect(resolved.preview).toContain("@女主 站在2号假人位");
     expect(resolved.preview).toContain(BLOCKING_FINISH_INSTRUCTION);
     const mentions = resolved.document.items.filter((item) => item.kind === "media_reference");
-    expect(mentions.map((item) => item.canvasNodeKey)).toEqual(["scene", "still", "hero", "heroine"]);
+    expect(mentions.map((item) => item.canvasNodeKey)).toEqual([
+      "scene",
+      "still",
+      "hero",
+      "heroine",
+    ]);
   });
 
   it("角色绑定跟随假人身份，删除后丢弃失效项", () => {

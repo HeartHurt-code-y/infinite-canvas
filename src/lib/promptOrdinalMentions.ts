@@ -315,10 +315,7 @@ function dropOverlaps(matches: readonly RawMatch[]): readonly RawMatch[] {
 }
 
 /** 候选数量决定「最后一张」指向谁；超出范围时返回 null。 */
-function indexAt(
-  indexes: readonly number[] | undefined,
-  position: number,
-): number | null {
+function indexAt(indexes: readonly number[] | undefined, position: number): number | null {
   if (indexes == null || indexes.length === 0) return null;
   const ordinal = position === -1 ? indexes.length : position;
   if (ordinal < 1 || ordinal > indexes.length) return null;
@@ -397,8 +394,7 @@ export function resolveOrdinalMentions(
   document: PromptContentDocumentV1,
   candidates: readonly PromptReferenceCandidate[],
 ): PromptOrdinalResolution {
-  if (candidates.length === 0)
-    return { document, freshMentionIds: [], converted: 0, unbound: [] };
+  if (candidates.length === 0) return { document, freshMentionIds: [], converted: 0, unbound: [] };
   const items: PromptContentItem[] = [];
   const freshMentionIds: string[] = [];
   const unbound: PromptUnboundMention[] = [];
@@ -411,14 +407,14 @@ export function resolveOrdinalMentions(
     unbound.push(...scan.unbound);
     let cursor = 0;
     for (const match of scan.matched) {
-      if (match.from > cursor) items.push({ kind: "text", text: item.text.slice(cursor, match.from) });
+      if (match.from > cursor)
+        items.push({ kind: "text", text: item.text.slice(cursor, match.from) });
       const reference = createPromptReference(match.candidate, { alias: match.label });
       items.push(reference);
       freshMentionIds.push(reference.mentionId);
       cursor = match.to;
     }
-    if (cursor < item.text.length)
-      items.push({ kind: "text", text: item.text.slice(cursor) });
+    if (cursor < item.text.length) items.push({ kind: "text", text: item.text.slice(cursor) });
   }
   return {
     document: { schema: "prompt-content", version: 1, items },

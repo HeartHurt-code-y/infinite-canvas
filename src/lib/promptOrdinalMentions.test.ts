@@ -37,7 +37,9 @@ const WEIXIN_IMAGES = [
   candidate("clip-1", "微信视频2026-09-08_194710_526.mp4", { kind: "video" }),
 ];
 
-function aliases(result: ReturnType<typeof resolveOrdinalMentions>): readonly (string | undefined)[] {
+function aliases(
+  result: ReturnType<typeof resolveOrdinalMentions>,
+): readonly (string | undefined)[] {
   return result.document.items.flatMap((item) =>
     item.kind === "media_reference" ? [item.aliasSnapshot] : [],
   );
@@ -72,10 +74,7 @@ describe("position words in prompt text", () => {
     const scan = scanOrdinalMentions("微信图片_2026091712222_746_208.png 换成夜景", WEIXIN_IMAGES);
     expect(scan.matched).toEqual([]);
     expect(scan.unbound).toEqual([]);
-    const result = resolveOrdinalMentions(
-      document("用 图片20260917 的质感"),
-      WEIXIN_IMAGES,
-    );
+    const result = resolveOrdinalMentions(document("用 图片20260917 的质感"), WEIXIN_IMAGES);
     expect(result.converted).toBe(0);
     expect(result.document).toEqual(document("用 图片20260917 的质感"));
   });
@@ -83,9 +82,7 @@ describe("position words in prompt text", () => {
   it("reports a rank word with no matching asset instead of silently leaving it", () => {
     const result = resolveOrdinalMentions(document("图1开场，图9收尾"), WEIXIN_IMAGES);
     expect(result.converted).toBe(1);
-    expect(result.unbound).toEqual([
-      { text: "图9", reason: "out-of-range", candidateCount: 3 },
-    ]);
+    expect(result.unbound).toEqual([{ text: "图9", reason: "out-of-range", candidateCount: 3 }]);
     // 「图9」原样留在正文里，只回报它为什么没绑定。
     expect(result.document.items.at(-1)).toEqual({ kind: "text", text: "开场，图9收尾" });
   });
@@ -93,9 +90,7 @@ describe("position words in prompt text", () => {
   it("leaves relative wording untouched and says why it could not bind", () => {
     const relative = resolveOrdinalMentions(document("以第一张为准"), WEIXIN_IMAGES);
     expect(relative.converted).toBe(0);
-    expect(relative.unbound).toEqual([
-      { text: "第一张", reason: "relative", candidateCount: 4 },
-    ]);
+    expect(relative.unbound).toEqual([{ text: "第一张", reason: "relative", candidateCount: 4 }]);
     // 带关键词的相对写法有确定的指代：第一张图 = 图1。
     const anchored = resolveOrdinalMentions(document("以第一张图为准"), WEIXIN_IMAGES);
     expect(aliases(anchored)).toEqual(["图1"]);
@@ -111,9 +106,7 @@ describe("position words in prompt text", () => {
     // 没有具体媒体关键词时（「最后一个镜头」）不猜，只提示。
     const vague = resolveOrdinalMentions(document("最后一个镜头拉远"), WEIXIN_IMAGES);
     expect(vague.converted).toBe(0);
-    expect(vague.unbound).toEqual([
-      { text: "最后一个", reason: "relative", candidateCount: 4 },
-    ]);
+    expect(vague.unbound).toEqual([{ text: "最后一个", reason: "relative", candidateCount: 4 }]);
   });
 
   it("keeps ordinary prose and unrelated numbering as plain text", () => {

@@ -33,21 +33,44 @@ function speakingCheckpoint() {
     ...source,
     phase: "awaiting_approval" as const,
     shots: [speakingShot],
-    shotRuns: { [speakingShot.id]: { shotId: speakingShot.id, qcStatus: "passed" as const,
-      retryCount: 0, videoTaskId: "video-1", clipPath: "C:\\output\\video.mp4" } },
+    shotRuns: {
+      [speakingShot.id]: {
+        shotId: speakingShot.id,
+        qcStatus: "passed" as const,
+        retryCount: 0,
+        videoTaskId: "video-1",
+        clipPath: "C:\\output\\video.mp4",
+      },
+    },
     comicDrama: {
       ...createComicDramaCheckpoint(),
       pending: { episodeId: "ep01", stage: "storyboard" as const, step: "voice_binding" as const },
       sharedAssets: [{ id: "father", kind: "character" as const, name: "父亲", prompt: "修表匠" }],
-      episodes: [{ id: "ep01", title: "第一集", script: "剧本", stages: {
-        storyboard: {
-          artifact: { content: "分镜", inputSummary: "剧本", version: 1, createdAt: 1,
-            assets: [], shots: [speakingShot] },
-          businessReview: { result: "PASS" as const, report: "通过" },
-          contentReview: { result: "PASS" as const, report: "通过" },
-          approvedVersion: 1, passed: true, repairCount: 0, history: [],
+      episodes: [
+        {
+          id: "ep01",
+          title: "第一集",
+          script: "剧本",
+          stages: {
+            storyboard: {
+              artifact: {
+                content: "分镜",
+                inputSummary: "剧本",
+                version: 1,
+                createdAt: 1,
+                assets: [],
+                shots: [speakingShot],
+              },
+              businessReview: { result: "PASS" as const, report: "通过" },
+              contentReview: { result: "PASS" as const, report: "通过" },
+              approvedVersion: 1,
+              passed: true,
+              repairCount: 0,
+              history: [],
+            },
+          },
         },
-      } }],
+      ],
     },
   };
 }
@@ -55,18 +78,32 @@ function speakingCheckpoint() {
 describe("comic drama node", () => {
   it("lets the user bind a provider model and control-panel voice at the voice gate", () => {
     const checkpoint = speakingCheckpoint();
-    const providerCatalog = catalog.map((entry) => ({ ...entry,
-      models: [...entry.models, {
-        definitionId: "project-speech", remoteModelId: "seed-tts-2.0",
-        displayName: "豆包语音", operations: ["speech_generation"] as typeof entry.models[number]["operations"],
-        operationSchema: {},
-      }],
+    const providerCatalog = catalog.map((entry) => ({
+      ...entry,
+      models: [
+        ...entry.models,
+        {
+          definitionId: "project-speech",
+          remoteModelId: "seed-tts-2.0",
+          displayName: "豆包语音",
+          operations: ["speech_generation"] as (typeof entry.models)[number]["operations"],
+          operationSchema: {},
+        },
+      ],
     }));
     function Harness() {
       const [options, setOptions] = useState(createComicDramaOptions());
-      return <ComicDramaConfiguration options={options} checkpoint={checkpoint}
-        providerCatalog={providerCatalog} brief="" disabled
-        onChange={setOptions} onBriefChange={vi.fn()} />;
+      return (
+        <ComicDramaConfiguration
+          options={options}
+          checkpoint={checkpoint}
+          providerCatalog={providerCatalog}
+          brief=""
+          disabled
+          onChange={setOptions}
+          onBriefChange={vi.fn()}
+        />
+      );
     }
     render(<Harness />);
     fireEvent.change(screen.getByLabelText("漫剧语音供应商"), {
@@ -82,29 +119,57 @@ describe("comic drama node", () => {
 
   it("shows the actual dubbed clip for an explicit shot-by-shot lip decision", async () => {
     const checkpoint = speakingCheckpoint();
-    const onReviewDubbedShot = vi.fn()
+    const onReviewDubbedShot = vi
+      .fn()
       .mockRejectedValueOnce(new Error("配音视频文件已改变"))
       .mockResolvedValueOnce(undefined);
-    render(<ComicDramaDeliverables checkpoint={{
-      ...checkpoint,
-      comicDrama: { ...checkpoint.comicDrama, pending: null, speech: {
-        voiceBindingsSignature: "voice-signature",
-        lines: { "ep01:P1#0": {
-          shotId: "ep01:P1", lineIndex: 0, speakerId: "father", text: "回来就好。",
-          startSeconds: 0.8, voiceId: "console-voice-father",
-          providerId: "project-provider", modelDefinitionId: "project-speech",
-          requestId: "run:speech:ep01:P1:0", requestSignature: "a".repeat(64),
-          path: "C:\\output\\voice.wav", durationSeconds: 1,
-        } },
-        dubbedClips: { "ep01:P1": {
-          sourcePath: "C:\\output\\video.mp4", sourceVideoTaskId: "video-1",
-          speechSignature: "speech-signature", requestId: "run:dub:ep01:P1:video-1",
-          requestSignature: "b".repeat(64), videoSignature: "c".repeat(64),
-          path: "C:\\output\\dubbed.mp4", durationSeconds: 5,
-        } },
-      } },
-    }} onReviewDubbedShot={onReviewDubbedShot} />);
-    expect(screen.getByLabelText("父亲开口配音预览")).toHaveAttribute("src", "C:\\output\\dubbed.mp4");
+    render(
+      <ComicDramaDeliverables
+        checkpoint={{
+          ...checkpoint,
+          comicDrama: {
+            ...checkpoint.comicDrama,
+            pending: null,
+            speech: {
+              voiceBindingsSignature: "voice-signature",
+              lines: {
+                "ep01:P1#0": {
+                  shotId: "ep01:P1",
+                  lineIndex: 0,
+                  speakerId: "father",
+                  text: "回来就好。",
+                  startSeconds: 0.8,
+                  voiceId: "console-voice-father",
+                  providerId: "project-provider",
+                  modelDefinitionId: "project-speech",
+                  requestId: "run:speech:ep01:P1:0",
+                  requestSignature: "a".repeat(64),
+                  path: "C:\\output\\voice.wav",
+                  durationSeconds: 1,
+                },
+              },
+              dubbedClips: {
+                "ep01:P1": {
+                  sourcePath: "C:\\output\\video.mp4",
+                  sourceVideoTaskId: "video-1",
+                  speechSignature: "speech-signature",
+                  requestId: "run:dub:ep01:P1:video-1",
+                  requestSignature: "b".repeat(64),
+                  videoSignature: "c".repeat(64),
+                  path: "C:\\output\\dubbed.mp4",
+                  durationSeconds: 5,
+                },
+              },
+            },
+          },
+        }}
+        onReviewDubbedShot={onReviewDubbedShot}
+      />,
+    );
+    expect(screen.getByLabelText("父亲开口配音预览")).toHaveAttribute(
+      "src",
+      "C:\\output\\dubbed.mp4",
+    );
     fireEvent.click(screen.getByRole("button", { name: "口型通过，采用本镜" }));
     expect(onReviewDubbedShot).toHaveBeenCalledWith("ep01:P1", "approved");
     await waitFor(() => expect(screen.getByRole("alert")).toHaveTextContent("配音视频文件已改变"));

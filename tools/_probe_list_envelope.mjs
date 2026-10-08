@@ -168,12 +168,17 @@ async function fetchPreviewStat(url) {
       http: preview.status,
       contentType: type.split(";")[0] ?? "",
       bytes: buf.byteLength,
-      looksImage: type.startsWith("image/") || (buf.byteLength > 8 && bytes[0] === 0xff && bytes[1] === 0xd8),
+      looksImage:
+        type.startsWith("image/") || (buf.byteLength > 8 && bytes[0] === 0xff && bytes[1] === 0xd8),
       tosCode,
       ms: Date.now() - started,
     };
   } catch (error) {
-    return { http: null, error: error instanceof Error ? error.name : "error", ms: Date.now() - started };
+    return {
+      http: null,
+      error: error instanceof Error ? error.name : "error",
+      ms: Date.now() - started,
+    };
   }
 }
 
@@ -184,7 +189,8 @@ function httpField(item, field) {
   if (!trimmed.startsWith("http://") && !trimmed.startsWith("https://")) return null;
   const parsed = new URL(trimmed);
   const queryKeys = [...parsed.searchParams.keys()];
-  const expires = parsed.searchParams.get("X-Tos-Expires") ?? parsed.searchParams.get("x-tos-expires");
+  const expires =
+    parsed.searchParams.get("X-Tos-Expires") ?? parsed.searchParams.get("x-tos-expires");
   const date = parsed.searchParams.get("X-Tos-Date") ?? parsed.searchParams.get("x-tos-date");
   return {
     field,
@@ -207,7 +213,11 @@ for (const item of sampleItems) {
   const source = httpField(item, "source_url") ?? httpField(item, "sourceUrl");
   const rustFetch = rust ? await fetchPreviewStat(rust.url) : null;
   const previewFetch =
-    preview && rust && preview.path === rust.path && preview.host === rust.host && preview.url === rust.url
+    preview &&
+    rust &&
+    preview.path === rust.path &&
+    preview.host === rust.host &&
+    preview.url === rust.url
       ? rustFetch
       : preview
         ? await fetchPreviewStat(preview.url)
@@ -257,7 +267,9 @@ if (firstId != null && firstId !== "") {
     getJson = null;
   }
   const getRecord = getJson?.data && typeof getJson.data === "object" ? getJson.data : getJson;
-  const getPreview = getRecord ? httpField(getRecord, "preview_url") ?? httpField(getRecord, "url") : null;
+  const getPreview = getRecord
+    ? (httpField(getRecord, "preview_url") ?? httpField(getRecord, "url"))
+    : null;
   getProbe = {
     http: getResponse.status,
     bodyChars: getText.length,
@@ -271,7 +283,11 @@ const report = {
   listHttp: response.status,
   listBodyChars: text.length,
   topKeys: json && typeof json === "object" ? Object.keys(json) : [],
-  dataType: Array.isArray(data) ? "array" : data && typeof data === "object" ? "object" : typeof data,
+  dataType: Array.isArray(data)
+    ? "array"
+    : data && typeof data === "object"
+      ? "object"
+      : typeof data,
   dataKeys: data && typeof data === "object" && !Array.isArray(data) ? Object.keys(data) : [],
   arrays: {
     dataList: summarizeArray("data.list", data?.list),
@@ -282,10 +298,12 @@ const report = {
     topList: summarizeArray("list", json?.list),
     topItems: summarizeArray("items", json?.items),
   },
-  rustAssetArrayPicks: rustFromData.length > 0 ? "data" : rustFromPayload.length > 0 ? "payload" : "none",
+  rustAssetArrayPicks:
+    rustFromData.length > 0 ? "data" : rustFromPayload.length > 0 ? "payload" : "none",
   rustPickedCount: rustMerged.length,
   rustPickedWithUrl: rustMerged.filter((item) => rustHttpUrl(item)).length,
-  rustPickedFirstKeys: rustMerged[0] && typeof rustMerged[0] === "object" ? Object.keys(rustMerged[0]) : [],
+  rustPickedFirstKeys:
+    rustMerged[0] && typeof rustMerged[0] === "object" ? Object.keys(rustMerged[0]) : [],
   previewSamples,
   getProbe,
 };

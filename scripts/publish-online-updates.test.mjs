@@ -119,7 +119,12 @@ async function fixture(t, version = "0.2.1", platform = PLATFORM) {
             codeSignatureVerified: true,
             architectureVerified: true,
             updateArchiveBytesVerified: true,
-              dmg: { dmgVerified: true, applicationBytesVerified: true, codeSignatureVerified: true, sha256: artifacts[2].sha256 },
+            dmg: {
+              dmgVerified: true,
+              applicationBytesVerified: true,
+              codeSignatureVerified: true,
+              sha256: artifacts[2].sha256,
+            },
           },
         }
       : { nsisResourceCount: 107 }),

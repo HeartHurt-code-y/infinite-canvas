@@ -10,9 +10,7 @@ import {
 } from "./assetGroups";
 import type { AssetNodeData, OutputNodeData } from "./workspaceModel";
 
-function output(
-  overrides: Partial<OutputNodeData> & Pick<OutputNodeData, "key">,
-): OutputNodeData {
+function output(overrides: Partial<OutputNodeData> & Pick<OutputNodeData, "key">): OutputNodeData {
   return {
     resultKey: `${overrides.key}#0`,
     sourceNodeId: "gen",

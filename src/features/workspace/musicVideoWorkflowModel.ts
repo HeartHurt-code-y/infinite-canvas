@@ -116,7 +116,8 @@ export function musicVideoLipReviewSignature(
   const clipPath = checkpoint.shotRuns[shotId]?.clipPath;
   if (!state?.song || !shot || shot.lipSync !== "sync" || !clipPath)
     throw new Error("口型审核缺少当前正面演唱镜头、片段或原曲身份。");
-  if (!/^[a-f0-9]{64}$/.test(clipSignature)) throw new Error("口型审核需要当前片段正文的 SHA-256。");
+  if (!/^[a-f0-9]{64}$/.test(clipSignature))
+    throw new Error("口型审核需要当前片段正文的 SHA-256。");
   return stableJsonSignature({
     runId: checkpoint.runId,
     songSignature: state.song.sourceSignature,
@@ -146,7 +147,9 @@ export function setMusicVideoLipReview(
     },
   };
 }
-export function musicVideoSpeechAnalysisMode(options: MusicVideoWorkflowOptions): "automatic" | "manual" {
+export function musicVideoSpeechAnalysisMode(
+  options: MusicVideoWorkflowOptions,
+): "automatic" | "manual" {
   return options.deliverable === "video" ? "automatic" : (options.speechAnalysisMode ?? "manual");
 }
 export function createMusicVideoOptions(): MusicVideoWorkflowOptions {
@@ -258,17 +261,18 @@ export function musicVideoDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowChe
     sections.push(
       `音视频流时长检查：${state.alignment.aligned ? "通过" : "未通过"}；音频 ${state.alignment.audioDurationSeconds}s / 视频 ${state.alignment.videoDurationSeconds}s。`,
     );
-  const syncShots = state.stages.prompts?.artifact?.shots?.filter((shot) => shot.lipSync === "sync") ?? [];
+  const syncShots =
+    state.stages.prompts?.artifact?.shots?.filter((shot) => shot.lipSync === "sync") ?? [];
   if (syncShots.length) {
     sections.push("## 逐镜口型人工验收");
+    sections.push("当前未接入可测量既有视频唇音偏移的自动检测服务；人工审核不等于自动口型验证。");
     sections.push(
-      "当前未接入可测量既有视频唇音偏移的自动检测服务；人工审核不等于自动口型验证。",
-    );
-    sections.push(
-      syncShots.map((shot) => {
-        const review = state.lipReviews?.[shot.id];
-        return `- ${shot.id} ${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)}s：${review?.decision === "approved" ? "人工选用" : review?.decision === "rejected" ? "人工驳回" : "待人工验收"}；${review?.note || "无备注"}`;
-      }).join("\n"),
+      syncShots
+        .map((shot) => {
+          const review = state.lipReviews?.[shot.id];
+          return `- ${shot.id} ${shot.startSeconds.toFixed(3)}–${shot.endSeconds.toFixed(3)}s：${review?.decision === "approved" ? "人工选用" : review?.decision === "rejected" ? "人工驳回" : "待人工验收"}；${review?.note || "无备注"}`;
+        })
+        .join("\n"),
     );
   } else sections.push("未安排正面演唱镜头，无口型验收目标。");
   sections.push("最终音轨使用用户提供的原曲母带；最终交付仍需用户预览确认。");

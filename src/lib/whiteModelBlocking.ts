@@ -91,11 +91,11 @@ export function isPanoramaAspect(width: number, height: number): boolean {
   return height > 0 && width / height >= PANORAMA_ASPECT_MIN;
 }
 
-export function documentHasPanoramaInstruction(document: PromptContentDocumentV1 | undefined): boolean {
+export function documentHasPanoramaInstruction(
+  document: PromptContentDocumentV1 | undefined,
+): boolean {
   if (!document) return false;
-  const text = document.items
-    .map((item) => (item.kind === "text" ? item.text : ""))
-    .join("");
+  const text = document.items.map((item) => (item.kind === "text" ? item.text : "")).join("");
   return /equirectangular|全景环境图|360\s*°?\s*全景/iu.test(text);
 }
 
@@ -241,7 +241,10 @@ export function whiteModelBlockingSignature(draft: WhiteModelStudioDraft): strin
   return JSON.stringify({
     plan: draft.plan,
     environment: draft.environment ?? null,
-    characterBindings: pruneWhiteModelCharacterBindings(draft.characterBindings, draft.plan.objects),
+    characterBindings: pruneWhiteModelCharacterBindings(
+      draft.characterBindings,
+      draft.plan.objects,
+    ),
   });
 }
 
@@ -334,7 +337,9 @@ export function buildBlockingPromptDocument(
     readonly binding: WhiteModelBinding;
     readonly target: MediaReferenceTarget;
   }[] = [];
-  for (const assignment of [...assignments].sort((left, right) => left.dummyNumber - right.dummyNumber)) {
+  for (const assignment of [...assignments].sort(
+    (left, right) => left.dummyNumber - right.dummyNumber,
+  )) {
     const target = mediaTarget(assignment.character);
     if (!target || target.mediaType !== "image") {
       return {

@@ -443,7 +443,9 @@ export function ProductSceneConfiguration({
               })
             }
           />
-          <small>一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。</small>
+          <small>
+            一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。
+          </small>
         </label>
         <label>
           场景倾向
@@ -719,9 +721,7 @@ export function ProductSceneDeliverables({
     [pendingReview, options],
   );
   const eligibleIds = new Set(eligible.map((row) => row.id));
-  const visibleEligibleIds = visible
-    .filter((row) => eligibleIds.has(row.id))
-    .map((row) => row.id);
+  const visibleEligibleIds = visible.filter((row) => eligibleIds.has(row.id)).map((row) => row.id);
   const selectedVisibleIds = visibleEligibleIds.filter((id) => selectedIds.includes(id));
   const hasNext = approvedThrough < (rows?.length ?? 0);
   const canNext = !disabled && hasNext;

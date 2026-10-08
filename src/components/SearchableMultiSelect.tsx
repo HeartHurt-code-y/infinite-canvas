@@ -89,10 +89,7 @@ export function SearchableMultiSelect({
     .filter(Boolean);
 
   return (
-    <div
-      className={`searchable-multi-select${disabled ? " is-disabled" : ""}`}
-      ref={containerRef}
-    >
+    <div className={`searchable-multi-select${disabled ? " is-disabled" : ""}`} ref={containerRef}>
       <div className="searchable-multi-select__trigger">
         {/*
          * 展开控件必须是真正的 <button>，chip 上的「移除」也是 <button>。

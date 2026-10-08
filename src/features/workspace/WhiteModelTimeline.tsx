@@ -35,7 +35,8 @@ export function WhiteModelTimeline({
   const next = allTimes.find((value) => value > time + 1e-6);
   const onCameraKey = nearestKeyframeIndex(plan.camera.keyframes, time, plan.fps) >= 0;
   const onActorKey = actor ? nearestKeyframeIndex(actor.keyframes, time, plan.fps) >= 0 : false;
-  const percent = (value: number) => `${(Math.min(duration, Math.max(0, value)) / duration) * 100}%`;
+  const percent = (value: number) =>
+    `${(Math.min(duration, Math.max(0, value)) / duration) * 100}%`;
 
   return (
     <div className="white-model-timeline">

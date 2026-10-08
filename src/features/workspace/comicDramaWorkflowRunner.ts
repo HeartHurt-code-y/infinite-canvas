@@ -27,10 +27,7 @@ import {
   type WorkflowPlan,
   type WorkflowPlanningContext,
 } from "./knowledgeVideoWorkflowRunner";
-import {
-  CANVAS_ID,
-  type KnowledgeVideoWorkflowCheckpoint,
-} from "./workspaceModel";
+import { CANVAS_ID, type KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import {
   comicDramaReviewOutputSchema,
   comicDramaStageOutputSchema,
@@ -107,7 +104,10 @@ function validateResume(
   if (previous && !sameWorkflowSignature(previous, inputSignature(request.node)))
     throw new Error("剧集资料已修改，请重新执行以重建受影响的导演分析、服化道和分镜。");
   const speech = checkpoint.comicDrama?.speech;
-  if (speech && !sameWorkflowSignature(speech.voiceBindingsSignature, voiceBindingsSignature(request.node)))
+  if (
+    speech &&
+    !sameWorkflowSignature(speech.voiceBindingsSignature, voiceBindingsSignature(request.node))
+  )
     throw new Error("角色音色绑定已改变，请重新制作，不能复用旧配音和视频片段。");
 }
 
@@ -200,14 +200,26 @@ export function parseComicDramaStage(
       if (item.acceptance.length === 0) throw new Error("镜头缺少验收标准。");
       const dialogue = item.dialogue;
       const dialogueLines = item.dialogueLines ?? [];
-      if (options.requireSpeechLines && Boolean(dialogue.trim()) !== (dialogueLines.length > 0))
+      if (options.requireSpeechLines && Boolean(dialogue.trim()) !== dialogueLines.length > 0)
         throw new Error(`镜头 ${id} 的逐字对白与有序说话人台词不一致。`);
-      if (dialogueLines.length && dialogueLines.map((line) => line.text).join("").replace(/\s/gu, "") !== dialogue.replace(/\s/gu, ""))
+      if (
+        dialogueLines.length &&
+        dialogueLines
+          .map((line) => line.text)
+          .join("")
+          .replace(/\s/gu, "") !== dialogue.replace(/\s/gu, "")
+      )
         throw new Error(`镜头 ${id} 的有序说话人台词必须逐字覆盖原对白。`);
       for (const [lineIndex, line] of dialogueLines.entries()) {
         if (!knownAssets.some((asset) => asset.id === line.speakerId && asset.kind === "character"))
-          throw new Error(`镜头 ${id} 第 ${lineIndex + 1} 句引用了未经确认的说话角色 ${line.speakerId}。`);
-        if (!Number.isFinite(line.startSeconds) || line.startSeconds < 0 || line.startSeconds >= item.durationSeconds)
+          throw new Error(
+            `镜头 ${id} 第 ${lineIndex + 1} 句引用了未经确认的说话角色 ${line.speakerId}。`,
+          );
+        if (
+          !Number.isFinite(line.startSeconds) ||
+          line.startSeconds < 0 ||
+          line.startSeconds >= item.durationSeconds
+        )
           throw new Error(`镜头 ${id} 第 ${lineIndex + 1} 句的起始时间超出镜头。`);
         if (lineIndex > 0 && line.startSeconds < dialogueLines[lineIndex - 1]!.startSeconds)
           throw new Error(`镜头 ${id} 的逐句对白必须按镜头内时间排序。`);
@@ -305,7 +317,10 @@ function reviewFeedback(run: ComicDramaStageRun): string {
     .join("\n\n");
 }
 
-type ComicDramaSpeechClient = Pick<typeof speechClient, "getRequestStatus" | "synthesize" | "composeDubbedVideo">;
+type ComicDramaSpeechClient = Pick<
+  typeof speechClient,
+  "getRequestStatus" | "synthesize" | "composeDubbedVideo"
+>;
 
 function speechLineKey(shotId: string, lineIndex: number): string {
   return `${shotId}#${lineIndex}`;
@@ -315,12 +330,22 @@ function speechLines(shot: KnowledgeVideoWorkflowCheckpoint["shots"][number]) {
   const lines = (shot as ComicDramaShot).dialogueLines ?? [];
   if (shot.narration.trim() && !lines.length)
     throw new Error(`镜头 ${shot.id} 有对白但缺少已确认的逐句说话人，不能自动配音。`);
-  if (lines.map((line) => line.text).join("").replace(/\s/gu, "") !== shot.narration.replace(/\s/gu, ""))
+  if (
+    lines
+      .map((line) => line.text)
+      .join("")
+      .replace(/\s/gu, "") !== shot.narration.replace(/\s/gu, "")
+  )
     throw new Error(`镜头 ${shot.id} 的逐句说话人台词与当前对白不一致，请重新审核分镜。`);
   for (const [index, line] of lines.entries()) {
-    if (!line.speakerId || !line.text || !Number.isFinite(line.startSeconds) ||
-      line.startSeconds < 0 || line.startSeconds >= shot.durationSeconds ||
-      (index > 0 && line.startSeconds < lines[index - 1]!.startSeconds))
+    if (
+      !line.speakerId ||
+      !line.text ||
+      !Number.isFinite(line.startSeconds) ||
+      line.startSeconds < 0 ||
+      line.startSeconds >= shot.durationSeconds ||
+      (index > 0 && line.startSeconds < lines[index - 1]!.startSeconds)
+    )
       throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句的角色、文本或时间无效。`);
   }
   return lines;
@@ -723,9 +748,10 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
       const speechModel = options.speech?.model;
       const selected = request.providerCatalog
         .find((entry) => entry.provider.enabled && entry.provider.id === speechModel?.providerId)
-        ?.models.find((entry) =>
-          entry.definitionId === speechModel?.modelDefinitionId &&
-          (entry.operations as readonly string[]).includes("speech_generation"),
+        ?.models.find(
+          (entry) =>
+            entry.definitionId === speechModel?.modelDefinitionId &&
+            (entry.operations as readonly string[]).includes("speech_generation"),
         );
       const bindings = options.speech?.voiceBindings ?? {};
       const missing = required.filter((asset) => !bindings[asset.id]?.trim());
@@ -733,7 +759,9 @@ async function planComicDrama(context: WorkflowPlanningContext): Promise<Workflo
         const voiceId = bindings[asset.id]?.trim() ?? "";
         return voiceId.length > 128 || /\s/u.test(voiceId);
       });
-      const ids = required.map((asset) => bindings[asset.id]?.trim()).filter((id): id is string => Boolean(id));
+      const ids = required
+        .map((asset) => bindings[asset.id]?.trim())
+        .filter((id): id is string => Boolean(id));
       const duplicates = new Set(ids).size !== ids.length;
       if (!selected || missing.length || malformed.length || duplicates) {
         const target = getDrama().episodes.at(-1)!;
@@ -798,23 +826,33 @@ export function createComicDramaWorkflowRunner(
       const model = options?.speech?.model;
       const selected = context.request.providerCatalog
         .find((entry) => entry.provider.enabled && entry.provider.id === model?.providerId)
-        ?.models.find((entry) =>
-          entry.definitionId === model?.modelDefinitionId &&
-          (entry.operations as readonly string[]).includes("speech_generation"),
+        ?.models.find(
+          (entry) =>
+            entry.definitionId === model?.modelDefinitionId &&
+            (entry.operations as readonly string[]).includes("speech_generation"),
         );
-      if (!selected) throw new Error("漫剧成片需要项目中已启用的语音合成模型，不能沿用未配音的旧分镜。");
-      const known = new Set(context.checkpoint().comicDrama?.sharedAssets
-        .filter((asset) => asset.kind === "character").map((asset) => asset.id));
+      if (!selected)
+        throw new Error("漫剧成片需要项目中已启用的语音合成模型，不能沿用未配音的旧分镜。");
+      const known = new Set(
+        context
+          .checkpoint()
+          .comicDrama?.sharedAssets.filter((asset) => asset.kind === "character")
+          .map((asset) => asset.id),
+      );
       const boundVoices = new Map<string, string>();
       for (const line of spoken) {
         const voiceId = options?.speech?.voiceBindings[line.speakerId]?.trim() ?? "";
         if (!known.has(line.speakerId) || !voiceId)
-          throw new Error(`说话角色 ${line.speakerId} 缺少已确认资产或控制台音色 ID，不能生成媒体。`);
+          throw new Error(
+            `说话角色 ${line.speakerId} 缺少已确认资产或控制台音色 ID，不能生成媒体。`,
+          );
         if (voiceId.length > 128 || /\s/u.test(voiceId))
           throw new Error(`说话角色 ${line.speakerId} 的控制台音色 ID 格式无效。`);
         const otherSpeaker = boundVoices.get(voiceId);
         if (otherSpeaker && otherSpeaker !== line.speakerId)
-          throw new Error(`说话角色 ${otherSpeaker} 与 ${line.speakerId} 绑定了同一个音色 ID，请分别指定。`);
+          throw new Error(
+            `说话角色 ${otherSpeaker} 与 ${line.speakerId} 绑定了同一个音色 ID，请分别指定。`,
+          );
         boundVoices.set(voiceId, line.speakerId);
       }
     },
@@ -849,17 +887,21 @@ export function createComicDramaWorkflowRunner(
         };
         const prior = context.checkpoint().comicDrama?.speech?.lines[key];
         if (prior) {
-          if (stableJsonSignature(intent) !== stableJsonSignature({
-            shotId: prior.shotId,
-            lineIndex: prior.lineIndex,
-            speakerId: prior.speakerId,
-            text: prior.text,
-            startSeconds: prior.startSeconds,
-            voiceId: prior.voiceId,
-            providerId: prior.providerId,
-            modelDefinitionId: prior.modelDefinitionId,
-            requestId: prior.requestId,
-          })) throw new Error(`镜头 ${shot.id} 的配音内容已改变，请重新制作。`);
+          if (
+            stableJsonSignature(intent) !==
+            stableJsonSignature({
+              shotId: prior.shotId,
+              lineIndex: prior.lineIndex,
+              speakerId: prior.speakerId,
+              text: prior.text,
+              startSeconds: prior.startSeconds,
+              voiceId: prior.voiceId,
+              providerId: prior.providerId,
+              modelDefinitionId: prior.modelDefinitionId,
+              requestId: prior.requestId,
+            })
+          )
+            throw new Error(`镜头 ${shot.id} 的配音内容已改变，请重新制作。`);
           const status = await voiceClient.getRequestStatus(prior.requestId);
           if (status.status === "recoverable") {
             await context.request.beforeSideEffect?.();
@@ -870,14 +912,24 @@ export function createComicDramaWorkflowRunner(
               voiceId: intent.voiceId,
               text: intent.text,
             });
-            if (recovered.path !== prior.path || recovered.requestSignature !== prior.requestSignature ||
-              recovered.voiceId !== prior.voiceId || recovered.durationSeconds !== prior.durationSeconds)
-              throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句恢复后的配音与已审核版本不一致。`);
+            if (
+              recovered.path !== prior.path ||
+              recovered.requestSignature !== prior.requestSignature ||
+              recovered.voiceId !== prior.voiceId ||
+              recovered.durationSeconds !== prior.durationSeconds
+            )
+              throw new Error(
+                `镜头 ${shot.id} 第 ${lineIndex + 1} 句恢复后的配音与已审核版本不一致。`,
+              );
           } else if (status.status !== "ready") {
-            throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句已保存配音文件状态为 ${status.status}，不能继续提交视频。`);
+            throw new Error(
+              `镜头 ${shot.id} 第 ${lineIndex + 1} 句已保存配音文件状态为 ${status.status}，不能继续提交视频。`,
+            );
           }
-          if (status.status === "ready" &&
-            (status.path !== prior.path || status.requestSignature !== prior.requestSignature))
+          if (
+            status.status === "ready" &&
+            (status.path !== prior.path || status.requestSignature !== prior.requestSignature)
+          )
             throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句已保存配音文件与原请求不一致。`);
           continue;
         }
@@ -908,8 +960,12 @@ export function createComicDramaWorkflowRunner(
           voiceId: intent.voiceId,
           text: intent.text,
         });
-        if (!result.path || result.voiceId !== voiceId ||
-          !Number.isFinite(result.durationSeconds) || result.durationSeconds <= 0)
+        if (
+          !result.path ||
+          result.voiceId !== voiceId ||
+          !Number.isFinite(result.durationSeconds) ||
+          result.durationSeconds <= 0
+        )
           throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句没有得到有效的真实配音。`);
         context.commit((current) => {
           const saved = current.comicDrama?.speech;
@@ -923,9 +979,12 @@ export function createComicDramaWorkflowRunner(
                 voiceBindingsSignature: bindingSignature,
                 lines: {
                   ...saved?.lines,
-                  [key]: { ...intent, path: result.path,
+                  [key]: {
+                    ...intent,
+                    path: result.path,
                     durationSeconds: result.durationSeconds,
-                    requestSignature: result.requestSignature },
+                    requestSignature: result.requestSignature,
+                  },
                 },
                 pendingRequests,
                 dubbedClips: saved?.dubbedClips ?? {},
@@ -935,14 +994,16 @@ export function createComicDramaWorkflowRunner(
           };
         });
       }
-      const savedLines = lines.map((_, index) =>
-        context.checkpoint().comicDrama?.speech?.lines[speechLineKey(shot.id, index)],
+      const savedLines = lines.map(
+        (_, index) => context.checkpoint().comicDrama?.speech?.lines[speechLineKey(shot.id, index)],
       );
       for (const [index, result] of savedLines.entries()) {
         if (!result) throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句缺少已保存配音。`);
         const nextStart = lines[index + 1]?.startSeconds ?? shot.durationSeconds;
         if (result.startSeconds + result.durationSeconds > nextStart + 0.04)
-          throw new Error(`镜头 ${shot.id} 第 ${index + 1} 句配音实测时长超过分镜时间窗口，请调整台词或镜头。`);
+          throw new Error(
+            `镜头 ${shot.id} 第 ${index + 1} 句配音实测时长超过分镜时间窗口，请调整台词或镜头。`,
+          );
       }
       if (!musicVideoSupportsAudioReference(context.request)) return [];
       return savedLines.map((result, index) => ({
@@ -962,11 +1023,18 @@ export function createComicDramaWorkflowRunner(
         const speech = context.checkpoint().comicDrama?.speech;
         const segments = lines.map((line, lineIndex) => {
           const result = speech?.lines[speechLineKey(shot.id, lineIndex)];
-          if (!result?.path) throw new Error(`镜头 ${shot.id} 缺少第 ${lineIndex + 1} 句真实配音。`);
-          if (result.text !== line.text || result.speakerId !== line.speakerId ||
+          if (!result?.path)
+            throw new Error(`镜头 ${shot.id} 缺少第 ${lineIndex + 1} 句真实配音。`);
+          if (
+            result.text !== line.text ||
+            result.speakerId !== line.speakerId ||
             result.startSeconds !== line.startSeconds ||
-            result.voiceId !== context.request.node.config.comicDrama?.speech?.voiceBindings[line.speakerId])
-            throw new Error(`镜头 ${shot.id} 第 ${lineIndex + 1} 句与已生成配音不一致，请重新制作。`);
+            result.voiceId !==
+              context.request.node.config.comicDrama?.speech?.voiceBindings[line.speakerId]
+          )
+            throw new Error(
+              `镜头 ${shot.id} 第 ${lineIndex + 1} 句与已生成配音不一致，请重新制作。`,
+            );
           return { audioPath: result.path, startSeconds: result.startSeconds };
         });
         const speechSignature = stableJsonSignature({
@@ -986,9 +1054,19 @@ export function createComicDramaWorkflowRunner(
           segments,
           outputName: `漫剧-${shot.id}-配音`,
         };
-        if (!(prior?.path && prior.sourcePath === path && prior.sourceVideoTaskId === taskId && prior.speechSignature === speechSignature)) {
+        if (!(
+          prior?.path &&
+          prior.sourcePath === path &&
+          prior.sourceVideoTaskId === taskId &&
+          prior.speechSignature === speechSignature
+        )) {
           const priorIntent = speech?.pendingDubRequests?.[shot.id];
-          if (priorIntent && (priorIntent.requestId !== requestId || priorIntent.sourcePath !== path || priorIntent.speechSignature !== speechSignature))
+          if (
+            priorIntent &&
+            (priorIntent.requestId !== requestId ||
+              priorIntent.sourcePath !== path ||
+              priorIntent.speechSignature !== speechSignature)
+          )
             throw new Error(`镜头 ${shot.id} 的待恢复配音合成与当前视频不一致，请重新制作。`);
           context.commit((current) => ({
             ...current,
@@ -998,14 +1076,23 @@ export function createComicDramaWorkflowRunner(
                 ...current.comicDrama!.speech!,
                 pendingDubRequests: {
                   ...current.comicDrama!.speech?.pendingDubRequests,
-                  [shot.id]: { requestId, sourcePath: path, sourceVideoTaskId: taskId, speechSignature },
+                  [shot.id]: {
+                    requestId,
+                    sourcePath: path,
+                    sourceVideoTaskId: taskId,
+                    speechSignature,
+                  },
                 },
               },
             },
           }));
           await context.request.beforeSideEffect?.();
           const result = await voiceClient.composeDubbedVideo(command);
-          if (!result.path || !Number.isFinite(result.durationSeconds) || result.durationSeconds <= 0)
+          if (
+            !result.path ||
+            !Number.isFinite(result.durationSeconds) ||
+            result.durationSeconds <= 0
+          )
             throw new Error(`镜头 ${shot.id} 未获得有效的配音视频。`);
           context.commit((current) => {
             const saved = current.comicDrama!.speech!;
@@ -1038,12 +1125,20 @@ export function createComicDramaWorkflowRunner(
         } else {
           await context.request.beforeSideEffect?.();
           const verified = await voiceClient.composeDubbedVideo(command);
-          if (verified.requestSignature !== prior.requestSignature ||
-            verified.videoSignature !== prior.videoSignature || verified.path !== prior.path)
+          if (
+            verified.requestSignature !== prior.requestSignature ||
+            verified.videoSignature !== prior.videoSignature ||
+            verified.path !== prior.path
+          )
             throw new Error(`镜头 ${shot.id} 的配音视频文件已改变，请重新验收当前版本。`);
         }
-        const actualSignature = await clipSignature(context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.path ?? "");
-        if (actualSignature !== context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.videoSignature)
+        const actualSignature = await clipSignature(
+          context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.path ?? "",
+        );
+        if (
+          actualSignature !==
+          context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id]?.videoSignature
+        )
           throw new Error(`镜头 ${shot.id} 的配音视频正文已改变，请重新试听并人工验收。`);
       }
       if (!comicDramaLipReviewComplete(context.checkpoint())) {
@@ -1067,17 +1162,19 @@ export function createComicDramaWorkflowRunner(
     startComposition: async (context, clips) => {
       if (!comicDramaLipReviewComplete(context.checkpoint()))
         throw new Error("配音镜头尚未逐镜通过人工口型验收，不能合成成片。");
-      const inputs = await Promise.all(clips.map(async ({ shot, path }, index) => {
-        if (!speechLines(shot).length)
-          return { key: shot.id, name: `镜头-${index + 1}`, source: path };
-        const dubbed = context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id];
-        if (!dubbed?.path || dubbed.sourcePath !== path)
-          throw new Error(`镜头 ${shot.id} 缺少当前版本的已审核配音片段。`);
-        const actualSignature = await clipSignature(dubbed.path);
-        if (actualSignature !== dubbed.videoSignature)
-          throw new Error(`镜头 ${shot.id} 的配音视频正文已改变，原口型验收失效。`);
-        return { key: shot.id, name: `镜头-${index + 1}-配音`, source: dubbed.path };
-      }));
+      const inputs = await Promise.all(
+        clips.map(async ({ shot, path }, index) => {
+          if (!speechLines(shot).length)
+            return { key: shot.id, name: `镜头-${index + 1}`, source: path };
+          const dubbed = context.checkpoint().comicDrama?.speech?.dubbedClips?.[shot.id];
+          if (!dubbed?.path || dubbed.sourcePath !== path)
+            throw new Error(`镜头 ${shot.id} 缺少当前版本的已审核配音片段。`);
+          const actualSignature = await clipSignature(dubbed.path);
+          if (actualSignature !== dubbed.videoSignature)
+            throw new Error(`镜头 ${shot.id} 的配音视频正文已改变，原口型验收失效。`);
+          return { key: shot.id, name: `镜头-${index + 1}-配音`, source: dubbed.path };
+        }),
+      );
       return context.dependencies.composerClient.startComposition(inputs, "漫剧-完整配音成片");
     },
     isPlanningComplete: (checkpoint) =>

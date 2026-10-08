@@ -73,15 +73,22 @@ export interface DubbedVideo {
 
 const positive = v.pipe(v.number(), v.finite(), v.minValue(Number.MIN_VALUE));
 const voiceSchema = v.object({
-  id: v.string(), name: v.string(), language: v.string(), engine: v.string(),
+  id: v.string(),
+  name: v.string(),
+  language: v.string(),
+  engine: v.string(),
 });
 const synthesizedSchema = v.object({
-  path: v.string(), mimeType: v.literal("audio/wav"), durationSeconds: positive,
-  voiceId: v.string(), requestSignature: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
+  path: v.string(),
+  mimeType: v.literal("audio/wav"),
+  durationSeconds: positive,
+  voiceId: v.string(),
+  requestSignature: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
   subtitlePath: v.nullable(v.string()),
 });
 const dubbedSchema = v.object({
-  path: v.string(), durationSeconds: positive,
+  path: v.string(),
+  durationSeconds: positive,
   requestSignature: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
   videoSignature: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/)),
 });

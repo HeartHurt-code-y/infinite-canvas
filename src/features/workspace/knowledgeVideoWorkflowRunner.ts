@@ -886,8 +886,7 @@ export function createKnowledgeVideoWorkflowRunner(
         if (node.config.comicDrama) {
           messages.composition =
             "全部漫剧片段已完成，请逐段检查画面、角色台词与配音音色，确认采用后合成。";
-          messages.final =
-            "配音成片已生成，请逐句试听并检查人物口型后确认最终交付。";
+          messages.final = "配音成片已生成，请逐句试听并检查人物口型后确认最终交付。";
         }
         commit((current) => ({
           ...current,

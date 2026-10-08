@@ -179,7 +179,10 @@ export const WhiteModelViewport = forwardRef<WhiteModelViewportHandle, WhiteMode
   },
 );
 
-function computeLensRect(size: { width: number; height: number }, plan: WhiteModelScenePlan): LensRect {
+function computeLensRect(
+  size: { width: number; height: number },
+  plan: WhiteModelScenePlan,
+): LensRect {
   const aspect = plan.width / plan.height;
   let width = size.width;
   let height = Math.round(width / aspect);

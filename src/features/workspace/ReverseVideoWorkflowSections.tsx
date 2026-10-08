@@ -28,7 +28,8 @@ interface ReverseVideoConfigurationProps {
   readonly onOpenDownloadSettings?: () => void;
   readonly cookieStatus?: VideoDownloaderEngineStatus | null;
   readonly cookieBusy?: boolean | undefined;
-  readonly onSelectCookieBrowser?: ((browser: VideoDownloaderCookieBrowser | null) => void) | undefined;
+  readonly onSelectCookieBrowser?:
+    ((browser: VideoDownloaderCookieBrowser | null) => void) | undefined;
   readonly onClearCookies?: (() => void) | undefined;
 }
 

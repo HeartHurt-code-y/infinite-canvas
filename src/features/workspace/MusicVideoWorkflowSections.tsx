@@ -120,8 +120,8 @@ export function MusicVideoConfiguration({
         ) : null}
         <small>
           成片模式要求已配置豆包语音识别连接和独立火山歌词对齐凭据；缺少或不可用时会阻断。
-          当前歌词对齐按中文配置；纯英文、日文歌曲不能走这条自动对齐链路。
-          LRC 可提供歌词边界作参考，自动模式以声学测量时间为准并等待试听确认。
+          当前歌词对齐按中文配置；纯英文、日文歌曲不能走这条自动对齐链路。 LRC
+          可提供歌词边界作参考，自动模式以声学测量时间为准并等待试听确认。
           历史手工文档模式不标记为已自动验证。
         </small>
         <label>
@@ -521,8 +521,13 @@ export function MusicVideoDeliverables({
   const [lipBusy, setLipBusy] = useState<string | null>(null);
   const [lipError, setLipError] = useState<string | null>(null);
   const state = checkpoint.musicVideo;
-  if (!state || (!state.speech && !MUSIC_VIDEO_STAGES.some((stage) => state.stages[stage]?.artifact))) return null;
-  const syncShots = state.stages.prompts?.artifact?.shots?.filter((shot) => shot.lipSync === "sync") ?? [];
+  if (
+    !state ||
+    (!state.speech && !MUSIC_VIDEO_STAGES.some((stage) => state.stages[stage]?.artifact))
+  )
+    return null;
+  const syncShots =
+    state.stages.prompts?.artifact?.shots?.filter((shot) => shot.lipSync === "sync") ?? [];
   async function reviewLipShot(shotId: string, decision: "approved" | "rejected") {
     const clipPath = checkpoint.shotRuns[shotId]?.clipPath;
     if (!clipPath) return;
@@ -551,13 +556,15 @@ export function MusicVideoDeliverables({
         <details className="canvas-knowledge-workflow__deliverables" open>
           <summary>原曲 ASR 与强制对齐</summary>
           <p>
-            ASR：{state.speech.asr
+            ASR：
+            {state.speech.asr
               ? `${state.speech.asr.engine} ${state.speech.asr.modelVersion} · ${state.speech.asr.segments.length} 段声学识别`
               : "未取得真实测量"}
           </p>
           {state.speech.asr ? <pre>{state.speech.asr.transcript || "未识别到唱词"}</pre> : null}
           <p>
-            强制对齐：{state.speech.forcedAlignment
+            强制对齐：
+            {state.speech.forcedAlignment
               ? `${state.speech.forcedAlignment.engine} ${state.speech.forcedAlignment.modelVersion} · ${state.speech.forcedAlignment.lines.length} 行`
               : "未取得真实测量"}
           </p>
@@ -643,7 +650,9 @@ export function MusicVideoDeliverables({
       {syncShots.length ? (
         <details className="canvas-knowledge-workflow__deliverables" open>
           <summary>正面演唱逐镜人工验收</summary>
-          <p>当前未接入自动唇音偏移检测。请试听原曲窗口、预览实际片段，并逐镜选用或驳回；片段正文变化后审核自动失效。</p>
+          <p>
+            当前未接入自动唇音偏移检测。请试听原曲窗口、预览实际片段，并逐镜选用或驳回；片段正文变化后审核自动失效。
+          </p>
           {lipError ? <p role="alert">{lipError}</p> : null}
           {syncShots.map((shot) => {
             const clipPath = checkpoint.shotRuns[shot.id]?.clipPath;
@@ -651,17 +660,30 @@ export function MusicVideoDeliverables({
             let current = false;
             if (review) {
               try {
-                current = review.signature === musicVideoLipReviewSignature(checkpoint, shot.id, review.clipSignature);
+                current =
+                  review.signature ===
+                  musicVideoLipReviewSignature(checkpoint, shot.id, review.clipSignature);
               } catch {
                 current = false;
               }
             }
-            const lyric = state.stages.timeline?.artifact?.timeline?.find((item) => item.id === shot.segmentId)?.text;
+            const lyric = state.stages.timeline?.artifact?.timeline?.find(
+              (item) => item.id === shot.segmentId,
+            )?.text;
             return (
               <div key={shot.id} className="canvas-music-video__lip-review">
-                <strong>{shot.title} · {shot.startSeconds.toFixed(2)}–{shot.endSeconds.toFixed(2)} 秒</strong>
+                <strong>
+                  {shot.title} · {shot.startSeconds.toFixed(2)}–{shot.endSeconds.toFixed(2)} 秒
+                </strong>
                 <p>{lyric || "该镜头没有已确认歌词"}</p>
-                <p>状态：{!current ? "待人工验收" : review?.decision === "approved" ? "人工选用" : "人工驳回"}</p>
+                <p>
+                  状态：
+                  {!current
+                    ? "待人工验收"
+                    : review?.decision === "approved"
+                      ? "人工选用"
+                      : "人工驳回"}
+                </p>
                 {clipPath && state.song ? (
                   <MusicVideoLipReviewPreview
                     clipPath={clipPath}
@@ -670,19 +692,35 @@ export function MusicVideoDeliverables({
                     endSeconds={shot.endSeconds}
                     title={shot.title}
                   />
-                ) : <p>片段或原曲尚未就绪。</p>}
+                ) : (
+                  <p>片段或原曲尚未就绪。</p>
+                )}
                 <label>
                   验收备注（可选）
                   <ImeTextarea
                     rows={2}
                     value={lipNotes[shot.id] ?? review?.note ?? ""}
                     disabled={disabled || !clipPath}
-                    onValueChange={(note) => setLipNotes((previous) => ({ ...previous, [shot.id]: note }))}
+                    onValueChange={(note) =>
+                      setLipNotes((previous) => ({ ...previous, [shot.id]: note }))
+                    }
                   />
                 </label>
                 <div className="canvas-music-video__row">
-                  <button type="button" disabled={disabled || !clipPath || lipBusy !== null} onClick={() => void reviewLipShot(shot.id, "approved")}>人工选用此镜</button>
-                  <button type="button" disabled={disabled || !clipPath || lipBusy !== null} onClick={() => void reviewLipShot(shot.id, "rejected")}>驳回并返工</button>
+                  <button
+                    type="button"
+                    disabled={disabled || !clipPath || lipBusy !== null}
+                    onClick={() => void reviewLipShot(shot.id, "approved")}
+                  >
+                    人工选用此镜
+                  </button>
+                  <button
+                    type="button"
+                    disabled={disabled || !clipPath || lipBusy !== null}
+                    onClick={() => void reviewLipShot(shot.id, "rejected")}
+                  >
+                    驳回并返工
+                  </button>
                 </div>
               </div>
             );

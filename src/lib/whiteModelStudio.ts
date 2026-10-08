@@ -138,7 +138,9 @@ export function createWhiteModelStudioDraft(): WhiteModelStudioDraft {
  * 读取画布里持久化的草稿：旧版 v1 方案自动迁移到 v2。迁移是确定性的，
  * 若旧签名与旧方案匹配，则同步换算成新签名，已渲染成片继续可用。
  */
-export function normalizeWhiteModelStudioDraft(draft: WhiteModelStudioDraft): WhiteModelStudioDraft {
+export function normalizeWhiteModelStudioDraft(
+  draft: WhiteModelStudioDraft,
+): WhiteModelStudioDraft {
   const plan: unknown = draft.plan;
   if (!isWhiteModelScenePlanV1(plan)) return draft;
   const legacyRequest = {

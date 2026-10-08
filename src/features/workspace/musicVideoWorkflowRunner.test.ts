@@ -471,7 +471,11 @@ describe("MV human-reviewed production", () => {
     flow.approve();
     const result = await flow.run();
     expect(result.musicVideo?.pending?.stage).toBe("timeline");
-    expect(flow.media.transcribeSong).toHaveBeenCalledWith(song.sourcePath, song.sourceSignature, "project-voice");
+    expect(flow.media.transcribeSong).toHaveBeenCalledWith(
+      song.sourcePath,
+      song.sourceSignature,
+      "project-voice",
+    );
     expect(flow.media.alignLyrics).toHaveBeenCalledWith(
       song.sourcePath,
       song.sourceSignature,
@@ -481,8 +485,11 @@ describe("MV human-reviewed production", () => {
     const commands = vi.mocked(flow.fake.promptClient.run).mock.calls.map(([input]) => input);
     expect(commands.map((input) => input.mode)).toEqual(["music_video_review"]);
     expect(
-      commands.every((input) =>
-        !input.multimodalInputs?.some((item) => item.localPath === song.sourcePath && item.kind === "audio"),
+      commands.every(
+        (input) =>
+          !input.multimodalInputs?.some(
+            (item) => item.localPath === song.sourcePath && item.kind === "audio",
+          ),
       ),
     ).toBe(true);
   });
@@ -499,7 +506,9 @@ describe("MV human-reviewed production", () => {
     flow.approve();
     const result = await flow.run();
     expect(result.musicVideo?.pending?.stage).toBe("timeline");
-    expect(result.musicVideo?.stages.timeline?.artifact?.inputSummary).toContain("未执行声学强制对齐");
+    expect(result.musicVideo?.stages.timeline?.artifact?.inputSummary).toContain(
+      "未执行声学强制对齐",
+    );
     expect(flow.media.transcribeSong).not.toHaveBeenCalled();
     expect(flow.media.alignLyrics).not.toHaveBeenCalled();
   });

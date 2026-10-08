@@ -573,7 +573,11 @@ export class WhiteModelViewportController {
 
     const path = new THREE.Line(
       new THREE.BufferGeometry(),
-      new THREE.LineBasicMaterial({ color: new THREE.Color(actor.color), transparent: true, opacity: 0.9 }),
+      new THREE.LineBasicMaterial({
+        color: new THREE.Color(actor.color),
+        transparent: true,
+        opacity: 0.9,
+      }),
     );
     const waypointGroup = new THREE.Group();
     const waypoints: THREE.Mesh[] = [];
@@ -731,8 +735,8 @@ export class WhiteModelViewportController {
     visual.path.visible = actor.keyframes.length > 1;
     if (visual.pathKeyframes === actor.keyframes) return;
     visual.pathKeyframes = actor.keyframes;
-    const points = actor.keyframes.map((frame) =>
-      new THREE.Vector3(frame.position[0], frame.position[1], frame.position[2] + 0.02),
+    const points = actor.keyframes.map(
+      (frame) => new THREE.Vector3(frame.position[0], frame.position[1], frame.position[2] + 0.02),
     );
     visual.path.geometry.dispose();
     visual.path.geometry = new THREE.BufferGeometry().setFromPoints(points);
@@ -960,7 +964,11 @@ export class WhiteModelViewportController {
       const frame = actor?.keyframes[drag.index];
       if (!actor || !frame) return;
       const target = ground.clone().sub(drag.grabOffset);
-      this.callbacks.onWaypointMove(actor.id, drag.index, vec.round([target.x, target.y, frame.position[2]], 3));
+      this.callbacks.onWaypointMove(
+        actor.id,
+        drag.index,
+        vec.round([target.x, target.y, frame.position[2]], 3),
+      );
       return;
     }
     if (drag.kind === "rotate") {

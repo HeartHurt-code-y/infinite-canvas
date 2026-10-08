@@ -1,22 +1,29 @@
 coverage/
 .vitest/
 dist/
+out/
 node_modules/
 src-tauri/gen/
 src-tauri/target/
 src-tauri/resources/remotion-runtime/
 tools/remotion-runtime/
-src-tauri/skills/screenplay/
 package-lock.json
 pnpm-lock.yaml
 .firecrawl/
 .playwright-mcp/
 .workbuddy/
-src-tauri/skills/storyboard/
-src-tauri/skills/h3-ref2va-optimizer/
-src-tauri/skills/fight-prompt-master/
-src-tauri/skills/multi-grid-storyboard-prompter/
-src-tauri/skills/storyboard-prompt/references/
-src-tauri/skills/gpt-image-2-style-library/source/
-src-tauri/skills/gpt-image-2-style-library/references/
-src-tauri/skills/gpt-image-2-style-library/data/
+.screenshots/
+.cache/
+.dsh/
+.v2c/
+.video_agent/
+.tmp/
+
+# 生成物与工具产物，不是源码，重排它们只会制造无法评审的巨型 diff。
+component-catalog.json
+.qoder-credits/
+
+# 随应用打包的净化供应商资料（markdown 正文与 manifest.json 由构建直接取字节）。
+# 之前按子目录零散排除，实际是同一件事：格式化会改写正文换行并扰动资源基准。
+skills/
+src-tauri/skills/

@@ -14,10 +14,7 @@ import { adapterSupportsAssetLibrary } from "./providerAdapters";
  * 没有云端素材库的上游主机（小写、不含端口）。判定按主机而不是连接 ID：
  * 用户照着同一个地址新建的连接同样没有素材库，而改名后的连接仍应被排除。
  */
-const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = [
-  "101.34.211.152",
-  "maas.aliyuncs.com",
-];
+const HOSTS_WITHOUT_ASSET_LIBRARY: readonly string[] = ["101.34.211.152", "maas.aliyuncs.com"];
 
 /** 取 Base URL 的主机名；地址无法解析时退回原始字符串（用户可能只填了主机）。 */
 function hostOf(baseUrl: string): string {

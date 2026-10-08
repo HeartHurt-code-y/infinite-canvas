@@ -86,7 +86,10 @@ describe("VideoMiddleFrame", () => {
 
   it("seek 未完成但已有可绘帧时也揭开封面，避免历史卡片一直灰底", () => {
     const thumb = mountMediaThumb(
-      <VideoMiddleFrame src="https://cdn.example.com/seedance.mp4" placeholder={<span>占位</span>} />,
+      <VideoMiddleFrame
+        src="https://cdn.example.com/seedance.mp4"
+        placeholder={<span>占位</span>}
+      />,
     );
     const video = thumb.querySelector("video")!;
     stubVideoReadings(video, { duration: 12, width: 1280, height: 720 });

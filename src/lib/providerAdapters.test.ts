@@ -20,9 +20,9 @@ describe("providerAdapters", () => {
     expect(assembleBailianBaseUrl("llm-workspace-1")).toBe(
       "https://llm-workspace-1.cn-beijing.maas.aliyuncs.com",
     );
-    expect(
-      parseBailianWorkspaceId("https://llm-workspace-1.cn-beijing.maas.aliyuncs.com/"),
-    ).toBe("llm-workspace-1");
+    expect(parseBailianWorkspaceId("https://llm-workspace-1.cn-beijing.maas.aliyuncs.com/")).toBe(
+      "llm-workspace-1",
+    );
     expect(parseBailianWorkspaceId("https://dashscope.aliyuncs.com/api/v1")).toBe("");
     expect(assembleBailianBaseUrl("  ")).toBe("");
   });

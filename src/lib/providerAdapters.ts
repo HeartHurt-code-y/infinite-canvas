@@ -54,11 +54,7 @@ export function adapterSupportsAssetLibrary(adapterId: string): boolean {
 
 export function isValidBailianWorkspaceId(workspaceId: string): boolean {
   const trimmed = workspaceId.trim();
-  return (
-    trimmed.length > 0 &&
-    trimmed.length <= 64 &&
-    /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(trimmed)
-  );
+  return trimmed.length > 0 && trimmed.length <= 64 && /^[A-Za-z0-9][A-Za-z0-9_-]*$/.test(trimmed);
 }
 
 export function assembleBailianBaseUrl(workspaceId: string): string {

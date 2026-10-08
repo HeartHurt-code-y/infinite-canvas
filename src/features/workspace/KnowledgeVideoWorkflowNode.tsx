@@ -1,6 +1,10 @@
 import { Icon } from "../../components/Icon";
 import { MusicVideoConfiguration, MusicVideoDeliverables } from "./MusicVideoWorkflowSections";
-import { musicVideoLipReviewSignature, patchMusicVideoArtifact, setMusicVideoLipReview } from "./musicVideoWorkflowModel";
+import {
+  musicVideoLipReviewSignature,
+  patchMusicVideoArtifact,
+  setMusicVideoLipReview,
+} from "./musicVideoWorkflowModel";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { ImeInput, ImeTextarea } from "../../components/ImeTextField";
@@ -23,7 +27,11 @@ import type {
 import { isTextGenerationModel, isVideoGenerationModel } from "./workspaceModel";
 import { AI_FILM_STAGES, AI_FILM_STAGE_LABELS, type AiFilmStage } from "./aiFilmWorkflowModel";
 import { ComicDramaConfiguration, ComicDramaDeliverables } from "./ComicDramaWorkflowSections";
-import { comicDramaDubbedShotSignature, comicDramaLipReviewComplete, reviewComicDramaDubbedShot } from "./comicDramaWorkflowModel";
+import {
+  comicDramaDubbedShotSignature,
+  comicDramaLipReviewComplete,
+  reviewComicDramaDubbedShot,
+} from "./comicDramaWorkflowModel";
 import { CommerceConfiguration, CommerceDeliverables } from "./CommerceWorkflowSections";
 import { commerceInputReady } from "./commerceWorkflowModel";
 import { RemotionConfiguration, RemotionDeliverables } from "./RemotionWorkflowSections";
@@ -480,7 +488,9 @@ export function KnowledgeVideoWorkflowNode({
     !decision &&
     ((isMusicVideo &&
       Boolean(checkpoint.mediaApprovals?.composition) &&
-      checkpoint.musicVideo?.stages.prompts?.artifact?.shots?.some((shot) => shot.lipSync === "sync")) ||
+      checkpoint.musicVideo?.stages.prompts?.artifact?.shots?.some(
+        (shot) => shot.lipSync === "sync",
+      )) ||
       (isComicDrama && Object.keys(checkpoint.comicDrama?.speech?.dubbedClips ?? {}).length > 0));
   const humanLipReviewComplete = isComicDrama
     ? comicDramaLipReviewComplete(checkpoint)
@@ -490,7 +500,10 @@ export function KnowledgeVideoWorkflowNode({
           const review = checkpoint.musicVideo?.lipReviews?.[shot.id];
           if (review?.decision !== "approved") return false;
           try {
-            return review.signature === musicVideoLipReviewSignature(checkpoint, shot.id, review.clipSignature);
+            return (
+              review.signature ===
+              musicVideoLipReviewSignature(checkpoint, shot.id, review.clipSignature)
+            );
           } catch {
             return false;
           }
@@ -1250,8 +1263,18 @@ export function KnowledgeVideoWorkflowNode({
             </span>
             <div>
               <small>继续前需要你决定</small>
-              <strong>{decision?.question ?? (awaitingHumanLipReview ? "请逐镜试听并验收当前口型。" : "自动流程遇到一个需要确认的选择。")}</strong>
-              <p>{decision?.recommendation ?? (awaitingHumanLipReview ? "下方逐镜选用全部配音或正面演唱片段后，才可继续合成；驳回的镜头需要返工。" : "采用系统推荐方案后，工作流会继续自动完成。")}</p>
+              <strong>
+                {decision?.question ??
+                  (awaitingHumanLipReview
+                    ? "请逐镜试听并验收当前口型。"
+                    : "自动流程遇到一个需要确认的选择。")}
+              </strong>
+              <p>
+                {decision?.recommendation ??
+                  (awaitingHumanLipReview
+                    ? "下方逐镜选用全部配音或正面演唱片段后，才可继续合成；驳回的镜头需要返工。"
+                    : "采用系统推荐方案后，工作流会继续自动完成。")}
+              </p>
               {decision?.kind === "qc" && !isCover && !isReverse ? (
                 decision.qcTarget || qcDecisionShot ? (
                   <>
@@ -1314,7 +1337,11 @@ export function KnowledgeVideoWorkflowNode({
             </div>
             <button
               type="button"
-              disabled={pickingMaterials || !materialsValid || (awaitingHumanLipReview && !humanLipReviewComplete)}
+              disabled={
+                pickingMaterials ||
+                !materialsValid ||
+                (awaitingHumanLipReview && !humanLipReviewComplete)
+              }
               onClick={() => {
                 const resolution = decisionResolution.trim() || decision?.recommendation?.trim();
                 setDecisionDraft({ key: "", value: "" });
@@ -1328,12 +1355,12 @@ export function KnowledgeVideoWorkflowNode({
               {awaitingHumanLipReview
                 ? "核对人工验收并继续合成"
                 : (isCover || isReverse) && decision?.kind === "qc"
-                ? "确认后修订并重检"
-                : decision?.kind === "qc"
-                  ? "采用当前结果并继续"
-                  : decisionResolution.trim()
-                    ? "确认并继续"
-                    : "采用推荐并继续"}
+                  ? "确认后修订并重检"
+                  : decision?.kind === "qc"
+                    ? "采用当前结果并继续"
+                    : decisionResolution.trim()
+                      ? "确认并继续"
+                      : "采用推荐并继续"}
             </button>
           </section>
         ) : null}
@@ -1352,7 +1379,8 @@ export function KnowledgeVideoWorkflowNode({
         ) : failedAtLinkedVideoDownload ? (
           <div className="canvas-knowledge-workflow__download-recovery">
             <p>
-              原片尚未下载为本地文件。可在上方切换 Cookies 来源后“重试当前步骤”；切换来源只是再次尝试，是否可访问以实际下载结果为准。若已有原片，也可改用本地视频并重新制作。
+              原片尚未下载为本地文件。可在上方切换 Cookies
+              来源后“重试当前步骤”；切换来源只是再次尝试，是否可访问以实际下载结果为准。若已有原片，也可改用本地视频并重新制作。
             </p>
             {isReverse && onPickReverseVideo ? (
               <button
@@ -1387,8 +1415,13 @@ export function KnowledgeVideoWorkflowNode({
               })
             }
             onLipReview={async (shotId, decision, clipSignature, note) => {
-              const reviewedSignature = musicVideoLipReviewSignature(checkpoint, shotId, clipSignature);
-              const currentPath = latestNodeRef.current.config.checkpoint.shotRuns[shotId]?.clipPath;
+              const reviewedSignature = musicVideoLipReviewSignature(
+                checkpoint,
+                shotId,
+                clipSignature,
+              );
+              const currentPath =
+                latestNodeRef.current.config.checkpoint.shotRuns[shotId]?.clipPath;
               if (!currentPath) throw new Error(`镜头 ${shotId} 缺少当前片段，请重新试听。`);
               const actualSignature = await mvMediaClient.clipSignature(currentPath);
               if (actualSignature !== clipSignature)
@@ -1396,7 +1429,8 @@ export function KnowledgeVideoWorkflowNode({
               const current = latestNodeRef.current;
               if (
                 current.config.checkpoint.shotRuns[shotId]?.clipPath !== currentPath ||
-                musicVideoLipReviewSignature(current.config.checkpoint, shotId, actualSignature) !== reviewedSignature
+                musicVideoLipReviewSignature(current.config.checkpoint, shotId, actualSignature) !==
+                  reviewedSignature
               )
                 throw new Error(`镜头 ${shotId} 的分镜或原曲已改变，请重新试听。`);
               onChange({
@@ -1471,12 +1505,18 @@ export function KnowledgeVideoWorkflowNode({
           <ComicDramaDeliverables
             checkpoint={node.config.checkpoint}
             onReviewDubbedShot={async (shotId, decision) => {
-              const reviewedSignature = comicDramaDubbedShotSignature(node.config.checkpoint, shotId);
+              const reviewedSignature = comicDramaDubbedShotSignature(
+                node.config.checkpoint,
+                shotId,
+              );
               const dubbed = node.config.checkpoint.comicDrama?.speech?.dubbedClips?.[shotId];
               if (!dubbed?.path) throw new Error(`镜头 ${shotId} 尚无可验证的配音片段。`);
               const observedSha = await mvMediaClient.clipSignature(dubbed.path);
               const current = latestNodeRef.current;
-              if (comicDramaDubbedShotSignature(current.config.checkpoint, shotId) !== reviewedSignature)
+              if (
+                comicDramaDubbedShotSignature(current.config.checkpoint, shotId) !==
+                reviewedSignature
+              )
                 throw new Error(`镜头 ${shotId} 的配音片段或分镜已改变，请重新试听。`);
               onChange({
                 ...current.config,
@@ -1931,9 +1971,7 @@ export function KnowledgeVideoWorkflowNode({
           ) : phase === "failed" ? (
             <>
               <span>
-                {downloadInputChanged
-                  ? "输入已改变，需重新审核执行计划"
-                  : "已完成的结果会保留"}
+                {downloadInputChanged ? "输入已改变，需重新审核执行计划" : "已完成的结果会保留"}
               </span>
               {!downloadInputChanged ? (
                 <button

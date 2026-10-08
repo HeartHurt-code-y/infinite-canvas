@@ -267,10 +267,10 @@ export function createWorkflowExecutionPlan(
             : []),
           "逐张审核产品形体、接口、Logo 与机位，导出已选用图片及清单",
         ]
-        : [
-            `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
-            `一键审批全部张数后生成空背景，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
-            "本地回贴产品原图并检查背景相似度",
+      : [
+          `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
+          `一键审批全部张数后生成空背景，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
+          "本地回贴产品原图并检查背景相似度",
           ...(productSceneQualityEnabled(config.productScene)
             ? ["逐张调用视觉文本模型，检查可见接口"]
             : []),
