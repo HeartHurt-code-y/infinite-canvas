@@ -1974,7 +1974,10 @@ mod tests {
         let (_directory, _storage, lifecycle) = task_lifecycle_for_model(
             "task-other-video",
             GenerationOperation::VideoGeneration,
-            "doubao-seedance-2-5-260628",
+            // 对照组必须是「不在签名 URL 续期白名单里」的普通视频型号：`sp2.5-*`、
+            // `rd-*` 与草稿样片型号只允许替换 `url` 键（见 allowed_sp25_signed_url_refresh），
+            // 用它们当本例的型号就测不到「结果源不可替换」这条规则。
+            "doubao-seedance-2-0-260128",
         );
         let mut result = register_video_result(&lifecycle, "task-other-video");
         result.save_status = SaveStatus::Writing;
