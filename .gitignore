@@ -79,3 +79,5 @@ src-tauri/resources/component-catalog.json
 src-tauri/resources/.ai-media-*/
 src-tauri/resources/ai-media-runtime/
 src-tauri/resources/ai-media-quality-runtime/
+# 一次性排查与格式化中间产物，任何提交都不应包含
+.tmp/
