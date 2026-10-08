@@ -9,7 +9,46 @@
   </head>
 
   <body>
-    <div id="root"></div>
+    <div id="root">
+      <!-- dev 冷启动时 Vite 需要现场转换全部源码模块（大仓库约 1-2 分钟），
+           JS 就绪前页面全白容易被误判为卡死。这个纯 CSS 占位无需任何脚本，
+           HTML 一到就渲染；React createRoot 首次渲染会整体替换 #root 内容。 -->
+      <div
+        style="
+          position: fixed;
+          inset: 0;
+          display: flex;
+          flex-direction: column;
+          gap: 16px;
+          align-items: center;
+          justify-content: center;
+          background: #17191c;
+          color: #8a919c;
+          font-family: system-ui, sans-serif;
+          font-size: 14px;
+          user-select: none;
+        "
+      >
+        <div
+          style="
+            width: 28px;
+            height: 28px;
+            border: 3px solid #2e3338;
+            border-top-color: #6ea8fe;
+            border-radius: 50%;
+            animation: ic-spin 0.9s linear infinite;
+          "
+        ></div>
+        <div>无限画布启动中…</div>
+        <style>
+          @keyframes ic-spin {
+            to {
+              transform: rotate(360deg);
+            }
+          }
+        </style>
+      </div>
+    </div>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>

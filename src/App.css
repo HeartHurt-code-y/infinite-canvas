@@ -12003,6 +12003,8 @@ button.prompt-mention__recognizable-tag:focus-visible {
 
 .history-result {
   position: relative;
+  /* min-content 钳制：长文件名与视频固有宽度不得把卡片撑出网格轨道。 */
+  min-width: 0;
   background: var(--color-paper);
   border: var(--rule-thin) solid var(--color-rule-2);
   border-radius: var(--radius-control);
@@ -12024,6 +12026,12 @@ button.prompt-mention__recognizable-tag:focus-visible {
 
 .history-result__preview {
   display: grid;
+  /* 隐式 auto 轨道会按内容 min-content（长文件名、视频固有宽度）撑爆卡片，
+   * 必须钳制为 minmax(0, 1fr)，让内容布局始终以卡片实际宽度为准。 */
+  grid-template-columns: minmax(0, 1fr);
+  /* 全局 `button { white-space: nowrap }` 会被卡片内容继承并压过 overflow-wrap，
+   * 长文件名将永远无法折行，必须在此复位。 */
+  white-space: normal;
   gap: var(--space-2xs);
   width: 100%;
   padding: var(--space-3xs);
@@ -12075,6 +12083,9 @@ button.prompt-mention__recognizable-tag:focus-visible {
 
 .history-result__facts {
   display: grid;
+  /* 与卡片同理：文件名等长 token 不得撑爆行内轨道；anywhere 允许在任意字符处折行。 */
+  grid-template-columns: minmax(0, 1fr);
+  overflow-wrap: anywhere;
   gap: 1px;
   padding-inline-end: calc(var(--size-control-compact) + var(--space-2xs));
   font-size: var(--text-2xs);

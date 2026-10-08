@@ -119,6 +119,26 @@ impl RuntimeComponentMigration {
         if !plans.is_empty() {
             let state = Arc::clone(&migration);
             std::thread::spawn(move || {
+                // 组件就绪过滤（resolve → critical_files_ready）会校验 GB 级关键文件，
+                // 只允许在后台线程执行；主线程 setup 绝不为它停留。内置与持久副本
+                // 均不存在的可选组件在这里就地剔除，避免单个缺失组件在 migrate()
+                // 里以错误中止整个迁移。
+                let plans: Vec<ComponentPlan> = plans
+                    .into_iter()
+                    .filter(|plan| plan.component.resolve(plan.ready).is_some())
+                    .collect();
+                {
+                    let mut status = state.status.lock().expect("migration status poisoned");
+                    status.total_components = plans.len();
+                    if plans.is_empty() {
+                        status.preparing = false;
+                        status.ready = true;
+                        status.current_component = None;
+                    }
+                }
+                if plans.is_empty() {
+                    return;
+                }
                 let retention_plans = plans
                     .iter()
                     .map(|plan| (plan.component.clone(), plan.ready))
@@ -710,6 +730,15 @@ impl RuntimeComponent {
             {
                 return true;
             }
+        }
+        // dev 构建只做元数据级校验（存在性、位于根内、文件类型、大小、修改时间已在
+        // 上方逐项检查），跳过逐文件 SHA-256：dev 树由本仓库 prepare 脚本生成，而
+        // debug 模式的 sha2 实现慢 10-50 倍，对 ffmpeg/blender/remotion 的关键可执行
+        // 文件（约 1.6GB）全量哈希实测阻塞 30-100 秒，叠加 Defender 实时扫描更久；
+        // 该哈希又可能被同步 command 在主线程触发（preflight / 引擎状态查询），
+        // 直接把窗口冻成“未响应”。防篡改校验属于发布场景，release 不受影响。
+        if cfg!(debug_assertions) {
+            return true;
         }
         for ((_, expected), stamp) in targets.iter().zip(&stamps) {
             if hash_file(&stamp.path).ok().as_deref() != Some(expected.as_str()) {

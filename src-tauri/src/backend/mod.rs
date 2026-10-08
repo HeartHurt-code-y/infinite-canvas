@@ -336,8 +336,11 @@ impl BackendState {
             });
         }
         // Optional resources absent from an online installer do not gate core startup.
-        migration_plans.retain(|plan| plan.component.resolve(plan.ready).is_some());
-        log_startup_stage!("组件迁移计划就绪探测");
+        // 注意：组件就绪过滤（resolve → critical_files_ready）会触碰关键文件的
+        // 校验逻辑，绝不能在主线程 setup 里执行，否则一次慢磁盘/杀软扫描就会把
+        // 窗口冻成白屏“未响应”。release 下的过滤已挪进 RuntimeComponentMigration
+        // 的后台线程；dev 下迁移计划为空表，不发生任何探测。
+        log_startup_stage!("组件迁移计划组装");
         // `tauri dev` uses build-tree resources directly. Copying ~1.7 GB is only
         // needed by packaged bridge releases before they can offer slim updates.
         let runtime_migration = RuntimeComponentMigration::start(if cfg!(debug_assertions) {

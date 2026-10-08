@@ -108,5 +108,11 @@ export default defineConfig(() => ({
       //    文件被改名或删除的瞬间拿到 EBUSY，并让整个 dev server 退出。
       ignored: ["**/src-tauri/**", "**/*.tmpdir/**", "**/*.tmp", "**/.*.tmp*"],
     },
+    // 注意：不要加 server.warmup。本仓库实测（2026-10-08）：warmup 会在页面
+    // 加载前爬取全部源码，一是拖慢/饿死真实页面请求（单线程事件循环被占满，
+    // 请求 30s+ 超时），二是爬取测试文件会把 vitest/@testing-library 拉进依赖
+    // 发现，触发「optimized dependencies changed. reloading」整页重载循环，
+    // 冷启动首屏从 33s 恶化到 10 分钟以上。依赖元数据完整时（deps 缓存未被
+    // 中途杀死），页面驱动的常规爬取 33s 内即可完成首屏。
   },
 }));
