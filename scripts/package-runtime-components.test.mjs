@@ -159,7 +159,7 @@ test("real macOS ZIP preserves executable permissions, file and directory symlin
   assert.match(intel.archive.url, /\/components\/darwin-x86_64\//);
   await assert.rejects(
     packageRuntimeComponent(component, { ...options, ...WINDOWS }),
-    /Only macOS component ZIPs/,
+    /Component ZIP packaging failed/,
   );
 });
 
