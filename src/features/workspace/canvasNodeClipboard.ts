@@ -285,11 +285,15 @@ export function pasteCanvasNodes(
           type: "knowledgeVideoWorkflow",
           data: freshWorkflow({ ...entry.data, ...position }),
         };
+      case "frameExtractor": {
+        const { checkpoint, ...config } = entry.data.config;
+        void checkpoint;
+        return { type: "frameExtractor", data: { ...entry.data, ...position, config } };
+      }
       case "screenplay":
       case "storyboard":
       case "viralRemix":
       case "videoDownloader":
-      case "frameExtractor":
       case "result":
         return { ...entry, data: { ...entry.data, ...position } } as CanvasNodeEntry;
     }

@@ -594,7 +594,7 @@ fn bundled_engine_repair_message() -> &'static str {
     if cfg!(debug_assertions) {
         "内置 Blender 资源缺失或不完整，请先运行 pnpm blender:prepare 准备完整应用资源，再重新检查"
     } else {
-        "内置 Blender 资源缺失或不完整，请修复安装或重新安装包含白模引擎的完整应用"
+        "Blender 组件缺失或损坏，请在功能组件中安装或修复后重试"
     }
 }
 

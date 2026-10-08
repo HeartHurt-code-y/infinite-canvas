@@ -10,9 +10,7 @@ import {
 } from "../../lib/backend";
 import {
   isMinimaxH3VideoModel,
-  isRdVideoModel,
   isWan30VideoModel,
-  modelGenerationCountMaximum,
   modelParameterCapabilities,
   resolvedParameterValue,
   wanMediaRolesForKind,
@@ -26,7 +24,6 @@ import {
   type SeedanceTaskMode,
 } from "../../lib/seedanceTasks";
 import {
-  perTaskVideoInputIssue,
   perTaskVideoProfile,
   perTaskVideoUrlIssue,
   type PerTaskVideoProfile,
@@ -48,6 +45,7 @@ import { WhiteModelControlSection } from "./WhiteModelControlSection";
 import { GreenScreenSection, type GreenScreenResult } from "./GreenScreenSection";
 import { resolveGreenScreen } from "../../lib/greenScreen";
 import { preferredPanoramaParameters } from "../../lib/whiteModelBlocking";
+import { supportsSeedanceDraft } from "../../lib/seedanceDraft";
 
 import type {
   AssetKind,
@@ -1439,24 +1437,18 @@ export function ImageNodeSettings({
   const selectedModel = availableModels.find(
     (model) => model.definitionId === config.modelSelection.modelDefinitionId,
   );
-  const selectedModelSupportsOperation = selectedModel?.operations.includes(operation) ?? false;
-  const parameterCapabilities = selectedModelSupportsOperation
+  const parameterCapabilities = selectedModel
     ? modelParameterCapabilities(
-        selectedModel!.operationSchema,
+        selectedModel.operationSchema,
         operation,
-        selectedModel!.remoteModelId,
+        selectedModel.remoteModelId,
       )
     : [];
-  // 生成数量上限：支持 `n` 参数的模型（GPT-Image 契约）按其声明上限，
-  // 否则沿用任务拆分上限。
-  const countMaximum = selectedModelSupportsOperation
-    ? modelGenerationCountMaximum(
-        selectedModel!.operationSchema,
-        operation,
-        selectedModel!.remoteModelId,
-        MAX_GENERATION_COUNT,
-      )
-    : MAX_GENERATION_COUNT;
+  const supportsBatchCount = parameterCapabilities.some(
+    (capability) => capability.key === "n" && capability.type === "integer",
+  );
+  // Remote n is one request; only the local multi-request fanout has an application cap.
+  const countMaximum = supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT;
   // `n` 由上方「生成数量」字段承载，避免与模型参数区重复渲染。
   // Seedream 组图数量 `max_images` 仅在组图模式为 auto 时展示。
   const sequentialMode = String(
@@ -1524,7 +1516,7 @@ export function ImageNodeSettings({
             const modelDefinitionId =
               availableProviders
                 .find((entry) => entry.provider.id === providerId)
-                ?.models.find((model) => model.operations.includes(operation))?.definitionId ?? "";
+                ?.models.find(isImageGenerationModel)?.definitionId ?? "";
             onChange({
               ...config,
               modelSelection: { providerId, modelDefinitionId },
@@ -1552,7 +1544,7 @@ export function ImageNodeSettings({
           type="number"
           inputMode="numeric"
           min={1}
-          max={countMaximum}
+          max={supportsBatchCount ? undefined : countMaximum}
           value={config.generationCount}
           onChange={(event) =>
             onChange({
@@ -1580,9 +1572,7 @@ export function ImageNodeSettings({
         >
           {!config.modelSelection.modelDefinitionId ? (
             <option value="">
-              {availableModels.some((model) => model.operations.includes(operation))
-                ? "请选择图片模型"
-                : "没有支持当前操作的图片模型"}
+              {availableModels.length > 0 ? "请选择图片模型" : "没有可用的图片模型"}
             </option>
           ) : null}
           {config.modelSelection.modelDefinitionId && !selectedModel ? (
@@ -1591,13 +1581,9 @@ export function ImageNodeSettings({
             </option>
           ) : null}
           {availableModels.map((model) => (
-            <option
-              key={model.definitionId}
-              value={model.definitionId}
-              disabled={!model.operations.includes(operation)}
-            >
+            <option key={model.definitionId} value={model.definitionId}>
               {model.displayName}
-              {model.operations.includes(operation) ? "" : "（不支持当前操作）"}
+              {model.operations.includes(operation) ? "" : "（目录未声明当前操作）"}
             </option>
           ))}
         </select>
@@ -1624,7 +1610,6 @@ export function ImageNodeSettings({
 function GenerationParameterField({
   capability,
   value,
-  hasMediaInputs,
   locked = false,
   onChange,
 }: {
@@ -1634,7 +1619,7 @@ function GenerationParameterField({
   readonly locked?: boolean;
   readonly onChange: (value: ModelParameterValue) => void;
 }) {
-  const disabled = locked || (capability.requiresNoMedia && hasMediaInputs);
+  const disabled = locked;
   if (capability.type === "boolean") {
     const checked = !disabled && value === true;
     return (
@@ -1648,7 +1633,7 @@ function GenerationParameterField({
             disabled={disabled}
             onChange={(event) => onChange(event.target.checked)}
           />
-          <span aria-hidden="true">{disabled ? "需无媒体输入" : checked ? "开启" : "关闭"}</span>
+          <span aria-hidden="true">{checked ? "开启" : "关闭"}</span>
         </span>
       </label>
     );
@@ -1669,6 +1654,9 @@ function GenerationParameterField({
             if (selected) onChange(selected.value);
           }}
         >
+          {!capability.options.some((option) => option.value === value) ? (
+            <option value={String(value)}>{String(value)}（当前值）</option>
+          ) : null}
           {capability.options.map((option) => (
             <option key={`${capability.key}-${String(option.value)}`} value={String(option.value)}>
               {option.label}
@@ -1688,8 +1676,6 @@ function GenerationParameterField({
         disabled={disabled}
         title={locked ? "由当前任务类型自动设置" : undefined}
         inputMode={numeric ? "numeric" : "text"}
-        min={capability.minimum}
-        max={capability.maximum}
         step={capability.step ?? (capability.type === "integer" ? 1 : undefined)}
         placeholder={capability.optional ? "随机" : undefined}
         value={String(value)}
@@ -1752,19 +1738,7 @@ export function VideoNodeSettings({
   );
   const perTaskProfile = perTaskVideoProfile(selectedModel?.remoteModelId ?? "");
   const perTaskPublicUrls = config.perTaskUrlMedia ?? [];
-  const perTaskInputIssue = perTaskProfile
-    ? (perTaskVideoUrlIssue(perTaskPublicUrls) ??
-      perTaskVideoInputIssue(perTaskProfile, [
-        ...(mediaInputs ?? []).map((input) => ({
-          kind: input.kind,
-          role: config.mediaRoles?.[input.key] ?? "",
-        })),
-        ...perTaskPublicUrls.map((input) => ({
-          kind: input.kind,
-          role: input.kind === "image" ? "reference_image" : "reference_audio",
-        })),
-      ]))
-    : null;
+  const perTaskInputIssue = perTaskVideoUrlIssue(perTaskPublicUrls);
   const parameterCapabilities = selectedModel
     ? modelParameterCapabilities(
         selectedModel.operationSchema,
@@ -1790,10 +1764,13 @@ export function VideoNodeSettings({
   const currentTaskLabel = seedanceTaskOptions(selectedModel?.remoteModelId ?? "").find(
     (option) => option.value === taskState.mode,
   )?.label;
-  // 绿幕与白模依赖魔芋 Seedance 2.5 的编辑/参考任务契约；RD 网关没有这些任务，
-  // 不渲染入口（未启用的存档配置仍显示，保留关闭或切换模型的路径）。
-  const showSeedanceExtras =
-    taskState.enabled && !isRdVideoModel(selectedModel?.remoteModelId ?? "");
+  // These tools compile ordinary prompt/media requests; acceptance comes from the service.
+  const showSeedanceExtras = taskState.enabled;
+  const showSeedanceDraft = supportsSeedanceDraft(
+    selectedProvider?.provider.adapterId ?? "",
+    selectedModel?.remoteModelId ?? "",
+  );
+  const seedanceDraftEnabled = showSeedanceDraft && config.parameterValues["draft"] === true;
 
   return (
     <div className="canvas-gen-node__settings" aria-label="视频生成参数">
@@ -1908,25 +1885,12 @@ export function VideoNodeSettings({
             {perTaskProfile.minimumDuration === perTaskProfile.maximumDuration
               ? "固定 30 秒"
               : `${perTaskProfile.minimumDuration}–${perTaskProfile.maximumDuration} 秒`}
-            ；最多 {perTaskProfile.maxImages} 张参考图
-            {perTaskProfile.maxAudios > 0
-              ? `、${perTaskProfile.maxAudios} 段参考音频`
-              : "，不支持参考音频"}
-            ；不支持参考视频或首尾帧。
+            ；以上为模型目录中的参考信息，素材和参数限制以服务端返回为准。
           </small>
           {perTaskInputIssue ? (
             <div className="canvas-gen-node__media-role-warning" role="alert">
               <Icon name="warning-circle" aria-hidden="true" size="sm" />
               <span>{perTaskInputIssue}</span>
-              {perTaskInputIssue.includes("旧素材角色") ? (
-                <button
-                  type="button"
-                  className="canvas-gen-node__url-add"
-                  onClick={() => onChange({ ...config, mediaRoles: {} })}
-                >
-                  清除旧素材角色
-                </button>
-              ) : null}
             </div>
           ) : null}
         </div>
@@ -1934,16 +1898,16 @@ export function VideoNodeSettings({
       {perTaskProfile && (config.urlMedia?.length ?? 0) > 0 ? (
         <div className="canvas-gen-node__media-roles" role="status">
           <small>
-            已保留 {config.urlMedia?.length} 个万相文档/网页
-            URL；此按次型号不会提交它们。切回万相模型可继续使用。
+            已保留 {config.urlMedia?.length} 个文档/网页 URL；提交时保留当前输入，
+            接口能否表达这些素材由后端反馈。
           </small>
         </div>
       ) : null}
       {!perTaskProfile && perTaskPublicUrls.length > 0 ? (
         <div className="canvas-gen-node__media-roles" role="status">
           <small>
-            已保留 {perTaskPublicUrls.length} 个按次参考
-            URL；当前型号不会提交它们。切回按次型号可继续使用。
+            已保留 {perTaskPublicUrls.length} 个参考 URL；提交时保留当前输入，
+            接口能否表达这些素材由后端反馈。
           </small>
         </div>
       ) : null}
@@ -2004,7 +1968,7 @@ export function VideoNodeSettings({
                         ? "首帧"
                         : taskState.mediaRoles[input.key] === "last_frame"
                           ? "尾帧"
-                          : "不兼容，请断开"}
+                          : "参考素材"}
                     </span>
                   </li>
                 ))}
@@ -2100,7 +2064,48 @@ export function VideoNodeSettings({
         />
       ) : null}
 
+      {showSeedanceDraft ? (
+        <div className="canvas-gen-node__media-roles" aria-label="草稿样片与正片">
+          <label className="canvas-gen-node__field">
+            <span>先生成草稿样片</span>
+            <span className="canvas-gen-node__toggle-control">
+              <input
+                type="checkbox"
+                aria-label="先生成草稿样片"
+                checked={seedanceDraftEnabled}
+                onChange={(event) =>
+                  onChange({
+                    ...config,
+                    parameterValues: {
+                      ...taskState.parameterValues,
+                      draft: event.target.checked,
+                      ...(event.target.checked ? { resolution: "480p" } : {}),
+                    },
+                  })
+                }
+              />
+              <span aria-hidden="true">{seedanceDraftEnabled ? "开启" : "关闭"}</span>
+            </span>
+          </label>
+          <small>
+            {seedanceDraftEnabled
+              ? "先生成 480p 样片；在产物的「原任务」中预览并审核后，可人工发起 1080p 正片。正片会创建独立付费任务，保留样片。"
+              : "直接生成支持 480p / 720p。需要 1080p 时先生成草稿样片，审核后再生成正片。"}
+          </small>
+          <small>可直接使用供应商 API Key，无需额外配置令牌分组。</small>
+          {seedanceDraftEnabled &&
+          config.parameterValues["resolution"] !== "480p" &&
+          config.parameterValues["resolution"] != null ? (
+            <small>
+              此存档保留了 {String(config.parameterValues["resolution"])}{" "}
+              分辨率；建议关闭后重新开启草稿以选择 480p，当前请求由服务端判定。
+            </small>
+          ) : null}
+        </div>
+      ) : null}
+
       {taskState.parameterCapabilities.map((capability) => {
+        if (capability.key === "draft") return null;
         if (taskState.enabled && capability.key === "omni_reference_task_type") return null;
         // Context-IR（智能扩写）只输出文本，没有分辨率概念，隐藏分辨率字段。
         const taskType = String(config.parameterValues["task_type"] ?? "generation");
@@ -2111,7 +2116,10 @@ export function VideoNodeSettings({
             capability={capability}
             value={resolvedParameterValue(capability, taskState.parameterValues)}
             hasMediaInputs={hasMediaInputs}
-            locked={taskState.lockedParameters.includes(capability.key)}
+            locked={
+              taskState.lockedParameters.includes(capability.key) ||
+              (seedanceDraftEnabled && capability.key === "resolution")
+            }
             onChange={(value) =>
               onChange({
                 ...config,
@@ -2209,9 +2217,7 @@ function VideoMediaRoleSection({
       {conflict ? (
         <div className="canvas-gen-node__media-role-warning" role="alert">
           <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          <span>
-            首帧/首尾帧与参考素材（参考图/参考视频/参考音频）不可在同一请求混用，请二选一。
-          </span>
+          <span>当前请求同时包含首尾帧与参考素材，将完整提交；支持范围由服务端返回。</span>
         </div>
       ) : null}
     </div>
@@ -2221,7 +2227,6 @@ function VideoMediaRoleSection({
 /** 万相 3.0 URL 素材（文档 file / 网页 link）：解析公开文档或网页内容生成视频。 */
 function VideoUrlMediaSection({
   urlMedia,
-  hasConnectedMedia,
   onChange,
 }: {
   readonly urlMedia: readonly VideoUrlMediaInput[];
@@ -2232,11 +2237,6 @@ function VideoUrlMediaSection({
   const [draftUrl, setDraftUrl] = useState("");
   const [draftError, setDraftError] = useState<string | null>(null);
 
-  const fileCount = urlMedia.filter((input) => input.role === "file").length;
-  const linkCount = urlMedia.filter((input) => input.role === "link").length;
-  const conflictCount = fileCount + linkCount > 1;
-  const mixedWithMedia = urlMedia.length > 0 && hasConnectedMedia;
-
   const commitDraft = () => {
     const trimmed = draftUrl.trim();
     if (!trimmed) return;
@@ -2245,14 +2245,6 @@ function VideoUrlMediaSection({
       return;
     }
     if (draftRole == null) return;
-    if (draftRole === "file" && fileCount >= 1) {
-      setDraftError("文档（file）每次请求限 1 个");
-      return;
-    }
-    if (draftRole === "link" && linkCount >= 1) {
-      setDraftError("网页（link）每次请求限 1 个");
-      return;
-    }
     const next: VideoUrlMediaInput = {
       id: `url-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
       url: trimmed,
@@ -2269,7 +2261,7 @@ function VideoUrlMediaSection({
     <div className="canvas-gen-node__url-media" aria-label="URL 素材（文档/网页）">
       <div className="canvas-gen-node__section-title">
         <span>文档 / 网页生视频</span>
-        <small>解析公开文档或网页内容，file 与 link 各限 1 个</small>
+        <small>完整提交文档、网页和已连接素材；支持范围由服务端返回</small>
       </div>
       {urlMedia.length > 0 ? (
         <ol className="canvas-gen-node__url-list">
@@ -2373,25 +2365,13 @@ function VideoUrlMediaSection({
           {draftError}
         </div>
       ) : null}
-      {conflictCount || mixedWithMedia ? (
-        <div className="canvas-gen-node__url-warning" role="alert">
-          <Icon name="warning-circle" aria-hidden="true" size="sm" />
-          <span>
-            {conflictCount
-              ? "文档（file）与网页（link）二选一，各限 1 个。"
-              : "文档/网页生视频不与其它素材混用，请仅保留 URL 素材。"}
-          </span>
-        </div>
-      ) : null}
     </div>
   );
 }
 
 /** Public image/audio references for the SP 2.5 per-task gateway. */
 function PerTaskVideoUrlSection({
-  profile,
   urlMedia,
-  connectedInputs,
   onChange,
 }: {
   readonly profile: PerTaskVideoProfile;
@@ -2410,19 +2390,6 @@ function PerTaskVideoUrlSection({
   };
   const commitDraft = () => {
     if (draftKind == null) return;
-    const kindLimit = draftKind === "image" ? profile.maxImages : profile.maxAudios;
-    const connectedCount = connectedInputs.filter((input) => input.kind === draftKind).length;
-    const urlCount = urlMedia.filter((input) => input.kind === draftKind).length;
-    if (connectedCount + urlCount >= kindLimit) {
-      setDraftError(
-        draftKind === "image"
-          ? `此型号最多支持 ${kindLimit} 张参考图。`
-          : kindLimit === 0
-            ? "此型号不支持参考音频。"
-            : `此型号最多支持 ${kindLimit} 段参考音频。`,
-      );
-      return;
-    }
     const next: PerTaskVideoUrlInput = {
       id: `sp-${Date.now()}-${Math.floor(Math.random() * 1e6)}`,
       kind: draftKind,
@@ -2508,15 +2475,13 @@ function PerTaskVideoUrlSection({
           >
             粘贴参考图 URL
           </button>
-          {profile.maxAudios > 0 ? (
-            <button
-              type="button"
-              className="canvas-gen-node__url-add"
-              onClick={() => setDraftKind("audio")}
-            >
-              粘贴参考音频 URL
-            </button>
-          ) : null}
+          <button
+            type="button"
+            className="canvas-gen-node__url-add"
+            onClick={() => setDraftKind("audio")}
+          >
+            粘贴参考音频 URL
+          </button>
         </div>
       )}
       {draftError ? (

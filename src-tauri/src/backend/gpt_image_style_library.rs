@@ -89,7 +89,7 @@ pub(super) struct StyleReferences {
 
 fn catalog_error(message: &str) -> BackendError {
     BackendError::validation(
-        "内置风格库不完整，请重新安装包含完整风格资源的应用",
+        "图片风格库组件缺失或损坏，请在功能组件中安装或修复后重试",
         json!({ "reason": message }),
     )
 }

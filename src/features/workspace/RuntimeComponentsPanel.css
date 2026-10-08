@@ -1,0 +1,130 @@
+.runtime-components {
+  width: min(46rem, calc(100vw - var(--space-md) * 2));
+  max-height: calc(100dvh - var(--space-md) * 2);
+  padding: 0;
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-panel);
+  color: var(--color-chrome-ink);
+  background: var(--color-chrome-2);
+  box-shadow: var(--shadow-raised);
+  font-size: var(--text-sm);
+  line-height: var(--leading-body);
+}
+.runtime-components[open] {
+  display: flex;
+  flex-direction: column;
+}
+.runtime-components::backdrop {
+  background: var(--color-scrim);
+}
+.runtime-components__header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: var(--space-md);
+  padding: var(--space-md);
+  border-bottom: var(--rule-thin) solid var(--color-chrome-rule);
+}
+.runtime-components__header h2 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+.runtime-components__header p,
+.runtime-components__footer p {
+  margin: var(--space-xs) 0 0;
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+}
+.runtime-components__body {
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-md);
+}
+.runtime-components__feature {
+  padding: var(--space-sm);
+  border-left: var(--rule-active) solid var(--color-accent);
+}
+.runtime-components__notice,
+.runtime-components__dependencies,
+.runtime-components__size {
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+}
+.runtime-components__error {
+  color: var(--color-error);
+  overflow-wrap: anywhere;
+}
+.runtime-components__transfer {
+  padding: var(--space-sm);
+  margin-bottom: var(--space-md);
+  background: var(--color-chrome-3);
+}
+.runtime-components__transfer p {
+  margin: 0 0 var(--space-xs);
+}
+.runtime-components__transfer progress {
+  width: 100%;
+  accent-color: var(--color-accent);
+}
+.runtime-components__list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.runtime-components__item {
+  padding: var(--space-md) 0;
+  border-bottom: var(--rule-thin) solid var(--color-chrome-rule);
+}
+.runtime-components__item--required {
+  border-left: var(--rule-active) solid var(--color-accent);
+  padding-left: var(--space-sm);
+}
+.runtime-components__identity {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--space-xs);
+}
+.runtime-components__identity h3 {
+  margin: 0;
+  font-size: var(--text-md);
+}
+.runtime-components__identity span {
+  color: var(--color-chrome-muted);
+  font-size: var(--text-xs);
+}
+.runtime-components__item p {
+  margin: var(--space-xs) 0;
+}
+.runtime-components__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-sm);
+  margin-top: var(--space-sm);
+}
+.runtime-components button {
+  min-height: var(--size-control);
+  padding: var(--space-xs) var(--space-sm);
+  border: var(--rule-thin) solid var(--color-chrome-rule-2);
+  border-radius: var(--radius-control);
+  color: inherit;
+  background: var(--color-chrome-3);
+  font: inherit;
+  cursor: pointer;
+}
+.runtime-components button:hover:not(:disabled) {
+  background: var(--color-chrome-rule);
+}
+.runtime-components button:disabled {
+  color: var(--color-chrome-muted);
+  cursor: default;
+}
+.runtime-components button:focus-visible {
+  outline: var(--rule-active) solid var(--color-accent);
+  outline-offset: var(--space-2xs);
+}
+.runtime-components__footer {
+  padding: var(--space-sm) var(--space-md);
+  border-top: var(--rule-thin) solid var(--color-chrome-rule);
+}

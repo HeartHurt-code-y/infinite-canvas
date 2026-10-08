@@ -80,6 +80,38 @@ export function listFilesRecursive(dir) {
   return files;
 }
 
+/** Prevent optional-component installers from entering the existing offline update feed. */
+export function assertUpdaterEditionChannel(bundleDir, baseUrl, { rejectOnline = false } = {}) {
+  const files = listFilesRecursive(bundleDir);
+  let online =
+    /(?:^|\/)\.cache\/tauri-editions\/online(?:\/|$)/i.test(
+      path.resolve(bundleDir).replaceAll("\\", "/"),
+    ) || files.some((filePath) => /-online-setup\.exe(?:\.sig)?$/i.test(filePath));
+  const markers = new Set(files.filter((entry) => path.basename(entry) === "distribution.json"));
+  let ancestor = path.resolve(bundleDir);
+  for (let depth = 0; depth < 8; depth += 1) {
+    const marker = path.join(ancestor, "distribution.json");
+    if (existsSync(marker)) markers.add(marker);
+    const parent = path.dirname(ancestor);
+    if (parent === ancestor) break;
+    ancestor = parent;
+  }
+  for (const filePath of markers) {
+    const distribution = JSON.parse(readFileSync(filePath, "utf8"));
+    if (distribution.edition === "online") online = true;
+  }
+  if (!online) return;
+  if (rejectOnline) {
+    throw new Error(
+      "轻量联网版必须使用独立发布流程和 windows-x86_64-online 频道，禁止写入现有离线版更新频道",
+    );
+  }
+  const endpoint = new URL(baseUrl);
+  if (!endpoint.pathname.replace(/\/+$/, "").endsWith("/windows-x86_64-online")) {
+    throw new Error("轻量联网版更新清单必须指向 windows-x86_64-online 独立频道");
+  }
+}
+
 /**
  * @param {string} bundleDir
  * @param {{ fallbackPlatform?: string, baseUrl: string, version?: string }} options
@@ -207,6 +239,7 @@ export function writeLatestJson(options) {
     typeof options["base-url"] === "string" && options["base-url"].trim() !== ""
       ? options["base-url"]
       : tosUpdatesPublicBaseUrl();
+  assertUpdaterEditionChannel(bundleDir, baseUrl);
   const out = typeof options.out === "string" ? options.out : path.join(bundleDir, "latest.json");
   const version = typeof options.version === "string" ? options.version : readAppVersion();
   const notes = typeof options.notes === "string" ? options.notes : "";

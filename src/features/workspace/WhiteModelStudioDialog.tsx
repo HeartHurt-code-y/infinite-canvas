@@ -4,6 +4,11 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toMediaSrc } from "../../lib/backend";
 import { captureMotionFromVideo, poseCaptureAvailable } from "../../lib/poseCapture";
 import {
+  ensureRuntimeFeatureInstalled,
+  requestRuntimeComponents,
+  subscribeRuntimeComponentsChanged,
+} from "../../lib/runtimeComponents";
+import {
   cameraKeyframeFromWorld,
   evaluateActor,
   evaluateCamera,
@@ -172,6 +177,12 @@ export function WhiteModelStudioDialog({
   const [captureNotice, setCaptureNotice] = useState<string | null>(null);
   const captureAbort = useRef<AbortController | null>(null);
   const engineRequestId = useRef(0);
+  const [componentRevision, setComponentRevision] = useState(0);
+
+  useEffect(
+    () => subscribeRuntimeComponentsChanged(() => setComponentRevision((value) => value + 1)),
+    [],
+  );
 
   const loadedJob = job?.jobId === local.jobId ? job : null;
   const restoring = !blocking && Boolean(local.jobId) && loadedJob == null;
@@ -181,8 +192,7 @@ export function WhiteModelStudioDialog({
   const finished = !blocking && loadedJob?.status === "succeeded" && Boolean(loadedJob.videoPath);
   const sceneIssue = local.mode === "create" ? whiteModelPlanIssue(local.plan) : null;
   const engineReady = engine?.available && enginePath === local.executablePath.trim();
-  const selectedActor =
-    local.plan.objects.find((actor) => actor.id === selectedActorId) ?? null;
+  const selectedActor = local.plan.objects.find((actor) => actor.id === selectedActorId) ?? null;
   const environmentSrc = environmentPreviewSrc(local.environment ?? null, imageInputs);
 
   useEffect(() => {
@@ -214,13 +224,13 @@ export function WhiteModelStudioDialog({
       alive = false;
       captureAbort.current?.abort();
     };
-  }, [blocking]);
+  }, [blocking, componentRevision]);
 
   useEffect(() => {
     if (blocking) return;
     let alive = true;
     const requestId = ++engineRequestId.current;
-    const path = initial.executablePath;
+    const path = localRef.current.executablePath;
     void getBlenderEngine(path)
       .then((result) => {
         if (alive && requestId === engineRequestId.current) {
@@ -229,17 +239,17 @@ export function WhiteModelStudioDialog({
         }
       })
       .catch((cause: unknown) => {
-        if (alive)
+        if (alive && requestId === engineRequestId.current)
           setError(
             path.trim()
               ? errorMessage(cause)
-              : `内置 Blender 检查失败：${errorMessage(cause)} 请修复安装包或重新安装应用。`,
+              : `Blender 组件检查失败：${errorMessage(cause)} 请打开组件管理安装或修复。`,
           );
       });
     return () => {
       alive = false;
     };
-  }, [blocking, initial.executablePath]);
+  }, [blocking, initial.executablePath, componentRevision]);
 
   useEffect(() => {
     if (blocking || !local.jobId) return;
@@ -372,8 +382,11 @@ export function WhiteModelStudioDialog({
       ...plan,
       camera: {
         ...plan.camera,
-        keyframes: upsertKeyframe(plan.camera.keyframes, time, plan.fps, (existing) =>
-          existing ?? cameraKeyframeFromWorld(plan, time, evaluateCamera(plan, time)),
+        keyframes: upsertKeyframe(
+          plan.camera.keyframes,
+          time,
+          plan.fps,
+          (existing) => existing ?? cameraKeyframeFromWorld(plan, time, evaluateCamera(plan, time)),
         ),
       },
     }));
@@ -407,6 +420,11 @@ export function WhiteModelStudioDialog({
     if (capture) return;
     setError(null);
     setCaptureNotice(null);
+    if (!(await poseCaptureAvailable())) {
+      setCaptureAvailable(false);
+      requestRuntimeComponents("motion-capture");
+      return;
+    }
     let selected: string | string[] | null;
     try {
       selected = await open({
@@ -484,7 +502,7 @@ export function WhiteModelStudioDialog({
         setError(
           path.trim()
             ? errorMessage(cause)
-            : `内置 Blender 检查失败：${errorMessage(cause)} 请修复安装包或重新安装应用。`,
+            : `Blender 组件检查失败：${errorMessage(cause)} 请打开组件管理安装或修复。`,
         );
       }
     } finally {
@@ -516,6 +534,14 @@ export function WhiteModelStudioDialog({
     setError(null);
     setPollError(null);
     try {
+      if (
+        !(await ensureRuntimeFeatureInstalled(
+          snapshot.executablePath.trim() ? "media-processing" : "white-model-render",
+        ))
+      ) {
+        setError("白模渲染所需组件尚未就绪，安装完成后请再次点击渲染。场景草稿已保留。");
+        return;
+      }
       const created = await startBlenderRender(whiteModelRenderRequest(snapshot));
       // 先把任务编号连同冻结请求一起写回画布，再允许关闭对话框。
       commitNow({ ...snapshot, jobId: created.jobId, jobInputSignature: signature });
@@ -626,7 +652,9 @@ export function WhiteModelStudioDialog({
       onKeyDown={(event) => {
         event.stopPropagation();
         const target = event.target as HTMLElement;
-        const editing = ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "SUMMARY"].includes(target.tagName);
+        const editing = ["INPUT", "TEXTAREA", "SELECT", "BUTTON", "SUMMARY"].includes(
+          target.tagName,
+        );
         if (event.key === "Escape") {
           event.preventDefault();
           close();
@@ -835,7 +863,8 @@ export function WhiteModelStudioDialog({
                       value={local.plan.fps}
                       onChange={(event) => {
                         const value = event.target.valueAsNumber;
-                        if (Number.isFinite(value)) updatePlan({ ...localRef.current.plan, fps: value });
+                        if (Number.isFinite(value))
+                          updatePlan({ ...localRef.current.plan, fps: value });
                       }}
                     />
                   </label>
@@ -845,7 +874,8 @@ export function WhiteModelStudioDialog({
                       value={`${local.plan.width}:${local.plan.height}`}
                       onChange={(event) => {
                         const [width, height] = event.target.value.split(":").map(Number);
-                        if (width && height) updatePlan({ ...localRef.current.plan, width, height });
+                        if (width && height)
+                          updatePlan({ ...localRef.current.plan, width, height });
                       }}
                     >
                       <option value="960:540">16:9 · 横屏</option>
@@ -858,111 +888,35 @@ export function WhiteModelStudioDialog({
               </fieldset>
             )}
             {blocking ? null : (
-            <details className="white-model-studio__advanced white-model-studio__section">
-              <summary>场景来源与渲染引擎</summary>
-              <div className="white-model-studio__advanced-body">
-                <label className="white-model-studio__field">
-                  <span>场景来源</span>
-                  <select
-                    value={local.mode}
-                    disabled={locked}
-                    onChange={(event) =>
-                      commitNow({
-                        ...localRef.current,
-                        mode: event.target.value === "blend" ? "blend" : "create",
-                      })
-                    }
-                  >
-                    <option value="create">在导演台搭建白模</option>
-                    <option value="blend">渲染 Blender 工程</option>
-                  </select>
-                </label>
-                {local.mode === "blend" ? (
-                  <>
-                    <label className="white-model-studio__field">
-                      <span>Blender 工程文件</span>
-                      <input
-                        required
-                        disabled={locked}
-                        value={local.sourceBlendPath}
-                        placeholder="选择 .blend 工程"
-                        onChange={(event) => updateDraft({ sourceBlendPath: event.target.value })}
-                      />
-                    </label>
-                    <div className="white-model-studio__actions">
-                      <button
-                        type="button"
-                        disabled={locked}
-                        onClick={() => {
-                          void chooseFile("blend");
-                        }}
-                      >
-                        导入 .blend 工程
-                      </button>
-                      <button
-                        type="button"
-                        disabled={!local.sourceBlendPath.trim() || opening}
-                        onClick={() => {
-                          void openProject(local.sourceBlendPath);
-                        }}
-                      >
-                        打开源工程精修
-                      </button>
-                    </div>
-                    <p className="white-model-studio__hint">
-                      精修后先在 Blender 保存，再重新渲染。
-                    </p>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    disabled={locked}
-                    onClick={() => {
-                      void chooseFile("blend");
-                    }}
-                  >
-                    导入已有 .blend 工程
-                  </button>
-                )}
-                <p className="white-model-studio__hint">
-                  渲染与工程精修均可直接使用内置引擎。
-                </p>
-                {!local.executablePath.trim() && engine && !engine.available ? (
-                  <p className="white-model-studio__hint">
-                    内置引擎无法启动，请修复安装包或重新安装应用。
-                  </p>
-                ) : null}
-                <button
-                  type="button"
-                  disabled={detecting}
-                  onClick={() => {
-                    void detectEngine();
-                  }}
-                >
-                  {detecting
-                    ? "正在检查…"
-                    : local.executablePath.trim()
-                      ? "重新检查外部引擎"
-                      : "重新检查内置引擎"}
-                </button>
-                <details
-                  className="white-model-studio__advanced"
-                  open={advancedEngineOpen}
-                  onToggle={(event) => setAdvancedEngineOpen(event.currentTarget.open)}
-                >
-                  <summary>高级设置：使用外部 Blender（可选）</summary>
-                  {advancedEngineOpen ? (
-                    <div className="white-model-studio__advanced-body">
-                      <p className="white-model-studio__hint">
-                        仅在需要指定其他版本时使用。留空即使用应用内置版本。
-                      </p>
+              <details className="white-model-studio__advanced white-model-studio__section">
+                <summary>场景来源与渲染引擎</summary>
+                <div className="white-model-studio__advanced-body">
+                  <label className="white-model-studio__field">
+                    <span>场景来源</span>
+                    <select
+                      value={local.mode}
+                      disabled={locked}
+                      onChange={(event) =>
+                        commitNow({
+                          ...localRef.current,
+                          mode: event.target.value === "blend" ? "blend" : "create",
+                        })
+                      }
+                    >
+                      <option value="create">在导演台搭建白模</option>
+                      <option value="blend">渲染 Blender 工程</option>
+                    </select>
+                  </label>
+                  {local.mode === "blend" ? (
+                    <>
                       <label className="white-model-studio__field">
-                        <span>外部 Blender 路径</span>
+                        <span>Blender 工程文件</span>
                         <input
-                          value={local.executablePath}
+                          required
                           disabled={locked}
-                          placeholder="留空使用内置 Blender"
-                          onChange={(event) => updateDraft({ executablePath: event.target.value })}
+                          value={local.sourceBlendPath}
+                          placeholder="选择 .blend 工程"
+                          onChange={(event) => updateDraft({ sourceBlendPath: event.target.value })}
                         />
                       </label>
                       <div className="white-model-studio__actions">
@@ -970,29 +924,113 @@ export function WhiteModelStudioDialog({
                           type="button"
                           disabled={locked}
                           onClick={() => {
-                            void chooseFile("engine");
+                            void chooseFile("blend");
                           }}
                         >
-                          选择外部 Blender
+                          导入 .blend 工程
                         </button>
-                        {local.executablePath.trim() ? (
+                        <button
+                          type="button"
+                          disabled={!local.sourceBlendPath.trim() || opening}
+                          onClick={() => {
+                            void openProject(local.sourceBlendPath);
+                          }}
+                        >
+                          打开源工程精修
+                        </button>
+                      </div>
+                      <p className="white-model-studio__hint">
+                        精修后先在 Blender 保存，再重新渲染。
+                      </p>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      disabled={locked}
+                      onClick={() => {
+                        void chooseFile("blend");
+                      }}
+                    >
+                      导入已有 .blend 工程
+                    </button>
+                  )}
+                  <p className="white-model-studio__hint">渲染与工程精修使用本机 Blender 组件。</p>
+                  {!local.executablePath.trim() && engine && !engine.available ? (
+                    <div className="white-model-studio__actions">
+                      <p className="white-model-studio__hint">
+                        Blender 组件尚未就绪，安装后即可渲染；场景编辑与预览仍可继续。
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => requestRuntimeComponents("white-model-render")}
+                      >
+                        安装或修复 Blender 组件
+                      </button>
+                    </div>
+                  ) : null}
+                  <button
+                    type="button"
+                    disabled={detecting}
+                    onClick={() => {
+                      void detectEngine();
+                    }}
+                  >
+                    {detecting
+                      ? "正在检查…"
+                      : local.executablePath.trim()
+                        ? "重新检查外部引擎"
+                        : "重新检查 Blender 组件"}
+                  </button>
+                  <details
+                    className="white-model-studio__advanced"
+                    open={advancedEngineOpen}
+                    onToggle={(event) => setAdvancedEngineOpen(event.currentTarget.open)}
+                  >
+                    <summary>高级设置：使用外部 Blender（可选）</summary>
+                    {advancedEngineOpen ? (
+                      <div className="white-model-studio__advanced-body">
+                        <p className="white-model-studio__hint">
+                          仅在需要指定其他版本时使用。留空即使用已安装的 Blender 组件。
+                        </p>
+                        <label className="white-model-studio__field">
+                          <span>外部 Blender 路径</span>
+                          <input
+                            value={local.executablePath}
+                            disabled={locked}
+                            placeholder="留空使用 Blender 组件"
+                            onChange={(event) =>
+                              updateDraft({ executablePath: event.target.value })
+                            }
+                          />
+                        </label>
+                        <div className="white-model-studio__actions">
                           <button
                             type="button"
                             disabled={locked}
                             onClick={() => {
-                              commitNow({ ...localRef.current, executablePath: "" });
-                              void detectEngine("");
+                              void chooseFile("engine");
                             }}
                           >
-                            恢复使用内置引擎
+                            选择外部 Blender
                           </button>
-                        ) : null}
+                          {local.executablePath.trim() ? (
+                            <button
+                              type="button"
+                              disabled={locked}
+                              onClick={() => {
+                                commitNow({ ...localRef.current, executablePath: "" });
+                                void detectEngine("");
+                              }}
+                            >
+                              恢复使用 Blender 组件
+                            </button>
+                          ) : null}
+                        </div>
                       </div>
-                    </div>
-                  ) : null}
-                </details>
-              </div>
-            </details>
+                    ) : null}
+                  </details>
+                </div>
+              </details>
             )}
           </form>
           {blocking ? (
@@ -1002,114 +1040,114 @@ export function WhiteModelStudioDialog({
               </p>
             ) : null
           ) : (
-          <section className="white-model-studio__output" aria-label="白模渲染结果">
-            <p className="white-model-studio__hint" role="status">
-              {enginePath !== local.executablePath.trim() && engine
-                ? "外部程序路径已修改，请重新检查引擎。"
-                : engine
-                  ? `${engine.message}${engine.version ? ` · ${engine.version}` : ""}`
-                  : local.executablePath.trim()
-                    ? "正在检查指定的外部 Blender…"
-                    : "正在检查内置 Blender…"}
-            </p>
-            {finished && loadedJob?.videoPath ? (
-              <div className="white-model-studio__preview">
-                <video
-                  controls
-                  src={toMediaSrc(loadedJob.videoPath)}
-                  poster={loadedJob.previewPath ? toMediaSrc(loadedJob.previewPath) : undefined}
-                  aria-label="白模视频预览"
-                />
-              </div>
-            ) : null}
-            {restoring ? <p role="status">正在恢复渲染任务…</p> : null}
-            {loadedJob ? (
-              <div className="white-model-studio__job">
-                <p role="status">{loadedJob.message}</p>
-                <progress aria-label="白模渲染进度" max={100} value={loadedJob.progress} />
-                <small>
-                  {loadedJob.width} × {loadedJob.height} · {loadedJob.durationSeconds} 秒 ·{" "}
-                  {Math.round(loadedJob.progress)}%
-                </small>
-                {loadedJob.error ? (
-                  <p role="alert" className="white-model-studio__error">
-                    {loadedJob.error}
-                  </p>
-                ) : null}
-                {loadedJob.status === "cancelled" ? (
-                  <p>渲染已取消，可以调整设置后重新渲染。</p>
-                ) : null}
-                {loadedJob.status === "failed" ? <p>已保留草稿，可以重新渲染。</p> : null}
-              </div>
-            ) : null}
-            {pollError ? (
-              <div role="alert" className="white-model-studio__error">
-                <p>读取任务失败：{pollError}</p>
-                <button type="button" onClick={() => setPollVersion((version) => version + 1)}>
-                  重试读取任务
-                </button>
-              </div>
-            ) : null}
-            {activeJob(loadedJob) || restoring ? (
-              <>
-                <p className="white-model-studio__hint">
-                  关闭导演台后继续渲染；再次打开可恢复查看进度。
-                </p>
-                <button
-                  type="button"
-                  disabled={cancelling}
-                  onClick={() => {
-                    void cancelRender();
-                  }}
-                >
-                  {cancelling ? "正在取消…" : "取消渲染"}
-                </button>
-              </>
-            ) : null}
-            {finished && !signatureMatches ? (
-              <p role="status" className="white-model-studio__hint">
-                设置已修改，当前预览属于上次渲染。请重新渲染后使用视频。
+            <section className="white-model-studio__output" aria-label="白模渲染结果">
+              <p className="white-model-studio__hint" role="status">
+                {enginePath !== local.executablePath.trim() && engine
+                  ? "外部程序路径已修改，请重新检查引擎。"
+                  : engine
+                    ? `${engine.message}${engine.version ? ` · ${engine.version}` : ""}`
+                    : local.executablePath.trim()
+                      ? "正在检查指定的外部 Blender…"
+                      : "正在检查 Blender 组件…"}
               </p>
-            ) : null}
-            {finished && loadedJob?.projectPath ? (
-              <div className="white-model-studio__project">
-                <strong>继续专业精修</strong>
-                <p className="white-model-studio__hint">
-                  在 Blender 中编辑角色、动画与相机，保存工程后将它设为渲染源。
-                </p>
-                <div className="white-model-studio__actions">
-                  <button
-                    type="button"
-                    disabled={opening || using}
-                    onClick={() => {
-                      void openProject(loadedJob.projectPath!);
-                    }}
-                  >
-                    {opening ? "正在打开…" : "在 Blender 中精修工程"}
-                  </button>
-                  <button
-                    type="button"
-                    disabled={locked}
-                    onClick={() =>
-                      commitNow({
-                        ...localRef.current,
-                        mode: "blend",
-                        sourceBlendPath: loadedJob.projectPath!,
-                        jobInputSignature: "",
-                      })
-                    }
-                  >
-                    将此工程设为下次渲染源
+              {finished && loadedJob?.videoPath ? (
+                <div className="white-model-studio__preview">
+                  <video
+                    controls
+                    src={toMediaSrc(loadedJob.videoPath)}
+                    poster={loadedJob.previewPath ? toMediaSrc(loadedJob.previewPath) : undefined}
+                    aria-label="白模视频预览"
+                  />
+                </div>
+              ) : null}
+              {restoring ? <p role="status">正在恢复渲染任务…</p> : null}
+              {loadedJob ? (
+                <div className="white-model-studio__job">
+                  <p role="status">{loadedJob.message}</p>
+                  <progress aria-label="白模渲染进度" max={100} value={loadedJob.progress} />
+                  <small>
+                    {loadedJob.width} × {loadedJob.height} · {loadedJob.durationSeconds} 秒 ·{" "}
+                    {Math.round(loadedJob.progress)}%
+                  </small>
+                  {loadedJob.error ? (
+                    <p role="alert" className="white-model-studio__error">
+                      {loadedJob.error}
+                    </p>
+                  ) : null}
+                  {loadedJob.status === "cancelled" ? (
+                    <p>渲染已取消，可以调整设置后重新渲染。</p>
+                  ) : null}
+                  {loadedJob.status === "failed" ? <p>已保留草稿，可以重新渲染。</p> : null}
+                </div>
+              ) : null}
+              {pollError ? (
+                <div role="alert" className="white-model-studio__error">
+                  <p>读取任务失败：{pollError}</p>
+                  <button type="button" onClick={() => setPollVersion((version) => version + 1)}>
+                    重试读取任务
                   </button>
                 </div>
-              </div>
-            ) : null}
-            {error ? (
-              <p role="alert" className="white-model-studio__error">
-                {error}
-              </p>
-            ) : null}
-          </section>
+              ) : null}
+              {activeJob(loadedJob) || restoring ? (
+                <>
+                  <p className="white-model-studio__hint">
+                    关闭导演台后继续渲染；再次打开可恢复查看进度。
+                  </p>
+                  <button
+                    type="button"
+                    disabled={cancelling}
+                    onClick={() => {
+                      void cancelRender();
+                    }}
+                  >
+                    {cancelling ? "正在取消…" : "取消渲染"}
+                  </button>
+                </>
+              ) : null}
+              {finished && !signatureMatches ? (
+                <p role="status" className="white-model-studio__hint">
+                  设置已修改，当前预览属于上次渲染。请重新渲染后使用视频。
+                </p>
+              ) : null}
+              {finished && loadedJob?.projectPath ? (
+                <div className="white-model-studio__project">
+                  <strong>继续专业精修</strong>
+                  <p className="white-model-studio__hint">
+                    在 Blender 中编辑角色、动画与相机，保存工程后将它设为渲染源。
+                  </p>
+                  <div className="white-model-studio__actions">
+                    <button
+                      type="button"
+                      disabled={opening || using}
+                      onClick={() => {
+                        void openProject(loadedJob.projectPath!);
+                      }}
+                    >
+                      {opening ? "正在打开…" : "在 Blender 中精修工程"}
+                    </button>
+                    <button
+                      type="button"
+                      disabled={locked}
+                      onClick={() =>
+                        commitNow({
+                          ...localRef.current,
+                          mode: "blend",
+                          sourceBlendPath: loadedJob.projectPath!,
+                          jobInputSignature: "",
+                        })
+                      }
+                    >
+                      将此工程设为下次渲染源
+                    </button>
+                  </div>
+                </div>
+              ) : null}
+              {error ? (
+                <p role="alert" className="white-model-studio__error">
+                  {error}
+                </p>
+              ) : null}
+            </section>
           )}
         </aside>
       </div>
@@ -1133,8 +1171,14 @@ export function WhiteModelStudioDialog({
         ) : (
           <>
             <p>
-              预览与成片共用同一份逐帧数据；应用已内置 Blender，无需另行安装或下载。使用视频后可继续配置角色映射。
+              预览与成片共用同一份逐帧数据；本地渲染需要 Blender
+              组件，首次使用可在组件管理中安装。使用视频后可继续配置角色映射。
             </p>
+            {!local.executablePath.trim() && !engineReady ? (
+              <button type="button" onClick={() => requestRuntimeComponents("white-model-render")}>
+                准备 Blender 渲染组件
+              </button>
+            ) : null}
             <div className="white-model-studio__actions">
               <button
                 type="submit"

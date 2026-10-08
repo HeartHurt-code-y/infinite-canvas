@@ -105,6 +105,36 @@ function createClient(detail: GenerationTaskDetail = DETAIL): GenerationTaskClie
 }
 
 describe("HistoryDialog diagnostics", () => {
+  it("opens an original task outside the first page and searches names in the backend scope", async () => {
+    const client = createClient({
+      ...DETAIL,
+      summary: { ...SUMMARY, id: "old-task", outputName: "第01集_镜头003" },
+    });
+    vi.mocked(client.list).mockResolvedValue({ items: [], nextCursorCreatedBefore: null });
+    render(
+      <HistoryDialog
+        open
+        client={client}
+        onClose={vi.fn()}
+        canvasId="canvas-1"
+        initialTaskId="old-task"
+      />,
+    );
+    await screen.findByText("第01集_镜头003");
+    expect(client.get).toHaveBeenCalledWith("old-task");
+    fireEvent.change(screen.getByRole("textbox", { name: "搜索任务名称、文件名或任务 ID" }), {
+      target: { value: "  镜头003  " },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "搜索" }));
+    await waitFor(() =>
+      expect(client.list).toHaveBeenLastCalledWith({
+        canvasId: "canvas-1",
+        statuses: null,
+        limit: 30,
+        search: "镜头003",
+      }),
+    );
+  });
   it("keeps generation history scoped to the canvas across pagination and canvas changes", async () => {
     const client = createClient();
     const list = vi.mocked(client.list);
@@ -545,6 +575,7 @@ describe("HistoryDialog diagnostics", () => {
         flushCanvasMediaVisibility();
       });
 
+      await waitFor(() => expect(preview!.querySelector("video")).not.toBeNull());
       const video = preview!.querySelector("video");
       expect(video).toHaveAttribute("src", expect.stringContaining("portrait-video.mp4"));
       expect(preview!.querySelector(".history-result__visual--auto")).toBeNull();
@@ -617,6 +648,32 @@ const REGEN_DETAIL: GenerationTaskDetail = {
 };
 
 describe("HistoryDialog regeneration", () => {
+  it("regenerates a media-only request even when the frozen catalog requires a prompt", async () => {
+    const client = createClient({
+      ...REGEN_DETAIL,
+      logicalRequest: {
+        ...REGEN_LOGICAL_REQUEST,
+        prompt: [],
+        modelOperationSchemaSnapshot: { text_to_image: { request: { promptMode: "required" } } },
+      },
+    });
+    render(<HistoryDialog open onClose={vi.fn()} client={client} />);
+    await screen.findByText("任务概要");
+    fireEvent.click(screen.getByRole("button", { name: /修改后重新生成/ }));
+    const dialog = await screen.findByRole("dialog", { name: "修改后重新生成" });
+    await within(dialog).findByText("参考图A");
+    fireEvent.click(within(dialog).getByRole("button", { name: "重新生成" }));
+    await waitFor(() => expect(client.start).toHaveBeenCalledTimes(1));
+    expect(vi.mocked(client.start).mock.calls[0]![0]).toMatchObject({
+      prompt: [],
+      explicitMedia: [
+        expect.objectContaining({
+          target: expect.objectContaining({ assetId: "asset-1" }) as unknown,
+        }),
+      ],
+    });
+  });
+
   it("regenerates the original task from its frozen request", async () => {
     const client = createClient(REGEN_DETAIL);
     render(<HistoryDialog open onClose={vi.fn()} client={client} />);

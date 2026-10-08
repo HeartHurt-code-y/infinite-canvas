@@ -5,6 +5,8 @@ import {
   workflowConnectedReferenceFixtures,
 } from "../../test/workflowMaterialFixtures";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
+const componentRequest = vi.hoisted(() => vi.fn());
+vi.mock("../../lib/runtimeComponents", () => ({ requestRuntimeComponents: componentRequest }));
 
 import type { OptimizeVideoPromptCommand } from "../../lib/backend";
 import type { RemotionRendererClient } from "../../lib/remotionRenderer";
@@ -366,7 +368,28 @@ describe("remotion composite workflow", () => {
     });
     const result = await runner.run(request);
     expect(result.phase).toBe("failed");
-    expect(result.error).toBe("本地动画渲染引擎未就绪");
+    expect(result.error).toContain("本地动画渲染引擎未就绪");
+    expect(result.error).toContain("手动重新制作");
+    expect(componentRequest).toHaveBeenCalledWith("animation-render");
+    expect(fake.promptClient.run).not.toHaveBeenCalled();
+    expect(renderer.start).not.toHaveBeenCalled();
+  });
+
+  it("preserves the previous plan when starting again requires a missing component", async () => {
+    const { fake, renderer, runner, request } = setup();
+    const previous = await runner.run(request);
+    vi.mocked(fake.promptClient.run).mockClear();
+    vi.mocked(renderer.start).mockClear();
+    vi.mocked(renderer.preflight).mockResolvedValueOnce({
+      ready: false,
+      message: "动画组件未安装",
+    });
+    const result = await runner.run({
+      ...request,
+      node: { ...request.node, config: { ...request.node.config, checkpoint: previous } },
+    });
+    expect(result.remotion?.plan).toEqual(previous.remotion?.plan);
+    expect(result.remotion?.history).toEqual(previous.remotion?.history);
     expect(fake.promptClient.run).not.toHaveBeenCalled();
     expect(renderer.start).not.toHaveBeenCalled();
   });

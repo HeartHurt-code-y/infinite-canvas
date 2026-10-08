@@ -18,6 +18,34 @@ fn run_runtime_component_pins_if_requested() -> bool {
     std::process::exit(0);
 }
 
+/// Let release verification read the exact optional-component trust pins from this executable.
+fn run_component_catalog_pins_if_requested() -> bool {
+    if !std::env::args().any(|arg| arg == "--print-component-catalog-pins") {
+        return false;
+    }
+    println!(
+        "IC_COMPONENT_CATALOG_PINS_V1 {}",
+        serde_json::json!({
+            "schemaVersion": 1,
+            "applicationVersion": env!("CARGO_PKG_VERSION"),
+            "edition": env!("IC_DISTRIBUTION_EDITION"),
+            "catalogSha256": env!("IC_COMPONENT_CATALOG_SHA256"),
+            "manifestPins": {
+                "blender": env!("IC_BLENDER_MANIFEST_SHA256"),
+                "remotion-runtime": env!("IC_REMOTION_MANIFEST_SHA256"),
+                "ffmpeg": env!("IC_FFMPEG_MANIFEST_SHA256"),
+                "pose-runtime": env!("IC_POSE_MANIFEST_SHA256"),
+                "gpt-image-2-style-library": env!("IC_STYLE_MANIFEST_SHA256"),
+                "ai-media-runtime": env!("IC_AI_MEDIA_MANIFEST_SHA256"),
+                "ai-media-quality-runtime": env!("IC_AI_MEDIA_QUALITY_MANIFEST_SHA256"),
+            },
+        })
+    );
+    use std::io::Write as _;
+    let _ = std::io::stdout().flush();
+    std::process::exit(0);
+}
+
 /// The slim NSIS installer runs this before it can remove an older MSI/NSIS install.
 /// It must work without starting WebView, backend services, or a migration thread.
 fn run_runtime_component_check_if_requested() -> bool {
@@ -81,6 +109,9 @@ fn run_keychain_access_self_test_if_requested() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    if run_component_catalog_pins_if_requested() {
+        return;
+    }
     if run_runtime_component_pins_if_requested() {
         return;
     }
@@ -139,10 +170,20 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
+            let setup_clock = std::time::Instant::now();
+            tauri_plugin_log::log::info!("[启动] setup 开始（主线程，期间事件循环不泵消息）");
             let state = backend::BackendState::initialize(app.handle())?;
+            tauri_plugin_log::log::info!(
+                "[启动] BackendState::initialize 完成, 耗时 {}ms",
+                setup_clock.elapsed().as_millis()
+            );
             if let Err(error) = state.tasks.recover() {
                 tauri_plugin_log::log::error!("backend recovery failed: {error}");
             }
+            tauri_plugin_log::log::info!(
+                "[启动] setup 结束, 总耗时 {}ms（此后事件循环才开始泵消息）",
+                setup_clock.elapsed().as_millis()
+            );
             app.manage(state);
             Ok(())
         })
@@ -170,6 +211,7 @@ pub fn run() {
             commands::get_canvas_document,
             commands::list_canvas_documents,
             commands::start_generation,
+            commands::rename_generation_result,
             commands::run_prompt_node,
             commands::fetch_commerce_sources,
             commands::save_reverse_video_evidence,
@@ -194,6 +236,12 @@ pub fn run() {
             commands::get_runtime_component_migration_status,
             commands::prepare_runtime_components_for_update,
             commands::get_runtime_component_update_status,
+            commands::get_runtime_component_manager_status,
+            commands::get_runtime_feature_status,
+            commands::install_runtime_component,
+            commands::import_runtime_component_archive,
+            commands::cancel_runtime_component_install,
+            commands::get_runtime_component_asset_root,
             commands::prepare_macos_delta_update,
             commands::get_macos_delta_update_status,
             commands::install_prepared_macos_delta_update,
@@ -208,6 +256,7 @@ pub fn run() {
             commands::list_generation_tasks,
             commands::get_generation_task,
             commands::get_generation_task_progress,
+            commands::promote_seedance_draft,
             commands::recover_generation_tasks,
             commands::query_video_task_now,
             commands::list_remote_video_tasks,
@@ -278,6 +327,22 @@ pub fn run() {
             commands::start_video_frame_extraction,
             commands::get_video_frame_extraction_job,
             commands::cancel_video_frame_extraction,
+            commands::retry_video_frame_extraction,
+            commands::probe_video_preparation,
+            commands::start_video_preparation,
+            commands::get_video_preparation_job,
+            commands::list_video_preparation_jobs,
+            commands::retry_video_preparation_job,
+            commands::cancel_video_preparation_job,
+            commands::rename_video_preparation_output,
+            commands::get_ai_media_runtime_status,
+            commands::import_ai_media_runtime,
+            commands::start_ai_media_job,
+            commands::get_ai_media_job,
+            commands::list_ai_media_jobs,
+            commands::retry_ai_media_job,
+            commands::cancel_ai_media_job,
+            commands::rename_ai_media_output,
             commands::analyze_reelbench_video,
             commands::recut_reelbench_video,
             commands::validate_reelbench_shots,
@@ -294,6 +359,9 @@ pub fn run() {
             // KILL_ON_JOB_CLOSE 自动完成，这里是空实现。
             if matches!(event, tauri::RunEvent::Exit) {
                 backend::process_tree::ProcessTree::kill_all();
+            }
+            if matches!(event, tauri::RunEvent::Ready) {
+                tauri_plugin_log::log::info!("[启动] 事件循环就绪，开始泵消息");
             }
         });
 }

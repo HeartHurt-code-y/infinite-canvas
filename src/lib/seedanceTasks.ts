@@ -18,19 +18,12 @@ export const SEEDANCE_TASK_OPTIONS: readonly { value: SeedanceTaskMode; label: s
   { value: "extend", label: "视频延长" },
 ];
 
-/**
- * 模型实际开放的任务选项。RD 网关只有全参考自动判断与首尾帧两档：
- * 没有 reference/edit/extend 任务字段，也不支持单首帧。
- */
-export function seedanceTaskOptions(modelId: string): readonly {
+/** Task choices express user intent; the remote service decides which requests it accepts. */
+export function seedanceTaskOptions(_modelId: string): readonly {
   value: SeedanceTaskMode;
   label: string;
 }[] {
-  if (isRdVideoModel(modelId)) {
-    return SEEDANCE_TASK_OPTIONS.filter(
-      (option) => option.value === "auto" || option.value === "first_last_frame",
-    );
-  }
+  void _modelId;
   return SEEDANCE_TASK_OPTIONS;
 }
 
@@ -62,76 +55,33 @@ function frameMode(mode: SeedanceTaskMode): boolean {
   return mode === "first_frame" || mode === "first_last_frame";
 }
 
-function capabilityAllowsValue(
-  capability: ModelParameterCapability,
-  value: ModelParameterValue,
-): boolean {
-  if (capability.type === "boolean" && typeof value !== "boolean") return false;
-  if (capability.type === "string" && typeof value !== "string") return false;
-  if (capability.type === "integer" || capability.type === "number") {
-    if (typeof value !== "number" || !Number.isFinite(value)) return false;
-    if (capability.type === "integer" && !Number.isInteger(value)) return false;
-    if (capability.minimum != null && value < capability.minimum) return false;
-    if (capability.maximum != null && value > capability.maximum) return false;
-  }
-  return (
-    capability.options.length === 0 || capability.options.some((option) => option.value === value)
-  );
-}
-
-/** Task limits narrow the provider's declared capabilities; they never add unsupported values. */
+/** The catalog supplies controls and defaults, never an extra task-specific acceptance filter. */
 export function seedanceTaskParameterCapabilities(
-  modelId: string,
+  _modelId: string,
   capabilities: readonly ModelParameterCapability[],
-  mode: SeedanceTaskMode,
+  _mode: SeedanceTaskMode,
 ): readonly ModelParameterCapability[] {
-  if (
-    isRdVideoModel(modelId) ||
-    !isSeedance25VideoModel(modelId) ||
-    !(frameMode(mode) || mode === "edit" || mode === "extend")
-  )
-    return capabilities;
-  const durations =
-    mode === "edit" ? [-1] : [-1, ...Array.from({ length: 27 }, (_, index) => index + 4)];
-  return capabilities.map((capability) => {
-    if (capability.key !== "duration") return capability;
-    const allowed = durations.filter((value) => capabilityAllowsValue(capability, value));
-    const options =
-      capability.options.length > 0
-        ? capability.options.filter(
-            (option) => typeof option.value === "number" && allowed.includes(option.value),
-          )
-        : allowed.map((value) => ({ value, label: value === -1 ? "智能时长" : `${value} 秒` }));
-    return {
-      ...capability,
-      options,
-      defaultValue: options.some((option) => option.value === capability.defaultValue)
-        ? capability.defaultValue
-        : (options[0]?.value ?? ""),
-    };
-  });
+  void _mode;
+  return capabilities;
 }
 
 function restoredMode(
-  modelId: string,
   config: SeedanceTaskSettings,
   inputs: readonly TaskInput[],
 ): SeedanceTaskMode {
-  // 存档里的任务模式只在当前模型开放时沿用；RD 网关不开放
-  // reference/edit/extend/单首帧，旧值或越界值回退到全参考。
-  if (seedanceTaskOptions(modelId).some((option) => option.value === config.seedanceTaskMode)) {
+  if (SEEDANCE_TASK_OPTIONS.some((option) => option.value === config.seedanceTaskMode)) {
     return config.seedanceTaskMode!;
   }
   const roles = inputs.map((input) => config.mediaRoles?.[input.key]);
   if (roles.includes("last_frame")) return "first_last_frame";
-  if (!isRdVideoModel(modelId) && roles.includes("first_frame")) return "first_frame";
+  if (roles.includes("first_frame")) return "first_frame";
   const previous = config.parameterValues["omni_reference_task_type"];
   return previous === "reference" || previous === "edit" || previous === "extend"
     ? previous
     : "auto";
 }
 
-/** One contract for visible settings and actual submission, including restored canvases. */
+/** Compile task roles without rejecting media or replacing explicit remote parameter choices. */
 export function resolveSeedanceTask(
   modelId: string,
   capabilities: readonly ModelParameterCapability[],
@@ -139,23 +89,16 @@ export function resolveSeedanceTask(
   inputs: readonly TaskInput[],
 ): SeedanceTaskState {
   const enabled = isSeedance25VideoModel(modelId);
-  const rd = enabled && isRdVideoModel(modelId);
-  const mode = enabled ? restoredMode(modelId, config, inputs) : "auto";
-  const parameterCapabilities = seedanceTaskParameterCapabilities(modelId, capabilities, mode);
+  const mode = enabled ? restoredMode(config, inputs) : "auto";
   const parameterValues = { ...config.parameterValues };
   const mediaRoles: Record<string, string> = { ...config.mediaRoles };
-  const lockedParameters: string[] = [];
-  let issue: string | null = null;
-  let hint = "";
-  const taskCapability = capabilities.find((item) => item.key === "omni_reference_task_type");
-  const requestsExplicitTaskType =
-    enabled && taskCapability != null && !frameMode(mode) && inputs.length > 0;
   const sendsExplicitTaskType =
-    requestsExplicitTaskType && capabilityAllowsValue(taskCapability, mode);
+    enabled &&
+    capabilities.some((item) => item.key === "omni_reference_task_type") &&
+    !frameMode(mode) &&
+    inputs.length > 0;
 
-  if (rd) {
-    // RD 网关契约：没有任务类型字段，没有自适应画幅与智能时长；
-    // 画幅与时长始终按用户所选值提交。
+  if (enabled) {
     for (const input of inputs) mediaRoles[input.key] = `reference_${input.kind}`;
     if (frameMode(mode)) {
       const images = inputs.filter((input) => input.kind === "image");
@@ -166,95 +109,15 @@ export function resolveSeedanceTask(
           (input) => input.key !== first?.key && config.mediaRoles?.[input.key] === "last_frame",
         ) ?? images.find((input) => input.key !== first?.key);
       if (first) mediaRoles[first.key] = "first_frame";
-      if (last) mediaRoles[last.key] = "last_frame";
-      if (inputs.length !== 2 || images.length !== 2) {
-        issue = "首尾帧生视频需要且只能连接 2 张图片；请断开其他参考素材。";
-      }
-      hint =
-        "首帧/尾帧必须成对出现，且不能与参考图、参考视频、参考音频混用；画幅与时长保持所选值。";
-    } else {
-      hint =
-        "全部素材作为参考：图片最多 30 张；参考视频最多 10 段（每段 2–15 秒、合计不超过 15 秒）；参考音频最多 10 段（每段 2–15 秒、合计不超过 15 秒）。";
-    }
-  } else if (enabled) {
-    const images = inputs.filter((input) => input.kind === "image");
-    const videos = inputs.filter((input) => input.kind === "video");
-    for (const input of inputs) mediaRoles[input.key] = `reference_${input.kind}`;
-    if (frameMode(mode)) {
-      const first =
-        images.find((input) => config.mediaRoles?.[input.key] === "first_frame") ?? images[0];
-      const last =
-        images.find(
-          (input) => input.key !== first?.key && config.mediaRoles?.[input.key] === "last_frame",
-        ) ?? images.find((input) => input.key !== first?.key);
-      if (first) mediaRoles[first.key] = "first_frame";
       if (mode === "first_last_frame" && last) mediaRoles[last.key] = "last_frame";
-      const required = mode === "first_frame" ? 1 : 2;
-      if (inputs.length !== required || images.length !== required) {
-        issue =
-          mode === "first_frame"
-            ? "首帧生视频需要且只能连接 1 张图片；请断开其他参考素材。"
-            : "首尾帧生视频需要且只能连接 2 张图片；请断开其他参考素材。";
-      }
-      hint = "画幅自动跟随首帧；首帧/尾帧与参考图、视频、音频不可混用。";
-    } else if (mode === "edit" || mode === "extend") {
-      if (videos.length === 0)
-        issue = `请连接至少 1 个待${mode === "edit" ? "编辑" : "延长"}的视频。`;
-      hint =
-        mode === "edit"
-          ? "画幅与时长跟随原视频。每个参考视频须为 4–30 秒，最多 10 个且合计不超过 30 秒；提示词请明确增加、删除、修改或替换内容。"
-          : "画幅跟随原视频；时长表示延长的部分，可选智能或模型已开放的 4–30 秒。每个参考视频须为 2–30 秒，最多 10 个且合计不超过 30 秒；提示词请明确向前/向后延长、延续或续写。";
-      if (videos.length > 10) issue = "视频编辑和视频延长最多支持 10 个参考视频。";
-    } else if (mode === "reference") {
-      if (inputs.length === 0) issue = "参考生视频需要至少连接 1 个图片、视频或音频素材。";
-      hint = "全部素材作为参考，画幅与时长可自由设置。";
-    } else {
-      hint = "按提示词自动判断任务。建议画幅选自适应、时长选智能，并使用 4–30 秒的参考视频。";
     }
-    if (frameMode(mode) || mode === "edit" || mode === "extend") {
-      parameterValues["ratio"] = "adaptive";
-      lockedParameters.push("ratio");
-    }
-    if (mode === "edit") {
-      parameterValues["duration"] = -1;
-      lockedParameters.push("duration");
-    }
-    for (const key of lockedParameters) {
-      const capability = capabilities.find((item) => item.key === key);
-      if (!capability || !capabilityAllowsValue(capability, parameterValues[key]!)) {
-        issue = `当前模型字段未开放${key === "ratio" ? "自适应画幅" : "智能时长"}，无法执行所选任务。`;
-      }
-    }
-    if (frameMode(mode) || mode === "edit" || mode === "extend") {
-      const duration = parameterCapabilities.find((item) => item.key === "duration");
-      if (!duration || duration.options.length === 0) {
-        issue =
-          mode === "edit"
-            ? "当前模型字段未开放智能时长，无法执行视频编辑。"
-            : "当前模型未开放智能（-1）或 4–30 秒范围内的可用时长，无法执行所选任务。";
-        delete parameterValues["duration"];
-        if (!lockedParameters.includes("duration")) lockedParameters.push("duration");
-      } else if (!duration.options.some((option) => option.value === parameterValues["duration"])) {
-        parameterValues["duration"] = duration.defaultValue;
-      }
-    }
-    delete parameterValues["omni_reference_task_type"];
+    // Existing dialects use this field; RD carries intent through the native videoTaskType
+    // marker and prompt. Do not use the catalog enum to veto a newer server capability.
     if (sendsExplicitTaskType) parameterValues["omni_reference_task_type"] = mode;
-    else if (requestsExplicitTaskType)
-      issue = "当前模型的任务字段未开放所选任务类型，请更换模型或选择已支持的任务。";
   }
 
-  const parameters = generationParameters(
-    parameterCapabilities,
-    parameterValues,
-    inputs.length > 0,
-  );
-  if (
-    !rd &&
-    (frameMode(mode) || mode === "edit" || mode === "extend") &&
-    parameterValues["duration"] == null
-  )
-    delete parameters["duration"];
+  const parameters = generationParameters(capabilities, parameterValues, inputs.length > 0);
+  // A frame request is represented by media roles, and RD has no remote task-type field.
   if (enabled && !sendsExplicitTaskType) delete parameters["omni_reference_task_type"];
   return {
     enabled,
@@ -262,15 +125,15 @@ export function resolveSeedanceTask(
     parameterValues,
     parameters,
     mediaRoles,
-    lockedParameters,
-    issue,
-    hint,
+    lockedParameters: [],
+    issue: null,
+    hint: "完整提交当前任务、素材和参数；模型支持范围及素材数量、时长限制由服务端返回。",
     sendsExplicitTaskType,
-    parameterCapabilities,
+    parameterCapabilities: capabilities,
   };
 }
 
-/** Explicit user task changes also apply the tutorial's safe defaults for automatic mode. */
+/** Explicit task changes may offer dialect defaults; restored requests retain user values. */
 export function selectSeedanceTask<T extends SeedanceTaskSettings>(
   modelId: string,
   capabilities: readonly ModelParameterCapability[],
@@ -281,10 +144,14 @@ export function selectSeedanceTask<T extends SeedanceTaskSettings>(
   const next = {
     ...config,
     seedanceTaskMode: mode,
-    // RD 网关没有自适应画幅与智能时长，auto 模式保持用户所选的显式值。
     parameterValues:
-      mode === "auto" && !isRdVideoModel(modelId)
-        ? { ...config.parameterValues, ratio: "adaptive", duration: -1 }
+      !isRdVideoModel(modelId) &&
+      (mode === "auto" || frameMode(mode) || mode === "edit" || mode === "extend")
+        ? {
+            ...config.parameterValues,
+            ratio: "adaptive",
+            ...(mode === "auto" || mode === "edit" ? { duration: -1 } : {}),
+          }
         : config.parameterValues,
   };
   const state = resolveSeedanceTask(modelId, capabilities, next, inputs);

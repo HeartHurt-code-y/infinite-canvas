@@ -1,6 +1,61 @@
-import { describe, expect, it } from "vitest";
-import { JOINT, JOINT_COUNT, decodeMotionClipJoints, encodeMotionClipJoints } from "./whiteModelScene";
-import { landmarksToJoints, normalizeCapturedFrames } from "./poseCapture";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  JOINT,
+  JOINT_COUNT,
+  decodeMotionClipJoints,
+  encodeMotionClipJoints,
+} from "./whiteModelScene";
+import {
+  landmarksToJoints,
+  normalizeCapturedFrames,
+  poseCaptureAssets,
+  poseCaptureAvailable,
+} from "./poseCapture";
+
+const componentMocks = vi.hoisted(() => ({
+  desktop: vi.fn(() => true),
+  assetRoot: vi.fn(),
+  convert: vi.fn((path: string) => `asset://${encodeURIComponent(path)}`),
+}));
+vi.mock("./backend", () => ({ isDesktopRuntime: componentMocks.desktop }));
+vi.mock("./runtimeComponents", () => ({
+  runtimeComponentsClient: { assetRoot: componentMocks.assetRoot },
+}));
+vi.mock("@tauri-apps/api/core", () => ({ convertFileSrc: componentMocks.convert }));
+beforeEach(() => {
+  vi.clearAllMocks();
+  componentMocks.desktop.mockReturnValue(true);
+});
+afterEach(() => vi.unstubAllGlobals());
+
+describe("动作捕捉组件资源", () => {
+  it("rechecks a missing component and recovers immediately after installation", async () => {
+    componentMocks.assetRoot
+      .mockRejectedValueOnce(new Error("未安装"))
+      .mockResolvedValue("C:\\User Files\\pose-runtime");
+    expect(await poseCaptureAvailable()).toBe(false);
+    expect(await poseCaptureAvailable()).toBe(true);
+    expect(componentMocks.assetRoot).toHaveBeenCalledTimes(2);
+    const assets = await poseCaptureAssets();
+    expect(assets.modelPath).toBe(
+      `asset://${encodeURIComponent("C:/User Files/pose-runtime/pose_landmarker_full.task")}`,
+    );
+    expect(componentMocks.convert).toHaveBeenCalledWith("C:/User Files/pose-runtime/wasm");
+  });
+
+  it("keeps a browser preview fallback and does not cache HTTP 404", async () => {
+    componentMocks.desktop.mockReturnValue(false);
+    const fetcher = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 404 })
+      .mockResolvedValueOnce({ ok: true, status: 200 });
+    vi.stubGlobal("fetch", fetcher);
+    expect(await poseCaptureAvailable()).toBe(false);
+    expect(await poseCaptureAvailable()).toBe(true);
+    expect(componentMocks.assetRoot).not.toHaveBeenCalled();
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+});
 
 function landmark(x: number, y: number, z: number) {
   return { x, y, z, visibility: 1 };
@@ -45,12 +100,15 @@ describe("一键动捕归一化", () => {
     const normalized = normalizeCapturedFrames([present, null, present]);
     expect(normalized.length).toBe(3 * JOINT_COUNT * 3);
     const first = normalized.subarray(0, JOINT_COUNT * 3);
-    expect(joint(first, JOINT.leftShoulder, 0)).toBeGreaterThan(joint(first, JOINT.rightShoulder, 0));
-    expect(Math.min(joint(first, JOINT.leftAnkle, 2), joint(first, JOINT.rightAnkle, 2))).toBeCloseTo(
-      0.045,
-      2,
+    expect(joint(first, JOINT.leftShoulder, 0)).toBeGreaterThan(
+      joint(first, JOINT.rightShoulder, 0),
     );
-    const height = joint(first, JOINT.head, 2) - Math.min(joint(first, JOINT.leftAnkle, 2), joint(first, JOINT.rightAnkle, 2));
+    expect(
+      Math.min(joint(first, JOINT.leftAnkle, 2), joint(first, JOINT.rightAnkle, 2)),
+    ).toBeCloseTo(0.045, 2);
+    const height =
+      joint(first, JOINT.head, 2) -
+      Math.min(joint(first, JOINT.leftAnkle, 2), joint(first, JOINT.rightAnkle, 2));
     expect(height).toBeGreaterThan(0.8);
     expect(height).toBeLessThan(1.05);
     const encoded = decodeMotionClipJoints(encodeMotionClipJoints(normalized), 3);

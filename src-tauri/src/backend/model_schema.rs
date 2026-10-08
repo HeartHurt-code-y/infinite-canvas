@@ -91,8 +91,9 @@ const GATEWAY_CHAT_PATH: &str = "/v1/chat/completions";
 /// 本函数是方舟连接的唯一改写入口，也在保存模型与打开数据库时把历史按模型名写下的
 /// 方舟原生端点改回网关端点。只在这三对互为替代的端点之间互换，其他家族
 /// （Veo / Vidu / Wan / MiniMax、Gemini、Anthropic）自己的路径原样保留；
-/// Grsai 连接是唯一整条契约改写的例外（端点 + 轮询 + 参数，见
-/// `apply_grsai_image_dialect`）。
+/// Grsai 图片连接，以及精确 Seedance 草稿样片模型在兼容网关上的契约，会按
+/// 对应文档同时改写端点、轮询和参数（见 `apply_grsai_image_dialect` 与
+/// `apply_seedance_draft_video_dialect`）。
 ///
 /// 返回是否发生改写，调用方据此决定是否需要把定义写回数据库。
 pub fn apply_request_dialect(schema: &mut Value, model_id: &str, dialect: RequestDialect) -> bool {
@@ -143,6 +144,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
     if dialect == RequestDialect::AliyunBailian {
         return apply_bailian_wan_video_dialect(schema, identity);
     }
+    let draft_profile_changed = apply_seedance_draft_video_dialect(schema, identity, dialect);
     let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
         return false;
     };
@@ -166,9 +168,10 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
             let native_seedance =
                 identity.contains("seedance") && !is_dreamina_seedance_video_model(identity);
             if !native_seedance {
-                return false;
+                return draft_profile_changed;
             }
-            let mut changed = set_request_field(request, "path", json!(ARK_VIDEO_PATH));
+            let mut changed = draft_profile_changed;
+            changed |= set_request_field(request, "path", json!(ARK_VIDEO_PATH));
             changed |= set_request_field(request, "parameterContainer", json!("root"));
             // 原生请求体的 content 数组也在顶层（网关契约才把它放进 metadata）。
             changed |= set_request_field(request, "contentContainer", json!("root"));
@@ -196,7 +199,7 @@ fn apply_video_dialect(schema: &mut Value, identity: &str, dialect: RequestDiale
                 return changed;
             }
             if path != ARK_VIDEO_PATH {
-                return false;
+                return draft_profile_changed;
             }
             let mut changed = set_request_field(request, "path", json!(GATEWAY_VIDEO_PATH));
             // 参数容器随方言走：原生契约把画幅/时长/分辨率平铺在顶层、content 也在顶层，
@@ -356,6 +359,10 @@ fn apply_text_dialect(schema: &mut Value, identity: &str, dialect: RequestDialec
 }
 
 pub fn infer_catalog_schema(item: &Value, model_id: &str, display_name: &str) -> Value {
+    // 草稿样片契约以完整模型 ID 为准，不能被聚合目录里的 text/chat 标签覆盖。
+    if is_seedance_draft_video_model(model_id) {
+        return default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+    }
     // 这八个远端 ID 有明确的按次视频合同。聚合网关的通用目录能力字段可能把
     // 它们误报成 chat/文本，不能让泛化标签覆盖已知的视频请求协议。
     if is_sp25_per_use_video_model(model_id) {
@@ -426,6 +433,88 @@ fn is_seedance_20_video_model(model_id: &str) -> bool {
 pub(crate) fn is_seedance_25_video_model(model_id: &str) -> bool {
     let identity = model_id.to_ascii_lowercase();
     identity.contains("seedance-2-5") || identity.contains("seedance-2.5")
+}
+
+pub(crate) const MOYU_SEEDANCE_DRAFT_PROFILE: &str = "moyu_seedance_25_draft_v1";
+
+pub(crate) fn is_seedance_draft_video_model(model_id: &str) -> bool {
+    model_id == "doubao-seedance-2-5-260628"
+}
+
+/// 同名模型在方舟上保留原生能力，只有 OpenAI 兼容网关采用本次草稿样片合同。
+/// 旧的通用国内档案同时声明 1080p、联网搜索等字段；该网关的生成阶段仅开放
+/// 480p/720p，1080p 正片由 draft_task 晋升请求让平台自动设置。
+fn apply_seedance_draft_video_dialect(
+    schema: &mut Value,
+    model_id: &str,
+    dialect: RequestDialect,
+) -> bool {
+    if !is_seedance_draft_video_model(model_id) {
+        return false;
+    }
+    let Some(operation) = operation_object_mut(schema, GenerationOperation::VideoGeneration) else {
+        return false;
+    };
+    let replacement = match dialect {
+        RequestDialect::OpenAiCompatible => {
+            let mut durations = vec![json!(-1)];
+            durations.extend((4..=30).map(Value::from));
+            json!({
+                "resultType": "video",
+                "requestProfileId": MOYU_SEEDANCE_DRAFT_PROFILE,
+                "profileVersion": 1,
+                "request": {
+                    "path": GATEWAY_VIDEO_PATH,
+                    "observePath": "/v1/video/generations/{task_id}",
+                    "encoding": "json",
+                    "parameterContainer": "metadata",
+                    "contentContainer": "metadata"
+                },
+                "parameters": {
+                    "ratio": {
+                        "type": "string", "label": "画幅", "default": "adaptive",
+                        "enum": ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"]
+                    },
+                    "resolution": {
+                        "type": "string", "label": "分辨率", "default": "720p",
+                        "enum": ["720p", "480p"]
+                    },
+                    "duration": {
+                        "type": "integer", "label": "时长", "default": 5, "enum": durations
+                    },
+                    "generate_audio": {
+                        "type": "boolean", "label": "生成音频", "default": true
+                    },
+                    "draft": {
+                        "type": "boolean", "label": "生成草稿样片", "default": false
+                    }
+                }
+            })
+        }
+        RequestDialect::VolcengineArk
+            if operation.get("requestProfileId").and_then(Value::as_str)
+                == Some(MOYU_SEEDANCE_DRAFT_PROFILE) =>
+        {
+            // default_operation_schema 按名称提供通用国内 Seedance 档案；端点随后
+            // 仍由本连接的方言统一改写，恢复方舟档案不改变其他模型或适配器。
+            default_operation_schema(model_id, GenerationOperation::VideoGeneration)
+        }
+        _ => return false,
+    };
+    let mut replacement = replacement.as_object().cloned().unwrap_or_default();
+    for (key, value) in operation.iter() {
+        if !matches!(
+            key.as_str(),
+            "parameters" | "request" | "requestProfileId" | "profileVersion" | "resultType"
+        ) {
+            replacement.insert(key.clone(), value.clone());
+        }
+    }
+    if *operation == replacement {
+        return false;
+    }
+    *operation = replacement;
+    true
 }
 
 fn is_dreamina_seedance_video_model(model_id: &str) -> bool {
@@ -888,19 +977,9 @@ pub fn normalize_parameters(operation_schema: &Value, supplied: &Value) -> Backe
         .cloned()
         .unwrap_or_default();
 
-    let unknown = supplied
-        .keys()
-        .filter(|key| !definitions.contains_key(*key))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !unknown.is_empty() {
-        return Err(BackendError::validation(
-            "generation parameters contain fields unsupported by the selected model",
-            json!({ "unsupported": unknown, "supported": definitions.keys().collect::<Vec<_>>() }),
-        ));
-    }
-
-    let mut normalized = Map::new();
+    // 本地 Schema 用于显示参数和补充缺省值，不是服务端能力白名单。
+    // 已保存的档案可能滞后于渠道，显式字段和值完整保留，由真实服务端判定。
+    let mut normalized = supplied.clone();
     for (key, definition) in &definitions {
         let definition = definition.as_object().ok_or_else(|| {
             BackendError::validation(
@@ -908,25 +987,11 @@ pub fn normalize_parameters(operation_schema: &Value, supplied: &Value) -> Backe
                 json!({ "parameter": key, "definition": definition }),
             )
         })?;
-        let value = supplied
-            .get(key)
-            .or_else(|| definition.get("default"))
-            .cloned();
-        let Some(value) = value else {
-            if definition
-                .get("required")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-            {
-                return Err(BackendError::validation(
-                    "a required model parameter is missing",
-                    json!({ "parameter": key }),
-                ));
-            }
-            continue;
-        };
-        validate_parameter_value(key, definition, &value)?;
-        normalized.insert(key.clone(), value);
+        if !normalized.contains_key(key)
+            && let Some(value) = definition.get("default")
+        {
+            normalized.insert(key.clone(), value.clone());
+        }
     }
     Ok(Value::Object(normalized))
 }
@@ -2398,6 +2463,16 @@ pub fn refresh_seedance_20_video_defaults(schema: &mut Value, model_id: &str) ->
 /// - 非空档案：原位补齐缺失的 `1080p` 分辨率与 `web_search` 定义，
 ///   不覆盖服务商下发的自定义参数。
 pub fn refresh_seedance_25_video_defaults(schema: &mut Value, model_id: &str) -> bool {
+    if is_seedance_draft_video_model(model_id)
+        && schema
+            .pointer("/video_generation/requestProfileId")
+            .and_then(Value::as_str)
+            == Some(MOYU_SEEDANCE_DRAFT_PROFILE)
+    {
+        // 已按网关草稿合同迁移的档案不再走旧国内能力补齐，避免每次打开都先
+        // 加回 1080p/联网搜索、再由连接方言删除，造成无意义的重复写入。
+        return false;
+    }
     // RD 网关模型 ID 含 `seedance-2.5` 子串，但契约完全不同；
     // 其档案由 `refresh_rd_video_defaults` 负责刷新，这里不能把 1080p/联网搜索
     // 等魔芋能力塞进 RD 顶层契约。
@@ -3282,9 +3357,14 @@ mod tests {
             normalize_parameters(video, &json!({ "duration": 30, "resolution": "720P" })).unwrap(),
             json!({ "ratio": "16:9", "duration": 30, "resolution": "720P" })
         );
-        assert!(normalize_parameters(video, &json!({ "duration": 29 })).is_err());
-        assert!(normalize_parameters(video, &json!({ "resolution": "1080P" })).is_err());
-        assert!(normalize_parameters(video, &json!({ "generate_audio": true })).is_err());
+        assert_eq!(
+            normalize_parameters(
+                video,
+                &json!({ "duration": 29, "resolution": "1080P", "generate_audio": true })
+            )
+            .unwrap(),
+            json!({ "ratio": "16:9", "duration": 29, "resolution": "1080P", "generate_audio": true })
+        );
 
         let mut unchanged = stale.clone();
         assert!(!refresh_sp25_per_use_video_defaults(
@@ -3552,6 +3632,77 @@ mod tests {
             operations_from_schema(&catalog),
             [GenerationOperation::VideoGeneration]
         );
+    }
+
+    #[test]
+    fn seedance_draft_gateway_schema_overrides_catalog_labels_and_keeps_ark_contract() {
+        let model = "doubao-seedance-2-5-260628";
+        let mut schema = infer_catalog_schema(
+            &json!({ "id": model, "capabilities": ["text_generation"] }),
+            model,
+            "文本模型",
+        );
+        assert_eq!(
+            operations_from_schema(&schema),
+            [GenerationOperation::VideoGeneration]
+        );
+        assert!(apply_request_dialect(
+            &mut schema,
+            model,
+            RequestDialect::OpenAiCompatible
+        ));
+        let gateway = &schema["video_generation"];
+        assert_eq!(gateway["requestProfileId"], MOYU_SEEDANCE_DRAFT_PROFILE);
+        assert_eq!(gateway["request"]["path"], "/v1/video/generations");
+        assert_eq!(gateway["parameters"]["duration"]["default"], 5);
+        assert_eq!(
+            gateway["parameters"]["resolution"]["enum"],
+            json!(["720p", "480p"])
+        );
+        assert_eq!(gateway["parameters"]["draft"]["default"], false);
+        assert!(gateway["parameters"].get("web_search").is_none());
+        assert!(gateway["parameters"].get("output_format").is_none());
+        assert!(!apply_request_dialect(
+            &mut schema,
+            model,
+            RequestDialect::OpenAiCompatible
+        ));
+        assert!(!refresh_seedance_25_video_defaults(&mut schema, model));
+
+        assert!(apply_request_dialect(
+            &mut schema,
+            model,
+            RequestDialect::VolcengineArk
+        ));
+        let ark = &schema["video_generation"];
+        assert_eq!(ark["request"]["path"], "/contents/generations/tasks");
+        assert_eq!(ark["request"]["parameterContainer"], "root");
+        assert_eq!(ark["parameters"]["duration"]["default"], -1);
+        assert!(
+            ark["parameters"]["resolution"]["enum"]
+                .as_array()
+                .unwrap()
+                .contains(&json!("1080p"))
+        );
+        assert!(ark["parameters"].get("web_search").is_some());
+        assert!(ark["parameters"].get("draft").is_none());
+        assert!(!apply_request_dialect(
+            &mut schema,
+            model,
+            RequestDialect::VolcengineArk
+        ));
+
+        for other in [
+            "doubao-seedance-2.5",
+            "doubao-seedance-2-5-260629",
+            "dreamina-seedance-2.5",
+            "rd-seedance-2.5-720p",
+        ] {
+            let mut legacy = default_model_schema(other, &[GenerationOperation::VideoGeneration]);
+            let before = legacy.clone();
+            apply_request_dialect(&mut legacy, other, RequestDialect::OpenAiCompatible);
+            assert_eq!(legacy, before, "unrelated model {other} keeps its contract");
+        }
     }
 
     #[test]
@@ -4334,18 +4485,26 @@ mod tests {
     }
 
     #[test]
-    fn normalizer_applies_defaults_and_rejects_unknown_or_invalid_values() {
+    fn normalizer_applies_defaults_and_defers_remote_parameter_policy() {
         let schema = json!({
             "parameters": {
-                "duration": { "type": "integer", "default": 5, "enum": [5, 8] }
+                "duration": { "type": "integer", "default": 5, "enum": [5, 8], "minimum": 5, "maximum": 8 },
+                "required_by_old_schema": { "type": "string", "required": true }
             }
         });
         assert_eq!(
             normalize_parameters(&schema, &json!({})).unwrap(),
             json!({ "duration": 5 })
         );
-        assert!(normalize_parameters(&schema, &json!({ "duration": 7 })).is_err());
-        assert!(normalize_parameters(&schema, &json!({ "unknown": true })).is_err());
+        for duration in [json!(7), json!(30), json!(1), json!("adaptive")] {
+            let supplied = json!({ "duration": duration, "channel_extension": true });
+            assert_eq!(normalize_parameters(&schema, &supplied).unwrap(), supplied);
+        }
+        assert_eq!(
+            normalize_parameters(&schema, &json!({ "channel_extension": true })).unwrap(),
+            json!({ "duration": 5, "channel_extension": true })
+        );
+        assert!(normalize_parameters(&schema, &json!([])).is_err());
     }
 
     #[test]

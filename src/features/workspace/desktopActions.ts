@@ -13,6 +13,25 @@ export async function openExternalUrl(url: string): Promise<void> {
   await openUrl(url);
 }
 
+/** Copy the stable source to a user-selected filename without moving referenced media. */
+export async function exportArtifactToDesktop(
+  sourcePath: string,
+  fileName: string,
+): Promise<string | null> {
+  const [{ save }, { copyFile }, { dirname, join }] = await Promise.all([
+    import("@tauri-apps/plugin-dialog"),
+    import("@tauri-apps/plugin-fs"),
+    import("@tauri-apps/api/path"),
+  ]);
+  const target = await save({
+    title: "导出产物",
+    defaultPath: await join(await dirname(sourcePath), fileName),
+  });
+  if (!target || target === sourcePath) return target;
+  await copyFile(sourcePath, target);
+  return target;
+}
+
 export async function saveMarkdownDocumentToDesktop(
   content: string,
   defaultPath: string,

@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
   assertArchiveEntries,
+  assertBlenderPackagingInventory,
+  assertPreparedManifestIdentity,
   BLENDER_VERSION,
+  blenderPackagingPolicy,
   downloadUrls,
   fileDigest,
   platformDistribution,
+  pruneWindowsDebugSymbols,
   snapshotFiles,
   SOURCE_ARCHIVE,
   verifyArchive,
@@ -126,4 +130,159 @@ test("archive and inventory paths cannot escape the generated bundle", async () 
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Windows staging excludes only runtime PDBs and inventories the retained runtime and sources", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "blender-prune-"));
+  const distribution = platformDistribution("win32", "x64");
+  const retained = [
+    "runtime/blender.exe",
+    "runtime/blender.shared/library.dll",
+    "runtime/python311.dll",
+    "runtime/4.5/python/bin/python.exe",
+    "runtime/4.5/scripts/modules/bpy/__init__.py",
+    "runtime/4.5/datafiles/default.blend",
+    "runtime/license/license.md",
+    "runtime/license/spdx/GPL-3.0-or-later.txt",
+    "runtime/copyright.txt",
+    `sources/${SOURCE_ARCHIVE.filename}`,
+    "sources/white_model.py",
+    "sources/white_model.LICENSE.txt",
+    "sources/reference.pdb",
+  ];
+  try {
+    for (const name of retained) {
+      await mkdir(path.dirname(path.join(root, name)), { recursive: true });
+      await writeFile(path.join(root, name), `retained ${name}`);
+    }
+    await writeFile(path.join(root, "runtime/blender.pdb"), "debug one");
+    await writeFile(path.join(root, "runtime/blender.shared/library.PDB"), "debug two");
+    const before = await snapshotFiles(root);
+    const pruning = await pruneWindowsDebugSymbols(root, distribution);
+    assert.deepEqual(pruning, {
+      omitted: [
+        { path: "runtime/blender.pdb", size: 9 },
+        { path: "runtime/blender.shared/library.PDB", size: 9 },
+      ],
+      totalBytes: 18,
+    });
+    const after = await snapshotFiles(root);
+    assert.deepEqual(
+      after,
+      before.filter((entry) => retained.includes(entry.path)),
+    );
+    await verifyManifestFiles(root, after);
+    assertBlenderPackagingInventory(after, distribution);
+    await assert.rejects(verifyManifestFiles(root, before), /文件缺失/);
+    assert.throws(() => assertBlenderPackagingInventory(before, distribution), /PDB 调试符号/);
+    for (const name of retained)
+      assert.equal(await readFile(path.join(root, name), "utf8"), `retained ${name}`);
+    assert.deepEqual(await pruneWindowsDebugSymbols(root, distribution), {
+      omitted: [],
+      totalBytes: 0,
+    });
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("macOS signed apps and Linux distributions are never pruned", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "blender-no-prune-"));
+  try {
+    await mkdir(path.join(root, "runtime/Blender.app/Contents/_CodeSignature"), {
+      recursive: true,
+    });
+    await writeFile(path.join(root, "runtime/Blender.app/Contents/keep.pdb"), "debug");
+    await writeFile(
+      path.join(root, "runtime/Blender.app/Contents/_CodeSignature/CodeResources"),
+      "signature",
+    );
+    const before = await snapshotFiles(root);
+    for (const platform of ["darwin", "linux"]) {
+      assert.deepEqual(await pruneWindowsDebugSymbols(root, { platform }), {
+        omitted: [],
+        totalBytes: 0,
+      });
+      await verifyManifestFiles(root, before);
+      assertBlenderPackagingInventory(before, { platform });
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("debug pruning rejects external links before removing any staging files", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "blender-link-check-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "blender-link-outside-"));
+  try {
+    await mkdir(path.join(root, "runtime"));
+    await writeFile(path.join(root, "runtime/a.pdb"), "keep until validated");
+    await writeFile(path.join(outside, "outside.pdb"), "outside");
+    try {
+      await symlink(outside, path.join(root, "runtime/z-outside"), "junction");
+    } catch (error) {
+      if (error.code === "EPERM") {
+        context.skip("Host does not permit creating symlink/junction fixtures");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(pruneWindowsDebugSymbols(root, { platform: "win32" }), /链接指向包外/);
+    assert.equal(await readFile(path.join(root, "runtime/a.pdb"), "utf8"), "keep until validated");
+    assert.equal(await readFile(path.join(outside, "outside.pdb"), "utf8"), "outside");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("debug pruning refuses a linked runtime directory", async (context) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "blender-root-link-check-"));
+  const outside = await mkdtemp(path.join(os.tmpdir(), "blender-root-link-outside-"));
+  try {
+    await writeFile(path.join(outside, "outside.pdb"), "outside");
+    try {
+      await symlink(outside, path.join(root, "runtime"), "junction");
+    } catch (error) {
+      if (error.code === "EPERM") {
+        context.skip("Host does not permit creating symlink/junction fixtures");
+        return;
+      }
+      throw error;
+    }
+    await assert.rejects(
+      pruneWindowsDebugSymbols(root, { platform: "win32" }),
+      /暂存目录不能是链接/,
+    );
+    assert.equal(await readFile(path.join(outside, "outside.pdb"), "utf8"), "outside");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("prepared caches without the current packaging policy are rebuilt rather than pruned in place", () => {
+  const distribution = platformDistribution("win32", "x64");
+  const manifest = {
+    schemaVersion: 1,
+    version: BLENDER_VERSION,
+    fingerprint: "current-fingerprint",
+    platform: distribution.platform,
+    arch: distribution.arch,
+    executable: distribution.executable,
+    archive: { sha256: distribution.sha256 },
+    sources: { md5: SOURCE_ARCHIVE.md5 },
+    packaging: { policy: blenderPackagingPolicy(distribution.platform) },
+  };
+  assertPreparedManifestIdentity(manifest, distribution, "current-fingerprint");
+  const legacy = { ...manifest };
+  delete legacy.packaging;
+  assert.throws(
+    () => assertPreparedManifestIdentity(legacy, distribution, "current-fingerprint"),
+    /发行裁剪策略/,
+  );
+  assert.throws(
+    () => assertPreparedManifestIdentity(manifest, distribution, "changed-fingerprint"),
+    /构建清单/,
+  );
 });

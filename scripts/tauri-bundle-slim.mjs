@@ -6,20 +6,19 @@ import { createReadStream } from "node:fs";
 import {
   copyFileSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readFileSync,
   readdirSync,
+  renameSync,
   statSync,
   unlinkSync,
 } from "node:fs";
+import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import {
-  DEFAULT_UPDATER_KEY_PATH,
-  REPO_ROOT,
-  resolveUpdaterSigningEnv,
-  UPDATER_CONFIG_PATH,
-} from "./tauri-build.mjs";
+import { isDeepStrictEqual } from "node:util";
+import { DEFAULT_UPDATER_KEY_PATH, REPO_ROOT, resolveUpdaterSigningEnv } from "./tauri-build.mjs";
 import { readAppVersion, writeLatestJson } from "./write-latest-json.mjs";
 import { tosUpdatesPublicBaseUrl } from "./tos-updates-config.mjs";
 import { assertRuntimeBaseline, createRuntimeBaseline } from "./runtime-resource-baseline.mjs";
@@ -29,9 +28,24 @@ import {
   stageRuntimeResourceReleaseFromSignedManifest,
 } from "./runtime-resource-release.mjs";
 import { verifyUpdaterSignature } from "./verify-updater-signature.mjs";
+import {
+  assertComponentRoot,
+  COMPONENT_CATALOG_RESOURCE,
+  describeRuntimeComponent,
+  RUNTIME_COMPONENTS,
+} from "./runtime-component-catalog.mjs";
+import {
+  assertCompiledEditionPins,
+  assertEditionCatalog,
+  readWindowsCompiledEditionPins,
+} from "./verify-edition-release.mjs";
+import { verifyNsisEditionResourceTable } from "./verify-nsis-edition-resources.mjs";
 
 const BUNDLE_ROOT = path.join(REPO_ROOT, "src-tauri", "target", "release", "bundle");
-const SLIM_CONFIG_PATH = path.join(REPO_ROOT, "src-tauri", "tauri.slim.conf.json");
+const GENERATED_SLIM_CONFIG_PATH = path.join(
+  REPO_ROOT,
+  ".cache/tauri-slim/tauri-slim.generated.json",
+);
 const PINNED_TAURI_CLI_VERSION = "2.11.4";
 const PREFLIGHT_FLAG = "--check-runtime-components";
 const PREFLIGHT_MARKER = "IC_RUNTIME_COMPONENT_CHECK_V1";
@@ -269,7 +283,7 @@ export function expectedWindowsBundleNames(version, productName = "无限画布"
   };
 }
 
-export function assertSlimNsisScript(script) {
+export function assertSlimNsisScript(script, expectedResources = []) {
   for (const directory of ["blender", "remotion-runtime", "ffmpeg", "skills"]) {
     if (
       script.includes(`File /a "/oname=${directory}\\`) ||
@@ -285,25 +299,125 @@ export function assertSlimNsisScript(script) {
   if (!init?.[1].includes("!insertmacro NSIS_HOOK_PREFLIGHT")) {
     throw new Error("瘦包缺少安装前资源完整性预检；不能在卸载旧 MSI 后才检查");
   }
+  return verifyNsisEditionResourceTable(script, expectedResources, "legacy slim");
 }
 
-function runTauriBundle(env) {
+/** Keep the v1 four-component delta protocol, but carry newly externalized pose resources. */
+export async function prepareSlimBundleResources({
+  executable,
+  applicationVersion,
+  root = REPO_ROOT,
+  readCompiledPins = readWindowsCompiledEditionPins,
+}) {
+  const pins = await readCompiledPins(executable);
+  const pinNames = RUNTIME_COMPONENTS.map(({ id }) => id).sort();
+  if (
+    pins?.schemaVersion !== 1 ||
+    pins.applicationVersion !== applicationVersion ||
+    pins.edition !== "offline" ||
+    typeof pins.catalogSha256 !== "string" ||
+    (pins.catalogSha256 !== "" && !/^[a-f0-9]{64}$/.test(pins.catalogSha256)) ||
+    !pins.manifestPins ||
+    JSON.stringify(Object.keys(pins.manifestPins).sort()) !== JSON.stringify(pinNames) ||
+    !/^[a-f0-9]{64}$/.test(pins.manifestPins["pose-runtime"] ?? "")
+  )
+    throw new Error("旧频道瘦包需要当前离线程序的有效组件和动捕编译标记");
+  const definition = RUNTIME_COMPONENTS.find(({ id }) => id === "pose-runtime");
+  const pose = await describeRuntimeComponent(definition, { root });
+  if (pose.manifestSha256 !== pins.manifestPins["pose-runtime"])
+    throw new Error("瘦包动捕清单与程序内置摘要不一致");
+  const inputs = pose.files.map(({ path: filename }) =>
+    path.join(root, definition.sourcePath, filename),
+  );
+  const resources = { "resources/pose-runtime/": "pose-runtime/" };
+  const expected = pose.files.map(({ path: filename }) => `pose-runtime/${filename}`);
+  if (pins.catalogSha256) {
+    const catalogPath = path.join(root, COMPONENT_CATALOG_RESOURCE);
+    await assertComponentRoot(path.dirname(catalogPath), root);
+    const info = lstatSync(catalogPath);
+    if (!info.isFile() || info.isSymbolicLink() || info.size > 32 * 1024 * 1024)
+      throw new Error("瘦包组件目录必须是受信任的常规文件");
+    if ((await sha256File(catalogPath)) !== pins.catalogSha256)
+      throw new Error("瘦包组件目录与程序内置摘要不一致");
+    const catalog = JSON.parse(readFileSync(catalogPath, "utf8"));
+    assertEditionCatalog(catalog, applicationVersion);
+    assertCompiledEditionPins(pins, {
+      catalog,
+      catalogSha256: pins.catalogSha256,
+      edition: "offline",
+      applicationVersion,
+    });
+    const catalogPose = catalog.components.find(({ id }) => id === "pose-runtime");
+    const { archive: _archive, ...recordedPose } = catalogPose;
+    if (!isDeepStrictEqual(recordedPose, pose))
+      throw new Error("瘦包动捕文件清单与编译绑定的组件目录不一致");
+    resources["resources/component-catalog.json"] = "component-catalog.json";
+    expected.push("component-catalog.json");
+    inputs.push(catalogPath);
+  }
+  assertReleaseExecutableFreshness(executable, inputs);
+  return {
+    resources,
+    expected,
+    inputs,
+    catalogSha256: pins.catalogSha256,
+    poseManifestSha256: pose.manifestSha256,
+  };
+}
+
+export async function writeSlimOverrideConfig(
+  prepared,
+  {
+    root = REPO_ROOT,
+    configPath = path.join(root, ".cache/tauri-slim/tauri-slim.generated.json"),
+  } = {},
+) {
+  if (path.resolve(configPath) !== path.join(root, ".cache/tauri-slim/tauri-slim.generated.json"))
+    throw new Error("瘦包必须使用工作区内的单一受控配置");
+  const base = JSON.parse(readFileSync(path.join(root, "src-tauri/tauri.conf.json"), "utf8"));
+  const slim = JSON.parse(readFileSync(path.join(root, "src-tauri/tauri.slim.conf.json"), "utf8"));
+  if (!Array.isArray(slim.bundle?.resources) || slim.bundle.resources.length)
+    throw new Error("瘦包源配置必须保持空资源安全默认值");
+  const inherited = base.bundle?.resources;
+  if (inherited !== undefined && (!inherited || typeof inherited !== "object"))
+    throw new Error("基础资源映射无效");
+  const tombstones =
+    inherited && !Array.isArray(inherited)
+      ? Object.fromEntries(Object.keys(inherited).map((source) => [source, null]))
+      : {};
+  const generated = {
+    ...slim,
+    bundle: {
+      ...slim.bundle,
+      createUpdaterArtifacts: true,
+      // Tauri pre-merges multiple CLI configs. Preserve tombstones in one overlay.
+      resources: { ...tombstones, ...prepared.resources },
+    },
+  };
+  await mkdir(path.dirname(configPath), { recursive: true });
+  await assertComponentRoot(path.dirname(configPath), root);
+  if (existsSync(configPath)) {
+    const info = lstatSync(configPath);
+    if (!info.isFile() || info.isSymbolicLink()) throw new Error("瘦包配置路径不可信");
+  }
+  const temporary = `${configPath}.tmp-${process.pid}`;
+  await writeFile(temporary, `${JSON.stringify(generated, null, 2)}\n`, { flag: "wx" });
+  renameSync(temporary, configPath);
+  return { configPath, config: generated };
+}
+
+export function slimBundleCliArgs(configPath = GENERATED_SLIM_CONFIG_PATH) {
+  return ["exec", "tauri", "bundle", "--bundles", "nsis", "--config", configPath];
+}
+
+function runTauriBundle(env, configPath) {
   return new Promise((resolve, reject) => {
-    const child = spawn(
-      "pnpm",
-      [
-        "exec",
-        "tauri",
-        "bundle",
-        "--bundles",
-        "nsis",
-        "--config",
-        UPDATER_CONFIG_PATH,
-        "--config",
-        SLIM_CONFIG_PATH,
-      ],
-      { cwd: REPO_ROOT, env, stdio: "inherit", shell: process.platform === "win32" },
-    );
+    const child = spawn("pnpm", slimBundleCliArgs(configPath), {
+      cwd: REPO_ROOT,
+      env,
+      stdio: "inherit",
+      shell: process.platform === "win32",
+    });
     child.on("error", reject);
     child.on("exit", (code) =>
       code === 0 ? resolve() : reject(new Error(`tauri bundle 失败（exit=${code ?? 1}）`)),
@@ -345,6 +459,10 @@ export async function stageSlimWindowsBundle(baselinePath, { reuseFullVersion } 
   }
   assertReleaseExecutableFreshness(executable, releaseExecutableInputs());
   await assertPreflightExecutable(executable);
+  const supplementalResources = await prepareSlimBundleResources({
+    executable,
+    applicationVersion: version,
+  });
   const fullSignature = reuseFullVersion ? null : readFileSync(fullSig, "utf8");
   const env = resolveUpdaterSigningEnv(process.env, DEFAULT_UPDATER_KEY_PATH);
   if (!env.TAURI_SIGNING_PRIVATE_KEY) {
@@ -455,9 +573,10 @@ export async function stageSlimWindowsBundle(baselinePath, { reuseFullVersion } 
     });
   }
   await assertCompiledResourcePins(executable, resourceRelease.manifest);
+  const { configPath } = await writeSlimOverrideConfig(supplementalResources);
 
   try {
-    await runTauriBundle(env);
+    await runTauriBundle(env, configPath);
     const generatedScript = path.join(
       REPO_ROOT,
       "src-tauri",
@@ -467,7 +586,7 @@ export async function stageSlimWindowsBundle(baselinePath, { reuseFullVersion } 
       "x64",
       "installer.nsi",
     );
-    assertSlimNsisScript(readFileSync(generatedScript, "utf8"));
+    assertSlimNsisScript(readFileSync(generatedScript, "utf8"), supplementalResources.expected);
     if (!existsSync(fullNsis) || !existsSync(fullSig)) {
       throw new Error("Tauri 未生成带签名的瘦包");
     }

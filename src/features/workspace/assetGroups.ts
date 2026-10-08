@@ -66,7 +66,7 @@ function withoutAssetGroup<T extends GroupableNode>(node: T): T {
 export function isUploadableOutput(node: CanvasGroupMember): node is OutputNodeData {
   return (
     !("assetId" in node) &&
-    (node.mediaType === "image" || node.mediaType === "video") &&
+    (node.mediaType === "image" || node.mediaType === "video" || node.mediaType === "audio") &&
     node.finalPath != null
   );
 }

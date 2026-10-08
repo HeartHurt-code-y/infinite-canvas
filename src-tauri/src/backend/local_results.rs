@@ -16,7 +16,10 @@ use uuid::Uuid;
 use super::{
     error::{BackendError, BackendResult},
     model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
-    provider::{ImageSource, ProviderRuntime, ResultDownloadAuth, redact_url_string},
+    provider::{
+        ImageSource, ProviderRuntime, ResultDownloadAuth, is_seedance_draft_gateway_task,
+        redact_url_string,
+    },
     result_transfer::{
         self, TransferPolicy, TransferProgress, download_result, is_retryable_transfer,
         production_policy,
@@ -79,6 +82,18 @@ fn signed_video_url_expired(error: &BackendError) -> bool {
         .get("httpStatus")
         .and_then(Value::as_u64)
         .is_some_and(|status| matches!(status, 401 | 403 | 410)))
+}
+
+fn video_result_transfer_policy(remote_model_id: Option<&str>) -> TransferPolicy {
+    let mut policy = production_policy();
+    // Fetch one complete representation instead of probing and splitting this
+    // model's result proxy, which could select a different rendition for Range.
+    if remote_model_id
+        .is_some_and(|model| model.trim().eq_ignore_ascii_case("dreamina-seedance-2.5"))
+    {
+        policy.max_parts = 1;
+    }
+    policy
 }
 
 /// One reservation corresponds to one GET, including a resumed Range GET.
@@ -173,13 +188,13 @@ impl LocalResultService {
     }
 
     fn is_sp25_video_result(&self, task_id: &str) -> BackendResult<bool> {
-        // 按次系列与 RD 网关的结果都是带签名与过期时间的直链，支持重新查询续签。
-        Ok(self
-            .storage
-            .get_task_execution(task_id)?
+        // 按次系列、RD 与草稿样片网关使用带签名直链，重查原任务续签。
+        let task = self.storage.get_task_execution(task_id)?;
+        Ok(task
             .remote_model_id_snapshot
             .as_deref()
-            .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model)))
+            .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model))
+            || is_seedance_draft_gateway_task(&task))
     }
 
     fn sp25_download_source(&self, task_id: &str) -> BackendResult<String> {
@@ -225,6 +240,7 @@ impl LocalResultService {
             .iter()
             .enumerate()
             .map(|(offset, source)| GenerationResultRecord {
+                display_name: None,
                 task_id: task_id.to_string(),
                 result_index: (offset + 1) as u32,
                 media_type: MediaType::Image,
@@ -249,6 +265,7 @@ impl LocalResultService {
         video_url: &str,
     ) -> GenerationResultRecord {
         GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index: 1,
             media_type: MediaType::Video,
@@ -271,6 +288,7 @@ impl LocalResultService {
         remote_task_id: &str,
     ) -> GenerationResultRecord {
         GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index: 1,
             media_type: MediaType::Video,
@@ -318,6 +336,7 @@ impl LocalResultService {
                 }
             );
             let mut record = GenerationResultRecord {
+                display_name: None,
                 task_id: task_id.to_string(),
                 result_index,
                 media_type: MediaType::Image,
@@ -436,6 +455,7 @@ impl LocalResultService {
             redact_url_string(video_url)
         );
         let mut record = GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index: 1,
             media_type: MediaType::Video,
@@ -461,7 +481,8 @@ impl LocalResultService {
                     .await
             }
             Ok(false) => {
-                self.download_with_retry(
+                self.download_video_with_retry(
+                    task_id,
                     video_url,
                     &self.download_auth(task_id),
                     &self.download_part_path(task_id, 1),
@@ -535,6 +556,7 @@ impl LocalResultService {
             bytes.len()
         );
         let mut record = GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index: 1,
             media_type: MediaType::Video,
@@ -610,6 +632,7 @@ impl LocalResultService {
         text: &str,
     ) -> GenerationResultRecord {
         GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index: 1,
             media_type: MediaType::Text,
@@ -695,6 +718,7 @@ impl LocalResultService {
 
         let saved = match write_outcome {
             Ok(()) => GenerationResultRecord {
+                display_name: None,
                 task_id: task_id.to_string(),
                 result_index: 1,
                 media_type: MediaType::Text,
@@ -727,6 +751,7 @@ impl LocalResultService {
                     error
                 );
                 GenerationResultRecord {
+                    display_name: None,
                     task_id: task_id.to_string(),
                     result_index: 1,
                     media_type: MediaType::Text,
@@ -834,6 +859,15 @@ impl LocalResultService {
                         .await
                 } else if let Err(error) = sp25_video {
                     Err(error)
+                } else if media_type == MediaType::Video {
+                    self.download_video_with_retry(
+                        &record.task_id,
+                        &url,
+                        &auth,
+                        &self.download_part_path(&record.task_id, record.result_index),
+                        on_progress,
+                    )
+                    .await
                 } else {
                     self.download_with_retry(
                         &url,
@@ -1022,6 +1056,26 @@ impl LocalResultService {
         .await
     }
 
+    async fn download_video_with_retry(
+        &self,
+        task_id: &str,
+        url: &str,
+        auth: &ResultDownloadAuth,
+        part_path: &Path,
+        on_progress: impl FnMut(TransferProgress) + Send + 'static,
+    ) -> BackendResult<Vec<u8>> {
+        let task = self.storage.get_task_execution(task_id)?;
+        self.download_with_retry_policy(
+            url,
+            auth,
+            part_path,
+            video_result_transfer_policy(task.remote_model_id_snapshot.as_deref()),
+            None,
+            on_progress,
+        )
+        .await
+    }
+
     async fn download_with_retry_policy(
         &self,
         url: &str,
@@ -1167,14 +1221,14 @@ impl LocalResultService {
         remote_task_id: Option<&str>,
         prepared: PreparedMedia,
     ) -> BackendResult<GenerationResultRecord> {
-        let directory = self.downloads_directory.join("无限画布");
+        let task = self.storage.get_task_execution(task_id)?;
+        let (relative_directory, stem) =
+            result_location(task_id, result_index, remote_task_id, &task.logical_request);
+        let directory = self.downloads_directory.join(&relative_directory);
         tokio::fs::create_dir_all(&directory).await?;
-        let stem = remote_task_id
-            .map(safe_file_stem)
-            .unwrap_or_else(|| format!("{}-{result_index}", safe_file_stem(task_id)));
         let file_name = format!("{stem}.{}", prepared.extension);
         let final_path = directory.join(&file_name);
-        let relative_path = Path::new("无限画布").join(&file_name);
+        let relative_path = relative_directory.join(&file_name);
         info!(
             "[save] 准备写入结果文件: taskId={}, resultIndex={}, 目标路径={}, 大小 {} 字节",
             task_id,
@@ -1243,6 +1297,7 @@ impl LocalResultService {
         }
 
         let record = GenerationResultRecord {
+            display_name: None,
             task_id: task_id.to_string(),
             result_index,
             media_type: if remote_task_id.is_some() {
@@ -1415,7 +1470,11 @@ pub fn safe_file_stem(value: &str) -> String {
     }
     if stem.is_empty()
         || matches!(
-            stem.to_ascii_uppercase().as_str(),
+            stem.split('.')
+                .next()
+                .unwrap_or("")
+                .to_ascii_uppercase()
+                .as_str(),
             "CON"
                 | "PRN"
                 | "AUX"
@@ -1445,8 +1504,123 @@ pub fn safe_file_stem(value: &str) -> String {
     stem
 }
 
+/// Per-task directories preserve an exact human filename without collisions between takes.
+fn result_location(
+    task_id: &str,
+    result_index: u32,
+    remote_task_id: Option<&str>,
+    request: &Value,
+) -> (PathBuf, String) {
+    let directory = Path::new("无限画布");
+    if let Some(name) = request
+        .get("outputName")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|name| !name.is_empty())
+    {
+        let base = name.rsplit_once('.').filter(|(_, extension)| {
+            matches!(
+                extension.to_ascii_lowercase().as_str(),
+                "png" | "jpg" | "jpeg" | "webp" | "gif" | "avif" | "mp4" | "mov" | "webm"
+            )
+        });
+        let mut name = safe_file_stem(base.map_or(name, |(stem, _)| stem));
+        while name.len() > 240 {
+            name.pop();
+        }
+        name = safe_file_stem(&name);
+        let batch = request
+            .pointer("/parameters/n")
+            .and_then(Value::as_u64)
+            .unwrap_or(1)
+            > 1;
+        let stem = if batch || result_index > 1 {
+            format!("{name}_{result_index:02}")
+        } else {
+            name
+        };
+        (directory.join(safe_file_stem(task_id)), stem)
+    } else {
+        let stem = remote_task_id
+            .map(safe_file_stem)
+            .unwrap_or_else(|| format!("{}-{result_index}", safe_file_stem(task_id)));
+        (directory.to_path_buf(), stem)
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_exact_dreamina_25_video_identity_uses_single_stream_policy() {
+        for model in ["dreamina-seedance-2.5", " DREAMINA-SEEDANCE-2.5 "] {
+            let policy = super::video_result_transfer_policy(Some(model));
+            assert_eq!(policy.max_parts, 1);
+            assert_eq!(policy.stall, super::production_policy().stall);
+            assert_eq!(policy.overall, super::production_policy().overall);
+        }
+        for model in [
+            None,
+            Some("dreamina-seedance-2.0"),
+            Some("dreamina-seedance-2.5-fast"),
+            Some("display name dreamina-seedance-2.5"),
+            Some("doubao-seedance-2-5-260628"),
+        ] {
+            assert_eq!(
+                super::video_result_transfer_policy(model).max_parts,
+                super::production_policy().max_parts
+            );
+        }
+    }
+
+    #[test]
+    fn named_result_locations_preserve_identity_and_batch_order() {
+        let request = serde_json::json!({"outputName": "第01集_镜头003"});
+        let (folder, stem) = super::result_location("task-one", 1, Some("remote"), &request);
+        assert_eq!(stem, "第01集_镜头003");
+        assert_eq!(folder, std::path::Path::new("无限画布").join("task-one"));
+        assert_ne!(
+            folder,
+            super::result_location("task-two", 1, None, &request).0
+        );
+        let batch = serde_json::json!({"outputName": "角色", "parameters": {"n": 3}});
+        assert_eq!(super::result_location("task", 1, None, &batch).1, "角色_01");
+        assert_eq!(super::result_location("task", 2, None, &batch).1, "角色_02");
+        assert_eq!(
+            super::result_location(
+                "task",
+                1,
+                None,
+                &serde_json::json!({"outputName": "第01集.MP4"})
+            )
+            .1,
+            "第01集"
+        );
+        assert_eq!(
+            super::result_location("task", 1, None, &serde_json::json!({})).1,
+            "task-1"
+        );
+        assert!(
+            !super::result_location(
+                "task",
+                1,
+                None,
+                &serde_json::json!({"outputName": "../CON"})
+            )
+            .1
+            .contains('/')
+        );
+        assert!(
+            super::result_location(
+                "task",
+                1,
+                None,
+                &serde_json::json!({"outputName": "字".repeat(80)})
+            )
+            .1
+            .len()
+                <= 240
+        );
+    }
     use super::*;
     use crate::backend::{
         credentials::CredentialStore,
@@ -1476,9 +1650,202 @@ mod tests {
         )
     }
 
+    #[tokio::test]
+    async fn dreamina_25_initial_and_interrupted_video_save_use_one_plain_get() {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        let body = std::env::var_os("INFINITE_CANVAS_TEST_VIDEO")
+            .map(|path| std::fs::read(path).expect("read supplied video"))
+            .unwrap_or_else(|| b"\0\0\0\x18ftypisom\0\0\0\0isom".to_vec());
+        let mut range_body = body.clone();
+        *range_body.last_mut().unwrap() ^= 1;
+        let plain_body = body.clone();
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let captured = Arc::clone(&requests);
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let server_stopped = Arc::clone(&stopped);
+        let server = std::thread::spawn(move || {
+            listener.set_nonblocking(true).unwrap();
+            while !server_stopped.load(std::sync::atomic::Ordering::SeqCst) {
+                let (mut stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2));
+                        continue;
+                    }
+                    Err(error) => panic!("accept failed: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut buffer = [0_u8; 4096];
+                let read = stream.read(&mut buffer).unwrap();
+                let request = String::from_utf8_lossy(&buffer[..read]).to_ascii_lowercase();
+                captured.lock().unwrap().push(request.clone());
+                if let Some(range) = request
+                    .lines()
+                    .find_map(|line| line.strip_prefix("range: bytes="))
+                {
+                    let (start, end) = range.trim().split_once('-').unwrap();
+                    let start: usize = start.parse().unwrap();
+                    let end: usize = if end.is_empty() {
+                        range_body.len() - 1
+                    } else {
+                        end.parse().unwrap()
+                    };
+                    let slice = &range_body[start..=end];
+                    let head = format!(
+                        "HTTP/1.1 206 Partial Content\r\nETag: \"range-rendition\"\r\nContent-Range: bytes {start}-{end}/{}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        range_body.len(),
+                        slice.len()
+                    );
+                    stream.write_all(head.as_bytes()).unwrap();
+                    stream.write_all(slice).unwrap();
+                } else {
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\nETag: \"plain-rendition\"\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        plain_body.len()
+                    );
+                    stream.write_all(head.as_bytes()).unwrap();
+                    stream.write_all(&plain_body).unwrap();
+                }
+            }
+        });
+        let directory = tempfile::tempdir().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("backend.sqlite")).unwrap());
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "dreamina-test".into(),
+                display_name: "海外平台".into(),
+                adapter_id: "moyu_v1".into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .unwrap();
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-dreamina-frozen")
+            .unwrap();
+        let providers =
+            ProviderRuntime::new(Arc::clone(&storage), lifecycle.clone(), credentials).unwrap();
+        let service = LocalResultService::new(
+            Arc::clone(&storage),
+            lifecycle.clone(),
+            reqwest::Client::builder().no_proxy().build().unwrap(),
+            directory.path().to_path_buf(),
+            providers,
+        );
+        let url = format!("http://127.0.0.1:{port}/video.mp4");
+        for (index, resume) in [false, true].into_iter().enumerate() {
+            let task_id = format!("dreamina-task-{index}");
+            let remote_id = format!("dreamina-remote-{index}");
+            lifecycle
+                .create(NewTask {
+                    id: &task_id,
+                    canvas_id: "canvas-1",
+                    source_node_id: "video-1",
+                    operation: GenerationOperation::VideoGeneration,
+                    provider: &provider,
+                    api_key_ref: &provider.api_key_ref,
+                    model_definition_id: "dreamina-model",
+                    remote_model_id: Some("dreamina-seedance-2.5"),
+                    logical_request: &json!({ "prompt": "fixture" }),
+                })
+                .unwrap();
+            let result = service.pending_video_result(&task_id, &remote_id, &url);
+            for fact in [
+                GenerationLifecycleFact::RecoveryRemoteResumed {
+                    remote_task_id: remote_id.clone(),
+                },
+                GenerationLifecycleFact::BeginObservation {
+                    attempt_id: format!("observe-{index}"),
+                    backoff_ms: None,
+                },
+                GenerationLifecycleFact::ProviderCallPrepared {
+                    call_id: format!("call-{index}"),
+                    attempt_id: format!("observe-{index}"),
+                    phase: "observe".into(),
+                    request: json!({ "method": "GET" }),
+                },
+                GenerationLifecycleFact::ProviderCallSent {
+                    call_id: format!("call-{index}"),
+                    sent_at: 1,
+                },
+                GenerationLifecycleFact::ProviderCallResponded {
+                    call_id: format!("call-{index}"),
+                    sent_at: 1,
+                    status: 200,
+                    headers: json!({}),
+                    raw_response: "{}".into(),
+                },
+                GenerationLifecycleFact::ObservationApplied {
+                    attempt_id: format!("observe-{index}"),
+                    call_id: format!("call-{index}"),
+                    tokens: None,
+                    observation: GenerationRemoteObservation::Succeeded {
+                        result: result.clone(),
+                    },
+                },
+            ] {
+                lifecycle.commit(&task_id, fact).unwrap();
+            }
+            let saved = if resume {
+                let mut interrupted = result;
+                interrupted.save_status = SaveStatus::Writing;
+                service.persist_result(&interrupted).unwrap();
+                interrupted.save_status = SaveStatus::Interrupted;
+                service.persist_result(&interrupted).unwrap();
+                let part = service.download_part_path(&task_id, 1);
+                tokio::fs::write(part, &body[..8]).await.unwrap();
+                service
+                    .resume_interrupted_result(interrupted, |_| {})
+                    .await
+                    .unwrap()
+            } else {
+                service
+                    .save_video(&task_id, &remote_id, &url, |_, _| {}, |_| {})
+                    .await
+                    .unwrap()
+            };
+            assert_eq!(saved.save_status, SaveStatus::Succeeded);
+            assert_eq!(saved.task_id, task_id);
+            assert_eq!(saved.result_index, 1);
+            assert_eq!(saved.source, json!({ "kind": "url", "url": url }));
+            assert_eq!(
+                tokio::fs::read(saved.final_path.unwrap()).await.unwrap(),
+                body
+            );
+            assert_eq!(saved.sha256, Some(sha256_bytes(&body)));
+            assert_eq!(
+                requests.lock().unwrap().len(),
+                index + 1,
+                "one request per initial/resumed save"
+            );
+        }
+        stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+        server.join().unwrap();
+        for request in requests.lock().unwrap().iter() {
+            assert!(request.starts_with("get /video.mp4 http/1.1"));
+            assert!(!request.contains("range:"));
+            assert!(request.contains("authorization: bearer sk-dreamina-frozen"));
+            assert!(request.contains(&format!("referer: http://127.0.0.1:{port}")));
+        }
+    }
+
     async fn sp25_signed_download_case(
         refresh_before_first: bool,
         resume_status: Option<SaveStatus>,
+        output_name: Option<&str>,
+    ) {
+        signed_video_download_case(refresh_before_first, resume_status, output_name, false).await;
+    }
+
+    async fn signed_video_download_case(
+        refresh_before_first: bool,
+        resume_status: Option<SaveStatus>,
+        output_name: Option<&str>,
+        seedance_draft: bool,
     ) {
         use std::io::{Read as _, Write as _};
         use std::net::TcpListener;
@@ -1502,12 +1869,23 @@ mod tests {
                         .write_all(b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
                         .expect("old link expired");
                 } else if path.starts_with("GET /v1/video/generations/remote-video ") {
-                    let body = json!({
-                        "task_id": "remote-video",
-                        "status": "succeeded",
-                        "progress": 100,
-                        "result_url": format!("http://127.0.0.1:{port}/fresh.mp4?signature=new")
-                    })
+                    let result_url = format!("http://127.0.0.1:{port}/fresh.mp4?signature=new");
+                    let body = if seedance_draft {
+                        json!({ "code": "success", "data": {
+                            "task_id": "remote-video", "status": "SUCCESS", "progress": "100%",
+                            "data": { "code": "success", "data": {
+                                "id": "remote-video", "status": "succeeded", "draft": true,
+                                "content": { "video_url": result_url }
+                            }}
+                        }})
+                    } else {
+                        json!({
+                            "task_id": "remote-video",
+                            "status": "succeeded",
+                            "progress": 100,
+                            "result_url": result_url
+                        })
+                    }
                     .to_string();
                     let head = format!(
                         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
@@ -1554,8 +1932,12 @@ mod tests {
                 provider: &provider,
                 api_key_ref: &provider.api_key_ref,
                 model_definition_id: "sp25-test-model",
-                remote_model_id: Some("sp2.5-720p-30s-ch5"),
-                logical_request: &json!({ "prompt": "test" }),
+                remote_model_id: Some(if seedance_draft {
+                    "doubao-seedance-2-5-260628"
+                } else {
+                    "sp2.5-720p-30s-ch5"
+                }),
+                logical_request: &json!({ "prompt": "test", "outputName": output_name }),
             })
             .expect("create task");
         lifecycle
@@ -1699,6 +2081,44 @@ mod tests {
                 .await
                 .expect("download after renewal")
         };
+        if let Some(name) = output_name {
+            let saved = if resume_status.is_some() {
+                storage.get_result("task-sp25-download", 1).unwrap()
+            } else {
+                service
+                    .commit_prepared(
+                        "task-sp25-download",
+                        1,
+                        Some("remote-video"),
+                        service
+                            .prepare_bytes(bytes.clone(), MediaType::Video)
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap()
+            };
+            let expected = directory
+                .path()
+                .join("无限画布")
+                .join("task-sp25-download")
+                .join(format!("{name}.mp4"));
+            assert_eq!(
+                saved.final_path.as_deref(),
+                Some(expected.to_str().unwrap())
+            );
+            assert_eq!(tokio::fs::read(&expected).await.unwrap(), MOCK_MP4);
+            let source = saved.source.clone();
+            storage
+                .rename_generation_result("task-sp25-download", 1, "镜头003_选用.mp4")
+                .unwrap();
+            let verified = service
+                .verify_local_result("task-sp25-download", 1)
+                .await
+                .unwrap();
+            assert_eq!(verified.source, source);
+            assert_eq!(verified.display_name.as_deref(), Some("镜头003_选用.mp4"));
+            assert_eq!(verified.final_path, saved.final_path);
+        }
         server.join().expect("server joins");
         assert_eq!(bytes, MOCK_MP4);
         assert_eq!(
@@ -1729,7 +2149,13 @@ mod tests {
 
     #[tokio::test]
     async fn expired_sp25_video_link_is_refreshed_without_resubmitting() {
-        sp25_signed_download_case(false, None).await;
+        sp25_signed_download_case(false, None, None).await;
+    }
+
+    #[tokio::test]
+    async fn seedance_draft_expired_and_interrupted_results_refresh_without_resubmitting() {
+        signed_video_download_case(false, None, Some("草稿样片"), true).await;
+        signed_video_download_case(true, Some(SaveStatus::Interrupted), Some("正片"), true).await;
     }
 
     #[tokio::test]
@@ -1740,8 +2166,15 @@ mod tests {
             SaveStatus::LocalMissing,
             SaveStatus::Conflict,
         ] {
-            sp25_signed_download_case(true, Some(status)).await;
+            sp25_signed_download_case(true, Some(status), None).await;
         }
+    }
+
+    #[tokio::test]
+    async fn named_video_download_and_resume_keep_filename_and_source_after_rename() {
+        sp25_signed_download_case(false, None, Some("第01集_镜头003")).await;
+        sp25_signed_download_case(true, Some(SaveStatus::Interrupted), Some("第01集_镜头003"))
+            .await;
     }
 
     #[tokio::test]
@@ -1908,6 +2341,7 @@ mod tests {
     fn windows_unsafe_file_names_are_deterministically_sanitized() {
         assert_eq!(safe_file_stem("task:abc/def?"), "task_abc_def_");
         assert_eq!(safe_file_stem("CON"), "_CON");
+        assert_eq!(safe_file_stem("CON.txt"), "_CON.txt");
         assert_eq!(safe_file_stem("trailing. "), "trailing");
     }
 

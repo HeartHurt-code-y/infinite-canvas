@@ -4,6 +4,7 @@ import { createPortal } from "react-dom";
 import { useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
 import { toMediaProxyUrl } from "../../lib/mediaProxy";
+import { requestRuntimeComponents } from "../../lib/runtimeComponents";
 import {
   formatBytes,
   formatRawBackendError,
@@ -27,10 +28,17 @@ import type { PromptContentEditorSession } from "../../lib/promptContent";
 
 import { AssetMediaState } from "./AssetLibraryViews";
 import { DownloadCookieSourceControls } from "./DownloadCookieSourceControls";
-import { copyTextToDesktopClipboard, revealDesktopItem } from "./desktopActions";
+import {
+  copyTextToDesktopClipboard,
+  revealDesktopItem,
+  exportArtifactToDesktop,
+} from "./desktopActions";
+import { NodeNameEditor } from "./NodeNameEditor";
+import { artifactFileName } from "./artifactNames";
 import { localAssetNodeMediaUrl } from "./localAssetMedia";
 import { useMediaByteSource } from "./mediaByteCache";
 import { VideoMiddleFrame } from "./VideoMiddleFrame";
+import { useLocalVideoPoster } from "./localVideoPoster";
 import { isVideoSourceUrl, useNodeInView } from "./mediaPreview";
 import {
   AssetKindIcon,
@@ -114,6 +122,7 @@ export function CanvasGenNode({
   onImportGreenScreenVideo,
   onStartGeneration,
   startError,
+  onRename,
 }: {
   readonly node: Extract<GenNodeData, { kind: "image" | "video" }>;
   readonly descriptor: StaticNodeDescriptor;
@@ -158,6 +167,7 @@ export function CanvasGenNode({
     input: ConnectedAssetInput | InheritedAssetInput,
   ) => void;
   readonly onStartGeneration: (key: string) => void;
+  readonly onRename?: ((key: string, name: string) => void) | undefined;
 }) {
   const isVideo = node.kind === "video";
   const nodeElementRef = useRef<HTMLDivElement>(null);
@@ -222,7 +232,7 @@ export function CanvasGenNode({
             <NodeTypeIcon kind={node.kind} size={16} />
           </span>
           <span className="canvas-gen-node__type-copy">
-            <strong>{descriptor.kindLabel}</strong>
+            <strong title={node.name}>{node.name ?? descriptor.kindLabel}</strong>
             <small>
               {isVideo
                 ? referenceInputCount > 0
@@ -235,6 +245,13 @@ export function CanvasGenNode({
           </span>
         </span>
         <span className="canvas-gen-node__actions">
+          {onRename ? (
+            <NodeNameEditor
+              name={node.name ?? descriptor.kindLabel}
+              label="修改生成节点名称"
+              onSave={(name) => onRename(node.key, name)}
+            />
+          ) : null}
           <button
             type="button"
             className="canvas-gen-node__remove"
@@ -803,13 +820,15 @@ export function CanvasVideoDownloaderNode({
           : engineStatus.state === "failed"
             ? "引擎获取失败"
             : "尚未安装 · 首次下载时自动获取";
+  const probeStatus = runState?.probeStatus ?? "";
   const statusText = running
     ? runState?.preparingEngine
       ? "正在准备下载引擎…"
-      : runState?.probeStatus ||
-        (engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource
+      : probeStatus.length > 0
+        ? probeStatus
+        : engineStatus?.cookieBrowser === "auto" && !runState?.credentialSource
           ? "正在逐源预检视频访问…"
-          : `正在下载 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`)
+          : `正在下载 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
     : runState?.status === "done"
       ? "下载完成 · 产物已落在右侧"
       : runState?.status === "cancelled"
@@ -929,6 +948,20 @@ export function CanvasVideoDownloaderNode({
         <p aria-label="下载输入数量">将依次下载 {downloadSources.length} 个链接</p>
       ) : null}
       <div className="canvas-video-downloader__engine-row">
+        {isDesktopRuntime() ? (
+          <button
+            type="button"
+            className="canvas-video-downloader__engine-action"
+            title="准备需要网页解析的视频下载功能"
+            onMouseDown={(event) => event.stopPropagation()}
+            onClick={(event) => {
+              event.stopPropagation();
+              requestRuntimeComponents("browser-download");
+            }}
+          >
+            网页解析组件
+          </button>
+        ) : null}
         <span
           className="canvas-video-downloader__engine-chip"
           data-state={engineStatus?.state ?? "unknown"}
@@ -1054,9 +1087,27 @@ export function CanvasVideoDownloaderNode({
         ) : null}
       </div>
       {runState?.status === "error" && runState.error ? (
-        <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
-          {runState.error}
-        </pre>
+        <>
+          <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
+            {runState.error}
+          </pre>
+          {isDesktopRuntime() &&
+          /browser runtime unavailable|网页解析组件.*(?:未|缺|安装)|浏览器.*组件.*(?:未|缺)/i.test(
+            runState.error,
+          ) ? (
+            <button
+              type="button"
+              className="canvas-video-downloader__engine-action"
+              onMouseDown={(event) => event.stopPropagation()}
+              onClick={(event) => {
+                event.stopPropagation();
+                requestRuntimeComponents("browser-download");
+              }}
+            >
+              准备网页解析组件
+            </button>
+          ) : null}
+        </>
       ) : null}
       {engineStatus?.state === "failed" && engineStatus.lastError ? (
         <pre className="canvas-video-downloader__error" role="alert" tabIndex={0}>
@@ -1154,22 +1205,26 @@ export function CanvasVideoFrameExtractorNode({
     onConfigChange(node.key, { ...node.config, timestamps });
   };
   const timestamps = parseTimestampList(timestampsText);
-  const canStart = resolvedSource != null && timestamps.length > 0 && !running;
+  const canStart =
+    !running &&
+    (node.config.checkpoint != null || (resolvedSource != null && timestamps.length > 0));
   const statusText = running
     ? runState?.preparingEngine
       ? "正在准备 ffmpeg 引擎…"
       : `正在抽帧 · ${runState?.progress != null ? Math.round(runState.progress) : 0}%`
     : runState?.status === "done"
       ? `抽帧完成 · ${producedFrames.length} 张图片已落在右侧`
-      : runState?.status === "cancelled"
-        ? "已取消"
-        : runState?.status === "error"
-          ? "抽帧失败 · 请查看错误"
-          : resolvedSource == null
-            ? "请连入视频或填写视频文件路径"
-            : timestamps.length === 0
-              ? "请填写至少一个抽帧秒数"
-              : "填好秒数后即可抽帧";
+      : runState?.status === "paused"
+        ? "任务已保存 · 可继续抽帧"
+        : runState?.status === "cancelled"
+          ? "已取消"
+          : runState?.status === "error"
+            ? "抽帧失败 · 请查看错误"
+            : resolvedSource == null
+              ? "请连入视频或填写视频文件路径"
+              : timestamps.length === 0
+                ? "请填写至少一个抽帧秒数"
+                : "填好秒数后即可抽帧";
   return (
     <div
       className={`canvas-video-frame-extractor${selected ? " is-selected" : ""}${dragging ? " is-dragging" : ""}`}
@@ -1233,7 +1288,7 @@ export function CanvasVideoFrameExtractorNode({
               ) : (
                 <Icon name="play" aria-hidden="true" size="md" />
               )}
-              <span>{running ? "抽帧中" : "开始抽帧"}</span>
+              <span>{running ? "抽帧中" : node.config.checkpoint ? "继续抽帧" : "开始抽帧"}</span>
             </button>
           )}
           <button
@@ -1272,6 +1327,7 @@ export function CanvasVideoFrameExtractorNode({
           value={manualPath}
           placeholder="或直接填写本地视频文件路径（可选）"
           aria-label="视频文件路径"
+          disabled={running || node.config.checkpoint != null}
           onMouseDown={(event) => event.stopPropagation()}
           onChange={(event) => {
             onConfigChange(node.key, { ...node.config, videoPath: event.target.value });
@@ -1280,6 +1336,18 @@ export function CanvasVideoFrameExtractorNode({
         <p className="canvas-video-frame-extractor__helper">
           按输入顺序对每段视频使用相同秒数抽帧；可通过任意上游节点传入视频。
         </p>
+        {!running && node.config.checkpoint ? (
+          <button
+            type="button"
+            onClick={() => {
+              const { checkpoint, ...config } = node.config;
+              void checkpoint;
+              onConfigChange(node.key, config);
+            }}
+          >
+            开始新批次
+          </button>
+        ) : null}
       </div>
 
       <div className="canvas-video-frame-extractor__field">
@@ -1297,6 +1365,7 @@ export function CanvasVideoFrameExtractorNode({
           value={timestampsText}
           placeholder="例如 3, 8.5, 12"
           aria-label="抽帧秒数，多个秒数用逗号分隔"
+          disabled={running || node.config.checkpoint != null}
           aria-invalid={(timestampsText.length > 0 && timestamps.length === 0) || undefined}
           onMouseDown={(event) => event.stopPropagation()}
           onChange={(event) => handleTimestampsInput(event.target.value)}
@@ -1432,6 +1501,7 @@ function FrameExtractorThumb({
  */
 function CanvasAssetNodeVideoVisual({
   videoUrl,
+  finalPath = null,
   previewing,
   isRealAsset,
   mountMedia,
@@ -1439,6 +1509,8 @@ function CanvasAssetNodeVideoVisual({
   onLoadError,
 }: {
   readonly videoUrl: string;
+  /** 已保存的原视频路径：静止封面走原生缓存，只在悬浮时播放原文件。 */
+  readonly finalPath?: string | null;
   readonly previewing: boolean;
   readonly isRealAsset: boolean;
   /** 节点是否在视口内（含余量）；false 时卸载视频元素。 */
@@ -1448,14 +1520,36 @@ function CanvasAssetNodeVideoVisual({
   readonly onLoadError?: () => void;
 }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
+  const attachVideo = useCallback((video: HTMLVideoElement | null) => {
+    const previous = videoRef.current;
+    if (previous != null && previous !== video) {
+      // ref 在 DOM 移除前清理：主动释放正在解码的来源，不等待浏览器清理脱离的元素。
+      previous.pause();
+      previous.removeAttribute("src");
+      previous.load();
+    }
+    videoRef.current = video;
+  }, []);
   const wasPreviewingRef = useRef(false);
   /** 中间帧时间戳（loadedmetadata 后记录），作为封面帧与悬浮复播/复位位置。 */
   const coverTimeRef = useRef(0);
-  const [coverReady, setCoverReady] = useState(false);
+  const [readyVideoUrl, setReadyVideoUrl] = useState<string | null>(null);
   // 云端 TOS 签名 URL 走本地代理，避免 2 小时过期后画布视频节点加载失败。
   const proxiedVideoUrl = toMediaProxyUrl(videoUrl) ?? videoUrl;
+  const coverReady = readyVideoUrl === proxiedVideoUrl;
   const [failedVideoUrl, setFailedVideoUrl] = useState<string | null>(null);
   const videoFailed = failedVideoUrl === proxiedVideoUrl;
+  const localVideo = isDesktopRuntime() && finalPath != null;
+  const poster = useLocalVideoPoster(localVideo ? finalPath : null, mountMedia);
+  const [failedPosterSrc, setFailedPosterSrc] = useState<string | null>(null);
+  const posterSrc = poster.src !== failedPosterSrc ? poster.src : null;
+  const posterFailed = poster.unavailable || (poster.src != null && posterSrc == null);
+  // JPEG 封面按几何可见性展示；只有实际悬浮播放或首帧降级时才申请视频解码器名额。
+  const { containerRef: decoderRef, inView: decoderInView } = useNodeInView<HTMLSpanElement>({
+    heavy: true,
+  });
+  const needsLocalDecoder = localVideo && (previewing || posterFailed);
+  const mountVideo = mountMedia && (!localVideo || (needsLocalDecoder && decoderInView));
 
   const seekToCover = (video: HTMLVideoElement) => {
     video.currentTime = coverTimeRef.current;
@@ -1475,45 +1569,62 @@ function CanvasAssetNodeVideoVisual({
       video.pause();
       seekToCover(video);
     }
-  }, [previewing]);
+  }, [previewing, mountVideo, proxiedVideoUrl]);
 
   return (
-    <>
+    <span className="media-frame-host" ref={needsLocalDecoder ? decoderRef : undefined}>
       {!mountMedia ? (
         // 节点滚出视口：卸载 <video>，留轻量占位（用户此时看不见该节点）。
         <span className="canvas-asset-node__video-lazy" aria-hidden="true" />
       ) : (
         <>
-          {!coverReady && isRealAsset ? (
+          {posterSrc != null ? (
+            <img
+              src={posterSrc}
+              alt=""
+              draggable={false}
+              decoding="async"
+              onLoad={() => {
+                if (poster.width != null && poster.height != null) {
+                  onAspectRatioChange(poster.width / poster.height);
+                }
+              }}
+              onError={() => setFailedPosterSrc(posterSrc)}
+            />
+          ) : null}
+          {posterSrc == null && (!coverReady || !mountVideo) && isRealAsset ? (
             <AssetMediaState kind="video" state={videoFailed ? "unavailable" : "loading"} />
           ) : null}
-          {!videoFailed ? (
+          {mountVideo && !videoFailed ? (
             <video
-              ref={videoRef}
+              key={proxiedVideoUrl}
+              ref={attachVideo}
               className={`canvas-asset-node__video${coverReady ? " is-ready" : ""}`}
               src={proxiedVideoUrl}
+              poster={posterSrc ?? undefined}
               muted
               loop
               playsInline
-              preload="metadata"
+              preload={localVideo ? "auto" : "metadata"}
               aria-hidden="true"
               tabIndex={-1}
               onLoadedMetadata={(event) => {
                 const video = event.currentTarget;
                 const aspectRatio = measuredAspectRatio(video.videoWidth, video.videoHeight);
                 if (aspectRatio != null) onAspectRatioChange(aspectRatio);
-                if (Number.isFinite(video.duration) && video.duration > 0) {
-                  coverTimeRef.current = video.duration / 2;
-                }
-                if (!previewing) seekToCover(video);
+                coverTimeRef.current =
+                  !localVideo && Number.isFinite(video.duration) && video.duration > 0
+                    ? video.duration / 2
+                    : 0;
+                if (!localVideo && !previewing) seekToCover(video);
               }}
-              onSeeked={() => setCoverReady(true)}
+              onSeeked={() => setReadyVideoUrl(proxiedVideoUrl)}
               onLoadedData={() => {
                 setFailedVideoUrl(null);
-                setCoverReady(true);
+                setReadyVideoUrl(proxiedVideoUrl);
               }}
               onError={() => {
-                setCoverReady(false);
+                setReadyVideoUrl(null);
                 setFailedVideoUrl(proxiedVideoUrl);
                 onLoadError?.();
               }}
@@ -1521,7 +1632,7 @@ function CanvasAssetNodeVideoVisual({
           ) : null}
         </>
       )}
-    </>
+    </span>
   );
 }
 
@@ -1663,6 +1774,7 @@ export function CanvasAssetNode({
   onRefreshMediaUrls,
   onPreview,
   onSaveToLibrary,
+  onPrepareVideo,
 }: {
   readonly node: AssetNodeData;
   readonly edgeCount: number;
@@ -1688,6 +1800,7 @@ export function CanvasAssetNode({
     ((key: string, destination: "local" | "cloud" | "object_storage") => void) | undefined;
   /** 兼容调用方的云端连接信息；目标范围与判重在保存操作中处理。 */
   readonly targetCloudProviderConnectionId?: string | null;
+  readonly onPrepareVideo?: ((key: string) => void) | undefined;
 }) {
   const typeLabel = ASSET_KIND_LABELS[node.kind];
   const awaitingCloudId = node.source !== "local" && isReviewTaskId(node.assetId);
@@ -1733,15 +1846,7 @@ export function CanvasAssetNode({
         imageBytes.reload();
       });
     },
-    [
-      node.assetId,
-      node.key,
-      node.kind,
-      node.providerConnectionId,
-      node.source,
-      onRefreshMediaUrls,
-      imageBytes,
-    ],
+    [node, onRefreshMediaUrls, imageBytes],
   );
   return (
     <div
@@ -1856,6 +1961,18 @@ export function CanvasAssetNode({
           ? `${typeLabel} · 云端处理中`
           : `${typeLabel} · ${edgeCount > 0 ? `${edgeCount} 条连线` : "未连接"}`}
       </span>
+      {isVideo && onPrepareVideo && !awaitingCloudId ? (
+        <div
+          className="artifact-actions nodrag nopan"
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          <button type="button" onClick={() => onPrepareVideo(node.key)}>
+            视频准备
+          </button>
+        </div>
+      ) : null}
       {onSaveToLibrary && !awaitingCloudId ? (
         <CanvasMediaSaveMenu
           nodeKey={node.key}
@@ -1931,7 +2048,11 @@ export function CanvasOutputLightbox({
   const mediaName =
     node.name ??
     (finalPath != null ? fileNameFromPath(finalPath) : null) ??
-    (node.mediaType === "video" ? "生成视频" : "生成图片");
+    (node.mediaType === "video"
+      ? "生成视频"
+      : node.mediaType === "audio"
+        ? "音频产物"
+        : "生成图片");
 
   return createPortal(
     <div className="history-lightbox" role="dialog" aria-modal="true" aria-label="媒体预览">
@@ -1959,6 +2080,14 @@ export function CanvasOutputLightbox({
             autoPlay
             muted
             playsInline
+          />
+        ) : node.mediaType === "audio" ? (
+          <audio
+            className="history-lightbox__media"
+            src={mediaSrc}
+            aria-label={mediaName}
+            controls
+            autoPlay
           />
         ) : (
           <img
@@ -2107,6 +2236,9 @@ export function CanvasOutputNode({
   saveProgress = null,
   rawResponse,
   modelLabel,
+  onRename,
+  onOpenHistory,
+  onPrepareVideo,
 }: {
   readonly node: OutputNodeData;
   /** 该节点正在被拖动（视觉反馈）。 */
@@ -2143,18 +2275,26 @@ export function CanvasOutputNode({
   readonly rawResponse: string | null;
   /** 模型展示名（进行中/失败态展示）。 */
   readonly modelLabel: string | null;
+  readonly onRename?: ((key: string, name: string) => Promise<void>) | undefined;
+  readonly onOpenHistory?: ((taskId: string) => void) | undefined;
+  readonly onPrepareVideo?: ((key: string) => void) | undefined;
 }) {
   const isTextResult = node.mediaType === "text";
   const isVideo = node.mediaType === "video";
+  const isAudio = node.mediaType === "audio";
+  const mediaLabel = isVideo ? "视频" : isAudio ? "音频" : "图片";
   const [previewing, setPreviewing] = useState(false);
   const [copied, setCopied] = useState(false);
   const [resuming, setResuming] = useState(false);
+  const [exporting, setExporting] = useState(false);
   const copyResetTimerRef = useRef<number | undefined>(undefined);
   // 视口懒挂载与本地图片缩略图：离屏不启动缩略图任务，也不解码原图。
   const { containerRef: previewButtonRef, inView: previewInView } =
-    useNodeInView<HTMLButtonElement>({ heavy: isVideo });
+    useNodeInView<HTMLButtonElement>({
+      heavy: isVideo && (node.finalPath == null || !isDesktopRuntime()),
+    });
   const imageThumbnail = useMediaThumbnailSrc(
-    !isVideo && !isTextResult ? node.finalPath : null,
+    !isVideo && !isAudio && !isTextResult ? node.finalPath : null,
     previewInView,
   );
   const mediaSrc = node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null);
@@ -2167,7 +2307,13 @@ export function CanvasOutputNode({
   const canUseAsGenerationReference = outputNodeReferenceTarget(node) != null;
   const canConnectToComposer = isVideo && hasArtifact;
   const dimensions = outputNodeDimensions(node);
-  const taskTypeLabel = isTextResult ? "智能扩写" : isVideo ? "视频生成" : "图片生成";
+  const taskTypeLabel = isTextResult
+    ? "智能扩写"
+    : isAudio
+      ? "音频处理"
+      : isVideo
+        ? "视频生成"
+        : "图片生成";
 
   // 未落卡时按任务状态派生展示阶段。
   const progress =
@@ -2303,25 +2449,29 @@ export function CanvasOutputNode({
     return () => window.clearTimeout(copyResetTimerRef.current);
   }, []);
   const metaLine =
-    node.origin === "composition"
-      ? "视频拼接与合成 · 本地结果"
-      : node.origin === "download"
-        ? "网络爆款视频下载 · 本地结果"
-        : node.origin === "white_model"
-          ? "Blender 白模动画 · 本地结果"
-          : node.origin === "white_model_still"
-            ? "白模站位图 · 本地结果"
-            : node.origin === "green_screen"
-              ? "绿幕流程 · 本地视频"
-              : node.origin === "video_edit"
-                ? "视频局部编辑 · 标注参考帧"
-                : task
-                  ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
-                      isFailed
-                        ? formatTaskClock(task.completedAt ?? task.updatedAt)
-                        : formatTaskClock(task.createdAt)
-                    }`
-                  : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
+    node.origin === "ai_media"
+      ? `AI 媒体处理 · 本地${mediaLabel}`
+      : node.origin === "video_preparation"
+        ? `视频准备 · 本地${mediaLabel}`
+        : node.origin === "composition"
+          ? "视频拼接与合成 · 本地结果"
+          : node.origin === "download"
+            ? "网络爆款视频下载 · 本地结果"
+            : node.origin === "white_model"
+              ? "Blender 白模动画 · 本地结果"
+              : node.origin === "white_model_still"
+                ? "白模站位图 · 本地结果"
+                : node.origin === "green_screen"
+                  ? "绿幕流程 · 本地视频"
+                  : node.origin === "video_edit"
+                    ? "视频局部编辑 · 标注参考帧"
+                    : task
+                      ? `${taskTypeLabel} · ${modelLabel ?? ""} · ${
+                          isFailed
+                            ? formatTaskClock(task.completedAt ?? task.updatedAt)
+                            : formatTaskClock(task.createdAt)
+                        }`
+                      : `${taskTypeLabel} · ${shortenTaskId(node.taskId)}`;
 
   const availableSaveDestinations: CanvasSaveDestination[] = [];
   if (onUploadToLocal) availableSaveDestinations.push("local");
@@ -2398,7 +2548,7 @@ export function CanvasOutputNode({
             type="button"
             ref={previewButtonRef}
             className="canvas-asset-node__visual canvas-asset-node__preview-button"
-            aria-label={`全屏浏览产物：${node.name ?? (isVideo ? "视频" : "图片")}`}
+            aria-label={`全屏浏览产物：${node.name ?? mediaLabel}`}
             title="拖动移动卡片 · 点击全屏浏览源媒体"
             onClick={(event) => {
               // 指针点按由拖动结束的激活回调处理（捕获层接管了 mouseup）；
@@ -2410,11 +2560,18 @@ export function CanvasOutputNode({
             {isVideo ? (
               <CanvasAssetNodeVideoVisual
                 videoUrl={mediaSrc}
+                finalPath={node.finalPath}
                 previewing={previewing}
                 isRealAsset
                 mountMedia={previewInView}
                 onAspectRatioChange={(aspectRatio) => onAspectRatioChange(node.key, aspectRatio)}
               />
+            ) : isAudio ? (
+              <span className="waveform waveform--node" aria-hidden="true">
+                {Array.from({ length: 14 }, (_, index) => (
+                  <i key={index} style={{ "--bar": (index % 5) + 2 } as CSSProperties} />
+                ))}
+              </span>
             ) : !previewInView ? (
               <span className="canvas-asset-node__video-lazy" aria-hidden="true" />
             ) : node.finalPath != null && isDesktopRuntime() && imageThumbnail.src == null ? (
@@ -2475,14 +2632,16 @@ export function CanvasOutputNode({
           <span className="canvas-asset-node__meta">
             {node.origin === "composition"
               ? `合成视频 · ${isPreviewOnly ? "已导出浏览器下载" : "已保存到本机"}`
-              : `${isVideo ? "视频" : "图片"}产物 · ${
+              : `${mediaLabel}产物 · ${
                   isPreviewOnly
                     ? failedSaveResult
                       ? "本地保存失败"
                       : savedResultName != null
                         ? "已保存到本机 · 正在补齐卡片"
                         : "正在保存到本机"
-                    : "已连线来源节点 · 可作为参考输入"
+                    : node.origin === "video_preparation" || node.origin === "ai_media"
+                      ? "已保存到本机 · 可作为参考输入"
+                      : "已连线来源节点 · 可作为参考输入"
                 }`}
           </span>
           {showSaveOverlay ? (
@@ -2599,20 +2758,71 @@ export function CanvasOutputNode({
           </span>
           <span className="canvas-asset-node__identity">
             <AssetKindIcon kind={node.mediaType} />
-            <span className="canvas-asset-node__name" title={modelLabel ?? undefined}>
-              {modelLabel ?? shortenTaskId(node.taskId)}
+            <span className="canvas-asset-node__name" title={node.name ?? modelLabel ?? undefined}>
+              {node.name ?? task?.outputName ?? modelLabel ?? shortenTaskId(node.taskId)}
             </span>
           </span>
           <span className="canvas-asset-node__meta">{metaLine}</span>
         </>
       )}
+      {(onRename && hasLocalArtifact) ||
+      onOpenHistory ||
+      (onPrepareVideo && isVideo && hasArtifact) ||
+      (hasLocalArtifact && isDesktopRuntime()) ? (
+        <div
+          className="artifact-actions nodrag nopan"
+          onMouseDown={(event) => event.stopPropagation()}
+          onPointerDown={(event) => event.stopPropagation()}
+          onClick={(event) => event.stopPropagation()}
+        >
+          {onPrepareVideo && isVideo && hasArtifact ? (
+            <button type="button" onClick={() => onPrepareVideo(node.key)}>
+              视频准备
+            </button>
+          ) : null}
+          {onRename && hasLocalArtifact ? (
+            <NodeNameEditor
+              name={fileBaseName(node.name ?? "产物") ?? "产物"}
+              label="修改产物名称"
+              onSave={(name) => onRename(node.key, name)}
+            />
+          ) : null}
+          {hasLocalArtifact && isDesktopRuntime() ? (
+            <button
+              type="button"
+              disabled={exporting}
+              onClick={() => {
+                setExporting(true);
+                void exportArtifactToDesktop(
+                  node.finalPath!,
+                  artifactFileName(node.name ?? "产物", node.finalPath!),
+                )
+                  .then((path) => {
+                    if (path) toast.success("产物已导出");
+                  })
+                  .catch((error: unknown) =>
+                    toast.error(`导出失败：${formatRawBackendError(error)}`),
+                  )
+                  .finally(() => setExporting(false));
+              }}
+            >
+              {exporting ? "导出中…" : "按名称导出"}
+            </button>
+          ) : null}
+          {onOpenHistory ? (
+            <button type="button" onClick={() => onOpenHistory(node.taskId)}>
+              原任务
+            </button>
+          ) : null}
+        </div>
+      ) : null}
       {availableSaveDestinations.length > 0 &&
-      (node.mediaType === "image" || node.mediaType === "video") &&
+      (node.mediaType === "image" || node.mediaType === "video" || node.mediaType === "audio") &&
       node.finalPath != null ? (
         <CanvasMediaSaveMenu
           nodeKey={node.key}
-          name={node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}
-          triggerLabel={`保存产物：${node.name ?? `${node.mediaType === "video" ? "视频" : "图片"}产物`}`}
+          name={node.name ?? `${mediaLabel}产物`}
+          triggerLabel={`保存产物：${node.name ?? `${mediaLabel}产物`}`}
           availableDestinations={availableSaveDestinations}
           onSave={(destination) => {
             if (destination === "local") onUploadToLocal?.(node.key);
@@ -2637,12 +2847,14 @@ export function CanvasOutputNode({
         <button
           type="button"
           className="canvas-asset-node__port"
-          aria-label={`从${isVideo ? "视频" : "图片"}产物 ${node.name ?? "未命名"} 拖出连线`}
+          aria-label={`从${mediaLabel}产物 ${node.name ?? "未命名"} 拖出连线`}
           title={
             canUseAsGenerationReference
-              ? isVideo
-                ? "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考视频、视频拼接与合成、爆款视频复刻节点"
-                : "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考图片"
+              ? isAudio
+                ? "拖到提示词节点作为音频参考，或拖到支持音频输入的视频生成节点"
+                : isVideo
+                  ? "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考视频、视频拼接与合成、爆款视频复刻节点"
+                  : "拖到提示词节点作为参考理解素材，或拖到图片/视频生成节点作为参考图片"
               : "拖到视频拼接与合成或爆款视频复刻节点"
           }
           onMouseDown={(event) => {

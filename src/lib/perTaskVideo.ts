@@ -23,11 +23,6 @@ export function perTaskVideoProfile(modelId: string): PerTaskVideoProfile | null
   return profile ? { modelId, ...profile } : null;
 }
 
-export interface PerTaskVideoInput {
-  readonly kind: "image" | "video" | "audio";
-  readonly role?: string;
-}
-
 /** Public image/audio URLs are separate from Wan's document and webpage URL inputs. */
 export interface PerTaskVideoUrlInput {
   readonly id: string;
@@ -93,29 +88,4 @@ export function perTaskVideoUrlConnection(input: PerTaskVideoUrlInput) {
     },
     role: input.kind === "image" ? "reference_image" : "reference_audio",
   };
-}
-
-/** Visible before submission; the native provider repeats these checks before the paid request. */
-export function perTaskVideoInputIssue(
-  profile: PerTaskVideoProfile,
-  inputs: readonly PerTaskVideoInput[],
-): string | null {
-  const videos = inputs.filter((input) => input.kind === "video");
-  if (videos.length > 0) return "此按次型号不支持参考视频，请断开视频素材。";
-
-  const images = inputs.filter((input) => input.kind === "image");
-  if (images.length > profile.maxImages)
-    return `此按次型号最多支持 ${profile.maxImages} 张参考图，当前已连接 ${images.length} 张。`;
-
-  const audios = inputs.filter((input) => input.kind === "audio");
-  if (audios.length > profile.maxAudios)
-    return profile.maxAudios === 0
-      ? "此按次型号不支持参考音频，请断开音频素材。"
-      : `此按次型号最多支持 ${profile.maxAudios} 段参考音频，当前已连接 ${audios.length} 段。`;
-
-  if (images.some((input) => input.role && input.role !== "reference_image"))
-    return "此按次型号仅支持参考图，不支持首帧、尾帧或其他图片用途；请清除旧素材角色。";
-  if (audios.some((input) => input.role && input.role !== "reference_audio"))
-    return "此按次型号仅支持参考音频；请清除旧素材角色。";
-  return null;
 }

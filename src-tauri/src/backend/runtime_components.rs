@@ -530,7 +530,7 @@ impl RuntimeComponent {
             && self.critical_files_ready(&self.bundled_root)
     }
 
-    fn stored_ready(&self, root: &Path, ready: fn(&Path) -> bool) -> bool {
+    pub(crate) fn stored_ready(&self, root: &Path, ready: fn(&Path) -> bool) -> bool {
         if !root
             .symlink_metadata()
             .is_ok_and(|metadata| metadata.file_type().is_dir())
@@ -584,6 +584,12 @@ impl RuntimeComponent {
         self.trusted_manifest(&path, &digest).then_some(digest)
     }
 
+    /// The component manager adds exact archive/inventory validation before this native
+    /// check. Keeping this check here preserves the same executable pins as bundled lookup.
+    pub(crate) fn verified_candidate(&self, root: &Path, ready: fn(&Path) -> bool) -> bool {
+        self.manifest_hash(root).is_some() && ready(root) && self.critical_files_ready(root)
+    }
+
     fn trusted_manifest(&self, path: &Path, digest: &str) -> bool {
         if self.name == "test-component" {
             return true;
@@ -605,6 +611,32 @@ impl RuntimeComponent {
             "remotion-runtime" => {
                 let inventory = env!("IC_REMOTION_INVENTORY_SHA256");
                 pinned_text(env!("IC_REMOTION_MANIFEST_SHA256"), Some(digest))
+                    && pinned_text(inventory, value["inventory"]["sha256"].as_str())
+            }
+            "ai-media-runtime" => {
+                // Optional does not mean untrusted: never execute an imported
+                // Python pack whose inventory was not pinned by this build.
+                let expected = env!("IC_AI_MEDIA_MANIFEST_SHA256");
+                let inventory = env!("IC_AI_MEDIA_INVENTORY_SHA256");
+                !expected.is_empty()
+                    && !inventory.is_empty()
+                    && pinned_text(expected, Some(digest))
+                    && pinned_text(inventory, value["inventory"]["sha256"].as_str())
+            }
+            "ai-media-quality-runtime" => {
+                let expected = env!("IC_AI_MEDIA_QUALITY_MANIFEST_SHA256");
+                let inventory = env!("IC_AI_MEDIA_QUALITY_INVENTORY_SHA256");
+                !expected.is_empty()
+                    && !inventory.is_empty()
+                    && pinned_text(expected, Some(digest))
+                    && pinned_text(inventory, value["inventory"]["sha256"].as_str())
+            }
+            "pose-runtime" => {
+                let expected = option_env!("IC_POSE_MANIFEST_SHA256").unwrap_or("");
+                let inventory = option_env!("IC_POSE_INVENTORY_SHA256").unwrap_or("");
+                !expected.is_empty()
+                    && !inventory.is_empty()
+                    && pinned_text(expected, Some(digest))
                     && pinned_text(inventory, value["inventory"]["sha256"].as_str())
             }
             "gpt-image-2-style-library" => {
@@ -694,7 +726,7 @@ impl RuntimeComponent {
         true
     }
 
-    fn retarget_critical_cache(&self, previous_root: &Path, destination: &Path) {
+    pub(crate) fn retarget_critical_cache(&self, previous_root: &Path, destination: &Path) {
         let Ok(destination) = destination.canonicalize() else {
             return;
         };
@@ -725,7 +757,9 @@ impl RuntimeComponent {
         let manifest: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
         let targets = match self.name {
             "ffmpeg" => ffmpeg_targets(root, &manifest, cfg!(target_os = "macos"))?,
-            "blender" => inventory_targets(root, &manifest)?,
+            "blender" | "ai-media-runtime" | "ai-media-quality-runtime" | "pose-runtime" => {
+                inventory_targets(root, &manifest)?
+            }
             "remotion-runtime" => {
                 if manifest["inventory"].is_object() {
                     inventory_targets(root, &manifest)?

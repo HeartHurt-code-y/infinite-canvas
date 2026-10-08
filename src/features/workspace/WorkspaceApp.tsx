@@ -1,5 +1,9 @@
 import { Icon } from "../../components/Icon";
 import { AppUpdateBanner } from "./AppUpdateBanner";
+import {
+  ensureRuntimeFeatureInstalled,
+  RUNTIME_COMPONENTS_REQUEST_EVENT,
+} from "../../lib/runtimeComponents";
 import { CanvasAgentController } from "./agent/canvasAgentController";
 import { CanvasAgentPanel } from "./agent/CanvasAgentPanel";
 import { createAgentCanvasTools } from "./agent/agentCanvasTools";
@@ -52,6 +56,8 @@ import {
   formatRawBackendError,
   frontendLog,
   generationClient,
+  promoteSeedanceDraft,
+  renameGenerationResult,
   inferMediaKindFromName,
   isDesktopRuntime,
   loadProviderCatalog,
@@ -76,6 +82,7 @@ import {
   type GenerationResultRecord,
   type GenerationResultSaveProgress,
   type GenerationTaskSummary,
+  type GenerationTaskDetail,
   type LocalAssetKindTotals,
   type LocalAssetRecord,
   type LocalBase64AssetGroupRecord,
@@ -94,22 +101,28 @@ import {
   type VideoDownloaderEngineStatus,
   type VideoFrameExtractionJobRecord,
 } from "../../lib/backend";
+import { artifactFileName, resultDisplayName } from "./artifactNames";
+import {
+  registerArtifactNameSync,
+  publishArtifactNameChange,
+  resolveCurrentArtifactName,
+  artifactNameChangeMatches,
+} from "./artifactNameSync";
+import { exportArtifactDeliveryToDesktop } from "./artifactDelivery";
+import type { VideoPreparationSource } from "./VideoPreparationDialog";
+import {
+  videoPreparationClient,
+  type VideoPreparationJob,
+  type VideoPreparationOutput,
+} from "../../lib/videoPreparation";
+import { aiMediaClient, type AiMediaJob, type AiMediaOutput } from "../../lib/aiMedia";
 import {
   assetLibraryProviders,
   isDeletableCloudAssetGroupId,
   resolveActiveAssetLibraryProvider,
 } from "../../lib/assetLibrarySupport";
-import {
-  generationParameters,
-  modelAllowsMediaOnlyPrompt,
-  modelParameterCapabilities,
-} from "../../lib/modelCapabilities";
-import {
-  perTaskVideoInputIssue,
-  perTaskVideoProfile,
-  perTaskVideoUrlConnection,
-  perTaskVideoUrlIssue,
-} from "../../lib/perTaskVideo";
+import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
+import { perTaskVideoUrlConnection, perTaskVideoUrlIssue } from "../../lib/perTaskVideo";
 import type {
   PromptContentConnection,
   PromptContentDocumentV1,
@@ -372,6 +385,7 @@ import {
   KNOWLEDGE_VIDEO_WORKFLOW_NODE_HEIGHT,
   ZOOM_STEP,
   assetNodeDimensions,
+  assetNodeReferenceTarget,
   assetNodeKey,
   abandonedUploadError,
   cloudAssetAwaitingId,
@@ -412,6 +426,7 @@ import {
   modelDisplayNameForTask,
   nearestAvailableNodePosition,
   nextOutputSlot,
+  nextPreparedMediaOutputSlot,
   nextVideoComposerOutputSlot,
   nextVideoDownloaderOutputSlot,
   knowledgeVideoWorkflowNodeWidth,
@@ -451,8 +466,14 @@ const EMPTY_CANVAS_FLOW_NODES: CanvasFlowNode[] = [];
 const VideoLocalEditDialog = lazy(() =>
   import("./VideoLocalEditDialog").then((module) => ({ default: module.VideoLocalEditDialog })),
 );
+const VideoPreparationDialog = lazy(() =>
+  import("./VideoPreparationDialog").then((module) => ({ default: module.VideoPreparationDialog })),
+);
 const WhiteModelStudioDialog = lazy(() =>
   import("./WhiteModelStudioDialog").then((module) => ({ default: module.WhiteModelStudioDialog })),
+);
+const RuntimeComponentsPanel = lazy(() =>
+  import("./RuntimeComponentsPanel").then((module) => ({ default: module.RuntimeComponentsPanel })),
 );
 const CANVAS_FLOW_EDGE_TYPES = { canvas: CanvasFlowEdgeView };
 
@@ -1141,6 +1162,7 @@ type PromptNodeCardProps = ComponentProps<typeof CanvasPromptNode>;
 type GenNodeCardProps = ComponentProps<typeof CanvasGenNode>;
 type Param0<T> = Parameters<T extends (...args: never) => unknown ? T : never>[0];
 type GenNodeCardSlotProps = {
+  readonly onRename: (key: string, name: string) => void;
   readonly nodeKey: string;
   readonly selected: boolean;
   readonly running: boolean;
@@ -1207,6 +1229,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
     onGreenScreenUseResult,
     onImportGreenScreenVideo,
     onStartGeneration,
+    onRename,
   } = props;
   const entry = useCanvasNodeEntry(nodeKey);
   const connectedInputs = useCanvasNodeDerived(nodeKey, genConnectedInputsFor, mediaInputsToken);
@@ -1313,6 +1336,7 @@ function CanvasGenNodeCardSlot(props: GenNodeCardSlotProps) {
         onReorderInput={onReorderInput}
         onSizeChange={onSizeChange}
         onImageConfigChange={onImageConfigChange}
+        onRename={onRename}
         onVideoConfigChange={onVideoConfigChange}
         onAnnotateVideo={onAnnotateVideo}
         onOpenWhiteModelStudio={onOpenWhiteModelStudio}
@@ -1766,17 +1790,37 @@ export function WorkspaceApp({
   const [mobilePanel, setMobilePanel] = useState<MobilePanel>(null);
   const [workflowRepositoryExpanded, setWorkflowRepositoryExpanded] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [runtimeComponentsOpen, setRuntimeComponentsOpen] = useState(false);
+  const [runtimeComponentFeatureId, setRuntimeComponentFeatureId] = useState<string | null>(null);
+  useEffect(() => {
+    const openComponents = (event: Event) => {
+      const detail = (event as CustomEvent<unknown>).detail;
+      const featureId =
+        detail &&
+        typeof detail === "object" &&
+        "featureId" in detail &&
+        typeof detail.featureId === "string"
+          ? detail.featureId
+          : null;
+      setRuntimeComponentFeatureId(featureId);
+      setRuntimeComponentsOpen(true);
+    };
+    window.addEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, openComponents);
+    return () => window.removeEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, openComponents);
+  }, []);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [historyInitialTab, setHistoryInitialTab] = useState<"generation" | "workflow">(
     "generation",
   );
   const [historyInitialWorkflowId, setHistoryInitialWorkflowId] = useState<string | null>(null);
+  const [historyInitialTaskId, setHistoryInitialTaskId] = useState<string | null>(null);
   const [realPersonDialogOpen, setRealPersonDialogOpen] = useState(false);
   const [videoLocalEdit, setVideoLocalEdit] = useState<{
     readonly nodeKey: string;
     readonly source: VideoLocalEditSource;
     readonly input: GenerationMediaInput;
   } | null>(null);
+  const [videoPreparation, setVideoPreparation] = useState<VideoPreparationSource | null>(null);
   const [whiteModelStudioNodeKey, setWhiteModelStudioNodeKey] = useState<string | null>(null);
   // 白模工作台目标节点窄订阅：仅该节点自身变化时重渲染弹窗区域。
   const whiteModelStudioEntry = useCanvasNodeEntry(whiteModelStudioNodeKey ?? "");
@@ -2194,11 +2238,13 @@ export function WorkspaceApp({
   const [frameExtractorRuns, setFrameExtractorRunsInternal] = useState<
     Readonly<Record<string, VideoFrameExtractorRunState>>
   >({});
-  const setFrameExtractorRuns = useDeferredSessionState(
+  const setFrameExtractorProgress = useDeferredSessionState(
     setFrameExtractorRunsInternal,
     activeRef,
     active,
   );
+  // 身份与状态必须立即推进后台批次；隐藏画布仅延迟高频进度。
+  const setFrameExtractorRuns = setFrameExtractorRunsInternal;
   const frameExtractorStartNodesRef = useRef<Map<string, VideoFrameExtractorNodeData>>(new Map());
   const frameExtractionQueuesRef = useRef(
     new Map<
@@ -2208,6 +2254,8 @@ export function WorkspaceApp({
         timestamps: readonly number[];
         batchId: string;
         activeJobId: string;
+        cancelRequested?: boolean;
+        requestId?: string;
       }
     >(),
   );
@@ -2577,7 +2625,6 @@ export function WorkspaceApp({
       workflowHistoryActionsRef.current.size > 0 ||
       videoComposerAbortControllersRef.current.size > 0 ||
       videoDownloadQueuesRef.current.size > 0 ||
-      frameExtractionQueuesRef.current.size > 0 ||
       Object.values(videoComposerRuns).some((run) => run.status === "running") ||
       Object.values(videoDownloaderRuns).some((run) => run.status === "running") ||
       Object.values(frameExtractorRuns).some((run) => run.status === "running")
@@ -2613,6 +2660,7 @@ export function WorkspaceApp({
   });
   const {
     hydrated: canvasHydrated,
+    flush: flushCanvasDocument,
     schedule: scheduleCanvasSave,
     documentChanged,
   } = canvasPersistence;
@@ -3968,15 +4016,16 @@ export function WorkspaceApp({
       const wanted = new Set(outputKeys);
       const saved = canvasNodesNow("output").flatMap((node) => {
         if (!wanted.has(node.key)) return [];
-        if (node.mediaType !== "image" && node.mediaType !== "video") return [];
+        if (node.mediaType !== "image" && node.mediaType !== "video" && node.mediaType !== "audio")
+          return [];
         if (node.finalPath == null) return [];
         return [{ node, mediaType: node.mediaType, localPath: node.finalPath }];
       });
       if (saved.length === 0) {
         toast.error(
           outputKeys.length === 1
-            ? "仅已保存到本地的图片/视频产物支持上传到素材库。"
-            : "组内没有已保存到本地的图片或视频产物，无法上传到当前素材库。",
+            ? "仅已保存到本地的媒体产物支持上传到素材库。"
+            : "组内没有已保存到本地的媒体产物，无法上传到当前素材库。",
         );
         return;
       }
@@ -4015,7 +4064,7 @@ export function WorkspaceApp({
         const name =
           output.node.name ??
           output.localPath.split(/[\\/]/).pop() ??
-          `${output.mediaType === "video" ? "视频" : "图片"}产物`;
+          `${output.mediaType === "video" ? "视频" : output.mediaType === "audio" ? "音频" : "图片"}产物`;
         if (destination === "cloud") uploadJobToOutputRef.current.set(pendingId, output.node.key);
         if (destination === "object_storage")
           objectStorageUploadJobToOutputRef.current.set(pendingId, output.node.key);
@@ -4024,7 +4073,7 @@ export function WorkspaceApp({
           {
             jobId: pendingId,
             name,
-            kind: output.mediaType === "video" ? "video" : "image",
+            kind: output.mediaType,
             assetId: null,
             status: "preparing",
             bytesUploaded: 0,
@@ -4117,7 +4166,7 @@ export function WorkspaceApp({
           {
             description:
               skipped > 0
-                ? `已跳过 ${skipped} 个尚未保存或不是图片/视频的产物。`
+                ? `已跳过 ${skipped} 个尚未保存的媒体或文本产物。`
                 : destination === "local"
                   ? "可以在本地素材库查看。"
                   : "进度可以在素材面板查看。",
@@ -6056,9 +6105,19 @@ export function WorkspaceApp({
 
   const updateFrameExtractorConfig = useCallback(
     (key: string, config: VideoFrameExtractorNodeConfig) => {
+      if (!config.checkpoint) {
+        frameExtractionQueuesRef.current.delete(key);
+        frameExtractorStartNodesRef.current.delete(key);
+        setFrameExtractorRuns((current) => {
+          if (!current[key]) return current;
+          const next = { ...current };
+          delete next[key];
+          return next;
+        });
+      }
       patchNode("frameExtractor", key, (node) => ({ ...node, config }));
     },
-    [patchNode],
+    [patchNode, setFrameExtractorRuns],
   );
 
   const updatePromptNodeConfig = useCallback(
@@ -6380,8 +6439,12 @@ export function WorkspaceApp({
         "info",
         `[generation] 发起提示词节点请求: node=${nodeKey}, task=${node.config.task}, mode=${node.config.mode}, model=${model.remoteModelId}, 历史 ${contextHistory.length} 条, 本轮 ${sourcePrompt.length} 字符, 视觉素材 ${visionImages.length} 张, 视频素材 ${videoMaterials.length} 个`,
       );
-      void promptNodeClient
-        .run({
+      void (async () => {
+        if (isGptImage2Style && !(await ensureRuntimeFeatureInstalled("image-style-library"))) {
+          setNodeStartError(nodeKey, "请先安装图片风格库组件，完成后再次点击生成。");
+          return null;
+        }
+        return promptNodeClient.run({
           canvasId: canvasId,
           sourceNodeId: nodeKey,
           providerConnectionId: provider.provider.id,
@@ -6392,8 +6455,10 @@ export function WorkspaceApp({
           contextHistory,
           visionImages,
           referenceInputs: videoMaterials,
-        })
+        });
+      })()
         .then((result) => {
+          if (!result) return;
           const dialogueResponse = isCinematicDialogue
             ? parseCinematicDialogueResponse(result.optimizedPrompt, dialogueGuard)
             : null;
@@ -8244,7 +8309,7 @@ export function WorkspaceApp({
       const saved = record.saveStatus === "succeeded" && record.finalPath != null;
       if (!saved && previewSrc == null && mediaType !== "text") return false;
       const finalPath = saved ? record.finalPath : null;
-      const name = finalPath ? fileNameFromPath(finalPath) : null;
+      const name = resultDisplayName(record) ?? (finalPath ? fileNameFromPath(finalPath) : null);
       // Context-IR 文本产物：扩写正文内联在 source.text，随事件写入卡片展示。
       const textContent =
         mediaType === "text" ? (textResultFromSource(record.source) ?? null) : null;
@@ -8278,7 +8343,9 @@ export function WorkspaceApp({
         ...node,
         resultKey,
         mediaType,
-        ...(saved ? { finalPath, previewSrc: null, name } : { previewSrc, finalPath: null }),
+        ...(saved
+          ? { finalPath, previewSrc: null, name: node.customName ?? name }
+          : { previewSrc, finalPath: null }),
         ...(textContent != null ? { textContent } : {}),
         ...(layer != null ? { layer } : {}),
       });
@@ -8715,7 +8782,7 @@ export function WorkspaceApp({
         selection,
         providerCatalog,
       );
-      if (!resolvedSelection?.model.operations.includes(operation)) {
+      if (!resolvedSelection) {
         setNodeStartError(
           nodeKey,
           genNode.kind === "video"
@@ -8725,21 +8792,9 @@ export function WorkspaceApp({
         return;
       }
 
-      const perTaskProfile =
-        genNode.kind === "video"
-          ? perTaskVideoProfile(resolvedSelection.model.remoteModelId)
-          : null;
-      if (perTaskProfile && genNode.kind === "video") {
-        if (genNode.config.greenScreen?.enabled || genNode.config.whiteModelControl?.enabled) {
-          setNodeStartError(
-            nodeKey,
-            "按次系列只支持参考图及指定型号的参考音频，请先关闭绿幕或白模视频控制。",
-          );
-          return;
-        }
-        // Wan's file/link inputs are stored on the node but hidden for this model.
-        // They are not reference images and must never enter this paid request.
-        connections = connections.slice(0, connectedAssets.length);
+      if (genNode.kind === "video") {
+        // Keep every configured input. Cached model profiles cannot veto the request,
+        // and an adapter must report media it cannot represent rather than discard it.
         const publicUrlInputs = genNode.config.perTaskUrlMedia ?? [];
         const urlIssue = perTaskVideoUrlIssue(publicUrlInputs);
         if (urlIssue) {
@@ -8747,11 +8802,6 @@ export function WorkspaceApp({
           return;
         }
         connections = [...connections, ...publicUrlInputs.map(perTaskVideoUrlConnection)];
-        const mediaIssue = perTaskVideoInputIssue(perTaskProfile, connections);
-        if (mediaIssue) {
-          setNodeStartError(nodeKey, mediaIssue);
-          return;
-        }
       }
       const parameterCapabilities = modelParameterCapabilities(
         resolvedSelection.model.operationSchema,
@@ -8819,10 +8869,8 @@ export function WorkspaceApp({
         setNodeStartError(nodeKey, whiteModel.issue);
         return;
       }
-      const allowMediaOnly = modelAllowsMediaOnlyPrompt(
-        resolvedSelection.model.operationSchema,
-        operation,
-      );
+      // Media-only acceptance is a remote capability, not a cached catalog policy.
+      const allowMediaOnly = true;
       const panorama =
         genNode.kind === "image" && genNode.config.panoramaEnabled
           ? preparePanoramaGeneration(promptDocument, connections, allowMediaOnly)
@@ -8871,9 +8919,7 @@ export function WorkspaceApp({
       const supportsBatchCount = parameterCapabilities.some(
         (capability) => capability.key === "n" && capability.type === "integer",
       );
-      const countMaximum = supportsBatchCount
-        ? GPT_IMAGE_MAX_GENERATION_COUNT
-        : MAX_GENERATION_COUNT;
+      const countMaximum = supportsBatchCount ? Number.MAX_SAFE_INTEGER : MAX_GENERATION_COUNT;
       const generationCount = Math.min(
         countMaximum,
         Math.max(1, Math.floor(genNode.config.generationCount) || 1),
@@ -8908,10 +8954,16 @@ export function WorkspaceApp({
         }
       };
       for (let index = 0; index < taskCount; index += 1) {
+        const outputName = genNode.name
+          ? taskCount > 1
+            ? `${genNode.name}_${String(index + 1).padStart(2, "0")}`
+            : genNode.name
+          : null;
         const submission = generationClient
           .start({
             canvasId: canvasId,
             sourceNodeId: nodeKey,
+            ...(outputName ? { outputName } : {}),
             operation,
             providerConnectionId: selection.providerId,
             modelDefinitionId: selection.modelDefinitionId,
@@ -8923,7 +8975,9 @@ export function WorkspaceApp({
           })
           .then((taskId) => {
             startedTaskIds.push(taskId);
-            const placeholderCount = supportsBatchCount ? generationCount : 1;
+            const placeholderCount = supportsBatchCount
+              ? Math.min(generationCount, GPT_IMAGE_MAX_GENERATION_COUNT)
+              : 1;
             const publish = () => {
               if (greenScreenSignature) {
                 patchNode("gen", nodeKey, (node) =>
@@ -8960,7 +9014,11 @@ export function WorkspaceApp({
                   mediaType: genNode.kind === "video" ? "video" : "image",
                   finalPath: null,
                   previewSrc: null,
-                  name: null,
+                  name: outputName
+                    ? placeholderCount > 1
+                      ? `${outputName}_${String(resultIndex).padStart(2, "0")}`
+                      : outputName
+                    : null,
                   ...nextOutputSlot(
                     currentOutputSource(nodesById, "gen", genNode),
                     current,
@@ -9039,7 +9097,9 @@ export function WorkspaceApp({
                 mediaType: command.operation === "video_generation" ? "video" : "image",
                 finalPath: null,
                 previewSrc: null,
-                name: null,
+                name: command.outputName
+                  ? `${command.outputName}_${String(resultIndex).padStart(2, "0")}`
+                  : null,
                 ...nextOutputSlot(
                   currentOutputSource(nodesById, "gen", genNode),
                   current,
@@ -9062,7 +9122,7 @@ export function WorkspaceApp({
               mediaType: command.operation === "video_generation" ? "video" : "image",
               finalPath: null,
               previewSrc: null,
-              name: null,
+              name: command.outputName ?? null,
               ...nextOutputSlot(
                 currentOutputSource(nodesById, "gen", genNode),
                 current,
@@ -9085,6 +9145,44 @@ export function WorkspaceApp({
       return firstTaskId;
     },
     [canvasId, addOutput, canvasNodesNow, refreshTasks, outputPlacementOptionsFor],
+  );
+
+  const promoteSeedanceDraftFromHistory = useCallback(
+    async (draft: GenerationTaskDetail): Promise<string> => {
+      const taskId = await promoteSeedanceDraft(draft.summary.id);
+      const sourceNode =
+        draft.summary.canvasId === canvasId
+          ? canvasNodesNow("gen").find((node) => node.key === draft.summary.sourceNodeId)
+          : undefined;
+      if (sourceNode) {
+        // The paid task already exists; a delayed summary must not make submission look failed.
+        const task = await generationClient.getProgress(taskId).catch(() => null);
+        const savedResult = task?.results.find(
+          (result) =>
+            result.mediaType === "video" && result.saveStatus === "succeeded" && result.finalPath,
+        );
+        if (!canvasNodesNow("output").some((node) => node.taskId === taskId)) {
+          addOutput((current, nodesById) => ({
+            key: outputNodeKey(),
+            resultKey: savedResult ? `${taskId}#${savedResult.resultIndex}` : null,
+            sourceNodeId: sourceNode.key,
+            taskId,
+            mediaType: "video",
+            finalPath: savedResult?.finalPath ?? null,
+            previewSrc: null,
+            name: task?.summary.outputName ?? `${draft.summary.outputName ?? "草稿样片"}_正片`,
+            ...nextOutputSlot(
+              currentOutputSource(nodesById, "gen", sourceNode),
+              current,
+              outputPlacementOptionsFor(nodesById, sourceNode.key),
+            ),
+          }));
+        }
+      }
+      refreshTasks();
+      return taskId;
+    },
+    [canvasId, canvasNodesNow, addOutput, outputPlacementOptionsFor, refreshTasks],
   );
 
   // 各生成节点的活动任务与最近成功结果（按 sourceNodeId = 节点 key 关联）。
@@ -9866,12 +9964,34 @@ export function WorkspaceApp({
 
   // ---- 视频抽帧：任务轮询与终态落卡 ----
 
+  const persistFrameExtractionCheckpoint = useCallback(
+    (nodeKey: string, checkpoint: VideoFrameExtractorNodeData["config"]["checkpoint"]) => {
+      patchNode("frameExtractor", nodeKey, (node) => {
+        const { checkpoint: previous, ...config } = node.config;
+        void previous;
+        const persisted = checkpoint
+          ? {
+              batchId: checkpoint.batchId,
+              activeJobId: checkpoint.activeJobId,
+              sources: [...checkpoint.sources],
+              timestamps: [...checkpoint.timestamps],
+              ...(checkpoint.requestId ? { requestId: checkpoint.requestId } : {}),
+            }
+          : undefined;
+        return { ...node, config: persisted ? { ...config, checkpoint: persisted } : config };
+      });
+    },
+    [patchNode],
+  );
+
   const submitNextFrameExtraction = useCallback(
     (nodeKey: string) => {
       const queue = frameExtractionQueuesRef.current.get(nodeKey);
       const source = queue?.sources.shift();
       if (!queue || !source) return;
       queue.activeJobId = "";
+      queue.requestId ??= crypto.randomUUID();
+      persistFrameExtractionCheckpoint(nodeKey, { ...queue, sources: [source, ...queue.sources] });
       setFrameExtractorRuns((current) => ({
         ...current,
         [nodeKey]: {
@@ -9882,19 +10002,39 @@ export function WorkspaceApp({
           error: null,
         },
       }));
-      void videoFrameExtractionClient
-        .startExtraction(source, queue.timestamps)
+      void flushCanvasDocument()
+        .then(() => {
+          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue)
+            throw new Error("抽帧批次已关闭。");
+          return videoFrameExtractionClient.startExtraction(
+            source,
+            queue.timestamps,
+            undefined,
+            queue.requestId,
+          );
+        })
         .then((record) => {
           if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) {
             void videoFrameExtractionClient.cancelJob(record.jobId).catch(() => undefined);
             return;
           }
           queue.activeJobId = record.jobId;
+          persistFrameExtractionCheckpoint(nodeKey, { ...queue, sources: [...queue.sources] });
+          void flushCanvasDocument().catch((error: unknown) =>
+            toast.error(`抽帧检查点保存失败：${formatRawBackendError(error)}`),
+          );
+          if (queue.cancelRequested) {
+            void videoFrameExtractionClient
+              .cancelJob(record.jobId)
+              .catch((error: unknown) =>
+                toast.error(`取消抽帧失败：${formatRawBackendError(error)}`),
+              );
+          }
           setFrameExtractorRuns((current) => ({
             ...current,
             [nodeKey]: {
               jobId: record.jobId,
-              status: "running",
+              status: record.status === "paused" ? "paused" : "running",
               preparingEngine: false,
               progress: null,
               error: null,
@@ -9916,7 +10056,7 @@ export function WorkspaceApp({
           }));
         });
     },
-    [setFrameExtractorRuns],
+    [setFrameExtractorRuns, persistFrameExtractionCheckpoint, flushCanvasDocument],
   );
 
   // 活动抽帧任务：查询 key 随运行任务集合变化，任务到终态后离开集合停止轮询。
@@ -9977,9 +10117,24 @@ export function WorkspaceApp({
       for (const { nodeKey, jobId, job, error } of results) {
         const queue = frameExtractionQueuesRef.current.get(nodeKey);
         if (queue?.activeJobId !== jobId) continue;
+        // 读取失败保留任务和批次，下一次轮询继续；不能把暂时 IPC 错误当成终态。
+        if (job == null) continue;
+        if (job.status === "paused") {
+          setFrameExtractorRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId,
+              status: "paused",
+              preparingEngine: false,
+              progress: job.progress,
+              error: job.error,
+            },
+          }));
+          continue;
+        }
         if (job != null && (job.status === "preparing_engine" || job.status === "processing")) {
           const preparingEngine = job.status === "preparing_engine";
-          setFrameExtractorRuns((current) => {
+          setFrameExtractorProgress((current) => {
             const previous = current[nodeKey];
             if (previous?.jobId !== jobId) return current;
             if (
@@ -10015,6 +10170,15 @@ export function WorkspaceApp({
             );
           } else {
             for (const frame of job.frames) {
+              if (
+                canvasNodesNow("output").some(
+                  (node) =>
+                    node.origin === "frame_extract" &&
+                    node.sourceNodeId === nodeKey &&
+                    node.finalPath === frame.path,
+                )
+              )
+                continue;
               addOutput((current, nodesById) => ({
                 key: outputNodeKey(),
                 resultKey: null,
@@ -10033,11 +10197,24 @@ export function WorkspaceApp({
               }));
             }
           }
-          if (queue.sources.length > 0) {
+          if (queue.sources.length > 0 && !queue.cancelRequested) {
+            delete queue.requestId;
             submitNextFrameExtraction(nodeKey);
             continue;
           }
           frameExtractionQueuesRef.current.delete(nodeKey);
+          const interruptedBatch = queue.cancelRequested && queue.sources.length > 0;
+          persistFrameExtractionCheckpoint(
+            nodeKey,
+            interruptedBatch
+              ? {
+                  batchId: queue.batchId,
+                  activeJobId: "",
+                  sources: [...queue.sources],
+                  timestamps: queue.timestamps,
+                }
+              : undefined,
+          );
           setFrameExtractorRuns((current) => {
             const previous = current[nodeKey];
             if (previous?.jobId !== jobId) return current;
@@ -10045,9 +10222,9 @@ export function WorkspaceApp({
               ...current,
               [nodeKey]: {
                 jobId,
-                status: "done",
+                status: interruptedBatch ? "cancelled" : "done",
                 preparingEngine: false,
-                progress: 100,
+                progress: interruptedBatch ? null : 100,
                 error: null,
               },
             };
@@ -10105,13 +10282,77 @@ export function WorkspaceApp({
     submitNextFrameExtraction,
     outputPlacementOptionsFor,
     setFrameExtractorRuns,
+    persistFrameExtractionCheckpoint,
+    setFrameExtractorProgress,
   ]);
+
+  // 画布与后端各自保存检查点；水合后先查询原任务，用户显式继续暂停任务。
+  const recoveredFrameCheckpointsRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!canvasHydrated || !isDesktopRuntime()) return;
+    for (const node of canvasNodesNow("frameExtractor")) {
+      const checkpoint = node.config.checkpoint;
+      if (!checkpoint || frameExtractionQueuesRef.current.has(node.key)) continue;
+      const recoveryKey = `${node.key}:${checkpoint.batchId}:${checkpoint.activeJobId}`;
+      if (recoveredFrameCheckpointsRef.current.has(recoveryKey)) continue;
+      recoveredFrameCheckpointsRef.current.add(recoveryKey);
+      const queue = { ...checkpoint, sources: [...checkpoint.sources] };
+      frameExtractionQueuesRef.current.set(node.key, queue);
+      frameExtractorStartNodesRef.current.set(node.key, node);
+      setFrameExtractorRuns((current) => ({
+        ...current,
+        [node.key]: {
+          jobId: checkpoint.activeJobId,
+          status: checkpoint.activeJobId ? "running" : "paused",
+          preparingEngine: false,
+          progress: null,
+          error: null,
+        },
+      }));
+    }
+  }, [canvasHydrated, frameExtractorNodeKeys, canvasNodesNow, setFrameExtractorRuns]);
 
   /** 每个上游视频依次抽帧；同一批次保留所有来源的完整帧产物。 */
   const handleStartFrameExtraction = useCallback(
     (nodeKey: string) => {
       const node = canvasNodesNow("frameExtractor").find((candidate) => candidate.key === nodeKey);
-      if (!node || frameExtractionQueuesRef.current.has(nodeKey)) return;
+      if (!node || frameExtractorRuns[nodeKey]?.status === "running") return;
+      const checkpoint = node.config.checkpoint;
+      if (checkpoint) {
+        const queue = { ...checkpoint, sources: [...checkpoint.sources] };
+        frameExtractionQueuesRef.current.set(nodeKey, queue);
+        frameExtractorStartNodesRef.current.set(nodeKey, node);
+        if (!queue.activeJobId) {
+          submitNextFrameExtraction(nodeKey);
+          return;
+        }
+        handledFrameExtractionJobIdsRef.current.delete(queue.activeJobId);
+        setFrameExtractorRuns((current) => ({
+          ...current,
+          [nodeKey]: {
+            jobId: queue.activeJobId,
+            status: "running",
+            preparingEngine: false,
+            progress: null,
+            error: null,
+          },
+        }));
+        void videoFrameExtractionClient.retryJob(queue.activeJobId).catch((error: unknown) => {
+          if (frameExtractionQueuesRef.current.get(nodeKey) !== queue) return;
+          setFrameExtractorRuns((current) => ({
+            ...current,
+            [nodeKey]: {
+              jobId: queue.activeJobId,
+              status: "error",
+              preparingEngine: false,
+              progress: null,
+              error: formatRawBackendError(error),
+            },
+          }));
+        });
+        return;
+      }
+      if (frameExtractionQueuesRef.current.has(nodeKey)) return;
       const inputs = extractorInputsFor(canvasReadModelOfState(canvasStore.getState()), nodeKey);
       const sources =
         inputs.length > 0
@@ -10149,31 +10390,26 @@ export function WorkspaceApp({
       });
       submitNextFrameExtraction(nodeKey);
     },
-    [canvasNodesNow, submitNextFrameExtraction, setFrameExtractorRuns, canvasStore],
+    [
+      canvasNodesNow,
+      submitNextFrameExtraction,
+      setFrameExtractorRuns,
+      canvasStore,
+      frameExtractorRuns,
+    ],
   );
 
-  const handleCancelFrameExtraction = useCallback(
-    (nodeKey: string) => {
-      const queue = frameExtractionQueuesRef.current.get(nodeKey);
-      if (!queue) return;
-      frameExtractionQueuesRef.current.delete(nodeKey);
-      setFrameExtractorRuns((current) => ({
-        ...current,
-        [nodeKey]: {
-          jobId: queue.activeJobId,
-          status: "cancelled",
-          preparingEngine: false,
-          progress: null,
-          error: null,
-        },
-      }));
-      if (queue.activeJobId)
-        void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
-          frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
-        });
-    },
-    [setFrameExtractorRuns],
-  );
+  const handleCancelFrameExtraction = useCallback((nodeKey: string) => {
+    const queue = frameExtractionQueuesRef.current.get(nodeKey);
+    if (!queue) return;
+    queue.cancelRequested = true;
+    if (queue.activeJobId)
+      void videoFrameExtractionClient.cancelJob(queue.activeJobId).catch((error: unknown) => {
+        queue.cancelRequested = false;
+        toast.error(`取消抽帧失败：${formatRawBackendError(error)}`);
+        frontendLog("error", `[frame-extractor] 取消请求失败: ${formatRawBackendError(error)}`);
+      });
+  }, []);
 
   /** 删除视频抽帧节点（保留已经生成的图片产物卡片）。 */
   const removeFrameExtractorNode = useCallback(
@@ -10733,7 +10969,142 @@ export function WorkspaceApp({
     window.requestAnimationFrame(() => settingsTriggerRef.current?.focus());
   };
 
-  const closeHistory = () => setHistoryOpen(false);
+  const closeHistory = () => {
+    setHistoryOpen(false);
+    setHistoryInitialTaskId(null);
+  };
+  const renameGenNode = useCallback(
+    (key: string, name: string) => {
+      patchNode("gen", key, (node) => ({ ...node, name }));
+    },
+    [patchNode],
+  );
+  useEffect(() => {
+    if (!canvasHydrated) return;
+    return registerArtifactNameSync((update) => patchNodes("output", update));
+  }, [canvasHydrated, patchNodes]);
+
+  // 已保存画布可长时间未打开；读本机结果记录恢复规范名称，再应用本会话较新的改名。
+  const reconciledArtifactNameTasksRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!canvasHydrated || !isDesktopRuntime()) return;
+    const taskIds = [
+      ...new Set(
+        canvasNodesNow("output")
+          .filter(
+            (node) =>
+              node.finalPath != null && (node.origin == null || node.origin === "generation"),
+          )
+          .map((node) => node.taskId),
+      ),
+    ];
+    for (const taskId of taskIds) {
+      if (reconciledArtifactNameTasksRef.current.has(taskId)) continue;
+      reconciledArtifactNameTasksRef.current.add(taskId);
+      void generationClient
+        .get(taskId)
+        .then((detail) => {
+          patchNodes("output", (node) => {
+            const record = detail.results.find(
+              (result) =>
+                result.saveStatus === "succeeded" &&
+                result.finalPath != null &&
+                artifactNameChangeMatches(node, {
+                  taskId,
+                  finalPath: result.finalPath,
+                  name: "match",
+                }),
+            );
+            const name = record ? resultDisplayName(record) : null;
+            if (!name || (node.name === name && node.customName === name))
+              return resolveCurrentArtifactName(node);
+            return resolveCurrentArtifactName({ ...node, name, customName: name });
+          });
+        })
+        .catch(() => {
+          reconciledArtifactNameTasksRef.current.delete(taskId);
+        });
+    }
+  }, [canvasHydrated, outputCardSignature, canvasNodesNow, patchNodes]);
+
+  const reconciledAiMediaNamesRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!canvasHydrated || !isDesktopRuntime()) return;
+    const taskIds = new Set(
+      canvasNodesNow("output")
+        .filter((node) => node.origin === "ai_media" && node.finalPath != null)
+        .map((node) => node.taskId),
+    );
+    for (const taskId of taskIds) {
+      if (reconciledAiMediaNamesRef.current.has(taskId)) continue;
+      reconciledAiMediaNamesRef.current.add(taskId);
+      void aiMediaClient
+        .get(taskId)
+        .then((job) => {
+          patchNodes("output", (node) => {
+            if (node.origin !== "ai_media" || node.taskId !== taskId) return node;
+            const output = job.outputs.find((item) =>
+              artifactNameChangeMatches(node, { taskId, finalPath: item.path, name: item.name }),
+            );
+            if (!output || node.name === output.name) return resolveCurrentArtifactName(node);
+            return resolveCurrentArtifactName({
+              ...node,
+              name: output.name,
+              customName: output.name,
+            });
+          });
+        })
+        .catch(() => reconciledAiMediaNamesRef.current.delete(taskId));
+    }
+  }, [canvasHydrated, outputCardSignature, canvasNodesNow, patchNodes]);
+
+  const renameOutputNode = useCallback(
+    async (key: string, name: string) => {
+      const entry = canvasStore.getState().nodesById[key];
+      const node = entry?.type === "output" ? entry.data : null;
+      if (!node?.finalPath) throw new Error("请等待产物保存完成。");
+      let fileName = artifactFileName(name, node.finalPath);
+      let resultIndex: number | undefined;
+      if ((node.origin == null || node.origin === "generation") && isDesktopRuntime()) {
+        // Read the saved identity: legacy canvas archives can contain zero-based result keys.
+        const detail = await generationClient.get(node.taskId);
+        const matches = detail.results.filter(
+          (result) => result.finalPath === node.finalPath && result.saveStatus === "succeeded",
+        );
+        if (matches.length !== 1)
+          throw new Error("无法唯一定位此产物的原任务结果，请先查看任务历史。");
+        await renameGenerationResult(node.taskId, matches[0]!.resultIndex, fileName);
+        resultIndex = matches[0]!.resultIndex;
+      }
+      if (node.origin === "video_preparation") {
+        const renamed = await videoPreparationClient.rename(node.taskId, fileName);
+        fileName = renamed.output?.name ?? fileName;
+      }
+      if (node.origin === "ai_media") {
+        const detail = await aiMediaClient.get(node.taskId);
+        const matches = detail.outputs.filter((output) => output.path === node.finalPath);
+        if (matches.length !== 1)
+          throw new Error("无法唯一定位此 AI 处理产物，请查看视频准备任务。");
+        resultIndex = matches[0]!.resultIndex;
+        const renamed = await aiMediaClient.rename(node.taskId, resultIndex, fileName);
+        fileName =
+          renamed.outputs.find((output) => output.resultIndex === resultIndex)?.name ?? fileName;
+      }
+      publishArtifactNameChange({
+        taskId: node.taskId,
+        finalPath: node.finalPath,
+        name: fileName,
+        ...(resultIndex == null ? {} : { resultIndex }),
+      });
+      toast.success("产物名称已保存，再次导出将使用新名称");
+    },
+    [canvasStore],
+  );
+  const openGenerationHistory = useCallback((taskId: string) => {
+    setHistoryInitialTaskId(taskId);
+    setHistoryInitialTab("generation");
+    setHistoryOpen(true);
+  }, []);
 
   const toggleMobilePanel = (panel: Exclude<MobilePanel, null>, trigger: HTMLButtonElement) => {
     if (mobilePanel === panel) {
@@ -10963,6 +11334,7 @@ export function WorkspaceApp({
         !historyOpen &&
         !realPersonDialogOpen &&
         videoLocalEdit == null &&
+        videoPreparation == null &&
         whiteModelStudioNodeKey == null &&
         previewAsset == null &&
         previewAssetNodeKey == null &&
@@ -10984,6 +11356,7 @@ export function WorkspaceApp({
       selectedCanvasNodeKeys,
       settingsOpen,
       videoLocalEdit,
+      videoPreparation,
       whiteModelStudioNodeKey,
     ],
   );
@@ -11011,6 +11384,7 @@ export function WorkspaceApp({
         !historyOpen &&
         !realPersonDialogOpen &&
         videoLocalEdit == null &&
+        videoPreparation == null &&
         whiteModelStudioNodeKey == null &&
         previewAsset == null &&
         previewAssetNodeKey == null &&
@@ -11036,6 +11410,7 @@ export function WorkspaceApp({
       selectedNodeKey,
       settingsOpen,
       videoLocalEdit,
+      videoPreparation,
       whiteModelStudioNodeKey,
     ],
   );
@@ -11046,6 +11421,159 @@ export function WorkspaceApp({
   // 画布节点 per-node 引用稳定缓存（配合 memo 化的 CanvasFlowNodeView）。
   const canvasFlowNodeCachesRef = useRef<CanvasFlowNodeCache>(undefined!);
   canvasFlowNodeCachesRef.current ??= new Map();
+
+  const [artifactDeliveryBusy, setArtifactDeliveryBusy] = useState(false);
+  const exportSelectedArtifacts = useCallback(async () => {
+    const outputs = canvasNodesNow("output").filter(
+      (node) => selectedCanvasNodeKeys.has(node.key) && node.finalPath != null,
+    );
+    if (!outputs.length) {
+      toast.error("请先选中已保存到本机的产物。");
+      return;
+    }
+    setArtifactDeliveryBusy(true);
+    try {
+      const directory = await exportArtifactDeliveryToDesktop(
+        outputs.map((node) => ({
+          ...node,
+          finalPath: node.finalPath!,
+          name: node.name ?? fileNameFromPath(node.finalPath!),
+        })),
+      );
+      if (directory) toast.success(`已交付 ${outputs.length} 个产物`, { description: directory });
+    } catch (error) {
+      toast.error(`批量交付失败：${formatRawBackendError(error)}`);
+    } finally {
+      setArtifactDeliveryBusy(false);
+    }
+  }, [canvasNodesNow, selectedCanvasNodeKeys]);
+
+  const openVideoPreparation = useCallback(
+    (key: string) => {
+      if (!isDesktopRuntime()) {
+        toast.error("视频准备需要在桌面应用中运行。");
+        return;
+      }
+      const entry = canvasStore.getState().nodesById[key];
+      const target =
+        entry?.type === "asset" && entry.data.kind === "video"
+          ? assetNodeReferenceTarget(entry.data)
+          : entry?.type === "output" && entry.data.mediaType === "video"
+            ? outputNodeReferenceTarget(entry.data)
+            : null;
+      if (!target) {
+        toast.error("请先保存视频，再进行视频准备。");
+        return;
+      }
+      setVideoPreparation({
+        target,
+        name:
+          entry?.type === "asset" || entry?.type === "output"
+            ? (entry.data.name ?? "视频")
+            : "视频",
+      });
+    },
+    [canvasStore],
+  );
+
+  const usePreparedVideoOutput = useCallback(
+    (output: VideoPreparationOutput, job: VideoPreparationJob) => {
+      const snapshot = canvasStore.getState();
+      const existing = canvasNodesOfState(snapshot, "output").find(
+        (node) =>
+          node.origin === "video_preparation" &&
+          node.taskId === job.jobId &&
+          node.finalPath === output.path,
+      );
+      if (existing) {
+        selectNode(existing.key);
+        toast.success("该产物已在当前画布");
+        return;
+      }
+      const sourceKey = job.source.canvasNodeKey ?? "";
+      addOutput((current, nodesById) => {
+        const entry = nodesById[sourceKey];
+        const dimensions =
+          entry?.type === "asset"
+            ? assetNodeDimensions(entry.data)
+            : entry?.type === "output"
+              ? outputNodeDimensions(entry.data)
+              : { width: 320, height: 240 };
+        const source = { x: entry?.data.x ?? 80, y: entry?.data.y ?? 80, ...dimensions };
+        return resolveCurrentArtifactName({
+          key: outputNodeKey(),
+          resultKey: null,
+          sourceNodeId: sourceKey,
+          taskId: job.jobId,
+          origin: "video_preparation",
+          mediaType: output.kind,
+          finalPath: output.path,
+          name: output.name,
+          previewSrc: null,
+          ...(output.width && output.height ? { aspectRatio: output.width / output.height } : {}),
+          ...nextPreparedMediaOutputSlot(
+            source,
+            current,
+            outputPlacementOptionsFor(nodesById, sourceKey),
+          ),
+        });
+      });
+      toast.success(`已将「${output.name}」加入画布`);
+    },
+    [canvasStore, selectNode, addOutput, outputPlacementOptionsFor],
+  );
+
+  const useAiMediaOutput = useCallback(
+    (output: AiMediaOutput, job: AiMediaJob) => {
+      if (output.kind === "data") throw new Error("深度数据和时间映射请保存为附件。");
+      if (
+        job.status !== "completed" ||
+        !job.outputs.some(
+          (item) => item.path === output.path && item.resultIndex === output.resultIndex,
+        )
+      )
+        throw new Error("请等待 AI 任务完成并选择已验证的产物。");
+      const existing = canvasNodesOfState(canvasStore.getState(), "output").find(
+        (node) =>
+          node.origin === "ai_media" && node.taskId === job.jobId && node.finalPath === output.path,
+      );
+      if (existing) {
+        selectNode(existing.key);
+        toast.success("该产物已在当前画布");
+        return;
+      }
+      const mediaType = output.kind;
+      const sourceKey = job.source.canvasNodeKey ?? "";
+      addOutput((current, nodesById) => {
+        const entry = nodesById[sourceKey];
+        const dimensions =
+          entry?.type === "asset"
+            ? assetNodeDimensions(entry.data)
+            : entry?.type === "output"
+              ? outputNodeDimensions(entry.data)
+              : { width: 320, height: 240 };
+        return resolveCurrentArtifactName({
+          key: outputNodeKey(),
+          resultKey: `${job.jobId}#${output.resultIndex}`,
+          sourceNodeId: sourceKey,
+          taskId: job.jobId,
+          origin: "ai_media",
+          mediaType,
+          finalPath: output.path,
+          name: output.name,
+          previewSrc: null,
+          ...(output.width && output.height ? { aspectRatio: output.width / output.height } : {}),
+          ...nextPreparedMediaOutputSlot(
+            { x: entry?.data.x ?? 80, y: entry?.data.y ?? 80, ...dimensions },
+            current,
+            outputPlacementOptionsFor(nodesById, sourceKey),
+          ),
+        });
+      });
+      toast.success(`已将「${output.name}」加入画布`);
+    },
+    [canvasStore, selectNode, addOutput, outputPlacementOptionsFor],
+  );
 
   const assetFlowNodes = useMemo<CanvasFlowNode[]>(
     () =>
@@ -11062,6 +11590,7 @@ export function WorkspaceApp({
             handleAssetAspectRatioChange,
             handleAssetMediaRefresh,
             handleSaveAssetNodeToLibrary,
+            openVideoPreparation,
             assetProvider?.id,
             isDesktopRuntime(),
           ],
@@ -11083,6 +11612,7 @@ export function WorkspaceApp({
                   onAspectRatioChange={handleAssetAspectRatioChange}
                   onRefreshMediaUrls={handleAssetMediaRefresh}
                   onPreview={setPreviewAssetNodeKey}
+                  onPrepareVideo={openVideoPreparation}
                   {...(isDesktopRuntime() ? { onSaveToLibrary: handleSaveAssetNodeToLibrary } : {})}
                   targetCloudProviderConnectionId={assetProvider?.id ?? null}
                 />
@@ -11100,6 +11630,7 @@ export function WorkspaceApp({
       handleAssetAspectRatioChange,
       handleAssetMediaRefresh,
       handleSaveAssetNodeToLibrary,
+      openVideoPreparation,
       assetProvider?.id,
       canvasStore,
     ],
@@ -11129,6 +11660,9 @@ export function WorkspaceApp({
             handleUploadOutputToCloud,
             handleUploadOutputToLocal,
             handleUploadOutputToObjectStorage,
+            renameOutputNode,
+            openGenerationHistory,
+            openVideoPreparation,
           ],
           () => ({
             id: node.key,
@@ -11160,6 +11694,13 @@ export function WorkspaceApp({
                   onUploadToCloud={(key) => void handleUploadOutputToCloud(key)}
                   onUploadToLocal={(key) => void handleUploadOutputToLocal(key)}
                   onUploadToObjectStorage={(key) => void handleUploadOutputToObjectStorage(key)}
+                  onRename={renameOutputNode}
+                  onPrepareVideo={openVideoPreparation}
+                  onOpenHistory={
+                    node.origin == null || node.origin === "generation"
+                      ? openGenerationHistory
+                      : undefined
+                  }
                 />
               ),
             },
@@ -11178,6 +11719,9 @@ export function WorkspaceApp({
       handleUploadOutputToCloud,
       handleUploadOutputToLocal,
       handleUploadOutputToObjectStorage,
+      renameOutputNode,
+      openGenerationHistory,
+      openVideoPreparation,
       retryInfoByTask,
       taskResults,
       saveProgressByResult,
@@ -11648,6 +12192,7 @@ export function WorkspaceApp({
                   onPromptChange={updatePromptNodeConfig}
                   onRunPrompt={handleRunPromptNode}
                   onImageConfigChange={updateImageNodeConfig}
+                  onRename={renameGenNode}
                   onVideoConfigChange={updateVideoNodeConfig}
                   onAnnotateVideo={openVideoLocalEdit}
                   onOpenWhiteModelStudio={openWhiteModelStudio}
@@ -11681,6 +12226,7 @@ export function WorkspaceApp({
       aliveCanvasNodeKeys,
       registerPromptInput,
       updateImageNodeConfig,
+      renameGenNode,
       updateVideoNodeConfig,
       openVideoLocalEdit,
       openWhiteModelStudio,
@@ -13047,6 +13593,22 @@ export function WorkspaceApp({
             >
               <Icon name="gear-six" aria-hidden="true" size="lg" />
             </button>
+            {isDesktopRuntime() ? (
+              <button
+                type="button"
+                className="header-icon"
+                aria-label="管理功能组件"
+                aria-controls="runtime-components-dialog"
+                aria-expanded={runtimeComponentsOpen}
+                data-tooltip="功能组件"
+                onClick={() => {
+                  setRuntimeComponentFeatureId(null);
+                  setRuntimeComponentsOpen(true);
+                }}
+              >
+                <Icon name="download-simple" aria-hidden="true" size="lg" />
+              </button>
+            ) : null}
           </div>
         </header>
 
@@ -13376,6 +13938,17 @@ export function WorkspaceApp({
               >
                 <Icon name="copy-simple" aria-hidden="true" size="md" />
               </button>
+              {isDesktopRuntime() ? (
+                <button
+                  type="button"
+                  aria-label="按名称批量交付选中产物"
+                  data-tooltip="按名称批量交付 · 附任务清单"
+                  disabled={artifactDeliveryBusy || selectedCanvasNodeKeys.size === 0}
+                  onClick={() => void exportSelectedArtifacts()}
+                >
+                  <Icon name="download-simple" aria-hidden="true" size="md" />
+                </button>
+              ) : null}
               <button
                 type="button"
                 aria-label="粘贴已复制节点"
@@ -13474,6 +14047,22 @@ export function WorkspaceApp({
           />
         ) : null}
       </div>
+      {runtimeComponentsOpen ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="runtime-components-dialog"
+              label="功能组件"
+              onClose={() => setRuntimeComponentsOpen(false)}
+            />
+          }
+        >
+          <RuntimeComponentsPanel
+            initialFeatureId={runtimeComponentFeatureId}
+            onClose={() => setRuntimeComponentsOpen(false)}
+          />
+        </Suspense>
+      ) : null}
       {settingsOpen ? (
         <Suspense
           fallback={
@@ -13512,10 +14101,12 @@ export function WorkspaceApp({
             canvasId={canvasId}
             initialTab={historyInitialTab}
             initialWorkflowId={historyInitialWorkflowId}
+            initialTaskId={historyInitialTaskId}
             onResumeWorkflow={resumeHistoryWorkflow}
             onRestartWorkflow={restartHistoryWorkflow}
             onLocateWorkflow={locateHistoryWorkflow}
             onRegenerateGeneration={regenerateGenerationFromHistory}
+            onPromoteSeedanceDraft={promoteSeedanceDraftFromHistory}
             activeWorkflowIds={activeWorkflowHistoryIds}
           />
         </Suspense>
@@ -13663,6 +14254,24 @@ export function WorkspaceApp({
             );
           })()
         : null}
+      {active && videoPreparation ? (
+        <Suspense
+          fallback={
+            <DeferredDialogFallback
+              id="video-preparation"
+              label="视频准备"
+              onClose={() => setVideoPreparation(null)}
+            />
+          }
+        >
+          <VideoPreparationDialog
+            source={videoPreparation}
+            onClose={() => setVideoPreparation(null)}
+            onUseOutput={usePreparedVideoOutput}
+            onUseAiOutput={useAiMediaOutput}
+          />
+        </Suspense>
+      ) : null}
       {active && videoLocalEdit ? (
         <Suspense
           fallback={

@@ -7,18 +7,21 @@
 //! 注意：抽帧产物是普通本地文件，不含任何账号凭据或会话信息。
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::composer::VideoCompositionService;
 use super::error::{BackendError, BackendResult};
+use super::storage::Storage;
 
 /// Windows 下隐藏子进程控制台窗口。
 #[cfg(windows)]
@@ -27,19 +30,21 @@ const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 /// 内存中最多保留的任务数；超出后清掉已终态的最旧记录，防止长会话无界增长。
 const JOB_RETAIN_LIMIT: usize = 100;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum VideoFrameExtractionStatus {
     /// 正在准备 FFmpeg 引擎。
     PreparingEngine,
     Processing,
+    /// An interrupted task keeps its verified frames and can continue explicitly.
+    Paused,
     Completed,
     Failed,
     Cancelled,
 }
 
 /// 单张抽帧结果的落地信息。
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ExtractedFrame {
     /// 图片文件绝对路径（前端经 convertFileSrc 展示）。
@@ -48,9 +53,21 @@ pub struct ExtractedFrame {
     pub timestamp_seconds: f64,
     pub width: u32,
     pub height: u32,
+    #[serde(default)]
+    pub byte_size: u64,
+    #[serde(default)]
+    pub sha256: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FrameSourceFingerprint {
+    pub byte_size: u64,
+    pub modified_at_ms: Option<u64>,
+    pub sha256: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct VideoFrameExtractionJobRecord {
     pub job_id: String,
@@ -63,17 +80,30 @@ pub struct VideoFrameExtractionJobRecord {
     pub error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default)]
+    pub output_directory: String,
+    #[serde(default)]
+    pub requested_timestamps: Vec<f64>,
+    #[serde(default)]
+    pub requested_percentages: Vec<f64>,
+    #[serde(default)]
+    pub resolved_timestamps: Vec<f64>,
+    #[serde(default)]
+    pub source_fingerprint: Option<FrameSourceFingerprint>,
 }
 
 struct JobEntry {
     record: VideoFrameExtractionJobRecord,
     cancelled: Arc<AtomicBool>,
+    /// A cancelled process may still be releasing handles. Do not overlap retries.
+    running: bool,
 }
 
 struct Inner {
     jobs: std::sync::Mutex<HashMap<String, JobEntry>>,
     downloads_dir: PathBuf,
     composer: VideoCompositionService,
+    storage: Option<Arc<Storage>>,
 }
 
 /// 画布视频抽帧服务。可克隆后在异步任务中使用。
@@ -89,8 +119,50 @@ impl VideoFrameExtractionService {
                 jobs: std::sync::Mutex::new(HashMap::new()),
                 downloads_dir,
                 composer,
+                storage: None,
             }),
         }
+    }
+
+    pub fn new_with_storage(
+        downloads_dir: PathBuf,
+        composer: VideoCompositionService,
+        storage: Arc<Storage>,
+    ) -> BackendResult<Self> {
+        storage.ensure_frame_extraction_storage()?;
+        let mut jobs = HashMap::new();
+        for mut record in storage.list_frame_extraction_jobs()? {
+            if matches!(
+                record.status,
+                VideoFrameExtractionStatus::PreparingEngine
+                    | VideoFrameExtractionStatus::Processing
+            ) {
+                record.status = VideoFrameExtractionStatus::Paused;
+                record.error = Some("应用已重启，已保留完成帧；点击继续抽帧恢复任务".to_string());
+                record.updated_at = now_ms();
+                storage.save_frame_extraction_job(&record)?;
+            }
+            // All resumable jobs remain accessible; terminal history is read from DB on demand.
+            if jobs.len() < JOB_RETAIN_LIMIT || record.status == VideoFrameExtractionStatus::Paused
+            {
+                jobs.insert(
+                    record.job_id.clone(),
+                    JobEntry {
+                        record,
+                        cancelled: Arc::new(AtomicBool::new(false)),
+                        running: false,
+                    },
+                );
+            }
+        }
+        Ok(Self {
+            inner: Arc::new(Inner {
+                jobs: std::sync::Mutex::new(jobs),
+                downloads_dir,
+                composer,
+                storage: Some(storage),
+            }),
+        })
     }
 
     /// 比例采样由后端在探测实际视频时长后换算，避免生成模型实际时长与计划值略有
@@ -101,17 +173,23 @@ impl VideoFrameExtractionService {
         timestamps: Vec<f64>,
         percentages: Vec<f64>,
     ) -> BackendResult<VideoFrameExtractionJobRecord> {
+        self.start_extraction_with_request_id(video_path, timestamps, percentages, None)
+    }
+
+    /// A UUID chosen and saved by the client before IPC makes a lost submission response recoverable.
+    /// A repeated request returns its original record; only retry_job resumes an interrupted run.
+    pub fn start_extraction_with_request_id(
+        &self,
+        video_path: &str,
+        timestamps: Vec<f64>,
+        percentages: Vec<f64>,
+        request_id: Option<String>,
+    ) -> BackendResult<VideoFrameExtractionJobRecord> {
         let video_path = video_path.trim();
         if video_path.is_empty() {
             return Err(BackendError::validation(
                 "请先指定要抽帧的视频文件",
                 Value::Null,
-            ));
-        }
-        if !is_remote_url(video_path) && !Path::new(video_path).is_file() {
-            return Err(BackendError::validation(
-                "视频文件不存在",
-                serde_json::json!({ "path": video_path }),
             ));
         }
         let mut timestamps: Vec<f64> = timestamps
@@ -159,8 +237,49 @@ impl VideoFrameExtractionService {
             ));
         }
 
-        let job_id = format!("frame-extract-{}", Uuid::new_v4());
+        let request_uuid = match request_id {
+            Some(id) if id.len() == 36 => Uuid::parse_str(&id).map_err(|_| {
+                BackendError::validation("抽帧提交标识必须是标准 UUID", Value::Null)
+            })?,
+            Some(_) => {
+                return Err(BackendError::validation(
+                    "抽帧提交标识必须是标准 UUID",
+                    Value::Null,
+                ));
+            }
+            None => Uuid::new_v4(),
+        };
+        let job_id = format!("frame-extract-{request_uuid}");
+        {
+            let jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+            if let Some(existing) =
+                self.existing_request(&jobs, &job_id, video_path, &timestamps, &percentages)?
+            {
+                return Ok(existing);
+            }
+        }
+        // Do the large-file read outside the jobs mutex, so other jobs can be polled or cancelled.
+        let source_fingerprint_result = if is_remote_url(video_path) {
+            Ok(None)
+        } else if !Path::new(video_path).is_file() {
+            Err(BackendError::validation(
+                "视频文件不存在",
+                serde_json::json!({ "path": video_path }),
+            ))
+        } else {
+            fingerprint_file(Path::new(video_path)).map(Some)
+        };
+        let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+        // All concurrent callers share this lock. Recheck after hashing, and persist + register
+        // the winner before releasing it: no second caller can create or launch the same request.
+        if let Some(existing) =
+            self.existing_request(&jobs, &job_id, video_path, &timestamps, &percentages)?
+        {
+            return Ok(existing);
+        }
+        let source_fingerprint = source_fingerprint_result?;
         let now = now_ms();
+        let output_directory = self.job_output_directory(&job_id);
         let record = VideoFrameExtractionJobRecord {
             job_id: job_id.clone(),
             video_path: video_path.to_string(),
@@ -170,36 +289,130 @@ impl VideoFrameExtractionService {
             error: None,
             created_at: now,
             updated_at: now,
+            output_directory: output_directory.to_string_lossy().into_owned(),
+            requested_timestamps: timestamps,
+            requested_percentages: percentages,
+            resolved_timestamps: Vec::new(),
+            source_fingerprint,
         };
-        {
-            let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
-            retain_recent_jobs(&mut jobs);
-            jobs.insert(
-                job_id.clone(),
-                JobEntry {
-                    record: record.clone(),
-                    cancelled: Arc::new(AtomicBool::new(false)),
-                },
-            );
-        }
+        self.persist_record(&record)?;
+        retain_recent_jobs(&mut jobs);
+        jobs.insert(
+            job_id.clone(),
+            JobEntry {
+                record: record.clone(),
+                cancelled: Arc::new(AtomicBool::new(false)),
+                running: true,
+            },
+        );
+        drop(jobs);
         let service = self.clone();
-        let owned_video_path = video_path.to_string();
         tauri::async_runtime::spawn(async move {
-            service
-                .run_extraction(job_id, owned_video_path, timestamps, percentages)
-                .await;
+            service.run_extraction(job_id).await;
         });
         Ok(record)
     }
 
-    pub fn get_job(&self, job_id: &str) -> BackendResult<VideoFrameExtractionJobRecord> {
-        let jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
-        jobs.get(job_id)
-            .map(|entry| entry.record.clone())
-            .ok_or_else(|| BackendError::NotFound(format!("frame extraction job {job_id}")))
+    fn existing_request(
+        &self,
+        jobs: &HashMap<String, JobEntry>,
+        job_id: &str,
+        video_path: &str,
+        timestamps: &[f64],
+        percentages: &[f64],
+    ) -> BackendResult<Option<VideoFrameExtractionJobRecord>> {
+        let existing = if let Some(entry) = jobs.get(job_id) {
+            Some(entry.record.clone())
+        } else if let Some(storage) = &self.inner.storage {
+            storage.get_frame_extraction_job(job_id)?
+        } else {
+            None
+        };
+        if let Some(record) = &existing {
+            if record.video_path != video_path
+                || record.requested_timestamps != timestamps
+                || record.requested_percentages != percentages
+            {
+                return Err(BackendError::validation(
+                    "相同抽帧提交标识对应不同的视频或参数，请创建新批次",
+                    serde_json::json!({ "jobId": job_id }),
+                ));
+            }
+        }
+        Ok(existing)
     }
 
-    /// 请求取消。run_extraction 在逐帧间隔感知标记并提前结束。
+    pub fn get_job(&self, job_id: &str) -> BackendResult<VideoFrameExtractionJobRecord> {
+        let jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+        if let Some(entry) = jobs.get(job_id) {
+            return Ok(entry.record.clone());
+        }
+        drop(jobs);
+        if let Some(storage) = &self.inner.storage {
+            if let Some(record) = storage.get_frame_extraction_job(job_id)? {
+                return Ok(record);
+            }
+        }
+        Err(BackendError::NotFound(format!(
+            "frame extraction job {job_id}"
+        )))
+    }
+
+    /// Resume the exact persisted request. Existing verified frames retain their paths.
+    pub fn retry_job(&self, job_id: &str) -> BackendResult<VideoFrameExtractionJobRecord> {
+        let saved = self.get_job(job_id)?;
+        if !is_remote_url(&saved.video_path) {
+            if let Some(expected) = &saved.source_fingerprint {
+                let current = fingerprint_file(Path::new(&saved.video_path))?;
+                verify_source_identity(expected, &current)?;
+            }
+        }
+        let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+        let entry = jobs.entry(job_id.to_string()).or_insert_with(|| JobEntry {
+            record: saved,
+            cancelled: Arc::new(AtomicBool::new(false)),
+            running: false,
+        });
+        if entry.running
+            || matches!(
+                entry.record.status,
+                VideoFrameExtractionStatus::Processing
+                    | VideoFrameExtractionStatus::PreparingEngine
+            )
+        {
+            return Err(BackendError::Conflict(
+                "抽帧任务仍在运行，请等待当前进程结束".to_string(),
+            ));
+        }
+        if entry.record.status == VideoFrameExtractionStatus::Completed {
+            return Ok(entry.record.clone());
+        }
+        if entry.record.requested_timestamps.is_empty()
+            && entry.record.requested_percentages.is_empty()
+        {
+            return Err(BackendError::validation(
+                "旧任务缺少抽帧请求，请重新选择视频创建任务",
+                Value::Null,
+            ));
+        }
+        let mut resumed = entry.record.clone();
+        resumed.status = VideoFrameExtractionStatus::PreparingEngine;
+        resumed.error = None;
+        resumed.updated_at = now_ms();
+        self.persist_record(&resumed)?;
+        entry.record = resumed.clone();
+        entry.cancelled = Arc::new(AtomicBool::new(false));
+        entry.running = true;
+        drop(jobs);
+        let service = self.clone();
+        let owned_id = job_id.to_string();
+        tauri::async_runtime::spawn(async move {
+            service.run_extraction(owned_id).await;
+        });
+        Ok(resumed)
+    }
+
+    /// Cancellation also interrupts FFmpeg and remote downloads, and is terminal for this run.
     pub fn cancel_job(&self, job_id: &str) -> BackendResult<VideoFrameExtractionJobRecord> {
         let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
         let entry = jobs
@@ -207,24 +420,64 @@ impl VideoFrameExtractionService {
             .ok_or_else(|| BackendError::NotFound(format!("frame extraction job {job_id}")))?;
         if matches!(
             entry.record.status,
-            VideoFrameExtractionStatus::PreparingEngine | VideoFrameExtractionStatus::Processing
+            VideoFrameExtractionStatus::PreparingEngine
+                | VideoFrameExtractionStatus::Processing
+                | VideoFrameExtractionStatus::Paused
         ) {
             entry.cancelled.store(true, Ordering::Relaxed);
             entry.record.status = VideoFrameExtractionStatus::Cancelled;
             entry.record.updated_at = now_ms();
+            entry.record.error = None;
+            self.persist_record(&entry.record)?;
         }
         Ok(entry.record.clone())
     }
 
-    fn update_record(&self, job_id: &str, mutate: impl FnOnce(&mut VideoFrameExtractionJobRecord)) {
-        let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
-        if let Some(entry) = jobs.get_mut(job_id) {
-            mutate(&mut entry.record);
-            entry.record.updated_at = now_ms();
+    fn persist_record(&self, record: &VideoFrameExtractionJobRecord) -> BackendResult<()> {
+        if let Some(storage) = &self.inner.storage {
+            storage.save_frame_extraction_job(record)?;
         }
+        Ok(())
     }
 
-    fn set_progress(&self, job_id: &str, percent: f64) {
+    fn job_output_directory(&self, job_id: &str) -> PathBuf {
+        self.inner
+            .downloads_dir
+            .join("无限画布")
+            .join("抽帧")
+            .join(job_id)
+    }
+
+    fn cancellation_flag(&self, job_id: &str) -> BackendResult<Arc<AtomicBool>> {
+        self.inner
+            .jobs
+            .lock()
+            .expect("frame jobs poisoned")
+            .get(job_id)
+            .map(|entry| entry.cancelled.clone())
+            .ok_or_else(|| BackendError::NotFound(format!("frame extraction job {job_id}")))
+    }
+
+    fn update_record(
+        &self,
+        job_id: &str,
+        mutate: impl FnOnce(&mut VideoFrameExtractionJobRecord),
+    ) -> BackendResult<()> {
+        let mut jobs = self.inner.jobs.lock().expect("frame jobs poisoned");
+        if let Some(entry) = jobs.get_mut(job_id) {
+            if entry.cancelled.load(Ordering::Relaxed) {
+                return Err(cancelled_error());
+            }
+            let mut updated = entry.record.clone();
+            mutate(&mut updated);
+            updated.updated_at = now_ms();
+            self.persist_record(&updated)?;
+            entry.record = updated;
+        }
+        Ok(())
+    }
+
+    fn set_progress(&self, job_id: &str, percent: f64) -> BackendResult<()> {
         self.update_record(job_id, |record| {
             let percent = percent.clamp(0.0, 99.0);
             record.progress = Some(
@@ -232,14 +485,32 @@ impl VideoFrameExtractionService {
                     .progress
                     .map_or(percent, |current| current.max(percent)),
             );
-        });
+        })
     }
 
     fn fail_job(&self, job_id: &str, message: String) {
-        self.update_record(job_id, |record| {
+        if self.is_cancelled(job_id) {
+            return;
+        }
+        let result = self.update_record(job_id, |record| {
             record.status = VideoFrameExtractionStatus::Failed;
             record.error = Some(message);
         });
+        if let Err(error) = result {
+            // A disk/DB failure must stop processing; surface it without claiming a checkpoint.
+            if let Some(entry) = self
+                .inner
+                .jobs
+                .lock()
+                .expect("frame jobs poisoned")
+                .get_mut(job_id)
+            {
+                if !entry.cancelled.load(Ordering::Relaxed) {
+                    entry.record.status = VideoFrameExtractionStatus::Failed;
+                    entry.record.error = Some(format!("保存抽帧进度失败：{error}"));
+                }
+            }
+        }
     }
 
     fn is_cancelled(&self, job_id: &str) -> bool {
@@ -259,160 +530,175 @@ impl VideoFrameExtractionService {
         self.inner.composer.ensure_ffmpeg().await.ok()
     }
 
-    async fn run_extraction(
-        &self,
-        job_id: String,
-        video_path: String,
-        timestamps: Vec<f64>,
-        percentages: Vec<f64>,
-    ) {
-        // 1. 确保引擎就绪。
-        let ffmpeg = match self.resolve_ffmpeg_binary().await {
-            Some(ffmpeg) => ffmpeg,
-            None => {
-                self.fail_job(&job_id, "FFmpeg 不可用，无法执行抽帧".to_string());
-                return;
-            }
-        };
-        self.update_record(&job_id, |record| {
-            record.status = VideoFrameExtractionStatus::Processing;
-        });
-
-        // 2. 输出目录：系统下载目录/无限画布/抽帧。
-        let out_dir = self.inner.downloads_dir.join("无限画布").join("抽帧");
-        if let Err(error) = tokio::fs::create_dir_all(&out_dir).await {
-            self.fail_job(&job_id, format!("创建抽帧目录失败：{error}"));
-            return;
+    async fn run_extraction(&self, job_id: String) {
+        if let Err(error) = self.perform_extraction(&job_id).await {
+            self.fail_job(&job_id, error.to_string());
         }
+        if let Some(entry) = self
+            .inner
+            .jobs
+            .lock()
+            .expect("frame jobs poisoned")
+            .get_mut(&job_id)
+        {
+            entry.running = false;
+        }
+    }
 
-        // 3. 云端/远程 http(s) 视频：先下载到本地临时文件，ffmpeg 只吃本地路径。
-        //    抽取完成后删除临时文件，帧图片留在抽帧目录。
-        let mut downloaded_remote: Option<PathBuf> = None;
-        let local_source: PathBuf = if is_remote_url(&video_path) {
-            let remote_dir = out_dir.join(".remote");
-            if let Err(error) = tokio::fs::create_dir_all(&remote_dir).await {
-                self.fail_job(&job_id, format!("创建远程视频临时目录失败：{error}"));
-                return;
-            }
-            let target = remote_dir.join(format!(
-                "{}-{}{}",
-                remote_stem(&video_path),
-                job_id.rsplit('-').next().unwrap_or("tmp"),
-                remote_extension(&video_path)
-            ));
-            match download_remote_video(&video_path, &target).await {
-                Ok(path) => {
-                    downloaded_remote = Some(path.clone());
-                    path
-                }
-                Err(error) => {
-                    self.fail_job(&job_id, format!("下载远程视频失败：{error}"));
-                    return;
-                }
-            }
+    async fn perform_extraction(&self, job_id: &str) -> BackendResult<()> {
+        let cancelled = self.cancellation_flag(job_id)?;
+        let ffmpeg = cancellable(&cancelled, self.resolve_ffmpeg_binary())
+            .await?
+            .ok_or_else(|| BackendError::protocol("FFmpeg 不可用，无法执行抽帧", Value::Null))?;
+        self.update_record(job_id, |record| {
+            record.status = VideoFrameExtractionStatus::Processing;
+        })?;
+        let saved = self.get_job(job_id)?;
+        let out_dir = if saved.output_directory.is_empty() {
+            self.job_output_directory(job_id)
         } else {
-            PathBuf::from(&video_path)
+            PathBuf::from(&saved.output_directory)
         };
+        tokio::fs::create_dir_all(&out_dir).await?;
 
-        // 4. 探测视频时长，校验每个抽帧秒数落在 [0, 时长) 内。
-        let duration = match probe_video_duration(&ffmpeg, &local_source).await {
-            Some(duration) => duration,
-            None => {
-                self.fail_job(
-                    &job_id,
-                    "无法读取视频时长，请确认该文件是有效的视频".to_string(),
-                );
-                return;
-            }
-        };
-        let timestamps = if percentages.is_empty() {
-            timestamps
+        // RAII removes remote source bytes on success, validation failure and cancellation.
+        let temporary_source = if is_remote_url(&saved.video_path) {
+            Some(TemporaryFile(out_dir.join(format!(
+                ".source-{}{}",
+                Uuid::new_v4(),
+                remote_extension(&saved.video_path)
+            ))))
         } else {
-            percentages
-                .into_iter()
-                .map(|percentage| {
-                    // 留出一帧安全边界；极短视频仍至少从 0.01 秒取样。
-                    (duration * percentage)
-                        .min((duration - 0.01).max(0.01))
-                        .max(0.01)
-                })
+            None
+        };
+        let local_source = if let Some(temporary) = &temporary_source {
+            cancellable(
+                &cancelled,
+                download_remote_video(&saved.video_path, &temporary.0),
+            )
+            .await??
+        } else {
+            PathBuf::from(&saved.video_path)
+        };
+        let fingerprint = fingerprint_file_async(local_source.clone(), cancelled.clone()).await?;
+        if let Some(expected) = &saved.source_fingerprint {
+            verify_source_identity(expected, &fingerprint)?;
+        }
+        self.update_record(job_id, |record| {
+            record.source_fingerprint = Some(fingerprint.clone());
+            record.output_directory = out_dir.to_string_lossy().into_owned();
+        })?;
+
+        let duration = probe_video_duration(&ffmpeg, &local_source, &cancelled).await?;
+        let timestamps = if !saved.resolved_timestamps.is_empty() {
+            saved.resolved_timestamps.clone()
+        } else if saved.requested_percentages.is_empty() {
+            saved.requested_timestamps.clone()
+        } else {
+            saved
+                .requested_percentages
+                .iter()
+                .map(|percentage| (duration * percentage).min((duration - 0.01).max(0.0)))
                 .collect()
         };
         for timestamp in &timestamps {
             if *timestamp >= duration {
-                self.fail_job(
-                    &job_id,
+                return Err(BackendError::validation(
                     format!(
-                        "抽帧秒数 {} 超过视频时长 {:.1} 秒",
+                        "抽帧秒数 {} 超过视频时长 {:.3} 秒",
                         format_seconds(*timestamp),
                         duration
                     ),
-                );
-                return;
+                    Value::Null,
+                ));
             }
         }
+        self.update_record(job_id, |record| {
+            record.resolved_timestamps = timestamps.clone();
+        })?;
 
-        let stem = if is_remote_url(&video_path) {
-            remote_stem(&video_path)
+        let stem = safe_stem(&if is_remote_url(&saved.video_path) {
+            remote_stem(&saved.video_path)
         } else {
-            video_stem(Path::new(&video_path))
-        };
-
-        // 5. 逐秒抽帧；单帧失败即终止任务并保留已产出帧。
-        let mut frames: Vec<ExtractedFrame> = Vec::with_capacity(timestamps.len());
-        let source_text = local_source.to_string_lossy().into_owned();
+            video_stem(Path::new(&saved.video_path))
+        });
+        let mut frames = Vec::with_capacity(timestamps.len());
         for (index, timestamp) in timestamps.iter().enumerate() {
-            if self.is_cancelled(&job_id) {
-                return;
-            }
-            let output = out_dir.join(format!("{stem}@{}.jpg", format_seconds(*timestamp)));
-            match extract_frame(&ffmpeg, &source_text, *timestamp, &output).await {
-                Ok((width, height)) => {
-                    frames.push(ExtractedFrame {
-                        path: output.to_string_lossy().into_owned(),
-                        timestamp_seconds: *timestamp,
-                        width,
-                        height,
-                    });
-                    self.update_record(&job_id, |record| {
-                        record.frames = frames.clone();
-                    });
-                }
-                Err(error) => {
-                    self.fail_job(
-                        &job_id,
-                        format!("抽取第 {} 秒帧失败：{error}", format_seconds(*timestamp)),
-                    );
-                    return;
-                }
-            }
+            ensure_not_cancelled(&cancelled)?;
+            let existing = saved
+                .frames
+                .iter()
+                .find(|frame| (frame.timestamp_seconds - timestamp).abs() < 0.000001);
+            let frame =
+                if let Some(frame) = existing.filter(|frame| verified_frame(frame, &out_dir)) {
+                    frame.clone()
+                } else {
+                    let candidate = out_dir.join(format!(
+                        "{:06}-{stem}@{}.jpg",
+                        index + 1,
+                        format_seconds(*timestamp)
+                    ));
+                    // Never overwrite a damaged/changed previous artifact or an uncheckpointed file.
+                    let output = if candidate.exists() {
+                        out_dir.join(format!(
+                            "{:06}-{stem}@{}-{}.jpg",
+                            index + 1,
+                            format_seconds(*timestamp),
+                            Uuid::new_v4()
+                        ))
+                    } else {
+                        candidate
+                    };
+                    extract_frame(&ffmpeg, &local_source, *timestamp, &output, &cancelled).await?
+                };
+            frames.push(frame);
+            self.update_record(job_id, |record| {
+                record.frames = frames.clone();
+            })?;
             self.set_progress(
-                &job_id,
+                job_id,
                 ((index + 1) as f64 / timestamps.len() as f64) * 100.0,
-            );
+            )?;
         }
-
-        // 6. 清理远程临时文件（尽力而为，不阻断结果）。
-        if let Some(remote) = downloaded_remote.take() {
-            let _ = tokio::fs::remove_file(&remote).await;
+        // Source changes while processing invalidate the whole attempt; retained outputs stay visible.
+        let final_fingerprint = fingerprint_file_async(local_source, cancelled.clone()).await?;
+        verify_source_identity(&fingerprint, &final_fingerprint)?;
+        if frames.iter().any(|frame| !verified_frame(frame, &out_dir)) {
+            return Err(BackendError::protocol(
+                "抽帧输出不完整或已被修改，请继续抽帧修复",
+                Value::Null,
+            ));
         }
-
-        self.update_record(&job_id, |record| {
+        self.update_record(job_id, |record| {
             record.status = VideoFrameExtractionStatus::Completed;
             record.progress = Some(100.0);
-        });
+            record.error = None;
+        })?;
+        Ok(())
     }
 }
 
-/// 用 ffmpeg 探测视频时长（秒）；解析失败返回 None。
-async fn probe_video_duration(ffmpeg: &Path, source: &Path) -> Option<f64> {
+/// 用 ffmpeg 探测视频时长（秒）；无法读取或取消时返回错误。
+async fn probe_video_duration(
+    ffmpeg: &Path,
+    source: &Path,
+    cancelled: &Arc<AtomicBool>,
+) -> BackendResult<f64> {
     let mut command = tokio::process::Command::new(ffmpeg);
-    command.arg("-i").arg(source).stdin(Stdio::null());
+    command
+        .arg("-i")
+        .arg(source)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let output = command.output().await.ok()?;
+    let output = run_cancellable_command(command, cancelled).await?;
     let text = String::from_utf8_lossy(&output.stderr);
     parse_duration(&text)
+        .filter(|duration| duration.is_finite() && *duration > 0.0)
+        .ok_or_else(|| {
+            BackendError::validation("无法读取视频时长，请确认该文件是有效的视频", Value::Null)
+        })
 }
 
 /// 从 ffmpeg 探测文本解析 `Duration: HH:MM:SS.xx`。
@@ -427,29 +713,31 @@ pub(crate) fn parse_duration(text: &str) -> Option<f64> {
 }
 
 /// 用 ffmpeg 从 source 的 timestamp 秒抽取 1 帧到 output（jpg，高质量）。
-/// 成功返回 (宽, 高)。
+/// 成功返回经真实解码与内容校验的图片记录。
 async fn extract_frame(
     ffmpeg: &Path,
-    source: &str,
+    source: &Path,
     timestamp_seconds: f64,
     output: &Path,
-) -> BackendResult<(u32, u32)> {
+    cancelled: &Arc<AtomicBool>,
+) -> BackendResult<ExtractedFrame> {
+    let temporary = TemporaryFile(output.with_file_name(format!(".frame-{}.jpg", Uuid::new_v4())));
     let mut command = tokio::process::Command::new(ffmpeg);
     command
-        .arg("-y")
+        .arg("-n")
         .arg("-ss")
         .arg(format_seconds(timestamp_seconds))
         .arg("-i")
         .arg(source)
         .args(["-frames:v", "1", "-q:v", "2"])
-        .arg(output)
+        .arg(&temporary.0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);
-    let result = command.output().await?;
+    let result = run_cancellable_command(command, cancelled).await?;
     if !result.status.success() {
         let stderr = String::from_utf8_lossy(&result.stderr);
         return Err(BackendError::protocol(
@@ -457,11 +745,222 @@ async fn extract_frame(
             serde_json::json!({ "detail": truncate_text(&stderr, 400) }),
         ));
     }
-    if !output.is_file() {
-        return Err(BackendError::protocol("抽帧未生成图片文件", Value::Null));
+    let mut frame = inspect_frame(&temporary.0, timestamp_seconds)?;
+    ensure_not_cancelled(cancelled)?;
+    // create_new works on removable disks too and cannot clobber a prior artifact.
+    let mut source_file = std::fs::File::open(&temporary.0)?;
+    let mut destination = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(output)?;
+    if let Err(error) =
+        std::io::copy(&mut source_file, &mut destination).and_then(|_| destination.sync_all())
+    {
+        drop(destination);
+        let _ = std::fs::remove_file(output);
+        return Err(error.into());
     }
-    let dimensions = parse_video_dimensions(&String::from_utf8_lossy(&result.stderr));
-    Ok(dimensions.unwrap_or((0, 0)))
+    drop(destination);
+    frame.path = output.to_string_lossy().into_owned();
+    Ok(frame)
+}
+
+struct TemporaryFile(PathBuf);
+impl Drop for TemporaryFile {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.0);
+    }
+}
+
+fn cancelled_error() -> BackendError {
+    BackendError::Conflict("抽帧任务已取消".to_string())
+}
+
+fn ensure_not_cancelled(cancelled: &Arc<AtomicBool>) -> BackendResult<()> {
+    if cancelled.load(Ordering::Relaxed) {
+        Err(cancelled_error())
+    } else {
+        Ok(())
+    }
+}
+
+async fn cancellable<T>(
+    cancelled: &Arc<AtomicBool>,
+    future: impl std::future::Future<Output = T>,
+) -> BackendResult<T> {
+    ensure_not_cancelled(cancelled)?;
+    tokio::select! {
+        result = future => { ensure_not_cancelled(cancelled)?; Ok(result) },
+        _ = async {
+            loop {
+                if cancelled.load(Ordering::Relaxed) { break; }
+                tokio::time::sleep(std::time::Duration::from_millis(75)).await;
+            }
+        } => Err(cancelled_error()),
+    }
+}
+
+/// Drain both pipes while FFmpeg runs, and reap it before releasing temporary input files.
+/// In particular, Windows cannot remove a downloaded source while a killed child still owns it.
+async fn run_cancellable_command(
+    mut command: tokio::process::Command,
+    cancelled: &Arc<AtomicBool>,
+) -> BackendResult<std::process::Output> {
+    ensure_not_cancelled(cancelled)?;
+    command
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = command.spawn()?;
+    let mut stdout = child.stdout.take().expect("piped stdout");
+    let mut stderr = child.stderr.take().expect("piped stderr");
+    let mut stdout_bytes = Vec::new();
+    let mut stderr_bytes = Vec::new();
+    let status = async {
+        let wait_result = cancellable(cancelled, child.wait()).await;
+        match wait_result {
+            Ok(status) => status.map_err(BackendError::from),
+            Err(error) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(error)
+            }
+        }
+    };
+    let (stdout_result, stderr_result, status_result) = tokio::join!(
+        tokio::io::AsyncReadExt::read_to_end(&mut stdout, &mut stdout_bytes),
+        tokio::io::AsyncReadExt::read_to_end(&mut stderr, &mut stderr_bytes),
+        status,
+    );
+    let status = status_result?;
+    stdout_result?;
+    stderr_result?;
+    Ok(std::process::Output {
+        status,
+        stdout: stdout_bytes,
+        stderr: stderr_bytes,
+    })
+}
+
+fn fingerprint_file(path: &Path) -> BackendResult<FrameSourceFingerprint> {
+    fingerprint_file_cancellable(path, None)
+}
+
+fn fingerprint_file_cancellable(
+    path: &Path,
+    cancelled: Option<&Arc<AtomicBool>>,
+) -> BackendResult<FrameSourceFingerprint> {
+    let mut file = std::fs::File::open(path)?;
+    let before = file.metadata()?;
+    if !before.is_file() || before.len() == 0 {
+        return Err(BackendError::validation(
+            "源视频文件为空或不可读取",
+            Value::Null,
+        ));
+    }
+    let mut digest = Sha256::new();
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        if let Some(flag) = cancelled {
+            ensure_not_cancelled(flag)?;
+        }
+        let count = file.read(&mut buffer)?;
+        if count == 0 {
+            break;
+        }
+        digest.update(&buffer[..count]);
+    }
+    let after = file.metadata()?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return Err(BackendError::validation(
+            "读取期间源视频已被修改，请重新创建抽帧任务",
+            Value::Null,
+        ));
+    }
+    Ok(FrameSourceFingerprint {
+        byte_size: after.len(),
+        modified_at_ms: after
+            .modified()
+            .ok()
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|duration| duration.as_millis() as u64),
+        sha256: hex::encode(digest.finalize()),
+    })
+}
+
+async fn fingerprint_file_async(
+    path: PathBuf,
+    cancelled: Arc<AtomicBool>,
+) -> BackendResult<FrameSourceFingerprint> {
+    let flag = cancelled.clone();
+    cancellable(
+        &cancelled,
+        tauri::async_runtime::spawn_blocking(move || {
+            fingerprint_file_cancellable(&path, Some(&flag))
+        }),
+    )
+    .await?
+    .map_err(|error| BackendError::Conflict(format!("读取源视频失败：{error}")))?
+}
+
+fn verify_source_identity(
+    expected: &FrameSourceFingerprint,
+    current: &FrameSourceFingerprint,
+) -> BackendResult<()> {
+    if expected.byte_size != current.byte_size || expected.sha256 != current.sha256 {
+        return Err(BackendError::validation(
+            "源视频内容已被替换，请重新创建抽帧任务；已有帧保留",
+            Value::Null,
+        ));
+    }
+    Ok(())
+}
+
+fn inspect_frame(path: &Path, timestamp_seconds: f64) -> BackendResult<ExtractedFrame> {
+    let fingerprint = fingerprint_file(path)?;
+    let decoded = image::open(path).map_err(|error| {
+        BackendError::protocol(
+            "抽帧图片无效或不完整",
+            serde_json::json!({ "detail": error.to_string() }),
+        )
+    })?;
+    if decoded.width() == 0 || decoded.height() == 0 {
+        return Err(BackendError::protocol("抽帧图片尺寸无效", Value::Null));
+    }
+    Ok(ExtractedFrame {
+        path: path.to_string_lossy().into_owned(),
+        timestamp_seconds,
+        width: decoded.width(),
+        height: decoded.height(),
+        byte_size: fingerprint.byte_size,
+        sha256: fingerprint.sha256,
+    })
+}
+
+fn verified_frame(frame: &ExtractedFrame, directory: &Path) -> bool {
+    let path = Path::new(&frame.path);
+    if path.parent() != Some(directory) || frame.sha256.is_empty() {
+        return false;
+    }
+    inspect_frame(path, frame.timestamp_seconds).is_ok_and(|actual| {
+        actual.byte_size == frame.byte_size
+            && actual.sha256 == frame.sha256
+            && actual.width == frame.width
+            && actual.height == frame.height
+    })
+}
+
+fn safe_stem(stem: &str) -> String {
+    stem.chars()
+        .map(|character| {
+            if character.is_control() || "<>:\"/\\|?*".contains(character) {
+                '_'
+            } else {
+                character
+            }
+        })
+        .take(80)
+        .collect()
 }
 
 /// 从 ffmpeg 探测文本解析 `Video: ... 1920x1080 ...`。
@@ -600,12 +1099,13 @@ fn retain_recent_jobs(jobs: &mut HashMap<String, JobEntry>) {
     let mut terminal: Vec<(String, i64)> = jobs
         .iter()
         .filter(|(_, entry)| {
-            matches!(
-                entry.record.status,
-                VideoFrameExtractionStatus::Completed
-                    | VideoFrameExtractionStatus::Failed
-                    | VideoFrameExtractionStatus::Cancelled
-            )
+            !entry.running
+                && matches!(
+                    entry.record.status,
+                    VideoFrameExtractionStatus::Completed
+                        | VideoFrameExtractionStatus::Failed
+                        | VideoFrameExtractionStatus::Cancelled
+                )
         })
         .map(|(key, entry)| (key.clone(), entry.record.updated_at))
         .collect();
@@ -619,6 +1119,530 @@ fn retain_recent_jobs(jobs: &mut HashMap<String, JobEntry>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn composer(directory: &Path) -> VideoCompositionService {
+        VideoCompositionService::new(
+            directory.join("downloads"),
+            directory.join("engine"),
+            directory.join("resources"),
+        )
+        .unwrap()
+    }
+
+    fn persisted_job(
+        directory: &Path,
+        source: &Path,
+        job_id: &str,
+    ) -> VideoFrameExtractionJobRecord {
+        VideoFrameExtractionJobRecord {
+            job_id: job_id.to_string(),
+            video_path: source.to_string_lossy().into_owned(),
+            status: VideoFrameExtractionStatus::Processing,
+            progress: Some(50.0),
+            frames: Vec::new(),
+            error: None,
+            created_at: 1,
+            updated_at: 2,
+            output_directory: directory
+                .join("downloads")
+                .join("无限画布")
+                .join("抽帧")
+                .join(job_id)
+                .to_string_lossy()
+                .into_owned(),
+            requested_timestamps: Vec::new(),
+            requested_percentages: vec![0.25, 0.75],
+            resolved_timestamps: vec![1.0, 3.0],
+            source_fingerprint: Some(fingerprint_file(source).unwrap()),
+        }
+    }
+
+    #[test]
+    fn same_named_sources_have_independent_job_output_directories() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = VideoFrameExtractionService::new(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+        );
+        let first_directory = service.job_output_directory("frame-extract-first");
+        let second_directory = service.job_output_directory("frame-extract-second");
+        std::fs::create_dir_all(&first_directory).unwrap();
+        std::fs::create_dir_all(&second_directory).unwrap();
+        let name = "000001-clip@1.jpg";
+        std::fs::write(first_directory.join(name), b"first source").unwrap();
+        std::fs::write(second_directory.join(name), b"second source").unwrap();
+        assert_ne!(first_directory, second_directory);
+        assert_eq!(
+            std::fs::read(first_directory.join(name)).unwrap(),
+            b"first source"
+        );
+    }
+
+    #[test]
+    fn checkpoint_restores_paused_request_and_verified_frame_after_restart() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("clip.mp4");
+        std::fs::write(&source, b"original video content").unwrap();
+        let database_path = temporary.path().join("workspace.sqlite");
+        let storage = Arc::new(Storage::open(&database_path).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let mut record = persisted_job(temporary.path(), &source, "frame-extract-recover");
+        let output_dir = PathBuf::from(&record.output_directory);
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let frame_path = output_dir.join("000001-clip@1.jpg");
+        image::RgbImage::new(16, 16).save(&frame_path).unwrap();
+        record.frames = vec![inspect_frame(&frame_path, 1.0).unwrap()];
+        storage.save_frame_extraction_job(&record).unwrap();
+        drop(storage);
+        let storage = Arc::new(Storage::open(&database_path).unwrap());
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+            storage.clone(),
+        )
+        .unwrap();
+        let recovered = service.get_job(&record.job_id).unwrap();
+        assert_eq!(recovered.status, VideoFrameExtractionStatus::Paused);
+        assert_eq!(recovered.requested_percentages, vec![0.25, 0.75]);
+        assert_eq!(recovered.resolved_timestamps, vec![1.0, 3.0]);
+        assert_eq!(recovered.frames[0].path, frame_path.to_string_lossy());
+        assert!(verified_frame(&recovered.frames[0], &output_dir));
+        assert_eq!(
+            storage
+                .get_frame_extraction_job(&record.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            VideoFrameExtractionStatus::Paused
+        );
+        // A changed artifact is never accepted as the completed checkpoint.
+        std::fs::write(&frame_path, b"damaged frame").unwrap();
+        assert!(!verified_frame(&recovered.frames[0], &output_dir));
+    }
+
+    #[test]
+    fn resume_rejects_same_path_replacement_with_same_byte_size() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("clip.mp4");
+        std::fs::write(&source, b"source A").unwrap();
+        let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let record = persisted_job(temporary.path(), &source, "frame-extract-replaced");
+        storage.save_frame_extraction_job(&record).unwrap();
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+            storage,
+        )
+        .unwrap();
+        std::fs::write(&source, b"source B").unwrap();
+        assert!(matches!(
+            service.retry_job(&record.job_id),
+            Err(BackendError::Validation { .. })
+        ));
+        assert_eq!(
+            service.get_job(&record.job_id).unwrap().status,
+            VideoFrameExtractionStatus::Paused
+        );
+    }
+
+    fn request_id_fixture() -> (
+        tempfile::TempDir,
+        VideoFrameExtractionService,
+        VideoFrameExtractionJobRecord,
+        String,
+    ) {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("clip.mp4");
+        std::fs::write(&source, b"original video content").unwrap();
+        let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let request_id = Uuid::new_v4().to_string();
+        let record = persisted_job(
+            temporary.path(),
+            &source,
+            &format!("frame-extract-{request_id}"),
+        );
+        storage.save_frame_extraction_job(&record).unwrap();
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+            storage,
+        )
+        .unwrap();
+        (temporary, service, record, request_id)
+    }
+
+    #[test]
+    fn request_id_recovers_original_paused_job_after_restart_without_relaunch() {
+        let (_temporary, service, record, request_id) = request_id_fixture();
+        // Lost-response recovery is a lookup, even when the original local source is no longer present.
+        std::fs::remove_file(&record.video_path).unwrap();
+        let recovered = service
+            .start_extraction_with_request_id(
+                &record.video_path,
+                vec![],
+                record.requested_percentages.clone(),
+                Some(request_id.to_uppercase()),
+            )
+            .unwrap();
+        assert_eq!(recovered.job_id, record.job_id);
+        assert_eq!(recovered.status, VideoFrameExtractionStatus::Paused);
+        assert_eq!(recovered.resolved_timestamps, record.resolved_timestamps);
+        assert!(
+            !service
+                .inner
+                .jobs
+                .lock()
+                .unwrap()
+                .get(&record.job_id)
+                .unwrap()
+                .running
+        );
+    }
+
+    #[test]
+    fn request_id_rejects_a_different_source_or_sampling_request() {
+        let (_temporary, service, record, request_id) = request_id_fixture();
+        assert!(matches!(
+            service.start_extraction_with_request_id(
+                "https://example.com/different-video.mp4",
+                vec![],
+                record.requested_percentages.clone(),
+                Some(request_id.clone()),
+            ),
+            Err(BackendError::Validation { .. })
+        ));
+        assert!(matches!(
+            service.start_extraction_with_request_id(
+                &record.video_path,
+                vec![],
+                vec![0.25, 0.5],
+                Some(request_id.clone()),
+            ),
+            Err(BackendError::Validation { .. })
+        ));
+        assert!(matches!(
+            service.start_extraction_with_request_id(
+                &record.video_path,
+                vec![1.0, 3.0],
+                vec![],
+                Some(request_id),
+            ),
+            Err(BackendError::Validation { .. })
+        ));
+        let original = service.get_job(&record.job_id).unwrap();
+        assert_eq!(original.requested_percentages, record.requested_percentages);
+        assert_eq!(original.status, VideoFrameExtractionStatus::Paused);
+    }
+
+    #[test]
+    fn request_id_is_strict_uuid_and_cannot_select_an_arbitrary_output_directory() {
+        let temporary = tempfile::tempdir().unwrap();
+        let service = VideoFrameExtractionService::new(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+        );
+        for request_id in [
+            "../other-directory",
+            "",
+            "frame-extract-manual",
+            "00000000000000000000000000000000",
+        ] {
+            assert!(matches!(
+                service.start_extraction_with_request_id(
+                    "https://example.com/video.mp4",
+                    vec![1.0],
+                    vec![],
+                    Some(request_id.to_string()),
+                ),
+                Err(BackendError::Validation { .. })
+            ));
+        }
+        assert!(service.inner.jobs.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn request_id_concurrent_repeats_preserve_the_original_record_and_runner_state() {
+        let (_temporary, service, record, request_id) = request_id_fixture();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let results = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let service = service.clone();
+                    let barrier = barrier.clone();
+                    let request_id = request_id.clone();
+                    let source = record.video_path.clone();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        service
+                            .start_extraction_with_request_id(
+                                &source,
+                                vec![],
+                                vec![0.75, 0.25],
+                                Some(request_id),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        assert!(results.iter().all(|result| result.job_id == record.job_id
+            && result.status == VideoFrameExtractionStatus::Paused));
+        let jobs = service.inner.jobs.lock().unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert!(!jobs.get(&record.job_id).unwrap().running);
+    }
+
+    #[test]
+    fn cancellation_is_persisted_and_late_error_cannot_replace_terminal_state() {
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("clip.mp4");
+        std::fs::write(&source, b"original source").unwrap();
+        let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let record = persisted_job(temporary.path(), &source, "frame-extract-cancel");
+        storage.save_frame_extraction_job(&record).unwrap();
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer(temporary.path()),
+            storage.clone(),
+        )
+        .unwrap();
+        service.cancel_job(&record.job_id).unwrap();
+        service.fail_job(&record.job_id, "late ffmpeg error".to_string());
+        assert!(
+            service
+                .update_record(&record.job_id, |job| {
+                    job.status = VideoFrameExtractionStatus::Completed;
+                })
+                .is_err()
+        );
+        let persisted = storage
+            .get_frame_extraction_job(&record.job_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(persisted.status, VideoFrameExtractionStatus::Cancelled);
+        assert!(persisted.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn cancellation_interrupts_an_inflight_wait() {
+        let cancelled = Arc::new(AtomicBool::new(false));
+        let signal = cancelled.clone();
+        let started = std::time::Instant::now();
+        let worker = tokio::spawn(async move {
+            cancellable(
+                &signal,
+                tokio::time::sleep(std::time::Duration::from_secs(10)),
+            )
+            .await
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        cancelled.store(true, Ordering::Relaxed);
+        assert!(worker.await.unwrap().is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
+
+    #[tokio::test]
+    #[ignore = "set INFINITE_CANVAS_TEST_FFMPEG to the already installed project engine"]
+    async fn real_ffmpeg_resume_reuses_verified_frame_and_completes_same_job() {
+        let ffmpeg = PathBuf::from(
+            std::env::var("INFINITE_CANVAS_TEST_FFMPEG").expect("existing FFmpeg path"),
+        );
+        assert!(ffmpeg.is_file());
+        let temporary = tempfile::tempdir().unwrap();
+        let source = temporary.path().join("clip.mp4");
+        let generated = tokio::process::Command::new(&ffmpeg)
+            .args([
+                "-n",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=c=red:s=64x64:r=10",
+                "-t",
+                "4",
+                "-an",
+                "-c:v",
+                "libx264",
+            ])
+            .arg(&source)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let storage = Arc::new(Storage::open(&temporary.path().join("workspace.sqlite")).unwrap());
+        storage.ensure_frame_extraction_storage().unwrap();
+        let mut record = persisted_job(temporary.path(), &source, "frame-extract-real-resume");
+        let output_dir = PathBuf::from(&record.output_directory);
+        std::fs::create_dir_all(&output_dir).unwrap();
+        let completed_frame = output_dir.join("000001-clip@1.jpg");
+        let cancellation_flag = Arc::new(AtomicBool::new(false));
+        record.frames.push(
+            extract_frame(&ffmpeg, &source, 1.0, &completed_frame, &cancellation_flag)
+                .await
+                .unwrap(),
+        );
+        let original_modified = std::fs::metadata(&completed_frame)
+            .unwrap()
+            .modified()
+            .unwrap();
+        storage.save_frame_extraction_job(&record).unwrap();
+        let composer = VideoCompositionService::new(
+            temporary.path().join("downloads"),
+            ffmpeg.parent().unwrap().to_path_buf(),
+            temporary.path().join("resources"),
+        )
+        .unwrap();
+        let service = VideoFrameExtractionService::new_with_storage(
+            temporary.path().join("downloads"),
+            composer,
+            storage.clone(),
+        )
+        .unwrap();
+        assert_eq!(
+            service.get_job(&record.job_id).unwrap().status,
+            VideoFrameExtractionStatus::Paused
+        );
+        assert_eq!(
+            service.retry_job(&record.job_id).unwrap().job_id,
+            record.job_id
+        );
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let completed = loop {
+            let current = service.get_job(&record.job_id).unwrap();
+            if matches!(
+                current.status,
+                VideoFrameExtractionStatus::Completed | VideoFrameExtractionStatus::Failed
+            ) {
+                break current;
+            }
+            assert!(std::time::Instant::now() < deadline, "resume timed out");
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            completed.status,
+            VideoFrameExtractionStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(completed.frames.len(), 2);
+        assert_eq!(completed.frames[0].path, record.frames[0].path);
+        assert_eq!(
+            std::fs::metadata(&completed_frame)
+                .unwrap()
+                .modified()
+                .unwrap(),
+            original_modified
+        );
+        assert!(
+            completed
+                .frames
+                .iter()
+                .all(|frame| verified_frame(frame, &output_dir))
+        );
+        assert_eq!(
+            storage
+                .get_frame_extraction_job(&record.job_id)
+                .unwrap()
+                .unwrap()
+                .status,
+            VideoFrameExtractionStatus::Completed
+        );
+
+        // Eight simultaneous initial submissions must produce one runner and one output frame.
+        let request_id = Uuid::new_v4().to_string();
+        let barrier = Arc::new(std::sync::Barrier::new(8));
+        let submitted = std::thread::scope(|scope| {
+            let workers: Vec<_> = (0..8)
+                .map(|_| {
+                    let service = service.clone();
+                    let barrier = barrier.clone();
+                    let request_id = request_id.clone();
+                    let source = source.to_string_lossy().into_owned();
+                    scope.spawn(move || {
+                        barrier.wait();
+                        service
+                            .start_extraction_with_request_id(
+                                &source,
+                                vec![2.0],
+                                vec![],
+                                Some(request_id),
+                            )
+                            .unwrap()
+                    })
+                })
+                .collect();
+            workers
+                .into_iter()
+                .map(|worker| worker.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let expected_job_id = format!("frame-extract-{request_id}");
+        assert!(submitted.iter().all(|job| job.job_id == expected_job_id));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let completed = loop {
+            let current = service.get_job(&expected_job_id).unwrap();
+            if matches!(
+                current.status,
+                VideoFrameExtractionStatus::Completed | VideoFrameExtractionStatus::Failed
+            ) {
+                break current;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "idempotent submission timed out"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        assert_eq!(
+            completed.status,
+            VideoFrameExtractionStatus::Completed,
+            "{:?}",
+            completed.error
+        );
+        assert_eq!(completed.frames.len(), 1);
+        assert_eq!(
+            std::fs::read_dir(&completed.output_directory)
+                .unwrap()
+                .count(),
+            1
+        );
+        assert_eq!(storage.list_frame_extraction_jobs().unwrap().len(), 2);
+
+        // Cancellation drops and kills an actual FFmpeg subprocess, rather than waiting for it.
+        let mut command = tokio::process::Command::new(&ffmpeg);
+        command
+            .args([
+                "-re",
+                "-f",
+                "lavfi",
+                "-i",
+                "color=s=16x16:r=1",
+                "-f",
+                "null",
+                "-",
+            ])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let signal = cancellation_flag.clone();
+        let started = std::time::Instant::now();
+        let worker = tokio::spawn(async move { run_cancellable_command(command, &signal).await });
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        cancellation_flag.store(true, Ordering::Relaxed);
+        assert!(worker.await.unwrap().is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+    }
 
     #[test]
     fn parses_standard_duration_line() {

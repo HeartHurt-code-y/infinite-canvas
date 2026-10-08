@@ -30,11 +30,9 @@ import {
   type LocalBase64AssetRecord,
   type MediaReferenceTarget,
   type MediaType,
-  type ModelOperationSchema,
   type PromptSegment,
   type StartGenerationCommand,
 } from "../../lib/backend";
-import { modelAllowsMediaOnlyPrompt } from "../../lib/modelCapabilities";
 import { VideoMiddleFrame } from "../workspace/VideoMiddleFrame";
 import { isVideoSourceUrl } from "../workspace/mediaPreview";
 import {
@@ -724,7 +722,8 @@ export function RegenerateGenerationDialog({
       const imported: LocalBase64AssetRecord[] = [];
       const failures: string[] = [];
       for (const localPath of paths) {
-        const fileName = localPath.split(/[\\/]/).pop() || localPath;
+        const pathFileName = localPath.split(/[\\/]/).pop() ?? "";
+        const fileName = pathFileName.length > 0 ? pathFileName : localPath;
         if (inferMediaKindFromName(fileName) == null) {
           failures.push(`${fileName}：不支持的文件类型`);
           continue;
@@ -782,17 +781,9 @@ export function RegenerateGenerationDialog({
       target: editorTargetForMaterial(material),
       ...(material.role ? { role: material.role } : {}),
     }));
-    const operationSchema = isRecord(task.logicalRequest)
-      ? isRecord(task.logicalRequest["modelOperationSchemaSnapshot"])
-        ? (task.logicalRequest["modelOperationSchemaSnapshot"] as ModelOperationSchema)
-        : null
-      : null;
     const prepared = promptModule.prepareGeneration(PROMPT_EDITOR_KEY, {
       connections,
-      allowMediaOnly:
-        operationSchema != null
-          ? modelAllowsMediaOnlyPrompt(operationSchema, frozen.operation)
-          : false,
+      allowMediaOnly: true,
     });
     if (prepared == null || !prepared.ok) {
       const issue = prepared?.issues[0] ?? ({ kind: "empty_prompt" } as const);
@@ -802,6 +793,7 @@ export function RegenerateGenerationDialog({
     void onSubmit({
       canvasId: frozen.canvasId,
       sourceNodeId: frozen.sourceNodeId,
+      ...(frozen.outputName ? { outputName: frozen.outputName } : {}),
       operation: frozen.operation,
       providerConnectionId: frozen.providerConnectionId,
       modelDefinitionId: frozen.modelDefinitionId,

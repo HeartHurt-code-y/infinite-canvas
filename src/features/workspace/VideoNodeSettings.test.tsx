@@ -13,6 +13,7 @@ import type { ConnectedAssetInput, VideoNodeConfig } from "./workspaceModel";
 const DOMESTIC = "doubao-seedance-2-5-260628";
 const OVERSEAS = "dreamina-seedance-2.5";
 const PER_TASK = "sp2.5-720p-30s-ch5";
+const RD = "rd-seedance-2.5-720p";
 const catalog: readonly ProviderCatalogEntry[] = [
   {
     provider: {
@@ -25,7 +26,7 @@ const catalog: readonly ProviderCatalogEntry[] = [
       createdAt: 1,
       updatedAt: 1,
     },
-    models: [DOMESTIC, OVERSEAS, "wan3.0-video", PER_TASK, "sp2.5-720p-30s-ch4"].map((id) => ({
+    models: [DOMESTIC, OVERSEAS, RD, "wan3.0-video", PER_TASK, "sp2.5-720p-30s-ch4"].map((id) => ({
       definitionId: id,
       remoteModelId: id,
       displayName: id,
@@ -75,15 +76,64 @@ function mountSettings(
 }
 
 describe("VideoNodeSettings Seedance task interaction", () => {
+  it("explicitly opts into 480p draft generation and explains the manual paid final step", () => {
+    const { changed } = mountSettings(DOMESTIC, [], catalog, {
+      parameterValues: { resolution: "720p", duration: 5, ratio: "16:9" },
+    });
+    const draft = screen.getByRole("checkbox", { name: "先生成草稿样片" });
+    expect(draft).not.toBeChecked();
+    expect(screen.getByLabelText("分辨率")).toHaveValue("720p");
+    expect(
+      within(screen.getByLabelText("分辨率")).queryByRole("option", { name: "1080p" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(draft);
+    expect(draft).toBeChecked();
+    expect(screen.getByLabelText("分辨率")).toBeDisabled();
+    expect(changed.mock.lastCall?.[0].parameterValues).toEqual({
+      resolution: "480p",
+      duration: 5,
+      ratio: "16:9",
+      draft: true,
+    });
+    expect(screen.getByText(/人工发起 1080p 正片/)).toHaveTextContent("独立付费任务");
+    expect(screen.getByText(/无需额外配置令牌分组/)).toBeInTheDocument();
+    fireEvent.click(draft);
+    expect(changed.mock.lastCall?.[0].parameterValues["draft"]).toBe(false);
+  });
+
+  it("does not offer Moyu draft generation on the Ark dialect or another Seedance model", () => {
+    const arkCatalog = catalog.map((entry) => ({
+      ...entry,
+      provider: { ...entry.provider, adapterId: "volcengine_ark_v1" },
+    }));
+    const { unmount } = render(
+      <VideoNodeSettings
+        config={{
+          modelSelection: { providerId: "provider", modelDefinitionId: DOMESTIC },
+          generationCount: 1,
+          parameterValues: {},
+          catalogResolved: true,
+        }}
+        providerCatalog={arkCatalog}
+        hasMediaInputs={false}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
+    unmount();
+    mountSettings(OVERSEAS, []);
+    expect(screen.queryByRole("checkbox", { name: "先生成草稿样片" })).not.toBeInTheDocument();
+  });
+
   it.each([DOMESTIC, OVERSEAS])(
-    "locks edit constraints and opens annotation for the chosen video on %s",
+    "offers edit defaults and keeps parameters editable on %s",
     (modelId) => {
       const { changed, annotate } = mountSettings(modelId);
       fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "edit" } });
       expect(screen.getByLabelText("画幅")).toHaveValue("adaptive");
-      expect(screen.getByLabelText("画幅")).toBeDisabled();
+      expect(screen.getByLabelText("画幅")).toBeEnabled();
       expect(screen.getByLabelText("时长")).toHaveValue("-1");
-      expect(screen.getByLabelText("时长")).toBeDisabled();
+      expect(screen.getByLabelText("时长")).toBeEnabled();
       expect(changed.mock.lastCall?.[0]).toMatchObject({
         seedanceTaskMode: "edit",
         parameterValues: { ratio: "adaptive", duration: -1 },
@@ -92,7 +142,7 @@ describe("VideoNodeSettings Seedance task interaction", () => {
       expect(annotate).toHaveBeenCalledWith(video);
       fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "extend" } });
       expect(screen.getByLabelText("时长")).toBeEnabled();
-      expect(screen.getByLabelText("画幅")).toBeDisabled();
+      expect(screen.getByLabelText("画幅")).toBeEnabled();
       expect(
         screen.queryByRole("button", { name: "局部消除与编辑 · 原视频" }),
       ).not.toBeInTheDocument();
@@ -101,10 +151,10 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     },
   );
 
-  it("shows a missing-video error and assigns swappable first/last frames by stable identity", () => {
+  it("defers missing/mixed media acceptance and preserves swappable frame identities", () => {
     const { changed } = mountSettings(DOMESTIC, [first, last]);
     fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "edit" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("请连接至少 1 个待编辑的视频");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "first_last_frame" } });
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(within(screen.getByLabelText("首尾帧素材")).getAllByRole("listitem")).toHaveLength(2);
@@ -116,7 +166,7 @@ describe("VideoNodeSettings Seedance task interaction", () => {
       expect.objectContaining({ mediaRoles: { 首图: "last_frame", 尾图: "first_frame" } }),
     );
     fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "first_frame" } });
-    expect(screen.getByRole("alert")).toHaveTextContent("只能连接 1 张图片");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
   });
 
   it("removes stale task selection when the user switches to a different model", () => {
@@ -129,7 +179,7 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     );
   });
 
-  it("offers only the task/provider duration intersection and submits the displayed selection", () => {
+  it("retains catalog duration controls without imposing a task duration intersection", () => {
     const customCatalog = catalog.map((entry) => ({
       ...entry,
       models: entry.models.map((model) => ({
@@ -144,15 +194,17 @@ describe("VideoNodeSettings Seedance task interaction", () => {
         },
       })),
     }));
-    const { changed } = mountSettings(DOMESTIC, [video], customCatalog);
+    const { changed } = mountSettings(DOMESTIC, [video], customCatalog, {
+      parameterValues: { duration: 45 },
+    });
     fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "extend" } });
     const duration = screen.getByRole("combobox", { name: "时长" });
     expect(
       within(duration)
         .getAllByRole("option")
         .map((option) => (option as HTMLOptionElement).value),
-    ).toEqual(["6", "12"]);
-    expect(duration).toHaveValue("6");
+    ).toEqual(["2", "3", "6", "12", "45"]);
+    expect(duration).toHaveValue("45");
     fireEvent.change(duration, { target: { value: "12" } });
     expect(duration).toHaveValue("12");
     const selected = changed.mock.lastCall![0];
@@ -165,12 +217,10 @@ describe("VideoNodeSettings Seedance task interaction", () => {
     const state = resolveSeedanceTask(model.remoteModelId, caps, selected, [video]);
     expect(state.issue).toBeNull();
     expect(state.parameters["duration"]).toBe(12);
-    expect(screen.getByText(/每个参考视频须为 2–30 秒/)).toHaveTextContent(
-      "最多 10 个且合计不超过 30 秒",
-    );
+    expect(screen.getByText(/完整提交当前任务/)).toHaveTextContent("由服务端返回");
   });
 
-  it("disables unavailable duration rather than presenting invalid custom options", () => {
+  it("shows a saved value outside the stale catalog and leaves it editable", () => {
     const customCatalog = catalog.map((entry) => ({
       ...entry,
       models: entry.models.map((model) => ({
@@ -185,17 +235,46 @@ describe("VideoNodeSettings Seedance task interaction", () => {
         },
       })),
     }));
-    mountSettings(DOMESTIC, [video], customCatalog);
+    mountSettings(DOMESTIC, [video], customCatalog, { parameterValues: { duration: 60 } });
     fireEvent.change(screen.getByLabelText("任务类型"), { target: { value: "extend" } });
-    expect(screen.getByLabelText("时长")).toBeDisabled();
-    expect(screen.getByLabelText("时长")).toHaveValue(null);
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "未开放智能（-1）或 4–30 秒范围内的可用时长",
-    );
+    expect(screen.getByLabelText("时长")).toBeEnabled();
+    expect(screen.getByLabelText("时长")).toHaveValue("60");
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("restores RD edit intent with explicit ratio and duration", () => {
+    mountSettings(RD, [video], catalog, {
+      seedanceTaskMode: "edit",
+      parameterValues: { ratio: "21:9", duration: 20 },
+    });
+    expect(screen.getByLabelText("任务类型")).toHaveValue("edit");
+    expect(screen.getByLabelText("画幅")).toHaveValue("21:9");
+    expect(screen.getByLabelText("时长")).toHaveValue("20");
+    expect(screen.getByLabelText("画幅")).toBeEnabled();
+    expect(screen.getByRole("button", { name: "局部消除与编辑 · 原视频" })).toBeInTheDocument();
   });
 });
 
 describe("VideoNodeSettings SP 2.5 public references", () => {
+  it("keeps multiple Wan documents and webpages alongside connected media", () => {
+    const { changed } = mountSettings("wan3.0-video", [video]);
+    const section = screen.getByLabelText("URL 素材（文档/网页）");
+    for (const [index, label] of ["粘贴文档 URL", "粘贴文档 URL", "粘贴网页链接"].entries()) {
+      fireEvent.click(within(section).getByRole("button", { name: label }));
+      fireEvent.change(within(section).getByRole("textbox"), {
+        target: { value: `https://example.test/reference-${index}` },
+      });
+      fireEvent.click(within(section).getByRole("button", { name: "添加" }));
+    }
+    expect(changed.mock.lastCall?.[0].urlMedia?.map((input) => input.role)).toEqual([
+      "file",
+      "file",
+      "link",
+    ]);
+    expect(within(section).getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
   it("saves typed image and audio URLs without losing them when switching models", () => {
     const imageUrl = "https://assets.example.test/image.png?signature=img%2F1";
     const audioUrl = "https://assets.example.test/audio.wav?signature=aud%2B2";
@@ -204,7 +283,7 @@ describe("VideoNodeSettings SP 2.5 public references", () => {
         { id: "wan-doc", role: "file", label: "文档", url: "https://example.test/doc.pdf" },
       ],
     });
-    expect(screen.getByText(/已保留 1 个万相文档\/网页 URL/)).toBeInTheDocument();
+    expect(screen.getByText(/已保留 1 个文档\/网页 URL/)).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "粘贴文档 URL" })).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "粘贴参考图 URL" }));
@@ -225,7 +304,7 @@ describe("VideoNodeSettings SP 2.5 public references", () => {
     fireEvent.change(screen.getByRole("combobox", { name: "视频模型" }), {
       target: { value: "wan3.0-video" },
     });
-    expect(screen.getByText(/已保留 2 个按次参考 URL/)).toBeInTheDocument();
+    expect(screen.getByText(/已保留 2 个参考 URL/)).toBeInTheDocument();
     expect(screen.queryByLabelText("按次参考 URL")).not.toBeInTheDocument();
     fireEvent.change(screen.getByRole("combobox", { name: "视频模型" }), {
       target: { value: PER_TASK },
@@ -236,18 +315,20 @@ describe("VideoNodeSettings SP 2.5 public references", () => {
     expect(changed.mock.lastCall?.[0].urlMedia).toHaveLength(1);
   });
 
-  it("blocks an invalid or over-limit URL before adding it to a paid request", () => {
+  it("allows adding references beyond cached counts and exposes audio references", () => {
     const { changed } = mountSettings(
       "sp2.5-720p-30s-ch4",
       Array.from({ length: 9 }, (_, index) => asset(`图${index}`, "image")),
     );
-    expect(screen.queryByRole("button", { name: "粘贴参考音频 URL" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "粘贴参考音频 URL" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "粘贴参考图 URL" }));
     fireEvent.change(screen.getByRole("textbox", { name: "参考图 URL" }), {
       target: { value: "https://assets.example.test/extra.png" },
     });
     fireEvent.click(screen.getByRole("button", { name: "添加" }));
-    expect(screen.getByRole("alert")).toHaveTextContent("最多支持 9 张参考图");
-    expect(changed).not.toHaveBeenCalled();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(changed.mock.lastCall?.[0].perTaskUrlMedia).toEqual([
+      expect.objectContaining({ kind: "image", url: "https://assets.example.test/extra.png" }),
+    ]);
   });
 });

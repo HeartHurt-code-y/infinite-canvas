@@ -5,8 +5,11 @@ use tauri_plugin_log::log::{debug, error, info};
 
 use super::{
     BackendState,
+    ai_media::{AiMediaJobRecord, AiMediaMode, StartAiMediaCommand},
+    ai_media_runtime::AiMediaRuntimeStatus,
     blender::{BlenderEngineStatus, BlenderRenderJob, StartBlenderRenderRequest},
     commerce_sources::{self, CommerceSource},
+    component_manager::{ComponentManagerStatus, RuntimeFeatureStatus},
     composer::{VideoComposerEngineStatus, VideoCompositionJobRecord},
     cover_images::{
         self, NormalizeCoverImageCommand, NormalizedCoverImage, ResumeCoverImageResultCommand,
@@ -75,6 +78,9 @@ use super::{
         TosStagingConfig, UpdateAssetGroupCommand, UpsertProviderConnectionCommand,
         UpsertProviderTokenGroupCommand, VideoTaskListCommand, WorkspaceUiPrefs,
     },
+    video_preparation::{
+        StartVideoPreparationCommand, VideoPreparationJobRecord, VideoPreparationProbe,
+    },
 };
 
 #[tauri::command]
@@ -103,6 +109,71 @@ pub async fn prepare_runtime_components_for_update(
 #[tauri::command]
 pub fn get_runtime_component_update_status() -> RuntimeResourceUpdateStatus {
     resource_update::runtime_component_update_status()
+}
+
+#[tauri::command]
+pub async fn get_runtime_component_manager_status(
+    state: State<'_, BackendState>,
+) -> Result<ComponentManagerStatus, String> {
+    let manager = state.component_manager.clone();
+    tokio::task::spawn_blocking(move || manager.status())
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn get_runtime_feature_status(
+    state: State<'_, BackendState>,
+    feature_id: String,
+) -> Result<RuntimeFeatureStatus, String> {
+    let manager = state.component_manager.clone();
+    tokio::task::spawn_blocking(move || manager.feature_status(&feature_id))
+        .await
+        .map_err(|error| error.to_string())
+}
+
+#[tauri::command]
+pub async fn install_runtime_component(
+    state: State<'_, BackendState>,
+    component_id: String,
+    repair: Option<bool>,
+) -> Result<(), String> {
+    state
+        .component_manager
+        .install(&component_id, repair.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+pub async fn import_runtime_component_archive(
+    state: State<'_, BackendState>,
+    component_id: String,
+    path: String,
+) -> Result<(), String> {
+    state
+        .component_manager
+        .import_archive(&component_id, Path::new(&path))
+        .await
+}
+
+#[tauri::command]
+pub fn cancel_runtime_component_install(state: State<'_, BackendState>) {
+    state.component_manager.cancel();
+}
+
+#[tauri::command]
+pub async fn get_runtime_component_asset_root(
+    state: State<'_, BackendState>,
+    component_id: String,
+) -> Result<String, String> {
+    let manager = state.component_manager.clone();
+    tokio::task::spawn_blocking(move || {
+        manager
+            .component_asset_root(&component_id)
+            .map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|error| error.to_string())?
 }
 
 #[tauri::command]
@@ -725,6 +796,27 @@ pub fn start_generation(
     command: StartGenerationCommand,
 ) -> CommandResult<String> {
     state.tasks.start(command).command()
+}
+
+#[tauri::command]
+pub fn promote_seedance_draft(
+    state: State<'_, BackendState>,
+    task_id: String,
+) -> CommandResult<String> {
+    state.tasks.promote_seedance_draft(&task_id).command()
+}
+
+#[tauri::command]
+pub fn rename_generation_result(
+    state: State<'_, BackendState>,
+    task_id: String,
+    result_index: u32,
+    name: String,
+) -> CommandResult<()> {
+    state
+        .storage
+        .rename_generation_result(&task_id, result_index, &name)
+        .command()
 }
 
 /// 独立提示词节点：调用已配置的文本模型生成或优化提示词；
@@ -1841,18 +1933,23 @@ pub async fn export_reelbench_video(
 }
 
 #[tauri::command]
-pub fn start_video_frame_extraction(
+pub async fn start_video_frame_extraction(
     state: State<'_, BackendState>,
     command: StartVideoFrameExtractionCommand,
 ) -> CommandResult<VideoFrameExtractionJobRecord> {
-    state
-        .frame_extractor
-        .start_extraction_with_percentages(
+    let service = state.frame_extractor.clone();
+    tokio::task::spawn_blocking(move || {
+        service.start_extraction_with_request_id(
             &command.video_path,
             command.timestamps,
             command.percentages,
+            command.request_id,
         )
-        .command()
+    })
+    .await
+    .map_err(|error| BackendError::Conflict(format!("抽帧任务启动失败：{error}")))
+    .and_then(|result| result)
+    .command()
 }
 
 #[tauri::command]
@@ -1869,6 +1966,165 @@ pub fn cancel_video_frame_extraction(
     job_id: String,
 ) -> CommandResult<VideoFrameExtractionJobRecord> {
     state.frame_extractor.cancel_job(&job_id).command()
+}
+
+#[tauri::command]
+pub async fn retry_video_frame_extraction(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoFrameExtractionJobRecord> {
+    let service = state.frame_extractor.clone();
+    tokio::task::spawn_blocking(move || service.retry_job(&job_id))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("抽帧任务恢复失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn probe_video_preparation(
+    state: State<'_, BackendState>,
+    source: super::types::MediaReferenceTarget,
+) -> CommandResult<VideoPreparationProbe> {
+    state.video_preparation.probe(source).await.command()
+}
+
+#[tauri::command]
+pub async fn start_video_preparation(
+    state: State<'_, BackendState>,
+    command: StartVideoPreparationCommand,
+) -> CommandResult<VideoPreparationJobRecord> {
+    state.video_preparation.start(command).await.command()
+}
+
+#[tauri::command]
+pub fn get_video_preparation_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoPreparationJobRecord> {
+    state
+        .video_preparation
+        .get(&job_id)
+        .and_then(|record| {
+            record.ok_or_else(|| BackendError::NotFound(format!("视频准备任务不存在：{job_id}")))
+        })
+        .command()
+}
+
+#[tauri::command]
+pub fn list_video_preparation_jobs(
+    state: State<'_, BackendState>,
+) -> CommandResult<Vec<VideoPreparationJobRecord>> {
+    state.video_preparation.list().command()
+}
+
+#[tauri::command]
+pub fn retry_video_preparation_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoPreparationJobRecord> {
+    state.video_preparation.retry(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_video_preparation_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<VideoPreparationJobRecord> {
+    state.video_preparation.cancel(&job_id).command()
+}
+
+#[tauri::command]
+pub fn rename_video_preparation_output(
+    state: State<'_, BackendState>,
+    job_id: String,
+    name: String,
+) -> CommandResult<VideoPreparationJobRecord> {
+    state
+        .video_preparation
+        .rename_output(&job_id, &name)
+        .command()
+}
+
+#[tauri::command]
+pub async fn get_ai_media_runtime_status(
+    state: State<'_, BackendState>,
+    mode: Option<AiMediaMode>,
+) -> CommandResult<AiMediaRuntimeStatus> {
+    let service = state.ai_media.clone();
+    tokio::task::spawn_blocking(move || service.runtime_status(mode.unwrap_or_default()))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("检查 AI 媒体运行组件失败：{error}")))
+        .command()
+}
+
+#[tauri::command]
+pub async fn import_ai_media_runtime(
+    state: State<'_, BackendState>,
+    root_path: String,
+    mode: Option<AiMediaMode>,
+) -> CommandResult<AiMediaRuntimeStatus> {
+    state
+        .ai_media
+        .import_runtime(&root_path, mode.unwrap_or_default())
+        .await
+        .command()
+}
+
+#[tauri::command]
+pub async fn start_ai_media_job(
+    state: State<'_, BackendState>,
+    command: StartAiMediaCommand,
+) -> CommandResult<AiMediaJobRecord> {
+    state.ai_media.start(command).await.command()
+}
+
+#[tauri::command]
+pub fn get_ai_media_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<AiMediaJobRecord> {
+    state
+        .ai_media
+        .get(&job_id)
+        .and_then(|record| {
+            record.ok_or_else(|| BackendError::NotFound(format!("AI 媒体任务不存在：{job_id}")))
+        })
+        .command()
+}
+
+#[tauri::command]
+pub fn list_ai_media_jobs(state: State<'_, BackendState>) -> CommandResult<Vec<AiMediaJobRecord>> {
+    state.ai_media.list().command()
+}
+
+#[tauri::command]
+pub fn retry_ai_media_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<AiMediaJobRecord> {
+    state.ai_media.retry(&job_id).command()
+}
+
+#[tauri::command]
+pub fn cancel_ai_media_job(
+    state: State<'_, BackendState>,
+    job_id: String,
+) -> CommandResult<AiMediaJobRecord> {
+    state.ai_media.cancel(&job_id).command()
+}
+
+#[tauri::command]
+pub fn rename_ai_media_output(
+    state: State<'_, BackendState>,
+    job_id: String,
+    result_index: u32,
+    name: String,
+) -> CommandResult<AiMediaJobRecord> {
+    state
+        .ai_media
+        .rename_output(&job_id, result_index, &name)
+        .command()
 }
 
 #[cfg(test)]

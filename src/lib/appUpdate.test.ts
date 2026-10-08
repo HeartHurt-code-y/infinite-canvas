@@ -4,6 +4,7 @@ import {
   APP_UPDATE_CHECK_INTERVAL_MS,
   APP_UPDATE_FOCUS_THROTTLE_MS,
   checkForAppUpdate,
+  createDesktopAppUpdateClient,
   describeUpdateError,
   dismissAvailableAppUpdate,
   downloadPercent,
@@ -26,6 +27,22 @@ import {
   type RuntimeComponentMigrationStatus,
   windowsUpdatePackageKind,
 } from "./appUpdate";
+
+const desktopMocks = vi.hoisted(() => ({
+  check: vi.fn(),
+  invoke: vi.fn(),
+  getVersion: vi.fn(() => Promise.resolve("0.2.0")),
+  relaunch: vi.fn(() => Promise.resolve()),
+}));
+
+vi.mock("@tauri-apps/plugin-updater", () => ({ check: desktopMocks.check }));
+vi.mock("@tauri-apps/plugin-os", () => ({
+  type: () => "windows",
+  arch: () => "x86_64",
+}));
+vi.mock("@tauri-apps/api/core", () => ({ invoke: desktopMocks.invoke }));
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: desktopMocks.getVersion }));
+vi.mock("@tauri-apps/plugin-process", () => ({ relaunch: desktopMocks.relaunch }));
 
 function mockClient(overrides: Partial<AppUpdateClient> = {}): AppUpdateClient {
   return {
@@ -55,6 +72,11 @@ beforeEach(() => {
 afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
+  desktopMocks.check.mockReset();
+  desktopMocks.invoke.mockReset();
+  desktopMocks.getVersion.mockClear();
+  desktopMocks.relaunch.mockClear();
+  Reflect.deleteProperty(window, "__TAURI_INTERNALS__");
   resetAppUpdateStateForTests();
   setAppUpdateClientForTests(null);
   window.localStorage.removeItem(SKIPPED_UPDATE_STORAGE_KEY);
@@ -295,8 +317,9 @@ describe("appUpdate store", () => {
 
   it("flushes the canvas after download and immediately before native install", async () => {
     const order: string[] = [];
-    registerAppUpdateBeforeInstallFlush(async () => {
+    registerAppUpdateBeforeInstallFlush(() => {
       order.push("flush");
+      return Promise.resolve();
     });
     const relaunch = vi.fn(() => {
       order.push("relaunch");
@@ -308,8 +331,9 @@ describe("appUpdate store", () => {
           Promise.resolve({
             available: true,
             version: "0.1.11",
-            download: async () => {
+            download: () => {
               order.push("download");
+              return Promise.resolve();
             },
             install: async (
               _progress?: (event: AppUpdateProgressEvent) => void,
@@ -574,6 +598,66 @@ describe("appUpdate store", () => {
     expect(waitForRuntimeComponents).not.toHaveBeenCalled();
     expect(downloadAndInstall).toHaveBeenCalledTimes(1);
     expect(getAppUpdateState().status).toBe("restarting");
+  });
+
+  it("installs the online feed without legacy runtime migration or a resource manifest", async () => {
+    Object.defineProperty(window, "__TAURI_INTERNALS__", {
+      configurable: true,
+      value: {},
+    });
+    const feed = {
+      version: "0.2.1",
+      notes: "轻量联网版：需要时可安装对应功能组件，也支持离线组件包。",
+      pub_date: "2026-10-07T14:59:14.512Z",
+      platforms: {
+        "windows-x86_64": {
+          url: "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/windows-x86_64-online/%E6%97%A0%E9%99%90%E7%94%BB%E5%B8%83_0.2.1_x64-online-setup.exe",
+          signature: "fixture-updater-signature",
+        },
+      },
+    };
+    const order: string[] = [];
+    const download = vi.fn((onProgress: (event: AppUpdateProgressEvent) => void) => {
+      order.push("download");
+      return completeDownload(onProgress);
+    });
+    const install = vi.fn(() => {
+      order.push("install");
+      return Promise.resolve();
+    });
+    const flush = vi.fn(() => {
+      order.push("save-canvas");
+      return Promise.resolve();
+    });
+    registerAppUpdateBeforeInstallFlush(flush);
+    desktopMocks.check.mockResolvedValue({
+      version: feed.version,
+      body: feed.notes,
+      rawJson: feed,
+      download,
+      install,
+    });
+    desktopMocks.invoke.mockRejectedValue(new Error("旧四组件尚未安装，迁移无法完成"));
+    setAppUpdateClientForTests(createDesktopAppUpdateClient());
+
+    await checkForAppUpdate();
+    await vi.waitFor(() => expect(install).toHaveBeenCalledTimes(1));
+
+    expect(desktopMocks.check).toHaveBeenCalledTimes(1);
+    expect(download).toHaveBeenCalledTimes(1);
+    expect(flush).toHaveBeenCalled();
+    expect(order[0]).toBe("download");
+    expect(order.at(-2)).toBe("save-canvas");
+    expect(order.at(-1)).toBe("install");
+    expect(desktopMocks.invoke).not.toHaveBeenCalled();
+    expect(desktopMocks.relaunch).not.toHaveBeenCalled();
+    expect(getAppUpdateState()).toMatchObject({
+      status: "restarting",
+      availableVersion: "0.2.1",
+      preparedBytes: 0,
+      totalPreparationBytes: 0,
+      error: null,
+    });
   });
 
   it("prepares signed changed resources before downloading the small installer", async () => {

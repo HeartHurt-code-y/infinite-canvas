@@ -397,6 +397,7 @@ mod tests {
     #[test]
     fn cover_recovery_targets_only_failed_image_results() {
         let record = GenerationResultRecord {
+            display_name: None,
             task_id: "cover-task".to_string(),
             result_index: 2,
             media_type: MediaType::Image,

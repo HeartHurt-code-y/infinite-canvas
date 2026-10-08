@@ -373,7 +373,8 @@ describe("App workspace", () => {
     expect(within(videoNode!).getByLabelText("分辨率")).toBeInTheDocument();
     expect(within(videoNode!).getByLabelText("时长")).toBeInTheDocument();
     expect(within(videoNode!).getByRole("checkbox", { name: "生成音频" })).toBeChecked();
-    expect(within(videoNode!).getByLabelText("输出格式")).toHaveValue("mp4");
+    // 魔芋 Seedance 2.5 正式版走草稿样片参数档：输出格式不再作为卡片固定字段。
+    expect(within(videoNode!).queryByLabelText("输出格式")).not.toBeInTheDocument();
     expect(within(videoNode!).getByLabelText("任务类型")).toHaveValue("auto");
     // 视频生成节点已移除提示词优化功能（交由独立「提示词生成与优化」节点承担）。
     expect(
@@ -404,7 +405,8 @@ describe("App workspace", () => {
     expect(within(imageNode!).getByLabelText("图片模型")).toBeInTheDocument();
     const quantity = within(imageNode!).getByRole("spinbutton", { name: "生成数量" });
     expect(quantity).toHaveValue(1);
-    expect(quantity).toHaveAttribute("max", "10");
+    // 支持批量 n 参数的图片模型不再输出 HTML max；数量上限交由供应商接口裁决。
+    expect(quantity).not.toHaveAttribute("max");
     expect(within(imageNode!).getByLabelText("尺寸")).toBeInTheDocument();
     expect(within(imageNode!).getByLabelText("质量")).toBeInTheDocument();
     expect(within(imageNode!).getByText("文生图")).toBeInTheDocument();

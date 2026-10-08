@@ -37,6 +37,7 @@ export function frozenStartCommand(detail: GenerationTaskDetail): StartGeneratio
     explicitMedia,
     parameters,
     generationCount,
+    outputName,
   } = request;
   if (
     typeof canvasId !== "string" ||
@@ -54,6 +55,7 @@ export function frozenStartCommand(detail: GenerationTaskDetail): StartGeneratio
     return null;
   }
   return {
+    ...(typeof outputName === "string" && outputName.trim() ? { outputName } : {}),
     canvasId,
     sourceNodeId,
     operation,

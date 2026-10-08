@@ -1532,6 +1532,7 @@ export interface TokenUsage {
 }
 
 export interface GenerationTaskSummary {
+  readonly outputName?: string | null | undefined;
   readonly id: string;
   readonly canvasId: string;
   readonly sourceNodeId: string;
@@ -1551,6 +1552,7 @@ export interface GenerationTaskSummary {
 }
 
 export interface GenerationTaskListQuery {
+  readonly search?: string;
   readonly canvasId?: string | null;
   readonly sourceNodeId?: string | null;
   readonly statuses?: readonly GenerationTaskStatus[] | null;
@@ -1574,6 +1576,7 @@ export type SaveStatus =
   "pending" | "writing" | "succeeded" | "failed" | "interrupted" | "local_missing" | "conflict";
 
 export interface GenerationResultRecord {
+  readonly displayName?: string | null | undefined;
   readonly taskId: string;
   readonly resultIndex: number;
   readonly mediaType: GenerationResultMediaType;
@@ -1727,6 +1730,8 @@ export interface ExplicitMediaInput {
 }
 
 export interface StartGenerationCommand {
+  /** 节点名称快照，仅用于本地历史和文件命名。 */
+  readonly outputName?: string;
   /** 本地视频任务意图，仅用于参数校验及重试，不原样发送给供应商。 */
   readonly videoTaskType?: SeedanceTaskMode;
   readonly workflowRunId?: string;
@@ -1757,6 +1762,19 @@ export const generationClient: GenerationTaskClient = {
     invokeDesktop("get_generation_task_progress", generationTaskProgressSchema, { taskId }),
   queryVideoTaskNow: (taskId) => invokeDesktopVoid("query_video_task_now", { taskId }),
 };
+
+/** Create a separate final task from a reviewed draft using its frozen credential scope. */
+export function promoteSeedanceDraft(taskId: string): Promise<string> {
+  return invokeDesktop("promote_seedance_draft", stringSchema, { taskId });
+}
+
+export async function renameGenerationResult(
+  taskId: string,
+  resultIndex: number,
+  name: string,
+): Promise<void> {
+  await invokeDesktopVoid("rename_generation_result", { taskId, resultIndex, name });
+}
 
 export type RemoteVideoTaskStatus =
   "NOT_START" | "SUBMITTED" | "QUEUED" | "IN_PROGRESS" | "SUCCESS" | "FAILURE" | "UNKNOWN";
@@ -2226,7 +2244,7 @@ export const videoDownloaderClient: VideoDownloaderClient = {
 // ---------- 画布视频抽帧（复用内置 FFmpeg 引擎） ----------
 
 export type VideoFrameExtractionStatus =
-  "preparing_engine" | "processing" | "completed" | "failed" | "cancelled";
+  "preparing_engine" | "processing" | "paused" | "completed" | "failed" | "cancelled";
 
 /** 单张抽帧结果。 */
 export interface ExtractedFrame {
@@ -2257,15 +2275,22 @@ export interface VideoFrameExtractionClient {
     timestamps: readonly number[],
     /** 可选的 0~1 比例采样点；由后端在探测实际视频时长后换算，避免计划时长漂移。 */
     percentages?: readonly number[],
+    requestId?: string,
   ) => Promise<VideoFrameExtractionJobRecord>;
   getJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
   cancelJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
+  retryJob: (jobId: string) => Promise<VideoFrameExtractionJobRecord>;
 }
 
 export const videoFrameExtractionClient: VideoFrameExtractionClient = {
-  startExtraction: (videoPath, timestamps, percentages) =>
+  startExtraction: (videoPath, timestamps, percentages, requestId) =>
     invokeDesktop("start_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
-      command: { videoPath, timestamps: [...timestamps], percentages: [...(percentages ?? [])] },
+      command: {
+        videoPath,
+        timestamps: [...timestamps],
+        percentages: [...(percentages ?? [])],
+        ...(requestId ? { requestId } : {}),
+      },
     }),
   getJob: (jobId) =>
     invokeDesktop("get_video_frame_extraction_job", videoFrameExtractionJobRecordSchema, {
@@ -2275,6 +2300,8 @@ export const videoFrameExtractionClient: VideoFrameExtractionClient = {
     invokeDesktop("cancel_video_frame_extraction", videoFrameExtractionJobRecordSchema, {
       jobId,
     }),
+  retryJob: (jobId) =>
+    invokeDesktop("retry_video_frame_extraction", videoFrameExtractionJobRecordSchema, { jobId }),
 };
 
 // ---------- 本地媒体缩略图 ----------

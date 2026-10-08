@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { createWhiteModelBlockingDraft } from "../../lib/whiteModelBlocking";
 import type * as WhiteModelBlockingModule from "../../lib/whiteModelBlocking";
 import type * as WhiteModelStudioModule from "../../lib/whiteModelStudio";
+import type * as RuntimeComponentsModule from "../../lib/runtimeComponents";
 import {
   createWhiteModelStudioDraft,
   whiteModelRenderSignature,
@@ -12,6 +13,10 @@ import {
   type WhiteModelStudioDraft,
 } from "../../lib/whiteModelStudio";
 import { WhiteModelStudioDialog, type WhiteModelStudioDialogProps } from "./WhiteModelStudioDialog";
+import {
+  publishRuntimeComponentsChanged,
+  RUNTIME_COMPONENTS_REQUEST_EVENT,
+} from "../../lib/runtimeComponents";
 
 const mocks = vi.hoisted(() => ({
   engine: vi.fn(),
@@ -23,6 +28,7 @@ const mocks = vi.hoisted(() => ({
   poseAvailable: vi.fn(),
   captureMotion: vi.fn(),
   saveStill: vi.fn(),
+  ensureFeature: vi.fn(),
 }));
 vi.mock("../../lib/whiteModelStudio", async (importOriginal) => ({
   ...(await importOriginal<typeof WhiteModelStudioModule>()),
@@ -37,6 +43,10 @@ vi.mock("../../lib/whiteModelBlocking", async (importOriginal) => {
   return { ...actual, saveWhiteModelStill: mocks.saveStill };
 });
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: mocks.chooseFile }));
+vi.mock("../../lib/runtimeComponents", async (importOriginal) => ({
+  ...(await importOriginal<typeof RuntimeComponentsModule>()),
+  ensureRuntimeFeatureInstalled: mocks.ensureFeature,
+}));
 vi.mock("../../lib/poseCapture", () => ({
   poseCaptureAvailable: mocks.poseAvailable,
   captureMotionFromVideo: mocks.captureMotion,
@@ -102,6 +112,7 @@ function openEnginePanel() {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.ensureFeature.mockResolvedValue(true);
   mocks.engine.mockResolvedValue({
     available: true,
     executablePath: "C:/InfiniteCanvas/resources/blender/blender.exe",
@@ -128,17 +139,80 @@ beforeEach(() => {
 });
 
 describe("白模导演台", () => {
+  it("checks all render dependencies before starting even when Blender itself is available", async () => {
+    mocks.ensureFeature.mockResolvedValue(false);
+    const view = harness(createWhiteModelStudioDraft());
+    await waitFor(() => expect(screen.getByRole("button", { name: "渲染白模视频" })).toBeEnabled());
+    fireEvent.click(screen.getByRole("button", { name: "渲染白模视频" }));
+    await screen.findByText(/白模渲染所需组件尚未就绪/);
+    expect(mocks.ensureFeature).toHaveBeenCalledWith("white-model-render");
+    expect(mocks.start).not.toHaveBeenCalled();
+    expect(view.saved().jobId).toBeNull();
+  });
+  it("opens Blender installation and refreshes readiness without losing the draft or auto rendering", async () => {
+    mocks.engine.mockResolvedValueOnce({
+      available: false,
+      executablePath: null,
+      version: null,
+      message: "Blender 组件未安装",
+    });
+    const event = vi.fn();
+    window.addEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, event);
+    try {
+      const view = harness(createWhiteModelStudioDraft());
+      await screen.findByText("Blender 组件未安装");
+      fireEvent.change(screen.getByLabelText("几何体"), { target: { value: "box" } });
+      fireEvent.click(screen.getByRole("button", { name: "准备 Blender 渲染组件" }));
+      expect((event.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+        featureId: "white-model-render",
+      });
+      act(() => publishRuntimeComponentsChanged());
+      await waitFor(() =>
+        expect(screen.getByRole("button", { name: "渲染白模视频" })).toBeEnabled(),
+      );
+      expect(screen.getByLabelText("几何体")).toHaveValue("box");
+      await waitFor(() =>
+        expect(view.saved().plan.objects.some((actor) => actor.shape === "box")).toBe(true),
+      );
+      expect(mocks.start).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, event);
+    }
+  });
+
+  it("opens motion capture installation before choosing a video when its component is missing", async () => {
+    mocks.poseAvailable.mockResolvedValue(false);
+    const event = vi.fn();
+    window.addEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, event);
+    try {
+      harness(createWhiteModelStudioDraft());
+      fireEvent.click(await screen.findByRole("button", { name: "安装动作捕捉组件" }));
+      await waitFor(() => expect(event).toHaveBeenCalledOnce());
+      expect((event.mock.calls[0]![0] as CustomEvent).detail).toEqual({
+        featureId: "motion-capture",
+      });
+      expect(mocks.chooseFile).not.toHaveBeenCalled();
+      expect(mocks.captureMotion).not.toHaveBeenCalled();
+    } finally {
+      window.removeEventListener(RUNTIME_COMPONENTS_REQUEST_EVENT, event);
+    }
+  });
   it("默认机位视角与镜头语言，保存走位后渲染并可恢复成片与精修工程", async () => {
     const view = harness(createWhiteModelStudioDraft());
     const renderButton = screen.getByRole("button", { name: "渲染白模视频" });
     await waitFor(() => expect(renderButton).toBeEnabled());
     expect(mocks.engine).toHaveBeenCalledWith("");
-    expect(screen.getByText(/应用已内置 Blender，无需另行安装或下载/)).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "机位视角" })).toHaveAttribute("aria-pressed", "true");
+    expect(screen.getByText(/本地渲染需要 Blender 组件/)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "机位视角" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     expect(screen.getByRole("button", { name: "导演视角" })).toBeInTheDocument();
     expect(screen.getByTestId("white-model-viewport")).toBeInTheDocument();
     expect(screen.getByLabelText("时间轴")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "按景别取景（写入当前时间的机位关键帧）" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "按景别取景（写入当前时间的机位关键帧）" }),
+    ).toBeEnabled();
     await waitFor(() =>
       expect(screen.getByRole("button", { name: "一键动捕：从视频提取动作…" })).toBeEnabled(),
     );
@@ -359,20 +433,30 @@ describe("白模导演台 · 站位", () => {
     };
     const onExportBlocking = vi.fn();
     const view = harness(
-      { ...createWhiteModelBlockingDraft(), environment: { key: scene.key, name: scene.name, target: scene.target } },
+      {
+        ...createWhiteModelBlockingDraft(),
+        environment: { key: scene.key, name: scene.name, target: scene.target },
+      },
       { purpose: "blocking", imageInputs: [scene, hero], onExportBlocking },
     );
     expect(mocks.engine).not.toHaveBeenCalled();
     expect(screen.getByRole("button", { name: "＋ 假人" })).toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "渲染白模视频" })).not.toBeInTheDocument();
     expect(screen.queryByLabelText("时间轴")).not.toBeInTheDocument();
-    expect(screen.getByLabelText("全景图 / 场景图")).toHaveValue(JSON.stringify([scene.key, scene.target]));
+    expect(screen.getByLabelText("全景图 / 场景图")).toHaveValue(
+      JSON.stringify([scene.key, scene.target]),
+    );
     fireEvent.click(screen.getByRole("button", { name: "↑ 替换" }));
     await waitFor(() => expect(view.saved().environment?.key).toBe("hero"));
-    fireEvent.change(screen.getByLabelText("1号假人角色参考"), { target: { value: JSON.stringify([hero.key, hero.target]) } });
+    fireEvent.change(screen.getByLabelText("1号假人角色参考"), {
+      target: { value: JSON.stringify([hero.key, hero.target]) },
+    });
     await waitFor(() =>
       expect(view.saved().characterBindings).toEqual([
-        { actorId: view.saved().plan.objects[0]?.id, reference: { key: hero.key, name: hero.name, target: hero.target } },
+        {
+          actorId: view.saved().plan.objects[0]?.id,
+          reference: { key: hero.key, name: hero.name, target: hero.target },
+        },
       ]),
     );
     fireEvent.click(screen.getByRole("button", { name: "导出站位图" }));

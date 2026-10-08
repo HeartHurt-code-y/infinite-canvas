@@ -259,6 +259,7 @@ function fakeDependencies(
       }),
     ),
     cancelJob: vi.fn(),
+    retryJob: vi.fn(),
   };
   const composer: VideoComposerClient = {
     getEngine: vi.fn(),

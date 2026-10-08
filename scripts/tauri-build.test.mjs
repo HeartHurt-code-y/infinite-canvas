@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import {
   buildTauriCliArgs,
+  configureEditionUpdaterConfig,
   resolveUpdaterSigningEnv,
   shouldEnableUpdaterArtifacts,
   UPDATER_CONFIG_PATH,
@@ -52,4 +53,45 @@ test("loads the updater private key file into TAURI_SIGNING_PRIVATE_KEY for taur
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("signed editions keep deletion tombstones and signing in one actual CLI overlay", (t) => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "ic-single-edition-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const configPath = path.join(root, ".cache/tauri-editions/online/tauri-edition.generated.json");
+  mkdirSync(path.dirname(configPath), { recursive: true });
+  writeFileSync(
+    configPath,
+    JSON.stringify({
+      bundle: { resources: { "resources/blender/": null, "resources/ffmpeg/": "ffmpeg/" } },
+    }),
+  );
+  const passthrough = ["--config", configPath, "--ci"];
+  for (const enableUpdaterArtifacts of [true, false]) {
+    assert.equal(
+      configureEditionUpdaterConfig(passthrough, {
+        edition: "online",
+        enableUpdaterArtifacts,
+        root,
+      }),
+      true,
+    );
+    const config = JSON.parse(readFileSync(configPath, "utf8"));
+    assert.equal(config.bundle.resources["resources/blender/"], null);
+    assert.equal(config.bundle.createUpdaterArtifacts, enableUpdaterArtifacts);
+    assert.deepEqual(
+      buildTauriCliArgs({ enableUpdaterArtifacts, passthrough, singleEditionConfig: true }),
+      ["build", ...passthrough],
+    );
+  }
+  assert.throws(
+    () =>
+      configureEditionUpdaterConfig(["--config", configPath, "--config", "other.json"], {
+        edition: "online",
+        enableUpdaterArtifacts: true,
+        root,
+      }),
+    /single generated/,
+  );
+  assert.equal(configureEditionUpdaterConfig([], { enableUpdaterArtifacts: true, root }), false);
 });

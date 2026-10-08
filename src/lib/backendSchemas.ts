@@ -385,6 +385,7 @@ const tokenUsageSchema = v.looseObject({
 });
 
 const generationTaskSummarySchema = v.looseObject({
+  outputName: v.optional(nullableStringSchema),
   id: v.string(),
   canvasId: v.string(),
   sourceNodeId: v.string(),
@@ -432,6 +433,7 @@ export const remoteVideoTaskPageSchema = v.looseObject({
 }) satisfies v.GenericSchema<RemoteVideoTaskPage>;
 
 export const generationResultRecordSchema = v.looseObject({
+  displayName: v.optional(nullableStringSchema),
   taskId: v.string(),
   resultIndex: v.number(),
   mediaType: generationResultMediaTypeSchema,
@@ -666,7 +668,14 @@ export const nullableMediaThumbnailSchema = v.nullable(mediaThumbnailSchema);
 export const videoFrameExtractionJobRecordSchema = v.looseObject({
   jobId: v.string(),
   videoPath: v.string(),
-  status: v.picklist(["preparing_engine", "processing", "completed", "failed", "cancelled"]),
+  status: v.picklist([
+    "preparing_engine",
+    "processing",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+  ]),
   progress: nullableNumberSchema,
   frames: v.array(
     v.looseObject({

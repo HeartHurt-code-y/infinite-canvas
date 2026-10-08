@@ -26,6 +26,7 @@ import {
   parseArgs,
   readAppVersion,
   writeLatestJson,
+  assertUpdaterEditionChannel,
 } from "./write-latest-json.mjs";
 import {
   TOS_UPDATES_BUCKET,
@@ -1479,6 +1480,7 @@ export async function publishUpdaterArtifacts(options) {
   }
   const version = typeof options.version === "string" ? options.version : readAppVersion();
   const bundlePath = path.resolve(bundleDir);
+  assertUpdaterEditionChannel(bundlePath, "https://placeholder.invalid", { rejectOnline: true });
   const incoming = collectUpdaterPlatforms(bundlePath, {
     baseUrl: "https://placeholder.invalid",
     fallbackPlatform: typeof options.platform === "string" ? options.platform : undefined,

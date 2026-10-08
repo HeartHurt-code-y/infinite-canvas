@@ -4,13 +4,14 @@
 // 构建会直接失败。本仓库的 CI 在配齐密钥之前仍要能打出普通安装包，所以默认
 // tauri.conf.json 不打开该开关，由这里按密钥是否存在再合并 tauri.updater.conf.json。
 import { spawn } from "node:child_process";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   verifyGeneratedNsisRemotionResources,
   verifyGeneratedNsisStyleResources,
 } from "./verify-nsis-remotion-resources.mjs";
+import { verifyGeneratedNsisEditionResources } from "./verify-nsis-edition-resources.mjs";
 
 const SCRIPT_DIR = path.dirname(fileURLToPath(import.meta.url));
 export const REPO_ROOT = path.resolve(SCRIPT_DIR, "..");
@@ -34,17 +35,52 @@ export function shouldEnableUpdaterArtifacts(env) {
  * @param {{
  *   enableUpdaterArtifacts: boolean,
  *   passthrough?: readonly string[] | undefined,
+ *   singleEditionConfig?: boolean,
  * }} options
  */
 export function buildTauriCliArgs(options) {
   const args = ["build"];
-  if (options.enableUpdaterArtifacts) {
+  if (options.enableUpdaterArtifacts && !options.singleEditionConfig) {
     args.push("--config", UPDATER_CONFIG_PATH);
   }
   if (options.passthrough && options.passthrough.length > 0) {
     args.push(...options.passthrough);
   }
   return args;
+}
+
+// Tauri merges CLI overlays together before applying them to the base config.
+// Keep edition resource tombstones and the signing flag in one overlay.
+export function configureEditionUpdaterConfig(
+  passthrough,
+  { edition, enableUpdaterArtifacts, root = REPO_ROOT },
+) {
+  if (!edition) return false;
+  if (edition !== "online" && edition !== "offline")
+    throw new Error("Invalid distribution edition");
+  const expected = path.join(
+    root,
+    ".cache/tauri-editions",
+    edition,
+    "tauri-edition.generated.json",
+  );
+  const configFlags = passthrough.filter(
+    (argument) => argument === "--config" || argument === "-c" || argument.startsWith("--config="),
+  );
+  const position = passthrough.indexOf("--config");
+  if (
+    configFlags.length !== 1 ||
+    position < 0 ||
+    path.resolve(passthrough[position + 1] ?? "") !== expected
+  )
+    throw new Error("Edition build requires its single generated resource/signing config");
+  const info = lstatSync(expected);
+  if (!info.isFile() || info.isSymbolicLink())
+    throw new Error("Generated edition config must be a regular file");
+  const config = JSON.parse(readFileSync(expected, "utf8"));
+  config.bundle = { ...config.bundle, createUpdaterArtifacts: enableUpdaterArtifacts };
+  writeFileSync(expected, JSON.stringify(config, null, 2) + "\n");
+  return true;
 }
 
 /**
@@ -106,20 +142,52 @@ async function main() {
     );
   }
   const passthrough = process.argv.slice(2);
-  const code = await runTauri(buildTauriCliArgs({ enableUpdaterArtifacts, passthrough }), env);
+  const singleEditionConfig = configureEditionUpdaterConfig(passthrough, {
+    edition: env.IC_DISTRIBUTION_EDITION,
+    enableUpdaterArtifacts,
+  });
+  const code = await runTauri(
+    buildTauriCliArgs({ enableUpdaterArtifacts, passthrough, singleEditionConfig }),
+    env,
+  );
   if (code !== 0) {
     process.exitCode = code;
     return;
   }
   const bundlesIndex = passthrough.indexOf("--bundles");
   const bundles = bundlesIndex >= 0 ? (passthrough[bundlesIndex + 1] ?? "") : "all";
+  const targetAt = passthrough.indexOf("--target");
+  const target =
+    targetAt < 0
+      ? passthrough.find((argument) => argument.startsWith("--target="))?.slice(9)
+      : passthrough[targetAt + 1];
+  const profile = passthrough.includes("--debug") ? "debug" : "release";
   if (
     process.platform === "win32" &&
+    env.IC_DISTRIBUTION_EDITION &&
     !passthrough.includes("--no-bundle") &&
     (bundles === "all" || bundles.split(",").includes("nsis"))
   ) {
-    const remotionCount = verifyGeneratedNsisRemotionResources();
-    const styleCount = verifyGeneratedNsisStyleResources();
+    const count = await verifyGeneratedNsisEditionResources({
+      root: REPO_ROOT,
+      edition: env.IC_DISTRIBUTION_EDITION,
+      targetDirectory: env.CARGO_TARGET_DIR ?? path.join(REPO_ROOT, "src-tauri/target"),
+      target,
+      profile,
+    });
+    console.log(
+      `[tauri-build] ${env.IC_DISTRIBUTION_EDITION} NSIS exact resource table verified: ${count} files`,
+    );
+  }
+  if (
+    process.platform === "win32" &&
+    env.IC_DISTRIBUTION_EDITION !== "online" &&
+    !passthrough.includes("--no-bundle") &&
+    (bundles === "all" || bundles.split(",").includes("nsis"))
+  ) {
+    const verification = { targetDirectory: env.CARGO_TARGET_DIR, target, profile };
+    const remotionCount = verifyGeneratedNsisRemotionResources(REPO_ROOT, verification);
+    const styleCount = verifyGeneratedNsisStyleResources(REPO_ROOT, verification);
     console.log(
       `[tauri-build] 完整 NSIS 已包含 ${remotionCount} 个 Remotion 资源文件和 ${styleCount} 个风格库清单文件`,
     );

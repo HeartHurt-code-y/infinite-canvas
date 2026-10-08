@@ -24,9 +24,19 @@ export function verifyNsisRemotionResourceTable(script, inventory) {
   return actual.size;
 }
 
-export function verifyGeneratedNsisRemotionResources(root = ROOT) {
+export function verifyGeneratedNsisRemotionResources(
+  root = ROOT,
+  { targetDirectory = path.join(root, "src-tauri/target"), profile = "release", target } = {},
+) {
   const script = readFileSync(
-    path.join(root, "src-tauri", "target", "release", "nsis", "x64", "installer.nsi"),
+    path.join(
+      targetDirectory,
+      ...(target ? [target] : []),
+      profile,
+      "nsis",
+      "x64",
+      "installer.nsi",
+    ),
     "utf8",
   );
   const inventory = JSON.parse(
@@ -53,9 +63,19 @@ export function verifyNsisStyleResourceTable(script, manifest) {
   return expected.length;
 }
 
-export function verifyGeneratedNsisStyleResources(root = ROOT) {
+export function verifyGeneratedNsisStyleResources(
+  root = ROOT,
+  { targetDirectory = path.join(root, "src-tauri/target"), profile = "release", target } = {},
+) {
   const script = readFileSync(
-    path.join(root, "src-tauri", "target", "release", "nsis", "x64", "installer.nsi"),
+    path.join(
+      targetDirectory,
+      ...(target ? [target] : []),
+      profile,
+      "nsis",
+      "x64",
+      "installer.nsi",
+    ),
     "utf8",
   );
   const manifest = JSON.parse(

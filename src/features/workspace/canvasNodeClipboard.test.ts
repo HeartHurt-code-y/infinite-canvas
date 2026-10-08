@@ -19,6 +19,39 @@ const asset = (key: string) => ({
 });
 
 describe("canvas node copy", () => {
+  it("复制抽帧节点保留配置并清除原任务检查点", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("frameExtractor", {
+      key: "original-frames",
+      kind: "frame_extractor",
+      x: 0,
+      y: 0,
+      config: {
+        videoPath: "C:/media/source.mp4",
+        timestamps: [1, 3],
+        checkpoint: {
+          batchId: "original-batch",
+          activeJobId: "original-job",
+          sources: ["C:/media/next.mp4"],
+          timestamps: [1, 3],
+        },
+      },
+    });
+    const original = canvas.commands.snapshotV2({});
+    const copied = pasteCanvasNodes(
+      captureCanvasNodes(original, new Set(["original-frames"])),
+      { x: 100, y: 100 },
+      () => "copied-frames",
+    );
+    expect(copied.nodes[0]).toMatchObject({
+      type: "frameExtractor",
+      data: { config: { videoPath: "C:/media/source.mp4", timestamps: [1, 3] } },
+    });
+    const entry = copied.nodes[0];
+    if (entry?.type !== "frameExtractor") throw new Error("copy kind changed");
+    expect(entry.data.config.checkpoint).toBeUndefined();
+    expect(original.frameExtractorNodes?.[0]?.config.checkpoint?.activeJobId).toBe("original-job");
+  });
   it("copies only internal edges and remaps slots and explicit media references", () => {
     const canvas = createCanvasState();
     canvas.commands.addNode("asset", asset("selected-asset"));

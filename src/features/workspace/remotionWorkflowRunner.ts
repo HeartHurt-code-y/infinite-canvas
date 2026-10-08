@@ -1,5 +1,6 @@
 import { promptNodeClient, type PromptNodeClient, type TextSkillMode } from "../../lib/backend";
 import { remotionRendererClient, type RemotionRendererClient } from "../../lib/remotionRenderer";
+import { requestRuntimeComponents } from "../../lib/runtimeComponents";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import { sameWorkflowSignature, stableJsonSignature } from "../../lib/workflowSignatures";
 import { parseComicDramaReview } from "./comicDramaWorkflowRunner";
@@ -322,6 +323,15 @@ export function createRemotionWorkflowRunner(
         if (!startsNew) validateWorkflowMaterialsResume(node.config, checkpoint);
         if (!startsNew && !sameWorkflowSignature(state().inputSignature, inputSignature(request)))
           throw new Error("动画描述或设置已修改，请按当前资料重新制作。");
+        progress("planning", 3, "正在检查本地动画渲染环境…");
+        const environment = await dependencies.renderer.preflight();
+        abort();
+        if (!environment.ready) {
+          requestRuntimeComponents("animation-render");
+          throw new Error(
+            `${environment.message} 请在组件管理中安装或修复动画渲染组件，然后手动重新制作。`,
+          );
+        }
         if (startsNew) {
           if (state().renderJob?.status === "running")
             await dependencies.renderer.cancel(state().renderJob!.id);
@@ -349,10 +359,6 @@ export function createRemotionWorkflowRunner(
             },
           });
         }
-        progress("planning", 3, "正在检查本地动画渲染环境…");
-        const environment = await dependencies.renderer.preflight();
-        abort();
-        if (!environment.ready) throw new Error(environment.message);
         const call = async <T>(
           mode: TextSkillMode,
           prompt: string,

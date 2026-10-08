@@ -8,7 +8,9 @@
 
 ## 引擎
 
-正式安装包内置完整 **Blender 4.5.13 LTS**，用户无需下载或安装 Blender。构建过程预先准备引擎、Python、动态库、资源与许可证；应用运行时使用包内引擎。显式选择其他本地 Blender 是可选的专业配置，桥接支持 4.5 或更新版本，实际验证基线为 4.5.13。
+项目已取消“Blender 必须随主安装包完整内置、使用时无需下载”的约定。允许将 Blender 作为独立功能组件按需下载或通过离线组件包安装；完整离线安装包可作为可选交付方式。
+
+Windows 轻量联网版通过「功能组件」按需安装 **Blender 4.5.13 LTS**，也可导入本版本对应的离线 ZIP；完整离线版继续内置引擎。组件包保留 Python、动态库、资源、许可证与对应源码，并在安装前校验压缩包摘要和逐文件库存。白模编辑与走位预览可先使用，调用本地渲染时才检查所需组件，安装完成后由用户再次启动渲染。显式选择其他本地 Blender 是可选的专业配置，桥接支持 4.5 或更新版本，实际验证基线为 4.5.13。macOS 沿用原完整构建。下文描述引擎的准备流程与资源布局。
 
 构建资源布局如下，缓存和解包暂存目录不进入安装包：
 
@@ -17,7 +19,7 @@ src-tauri/resources/blender/
   manifest.json
   files-manifest.json
   SOURCE.txt
-  runtime/                 # 完整官方发行内容
+  runtime/                 # 官方运行资源；Windows 排除 PDB 调试符号
   sources/
     blender-4.5.13.tar.xz
     white_model.py
@@ -28,7 +30,7 @@ Windows 可执行文件为 `runtime/blender.exe`，macOS 为 `runtime/Blender.ap
 
 ## 构建时准备
 
-`scripts/prepare-blender-runtime.mjs` 使用 [官方 4.5.13 发行目录](https://download.blender.org/release/Blender4.5/)和固定 SHA-256。它完整解包官方发行内容，实际执行 `--version`，再发布资源目录。Windows 使用原生 `tar.exe`，macOS 使用 `hdiutil` 和 `ditto` 保留完整 `.app` 及其链接，Linux 使用 `tar`。不读取用户 AppData 中的已安装 Blender。
+`scripts/prepare-blender-runtime.mjs` 使用 [官方 4.5.13 发行目录](https://download.blender.org/release/Blender4.5/)和固定 SHA-256。它完整解包官方发行内容，仅在 Windows 暂存目录中排除 `.pdb` 调试符号，实际执行 `--version`，按精简后的文件生成库存与策略记录，再发布资源目录。原始归档仍保留在构建缓存中，可用于调试符号提取。Windows 使用原生 `tar.exe`，macOS 使用 `hdiutil` 和 `ditto` 保留完整 `.app` 及其链接且不裁剪，Linux 使用 `tar`。不读取用户 AppData 中的已安装 Blender。
 
 ```powershell
 pnpm blender:prepare
@@ -47,7 +49,7 @@ pnpm blender:prepare
 b5fdf800ce65fa2f209e8f68d02667e4d720fa1c42f247c72d1882ab04decba6
 ```
 
-Windows x64 归档约 **380.2 MiB**，完整资源包实测约 **963.0 MiB**，其中已包含约 **81.2 MiB** 的对应 Blender 源码归档；最终安装包大小由平台压缩与其他应用资源共同决定。全文件库存存放在独立 `files-manifest.json`，主 `manifest.json` 只保存平台、版本、路径、来源和库存摘要，启动时无需读取大型库存。
+Windows x64 原始归档约 **380.2 MiB**，未精简的完整资源包实测约 **963.0 MiB**，其中已包含约 **81.2 MiB** 的对应 Blender 源码归档。发行准备仅排除 Windows 调试符号，源码与全部运行文件保留；实际排除路径和字节数记录在 `manifest.json` 的 `packaging` 字段。最终安装包大小由平台压缩与其他应用资源共同决定。全文件库存存放在独立 `files-manifest.json`，主 `manifest.json` 保存平台、版本、路径、来源、发行策略和库存摘要，启动时无需读取大型库存。
 
 Workbench 适合白模预演，保留物体颜色、空间遮挡和相机动画，输出不透明画面。它仍需可用的显卡驱动，后台运行不等于只使用 CPU。所选引擎的实际启动和渲染错误会返回任务状态。
 

@@ -1,4 +1,5 @@
-// Build-time only: ship the complete, verified official Blender distribution.
+// Build-time only: ship the verified official Blender runtime and matching sources.
+// Windows debug symbols are retained in the cached official archive, not the user bundle.
 import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, createWriteStream, existsSync } from "node:fs";
 import {
@@ -85,6 +86,10 @@ const SOURCE = {
 };
 const PROJECT_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+export function blenderPackagingPolicy(platform) {
+  return platform === "win32" ? "windows-runtime-without-pdb-v1" : "official-distribution-v1";
+}
+
 export function platformDistribution(platform, arch) {
   const distribution = DISTRIBUTIONS[`${platform}/${arch}`];
   if (!distribution)
@@ -142,6 +147,77 @@ function safeBundlePath(root, relative) {
   const candidate = path.resolve(root, relative);
   if (!contained(root, candidate)) throw new Error("运行时清单路径越界");
   return candidate;
+}
+
+// Only newly extracted Windows staging trees are passed here. Validate every path
+// and link before deleting anything; never follow links or touch signed macOS apps.
+export async function pruneWindowsDebugSymbols(root, distribution) {
+  const omitted = [];
+  if (distribution.platform !== "win32") return { omitted, totalBytes: 0 };
+  const rootInfo = await lstat(root);
+  if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink())
+    throw new Error("Blender 暂存根目录必须是实际目录");
+  const rootReal = await realpath(root);
+  async function walk(relative) {
+    const directory = safeBundlePath(root, relative);
+    const info = await lstat(directory);
+    if (!info.isDirectory() || info.isSymbolicLink())
+      throw new Error(`Blender 暂存目录不能是链接：${relative}`);
+    if (!contained(rootReal, await realpath(directory)))
+      throw new Error(`Blender 暂存目录越界：${relative}`);
+    const entries = (await readdir(directory, { withFileTypes: true })).sort((a, b) =>
+      a.name.localeCompare(b.name, "en"),
+    );
+    for (const entry of entries) {
+      const name = `${relative}/${entry.name}`;
+      const full = safeBundlePath(root, name);
+      const childInfo = await lstat(full);
+      if (childInfo.isSymbolicLink()) {
+        const target = await readlink(full);
+        if (path.isAbsolute(target) || !contained(rootReal, await realpath(full)))
+          throw new Error(`运行时符号链接指向包外：${name}`);
+        if (/\.pdb$/i.test(entry.name)) throw new Error(`Blender 调试符号不能是链接：${name}`);
+      } else if (childInfo.isDirectory()) {
+        await walk(name);
+      } else if (childInfo.isFile()) {
+        if (/\.pdb$/i.test(entry.name)) omitted.push({ path: name, size: childInfo.size });
+      } else {
+        throw new Error(`运行时包含不支持的文件类型：${name}`);
+      }
+    }
+  }
+  await walk("runtime");
+  for (const entry of omitted) {
+    const full = safeBundlePath(root, entry.path);
+    const info = await lstat(full);
+    if (!info.isFile() || info.isSymbolicLink() || !contained(rootReal, await realpath(full)))
+      throw new Error(`Blender 调试符号路径已变化：${entry.path}`);
+    await rm(full);
+  }
+  return { omitted, totalBytes: omitted.reduce((sum, entry) => sum + entry.size, 0) };
+}
+
+export function assertPreparedManifestIdentity(manifest, distribution, buildFingerprint) {
+  if (
+    manifest.schemaVersion !== 1 ||
+    manifest.fingerprint !== buildFingerprint ||
+    manifest.version !== BLENDER_VERSION ||
+    manifest.platform !== distribution.platform ||
+    manifest.arch !== distribution.arch ||
+    manifest.executable !== distribution.executable ||
+    manifest.archive?.sha256 !== distribution.sha256 ||
+    manifest.sources?.md5 !== SOURCE.md5 ||
+    manifest.packaging?.policy !== blenderPackagingPolicy(distribution.platform)
+  )
+    throw new Error("运行时版本、发行裁剪策略或构建清单已变化");
+}
+
+export function assertBlenderPackagingInventory(files, distribution) {
+  if (
+    distribution.platform === "win32" &&
+    files.some((entry) => entry.path.startsWith("runtime/") && /\.pdb$/i.test(entry.path))
+  )
+    throw new Error("Windows Blender 发行包仍包含 PDB 调试符号，需要重新准备");
 }
 
 export function assertArchiveEntries(listing) {
@@ -410,7 +486,10 @@ async function writeSources(stage, projectRoot, sourceArchive, distribution) {
   await writeFile(
     path.join(stage, "SOURCE.txt"),
     [
-      `This application redistributes the unmodified official Blender ${BLENDER_VERSION} binary distribution.`,
+      `This application redistributes the official Blender ${BLENDER_VERSION} runtime.`,
+      distribution.platform === "win32"
+        ? "Windows PDB debug symbols are omitted from the user bundle; all runtime binaries, scripts, assets, licenses and matching source are retained."
+        : "The official binary distribution is retained without file pruning.",
       "Blender and its bundled libraries retain their upstream copyright notices and licenses.",
       `Official license information: https://www.blender.org/about/license/`,
       `Bundled license directory: ${licensePath}`,
@@ -480,17 +559,7 @@ export async function prepareBlender({
   if (!force) {
     try {
       const manifest = JSON.parse(await readFile(path.join(destination, "manifest.json"), "utf8"));
-      if (
-        manifest.schemaVersion !== 1 ||
-        manifest.fingerprint !== buildFingerprint ||
-        manifest.version !== BLENDER_VERSION ||
-        manifest.platform !== distribution.platform ||
-        manifest.arch !== distribution.arch ||
-        manifest.executable !== distribution.executable ||
-        manifest.archive?.sha256 !== distribution.sha256 ||
-        manifest.sources?.md5 !== SOURCE.md5
-      )
-        throw new Error("运行时版本或构建清单已变化");
+      assertPreparedManifestIdentity(manifest, distribution, buildFingerprint);
       await verifyLayout(destination, distribution);
       if (manifest.inventory?.path !== "files-manifest.json")
         throw new Error("缺少完整运行时内容清单");
@@ -499,6 +568,7 @@ export async function prepareBlender({
         throw new Error("运行时内容清单校验失败");
       const files = JSON.parse(await readFile(inventoryPath, "utf8"));
       await verifyManifestFiles(destination, files);
+      assertBlenderPackagingInventory(files, distribution);
       probeVersion(destination, distribution);
       console.log(
         `[blender:prepare] 完整内置引擎已校验：${BLENDER_VERSION} ${distribution.platform}/${distribution.arch}, ${files.length} 个文件/链接`,
@@ -517,10 +587,12 @@ export async function prepareBlender({
   const stage = path.join(cache, `stage-${randomUUID()}`);
   await mkdir(stage);
   await unpackRuntime(archive, stage, distribution);
+  const pruning = await pruneWindowsDebugSymbols(stage, distribution);
   await verifyLayout(stage, distribution);
   const versionText = probeVersion(stage, distribution);
   const sources = await writeSources(stage, projectRoot, sourceArchive, distribution);
   const files = await snapshotFiles(stage);
+  assertBlenderPackagingInventory(files, distribution);
   const totalBytes = files.reduce((sum, entry) => sum + (entry.size ?? 0), 0);
   const inventoryPath = path.join(stage, "files-manifest.json");
   await writeFile(inventoryPath, JSON.stringify(files, null, 2) + "\n");
@@ -540,6 +612,11 @@ export async function prepareBlender({
       size: distribution.size,
     },
     sources,
+    packaging: {
+      policy: blenderPackagingPolicy(distribution.platform),
+      omitted: pruning.omitted,
+      omittedBytes: pruning.totalBytes,
+    },
     totalBytes,
     inventory: {
       path: "files-manifest.json",
@@ -570,6 +647,10 @@ export async function prepareBlender({
     throw error;
   }
   if (hadPrevious) await rm(previous, { recursive: true, force: true });
+  if (pruning.omitted.length)
+    console.log(
+      `[blender:prepare] 已排除 ${pruning.omitted.length} 个 Windows 调试符号，减少 ${(pruning.totalBytes / 1024 / 1024).toFixed(1)} MiB（官方归档保留在构建缓存）`,
+    );
   console.log(
     `[blender:prepare] 已内置 ${versionText}：${files.length} 个文件/链接，总计 ${(totalBytes / 1024 / 1024).toFixed(1)} MiB（含对应源码）`,
   );

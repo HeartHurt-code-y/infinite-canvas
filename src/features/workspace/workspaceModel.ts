@@ -460,6 +460,7 @@ export const OUTPUT_NODE_GAP_Y = 32;
 // Tauri WebView 的系统拖放处理器会拦截 HTML5 dataTransfer 拖拽，不能依赖 draggable。
 
 export interface BaseGenNodeData {
+  readonly name?: string;
   readonly key: string;
   readonly x: number;
   readonly y: number;
@@ -627,15 +628,23 @@ export interface VideoFrameExtractorNodeConfig {
    * （素材视频 / 视频产物 / 下载节点完成产物）。
    */
   readonly videoPath: string;
+  /** 持久化本地批次，重启后继续同一个任务及其剩余视频。 */
+  readonly checkpoint?: {
+    readonly batchId: string;
+    readonly activeJobId: string;
+    readonly requestId?: string;
+    readonly sources: readonly string[];
+    readonly timestamps: readonly number[];
+  };
 }
 
 /**
- * 抽帧任务的会话内运行状态。jobId 关联后端内存任务记录；
+ * 抽帧任务的展示状态。jobId 关联后端持久化任务记录；
  * 完成后每个抽帧秒数自动落一张 origin=frame_extract 的图片产物卡片。
  */
 export interface VideoFrameExtractorRunState {
   readonly jobId: string;
-  readonly status: "running" | "done" | "error" | "cancelled";
+  readonly status: "running" | "paused" | "done" | "error" | "cancelled";
   readonly preparingEngine: boolean;
   readonly progress: number | null;
   readonly error: string | null;
@@ -987,6 +996,8 @@ export interface OutputLayerInfo {
  * 任务进行中先落下占位卡片展示进度，结果返回后先展示会话内预览，保存完成后切换到本地文件，失败展示完整原始错误。
  */
 export interface OutputNodeData {
+  /** 用户改名独立于媒体身份和自动保存路径，结果补发不能覆盖。 */
+  readonly customName?: string;
   /** 节点实例 id。 */
   readonly key: string;
   /** 结果唯一标识（taskId#resultIndex）；任务尚未产出结果时为 null。 */
@@ -995,7 +1006,7 @@ export interface OutputNodeData {
   readonly sourceNodeId: string;
   readonly taskId: string;
   /** 文本产物（Context-IR 等）为 "text"，无法作为媒体参考输入。 */
-  readonly mediaType: "image" | "video" | "text";
+  readonly mediaType: "image" | "video" | "audio" | "text";
   /** 旧文档未保存时默认为 generation。 */
   readonly origin?:
     | "generation"
@@ -1003,6 +1014,8 @@ export interface OutputNodeData {
     | "download"
     | "frame_extract"
     | "video_edit"
+    | "video_preparation"
+    | "ai_media"
     | "white_model"
     | "white_model_still"
     | "green_screen";
@@ -1037,7 +1050,7 @@ export interface OutputNodeData {
 }
 
 export function outputNodeDimensions(node: OutputNodeData): CanvasNodeDimensions {
-  if (node.mediaType === "text") {
+  if (node.mediaType === "text" || node.mediaType === "audio") {
     return { width: OUTPUT_NODE_WIDTH, height: OUTPUT_NODE_HEIGHT };
   }
   return node.finalPath == null && node.previewSrc == null
@@ -1228,6 +1241,15 @@ export function nextOutputSlot(
 ): { x: number; y: number } {
   const width = genNode.measured?.width ?? genNodeDimensions(genNode.kind).width;
   return nextOutputPosition({ x: genNode.x, y: genNode.y, width, height: 0 }, current, options);
+}
+
+/** 本地媒体处理产物同样按来源节点布局，避免覆盖已有卡片。 */
+export function nextPreparedMediaOutputSlot(
+  source: CanvasNodeRect,
+  current: readonly OutputNodeData[],
+  options: OutputPlacementOptions = {},
+): { x: number; y: number } {
+  return nextOutputPosition(source, current, options);
 }
 
 export function nextVideoComposerOutputSlot(
@@ -2284,7 +2306,7 @@ export interface VideoNodeConfig {
   readonly mediaRoles?: Readonly<Record<string, string>>;
   /** URL 素材（文档 file / 网页 link 生视频），随画布保存。 */
   readonly urlMedia?: readonly VideoUrlMediaInput[];
-  /** 按次视频专用公网参考图/音频 URL；切换模型时保留，只有按次型号才提交。 */
+  /** 公网参考图/音频 URL；切换模型时保留，提交当前输入后由接口反馈支持范围。 */
   readonly perTaskUrlMedia?: readonly PerTaskVideoUrlInput[];
   /** 输入素材的槽位顺序；元素为素材节点 key，null 表示空槽。
    *  删除素材时保留空槽（不压缩），新增时填充最小空槽，保证其余素材顺序不变。 */
@@ -2295,7 +2317,7 @@ export interface VideoNodeConfig {
 export interface VideoUrlMediaInput {
   readonly id: string;
   readonly url: string;
-  /** file = 文档 URL；link = 网页 URL。二选一、各限 1 个、不与其它素材混用。 */
+  /** file = 文档 URL；link = 网页 URL。服务端决定数量与混用支持范围。 */
   readonly role: "file" | "link";
   /** 展示用简短名称（如页面标题或域名）。 */
   readonly label: string;
@@ -2747,6 +2769,8 @@ export function outputNodeReferenceTarget(node: OutputNodeData): MediaReferenceT
   if (
     node.origin === "composition" ||
     node.origin === "download" ||
+    node.origin === "video_preparation" ||
+    node.origin === "ai_media" ||
     node.origin === "white_model" ||
     node.origin === "green_screen"
   ) {
@@ -2787,11 +2811,13 @@ export function assetGenerationInput(node: AssetNodeData): GenerationMediaInput 
 export function outputGenerationInput(node: OutputNodeData): GenerationMediaInput | null {
   const target = outputNodeReferenceTarget(node);
   if (target == null) return null;
-  // 文本产物无法作为媒体参考，target 非空即 image/video。
+  // 文本产物无法作为媒体参考，其他媒体沿用稳定引用。
   const kind = node.mediaType as AssetKind;
   return {
     key: node.key,
-    name: node.name ?? `${node.mediaType === "image" ? "图片" : "视频"}产物`,
+    name:
+      node.name ??
+      `${node.mediaType === "image" ? "图片" : node.mediaType === "audio" ? "音频" : "视频"}产物`,
     kind,
     target,
     previewUrl: node.finalPath != null ? toMediaSrc(node.finalPath) : (node.previewSrc ?? null),

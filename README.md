@@ -28,25 +28,31 @@ pnpm dev:daemon:stop    # 停止常驻 dev server（状态：pnpm dev:daemon:sta
 
 ## 常用命令
 
-| 命令                       | 用途                                                                |
-| -------------------------- | ------------------------------------------------------------------- |
-| `pnpm dev`                 | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）       |
-| `pnpm dev:daemon`          | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）   |
-| `pnpm tauri:dev`           | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）            |
-| `pnpm build`               | 类型检查并构建前端                                                  |
-| `pnpm tauri:build`         | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物   |
-| `pnpm tauri:bundle:slim`   | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线 |
-| `pnpm update:manifest`     | 根据指定版本的 updater 产物生成 `latest.json`                       |
-| `pnpm test`                | 运行前端测试                                                        |
-| `pnpm lint`                | 执行类型感知 ESLint 检查                                            |
-| `pnpm format`              | 使用 Prettier 格式化工程文件                                        |
-| `pnpm check`               | 执行前端、Rust 格式化及 Clippy 全量检查                             |
-| `pnpm ffmpeg:prepare`      | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`          |
-| `pnpm remotion:prepare`    | 准备内置动画渲染运行时                                              |
-| `pnpm blender:prepare`     | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码           |
-| `pnpm macos:verify-bundle` | 校验 macOS 产物签名与内置可执行文件签名                             |
+| 命令                         | 用途                                                                   |
+| ---------------------------- | ---------------------------------------------------------------------- |
+| `pnpm dev`                   | 仅启动 Vite 前端（复用已在运行的 dev server，没有则启动一个）          |
+| `pnpm dev:daemon`            | 以脱离作业树的方式常驻启动 dev server（`status` / `stop` 同前缀）      |
+| `pnpm tauri:dev`             | 启动完整桌面应用（自动预置动画、FFmpeg 与 Blender 引擎）               |
+| `pnpm build`                 | 类型检查并构建前端                                                     |
+| `pnpm tauri:build`           | 构建带完整本地引擎的离线安装包；有升级私钥时同时签名 updater 产物      |
+| `pnpm tauri:build:online`    | 构建 Windows 轻量联网版，按需安装功能组件，使用独立更新频道            |
+| `pnpm update:publish:online` | 校验轻量版构建凭证、签名与七种组件，上传并逐字节验证后发布独立更新频道 |
+| `pnpm tauri:build:offline`   | 构建 Windows 完整离线套件：安装包内置五种组件，两种 AI 组件随附 ZIP    |
+| `pnpm components:pack`       | 校验运行资源并生成压缩组件包、固定摘要目录及离线导入用 ZIP             |
+| `pnpm tauri:bundle:slim`     | 基于已构建程序生成 Windows 小型更新包，需提供已发布完整包的资源基线    |
+| `pnpm update:manifest`       | 根据指定版本的 updater 产物生成 `latest.json`                          |
+| `pnpm test`                  | 运行前端测试                                                           |
+| `pnpm lint`                  | 执行类型感知 ESLint 检查                                               |
+| `pnpm format`                | 使用 Prettier 格式化工程文件                                           |
+| `pnpm check`                 | 执行前端、Rust 格式化及 Clippy 全量检查                                |
+| `pnpm ffmpeg:prepare`        | 下载并预置内置 FFmpeg 引擎到 `src-tauri/resources/ffmpeg/`             |
+| `pnpm remotion:prepare`      | 准备内置动画渲染运行时                                                 |
+| `pnpm blender:prepare`       | 校验并预置随安装包分发的完整 Blender 引擎、许可与对应源码              |
+| `pnpm macos:verify-bundle`   | 校验 macOS 产物签名与内置可执行文件签名                                |
 
-白模工作室默认使用应用内置 Blender，用户无需另行安装或首次运行时下载引擎。构建准备在开发机器上完成，正式安装包包含完整运行库、Python 与工程精修所需资源。外部 Blender 仅作为高级可选设置；内置资源缺失时会报告安装包损坏。打包方式、支持平台与验证说明见 [Blender 桥接](tools/blender/README.md)。
+Windows 提供轻量联网版与完整离线套件。轻量版保留日常媒体处理所需的 FFmpeg，Blender、动画和网页解析、动捕、图片风格库及 AI 媒体运行时通过顶部「功能组件」安装；对应功能首次使用时会打开所需组件列表。支持中断续传、修复及离线 ZIP 导入，安装后返回原功能主动继续操作，保留草稿与已有任务。完整离线套件的安装包内置 Blender、Remotion、FFmpeg、动捕和风格库五种组件，两种 AI 组件以 ZIP 随套件提供；安装应用后在「功能组件」分别导入随附 ZIP，即可离线准备全部七种组件，无需下载。交付时须保留安装包、签名、两种 AI ZIP 与离线组件收据的完整套件，单独安装 EXE 不会同时安装两种 AI 组件。构建机仍须预先准备并校验所有组件，生成本版本程序信任的目录和压缩包。显式选择外部 Blender 继续作为高级可选设置。新的组件 ZIP 与双版本构建入口先支持 Windows x64；macOS 沿用现有完整构建。分发与校验流程见 [功能组件与轻量版](docs/integrations/runtime-components.md) 和 [Blender 桥接](tools/blender/README.md)。
+
+发行资源准备会精简运行时不需要的开发内容：Windows Blender 排除 PDB 调试符号；Remotion 按实际依赖关系合并可兼容的重复副本，并排除旧的 `.ignored_*` 依赖目录；独立 AI 组件排除指定开发静态链接库与 C/C++ 头文件。引擎动态库、Python/Node、浏览器、模型、参考原图、许可证与对应源码继续保留。完整性清单在精简后重新生成，程序须根据这些清单重新构建；不能手动删除资源后继续复用旧程序或旧签名清单。
 
 ## 凭据存储：默认明文文件
 

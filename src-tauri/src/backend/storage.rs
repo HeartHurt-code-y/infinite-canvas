@@ -52,6 +52,14 @@ mod remote_video_tasks;
 #[path = "storage/local_base64_assets.rs"]
 mod local_base64_assets;
 
+#[path = "storage/ai_media.rs"]
+mod ai_media;
+#[path = "storage/video_preparation.rs"]
+mod video_preparation;
+
+#[path = "storage/frame_extraction.rs"]
+mod frame_extraction;
+
 pub use generation_lifecycle::{
     GenerationLifecycleFact, GenerationOperationalEvent, GenerationRemoteObservation,
     GenerationTaskLifecycle, PersistedTaskTransition, PersistedTaskTransitionEvent,
@@ -247,6 +255,14 @@ CREATE TABLE IF NOT EXISTS canvas_documents (
   revision INTEGER NOT NULL CHECK (revision > 0),
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS generation_result_names (
+  task_id TEXT NOT NULL,
+  result_index INTEGER NOT NULL,
+  name TEXT NOT NULL,
+  PRIMARY KEY(task_id, result_index),
+  FOREIGN KEY(task_id, result_index) REFERENCES generation_results(task_id, result_index)
 );
 
 CREATE INDEX IF NOT EXISTS idx_canvas_documents_updated
@@ -1156,6 +1172,30 @@ impl Storage {
         let timestamp = now_ms();
         let mut connection = self.lock()?;
         let transaction = connection.transaction()?;
+        if let Some(source_task_id) = task
+            .logical_request
+            .get("seedanceDraftSourceTaskId")
+            .and_then(Value::as_str)
+        {
+            let existing: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM generation_tasks
+                 WHERE json_extract(logical_request_json, '$.seedanceDraftSourceTaskId') = ?1
+                   AND status != 'failed'
+                   AND (status != 'interrupted' OR remote_task_id IS NOT NULL OR EXISTS (
+                       SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
+                         AND c.sent_at IS NOT NULL
+                   )) LIMIT 1",
+                    params![source_task_id],
+                    |row| row.get(0),
+                )
+                .optional()?;
+            if let Some(task_id) = existing {
+                return Err(BackendError::Conflict(format!(
+                    "该草稿已有正片任务 {task_id}，请查询原任务，避免重复付费"
+                )));
+            }
+        }
         transaction.execute(
             "INSERT INTO generation_tasks
              (id, canvas_id, source_node_id, operation, status, query_health,
@@ -1192,6 +1232,26 @@ impl Storage {
         workflow_history::associate_task(&transaction, &task)?;
         transaction.commit()?;
         Ok(())
+    }
+
+    pub fn seedance_draft_final_task_id(
+        &self,
+        source_task_id: &str,
+    ) -> BackendResult<Option<String>> {
+        Ok(self
+            .lock()?
+            .query_row(
+                "SELECT id FROM generation_tasks
+             WHERE json_extract(logical_request_json, '$.seedanceDraftSourceTaskId') = ?1
+               AND status != 'failed'
+               AND (status != 'interrupted' OR remote_task_id IS NOT NULL OR EXISTS (
+                   SELECT 1 FROM provider_calls c WHERE c.task_id = generation_tasks.id
+                     AND c.sent_at IS NOT NULL
+               )) ORDER BY created_at DESC LIMIT 1",
+                params![source_task_id],
+                |row| row.get(0),
+            )
+            .optional()?)
     }
 
     pub fn get_task_execution(&self, task_id: &str) -> BackendResult<TaskExecutionRecord> {
@@ -1238,7 +1298,8 @@ impl Storage {
             .query_row(
                 "SELECT task_id, result_index, media_type, remote_task_id, source_json,
                         save_status, final_path, relative_path, byte_size, mime_type, sha256,
-                        saved_at, error_json
+                        saved_at, error_json,
+                        (SELECT name FROM generation_result_names n WHERE n.task_id = generation_results.task_id AND n.result_index = generation_results.result_index)
                  FROM generation_results WHERE task_id = ?1 AND result_index = ?2",
                 params![task_id, result_index],
                 result_from_row,
@@ -1254,7 +1315,8 @@ impl Storage {
             let mut statement = transaction.prepare(
                 "SELECT task_id, result_index, media_type, remote_task_id, source_json,
                         save_status, final_path, relative_path, byte_size, mime_type, sha256,
-                        saved_at, error_json
+                        saved_at, error_json,
+                        (SELECT name FROM generation_result_names n WHERE n.task_id = generation_results.task_id AND n.result_index = generation_results.result_index)
                  FROM generation_results
                  WHERE save_status IN ('pending', 'writing')
                  ORDER BY task_id, result_index",
@@ -1451,7 +1513,8 @@ impl Storage {
             &connection,
             "SELECT task_id, result_index, media_type, remote_task_id, source_json,
                     save_status, final_path, relative_path, byte_size, mime_type, sha256,
-                    saved_at, error_json
+                    saved_at, error_json,
+                    (SELECT name FROM generation_result_names n WHERE n.task_id = generation_results.task_id AND n.result_index = generation_results.result_index)
              FROM generation_results WHERE task_id = ?1 ORDER BY result_index",
             task_id,
             result_from_row,
@@ -1524,7 +1587,11 @@ impl Storage {
                 AND (?3 IS NULL OR status IN (SELECT value FROM json_each(?3)))
                 AND (?4 IS NULL OR created_at < ?4)
                 AND (?5 IS NULL OR created_at >= ?5)
-                AND (?6 IS NULL OR created_at <= ?6)"
+                AND (?6 IS NULL OR created_at <= ?6)
+                AND (?8 IS NULL OR instr(lower(COALESCE(json_extract(logical_request_json, '$.outputName'), '')), lower(?8)) > 0
+                  OR instr(lower(id), lower(?8)) > 0 OR instr(lower(COALESCE(remote_task_id, '')), lower(?8)) > 0
+                  OR EXISTS (SELECT 1 FROM generation_results r WHERE r.task_id = generation_tasks.id AND instr(lower(COALESCE(r.final_path, '')), lower(?8)) > 0)
+                  OR EXISTS (SELECT 1 FROM generation_result_names n WHERE n.task_id = generation_tasks.id AND instr(lower(n.name), lower(?8)) > 0))"
             )
         ))?;
         let mut items = statement
@@ -1536,7 +1603,12 @@ impl Storage {
                     query.cursor_created_before,
                     query.created_from,
                     query.created_to,
-                    limit + 1
+                    limit + 1,
+                    query
+                        .search
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|s| !s.is_empty())
                 ],
                 task_summary_from_row,
             )?
@@ -1551,6 +1623,32 @@ impl Storage {
             items,
             next_cursor_created_before,
         })
+    }
+
+    /// Naming metadata is independent of the result lifecycle and its immutable media path.
+    pub fn rename_generation_result(
+        &self,
+        task_id: &str,
+        result_index: u32,
+        name: &str,
+    ) -> BackendResult<()> {
+        let name = name.trim();
+        if name.is_empty() || name.chars().count() > 128 || name.chars().any(char::is_control) {
+            return Err(BackendError::validation(
+                "产物文件名须为 1–128 个字符",
+                json!({}),
+            ));
+        }
+        let record = self.get_result(task_id, result_index)?;
+        if record.final_path.is_none() || record.save_status != SaveStatus::Succeeded {
+            return Err(BackendError::Conflict("请等待产物保存成功后再命名".into()));
+        }
+        self.lock()?.execute(
+            "INSERT INTO generation_result_names(task_id, result_index, name) VALUES (?1, ?2, ?3)
+             ON CONFLICT(task_id, result_index) DO UPDATE SET name = excluded.name",
+            params![task_id, result_index, name],
+        )?;
+        Ok(())
     }
 
     pub fn list_nonterminal_tasks(&self) -> BackendResult<Vec<TaskExecutionRecord>> {
@@ -2477,7 +2575,8 @@ fn task_summary_sql(where_clause: &str) -> String {
         "SELECT id, canvas_id, source_node_id, operation, status, query_health,
                 provider_connection_id, provider_display_name_snapshot, model_definition_id,
                 remote_model_id_snapshot, remote_task_id, progress, tokens_json,
-                created_at, updated_at, completed_at FROM generation_tasks {where_clause}"
+                created_at, updated_at, completed_at,
+                json_extract(logical_request_json, '$.outputName') FROM generation_tasks {where_clause}"
     )
 }
 
@@ -2491,6 +2590,7 @@ fn task_summary_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationTaskSummar
         .transpose()
         .map_err(json_sql_error)?;
     Ok(GenerationTaskSummary {
+        output_name: row.get(16)?,
         id: row.get(0)?,
         canvas_id: row.get(1)?,
         source_node_id: row.get(2)?,
@@ -2562,6 +2662,7 @@ fn result_from_row(row: &Row<'_>) -> rusqlite::Result<GenerationResultRecord> {
     let save_status: String = row.get(5)?;
     let error: Option<String> = row.get(12)?;
     Ok(GenerationResultRecord {
+        display_name: row.get(13)?,
         task_id: row.get(0)?,
         result_index: row.get(1)?,
         media_type: parse_media_type(media_type)?,
@@ -2746,6 +2847,73 @@ fn text_sql_error(error: String) -> rusqlite::Error {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn seedance_draft_final_identity_survives_restart_and_blocks_duplicate_paid_tasks() {
+        let directory = tempfile::TempDir::new().unwrap();
+        let path = directory.path().join("draft.sqlite");
+        let storage = super::Storage::open(&path).unwrap();
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        let logical = serde_json::json!({
+            "seedanceDraftSourceTaskId": "local-draft",
+            "parameters": {"draft_task_id": "remote-draft"}
+        });
+        let create = |storage: &super::Storage, id: &str| {
+            storage.insert_task(super::NewTask {
+                id,
+                canvas_id: "canvas-original",
+                source_node_id: "node-original",
+                operation: super::GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: "original-sd2-asset-credential",
+                model_definition_id: "model-original",
+                remote_model_id: Some("doubao-seedance-2-5-260628"),
+                logical_request: &logical,
+            })
+        };
+        create(&storage, "final-1").unwrap();
+        assert!(create(&storage, "final-duplicate").is_err());
+        drop(storage);
+        let reopened = super::Storage::open(&path).unwrap();
+        assert_eq!(
+            reopened
+                .seedance_draft_final_task_id("local-draft")
+                .unwrap()
+                .as_deref(),
+            Some("final-1")
+        );
+        let task = reopened.get_task_execution("final-1").unwrap();
+        assert_eq!(task.api_key_ref_snapshot, "original-sd2-asset-credential");
+        assert_eq!(task.logical_request, logical);
+        reopened
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE generation_tasks SET status='interrupted' WHERE id='final-1'",
+                [],
+            )
+            .unwrap();
+        assert!(
+            reopened
+                .seedance_draft_final_task_id("local-draft")
+                .unwrap()
+                .is_none()
+        );
+        create(&reopened, "final-after-unsent-interruption").unwrap();
+        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='interrupted', remote_task_id='remote-final' WHERE id='final-after-unsent-interruption'", []).unwrap();
+        assert!(create(&reopened, "final-with-remote-duplicate").is_err());
+        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='unknown' WHERE id='final-after-unsent-interruption'", []).unwrap();
+        assert!(create(&reopened, "final-after-ambiguous").is_err());
+        reopened.lock().unwrap().execute("UPDATE generation_tasks SET status='failed' WHERE id='final-after-unsent-interruption'", []).unwrap();
+        create(&reopened, "final-explicit-retry").unwrap();
+        assert_eq!(
+            reopened
+                .seedance_draft_final_task_id("local-draft")
+                .unwrap()
+                .as_deref(),
+            Some("final-explicit-retry")
+        );
+    }
+
     use std::sync::Arc;
 
     use tempfile::TempDir;
@@ -2994,6 +3162,112 @@ mod tests {
                     .is_err()
             );
         }
+    }
+
+    #[test]
+    fn named_history_search_and_result_rename_survive_restart_without_moving_media() {
+        let directory = TempDir::new().unwrap();
+        let path = directory.path().join("backend.sqlite");
+        let storage = Storage::open(&path).unwrap();
+        let provider = storage.get_provider_connection("provider-sd20").unwrap();
+        for index in 0..45 {
+            let id = format!("named-task-{index}");
+            storage
+                .insert_task(NewTask {
+                    id: &id,
+                    canvas_id: "names-canvas",
+                    source_node_id: "names-node",
+                    operation: GenerationOperation::TextToImage,
+                    provider: &provider,
+                    api_key_ref: &provider.api_key_ref,
+                    model_definition_id: "gpt-image-2",
+                    remote_model_id: Some("gpt-image-2"),
+                    logical_request: &json!({"outputName": format!("第{index:02}集")}),
+                })
+                .unwrap();
+            storage
+                .lock()
+                .unwrap()
+                .execute(
+                    "UPDATE generation_tasks SET created_at = ?1 WHERE id = ?2",
+                    params![index * 1000, id],
+                )
+                .unwrap();
+        }
+        storage.lock().unwrap().execute(
+            "INSERT INTO generation_results(task_id, result_index, media_type, source_json, save_status, final_path) VALUES ('named-task-0', 1, 'image', '{}', 'succeeded', 'C:/outputs/original.png')", [],
+        ).unwrap();
+        let query = |search: &str| {
+            serde_json::from_value::<GenerationTaskListQuery>(
+                json!({"canvasId": "names-canvas", "search": search, "limit": 1}),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            storage.list_tasks(&query("第00集")).unwrap().items[0].id,
+            "named-task-0"
+        );
+        storage
+            .rename_generation_result("named-task-0", 1, "镜头003_选用.png")
+            .unwrap();
+        assert!(
+            storage
+                .rename_generation_result("named-task-0", 2, "不存在")
+                .is_err()
+        );
+        assert!(
+            storage
+                .rename_generation_result("named-task-0", 1, "  ")
+                .is_err()
+        );
+        // Simulate a later lifecycle write of the archived source; the naming overlay remains.
+        storage
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE generation_results SET source_json = '{}' WHERE task_id = 'named-task-0'",
+                [],
+            )
+            .unwrap();
+        drop(storage);
+        let storage = Storage::open(&path).unwrap();
+        let detail = storage.get_task_detail("named-task-0").unwrap();
+        assert_eq!(detail.summary.output_name.as_deref(), Some("第00集"));
+        assert_eq!(
+            detail.results[0].display_name.as_deref(),
+            Some("镜头003_选用.png")
+        );
+        assert_eq!(detail.results[0].source, json!({}));
+        assert_eq!(
+            detail.results[0].final_path.as_deref(),
+            Some("C:/outputs/original.png")
+        );
+        for search in ["镜头003", "original.png", "named-task-0", "第00集"] {
+            assert_eq!(
+                storage.list_tasks(&query(search)).unwrap().items[0].id,
+                "named-task-0"
+            );
+        }
+        assert!(
+            storage
+                .list_tasks(&query("%' OR 1=1 --"))
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        let other_canvas = serde_json::from_value::<GenerationTaskListQuery>(
+            json!({"canvasId": "other", "search": "镜头003"}),
+        )
+        .unwrap();
+        assert!(storage.list_tasks(&other_canvas).unwrap().items.is_empty());
+        let mut pagination = query("第");
+        let first = storage.list_tasks(&pagination).unwrap();
+        assert_eq!(first.items[0].id, "named-task-44");
+        pagination.cursor_created_before = first.next_cursor_created_before;
+        assert_eq!(
+            storage.list_tasks(&pagination).unwrap().items[0].id,
+            "named-task-43"
+        );
     }
 
     #[test]
@@ -4215,11 +4489,14 @@ mod tests {
             .find(|model| model.id == "remote::company-prod::doubao-seedance-2-5-260628")
             .expect("migrated Seedance 2.5 definition");
         let parameters = &definition.operations["video_generation"]["parameters"];
+        assert_eq!(parameters["resolution"]["enum"], json!(["720p", "480p"]));
+        assert!(parameters.get("web_search").is_none());
+        assert_eq!(parameters["duration"]["default"], 5);
+        assert_eq!(parameters["draft"]["default"], false);
         assert_eq!(
-            parameters["resolution"]["enum"],
-            json!(["720p", "480p", "1080p"])
+            definition.operations["video_generation"]["requestProfileId"],
+            "moyu_seedance_25_draft_v1"
         );
-        assert_eq!(parameters["web_search"]["transform"], "web_search_tool");
     }
 
     #[test]

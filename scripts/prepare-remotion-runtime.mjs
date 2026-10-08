@@ -10,12 +10,18 @@ import {
   remotionInventoryFilesMatch,
   remotionTreeIsMaterialized,
   remotionPackagesPresent,
+  remotionCachedSourcesMatch,
   materializeRemotionRuntime,
   writeRemotionFileInventory,
 } from "./remotion-runtime-integrity.mjs";
+import {
+  optimizeRemotionDependencies,
+  REMOTION_DISTRIBUTION_VERSION,
+} from "./remotion-runtime-distribution.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const source = path.join(root, "tools", "remotion-runtime");
+const offlineCached = process.argv.includes("--offline-cached");
 // Node 26 currently leaves extract-zip's stream pipeline unresolved on Windows.
 // Use the same pinned Node LTS for preparation and the shipped offline engine.
 const nodeVersion = "24.19.0";
@@ -57,6 +63,7 @@ if (process.platform === "win32" && process.version !== `v${nodeVersion}`) {
     }
   }
   if (!available) {
+    if (offlineCached) throw new Error("离线迁移缺少已校验的固定 Node 运行时；不会下载");
     console.log("准备固定版本的本地动画引擎");
     const response = await fetch(
       `https://nodejs.org/dist/v${nodeVersion}/win-${process.arch}/node.exe`,
@@ -69,7 +76,7 @@ if (process.platform === "win32" && process.version !== `v${nodeVersion}`) {
     await writeFile(executable, bytes);
   }
   const code = await new Promise((resolve, reject) => {
-    const child = spawn(executable, [fileURLToPath(import.meta.url)], {
+    const child = spawn(executable, [fileURLToPath(import.meta.url), ...process.argv.slice(2)], {
       cwd: root,
       stdio: "inherit",
       windowsHide: true,
@@ -91,9 +98,15 @@ const fileNames = [
   "resolve-rednote.mjs",
 ];
 const hash = createHash("sha256");
-for (const name of fileNames) hash.update(await readFile(path.join(source, name)));
+const buildInputs = {};
+for (const name of fileNames) {
+  const bytes = await readFile(path.join(source, name));
+  hash.update(bytes);
+  buildInputs[name] = createHash("sha256").update(bytes).digest("hex");
+}
 hash.update(await readFile(fileURLToPath(import.meta.url)));
 hash.update(await readFile(path.join(root, "scripts", "remotion-runtime-integrity.mjs")));
+hash.update(await readFile(path.join(root, "scripts", "remotion-runtime-distribution.mjs")));
 hash.update(process.version + process.platform + process.arch);
 const fingerprint = hash.digest("hex");
 const manifestPath = path.join(destination, "runtime-manifest.json");
@@ -119,6 +132,7 @@ const readyPaths = [
 ];
 if (
   oldManifest?.fingerprint === fingerprint &&
+  oldManifest?.distribution?.version === REMOTION_DISTRIBUTION_VERSION &&
   readyPaths.every((file) => existsSync(path.join(destination, file))) &&
   (await remotionCriticalFilesMatch(
     destination,
@@ -130,6 +144,52 @@ if (
   (await remotionTreeIsMaterialized(destination))
 ) {
   console.log("动画渲染运行时已就绪");
+  process.exit(0);
+}
+
+if (offlineCached) {
+  const packageJson = JSON.parse(await readFile(path.join(source, "package.json"), "utf8"));
+  const lockHash = createHash("sha256")
+    .update(await readFile(path.join(source, "pnpm-lock.yaml")))
+    .digest("hex");
+  if (
+    !oldManifest ||
+    oldManifest.nodeVersion !== process.version ||
+    oldManifest.remotionVersion !== packageJson.dependencies.remotion ||
+    oldManifest.lockHash !== lockHash ||
+    !readyPaths.every((file) => existsSync(path.join(destination, file))) ||
+    !(await remotionCriticalFilesMatch(
+      destination,
+      nodeName,
+      oldManifest.browserExecutable,
+      oldManifest.criticalSha256,
+    )) ||
+    !(await remotionInventoryFilesMatch(destination, oldManifest.inventory)) ||
+    !(await remotionTreeIsMaterialized(destination)) ||
+    !(await remotionCachedSourcesMatch(destination, source))
+  )
+    throw new Error("旧动画组件与源码、固定版本或完整清单不匹配，不能离线迁移；请完整准备运行时");
+  const distribution = await optimizeRemotionDependencies(destination);
+  await writeFile(
+    manifestPath,
+    JSON.stringify(
+      {
+        ...oldManifest,
+        fingerprint,
+        buildInputs,
+        distribution,
+        criticalSha256: await hashRemotionCriticalFiles(
+          destination,
+          nodeName,
+          oldManifest.browserExecutable,
+        ),
+        inventory: await writeRemotionFileInventory(destination),
+      },
+      null,
+      2,
+    ),
+  );
+  console.log(`动画运行时离线迁移完成：${distribution.layout} / ${destination}`);
   process.exit(0);
 }
 
@@ -227,6 +287,7 @@ try {
     gitSource: null,
     askAIEnabled: false,
   });
+  const distribution = await optimizeRemotionDependencies(destination);
   const packageJson = JSON.parse(await readFile(path.join(source, "package.json"), "utf8"));
   await writeFile(
     manifestPath,
@@ -234,6 +295,8 @@ try {
       {
         schemaVersion: 1,
         fingerprint,
+        buildInputs,
+        distribution,
         lockHash,
         nodeVersion: process.version,
         remotionVersion: packageJson.dependencies.remotion,

@@ -300,6 +300,9 @@ impl VideoTaskType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StartGenerationCommand {
+    /// Local naming metadata, frozen with the task and never sent as a provider parameter.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workflow_run_id: Option<String>,
     pub canvas_id: String,
@@ -467,6 +470,7 @@ pub struct TokenUsage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskSummary {
+    pub output_name: Option<String>,
     pub id: String,
     pub canvas_id: String,
     pub source_node_id: String,
@@ -538,6 +542,8 @@ pub struct TextGenerationOutputRecord {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationResultRecord {
+    #[serde(default)]
+    pub display_name: Option<String>,
     pub task_id: String,
     pub result_index: u32,
     pub media_type: MediaType,
@@ -592,6 +598,7 @@ pub struct GenerationProgressResult {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GenerationTaskListQuery {
+    pub search: Option<String>,
     pub canvas_id: Option<String>,
     pub source_node_id: Option<String>,
     pub statuses: Option<Vec<GenerationTaskStatus>>,
@@ -715,6 +722,8 @@ pub struct StartVideoCompositionCommand {
 #[serde(rename_all = "camelCase")]
 pub struct StartVideoFrameExtractionCommand {
     pub video_path: String,
+    #[serde(default)]
+    pub request_id: Option<String>,
     #[serde(default)]
     pub timestamps: Vec<f64>,
     /// 0~1 的视频比例采样点。后端先探测实际时长再换算，和 timestamps 二选一。

@@ -22,6 +22,7 @@ export function VideoMiddleFrame({
   placeholder,
   objectFit = "contain",
   eager = false,
+  firstFrame = false,
   onAspectRatioChange,
   onLoadError,
 }: {
@@ -34,6 +35,8 @@ export function VideoMiddleFrame({
    * 按画布几何会永远判不可见。
    */
   readonly eager?: boolean;
+  /** 本地封面降级：只解码首帧，避开容器索引或精确 seek 不可用的问题。 */
+  readonly firstFrame?: boolean;
   readonly onAspectRatioChange?: (aspectRatio: number) => void;
   /** 视频不可读（签名过期、编码不支持等）：调用方回退为类型图标。 */
   readonly onLoadError?: () => void;
@@ -56,7 +59,7 @@ export function VideoMiddleFrame({
         src={inView ? proxiedSrc : undefined}
         muted
         playsInline
-        preload="metadata"
+        preload={firstFrame ? "auto" : "metadata"}
         draggable={false}
         aria-hidden="true"
         tabIndex={-1}
@@ -65,6 +68,7 @@ export function VideoMiddleFrame({
           if (video.videoWidth > 0 && video.videoHeight > 0) {
             onAspectRatioChange?.(video.videoWidth / video.videoHeight);
           }
+          if (firstFrame) return;
           if (Number.isFinite(video.duration) && video.duration > 0) {
             video.currentTime = video.duration / 2;
             return;

@@ -23,9 +23,16 @@ import {
   type WhiteModelScenePlan,
   type WhiteModelVector,
 } from "../../lib/whiteModelScene";
-import { createWhiteModelBlockingObject, dummyNumbers, type WhiteModelStudioMediaInput } from "../../lib/whiteModelBlocking";
+import {
+  createWhiteModelBlockingObject,
+  dummyNumbers,
+  type WhiteModelStudioMediaInput,
+} from "../../lib/whiteModelBlocking";
 import type { WhiteModelBinding } from "../../lib/whiteModelControl";
-import { createWhiteModelObject, type WhiteModelCharacterBinding } from "../../lib/whiteModelStudio";
+import {
+  createWhiteModelObject,
+  type WhiteModelCharacterBinding,
+} from "../../lib/whiteModelStudio";
 import type { PlaybackClock } from "./whiteModelPlayback";
 
 export interface MotionCaptureState {
@@ -50,7 +57,10 @@ export interface WhiteModelInspectorProps {
   readonly environment?: WhiteModelBinding | null;
   readonly onEnvironmentChange?: (binding: WhiteModelBinding | null) => void;
   readonly characterBindings?: readonly WhiteModelCharacterBinding[];
-  readonly onCharacterBindingChange?: (actorId: string, reference: WhiteModelBinding | null) => void;
+  readonly onCharacterBindingChange?: (
+    actorId: string,
+    reference: WhiteModelBinding | null,
+  ) => void;
 }
 
 function NumberField({
@@ -74,7 +84,9 @@ function NumberField({
 }) {
   const [editingValue, setEditingValue] = useState<string | null>(null);
   return (
-    <label className={`white-model-studio__field${compact ? " white-model-studio__field--compact" : ""}`}>
+    <label
+      className={`white-model-studio__field${compact ? " white-model-studio__field--compact" : ""}`}
+    >
       <span>{label}</span>
       <input
         type="number"
@@ -321,12 +333,18 @@ export function WhiteModelInspector({
             </select>
           </label>
         </div>
-        <div className="white-model-studio__actions white-model-inspector__lenses" role="group" aria-label="常用焦距">
+        <div
+          className="white-model-studio__actions white-model-inspector__lenses"
+          role="group"
+          aria-label="常用焦距"
+        >
           {[24, 35, 50, 85].map((lens) => (
             <button
               type="button"
               key={lens}
-              className={plan.camera.lens === lens ? "white-model-inspector__chip--active" : undefined}
+              className={
+                plan.camera.lens === lens ? "white-model-inspector__chip--active" : undefined
+              }
               onClick={() => updateCamera({ lens })}
             >
               {lens}mm
@@ -385,7 +403,10 @@ export function WhiteModelInspector({
           <div className="white-model-studio__row">
             <label className="white-model-studio__field">
               <span>景别</span>
-              <select value={shotSize} onChange={(event) => setShotSize(event.target.value as ShotSize)}>
+              <select
+                value={shotSize}
+                onChange={(event) => setShotSize(event.target.value as ShotSize)}
+              >
                 {SHOT_SIZES.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
@@ -395,7 +416,10 @@ export function WhiteModelInspector({
             </label>
             <label className="white-model-studio__field">
               <span>角度</span>
-              <select value={shotAngle} onChange={(event) => setShotAngle(event.target.value as ShotAngle)}>
+              <select
+                value={shotAngle}
+                onChange={(event) => setShotAngle(event.target.value as ShotAngle)}
+              >
                 {SHOT_ANGLES.map((option) => (
                   <option key={option.value} value={option.value}>
                     {option.label}
@@ -476,7 +500,11 @@ export function WhiteModelInspector({
                 />
               </div>
               <VectorFields
-                label={plan.camera.follow?.mode === "track" ? `机位 ${index + 1} 相对位置` : `机位 ${index + 1} 位置`}
+                label={
+                  plan.camera.follow?.mode === "track"
+                    ? `机位 ${index + 1} 相对位置`
+                    : `机位 ${index + 1} 位置`
+                }
                 value={frame.position}
                 onChange={(position) =>
                   updateCamera({
@@ -599,7 +627,11 @@ function ActorPanel({
       <div className="white-model-studio__row">
         <label className="white-model-studio__field">
           <span>角色名称</span>
-          <input required value={actor.name} onChange={(event) => onChange({ name: event.target.value })} />
+          <input
+            required
+            value={actor.name}
+            onChange={(event) => onChange({ name: event.target.value })}
+          />
         </label>
         <label className="white-model-studio__field">
           <span>几何体</span>
@@ -611,7 +643,11 @@ function ActorPanel({
               onChange({
                 shape,
                 size:
-                  shape === "person" && !wasPerson ? 1.75 : shape !== "person" && wasPerson ? 1 : actor.size,
+                  shape === "person" && !wasPerson
+                    ? 1.75
+                    : shape !== "person" && wasPerson
+                      ? 1
+                      : actor.size,
               });
             }}
           >
@@ -623,7 +659,11 @@ function ActorPanel({
         </label>
         <label className="white-model-studio__field">
           <span>颜色</span>
-          <input type="color" value={actor.color} onChange={(event) => onChange({ color: event.target.value })} />
+          <input
+            type="color"
+            value={actor.color}
+            onChange={(event) => onChange({ color: event.target.value })}
+          />
         </label>
         <NumberField
           label={isPerson ? "身高（米）" : "尺寸（米）"}
@@ -648,7 +688,9 @@ function ActorPanel({
           <span>朝向</span>
           <select
             value={actor.facing}
-            onChange={(event) => onChange({ facing: event.target.value === "manual" ? "manual" : "path" })}
+            onChange={(event) =>
+              onChange({ facing: event.target.value === "manual" ? "manual" : "path" })
+            }
           >
             <option value="path">自动面向行进方向</option>
             <option value="manual">手动（拖动朝向手柄）</option>
@@ -697,11 +739,15 @@ function ActorPanel({
           <div className="white-model-studio__actions">
             <button
               type="button"
-              disabled={captureBusy || !captureAvailable}
+              disabled={captureBusy}
               onClick={onCaptureMotion}
-              title={captureAvailable ? "选择一段真人表演视频，一键提取动作驱动白模" : "动作捕捉模型未随应用打包"}
+              title={
+                captureAvailable
+                  ? "选择一段真人表演视频，一键提取动作驱动白模"
+                  : "打开组件管理，安装动作捕捉模型"
+              }
             >
-              一键动捕：从视频提取动作…
+              {captureAvailable ? "一键动捕：从视频提取动作…" : "安装动作捕捉组件"}
             </button>
             {capture ? (
               <button type="button" onClick={onCancelCapture}>
@@ -740,7 +786,9 @@ function ActorPanel({
                 <input
                   type="checkbox"
                   checked={clip.loop}
-                  onChange={(event) => onChange({ motion: { ...clip, loop: event.target.checked } })}
+                  onChange={(event) =>
+                    onChange({ motion: { ...clip, loop: event.target.checked } })
+                  }
                 />
               </label>
               <p className="white-model-studio__hint">
@@ -751,15 +799,13 @@ function ActorPanel({
           ) : null}
           {!captureAvailable ? (
             <p className="white-model-studio__hint">
-              动作捕捉模型未随此构建打包（运行 pnpm pose:prepare 后重新构建即可启用）。
+              首次使用需要安装动作捕捉组件。安装后即可选择视频，现有角色与动作草稿会保留。
             </p>
           ) : null}
         </div>
       ) : null}
       <details className="white-model-inspector__keyframes" open>
-        <summary>
-          路径点（{actor.keyframes.length}）· 在视口拖动角色即可在当前时间写入
-        </summary>
+        <summary>路径点（{actor.keyframes.length}）· 在视口拖动角色即可在当前时间写入</summary>
         {actor.keyframes.map((frame, index) => (
           <div className="white-model-studio__keyframe" key={index}>
             <div className="white-model-studio__keyframe-head">
@@ -852,8 +898,7 @@ function StudioImageSelect({
   readonly inputs: readonly WhiteModelStudioMediaInput[];
   readonly onChange: (binding: WhiteModelBinding | null) => void;
 }) {
-  const selected =
-    binding == null ? null : inputs.find((input) => input.key === binding.key);
+  const selected = binding == null ? null : inputs.find((input) => input.key === binding.key);
   const missing = binding != null && selected == null;
   return (
     <label className="white-model-studio__field">

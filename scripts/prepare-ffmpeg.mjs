@@ -21,10 +21,13 @@ import {
   readdirSync,
   cpSync,
   chmodSync,
+  lstatSync,
 } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { ensureWindowsFfmpegLicense } from "./ffmpeg-runtime-license.mjs";
+import { assertComponentRoot } from "./runtime-component-catalog.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const destination = path.join(root, "src-tauri", "resources", "ffmpeg");
@@ -280,6 +283,7 @@ function extractArchive(archivePath, extractDir) {
 }
 
 async function prepare() {
+  if (existsSync(destination)) await assertComponentRoot(destination, root);
   const ffmpegDownloadUrlValue = ffmpegDownloadUrl();
   const force = process.argv.includes("--force");
   const ffmpegPath = path.join(destination, ffmpegName());
@@ -300,11 +304,24 @@ async function prepare() {
     existing?.schemaVersion === 1 &&
     existing?.version &&
     existsSync(ffmpegPath) &&
-    (isDarwin ? ffprobeSettled : existsSync(ffprobePath));
+    !lstatSync(ffmpegPath).isSymbolicLink() &&
+    sha256(ffmpegPath) === existing.ffmpegSha256 &&
+    (isDarwin ? ffprobeSettled : existsSync(ffprobePath)) &&
+    (!existsSync(ffprobePath) ||
+      (!lstatSync(ffprobePath).isSymbolicLink() && sha256(ffprobePath) === existing.ffprobeSha256));
   if (ready) {
+    if (process.platform === "win32") {
+      const licensed = ensureWindowsFfmpegLicense(destination, existing);
+      if (JSON.stringify(existing) !== JSON.stringify(licensed))
+        writeFileSync(manifestPath, JSON.stringify(licensed, null, 2) + "\n");
+    }
     console.log(`[ffmpeg:prepare] 内置 FFmpeg 已就绪：v${existing.version}`);
-    process.exit(0);
+    return;
   }
+  if (process.argv.includes("--offline-cached"))
+    throw new Error(
+      "FFmpeg prepared binary hashes are missing or invalid; offline preparation will not download replacements",
+    );
 
   console.log("[ffmpeg:prepare] 准备内置 FFmpeg 引擎");
   const tempRoot = path.join(destination, ".prepare");
@@ -353,22 +370,18 @@ async function prepare() {
       await fetchDarwinFFprobe(ffprobePath);
     }
 
-    writeFileSync(
-      manifestPath,
-      JSON.stringify(
-        {
-          schemaVersion: 1,
-          version,
-          source: ffmpegDownloadUrlValue,
-          ffmpegSha256: sha256(ffmpegPath),
-          ffprobeSha256: existsSync(ffprobePath) ? sha256(ffprobePath) : null,
-          ffprobeUnavailable: !existsSync(ffprobePath),
-          preparedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      ),
-    );
+    let preparedManifest = {
+      schemaVersion: 1,
+      version,
+      source: ffmpegDownloadUrlValue,
+      ffmpegSha256: sha256(ffmpegPath),
+      ffprobeSha256: existsSync(ffprobePath) ? sha256(ffprobePath) : null,
+      ffprobeUnavailable: !existsSync(ffprobePath),
+      preparedAt: new Date().toISOString(),
+    };
+    if (process.platform === "win32")
+      preparedManifest = ensureWindowsFfmpegLicense(destination, preparedManifest);
+    writeFileSync(manifestPath, JSON.stringify(preparedManifest, null, 2) + "\n");
     console.log(`[ffmpeg:prepare] 已写入 ${path.relative(root, manifestPath)}`);
   } catch (error) {
     console.error(`[ffmpeg:prepare] 失败：${error.message}`);
@@ -379,7 +392,8 @@ async function prepare() {
   }
 }
 
-prepare().catch((error) => {
-  console.error(`[ffmpeg:prepare] 失败：${error.message}`);
-  process.exit(1);
-});
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url))
+  prepare().catch((error) => {
+    console.error(`[ffmpeg:prepare] 失败：${error.message}`);
+    process.exit(1);
+  });

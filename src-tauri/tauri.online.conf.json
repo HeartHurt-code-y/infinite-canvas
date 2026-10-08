@@ -1,0 +1,21 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "build": {
+    "beforeBuildCommand": "pnpm ffmpeg:prepare && pnpm remotion:prepare && pnpm blender:prepare && pnpm pose:prepare && pnpm ai-media:prepare && pnpm ai-media:prepare:quality && pnpm components:pack && pnpm build"
+  },
+  "bundle": {
+    "resources": {
+      "resources/ffmpeg/": "ffmpeg/",
+      "skills/anime-drama-v23/": "skills/anime-drama-v23/",
+      "skills/music-video-workflow/": "skills/music-video-workflow/",
+      "resources/component-catalog.json": "component-catalog.json"
+    }
+  },
+  "plugins": {
+    "updater": {
+      "endpoints": [
+        "https://sd20-zq.tos-cn-beijing.volces.com/infinite-canvas/updates/{{target}}-{{arch}}-online/latest.json"
+      ]
+    }
+  }
+}

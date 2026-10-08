@@ -16,11 +16,11 @@ use super::{
     credentials::CredentialStore,
     error::{BackendError, BackendResult},
     model_schema::{
-        GRSAI_IMAGE_PROFILE, RequestDialect, apply_request_dialect, default_model_schema,
-        grsai_pixel_dimensions, infer_catalog_schema, is_grsai_pixel_image_model,
-        is_rd_video_model, is_seedance_25_video_model, is_sp25_per_use_video_model,
-        operations_from_schema, provider_scoped_model_definition_id, rd_video_limits,
-        schema_for_enabled_operations, sp25_per_use_limits,
+        GRSAI_IMAGE_PROFILE, MOYU_SEEDANCE_DRAFT_PROFILE, RequestDialect, apply_request_dialect,
+        default_model_schema, grsai_pixel_dimensions, infer_catalog_schema,
+        is_grsai_pixel_image_model, is_rd_video_model, is_seedance_25_video_model,
+        is_seedance_draft_video_model, is_sp25_per_use_video_model, operations_from_schema,
+        provider_scoped_model_definition_id, schema_for_enabled_operations,
     },
     prompt_optimize::{TextModelFallbackRequest, TextModelStream},
     provider_adapter::{
@@ -1460,6 +1460,7 @@ impl ProviderRuntime {
                 let sp25_per_use =
                     resolved.operation_schema["requestProfileId"] == "sp25_per_use_video_v1";
                 let rd_video = resolved.operation_schema["requestProfileId"] == "rd_video_v1";
+                let seedance_draft = is_seedance_draft_gateway_task(task);
                 let body = if sp25_per_use {
                     self.prepare_sp25_video_body(task, attempt_id, &context, resolved)
                         .await?
@@ -1474,10 +1475,10 @@ impl ProviderRuntime {
                     )
                 };
                 let path = request_path(&resolved.operation_schema, "/v1/video/generations")?;
-                let response = if sp25_per_use || rd_video {
-                    // 按次与 RD 网关都是「受理即预扣费用」的付费提交，请求体只有
-                    // 文档字段；通用网关的「不认识字段就剥离重发」不得改变一次
-                    // 付费提交的请求体。
+                let response = if sp25_per_use || rd_video || seedance_draft {
+                    // 按次、RD 与 Seedance 草稿样片都是独立计费的提交；通用网关的
+                    // 「不认识字段就剥离重发」不得改变一次付费提交的请求体，尤其
+                    // 不能因剥离 draft 而意外创建正片。
                     self.captured_json(
                         task,
                         attempt_id,
@@ -1490,16 +1491,32 @@ impl ProviderRuntime {
                         },
                     )
                     .await
-                    .map_err(sp25_ambiguous_submission_error)?
+                    .map_err(|error| {
+                        if seedance_draft {
+                            seedance_ambiguous_submission_error(error)
+                        } else {
+                            sp25_ambiguous_submission_error(error)
+                        }
+                    })?
                 } else {
                     self.send_submission_json(task, attempt_id, &context, "submit", &path, body)
                         .await?
                 };
                 let task_id = if sp25_per_use {
                     parse_sp25_video_task_id(&response)?
+                } else if seedance_draft {
+                    parse_seedance_draft_task_id(&response)?
                 } else {
                     parse_video_task_id(&response)?
                 };
+                if seedance_draft
+                    && resolved.parameters["draft_task_id"].as_str() == Some(task_id.as_str())
+                {
+                    return Err(seedance_ambiguous_submission_error(BackendError::protocol(
+                        "草稿转正片响应沿用了草稿任务 ID，无法确认正片任务身份",
+                        json!({ "draftTaskId": task_id }),
+                    )));
+                }
                 Ok((GenerationSubmission::RemoteVideoTask { task_id }, response))
             }
             // 文本模型不通过生成任务管线提交：提示词优化等功能按各自流程直接调用
@@ -1515,7 +1532,7 @@ impl ProviderRuntime {
     }
 
     /// 按次系列的本地参考素材直接上传到生成平台。上传沿用任务冻结的连接和令牌；
-    /// URL 素材则原样透传。先完成所有不收费的校验，再发任何上传或生成请求。
+    /// URL 素材则原样透传。客户端仅检查编码完整性，渠道规则由服务端返回。
     async fn prepare_sp25_video_body(
         &self,
         task: &TaskExecutionRecord,
@@ -1546,7 +1563,7 @@ impl ProviderRuntime {
 
     /// Seedance 2.5 RD 网关：本地参考图/视频/音频先经免费的 `POST /v1/assets/uploads`
     /// 换取公网 URL，再提交付费任务；公网 URL 素材原样透传。
-    /// 与按次系列相同，先完成所有不收费的校验，再发任何上传或生成请求。
+    /// 本地任务标记只表达用户意图，不用于判断渠道能力。
     async fn prepare_rd_video_body(
         &self,
         task: &TaskExecutionRecord,
@@ -1661,19 +1678,23 @@ impl ProviderRuntime {
     }
 
     /// 已成功任务的签名下载 URL 可过期；只重查冻结任务，不重新提交收费请求。
-    /// 按次系列与 RD 网关的查询契约一致（`task_id` + `status` + 签名结果地址），
-    /// 共用同一续签路径。
+    /// 按次系列、RD 与 Seedance 草稿样片共用同一续签路径；后者的 task_id、
+    /// SUCCESS 状态与签名结果地址来自网关的 data 信封。
     pub(crate) async fn refresh_sp25_video_url(
         &self,
         task: &TaskExecutionRecord,
     ) -> BackendResult<String> {
-        let refreshable = task
-            .remote_model_id_snapshot
-            .as_deref()
-            .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model));
+        let seedance_draft = is_seedance_draft_gateway_task(task);
+        let refreshable = seedance_draft
+            || task
+                .remote_model_id_snapshot
+                .as_deref()
+                .is_some_and(|model| {
+                    is_sp25_per_use_video_model(model) || is_rd_video_model(model)
+                });
         if !refreshable {
             return Err(BackendError::validation(
-                "仅按次系列与 RD 网关任务支持重新签发下载链接",
+                "仅按次系列、RD 网关与 Seedance 草稿样片任务支持重新签发下载链接",
                 json!({ "taskId": task.id }),
             ));
         }
@@ -1699,9 +1720,24 @@ impl ProviderRuntime {
             ));
         }
         let payload: Value = serde_json::from_str(&response.body)?;
-        if payload.get("task_id").and_then(Value::as_str) != Some(remote_task_id)
-            || payload.get("status").and_then(Value::as_str) != Some("succeeded")
-        {
+        let observed_id = if seedance_draft {
+            payload
+                .pointer("/data/task_id")
+                .or_else(|| payload.get("task_id"))
+        } else {
+            payload.get("task_id")
+        }
+        .and_then(Value::as_str);
+        let succeeded = if seedance_draft {
+            payload
+                .pointer("/data/status")
+                .or_else(|| payload.get("status"))
+                .and_then(Value::as_str)
+                .is_some_and(|status| matches!(status, "SUCCESS" | "succeeded"))
+        } else {
+            payload.get("status").and_then(Value::as_str) == Some("succeeded")
+        };
+        if observed_id != Some(remote_task_id) || !succeeded {
             return Err(BackendError::protocol(
                 "视频任务尚未成功或返回了不匹配的任务身份",
                 json!({ "taskId": task.id, "remoteTaskId": remote_task_id, "response": redact_request_value(&payload) }),
@@ -2488,12 +2524,6 @@ impl ProviderRuntime {
         resolved: &ResolvedGeneration,
         path: &str,
     ) -> BackendResult<CapturedHttpResponse> {
-        if resolved.images.is_empty() {
-            return Err(BackendError::validation(
-                "image-to-image requires at least one resolved image",
-                json!({ "taskId": task.id }),
-            ));
-        }
         let remote_model_id = task
             .remote_model_id_snapshot
             .as_deref()
@@ -3160,10 +3190,16 @@ impl ProviderRuntime {
             model.model_definition_id = scoped_definition_id;
             if let Some(definition) = definition {
                 model.operation_schema = definition.operations.clone();
+                if is_seedance_draft_video_model(&model.id)
+                    && model.operation_schema.get("video_generation").is_none()
+                {
+                    model.operation_schema =
+                        default_model_schema(&model.id, &[GenerationOperation::VideoGeneration]);
+                }
                 // 已保存或预置的定义可能带着另一套方言的端点（例如按模型名推导出的
                 // 方舟原生路径），展示与保存前统一改写成本连接的方言。
                 apply_request_dialect(&mut model.operation_schema, &model.id, dialect);
-                model.suggested_operations = operations_from_schema(&definition.operations);
+                model.suggested_operations = operations_from_schema(&model.operation_schema);
             }
             model.has_configured_binding = binding.is_some();
             model.configured_operations = binding
@@ -3343,32 +3379,13 @@ fn mapped_parameters(
         .pointer("/request/parameterContainer")
         .and_then(Value::as_str)
         .unwrap_or(fallback_container);
-    let has_media =
-        !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty();
-
     let mut mapped = Vec::new();
     for (key, value) in values {
+        let empty_definition = Map::new();
         let definition = definitions
             .get(key)
             .and_then(Value::as_object)
-            .ok_or_else(|| {
-                BackendError::validation(
-                    "normalized parameter is absent from the frozen model schema",
-                    json!({ "parameter": key }),
-                )
-            })?;
-        if has_media
-            && value.as_bool() == Some(true)
-            && definition
-                .get("requiresNoMedia")
-                .and_then(Value::as_bool)
-                .unwrap_or(false)
-        {
-            return Err(BackendError::validation(
-                "model parameter requires a generation request without media inputs",
-                json!({ "parameter": key }),
-            ));
-        }
+            .unwrap_or(&empty_definition);
         let field = definition
             .get("requestField")
             .and_then(Value::as_str)
@@ -3475,12 +3492,6 @@ fn build_text_to_image_body(
             resolved.archive(),
         ));
     }
-    if resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "text-to-image prompt must not be empty",
-            json!({ "taskId": task.id }),
-        ));
-    }
     ensure_request_encoding(&resolved.operation_schema, "json")?;
     let model_field = request_field(&resolved.operation_schema, "modelField", "model")?;
     let prompt_field = request_field(&resolved.operation_schema, "promptField", "prompt")?;
@@ -3513,19 +3524,6 @@ fn build_seedream_image_to_image_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<Value> {
-    if resolved.images.is_empty() {
-        return Err(BackendError::validation(
-            "seedream image-to-image requires at least one image reference",
-            json!({ "taskId": task.id }),
-        ));
-    }
-    // 文档规定 `image` 数组最多传入 6 张参考图（https://doc.moyu.info/9280685m0.md）。
-    if resolved.images.len() > 6 {
-        return Err(BackendError::validation(
-            "seedream image-to-image accepts at most 6 image references",
-            json!({ "images": resolved.images.len() }),
-        ));
-    }
     if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
         return Err(BackendError::validation(
             "seedream image-to-image only accepts image reference inputs",
@@ -3533,12 +3531,6 @@ fn build_seedream_image_to_image_body(
                 "videos": resolved.videos.len(),
                 "audios": resolved.audios.len()
             }),
-        ));
-    }
-    if resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "image-to-image prompt must not be empty",
-            json!({ "taskId": task.id }),
         ));
     }
     ensure_request_encoding(&resolved.operation_schema, "json")?;
@@ -3600,12 +3592,6 @@ fn build_gemini_image_to_image_body(
     task: &TaskExecutionRecord,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<Value> {
-    if resolved.images.is_empty() {
-        return Err(BackendError::validation(
-            "gemini image-to-image requires at least one image reference",
-            json!({ "taskId": task.id }),
-        ));
-    }
     if !resolved.videos.is_empty() || !resolved.audios.is_empty() {
         return Err(BackendError::validation(
             "gemini image-to-image only accepts image reference inputs",
@@ -3613,12 +3599,6 @@ fn build_gemini_image_to_image_body(
                 "videos": resolved.videos.len(),
                 "audios": resolved.audios.len()
             }),
-        ));
-    }
-    if resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "image-to-image prompt must not be empty",
-            json!({ "taskId": task.id }),
         ));
     }
     ensure_request_encoding(&resolved.operation_schema, "json")?;
@@ -3701,12 +3681,6 @@ fn build_grsai_image_body(
             }),
         ));
     }
-    if resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "grsai image generation prompt must not be empty",
-            json!({ "taskId": task.id }),
-        ));
-    }
     let model = task
         .remote_model_id_snapshot
         .as_deref()
@@ -3757,12 +3731,6 @@ fn build_grsai_image_body(
                 )))
             })
             .collect::<BackendResult<Vec<_>>>()?;
-        if inputs.is_empty() {
-            return Err(BackendError::validation(
-                "grsai image-to-image requires at least one image reference",
-                json!({ "taskId": task.id }),
-            ));
-        }
         body.insert(image_field, Value::Array(inputs));
     }
 
@@ -3784,35 +3752,36 @@ fn build_grsai_image_body(
         .and_then(|values| values.get("aspect_ratio"))
         .cloned()
         .unwrap_or(json!("1:1"));
-    let aspect_ratio = aspect_ratio.as_str().unwrap_or("1:1");
-    let aspect_ratio_value = if aspect_ratio == "auto" {
-        Value::String("auto".into())
-    } else if is_grsai_pixel_image_model(model) {
-        let resolution = values
-            .and_then(|values| values.get("resolution"))
-            .and_then(Value::as_str)
-            .unwrap_or("2k");
-        let pixel = grsai_pixel_dimensions(aspect_ratio, resolution).ok_or_else(|| {
-            BackendError::validation(
-                "grsai vip 系模型不支持该画幅与分辨率档位组合（1:3 / 3:1 没有第三档）",
-                json!({
-                    "model": model,
-                    "aspectRatio": aspect_ratio,
-                    "resolution": resolution
-                }),
-            )
-        })?;
-        Value::String(pixel.into())
-    } else {
-        Value::String(aspect_ratio.into())
+    let aspect_ratio_value = match aspect_ratio.as_str() {
+        Some(ratio) if ratio != "auto" && is_grsai_pixel_image_model(model) => {
+            let resolution = values
+                .and_then(|values| values.get("resolution"))
+                .cloned()
+                .unwrap_or_else(|| json!("2k"));
+            if let Some(pixel) = resolution
+                .as_str()
+                .and_then(|tier| grsai_pixel_dimensions(ratio, tier))
+            {
+                Value::String(pixel.into())
+            } else {
+                // 新档位/自定义像素不在旧查表中时，完整交给渠道判定。
+                body.insert("resolution".into(), resolution);
+                aspect_ratio.clone()
+            }
+        }
+        _ => aspect_ratio.clone(),
     };
     body.insert("aspectRatio".into(), aspect_ratio_value);
-    let transparent = values
-        .and_then(|values| values.get("background"))
-        .and_then(Value::as_bool)
-        .unwrap_or(false);
-    if transparent {
-        body.insert("background".into(), Value::String("transparent".into()));
+    if let Some(background) = values.and_then(|values| values.get("background")) {
+        match background.as_bool() {
+            Some(true) => {
+                body.insert("background".into(), Value::String("transparent".into()));
+            }
+            Some(false) => {}
+            None => {
+                body.insert("background".into(), background.clone());
+            }
+        }
     }
     Ok(Value::Object(body))
 }
@@ -4023,114 +3992,30 @@ fn rd_existing_reference_url(media: &ResolvedMedia) -> BackendResult<String> {
 }
 
 fn validate_sp25_video_request(model: &str, resolved: &ResolvedGeneration) -> BackendResult<()> {
-    let (min_duration, max_duration, max_images, max_audios) = sp25_per_use_limits(model)
-        .ok_or_else(|| {
-            BackendError::validation("不支持的按次视频模型 ID", json!({ "model": model }))
-        })?;
     ensure_request_encoding(&resolved.operation_schema, "json")?;
-    if resolved.video_task_type.is_some() || !resolved.videos.is_empty() {
+    if !resolved.parameters.is_object() {
         return Err(BackendError::validation(
-            "按次系列仅支持参考图和指定型号的参考音频，不支持参考视频或视频编辑/延长任务",
-            json!({ "model": model, "videos": resolved.videos.len() }),
-        ));
-    }
-    if resolved.images.len() > max_images as usize || resolved.audios.len() > max_audios as usize {
-        return Err(BackendError::validation(
-            "按次视频参考素材数量超出所选型号上限",
-            json!({ "model": model, "images": resolved.images.len(), "maxImages": max_images,
-                "referenceAudios": resolved.audios.len(), "maxReferenceAudios": max_audios }),
-        ));
-    }
-    let parameters = resolved.parameters.as_object().ok_or_else(|| {
-        BackendError::validation("按次视频参数必须是对象", json!({ "model": model }))
-    })?;
-    for key in parameters.keys() {
-        if !matches!(key.as_str(), "ratio" | "duration" | "resolution") {
-            return Err(BackendError::validation(
-                "按次视频型号不支持该参数",
-                json!({ "model": model, "parameter": key }),
-            ));
-        }
-    }
-    if let Some(ratio) = parameters.get("ratio") {
-        if !matches!(
-            ratio.as_str(),
-            Some("16:9" | "9:16" | "1:1" | "4:3" | "3:4" | "21:9")
-        ) {
-            return Err(BackendError::validation(
-                "按次视频画幅不受支持",
-                json!({ "model": model, "ratio": ratio }),
-            ));
-        }
-    }
-    if let Some(duration) = parameters.get("duration") {
-        let valid = duration.as_u64().is_some_and(|seconds| {
-            seconds >= u64::from(min_duration) && seconds <= u64::from(max_duration)
-        });
-        if !valid {
-            return Err(BackendError::validation(
-                "按次视频时长超出所选型号范围",
-                json!({ "model": model, "duration": duration,
-                    "minimum": min_duration, "maximum": max_duration }),
-            ));
-        }
-    }
-    if let Some(resolution) = parameters.get("resolution")
-        && resolution.as_str() != Some("720P")
-    {
-        return Err(BackendError::validation(
-            "按次视频分辨率由型号固定为 720P",
-            json!({ "model": model, "resolution": resolution }),
-        ));
-    }
-    let prompt = video_prompt(resolved);
-    if prompt.trim().is_empty() && resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "按次视频提示词不能为空",
+            "按次视频参数必须是对象",
             json!({ "model": model }),
         ));
     }
-    for media in &resolved.images {
-        if media.role != "reference_image" {
-            return Err(BackendError::validation(
-                "按次视频仅支持参考图，不支持首尾帧角色",
-                media.archive(),
-            ));
-        }
-        if let Some(bytes) = &media.bytes {
-            if bytes.is_empty()
-                || bytes.len() > 10_000_000
-                || !matches!(
-                    media.mime_type.as_str(),
-                    "image/jpeg" | "image/png" | "image/webp"
-                )
-            {
-                return Err(BackendError::validation(
-                    "按次视频参考图须为不超过 10 MB 的 JPG、PNG 或 WebP",
-                    media.archive(),
-                ));
-            }
-        } else {
-            sp25_existing_reference_url(media)?;
-        }
+    // 该请求档案只有图片和音频字段，拒绝无法编码的输入，避免静默漏传。
+    if !resolved.videos.is_empty()
+        || resolved
+            .images
+            .iter()
+            .any(|media| media.role != "reference_image")
+    {
+        return Err(BackendError::validation(
+            "当前按次请求档案无法编码参考视频或首尾帧用途",
+            json!({ "model": model, "videos": resolved.videos.len() }),
+        ));
     }
-    for media in &resolved.audios {
-        if media.role != "reference_audio" {
-            return Err(BackendError::validation(
-                "按次视频音频输入必须为参考音频",
-                media.archive(),
-            ));
-        }
+    for media in resolved.images.iter().chain(&resolved.audios) {
         if let Some(bytes) = &media.bytes {
-            if bytes.is_empty()
-                || bytes.len() > 50_000_000
-                || !matches!(
-                    media.mime_type.as_str(),
-                    "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/x-wav" | "audio/wave"
-                )
-            {
+            if bytes.is_empty() {
                 return Err(BackendError::validation(
-                    "按次视频参考音频须为不超过 50 MB 的 MP3 或 WAV",
+                    "参考素材文件为空",
                     media.archive(),
                 ));
             }
@@ -4166,336 +4051,65 @@ fn build_sp25_video_body(
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
     body.insert("prompt".into(), json!(prompt));
-    let parameters = resolved
-        .parameters
-        .as_object()
-        .expect("validated parameters");
-    body.insert(
-        "ratio".into(),
-        parameters
-            .get("ratio")
-            .cloned()
-            .unwrap_or_else(|| json!("16:9")),
-    );
-    if let Some(duration) = parameters.get("duration") {
-        body.insert("duration".into(), duration.clone());
-    }
-    // 型号 ID 已确定 720P。兼容旧快照显式的合法值，但新档案无需传此字段。
-    if let Some(resolution) = parameters.get("resolution") {
-        body.insert("resolution".into(), resolution.clone());
-    }
     if !images.is_empty() {
         body.insert("images".into(), json!(images));
     }
     if !audios.is_empty() {
         body.insert("reference_audios".into(), json!(audios));
     }
+    insert_mapped_parameters(&mut body, "metadata", mapped_parameters(resolved, "root")?)?;
+    body.entry("ratio").or_insert_with(|| json!("16:9"));
     Ok(Value::Object(body))
 }
 
-/// 参考媒体实测时长的边界容差。生成与剪辑产物的封装时长普遍带有 1–2 帧误差
-/// （如标称 30 秒的 Seedance 产物实测 30.08 秒），严格卡线会把自家合法产物
-/// 拒之门外；小幅越界放行、由上游做最终判定，客户端不为几十毫秒的封装误差
-/// 拦下付费任务。
-const REFERENCE_DURATION_TOLERANCE_SECONDS: f64 = 0.5;
-
-fn reference_duration_in_range(duration: Option<f64>, minimum: f64, maximum: f64) -> bool {
-    let tolerance = REFERENCE_DURATION_TOLERANCE_SECONDS;
-    duration.is_some_and(|duration| {
-        duration.is_finite() && (minimum - tolerance..=maximum + tolerance).contains(&duration)
-    })
-}
-
-fn reference_duration_total_exceeds(total: f64, maximum: f64) -> bool {
-    total > maximum + REFERENCE_DURATION_TOLERANCE_SECONDS
-}
-
-/// 错误信息附带实测时长：用户剪短副本后仍看到原文件被拒绝时，
-/// 能从"实测 30.08 秒"直接看出任务引用的还是原始文件。
-fn describe_measured_duration(duration: Option<f64>) -> String {
-    duration
-        .filter(|value| value.is_finite())
-        .map(|value| format!("（实测 {value:.2} 秒）"))
-        .unwrap_or_default()
-}
-
-/// Seedance 2.5 RD 网关提交前校验。文档契约：`duration` 4–30 必填；`ratio` 六档、
-/// 默认 16:9；`resolution` 可省略但必须与模型档位一致；参考图最多 30 张
-/// （JPG/PNG/WebP，各 ≤10 MB）；参考视频最多 10 段（MP4，各 ≤60 MB，每段 2–15 秒
-/// 且合计 ≤15 秒）；参考音频最多 10 段（MP3/WAV，各 ≤50 MB，每段 2–15 秒且合计
-/// ≤15 秒）；`start_frame`/`end_frame` 各 1 张、必须成对、不能与 `images` 同用；
-/// `generate_audio` 默认出声；`n` 只接受 1（不暴露该字段）。
-/// 时长边界带 [`REFERENCE_DURATION_TOLERANCE_SECONDS`] 容差；校验全部在
-/// 预扣费用的提交之前完成。
+/// 只检查 RD 请求能否无损编码；远端能力规则由渠道校验。
 fn validate_rd_video_request(model: &str, resolved: &ResolvedGeneration) -> BackendResult<()> {
-    let limits = rd_video_limits(model).ok_or_else(|| {
-        BackendError::validation("不支持的 RD 视频模型 ID", json!({ "model": model }))
-    })?;
     ensure_request_encoding(&resolved.operation_schema, "json")?;
-    // RD 契约没有编辑/延长任务：video_task_type 只会由魔芋专属参数推导。
-    if resolved.video_task_type.is_some() {
+    if !resolved.parameters.is_object() {
         return Err(BackendError::validation(
-            "RD 视频不支持视频编辑或延长任务",
+            "RD 视频参数必须是对象",
             json!({ "model": model }),
         ));
     }
-    let reference_images = resolved
-        .images
-        .iter()
-        .filter(|media| !matches!(media.role.as_str(), "first_frame" | "last_frame"))
-        .count();
-    let first_frames = resolved
-        .images
-        .iter()
-        .filter(|media| media.role == "first_frame")
-        .count();
-    let last_frames = resolved
-        .images
-        .iter()
-        .filter(|media| media.role == "last_frame")
-        .count();
-    if first_frames > 1 || last_frames > 1 {
-        return Err(BackendError::validation(
-            "RD 视频首帧、尾帧各只能有 1 张",
-            json!({ "model": model, "firstFrames": first_frames, "lastFrames": last_frames }),
-        ));
-    }
-    if (first_frames > 0) != (last_frames > 0) {
-        return Err(BackendError::validation(
-            "RD 视频首帧与尾帧必须成对出现，请同时连接首帧和尾帧，或都移除",
-            json!({ "model": model, "firstFrames": first_frames, "lastFrames": last_frames }),
-        ));
-    }
-    if first_frames > 0 && reference_images > 0 {
-        return Err(BackendError::validation(
-            "RD 视频首尾帧不能与参考图同时使用；请断开参考图或改用首尾帧模式",
-            json!({ "model": model, "referenceImages": reference_images }),
-        ));
-    }
-    if reference_images > limits.max_images as usize
-        || resolved.videos.len() > limits.max_videos as usize
-        || resolved.audios.len() > limits.max_audios as usize
-    {
-        return Err(BackendError::validation(
-            "RD 视频参考素材数量超出上限（30 图、10 视频、10 音频）",
-            json!({
-                "model": model,
-                "referenceImages": reference_images, "maxImages": limits.max_images,
-                "referenceVideos": resolved.videos.len(), "maxVideos": limits.max_videos,
-                "referenceAudios": resolved.audios.len(), "maxAudios": limits.max_audios
-            }),
-        ));
-    }
-    let parameters = resolved.parameters.as_object().ok_or_else(|| {
-        BackendError::validation("RD 视频参数必须是对象", json!({ "model": model }))
-    })?;
-    for key in parameters.keys() {
-        if !matches!(
-            key.as_str(),
-            "ratio" | "duration" | "resolution" | "generate_audio"
-        ) {
+    // 当前上传编译器为首帧、尾帧各保留一个 URL；多个同用途输入无法无损编码。
+    for role in ["first_frame", "last_frame"] {
+        if resolved
+            .images
+            .iter()
+            .filter(|media| media.role == role)
+            .count()
+            > 1
+        {
             return Err(BackendError::validation(
-                "RD 视频不支持该参数",
-                json!({ "model": model, "parameter": key }),
+                "当前 RD 请求编译器每种首尾帧用途只能编码一张图片",
+                json!({ "role": role }),
             ));
         }
     }
-    if let Some(ratio) = parameters.get("ratio") {
-        if !matches!(
-            ratio.as_str(),
-            Some("16:9" | "9:16" | "1:1" | "4:3" | "3:4" | "21:9")
-        ) {
-            return Err(BackendError::validation(
-                "RD 视频画幅不受支持",
-                json!({ "model": model, "ratio": ratio }),
-            ));
-        }
-    }
-    // 文档把 duration 列为必填（缺省或越界返回 400）。
-    let duration_valid = parameters
-        .get("duration")
-        .and_then(Value::as_u64)
-        .is_some_and(|seconds| {
-            (u64::from(limits.minimum_duration)..=u64::from(limits.maximum_duration))
-                .contains(&seconds)
-        });
-    if !duration_valid {
-        return Err(BackendError::validation(
-            format!(
-                "RD 视频时长必须在 {} 到 {} 秒之间",
-                limits.minimum_duration, limits.maximum_duration
-            ),
-            json!({ "model": model, "duration": parameters.get("duration") }),
-        ));
-    }
-    if let Some(resolution) = parameters.get("resolution")
-        && resolution.as_str() != Some(limits.resolution)
-    {
-        return Err(BackendError::validation(
-            format!(
-                "RD 视频分辨率由模型档位固定为 {}，传了必须与档位一致",
-                limits.resolution
-            ),
-            json!({ "model": model, "resolution": resolution }),
-        ));
-    }
-    if let Some(generate_audio) = parameters.get("generate_audio")
-        && generate_audio.as_bool().is_none()
-    {
-        return Err(BackendError::validation(
-            "RD 视频的生成音频参数必须是布尔值",
-            json!({ "model": model, "generateAudio": generate_audio }),
-        ));
-    }
-    let prompt = video_prompt(resolved);
-    if prompt.trim().is_empty() && resolved.rendered_prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "RD 视频提示词不能为空",
-            json!({ "model": model }),
-        ));
-    }
+    // 客户端仅保证素材可上传/可寻址。渠道决定任务能力、数量、格式、大小与时长。
     for media in resolved
         .images
         .iter()
-        .filter(|media| !matches!(media.role.as_str(), "first_frame" | "last_frame"))
-    {
-        if media.role != "reference_image" && !media.role.is_empty() {
-            return Err(BackendError::validation(
-                "RD 视频参考图不支持其他图片用途；请清除旧素材角色",
-                media.archive(),
-            ));
-        }
-        if let Some(bytes) = &media.bytes {
-            if bytes.is_empty()
-                || bytes.len() > 10_000_000
-                || !matches!(
-                    media.mime_type.as_str(),
-                    "image/jpeg" | "image/png" | "image/webp"
-                )
-            {
-                return Err(BackendError::validation(
-                    "RD 视频参考图须为不超过 10 MB 的 JPG、PNG 或 WebP",
-                    media.archive(),
-                ));
-            }
-        } else {
-            rd_existing_reference_url(media)?;
-        }
-    }
-    for media in resolved
-        .images
-        .iter()
-        .filter(|media| matches!(media.role.as_str(), "first_frame" | "last_frame"))
+        .chain(&resolved.videos)
+        .chain(&resolved.audios)
     {
         if let Some(bytes) = &media.bytes {
-            if bytes.is_empty()
-                || bytes.len() > 10_000_000
-                || !matches!(
-                    media.mime_type.as_str(),
-                    "image/jpeg" | "image/png" | "image/webp"
-                )
-            {
+            if bytes.is_empty() {
                 return Err(BackendError::validation(
-                    "RD 视频首尾帧须为不超过 10 MB 的 JPG、PNG 或 WebP",
+                    "参考素材文件为空",
                     media.archive(),
                 ));
             }
         } else {
             rd_existing_reference_url(media)?;
         }
-    }
-    for media in &resolved.videos {
-        if media.role != "reference_video" && !media.role.is_empty() {
-            return Err(BackendError::validation(
-                "RD 视频的视频输入必须为参考视频",
-                media.archive(),
-            ));
-        }
-        if let Some(bytes) = &media.bytes {
-            if bytes.is_empty() || bytes.len() > 60_000_000 || media.mime_type != "video/mp4" {
-                return Err(BackendError::validation(
-                    "RD 视频参考视频须为不超过 60 MB 的 MP4",
-                    media.archive(),
-                ));
-            }
-        } else {
-            rd_existing_reference_url(media)?;
-        }
-        // 每段参考视频须为 2–15 秒；时长由真实媒体探测确认，不接受元数据自报。
-        // 边界带容差：封装误差导致的小幅越界放行，由上游做最终判定。
-        if !reference_duration_in_range(media.duration_seconds, 2.0, 15.0) {
-            return Err(BackendError::validation(
-                format!(
-                    "RD 视频要求每个参考视频的实际时长为 2–15 秒：{}{}",
-                    media.display_name,
-                    describe_measured_duration(media.duration_seconds)
-                ),
-                media.archive(),
-            ));
-        }
-    }
-    let reference_video_total: f64 = resolved
-        .videos
-        .iter()
-        .filter_map(|video| video.duration_seconds)
-        .sum();
-    if reference_duration_total_exceeds(reference_video_total, 15.0) {
-        return Err(BackendError::validation(
-            "RD 视频参考视频实际总时长不能超过 15 秒",
-            json!({ "totalDurationSeconds": reference_video_total }),
-        ));
-    }
-    for media in &resolved.audios {
-        if media.role != "reference_audio" && !media.role.is_empty() {
-            return Err(BackendError::validation(
-                "RD 视频音频输入必须为参考音频",
-                media.archive(),
-            ));
-        }
-        if let Some(bytes) = &media.bytes {
-            if bytes.is_empty()
-                || bytes.len() > 50_000_000
-                || !matches!(
-                    media.mime_type.as_str(),
-                    "audio/mpeg" | "audio/mp3" | "audio/wav" | "audio/x-wav" | "audio/wave"
-                )
-            {
-                return Err(BackendError::validation(
-                    "RD 视频参考音频须为不超过 50 MB 的 MP3 或 WAV",
-                    media.archive(),
-                ));
-            }
-        } else {
-            rd_existing_reference_url(media)?;
-        }
-        if !reference_duration_in_range(media.duration_seconds, 2.0, 15.0) {
-            return Err(BackendError::validation(
-                format!(
-                    "RD 视频要求每段参考音频的实际时长为 2–15 秒：{}{}",
-                    media.display_name,
-                    describe_measured_duration(media.duration_seconds)
-                ),
-                media.archive(),
-            ));
-        }
-    }
-    let reference_audio_total: f64 = resolved
-        .audios
-        .iter()
-        .filter_map(|audio| audio.duration_seconds)
-        .sum();
-    if reference_duration_total_exceeds(reference_audio_total, 15.0) {
-        return Err(BackendError::validation(
-            "RD 视频参考音频实际总时长不能超过 15 秒",
-            json!({ "totalDurationSeconds": reference_audio_total }),
-        ));
     }
     Ok(())
 }
 
 /// Seedance 2.5 RD 网关请求体：全部字段为顶层（与魔芋 metadata 契约不同）。
 /// `images` / `reference_videos` / `reference_audios` / `start_frame` / `end_frame`
-/// 均为公网 URL 数组；`start_frame` 与 `end_frame` 成对出现时不再传 `images`。
+/// 均为公网 URL 数组；当前连接的首尾帧与参考素材完整保留。
 fn build_rd_video_body(
     model: &str,
     resolved: &ResolvedGeneration,
@@ -4553,27 +4167,12 @@ fn build_rd_video_body(
     } else {
         prompt
     };
-    let parameters = resolved
-        .parameters
-        .as_object()
-        .expect("validated parameters");
     let mut body = Map::new();
     body.insert("model".into(), json!(model));
-    body.insert("prompt".into(), json!(prompt));
-    body.insert("duration".into(), parameters["duration"].clone());
     body.insert(
-        "ratio".into(),
-        parameters
-            .get("ratio")
-            .cloned()
-            .unwrap_or_else(|| json!("16:9")),
+        "prompt".into(),
+        json!(seedance_task_prompt(model, resolved, prompt)),
     );
-    if let Some(resolution) = parameters.get("resolution") {
-        body.insert("resolution".into(), resolution.clone());
-    }
-    if let Some(generate_audio) = parameters.get("generate_audio") {
-        body.insert("generate_audio".into(), generate_audio.clone());
-    }
     if let Some(start_frame) = &start_frame {
         body.insert("start_frame".into(), json!([start_frame]));
     }
@@ -4589,7 +4188,59 @@ fn build_rd_video_body(
     if !audios.is_empty() {
         body.insert("reference_audios".into(), json!(audios));
     }
+    insert_mapped_parameters(&mut body, "metadata", mapped_parameters(resolved, "root")?)?;
+    body.entry("ratio").or_insert_with(|| json!("16:9"));
     Ok(Value::Object(body))
+}
+
+pub(crate) fn is_seedance_draft_gateway_task(task: &TaskExecutionRecord) -> bool {
+    task.remote_model_id_snapshot
+        .as_deref()
+        .is_some_and(is_seedance_draft_video_model)
+        && RequestDialect::for_adapter(&task.adapter_id_snapshot)
+            == RequestDialect::OpenAiCompatible
+}
+
+fn build_seedance_draft_promotion_body(
+    model: &str,
+    resolved: &ResolvedGeneration,
+) -> BackendResult<Value> {
+    if !is_seedance_draft_video_model(model)
+        || resolved.operation_schema["requestProfileId"] != MOYU_SEEDANCE_DRAFT_PROFILE
+    {
+        return Err(BackendError::validation(
+            "草稿转正片仅支持已接入的 Seedance 草稿样片网关协议",
+            json!({ "model": model }),
+        ));
+    }
+    let parameters = resolved
+        .parameters
+        .as_object()
+        .ok_or_else(|| BackendError::validation("草稿转正片参数必须是对象", json!({})))?;
+    let draft_task_id = parameters
+        .get("draft_task_id")
+        .and_then(Value::as_str)
+        .filter(|id| valid_sp25_task_id(id))
+        .ok_or_else(|| BackendError::validation("草稿远程任务 ID 无效", json!({})))?;
+    if parameters.len() != 1
+        || !resolved.images.is_empty()
+        || !resolved.videos.is_empty()
+        || !resolved.audios.is_empty()
+        || !resolved.rendered_prompt.trim().is_empty()
+        || !resolved.content.is_empty()
+    {
+        return Err(BackendError::validation(
+            "草稿转正片必须只引用草稿任务，不能重复传入提示词、素材、时长、画幅或其他参数",
+            json!({ "draftTaskId": draft_task_id }),
+        ));
+    }
+    Ok(json!({
+        "model": model,
+        "prompt": "占位",
+        "metadata": {
+            "content": [{ "type": "draft_task", "draft_task": { "id": draft_task_id } }]
+        }
+    }))
 }
 
 fn build_video_body(
@@ -4606,20 +4257,20 @@ fn build_video_body(
                 json!({ "taskId": task.id, "modelDefinitionId": task.model_definition_id }),
             )
         })?;
-    let has_media =
-        !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty();
-    let accepts_media_only_prompt = has_media
-        && resolved
-            .operation_schema
-            .pointer("/request/promptMode")
-            .and_then(Value::as_str)
-            == Some("prompt_or_media");
-    if resolved.rendered_prompt.trim().is_empty() && !accepts_media_only_prompt {
+    if resolved.parameters.get("draft_task_id").is_some() {
+        ensure_request_encoding(&resolved.operation_schema, "json")?;
+        return build_seedance_draft_promotion_body(model, resolved);
+    }
+    let seedance_draft =
+        resolved.operation_schema["requestProfileId"] == MOYU_SEEDANCE_DRAFT_PROFILE;
+    if seedance_draft && !is_seedance_draft_video_model(model) {
         return Err(BackendError::validation(
-            "video prompt must not be empty",
-            json!({ "taskId": task.id }),
+            "Seedance 草稿样片协议与远程模型不一致",
+            json!({ "model": model }),
         ));
     }
+    let has_media =
+        !resolved.images.is_empty() || !resolved.videos.is_empty() || !resolved.audios.is_empty();
     ensure_request_encoding(&resolved.operation_schema, "json")?;
     validate_seedance_25_video_task(model, resolved)?;
     match resolved
@@ -4735,9 +4386,14 @@ fn build_video_body(
     // 顶层 prompt 非空以满足平台校验；纯文生视频（无媒体）维持 content 为空，
     // 由平台按既有行为回退到顶层 prompt。
     let prompt = seedance_task_prompt(model, resolved, video_prompt(resolved));
+    if seedance_draft {
+        body.insert(prompt_field.clone(), json!("占位"));
+    }
     if !prompt.trim().is_empty() {
-        body.insert(prompt_field, Value::String(prompt.clone()));
-        if has_media {
+        if !seedance_draft {
+            body.insert(prompt_field, Value::String(prompt.clone()));
+        }
+        if has_media || seedance_draft {
             content.insert(0, json!({ "type": "text", "text": prompt }));
         }
     }
@@ -4809,22 +4465,14 @@ fn seedance_task_prompt(model: &str, resolved: &ResolvedGeneration, prompt: Stri
     }
 }
 
-/// 官方 2.5 特殊任务约束在付费提交前再次校验。海外模型的本地意图只参与
-/// 校验，远端字段依旧由冻结 schema 白名单决定。
+/// 保持本地任务意图与已编码字段一致，不在客户端执行渠道能力或配额校验。
 fn validate_seedance_25_video_task(
     model: &str,
     resolved: &ResolvedGeneration,
 ) -> BackendResult<()> {
     if !is_seedance_25_video_model(model) {
-        if resolved.video_task_type.is_some() {
-            return Err(BackendError::validation(
-                "所选模型不支持 Seedance 2.5 任务类型，请重新选择模型或任务类型",
-                json!({ "model": model }),
-            ));
-        }
         return Ok(());
     }
-    let task_type = seedance_video_task_type(resolved.video_task_type, &resolved.parameters);
     if let Some(local_type) = resolved.video_task_type
         && let Some(remote_type) = resolved.parameters["omni_reference_task_type"].as_str()
         && remote_type != local_type.omni_reference_task_type()
@@ -4834,139 +4482,23 @@ fn validate_seedance_25_video_task(
             json!({ "videoTaskType": local_type, "omniReferenceTaskType": remote_type }),
         ));
     }
-    let mut first_frames = 0;
-    let mut last_frames = 0;
-    let mut references = 0;
-    let mut reference_videos = 0;
     for media in resolved
         .images
         .iter()
         .chain(&resolved.videos)
         .chain(&resolved.audios)
     {
-        match (media.media_type, media.role.as_str()) {
-            (MediaType::Image, "first_frame") => first_frames += 1,
-            (MediaType::Image, "last_frame") => last_frames += 1,
-            (MediaType::Image, "reference_image") | (MediaType::Audio, "reference_audio") => {
-                references += 1
-            }
-            (MediaType::Video, "reference_video") => {
-                references += 1;
-                reference_videos += 1;
-            }
-            _ => {
-                return Err(BackendError::validation(
-                    "Seedance 2.5 素材类型与用途不匹配",
-                    media.archive(),
-                ));
-            }
-        }
-    }
-    let has_frames = first_frames > 0 || last_frames > 0;
-    let selected_frames = matches!(
-        task_type,
-        VideoTaskType::FirstFrame | VideoTaskType::FirstLastFrame
-    );
-    if first_frames > 1 || last_frames > 1 || (has_frames && first_frames != 1) {
-        return Err(BackendError::validation(
-            "首帧/首尾帧任务必须有且仅有一张首帧，尾帧最多一张",
-            json!({ "firstFrames": first_frames, "lastFrames": last_frames }),
-        ));
-    }
-    if (has_frames && references > 0)
-        || (has_frames
-            && matches!(
-                task_type,
-                VideoTaskType::Reference | VideoTaskType::Edit | VideoTaskType::Extend
-            ))
-    {
-        return Err(BackendError::validation(
-            "首帧/首尾帧与全参考、视频编辑、视频延长不能混用，请调整素材用途或任务类型",
-            json!({ "videoTaskType": task_type, "firstFrames": first_frames, "lastFrames": last_frames, "references": references }),
-        ));
-    }
-    if (selected_frames && first_frames != 1)
-        || (task_type == VideoTaskType::FirstLastFrame && last_frames != 1)
-        || (task_type == VideoTaskType::FirstFrame && last_frames != 0)
-    {
-        return Err(BackendError::validation(
-            "首帧任务需要一张首帧；首尾帧任务需要各一张首帧和尾帧",
-            json!({ "videoTaskType": task_type, "firstFrames": first_frames, "lastFrames": last_frames }),
-        ));
-    }
-    if matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend) && reference_videos == 0 {
-        return Err(BackendError::validation(
-            "视频编辑和视频延长至少需要一个参考视频",
-            json!({ "videoTaskType": task_type }),
-        ));
-    }
-    if task_type == VideoTaskType::Reference && references == 0 {
-        return Err(BackendError::validation(
-            "全参考任务至少需要一个参考素材",
-            json!({ "videoTaskType": task_type }),
-        ));
-    }
-    if (has_frames
-        || selected_frames
-        || matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend))
-        && resolved.parameters["ratio"].as_str() != Some("adaptive")
-    {
-        return Err(BackendError::validation(
-            "Seedance 2.5 首帧/首尾帧、视频编辑和视频延长的画幅必须为自适应（adaptive）",
-            json!({ "ratio": resolved.parameters["ratio"] }),
-        ));
-    }
-    if has_frames
-        || selected_frames
-        || matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend)
-    {
-        let duration = resolved.parameters["duration"].as_i64();
-        if !duration.is_some_and(|value| value == -1 || (4..=30).contains(&value)) {
+        if !matches!(
+            (media.media_type, media.role.as_str()),
+            (
+                MediaType::Image,
+                "first_frame" | "last_frame" | "reference_image"
+            ) | (MediaType::Video, "reference_video")
+                | (MediaType::Audio, "reference_audio")
+        ) {
             return Err(BackendError::validation(
-                "Seedance 2.5 输出时长必须为智能（-1）或 4–30 秒",
-                json!({ "duration": resolved.parameters["duration"] }),
-            ));
-        }
-    }
-    if task_type == VideoTaskType::Edit && resolved.parameters["duration"].as_i64() != Some(-1) {
-        return Err(BackendError::validation(
-            "视频编辑的输出时长必须为智能（-1），自动跟随待编辑视频",
-            json!({ "duration": resolved.parameters["duration"] }),
-        ));
-    }
-    if matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend) {
-        if reference_videos > 10 {
-            return Err(BackendError::validation(
-                "视频编辑和视频延长最多支持 10 个参考视频",
-                json!({ "referenceVideos": reference_videos }),
-            ));
-        }
-        let minimum_seconds = if task_type == VideoTaskType::Edit {
-            4.0
-        } else {
-            2.0
-        };
-        for video in &resolved.videos {
-            if !reference_duration_in_range(video.duration_seconds, minimum_seconds, 30.0) {
-                return Err(BackendError::validation(
-                    format!(
-                        "当前视频任务要求每个参考视频的实际时长为 {minimum_seconds}–30 秒：{}{}",
-                        video.display_name,
-                        describe_measured_duration(video.duration_seconds)
-                    ),
-                    video.archive(),
-                ));
-            }
-        }
-        let total_seconds: f64 = resolved
-            .videos
-            .iter()
-            .filter_map(|video| video.duration_seconds)
-            .sum();
-        if reference_duration_total_exceeds(total_seconds, 30.0) {
-            return Err(BackendError::validation(
-                "视频编辑和视频延长的参考视频实际总时长不能超过 30 秒",
-                json!({ "totalDurationSeconds": total_seconds }),
+                "Seedance 2.5 素材类型与用途不匹配",
+                media.archive(),
             ));
         }
     }
@@ -5054,12 +4586,6 @@ fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
     let prompt = video_prompt(resolved);
-    if prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "Veo video prompt must not be empty",
-            resolved.archive(),
-        ));
-    }
     body.insert(prompt_field, Value::String(prompt));
 
     // 图生视频参考图：只支持公网 http(s) URL（暂存对象或远端素材的读取地址），
@@ -5098,19 +4624,6 @@ fn build_veo_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendRe
         mapped_parameters(resolved, "root")?,
     )?;
 
-    // 1080p 分辨率仅支持 8 秒时长（接口约束，提前给出可读错误）。
-    let resolution = body
-        .get("resolution")
-        .and_then(Value::as_str)
-        .unwrap_or("720p");
-    let duration = body.get("duration").and_then(Value::as_i64).unwrap_or(8);
-    if resolution == "1080p" && duration != 8 {
-        return Err(BackendError::validation(
-            "Veo 1080p resolution requires a duration of 8 seconds",
-            json!({ "resolution": resolution, "duration": duration }),
-        ));
-    }
-
     Ok(Value::Object(body))
 }
 
@@ -5144,12 +4657,6 @@ fn build_vidu_video_body(model: &str, resolved: &ResolvedGeneration) -> BackendR
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
     let prompt = video_prompt(resolved);
-    if prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "Vidu video prompt must not be empty",
-            resolved.archive(),
-        ));
-    }
     body.insert(prompt_field, Value::String(prompt));
 
     // 图生/首尾帧/参考图输入：支持公网 http(s) URL 与带前缀的 Base64 Data URI。
@@ -5213,12 +4720,6 @@ fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> Ba
     let mut body = Map::new();
     body.insert(model_field, Value::String(model.to_string()));
     let prompt = video_prompt(resolved);
-    if prompt.trim().is_empty() {
-        return Err(BackendError::validation(
-            "MiniMax-H3 video prompt must not be empty",
-            resolved.archive(),
-        ));
-    }
     body.insert(prompt_field, Value::String(prompt));
 
     // resolution/ratio/duration/aigc_watermark 落在顶层；task_type 声明了
@@ -5239,29 +4740,17 @@ fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> Ba
     if task_type == "regeneration" {
         // regeneration：源视频作为 base_video_url（source_task_id 与 base_video_url
         // 二选一，本地未提供任务 ID 输入，使用连接的源视频地址）；可额外携带
-        // 参考音频；输出时长由源视频决定，不发送 duration。
+        // 参考素材完整保留；输出时长由源视频决定，不发送 duration。
         if resolved.videos.len() != 1 {
             return Err(BackendError::validation(
                 "MiniMax-H3 regeneration requires exactly one source video input",
                 json!({ "videos": resolved.videos.len() }),
             ));
         }
-        if !resolved.images.is_empty() {
-            return Err(BackendError::validation(
-                "MiniMax-H3 regeneration does not accept image inputs",
-                json!({ "images": resolved.images.len() }),
-            ));
-        }
         body.remove("duration");
     } else if task_type == "h3_context_ir" {
-        // Context-IR（智能扩写）：产出文本而非视频，不接受 resolution（文档说明传了
-        // 也会被忽略）；输入仅限参考视频/音频（各 ≤3），不接受图片。
-        if !resolved.images.is_empty() {
-            return Err(BackendError::validation(
-                "MiniMax-H3 Context-IR does not accept image inputs",
-                json!({ "images": resolved.images.len() }),
-            ));
-        }
+        // Context-IR（智能扩写）产出文本，沿用既有协议省略视频分辨率字段；
+        // 连接素材完整提交，支持范围由渠道决定。
         body.remove("resolution");
     }
 
@@ -5275,6 +4764,82 @@ fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> Ba
         )
     })?;
     metadata_object.insert("task_type".into(), Value::String(task_type.clone()));
+
+    for (field, has_connected_media) in [
+        (
+            "reference_images",
+            resolved
+                .images
+                .iter()
+                .any(|media| media.role == "reference_image"),
+        ),
+        (
+            "reference_videos",
+            task_type != "regeneration" && !resolved.videos.is_empty(),
+        ),
+        ("reference_audios", !resolved.audios.is_empty()),
+        (
+            "first_frame_image",
+            resolved
+                .images
+                .iter()
+                .any(|media| media.role == "first_frame"),
+        ),
+        (
+            "last_frame_image",
+            resolved
+                .images
+                .iter()
+                .any(|media| media.role == "last_frame"),
+        ),
+        (
+            "base_video_url",
+            task_type == "regeneration" && !resolved.videos.is_empty(),
+        ),
+    ] {
+        if has_connected_media && metadata_object.contains_key(field) {
+            return Err(BackendError::validation(
+                "model parameter collides with a connected media field",
+                json!({ "parameter": field }),
+            ));
+        }
+    }
+
+    for media in &resolved.images {
+        let reference = media.remote_reference.as_ref().ok_or_else(|| {
+            BackendError::validation(
+                "MiniMax-H3 image input has no remote-readable reference",
+                media.archive(),
+            )
+        })?;
+        match media.role.as_str() {
+            "first_frame" => {
+                metadata_object
+                    .insert("first_frame_image".into(), Value::String(reference.clone()));
+            }
+            "last_frame" => {
+                metadata_object.insert("last_frame_image".into(), Value::String(reference.clone()));
+            }
+            "reference_image" => {
+                metadata_object
+                    .entry("reference_images")
+                    .or_insert_with(|| Value::Array(Vec::new()))
+                    .as_array_mut()
+                    .expect("reference_images array")
+                    .push(Value::String(reference.clone()));
+            }
+            _ => {
+                return Err(BackendError::validation(
+                    "MiniMax-H3 image role is incompatible with the resolved media type",
+                    json!({
+                        "role": media.role,
+                        "mediaType": media.media_type,
+                        "displayName": media.display_name
+                    }),
+                ));
+            }
+        }
+    }
 
     if task_type == "regeneration" {
         let base = resolved.videos.first().expect("videos length checked");
@@ -5300,42 +4865,6 @@ fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> Ba
                 .push(Value::String(reference.clone()));
         }
     } else {
-        for media in &resolved.images {
-            let reference = media.remote_reference.as_ref().ok_or_else(|| {
-                BackendError::validation(
-                    "MiniMax-H3 image input has no remote-readable reference",
-                    media.archive(),
-                )
-            })?;
-            match media.role.as_str() {
-                "first_frame" => {
-                    metadata_object
-                        .insert("first_frame_image".into(), Value::String(reference.clone()));
-                }
-                "last_frame" => {
-                    metadata_object
-                        .insert("last_frame_image".into(), Value::String(reference.clone()));
-                }
-                "reference_image" => {
-                    metadata_object
-                        .entry("reference_images")
-                        .or_insert_with(|| Value::Array(Vec::new()))
-                        .as_array_mut()
-                        .expect("reference_images array")
-                        .push(Value::String(reference.clone()));
-                }
-                _ => {
-                    return Err(BackendError::validation(
-                        "MiniMax-H3 image role is incompatible with the resolved media type",
-                        json!({
-                            "role": media.role,
-                            "mediaType": media.media_type,
-                            "displayName": media.display_name
-                        }),
-                    ));
-                }
-            }
-        }
         for media in &resolved.videos {
             let reference = media.remote_reference.as_ref().ok_or_else(|| {
                 BackendError::validation(
@@ -5369,70 +4898,34 @@ fn build_minimax_h3_video_body(model: &str, resolved: &ResolvedGeneration) -> Ba
     Ok(Value::Object(body))
 }
 
-/// MiniMax-H3 媒体前置校验：
-/// - 首帧/尾帧图片各最多 1 张，参考图最多 9 张，参考视频/音频各最多 3 段；
-/// - 首帧/尾帧模式与参考图/视频/音频模式不可混用（平台会以 build_request_failed 拒绝）；
-/// - 角色必须与素材类型匹配（role: first_frame/last_frame/reference_image → 图片，
-///   reference_video → 视频，reference_audio → 音频）。
+/// 仅验证单值帧字段与媒体角色的编码完整性；渠道配额和素材组合由服务端判断。
 fn validate_minimax_h3_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
     let mut first_frames = 0_usize;
     let mut last_frames = 0_usize;
-    let mut reference_images = 0_usize;
-    let mut reference_videos = 0_usize;
-    let mut reference_audios = 0_usize;
     for media in resolved
         .images
         .iter()
         .chain(&resolved.videos)
         .chain(&resolved.audios)
     {
-        match media.role.as_str() {
-            "first_frame" if media.media_type == MediaType::Image => first_frames += 1,
-            "last_frame" if media.media_type == MediaType::Image => last_frames += 1,
-            "reference_image" if media.media_type == MediaType::Image => reference_images += 1,
-            "reference_video" if media.media_type == MediaType::Video => reference_videos += 1,
-            "reference_audio" if media.media_type == MediaType::Audio => reference_audios += 1,
+        match (media.media_type, media.role.as_str()) {
+            (MediaType::Image, "first_frame") => first_frames += 1,
+            (MediaType::Image, "last_frame") => last_frames += 1,
+            (MediaType::Image, "reference_image")
+            | (MediaType::Video, "reference_video")
+            | (MediaType::Audio, "reference_audio") => {}
             _ => {
                 return Err(BackendError::validation(
                     "MiniMax-H3 media role is incompatible with the resolved media type",
-                    json!({
-                        "role": media.role,
-                        "mediaType": media.media_type,
-                        "displayName": media.display_name
-                    }),
+                    media.archive(),
                 ));
             }
         }
     }
-    if first_frames > 1
-        || last_frames > 1
-        || reference_images > 9
-        || reference_videos > 3
-        || reference_audios > 3
-    {
+    if first_frames > 1 || last_frames > 1 {
         return Err(BackendError::validation(
-            "MiniMax-H3 media input exceeds a documented count limit",
-            json!({
-                "firstFrames": first_frames,
-                "lastFrames": last_frames,
-                "referenceImages": reference_images,
-                "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios
-            }),
-        ));
-    }
-    let has_frame_inputs = first_frames > 0 || last_frames > 0;
-    let has_reference_inputs = reference_images > 0 || reference_videos > 0 || reference_audios > 0;
-    if has_frame_inputs && has_reference_inputs {
-        return Err(BackendError::validation(
-            "MiniMax-H3 frame inputs and reference inputs cannot be mixed",
-            json!({
-                "firstFrames": first_frames,
-                "lastFrames": last_frames,
-                "referenceImages": reference_images,
-                "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios
-            }),
+            "MiniMax-H3 singleton frame fields cannot encode multiple images with the same role",
+            json!({ "firstFrames": first_frames, "lastFrames": last_frames }),
         ));
     }
     Ok(())
@@ -5461,58 +4954,26 @@ fn wan_prompt(resolved: &ResolvedGeneration) -> String {
 }
 
 fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
-    const ALLOWED_IMAGE_MIME_TYPES: [&str; 5] = [
-        "image/jpeg",
-        "image/png",
-        "image/bmp",
-        "image/x-ms-bmp",
-        "image/webp",
-    ];
-
-    let mut first_frames = 0_usize;
-    let mut last_frames = 0_usize;
-    let mut reference_images = 0_usize;
-    let mut reference_videos = 0_usize;
-    let mut reference_audios = 0_usize;
-    let mut document_files = 0_usize;
-    let mut document_links = 0_usize;
     for media in resolved
         .images
         .iter()
         .chain(&resolved.videos)
         .chain(&resolved.audios)
     {
-        match media.role.as_str() {
-            "first_frame" if media.media_type == MediaType::Image => first_frames += 1,
-            "last_frame" if media.media_type == MediaType::Image => last_frames += 1,
-            "reference_image" if media.media_type == MediaType::Image => reference_images += 1,
-            "reference_video" if media.media_type == MediaType::Video => reference_videos += 1,
-            "reference_audio" if media.media_type == MediaType::Audio => reference_audios += 1,
-            // 文档/网页生视频：`file`/`link` 素材本身就是公网 URL，不绑定图片/视频/音频类型。
-            "file" => document_files += 1,
-            "link" => document_links += 1,
-            _ => {
-                return Err(BackendError::validation(
-                    "Wan 3.0 media role is incompatible with the resolved media type",
-                    json!({
-                        "role": media.role,
-                        "mediaType": media.media_type,
-                        "displayName": media.display_name
-                    }),
-                ));
-            }
-        }
-        // 图片格式约束只适用于真正的图片素材；`file`/`link` 是公网文档/网页 URL。
-        if media.media_type == MediaType::Image
-            && !matches!(media.role.as_str(), "file" | "link")
-            && !ALLOWED_IMAGE_MIME_TYPES.contains(&media.mime_type.as_str())
-        {
+        if !matches!(
+            (media.media_type, media.role.as_str()),
+            (
+                MediaType::Image,
+                "first_frame" | "last_frame" | "reference_image"
+            ) | (MediaType::Video, "reference_video")
+                | (MediaType::Audio, "reference_audio")
+                | (_, "file" | "link")
+        ) {
             return Err(BackendError::validation(
-                "Wan 3.0 image input uses an unsupported format",
-                json!({ "mimeType": media.mime_type, "displayName": media.display_name }),
+                "Wan 3.0 media role is incompatible with the resolved media type",
+                media.archive(),
             ));
         }
-        // 文档/网页仅支持无需登录的公开页面：请求层至少校验引用是公网 http(s) URL。
         if matches!(media.role.as_str(), "file" | "link")
             && !media.remote_reference.as_deref().is_some_and(|reference| {
                 reference.starts_with("http://") || reference.starts_with("https://")
@@ -5520,72 +4981,9 @@ fn validate_wan_media(resolved: &ResolvedGeneration) -> BackendResult<()> {
         {
             return Err(BackendError::validation(
                 "Wan 3.0 document/link input must reference a public http(s) URL",
-                json!({
-                    "role": media.role,
-                    "displayName": media.display_name
-                }),
+                media.archive(),
             ));
         }
-    }
-
-    if first_frames > 1
-        || last_frames > 1
-        || reference_images > 10
-        || reference_videos > 5
-        || reference_audios > 5
-        || document_files > 1
-        || document_links > 1
-    {
-        return Err(BackendError::validation(
-            "Wan 3.0 media input exceeds a documented count limit",
-            json!({
-                "firstFrames": first_frames,
-                "lastFrames": last_frames,
-                "referenceImages": reference_images,
-                "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios,
-                "documentFiles": document_files,
-                "documentLinks": document_links
-            }),
-        ));
-    }
-    let has_frame_inputs = first_frames > 0 || last_frames > 0;
-    let has_reference_inputs = reference_images > 0 || reference_videos > 0 || reference_audios > 0;
-    if has_frame_inputs && has_reference_inputs {
-        return Err(BackendError::validation(
-            "Wan 3.0 frame inputs and reference inputs cannot be mixed",
-            json!({
-                "firstFrames": first_frames,
-                "lastFrames": last_frames,
-                "referenceImages": reference_images,
-                "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios
-            }),
-        ));
-    }
-    let has_document_inputs = document_files > 0 || document_links > 0;
-    if has_document_inputs && (has_frame_inputs || has_reference_inputs) {
-        return Err(BackendError::validation(
-            "Wan 3.0 document/link inputs cannot be mixed with other media inputs",
-            json!({
-                "documentFiles": document_files,
-                "documentLinks": document_links,
-                "firstFrames": first_frames,
-                "lastFrames": last_frames,
-                "referenceImages": reference_images,
-                "referenceVideos": reference_videos,
-                "referenceAudios": reference_audios
-            }),
-        ));
-    }
-    if document_files > 0 && document_links > 0 {
-        return Err(BackendError::validation(
-            "Wan 3.0 file and link inputs are mutually exclusive",
-            json!({
-                "documentFiles": document_files,
-                "documentLinks": document_links
-            }),
-        ));
     }
     Ok(())
 }
@@ -5897,6 +5295,32 @@ fn sp25_response_error(status: u16, raw: &str, fallback: &str) -> BackendError {
         },
         json!({ "httpStatus": status, "error": redact_request_value(error) }),
     )
+}
+
+fn seedance_ambiguous_submission_error(error: BackendError) -> BackendError {
+    if matches!(
+        error,
+        BackendError::Validation { .. } | BackendError::Url(_)
+    ) {
+        return error;
+    }
+    BackendError::protocol(
+        "Seedance 视频提交结果无法确认，平台可能已受理；请先核对远程任务，避免重复扣费",
+        json!({ "ambiguousPaidSubmission": true, "source": error.runtime_record() }),
+    )
+}
+
+fn parse_seedance_draft_task_id(response: &CapturedHttpResponse) -> BackendResult<String> {
+    let parsed = parse_video_task_id(response);
+    let task_id = match parsed {
+        Ok(task_id) if valid_sp25_task_id(&task_id) => return Ok(task_id),
+        Ok(_) => BackendError::protocol("Seedance 提交响应的 task_id 格式无效", json!({})),
+        Err(error) => error,
+    };
+    if response.is_success() || response.status >= 500 {
+        return Err(seedance_ambiguous_submission_error(task_id));
+    }
+    Err(task_id)
 }
 
 fn sp25_ambiguous_submission_error(error: BackendError) -> BackendError {
@@ -6234,8 +5658,26 @@ fn require_success(response: &CapturedHttpResponse) -> BackendResult<()> {
     if response.is_success() {
         Ok(())
     } else {
+        let payload: Value = serde_json::from_str(&response.body).unwrap_or(Value::Null);
+        let message = payload
+            .pointer("/error/message")
+            .or_else(|| payload.pointer("/output/message"))
+            .or_else(|| payload.get("message"))
+            .or_else(|| payload.get("error"))
+            .and_then(Value::as_str)
+            .filter(|message| !message.trim().is_empty());
+        let code = payload
+            .pointer("/error/code")
+            .or_else(|| payload.get("code"))
+            .and_then(Value::as_str)
+            .filter(|code| !code.is_empty());
+        let summary = match (message, code) {
+            (Some(message), Some(code)) => format!("{message} ({code}, HTTP {})", response.status),
+            (Some(message), None) => format!("{message} (HTTP {})", response.status),
+            _ => format!("provider returned HTTP {}", response.status),
+        };
         Err(BackendError::protocol(
-            format!("provider returned HTTP {}", response.status),
+            summary,
             json!({
                 "httpStatus": response.status,
                 "headers": response.headers,
@@ -8060,7 +7502,7 @@ mod tests {
     }
 
     #[test]
-    fn seedream_image_to_image_rejects_more_than_six_reference_images() {
+    fn seedream_image_to_image_preserves_more_than_six_reference_images() {
         let schema = super::super::model_schema::default_model_schema(
             "doubao-seedream-5-0-260128",
             &[GenerationOperation::ImageToImage],
@@ -8075,15 +7517,13 @@ mod tests {
                 Some((index - 1) as usize),
             ));
         }
-        let error = build_seedream_image_to_image_body(
+        let body = build_seedream_image_to_image_body(
             &task(GenerationOperation::ImageToImage),
             &generation,
         )
-        .expect_err("seedream image-to-image must reject 7 reference images");
-        assert!(
-            error.to_string().contains("at most 6 image references"),
-            "unexpected error: {error}"
-        );
+        .expect("reference count is validated by the channel");
+        assert_eq!(body["image"].as_array().expect("reference array").len(), 7);
+        assert_eq!(body["image"][6], "https://cdn.example.com/7.png");
     }
 
     #[test]
@@ -8252,8 +7692,8 @@ mod tests {
     }
 
     #[test]
-    fn video_builder_maps_declared_parameters_and_transforms_web_search() {
-        let generation = resolved(
+    fn video_builder_maps_declared_and_new_parameters_and_keeps_media_with_web_search() {
+        let mut generation = resolved(
             json!({
                 "request": {
                     "encoding": "json",
@@ -8281,6 +7721,34 @@ mod tests {
         assert_eq!(
             body["metadata"]["content"].as_array().map(Vec::len),
             Some(0)
+        );
+        generation.parameters["channel_option"] = json!({ "mode": "new-service-mode" });
+        generation.parameters["frames"] = json!("channel-auto");
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://example.com/reference.png",
+            None,
+        ));
+        let body = build_video_body(&task(GenerationOperation::VideoGeneration), &generation)
+            .expect("new parameters and web-search/media combination reach the channel");
+        assert_eq!(
+            body["metadata"]["channel_option"],
+            json!({ "mode": "new-service-mode" })
+        );
+        assert_eq!(body["metadata"]["frame_count"], "channel-auto");
+        assert_eq!(body["metadata"]["tools"], json!([{ "type": "web_search" }]));
+        assert_eq!(
+            body["metadata"]["content"]
+                .as_array()
+                .expect("text and image content")
+                .len(),
+            2
+        );
+        assert_eq!(
+            body["metadata"]["content"][1]["image_url"]["url"],
+            "https://example.com/reference.png"
         );
     }
 
@@ -8431,7 +7899,7 @@ mod tests {
     }
 
     #[test]
-    fn seedance_edit_requires_real_video_duration_and_keeps_local_mode_out_of_remote_body() {
+    fn seedance_edit_defers_duration_policy_and_keeps_local_mode_out_of_remote_body() {
         for (model, dialect) in [
             // 同一个国内模型名：方舟连接参数平铺在根级，网关连接归入 metadata。
             ("doubao-seedance-2-5-260628", RequestDialect::VolcengineArk),
@@ -8440,8 +7908,8 @@ mod tests {
         ] {
             let (task, mut generation) = seedance_task_fixture(model, VideoTaskType::Edit, dialect);
             assert!(
-                build_video_body(&task, &generation).is_err(),
-                "edit needs video"
+                build_video_body(&task, &generation).is_ok(),
+                "channel decides whether edit needs video"
             );
             generation.videos.push(resolved_media(
                 MediaType::Video,
@@ -8459,15 +7927,15 @@ mod tests {
             ] {
                 generation.videos[0].duration_seconds = duration;
                 assert!(
-                    build_video_body(&task, &generation).is_err(),
-                    "invalid actual duration: {duration:?}"
+                    build_video_body(&task, &generation).is_ok(),
+                    "duration metadata must not block submission: {duration:?}"
                 );
             }
-            // 标称 30 秒的生成产物实测常带 1–2 帧封装越界（30.08 秒），容差内放行。
+            // Local metadata does not determine channel duration policy.
             for duration in [4.0, 16.5, 30.0, 30.08] {
                 generation.videos[0].duration_seconds = Some(duration);
                 let body = build_video_body(&task, &generation).expect("valid edit");
-                // 本地任务类型只参与校验，不写进请求体：远端字段由冻结 schema 决定
+                // 本地任务类型不写进请求体：远端字段由冻结 schema 决定
                 // （Seedance 2.5 的任务类型 `omni_reference_task_type` 是字符串）。
                 assert!(body.get("videoTaskType").is_none());
                 assert!(body["metadata"].get("videoTaskType").is_none());
@@ -8492,21 +7960,35 @@ mod tests {
                 }
             }
             generation.parameters["duration"] = json!(10);
-            assert!(build_video_body(&task, &generation).is_err());
+            let body =
+                build_video_body(&task, &generation).expect("output duration passed to channel");
+            let parameters = if dialect == RequestDialect::VolcengineArk {
+                &body
+            } else {
+                &body["metadata"]
+            };
+            assert_eq!(parameters["duration"], 10);
             generation.parameters["duration"] = json!(-1);
             generation.parameters["ratio"] = json!("16:9");
-            assert!(build_video_body(&task, &generation).is_err());
+            let body =
+                build_video_body(&task, &generation).expect("output ratio passed to channel");
+            let parameters = if dialect == RequestDialect::VolcengineArk {
+                &body
+            } else {
+                &body["metadata"]
+            };
+            assert_eq!(parameters["ratio"], "16:9");
         }
     }
 
     #[test]
-    fn seedance_frames_require_first_frame_and_cannot_mix_reference_media() {
+    fn seedance_frames_and_reference_media_are_preserved_for_channel_validation() {
         let (task, mut generation) = seedance_task_fixture(
             "doubao-seedance-2-5-260628",
             VideoTaskType::FirstFrame,
             RequestDialect::OpenAiCompatible,
         );
-        assert!(build_video_body(&task, &generation).is_err());
+        assert!(build_video_body(&task, &generation).is_ok());
         generation.images.push(resolved_media(
             MediaType::Image,
             1,
@@ -8516,12 +7998,15 @@ mod tests {
         ));
         assert!(build_video_body(&task, &generation).is_ok());
         generation.parameters["ratio"] = json!("1:1");
-        assert!(build_video_body(&task, &generation).is_err());
+        assert_eq!(
+            build_video_body(&task, &generation).expect("ratio passed through")["metadata"]["ratio"],
+            "1:1"
+        );
         generation.parameters["ratio"] = json!("adaptive");
         generation.video_task_type = Some(VideoTaskType::FirstLastFrame);
         assert!(
-            build_video_body(&task, &generation).is_err(),
-            "missing last frame"
+            build_video_body(&task, &generation).is_ok(),
+            "frame pairing is decided by channel"
         );
         generation.images.push(resolved_media(
             MediaType::Image,
@@ -8538,27 +8023,31 @@ mod tests {
             "https://cdn.example.com/reference.png",
             None,
         ));
-        assert!(
-            build_video_body(&task, &generation).is_err(),
-            "mixed reference image"
+        let body = build_video_body(&task, &generation).expect("mixed frame/reference input");
+        assert_eq!(
+            body["metadata"]["content"]
+                .as_array()
+                .expect("content")
+                .len(),
+            4
         );
         generation.images.pop();
         generation.images.remove(0);
         generation.video_task_type = None;
         assert!(
-            build_video_body(&task, &generation).is_err(),
-            "legacy last frame alone"
+            build_video_body(&task, &generation).is_ok(),
+            "legacy last frame is retained for channel validation"
         );
     }
 
     #[test]
-    fn seedance_extend_requires_video_and_adaptive_ratio_with_legal_output_duration() {
+    fn seedance_extend_preserves_output_duration_and_ratio_for_channel_validation() {
         let (task, mut generation) = seedance_task_fixture(
             "dreamina-seedance-2.5",
             VideoTaskType::Extend,
             RequestDialect::OpenAiCompatible,
         );
-        assert!(build_video_body(&task, &generation).is_err());
+        assert!(build_video_body(&task, &generation).is_ok());
         generation.videos.push(resolved_media(
             MediaType::Video,
             1,
@@ -8568,7 +8057,7 @@ mod tests {
         ));
         for duration in [None, Some(1.0), Some(31.0)] {
             generation.videos[0].duration_seconds = duration;
-            assert!(build_video_body(&task, &generation).is_err());
+            assert!(build_video_body(&task, &generation).is_ok());
         }
         // 实测 30.08 秒在 2–30 秒边界的封装容差内。
         generation.videos[0].duration_seconds = Some(30.08);
@@ -8579,21 +8068,27 @@ mod tests {
             assert!(build_video_body(&task, &generation).is_ok());
         }
         for duration in [json!(0), json!(3), json!(31), json!(4.5), json!("10")] {
-            generation.parameters["duration"] = duration;
-            assert!(build_video_body(&task, &generation).is_err());
+            generation.parameters["duration"] = duration.clone();
+            let body = build_video_body(&task, &generation).expect("channel validates duration");
+            assert_eq!(body["metadata"]["duration"], duration);
         }
         generation.parameters["duration"] = json!(-1);
         generation.parameters["ratio"] = json!("16:9");
-        assert!(build_video_body(&task, &generation).is_err());
+        assert_eq!(
+            build_video_body(&task, &generation).expect("channel validates ratio")["metadata"]["ratio"],
+            "16:9"
+        );
     }
 
     #[test]
-    fn seedance_legacy_edit_parameter_is_validated_and_conflicting_local_intent_is_rejected() {
+    fn seedance_legacy_edit_parameter_is_preserved_and_conflicting_local_intent_is_rejected() {
         let (task, mut generation) = seedance_task_fixture(
             "doubao-seedance-2-5-260628",
             VideoTaskType::Edit,
             RequestDialect::OpenAiCompatible,
         );
+        // 新草稿网关不再默认声明 omni 字段；仍须识别历史显式保存的 edit 意图。
+        generation.parameters["omni_reference_task_type"] = json!("edit");
         generation.video_task_type = None;
         generation.videos.push(resolved_media(
             MediaType::Video,
@@ -8602,7 +8097,7 @@ mod tests {
             "https://cdn.example.com/edit.mp4",
             None,
         ));
-        assert!(build_video_body(&task, &generation).is_err());
+        assert!(build_video_body(&task, &generation).is_ok());
         generation.videos[0].duration_seconds = Some(10.0);
         assert!(build_video_body(&task, &generation).is_ok());
         generation.video_task_type = Some(VideoTaskType::Extend);
@@ -8610,7 +8105,7 @@ mod tests {
     }
 
     #[test]
-    fn seedance_edit_and_extend_limit_actual_total_duration_and_video_count() {
+    fn seedance_edit_and_extend_preserve_references_beyond_former_duration_and_count_limits() {
         for model in ["doubao-seedance-2-5-260628", "dreamina-seedance-2.5"] {
             for mode in [VideoTaskType::Edit, VideoTaskType::Extend] {
                 let (task, mut generation) =
@@ -8630,7 +8125,7 @@ mod tests {
                     build_video_body(&task, &generation).is_ok(),
                     "30 seconds total"
                 );
-                // 单段容差内越界（合计 30.08 秒）放行；明确超限仍拒绝。
+                // Duration metadata stays advisory regardless of the former limit.
                 generation.videos[1].duration_seconds = Some(15.08);
                 assert!(
                     build_video_body(&task, &generation).is_ok(),
@@ -8638,8 +8133,8 @@ mod tests {
                 );
                 generation.videos[1].duration_seconds = Some(15.6);
                 assert!(
-                    build_video_body(&task, &generation).is_err(),
-                    "more than 30 seconds total"
+                    build_video_body(&task, &generation).is_ok(),
+                    "channel validates total duration"
                 );
                 generation.videos.clear();
                 for position in 1..=11 {
@@ -8657,24 +8152,27 @@ mod tests {
                     });
                     generation.videos.push(video);
                 }
-                assert!(
-                    build_video_body(&task, &generation)
-                        .unwrap_err()
-                        .to_string()
-                        .contains("10 个")
+                let body =
+                    build_video_body(&task, &generation).expect("channel validates video count");
+                assert_eq!(
+                    body["metadata"]["content"]
+                        .as_array()
+                        .expect("content")
+                        .len(),
+                    12
                 );
             }
         }
     }
 
     #[test]
-    fn seedance_reference_needs_at_least_one_reference() {
+    fn seedance_reference_defers_minimum_reference_count_to_channel() {
         let (task, mut generation) = seedance_task_fixture(
             "doubao-seedance-2-5-260628",
             VideoTaskType::Reference,
             RequestDialect::OpenAiCompatible,
         );
-        assert!(build_video_body(&task, &generation).is_err());
+        assert!(build_video_body(&task, &generation).is_ok());
         generation.images.push(resolved_media(
             MediaType::Image,
             1,
@@ -8876,18 +8374,453 @@ mod tests {
             assert!(other.get("ratio").is_none(), "参数不能出现在另一个容器里");
             assert!(other.get("duration").is_none());
             // content 与参数同容器：首个 text 条目是渲染后的完整提示词（媒体引用渲染为
-            // 「视频N」短标签，编辑任务再补「编辑视频：」前缀），与顶层 prompt 一致。
+            // 「视频N」短标签，编辑任务再补「编辑视频：」前缀）；新草稿样片网关
+            // 的顶层 prompt 仅作为平台占位字段。
             let content = if native {
                 &body["content"]
             } else {
                 &body["metadata"]["content"]
             };
             assert_eq!(content[0]["type"], "text");
-            assert_eq!(content[0]["text"], body["prompt"]);
+            if native {
+                assert_eq!(content[0]["text"], body["prompt"]);
+            } else {
+                assert_eq!(body["prompt"], "占位");
+            }
             assert_eq!(content[0]["text"], "编辑视频：\n把天空换成黄昏视频1");
             assert_eq!(content[1]["role"], "reference_video");
             // 请求体里没有本地 videoTaskType 字段：远端任务类型用 omni_reference_task_type 表达。
             assert!(body.get("videoTaskType").is_none());
+        }
+    }
+
+    #[test]
+    fn seedance_draft_text_request_places_actual_prompt_in_content() {
+        let (task, mut generation) = seedance_task_fixture(
+            "doubao-seedance-2-5-260628",
+            VideoTaskType::Auto,
+            RequestDialect::OpenAiCompatible,
+        );
+        generation.parameters = json!({ "draft": true, "duration": 5, "resolution": "480p", "ratio": "16:9", "generate_audio": true });
+        let body = build_video_body(&task, &generation).expect("draft text request");
+        assert_eq!(body["prompt"], "占位");
+        assert_eq!(
+            body["metadata"]["content"],
+            json!([{ "type": "text", "text": "A train arrives" }])
+        );
+        assert_eq!(body["metadata"]["draft"], true);
+        assert_eq!(body["metadata"]["duration"], 5);
+        assert_eq!(body["metadata"]["resolution"], "480p");
+        assert!(body.get("draft").is_none());
+    }
+
+    #[test]
+    fn seedance_draft_promotion_sends_only_the_remote_draft_identity() {
+        let (task, mut generation) = seedance_task_fixture(
+            "doubao-seedance-2-5-260628",
+            VideoTaskType::Auto,
+            RequestDialect::OpenAiCompatible,
+        );
+        generation.parameters = json!({ "draft_task_id": "cgt-20260930102030-abcde" });
+        generation.content.clear();
+        generation.rendered_prompt.clear();
+        let body = build_video_body(&task, &generation).expect("promote draft");
+        assert_eq!(
+            body,
+            json!({
+                "model": "doubao-seedance-2-5-260628", "prompt": "占位",
+                "metadata": { "content": [{ "type": "draft_task", "draft_task": { "id": "cgt-20260930102030-abcde" } }] }
+            })
+        );
+        for extra in [
+            "duration",
+            "ratio",
+            "resolution",
+            "generate_audio",
+            "draft",
+            "seed",
+        ] {
+            let mut invalid = generation.clone();
+            invalid.parameters[extra] = json!(5);
+            assert!(
+                build_video_body(&task, &invalid).is_err(),
+                "promotion rejects {extra}"
+            );
+        }
+        let mut with_media = generation.clone();
+        with_media.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://example.com/ref.png",
+            None,
+        ));
+        assert!(build_video_body(&task, &with_media).is_err());
+        let mut with_prompt = generation.clone();
+        with_prompt
+            .content
+            .push(CompiledContentItem::Text("change the draft".into()));
+        assert!(build_video_body(&task, &with_prompt).is_err());
+        for invalid_id in ["", "../remote", "https://example.com/task"] {
+            generation.parameters["draft_task_id"] = json!(invalid_id);
+            assert!(build_video_body(&task, &generation).is_err());
+        }
+        generation.parameters["draft_task_id"] = json!("cgt-draft");
+        generation.operation_schema =
+            video_schema_for_dialect("doubao-seedance-2-5-260628", RequestDialect::VolcengineArk);
+        assert!(build_video_body(&task, &generation).is_err());
+    }
+
+    #[test]
+    fn seedance_draft_submission_preserves_new_task_id_and_marks_uncertain_acceptance() {
+        let mut response = CapturedHttpResponse {
+            call_id: "draft-submit".into(),
+            status: 200,
+            headers: json!({}),
+            body: json!({ "task_id": "cgt-new-final-task" }).to_string(),
+        };
+        assert_eq!(
+            parse_seedance_draft_task_id(&response).unwrap(),
+            "cgt-new-final-task"
+        );
+        for body in ["invalid json", "{}", "{\"task_id\":\"../bad\"}"] {
+            response.body = body.into();
+            let error = parse_seedance_draft_task_id(&response).unwrap_err();
+            assert_eq!(
+                error.runtime_record()["details"]["ambiguousPaidSubmission"],
+                true
+            );
+        }
+        response.status = 400;
+        response.body =
+            json!({ "error": { "message": "InvalidParameter", "code": "bad_request" } })
+                .to_string();
+        let error = parse_seedance_draft_task_id(&response).unwrap_err();
+        assert_ne!(
+            error.runtime_record()["details"]["ambiguousPaidSubmission"],
+            true
+        );
+        response.status = 502;
+        let error = parse_seedance_draft_task_id(&response).unwrap_err();
+        assert_eq!(
+            error.runtime_record()["details"]["ambiguousPaidSubmission"],
+            true
+        );
+    }
+
+    fn seedance_draft_mock_runtime(
+        status: u16,
+        payload: Value,
+    ) -> (
+        tempfile::TempDir,
+        ProviderRuntime,
+        TaskExecutionRecord,
+        std::thread::JoinHandle<Vec<(String, Value)>>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("mock provider");
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let server = std::thread::spawn(move || {
+            let mut deadline = Instant::now() + Duration::from_secs(5);
+            let mut requests = Vec::new();
+            while Instant::now() < deadline {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _)) => stream,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(error) => panic!("accept: {error}"),
+                };
+                stream.set_nonblocking(false).unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                let mut buffer = [0; 4096];
+                let header_end = loop {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                    if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                    .unwrap_or(0);
+                while bytes.len() - header_end < length {
+                    let read = stream.read(&mut buffer).unwrap();
+                    assert!(read > 0);
+                    bytes.extend_from_slice(&buffer[..read]);
+                }
+                let body = if length == 0 {
+                    Value::Null
+                } else {
+                    serde_json::from_slice(&bytes[header_end..header_end + length]).unwrap()
+                };
+                requests.push((headers, body));
+                let payload = payload.to_string();
+                let response = format!(
+                    "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                deadline = Instant::now() + Duration::from_millis(250);
+            }
+            requests
+        });
+        let directory = tempfile::TempDir::new().unwrap();
+        let storage = Arc::new(Storage::open(&directory.path().join("backend.sqlite")).unwrap());
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "seedance-draft-mock".into(),
+                display_name: "Seedance draft mock".into(),
+                adapter_id: MOYU_ADAPTER_ID.into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .unwrap();
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-frozen-test")
+            .unwrap();
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        lifecycle
+            .create(NewTask {
+                id: "seedance-draft-mock-task",
+                canvas_id: "canvas-1",
+                source_node_id: "video-1",
+                operation: GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "draft-model",
+                remote_model_id: Some("doubao-seedance-2-5-260628"),
+                logical_request: &json!({}),
+            })
+            .unwrap();
+        for fact in [
+            GenerationLifecycleFact::BeginResolution {
+                attempt_id: "resolve-1".into(),
+            },
+            GenerationLifecycleFact::ResolutionSucceeded {
+                attempt_id: "resolve-1".into(),
+                resolved_request: json!({}),
+            },
+            GenerationLifecycleFact::BeginSubmission {
+                attempt_id: "submit-1".into(),
+                backoff_ms: None,
+            },
+        ] {
+            lifecycle.commit("seedance-draft-mock-task", fact).unwrap();
+        }
+        let task = storage
+            .get_task_execution("seedance-draft-mock-task")
+            .unwrap();
+        let runtime = ProviderRuntime::new(storage, lifecycle, credentials).unwrap();
+        (directory, runtime, task, server)
+    }
+
+    #[tokio::test]
+    async fn seedance_draft_gateway_rejection_never_strips_draft_or_resubmits() {
+        let (_directory, runtime, task, server) = seedance_draft_mock_runtime(
+            400,
+            json!({
+                "error": { "message": "unknown parameter: draft" }
+            }),
+        );
+        let schema = video_schema_for_dialect(
+            "doubao-seedance-2-5-260628",
+            RequestDialect::OpenAiCompatible,
+        );
+        let request = resolved(schema, json!({ "draft": true, "resolution": "480p" }));
+        assert!(runtime.submit(&task, "submit-1", &request).await.is_err());
+        let captured = server.join().unwrap();
+        assert_eq!(
+            captured.len(),
+            1,
+            "rejecting draft cannot cause a second paid request"
+        );
+        assert!(
+            captured[0]
+                .0
+                .starts_with("POST /v1/video/generations HTTP/1.1")
+        );
+        assert_eq!(captured[0].1["metadata"]["draft"], true);
+    }
+
+    #[tokio::test]
+    async fn seedance_draft_promotion_submits_once_and_observes_a_new_remote_identity() {
+        let (_directory, runtime, task, server) =
+            seedance_draft_mock_runtime(200, json!({ "task_id": "cgt-final-new" }));
+        let schema = video_schema_for_dialect(
+            "doubao-seedance-2-5-260628",
+            RequestDialect::OpenAiCompatible,
+        );
+        let mut request = resolved(schema, json!({ "draft_task_id": "cgt-draft-source" }));
+        request.content.clear();
+        request.rendered_prompt.clear();
+        let (submission, _) = runtime.submit(&task, "submit-1", &request).await.unwrap();
+        assert!(
+            matches!(submission, GenerationSubmission::RemoteVideoTask { task_id } if task_id == "cgt-final-new")
+        );
+        let captured = server.join().unwrap();
+        assert_eq!(captured.len(), 1);
+        assert_eq!(
+            captured[0].1["metadata"],
+            json!({ "content": [{ "type": "draft_task", "draft_task": { "id": "cgt-draft-source" } }] })
+        );
+        assert!(
+            captured[0]
+                .0
+                .contains("authorization: Bearer sk-frozen-test")
+        );
+    }
+
+    #[tokio::test]
+    async fn seedance_draft_promotion_rejects_a_reused_remote_draft_identity() {
+        let (_directory, runtime, task, server) =
+            seedance_draft_mock_runtime(200, json!({ "task_id": "cgt-draft-source" }));
+        let schema = video_schema_for_dialect(
+            "doubao-seedance-2-5-260628",
+            RequestDialect::OpenAiCompatible,
+        );
+        let mut request = resolved(schema, json!({ "draft_task_id": "cgt-draft-source" }));
+        request.content.clear();
+        request.rendered_prompt.clear();
+        let error = runtime
+            .submit(&task, "submit-1", &request)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.runtime_record()["details"]["ambiguousPaidSubmission"],
+            true
+        );
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn seedance_draft_url_refresh_checks_enveloped_identity_and_both_result_paths() {
+        for nested in [false, true] {
+            let mut payload =
+                json!({ "data": { "task_id": "cgt-existing-final", "status": "SUCCESS" } });
+            if nested {
+                payload["data"]["data"] = json!({ "data": { "content": { "video_url": "https://cdn.example.com/fresh.mp4" } } });
+            } else {
+                payload["data"]["result_url"] = json!("https://cdn.example.com/fresh.mp4");
+            }
+            let (_directory, runtime, mut task, server) = seedance_draft_mock_runtime(200, payload);
+            task.remote_task_id = Some("cgt-existing-final".into());
+            assert_eq!(
+                runtime.refresh_sp25_video_url(&task).await.unwrap(),
+                "https://cdn.example.com/fresh.mp4"
+            );
+            let captured = server.join().unwrap();
+            assert_eq!(captured.len(), 1);
+            assert!(
+                captured[0]
+                    .0
+                    .starts_with("GET /v1/video/generations/cgt-existing-final HTTP/1.1")
+            );
+        }
+        let (_directory, runtime, mut task, server) = seedance_draft_mock_runtime(
+            200,
+            json!({
+                "data": { "task_id": "cgt-wrong", "status": "SUCCESS", "result_url": "https://cdn.example.com/other.mp4" }
+            }),
+        );
+        task.remote_task_id = Some("cgt-existing-final".into());
+        assert!(runtime.refresh_sp25_video_url(&task).await.is_err());
+        assert_eq!(server.join().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn video_reference_array_builders_preserve_inputs_beyond_former_channel_quotas() {
+        for model in ["wan3.0-video", "MiniMax-H3"] {
+            let schema = default_model_schema(model, &[GenerationOperation::VideoGeneration])["video_generation"].clone();
+            let mut request = resolved(schema, json!({ "duration": 5, "ratio": "adaptive" }));
+            request.images.push(resolved_media(
+                MediaType::Image,
+                1,
+                "first_frame",
+                "https://example.com/first.png",
+                None,
+            ));
+            for index in 2..=12 {
+                let mut media = resolved_media(
+                    MediaType::Image,
+                    index,
+                    "reference_image",
+                    &format!("https://example.com/{index}.gif"),
+                    None,
+                );
+                media.mime_type = "image/gif".into();
+                request.images.push(media);
+            }
+            for index in 1..=6 {
+                request.videos.push(resolved_media(
+                    MediaType::Video,
+                    index,
+                    "reference_video",
+                    &format!("https://example.com/{index}.mp4"),
+                    None,
+                ));
+                request.audios.push(resolved_media(
+                    MediaType::Audio,
+                    index,
+                    "reference_audio",
+                    &format!("https://example.com/{index}.mp3"),
+                    None,
+                ));
+            }
+            let mut task = task(GenerationOperation::VideoGeneration);
+            task.remote_model_id_snapshot = Some(model.into());
+            let body =
+                build_video_body(&task, &request).expect("all inputs reach channel validation");
+            if model == "wan3.0-video" {
+                assert_eq!(body["media"].as_array().expect("media array").len(), 24);
+                assert_eq!(body["media"][0]["type"], "first_frame");
+                assert_eq!(body["media"][11]["url"], "https://example.com/12.gif");
+            } else {
+                assert_eq!(
+                    body["metadata"]["first_frame_image"],
+                    "https://example.com/first.png"
+                );
+                assert_eq!(
+                    body["metadata"]["reference_images"]
+                        .as_array()
+                        .expect("images")
+                        .len(),
+                    11
+                );
+                assert_eq!(
+                    body["metadata"]["reference_videos"]
+                        .as_array()
+                        .expect("videos")
+                        .len(),
+                    6
+                );
+                assert_eq!(
+                    body["metadata"]["reference_audios"]
+                        .as_array()
+                        .expect("audios")
+                        .len(),
+                    6
+                );
+                request.images.push(request.images[0].clone());
+                assert!(
+                    build_video_body(&task, &request).is_err(),
+                    "a scalar frame field cannot silently discard a second frame"
+                );
+            }
         }
     }
 
@@ -9034,7 +8967,7 @@ mod tests {
     }
 
     #[test]
-    fn wan_video_builder_accepts_image_larger_than_former_byte_limit() {
+    fn wan_video_builder_defers_image_size_and_format_policy_to_channel() {
         let schema = super::super::model_schema::default_model_schema(
             "wan3.0-video",
             &[GenerationOperation::VideoGeneration],
@@ -9061,7 +8994,9 @@ mod tests {
             json!([{"type": "first_frame", "url": "https://cdn.example.com/large.png"}])
         );
         generation.images[0].mime_type = "image/gif".into();
-        assert!(build_video_body(&video_task, &generation).is_err());
+        let body = build_video_body(&video_task, &generation)
+            .expect("channel determines image format support");
+        assert_eq!(body["media"][0]["url"], "https://cdn.example.com/large.png");
     }
 
     #[test]
@@ -9113,13 +9048,13 @@ mod tests {
     }
 
     #[test]
-    fn wan_video_builder_rejects_document_media_mixed_with_other_inputs() {
+    fn wan_video_builder_preserves_document_media_mixed_with_other_inputs() {
         let schema = super::super::model_schema::default_model_schema(
             "wan3.0-video",
             &[GenerationOperation::VideoGeneration],
         );
 
-        // file 与 link 互斥。
+        // Channel policy decides which combinations are supported.
         let mut mixed_generation = resolved(
             schema["video_generation"].clone(),
             json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
@@ -9140,11 +9075,17 @@ mod tests {
         ));
         let mut mixed_task = task(GenerationOperation::VideoGeneration);
         mixed_task.remote_model_id_snapshot = Some("wan3.0-video".into());
-        let error = build_video_body(&mixed_task, &mixed_generation)
-            .expect_err("Wan file/link mixing must fail");
-        assert!(error.to_string().contains("mutually exclusive"));
+        let body = build_video_body(&mixed_task, &mixed_generation)
+            .expect("document and link inputs reach the channel");
+        assert_eq!(
+            body["media"],
+            json!([
+                { "type": "file", "url": "https://example.com/public-doc.pdf" },
+                { "type": "link", "url": "https://example.com/public-article" }
+            ])
+        );
 
-        // file/link 不与参考素材混用。
+        // Document and reference inputs retain their original roles and URLs.
         let mut reference_generation = resolved(
             schema["video_generation"].clone(),
             json!({ "resolution": "1080P", "ratio": "adaptive", "duration": 5 }),
@@ -9165,9 +9106,15 @@ mod tests {
         ));
         let mut reference_task = task(GenerationOperation::VideoGeneration);
         reference_task.remote_model_id_snapshot = Some("wan3.0-video".into());
-        let error = build_video_body(&reference_task, &reference_generation)
-            .expect_err("Wan document/link with references must fail");
-        assert!(error.to_string().contains("cannot be mixed"));
+        let body = build_video_body(&reference_task, &reference_generation)
+            .expect("document and references reach the channel");
+        assert_eq!(
+            body["media"],
+            json!([
+                { "type": "link", "url": "https://example.com/public-article" },
+                { "type": "reference_audio", "url": "https://cdn.example.com/music.mp3" }
+            ])
+        );
     }
 
     #[test]
@@ -9588,7 +9535,7 @@ mod tests {
     }
 
     #[test]
-    fn minimax_h3_builder_rejects_mixed_frame_and_reference_inputs() {
+    fn minimax_h3_builder_preserves_mixed_inputs_and_rejects_wrong_role_types() {
         let schema = super::super::model_schema::default_model_schema(
             "MiniMax-H3",
             &[GenerationOperation::VideoGeneration],
@@ -9619,12 +9566,15 @@ mod tests {
         ));
         let mut video_task = task(GenerationOperation::VideoGeneration);
         video_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
-        let error = build_video_body(&video_task, &generation)
-            .expect_err("Mixed frame and reference must fail");
-        assert!(
-            error
-                .to_string()
-                .contains("frame inputs and reference inputs cannot be mixed")
+        let body = build_video_body(&video_task, &generation)
+            .expect("mixed frame and reference reach the channel");
+        assert_eq!(
+            body["metadata"]["first_frame_image"],
+            "https://cdn.example.com/first.png"
+        );
+        assert_eq!(
+            body["metadata"]["reference_images"],
+            json!(["https://cdn.example.com/ref.png"])
         );
 
         // 角色与素材类型不匹配。
@@ -9691,6 +9641,24 @@ mod tests {
         // regeneration 输出时长由源视频决定，不发送 duration。
         assert!(body.get("duration").is_none());
         assert!(body["metadata"].get("reference_videos").is_none());
+
+        generation.images.push(resolved_media(
+            MediaType::Image,
+            1,
+            "reference_image",
+            "https://cdn.example.com/context.png",
+            None,
+        ));
+        let body = build_video_body(&video_task, &generation)
+            .expect("regeneration preserves connected images");
+        assert_eq!(
+            body["metadata"]["base_video_url"],
+            "https://cdn.example.com/source.mp4"
+        );
+        assert_eq!(
+            body["metadata"]["reference_images"],
+            json!(["https://cdn.example.com/context.png"])
+        );
 
         // 缺少源视频时拒绝。
         let empty = resolved(
@@ -9763,7 +9731,7 @@ mod tests {
             json!(["https://cdn.example.com/music.mp3"])
         );
 
-        // Context-IR 不接受图片输入。
+        // 连接的图片必须完整交给渠道，由渠道决定当前任务是否支持。
         let mut with_image = resolved(
             schema["video_generation"].clone(),
             json!({ "task_type": "h3_context_ir" }),
@@ -9777,11 +9745,11 @@ mod tests {
         ));
         let mut image_task = task(GenerationOperation::VideoGeneration);
         image_task.remote_model_id_snapshot = Some("MiniMax-H3".into());
-        let error =
-            build_video_body(&image_task, &with_image).expect_err("Context-IR must reject images");
-        assert!(
-            error.to_string().contains("does not accept image inputs"),
-            "unexpected error: {error}"
+        let body =
+            build_video_body(&image_task, &with_image).expect("channel decides image support");
+        assert_eq!(
+            body["metadata"]["reference_images"],
+            json!(["https://cdn.example.com/shot.png"])
         );
     }
 
@@ -9898,7 +9866,7 @@ mod tests {
     }
 
     #[test]
-    fn veo_video_builder_rejects_1080p_with_non_8_duration() {
+    fn veo_video_builder_preserves_1080p_with_non_8_duration() {
         let schema = super::super::model_schema::default_model_schema(
             "veo-3.1-fast",
             &[GenerationOperation::VideoGeneration],
@@ -9915,13 +9883,10 @@ mod tests {
         );
         let mut video_task = task(GenerationOperation::VideoGeneration);
         video_task.remote_model_id_snapshot = Some("veo-3.1-fast".into());
-        let error = build_video_body(&video_task, &generation)
-            .expect_err("Veo 1080p with non-8 duration must fail");
-        assert!(
-            error
-                .to_string()
-                .contains("requires a duration of 8 seconds")
-        );
+        let body = build_video_body(&video_task, &generation)
+            .expect("resolution and duration reach the channel");
+        assert_eq!(body["resolution"], "1080p");
+        assert_eq!(body["duration"], 4);
     }
 
     #[test]
@@ -10318,16 +10283,17 @@ mod tests {
         assert_eq!(auto["aspectRatio"], "auto");
         assert!(auto.get("background").is_none());
 
-        // 1:3 / 3:1 没有第三档：组合落在文档表外时报可读错误，不发请求。
-        let error = build_grsai_image_body(
+        // Unknown combinations remain explicit for the channel to evaluate.
+        let body = build_grsai_image_body(
             &record,
             &resolved(
                 schema["text_to_image"].clone(),
                 json!({ "aspect_ratio": "1:3", "resolution": "4k" }),
             ),
         )
-        .expect_err("1:3 has no 4k tier");
-        assert!(error.to_string().contains("画幅"));
+        .expect("channel validates unknown ratio/resolution combination");
+        assert_eq!(body["aspectRatio"], "1:3");
+        assert_eq!(body["resolution"], "4k");
     }
 
     #[test]
@@ -10793,7 +10759,7 @@ mod tests {
     }
 
     #[test]
-    fn sp25_per_use_body_has_only_documented_fields_and_enforces_media_limits() {
+    fn sp25_per_use_body_preserves_references_and_defers_parameter_policy_to_channel() {
         let schema = default_model_schema(
             "sp2.5-720p-30s-ch5",
             &[GenerationOperation::VideoGeneration],
@@ -10841,7 +10807,8 @@ mod tests {
             "https://example.com/11.png",
             None,
         ));
-        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        let body = build_video_body(&task, &request).expect("channel validates image count");
+        assert_eq!(body["images"].as_array().expect("images").len(), 11);
         request.images.pop();
         request.videos.push(resolved_media(
             MediaType::Video,
@@ -10853,12 +10820,54 @@ mod tests {
         assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
         request.videos.clear();
         request.parameters = json!({ "ratio": "16:9", "generate_audio": false });
-        assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+        let body = build_video_body(&task, &request).expect("channel validates audio option");
+        assert_eq!(body["generate_audio"], false);
         request.parameters = json!({ "ratio": "16:9" });
         request.images[0].remote_reference = Some("asset://private-id".into());
         assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
         request.images[0].remote_reference = Some("http://127.0.0.1/private.png".into());
         assert!(validate_sp25_video_request("sp2.5-720p-30s-ch5", &request).is_err());
+    }
+
+    #[test]
+    fn rd_reference_video_with_local_task_intent_reaches_request_body() {
+        for mode in [
+            VideoTaskType::Auto,
+            VideoTaskType::Reference,
+            VideoTaskType::Edit,
+            VideoTaskType::Extend,
+        ] {
+            let schema = default_model_schema(
+                "rd-seedance-2.5-720p",
+                &[GenerationOperation::VideoGeneration],
+            )["video_generation"]
+                .clone();
+            let mut request = resolved(schema, json!({ "duration": 5, "ratio": "16:9" }));
+            request.video_task_type = Some(mode);
+            request.videos.push(resolved_media(
+                MediaType::Video,
+                1,
+                "reference_video",
+                "https://example.com/reference.mp4",
+                None,
+            ));
+            let body = build_rd_video_body(
+                "rd-seedance-2.5-720p",
+                &request,
+                vec![],
+                vec!["https://example.com/reference.mp4".into()],
+                vec![],
+                None,
+                None,
+            )
+            .expect("local task intent must not prevent RD reference-video submission");
+            assert_eq!(
+                body["reference_videos"],
+                json!(["https://example.com/reference.mp4"])
+            );
+            assert!(body.get("videoTaskType").is_none());
+            assert!(body.get("omni_reference_task_type").is_none());
+        }
     }
 
     #[test]
@@ -10978,11 +10987,11 @@ mod tests {
             json!(["https://example.com/first.png"])
         );
         assert_eq!(body["end_frame"], json!(["https://example.com/last.png"]));
-        // 首尾帧与 images 不能同时使用。
+        // This request contains only frame inputs, so no images field is emitted.
         assert!(body.get("images").is_none());
         assert_eq!(body["resolution"], "1080P");
 
-        // 单独的尾帧不成对：校验拒绝。
+        // The channel decides whether a single last frame is accepted.
         let mut unpaired = resolved(
             default_model_schema(
                 "rd-seedance-2.5-1080p",
@@ -10998,9 +11007,20 @@ mod tests {
             "https://example.com/last.png",
             None,
         )];
-        assert!(validate_rd_video_request("rd-seedance-2.5-1080p", &unpaired).is_err());
+        let body = build_rd_video_body(
+            "rd-seedance-2.5-1080p",
+            &unpaired,
+            vec![],
+            vec![],
+            vec![],
+            None,
+            Some("https://example.com/last.png".into()),
+        )
+        .expect("single last frame retained");
+        assert_eq!(body["end_frame"], json!(["https://example.com/last.png"]));
+        assert!(body.get("start_frame").is_none());
 
-        // 首尾帧与参考图混用：成对成立但与 images 同用，校验拒绝。
+        // Mixed frames and reference images are retained for channel validation.
         let mut mixed = resolved(
             default_model_schema(
                 "rd-seedance-2.5-1080p",
@@ -11032,11 +11052,26 @@ mod tests {
                 None,
             ),
         ];
-        assert!(validate_rd_video_request("rd-seedance-2.5-1080p", &mixed).is_err());
+        let body = build_rd_video_body(
+            "rd-seedance-2.5-1080p",
+            &mixed,
+            vec!["https://example.com/ref.png".into()],
+            vec![],
+            vec![],
+            Some("https://example.com/first.png".into()),
+            Some("https://example.com/last.png".into()),
+        )
+        .expect("mixed frame and reference input retained");
+        assert_eq!(body["images"], json!(["https://example.com/ref.png"]));
+        assert_eq!(
+            body["start_frame"],
+            json!(["https://example.com/first.png"])
+        );
+        assert_eq!(body["end_frame"], json!(["https://example.com/last.png"]));
     }
 
     #[test]
-    fn rd_video_validation_enforces_duration_tier_and_reference_limits() {
+    fn rd_video_validation_defers_duration_format_tier_and_reference_limits_to_channel() {
         let schema = default_model_schema(
             "rd-seedance-2.5-720p",
             &[GenerationOperation::VideoGeneration],
@@ -11044,24 +11079,48 @@ mod tests {
             .clone();
         let mut request = resolved(schema, json!({ "duration": 5 }));
 
-        // duration 缺省或越界返回 400（文档），本地先拒绝。
+        // Required fields, ranges, and model tiers are channel policy.
         request.parameters = json!({ "ratio": "16:9" });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.parameters = json!({ "duration": 3 });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.parameters = json!({ "duration": 31 });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
-        // 分辨率必须与模型档位一致。
+        assert_eq!(
+            build_rd_video_body(
+                "rd-seedance-2.5-720p",
+                &request,
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None
+            )
+            .expect("channel validates duration")["duration"],
+            31
+        );
+        // Resolution is retained even when it differs from the model suffix.
         request.parameters = json!({ "duration": 5, "resolution": "1080P" });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
-        // 画幅六档之外拒绝。
+        assert_eq!(
+            build_rd_video_body(
+                "rd-seedance-2.5-720p",
+                &request,
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None
+            )
+            .expect("channel validates resolution")["resolution"],
+            "1080P"
+        );
+        // New ratios must not be blocked by a stale local enum.
         request.parameters = json!({ "duration": 5, "ratio": "2:1" });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.parameters = json!({ "duration": 5, "ratio": "adaptive" });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.parameters = json!({ "duration": 5 });
 
-        // 参考视频每段 2–15 秒；时长来自真实探测，缺失即拒绝。
+        // Reference duration metadata is advisory.
         let mut short_video = resolved_media(
             MediaType::Video,
             1,
@@ -11071,7 +11130,7 @@ mod tests {
         );
         short_video.duration_seconds = Some(1.0);
         request.videos = vec![short_video];
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         let mut long_video = resolved_media(
             MediaType::Video,
             1,
@@ -11080,8 +11139,10 @@ mod tests {
             None,
         );
         long_video.duration_seconds = Some(16.0);
+        long_video.mime_type = "video/quicktime".into();
+        long_video.byte_size = 60 * 1024 * 1024 + 1;
         request.videos = vec![long_video];
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         // 标称 15 秒产物的封装越界（实测 15.08 秒）在容差内放行。
         let mut boundary_video = resolved_media(
             MediaType::Video,
@@ -11093,7 +11154,7 @@ mod tests {
         boundary_video.duration_seconds = Some(15.08);
         request.videos = vec![boundary_video];
         assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
-        // 合计 15 秒上限。
+        // Total reference duration is also evaluated by the channel.
         request.videos = (1..=2)
             .map(|index| {
                 let mut media = resolved_media(
@@ -11107,7 +11168,7 @@ mod tests {
                 media
             })
             .collect();
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         // 11 秒 + 4 秒 = 15 秒：恰好通过。
         request.videos = (1..=2)
             .map(|index| {
@@ -11125,7 +11186,7 @@ mod tests {
         assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.videos.clear();
 
-        // 参考音频同样按 2–15 秒与合计 15 秒校验。
+        // Audio metadata does not impose client-side duration limits.
         let mut audio = resolved_media(
             MediaType::Audio,
             1,
@@ -11135,15 +11196,27 @@ mod tests {
         );
         audio.duration_seconds = Some(16.0);
         request.audios = vec![audio];
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
         request.audios.clear();
 
-        // 不支持的参数键拒绝（文档未声明 seed/watermark/output_format 等）。
+        // Parameters introduced by the channel must remain in the request.
         request.parameters = json!({ "duration": 5, "seed": 1 });
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        assert_eq!(
+            build_rd_video_body(
+                "rd-seedance-2.5-720p",
+                &request,
+                vec![],
+                vec![],
+                vec![],
+                None,
+                None
+            )
+            .expect("new channel parameter retained")["seed"],
+            1
+        );
         request.parameters = json!({ "duration": 5 });
 
-        // 参考图上限 30。
+        // All connected reference images are retained beyond the former quota.
         request.images = (1..=31)
             .map(|index| {
                 resolved_media(
@@ -11155,7 +11228,27 @@ mod tests {
                 )
             })
             .collect();
-        assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_err());
+        let uploaded = request
+            .images
+            .iter()
+            .map(|media| media.remote_reference.clone().expect("remote URL"))
+            .collect();
+        assert_eq!(
+            build_rd_video_body(
+                "rd-seedance-2.5-720p",
+                &request,
+                uploaded,
+                vec![],
+                vec![],
+                None,
+                None
+            )
+            .expect("image quota deferred")["images"]
+                .as_array()
+                .expect("images")
+                .len(),
+            31
+        );
         request.images.truncate(30);
         assert!(validate_rd_video_request("rd-seedance-2.5-720p", &request).is_ok());
     }
@@ -11170,7 +11263,12 @@ mod tests {
         let mut request = resolved(schema, json!({ "ratio": "16:9", "duration": 16 }));
         assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_ok());
         request.parameters["duration"] = json!(15);
-        assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_err());
+        let mut task = task(GenerationOperation::VideoGeneration);
+        task.remote_model_id_snapshot = Some("sp2.5-720p-16-30s".into());
+        assert_eq!(
+            build_video_body(&task, &request).expect("channel validates duration tier")["duration"],
+            15
+        );
         request.parameters["duration"] = json!(30);
         assert!(validate_sp25_video_request("sp2.5-720p-16-30s", &request).is_ok());
 
@@ -11254,6 +11352,278 @@ mod tests {
             persistence_error.runtime_record()["details"]["ambiguousPaidSubmission"],
             true
         );
+    }
+
+    async fn submit_rd_reference_video_to_mock(
+        task_type: VideoTaskType,
+        duration: u32,
+        additional_videos: u32,
+        reject: bool,
+    ) -> (
+        BackendResult<(GenerationSubmission, CapturedHttpResponse)>,
+        Vec<(String, Vec<u8>)>,
+        Vec<String>,
+    ) {
+        use std::io::{Read as _, Write as _};
+        use std::net::TcpListener;
+        use std::time::{Duration, Instant};
+
+        const VIDEO: &[u8] = b"mock-local-reference-video";
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind mock provider");
+        let port = listener.local_addr().expect("mock address").port();
+        listener.set_nonblocking(true).expect("nonblocking mock");
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let mut captured = Vec::new();
+            for index in 0..2 {
+                let mut stream = loop {
+                    match listener.accept() {
+                        Ok((stream, _)) => break stream,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            if Instant::now() >= deadline {
+                                return captured;
+                            }
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                        Err(error) => panic!("accept mock request: {error}"),
+                    }
+                };
+                stream.set_nonblocking(false).expect("blocking stream");
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(5)))
+                    .expect("read timeout");
+                let mut bytes = Vec::new();
+                let mut chunk = [0_u8; 4096];
+                let header_end = loop {
+                    let read = stream.read(&mut chunk).expect("read request");
+                    assert!(read > 0, "request closed before headers");
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(index) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).expect("headers");
+                let content_length = headers
+                    .lines()
+                    .filter_map(|line| line.split_once(':'))
+                    .find(|(name, _)| name.eq_ignore_ascii_case("content-length"))
+                    .and_then(|(_, length)| length.trim().parse::<usize>().ok())
+                    .expect("known body length");
+                while bytes.len() - header_end < content_length {
+                    let read = stream.read(&mut chunk).expect("read body");
+                    assert!(read > 0, "request closed before body");
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+                let payload = if index == 0 {
+                    json!({ "url": "https://assets.example.test/reference.mp4?signature=video" })
+                } else if reject {
+                    json!({ "error": { "message": "channel duration/count rejected", "code": "channel_limits" } })
+                } else {
+                    json!({ "task_id": "remote_rd_reference_1", "status": "queued" })
+                }
+                .to_string();
+                let status = if index == 1 && reject {
+                    "400 Bad Request"
+                } else {
+                    "200 OK"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{payload}",
+                    payload.len()
+                );
+                stream
+                    .write_all(response.as_bytes())
+                    .expect("write response");
+                captured.push((
+                    headers,
+                    bytes[header_end..header_end + content_length].to_vec(),
+                ));
+            }
+            captured
+        });
+
+        let directory = tempfile::TempDir::new().expect("temp dir");
+        let storage =
+            Arc::new(Storage::open(&directory.path().join("backend.sqlite")).expect("db"));
+        let provider = storage
+            .upsert_provider_connection(&UpsertProviderConnectionCommand {
+                id: "rd-reference-regression".into(),
+                display_name: "RD reference regression".into(),
+                adapter_id: MOYU_ADAPTER_ID.into(),
+                base_url: format!("http://127.0.0.1:{port}/v1"),
+                enabled: true,
+            })
+            .expect("provider");
+        let credentials = CredentialStore::file(directory.path().join("credentials.json"));
+        credentials
+            .set(&provider.api_key_ref, "sk-test")
+            .expect("credential");
+        let lifecycle = GenerationTaskLifecycle::new(Arc::clone(&storage));
+        lifecycle
+            .create(NewTask {
+                id: "task-rd-reference-regression",
+                canvas_id: "canvas-1",
+                source_node_id: "video-1",
+                operation: GenerationOperation::VideoGeneration,
+                provider: &provider,
+                api_key_ref: &provider.api_key_ref,
+                model_definition_id: "rd-test-model",
+                remote_model_id: Some("rd-seedance-2.5-720p"),
+                logical_request: &json!({ "prompt": "test" }),
+            })
+            .expect("task");
+        for fact in [
+            GenerationLifecycleFact::BeginResolution {
+                attempt_id: "resolve-1".into(),
+            },
+            GenerationLifecycleFact::ResolutionSucceeded {
+                attempt_id: "resolve-1".into(),
+                resolved_request: json!({ "prompt": "test" }),
+            },
+            GenerationLifecycleFact::BeginSubmission {
+                attempt_id: "submit-1".into(),
+                backoff_ms: None,
+            },
+        ] {
+            lifecycle
+                .commit("task-rd-reference-regression", fact)
+                .expect("lifecycle");
+        }
+        let task = storage
+            .get_task_execution("task-rd-reference-regression")
+            .expect("task");
+        let schema = default_model_schema(
+            "rd-seedance-2.5-720p",
+            &[GenerationOperation::VideoGeneration],
+        )["video_generation"]
+            .clone();
+        let mut request = resolved(schema, json!({ "duration": duration, "ratio": "16:9" }));
+        request.video_task_type = Some(task_type);
+        let mut video = resolved_media(MediaType::Video, 1, "reference_video", "", None);
+        video.bytes = Some(VIDEO.to_vec());
+        video.remote_reference = None;
+        video.file_name = "reference.mp4".into();
+        video.byte_size = VIDEO.len() as u64;
+        // Metadata is advisory; missing or long duration must reach the channel.
+        video.duration_seconds = reject.then_some(30.0);
+        request.videos.push(video);
+        for index in 0..additional_videos {
+            request.videos.push(resolved_media(
+                MediaType::Video,
+                index + 2,
+                "reference_video",
+                &format!("https://assets.example.test/reference-{index}.mp4"),
+                None,
+            ));
+        }
+        let runtime =
+            ProviderRuntime::new(Arc::clone(&storage), lifecycle, credentials).expect("runtime");
+        let result = runtime.submit(&task, "submit-1", &request).await;
+        let captured = server.join().expect("mock server");
+        let phases = storage
+            .get_task_detail(&task.id)
+            .expect("task detail")
+            .calls
+            .into_iter()
+            .map(|call| call.phase)
+            .collect();
+        (result, captured, phases)
+    }
+
+    #[tokio::test]
+    async fn rd_local_reference_video_with_task_intent_reaches_one_paid_submission() {
+        for task_type in [VideoTaskType::Auto, VideoTaskType::Reference] {
+            let (result, captured, phases) =
+                submit_rd_reference_video_to_mock(task_type, 5, 0, false).await;
+            let (submission, response) = result.expect("upload then submit RD reference video");
+            assert!(
+                matches!(submission, GenerationSubmission::RemoteVideoTask { task_id } if task_id == "remote_rd_reference_1")
+            );
+            assert_eq!(response.status, 200);
+            assert_eq!(
+                captured.len(),
+                2,
+                "one upload followed by exactly one paid submission"
+            );
+            assert!(
+                captured[0]
+                    .0
+                    .starts_with("POST /v1/assets/uploads HTTP/1.1")
+            );
+            assert!(String::from_utf8_lossy(&captured[0].1).contains("filename=\"reference.mp4\""));
+            assert!(
+                captured[1]
+                    .0
+                    .starts_with("POST /v1/video/generations HTTP/1.1")
+            );
+            let body: Value = serde_json::from_slice(&captured[1].1).expect("submission JSON");
+            assert_eq!(
+                body["reference_videos"],
+                json!(["https://assets.example.test/reference.mp4?signature=video"])
+            );
+            for local_marker in [
+                "videoTaskType",
+                "video_task_type",
+                "omni_reference_task_type",
+            ] {
+                assert!(
+                    body.get(local_marker).is_none(),
+                    "local marker must not leak: {local_marker}"
+                );
+            }
+            assert_eq!(phases, ["upload", "submit"]);
+        }
+    }
+
+    #[tokio::test]
+    async fn rd_channel_duration_and_reference_count_rejections_preserve_server_error() {
+        let (result, captured, phases) =
+            submit_rd_reference_video_to_mock(VideoTaskType::Reference, 31, 10, true).await;
+        let error = result.expect_err("service rejection");
+        let record = error.runtime_record();
+        assert!(
+            record["message"]
+                .as_str()
+                .unwrap()
+                .contains("channel duration/count rejected")
+        );
+        assert!(
+            record["message"]
+                .as_str()
+                .unwrap()
+                .contains("channel_limits")
+        );
+        assert_eq!(
+            record["kind"], "protocol",
+            "channel policy must not produce a local validation error"
+        );
+        assert_eq!(record["details"]["httpStatus"], 400);
+        let upstream: Value = serde_json::from_str(
+            record["details"]["rawResponse"]
+                .as_str()
+                .expect("original service response"),
+        )
+        .expect("service JSON");
+        assert_eq!(
+            upstream["error"]["message"],
+            "channel duration/count rejected"
+        );
+        assert_eq!(upstream["error"]["code"], "channel_limits");
+        assert_eq!(
+            captured.len(),
+            2,
+            "service rejection must not trigger another paid submission"
+        );
+        let body: Value = serde_json::from_slice(&captured[1].1).expect("submitted request");
+        assert_eq!(body["duration"], 31);
+        assert_eq!(
+            body["reference_videos"]
+                .as_array()
+                .expect("all reference videos")
+                .len(),
+            11
+        );
+        assert_eq!(phases, ["upload", "submit"]);
     }
 
     #[tokio::test]

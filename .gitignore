@@ -44,6 +44,9 @@ __pycache__/
 # Local visual-audit screenshots (produced by scripts/audit-visuals.mjs)
 .screenshots/
 
+# Local installer-size measurements, runtime smoke outputs, and original-pack backups
+.cache/
+
 # Local-only project docs (kept on this machine, not pushed to remote)
 docs/
 CONTEXT.md
@@ -67,3 +70,12 @@ src-tauri/resources/blender/
 
 # MediaPipe pose runtime + model for the white-model motion capture (rebuilt by pose:prepare)
 public/pose/
+src-tauri/resources/pose-runtime/
+src-tauri/resources/.pose-*/
+src-tauri/resources/component-catalog.json
+
+# Optional, verified local AI inference pack (rebuilt by ai-media:prepare)
+.cache/ai-media/
+src-tauri/resources/.ai-media-*/
+src-tauri/resources/ai-media-runtime/
+src-tauri/resources/ai-media-quality-runtime/

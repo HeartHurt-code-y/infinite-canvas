@@ -12,6 +12,7 @@ import {
   createKnowledgeVideoWorkflowConfig,
   createPromptNodeConfig,
   nextOutputSlot,
+  outputNodeReferenceTarget,
   type KnowledgeVideoWorkflowNodeData,
 } from "../workspace/workspaceModel";
 import { createCanvasState, type CanvasDocumentV1, type CanvasNodeEntry } from "./canvasStore";
@@ -143,6 +144,67 @@ const flushHistoryBatch = async () => {
 };
 
 describe("canvas state interface", () => {
+  it("撤销重做布局保持抽帧的持久任务身份", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("frameExtractor", {
+      key: "frames",
+      kind: "frame_extractor",
+      x: 0,
+      y: 0,
+      config: { videoPath: "C:/source.mp4", timestamps: [3] },
+    });
+    const checkpoint = {
+      batchId: "batch",
+      activeJobId: "job",
+      requestId: "uuid",
+      sources: ["C:/next.mp4"],
+      timestamps: [3],
+    };
+    canvas.commands.patchNode("frameExtractor", "frames", (node) => ({
+      ...node,
+      config: { ...node.config, checkpoint },
+    }));
+    canvas.commands.undo();
+    expect(canvas.commands.snapshotV2({}).frameExtractorNodes?.[0]?.config.checkpoint).toEqual(
+      checkpoint,
+    );
+    canvas.commands.redo();
+    expect(canvas.commands.snapshotV2({}).frameExtractorNodes?.[0]?.config.checkpoint).toEqual(
+      checkpoint,
+    );
+  });
+  it("persists editable names while keeping the original task and media reference intact", () => {
+    const canvas = createCanvasState();
+    canvas.commands.addNode("gen", genNode);
+    const output: OutputNodeData = {
+      key: "named-output",
+      resultKey: "task-1#1",
+      sourceNodeId: genNode.key,
+      taskId: "task-1",
+      mediaType: "video",
+      finalPath: "C:/outputs/original.mp4",
+      name: "original.mp4",
+      x: 0,
+      y: 0,
+    };
+    canvas.commands.addOutput(output);
+    const reference = outputNodeReferenceTarget(output);
+    canvas.commands.patchNode("gen", genNode.key, (node) => ({ ...node, name: "第01集_镜头003" }));
+    canvas.commands.patchNode("output", output.key, (node) => ({
+      ...node,
+      name: "镜头003_选用.mp4",
+      customName: "镜头003_选用.mp4",
+    }));
+    const restored = createCanvasState();
+    expect(
+      restored.commands.restoreDocument(JSON.parse(JSON.stringify(canvas.commands.snapshotV2({})))),
+    ).toMatchObject({ ok: true });
+    expect(restored.getSnapshot().nodes.gen[0]?.name).toBe("第01集_镜头003");
+    const renamed = restored.getSnapshot().nodes.output[0]!;
+    expect(renamed.customName).toBe("镜头003_选用.mp4");
+    expect(renamed.finalPath).toBe(output.finalPath);
+    expect(outputNodeReferenceTarget(renamed)).toEqual(reference);
+  });
   it("exposes typed node views while keeping unrelated projections reference-stable", () => {
     const canvas = createCanvasState(74);
     canvas.commands.addNode("asset", assetNode);

@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { createReadStream, existsSync } from "node:fs";
 import {
   copyFile,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -30,6 +31,41 @@ export function remotionPackagesPresent(root, packageNames) {
   return packageNames.every((name) =>
     existsSync(path.join(root, "node_modules", ...name.split("/"), "package.json")),
   );
+}
+
+/** Verify a cached bundle's original inputs before migrating it without bundling. */
+export async function remotionCachedSourcesMatch(root, source) {
+  try {
+    for (const name of [
+      "package.json",
+      "pnpm-lock.yaml",
+      "plan.mjs",
+      "Composition.tsx",
+      "render.mjs",
+      "resolve-douyin.mjs",
+      "resolve-rednote.mjs",
+    ]) {
+      if (!(await readFile(path.join(root, name))).equals(await readFile(path.join(source, name))))
+        return false;
+    }
+    const required = new Map();
+    for (const name of ["index.tsx", "Composition.tsx", "plan.mjs"])
+      required.set(name, await readFile(path.join(source, name), "utf8"));
+    const matched = new Set();
+    for (const entry of await readdir(path.join(root, "bundle"), { withFileTypes: true })) {
+      if (!entry.isFile() || !entry.name.endsWith(".map")) continue;
+      const map = JSON.parse(await readFile(path.join(root, "bundle", entry.name), "utf8"));
+      for (const [index, origin] of (map.sources ?? []).entries()) {
+        const name = origin.startsWith("./") ? origin.slice(2) : origin;
+        if (!required.has(name)) continue;
+        if (map.sourcesContent?.[index] !== required.get(name)) return false;
+        matched.add(name);
+      }
+    }
+    return matched.size === required.size;
+  } catch {
+    return false;
+  }
 }
 
 async function sha256File(filePath) {
@@ -198,6 +234,8 @@ export async function remotionTreeIsMaterialized(root) {
     return true;
   }
   try {
+    const rootInfo = await lstat(root);
+    if (!rootInfo.isDirectory() || rootInfo.isSymbolicLink()) return false;
     return await visit(root);
   } catch {
     return false;

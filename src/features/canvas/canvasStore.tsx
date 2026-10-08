@@ -423,6 +423,7 @@ function sameConnectionData(
       first.previewSrc === second.previewSrc &&
       first.name === second.name &&
       first.textContent === second.textContent &&
+      first.customName === second.customName &&
       first.libraryPickOrder === second.libraryPickOrder &&
       first.assetGroupId === second.assetGroupId
     );
@@ -430,7 +431,9 @@ function sameConnectionData(
   if (type === "gen") {
     const first = previous as GenNodeData;
     const second = next as GenNodeData;
-    return first.kind === second.kind && first.config === second.config;
+    return (
+      first.kind === second.kind && first.config === second.config && first.name === second.name
+    );
   }
   if (type === "screenplay" || type === "storyboard" || type === "viralRemix") {
     const first = previous as ScreenplayNodeData;
@@ -1651,6 +1654,7 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
   const reconcileWorkflows = (
     freshDocument = false,
     protectedNodes: ReadonlyMap<string, KnowledgeVideoWorkflowNodeData> = new Map(),
+    protectedFrames: ReadonlyMap<string, VideoFrameExtractorNodeData> = new Map(),
   ) => {
     if (freshDocument) workflowVersions.clear();
     const current = store.getState().nodesById;
@@ -1680,6 +1684,16 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
         data,
       };
       workflowVersions.set(key, data.config);
+    }
+    // 媒体任务检查点属于后台执行身份；撤销布局不能丢掉或替换在途批次。
+    for (const [key, data] of protectedFrames) {
+      const entry = nodesById[key];
+      if (entry?.type === "frameExtractor" && entry.data.config === data.config) continue;
+      if (nodesById === current) nodesById = { ...current };
+      (nodesById as Record<string, CanvasNodeEntry>)[key] = {
+        type: "frameExtractor",
+        data: entry?.type === "frameExtractor" ? { ...entry.data, config: data.config } : data,
+      };
     }
     if (nodesById !== current) {
       // Reattaching version metadata must not push another canvas undo or clear its redo stack.
@@ -1748,14 +1762,24 @@ function createCanvasStateImplementation(initialZoom = 100): CanvasStateImplemen
     },
     undo: (protectedWorkflowKeys) => {
       const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
+      const protectedFrames = new Map(
+        canvasNodeLists(store.getState().nodesById)
+          .frameExtractor.filter((node) => node.config.checkpoint != null)
+          .map((node) => [node.key, node] as const),
+      );
       const result = store.getState().undo();
-      if (result === "applied") reconcileWorkflows(false, protectedNodes);
+      if (result === "applied") reconcileWorkflows(false, protectedNodes, protectedFrames);
       return result;
     },
     redo: (protectedWorkflowKeys) => {
       const protectedNodes = protectedWorkflows(protectedWorkflowKeys);
+      const protectedFrames = new Map(
+        canvasNodeLists(store.getState().nodesById)
+          .frameExtractor.filter((node) => node.config.checkpoint != null)
+          .map((node) => [node.key, node] as const),
+      );
       const result = store.getState().redo();
-      if (result === "applied") reconcileWorkflows(false, protectedNodes);
+      if (result === "applied") reconcileWorkflows(false, protectedNodes, protectedFrames);
       return result;
     },
     runWithCoalescedHistory: (fn) => store.getState().runWithCoalescedHistory(fn),

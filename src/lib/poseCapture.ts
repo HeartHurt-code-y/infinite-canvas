@@ -3,8 +3,8 @@
  * 把 33 个世界关键点换算成白模人形的 17 个关节，并归一化到「单位身高、面朝 -Y、脚踩地面」
  * 的局部空间，编码为可随画布保存的紧凑动捕片段。
  *
- * 运行时资源（WASM 与 .task 模型）由 `pnpm pose:prepare` 复制/下载到 public/pose/，
- * 随安装包离线分发；资源缺失时 `poseCaptureAvailable()` 返回 false，界面据此提示。
+ * 桌面端从已验证的动作捕捉组件加载 WASM 与模型；浏览器开发预览可使用 /pose/。
+ * 可用性按调用重新检查，安装组件后无需重启应用。
  */
 
 import {
@@ -14,6 +14,9 @@ import {
   yawFromDirection,
   type WhiteModelMotionClip,
 } from "./whiteModelScene";
+import { convertFileSrc } from "@tauri-apps/api/core";
+import { isDesktopRuntime } from "./backend";
+import { runtimeComponentsClient } from "./runtimeComponents";
 
 export const POSE_ASSET_BASE = `${import.meta.env.BASE_URL ?? "/"}pose/`;
 export const POSE_MODEL_FILE = "pose_landmarker_full.task";
@@ -35,19 +38,31 @@ interface Landmark {
 
 type Frame = Float64Array | null;
 
-let availability: Promise<boolean> | null = null;
+export async function poseCaptureAssets(): Promise<{ wasmBase: string; modelPath: string }> {
+  if (!isDesktopRuntime())
+    return {
+      wasmBase: `${POSE_ASSET_BASE}wasm`,
+      modelPath: `${POSE_ASSET_BASE}${POSE_MODEL_FILE}`,
+    };
+  const root = (await runtimeComponentsClient.assetRoot("pose-runtime"))
+    .replace(/\\/g, "/")
+    .replace(/\/+$/, "");
+  return {
+    wasmBase: convertFileSrc(`${root}/wasm`),
+    modelPath: convertFileSrc(`${root}/${POSE_MODEL_FILE}`),
+  };
+}
 
-/** 资源是否随构建打包；404 视为缺失，其它响应（含不支持 HEAD 的自定义协议）乐观放行。 */
-export function poseCaptureAvailable(): Promise<boolean> {
-  availability ??= (async () => {
-    try {
-      const response = await fetch(`${POSE_ASSET_BASE}${POSE_MODEL_FILE}`, { method: "HEAD" });
-      return response.status !== 404;
-    } catch {
-      return false;
-    }
-  })();
-  return availability;
+/** 不缓存缺失状态；桌面端原生接口只返回已完成校验的组件目录。 */
+export async function poseCaptureAvailable(): Promise<boolean> {
+  try {
+    const assets = await poseCaptureAssets();
+    if (isDesktopRuntime()) return true;
+    const response = await fetch(assets.modelPath, { method: "HEAD" });
+    return response.ok;
+  } catch {
+    return false;
+  }
 }
 
 function waitForEvent(
@@ -89,7 +104,10 @@ function waitForEvent(
 async function seek(video: HTMLVideoElement, time: number, signal?: AbortSignal): Promise<void> {
   signal?.throwIfAborted();
   const target = Math.min(Math.max(0, time), Math.max(0, video.duration - 0.001));
-  if (video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA && Math.abs(video.currentTime - target) < 0.002) {
+  if (
+    video.readyState >= HTMLMediaElement.HAVE_CURRENT_DATA &&
+    Math.abs(video.currentTime - target) < 0.002
+  ) {
     return;
   }
   const ready = waitForEvent(video, "seeked", signal);
@@ -154,7 +172,9 @@ export function landmarksToJoints(landmarks: readonly Landmark[]): Float64Array 
 function percentile(values: number[], fraction: number): number {
   if (!values.length) return 0;
   const sorted = [...values].sort((a, b) => a - b);
-  return sorted[Math.min(sorted.length - 1, Math.max(0, Math.floor(fraction * (sorted.length - 1))))]!;
+  return sorted[
+    Math.min(sorted.length - 1, Math.max(0, Math.floor(fraction * (sorted.length - 1))))
+  ]!;
 }
 
 /**
@@ -205,9 +225,7 @@ export function normalizeCapturedFrames(frames: readonly Frame[]): Float32Array 
 }
 
 function fillMissing(frames: readonly Frame[]): Float64Array[] {
-  const known = frames
-    .map((frame, index) => (frame ? index : -1))
-    .filter((index) => index >= 0);
+  const known = frames.map((frame, index) => (frame ? index : -1)).filter((index) => index >= 0);
   if (!known.length) return [];
   return frames.map((frame, index) => {
     if (frame) return Float64Array.from(frame);
@@ -232,7 +250,9 @@ function smooth(joints: Float32Array, frameCount: number): Float32Array {
     const next = Math.min(frameCount - 1, frame + 1) * stride;
     for (let offset = 0; offset < stride; offset += 1) {
       output[current + offset] =
-        joints[previous + offset]! * 0.25 + joints[current + offset]! * 0.5 + joints[next + offset]! * 0.25;
+        joints[previous + offset]! * 0.25 +
+        joints[current + offset]! * 0.5 +
+        joints[next + offset]! * 0.25;
     }
   }
   return output;
@@ -244,10 +264,11 @@ interface Landmarker {
 }
 
 async function createLandmarker(): Promise<Landmarker> {
+  const assets = await poseCaptureAssets();
   const vision = await import("@mediapipe/tasks-vision");
-  const fileset = await vision.FilesetResolver.forVisionTasks(`${POSE_ASSET_BASE}wasm`);
+  const fileset = await vision.FilesetResolver.forVisionTasks(assets.wasmBase);
   const options = (delegate: "GPU" | "CPU") => ({
-    baseOptions: { modelAssetPath: `${POSE_ASSET_BASE}${POSE_MODEL_FILE}`, delegate },
+    baseOptions: { modelAssetPath: assets.modelPath, delegate },
     runningMode: "VIDEO" as const,
     numPoses: 1,
     minPoseDetectionConfidence: 0.5,

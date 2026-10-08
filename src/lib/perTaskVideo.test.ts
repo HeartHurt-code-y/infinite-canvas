@@ -1,6 +1,5 @@
 import { describe, expect, it } from "vitest";
 import {
-  perTaskVideoInputIssue,
   perTaskVideoProfile,
   perTaskVideoUrlConnection,
   perTaskVideoUrlIssue,
@@ -30,38 +29,6 @@ describe("SP 2.5 per-task video input limits", () => {
     expect(perTaskVideoProfile("sp2.5-720p-30s-ch7")).toBeNull();
     expect(perTaskVideoProfile("SP2.5-720p-30s-ch3")).toBeNull();
     expect(perTaskVideoProfile("doubao-seedance-2-5-260628")).toBeNull();
-  });
-
-  it("rejects unsupported references before creating a paid task", () => {
-    const imageOnly = perTaskVideoProfile("sp2.5-720p-30s-ch4")!;
-    expect(perTaskVideoInputIssue(imageOnly, [{ kind: "video" }])).toContain("不支持参考视频");
-    expect(perTaskVideoInputIssue(imageOnly, [{ kind: "audio" }])).toContain("不支持参考音频");
-    expect(
-      perTaskVideoInputIssue(
-        imageOnly,
-        Array.from({ length: 10 }, () => ({ kind: "image" })),
-      ),
-    ).toContain("最多支持 9 张参考图");
-    expect(perTaskVideoInputIssue(imageOnly, [{ kind: "image", role: "first_frame" }])).toContain(
-      "不支持首帧",
-    );
-    expect(
-      perTaskVideoInputIssue(imageOnly, [{ kind: "image", role: "reference_image" }]),
-    ).toBeNull();
-
-    const withAudio = perTaskVideoProfile("sp2.5-720p-30s-ch6")!;
-    expect(
-      perTaskVideoInputIssue(
-        withAudio,
-        Array.from({ length: 10 }, () => ({ kind: "audio" })),
-      ),
-    ).toBeNull();
-    expect(
-      perTaskVideoInputIssue(
-        withAudio,
-        Array.from({ length: 11 }, () => ({ kind: "audio" })),
-      ),
-    ).toContain("最多支持 10 段参考音频");
   });
 
   it("keeps public image and audio URLs typed and preserves signed query strings", () => {

@@ -21,8 +21,46 @@ import {
   remotionTreeIsMaterialized,
   materializeRemotionRuntime,
   remotionPackagesPresent,
+  remotionCachedSourcesMatch,
   writeRemotionFileInventory,
 } from "./remotion-runtime-integrity.mjs";
+
+test("offline migration verifies copied sources and original bundled sources from preserved error maps", async () => {
+  const root = mkdtempSync(path.join(os.tmpdir(), "remotion-cached-sources-"));
+  const source = mkdtempSync(path.join(os.tmpdir(), "remotion-current-sources-"));
+  try {
+    mkdirSync(path.join(root, "bundle"));
+    for (const name of [
+      "package.json",
+      "pnpm-lock.yaml",
+      "plan.mjs",
+      "Composition.tsx",
+      "render.mjs",
+      "resolve-douyin.mjs",
+      "resolve-rednote.mjs",
+      "index.tsx",
+    ]) {
+      writeFileSync(path.join(source, name), `current:${name}`);
+      if (name !== "index.tsx") writeFileSync(path.join(root, name), `current:${name}`);
+    }
+    const sources = ["./index.tsx", "./Composition.tsx", "./plan.mjs"];
+    const sourcesContent = ["current:index.tsx", "current:Composition.tsx", "current:plan.mjs"];
+    const map = path.join(root, "bundle/bundle.js.map");
+    writeFileSync(map, JSON.stringify({ sources, sourcesContent }));
+    assert.equal(await remotionCachedSourcesMatch(root, source), true);
+    writeFileSync(path.join(source, "index.tsx"), "new entrypoint");
+    assert.equal(await remotionCachedSourcesMatch(root, source), false);
+    writeFileSync(path.join(source, "index.tsx"), "current:index.tsx");
+    writeFileSync(path.join(root, "resolve-douyin.mjs"), "stale resolver");
+    assert.equal(await remotionCachedSourcesMatch(root, source), false);
+    writeFileSync(path.join(root, "resolve-douyin.mjs"), "current:resolve-douyin.mjs");
+    rmSync(map);
+    assert.equal(await remotionCachedSourcesMatch(root, source), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(source, { recursive: true, force: true });
+  }
+});
 
 test("prepared Remotion manifest detects changes to runtime executables and scripts", async () => {
   const root = mkdtempSync(path.join(os.tmpdir(), "remotion-critical-"));

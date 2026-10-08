@@ -15,7 +15,8 @@ use super::{
     local_results::LocalResultService,
     media::{MediaResolver, ResolvedBundle},
     model_schema::{
-        default_model_schema, is_rd_video_model, is_sp25_per_use_video_model, normalize_parameters,
+        RequestDialect, apply_request_dialect, default_model_schema, is_rd_video_model,
+        is_seedance_draft_video_model, is_sp25_per_use_video_model, normalize_parameters,
     },
     provider::{GenerationObservation, GenerationSubmission, ProviderRuntime, parse_token_usage},
     staging::StagingService,
@@ -105,6 +106,7 @@ pub struct GenerationTaskService {
     local_results: LocalResultService,
     staging: StagingService,
     video_polls: Arc<VideoPollRegistry>,
+    draft_promotions: Arc<Mutex<()>>,
 }
 
 impl GenerationTaskService {
@@ -126,6 +128,7 @@ impl GenerationTaskService {
             local_results,
             staging,
             video_polls: Arc::new(VideoPollRegistry::default()),
+            draft_promotions: Arc::new(Mutex::new(())),
         }
     }
 
@@ -181,7 +184,7 @@ impl GenerationTaskService {
             .ok_or_else(|| {
                 BackendError::NotFound(format!("model definition {}", command.model_definition_id))
             })?;
-        let operation_schema = operation_schema_for_start(
+        let mut operation_schema = operation_schema_for_start(
             &model.operations,
             command.operation,
             binding.remote_model_id.as_deref(),
@@ -196,6 +199,25 @@ impl GenerationTaskService {
                 }),
             )
         })?;
+        if command.operation == GenerationOperation::VideoGeneration
+            && let Some(model_id) = binding.remote_model_id.as_deref()
+            && is_seedance_draft_video_model(model_id)
+        {
+            let mut schema =
+                default_model_schema(model_id, &[GenerationOperation::VideoGeneration]);
+            apply_request_dialect(
+                &mut schema,
+                model_id,
+                RequestDialect::for_adapter(&provider.adapter_id),
+            );
+            operation_schema = schema["video_generation"].clone();
+            if command.parameters.get("draft_task_id").is_some() {
+                return Err(BackendError::validation(
+                    "请从已成功的草稿样片历史详情生成正片",
+                    json!({ "sourceNodeId": command.source_node_id }),
+                ));
+            }
+        }
         if !operation_schema.is_object() {
             return Err(BackendError::validation(
                 "model operation schema must be a JSON object",
@@ -284,6 +306,47 @@ impl GenerationTaskService {
 
     pub fn get_progress(&self, task_id: &str) -> BackendResult<GenerationTaskProgress> {
         self.storage.get_task_progress(task_id)
+    }
+
+    pub fn promote_seedance_draft(&self, source_task_id: &str) -> BackendResult<String> {
+        let _guard = self.draft_promotions.lock().map_err(|_| {
+            BackendError::Conflict("draft promotion registry is unavailable".into())
+        })?;
+        let source = self.storage.get_task_execution(source_task_id)?;
+        let prepared = super::seedance_draft::prepare_promotion(&source)?;
+        if let Some(task_id) = self.storage.seedance_draft_final_task_id(source_task_id)? {
+            return Ok(task_id);
+        }
+        // Validate the original credential scope before persisting a new task.
+        self.providers.resolve_frozen(&source)?;
+        validate_start_command(&prepared.command)?;
+        let task_id = Uuid::new_v4().to_string();
+        self.lifecycle.create(NewTask {
+            id: &task_id,
+            canvas_id: &prepared.command.canvas_id,
+            source_node_id: &prepared.command.source_node_id,
+            operation: GenerationOperation::VideoGeneration,
+            provider: &prepared.provider,
+            api_key_ref: &source.api_key_ref_snapshot,
+            model_definition_id: &source.model_definition_id,
+            remote_model_id: Some(&prepared.remote_model_id),
+            logical_request: &prepared.logical_request,
+        })?;
+        self.emit(
+            "generation:created",
+            &json!({
+                "taskId": task_id, "sourceNodeId": prepared.command.source_node_id,
+                "seedanceDraftSourceTaskId": source_task_id,
+            }),
+        );
+        let service = self.clone();
+        let spawned_task_id = task_id.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Err(error) = service.execute(&spawned_task_id).await {
+                let _ = service.finish_with_execution_error(&spawned_task_id, error);
+            }
+        });
+        Ok(task_id)
     }
 
     pub fn recover(&self) -> BackendResult<RecoveryReport> {
@@ -1471,6 +1534,14 @@ impl GenerationTaskService {
 }
 
 fn validate_start_command(command: &StartGenerationCommand) -> BackendResult<()> {
+    if command.output_name.as_ref().is_some_and(|name| {
+        name.trim().is_empty() || name.chars().count() > 100 || name.chars().any(char::is_control)
+    }) {
+        return Err(BackendError::validation(
+            "任务产物名称须为 1–100 个字符",
+            json!({}),
+        ));
+    }
     let mut missing = Vec::new();
     if command.canvas_id.trim().is_empty() {
         missing.push("canvasId");
@@ -1486,7 +1557,7 @@ fn validate_start_command(command: &StartGenerationCommand) -> BackendResult<()>
     }
     if command.generation_count != 1 {
         return Err(BackendError::validation(
-            "generation count is fixed to 1 for the current API contracts",
+            "each local generation task represents one request; batch requests require separate tasks",
             json!({ "generationCount": command.generation_count, "supported": 1 }),
         ));
     }
@@ -1543,6 +1614,33 @@ fn video_poll_interval(model_id: Option<&str>) -> std::time::Duration {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rd_task_snapshot_preserves_channel_parameters_outside_local_schema() {
+        let stale = json!({
+            "video_generation": {
+                "resultType": "video",
+                "requestProfileId": "moyu_video_metadata_v1",
+                "parameters": {}
+            }
+        });
+        let schema = operation_schema_for_start(
+            &stale,
+            GenerationOperation::VideoGeneration,
+            Some("rd-seedance-2.5-720p"),
+        )
+        .expect("RD transport schema");
+        assert_eq!(schema["requestProfileId"], "rd_video_v1");
+        let supplied = json!({
+            "duration": 30,
+            "resolution": "1080p",
+            "channel_extension": "preserve-me"
+        });
+        let parameters = normalize_parameters(&schema, &supplied).unwrap();
+        for (key, value) in supplied.as_object().unwrap() {
+            assert_eq!(parameters.get(key), Some(value));
+        }
+    }
 
     #[test]
     fn sp25_freezes_canonical_schema_from_bound_remote_id() {

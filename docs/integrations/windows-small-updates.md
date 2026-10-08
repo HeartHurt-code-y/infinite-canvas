@@ -1,6 +1,6 @@
 # Windows 小型更新与过渡发版
 
-Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本项目的 `0.1.7` 更新下载约 733 MiB。这里的小型更新仍是经过 Tauri 签名的 NSIS 安装器；它只包含新的程序，不重复携带稳定的 Blender、Remotion、FFmpeg 与风格库资源。构建小包仍须在本地生成同版完整 NSIS，以核对资源文件表；常规发版不再默认上传完整离线包。
+Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本项目的 `0.1.7` 更新下载约 733 MiB。这里的小型更新仍是经过 Tauri 签名的 NSIS 安装器；它携带新的程序、动捕原生组件，以及程序固定信任的组件目录（有编译摘要时），不重复携带稳定的 Blender、Remotion、FFmpeg 与风格库资源。构建小包仍须在本地生成同版完整 NSIS，以核对资源文件表；常规发版不再默认上传完整离线包。
 
 ## 兼容边界
 
@@ -9,6 +9,7 @@ Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本�
 - 过渡版启动后，在后台把四类稳定资源复制到 `AppLocalData/runtime-components/` 的版本目录，逐文件校验后才标记完成。迁移期间依旧使用安装目录里的完整资源。组件未准备好时，应用内更新会等待并显示本地进度；失败时保留原安装并显示错误。
 - 小包的 NSIS 安装程序在卸载任何旧版之前，先运行新程序的只读组件自检。自检只接受四类已持久化且与新构建清单匹配的资源，手动运行小包或静默安装也必须通过；失败时停止安装。可使用已发布的完整过渡版，或由发布者单独提供的完整安装包修复。
 - 新版客户端在下载小型 NSIS 前先获取目标版本的签名资源清单。它按 SHA-256 复用本地已有文件，仅下载缺少或内容变化的对象，逐文件校验后在持久组件目录发布完整的目标版本；安装器预检再以新程序内置的清单核对这四类组件。失败时保留旧组件与旧程序，可重试。
+- 动捕的 WASM 与模型从前端静态资源迁入 `pose-runtime/` 后，由小型 NSIS 直接携带，避免旧四组件资源协议遗漏动捕。每次小包构建读取实际程序的动捕与组件目录编译摘要，核验动捕的完整原生清单、文件内容及构建时间；固定了组件目录的程序还必须携带相同 SHA-256 的目录。缺少资源、摘要不一致、资源晚于程序或目录版本错误时停止打包。旧四组件清单、下载与安装预检协议保持不变。
 - 应用保持自动检查更新；发现新版本后在后台准备资源并下载小型安装包。准备完成后自动安装并重启应用；画布保存失败时停止安装并显示错误。
 - `update:baseline` 保留完整过渡包的版本、签名包哈希与资源映射来源。`tauri:bundle:slim` 要求本版完整 NSIS 文件表覆盖四类资源的每个文件，且新程序内置的四个清单哈希与签名资源清单一致，才允许这些组件的资源树变化。资源映射或未纳入按文件更新的其他技能资源变化仍需新的完整过渡包。
 - 旧 NSIS 的 `/UPDATE` 安装会保留未列入新包的资源；从 MSI 来的客户可能先卸载原安装。持久组件目录覆盖这两条路径。小包安装失败时可运行完整过渡版或单独提供的完整安装包修复。
@@ -17,7 +18,7 @@ Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本�
 
 1. 将 `package.json`、`src-tauri/tauri.conf.json`、`src-tauri/Cargo.toml` 升到相同的新版本。备齐原 updater 签名私钥；不能更换已经发给客户的公钥。
 2. Windows 上运行 `pnpm tauri:build --bundles nsis`，在本地生成并保留同版签名完整 NSIS。完整过渡版须运行 `pnpm update:baseline -- --out <bridge-baseline.json> --full-nsis <同版完整NSIS路径>`，将含完整包及签名哈希的基线与安装包一同归档。小包发版使用已经验证的完整过渡版基线。将同版源码提交推送到 Codemagic 所用分支，确认 `updater_signing` 环境组中的 updater 私钥与 TOS 上传凭据后，再触发 `codemagic.yaml` 的 `macos-package`。本项目不要求 Apple 公证；无证书时使用 ad-hoc 签名，并向首次安装者提供隔离属性处理指引。
-3. **仅在过渡版的迁移与升级路径通过验证后**，常规 Windows 发版运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。此步骤从同版完整 NSIS 文件表生成目标版本的签名资源清单，并要求完整包的修改时间晚于新程序及清单覆盖的所有资源源文件；小包只包含程序。检查清单、完整包、小包及签名，再用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <slim-dir> --resource-baseline <0.1.10 bridge-baseline.json> --no-full-offline --version <version>` 发布。发布脚本先确认内容哈希对象与清单均可匿名访问，最后切换 Windows 平台 `latest.json`；完整 NSIS 留在本地，不上传。
+3. **仅在过渡版的迁移与升级路径通过验证后**，常规 Windows 发版运行 `pnpm tauri:bundle:slim -- --baseline <bridge-baseline.json>`。此步骤从同版完整 NSIS 文件表生成目标版本的签名资源清单，并要求完整包的修改时间晚于新程序及清单覆盖的所有资源源文件；小包还随附程序固定版本的动捕与组件目录。包装脚本生成单一资源与签名覆盖配置，逐项删除基础配置继承的大资源映射，再加入动捕和目录，避免多份 CLI 配置提前合并后丢失删除项。检查清单、完整包、小包及签名，再用 `pnpm update:publish -- --channel windows-x86_64 --bundle-dir <slim-dir> --resource-baseline <0.1.10 bridge-baseline.json> --no-full-offline --version <version>` 发布。发布脚本先确认内容哈希对象与清单均可匿名访问，最后切换 Windows 平台 `latest.json`；完整 NSIS 留在本地，不上传。
 4. Codemagic 的 Mac 工作流在验签后用 `--channel darwin-aarch64 --bundle-dir <mac-full-dir> --full-bundle-dir <mac-dmg-dir> --version <version>` 发布 Mac 平台频道。Mac 离线 DMG 与安装脚本仍供首次安装和修复使用；`.github/workflows/macos-package.yml` 只构建产物，作为备用入口。Mac 工作流不发布旧共享清单。Windows 平台 `0.1.11` 验证完成后，运行 `pnpm update:publish --retire-legacy --expected-version 0.1.10 --require-windows-version 0.1.11 --backup-file <new local path>`，先在全新本地路径保存旧清单，再删除远端 `updates/latest.json`；后续不重新创建它。
 
 上述命令中的目录必须来自同一次构建。`TOS_ACCESS_KEY`、`TOS_SECRET_KEY` 只从环境变量读取；不要放进命令、文档或仓库。每次更新都升版本号，避免 CDN 的长期缓存复用旧安装包 URL。
@@ -27,7 +28,7 @@ Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本�
 ## 最小验收
 
 1. 运行更新脚本的定向测试、Rust 组件迁移及按文件预备的定向测试，以及 TypeScript 类型检查。
-2. 对实际生成的 NSIS 脚本确认小包未含 `blender/`、`remotion-runtime/`、`ffmpeg/`、`skills/`；比较完整包与小包的字节数，并确认两份 `.sig` 均非空。
+2. 对实际生成的 NSIS 脚本确认小包未含 `blender/`、`remotion-runtime/`、`ffmpeg/`、`skills/`；资源文件表必须恰好等于本次校验的动捕清单和固定组件目录，缺项、多项或重复项均拒绝。比较完整包与小包的字节数，并确认两份 `.sig` 均非空。
 3. 在隔离的 Windows 安装上依次执行 `0.1.7 → 完整过渡版 → 小型更新版`，至少覆盖 NSIS 与 MSI 来源各一次。用目标版本只修改少量资源的样本核对下载字节数、未变文件复用、断点重试、哈希错误拒绝与旧版本保留。检查画布/密钥保留，以及断网后的 Blender、Remotion、FFmpeg 与风格库图片可用；目标组件未准备完成时应拒绝小包安装。
 4. 发布后读取两个平台清单，核对版本、唯一的版本化下载 URL、签名和 HTTP 可访问性。确认旧共享清单删除后返回不存在，并记录旧客户端需要手动过渡的影响。
 
@@ -38,6 +39,16 @@ Tauri 2 在 Windows 上把 NSIS/MSI 安装器作为 updater 产物，因此本�
 修复后的资源配置只映射风格库整目录。下一版必须先发布包含全部资源的完整 NSIS 安装包，重新生成资源基线，再考虑之后的小包。新基线同时记录资源映射；旧 `0.1.8` 基线不能继续用于制作小包。已安装且迁移失败的旧客户端运行的是不可变的旧代码，需一次手动安装修复后的完整包，保留应用数据；安装后启动应用并确认组件迁移完成。发布前应在隔离安装上验证 NSIS 与 MSI 来源的升级路径，并逐项核对新安装包中的风格库清单文件。
 
 按文件下载是新客户端具备的更新能力，不能反向修复已经安装的旧代码。尤其 `0.1.8` 的资源迁移失败发生在旧更新逻辑内，仍需上述一次性完整包桥接。完成桥接后，后续四类资源的内容变化才可通过签名清单按文件更新；每版程序本身仍通过 Tauri 签名的小型 NSIS 更新。
+
+## Windows 轻量联网版发布
+
+轻量联网版使用独立的 `windows-x86_64-online/latest.json`，采用完整轻量 NSIS 更新。七种功能组件按本次应用固定的组件目录分发 ZIP；该频道不使用旧四组件的 `resourceManifest`，不会改写既有 Windows、macOS 或已退役共享频道。
+
+运行 `pnpm tauri:build:online --bundles nsis --ci` 生成本版产物，然后先运行 `pnpm update:publish:online --distribution-dir .cache/tauri-editions/online/artifacts/<版本> --dry-run`。构建前后必须具有相同的源码指纹，`build-source.json` 绑定实际程序 SHA-256 与全部编译输入；发布时再次核对当前源码、程序版本、更新签名、安装器文件表、组件目录和七种完整 ZIP。修改源码后必须重建，不能发布旧产物。
+
+正式发布使用同一命令并去掉 `--dry-run`。上传先创建七个组件 ZIP、安装包及其签名，所有对象以匿名完整 GET 校验大小和 SHA-256，随后复核本地产物与源码，最后以条件写入切换在线清单。版本化对象禁止覆盖；同版本内容冲突和降级均停止。已有清单会先备份并验证，清单并发变化会阻止发布。若清单写入结果无法确认，必须先读取线上清单确认实际状态，不能直接宣称成功或回滚。
+
+上传凭据优先读取环境变量 `TOS_ACCESS_KEY`、`TOS_SECRET_KEY`；Windows 未提供时，只读取应用已经配置的同一可信 TOS 来源及其凭据引用，密钥仅保留在进程内。上传续传记录存于 `.cache/online-publish/uploads/`，不能放入安装产物目录。`pnpm update:online-test` 执行发布、传输与源码凭证的定向回归。首次从旧完整版转入轻量版需要手动安装轻量版安装器；后续更新由独立在线频道提供。
 
 ## 0.1.11 分流边界
 

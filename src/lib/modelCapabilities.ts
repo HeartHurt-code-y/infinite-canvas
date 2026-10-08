@@ -1,5 +1,6 @@
 import type { GenerationOperation, ModelOperationSchema } from "./backend";
 import { perTaskVideoProfile } from "./perTaskVideo";
+import { SEEDANCE_DRAFT_MODEL_ID, SEEDANCE_DRAFT_PROFILE_ID } from "./seedanceDraft";
 
 export type ModelParameterValue = string | number | boolean;
 
@@ -53,6 +54,7 @@ const PARAMETER_LABELS: Readonly<Record<string, string>> = {
   optimize_prompt_mode: "提示词优化",
   background: "背景通道",
   layer_decomposition: "图层拆分",
+  draft: "先生成草稿样片",
 };
 
 const OPTION_LABELS: Readonly<Record<string, string>> = {
@@ -91,7 +93,11 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function isParameterValue(value: unknown): value is ModelParameterValue {
-  return typeof value === "string" || typeof value === "number" || typeof value === "boolean";
+  return (
+    typeof value === "string" ||
+    (typeof value === "number" && Number.isFinite(value)) ||
+    typeof value === "boolean"
+  );
 }
 
 function optionLabel(value: ModelParameterValue, key: string): string {
@@ -902,8 +908,7 @@ function videoParameters(modelId: string): Record<string, unknown> {
     : seedance20
       ? [-1, ...Array.from({ length: 12 }, (_, index) => index + 4)]
       : [5, 8, 12];
-  // 海外 Dreamina Seedance 仅开放 720p/480p；国内 Seedance 2.5 官方全平台
-  // 支持 1080p（文档曾前后矛盾，现已确认），2.5 的 fast/mini 变体保持 720p/480p。
+  // Native Ark keeps its declared capabilities; the Moyu draft profile is applied separately.
   const resolutions = dreamina
     ? ["720p", "480p"]
     : seedance25
@@ -975,6 +980,26 @@ function videoParameters(modelId: string): Record<string, unknown> {
   return parameters;
 }
 
+function seedanceDraftVideoParameters(): Record<string, unknown> {
+  return {
+    ratio: {
+      type: "string",
+      label: "画幅",
+      default: "adaptive",
+      enum: ["16:9", "4:3", "1:1", "3:4", "9:16", "21:9", "adaptive"],
+    },
+    resolution: { type: "string", label: "分辨率", default: "720p", enum: ["720p", "480p"] },
+    duration: {
+      type: "integer",
+      label: "时长",
+      default: 5,
+      enum: [-1, ...Array.from({ length: 27 }, (_, index) => index + 4)],
+    },
+    generate_audio: { type: "boolean", label: "生成音频", default: true },
+    draft: { type: "boolean", label: "先生成草稿样片", default: false },
+  };
+}
+
 export function defaultModelOperationSchema(
   modelId: string,
   operations: readonly GenerationOperation[],
@@ -991,11 +1016,13 @@ export function defaultModelOperationSchema(
         return [operation, { resultType: "text", parameters: {} }];
       }
       const wan30 = isWan30VideoModel(modelId);
+      const draftProfile = modelId.toLowerCase() === SEEDANCE_DRAFT_MODEL_ID;
       return [
         operation,
         {
           resultType: "video",
-          parameters: videoParameters(modelId),
+          parameters: draftProfile ? seedanceDraftVideoParameters() : videoParameters(modelId),
+          ...(draftProfile ? { requestProfileId: SEEDANCE_DRAFT_PROFILE_ID } : {}),
           ...(wan30 ? { request: { promptMode: "prompt_or_media" } } : {}),
         },
       ];
@@ -1031,6 +1058,7 @@ export function modelParameterCapabilities(
   const operationValue = operationSchema[operation];
   const operationDefinition = isRecord(operationValue) ? operationValue : null;
   const declaredParameters = operationDefinition?.["parameters"];
+  const draftProfile = operationDefinition?.["requestProfileId"] === SEEDANCE_DRAFT_PROFILE_ID;
   if (!isRecord(declaredParameters)) {
     if (operationDefinition && !perTaskVideoProfile(modelId)) return [];
     const fallback = fallbackParameters(modelId, operation);
@@ -1039,58 +1067,32 @@ export function modelParameterCapabilities(
       .sort((left, right) => left.order - right.order);
   }
 
-  const fallback = fallbackParameters(modelId, operation);
-  // 按次 SP 2.5 型号仅使用本地已核对的参数白名单，避免供应商返回的旧 Seedance
-  // 字段进入付费请求。升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
+  const fallback = draftProfile
+    ? seedanceDraftVideoParameters()
+    : fallbackParameters(modelId, operation);
+  // 升级前保存的 Wan / 海外 Dreamina Seedance / Veo / Vidu / gpt-image / Gemini 图片
   // 定义带有显式 `parameters: {}`；通用模型仍把空对象视为权威声明，但这些已知契约
   // 需要立即回退到当前档案，避免节点参数区空白。
-  const effectiveParameters = perTaskVideoProfile(modelId)
-    ? fallback
-    : (isWan30VideoModel(modelId) ||
-          isVeoVideoModel(modelId) ||
-          isViduVideoModel(modelId) ||
-          isMinimaxH3VideoModel(modelId) ||
-          isRdVideoModel(modelId) ||
-          isGptImageModel(modelId) ||
-          isGeminiImageModel(modelId) ||
-          isSeedreamImageModel(modelId) ||
-          (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
-        Object.keys(declaredParameters).length === 0
+  const effectiveParameters =
+    (perTaskVideoProfile(modelId) ||
+      isWan30VideoModel(modelId) ||
+      isVeoVideoModel(modelId) ||
+      isViduVideoModel(modelId) ||
+      isMinimaxH3VideoModel(modelId) ||
+      isRdVideoModel(modelId) ||
+      isGptImageModel(modelId) ||
+      isGeminiImageModel(modelId) ||
+      isSeedreamImageModel(modelId) ||
+      draftProfile ||
+      (isDreaminaSeedanceVideoModel(modelId) && Object.keys(fallback).length > 0)) &&
+    Object.keys(declaredParameters).length === 0
       ? fallback
-      : declaredParameters;
+      : draftProfile
+        ? fallback
+        : declaredParameters;
   return Object.entries(effectiveParameters)
     .flatMap(([key, value], index) => parameterCapability(key, value, fallback[key], index) ?? [])
     .sort((left, right) => left.order - right.order);
-}
-
-function matchesCapability(
-  value: unknown,
-  capability: ModelParameterCapability,
-): value is ModelParameterValue {
-  if (!isParameterValue(value)) return false;
-  if (capability.type === "boolean" && typeof value !== "boolean") return false;
-  if (
-    (capability.type === "integer" || capability.type === "number") &&
-    typeof value !== "number"
-  ) {
-    return false;
-  }
-  if (capability.type === "integer" && typeof value === "number" && !Number.isInteger(value)) {
-    return false;
-  }
-  if (
-    capability.options.length > 0 &&
-    !capability.options.some((option) => option.value === value)
-  ) {
-    return false;
-  }
-  if (typeof value === "number" && capability.minimum != null && value < capability.minimum) {
-    return false;
-  }
-  if (typeof value === "number" && capability.maximum != null && value > capability.maximum) {
-    return false;
-  }
-  return true;
 }
 
 export function resolvedParameterValue(
@@ -1098,24 +1100,28 @@ export function resolvedParameterValue(
   values: Readonly<Record<string, ModelParameterValue>>,
 ): ModelParameterValue {
   const value = values[capability.key];
-  return matchesCapability(value, capability) ? value : capability.defaultValue;
+  return isParameterValue(value) ? value : capability.defaultValue;
 }
 
 export function generationParameters(
   capabilities: readonly ModelParameterCapability[],
   values: Readonly<Record<string, ModelParameterValue>>,
-  hasMediaInputs: boolean,
+  _hasMediaInputs: boolean,
 ): Record<string, ModelParameterValue> {
-  return Object.fromEntries(
-    capabilities.flatMap((capability) => {
-      if (capability.requiresNoMedia && hasMediaInputs) return [];
-      if (capability.optional) {
-        const value = values[capability.key];
-        return matchesCapability(value, capability) ? [[capability.key, value]] : [];
-      }
-      return [[capability.key, resolvedParameterValue(capability, values)]];
-    }),
+  void _hasMediaInputs;
+  // A cached schema supplies defaults, but cannot veto a newer remote capability or
+  // silently replace a saved user choice. Keep all explicit serializable values.
+  const parameters = Object.fromEntries(
+    Object.entries(values).filter((entry): entry is [string, ModelParameterValue] =>
+      isParameterValue(entry[1]),
+    ),
   );
+  for (const capability of capabilities) {
+    if (!capability.optional && parameters[capability.key] == null) {
+      parameters[capability.key] = capability.defaultValue;
+    }
+  }
+  return parameters;
 }
 
 /** 模型是否支持批量数量参数 `n`：支持时一次请求生成多张，不再拆分多个独立任务。 */
@@ -1127,17 +1133,4 @@ export function modelSupportsBatchCount(
   return modelParameterCapabilities(operationSchema, operation, modelId).some(
     (capability) => capability.key === "n" && capability.type === "integer",
   );
-}
-
-/** 模型声明的批量数量上限；模型不支持 `n` 时回退到 fallback（沿用任务拆分上限）。 */
-export function modelGenerationCountMaximum(
-  operationSchema: ModelOperationSchema,
-  operation: GenerationOperation,
-  modelId: string,
-  fallback: number,
-): number {
-  const capability = modelParameterCapabilities(operationSchema, operation, modelId).find(
-    (item) => item.key === "n" && item.type === "integer",
-  );
-  return capability?.maximum ?? fallback;
 }

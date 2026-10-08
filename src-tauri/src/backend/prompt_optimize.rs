@@ -2704,11 +2704,10 @@ fn build_text_model_request(
                             }));
                         }
                         PromptMultimodalKind::Audio
-                            if remote_model_id.to_ascii_lowercase().contains("audio")
-                                && matches!(
-                                    material.mime_type.as_str(),
-                                    "audio/mpeg" | "audio/wav"
-                                ) =>
+                            if matches!(
+                                material.mime_type.as_str(),
+                                "audio/mpeg" | "audio/wav"
+                            ) =>
                         {
                             let data = material.base64.as_ref().ok_or_else(|| {
                                 BackendError::validation(
@@ -4657,7 +4656,7 @@ mod tests {
         };
         let plan = build_text_model_request(
             "openai_chat_v1",
-            "gpt-4o-audio-preview",
+            "custom-channel-model",
             "SYS",
             &[],
             "USER",

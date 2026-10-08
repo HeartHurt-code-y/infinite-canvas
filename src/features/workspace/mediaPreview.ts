@@ -188,6 +188,14 @@ export function useNodeInView<T extends HTMLElement>(
   useEffect(() => {
     heavyRef.current = heavy;
     eagerRef.current = eager;
+    // 远程预览落盘后会变为轻量 JPEG；更新已登记的观察者，不能沿用旧解码器预算。
+    if (listenerIdRef.current != null) {
+      const listener = listeners.get(listenerIdRef.current);
+      if (listener != null && (listener.heavy !== heavy || listener.eager !== eager)) {
+        listeners.set(listener.id, { ...listener, heavy, eager });
+        scheduleVisibilityRecompute();
+      }
+    }
   }, [eager, heavy]);
 
   const publish = useCallback((next: boolean) => {

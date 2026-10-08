@@ -8,20 +8,19 @@ use super::{
     asset_library::{
         AssetDelivery, AssetLibrary, AssetReadTrace, ResolveAsset, ResolvedAssetAccess,
     },
-    composer::VideoCompositionService,
     error::{BackendError, BackendResult},
     local_base64_assets::{LocalBase64Library, extension_for_mime},
     local_results::{LocalResultService, safe_file_stem, sha256_bytes},
-    model_schema::{is_rd_video_model, is_seedance_25_video_model, is_seedream_image_model},
+    model_schema::is_seedream_image_model,
     provider::{
         CompiledContentItem, ProviderRuntime, ResolvedGeneration, ResolvedMedia,
-        redact_request_value, redact_url_string, seedance_video_task_type,
+        redact_request_value, redact_url_string,
     },
     staging::{StagingLease, StagingService, fake_ip_aware_client},
     storage::TaskExecutionRecord,
     types::{
         ExplicitMediaInput, GenerationOperation, MediaReferenceTarget, MediaType, PromptSegment,
-        SaveStatus, StartGenerationCommand, VideoTaskType,
+        SaveStatus, StartGenerationCommand,
     },
 };
 
@@ -42,7 +41,6 @@ pub struct MediaResolver {
     local_results: LocalResultService,
     staging: StagingService,
     local_base64_assets: LocalBase64Library,
-    composer: VideoCompositionService,
 }
 
 pub struct ResolvedBundle {
@@ -257,7 +255,6 @@ impl MediaResolver {
         assets: AssetLibrary,
         local_results: LocalResultService,
         staging: StagingService,
-        composer: VideoCompositionService,
         local_base64_assets: LocalBase64Library,
     ) -> Self {
         Self {
@@ -265,7 +262,6 @@ impl MediaResolver {
             assets,
             local_results,
             staging,
-            composer,
             local_base64_assets,
         }
     }
@@ -286,7 +282,7 @@ impl MediaResolver {
             }),
             Err(error) => {
                 // resolve 未返回 bundle 时，任务服务无法取得租约；在这里回收已创建
-                // 的暂存对象，包含当前视频探测失败前刚取得的租约。
+                // 的暂存对象。
                 for lease in &staging_leases {
                     if let Err(cleanup_error) = self.staging.cleanup_lease(lease).await {
                         warn!(
@@ -311,7 +307,7 @@ impl MediaResolver {
         let command: StartGenerationCommand = serde_json::from_value(task.logical_request.clone())?;
         if command.generation_count != 1 {
             return Err(BackendError::validation(
-                "the configured Moyu MVP operations do not expose a generation count parameter",
+                "each local generation task represents one request; batch requests require separate tasks",
                 json!({ "generationCount": command.generation_count, "supported": 1 }),
             ));
         }
@@ -340,10 +336,6 @@ impl MediaResolver {
             .get("requestProfileId")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        let rd_video = task
-            .remote_model_id_snapshot
-            .as_deref()
-            .is_some_and(is_rd_video_model);
         // 按次系列与 RD 网关把本地素材上传到供应商的 /v1/assets/uploads，
         // 因此解析阶段必须拿到本地字节；纯 URL 素材不受影响。
         let needs_local_bytes = matches!(request_profile, "sp25_per_use_video_v1" | "rd_video_v1")
@@ -352,15 +344,8 @@ impl MediaResolver {
                 task.remote_model_id_snapshot.as_deref(),
                 &operation_schema,
             );
-        let task_type = seedance_video_task_type(command.video_task_type, &command.parameters);
-        let probe_task_videos = task.operation == GenerationOperation::VideoGeneration
-            && task
-                .remote_model_id_snapshot
-                .as_deref()
-                .is_some_and(is_seedance_25_video_model)
-            && matches!(task_type, VideoTaskType::Edit | VideoTaskType::Extend);
         for input in inputs {
-            let (mut resolved, lease) = self
+            let (resolved, lease) = self
                 .resolve_target(
                     task,
                     attempt_id,
@@ -399,38 +384,6 @@ impl MediaResolver {
             if let Some(lease) = lease {
                 staging_leases.push(lease);
             }
-            if rd_video && matches!(resolved.media_type, MediaType::Video | MediaType::Audio) {
-                // RD 网关要求参考视频/音频每段 2–15 秒且合计 15 秒；
-                // 时长由真实媒体探测确认，探测失败给出可操作的错误。
-                let kind = if resolved.media_type == MediaType::Video {
-                    "参考视频"
-                } else {
-                    "参考音频"
-                };
-                let duration = self
-                    .probe_input_video_duration(task, attempt_id, input.target, &resolved)
-                    .await
-                    .map_err(|error| {
-                        BackendError::validation(
-                            format!("无法确认{kind}「{}」的实际时长，当前任务要求 2–15 秒，请检查素材是否可读取", input.display_name),
-                            redact_request_value(&json!({ "media": resolved.archive(), "sourceError": error.runtime_record() })),
-                        )
-                    })?;
-                resolved.duration_seconds = Some(duration);
-            } else if probe_task_videos && resolved.media_type == MediaType::Video {
-                let minimum_seconds = if task_type == VideoTaskType::Edit {
-                    4
-                } else {
-                    2
-                };
-                let duration = self.probe_input_video_duration(task, attempt_id, input.target, &resolved).await.map_err(|error| {
-                    BackendError::validation(
-                        format!("无法确认参考视频「{}」的实际时长，当前任务要求 {minimum_seconds}–30 秒，请检查素材是否可读取", input.display_name),
-                        redact_request_value(&json!({ "media": resolved.archive(), "sourceError": error.runtime_record() })),
-                    )
-                })?;
-                resolved.duration_seconds = Some(duration);
-            }
             info!(
                 "[resolve] 媒体输入解析成功: taskId={}, {}{}, 名称={}, 角色={}, 大小 {} 字节, mime={}",
                 task.id,
@@ -444,14 +397,7 @@ impl MediaResolver {
             push_media(resolved, &mut images, &mut videos, &mut audios);
         }
 
-        validate_compiled_operation(
-            task.operation,
-            &rendered_prompt,
-            &images,
-            &videos,
-            &audios,
-            &operation_schema,
-        )?;
+        validate_media_encoding(task.operation, &images, &videos, &audios)?;
 
         // 每类数组直接遵循已经校验的同类编号；供应商不能再决定另一套顺序。
         images.sort_by_key(|media| media.type_position);
@@ -468,83 +414,6 @@ impl MediaResolver {
             video_task_type: command.video_task_type,
             operation_schema,
         })
-    }
-
-    async fn probe_input_video_duration(
-        &self,
-        task: &TaskExecutionRecord,
-        attempt_id: &str,
-        target: &MediaReferenceTarget,
-        media: &ResolvedMedia,
-    ) -> BackendResult<f64> {
-        match target {
-            MediaReferenceTarget::LocalFile { path, .. } => {
-                self.composer.probe_video_duration(path).await
-            }
-            MediaReferenceTarget::LocalResult {
-                generation_task_id,
-                result_index,
-                ..
-            } => {
-                let record = self
-                    .local_results
-                    .verify_local_result(generation_task_id, *result_index)
-                    .await?;
-                let path = record.final_path.ok_or_else(|| {
-                    BackendError::validation("本地视频结果没有可读取的文件", media.archive())
-                })?;
-                self.composer.probe_video_duration(&path).await
-            }
-            MediaReferenceTarget::Asset {
-                provider_connection_id,
-                asset_id,
-                ..
-            } => {
-                // Asset:// 是模型引用身份，不能交给 ffprobe。使用同一素材服务解析
-                // 可下载的真实字节，避免相信名称、封面或前端 duration 元数据。
-                // RD 网关对参考音频也做时长探测，因此按被探测素材的实际类型解析。
-                let asset = self
-                    .assets
-                    .resolve(ResolveAsset {
-                        identity: super::types::CloudAssetIdentity {
-                            provider_connection_id: provider_connection_id.clone(),
-                            asset_id: asset_id.clone(),
-                        },
-                        expected_media_type: media.media_type,
-                        delivery: AssetDelivery::Bytes,
-                        trace: AssetReadTrace { task, attempt_id },
-                    })
-                    .await?;
-                let ResolvedAssetAccess::Bytes(bytes) = asset.access else {
-                    return Err(BackendError::protocol(
-                        "媒体时长校验未取得可读取的素材字节",
-                        media.archive(),
-                    ));
-                };
-                self.composer.probe_video_bytes_duration(&bytes).await
-            }
-            MediaReferenceTarget::LocalBase64Asset { asset_id, .. } => {
-                if let Some(bytes) = media.bytes.as_deref() {
-                    self.composer.probe_video_bytes_duration(bytes).await
-                } else {
-                    let path = self
-                        .local_base64_assets
-                        .decoded_path(asset_id, MediaType::Video)?;
-                    let probe = self
-                        .composer
-                        .probe_video_duration(path.to_string_lossy().as_ref())
-                        .await;
-                    let _ = std::fs::remove_file(path);
-                    probe
-                }
-            }
-            MediaReferenceTarget::LocalAsset { .. } | MediaReferenceTarget::Url { .. } => {
-                let source = media.remote_reference.as_deref().ok_or_else(|| {
-                    BackendError::validation("视频没有可读取的来源", media.archive())
-                })?;
-                self.composer.probe_video_duration(source).await
-            }
-        }
     }
 
     async fn resolve_target(
@@ -1131,27 +1000,14 @@ fn image_edit_needs_local_bytes(
         != Some("seedream_image_urls")
 }
 
-fn validate_compiled_operation(
+/// 只拦截当前编码器无法保留的媒体类型，避免付费请求静默漏掉用户素材。
+/// 提示词是否可空、是否必须有参考图以及模型能力交给远端服务判定。
+fn validate_media_encoding(
     operation: GenerationOperation,
-    prompt: &str,
     images: &[ResolvedMedia],
     videos: &[ResolvedMedia],
     audios: &[ResolvedMedia],
-    operation_schema: &Value,
 ) -> BackendResult<()> {
-    let has_media = !images.is_empty() || !videos.is_empty() || !audios.is_empty();
-    let accepts_media_only_prompt = operation == GenerationOperation::VideoGeneration
-        && has_media
-        && operation_schema
-            .pointer("/request/promptMode")
-            .and_then(Value::as_str)
-            == Some("prompt_or_media");
-    if prompt.trim().is_empty() && !accepts_media_only_prompt {
-        return Err(BackendError::validation(
-            "compiled prompt must not be empty",
-            json!({ "operation": operation }),
-        ));
-    }
     match operation {
         GenerationOperation::TextToImage
             if !images.is_empty() || !videos.is_empty() || !audios.is_empty() =>
@@ -1165,10 +1021,6 @@ fn validate_compiled_operation(
                 }),
             ))
         }
-        GenerationOperation::ImageToImage if images.is_empty() => Err(BackendError::validation(
-            "image-to-image requires at least one image",
-            json!({ "operation": operation }),
-        )),
         GenerationOperation::ImageToImage if !videos.is_empty() || !audios.is_empty() => {
             Err(BackendError::validation(
                 "image-to-image cannot encode video or audio references",

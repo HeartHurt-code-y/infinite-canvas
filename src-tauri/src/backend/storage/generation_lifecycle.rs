@@ -6,7 +6,10 @@ use serde_json::{Value, json};
 use super::{Storage, now_ms};
 use crate::backend::{
     error::{BackendError, BackendResult},
-    model_schema::{is_rd_video_model, is_sp25_per_use_video_model},
+    model_schema::{
+        RequestDialect, is_rd_video_model, is_seedance_draft_video_model,
+        is_sp25_per_use_video_model,
+    },
     types::{
         GenerationOperation, GenerationResultRecord, GenerationTaskStatus, MediaType, QueryHealth,
         SaveStatus, TokenUsage,
@@ -1109,15 +1112,17 @@ fn is_sp25_video_result_task(
     if result.media_type != MediaType::Video || result.remote_task_id.is_none() {
         return Ok(false);
     }
-    let (model_id, task_remote_id): (Option<String>, Option<String>) = transaction.query_row(
-        "SELECT remote_model_id_snapshot, remote_task_id FROM generation_tasks WHERE id = ?1",
+    let (model_id, task_remote_id, adapter_id): (Option<String>, Option<String>, String) = transaction.query_row(
+        "SELECT remote_model_id_snapshot, remote_task_id, adapter_id_snapshot FROM generation_tasks WHERE id = ?1",
         params![task_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
-    Ok(model_id
-        .as_deref()
-        .is_some_and(|model| is_sp25_per_use_video_model(model) || is_rd_video_model(model))
-        && task_remote_id == result.remote_task_id)
+    Ok(model_id.as_deref().is_some_and(|model| {
+        is_sp25_per_use_video_model(model)
+            || is_rd_video_model(model)
+            || (is_seedance_draft_video_model(model)
+                && RequestDialect::for_adapter(&adapter_id) == RequestDialect::OpenAiCompatible)
+    }) && task_remote_id == result.remote_task_id)
 }
 
 fn upsert_result(
@@ -1855,6 +1860,7 @@ mod tests {
             .expect("begin observation");
         record_successful_call(lifecycle, task_id, "observe-1", "observe-call-1", "observe");
         let result = GenerationResultRecord {
+            display_name: None,
             task_id: task_id.into(),
             result_index: 1,
             media_type: MediaType::Video,
@@ -2079,6 +2085,7 @@ mod tests {
             "submit",
         );
         let result = GenerationResultRecord {
+            display_name: None,
             task_id: "task-image".into(),
             result_index: 1,
             media_type: MediaType::Image,
@@ -2118,6 +2125,7 @@ mod tests {
             task_lifecycle("task-no-evidence", GenerationOperation::TextToImage);
         begin_submission(&lifecycle, "task-no-evidence");
         let result = GenerationResultRecord {
+            display_name: None,
             task_id: "task-no-evidence".into(),
             result_index: 1,
             media_type: MediaType::Image,
@@ -2172,6 +2180,7 @@ mod tests {
             "submit",
         );
         let mut result = GenerationResultRecord {
+            display_name: None,
             task_id: "task-result".into(),
             result_index: 1,
             media_type: MediaType::Image,

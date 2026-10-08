@@ -13,6 +13,7 @@ import {
   formatBytes,
   formatRawBackendError,
   generationClient,
+  promoteSeedanceDraft,
   isDesktopRuntime,
   toMediaSrc,
   type GenerationResultRecord,
@@ -24,7 +25,10 @@ import {
   type StartGenerationCommand,
 } from "../../lib/backend";
 import { textResultFromSource } from "../workspace/workspaceModel";
+import { resultDisplayName } from "../workspace/artifactNames";
+import { subscribeArtifactNameChanges } from "../workspace/artifactNameSync";
 import { VideoMiddleFrame } from "../workspace/VideoMiddleFrame";
+import { useLocalVideoPoster } from "../workspace/localVideoPoster";
 import type { WorkflowHistoryClient, WorkflowHistoryRecord } from "../../lib/workflowHistory";
 import { WorkflowHistoryPanel } from "./WorkflowHistoryPanel";
 import { RemoteVideoHistoryPanel } from "./RemoteVideoHistoryPanel";
@@ -32,6 +36,11 @@ import { HistoryDateRangeFilter } from "./HistoryDateRangeFilter";
 import type { HistoryDateRange } from "./historyDateRange";
 import { RegenerateGenerationDialog } from "./RegenerateGenerationDialog";
 import { frozenStartCommand, isRegenerableOperation } from "./regenerateGeneration";
+import {
+  canPromoteSeedanceDraft,
+  isSeedanceDraftTask,
+  seedanceDraftSourceTaskId,
+} from "../../lib/seedanceDraft";
 
 async function revealDesktopItem(path: string): Promise<void> {
   const { revealItemInDir } = await import("@tauri-apps/plugin-opener");
@@ -473,15 +482,26 @@ type HistoryTab = "generation" | "workflow" | "remoteVideo";
 /** 历史记录生成结果缩略图：宽度 100%，高度按媒体原始比例自适应，object-fit: contain 保证不裁剪。 */
 function HistoryResultVisual({
   src,
+  finalPath,
   mediaType,
   alt,
 }: {
   readonly src: string;
+  readonly finalPath: string;
   readonly mediaType: "image" | "video";
   readonly alt: string;
 }) {
   const [aspectRatio, setAspectRatio] = useState<number | null>(null);
   const [failed, setFailed] = useState(false);
+  const poster = useLocalVideoPoster(mediaType === "video" ? finalPath : null);
+  const [failedPosterSrc, setFailedPosterSrc] = useState<string | null>(null);
+  const posterSrc = poster.src !== failedPosterSrc ? poster.src : null;
+  const nativePosterPending =
+    mediaType === "video" &&
+    isDesktopRuntime() &&
+    posterSrc == null &&
+    !poster.unavailable &&
+    poster.src == null;
   const containerStyle: CSSProperties =
     aspectRatio != null ? { aspectRatio: `${aspectRatio}` } : {};
   const placeholder = (
@@ -499,12 +519,27 @@ function HistoryResultVisual({
     >
       {failed ? (
         <span className="history-result__missing">{placeholder}</span>
+      ) : mediaType === "video" && posterSrc != null ? (
+        <img
+          src={posterSrc}
+          alt={alt}
+          draggable={false}
+          onLoad={() => {
+            if (poster.width != null && poster.height != null) {
+              setAspectRatio(poster.width / poster.height);
+            }
+          }}
+          onError={() => setFailedPosterSrc(posterSrc)}
+        />
+      ) : nativePosterPending ? (
+        placeholder
       ) : mediaType === "video" ? (
         // 弹层不在画布视口里：必须 eager，否则封面会按画布几何被判不可见，src 永不挂上。
         // 中间帧定位前先露出类型图标，避免 WebView seek 挂起时只剩一块灰底。
         <VideoMiddleFrame
           src={src}
           eager
+          firstFrame
           placeholder={placeholder}
           onAspectRatioChange={setAspectRatio}
           onLoadError={() => setFailed(true)}
@@ -562,10 +597,12 @@ export function HistoryDialog({
   canvasId,
   initialTab = "generation",
   initialWorkflowId,
+  initialTaskId,
   onResumeWorkflow,
   onRestartWorkflow,
   onLocateWorkflow,
   onRegenerateGeneration,
+  onPromoteSeedanceDraft,
   activeWorkflowIds,
 }: {
   readonly open: boolean;
@@ -575,6 +612,7 @@ export function HistoryDialog({
   readonly canvasId?: string;
   readonly initialTab?: HistoryTab;
   readonly initialWorkflowId?: string | null;
+  readonly initialTaskId?: string | null;
   readonly onResumeWorkflow?: (
     record: WorkflowHistoryRecord,
     decisionResolution?: string,
@@ -583,13 +621,16 @@ export function HistoryDialog({
   readonly onLocateWorkflow?: (record: WorkflowHistoryRecord) => void;
   /** 从历史重新生成时由宿主创建全新任务（并负责画布占位卡片）；缺省时直接调用 client.start。 */
   readonly onRegenerateGeneration?: (command: StartGenerationCommand) => Promise<string>;
+  readonly onPromoteSeedanceDraft?: (draft: GenerationTaskDetail) => Promise<string>;
   readonly activeWorkflowIds?: readonly string[];
 }) {
   const dialogRef = useRef<HTMLElement | null>(null);
   const [activeTab, setActiveTab] = useState<HistoryTab>(initialTab ?? "generation");
   const [workflowVisited, setWorkflowVisited] = useState(initialTab === "workflow");
   const [remoteVideoVisited, setRemoteVideoVisited] = useState(initialTab === "remoteVideo");
-  const linkedTaskIdRef = useRef<string | null>(null);
+  const linkedTaskIdRef = useRef<string | null>(initialTaskId ?? null);
+  const [searchDraft, setSearchDraft] = useState("");
+  const [search, setSearch] = useState("");
   const [statusFilter, setStatusFilter] = useState<HistoryStatusFilter>("all");
   const [scope, setScope] = useState<HistoryScope>("canvas");
   // 跨画布浏览时的归属标注：画布 id → 标题，切到「全部画布」时取一次本地画布清单。
@@ -603,7 +644,15 @@ export function HistoryDialog({
   const [listError, setListError] = useState<string | null>(null);
   // 重新生成成功后递增，强制列表回到第一页并选中新任务。
   const [listRevision, setListRevision] = useState(0);
-  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(null);
+  const [detailRevision, setDetailRevision] = useState(0);
+  useEffect(() => {
+    if (!open) return;
+    return subscribeArtifactNameChanges(() => {
+      setListRevision((value) => value + 1);
+      setDetailRevision((value) => value + 1);
+    });
+  }, [open]);
+  const [selectedTaskId, setSelectedTaskId] = useState<string | null>(initialTaskId ?? null);
   const [detail, setDetail] = useState<GenerationTaskDetail | null>(null);
   const [detailError, setDetailError] = useState<string | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
@@ -613,6 +662,9 @@ export function HistoryDialog({
   const [regenerateBusy, setRegenerateBusy] = useState(false);
   const [regenerateError, setRegenerateError] = useState<string | null>(null);
   const [regenerateMessage, setRegenerateMessage] = useState<string | null>(null);
+  const [draftPromotionBusy, setDraftPromotionBusy] = useState(false);
+  const [draftPromotionError, setDraftPromotionError] = useState<string | null>(null);
+  const draftPromotionBusyRef = useRef(false);
   const listRequestRef = useRef(0);
   const detailRequestRef = useRef(0);
   const regenerateBusyRef = useRef(false);
@@ -628,6 +680,7 @@ export function HistoryDialog({
         ...generationScopeQuery(scope, canvasId),
         statuses: statusFilterToStatuses(statusFilter),
         limit: HISTORY_PAGE_SIZE,
+        ...(search ? { search } : {}),
       })
       .then((page) => {
         if (cancelled || requestId !== listRequestRef.current) return;
@@ -652,7 +705,7 @@ export function HistoryDialog({
       // 本实例的作废已由 cancelled 覆盖；listRequestRef 由 resetList 与下次请求递增，
       // 避免在 effect 清理阶段读写 ref（react-hooks/exhaustive-deps）。
     };
-  }, [open, activeTab, statusFilter, scope, dateRange, canvasId, client, listRevision]);
+  }, [open, activeTab, statusFilter, scope, dateRange, canvasId, client, listRevision, search]);
 
   const resetList = () => {
     ++listRequestRef.current;
@@ -721,6 +774,7 @@ export function HistoryDialog({
         ...generationScopeQuery(scope, canvasId),
         statuses: statusFilterToStatuses(statusFilter),
         cursorCreatedBefore: cursor,
+        ...(search ? { search } : {}),
         limit: HISTORY_PAGE_SIZE,
       });
       if (requestId !== listRequestRef.current) return;
@@ -732,7 +786,7 @@ export function HistoryDialog({
     } finally {
       if (requestId === listRequestRef.current) setListLoading(false);
     }
-  }, [client, cursor, listLoading, listLoaded, statusFilter, scope, dateRange, canvasId]);
+  }, [client, cursor, listLoading, listLoaded, statusFilter, scope, dateRange, canvasId, search]);
 
   // 选中任务后加载完整详情（含尝试、供应商调用、结果与最终错误）。
   // 请求期间保留旧详情（标准主从布局），响应到达后整体替换。
@@ -755,7 +809,7 @@ export function HistoryDialog({
     return () => {
       cancelled = true;
     };
-  }, [open, activeTab, client, selectedTaskId]);
+  }, [open, activeTab, client, selectedTaskId, detailRevision]);
 
   const selectHistoryTab = (tab: HistoryTab) => {
     setActiveTab(tab);
@@ -815,9 +869,33 @@ export function HistoryDialog({
     setRegenerateEditorTask(task);
   };
 
+  const submitDraftPromotion = async (draft: GenerationTaskDetail) => {
+    if (draftPromotionBusyRef.current || !canPromoteSeedanceDraft(draft)) return;
+    draftPromotionBusyRef.current = true;
+    setDraftPromotionBusy(true);
+    setDraftPromotionError(null);
+    try {
+      const taskId = onPromoteSeedanceDraft
+        ? await onPromoteSeedanceDraft(draft)
+        : await promoteSeedanceDraft(draft.summary.id);
+      linkedTaskIdRef.current = taskId;
+      setDetail(null);
+      setSelectedTaskId(taskId);
+      setListRevision((value) => value + 1);
+    } catch (error: unknown) {
+      setDraftPromotionError(formatRawBackendError(error));
+    } finally {
+      draftPromotionBusyRef.current = false;
+      setDraftPromotionBusy(false);
+    }
+  };
+
   const summary = detail?.summary ?? null;
+  const sourceDraftTaskId = detail ? seedanceDraftSourceTaskId(detail) : null;
+  const isDraft = detail ? isSeedanceDraftTask(detail) : false;
   const frozenCommand = useMemo(() => (detail ? frozenStartCommand(detail) : null), [detail]);
-  const canRegenerate = detail != null && isRegenerableOperation(summary?.operation ?? "");
+  const canRegenerate =
+    detail != null && sourceDraftTaskId == null && isRegenerableOperation(summary?.operation ?? "");
   const promptSegments = useMemo(() => (detail ? promptSegmentsFromDetail(detail) : []), [detail]);
   const resultErrorsExist = detail?.results.some((result) => result.error != null) === true;
   const attempts = useMemo(
@@ -972,6 +1050,23 @@ export function HistoryDialog({
         >
           <aside className="history-list" aria-label="任务列表">
             <div className="history-list__toolbar">
+              <form
+                className="history-name-search"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  resetList();
+                  setSearch(searchDraft.trim());
+                  setListRevision((current) => current + 1);
+                }}
+              >
+                <input
+                  aria-label="搜索任务名称、文件名或任务 ID"
+                  placeholder="任务名称 / 文件名 / 任务 ID"
+                  value={searchDraft}
+                  onChange={(event) => setSearchDraft(event.target.value)}
+                />
+                <button type="submit">搜索</button>
+              </form>
               <div className="history-filters" role="tablist" aria-label="状态筛选">
                 {HISTORY_FILTERS.map((filter) => (
                   <button
@@ -1045,7 +1140,7 @@ export function HistoryDialog({
                           ) : null}
                         </span>
                         <span className="history-item__title">
-                          {operationTitle} · {modelTitle}
+                          {task.outputName ?? `${operationTitle} · ${modelTitle}`}
                         </span>
                         <span className="history-item__meta">
                           {canvasName != null ? (
@@ -1093,6 +1188,12 @@ export function HistoryDialog({
                 <section className="history-section">
                   <h3>任务概要</h3>
                   <dl className="history-facts">
+                    {summary.outputName ? (
+                      <div>
+                        <dt>生成时名称</dt>
+                        <dd>{summary.outputName}</dd>
+                      </div>
+                    ) : null}
                     <div>
                       <dt>任务 ID</dt>
                       <dd className="history-mono">{summary.id}</dd>
@@ -1140,6 +1241,49 @@ export function HistoryDialog({
                     </div>
                   </dl>
                 </section>
+
+                {isDraft ? (
+                  <section className="history-section">
+                    <h3>草稿样片 → 1080p 正片</h3>
+                    <p className="history-regenerate__note">
+                      请先预览下方样片，确认构图、动作和时序。审核通过后会发起独立付费任务；
+                      正片固定 1080p，自动复用样片设置，样片记录和视频保留。
+                    </p>
+                    <div className="history-regenerate">
+                      <button
+                        type="button"
+                        className="history-regenerate__primary"
+                        disabled={draftPromotionBusy || !canPromoteSeedanceDraft(detail)}
+                        onClick={() => void submitDraftPromotion(detail)}
+                      >
+                        {draftPromotionBusy ? "提交正片中…" : "样片已审核，生成 1080p 正片"}
+                      </button>
+                    </div>
+                    {summary.status !== "succeeded" ? (
+                      <p className="history-empty-note">样片成功后才能生成正片。</p>
+                    ) : null}
+                    {draftPromotionError ? (
+                      <p role="alert" className="history-regenerate__error">
+                        {draftPromotionError}
+                      </p>
+                    ) : null}
+                  </section>
+                ) : null}
+
+                {sourceDraftTaskId ? (
+                  <section className="history-section">
+                    <h3>1080p 正片</h3>
+                    <p className="history-regenerate__note">
+                      此任务引用已审核草稿生成，构图、时长、画幅与音频设置由平台复用。
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => selectLinkedGenerationTask(sourceDraftTaskId)}
+                    >
+                      查看原草稿样片
+                    </button>
+                  </section>
+                ) : null}
 
                 {canRegenerate ? (
                   <section className="history-section">
@@ -1272,6 +1416,7 @@ export function HistoryDialog({
                                 {isViewable && isDesktopRuntime() ? (
                                   <HistoryResultVisual
                                     src={toMediaSrc(result.finalPath)}
+                                    finalPath={result.finalPath}
                                     mediaType={result.mediaType === "video" ? "video" : "image"}
                                     alt={`结果 ${result.resultIndex + 1}`}
                                   />
@@ -1283,6 +1428,11 @@ export function HistoryDialog({
                                   </span>
                                 )}
                                 <span className="history-result__facts">
+                                  <span>
+                                    {resultDisplayName(result) ??
+                                      result.finalPath?.split(/[\\/]/).pop() ??
+                                      `结果 ${result.resultIndex}`}
+                                  </span>
                                   <span>
                                     结果 {result.resultIndex + 1} ·{" "}
                                     {result.mediaType === "text"
