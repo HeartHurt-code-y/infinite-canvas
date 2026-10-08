@@ -1,0 +1,53 @@
+.product-scene-protection {
+  display: grid;
+  gap: var(--space-sm);
+  min-width: 0;
+  padding: var(--space-sm);
+  border: var(--rule-thin) solid var(--color-rule-2);
+  border-radius: var(--radius-control);
+}
+.product-scene-protection p {
+  margin: 0;
+  line-height: var(--leading-body);
+}
+.product-scene-protection__canvas {
+  position: relative;
+  overflow: hidden;
+  min-width: 0;
+  touch-action: none;
+  cursor: crosshair;
+}
+.product-scene-protection__canvas img {
+  display: block;
+  width: 100%;
+  max-height: none;
+  height: auto;
+  pointer-events: none;
+}
+.product-scene-protection__rect {
+  position: absolute;
+  box-sizing: border-box;
+  border: var(--rule-active) solid var(--color-accent);
+  box-shadow: 0 0 0 100vmax var(--color-scrim);
+  pointer-events: none;
+}
+.product-scene-protection__rect span {
+  display: inline-block;
+  max-width: 100%;
+  padding: var(--space-xs);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  font-size: var(--text-xs);
+}
+.product-scene-protection__fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: var(--space-sm);
+  min-width: 0;
+}
+.product-scene-protection label,
+.product-scene-protection button,
+.product-scene-protection small {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}

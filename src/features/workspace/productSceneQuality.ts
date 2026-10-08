@@ -53,6 +53,7 @@ export function productSceneQualityEnabled(options: ProductSceneWorkflowOptions)
 export function productSceneQualityOptionsValid(options: ProductSceneWorkflowOptions): boolean {
   const quality = options.quality;
   if (!quality) return true;
+  if (options.generationMode === "protected" && productSceneQualityEnabled(options)) return false;
   if (typeof quality.inspectPorts !== "boolean" || typeof quality.portSpecification !== "string")
     return false;
   const logo = quality.logo;
@@ -89,7 +90,6 @@ export function productSceneRowCanAccept(
 }
 
 function computeRowCanAccept(row: ProductSceneRow, options: ProductSceneWorkflowOptions): boolean {
-  if (!productSceneQualityOptionsValid(options)) return false;
   if (
     !row.outputPath ||
     row.status === "running" ||
@@ -97,6 +97,8 @@ function computeRowCanAccept(row: ProductSceneRow, options: ProductSceneWorkflow
     row.status === "error"
   )
     return false;
+  if (options.generationMode === "protected") return true;
+  if (!productSceneQualityOptionsValid(options)) return false;
   if (!productSceneQualityEnabled(options)) return true;
   const quality = row.quality;
   if (quality?.status !== "passed" || quality.outputPath !== row.outputPath || !quality.inspection)

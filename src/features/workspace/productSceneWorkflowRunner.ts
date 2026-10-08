@@ -7,7 +7,12 @@ import {
   type PromptNodeClient,
 } from "../../lib/backend";
 import { coverImageClient } from "../../lib/coverImages";
-import { productSceneImageClient } from "../../lib/productSceneImages";
+import { productSceneImageClient, type ProductSceneComposite } from "../../lib/productSceneImages";
+import {
+  productSceneJewelrySignature,
+  productSceneProtectionWarnings,
+  type ProductSceneProtectionEvidence,
+} from "./productSceneJewelry";
 import { generationParameters, modelParameterCapabilities } from "../../lib/modelCapabilities";
 import { formatWorkflowError } from "../../lib/workflowErrors";
 import type {
@@ -43,7 +48,12 @@ interface Dependencies {
   readonly promptClient: PromptNodeClient;
   readonly imageClient: Pick<
     typeof productSceneImageClient,
-    "compose" | "validateViews" | "normalizeGenerated" | "validateLogo" | "applyLogo"
+    | "compose"
+    | "composeProtected"
+    | "validateViews"
+    | "normalizeGenerated"
+    | "validateLogo"
+    | "applyLogo"
   >;
   readonly resultRecovery: {
     resume(taskId: string, resultIndex: number): Promise<GenerationResultRecord>;
@@ -151,7 +161,20 @@ export function createProductSceneWorkflowRunner(
       const update = (change: Partial<ProductSceneWorkflowCheckpoint>) =>
         commit({ productScene: { ...state(), ...change } });
       const updateRow = (id: string, change: Partial<ProductSceneRow>) =>
-        update({ rows: state().rows.map((row) => (row.id === id ? { ...row, ...change } : row)) });
+        update({
+          rows: state().rows.map((row) => {
+            if (row.id !== id) return row;
+            const replaced =
+              Object.hasOwn(change, "outputPath") && change.outputPath !== row.outputPath;
+            const withoutReview = { ...row };
+            delete withoutReview.jewelryReview;
+            delete withoutReview.protection;
+            return {
+              ...(replaced ? withoutReview : row),
+              ...change,
+            };
+          }),
+        });
       const abort = () => {
         if (signal.aborted) throw new DOMException("已暂停", "AbortError");
       };
@@ -194,7 +217,7 @@ export function createProductSceneWorkflowRunner(
             error: null,
             decision: null,
             productScene: { ...createProductSceneCheckpoint(), inputSignature: signature, rows },
-            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；一次审批全部张数，并发最多 ${options.maxConcurrency ?? 10} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}逐张选用后才能导出。`,
+            script: `${options.productName}：${rows.length} 张场景计划；${options.aspectRatio}；一次审批全部张数，并发最多 ${options.maxConcurrency ?? 10} 张。${mode === "reference" ? "全部产品参考图送入图生图模型，按不同目标机位生成完整产品与场景；新角度须人工核对结构和文字，不承诺100%一致。" : mode === "protected" ? `单件实物 ${options.jewelry!.specimenId}（SKU ${options.jewelry!.skuId}）；冻结系列模板 ${options.jewelry!.seriesStyle.name} v${options.jewelry!.seriesStyle.version}。仅生成空背景，本地保留源片保护区、透明珠相关局部背景及真实佩戴关系；人工核对随成图保留为记录。` : "只生成空背景，本地合成已确认原图，保留原拍摄角度。"}${mode === "protected" ? "已有成图可自行选用或直接导出，未审核与记录变化作为提示。" : "逐张选用后才能导出。"}`,
           });
           progress("本地场景计划已生成，尚未调用图片模型。请一键审批全部张数后开始。");
           return checkpoint;
@@ -209,7 +232,9 @@ export function createProductSceneWorkflowRunner(
           commit({ phase: "awaiting_approval", error: null, decision: null });
           progress(
             state().batchReviewPending
-              ? "已生成图片待审核，可一键选用、逐张处理或重做失败项。"
+              ? mode === "protected"
+                ? "已有成图可按需核对、自行选用或直接导出；失败项可沿用原任务重试。"
+                : "已生成图片待审核，可一键选用、逐张处理或重做失败项。"
               : "请一键审批全部张数后开始生成。",
           );
           return checkpoint;
@@ -241,6 +266,8 @@ export function createProductSceneWorkflowRunner(
           );
         if (qualityEnabled && (!textModel || !isTextGenerationModel(textModel)))
           throw new Error("自动接口检测或 Logo 透视贴回需要选择支持视觉输入的项目文本模型。");
+        if (mode === "protected" && !dependencies.imageClient.composeProtected)
+          throw new Error("当前桌面组件不支持源片保护合成，请更新后重试；已有任务已保留。");
         if (logo)
           await dependencies.imageClient.validateLogo({
             path: logo.path,
@@ -250,11 +277,26 @@ export function createProductSceneWorkflowRunner(
           views: options.views.map((view) => ({
             path: view.preparedPath,
             contentHash: view.contentHash,
+            ...(mode === "protected"
+              ? { region: view.protection!.rect, feather: view.protection!.feather }
+              : {}),
           })),
         });
         abort();
+        const retryRowId = state().retryRowId;
+        if (retryRowId != null) {
+          const retryRow = state().rows.find((row) => row.id === retryRowId);
+          if (
+            mode !== "protected" ||
+            !retryRow?.taskId ||
+            retryRow.index > state().approvedThrough ||
+            retryRow.status === "rejected"
+          )
+            throw new Error("当前图片没有可续查的已提交任务，不能按重试流程重新计费生成。");
+        }
         const pending = state().rows.filter(
           (row) =>
+            (retryRowId == null || row.id === retryRowId) &&
             row.index <= state().approvedThrough &&
             row.status !== "rejected" &&
             (!row.outputPath ||
@@ -439,7 +481,10 @@ export function createProductSceneWorkflowRunner(
           if (!view) throw new Error("计划引用的产品视角已移除，请重新生成计划。");
           if (
             (row().recipe.generationMode ?? "composite") !== mode ||
-            (mode === "reference" && !row().recipe.targetCamera)
+            (mode === "reference" && !row().recipe.targetCamera) ||
+            (mode === "protected" &&
+              row().recipe.jewelrySignature !==
+                productSceneJewelrySignature(options, view, row().recipe.placement))
           )
             throw new Error("计划中的生成模式或目标机位与当前设置不匹配，请重新创建计划。");
           updateRow(plannedRow.id, { status: "running", error: null });
@@ -447,12 +492,20 @@ export function createProductSceneWorkflowRunner(
             `正在处理第 ${plannedRow.index}/${options.totalCount} 张：${plannedRow.recipe.label}。`,
           );
           if (!row().outputPath) {
+            if (retryRowId != null && !row().taskId)
+              throw new Error("原任务身份已丢失，已阻止重试提交新的付费图片。");
             if (!row().taskId) {
               try {
                 await dependencies.imageClient.validateViews({
                   views: options.views.map((reference) => ({
                     path: reference.preparedPath,
                     contentHash: reference.contentHash,
+                    ...(mode === "protected"
+                      ? {
+                          region: reference.protection!.rect,
+                          feather: reference.protection!.feather,
+                        }
+                      : {}),
                   })),
                 });
               } catch (error) {
@@ -503,8 +556,8 @@ export function createProductSceneWorkflowRunner(
               updateRow(plannedRow.id, { taskId });
               await flush();
             }
-            let backgroundReady = false;
-            for (let poll = 0; poll < 1800; poll++) {
+            let backgroundReady = Boolean(row().backgroundPath);
+            for (let poll = 0; !backgroundReady && poll < 1800; poll++) {
               abort();
               const detail = await dependencies.generationClient.getProgress(row().taskId!);
               const saved = detail.results.find(
@@ -561,26 +614,45 @@ export function createProductSceneWorkflowRunner(
                     aspectRatio: options.aspectRatio,
                   })
                 : null;
+            let composed:
+              | (ProductSceneComposite & { readonly protection?: ProductSceneProtectionEvidence })
+              | null = null;
+            if (mode === "protected") {
+              if (!dependencies.imageClient.composeProtected)
+                throw new Error(
+                  "当前桌面组件不支持源片保护合成，请更新后重试；原背景任务已保留。 ",
+                );
+              composed = await dependencies.imageClient.composeProtected({
+                backgroundPath: row().backgroundPath!,
+                productPath: view.preparedPath,
+                productHash: view.contentHash,
+                outputId,
+                aspectRatio: options.aspectRatio,
+                placement: row().recipe.placement,
+                region: view.protection!.rect,
+                feather: view.protection!.feather,
+              });
+            } else if (!generated) {
+              composed = await dependencies.imageClient.compose({
+                backgroundPath: row().backgroundPath!,
+                productPath: view.preparedPath,
+                productHash: view.contentHash,
+                outputId,
+                aspectRatio: options.aspectRatio,
+                placement: row().recipe.placement,
+                depthStrength: options.depthStrength,
+              });
+            }
             const output = generated
               ? { ...generated, backgroundHash: generated.imageHash, foregroundHash: null }
-              : {
-                  ...(await dependencies.imageClient.compose({
-                    backgroundPath: row().backgroundPath!,
-                    productPath: view.preparedPath,
-                    productHash: view.contentHash,
-                    outputId,
-                    aspectRatio: options.aspectRatio,
-                    placement: row().recipe.placement,
-                    depthStrength: options.depthStrength,
-                  })),
-                  padded: false,
-                };
+              : { ...composed!, padded: false };
             const width = options.aspectRatio === "3:4" ? 1536 : 1152;
             if (!output.path || output.width !== width || output.height !== 2048)
               throw new Error("本地处理没有返回约定尺寸，请检查输出；原生成任务已保留。");
             if (mode === "composite" && output.foregroundHash !== view.contentHash)
               throw new Error("产品原图内容签名已改变，已拒绝继续合成。请重新准备并确认原图。");
             const duplicates = state().rows.filter((previous) => {
+              if (mode === "protected") return false;
               if (previous.id === plannedRow.id || !previous.outputPath || !previous.backgroundHash)
                 return false;
               if ((previous.recipe.generationMode ?? "composite") !== mode) return false;
@@ -593,11 +665,16 @@ export function createProductSceneWorkflowRunner(
             const reviewNotes = [
               mode === "reference"
                 ? "AI 多机位待人工核对：目标相机是否真正改变，硬件轮廓、材质与格栅、Logo文字、接口数量与排列、指示灯、透视及场景逻辑。参考约束不是像素锁定，不承诺100%结构一致。"
-                : "待人工核对：产品原图、透视与比例、接触阴影、遮挡、背景逻辑。自动合成不等于实拍验收。",
+                : mode === "protected"
+                  ? `本地原片合成已完成；保护回执记录合成当时的状态，不能证明之后被改动的文件仍已验证。可对照实物 ${options.jewelry!.specimenId} 记录连接、主珠形状、配饰细节、天然纹理、佩戴比例及系列风格，核对结果不影响选用或导出。关键特征：${options.jewelry!.criticalFeatures}`
+                  : "待人工核对：产品原图、透视与比例、接触阴影、遮挡、背景逻辑。自动合成不等于实拍验收。",
               ...(output.padded
                 ? [
                     "模型原生画幅不匹配，已保留完整画面补边，请复核构图；建议选择支持目标比例的模型。",
                   ]
+                : []),
+              ...(mode === "protected"
+                ? productSceneProtectionWarnings(composed?.protection, view, output.foregroundHash)
                 : []),
               ...(duplicates.length
                 ? [
@@ -610,6 +687,9 @@ export function createProductSceneWorkflowRunner(
               outputPath: output.path,
               backgroundHash: output.backgroundHash,
               foregroundHash: output.foregroundHash,
+              ...(mode === "protected" && composed?.protection
+                ? { protection: composed.protection }
+                : {}),
               reviewNotes,
               error: null,
             });
@@ -677,14 +757,18 @@ export function createProductSceneWorkflowRunner(
         const allGenerated = state().rows.every(
           (row) => Boolean(row.outputPath) || row.status === "rejected",
         );
-        update({ batchReviewPending: true });
+        update({ batchReviewPending: true, retryRowId: null });
         commit({ phase: "awaiting_approval", error: null, decision: null });
         progress(
           failedRows.length
-            ? `有 ${failedRows.length} 张失败（第 ${failedRows.sort((a, b) => a - b).join("、")} 张）；其他图片已保留，请查看失败项并重做或拒绝。`
+            ? `有 ${failedRows.length} 张失败（第 ${failedRows.sort((a, b) => a - b).join("、")} 张）；其他图片已保留，${mode === "protected" ? "已有成图可直接导出，失败项可沿用原任务重试。" : "请查看失败项并重做或拒绝。"}`
             : allGenerated
-              ? "计划内图片已生成，仍须逐张人工选用；生成完成不代表验收或全部交付。"
-              : "本轮已生成并暂停，请审核图片或重做失败项。",
+              ? mode === "protected"
+                ? "计划内图片已生成，可直接导出或自行选用；人工核对和文件变化作为提示记录，不代表当前文件已经验收。"
+                : "计划内图片已生成，仍须逐张人工选用；生成完成不代表验收或全部交付。"
+              : mode === "protected"
+                ? "本轮已生成并暂停，已有成图可选用或导出，失败项可沿用原任务重试。"
+                : "本轮已生成并暂停，请审核图片或重做失败项。",
         );
         return checkpoint;
       } catch (error) {

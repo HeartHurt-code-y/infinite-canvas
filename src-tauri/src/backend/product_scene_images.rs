@@ -20,6 +20,8 @@ use super::error::{BackendError, BackendResult};
 #[serde(rename_all = "camelCase")]
 pub struct PrepareProductViewCommand {
     pub source_path: String,
+    #[serde(default)]
+    pub preserve_photo: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -29,6 +31,7 @@ pub struct PreparedProductView {
     pub width: u32,
     pub height: u32,
     pub content_hash: String,
+    pub photo_preserved: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -36,6 +39,10 @@ pub struct PreparedProductView {
 pub struct ProductViewIdentity {
     pub path: String,
     pub content_hash: String,
+    #[serde(default)]
+    pub region: Option<ProductProtectionRegion>,
+    #[serde(default)]
+    pub feather: Option<f64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -43,7 +50,7 @@ pub struct ValidateProductViewsCommand {
     pub views: Vec<ProductViewIdentity>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProductPlacement {
     pub center_x: f64,
@@ -71,6 +78,64 @@ pub struct ProductSceneComposite {
     pub height: u32,
     pub background_hash: String,
     pub foreground_hash: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductProtectionRegion {
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ComposeProtectedProductSceneCommand {
+    pub background_path: String,
+    pub product_path: String,
+    pub product_hash: String,
+    pub output_id: String,
+    pub aspect_ratio: String,
+    pub placement: ProductPlacement,
+    pub region: ProductProtectionRegion,
+    pub feather: f64,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductSceneProtectionReceipt {
+    pub region: ProductProtectionRegion,
+    pub feather: f64,
+    pub source_width: u32,
+    pub source_height: u32,
+    pub core_pixel_count: u64,
+    pub output_hash: String,
+    #[serde(default)]
+    pub warnings: Vec<String>,
+    /// The saved PNG's protected core equals the resized master. This does not
+    /// certify physical dimensions, unseen structure, or refraction in a new scene.
+    pub verified: bool,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProductSceneProtectedComposite {
+    pub path: String,
+    pub width: u32,
+    pub height: u32,
+    pub background_hash: String,
+    pub foreground_hash: String,
+    pub protection: ProductSceneProtectionReceipt,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProtectedSceneReceiptFile {
+    schema_version: String,
+    original_path: String,
+    placement: ProductPlacement,
+    composite: ProductSceneProtectedComposite,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -225,7 +290,15 @@ impl ProductSceneImageService {
         command: PrepareProductViewCommand,
     ) -> BackendResult<PreparedProductView> {
         let source = source_path(&command.source_path)?;
-        let cutout = prepare_cutout(decode(&source)?.into_rgba8())?;
+        let photo = decode(&source)?.into_rgba8();
+        let cutout = if command.preserve_photo {
+            if !photo.pixels().any(|pixel| pixel[3] > 0) {
+                return Err(invalid("原片完全透明，请导入真实商品或佩戴照片。"));
+            }
+            photo
+        } else {
+            prepare_cutout(photo)?
+        };
         let (width, height) = cutout.dimensions();
         let path = self
             .directory("产品母版")?
@@ -236,6 +309,7 @@ impl ProductSceneImageService {
             path: path.to_string_lossy().into_owned(),
             width,
             height,
+            photo_preserved: command.preserve_photo,
         })
     }
 
@@ -262,6 +336,7 @@ impl ProductSceneImageService {
             path: path.to_string_lossy().into_owned(),
             width,
             height,
+            photo_preserved: false,
         })
     }
 
@@ -301,6 +376,8 @@ impl ProductSceneImageService {
         let bytes = self.verified_logo_bytes(&ProductViewIdentity {
             path: command.logo_path,
             content_hash: command.logo_hash.clone(),
+            region: None,
+            feather: None,
         })?;
         let logo = ImageReader::new(Cursor::new(bytes))
             .with_guessed_format()?
@@ -337,14 +414,66 @@ impl ProductSceneImageService {
         Ok(path)
     }
 
-    pub fn validate_views(&self, command: ValidateProductViewsCommand) -> BackendResult<()> {
+    fn current_protected_photo(
+        &self,
+        path: &str,
+        expected_hash: &str,
+    ) -> BackendResult<(PathBuf, Vec<u8>, String, Vec<String>)> {
+        let path = source_path(path)?;
+        if !path.starts_with(self.directory("产品母版")?) {
+            return Err(invalid("请先导入产品原片，再进行本地保护合成。"));
+        }
+        let bytes = fs::read(&path)?;
+        let current_hash = hex::encode(Sha256::digest(&bytes));
+        let warnings = if current_hash != expected_hash {
+            vec!["产品母版内容已变化，已使用当前文件；原确认与旧审核记录仅作历史参考。".into()]
+        } else {
+            Vec::new()
+        };
+        Ok((path, bytes, current_hash, warnings))
+    }
+
+    pub fn validate_views(&self, command: ValidateProductViewsCommand) -> BackendResult<bool> {
         if command.views.is_empty() {
             return Err(invalid("请先导入并确认产品视图。"));
         }
+        let mut protected_validated = false;
         for view in command.views {
-            self.validate_view(&view.path, &view.content_hash)?;
+            if let Some(region) = &view.region {
+                let feather = view.feather.unwrap_or(0.0);
+                if !feather.is_finite() || !(0.0..=0.1).contains(&feather) {
+                    return Err(invalid("保护范围外的羽化必须在 0～0.1 之间。"));
+                }
+                let (_, bytes, _, warnings) =
+                    self.current_protected_photo(&view.path, &view.content_hash)?;
+                for warning in warnings {
+                    tauri_plugin_log::log::warn!("[原片保护检查] {warning}");
+                }
+                let photo = ImageReader::new(Cursor::new(bytes))
+                    .with_guessed_format()?
+                    .decode()
+                    .map_err(image_error)?
+                    .into_rgba8();
+                require_opaque_core(
+                    &photo,
+                    protection_rect(region, photo.width(), photo.height())?,
+                )?;
+                // Lanczos support reaches beyond the selected region. Without
+                // placement at preflight, require a fully opaque photographed
+                // master so no future downscale can introduce transparent core pixels.
+                if photo.pixels().any(|pixel| pixel[3] != 255) {
+                    return Err(invalid(
+                        "原片保护需要不透明实拍母版，请导入 JPG 或不透明 PNG，避免透明边缘影响缩放后的核心。",
+                    ));
+                }
+                protected_validated = true;
+            } else if view.feather.is_some() {
+                return Err(invalid("请同时确认原片保护范围，不能单独设置羽化。"));
+            } else {
+                self.validate_view(&view.path, &view.content_hash)?;
+            }
         }
-        Ok(())
+        Ok(protected_validated)
     }
 
     pub fn compose(
@@ -386,6 +515,231 @@ impl ProductSceneImageService {
         })
     }
 
+    /// Preserve a photographed product (and, if selected, its wrist/occlusion)
+    /// using one uniform placement. The model only supplies the outer scene.
+    pub fn compose_protected(
+        &self,
+        command: ComposeProtectedProductSceneCommand,
+    ) -> BackendResult<ProductSceneProtectedComposite> {
+        let width = output_width(&command.output_id, &command.aspect_ratio)?;
+        let (product, product_bytes, product_hash, warnings) =
+            self.current_protected_photo(&command.product_path, &command.product_hash)?;
+        // Decode the same current byte snapshot used for the returned identity.
+        let foreground = ImageReader::new(Cursor::new(product_bytes))
+            .with_guessed_format()?
+            .decode()
+            .map_err(image_error)?
+            .into_rgba8();
+        let background = decode(&source_path(&command.background_path)?)?;
+        let background_hash = difference_hash(&background);
+        let composition = composite_protected_image(
+            background,
+            &foreground,
+            width,
+            2048,
+            &command.placement,
+            &command.region,
+            command.feather,
+        )?;
+        let path = self.directory("成图")?.join(format!(
+            "{}-protected-{}.png",
+            command.output_id,
+            Uuid::new_v4()
+        ));
+        write_png(&path, composition.image)?;
+        // Check the persisted lossless pixels, not just the in-memory overlay.
+        let saved = decode(&path)?.into_rgba8();
+        let (saved_width, saved_height) = saved.dimensions();
+        let verified = (saved_width, saved_height) == (width, 2048)
+            && core_hash(&saved, composition.output_core) == composition.expected_core_hash;
+        let mut protection = composition.receipt;
+        protection.verified = verified;
+        protection.output_hash = hash_file(&path)?;
+        protection.warnings = warnings;
+        if !verified {
+            protection.warnings.push(
+                "保存成图的保护核心与缩放原片存在差异；已保留当前可读取成图，核验记录未通过。"
+                    .into(),
+            );
+        }
+        let result = ProductSceneProtectedComposite {
+            path: path.to_string_lossy().into_owned(),
+            width: saved_width,
+            height: saved_height,
+            background_hash,
+            foreground_hash: product_hash,
+            protection,
+        };
+        let receipt_path = path.with_extension("protection.json");
+        let receipt = serde_json::to_vec_pretty(&ProtectedSceneReceiptFile {
+            schema_version: "product-scene-protection.v1".into(),
+            original_path: product.to_string_lossy().into_owned(),
+            placement: command.placement,
+            composite: result.clone(),
+        })?;
+        let mut receipt_file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(receipt_path)?;
+        receipt_file.write_all(&receipt)?;
+        receipt_file.sync_all()?;
+        Ok(result)
+    }
+
+    fn export_has_protection(path: &Path, manifest: &Value) -> bool {
+        manifest.get("generationMode").and_then(Value::as_str) == Some("protected")
+            || path.with_extension("protection.json").exists()
+            || path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.contains("-protected-"))
+    }
+
+    /// Delivery preserves readable current files. Approval and composition
+    /// evidence are advisory historical records, never export prerequisites.
+    fn protection_diagnostics_for_export(
+        &self,
+        path: &Path,
+        manifest: &Value,
+        current_output_hash: &str,
+    ) -> Option<Value> {
+        if !Self::export_has_protection(path, manifest) {
+            return None;
+        }
+        let mut warnings: Vec<String> = Vec::new();
+        let historical = match fs::read(path.with_extension("protection.json")) {
+            Ok(bytes) => match serde_json::from_slice::<Value>(&bytes) {
+                Ok(value) => Some(value),
+                Err(_) => {
+                    warnings.push(
+                        "原片保护回执损坏；导出当前可读取图片，旧回执无法作为当前核验证据。".into(),
+                    );
+                    None
+                }
+            },
+            Err(_) => {
+                warnings.push("原片保护回执缺失或无法读取；导出当前图片并记录实际摘要。".into());
+                None
+            }
+        };
+        let mut current_match = false;
+        if let Some(history) = &historical {
+            match serde_json::from_value::<ProtectedSceneReceiptFile>(history.clone()) {
+                Ok(receipt) => {
+                    let native = &receipt.composite;
+                    current_match = receipt.schema_version == "product-scene-protection.v1"
+                        && native.protection.verified
+                        && native.protection.core_pixel_count > 0
+                        && native.protection.output_hash == current_output_hash;
+                    warnings.extend(native.protection.warnings.clone());
+                    if native.protection.output_hash != current_output_hash {
+                        warnings.push(
+                            "成图内容已变化；保护回执对应历史成图，当前导出使用实际图片摘要。"
+                                .into(),
+                        );
+                    }
+                    if source_path(&native.path).ok().as_deref() != Some(path) {
+                        warnings.push("保护回执引用旧成图路径，仅保留历史证据。".into());
+                        current_match = false;
+                    }
+                    match source_path(&receipt.original_path).and_then(|source| hash_file(&source))
+                    {
+                        Ok(hash) if hash == native.foreground_hash => {}
+                        Ok(_) => {
+                            warnings.push(
+                                "源片内容已变化；已有成图仍可导出，回执中的源片摘要属于历史记录。"
+                                    .into(),
+                            );
+                            current_match = false;
+                        }
+                        Err(_) => {
+                            warnings.push(
+                                "历史源片缺失或无法读取；已有成图仍可导出，无法复核当前源片。"
+                                    .into(),
+                            );
+                            current_match = false;
+                        }
+                    }
+                    if !current_match && warnings.is_empty() {
+                        warnings
+                            .push("保护回执未形成有效的当前内容对应记录，仅保留历史证据。".into());
+                    }
+                }
+                Err(_) => warnings.push("保护回执格式属于旧版本或不完整，仅保留历史资料。".into()),
+            }
+        }
+        let row = manifest
+            .get("rows")
+            .and_then(Value::as_array)
+            .and_then(|rows| {
+                rows.iter().find(|row| {
+                    row.get("outputPath")
+                        .and_then(Value::as_str)
+                        .and_then(|value| source_path(value).ok())
+                        .as_deref()
+                        == Some(path)
+                })
+            });
+        if let Some(row) = row {
+            if row.get("status").and_then(Value::as_str) != Some("accepted") {
+                warnings.push("此图尚未标记选用，按用户选择导出。".into());
+            }
+            let review = row.get("jewelryReview");
+            let review_path = review
+                .and_then(|r| r.get("outputPath"))
+                .and_then(Value::as_str)
+                .and_then(|value| source_path(value).ok());
+            if review_path.as_deref() != Some(path) {
+                warnings.push("人工审核缺失或引用旧成图，审核记录仅作历史参考。".into());
+            }
+            if [
+                "connections",
+                "shape",
+                "details",
+                "texture",
+                "scale",
+                "style",
+            ]
+            .iter()
+            .any(|key| {
+                review
+                    .and_then(|r| r.get("checks"))
+                    .and_then(|checks| checks.get(key))
+                    .and_then(Value::as_str)
+                    != Some("pass")
+            }) {
+                warnings.push("六项人工核对尚未全部通过，按用户选择导出并保留原记录。".into());
+            }
+            if row
+                .get("protection")
+                .and_then(|proof| proof.get("outputHash"))
+                .and_then(Value::as_str)
+                != Some(current_output_hash)
+            {
+                warnings
+                    .push("工作流中的成图摘要缺失或已旧，导出记录采用当前文件实际摘要。".into());
+            }
+            if let Some(record) = &historical {
+                let old_proof = &record["composite"]["protection"];
+                let row_proof = &row["protection"];
+                if row_proof["region"] != old_proof["region"]
+                    || row_proof["feather"] != old_proof["feather"]
+                {
+                    warnings.push("工作流保护范围与历史回执不同，两份记录保留供人工查看。".into());
+                }
+            }
+        } else {
+            warnings.push("工作流未提供此图对应的审核记录，按用户选择导出。".into());
+        }
+        Some(json!({
+            "historicalEvidence": historical,
+            "verificationState": if current_match { "current" } else if historical.is_some() { "historical" } else { "unavailable" },
+            "verificationScope": "composition record and current file hashes only; human review remains advisory",
+            "currentOutputHash": current_output_hash,
+            "warnings": warnings,
+        }))
+    }
+
     /// Keep the new perspective produced by the model. Never paste an old product
     /// view over it, and never crop ports/edges to force a different aspect ratio.
     pub fn normalize_generated(
@@ -414,7 +768,7 @@ impl ProductSceneImageService {
 
     pub fn export(&self, command: ExportProductScenesCommand) -> BackendResult<ProductSceneExport> {
         if command.paths.is_empty() || command.paths.len() > 500 {
-            return Err(invalid("请选择 1～500 张已审核的产品场景图。"));
+            return Err(invalid("请选择 1～500 张产品场景成图。"));
         }
         let parent = Path::new(&command.directory);
         if !parent.is_absolute() || !parent.is_dir() {
@@ -436,6 +790,13 @@ impl ProductSceneImageService {
             })
             .collect::<BackendResult<Vec<_>>>()?;
         let manifest: Value = serde_json::from_str(&command.manifest)?;
+        // A readable image is required for protected delivery. Historical
+        // approvals and hashes only produce diagnostics in the manifest.
+        for path in &paths {
+            if Self::export_has_protection(path, &manifest) {
+                decode(path)?;
+            }
+        }
         let id = Uuid::new_v4();
         let temporary = parent.join(format!(".产品场景图-{id}.partial"));
         let destination = parent.join(format!("产品场景图-{id}"));
@@ -451,9 +812,24 @@ impl ProductSceneImageService {
                 let target = temporary.join(&filename);
                 created.push(target.clone());
                 fs::copy(source, &target)?;
-                files.push(
-                    json!({"file": filename, "sourcePath": source, "sha256": hash_file(&target)?}),
-                );
+                let copied_hash = hash_file(&target)?;
+                if Self::export_has_protection(source, &manifest) {
+                    decode(&target)?;
+                }
+                let protection =
+                    self.protection_diagnostics_for_export(source, &manifest, &copied_hash);
+                let warnings = protection
+                    .as_ref()
+                    .and_then(|proof| proof.get("warnings"))
+                    .cloned()
+                    .unwrap_or_else(|| json!([]));
+                files.push(json!({
+                    "file": filename,
+                    "sourcePath": source,
+                    "sha256": copied_hash,
+                    "warnings": warnings,
+                    "protection": protection,
+                }));
             }
             let metadata = temporary.join("manifest.json");
             created.push(metadata.clone());
@@ -792,6 +1168,213 @@ fn resize_foreground(source: &RgbaImage, width: u32, height: u32) -> RgbaImage {
     DynamicImage::ImageRgba32F(resized).into_rgba8()
 }
 
+#[derive(Debug, Clone, Copy)]
+struct PixelRect {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+impl PixelRect {
+    fn count(self) -> u64 {
+        u64::from(self.right - self.left) * u64::from(self.bottom - self.top)
+    }
+
+    fn translated(self, x: u32, y: u32) -> Self {
+        Self {
+            left: self.left + x,
+            top: self.top + y,
+            right: self.right + x,
+            bottom: self.bottom + y,
+        }
+    }
+}
+
+fn protection_rect(
+    region: &ProductProtectionRegion,
+    width: u32,
+    height: u32,
+) -> BackendResult<PixelRect> {
+    if width == 0
+        || height == 0
+        || ![region.x, region.y, region.width, region.height]
+            .iter()
+            .all(|value| value.is_finite())
+        || region.x < 0.0
+        || region.y < 0.0
+        || region.width <= 0.0
+        || region.height <= 0.0
+        || region.x + region.width > 1.0
+        || region.y + region.height > 1.0
+    {
+        return Err(invalid("保护范围必须是原片内有效的矩形，请重新确认。"));
+    }
+    // Outward rounding gives a deterministic, nonempty core at either resolution.
+    let rect = PixelRect {
+        left: (region.x * f64::from(width)).floor() as u32,
+        top: (region.y * f64::from(height)).floor() as u32,
+        right: ((region.x + region.width) * f64::from(width)).ceil() as u32,
+        bottom: ((region.y + region.height) * f64::from(height)).ceil() as u32,
+    };
+    if rect.right > width || rect.bottom > height || rect.count() == 0 {
+        return Err(invalid("保护范围没有可验证的核心像素。"));
+    }
+    Ok(rect)
+}
+
+fn require_opaque_core(source: &RgbaImage, core: PixelRect) -> BackendResult<()> {
+    for y in core.top..core.bottom {
+        for x in core.left..core.right {
+            if source.get_pixel(x, y)[3] != 255 {
+                return Err(invalid(
+                    "保护核心含透明像素，无法保持原片完整内容。请使用不透明实拍母版或调整保护范围。",
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn core_hash(source: &RgbaImage, core: PixelRect) -> String {
+    let mut hash = Sha256::new();
+    for y in core.top..core.bottom {
+        for x in core.left..core.right {
+            hash.update(source.get_pixel(x, y).0);
+        }
+    }
+    hex::encode(hash.finalize())
+}
+
+struct ProtectedComposition {
+    image: RgbaImage,
+    receipt: ProductSceneProtectionReceipt,
+    output_core: PixelRect,
+    expected_core_hash: String,
+}
+
+fn protected_photo_geometry(
+    source: &RgbaImage,
+    width: u32,
+    height: u32,
+    placement: &ProductPlacement,
+) -> BackendResult<(u32, u32, u32, u32)> {
+    if source.width() == 0
+        || source.height() == 0
+        || width == 0
+        || height == 0
+        || !placement.center_x.is_finite()
+        || !(0.2..=0.8).contains(&placement.center_x)
+        || !placement.baseline_y.is_finite()
+        || !(0.35..=0.92).contains(&placement.baseline_y)
+        || !placement.width_fraction.is_finite()
+        || !(0.2..=0.8).contains(&placement.width_fraction)
+    {
+        return Err(invalid("原片保护构图参数无效。"));
+    }
+    let center = f64::from(width) * placement.center_x;
+    let baseline = (f64::from(height) * placement.baseline_y).round() as u32;
+    let ratio = f64::from(source.height()) / f64::from(source.width());
+    let requested_width = (f64::from(width) * placement.width_fraction).round();
+    let mut photo_width = requested_width
+        .min(center * 2.0)
+        .min((f64::from(width) - center) * 2.0)
+        .min(f64::from(baseline) / ratio)
+        .floor() as u32;
+    // Preserve the chosen center and baseline. Shrink the whole photo together,
+    // including wrist and occlusion, until all four photo edges fit the output.
+    while photo_width > 0 {
+        let photo_height = (f64::from(photo_width) * ratio).round() as u32;
+        let x = (center - f64::from(photo_width) / 2.0).round() as i64;
+        if photo_height > 0
+            && photo_height <= baseline
+            && x >= 0
+            && x + i64::from(photo_width) <= i64::from(width)
+            && baseline <= height
+        {
+            return Ok((photo_width, photo_height, x as u32, baseline - photo_height));
+        }
+        photo_width -= 1;
+    }
+    Err(invalid("原片无法完整放入当前画幅，请调整构图。"))
+}
+
+fn composite_protected_image(
+    background: DynamicImage,
+    source: &RgbaImage,
+    width: u32,
+    height: u32,
+    placement: &ProductPlacement,
+    region: &ProductProtectionRegion,
+    feather: f64,
+) -> BackendResult<ProtectedComposition> {
+    if !feather.is_finite() || !(0.0..=0.1).contains(&feather) {
+        return Err(invalid("保护范围外的羽化必须在 0～0.1 之间。"));
+    }
+    let source_core = protection_rect(region, source.width(), source.height())?;
+    require_opaque_core(source, source_core)?;
+    let (photo_width, photo_height, x, y) =
+        protected_photo_geometry(source, width, height, placement)?;
+    let photo = resize_foreground(source, photo_width, photo_height);
+    let core = protection_rect(region, photo_width, photo_height)?;
+    require_opaque_core(&photo, core)?;
+    let expected_core_hash = core_hash(&photo, core);
+    let mut canvas = background
+        .resize_to_fill(width, height, imageops::FilterType::Lanczos3)
+        .into_rgba8();
+    let mut masked = photo.clone();
+    let feather_pixels = feather * f64::from(photo_width.min(photo_height));
+    for (px, py, pixel) in masked.enumerate_pixels_mut() {
+        if (core.left..core.right).contains(&px) && (core.top..core.bottom).contains(&py) {
+            continue;
+        }
+        let dx = if px < core.left {
+            core.left - px
+        } else {
+            px.saturating_sub(core.right - 1)
+        };
+        let dy = if py < core.top {
+            core.top - py
+        } else {
+            py.saturating_sub(core.bottom - 1)
+        };
+        let distance = f64::from(dx.max(dy));
+        let weight = if feather_pixels > 0.0 {
+            (1.0 - distance / feather_pixels).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        pixel[3] = (f64::from(pixel[3]) * weight).round() as u8;
+    }
+    imageops::overlay(&mut canvas, &masked, i64::from(x), i64::from(y));
+    // Copy opaque core bytes exactly; blending and feather never enter the core.
+    for py in core.top..core.bottom {
+        for px in core.left..core.right {
+            canvas.put_pixel(px + x, py + y, *photo.get_pixel(px, py));
+        }
+    }
+    let output_core = core.translated(x, y);
+    let verified = core_hash(&canvas, output_core) == expected_core_hash;
+    if !verified {
+        return Err(invalid("原片保护核心像素合成校验失败。"));
+    }
+    Ok(ProtectedComposition {
+        image: canvas,
+        receipt: ProductSceneProtectionReceipt {
+            region: region.clone(),
+            feather,
+            source_width: source.width(),
+            source_height: source.height(),
+            core_pixel_count: core.count(),
+            output_hash: String::new(),
+            warnings: Vec::new(),
+            verified,
+        },
+        output_core,
+        expected_core_hash,
+    })
+}
+
 fn composite_image(
     background: DynamicImage,
     foreground: &RgbaImage,
@@ -870,6 +1453,433 @@ fn composite_image(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn protected_test_region() -> ProductProtectionRegion {
+        ProductProtectionRegion {
+            x: 0.1,
+            y: 0.1,
+            width: 0.8,
+            height: 0.8,
+        }
+    }
+
+    #[test]
+    fn preserved_photo_keeps_white_crystal_thin_chain_and_full_dimensions() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        let source = temp.path().join("crystal-photo.png");
+        let mut photo = RgbaImage::from_pixel(40, 32, Rgba([255, 255, 255, 255]));
+        // Pale crystal is connected to the white background; the fine chain is
+        // only one pixel wide. Neither should enter the old white flood/crop path.
+        for y in 0..24 {
+            for x in 10..30 {
+                photo.put_pixel(x, y, Rgba([248, 250, 252, 255]));
+            }
+        }
+        for x in 6..34 {
+            photo.put_pixel(x, 25, Rgba([100, 105, 110, 255]));
+        }
+        photo.put_pixel(20, 13, Rgba([235, 237, 240, 255]));
+        write_png(&source, photo.clone()).unwrap();
+        let command: PrepareProductViewCommand = serde_json::from_value(json!({
+            "sourcePath": source.to_string_lossy(),
+        }))
+        .unwrap();
+        assert!(!command.preserve_photo);
+        let prepared = service
+            .prepare(PrepareProductViewCommand {
+                preserve_photo: true,
+                ..command.clone()
+            })
+            .unwrap();
+        assert_eq!((prepared.width, prepared.height), (40, 32));
+        assert_eq!(
+            decode(Path::new(&prepared.path)).unwrap().into_rgba8(),
+            photo
+        );
+        assert_eq!(
+            hash_file(Path::new(&prepared.path)).unwrap(),
+            prepared.content_hash
+        );
+        assert_ne!(prepared.path, command.source_path);
+        let legacy = service.prepare(command).unwrap();
+        assert_ne!((legacy.width, legacy.height), (40, 32));
+    }
+
+    #[test]
+    fn protected_core_is_identical_on_different_backgrounds_and_feather_stays_outside() {
+        let photo = RgbaImage::from_fn(40, 20, |x, y| {
+            Rgba([(x * 4) as u8, (y * 9) as u8, 120, 255])
+        });
+        let placement = ProductPlacement {
+            center_x: 0.5,
+            baseline_y: 0.75,
+            width_fraction: 0.5,
+        };
+        let compose = |color| {
+            composite_protected_image(
+                DynamicImage::ImageRgba8(RgbaImage::from_pixel(80, 100, color)),
+                &photo,
+                80,
+                100,
+                &placement,
+                &protected_test_region(),
+                0.1,
+            )
+            .unwrap()
+        };
+        let first = compose(Rgba([230, 230, 230, 255]));
+        let second = compose(Rgba([10, 20, 30, 255]));
+        assert!(first.receipt.verified && second.receipt.verified);
+        assert_eq!(first.receipt.core_pixel_count, 32 * 16);
+        for y in 2..18 {
+            for x in 4..36 {
+                assert_eq!(first.image.get_pixel(x + 20, y + 55), photo.get_pixel(x, y));
+                assert_eq!(
+                    second.image.get_pixel(x + 20, y + 55),
+                    photo.get_pixel(x, y)
+                );
+            }
+        }
+        assert_eq!(*first.image.get_pixel(15, 65), Rgba([230, 230, 230, 255]));
+        assert_ne!(
+            first.image.get_pixel(23, 65),
+            second.image.get_pixel(23, 65)
+        );
+        assert_eq!(first.expected_core_hash, second.expected_core_hash);
+    }
+
+    #[test]
+    fn protected_wearing_photo_uses_one_uniform_scale_and_keeps_all_edges_in_canvas() {
+        let photo = RgbaImage::from_fn(60, 120, |x, y| {
+            // Wrist and bracelet use the same source grid; they cannot be scaled separately.
+            Rgba([
+                (x * 3) as u8,
+                (y * 2) as u8,
+                if y > 50 { 220 } else { 80 },
+                255,
+            ])
+        });
+        let placement = ProductPlacement {
+            center_x: 0.8,
+            baseline_y: 0.35,
+            width_fraction: 0.8,
+        };
+        let (pw, ph, x, y) = protected_photo_geometry(&photo, 120, 200, &placement).unwrap();
+        assert_eq!((pw, ph), (35, 70));
+        assert_eq!(ph, pw * 2);
+        assert!(x + pw <= 120 && y + ph <= 200);
+        let result = composite_protected_image(
+            DynamicImage::ImageRgba8(RgbaImage::from_pixel(120, 200, Rgba([0, 0, 0, 255]))),
+            &photo,
+            120,
+            200,
+            &placement,
+            &ProductProtectionRegion {
+                x: 0.0,
+                y: 0.0,
+                width: 1.0,
+                height: 1.0,
+            },
+            0.0,
+        )
+        .unwrap();
+        let expected = resize_foreground(&photo, pw, ph);
+        for py in 0..ph {
+            for px in 0..pw {
+                assert_eq!(
+                    result.image.get_pixel(px + x, py + y),
+                    expected.get_pixel(px, py)
+                );
+            }
+        }
+        assert_eq!(result.receipt.core_pixel_count, u64::from(pw * ph));
+    }
+
+    #[test]
+    fn protected_composition_rejects_invalid_region_feather_and_transparent_core() {
+        let photo = RgbaImage::from_pixel(40, 20, Rgba([235, 235, 240, 255]));
+        let placement = ProductPlacement {
+            center_x: 0.5,
+            baseline_y: 0.75,
+            width_fraction: 0.5,
+        };
+        let compose = |source: &RgbaImage, region: &ProductProtectionRegion, feather| {
+            composite_protected_image(
+                DynamicImage::ImageRgba8(RgbaImage::from_pixel(80, 100, Rgba([0, 0, 0, 255]))),
+                source,
+                80,
+                100,
+                &placement,
+                region,
+                feather,
+            )
+        };
+        for region in [
+            ProductProtectionRegion {
+                x: f64::NAN,
+                ..protected_test_region()
+            },
+            ProductProtectionRegion {
+                y: f64::INFINITY,
+                ..protected_test_region()
+            },
+            ProductProtectionRegion {
+                x: -0.1,
+                ..protected_test_region()
+            },
+            ProductProtectionRegion {
+                width: 0.0,
+                ..protected_test_region()
+            },
+            ProductProtectionRegion {
+                width: 1.0,
+                ..protected_test_region()
+            },
+            ProductProtectionRegion {
+                height: -0.2,
+                ..protected_test_region()
+            },
+        ] {
+            assert!(compose(&photo, &region, 0.0).is_err());
+        }
+        for feather in [f64::NAN, f64::INFINITY, -0.01, 0.11] {
+            assert!(compose(&photo, &protected_test_region(), feather).is_err());
+        }
+        let mut transparent = photo;
+        transparent.put_pixel(20, 10, Rgba([235, 235, 240, 254]));
+        assert!(compose(&transparent, &protected_test_region(), 0.0).is_err());
+    }
+
+    #[test]
+    fn protected_preflight_rejects_transparency_and_invalid_scope_before_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        let source = temp.path().join("preflight-photo.png");
+        let mut photo = RgbaImage::from_pixel(40, 30, Rgba([245, 249, 252, 255]));
+        // Transparency outside the core can enter it through a later resize filter.
+        photo.put_pixel(0, 0, Rgba([245, 249, 252, 0]));
+        write_png(&source, photo).unwrap();
+        let prepared = service
+            .prepare(PrepareProductViewCommand {
+                source_path: source.to_string_lossy().into_owned(),
+                preserve_photo: true,
+            })
+            .unwrap();
+        let legacy: ValidateProductViewsCommand = serde_json::from_value(json!({
+            "views": [{ "path": prepared.path, "contentHash": prepared.content_hash }],
+        }))
+        .unwrap();
+        service.validate_views(legacy).unwrap();
+        let protected: ValidateProductViewsCommand = serde_json::from_value(json!({
+            "views": [{ "path": prepared.path, "contentHash": prepared.content_hash,
+                        "region": protected_test_region(), "feather": 0.05 }],
+        }))
+        .unwrap();
+        assert!(service.validate_views(protected).is_err());
+        let invalid_scope: ValidateProductViewsCommand = serde_json::from_value(json!({
+            "views": [{ "path": prepared.path, "contentHash": prepared.content_hash,
+                        "region": { "x": 0, "y": 0, "width": 2, "height": 1 } }],
+        }))
+        .unwrap();
+        assert!(service.validate_views(invalid_scope).is_err());
+        let transparent = temp.path().join("all-transparent.png");
+        write_png(
+            &transparent,
+            RgbaImage::from_pixel(20, 20, Rgba([0, 0, 0, 0])),
+        )
+        .unwrap();
+        assert!(
+            service
+                .prepare(PrepareProductViewCommand {
+                    source_path: transparent.to_string_lossy().into_owned(),
+                    preserve_photo: true,
+                })
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn protected_delivery_keeps_current_files_and_records_advisory_history() {
+        let temp = tempfile::tempdir().unwrap();
+        let service = ProductSceneImageService::new(temp.path().to_owned());
+        let source = temp.path().join("real-photo.png");
+        write_png(
+            &source,
+            RgbaImage::from_pixel(40, 30, Rgba([245, 249, 252, 255])),
+        )
+        .unwrap();
+        let background = temp.path().join("background.png");
+        write_png(
+            &background,
+            RgbaImage::from_pixel(40, 50, Rgba([30, 35, 40, 255])),
+        )
+        .unwrap();
+        let prepared = service
+            .prepare(PrepareProductViewCommand {
+                source_path: source.to_string_lossy().into_owned(),
+                preserve_photo: true,
+            })
+            .unwrap();
+        let command = ComposeProtectedProductSceneCommand {
+            background_path: background.to_string_lossy().into_owned(),
+            product_path: prepared.path.clone(),
+            product_hash: prepared.content_hash.clone(),
+            output_id: "protected-receipt-test".into(),
+            aspect_ratio: "3:4".into(),
+            placement: ProductPlacement {
+                center_x: 0.5,
+                baseline_y: 0.75,
+                width_fraction: 0.2,
+            },
+            region: protected_test_region(),
+            feather: 0.05,
+        };
+        let result = service.compose_protected(command.clone()).unwrap();
+        let output = Path::new(&result.path);
+        let receipt_path = output.with_extension("protection.json");
+        assert!(receipt_path.is_file());
+        assert!(result.protection.verified && result.protection.core_pixel_count > 0);
+        assert_eq!(hash_file(output).unwrap(), result.protection.output_hash);
+        assert_eq!(result.foreground_hash, prepared.content_hash);
+        let manifest = json!({
+            "generationMode": "protected",
+            "rows": [{ "outputPath": result.path, "status": "accepted", "foregroundHash": result.foreground_hash,
+                       "jewelryReview": { "outputPath": result.path, "checks": {
+                         "connections": "pass", "shape": "pass", "details": "pass",
+                         "texture": "pass", "scale": "pass", "style": "pass"
+                       }},
+                       "protection": result.protection }],
+        });
+        let export = |manifest: &Value| {
+            service.export(ExportProductScenesCommand {
+                paths: vec![result.path.clone()],
+                manifest: manifest.to_string(),
+                directory: temp.path().to_string_lossy().into_owned(),
+            })
+        };
+        let first_file = |delivery: ProductSceneExport| -> Value {
+            let manifest: Value = serde_json::from_slice(
+                &fs::read(Path::new(&delivery.directory).join("manifest.json")).unwrap(),
+            )
+            .unwrap();
+            manifest["files"][0].clone()
+        };
+        let baseline = first_file(export(&manifest).unwrap());
+        assert_eq!(baseline["sha256"], json!(result.protection.output_hash));
+        assert_eq!(baseline["protection"]["verificationState"], "current");
+        assert_eq!(baseline["warnings"], json!([]));
+        assert_eq!(
+            baseline["protection"]["historicalEvidence"]["composite"]["protection"]["outputHash"],
+            json!(result.protection.output_hash)
+        );
+
+        let mut unreviewed = manifest.clone();
+        unreviewed["rows"][0]["status"] = json!("needs_review");
+        unreviewed["rows"][0]["jewelryReview"] = Value::Null;
+        assert!(
+            !first_file(export(&unreviewed).unwrap())["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut old_review = manifest.clone();
+        old_review["rows"][0]["jewelryReview"]["outputPath"] = json!(prepared.path);
+        old_review["rows"][0]["jewelryReview"]["checks"]["shape"] = json!("fail");
+        assert!(
+            !first_file(export(&old_review).unwrap())["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        let mut old_region = manifest.clone();
+        old_region["rows"][0]["protection"]["region"]["width"] = json!(0.5);
+        assert!(
+            !first_file(export(&old_region).unwrap())["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(export(&json!({"generationMode": "protected"})).is_ok());
+
+        let replace_png = |path: &Path, pixels| {
+            let mut bytes = Cursor::new(Vec::new());
+            DynamicImage::ImageRgba8(pixels)
+                .write_to(&mut bytes, ImageFormat::Png)
+                .unwrap();
+            fs::write(path, bytes.into_inner()).unwrap();
+        };
+        let original_output = fs::read(output).unwrap();
+        replace_png(
+            output,
+            RgbaImage::from_pixel(80, 60, Rgba([18, 30, 45, 255])),
+        );
+        let changed_output_hash = hash_file(output).unwrap();
+        let changed_output = first_file(export(&manifest).unwrap());
+        assert_eq!(changed_output["sha256"], json!(changed_output_hash));
+        assert_eq!(
+            changed_output["protection"]["currentOutputHash"],
+            json!(changed_output_hash)
+        );
+        assert_eq!(
+            changed_output["protection"]["verificationState"],
+            "historical"
+        );
+        assert!(!changed_output["warnings"].as_array().unwrap().is_empty());
+        fs::write(output, b"unreadable image").unwrap();
+        assert!(export(&manifest).is_err());
+        fs::write(output, original_output).unwrap();
+
+        let original_master = fs::read(&prepared.path).unwrap();
+        replace_png(
+            Path::new(&prepared.path),
+            RgbaImage::from_pixel(40, 30, Rgba([225, 235, 240, 255])),
+        );
+        let actual_master_hash = hash_file(Path::new(&prepared.path)).unwrap();
+        let preflight: ValidateProductViewsCommand = serde_json::from_value(json!({
+            "views": [{ "path": prepared.path, "contentHash": prepared.content_hash,
+                        "region": protected_test_region(), "feather": 0.05 }],
+        }))
+        .unwrap();
+        assert!(service.validate_views(preflight).unwrap());
+        let changed_source = service.compose_protected(command.clone()).unwrap();
+        assert_eq!(changed_source.foreground_hash, actual_master_hash);
+        assert_ne!(changed_source.foreground_hash, prepared.content_hash);
+        assert!(!changed_source.protection.warnings.is_empty());
+        assert_eq!(
+            first_file(export(&manifest).unwrap())["protection"]["verificationState"],
+            "historical"
+        );
+        fs::remove_file(&prepared.path).unwrap();
+        assert!(
+            !first_file(export(&manifest).unwrap())["warnings"]
+                .as_array()
+                .unwrap()
+                .is_empty()
+        );
+        assert!(service.compose_protected(command).is_err());
+        fs::write(&prepared.path, original_master).unwrap();
+
+        let original_receipt = fs::read(&receipt_path).unwrap();
+        fs::write(&receipt_path, b"corrupt historical receipt").unwrap();
+        let corrupt = first_file(export(&manifest).unwrap());
+        assert_eq!(corrupt["protection"]["verificationState"], "unavailable");
+        assert!(!corrupt["warnings"].as_array().unwrap().is_empty());
+        fs::write(
+            &receipt_path,
+            br#"{"schemaVersion":"old-version","history":"keep"}"#,
+        )
+        .unwrap();
+        let old = first_file(export(&manifest).unwrap());
+        assert_eq!(old["protection"]["verificationState"], "historical");
+        assert_eq!(old["protection"]["historicalEvidence"]["history"], "keep");
+        fs::remove_file(&receipt_path).unwrap();
+        assert_eq!(
+            first_file(export(&manifest).unwrap())["protection"]["verificationState"],
+            "unavailable"
+        );
+        fs::write(&receipt_path, original_receipt).unwrap();
+    }
 
     fn test_logo_quad() -> Vec<LogoPoint> {
         vec![
@@ -954,6 +1964,7 @@ mod tests {
         let prepared = service
             .prepare_logo(PrepareProductViewCommand {
                 source_path: source_logo.to_string_lossy().into_owned(),
+                preserve_photo: false,
             })
             .unwrap();
         let source = service.directory("成图").unwrap().join("original.png");
@@ -1017,7 +2028,10 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         let service = ProductSceneImageService::new(root.clone());
         let prepared = service
-            .prepare(PrepareProductViewCommand { source_path: input })
+            .prepare(PrepareProductViewCommand {
+                source_path: input,
+                preserve_photo: false,
+            })
             .unwrap();
         // A plain procedural background solely for checking cutout edges, geometry and IPC output.
         let background = root.join(format!("smoke-background-{}.png", Uuid::new_v4()));
@@ -1119,6 +2133,7 @@ mod tests {
         let prepared = service
             .prepare(PrepareProductViewCommand {
                 source_path: source.to_string_lossy().into_owned(),
+                preserve_photo: false,
             })
             .unwrap();
         service

@@ -390,6 +390,8 @@ export function KnowledgeVideoWorkflowNode({
     productSceneOptions != null && productSceneQualityEnabled(productSceneOptions);
   const isProductReference =
     productSceneOptions != null && productSceneGenerationMode(productSceneOptions) === "reference";
+  const isProductProtected =
+    productSceneOptions != null && productSceneGenerationMode(productSceneOptions) === "protected";
   const reverseOptions = node.config.reverseVideo;
   const reelbenchOptions = node.config.reelbench;
   const isReelbench = reelbenchOptions != null;
@@ -1190,7 +1192,9 @@ export function KnowledgeVideoWorkflowNode({
             <p>
               {isProductReference
                 ? "AI 多机位需要支持参考图片的图片模型；参考图用于约束产品身份，目标机位由工作流单独安排。"
-                : "原图保真合成需要支持文字生图的图片模型；模型生成空背景，本地回贴已确认产品原图。"}
+                : isProductProtected
+                  ? "珠宝原片保护需要支持文字生图的图片模型，只生成外围空背景；本地保留已确认实拍范围和佩戴关系，六项人工核对后选用。"
+                  : "原图保真合成需要支持文字生图的图片模型；模型生成空背景，本地回贴已确认产品原图。"}
             </p>
           ) : null}
           {isReverse ? <p>请选择能识别图片的文本模型，用于分析带时间戳的真实视频联系表。</p> : null}

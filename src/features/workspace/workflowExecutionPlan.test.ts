@@ -17,7 +17,7 @@ import {
 import { createRecordedWorkflowRunner } from "./workflowHistoryExecution";
 import type { KnowledgeVideoWorkflowNodeData } from "./workspaceModel";
 import { createComicDramaOptions } from "./comicDramaWorkflowModel";
-import { createProductSceneOptions } from "./productSceneWorkflowModel";
+import { createJewelrySceneOptions, createProductSceneOptions } from "./productSceneWorkflowModel";
 import { createReelbenchOptions } from "./reelbenchWorkflowModel";
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 
@@ -87,6 +87,32 @@ describe("workflow dependency plans and human review", () => {
     const titles = createWorkflowExecutionPlan(changed).steps.map((step) => step.title);
     expect(titles).toContain("逐张调用视觉文本模型，检查可见接口与 Logo 所在平面");
     expect(titles).toContain("定位可靠且表面清晰时按透视贴回已确认 Logo");
+  });
+  it("discloses protected photograph processing and invalidates approval after a series change", () => {
+    const original = node();
+    const options = createJewelrySceneOptions();
+    const source = approve({
+      ...original,
+      config: { ...original.config, productScene: options },
+    });
+    const titles = createWorkflowExecutionPlan(source).steps.map((step) => step.title);
+    expect(titles.join("\n")).toContain("只生成外围空背景");
+    expect(titles.join("\n")).toContain("六项人工核对");
+    expect(titles.join("\n")).not.toContain("调用视觉文本模型");
+    const changed = {
+      ...source,
+      config: {
+        ...source.config,
+        productScene: {
+          ...options,
+          jewelry: {
+            ...options.jewelry!,
+            seriesStyle: { ...options.jewelry!.seriesStyle, version: "2" },
+          },
+        },
+      },
+    };
+    expect(isWorkflowExecutionPlanApproved(getWorkflowExecutionPlan(source), changed)).toBe(false);
   });
   it("uses Kahn order on an unsorted diamond and rejects cycles/missing dependencies before execution", async () => {
     const steps = [

@@ -10,14 +10,22 @@ import {
 } from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
 import {
+  createJewelrySceneOptions,
+  canRetryProductSceneRow,
+  JEWELRY_REVIEW_CHECKS,
   productSceneGenerationMode,
+  productSceneJewelryReviewWarnings,
   productSceneQualityEnabled,
   productSceneRowCanAccept,
   resetProductSceneQuality,
   resetProductSceneRow,
+  retryProductSceneRow,
+  updateProductSceneViewProtection,
   type ProductSceneRow,
+  type ProductSceneJewelryReview,
   type ProductSceneWorkflowOptions,
 } from "./productSceneWorkflowModel";
+import { ProductSceneProtectionEditor } from "./ProductSceneProtectionEditor";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import "./ProductSceneWorkflowSections.css";
 
@@ -49,6 +57,103 @@ const QUALITY_STATUS = {
   failed: "检查失败",
 } as const;
 const PRODUCT_SCENE_THUMBNAIL_MAX_DIMENSION = 512;
+
+function jewelryReviewForOutput(row: ProductSceneRow): ProductSceneJewelryReview {
+  if (row.jewelryReview?.outputPath === row.outputPath) return row.jewelryReview;
+  return {
+    outputPath: row.outputPath ?? "",
+    checks: {
+      connections: "uncertain",
+      shape: "uncertain",
+      details: "uncertain",
+      texture: "uncertain",
+      scale: "uncertain",
+      style: "uncertain",
+    },
+    notes: "",
+  };
+}
+
+function ProductSceneJewelryReviewDetails({
+  row,
+  options,
+  sourcePath,
+  disabled,
+  onChange,
+  onPreview,
+}: {
+  readonly row: ProductSceneRow;
+  readonly options: ProductSceneWorkflowOptions;
+  readonly sourcePath: string | undefined;
+  readonly disabled: boolean;
+  readonly onChange: (review: ProductSceneJewelryReview) => void;
+  readonly onPreview: (path: string) => void;
+}) {
+  if (!row.outputPath) return null;
+  const review = jewelryReviewForOutput(row);
+  return (
+    <section
+      className="product-scene__jewelry-review"
+      aria-label={`第 ${row.index} 张珠宝人工复核`}
+    >
+      <strong>对照实拍母版，逐项人工核对</strong>
+      {sourcePath ? (
+        <button type="button" onClick={() => onPreview(sourcePath)}>
+          查看第 {row.index} 张实拍母版对照
+        </button>
+      ) : null}
+      {row.protection ? (
+        <small>
+          制作时保护核验：{row.protection.verified ? "记录为通过" : "记录为未通过"} · 原片{" "}
+          {row.protection.sourceWidth} × {row.protection.sourceHeight} · 核验{" "}
+          {row.protection.corePixelCount} 个像素
+        </small>
+      ) : (
+        <small>尚无原片保护核验记录，可以继续选用或导出。</small>
+      )}
+      <small>
+        复核和保护记录供参考，不限制选用或导出。连接、天然特征、佩戴关系及融合边缘可按需要逐项检查。
+      </small>
+      {productSceneJewelryReviewWarnings(row, options).map((warning, index) => (
+        <small key={index}>提示：{warning}</small>
+      ))}
+      {JEWELRY_REVIEW_CHECKS.map(({ key, label }) => (
+        <label key={key}>
+          {label}
+          <select
+            aria-label={`第 ${row.index} 张 ${label}`}
+            value={review.checks[key]}
+            disabled={disabled}
+            onChange={(event) =>
+              onChange({
+                ...review,
+                checks: {
+                  ...review.checks,
+                  [key]: event.target.value as "pass" | "fail" | "uncertain",
+                },
+              })
+            }
+          >
+            <option value="uncertain">待核对 / 无法确定</option>
+            <option value="pass">人工核对通过</option>
+            <option value="fail">不通过</option>
+          </select>
+        </label>
+      ))}
+      <label>
+        复核备注
+        <ImeTextarea
+          aria-label={`第 ${row.index} 张珠宝复核备注`}
+          rows={2}
+          value={review.notes}
+          disabled={disabled}
+          onValueChange={(notes) => onChange({ ...review, notes })}
+          placeholder="记录对照依据、需要精修的边缘或不通过原因。"
+        />
+      </label>
+    </section>
+  );
+}
 
 function ProductSceneRowThumbnail({ path, alt }: { readonly path: string; readonly alt: string }) {
   const desktop = isDesktopRuntime();
@@ -211,6 +316,7 @@ export function ProductSceneConfiguration({
   const generationMode = productSceneGenerationMode(options);
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<string | null>(null);
+  const [editingProtection, setEditingProtection] = useState<string | null>(null);
   const picking = useRef(false);
   const latest = useRef(options);
   useEffect(() => {
@@ -225,13 +331,19 @@ export function ProductSceneConfiguration({
     setError(null);
     try {
       const files = await pickPromptMultimodalFiles({
-        title: "选择同一版本产品的白底或透明原图",
+        title:
+          generationMode === "protected"
+            ? "选择这件实物的完整摆拍或真实佩戴原片"
+            : "选择同一版本产品的白底或透明原图",
         kinds: ["image"],
       });
       const added: ProductSceneWorkflowOptions["views"][number][] = [];
       for (const file of files) {
         if (file.kind !== "image") continue;
-        const prepared = await productSceneImageClient.prepare({ sourcePath: file.localPath });
+        const prepared = await productSceneImageClient.prepare({
+          sourcePath: file.localPath,
+          ...(generationMode === "protected" ? { preservePhoto: true } : {}),
+        });
         if (
           [...latest.current.views, ...added].some(
             (view) => view.contentHash === prepared.contentHash,
@@ -248,6 +360,15 @@ export function ProductSceneConfiguration({
           width: prepared.width,
           height: prepared.height,
           approved: false,
+          ...(generationMode === "protected"
+            ? {
+                protection: {
+                  rect: { x: 0, y: 0, width: 1, height: 1 },
+                  feather: 0.025,
+                  use: "product" as const,
+                },
+              }
+            : {}),
         });
       }
       if (added.length) onChange({ ...latest.current, views: [...latest.current.views, ...added] });
@@ -308,24 +429,107 @@ export function ProductSceneConfiguration({
         <select
           aria-label="产品场景生成方式"
           value={generationMode}
-          onChange={(event) =>
-            onChange({
-              ...options,
-              generationMode: event.target.value as "reference" | "composite",
-            })
-          }
+          onChange={(event) => {
+            const nextMode = event.target.value as "reference" | "composite" | "protected";
+            setEditingProtection(null);
+            setError(null);
+            const normalOptions = { ...options };
+            delete normalOptions.jewelry;
+            onChange(
+              nextMode === "protected"
+                ? createJewelrySceneOptions(options)
+                : {
+                    ...normalOptions,
+                    generationMode: nextMode,
+                    ...(generationMode === "protected" ? { views: [] } : {}),
+                  },
+            );
+          }}
         >
           <option value="reference">AI 多机位</option>
           <option value="composite">原图保真合成</option>
+          <option value="protected">珠宝原片保护</option>
         </select>
       </label>
       <p>
         {generationMode === "reference"
           ? "用已确认的同一产品图片作为参考，工作流随机组合目标机位和场景，交给图片模型生成完整画面。新机位可以由提示词引导，无需先补拍或提供 CAD；产品形体、接口与 Logo 必须逐张审核。"
-          : "AI 生成空场景，已确认产品原图在本地合成，保留原图的产品结构。此模式仅使用原图已有角度。"}
+          : generationMode === "protected"
+            ? "保留获批实拍母版的完整范围，AI 制作外围场景。透明珠子相关原背景和真实佩戴关系一并保留；适合忠实展示同一件实物，不产生新的商品角度或佩戴姿势。"
+            : "AI 生成空场景，已确认产品原图在本地合成，保留原图的产品结构。此模式仅使用原图已有角度。"}
       </p>
+      {generationMode === "protected" && options.jewelry ? (
+        <section className="product-scene__jewelry-settings" aria-label="珠宝实物与系列模板">
+          <strong>实物身份与系列模板</strong>
+          <label>
+            商品 SKU
+            <ImeInput
+              aria-label="珠宝商品 SKU"
+              value={options.jewelry.skuId}
+              onValueChange={(skuId) =>
+                onChange({ ...options, jewelry: { ...options.jewelry!, skuId } })
+              }
+            />
+          </label>
+          <label>
+            单件实物编号 / 天然纹理身份
+            <ImeInput
+              aria-label="单件实物编号"
+              value={options.jewelry.specimenId}
+              onValueChange={(specimenId) =>
+                onChange({ ...options, jewelry: { ...options.jewelry!, specimenId } })
+              }
+            />
+            <small>同 SKU 的不同手串也需分别记录，不能共用天然纹理、棉絮或包裹物身份。</small>
+          </label>
+          <label>
+            必须保留的关键特征
+            <ImeTextarea
+              aria-label="珠宝关键特征"
+              rows={3}
+              value={options.jewelry.criticalFeatures}
+              onValueChange={(criticalFeatures) =>
+                onChange({ ...options, jewelry: { ...options.jewelry!, criticalFeatures } })
+              }
+              placeholder="例如珠子数量与顺序、爱心珠朝向、异形主珠轮廓、棉絮与包裹物位置。"
+            />
+          </label>
+          {(
+            [
+              ["name", "系列模板名称"],
+              ["version", "系列模板版本"],
+              ["background", "系列背景要求"],
+              ["lighting", "系列光照要求"],
+            ] as const
+          ).map(([key, label]) => (
+            <label key={key}>
+              {label}
+              <ImeInput
+                aria-label={label}
+                value={options.jewelry!.seriesStyle[key]}
+                onValueChange={(value) =>
+                  onChange({
+                    ...options,
+                    jewelry: {
+                      ...options.jewelry!,
+                      seriesStyle: { ...options.jewelry!.seriesStyle, [key]: value },
+                    },
+                  })
+                }
+              />
+            </label>
+          ))}
+          <small>
+            以上信息均需填写。构图与原片占比在同一系列内固定；修改实物、母版、范围或模板后需重新审批制作计划。
+          </small>
+        </section>
+      ) : null}
       <button type="button" onClick={() => void pickProducts()}>
-        {busy ? "正在处理产品图…" : "添加白底 / 透明产品原图"}
+        {busy
+          ? "正在处理产品图…"
+          : generationMode === "protected"
+            ? "添加完整实拍 / 佩戴原片"
+            : "添加白底 / 透明产品原图"}
       </button>
       {error ? <p role="alert">{error}</p> : null}
       <div className="product-scene__views">
@@ -339,7 +543,7 @@ export function ProductSceneConfiguration({
             >
               <img
                 src={toMediaSrc(view.preparedPath)}
-                alt={`${view.label} 抠图预览`}
+                alt={`${view.label} ${generationMode === "protected" ? "完整实拍原片" : "抠图预览"}`}
                 loading="lazy"
               />
             </button>
@@ -354,33 +558,68 @@ export function ProductSceneConfiguration({
                   : ""}
               </small>
             ) : null}
-            <label>
-              {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
-              <select
-                aria-label={`${view.label} 原图角度`}
-                value={view.angle}
-                onChange={(event) =>
-                  onChange({
-                    ...options,
-                    views: options.views.map((item) =>
-                      item.id === view.id
-                        ? {
-                            ...item,
-                            angle: event.target.value as typeof view.angle,
-                            approved: false,
-                          }
-                        : item,
-                    ),
-                  })
-                }
-              >
-                {Object.entries(ANGLES).map(([value, label]) => (
-                  <option key={value} value={value}>
-                    {label}
-                  </option>
-                ))}
-              </select>
-            </label>
+            {generationMode !== "protected" ? (
+              <label>
+                {generationMode === "reference" ? "参考图原始角度（与目标机位独立）" : "原图角度"}
+                <select
+                  aria-label={`${view.label} 原图角度`}
+                  value={view.angle}
+                  onChange={(event) =>
+                    onChange({
+                      ...options,
+                      views: options.views.map((item) =>
+                        item.id === view.id
+                          ? {
+                              ...item,
+                              angle: event.target.value as typeof view.angle,
+                              approved: false,
+                            }
+                          : item,
+                      ),
+                    })
+                  }
+                >
+                  {Object.entries(ANGLES).map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+            ) : null}
+            {generationMode === "protected" ? (
+              <>
+                <small>
+                  {view.protection?.use === "wearing"
+                    ? "真实佩戴母版 · 保留手腕与遮挡"
+                    : "商品摆拍母版 · 保留阴影与透射背景"}
+                  {view.protection
+                    ? ` · 保护 ${Math.round(view.protection.rect.width * 100)}% × ${Math.round(view.protection.rect.height * 100)}% 原片`
+                    : " · 尚未设置保护范围"}
+                </small>
+                {editingProtection === view.id ? (
+                  <ProductSceneProtectionEditor
+                    view={view}
+                    onSave={(protection) => {
+                      onChange({
+                        ...options,
+                        views: options.views.map((item) =>
+                          item.id === view.id
+                            ? updateProductSceneViewProtection(item, protection)
+                            : item,
+                        ),
+                      });
+                      setEditingProtection(null);
+                    }}
+                    onCancel={() => setEditingProtection(null)}
+                  />
+                ) : (
+                  <button type="button" onClick={() => setEditingProtection(view.id)}>
+                    编辑 {view.label} 保护范围
+                  </button>
+                )}
+              </>
+            ) : null}
             <label className="product-scene__approval">
               <input
                 type="checkbox"
@@ -394,7 +633,9 @@ export function ProductSceneConfiguration({
                   })
                 }
               />
-              确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整
+              {generationMode === "protected"
+                ? "确认这件实物与母版一致，保护范围含完整商品、阴影、透射原背景及必要手腕"
+                : "确认同一产品版本，原始角度标注正确，边缘 / Logo / 接口完整"}
             </label>
             <button
               type="button"
@@ -408,8 +649,9 @@ export function ProductSceneConfiguration({
         ))}
       </div>
       <small>
-        请先放大核对透明区域、金色格栅及脚垫是否被误删。参考图原始角度用于识别产品；AI
-        多机位模式的拍摄角度由制作计划另行安排。
+        {generationMode === "protected"
+          ? "原片完整保留，不做白底阈值抠图。先放大核对实物身份与保护边界，默认整张原片；需要制作外围时再缩小范围并重新确认。透明珠子透过的原背景不会自动换成新背景。"
+          : "请先放大核对透明区域、金色格栅及脚垫是否被误删。参考图原始角度用于识别产品；AI 多机位模式的拍摄角度由制作计划另行安排。"}
       </small>
       <div className="product-scene__settings">
         <label>
@@ -447,24 +689,26 @@ export function ProductSceneConfiguration({
             一键审批后同时提交最多 {options.maxConcurrency ?? 10} 张；受模型服务的并发额度限制。
           </small>
         </label>
-        <label>
-          场景倾向
-          <select
-            aria-label="场景倾向"
-            value={options.sceneBias}
-            onChange={(event) =>
-              onChange({
-                ...options,
-                sceneBias: event.target.value as ProductSceneWorkflowOptions["sceneBias"],
-              })
-            }
-          >
-            <option value="mixed">均衡混合</option>
-            <option value="geek">桌面极客</option>
-            <option value="office">企业办公</option>
-            <option value="unboxing">开箱摆放</option>
-          </select>
-        </label>
+        {generationMode !== "protected" ? (
+          <label>
+            场景倾向
+            <select
+              aria-label="场景倾向"
+              value={options.sceneBias}
+              onChange={(event) =>
+                onChange({
+                  ...options,
+                  sceneBias: event.target.value as ProductSceneWorkflowOptions["sceneBias"],
+                })
+              }
+            >
+              <option value="mixed">均衡混合</option>
+              <option value="geek">桌面极客</option>
+              <option value="office">企业办公</option>
+              <option value="unboxing">开箱摆放</option>
+            </select>
+          </label>
+        ) : null}
         <label>
           图片比例
           <select
@@ -482,9 +726,9 @@ export function ProductSceneConfiguration({
           </select>
         </label>
         <label>
-          产品画面占比
+          {generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
           <input
-            aria-label="产品画面占比"
+            aria-label={generationMode === "protected" ? "完整原片画面占比" : "产品画面占比"}
             type="range"
             min={0.3}
             max={0.65}
@@ -492,154 +736,171 @@ export function ProductSceneConfiguration({
             value={options.productScale ?? 0.48}
             onChange={(event) => onChange({ ...options, productScale: Number(event.target.value) })}
           />
-          <small>{Math.round((options.productScale ?? 0.48) * 100)}% · 产品宽度占画面宽度</small>
-        </label>
-        <label>
-          背景景深
-          <input
-            aria-label="背景景深"
-            type="range"
-            min={0}
-            max={1}
-            step={0.05}
-            value={options.depthStrength}
-            onChange={(event) =>
-              onChange({ ...options, depthStrength: Number(event.target.value) })
-            }
-          />
           <small>
-            {Math.round(options.depthStrength * 100)}% ·{" "}
-            {generationMode === "reference"
-              ? "通过拍摄提示词控制景深"
-              : "调整背景虚化，产品保持清晰"}
+            {Math.round((options.productScale ?? 0.48) * 100)}% ·{" "}
+            {generationMode === "protected"
+              ? "完整原片宽度占画面宽度，保持片内佩戴关系；不是毫米尺寸标定"
+              : "产品宽度占画面宽度"}
           </small>
         </label>
-        <label>
-          场景种子
-          <input
-            aria-label="场景种子"
-            type="number"
-            min={0}
-            step={1}
-            value={options.seed}
-            onChange={(event) =>
-              onChange({
-                ...options,
-                seed: Math.max(0, Math.floor(Number(event.target.value) || 0)),
-              })
-            }
-          />
-        </label>
-      </div>
-      <small>
-        手机随拍风格为 AI 展示图。导出清单会标明生成方式；不写入虚假的手机拍摄信息或买家身份。
-      </small>
-      <section className="product-scene__quality-settings" aria-label="产品自动检查与 Logo 贴回">
-        <strong>自动检查与 Logo 贴回</strong>
-        <label className="product-scene__approval">
-          <input
-            type="checkbox"
-            checked={options.quality?.inspectPorts ?? false}
-            onChange={(event) =>
-              onChange({
-                ...options,
-                quality: {
-                  portSpecification: "",
-                  ...options.quality,
-                  inspectPorts: event.target.checked,
-                },
-              })
-            }
-          />
-          自动检测可见接口
-        </label>
-        {options.quality?.inspectPorts ? (
+        {generationMode !== "protected" ? (
           <label>
-            已确认接口规格（可选）
-            <ImeTextarea
-              aria-label="已确认接口规格"
-              rows={3}
-              value={options.quality.portSpecification}
-              onValueChange={(portSpecification) =>
-                onChange({
-                  ...options,
-                  quality: { inspectPorts: true, ...options.quality, portSpecification },
-                })
+            背景景深
+            <input
+              aria-label="背景景深"
+              type="range"
+              min={0}
+              max={1}
+              step={0.05}
+              value={options.depthStrength}
+              onChange={(event) =>
+                onChange({ ...options, depthStrength: Number(event.target.value) })
               }
-              placeholder="只填写你已确认的接口类型、数量、排列和位置；留空时依据产品参考图检查可见部分。"
             />
-            <small>接口面未出现在图片中会标记“不可见”，不会视为全部接口已通过验证。</small>
+            <small>
+              {Math.round(options.depthStrength * 100)}% ·{" "}
+              {generationMode === "reference"
+                ? "通过拍摄提示词控制景深"
+                : "调整背景虚化，产品保持清晰"}
+            </small>
           </label>
         ) : null}
-        <button
-          type="button"
-          disabled={generationMode !== "reference"}
-          onClick={() => void pickLogo()}
-        >
-          上传透明 PNG Logo 原样贴回
-        </button>
+        {generationMode !== "protected" ? (
+          <label>
+            场景种子
+            <input
+              aria-label="场景种子"
+              type="number"
+              min={0}
+              step={1}
+              value={options.seed}
+              onChange={(event) =>
+                onChange({
+                  ...options,
+                  seed: Math.max(0, Math.floor(Number(event.target.value) || 0)),
+                })
+              }
+            />
+          </label>
+        ) : null}
+      </div>
+      {generationMode !== "protected" ? (
         <small>
-          {generationMode === "reference"
-            ? "仅在模型高置信定位到 Logo 所在平面时，按透视贴回已确认 Logo；定位不确定时保留待处理状态。"
-            : "原图保真合成保留产品原图上的 Logo，不添加额外 Logo。"}
+          手机随拍风格为 AI 展示图。导出清单会标明生成方式；不写入虚假的手机拍摄信息或买家身份。
         </small>
-        {options.quality?.logo ? (
-          <div className="product-scene__logo">
-            <button
-              type="button"
-              className="product-scene__preview"
-              onClick={() => setPreview(options.quality!.logo!.path)}
-              aria-label="放大源 Logo"
-            >
-              <img
-                src={toMediaSrc(options.quality.logo.path)}
-                alt="待贴回的源 Logo"
-                loading="lazy"
+      ) : (
+        <small>
+          导出清单记录这件实物、母版、保护范围、模板版本与人工复核；生成背景不会冒充实拍或买家反馈。
+        </small>
+      )}
+      {generationMode !== "protected" ? (
+        <section className="product-scene__quality-settings" aria-label="产品自动检查与 Logo 贴回">
+          <strong>自动检查与 Logo 贴回</strong>
+          <label className="product-scene__approval">
+            <input
+              type="checkbox"
+              checked={options.quality?.inspectPorts ?? false}
+              onChange={(event) =>
+                onChange({
+                  ...options,
+                  quality: {
+                    portSpecification: "",
+                    ...options.quality,
+                    inspectPorts: event.target.checked,
+                  },
+                })
+              }
+            />
+            自动检测可见接口
+          </label>
+          {options.quality?.inspectPorts ? (
+            <label>
+              已确认接口规格（可选）
+              <ImeTextarea
+                aria-label="已确认接口规格"
+                rows={3}
+                value={options.quality.portSpecification}
+                onValueChange={(portSpecification) =>
+                  onChange({
+                    ...options,
+                    quality: { inspectPorts: true, ...options.quality, portSpecification },
+                  })
+                }
+                placeholder="只填写你已确认的接口类型、数量、排列和位置；留空时依据产品参考图检查可见部分。"
               />
-            </button>
-            <small>
-              {options.quality.logo.width} × {options.quality.logo.height} ·
-              此透明图用于原样贴回，不由图片模型重新绘制。
-            </small>
-            <label className="product-scene__approval">
-              <input
-                type="checkbox"
-                checked={options.quality.logo.approved}
-                onChange={(event) => {
-                  const quality = options.quality;
-                  if (quality?.logo)
-                    onChange({
-                      ...options,
-                      quality: {
-                        ...quality,
-                        logo: { ...quality.logo, approved: event.target.checked },
-                      },
-                    });
-                }}
-              />
-              确认此 Logo 内容与透明边缘正确
+              <small>接口面未出现在图片中会标记“不可见”，不会视为全部接口已通过验证。</small>
             </label>
-            <button
-              type="button"
-              onClick={() => {
-                const quality = { ...options.quality! };
-                delete quality.logo;
-                onChange({ ...options, quality });
-              }}
-            >
-              移除 Logo 贴回
-            </button>
-            {generationMode !== "reference" ? (
-              <p role="alert">请移除此额外 Logo，或切换到 AI 多机位模式。</p>
-            ) : null}
-          </div>
-        ) : null}
-        {productSceneQualityEnabled(options) ? (
+          ) : null}
+          <button
+            type="button"
+            disabled={generationMode !== "reference"}
+            onClick={() => void pickLogo()}
+          >
+            上传透明 PNG Logo 原样贴回
+          </button>
           <small>
-            启用后需要选择可看图的项目文本模型，每张会额外执行视觉检查；仍需你选用后才会导出。
+            {generationMode === "reference"
+              ? "仅在模型高置信定位到 Logo 所在平面时，按透视贴回已确认 Logo；定位不确定时保留待处理状态。"
+              : "原图保真合成保留产品原图上的 Logo，不添加额外 Logo。"}
           </small>
-        ) : null}
-      </section>
+          {options.quality?.logo ? (
+            <div className="product-scene__logo">
+              <button
+                type="button"
+                className="product-scene__preview"
+                onClick={() => setPreview(options.quality!.logo!.path)}
+                aria-label="放大源 Logo"
+              >
+                <img
+                  src={toMediaSrc(options.quality.logo.path)}
+                  alt="待贴回的源 Logo"
+                  loading="lazy"
+                />
+              </button>
+              <small>
+                {options.quality.logo.width} × {options.quality.logo.height} ·
+                此透明图用于原样贴回，不由图片模型重新绘制。
+              </small>
+              <label className="product-scene__approval">
+                <input
+                  type="checkbox"
+                  checked={options.quality.logo.approved}
+                  onChange={(event) => {
+                    const quality = options.quality;
+                    if (quality?.logo)
+                      onChange({
+                        ...options,
+                        quality: {
+                          ...quality,
+                          logo: { ...quality.logo, approved: event.target.checked },
+                        },
+                      });
+                  }}
+                />
+                确认此 Logo 内容与透明边缘正确
+              </label>
+              <button
+                type="button"
+                onClick={() => {
+                  const quality = { ...options.quality! };
+                  delete quality.logo;
+                  onChange({ ...options, quality });
+                }}
+              >
+                移除 Logo 贴回
+              </button>
+              {generationMode !== "reference" ? (
+                <p role="alert">请移除此额外 Logo，或切换到 AI 多机位模式。</p>
+              ) : null}
+            </div>
+          ) : null}
+          {productSceneQualityEnabled(options) ? (
+            <small>
+              启用后需要选择可看图的项目文本模型，每张会额外执行视觉检查；仍需你选用后才会导出。
+            </small>
+          ) : null}
+        </section>
+      ) : null}
       {preview ? (
         <ProductSceneImagePreview path={preview} onClose={() => setPreview(null)} />
       ) : null}
@@ -665,6 +926,7 @@ export function ProductSceneDeliverables({
   );
   const [page, setPage] = useState(0);
   const [exporting, setExporting] = useState(false);
+  const exportPending = useRef(false);
   const [message, setMessage] = useState("");
   const [preview, setPreview] = useState<string | null>(null);
   const state = checkpoint.productScene;
@@ -701,6 +963,7 @@ export function ProductSceneDeliverables({
       ),
     [rows, options],
   );
+  const generated = useMemo(() => (rows ?? []).filter((row) => Boolean(row.outputPath)), [rows]);
   const filtered = useMemo(
     () => (rows ?? []).filter((row) => filter === "all" || row.status === filter),
     [rows, filter],
@@ -749,6 +1012,26 @@ export function ProductSceneDeliverables({
     const rows = state.rows.map((row) => (row.id === id ? { ...row, status } : row));
     setSelectedIds((current) => current.filter((selectedId) => selectedId !== id));
     saveReviewedRows(rows);
+  }
+
+  function updateJewelryReview(id: string, jewelryReview: ProductSceneJewelryReview) {
+    if (!state || disabled) return;
+    const row = state.rows.find((entry) => entry.id === id);
+    if (!row?.outputPath || jewelryReview.outputPath !== row.outputPath) return;
+    onChange({
+      ...checkpoint,
+      productScene: {
+        ...state,
+        rows: state.rows.map((entry) =>
+          entry.id === id
+            ? {
+                ...entry,
+                jewelryReview,
+              }
+            : entry,
+        ),
+      },
+    });
   }
 
   function acceptRows(ids: readonly string[]) {
@@ -809,13 +1092,30 @@ export function ProductSceneDeliverables({
     onContinue();
   }
 
-  async function exportAccepted() {
-    if (!accepted.length || exporting || disabled) return;
+  function retry(id: string) {
+    if (!state || disabled) return;
+    const row = state.rows.find((value) => value.id === id);
+    if (!row || !canRetryProductSceneRow(row)) return;
+    const next = retryProductSceneRow(state, id);
+    if (next === state) return;
+    onChange({
+      ...checkpoint,
+      phase: "paused",
+      decision: null,
+      error: null,
+      productScene: next,
+    });
+    onContinue();
+  }
+
+  async function exportImages(deliveryRows: readonly ProductSceneRow[], allOutputs = false) {
+    if (!deliveryRows.length || exportPending.current || disabled) return;
+    exportPending.current = true;
     setExporting(true);
     setMessage("");
     try {
       const result = await productSceneImageClient.export({
-        paths: accepted.map((row) => row.outputPath!),
+        paths: deliveryRows.map((row) => row.outputPath!),
         manifest: JSON.stringify(
           {
             schemaVersion: "product-scene-delivery.v1",
@@ -823,22 +1123,34 @@ export function ProductSceneDeliverables({
             provenance:
               generationMode === "reference"
                 ? "基于用户确认产品参考图，由 AI 生成不同机位与场景的展示图"
-                : "AI 生成场景与用户确认产品原图的本地合成展示图",
+                : generationMode === "protected"
+                  ? "实拍母版保护范围与 AI 外围场景本地合成；审核及保护记录供参考，文件变更提示不阻止导出"
+                  : "AI 生成场景与用户确认产品原图的本地合成展示图",
             productName: options.productName,
             aspectRatio: options.aspectRatio,
             seed: options.seed,
             views: options.views,
             quality: options.quality ?? null,
-            rows: accepted,
+            jewelry: options.jewelry ?? null,
+            exportScope: allOutputs ? "all_outputs" : "accepted",
+            rows: deliveryRows.map((row) =>
+              generationMode === "protected"
+                ? { ...row, reviewWarnings: productSceneJewelryReviewWarnings(row, options) }
+                : row,
+            ),
           },
           null,
           2,
         ),
       });
-      if (result) setMessage(`已导出 ${result.count} 张选用图片：${result.directory}`);
+      if (result)
+        setMessage(
+          `已导出 ${result.count} 张${allOutputs ? "成图" : "选用图片"}：${result.directory}`,
+        );
     } catch (error) {
       setMessage(`导出失败：${formatRawBackendError(error)}`);
     } finally {
+      exportPending.current = false;
       setExporting(false);
     }
   }
@@ -852,8 +1164,12 @@ export function ProductSceneDeliverables({
       <p>
         {generationMode === "reference"
           ? "请逐张核对产品形体、接口数量与排列、Logo 文字，以及目标机位是否真正落实，再检查背景逻辑、透视和阴影。"
-          : "请逐张核对背景合理性、产品比例、透视、落地阴影和边缘。"}
-        相似度检查只能辅助去重；选用后才进入导出包。
+          : generationMode === "protected"
+            ? "可以直接选用或导出成图。六项人工复核、旧审核及源片或成图变更只作提示；需要时可对照实拍母版检查。"
+            : "请逐张核对背景合理性、产品比例、透视、落地阴影和边缘。"}
+        {generationMode === "protected"
+          ? "可导出已选用图片或全部已有成图，清单保留原有审核状态和来源记录。"
+          : "相似度检查只能辅助去重；选用后才进入导出包。"}
       </p>
       <div className="product-scene__actions">
         <button type="button" disabled={!canNext} onClick={approveAll}>
@@ -864,10 +1180,19 @@ export function ProductSceneDeliverables({
         <button
           type="button"
           disabled={disabled || exporting || !accepted.length}
-          onClick={() => void exportAccepted()}
+          onClick={() => void exportImages(accepted)}
         >
           {exporting ? "正在导出…" : `导出已选用 ${accepted.length} 张`}
         </button>
+        {generationMode === "protected" ? (
+          <button
+            type="button"
+            disabled={disabled || exporting || !generated.length}
+            onClick={() => void exportImages(generated, true)}
+          >
+            导出全部成图 {generated.length} 张
+          </button>
+        ) : null}
       </div>
       {message ? <p role="status">{message}</p> : null}
       {state.approvedThrough > 0 ? (
@@ -885,7 +1210,8 @@ export function ProductSceneDeliverables({
               disabled={disabled || !eligible.length}
               onClick={() => acceptRows(eligible.map((row) => row.id))}
             >
-              一键选用全部合格图（{eligible.length} 张）
+              {generationMode === "protected" ? "一键选用全部成图" : "一键选用全部合格图"}（
+              {eligible.length} 张）
             </button>
             <button
               type="button"
@@ -898,7 +1224,7 @@ export function ProductSceneDeliverables({
             >
               {selectedVisibleIds.length === visibleEligibleIds.length && visibleEligibleIds.length
                 ? "取消本页选择"
-                : `选择本页合格图（${visibleEligibleIds.length} 张）`}
+                : `选择本页${generationMode === "protected" ? "成图" : "合格图"}（${visibleEligibleIds.length} 张）`}
             </button>
             <button
               type="button"
@@ -987,12 +1313,31 @@ export function ProductSceneDeliverables({
               <small key={index}>{note}</small>
             ))}
             <ProductSceneQualityDetails row={row} options={options} />
+            {generationMode === "protected" ? (
+              <ProductSceneJewelryReviewDetails
+                row={row}
+                options={options}
+                sourcePath={
+                  options.views.find((view) => view.id === row.recipe.viewId)?.preparedPath
+                }
+                disabled={disabled}
+                onChange={(review) => updateJewelryReview(row.id, review)}
+                onPreview={setPreview}
+              />
+            ) : null}
             {row.quality?.basePath && row.quality.basePath !== row.outputPath ? (
               <button type="button" onClick={() => setPreview(row.quality!.basePath)}>
                 查看第 {row.index} 张贴回前原图
               </button>
             ) : null}
             <div className="product-scene__actions">
+              {canRetryProductSceneRow(row) && row.index <= state.approvedThrough ? (
+                <button type="button" disabled={disabled} onClick={() => retry(row.id)}>
+                  {row.backgroundPath
+                    ? `重试第 ${row.index} 张本地合成（沿用背景）`
+                    : `重试第 ${row.index} 张（沿用原任务）`}
+                </button>
+              ) : null}
               <button
                 type="button"
                 disabled={

@@ -27,10 +27,12 @@ use super::{
         self, AlignMvLyricsCommand, MvAsrTranscript, MvLyricsAlignment, TranscribeMvSongCommand,
     },
     product_scene_images::{
-        ApplyProductSceneLogoCommand, ComposeProductSceneCommand, ExportProductScenesCommand,
+        ApplyProductSceneLogoCommand, ComposeProductSceneCommand,
+        ComposeProtectedProductSceneCommand, ExportProductScenesCommand,
         NormalizeProductSceneImageCommand, PrepareProductViewCommand, PreparedProductView,
         ProductSceneComposite, ProductSceneExport, ProductSceneGeneratedImage,
-        ProductSceneLogoComposite, ProductViewIdentity, ValidateProductViewsCommand,
+        ProductSceneLogoComposite, ProductSceneProtectedComposite, ProductViewIdentity,
+        ValidateProductViewsCommand,
     },
     prompt_optimize::{OptimizeVideoPromptCommand, OptimizedPromptResult},
     provider_adapter::ProviderAdapterKind,
@@ -294,7 +296,7 @@ pub async fn prepare_product_scene_view(
 pub async fn validate_product_scene_views(
     state: State<'_, BackendState>,
     command: ValidateProductViewsCommand,
-) -> CommandResult<()> {
+) -> CommandResult<bool> {
     let service = state.product_scene_images.clone();
     tokio::task::spawn_blocking(move || service.validate_views(command))
         .await
@@ -351,6 +353,19 @@ pub async fn compose_product_scene(
     tokio::task::spawn_blocking(move || service.compose(command))
         .await
         .map_err(|error| BackendError::Conflict(format!("产品场景合成失败：{error}")))
+        .and_then(|result| result)
+        .command()
+}
+
+#[tauri::command]
+pub async fn compose_product_scene_protected(
+    state: State<'_, BackendState>,
+    command: ComposeProtectedProductSceneCommand,
+) -> CommandResult<ProductSceneProtectedComposite> {
+    let service = state.product_scene_images.clone();
+    tokio::task::spawn_blocking(move || service.compose_protected(command))
+        .await
+        .map_err(|error| BackendError::Conflict(format!("产品原片保护合成失败：{error}")))
         .and_then(|result| result)
         .command()
 }

@@ -252,30 +252,38 @@ export function createWorkflowExecutionPlan(
 ): WorkflowExecutionPlan {
   const config = node.config;
   const titles = config.productScene
-    ? productSceneGenerationMode(config.productScene) === "reference"
+    ? productSceneGenerationMode(config.productScene) === "protected"
       ? [
-          `使用已确认产品参考图，规划 ${config.productScene.totalCount} 张不同目标机位与场景`,
-          `一键审批全部张数后调用参考图生成，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
-          "按目标机位生成完整画面，统一尺寸并辅助检查画面相似度",
-          ...(productSceneQualityEnabled(config.productScene)
-            ? [
-                "逐张调用视觉文本模型，检查可见接口与 Logo 所在平面",
-                ...(config.productScene.quality?.logo
-                  ? ["定位可靠且表面清晰时按透视贴回已确认 Logo"]
-                  : []),
-              ]
-            : []),
-          "逐张审核产品形体、接口、Logo 与机位，导出已选用图片及清单",
+          `确认商品 SKU、单件实物与完整实拍保护范围，按系列模板规划 ${config.productScene.totalCount} 张图片`,
+          `一键审批全部张数后只生成外围空背景，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
+          "本地等比保留原片与佩戴关系，验证保护核心；不自动去白底、重绘珠子或改变商品颜色",
+          "可按需要对照原片完成六项人工核对，审核与文件变更仅作提示",
+          "直接导出已有成图或已选用图片，记录原片、历史保护验证、系列模板和审核状态",
         ]
-      : [
-          `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
-          `一键审批全部张数后生成空背景，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
-          "本地回贴产品原图并检查背景相似度",
-          ...(productSceneQualityEnabled(config.productScene)
-            ? ["逐张调用视觉文本模型，检查可见接口"]
-            : []),
-          "逐张审核、拒绝或重做，导出已选用图片与清单",
-        ]
+      : productSceneGenerationMode(config.productScene) === "reference"
+        ? [
+            `使用已确认产品参考图，规划 ${config.productScene.totalCount} 张不同目标机位与场景`,
+            `一键审批全部张数后调用参考图生成，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
+            "按目标机位生成完整画面，统一尺寸并辅助检查画面相似度",
+            ...(productSceneQualityEnabled(config.productScene)
+              ? [
+                  "逐张调用视觉文本模型，检查可见接口与 Logo 所在平面",
+                  ...(config.productScene.quality?.logo
+                    ? ["定位可靠且表面清晰时按透视贴回已确认 Logo"]
+                    : []),
+                ]
+              : []),
+            "逐张审核产品形体、接口、Logo 与机位，导出已选用图片及清单",
+          ]
+        : [
+            `使用已确认产品角度，规划 ${config.productScene.totalCount} 张不同场景`,
+            `一键审批全部张数后生成空背景，同时运行最多 ${config.productScene.maxConcurrency ?? 10} 个生成任务`,
+            "本地回贴产品原图并检查背景相似度",
+            ...(productSceneQualityEnabled(config.productScene)
+              ? ["逐张调用视觉文本模型，检查可见接口"]
+              : []),
+            "逐张审核、拒绝或重做，导出已选用图片与清单",
+          ]
     : config.reelbench
       ? [
           "读取原片并测量时长、帧率、场景切点与镜头运动",

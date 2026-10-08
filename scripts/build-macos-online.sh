@@ -28,6 +28,7 @@ rm -rf "$online_root/target/release/bundle" "$online_root/artifacts/$release_ver
 pnpm tauri:build:online --bundles app,dmg
 IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib component_
 IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib runtime_components::tests
+IC_DISTRIBUTION_EDITION=online CARGO_TARGET_DIR="$online_root/target" cargo test --manifest-path src-tauri/Cargo.toml --locked --release --lib product_scene_images
 node scripts/verify-edition-release.mjs --distribution-dir "$online_root/artifacts/$release_version"
 # Exercise the exact first-install helper on a temporary target. A component
 # catalog pins native bytes, so clearing Gatekeeper attributes must preserve them.

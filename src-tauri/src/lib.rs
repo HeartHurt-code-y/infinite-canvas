@@ -228,6 +228,7 @@ pub fn run() {
             commands::validate_product_scene_logo,
             commands::apply_product_scene_logo,
             commands::compose_product_scene,
+            commands::compose_product_scene_protected,
             commands::normalize_product_scene_image,
             commands::export_product_scenes,
             commands::resume_cover_image_result,

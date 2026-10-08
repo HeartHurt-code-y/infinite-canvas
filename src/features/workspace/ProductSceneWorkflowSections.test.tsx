@@ -3,6 +3,7 @@ import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { node } from "../../test/videoWorkflowFixtures";
 import { mediaClient } from "../../lib/backend";
+import * as backend from "../../lib/backend";
 import { productSceneImageClient } from "../../lib/productSceneImages";
 import {
   ProductSceneConfiguration,
@@ -11,8 +12,11 @@ import {
 import {
   createProductSceneCheckpoint,
   createProductSceneOptions,
+  createJewelrySceneOptions,
+  JEWELRY_REVIEW_CHECKS,
   generateProductScenePlan,
   type ProductSceneWorkflowOptions,
+  type ProductSceneRow,
 } from "./productSceneWorkflowModel";
 import type { KnowledgeVideoWorkflowCheckpoint } from "./workspaceModel";
 import type { ProductSceneInspection } from "./productSceneQuality";
@@ -59,7 +63,385 @@ function checkpoint(): KnowledgeVideoWorkflowCheckpoint {
   };
 }
 
+function jewelryOptions(): ProductSceneWorkflowOptions {
+  const base = createJewelrySceneOptions();
+  return {
+    ...base,
+    totalCount: 1,
+    jewelry: {
+      ...base.jewelry!,
+      skuId: "SKU-01",
+      specimenId: "实物-01",
+      criticalFeatures: "爱心主珠朝外，棉絮位于右侧珠内",
+    },
+    views: [
+      {
+        ...options().views[0]!,
+        width: 300,
+        height: 200,
+        protection: { rect: { x: 0, y: 0, width: 1, height: 1 }, feather: 0.025, use: "product" },
+      },
+    ],
+  };
+}
+
+function jewelryCheckpoint(configured = jewelryOptions()): KnowledgeVideoWorkflowCheckpoint {
+  return {
+    ...checkpoint(),
+    productScene: {
+      ...createProductSceneCheckpoint(),
+      approvedThrough: 1,
+      rows: generateProductScenePlan(configured).map((row) => ({
+        ...row,
+        status: "needs_review",
+        outputPath: "C:/out/jewelry.png",
+        foregroundHash: configured.views[0]!.contentHash,
+        protection: {
+          region: configured.views[0]!.protection!.rect,
+          feather: 0.025,
+          sourceWidth: 300,
+          sourceHeight: 200,
+          corePixelCount: 60000,
+          verified: true,
+          outputHash: "c".repeat(64),
+        },
+      })),
+    },
+  };
+}
+
 describe("ProductSceneWorkflowSections", () => {
+  it("prepares a complete jewelry photograph without background removal and requires source approval", async () => {
+    vi.spyOn(backend, "pickPromptMultimodalFiles").mockResolvedValue([
+      {
+        localPath: "C:/photo/wearing.png",
+        displayName: "真实佩戴.png",
+        kind: "image",
+        mimeType: "image/png",
+        byteSize: 32000,
+      },
+    ]);
+    const prepare = vi.spyOn(productSceneImageClient, "prepare").mockResolvedValue({
+      path: "C:/prepared/wearing.png",
+      contentHash: "d".repeat(64),
+      width: 2000,
+      height: 1600,
+    });
+    const change = vi.fn<(next: ProductSceneWorkflowOptions) => void>();
+    render(
+      <ProductSceneConfiguration
+        options={createJewelrySceneOptions()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "添加完整实拍 / 佩戴原片" }));
+    await waitFor(() => expect(change).toHaveBeenCalledOnce());
+    expect(prepare).toHaveBeenCalledWith({
+      sourcePath: "C:/photo/wearing.png",
+      preservePhoto: true,
+    });
+    expect(change.mock.calls[0]![0].views).toEqual([
+      expect.objectContaining({
+        preparedPath: "C:/prepared/wearing.png",
+        approved: false,
+        protection: { rect: { x: 0, y: 0, width: 1, height: 1 }, feather: 0.025, use: "product" },
+      }),
+    ]);
+    expect(screen.queryByRole("combobox", { name: "场景倾向" })).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "上传透明 PNG Logo 原样贴回" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps protection edits as a cancellable draft and revokes source approval only on changed application", () => {
+    const change = vi.fn();
+    render(
+      <ProductSceneConfiguration
+        options={jewelryOptions()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "编辑 机身原图 保护范围" }));
+    fireEvent.change(screen.getByRole("spinbutton", { name: "机身原图 保护宽度百分比" }), {
+      target: { value: "80" },
+    });
+    expect(change).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "取消编辑" }));
+    expect(change).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "编辑 机身原图 保护范围" }));
+    expect(screen.getByRole("spinbutton", { name: "机身原图 保护宽度百分比" })).toHaveValue(100);
+    fireEvent.change(screen.getByRole("spinbutton", { name: "机身原图 保护宽度百分比" }), {
+      target: { value: "80" },
+    });
+    fireEvent.change(screen.getByRole("combobox", { name: "机身原图 原片用途" }), {
+      target: { value: "wearing" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "应用保护范围" }));
+    expect(change).toHaveBeenCalledWith(
+      expect.objectContaining({
+        views: [
+          expect.objectContaining({
+            approved: false,
+            protection: {
+              rect: { x: 0, y: 0, width: 0.8, height: 1 },
+              feather: 0.025,
+              use: "wearing",
+            },
+          }),
+        ],
+      }),
+    );
+  });
+
+  it("clears prepared views across jewelry mode boundaries so old cutouts cannot become photographs", () => {
+    const change = vi.fn<(next: ProductSceneWorkflowOptions) => void>();
+    const { rerender } = render(
+      <ProductSceneConfiguration
+        options={options()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
+      target: { value: "protected" },
+    });
+    expect(change).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        generationMode: "protected",
+        views: [],
+      }),
+    );
+    expect(change.mock.calls.at(-1)![0].jewelry?.specimenId).toBe("");
+    rerender(
+      <ProductSceneConfiguration
+        options={jewelryOptions()}
+        disabled={false}
+        onChange={change}
+        onBusyChange={vi.fn()}
+      />,
+    );
+    fireEvent.change(screen.getByRole("combobox", { name: "产品场景生成方式" }), {
+      target: { value: "reference" },
+    });
+    expect(change).toHaveBeenLastCalledWith(
+      expect.objectContaining({ generationMode: "reference", views: [] }),
+    );
+  });
+
+  it("allows unreviewed jewelry acceptance and keeps optional review evidence in one export", async () => {
+    let finishExport!: (value: { count: number; directory: string }) => void;
+    const exportMock = vi.spyOn(productSceneImageClient, "export").mockReturnValue(
+      new Promise((resolve) => {
+        finishExport = resolve;
+      }),
+    );
+    const initial = jewelryCheckpoint();
+    const change = vi.fn();
+    function Harness() {
+      const [current, setCurrent] = useState(initial);
+      return (
+        <ProductSceneDeliverables
+          options={jewelryOptions()}
+          checkpoint={current}
+          disabled={false}
+          onChange={(next) => {
+            change(next);
+            setCurrent(next);
+          }}
+          onContinue={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "一键选用全部成图（1 张）" })).toBeEnabled();
+    expect(screen.getByRole("checkbox", { name: "选择第 1 张" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "查看第 1 张实拍母版对照" })).toBeEnabled();
+    for (const { label } of JEWELRY_REVIEW_CHECKS.slice(0, 5)) {
+      fireEvent.change(screen.getByRole("combobox", { name: `第 1 张 ${label}` }), {
+        target: { value: "pass" },
+      });
+    }
+    expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[5].label}` }),
+      { target: { value: "pass" } },
+    );
+    fireEvent.change(screen.getByRole("textbox", { name: "第 1 张珠宝复核备注" }), {
+      target: { value: "对照实物-01，天然棉絮一致" },
+    });
+    const reviewed = change.mock.calls.at(-1)![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(reviewed.productScene!.approvedThrough).toBe(1);
+    expect(reviewed.productScene!.rows[0]!.jewelryReview).toEqual({
+      outputPath: "C:/out/jewelry.png",
+      checks: {
+        connections: "pass",
+        shape: "pass",
+        details: "pass",
+        texture: "pass",
+        scale: "pass",
+        style: "pass",
+      },
+      notes: "对照实物-01，天然棉絮一致",
+    });
+    expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
+    fireEvent.click(screen.getByRole("button", { name: "一键选用全部成图（1 张）" }));
+    const exportButton = screen.getByRole("button", { name: "导出已选用 1 张" });
+    fireEvent.click(exportButton);
+    fireEvent.click(exportButton);
+    expect(exportMock).toHaveBeenCalledOnce();
+    const manifest = JSON.parse(exportMock.mock.calls[0]![0].manifest) as {
+      jewelry: unknown;
+      views: unknown;
+      rows: ProductSceneRow[];
+    };
+    expect(manifest.jewelry).toEqual(jewelryOptions().jewelry);
+    expect(manifest.views).toEqual(jewelryOptions().views);
+    expect(manifest.rows[0]!.jewelryReview!.notes).toContain("实物-01");
+    finishExport({ directory: "C:/delivery", count: 1 });
+    await screen.findByText("已导出 1 张选用图片：C:/delivery");
+  });
+
+  it("resets displayed checks and notes when a different output replaces the reviewed file", () => {
+    const base = jewelryCheckpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      productScene: {
+        ...base.productScene!,
+        rows: base.productScene!.rows.map((row) => ({
+          ...row,
+          outputPath: "C:/out/replaced.png",
+          jewelryReview: {
+            outputPath: "C:/out/old.png",
+            checks: {
+              connections: "pass",
+              shape: "pass",
+              details: "pass",
+              texture: "pass",
+              scale: "pass",
+              style: "pass",
+            },
+            notes: "旧输出备注",
+          },
+        })),
+      },
+    };
+    const change = vi.fn<(next: KnowledgeVideoWorkflowCheckpoint) => void>();
+    render(
+      <ProductSceneDeliverables
+        options={jewelryOptions()}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
+    expect(screen.getByRole("textbox", { name: "第 1 张珠宝复核备注" })).toHaveValue("");
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}` }),
+      { target: { value: "pass" } },
+    );
+    expect(change.mock.calls[0]![0].productScene!.rows[0]!.jewelryReview).toMatchObject({
+      outputPath: "C:/out/replaced.png",
+      checks: { connections: "pass", shape: "uncertain" },
+      notes: "",
+    });
+  });
+
+  it.each(["unreviewed", "old_review"] as const)(
+    "exports %s jewelry without selection despite changed source identity and stale protection",
+    async (reviewState) => {
+      const base = jewelryCheckpoint();
+      const row = base.productScene!.rows[0]!;
+      const current: ProductSceneRow = {
+        ...row,
+        foregroundHash: "b".repeat(64),
+        protection: { ...row.protection!, verified: false },
+        ...(reviewState === "old_review"
+          ? {
+              jewelryReview: {
+                outputPath: "C:/out/old.png",
+                checks: {
+                  connections: "fail" as const,
+                  shape: "uncertain" as const,
+                  details: "uncertain" as const,
+                  texture: "uncertain" as const,
+                  scale: "uncertain" as const,
+                  style: "uncertain" as const,
+                },
+                notes: "旧审核未通过",
+              },
+            }
+          : {}),
+      };
+      const initial = { ...base, productScene: { ...base.productScene!, rows: [current] } };
+      const exportMock = vi.spyOn(productSceneImageClient, "export").mockResolvedValue({
+        directory: "C:/delivery",
+        count: 1,
+      });
+      const change = vi.fn();
+      render(
+        <ProductSceneDeliverables
+          options={jewelryOptions()}
+          checkpoint={initial}
+          disabled={false}
+          onChange={change}
+          onContinue={vi.fn()}
+        />,
+      );
+      expect(screen.getByRole("button", { name: "选用第 1 张" })).toBeEnabled();
+      fireEvent.click(screen.getByRole("button", { name: "导出全部成图 1 张" }));
+      await screen.findByText("已导出 1 张成图：C:/delivery");
+      expect(change).not.toHaveBeenCalled();
+      const command = exportMock.mock.calls[0]![0];
+      expect(command.paths).toEqual([current.outputPath]);
+      const manifest = JSON.parse(command.manifest) as {
+        exportScope: string;
+        rows: (ProductSceneRow & { reviewWarnings: string[] })[];
+      };
+      expect(manifest.exportScope).toBe("all_outputs");
+      expect(manifest.rows[0]!.status).toBe("needs_review");
+      expect(manifest.rows[0]!.jewelryReview).toEqual(current.jewelryReview);
+      expect(manifest.rows[0]!.reviewWarnings.length).toBeGreaterThan(0);
+    },
+  );
+
+  it("preserves selected jewelry and completed state when optional review is changed to fail", () => {
+    const base = jewelryCheckpoint();
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      phase: "done",
+      productScene: {
+        ...base.productScene!,
+        rows: base.productScene!.rows.map((row) => ({ ...row, status: "accepted" })),
+      },
+    };
+    const change = vi.fn();
+    render(
+      <ProductSceneDeliverables
+        options={jewelryOptions()}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={vi.fn()}
+      />,
+    );
+    fireEvent.change(
+      screen.getByRole("combobox", { name: `第 1 张 ${JEWELRY_REVIEW_CHECKS[0].label}` }),
+      { target: { value: "fail" } },
+    );
+    const updated = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(updated.phase).toBe("done");
+    expect(updated.productScene!.rows[0]!.status).toBe("accepted");
+    expect(updated.productScene!.rows[0]!.jewelryReview!.checks.connections).toBe("fail");
+    expect(screen.getByRole("button", { name: "导出已选用 1 张" })).toBeEnabled();
+  });
   it("uses a small cached thumbnail for desktop review cards and loads the original only in preview", async () => {
     const originalPath = "C:/outputs/full-scene.png";
     const thumbnailPath = "C:/cache/full-scene-thumb.jpg";
@@ -603,6 +985,51 @@ describe("ProductSceneWorkflowSections", () => {
       outputPath: null,
       attempts: [{ taskId: "paid-1", outputPath: "C:/out/1.png" }],
     });
+    expect(proceed).toHaveBeenCalledOnce();
+  });
+
+  it("retries protected local composition with its paid background while preserving other review rows", () => {
+    const configured = { ...jewelryOptions(), totalCount: 2 };
+    const base = jewelryCheckpoint(configured);
+    const rows = base.productScene!.rows.map((row, index) =>
+      index === 0
+        ? {
+            ...row,
+            status: "error" as const,
+            taskId: "paid-background-1",
+            backgroundPath: "C:/out/background.png",
+            outputPath: null,
+            error: "本地保存临时失败",
+          }
+        : row,
+    );
+    const initial: KnowledgeVideoWorkflowCheckpoint = {
+      ...base,
+      productScene: { ...base.productScene!, approvedThrough: 2, batchReviewPending: true, rows },
+    };
+    const change = vi.fn();
+    const proceed = vi.fn();
+    render(
+      <ProductSceneDeliverables
+        options={configured}
+        checkpoint={initial}
+        disabled={false}
+        onChange={change}
+        onContinue={proceed}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: "重试第 1 张本地合成（沿用背景）" }));
+    const updated = change.mock.calls[0]![0] as KnowledgeVideoWorkflowCheckpoint;
+    expect(updated.productScene!.rows[0]).toMatchObject({
+      status: "queued",
+      taskId: "paid-background-1",
+      backgroundPath: "C:/out/background.png",
+      outputPath: null,
+      error: null,
+    });
+    expect(updated.productScene!.rows[0]!.recipe).toEqual(rows[0]!.recipe);
+    expect(updated.productScene!.rows[1]).toEqual(rows[1]);
+    expect(updated.productScene!.batchReviewPending).toBe(false);
     expect(proceed).toHaveBeenCalledOnce();
   });
 

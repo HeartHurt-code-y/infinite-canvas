@@ -94,7 +94,9 @@
 }
 .product-scene__quality-settings,
 .product-scene__quality-result,
-.product-scene__logo {
+.product-scene__logo,
+.product-scene__jewelry-settings,
+.product-scene__jewelry-review {
   display: grid;
   gap: var(--space-sm);
   padding: var(--space-sm);

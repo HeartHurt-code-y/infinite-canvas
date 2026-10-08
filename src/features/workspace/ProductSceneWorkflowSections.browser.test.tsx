@@ -1,6 +1,7 @@
 import { render } from "vitest-browser-react";
-import { page } from "vitest/browser";
-import { describe, expect, it } from "vitest";
+import { page, userEvent } from "vitest/browser";
+import { describe, expect, it, vi } from "vitest";
+import { ProductSceneProtectionEditor } from "./ProductSceneProtectionEditor";
 import "../../App.css";
 import "./ProductSceneWorkflowSections.css";
 
@@ -20,6 +21,77 @@ function assertNoHorizontalOverflow(container: HTMLElement) {
 }
 
 describe("product scene reference cards in a narrow canvas node", () => {
+  it("keeps the protection editor usable at narrow and wide node sizes with pointer and keyboard input", async () => {
+    const save = vi.fn();
+    const image =
+      "data:image/svg+xml," +
+      encodeURIComponent(
+        '<svg xmlns="http://www.w3.org/2000/svg" width="300" height="200"><rect width="300" height="200" fill="silver"/></svg>',
+      );
+    await render(
+      <div data-testid="protection-node" style={{ width: 375 }}>
+        <fieldset className="product-scene__configuration">
+          <article className="product-scene__view">
+            <ProductSceneProtectionEditor
+              view={{
+                id: "source",
+                label: "天然水晶手串真实佩戴母版.png",
+                angle: "front45",
+                sourcePath: image,
+                preparedPath: image,
+                contentHash: "a".repeat(64),
+                width: 300,
+                height: 200,
+                approved: true,
+                protection: {
+                  rect: { x: 0, y: 0, width: 1, height: 1 },
+                  feather: 0.025,
+                  use: "wearing",
+                },
+              }}
+              onSave={save}
+              onCancel={vi.fn()}
+            />
+          </article>
+        </fieldset>
+      </div>,
+    );
+    const node = page.getByTestId("protection-node").element() as HTMLElement;
+    await expect
+      .element(page.getByRole("img", { name: "天然水晶手串真实佩戴母版.png 完整实拍母版" }))
+      .toBeVisible();
+    for (const width of [375, 720]) {
+      node.style.width = `${width}px`;
+      expect(node.scrollWidth).toBeLessThanOrEqual(node.clientWidth + 1);
+      for (const control of node.querySelectorAll<HTMLElement>("input, select, button")) {
+        expect(control.getBoundingClientRect().right).toBeLessThanOrEqual(
+          node.getBoundingClientRect().right + 1,
+        );
+      }
+    }
+    const widthField = page.getByRole("spinbutton", {
+      name: "天然水晶手串真实佩戴母版.png 保护宽度百分比",
+    });
+    const canvas = node.querySelector<HTMLElement>(".product-scene-protection__canvas")!;
+    const bounds = canvas.getBoundingClientRect();
+    await userEvent.dragAndDrop(canvas, canvas, {
+      sourcePosition: { x: bounds.width * 0.2, y: bounds.height * 0.15 },
+      targetPosition: { x: bounds.width * 0.8, y: bounds.height * 0.85 },
+    });
+    expect(Number((widthField.element() as HTMLInputElement).value)).toBeCloseTo(60, 0);
+    expect(save).not.toHaveBeenCalled();
+    await page.getByRole("button", { name: "重置为整张原片" }).click();
+    await widthField.fill("75");
+    await expect.element(widthField).toHaveValue(75);
+    expect(save).not.toHaveBeenCalled();
+    (page.getByRole("button", { name: "应用保护范围" }).element() as HTMLElement).focus();
+    await userEvent.keyboard("{Enter}");
+    expect(save).toHaveBeenCalledWith({
+      rect: { x: 0, y: 0, width: 0.75, height: 1 },
+      feather: 0.025,
+      use: "wearing",
+    });
+  });
   it("keeps long names and controls inside cards, then uses two columns when space permits", async () => {
     await render(
       <div data-testid="node" style={{ width: 420 }}>

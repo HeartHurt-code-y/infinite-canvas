@@ -1,5 +1,22 @@
 import { stableJsonSignature } from "../../lib/workflowSignatures";
 import {
+  productSceneJewelryOptionsValid,
+  productSceneJewelrySignature,
+  type ProductSceneJewelryOptions,
+  type ProductSceneJewelryReview,
+  type ProductSceneProtectionEvidence,
+  type ProductSceneViewProtection,
+} from "./productSceneJewelry";
+export {
+  JEWELRY_REVIEW_CHECKS,
+  productSceneProtectionValid,
+  updateProductSceneViewProtection,
+  productSceneJewelryReviewWarnings,
+  type ProductSceneJewelryCheck,
+  type ProductSceneJewelryReview,
+  type ProductSceneViewProtection,
+} from "./productSceneJewelry";
+import {
   productSceneQualityEnabled,
   productSceneQualityOptionsValid,
   type ProductSceneQualityOptions,
@@ -16,7 +33,7 @@ import type {
 } from "./workspaceModel";
 
 export type ProductSceneAngle = "front45" | "rear30" | "eye" | "top45" | "top90";
-export type ProductSceneGenerationMode = "reference" | "composite";
+export type ProductSceneGenerationMode = "reference" | "composite" | "protected";
 export interface ProductSceneTargetCamera {
   readonly id: string;
   readonly label: string;
@@ -35,6 +52,7 @@ export interface ProductSceneView {
   readonly approved: boolean;
   readonly width?: number;
   readonly height?: number;
+  readonly protection?: ProductSceneViewProtection;
 }
 export interface ProductSceneWorkflowOptions {
   /** Missing on legacy plans means composite, so saved paid tasks never change operation. */
@@ -53,12 +71,14 @@ export interface ProductSceneWorkflowOptions {
   readonly seed: number;
   readonly views: readonly ProductSceneView[];
   readonly quality?: ProductSceneQualityOptions;
+  readonly jewelry?: ProductSceneJewelryOptions;
 }
 export interface ProductSceneRecipe {
   readonly generationMode?: ProductSceneGenerationMode;
   readonly targetCamera?: ProductSceneTargetCamera;
   readonly depthStrength?: number;
   readonly reserveLogoArea?: boolean;
+  readonly jewelrySignature?: string;
   readonly aspectRatio: "3:4" | "9:16";
   readonly scene: string;
   readonly label: string;
@@ -81,6 +101,8 @@ export interface ProductSceneAttempt {
   readonly error: string | null;
   readonly recipe?: ProductSceneRecipe;
   readonly quality?: ProductSceneQualityState;
+  readonly protection?: ProductSceneProtectionEvidence;
+  readonly jewelryReview?: ProductSceneJewelryReview;
 }
 export interface ProductSceneRow extends ProductSceneAttempt {
   readonly id: string;
@@ -98,6 +120,8 @@ export interface ProductSceneWorkflowCheckpoint {
   /** Explicitly approved upper row count; opening a plan never allocates paid work. */
   readonly approvedThrough: number;
   readonly batchReviewPending: boolean;
+  /** A user-requested retry of one existing paid task; never permission to submit a new task. */
+  readonly retryRowId?: string | null;
 }
 
 export function createProductSceneOptions(): ProductSceneWorkflowOptions {
@@ -113,6 +137,30 @@ export function createProductSceneOptions(): ProductSceneWorkflowOptions {
     productScale: 0.48,
     seed: 20260923,
     views: [],
+  };
+}
+export function createJewelrySceneOptions(
+  existing?: ProductSceneWorkflowOptions,
+): ProductSceneWorkflowOptions {
+  const base = { ...(existing ?? createProductSceneOptions()) };
+  delete base.quality;
+  return {
+    ...base,
+    generationMode: "protected",
+    productName: "珠宝商品",
+    totalCount: 10,
+    views: [],
+    jewelry: existing?.jewelry ?? {
+      skuId: "",
+      specimenId: "",
+      criticalFeatures: "",
+      seriesStyle: {
+        name: "暖白珠宝系列",
+        version: "1",
+        background: "暖白缎面背景，柔和留白，不含商品、文字或配饰",
+        lighting: "左上方柔和漫射主光，中性白平衡，轻柔阴影，匹配原片真实反光",
+      },
+    },
   };
 }
 export function productSceneGenerationMode(
@@ -137,7 +185,8 @@ export function productSceneInputReady(options: ProductSceneWorkflowOptions): bo
   return (
     Boolean(options.productName.trim()) &&
     productSceneQualityOptionsValid(options) &&
-    ["reference", "composite"].includes(productSceneGenerationMode(options)) &&
+    productSceneJewelryOptionsValid(options) &&
+    ["reference", "composite", "protected"].includes(productSceneGenerationMode(options)) &&
     Number.isInteger(options.totalCount) &&
     options.totalCount >= 1 &&
     options.totalCount <= 500 &&
@@ -394,6 +443,14 @@ const REAR_TARGET_CAMERAS: readonly ProductSceneTargetCamera[] = [
 ];
 
 function backgroundPrompt(recipe: Omit<ProductSceneRecipe, "prompt">): string {
+  if (recipe.generationMode === "protected") {
+    return [
+      `Create only one empty background plate for local jewelry-source composition. Portrait ${recipe.aspectRatio} framing.`,
+      `Frozen series background: ${recipe.material}. Frozen lighting: ${recipe.lighting}.`,
+      `Match the approved source camera orientation: ${recipe.camera}. Leave the entire central foreground clear and unobstructed; the protected real source and its local surroundings will be placed here by the application.`,
+      "No jewelry, beads, chains, gemstones, product, people, hands, wrists, accessories, printed words, logo, watermark or caption. Do not infer or recreate any physical specimen. Soft restrained scene texture with continuous neutral surroundings and no object intersecting the clear placement area.",
+    ].join("\n");
+  }
   const description = SCENES.find((scene) => scene.id === recipe.scene)!.description;
   if (recipe.generationMode === "reference" && recipe.targetCamera) {
     const camera = recipe.targetCamera;
@@ -451,6 +508,44 @@ function shuffle<T>(values: readonly T[], next: () => number): T[] {
 export function generateProductScenePlan(options: ProductSceneWorkflowOptions): ProductSceneRow[] {
   if (!productSceneInputReady(options))
     throw new Error("请确认产品透明底原图及其角度，并检查数量、画幅和批次设置。");
+  if (productSceneGenerationMode(options) === "protected") {
+    const style = options.jewelry!.seriesStyle;
+    return Array.from({ length: options.totalCount }, (_, index) => {
+      const view = options.views[index % options.views.length]!;
+      const placement = {
+        centerX: 0.5,
+        baselineY: 0.83,
+        widthFraction: options.productScale ?? 0.48,
+      };
+      const recipe: Omit<ProductSceneRecipe, "prompt"> = {
+        generationMode: "protected",
+        aspectRatio: options.aspectRatio,
+        scene: "jewelry-series",
+        label: `${style.name} v${style.version} · ${view.label}`,
+        material: style.background,
+        props: "无新增配饰",
+        lighting: style.lighting,
+        camera: "沿用完整实拍原片的投影关系，不生成新机位",
+        viewId: view.id,
+        placement,
+        jewelrySignature: productSceneJewelrySignature(options, view, placement),
+      };
+      return {
+        id: `product-scene-${index + 1}`,
+        index: index + 1,
+        recipe: { ...recipe, prompt: backgroundPrompt(recipe) },
+        status: "queued",
+        taskId: null,
+        backgroundPath: null,
+        outputPath: null,
+        backgroundHash: null,
+        foregroundHash: null,
+        error: null,
+        reviewNotes: [],
+        attempts: [],
+      };
+    });
+  }
   const next = random(options.seed);
   const scenes = shuffle(
     SCENES.filter((scene) => options.sceneBias === "mixed" || scene.group === options.sceneBias),
@@ -535,6 +630,13 @@ export function productSceneRecipeSignature(recipe: ProductSceneRecipe): string 
     ...(recipe.generationMode === "reference" ? {} : { viewId: recipe.viewId }),
     generationMode: recipe.generationMode ?? "composite",
     targetCamera: recipe.targetCamera?.id,
+    ...(recipe.generationMode === "protected"
+      ? {
+          jewelrySignature: recipe.jewelrySignature,
+          placement: recipe.placement,
+          camera: recipe.camera,
+        }
+      : {}),
   });
 }
 
@@ -561,17 +663,19 @@ export function resetProductSceneRow(
     ),
     next,
   );
-  const replacement = choices.find(
-    (candidate) => !used.has(productSceneRecipeSignature(candidate)),
-  );
+  const replacement =
+    row.recipe.generationMode === "protected"
+      ? row.recipe
+      : choices.find((candidate) => !used.has(productSceneRecipeSignature(candidate)));
   if (!replacement) throw new Error("此视角和场景的未使用组合已用完，请创建新的计划或增加视角。");
   const recipe = { ...replacement, prompt: backgroundPrompt(replacement) };
   return {
     ...state,
     batchReviewPending: false,
+    retryRowId: null,
     rows: state.rows.map((entry) => {
       if (entry.id !== rowId) return entry;
-      const { quality, ...base } = entry;
+      const { quality, protection, jewelryReview, ...base } = entry;
       return {
         ...base,
         recipe,
@@ -592,10 +696,38 @@ export function resetProductSceneRow(
             error: entry.error,
             recipe: entry.recipe,
             ...(quality ? { quality } : {}),
+            ...(protection ? { protection } : {}),
+            ...(jewelryReview ? { jewelryReview } : {}),
           },
         ],
       };
     }),
+  };
+}
+
+export function canRetryProductSceneRow(row: ProductSceneRow): boolean {
+  return (
+    row.recipe.generationMode === "protected" &&
+    row.status === "error" &&
+    Boolean(row.taskId?.trim()) &&
+    !row.outputPath
+  );
+}
+
+/** Retry saving/composing the existing background task without spending on another image. */
+export function retryProductSceneRow(
+  state: ProductSceneWorkflowCheckpoint,
+  rowId: string,
+): ProductSceneWorkflowCheckpoint {
+  const row = state.rows.find((entry) => entry.id === rowId);
+  if (!row || !canRetryProductSceneRow(row) || row.index > state.approvedThrough) return state;
+  return {
+    ...state,
+    batchReviewPending: false,
+    retryRowId: rowId,
+    rows: state.rows.map((entry) =>
+      entry.id === rowId ? { ...entry, status: "queued", error: null } : entry,
+    ),
   };
 }
 
@@ -618,11 +750,21 @@ export function productSceneDeliveryMarkdown(checkpoint: KnowledgeVideoWorkflowC
   return (
     [
       "# 产品场景图交付清单",
-      "AI 产品场景示意图；不作为真实买家实拍或用户评价。参考图生成模式可推演新机位，需要人工核对硬件结构与文字，不承诺像素或结构完全一致；原图合成模式保留已有拍摄角度。",
+      "AI 产品场景示意图；不作为真实买家实拍或用户评价。参考图生成模式可推演新机位，需要人工核对结构与文字，不承诺完全一致；原图合成保留原机位；源片保护模式按指定范围复制缩放后的源片，保留局部背景与真实佩戴关系。人工核对与保护回执保留为历史记录，不限制现有成图导出，不能据此声称当前文件已验证。",
       `计划 ${state.rows.length} 张；已生成 ${state.rows.filter((row) => row.outputPath).length} 张；人工选用 ${accepted.length} 张。生成完成不代表验收通过。`,
       ...state.rows.map(
         (row) =>
-          `## ${row.index}. ${row.recipe.label}\n\n状态：${row.status}\n\n模式：${row.recipe.generationMode === "reference" ? "参考图生成新机位" : "原图本地合成"}\n\n参考素材：${row.recipe.viewId}\n\n目标机位：${row.recipe.targetCamera?.label ?? row.recipe.camera}\n\n背景：${row.recipe.material} / ${row.recipe.props} / ${row.recipe.lighting}\n\n远端任务：${row.taskId ?? "未提交"}\n\n文件：${row.outputPath ?? "未生成"}\n\n检查提示：${row.reviewNotes.join("；") || "请逐张核对主体、接触阴影、比例、透视与背景逻辑"}${row.error ? `\n\n错误：${row.error}` : ""}`,
+          `## ${row.index}. ${row.recipe.label}\n\n状态：${row.status}\n\n模式：${row.recipe.generationMode === "reference" ? "参考图生成新机位" : row.recipe.generationMode === "protected" ? "珠宝源片保护合成" : "原图本地合成"}\n\n参考素材：${row.recipe.viewId}\n\n目标机位：${row.recipe.targetCamera?.label ?? row.recipe.camera}\n\n背景：${row.recipe.material} / ${row.recipe.props} / ${row.recipe.lighting}\n\n远端任务：${row.taskId ?? "未提交"}\n\n文件：${row.outputPath ?? "未生成"}\n\n检查提示：${row.reviewNotes.join("；") || "请逐张核对主体、接触阴影、比例、透视与背景逻辑"}${
+            row.recipe.generationMode === "protected"
+              ? `\n\n合成时保护记录：${row.protection?.verified === true ? "记录为通过；当前文件未重新验证" : "未验证或记录不完整"}\n\n人工检查记录：${
+                  row.jewelryReview
+                    ? Object.entries(row.jewelryReview.checks)
+                        .map(([key, value]) => `${key}=${value}`)
+                        .join("；")
+                    : "尚未完成六项人工检查"
+                }\n\n审核备注：${row.jewelryReview?.notes.trim() ? row.jewelryReview.notes : "无"}`
+              : ""
+          }${row.error ? `\n\n错误：${row.error}` : ""}`,
       ),
     ].join("\n\n") + "\n"
   );
